@@ -75,15 +75,15 @@ const REVOCATION_RESULT_PREFIX = 'session-revocation-v1';
 /**
  * Default session policy.
  *
- * Membership is fresh for one hour, then remains usable for a configurable
+ * Membership is fresh for 24 hours, then remains usable for a configurable
  * 72-hour outage grace. The exact grace deadline is denied and requires fresh
  * Google-backed membership evidence. Session and device revocations are read from the
  * database on every request, so they do not wait on the membership TTL/grace
  * and take effect immediately (strictly better than the required 60 seconds).
  */
 export const DEFAULT_SESSION_POLICY = Object.freeze({
-  sessionLifetimeSeconds: 30 * DAY_SECONDS,
-  membershipTtlSeconds: 60 * 60,
+  sessionLifetimeSeconds: 90 * DAY_SECONDS,
+  membershipTtlSeconds: DAY_SECONDS,
   membershipGraceSeconds: 3 * DAY_SECONDS,
 });
 
@@ -139,24 +139,24 @@ export function readSessionPolicy(
   return Object.freeze({
     sessionLifetimeSeconds: readBoundedInteger(
       environment,
-      'SESSION_LIFETIME_SECONDS',
+      'PSD_EOC_SESSION_LIFETIME_SECONDS',
       DEFAULT_SESSION_POLICY.sessionLifetimeSeconds,
-      60 * 60,
+      DAY_SECONDS,
       365 * DAY_SECONDS,
     ),
     membershipTtlSeconds: readBoundedInteger(
       environment,
-      'SESSION_MEMBERSHIP_TTL_SECONDS',
+      'PSD_EOC_MEMBERSHIP_TTL_SECONDS',
       DEFAULT_SESSION_POLICY.membershipTtlSeconds,
-      60,
+      5 * 60,
       7 * DAY_SECONDS,
     ),
     membershipGraceSeconds: readBoundedInteger(
       environment,
-      'SESSION_MEMBERSHIP_GRACE_SECONDS',
+      'PSD_EOC_MEMBERSHIP_GRACE_SECONDS',
       DEFAULT_SESSION_POLICY.membershipGraceSeconds,
       60,
-      30 * DAY_SECONDS,
+      14 * DAY_SECONDS,
     ),
   });
 }
@@ -220,8 +220,13 @@ function digestJson(value: unknown): string {
   return digestText(JSON.stringify(value));
 }
 
+/** Accepts issue #7 refresh bearers and issue #6 initial OIDC credentials. */
+export function isOpaqueSessionCredential(value: string): boolean {
+  return /^(?:[A-Za-z0-9_-]{43}|[A-Za-z0-9_-]{64})$/u.test(value);
+}
+
 function assertOpaqueRefreshToken(value: string): void {
-  if (!/^[A-Za-z0-9_-]{43}$/u.test(value)) {
+  if (!isOpaqueSessionCredential(value)) {
     throw new SessionAccessError(
       'INVALID_CREDENTIAL',
       'The session credential is invalid.',

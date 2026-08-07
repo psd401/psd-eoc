@@ -764,6 +764,34 @@ describe('rotation and revocation', () => {
 });
 
 describe('transport and policy boundaries', () => {
+  test('accepts an OIDC-issued web credential and rotates it without Google', async () => {
+    const oidcCredential = 'A'.repeat(64);
+    const store = new MemorySessionStore(oidcCredential);
+    const service = new SessionService(store);
+
+    await expect(
+      authenticateSessionRequest(
+        webRequest(oidcCredential),
+        service,
+        { mutation: false },
+        INSIDE_GRACE,
+      ),
+    ).resolves.toMatchObject({ actor: { sessionId: IDS.session } });
+
+    const refreshed = await executeRefreshSessionCapability({
+      service,
+      token: oidcCredential,
+      source: 'web',
+      idempotencyKey: 'oidc-cookie-refresh-compatibility-0001',
+      csrfVerified: true,
+      now: INSIDE_GRACE,
+    });
+    expect(refreshed.refreshToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    await expect(
+      service.authenticate(refreshed.refreshToken, 'web', INSIDE_GRACE),
+    ).resolves.toMatchObject({ actor: { sessionId: IDS.session } });
+  });
+
   test('writes secure browser cookies and accepts only an opaque mobile bearer', () => {
     const token = createOpaqueRefreshToken();
     const written: Array<{
@@ -864,9 +892,9 @@ describe('transport and policy boundaries', () => {
     const store = new MemorySessionStore(initial);
     store.snapshotCapturedAt = new Date('2026-08-07T09:00:00.000Z');
     const policy = readSessionPolicy({
-      SESSION_LIFETIME_SECONDS: '3600',
-      SESSION_MEMBERSHIP_TTL_SECONDS: '600',
-      SESSION_MEMBERSHIP_GRACE_SECONDS: '1200',
+      PSD_EOC_SESSION_LIFETIME_SECONDS: '86400',
+      PSD_EOC_MEMBERSHIP_TTL_SECONDS: '600',
+      PSD_EOC_MEMBERSHIP_GRACE_SECONDS: '1200',
     });
     const service = new SessionService(store, policy);
     const issuedAt = new Date('2026-08-07T09:05:00.000Z');
@@ -917,12 +945,17 @@ describe('transport and policy boundaries', () => {
   });
 
   test('rejects invalid TTL/grace configuration', () => {
+    expect(readSessionPolicy({})).toEqual({
+      sessionLifetimeSeconds: 90 * 24 * 60 * 60,
+      membershipTtlSeconds: 24 * 60 * 60,
+      membershipGraceSeconds: 72 * 60 * 60,
+    });
     expect(() =>
-      readSessionPolicy({ SESSION_MEMBERSHIP_GRACE_SECONDS: '-1' }),
-    ).toThrow('SESSION_MEMBERSHIP_GRACE_SECONDS');
+      readSessionPolicy({ PSD_EOC_MEMBERSHIP_GRACE_SECONDS: '-1' }),
+    ).toThrow('PSD_EOC_MEMBERSHIP_GRACE_SECONDS');
     expect(() =>
-      readSessionPolicy({ SESSION_MEMBERSHIP_TTL_SECONDS: '999999999' }),
-    ).toThrow('SESSION_MEMBERSHIP_TTL_SECONDS');
+      readSessionPolicy({ PSD_EOC_MEMBERSHIP_TTL_SECONDS: '999999999' }),
+    ).toThrow('PSD_EOC_MEMBERSHIP_TTL_SECONDS');
   });
 });
 
