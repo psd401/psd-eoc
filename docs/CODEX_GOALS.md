@@ -55,7 +55,7 @@ Zod schemas that downstream issues can import unchanged.
 
 ## Wave 2 — Nine-way parallel fan-out (one goal per agent)
 
-Run up to nine agents at once, one block each:
+Run up to twelve agents at once, one block each:
 
 ```
 Goal: complete issue #2 (safety-charter enforcement). Master preamble applies.
@@ -90,6 +90,26 @@ Goal: complete issue #19 (Expo scaffold + EAS profiles + real/drill theming).
 ```
 ```
 Goal: complete issue #28 (hash-chained security audit log module).
+```
+```
+Goal: complete issue #39 (GCP via Terraform: project, read-only Groups
+service account, OAuth clients) and then #40's Terraform portion (Firebase
+project + Android app in infra/gcp/firebase.tf). Runs from this machine with
+gcloud auth; zero-manual-steps target, residual console steps documented
+honestly.
+```
+```
+Goal: complete the script portions of issues #35 and #36 (SMS registration
+scripts via the End User Messaging registration APIs; SES delegated-zone IaC
+plus the production-access API request script). Build and verify against
+mocks/dry-runs — do NOT submit real registrations; the human runs the submit
+scripts.
+```
+```
+Goal: complete the script portions of issues #38 and #41 (fastlane/ASC API
+automation for the App Store record and TestFlight groups; Google Groups
+inventory + draft mapping script). Interactive auth steps are documented for
+the human, never bypassed.
 ```
 
 ## Wave 3 — Engine + surfaces (after #9 merges; up to seven parallel)
@@ -179,7 +199,10 @@ behind a cutover flag, with side-by-side latency evidence).
 
 ## Human tasks running alongside (not for Codex)
 
-#35 SMS registration • #36 SES DNS/prod • #37 Play account • #38 App Store
-Connect/TestFlight • #39 GCP OAuth + Groups service account • #40 FCM/APNs/
-Expo credentials • #41 Groups inventory • #42 retention lookup.
-#35 and #37 have the longest lead times — start them first.
+Only two are genuinely human: #37 Play Console org account + first AAB upload
+(no API exists — start it today, verification takes days) and #42 retention
+lookup (bot-blocked site, informational). Everything else external is
+automation-first: Codex builds the scripts (Wave 2), the human supplies
+business data, runs the submit/interactive-auth steps from this machine, and
+rides the carrier/AWS/Apple approval waits: #35 SMS, #36 SES, #38 App Store
+Connect, #40 push credentials, #41 groups mapping confirmation.
