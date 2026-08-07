@@ -1,0 +1,16 @@
+export const DEPLOYMENT_ACCOUNT = '338414773271';
+export const DEPLOYMENT_REGION = 'us-west-2';
+export const STACK_NAME = 'PsdEoc';
+
+export const APP_RUNNER_HEALTH_CHECK_PATH = '/api/health';
+export const SES_IDENTITY_DOMAIN = 'alerts.psd401.net';
+
+export const GITHUB_OWNER_ID = '1902994';
+export const GITHUB_REPOSITORY = 'psd401/psd-eoc';
+export const GITHUB_REPOSITORY_ID = '1326178900';
+export const GITHUB_MAIN_REF = 'refs/heads/main';
+export const GITHUB_OIDC_ISSUER = 'token.actions.githubusercontent.com';
+export const GITHUB_OIDC_SUBJECT =
+  'repo:psd401@1902994/psd-eoc@1326178900:ref:refs/heads/main';
+
+export const NOTIFICATION_CHANNELS = ['push', 'email', 'sms'] as const;
