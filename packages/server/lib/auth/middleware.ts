@@ -217,6 +217,15 @@ export function writeBrowserSessionCookies(
     ...WEB_SESSION_COOKIE_OPTIONS,
     maxAge: maxAgeSeconds,
   });
+  writeBrowserCsrfCookie(cookies, csrfToken, maxAgeSeconds);
+}
+
+/** Bootstraps double-submit protection without replacing an OIDC session. */
+export function writeBrowserCsrfCookie(
+  cookies: CookieWriter,
+  csrfToken: string,
+  maxAgeSeconds: number,
+): void {
   cookies.set(WEB_CSRF_COOKIE_NAME, csrfToken, {
     ...WEB_CSRF_COOKIE_OPTIONS,
     maxAge: maxAgeSeconds,
