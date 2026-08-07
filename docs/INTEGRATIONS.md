@@ -12,7 +12,7 @@ or delivery.
 | Google Groups | Access gating and versioned staff roster snapshots | `mocked` | Synthetic staff groups only; no delegated account is connected to PSD EOC |
 | Expo Push | iOS and Android push handoff | `mocked` | Synthetic device targets only; no provider credentials or live handoff are connected |
 | Amazon SES | Staff email notification handoff | `mocked` | Synthetic recipients only; no live send is connected |
-| AWS End User Messaging SMS | Staff SMS notification handoff | `mocked` | Synthetic recipients only; no live send is connected, and carrier registration alone cannot establish live readiness |
+| AWS End User Messaging SMS | Staff SMS notification handoff | `blocked` | No live send is connected; `CARRIER_REGISTRATION_PENDING` records the unmet prerequisite, and registration alone cannot establish live readiness |
 | Amazon S3 | Private event-media storage and authorized reads | `mocked` | Synthetic object metadata only; no live bucket or presigned operation is connected |
 
 The allowed truth labels are `mocked`, `configured-unverified`,
