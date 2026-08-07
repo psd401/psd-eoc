@@ -1,6 +1,6 @@
 export default function SignedInPage() {
   return (
-    <main id="main-content">
+    <main id="main-content" tabIndex={-1}>
       <section className="auth-card" aria-labelledby="signed-in-heading">
         <h1 id="signed-in-heading">Return to PSD EOC</h1>
         <p>

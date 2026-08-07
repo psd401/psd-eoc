@@ -776,7 +776,8 @@ export function createDrizzleInitialWebSessionStore(
                   ),
                 ),
               )
-              .limit(1);
+              .limit(1)
+              .for('share');
 
             const snapshotGroupEvidence = await transaction
               .select({
@@ -791,7 +792,8 @@ export function createDrizzleInitialWebSessionStore(
                   accessMembershipSnapshotGroups.snapshotId,
                   request.membershipSnapshot.id,
                 ),
-              );
+              )
+              .for('share');
             const expectedGroupKeys = new Set(
               snapshotGroupEvidence
                 .filter(({ completionKind }) => completionKind === 'expected')
@@ -840,7 +842,8 @@ export function createDrizzleInitialWebSessionStore(
                   ),
                   eq(accessMembershipMemberGroups.userId, request.user.id),
                 ),
-              );
+              )
+              .for('share');
             const membershipGroupKeys = new Set(
               membershipGroupEvidence.map(accessGroupKey),
             );
@@ -857,7 +860,8 @@ export function createDrizzleInitialWebSessionStore(
                   ),
                   eq(accessMembershipMemberFacilities.userId, request.user.id),
                 ),
-              );
+              )
+              .for('share');
             const contextGroupKeys = new Set(
               request.membershipMember.accessGroupSourceRefs.map(
                 accessGroupKey,
@@ -906,7 +910,8 @@ export function createDrizzleInitialWebSessionStore(
               .select()
               .from(users)
               .where(eq(users.id, request.user.id))
-              .limit(1);
+              .limit(1)
+              .for('share');
             if (
               persistedUser === undefined ||
               persistedUser.googleSubject !== request.user.googleSubject ||
@@ -928,13 +933,15 @@ export function createDrizzleInitialWebSessionStore(
             const persistedRoles = await transaction
               .select({ role: userRoles.role })
               .from(userRoles)
-              .where(eq(userRoles.userId, request.user.id));
+              .where(eq(userRoles.userId, request.user.id))
+              .for('share');
             const roles = sortedRoles(persistedRoles.map(({ role }) => role));
 
             const persistedFacilityScopes = await transaction
               .select({ facilityId: userFacilityScopes.facilityId })
               .from(userFacilityScopes)
-              .where(eq(userFacilityScopes.userId, request.user.id));
+              .where(eq(userFacilityScopes.userId, request.user.id))
+              .for('share');
             const facilityScope =
               persistedUser.facilityScopeKind === 'district'
                 ? persistedFacilityScopes.length === 0
@@ -1133,6 +1140,9 @@ export function createDrizzleInitialWebSessionStore(
               },
             });
 
+            // A mismatch must abort this transaction before success evidence.
+            assertPersistedResultMatchesRequest(result, request);
+
             await transaction.execute(ACCESS_GATE_AUDIT_LOCK_SQL);
             const [previousAuditEntry] = await transaction
               .select({
@@ -1184,11 +1194,15 @@ export function createDrizzleInitialWebSessionStore(
             return result;
           });
         } catch (error) {
-          if (
-            attempt >= SESSION_TRANSACTION_ATTEMPTS ||
-            !isRetryableSessionTransactionError(error)
-          ) {
-            throw error;
+          const retryable = isRetryableSessionTransactionError(error);
+          if (attempt >= SESSION_TRANSACTION_ATTEMPTS || !retryable) {
+            if (error instanceof WebSessionIssuanceError) {
+              throw error;
+            }
+            throw new WebSessionIssuanceError(
+              'SESSION_PERSISTENCE_REJECTED',
+              'The initial web session could not be persisted.',
+            );
           }
           await new Promise<void>((resolve) => {
             setTimeout(

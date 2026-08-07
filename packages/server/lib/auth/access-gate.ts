@@ -31,6 +31,7 @@ import {
   users,
 } from '../../db/schema';
 import type { GoogleOidcCallbackErrorCode } from './oidc';
+import type { WebSessionIssuanceErrorCode } from './session-cookie';
 
 /** Environment variable containing comma-separated immutable Google subjects. */
 export const BOOTSTRAP_ADMIN_SUBJECTS_ENV =
@@ -147,7 +148,10 @@ export type AccessGateAuditEvent =
       requestId: string;
       occurredAt: string;
       subjectDigest: string | null;
-      reasonCode: AccessGateDenialReason | GoogleOidcCallbackErrorCode;
+      reasonCode:
+        | AccessGateDenialReason
+        | GoogleOidcCallbackErrorCode
+        | WebSessionIssuanceErrorCode;
       userId: string | null;
     }>
   | Readonly<{
@@ -370,6 +374,11 @@ async function deny(
   return Object.freeze({ granted: false, reasonCode });
 }
 
+function validatedAuditUserId(evidence: AccessGateEvidence): string | null {
+  const parsed = UuidSchema.safeParse(evidence.user?.id);
+  return parsed.success ? parsed.data : null;
+}
+
 /**
  * Checks only the latest complete cached access snapshot. No request path in
  * this module contacts Google or treats an environment subject as membership.
@@ -386,7 +395,7 @@ export async function checkAccessGate(
       input,
       dependencies.audit,
       evaluated.reasonCode,
-      evidence.user?.id ?? null,
+      validatedAuditUserId(evidence),
     );
   }
 

@@ -32,9 +32,11 @@ import {
   createCompleteOidcSignInAuthorizer,
   createCompleteOidcSignInHandler,
   createDrizzleInitialWebSessionStore,
+  WebSessionIssuanceError,
   type CompleteOidcSignInContext,
   type InitialWebSessionStore,
   type WebSessionCookie,
+  type WebSessionIssuanceErrorCode,
   type WebSessionPolicy,
 } from '../../../../lib/auth/session-cookie';
 
@@ -58,6 +60,24 @@ interface AuthDatabaseConnection {
   close(): Promise<void>;
 }
 
+interface PostGateAuditContext {
+  readonly requestId: string;
+  readonly subjectDigest: string;
+  readonly userId: string;
+}
+
+/** User-facing routing remains separate from the exact append-only audit code. */
+const SESSION_DENIAL_PAGE_REASONS: Readonly<
+  Record<WebSessionIssuanceErrorCode, 'access' | 'callback' | 'configuration'>
+> = Object.freeze({
+  INVALID_AUTHORIZATION_CONTEXT: 'callback',
+  INVALID_SESSION_POLICY: 'configuration',
+  MEMBERSHIP_NOT_CURRENT: 'configuration',
+  PERSISTED_RESULT_MISMATCH: 'configuration',
+  SESSION_REPLAY_REJECTED: 'callback',
+  SESSION_PERSISTENCE_REJECTED: 'configuration',
+});
+
 /**
  * Mirrors db/client.ts configuration and lifecycle semantics inside the route
  * bundle. The shared module's NodeNext `.js` source specifiers are not
@@ -75,6 +95,48 @@ function requiredEnvironmentValue(name: string): string {
     throw new Error(`${name} must be configured.`);
   }
   return value;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    normalized === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/u.test(normalized)
+  );
+}
+
+function assertLoopbackHttpEnvironmentUrl(name: string): void {
+  let url: URL;
+  try {
+    url = new URL(requiredEnvironmentValue(name));
+  } catch {
+    throw new Error(`${name} must be a loopback HTTP URL in auth test mode.`);
+  }
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    !isLoopbackHostname(url.hostname) ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.hash.length > 0
+  ) {
+    throw new Error(`${name} must be a loopback HTTP URL in auth test mode.`);
+  }
+}
+
+function assertPlaywrightAuthTestRuntime(): void {
+  if (process.env.NODE_ENV !== 'development') {
+    throw new Error(
+      'The Playwright auth runtime requires the development runtime.',
+    );
+  }
+  [
+    'GOOGLE_OIDC_REDIRECT_URI',
+    'GOOGLE_OIDC_AUTHORIZATION_ENDPOINT',
+    'GOOGLE_OIDC_TOKEN_ENDPOINT',
+    'GOOGLE_OIDC_JWKS_URI',
+  ].forEach(assertLoopbackHttpEnvironmentUrl);
 }
 
 function optionalPositiveInteger(
@@ -235,9 +297,7 @@ function readSessionPolicy(): Readonly<WebSessionPolicy> {
 
 async function createAuthRuntime(): Promise<AuthRuntime> {
   if (process.env.PSD_EOC_AUTH_TEST_MODE === 'playwright') {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('The auth test runtime is forbidden in production.');
-    }
+    assertPlaywrightAuthTestRuntime();
     const { getPlaywrightAuthRuntime } = await import(
       '../../test/auth-test-runtime'
     );
@@ -292,7 +352,6 @@ function denialPageReason(
     'ACCESS_SNAPSHOT_UNAVAILABLE',
     'ACCESS_CONFIGURATION_NOT_SYNCED',
     'ACCESS_EVIDENCE_INVALID',
-    'BOOTSTRAP_ADMIN_GRANT_FAILED',
   ].includes(reasonCode)
     ? 'configuration'
     : 'access';
@@ -319,6 +378,7 @@ function buildMembershipMember(
 export async function GET(request: Request): Promise<NextResponse> {
   let clearCookieHeader: string | undefined;
   let runtime: AuthRuntime | undefined;
+  let postGateAuditContext: PostGateAuditContext | undefined;
   try {
     const configuration = readGoogleOidcConfiguration();
     const callback = await completeGoogleOidcCallback(configuration, {
@@ -356,6 +416,11 @@ export async function GET(request: Request): Promise<NextResponse> {
         clearCookieHeader,
       );
     }
+    postGateAuditContext = Object.freeze({
+      requestId,
+      subjectDigest: callback.principal.subjectDigest,
+      userId: access.user.id,
+    });
 
     let sessionCookie: WebSessionCookie | undefined;
     const context: CompleteOidcSignInContext = Object.freeze({
@@ -434,6 +499,29 @@ export async function GET(request: Request): Promise<NextResponse> {
         }
       }
       return deniedResponse(request, 'callback', error.clearCookieHeader);
+    }
+    if (
+      error instanceof WebSessionIssuanceError &&
+      postGateAuditContext !== undefined &&
+      runtime !== undefined
+    ) {
+      try {
+        await runtime.auditSink.append({
+          outcome: 'denied',
+          requestId: postGateAuditContext.requestId,
+          occurredAt: new Date().toISOString(),
+          subjectDigest: postGateAuditContext.subjectDigest,
+          reasonCode: error.code,
+          userId: postGateAuditContext.userId,
+        });
+      } catch {
+        return deniedResponse(request, 'configuration', clearCookieHeader);
+      }
+      return deniedResponse(
+        request,
+        SESSION_DENIAL_PAGE_REASONS[error.code],
+        clearCookieHeader,
+      );
     }
     return deniedResponse(request, 'configuration', clearCookieHeader);
   } finally {

@@ -1,5 +1,35 @@
 import { expect, test } from '@playwright/test';
 
+test('auth pages expose landmarks, alerts, and keyboard-operable navigation', async ({
+  page,
+}) => {
+  for (const path of ['/login', '/denied?reason=access', '/signed-in']) {
+    await page.goto(path);
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+    await expect(page.getByRole('main')).toHaveCount(1);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
+  }
+
+  await page.goto('/login');
+  const skipLink = page.getByRole('link', { name: 'Skip to main content' });
+  await page.keyboard.press('Tab');
+  await expect(skipLink).toBeFocused();
+  await expect(skipLink).toBeVisible();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('main')).toBeFocused();
+
+  await page.keyboard.press('Tab');
+  const signInLink = page.getByRole('link', { name: 'Continue with Google' });
+  await expect(signInLink).toBeFocused();
+  const actionSize = await signInLink.boundingBox();
+  expect(actionSize?.height).toBeGreaterThanOrEqual(44);
+
+  await page.goto('/denied?reason=access');
+  await expect(page.getByRole('main').getByRole('alert')).toContainText(
+    'not currently in a PSD EOC access group',
+  );
+});
+
 test('mocked Google IdP signs in a configured access-group member', async ({
   context,
   page,

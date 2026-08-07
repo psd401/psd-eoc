@@ -50,20 +50,28 @@ const SESSION_POLICY: Readonly<WebSessionPolicy> = Object.freeze({
 
 type ClaimVariant =
   | 'valid'
+  | 'missing-name'
   | 'wrong-issuer'
   | 'wrong-audience'
   | 'wrong-domain'
   | 'unverified-email'
-  | 'wrong-nonce';
+  | 'wrong-nonce'
+  | 'wrong-signature'
+  | 'expired-token'
+  | 'wrong-algorithm'
+  | 'missing-kid';
 
 interface TokenInstruction {
   readonly nonce: string;
   readonly variant: ClaimVariant;
+  readonly idTokenOverride?: string;
 }
 
 let privateKey: CryptoKey;
+let unrelatedPrivateKey: CryptoKey;
 let publicJwk: JWK;
 const tokenInstructions = new Map<string, TokenInstruction>();
+const issuedTokens = new Map<string, string>();
 const mockProviderOrigin = 'http://127.0.0.1:45106';
 const originalFetch = globalThis.fetch;
 let tokenRequestCount = 0;
@@ -77,28 +85,43 @@ function json(value: unknown, status = 200): Response {
 
 async function signToken(instruction: TokenInstruction): Promise<string> {
   const { variant } = instruction;
-  return new SignJWT({
+  const now = Math.floor(Date.now() / 1_000);
+  const token = new SignJWT({
     nonce:
       variant === 'wrong-nonce' ? 'not-the-request-nonce' : instruction.nonce,
     hd: variant === 'wrong-domain' ? 'example.invalid' : HOSTED_DOMAIN,
     email: 'member@psd401.net',
     email_verified: variant !== 'unverified-email',
-    name: 'Synthetic Member',
+    ...(variant === 'missing-name' ? {} : { name: 'Synthetic Member' }),
   })
-    .setProtectedHeader({ alg: 'RS256', kid: 'unit-test-key', typ: 'JWT' })
     .setIssuer(
       variant === 'wrong-issuer' ? 'https://issuer.invalid' : GOOGLE_ISSUER,
     )
     .setAudience(variant === 'wrong-audience' ? 'another-client' : CLIENT_ID)
     .setSubject(PLAYWRIGHT_MEMBER_SUBJECT)
-    .setIssuedAt()
-    .setExpirationTime('5m')
-    .sign(privateKey);
+    .setIssuedAt(variant === 'expired-token' ? now - 1_200 : now)
+    .setExpirationTime(variant === 'expired-token' ? now - 600 : now + 300);
+
+  if (variant === 'wrong-algorithm') {
+    return token
+      .setProtectedHeader({ alg: 'HS256', kid: 'unit-test-key', typ: 'JWT' })
+      .sign(new TextEncoder().encode('synthetic-wrong-algorithm-key-32b'));
+  }
+
+  return token
+    .setProtectedHeader({
+      alg: 'RS256',
+      ...(variant === 'missing-kid' ? {} : { kid: 'unit-test-key' }),
+      typ: 'JWT',
+    })
+    .sign(variant === 'wrong-signature' ? unrelatedPrivateKey : privateKey);
 }
 
 beforeAll(async () => {
   const keys = await generateKeyPair('RS256', { extractable: true });
   privateKey = keys.privateKey;
+  unrelatedPrivateKey = (await generateKeyPair('RS256', { extractable: true }))
+    .privateKey;
   publicJwk = {
     ...(await exportJWK(keys.publicKey)),
     alg: 'RS256',
@@ -118,6 +141,9 @@ beforeAll(async () => {
     );
     if (url.origin !== mockProviderOrigin) {
       throw new Error('Unit OIDC attempted a non-mock network request.');
+    }
+    if (url.pathname === '/jwks-malformed') {
+      return json({ keys: 'not-an-array' });
     }
     if (url.pathname === '/jwks') {
       return json({ keys: [publicJwk] });
@@ -141,7 +167,10 @@ beforeAll(async () => {
       ) {
         return json({ error: 'invalid_grant' }, 400);
       }
-      return json({ id_token: await signToken(instruction) });
+      const idToken =
+        instruction.idTokenOverride ?? (await signToken(instruction));
+      issuedTokens.set(code, idToken);
+      return json({ id_token: idToken });
     }
     return new Response('Not found.', { status: 404 });
   }) as typeof globalThis.fetch;
@@ -208,8 +237,18 @@ function createSyntheticSignInEnvelope(
   );
 }
 
-async function callbackForVariant(variant: ClaimVariant) {
-  const configuration = readGoogleOidcConfiguration(oidcEnvironment());
+async function callbackForVariant(
+  variant: ClaimVariant,
+  options: Readonly<{
+    idTokenOverride?: string;
+    jwksPath?: '/jwks' | '/jwks-malformed';
+  }> = {},
+) {
+  const configuration = readGoogleOidcConfiguration(
+    oidcEnvironment({
+      GOOGLE_OIDC_JWKS_URI: `${mockProviderOrigin}${options.jwksPath ?? '/jwks'}`,
+    }),
+  );
   const started = await beginGoogleOidcSignIn(configuration);
   const authorization = new URL(started.authorizationUrl);
   const state = authorization.searchParams.get('state');
@@ -218,7 +257,13 @@ async function callbackForVariant(variant: ClaimVariant) {
     throw new Error('OIDC start omitted state or nonce.');
   }
   const code = `${variant}-${randomUUID()}`;
-  tokenInstructions.set(code, { nonce, variant });
+  tokenInstructions.set(code, {
+    nonce,
+    variant,
+    ...(options.idTokenOverride === undefined
+      ? {}
+      : { idTokenOverride: options.idTokenOverride }),
+  });
   const callbackUrl = new URL(configuration.redirectUri);
   callbackUrl.searchParams.set('code', code);
   callbackUrl.searchParams.set('state', state);
@@ -226,6 +271,7 @@ async function callbackForVariant(variant: ClaimVariant) {
     configuration,
     started,
     callbackUrl,
+    code,
     result: completeGoogleOidcCallback(configuration, {
       method: 'GET',
       callbackUrl,
@@ -272,6 +318,9 @@ describe('Google OIDC adapter', () => {
       emailVerified: true,
       subject: PLAYWRIGHT_MEMBER_SUBJECT,
     });
+    expect(result.capabilityInput.device.installationId).toMatch(
+      /^web\.[A-Za-z0-9_-]{43}$/u,
+    );
     expect(result.transport).toEqual({
       kind: 'oidc-code-callback',
       method: 'GET',
@@ -291,12 +340,40 @@ describe('Google OIDC adapter', () => {
     ).toEqual(result.capabilityInput);
   });
 
+  test('uses a minimized fallback when Google omits the optional name claim', async () => {
+    const callback = await callbackForVariant('missing-name');
+    const result = await callback.result;
+    expect(result.capabilityInput.claims.displayName).toBe('PSD staff member');
+  });
+
+  test('generates a fresh server-owned installation identifier for every flow', async () => {
+    const first = await callbackForVariant('valid');
+    const second = await callbackForVariant('valid');
+    const [firstResult, secondResult] = await Promise.all([
+      first.result,
+      second.result,
+    ]);
+    expect(firstResult.capabilityInput.device.installationId).toMatch(
+      /^web\.[A-Za-z0-9_-]{43}$/u,
+    );
+    expect(secondResult.capabilityInput.device.installationId).toMatch(
+      /^web\.[A-Za-z0-9_-]{43}$/u,
+    );
+    expect(firstResult.capabilityInput.device.installationId).not.toBe(
+      secondResult.capabilityInput.device.installationId,
+    );
+  });
+
   for (const variant of [
     'wrong-issuer',
     'wrong-audience',
     'wrong-domain',
     'unverified-email',
     'wrong-nonce',
+    'wrong-signature',
+    'expired-token',
+    'wrong-algorithm',
+    'missing-kid',
   ] as const) {
     test(`rejects ${variant.replaceAll('-', ' ')}`, async () => {
       const callback = await callbackForVariant(variant);
@@ -308,6 +385,52 @@ describe('Google OIDC adapter', () => {
       }
     });
   }
+
+  test('rejects a malformed JWKS document', async () => {
+    const callback = await callbackForVariant('valid', {
+      jwksPath: '/jwks-malformed',
+    });
+    try {
+      await callback.result;
+      throw new Error('Expected malformed JWKS rejection.');
+    } catch (error) {
+      expectOidcError(error, 'OIDC_ID_TOKEN_INVALID');
+    }
+  });
+
+  test('rejects replay of a consumed authorization code', async () => {
+    const callback = await callbackForVariant('valid');
+    await callback.result;
+    try {
+      await completeGoogleOidcCallback(callback.configuration, {
+        method: 'GET',
+        callbackUrl: callback.callbackUrl,
+        cookieHeader: cookieRequestHeader(callback.started.setCookieHeader),
+      });
+      throw new Error('Expected consumed authorization-code rejection.');
+    } catch (error) {
+      expectOidcError(error, 'OIDC_TOKEN_EXCHANGE_FAILED');
+    }
+  });
+
+  test('rejects an ID token replayed into a fresh nonce-bound flow', async () => {
+    const first = await callbackForVariant('valid');
+    await first.result;
+    const replayedToken = issuedTokens.get(first.code);
+    if (replayedToken === undefined) {
+      throw new Error('Synthetic provider did not capture its issued token.');
+    }
+
+    const replay = await callbackForVariant('valid', {
+      idTokenOverride: replayedToken,
+    });
+    try {
+      await replay.result;
+      throw new Error('Expected nonce-bound token replay rejection.');
+    } catch (error) {
+      expectOidcError(error, 'OIDC_ID_TOKEN_INVALID');
+    }
+  });
 
   test('rejects state mismatch before any token request', async () => {
     const configuration = readGoogleOidcConfiguration(oidcEnvironment());
@@ -361,6 +484,24 @@ describe('Google OIDC adapter', () => {
         GOOGLE_OIDC_REDIRECT_URI: 'https://eoc.psd401.net/auth/callback',
       }),
     ).toThrow(GoogleOidcConfigurationError);
+  });
+
+  test('allows provider overrides only with a non-production loopback callback', () => {
+    expect(
+      readGoogleOidcConfiguration(oidcEnvironment({ NODE_ENV: 'development' }))
+        .authorizationEndpoint,
+    ).toBe(`${mockProviderOrigin}/authorize`);
+
+    for (const runtimeMode of [undefined, 'development', 'test'] as const) {
+      expect(() =>
+        readGoogleOidcConfiguration(
+          oidcEnvironment({
+            NODE_ENV: runtimeMode,
+            GOOGLE_OIDC_REDIRECT_URI: 'https://eoc.psd401.net/auth/callback',
+          }),
+        ),
+      ).toThrow(GoogleOidcConfigurationError);
+    }
   });
 });
 
@@ -482,6 +623,49 @@ describe('configured Groups access and initial session', () => {
         reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
       }),
     );
+  });
+
+  test('audits malformed persisted user evidence without trusting its identifier', async () => {
+    const runtime = createPlaywrightAuthRuntime();
+    const evidence = await runtime.accessStore.loadEvidence(
+      PLAYWRIGHT_MEMBER_SUBJECT,
+    );
+    if (evidence.user === null) {
+      throw new Error('Synthetic member user evidence is unavailable.');
+    }
+    const user = evidence.user;
+    const subjectDigest = '9'.repeat(64);
+    const decision = await checkAccessGate(
+      {
+        googleSubject: PLAYWRIGHT_MEMBER_SUBJECT,
+        subjectDigest,
+        requestId: randomUUID(),
+        checkedAt: new Date().toISOString(),
+      },
+      {
+        store: {
+          async loadEvidence() {
+            return {
+              ...evidence,
+              user: { ...user, id: 'malformed-user-id' },
+            };
+          },
+        },
+        audit: runtime.auditSink,
+      },
+    );
+    expect(decision).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
+    });
+    expect(runtime.auditEntries).toHaveLength(1);
+    expect(runtime.auditEntries[0]).toMatchObject({
+      category: 'access-denial',
+      outcome: 'denied',
+      principal: { kind: 'unauthenticated', subjectDigest },
+      target: null,
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
+    });
   });
 
   test('requires a snapshot begun after the latest successful group-source update', async () => {

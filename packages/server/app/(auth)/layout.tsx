@@ -42,6 +42,11 @@ export default function AuthLayout({
             padding: clamp(3rem, 10vh, 7rem) 0 3rem;
           }
 
+          main:focus {
+            outline: 0.25rem solid #92400e;
+            outline-offset: 0.25rem;
+          }
+
           .auth-card {
             border: 1px solid #cbd5e1;
             border-radius: 0.75rem;
