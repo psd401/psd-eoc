@@ -51,7 +51,8 @@ test('mocked Google IdP signs in a configured access-group member', async ({
   await expect(
     page.getByRole('heading', { name: 'Return to PSD EOC' }),
   ).toBeVisible();
-  const sessionCookie = (await context.cookies()).find(
+  const cookies = await context.cookies();
+  const sessionCookie = cookies.find(
     (cookie) => cookie.name === '__Host-psd-eoc-session',
   );
   expect(sessionCookie).toMatchObject({
@@ -60,6 +61,15 @@ test('mocked Google IdP signs in a configured access-group member', async ({
     sameSite: 'Lax',
   });
   expect(sessionCookie?.value.length).toBeGreaterThanOrEqual(64);
+  const csrfCookie = cookies.find(
+    (cookie) => cookie.name === '__Host-psd-eoc-csrf',
+  );
+  expect(csrfCookie).toMatchObject({
+    httpOnly: false,
+    secure: true,
+    sameSite: 'Strict',
+  });
+  expect(csrfCookie?.value).toMatch(/^[A-Za-z0-9_-]{43}$/u);
 });
 
 test('public completion page does not claim an unauthenticated session', async ({

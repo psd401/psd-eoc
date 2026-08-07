@@ -30,6 +30,10 @@ import {
   readGoogleOidcConfiguration,
 } from '../../../../lib/auth/oidc';
 import {
+  createCsrfToken,
+  writeBrowserCsrfCookie,
+} from '../../../../lib/auth/middleware';
+import {
   createCompleteOidcSignInAuthorizer,
   createCompleteOidcSignInHandler,
   createDrizzleInitialWebSessionStore,
@@ -483,6 +487,11 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
     response.headers.append('Set-Cookie', clearCookieHeader);
     response.cookies.set(sessionCookie);
+    writeBrowserCsrfCookie(
+      response.cookies,
+      createCsrfToken(),
+      sessionCookie.maxAge,
+    );
     return noStore(response);
   } catch (error) {
     if (error instanceof GoogleOidcCallbackError) {
