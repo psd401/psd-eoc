@@ -13,7 +13,9 @@ code, issues, or imported data.
    incident, send a real notification, issue an all-clear, or close a real
    event. These four actions require an authenticated human in the app. This
    boundary is enforced server-side; never weaken, bypass, or mock it away in
-   production code paths.
+   production code paths. The canonical action-ID registry is
+   `packages/contracts/src/human-only.ts`; no agent-facing manifest may expose
+   an ID from that registry.
 2. **No live sends during development.** Never connect a write-capable flow to
    a live messaging provider (push, SMS, email, InformaCast, or anything else)
    without verified credentials, an approved synthetic target list, explicit
