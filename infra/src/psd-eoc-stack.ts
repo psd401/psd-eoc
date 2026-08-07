@@ -311,10 +311,8 @@ export class PsdEocStack extends Stack {
     criticalAlarmTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     const appImageIdentifier = new CfnParameter(this, 'AppImageIdentifier', {
-      allowedPattern:
-        '^338414773271\\.dkr\\.ecr\\.us-west-2\\.amazonaws\\.com\\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$',
-      constraintDescription:
-        'Use an immutable image digest from a private ECR repository in account 338414773271 and us-west-2.',
+      allowedPattern: `^${DEPLOYMENT_ACCOUNT}\\.dkr\\.ecr\\.${DEPLOYMENT_REGION}\\.amazonaws\\.com\\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$`,
+      constraintDescription: `Use an immutable image digest from a private ECR repository in account ${DEPLOYMENT_ACCOUNT} and ${DEPLOYMENT_REGION}.`,
       description:
         'Approved PSD EOC server image URI pinned by sha256 digest; required only for a manually approved deployment.',
       type: 'String',
