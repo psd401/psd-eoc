@@ -128,11 +128,6 @@ export class GoogleOidcCallbackError extends Error {
   }
 }
 
-export interface BeginGoogleOidcSignInInput {
-  /** Existing opaque web installation identifier, when one is available. */
-  readonly installationId?: string;
-}
-
 export interface BeginGoogleOidcSignInResult {
   readonly authorizationUrl: string;
   readonly setCookieHeader: string;
@@ -293,6 +288,7 @@ function isLoopbackHostname(hostname: string): boolean {
 function parseProviderEndpoints(
   environment: Environment,
   mode: RuntimeMode,
+  loopbackRedirect: boolean,
 ): Readonly<{
   authorizationEndpoint: string;
   tokenEndpoint: string;
@@ -308,9 +304,9 @@ function parseProviderEndpoints(
   );
   const suppliedCount = values.filter((value) => value !== undefined).length;
 
-  if (mode === 'production' && suppliedCount > 0) {
+  if (suppliedCount > 0 && (mode === 'production' || !loopbackRedirect)) {
     return configurationError(
-      'Google OIDC provider endpoint overrides are forbidden in production.',
+      'Google OIDC provider endpoint overrides require a non-production loopback callback.',
     );
   }
   if (suppliedCount !== 0 && suppliedCount !== names.length) {
@@ -384,39 +380,37 @@ export function readGoogleOidcConfiguration(
     128,
   );
 
-  if (
-    mode === 'production' &&
-    !/^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/u.test(clientId)
-  ) {
-    return configurationError(
-      'GOOGLE_OIDC_CLIENT_ID must be a Google OAuth client ID in production.',
-    );
-  }
-
   const redirectUri = parseAbsoluteUrl(
     'GOOGLE_OIDC_REDIRECT_URI',
     redirectUriValue,
   );
+  const loopbackRedirect = isLoopbackHostname(redirectUri.hostname);
   if (redirectUri.search.length > 0) {
     return configurationError(
       'GOOGLE_OIDC_REDIRECT_URI cannot contain a query or fragment.',
     );
   }
-  if (mode === 'production' && redirectUri.protocol !== 'https:') {
+  const productionLikeRedirect = mode === 'production' || !loopbackRedirect;
+  if (
+    productionLikeRedirect &&
+    !/^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/u.test(clientId)
+  ) {
     return configurationError(
-      'GOOGLE_OIDC_REDIRECT_URI must use HTTPS in production.',
+      'GOOGLE_OIDC_CLIENT_ID must be a Google OAuth client ID for a non-loopback deployment.',
     );
   }
-  if (
-    redirectUri.protocol === 'http:' &&
-    !isLoopbackHostname(redirectUri.hostname)
-  ) {
+  if (productionLikeRedirect && redirectUri.protocol !== 'https:') {
+    return configurationError(
+      'GOOGLE_OIDC_REDIRECT_URI must use HTTPS for a non-loopback deployment.',
+    );
+  }
+  if (redirectUri.protocol === 'http:' && !loopbackRedirect) {
     return configurationError(
       'An HTTP GOOGLE_OIDC_REDIRECT_URI must use a loopback host.',
     );
   }
 
-  const endpoints = parseProviderEndpoints(environment, mode);
+  const endpoints = parseProviderEndpoints(environment, mode, loopbackRedirect);
   const secureCookies = redirectUri.protocol === 'https:';
   const configuration: GoogleOidcConfiguration = Object.freeze({
     mode,
@@ -753,27 +747,9 @@ function readCookieValue(
   return matches.length === 1 ? (matches[0] ?? null) : null;
 }
 
-function validateInstallationId(installationId: string | undefined): string {
-  if (installationId === undefined) {
-    return `web.${encodeBase64Url(randomBytes(32))}`;
-  }
-  if (
-    installationId.length < 16 ||
-    installationId.length > 255 ||
-    installationId !== installationId.trim() ||
-    /[\r\n\0]/u.test(installationId)
-  ) {
-    return configurationError(
-      'The web installation identifier must be an opaque 16-255 character value.',
-    );
-  }
-  return installationId;
-}
-
 /** Starts a code+PKCE request and returns the redirect plus transient cookie. */
 export async function beginGoogleOidcSignIn(
   configuration: GoogleOidcConfiguration,
-  input: BeginGoogleOidcSignInInput = {},
 ): Promise<BeginGoogleOidcSignInResult> {
   getPrivateConfiguration(configuration);
   const state = encodeBase64Url(randomBytes(32));
@@ -787,7 +763,7 @@ export async function beginGoogleOidcSignIn(
     state,
     nonce,
     codeVerifier,
-    installationId: validateInstallationId(input.installationId),
+    installationId: `web.${encodeBase64Url(randomBytes(32))}`,
     issuedAt,
     expiresAt,
   };
@@ -1083,7 +1059,7 @@ async function verifyIdToken(
 
   const { payload, protectedHeader } = verified;
   const subject = boundedClaimString(payload.sub, 255);
-  const displayName = boundedClaimString(payload.name, 160);
+  const claimedDisplayName = boundedClaimString(payload.name, 160);
   const rawEmail = boundedClaimString(payload.email, 320);
   const email = rawEmail?.toLowerCase() ?? null;
   if (
@@ -1097,7 +1073,6 @@ async function verifyIdToken(
     payload.email_verified !== true ||
     email === null ||
     !email.endsWith(`@${PSD_HOSTED_DOMAIN}`) ||
-    displayName === null ||
     typeof payload.nonce !== 'string' ||
     !constantTimeEqual(payload.nonce, expectedNonce)
   ) {
@@ -1111,6 +1086,7 @@ async function verifyIdToken(
 
   const subjectDigest = await sha256Hex(subject);
   const claimsDigest = await sha256Hex(idToken);
+  const displayName = claimedDisplayName ?? 'PSD staff member';
   const claims: CompleteOidcSignInInput['claims'] = {
     issuer: GOOGLE_ISSUER,
     audience: configuration.clientId,

@@ -1,6 +1,6 @@
 export default function LoginPage() {
   return (
-    <main id="main-content">
+    <main id="main-content" tabIndex={-1}>
       <section className="auth-card" aria-labelledby="sign-in-heading">
         <h1 id="sign-in-heading">Sign in to PSD EOC</h1>
         <p>

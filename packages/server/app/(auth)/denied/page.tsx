@@ -22,7 +22,7 @@ export default async function DeniedPage({
     : 'PSD EOC could not sign you in. No session was created.';
 
   return (
-    <main id="main-content">
+    <main id="main-content" tabIndex={-1}>
       <section className="auth-card" aria-labelledby="denied-heading">
         <h1 id="denied-heading">Access not granted</h1>
         <p role="alert">{message}</p>
