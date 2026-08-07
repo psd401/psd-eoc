@@ -17,6 +17,7 @@ import {
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
+  POST_GATE_SIGN_IN_FAILED_REASON,
   readBootstrapAdminSubjects,
   type AccessGateAuditSink,
   type AccessGateDenialReason,
@@ -263,11 +264,17 @@ function parsePolicySeconds(
     return fallback;
   }
   if (!/^\d+$/u.test(configured)) {
-    throw new Error(`${name} must be a bounded positive integer.`);
+    throw new WebSessionIssuanceError(
+      'INVALID_SESSION_POLICY',
+      `${name} must be a bounded positive integer.`,
+    );
   }
   const parsed = Number(configured);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    throw new Error(`${name} must be a bounded positive integer.`);
+    throw new WebSessionIssuanceError(
+      'INVALID_SESSION_POLICY',
+      `${name} must be a bounded positive integer.`,
+    );
   }
   return parsed;
 }
@@ -500,18 +507,18 @@ export async function GET(request: Request): Promise<NextResponse> {
       }
       return deniedResponse(request, 'callback', error.clearCookieHeader);
     }
-    if (
-      error instanceof WebSessionIssuanceError &&
-      postGateAuditContext !== undefined &&
-      runtime !== undefined
-    ) {
+    if (postGateAuditContext !== undefined && runtime !== undefined) {
+      const reasonCode =
+        error instanceof WebSessionIssuanceError
+          ? error.code
+          : POST_GATE_SIGN_IN_FAILED_REASON;
       try {
         await runtime.auditSink.append({
           outcome: 'denied',
           requestId: postGateAuditContext.requestId,
           occurredAt: new Date().toISOString(),
           subjectDigest: postGateAuditContext.subjectDigest,
-          reasonCode: error.code,
+          reasonCode,
           userId: postGateAuditContext.userId,
         });
       } catch {
@@ -519,7 +526,9 @@ export async function GET(request: Request): Promise<NextResponse> {
       }
       return deniedResponse(
         request,
-        SESSION_DENIAL_PAGE_REASONS[error.code],
+        error instanceof WebSessionIssuanceError
+          ? SESSION_DENIAL_PAGE_REASONS[error.code]
+          : 'configuration',
         clearCookieHeader,
       );
     }
