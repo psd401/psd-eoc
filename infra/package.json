@@ -4,6 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit --project tsconfig.json"
+    "deploy": "cdk deploy --output ../node_modules/.cache/psd-eoc-cdk.out",
+    "synth": "cdk synth --quiet --no-lookups --strict --no-notices --output ../node_modules/.cache/psd-eoc-cdk.out",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit --project tsconfig.json && bun run synth"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.263.0",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1135.0"
   }
 }
