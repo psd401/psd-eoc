@@ -44,7 +44,16 @@ export default async function DevicesPage({
     redirect('/login?reason=session-expired');
   }
   if (!authenticated.roles.includes('admin')) {
-    redirect('/denied?reason=administrator-required');
+    return (
+      <main id="main-content" tabIndex={-1}>
+        <h1>Administrator access required</h1>
+        <p role="alert">
+          Your PSD EOC session is active, but only administrators can manage
+          device sessions.
+        </p>
+        <p>Contact a PSD EOC administrator if you need device-session help.</p>
+      </main>
+    );
   }
   const parameters = await searchParams;
   const page = await executeListDeviceSessionsCapability({

@@ -20,9 +20,11 @@ import {
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
   authenticateSessionRequest,
+  createCsrfToken,
   readPresentedSessionCredential,
   requireFacilityAccess,
   requireRole,
+  writeBrowserCsrfCookie,
   writeBrowserSessionCookies,
   type CookieWriter,
 } from '../../../lib/auth/middleware.js';
@@ -764,10 +766,55 @@ describe('rotation and revocation', () => {
 });
 
 describe('transport and policy boundaries', () => {
-  test('accepts an OIDC-issued web credential and rotates it without Google', async () => {
+  test('uses callback CSRF protection to rotate an OIDC credential without Google', async () => {
     const oidcCredential = 'A'.repeat(64);
     const store = new MemorySessionStore(oidcCredential);
     const service = new SessionService(store);
+    const csrfToken = createCsrfToken();
+    const written: Array<{
+      name: string;
+      value: string;
+      options: Parameters<CookieWriter['set']>[2];
+    }> = [];
+    writeBrowserCsrfCookie(
+      {
+        set(name, value, options) {
+          written.push({ name, value, options });
+        },
+      },
+      csrfToken,
+      3_600,
+    );
+    expect(written).toEqual([
+      {
+        name: WEB_CSRF_COOKIE_NAME,
+        value: csrfToken,
+        options: {
+          httpOnly: false,
+          secure: true,
+          sameSite: 'strict',
+          path: '/',
+          maxAge: 3_600,
+        },
+      },
+    ]);
+
+    const presented = readPresentedSessionCredential(
+      new Request('https://eoc.test/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+          cookie: `${WEB_SESSION_COOKIE_NAME}=${oidcCredential}; ${WEB_CSRF_COOKIE_NAME}=${csrfToken}`,
+          origin: 'https://eoc.test',
+          'x-psd-eoc-csrf': csrfToken,
+        },
+      }),
+      { mutation: true },
+    );
+    expect(presented).toEqual({
+      token: oidcCredential,
+      source: 'web',
+      csrfVerified: true,
+    });
 
     await expect(
       authenticateSessionRequest(
@@ -780,10 +827,10 @@ describe('transport and policy boundaries', () => {
 
     const refreshed = await executeRefreshSessionCapability({
       service,
-      token: oidcCredential,
-      source: 'web',
+      token: presented.token,
+      source: presented.source,
       idempotencyKey: 'oidc-cookie-refresh-compatibility-0001',
-      csrfVerified: true,
+      csrfVerified: presented.csrfVerified,
       now: INSIDE_GRACE,
     });
     expect(refreshed.refreshToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
