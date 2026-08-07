@@ -12,23 +12,18 @@ queue consumers, provider-send permissions, subscriptions, schedules, or live
 provider configuration. The generated Google and Expo secrets are deliberately
 unusable placeholders.
 
-Issue #2 owns the canonical `docs/INTEGRATIONS.md` table. Until that issue
-lands, the issue #4 resources have these explicit truth labels:
-
-| Integration                | Truth label             | Evidence                                                                                                    |
-| -------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Aurora PostgreSQL Data API | `configured-unverified` | CDK configuration only; nothing has been deployed or exercised                                              |
-| Private S3 media storage   | `configured-unverified` | CDK configuration only; no media flow exists                                                                |
-| App Runner                 | `blocked`               | Deployment requires an approved image digest and a separately authorized least-privilege database LOGIN     |
-| Amazon SES                 | `configured-unverified` | Identity and manual DKIM outputs only; no send permission or production-access claim                        |
-| Google OAuth               | `blocked`               | Secrets Manager contains a generated placeholder with a blocked client ID                                   |
-| Expo Push                  | `blocked`               | Placeholder secret is not granted to any runtime; no push worker exists                                     |
-| AWS End User Messaging SMS | `blocked`               | Queue scaffolding only; no provider configuration or send permission exists                                 |
-| GitHub Actions OIDC        | `configured-unverified` | Role trust is synthesized for immutable repository ID `1326178900`; CI has no deploy job or OIDC permission |
+[`docs/INTEGRATIONS.md`](../docs/INTEGRATIONS.md) is the single source of truth
+for integration labels. This infrastructure-only issue does not advance any
+label: no resource was deployed and no provider connectivity was exercised.
+The register's existing `mocked` and `blocked` states therefore remain
+authoritative. Synthesized resources, generated placeholders, identity
+definitions, and passing tests are not evidence of configured or live
+integration status.
 
 Provider activation remains subject to the synthetic-target, consequence
-preview, authorization, and human-confirmation rules in `AGENTS.md`. A passing
-synthesis or mock never changes a truth label to `live-verified`.
+preview, authorization, and human-confirmation rules in `AGENTS.md`. Any
+future label change must land in the canonical register with the required
+evidence and approval.
 
 ## What the stack contains
 
