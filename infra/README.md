@@ -52,6 +52,9 @@ evidence and approval.
 
 The account-level GitHub OIDC provider is shared with PSD Maps and is imported
 by ARN. Creating another provider for the same issuer in this stack would fail.
+GitHub's live repository OIDC settings report the immutable default subject
+prefix `repo:psd401@1902994/psd-eoc@1326178900`, which the deploy-role trust
+matches exactly before appending the `main` ref context.
 
 The generated `/psd-eoc/database/application` secret is deliberately blocked
 until an approved database bootstrap creates its `psd_eoc_application` LOGIN
