@@ -1,0 +1,12 @@
+{
+  "name": "@psd-eoc/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit --project tsconfig.json"
+  },
+  "dependencies": {
+    "@psd-eoc/contracts": "workspace:*"
+  }
+}
