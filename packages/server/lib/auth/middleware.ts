@@ -6,6 +6,7 @@ import {
   SessionAccessError,
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
+  isOpaqueSessionCredential,
   type AuthenticatedSession,
   type SessionService,
 } from './sessions';
@@ -60,8 +61,8 @@ function readBearer(header: string | null): string | null {
   if (header === null) {
     return null;
   }
-  const match = /^Bearer ([A-Za-z0-9_-]{43})$/u.exec(header);
-  if (match?.[1] === undefined) {
+  const match = /^Bearer ([A-Za-z0-9_-]+)$/u.exec(header);
+  if (match?.[1] === undefined || !isOpaqueSessionCredential(match[1])) {
     throw new SessionAccessError(
       'INVALID_CREDENTIAL',
       'The mobile session credential is invalid.',

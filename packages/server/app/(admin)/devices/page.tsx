@@ -34,14 +34,14 @@ export default async function DevicesPage({
   const cookieStore = await cookies();
   const token = cookieStore.get(WEB_SESSION_COOKIE_NAME)?.value;
   if (token === undefined) {
-    redirect('/sign-in?reason=session-required');
+    redirect('/login?reason=session-required');
   }
   const service = getDefaultSessionService();
   let authenticated;
   try {
     authenticated = await service.authenticate(token, 'web');
   } catch {
-    redirect('/sign-in?reason=session-expired');
+    redirect('/login?reason=session-expired');
   }
   if (!authenticated.roles.includes('admin')) {
     redirect('/denied?reason=administrator-required');
