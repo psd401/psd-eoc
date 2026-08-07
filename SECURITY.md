@@ -16,9 +16,11 @@ human-only for critical actions.
 
 ## Hard rules
 
-- Four human-only actions (start real incident, send real notification,
-  all-clear, close real event) are enforced server-side; no agent credential
-  can satisfy them. AI can never satisfy approval.
+- The four human-only actions—start a real incident, send a real notification,
+  issue an all-clear on a real event, and close a real event—are registered in
+  `packages/contracts/src/human-only.ts` and enforced server-side. No agent
+  credential or agent-surface manifest may expose or satisfy a registered
+  action ID; AI can never supply approval or confirmation.
 - All mutations require idempotency keys; activation endpoints are POST-only,
   CSRF-protected, rate-limited; no state change on GET.
 - Live provider sends require: verified credentials + approved targets +
