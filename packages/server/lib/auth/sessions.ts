@@ -68,6 +68,7 @@ const DAY_SECONDS = 24 * 60 * 60;
 const REFRESH_TOKEN_BYTES = 32;
 const REFRESH_RETRY_RECOVERY_SECONDS = 5 * 60;
 const SESSION_LIST_READ_CONCURRENCY = 8;
+const SESSIONS_PER_DEVICE_SUMMARY = 100;
 const REFRESH_RESULT_PREFIX = 'refresh-v1';
 const REVOCATION_RESULT_PREFIX = 'session-revocation-v1';
 
@@ -823,9 +824,35 @@ export class SessionService {
       entry.sessions.push(context.result.session);
       grouped.set(device.id, entry);
     }
-    const rows = [...grouped.values()].sort((left, right) =>
-      left.deviceEnrollment.id.localeCompare(right.deviceEnrollment.id),
-    );
+    const rows = [...grouped.values()]
+      .sort((left, right) =>
+        left.deviceEnrollment.id.localeCompare(right.deviceEnrollment.id),
+      )
+      .flatMap((entry) => {
+        const orderedSessions = [...entry.sessions].sort(
+          (left, right) =>
+            right.createdAt.localeCompare(left.createdAt) ||
+            left.id.localeCompare(right.id),
+        );
+        const summaries: Array<{
+          deviceEnrollment: DeviceEnrollment;
+          sessions: SessionEstablishmentResult['session'][];
+        }> = [];
+        for (
+          let offset = 0;
+          offset < orderedSessions.length;
+          offset += SESSIONS_PER_DEVICE_SUMMARY
+        ) {
+          summaries.push({
+            deviceEnrollment: entry.deviceEnrollment,
+            sessions: orderedSessions.slice(
+              offset,
+              offset + SESSIONS_PER_DEVICE_SUMMARY,
+            ),
+          });
+        }
+        return summaries;
+      });
     const offset = decodeCursor(input.cursor);
     const items = rows.slice(offset, offset + input.limit);
     const nextOffset = offset + items.length;

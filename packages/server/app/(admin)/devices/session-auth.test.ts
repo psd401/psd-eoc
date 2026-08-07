@@ -554,6 +554,78 @@ describe('Google-outage session continuity', () => {
   });
 });
 
+describe('device session administration', () => {
+  test('paginates every retained session without exceeding the contract bound', async () => {
+    const token = createOpaqueRefreshToken();
+    const store = new MemorySessionStore(token);
+    const retainedSessions = Array.from({ length: 101 }, (_, index) => {
+      const sequence = String(index + 1).padStart(12, '0');
+      const sessionResult = result({
+        sessionId: `20000000-0000-4000-8000-${sequence}`,
+        epochId: `30000000-0000-4000-8000-${sequence}`,
+      });
+      return Object.freeze({
+        result: sessionResult,
+        membershipSnapshotId: IDS.snapshot,
+        membershipCapturedAt: new Date('2026-08-07T09:00:00.000Z'),
+        membershipScope: sessionResult.user.facilityScope,
+        membershipAccessActive: true,
+        revocation: null,
+        connectivityEpochActive: true,
+      }) satisfies StoredSessionContext;
+    });
+    spyOn(store, 'listDeviceSessions').mockResolvedValue(retainedSessions);
+    const service = new SessionService(store);
+    const authenticated = await service.authenticate(
+      token,
+      'web',
+      INSIDE_GRACE,
+    );
+
+    const firstPage = await executeListDeviceSessionsCapability({
+      service,
+      authenticated,
+      query: {
+        userId: null,
+        includeRevoked: true,
+        cursor: null,
+        limit: 1,
+      },
+      now: INSIDE_GRACE,
+    });
+    expect(firstPage.items).toHaveLength(1);
+    expect(firstPage.items[0]?.sessions).toHaveLength(100);
+    expect(firstPage.pageInfo.hasMore).toBe(true);
+    const nextCursor = firstPage.pageInfo.nextCursor;
+    if (nextCursor === null) {
+      throw new Error('Expected a continuation for the retained session list.');
+    }
+
+    const secondPage = await executeListDeviceSessionsCapability({
+      service,
+      authenticated,
+      query: {
+        userId: null,
+        includeRevoked: true,
+        cursor: nextCursor,
+        limit: 1,
+      },
+      now: INSIDE_GRACE,
+    });
+    expect(secondPage.items).toHaveLength(1);
+    expect(secondPage.items[0]?.sessions).toHaveLength(1);
+    expect(secondPage.pageInfo).toEqual({
+      hasMore: false,
+      nextCursor: null,
+    });
+    const listedSessionIds = [...firstPage.items, ...secondPage.items].flatMap(
+      (item) => item.sessions.map((session) => session.id),
+    );
+    expect(listedSessionIds).toHaveLength(101);
+    expect(new Set(listedSessionIds).size).toBe(101);
+  });
+});
+
 describe('rotation and revocation', () => {
   test('returns the same successor for an idempotent retry and rejects replay under a new key', async () => {
     const token = createOpaqueRefreshToken();
