@@ -10,6 +10,8 @@ export const GITHUB_REPOSITORY = 'psd401/psd-eoc';
 export const GITHUB_REPOSITORY_ID = '1326178900';
 export const GITHUB_MAIN_REF = 'refs/heads/main';
 export const GITHUB_OIDC_ISSUER = 'token.actions.githubusercontent.com';
+export const GITHUB_DEPLOY_JOB_WORKFLOW_REF =
+  'psd401/psd-eoc/.github/workflows/deploy-infrastructure.yml@refs/heads/main';
 // GitHub's live repository OIDC settings report this immutable default prefix.
 // Repositories created after July 15, 2026 include owner and repository IDs.
 export const GITHUB_OIDC_SUBJECT =

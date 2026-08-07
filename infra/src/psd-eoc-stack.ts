@@ -3,6 +3,7 @@ import {
   CfnParameter,
   Duration,
   RemovalPolicy,
+  Resource,
   Stack,
   Tags,
   Validations,
@@ -25,6 +26,7 @@ import {
   APP_RUNNER_HEALTH_CHECK_PATH,
   DEPLOYMENT_ACCOUNT,
   DEPLOYMENT_REGION,
+  GITHUB_DEPLOY_JOB_WORKFLOW_REF,
   GITHUB_MAIN_REF,
   GITHUB_OIDC_ISSUER,
   GITHUB_OIDC_SUBJECT,
@@ -219,6 +221,7 @@ export class PsdEocStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       versioned: true,
     });
+    this.retainGeneratedPolicy(mediaBucket);
 
     const fanout = this.createQueueWithDeadLetterQueue(
       'Fanout',
@@ -302,6 +305,7 @@ export class PsdEocStack extends Stack {
       topicName: 'psd-eoc-operations-alarms',
     });
     operationsAlarmTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    this.retainGeneratedPolicy(operationsAlarmTopic);
     const criticalAlarmTopic = new sns.Topic(this, 'CriticalAlarmTopic', {
       displayName: 'PSD EOC critical alarms',
       enforceSSL: true,
@@ -309,6 +313,7 @@ export class PsdEocStack extends Stack {
       topicName: 'psd-eoc-critical-alarms',
     });
     criticalAlarmTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    this.retainGeneratedPolicy(criticalAlarmTopic);
 
     const appImageIdentifier = new CfnParameter(this, 'AppImageIdentifier', {
       allowedPattern: `^${DEPLOYMENT_ACCOUNT}\\.dkr\\.ecr\\.${DEPLOYMENT_REGION}\\.amazonaws\\.com\\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$`,
@@ -472,6 +477,8 @@ export class PsdEocStack extends Stack {
         {
           StringEquals: {
             [`${GITHUB_OIDC_ISSUER}:aud`]: 'sts.amazonaws.com',
+            [`${GITHUB_OIDC_ISSUER}:job_workflow_ref`]:
+              GITHUB_DEPLOY_JOB_WORKFLOW_REF,
             [`${GITHUB_OIDC_ISSUER}:ref`]: GITHUB_MAIN_REF,
             [`${GITHUB_OIDC_ISSUER}:repository`]: GITHUB_REPOSITORY,
             [`${GITHUB_OIDC_ISSUER}:repository_id`]: GITHUB_REPOSITORY_ID,
@@ -481,7 +488,7 @@ export class PsdEocStack extends Stack {
         },
       ),
       description:
-        'Future CDK deployment role restricted to psd401/psd-eoc main via GitHub OIDC.',
+        'Future CDK deployment role restricted to the approved psd-eoc reusable workflow on main.',
       maxSessionDuration: Duration.hours(1),
       roleName: 'PsdEocGithubActionsDeploy',
     });
@@ -576,6 +583,7 @@ export class PsdEocStack extends Stack {
       retentionPeriod: Duration.days(14),
     });
     deadLetterQueue.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    this.retainGeneratedPolicy(deadLetterQueue);
 
     const queue = new sqs.Queue(this, `${idPrefix}Queue`, {
       deadLetterQueue: {
@@ -589,8 +597,19 @@ export class PsdEocStack extends Stack {
       visibilityTimeout: Duration.seconds(60),
     });
     queue.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    this.retainGeneratedPolicy(queue);
 
     return { deadLetterQueue, queue };
+  }
+
+  private retainGeneratedPolicy(resource: Construct): void {
+    const policy = resource.node.tryFindChild('Policy');
+    if (!(policy instanceof Resource)) {
+      throw new Error(
+        `${resource.node.path} must synthesize a retained transport-security policy.`,
+      );
+    }
+    policy.applyRemovalPolicy(RemovalPolicy.RETAIN);
   }
 
   private cdkBootstrapRoleArns(): string[] {
