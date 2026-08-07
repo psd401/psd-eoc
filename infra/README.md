@@ -34,7 +34,8 @@ evidence and approval.
 - A versioned, KMS-encrypted media bucket with every public-access block,
   TLS-only access, retained data, and no lifecycle deletion.
 - A central fan-out queue plus push, email, and SMS work queues. Every queue has
-  an attached retained dead-letter queue and bounded receive attempts.
+  an attached retained dead-letter queue and bounded receive attempts; each
+  dead-letter queue accepts redrive only from its paired source queue.
 - An App Runner service with at least two provisioned instances and automatic
   source deployments disabled. Its database environment matches the server's
   Data API contract.
