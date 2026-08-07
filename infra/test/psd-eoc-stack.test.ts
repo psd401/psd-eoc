@@ -187,14 +187,29 @@ describe('bounded notification queues', () => {
       }
 
       const sourceProperties = resourceProperties(source.resource);
+      const deadLetterProperties = resourceProperties(deadLetter.resource);
       const redrive = asRecord(sourceProperties.RedrivePolicy);
       const deadLetterTarget = asRecord(redrive.deadLetterTargetArn);
+      const redriveAllow = asRecord(deadLetterProperties.RedriveAllowPolicy);
 
       expect(deadLetterTarget['Fn::GetAtt']).toEqual([
         deadLetter.logicalId,
         'Arn',
       ]);
       expect(redrive.maxReceiveCount).toBe(5);
+      expect(redriveAllow.redrivePermission).toBe('byQueue');
+      expect(redriveAllow.sourceQueueArns).toEqual([
+        {
+          'Fn::Join': [
+            '',
+            [
+              'arn:',
+              { Ref: 'AWS::Partition' },
+              `:sqs:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:${queueName}`,
+            ],
+          ],
+        },
+      ]);
       expect(sourceProperties.SqsManagedSseEnabled).toBe(true);
       expect(source.resource.DeletionPolicy).toBe('Retain');
       expect(deadLetter.resource.DeletionPolicy).toBe('Retain');

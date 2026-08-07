@@ -576,10 +576,23 @@ export class PsdEocStack extends Stack {
     idPrefix: string,
     queueName: string,
   ): QueueWithDeadLetterQueue {
+    // The source queue has a fixed physical name, so its ARN can be declared
+    // without a CloudFormation reference. That keeps this deny-by-default
+    // allow-list from forming a dependency cycle with the source queue's
+    // RedrivePolicy reference back to the DLQ.
+    const sourceQueueIdentity = sqs.Queue.fromQueueArn(
+      this,
+      `${idPrefix}RedriveSourceQueue`,
+      this.formatArn({ service: 'sqs', resource: queueName }),
+    );
     const deadLetterQueue = new sqs.Queue(this, `${idPrefix}DeadLetterQueue`, {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
       queueName: `${queueName}-dlq`,
+      redriveAllowPolicy: {
+        redrivePermission: sqs.RedrivePermission.BY_QUEUE,
+        sourceQueues: [sourceQueueIdentity],
+      },
       retentionPeriod: Duration.days(14),
     });
     deadLetterQueue.applyRemovalPolicy(RemovalPolicy.RETAIN);
