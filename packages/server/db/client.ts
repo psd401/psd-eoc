@@ -10,8 +10,8 @@ import {
 import postgres from 'postgres';
 import { z } from 'zod';
 
-import * as relations from './relations.js';
-import * as tables from './schema.js';
+import * as relations from './relations';
+import * as tables from './schema';
 
 const databaseSchema = { ...tables, ...relations };
 
