@@ -1,0 +1,886 @@
+import { z } from 'zod';
+
+import { PaginationCursorSchema, paginatedSchema } from './api';
+import { ActorSchema, ConnectivityEpochIdSchema } from './capability';
+import { FacilityScopeSchema } from './facility';
+import { AccessGroupSourceRefSchema, type AccessGroupSourceRef } from './group';
+import {
+  hasUniqueStrings,
+  isAtOrAfter,
+  TimestampSchema,
+  UuidSchema,
+  VersionSchema,
+} from './shared';
+
+const accessGroupSourceRefKey = (source: AccessGroupSourceRef): string =>
+  `${source.id}:${source.kind}:${source.purpose}:${source.facilityId ?? ''}`;
+
+/**
+ * Owns the complete release-one authorization role set. Roles are assigned by
+ * trusted administrative flows and always combine with server-side facility
+ * scope checks.
+ */
+export const RoleSchema = z.enum(['staff', 'admin']);
+
+/** Release-one user role inferred from {@link RoleSchema}. */
+export type Role = z.infer<typeof RoleSchema>;
+
+/**
+ * Owns the stable internal identifier for a staff user. The related immutable
+ * Google subject remains the external identity key.
+ */
+export const UserIdSchema = UuidSchema;
+
+/** Stable user identifier inferred from {@link UserIdSchema}. */
+export type UserId = z.infer<typeof UserIdSchema>;
+
+/**
+ * Owns a minimized staff identity record. The Google subject is immutable;
+ * disabling a user preserves history rather than deleting or re-keying it.
+ * No student identity shape exists in this package.
+ */
+export const UserSchema = z
+  .object({
+    id: UserIdSchema,
+    googleSubject: z.string().trim().min(1).max(255),
+    email: z
+      .string()
+      .trim()
+      .email()
+      .max(320)
+      .refine((email) => email.toLowerCase().endsWith('@psd401.net'), {
+        message: 'User email must belong to the psd401.net hosted domain.',
+      }),
+    displayName: z.string().trim().min(1).max(160),
+    roles: z
+      .array(RoleSchema)
+      .min(1)
+      .max(2)
+      .refine((roles) => new Set(roles).size === roles.length, {
+        message: 'User roles must be unique.',
+      })
+      .readonly(),
+    facilityScope: FacilityScopeSchema,
+    createdAt: TimestampSchema,
+    disabledAt: TimestampSchema.nullable(),
+  })
+  .strict()
+  .superRefine((user, context) => {
+    if (user.disabledAt && !isAtOrAfter(user.disabledAt, user.createdAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A user cannot be disabled before creation.',
+        path: ['disabledAt'],
+      });
+    }
+  })
+  .readonly();
+
+/** Minimized, immutable-key staff identity inferred from its schema. */
+export type User = z.infer<typeof UserSchema>;
+
+/**
+ * Owns the supported device platforms used for sessions and push enrollment.
+ * Native platforms require biometric return unlock; web uses a secure cookie.
+ */
+export const DevicePlatformSchema = z.enum(['web', 'ios', 'android']);
+
+/** Supported device platform inferred from its schema. */
+export type DevicePlatform = z.infer<typeof DevicePlatformSchema>;
+
+/**
+ * Owns the trusted return-unlock mechanism bound to a device enrollment.
+ * Native devices use biometric protection and web enrollments use a secure
+ * session cookie.
+ */
+export const DeviceUnlockMethodSchema = z.enum([
+  'secure-session-cookie',
+  'biometric',
+]);
+
+/** Device return-unlock mechanism inferred from its schema. */
+export type DeviceUnlockMethod = z.infer<typeof DeviceUnlockMethodSchema>;
+
+/**
+ * Owns the stable identifier for a device enrollment. Revocation appends
+ * lifecycle evidence and preserves the enrollment for audit reconstruction.
+ */
+export const DeviceEnrollmentIdSchema = UuidSchema;
+
+/** Device enrollment identifier inferred from its schema. */
+export type DeviceEnrollmentId = z.infer<typeof DeviceEnrollmentIdSchema>;
+
+/**
+ * Owns a device-bound enrollment without exposing credentials. Native
+ * enrollments are biometric-gated; web enrollments use secure cookies.
+ */
+export const DeviceEnrollmentSchema = z
+  .object({
+    id: DeviceEnrollmentIdSchema,
+    userId: UserIdSchema,
+    platform: DevicePlatformSchema,
+    unlockMethod: DeviceUnlockMethodSchema,
+    installationId: z.string().trim().min(16).max(255),
+    enrolledAt: TimestampSchema,
+    lastSeenAt: TimestampSchema,
+    revokedAt: TimestampSchema.nullable(),
+  })
+  .strict()
+  .superRefine((device, context) => {
+    const requiredUnlock =
+      device.platform === 'web' ? 'secure-session-cookie' : 'biometric';
+    if (device.unlockMethod !== requiredUnlock) {
+      context.addIssue({
+        code: 'custom',
+        message: `${device.platform} enrollments require ${requiredUnlock}.`,
+        path: ['unlockMethod'],
+      });
+    }
+    if (!isAtOrAfter(device.lastSeenAt, device.enrolledAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Last-seen time cannot precede enrollment.',
+        path: ['lastSeenAt'],
+      });
+    }
+    if (device.revokedAt && !isAtOrAfter(device.revokedAt, device.enrolledAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Revocation cannot precede enrollment.',
+        path: ['revokedAt'],
+      });
+    }
+  })
+  .readonly();
+
+/** Device-bound enrollment inferred from its schema. */
+export type DeviceEnrollment = z.infer<typeof DeviceEnrollmentSchema>;
+
+/**
+ * Owns the stable identifier for a revocable application session. Tokens and
+ * token hashes intentionally never appear in this client-safe contract.
+ */
+export const SessionIdSchema = UuidSchema;
+
+/** Stable session identifier inferred from its schema. */
+export type SessionId = z.infer<typeof SessionIdSchema>;
+
+/** Stable identifier for immutable Google access-membership evidence. */
+export const AccessMembershipSnapshotIdSchema = UuidSchema;
+
+/** Access-membership snapshot identifier inferred from its schema. */
+export type AccessMembershipSnapshotId = z.infer<
+  typeof AccessMembershipSnapshotIdSchema
+>;
+
+/**
+ * Owns one minimized member row in a complete access-membership snapshot.
+ * Only designated access-group provenance and server-authorized facility scope
+ * are retained; no roster contacts or student data appear here.
+ */
+export const AccessMembershipMemberSchema = z
+  .object({
+    userId: UserIdSchema,
+    googleSubject: z.string().trim().min(1).max(255),
+    accessGroupSourceRefs: z
+      .array(AccessGroupSourceRefSchema)
+      .min(1)
+      .max(50)
+      .readonly(),
+    facilityScope: FacilityScopeSchema,
+  })
+  .strict()
+  .superRefine((member, context) => {
+    if (
+      !hasUniqueStrings(member.accessGroupSourceRefs.map((source) => source.id))
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Access-group provenance references must be unique.',
+        path: ['accessGroupSourceRefs'],
+      });
+    }
+  })
+  .readonly();
+
+/** Minimized cached access-member evidence inferred from its schema. */
+export type AccessMembershipMember = z.infer<
+  typeof AccessMembershipMemberSchema
+>;
+
+/**
+ * Owns one complete, immutable Google Groups access snapshot. Expected and
+ * completed designated-group sets must match exactly; partial syncs never
+ * become session authorization evidence.
+ */
+export const AccessMembershipSnapshotSchema = z
+  .object({
+    id: AccessMembershipSnapshotIdSchema,
+    version: VersionSchema,
+    complete: z.literal(true),
+    expectedAccessGroupSourceRefs: z
+      .array(AccessGroupSourceRefSchema)
+      .min(1)
+      .max(100)
+      .readonly(),
+    completedAccessGroupSourceRefs: z
+      .array(AccessGroupSourceRefSchema)
+      .min(1)
+      .max(100)
+      .readonly(),
+    members: z.array(AccessMembershipMemberSchema).max(1_200).readonly(),
+    syncStartedAt: TimestampSchema,
+    capturedAt: TimestampSchema,
+  })
+  .strict()
+  .superRefine((snapshot, context) => {
+    const expectedIds = snapshot.expectedAccessGroupSourceRefs.map(
+      (source) => source.id,
+    );
+    const completedIds = snapshot.completedAccessGroupSourceRefs.map(
+      (source) => source.id,
+    );
+    const expected = snapshot.expectedAccessGroupSourceRefs
+      .map(accessGroupSourceRefKey)
+      .sort();
+    const completed = snapshot.completedAccessGroupSourceRefs
+      .map(accessGroupSourceRefKey)
+      .sort();
+    if (
+      !hasUniqueStrings(expectedIds) ||
+      !hasUniqueStrings(completedIds) ||
+      !hasUniqueStrings(expected) ||
+      !hasUniqueStrings(completed) ||
+      expected.length !== completed.length ||
+      expected.some((id, index) => id !== completed[index])
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A complete access snapshot must include every expected group.',
+        path: ['completedAccessGroupSourceRefs'],
+      });
+    }
+    const expectedSet = new Set(expected);
+    snapshot.members.forEach((member, memberIndex) => {
+      member.accessGroupSourceRefs.forEach((groupSource, groupIndex) => {
+        if (!expectedSet.has(accessGroupSourceRefKey(groupSource))) {
+          context.addIssue({
+            code: 'custom',
+            message: 'Member provenance must use a designated access group.',
+            path: ['members', memberIndex, 'accessGroupSourceRefs', groupIndex],
+          });
+        }
+      });
+    });
+    if (!hasUniqueStrings(snapshot.members.map((member) => member.userId))) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Access snapshot user IDs must be unique.',
+        path: ['members'],
+      });
+    }
+    if (
+      !hasUniqueStrings(snapshot.members.map((member) => member.googleSubject))
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Access snapshot Google subjects must be unique.',
+        path: ['members'],
+      });
+    }
+    if (!isAtOrAfter(snapshot.capturedAt, snapshot.syncStartedAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Access snapshot capture cannot precede sync start.',
+        path: ['capturedAt'],
+      });
+    }
+  })
+  .readonly();
+
+/** Complete immutable access-membership evidence inferred from its schema. */
+export type AccessMembershipSnapshot = z.infer<
+  typeof AccessMembershipSnapshotSchema
+>;
+
+/**
+ * Owns truthful session-authorization provenance. Normal users rely on a
+ * complete Google access snapshot. Every app session is gated by designated
+ * Google Group membership; no environment or administrative bypass exists.
+ */
+export const MembershipSourceSchema = z.literal('google-group-snapshot');
+
+/** Cached access-membership source inferred from its schema. */
+export type MembershipSource = z.infer<typeof MembershipSourceSchema>;
+
+/**
+ * Owns the complete Google Group authorization evidence used to issue one
+ * session. Designated group membership is mandatory for every user and role.
+ */
+export const SessionAuthorizationSchema = z
+  .object({
+    kind: z.literal('group-membership'),
+    source: MembershipSourceSchema,
+    membershipSnapshotId: AccessMembershipSnapshotIdSchema,
+    membershipValidUntil: TimestampSchema,
+    membershipGraceUntil: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Session authorization evidence inferred from its schema. */
+export type SessionAuthorization = z.infer<typeof SessionAuthorizationSchema>;
+
+/**
+ * Owns a long-lived, device-bound session lifecycle. Cached group membership
+ * remains usable through its explicit grace time so a Google outage does not
+ * block an already authenticated staff member; expiry and revocation remain
+ * fail-closed.
+ */
+export const SessionSchema = z
+  .object({
+    id: SessionIdSchema,
+    userId: UserIdSchema,
+    deviceEnrollmentId: DeviceEnrollmentIdSchema,
+    createdAt: TimestampSchema,
+    expiresAt: TimestampSchema,
+    authorization: SessionAuthorizationSchema,
+    revokedAt: TimestampSchema.nullable(),
+  })
+  .strict()
+  .superRefine((session, context) => {
+    if (!isAtOrAfter(session.expiresAt, session.createdAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Session expiry cannot precede creation.',
+        path: ['expiresAt'],
+      });
+    }
+    if (
+      !isAtOrAfter(
+        session.authorization.membershipValidUntil,
+        session.createdAt,
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Membership validity cannot precede session creation.',
+        path: ['authorization', 'membershipValidUntil'],
+      });
+    }
+    if (
+      !isAtOrAfter(
+        session.authorization.membershipGraceUntil,
+        session.authorization.membershipValidUntil,
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Membership grace cannot end before normal validity.',
+        path: ['authorization', 'membershipGraceUntil'],
+      });
+    }
+    if (
+      session.revokedAt &&
+      !isAtOrAfter(session.revokedAt, session.createdAt)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Session revocation cannot precede creation.',
+        path: ['revokedAt'],
+      });
+    }
+  })
+  .readonly();
+
+/** Device-bound session lifecycle inferred from its schema. */
+export type Session = z.infer<typeof SessionSchema>;
+
+/**
+ * Owns one server-issued online connectivity epoch for a session. A reconnect
+ * appends a new epoch; confirmations bind its ID and cannot cross epochs.
+ */
+export const ConnectivityEpochSchema = z
+  .object({
+    id: ConnectivityEpochIdSchema,
+    sessionId: SessionIdSchema,
+    establishedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Online session connectivity epoch inferred from its schema. */
+export type ConnectivityEpoch = z.infer<typeof ConnectivityEpochSchema>;
+
+/** Stable identifier for an append-only connectivity invalidation fact. */
+export const ConnectivityEpochInvalidationIdSchema = UuidSchema;
+
+/** Connectivity invalidation identifier inferred from its schema. */
+export type ConnectivityEpochInvalidationId = z.infer<
+  typeof ConnectivityEpochInvalidationIdSchema
+>;
+
+/**
+ * Owns one append-only invalidation of an earlier online epoch. Reconnect,
+ * disconnect, and session revocation all force a fresh epoch and decision.
+ */
+export const ConnectivityEpochInvalidationSchema = z
+  .object({
+    id: ConnectivityEpochInvalidationIdSchema,
+    connectivityEpochId: ConnectivityEpochIdSchema,
+    reason: z.enum(['disconnected', 'reconnected', 'session-revoked']),
+    invalidatedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Append-only connectivity invalidation fact inferred from its schema. */
+export type ConnectivityEpochInvalidation = z.infer<
+  typeof ConnectivityEpochInvalidationSchema
+>;
+
+/** Stable identifier for the initial session token issuance fact. */
+export const SessionTokenIssuanceIdSchema = UuidSchema;
+
+/** Initial session-token issuance identifier inferred from its schema. */
+export type SessionTokenIssuanceId = z.infer<
+  typeof SessionTokenIssuanceIdSchema
+>;
+
+/**
+ * Owns the append-only initial refresh-token credential fact for a session.
+ * Only the cryptographic digest is retained; plaintext tokens never enter
+ * contracts, persistence logs, or client-readable responses.
+ */
+export const SessionTokenIssuanceSchema = z
+  .object({
+    id: SessionTokenIssuanceIdSchema,
+    sessionId: SessionIdSchema,
+    tokenDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    issuedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Append-only initial refresh-token fact inferred from its schema. */
+export type SessionTokenIssuance = z.infer<typeof SessionTokenIssuanceSchema>;
+
+/**
+ * Owns the stable identifier for an append-only refresh-token rotation event.
+ * Rotation history supports replay detection without storing plaintext tokens.
+ */
+export const SessionTokenRotationIdSchema = UuidSchema;
+
+/** Refresh-token rotation identifier inferred from its schema. */
+export type SessionTokenRotationId = z.infer<
+  typeof SessionTokenRotationIdSchema
+>;
+
+/**
+ * Owns one append-only refresh-token rotation fact. Only cryptographic token
+ * digests are stored; replay detection appends a separate fact rather than
+ * rewriting this rotation event.
+ */
+export const SessionTokenRotationSchema = z
+  .object({
+    id: SessionTokenRotationIdSchema,
+    sessionId: SessionIdSchema,
+    previousTokenDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    nextTokenDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    rotatedAt: TimestampSchema,
+  })
+  .strict()
+  .superRefine((rotation, context) => {
+    if (rotation.previousTokenDigest === rotation.nextTokenDigest) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Refresh-token rotation must change the token digest.',
+        path: ['nextTokenDigest'],
+      });
+    }
+  })
+  .readonly();
+
+/** Append-only refresh-token rotation fact inferred from its schema. */
+export type SessionTokenRotation = z.infer<typeof SessionTokenRotationSchema>;
+
+/**
+ * Owns the stable identifier for an append-only refresh-token replay fact.
+ * Detection never mutates the rotation record that supplied the used digest.
+ */
+export const SessionTokenReplayIdSchema = UuidSchema;
+
+/** Refresh-token replay identifier inferred from its schema. */
+export type SessionTokenReplayId = z.infer<typeof SessionTokenReplayIdSchema>;
+
+/**
+ * Owns one append-only refresh-token replay detection fact. It points to the
+ * immutable rotation whose retired digest was presented and records no raw or
+ * hashed credential beyond that already retained rotation reference.
+ */
+export const SessionTokenReplaySchema = z
+  .object({
+    id: SessionTokenReplayIdSchema,
+    sessionId: SessionIdSchema,
+    rotationId: SessionTokenRotationIdSchema,
+    detectedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Append-only refresh-token replay fact inferred from its schema. */
+export type SessionTokenReplay = z.infer<typeof SessionTokenReplaySchema>;
+
+/**
+ * Owns the stable identifier for an append-only session revocation fact.
+ * Revocations are retained and consulted by deny-by-default middleware.
+ */
+export const SessionRevocationIdSchema = UuidSchema;
+
+/** Session revocation identifier inferred from its schema. */
+export type SessionRevocationId = z.infer<typeof SessionRevocationIdSchema>;
+
+/**
+ * Owns one append-only session revocation fact with actor provenance and a
+ * bounded reason code. Revocation history is never deleted or reset.
+ */
+export const SessionRevocationSchema = z
+  .object({
+    id: SessionRevocationIdSchema,
+    sessionId: SessionIdSchema,
+    revokedBy: ActorSchema,
+    reasonCode: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Z0-9_]+$/u),
+    revokedAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Append-only session revocation fact inferred from its schema. */
+export type SessionRevocation = z.infer<typeof SessionRevocationSchema>;
+
+/**
+ * Owns normalized, signature-verified Google claims and device facts passed
+ * into session establishment after the adapter has consumed the one-time
+ * authorization code. Codes, PKCE verifiers, tokens, and other credentials
+ * never enter the capability input or logs. Group authorization, roles, and
+ * facility scope remain server-derived and are not accepted here.
+ */
+export const CompleteOidcSignInInputSchema = z
+  .object({
+    claims: z
+      .object({
+        issuer: z.literal('https://accounts.google.com'),
+        audience: z.string().trim().min(1).max(255),
+        subject: z.string().trim().min(1).max(255),
+        subjectDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        claimsDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        hostedDomain: z.literal('psd401.net'),
+        email: z
+          .string()
+          .trim()
+          .email()
+          .max(320)
+          .refine((email) => email.toLowerCase().endsWith('@psd401.net'), {
+            message: 'OIDC email must belong to the psd401.net hosted domain.',
+          }),
+        emailVerified: z.literal(true),
+        displayName: z.string().trim().min(1).max(160),
+      })
+      .strict()
+      .readonly(),
+    device: z
+      .object({
+        platform: DevicePlatformSchema,
+        unlockMethod: DeviceUnlockMethodSchema,
+        installationId: z.string().trim().min(16).max(255),
+      })
+      .strict()
+      .readonly(),
+  })
+  .strict()
+  .superRefine((input, context) => {
+    const requiredUnlock =
+      input.device.platform === 'web' ? 'secure-session-cookie' : 'biometric';
+    if (input.device.unlockMethod !== requiredUnlock) {
+      context.addIssue({
+        code: 'custom',
+        message: `${input.device.platform} sign-in requires ${requiredUnlock}.`,
+        path: ['device', 'unlockMethod'],
+      });
+    }
+  })
+  .readonly();
+
+/** Pre-session OIDC callback input inferred from its schema. */
+export type CompleteOidcSignInInput = z.infer<
+  typeof CompleteOidcSignInInputSchema
+>;
+
+/**
+ * Owns the deliberately empty refresh input. The specialized refresh
+ * envelope carries a server-verified current credential principal; the
+ * capability creates a fresh connectivity epoch and accepts no caller claim.
+ */
+export const RefreshSessionInputSchema = z.object({}).strict().readonly();
+
+/** Refresh-session input inferred from its schema. */
+export type RefreshSessionInput = z.infer<typeof RefreshSessionInputSchema>;
+
+/** Owns an authenticated request to revoke one retained session. */
+export const RevokeSessionInputSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+    reasonCode: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Z0-9_]+$/u),
+  })
+  .strict()
+  .readonly();
+
+/** Session-revocation input inferred from its schema. */
+export type RevokeSessionInput = z.infer<typeof RevokeSessionInputSchema>;
+
+/**
+ * Owns the non-secret result of initial sign-in and refresh. Credential
+ * material is delivered only by the protected transport and does not enter
+ * a serializable capability result.
+ */
+export const SessionEstablishmentResultSchema = z
+  .object({
+    user: UserSchema,
+    session: SessionSchema,
+    deviceEnrollment: DeviceEnrollmentSchema,
+    connectivityEpoch: ConnectivityEpochSchema,
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      result.session.userId !== result.user.id ||
+      result.session.deviceEnrollmentId !== result.deviceEnrollment.id ||
+      result.deviceEnrollment.userId !== result.user.id ||
+      result.connectivityEpoch.sessionId !== result.session.id
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Established identity, device, session, and epoch must agree.',
+        path: ['session'],
+      });
+    }
+  })
+  .readonly();
+
+/** Non-secret established-session result inferred from its schema. */
+export type SessionEstablishmentResult = z.infer<
+  typeof SessionEstablishmentResultSchema
+>;
+
+/** Owns the current authenticated identity and online-session view. */
+export const CurrentSessionResultSchema = z
+  .object({
+    user: UserSchema,
+    session: SessionSchema,
+    deviceEnrollment: DeviceEnrollmentSchema,
+    connectivityEpoch: ConnectivityEpochSchema,
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      result.session.userId !== result.user.id ||
+      result.session.deviceEnrollmentId !== result.deviceEnrollment.id ||
+      result.deviceEnrollment.userId !== result.user.id ||
+      result.connectivityEpoch.sessionId !== result.session.id
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Current identity, device, session, and epoch must agree.',
+        path: ['session'],
+      });
+    }
+  })
+  .readonly();
+
+/** Current authenticated session result inferred from its schema. */
+export type CurrentSessionResult = z.infer<typeof CurrentSessionResultSchema>;
+
+/** Owns bounded device-session administration filters. */
+export const ListDeviceSessionsInputSchema = z
+  .object({
+    userId: UserIdSchema.nullable(),
+    includeRevoked: z.boolean(),
+    cursor: PaginationCursorSchema.nullable(),
+    limit: z.number().int().positive().max(200),
+  })
+  .strict()
+  .readonly();
+
+/** Device-session list input inferred from its schema. */
+export type ListDeviceSessionsInput = z.infer<
+  typeof ListDeviceSessionsInputSchema
+>;
+
+/** Owns one credential-free device and session administration row. */
+export const DeviceSessionSummarySchema = z
+  .object({
+    deviceEnrollment: DeviceEnrollmentSchema,
+    sessions: z.array(SessionSchema).max(100).readonly(),
+  })
+  .strict()
+  .superRefine((summary, context) => {
+    summary.sessions.forEach((session, index) => {
+      if (
+        session.deviceEnrollmentId !== summary.deviceEnrollment.id ||
+        session.userId !== summary.deviceEnrollment.userId
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Device-session rows must belong to their enrollment.',
+          path: ['sessions', index],
+        });
+      }
+    });
+  })
+  .readonly();
+
+/** Credential-free device-session row inferred from its schema. */
+export type DeviceSessionSummary = z.infer<typeof DeviceSessionSummarySchema>;
+
+/** Owns a bounded page of credential-free device-session rows. */
+export const DeviceSessionPageSchema = paginatedSchema(
+  DeviceSessionSummarySchema,
+);
+
+/** Device-session page inferred from its schema. */
+export type DeviceSessionPage = z.infer<typeof DeviceSessionPageSchema>;
+
+/**
+ * Owns native push-token registration input. The token is untrusted contact
+ * input, never a fixture or log field, and is bound to an existing native
+ * device enrollment rather than a caller-provided user identity.
+ */
+export const RegisterPushTokenInputSchema = z
+  .object({
+    deviceEnrollmentId: DeviceEnrollmentIdSchema,
+    platform: z.enum(['ios', 'android']),
+    token: z.string().trim().min(16).max(4_096),
+  })
+  .strict()
+  .readonly();
+
+/** Native push-token registration input inferred from its schema. */
+export type RegisterPushTokenInput = z.infer<
+  typeof RegisterPushTokenInputSchema
+>;
+
+/** Owns a non-secret receipt for a native push-token registration. */
+export const PushTokenRegistrationReceiptSchema = z
+  .object({
+    deviceEnrollmentId: DeviceEnrollmentIdSchema,
+    platform: z.enum(['ios', 'android']),
+    status: z.literal('registered'),
+  })
+  .strict()
+  .readonly();
+
+/** Push-token registration receipt inferred from its schema. */
+export type PushTokenRegistrationReceipt = z.infer<
+  typeof PushTokenRegistrationReceiptSchema
+>;
+
+/** Owns a token-free request to unregister the current device's push token. */
+export const UnregisterPushTokenInputSchema = z
+  .object({
+    deviceEnrollmentId: DeviceEnrollmentIdSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Push-token unregistration input inferred from its schema. */
+export type UnregisterPushTokenInput = z.infer<
+  typeof UnregisterPushTokenInputSchema
+>;
+
+/** Owns a non-secret receipt for a native push-token unregistration. */
+export const PushTokenUnregistrationReceiptSchema = z
+  .object({
+    deviceEnrollmentId: DeviceEnrollmentIdSchema,
+    status: z.literal('unregistered'),
+  })
+  .strict()
+  .readonly();
+
+/** Push-token unregistration receipt inferred from its schema. */
+export type PushTokenUnregistrationReceipt = z.infer<
+  typeof PushTokenUnregistrationReceiptSchema
+>;
+
+/** Owns the bounded current-user device-list request. */
+export const ListMyDevicesInputSchema = z
+  .object({
+    includeRevoked: z.boolean(),
+    cursor: PaginationCursorSchema.nullable(),
+    limit: z.number().int().positive().max(100),
+  })
+  .strict()
+  .readonly();
+
+/** Current-user device-list input inferred from its schema. */
+export type ListMyDevicesInput = z.infer<typeof ListMyDevicesInputSchema>;
+
+/** Owns a bounded page of device enrollments without credential material. */
+export const DeviceEnrollmentPageSchema = paginatedSchema(
+  DeviceEnrollmentSchema,
+);
+
+/** Device-enrollment page inferred from its schema. */
+export type DeviceEnrollmentPage = z.infer<typeof DeviceEnrollmentPageSchema>;
+
+/** Owns bounded user-administration list filters. */
+export const ListUsersInputSchema = z
+  .object({
+    facilityId: UuidSchema.nullable(),
+    includeDisabled: z.boolean(),
+    cursor: PaginationCursorSchema.nullable(),
+    limit: z.number().int().positive().max(200),
+  })
+  .strict()
+  .readonly();
+
+/** User-administration list input inferred from its schema. */
+export type ListUsersInput = z.infer<typeof ListUsersInputSchema>;
+
+/** Owns a bounded page of minimized staff user records. */
+export const UserPageSchema = paginatedSchema(UserSchema);
+
+/** Minimized staff-user page inferred from its schema. */
+export type UserPage = z.infer<typeof UserPageSchema>;
+
+/**
+ * Owns an administrative role replacement request. The authenticated actor,
+ * authorization decision, and write time remain capability-engine concerns.
+ */
+export const SetUserRolesInputSchema = z
+  .object({
+    userId: UserIdSchema,
+    roles: z
+      .array(RoleSchema)
+      .min(1)
+      .max(2)
+      .refine((roles) => new Set(roles).size === roles.length, {
+        message: 'User roles must be unique.',
+      })
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
+/** Administrative role-replacement input inferred from its schema. */
+export type SetUserRolesInput = z.infer<typeof SetUserRolesInputSchema>;
