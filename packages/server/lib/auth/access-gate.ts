@@ -39,6 +39,10 @@ export const BOOTSTRAP_ADMIN_SUBJECTS_ENV =
 
 const ACCESS_GATE_AUDIT_ACTION = 'complete-oidc-sign-in' as const;
 
+/** Safe fallback when a post-gate failure has no narrower reason taxonomy. */
+export const POST_GATE_SIGN_IN_FAILED_REASON =
+  'POST_GATE_SIGN_IN_FAILED' as const;
+
 /** Safe, bounded reasons that can be persisted for a denied sign-in. */
 export const ACCESS_GATE_DENIAL_REASONS = [
   'UNKNOWN_USER',
@@ -151,7 +155,8 @@ export type AccessGateAuditEvent =
       reasonCode:
         | AccessGateDenialReason
         | GoogleOidcCallbackErrorCode
-        | WebSessionIssuanceErrorCode;
+        | WebSessionIssuanceErrorCode
+        | typeof POST_GATE_SIGN_IN_FAILED_REASON;
       userId: string | null;
     }>
   | Readonly<{
