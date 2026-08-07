@@ -91,6 +91,11 @@ Goal: complete issue #19 (Expo scaffold + EAS profiles + real/drill theming).
 ```
 Goal: complete issue #28 (hash-chained security audit log module).
 ```
+```
+Goal: complete issue #39 (GCP via Terraform: project, read-only Groups
+service account, OAuth clients). Runs from this machine with gcloud auth;
+zero-manual-steps target, residual console steps documented honestly.
+```
 
 ## Wave 3 — Engine + surfaces (after #9 merges; up to seven parallel)
 
@@ -180,6 +185,6 @@ behind a cutover flag, with side-by-side latency evidence).
 ## Human tasks running alongside (not for Codex)
 
 #35 SMS registration • #36 SES DNS/prod • #37 Play account • #38 App Store
-Connect/TestFlight • #39 GCP OAuth + Groups service account • #40 FCM/APNs/
-Expo credentials • #41 Groups inventory • #42 retention lookup.
+Connect/TestFlight • #40 FCM/APNs/Expo credentials • #41 Groups inventory •
+#42 retention lookup. (#39 GCP is Terraform-automated — Wave 2, not human.)
 #35 and #37 have the longest lead times — start them first.
