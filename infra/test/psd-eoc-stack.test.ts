@@ -6,6 +6,7 @@ import {
   APP_RUNNER_HEALTH_CHECK_PATH,
   DEPLOYMENT_ACCOUNT,
   DEPLOYMENT_REGION,
+  GITHUB_DEPLOY_JOB_WORKFLOW_REF,
   GITHUB_MAIN_REF,
   GITHUB_OIDC_ISSUER,
   GITHUB_OIDC_SUBJECT,
@@ -154,6 +155,10 @@ describe('retained private media storage', () => {
     const bucketPolicies = template.findResources('AWS::S3::BucketPolicy');
     expect(JSON.stringify(bucketPolicies)).toContain('aws:SecureTransport');
     expect(JSON.stringify(bucketPolicies)).toContain('Deny');
+    for (const policy of Object.values(bucketPolicies).map(asRecord)) {
+      expect(policy.DeletionPolicy).toBe('Retain');
+      expect(policy.UpdateReplacePolicy).toBe('Retain');
+    }
   });
 });
 
@@ -193,6 +198,14 @@ describe('bounded notification queues', () => {
       expect(sourceProperties.SqsManagedSseEnabled).toBe(true);
       expect(source.resource.DeletionPolicy).toBe('Retain');
       expect(deadLetter.resource.DeletionPolicy).toBe('Retain');
+    }
+
+    const queuePolicies = resourceEntries('AWS::SQS::QueuePolicy');
+    expect(queuePolicies).toHaveLength(8);
+    for (const [, policy] of queuePolicies) {
+      expect(JSON.stringify(policy)).toContain('aws:SecureTransport');
+      expect(policy.DeletionPolicy).toBe('Retain');
+      expect(policy.UpdateReplacePolicy).toBe('Retain');
     }
   });
 });
@@ -399,6 +412,13 @@ describe('observability skeleton', () => {
       expect(resourceProperties(topic).KmsMasterKeyId).toBeDefined();
       expect(topic.DeletionPolicy).toBe('Retain');
     }
+    const topicPolicies = resourceEntries('AWS::SNS::TopicPolicy');
+    expect(topicPolicies).toHaveLength(2);
+    for (const [, policy] of topicPolicies) {
+      expect(JSON.stringify(policy)).toContain('aws:SecureTransport');
+      expect(policy.DeletionPolicy).toBe('Retain');
+      expect(policy.UpdateReplacePolicy).toBe('Retain');
+    }
     template.resourceCountIs('AWS::SNS::Subscription', 0);
     template.resourceCountIs('AWS::CloudWatch::Alarm', 0);
   });
@@ -449,7 +469,7 @@ describe('observability skeleton', () => {
 });
 
 describe('GitHub OIDC deployment boundary', () => {
-  it('trusts only the immutable repository identity on main', () => {
+  it('trusts only the immutable repository and approved workflow on main', () => {
     const roles = resourceEntries('AWS::IAM::Role');
     const deployRoleEntry = roles.find(
       ([, role]) =>
@@ -474,6 +494,8 @@ describe('GitHub OIDC deployment boundary', () => {
     });
     expect(condition).toEqual({
       [`${GITHUB_OIDC_ISSUER}:aud`]: 'sts.amazonaws.com',
+      [`${GITHUB_OIDC_ISSUER}:job_workflow_ref`]:
+        GITHUB_DEPLOY_JOB_WORKFLOW_REF,
       [`${GITHUB_OIDC_ISSUER}:ref`]: GITHUB_MAIN_REF,
       [`${GITHUB_OIDC_ISSUER}:repository`]: GITHUB_REPOSITORY,
       [`${GITHUB_OIDC_ISSUER}:repository_id`]: GITHUB_REPOSITORY_ID,

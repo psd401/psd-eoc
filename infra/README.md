@@ -47,14 +47,22 @@ evidence and approval.
 - An SES identity for `alerts.psd401.net` with six CloudFormation outputs for
   the three manual Easy DKIM CNAME records.
 - A short-session GitHub OIDC role restricted to this repository's immutable
-  owner/repository IDs and the `main` ref. It can assume only the account's
-  standard CDK bootstrap roles; it has no static access key.
+  owner/repository IDs, the `main` ref, and the exact future reusable workflow
+  `.github/workflows/deploy-infrastructure.yml`. It can assume only the
+  account's standard CDK bootstrap roles; it has no static access key.
 
 The account-level GitHub OIDC provider is shared with PSD Maps and is imported
 by ARN. Creating another provider for the same issuer in this stack would fail.
 GitHub's live repository OIDC settings report the immutable default subject
 prefix `repo:psd401@1902994/psd-eoc@1326178900`, which the deploy-role trust
 matches exactly before appending the `main` ref context.
+
+The deploy role also requires `job_workflow_ref` to equal
+`psd401/psd-eoc/.github/workflows/deploy-infrastructure.yml@refs/heads/main`.
+That reusable workflow does not exist in this issue, so the role remains
+unassumable until a separately reviewed deployment issue creates it. Existing
+OIDC-capable workflows, including the comment-triggered Claude workflow, do
+not match this condition and cannot assume the deploy role.
 
 The generated `/psd-eoc/database/application` secret is deliberately blocked
 until an approved database bootstrap creates its `psd_eoc_application` LOGIN
