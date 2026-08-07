@@ -1,0 +1,2871 @@
+import { describe, expect, test } from 'bun:test';
+
+import * as Contracts from './index';
+import {
+  AccessMembershipSnapshotSchema,
+  AgentApiKeyPageSchema,
+  AgentApiKeySchema,
+  AgentCapabilityGrantSchema,
+  ActivationPreviewSchema,
+  AudienceConfigSchema,
+  CAPABILITY_CATALOG,
+  CAPABILITY_MUTATION_SAFETY_MANIFEST,
+  CAPABILITY_QUERY_MANIFEST,
+  CapabilityEnvelopeSchema,
+  ChannelAttemptSchema,
+  ConnectivityEpochInvalidationSchema,
+  ConnectivityEpochSchema,
+  CreateActivationPreviewInputSchema,
+  DeliveryEvidenceSchema,
+  DeliveryReportSchema,
+  DeliveryTruthStateSchema,
+  DeliveryTruthTransitionSchema,
+  DispatchBatchSchema,
+  DrillRecordSchema,
+  EventClassificationSchema,
+  EventSchema,
+  EventTargetingSchema,
+  EventTransitionSchema,
+  EventTypeVersionSchema,
+  EventTypeVersionDraftSchema,
+  GroupSourceSchema,
+  HUMAN_ONLY_ACTION_IDS,
+  HttpsUrlSchema,
+  JournalEntrySchema,
+  JournalEntryInputSchema,
+  HumanConfirmationRecordSchema,
+  IdempotencyRecordSchema,
+  IntegrationStatusSchema,
+  LifecycleConsequencePreviewSchema,
+  MediaReadGrantSchema,
+  MutationCapabilityEnvelopeSchema,
+  MessageTemplateCatalogSchema,
+  NotificationIntentSchema,
+  NotificationOutboxMessageSchema,
+  NotificationStatusSchema,
+  OidcCallbackRejectionEvidenceSchema,
+  OutboxRecordSchema,
+  PreparedActivationSchema,
+  RosterSnapshotSchema,
+  RosterSourceConfigurationSchema,
+  RosterSyncResultSchema,
+  RefreshCredentialRejectionEvidenceSchema,
+  RenderedMessageSchema,
+  SecurityAuditEntrySchema,
+  SecurityAuditQuerySchema,
+  SetChannelEnabledInputSchema,
+  SessionSchema,
+  SessionTokenIssuanceSchema,
+  SessionTokenReplaySchema,
+  SessionTokenRotationSchema,
+  StaleRosterReportSchema,
+  StartEventInputSchema,
+  defineCapability,
+  parseCapabilityEnvelopeFor,
+  parseCapabilityInput,
+  resolveHumanActionRequirement,
+  type EventKind,
+  type RosterPopulation,
+  type TemplateMode,
+} from './index';
+
+const ids = {
+  actor: '00000000-0000-4000-8000-000000000001',
+  session: '00000000-0000-4000-8000-000000000002',
+  request: '00000000-0000-4000-8000-000000000003',
+  confirmation: '00000000-0000-4000-8000-000000000004',
+  facility: '00000000-0000-4000-8000-000000000005',
+  otherFacility: '00000000-0000-4000-8000-000000000006',
+  neighborhood: '00000000-0000-4000-8000-000000000007',
+  audience: '00000000-0000-4000-8000-000000000008',
+  group: '00000000-0000-4000-8000-000000000009',
+  roster: '00000000-0000-4000-8000-000000000010',
+  recipient: '00000000-0000-4000-8000-000000000011',
+  endpoint: '00000000-0000-4000-8000-000000000012',
+  eventType: '00000000-0000-4000-8000-000000000013',
+  eventTypeVersion: '00000000-0000-4000-8000-000000000014',
+  event: '00000000-0000-4000-8000-000000000015',
+  journal: '00000000-0000-4000-8000-000000000016',
+  earlierJournal: '00000000-0000-4000-8000-000000000017',
+  intent: '00000000-0000-4000-8000-000000000018',
+  batch: '00000000-0000-4000-8000-000000000019',
+  attempt: '00000000-0000-4000-8000-000000000020',
+  evidence: '00000000-0000-4000-8000-000000000021',
+  agent: '00000000-0000-4000-8000-000000000022',
+  apiKey: '00000000-0000-4000-8000-000000000023',
+  device: '00000000-0000-4000-8000-000000000024',
+  smsEndpoint: '00000000-0000-4000-8000-000000000025',
+  pushEndpoint: '00000000-0000-4000-8000-000000000026',
+  preview: '00000000-0000-4000-8000-000000000027',
+  prepared: '00000000-0000-4000-8000-000000000028',
+  outbox: '00000000-0000-4000-8000-000000000029',
+  replay: '00000000-0000-4000-8000-000000000030',
+  rotation: '00000000-0000-4000-8000-000000000031',
+  audit: '00000000-0000-4000-8000-000000000032',
+  secondRecipient: '00000000-0000-4000-8000-000000000033',
+  secondEndpoint: '00000000-0000-4000-8000-000000000034',
+  membershipSnapshot: '00000000-0000-4000-8000-000000000035',
+  connectivityEpoch: '00000000-0000-4000-8000-000000000036',
+  previousConnectivityEpoch: '00000000-0000-4000-8000-000000000037',
+  rosterConfiguration: '00000000-0000-4000-8000-000000000038',
+  tokenIssuance: '00000000-0000-4000-8000-000000000039',
+  transition: '00000000-0000-4000-8000-000000000040',
+} as const;
+
+const times = {
+  before: '2026-08-07T03:59:00.000Z',
+  created: '2026-08-07T04:00:00.000Z',
+  activated: '2026-08-07T04:01:00.000Z',
+  later: '2026-08-07T04:02:00.000Z',
+  confirmationExpiry: '2026-08-07T04:04:00.000Z',
+  previewExpiry: '2026-08-07T04:10:00.000Z',
+  afterExpiry: '2026-08-07T04:20:00.000Z',
+  sessionExpiry: '2026-08-08T04:00:00.000Z',
+} as const;
+
+const humanActor = {
+  kind: 'human',
+  userId: ids.actor,
+  sessionId: ids.session,
+} as const;
+
+const agentActor = {
+  kind: 'agent',
+  agentId: ids.agent,
+  apiKeyId: ids.apiKey,
+} as const;
+
+const systemActor = {
+  kind: 'system',
+  serviceId: 'synthetic-test-runner',
+} as const;
+
+const seedActor = {
+  kind: 'system',
+  serviceId: 'database-seed',
+} as const;
+
+const districtScope = {
+  facilityScope: { kind: 'district' },
+} as const;
+
+const webMutationTransport = {
+  kind: 'web-interactive',
+  method: 'POST',
+  interaction: 'explicit-user-submit',
+  csrfVerified: true,
+} as const;
+
+const mcpMutationTransport = { kind: 'mcp-tool-call' } as const;
+
+const agentRestMutationTransport = {
+  kind: 'agent-rest-command',
+  method: 'POST',
+} as const;
+
+const scheduledMutationTransport = {
+  kind: 'scheduled-execution',
+} as const;
+
+const capabilityByProtectedAction = {
+  'start-real-incident': 'start-event',
+  'send-real-notification': 'start-event',
+  'all-clear': 'all-clear-event',
+  'close-real-event': 'close-event',
+} as const;
+
+const realTypeRef = {
+  id: ids.eventTypeVersion,
+  templateMode: 'real',
+} as const;
+
+const drillTypeRef = {
+  id: ids.eventTypeVersion,
+  templateMode: 'drill',
+} as const;
+
+const audienceRef = { id: ids.audience, version: 1 } as const;
+
+function templateSet(
+  mode: TemplateMode,
+  purpose: 'activation' | 'all-clear' | 'reactivation',
+) {
+  const classificationMarker = mode === 'real' ? 'INCIDENT' : 'DRILL';
+  const purposeText = {
+    activation: 'Follow safety procedures',
+    'all-clear': 'The event is all clear',
+    reactivation: 'The event has been reactivated',
+  }[purpose];
+  return {
+    templateMode: mode,
+    purpose,
+    push: {
+      channel: 'push',
+      templateMode: mode,
+      purpose,
+      classificationMarker,
+      title: `${purposeText} at {{site}}`,
+      body: `${purposeText} at {{site}}.`,
+    },
+    email: {
+      channel: 'email',
+      templateMode: mode,
+      purpose,
+      classificationMarker,
+      subject: `${purposeText} at {{site}}`,
+      textBody: `${purposeText} at {{site}}.`,
+    },
+    sms: {
+      channel: 'sms',
+      templateMode: mode,
+      purpose,
+      classificationMarker,
+      body: `${purposeText} at {{site}}.`,
+    },
+  } as const;
+}
+
+function templateCatalog(mode: TemplateMode) {
+  return {
+    activation: templateSet(mode, 'activation'),
+    'all-clear': templateSet(mode, 'all-clear'),
+    reactivation: templateSet(mode, 'reactivation'),
+  } as const;
+}
+
+function eventTypeVersion(mode: TemplateMode) {
+  return {
+    id: ids.eventTypeVersion,
+    eventTypeId: ids.eventType,
+    version: 1,
+    templateMode: mode,
+    name: mode === 'real' ? 'Lockdown' : 'Lockdown Drill',
+    description: null,
+    enabled: true,
+    templates: templateCatalog(mode),
+    supersedesVersionId: null,
+    createdBy: seedActor,
+    publicationAuthorization: {
+      kind: 'repository-seed',
+      approvalReference: 'reviewed-seed-change',
+    },
+    createdAt: times.created,
+  } as const;
+}
+
+function targeting(
+  kind: EventKind,
+  templateMode: TemplateMode,
+  rosterPopulation: RosterPopulation,
+) {
+  return { kind, templateMode, rosterPopulation } as const;
+}
+
+function activeEvent(
+  kind: EventKind,
+  templateMode: TemplateMode,
+  rosterPopulation: RosterPopulation,
+) {
+  const target = targeting(kind, templateMode, rosterPopulation);
+  const requiresHuman =
+    kind === 'incident' || (kind === 'drill' && rosterPopulation === 'staff');
+  return {
+    id: ids.event,
+    facilityId: ids.facility,
+    kind,
+    templateMode,
+    eventTypeVersion: { id: ids.eventTypeVersion, templateMode },
+    status: 'active',
+    rosterSnapshotId: ids.roster,
+    rosterPopulation,
+    createdBy: requiresHuman ? humanActor : agentActor,
+    createdAt: times.created,
+    activatedAt: times.activated,
+    allClearAt: null,
+    reactivatedAt: null,
+    closedAt: null,
+    correctionOfEventId: null,
+    correctionReason: null,
+    activationAuthorization: activationAuthorization(target),
+  } as const;
+}
+
+function activationPreview(target = targeting('incident', 'real', 'staff')) {
+  return {
+    id: ids.preview,
+    facilityId: ids.facility,
+    ...target,
+    eventTypeVersion:
+      target.templateMode === 'real' ? realTypeRef : drillTypeRef,
+    rosterSnapshotId: ids.roster,
+    audienceConfig: audienceRef,
+    recipientCount: 42,
+    channels: channelPlan(target),
+    sendReadiness: 'ready',
+    blockingReasonCodes: [],
+    activeEventIds: [],
+    consequenceDigest: 'a'.repeat(64),
+    createdAt: times.created,
+    expiresAt: times.previewExpiry,
+  } as const;
+}
+
+function lifecyclePreview(
+  purpose: 'all-clear' | 'reactivation',
+  target = targeting('incident', 'real', 'staff'),
+) {
+  return {
+    id: ids.preview,
+    eventId: ids.event,
+    purpose,
+    ...target,
+    eventTypeVersion:
+      target.templateMode === 'real' ? realTypeRef : drillTypeRef,
+    rosterSnapshotId: ids.roster,
+    audienceConfig: audienceRef,
+    recipientCount: 42,
+    channels: channelPlan(target, purpose),
+    sendReadiness: 'ready',
+    blockingReasonCodes: [],
+    consequenceDigest: 'a'.repeat(64),
+    createdAt: times.created,
+    expiresAt: times.previewExpiry,
+  } as const;
+}
+
+function renderedMessage(
+  channel: 'push' | 'email' | 'sms',
+  target: ReturnType<typeof targeting>,
+  purpose: 'activation' | 'all-clear' | 'reactivation' = 'activation',
+) {
+  const marker = target.templateMode === 'real' ? 'INCIDENT' : 'DRILL';
+  const common = {
+    eventKind: target.kind,
+    templateMode: target.templateMode,
+    purpose,
+    classificationMarker: marker,
+  } as const;
+  switch (channel) {
+    case 'push':
+      return {
+        ...common,
+        channel,
+        title: `[${marker}] Lockdown`,
+        body: `[${marker}] Follow district safety procedures.`,
+      } as const;
+    case 'email':
+      return {
+        ...common,
+        channel,
+        subject: `[${marker}] Lockdown`,
+        textBody: `[${marker}] Follow district safety procedures.`,
+      } as const;
+    case 'sms':
+      return {
+        ...common,
+        channel,
+        body: `[${marker}] Follow district safety procedures.`,
+      } as const;
+  }
+}
+
+function integrationStatus(
+  channel: 'push' | 'email' | 'sms',
+  population: RosterPopulation,
+) {
+  const integrationId = {
+    push: 'expo-push',
+    email: 'ses-email',
+    sms: 'aws-eum-sms',
+  }[channel];
+  return population === 'synthetic'
+    ? ({
+        integrationId,
+        label: 'mocked',
+        verifiedAt: null,
+        verifiedByUserId: null,
+        authorizationReference: null,
+        reasonCode: null,
+        observedAt: times.created,
+      } as const)
+    : ({
+        integrationId,
+        label: 'live-verified',
+        verifiedAt: times.created,
+        verifiedByUserId: ids.actor,
+        authorizationReference: 'approved-synthetic-contract-fixture',
+        reasonCode: null,
+        observedAt: times.activated,
+      } as const);
+}
+
+function channelPlan(
+  target: ReturnType<typeof targeting>,
+  purpose: 'activation' | 'all-clear' | 'reactivation' = 'activation',
+) {
+  return (['push', 'email', 'sms'] as const).map((channel) => ({
+    channel,
+    endpointCount: 14,
+    renderedMessage: renderedMessage(channel, target, purpose),
+    integrationStatus: integrationStatus(channel, target.rosterPopulation),
+  }));
+}
+
+function activationAuthorization(target: ReturnType<typeof targeting>) {
+  const common = {
+    activationPreviewId: ids.preview,
+    consequenceDigest: 'a'.repeat(64),
+    requestId: ids.request,
+  } as const;
+  return target.rosterPopulation === 'staff'
+    ? ({
+        ...common,
+        kind: 'human-confirmed',
+        preparedActivationId: null,
+        confirmationId: ids.confirmation,
+      } as const)
+    : ({ ...common, kind: 'synthetic-training' } as const);
+}
+
+function lifecycleAuthorization(
+  purpose: 'all-clear' | 'reactivation',
+  target: ReturnType<typeof targeting>,
+) {
+  const common = {
+    purpose,
+    targeting: target,
+    lifecyclePreviewId: ids.preview,
+    transitionId: ids.transition,
+    consequenceDigest: 'a'.repeat(64),
+    requestId: ids.request,
+  } as const;
+  if (target.rosterPopulation === 'synthetic') {
+    return { ...common, kind: 'synthetic-lifecycle' } as const;
+  }
+  const actionIds =
+    purpose === 'all-clear'
+      ? (['all-clear', 'send-real-notification'] as const)
+      : target.kind === 'incident'
+        ? (['start-real-incident', 'send-real-notification'] as const)
+        : (['send-real-notification'] as const);
+  return {
+    ...common,
+    kind: 'human-confirmed-lifecycle',
+    actionIds,
+    confirmationId: ids.confirmation,
+  } as const;
+}
+
+function notificationClassification(
+  eventKind: EventKind,
+  templateMode: TemplateMode,
+  rosterPopulation: RosterPopulation,
+) {
+  return { eventKind, templateMode, rosterPopulation } as const;
+}
+
+describe('event type, targeting, and activation contracts', () => {
+  test('accepts only explicit kind/mode and targeting combinations', () => {
+    for (const classification of [
+      { kind: 'incident', templateMode: 'real' },
+      { kind: 'drill', templateMode: 'drill' },
+      { kind: 'test', templateMode: 'drill' },
+    ] as const) {
+      expect(EventClassificationSchema.safeParse(classification).success).toBe(
+        true,
+      );
+    }
+
+    for (const classification of [
+      { kind: 'incident', templateMode: 'drill' },
+      { kind: 'drill', templateMode: 'real' },
+      { kind: 'test', templateMode: 'real' },
+    ] as const) {
+      expect(EventClassificationSchema.safeParse(classification).success).toBe(
+        false,
+      );
+    }
+
+    for (const target of [
+      targeting('incident', 'real', 'staff'),
+      targeting('drill', 'drill', 'staff'),
+      targeting('drill', 'drill', 'synthetic'),
+      targeting('test', 'drill', 'synthetic'),
+    ]) {
+      expect(EventTargetingSchema.safeParse(target).success).toBe(true);
+    }
+    expect(
+      EventTargetingSchema.safeParse(targeting('incident', 'real', 'synthetic'))
+        .success,
+    ).toBe(false);
+    expect(
+      EventTargetingSchema.safeParse(targeting('test', 'drill', 'staff'))
+        .success,
+    ).toBe(false);
+  });
+
+  test('pins classification across every channel template', () => {
+    const valid = eventTypeVersion('real');
+    expect(EventTypeVersionSchema.safeParse(valid).success).toBe(true);
+    expect(
+      EventTypeVersionSchema.safeParse({
+        ...valid,
+        templates: {
+          ...valid.templates,
+          activation: {
+            ...valid.templates.activation,
+            push: {
+              ...valid.templates.activation.push,
+              templateMode: 'drill',
+              classificationMarker: 'DRILL',
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('accepts only the documented template grammar and no raw HTML', () => {
+    const valid = eventTypeVersion('drill');
+    expect(EventTypeVersionSchema.safeParse(valid).success).toBe(true);
+    expect(
+      EventTypeVersionSchema.safeParse({
+        ...valid,
+        templates: {
+          ...valid.templates,
+          activation: {
+            ...valid.templates.activation,
+            sms: {
+              ...valid.templates.activation.sms,
+              body: 'At {{unknown}}.',
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      EventTypeVersionSchema.safeParse({ ...valid, createdBy: agentActor })
+        .success,
+    ).toBe(false);
+    expect(
+      EventTypeVersionSchema.safeParse({
+        ...valid,
+        createdBy: agentActor,
+        publicationAuthorization: {
+          kind: 'agent-configuration',
+          agentId: ids.agent,
+          apiKeyId: ids.apiKey,
+          authorizationReference: 'explicit-event-type-publish-grant',
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      EventTypeVersionDraftSchema.safeParse({
+        id: ids.prepared,
+        eventTypeId: ids.eventType,
+        status: 'draft',
+        templateMode: 'drill',
+        name: 'Agent proposed drill wording',
+        description: null,
+        templates: templateCatalog('drill'),
+        draftedBy: agentActor,
+        createdAt: times.created,
+      }).success,
+    ).toBe(true);
+    expect(
+      EventTypeVersionSchema.safeParse({
+        ...valid,
+        templates: {
+          ...valid.templates,
+          activation: {
+            ...valid.templates.activation,
+            push: {
+              ...valid.templates.activation.push,
+              body: 'At {{site}.',
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      EventTypeVersionSchema.safeParse({
+        ...valid,
+        templates: {
+          ...valid.templates,
+          activation: {
+            ...valid.templates.activation,
+            email: {
+              ...valid.templates.activation.email,
+              htmlBody: '<script>unsafe()</script>',
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('rejects Unicode controls that can visually spoof real versus drill', () => {
+    const bidiSpoof = '[DRILL] \u202E]TNEDICNI[\u202C';
+    expect(
+      RenderedMessageSchema.safeParse({
+        ...renderedMessage('push', targeting('drill', 'drill', 'synthetic')),
+        body: bidiSpoof,
+      }).success,
+    ).toBe(false);
+
+    const drillTemplates = templateCatalog('drill');
+    expect(
+      MessageTemplateCatalogSchema.safeParse({
+        ...drillTemplates,
+        activation: {
+          ...drillTemplates.activation,
+          push: {
+            ...drillTemplates.activation.push,
+            body: `Drill instructions \u2066${bidiSpoof}\u2069`,
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      MessageTemplateCatalogSchema.safeParse({
+        ...drillTemplates,
+        activation: {
+          ...drillTemplates.activation,
+          sms: {
+            ...drillTemplates.activation.sms,
+            body: 'Cafe\u0301 drill instructions',
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('keeps real incidents and staff drills human-created', () => {
+    expect(
+      EventSchema.safeParse(activeEvent('incident', 'real', 'staff')).success,
+    ).toBe(true);
+    expect(
+      EventSchema.safeParse(activeEvent('drill', 'drill', 'staff')).success,
+    ).toBe(true);
+    expect(
+      EventSchema.safeParse(activeEvent('drill', 'drill', 'synthetic')).success,
+    ).toBe(true);
+    expect(
+      EventSchema.safeParse(activeEvent('test', 'drill', 'synthetic')).success,
+    ).toBe(true);
+
+    expect(
+      EventSchema.safeParse({
+        ...activeEvent('incident', 'real', 'staff'),
+        createdBy: agentActor,
+      }).success,
+    ).toBe(false);
+    expect(
+      EventSchema.safeParse({
+        ...activeEvent('drill', 'drill', 'staff'),
+        createdBy: agentActor,
+      }).success,
+    ).toBe(false);
+    expect(
+      EventSchema.safeParse({
+        ...activeEvent('incident', 'real', 'staff'),
+        status: 'draft',
+        rosterSnapshotId: null,
+        rosterPopulation: null,
+        createdBy: agentActor,
+        activatedAt: null,
+        allClearAt: null,
+        reactivatedAt: null,
+        closedAt: null,
+        correctionOfEventId: ids.prepared,
+        correctionReason: 'Append-only incident correction draft.',
+        activationAuthorization: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      EventSchema.safeParse(activeEvent('test', 'drill', 'staff')).success,
+    ).toBe(false);
+  });
+
+  test('lets agents prepare but never activate staff-targeting events', () => {
+    const prepared = {
+      id: ids.prepared,
+      preview: activationPreview(),
+      preparedBy: agentActor,
+      preparedAt: times.activated,
+    } as const;
+    expect(PreparedActivationSchema.safeParse(prepared).success).toBe(true);
+    expect(
+      PreparedActivationSchema.safeParse({
+        ...prepared,
+        preparedBy: systemActor,
+      }).success,
+    ).toBe(false);
+    expect(
+      PreparedActivationSchema.safeParse({
+        ...prepared,
+        preparedAt: times.afterExpiry,
+      }).success,
+    ).toBe(false);
+    expect(
+      PreparedActivationSchema.safeParse({
+        ...prepared,
+        preview: activationPreview(targeting('test', 'drill', 'synthetic')),
+      }).success,
+    ).toBe(false);
+  });
+
+  test('binds activation to server-issued previews and an explicit start choice', () => {
+    expect(ActivationPreviewSchema.safeParse(activationPreview()).success).toBe(
+      true,
+    );
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...activationPreview(),
+        channels: [activationPreview().channels[2]],
+      }).success,
+    ).toBe(false);
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...activationPreview(),
+        recipientCount: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...activationPreview(),
+        recipientCount: 0,
+        channels: activationPreview().channels.map((channel) => ({
+          ...channel,
+          endpointCount: 0,
+        })),
+        sendReadiness: 'blocked',
+        blockingReasonCodes: ['NO_RECIPIENTS'],
+      }).success,
+    ).toBe(true);
+    expect(
+      IntegrationStatusSchema.safeParse({
+        ...integrationStatus('push', 'staff'),
+        authorizationReference: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      IntegrationStatusSchema.safeParse({
+        ...integrationStatus('push', 'synthetic'),
+        verifiedAt: times.created,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetChannelEnabledInputSchema.safeParse({
+        integrationId: 'expo-push',
+        enabled: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetChannelEnabledInputSchema.safeParse({
+        integrationId: 'expo-push',
+        enabled: true,
+        productOwnerApprovalReference: 'approved-production-change-001',
+      }).success,
+    ).toBe(true);
+    expect(
+      LifecycleConsequencePreviewSchema.safeParse(lifecyclePreview('all-clear'))
+        .success,
+    ).toBe(true);
+    expect(
+      LifecycleConsequencePreviewSchema.safeParse({
+        ...lifecyclePreview('all-clear'),
+        channels: channelPlan(
+          targeting('incident', 'real', 'staff'),
+          'activation',
+        ),
+      }).success,
+    ).toBe(false);
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...activationPreview(),
+        expiresAt: times.sessionExpiry,
+      }).success,
+    ).toBe(false);
+    const misleadingPush = activationPreview();
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...misleadingPush,
+        channels: misleadingPush.channels.map((channel) =>
+          channel.channel === 'push'
+            ? {
+                ...channel,
+                renderedMessage: {
+                  ...channel.renderedMessage,
+                  body: '[INCIDENT] [DRILL] This is only a drill.',
+                },
+              }
+            : channel,
+        ),
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateActivationPreviewInputSchema.safeParse({
+        facilityId: ids.facility,
+        kind: 'test',
+        templateMode: 'drill',
+        eventTypeVersion: drillTypeRef,
+        rosterPopulation: 'synthetic',
+      }).success,
+    ).toBe(true);
+
+    const start = {
+      source: 'activation-preview',
+      activationPreviewId: ids.preview,
+      activeEventDecision: {
+        decision: 'start-new',
+        activeEventIdsSeen: [],
+      },
+    } as const;
+    expect(StartEventInputSchema.safeParse(start).success).toBe(true);
+    expect(
+      StartEventInputSchema.safeParse({
+        ...start,
+        activeEventDecision: {
+          decision: 'join-existing',
+          eventId: ids.event,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      StartEventInputSchema.safeParse({
+        ...start,
+        rosterSnapshotId: ids.roster,
+      }).success,
+    ).toBe(false);
+    expect(
+      StartEventInputSchema.safeParse({
+        source: 'prepared-activation',
+        preparedActivationId: ids.prepared,
+        activeEventDecision: {
+          decision: 'start-new',
+          activeEventIdsSeen: [ids.event],
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  test('persists complete human or synthetic transition provenance', () => {
+    const staffTarget = targeting('incident', 'real', 'staff');
+    const staffTransition = {
+      id: ids.transition,
+      sequence: 1,
+      actor: humanActor,
+      source: 'web',
+      occurredAt: times.activated,
+      requestId: ids.request,
+      confirmationId: ids.confirmation,
+      consequenceDigest: 'a'.repeat(64),
+      targeting: staffTarget,
+      idempotencyKey: 'activate-staff-event-0001',
+      transition: 'activate',
+      eventId: ids.event,
+      from: 'draft',
+      to: 'active',
+      activationAuthorization: activationAuthorization(staffTarget),
+    } as const;
+    expect(EventTransitionSchema.safeParse(staffTransition).success).toBe(true);
+    expect(
+      EventTransitionSchema.safeParse({
+        ...staffTransition,
+        actor: agentActor,
+        source: 'mcp',
+      }).success,
+    ).toBe(false);
+    expect(
+      EventTransitionSchema.safeParse({
+        ...staffTransition,
+        activationAuthorization: activationAuthorization(
+          targeting('test', 'drill', 'synthetic'),
+        ),
+      }).success,
+    ).toBe(false);
+
+    const syntheticTarget = targeting('test', 'drill', 'synthetic');
+    expect(
+      EventTransitionSchema.safeParse({
+        ...staffTransition,
+        actor: agentActor,
+        source: 'mcp',
+        confirmationId: null,
+        consequenceDigest: null,
+        targeting: syntheticTarget,
+        activationAuthorization: activationAuthorization(syntheticTarget),
+      }).success,
+    ).toBe(true);
+
+    const staffReactivate = {
+      id: ids.transition,
+      sequence: 3,
+      actor: humanActor,
+      source: 'web',
+      occurredAt: times.later,
+      requestId: ids.request,
+      confirmationId: ids.confirmation,
+      consequenceDigest: 'a'.repeat(64),
+      targeting: staffTarget,
+      idempotencyKey: 'reactivate-staff-event-0001',
+      transition: 'reactivate',
+      eventId: ids.event,
+      from: 'all-clear',
+      to: 'active',
+      notificationAuthorization: lifecycleAuthorization(
+        'reactivation',
+        staffTarget,
+      ),
+    } as const;
+    expect(EventTransitionSchema.safeParse(staffReactivate).success).toBe(true);
+    expect(
+      EventTransitionSchema.safeParse({
+        ...staffReactivate,
+        actor: agentActor,
+        source: 'mcp',
+        confirmationId: null,
+        consequenceDigest: null,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      EventSchema.safeParse({
+        ...activeEvent('incident', 'real', 'staff'),
+        allClearAt: times.later,
+        reactivatedAt: times.confirmationExpiry,
+      }).success,
+    ).toBe(true);
+    expect(
+      EventSchema.safeParse({
+        ...activeEvent('incident', 'real', 'staff'),
+        allClearAt: times.later,
+      }).success,
+    ).toBe(false);
+
+    const staffDrillClose = {
+      id: ids.transition,
+      sequence: 4,
+      actor: humanActor,
+      source: 'web',
+      occurredAt: times.later,
+      requestId: ids.request,
+      confirmationId: null,
+      consequenceDigest: null,
+      targeting: targeting('drill', 'drill', 'staff'),
+      idempotencyKey: 'close-staff-drill-0001',
+      transition: 'close',
+      eventId: ids.event,
+      from: 'all-clear',
+      to: 'closed',
+    } as const;
+    expect(EventTransitionSchema.safeParse(staffDrillClose).success).toBe(true);
+    expect(
+      EventTransitionSchema.safeParse({
+        ...staffDrillClose,
+        actor: agentActor,
+        source: 'mcp',
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('human-only capability boundary', () => {
+  test('allows each protected action only for its confirmed human session', () => {
+    for (const capabilityId of HUMAN_ONLY_ACTION_IDS) {
+      const operationId = capabilityByProtectedAction[capabilityId];
+      const common = {
+        capabilityId: operationId,
+        operation: 'mutation',
+        scope: districtScope,
+        requestId: ids.request,
+        serverTime: times.activated,
+        input: {},
+        idempotencyKey: `protected-${capabilityId}-0001`,
+        transport: webMutationTransport,
+        connectivityEpochId: ids.connectivityEpoch,
+        requiredHumanActionIds: [capabilityId],
+        requiredConsequenceDigest: 'b'.repeat(64),
+      } as const;
+      const humanConfirmation = {
+        id: ids.confirmation,
+        capabilityId: operationId,
+        actionIds: [capabilityId],
+        connectivityEpochId: ids.connectivityEpoch,
+        confirmedByUserId: ids.actor,
+        confirmedWithSessionId: ids.session,
+        consequenceDigest: 'b'.repeat(64),
+        issuedAt: times.created,
+        expiresAt: times.confirmationExpiry,
+      } as const;
+
+      expect(
+        MutationCapabilityEnvelopeSchema.safeParse({
+          ...common,
+          actor: humanActor,
+          source: 'web',
+          humanConfirmation,
+        }).success,
+      ).toBe(true);
+      expect(
+        MutationCapabilityEnvelopeSchema.safeParse({
+          ...common,
+          actor: agentActor,
+          source: 'mcp',
+          transport: mcpMutationTransport,
+          connectivityEpochId: null,
+          humanConfirmation: null,
+        }).success,
+      ).toBe(false);
+      expect(
+        MutationCapabilityEnvelopeSchema.safeParse({
+          ...common,
+          actor: systemActor,
+          source: 'scheduled-job',
+          transport: scheduledMutationTransport,
+          connectivityEpochId: null,
+          humanConfirmation: null,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  test('closes capability aliases and multi-action bypasses', () => {
+    const common = {
+      capabilityId: 'start-event',
+      operation: 'mutation',
+      scope: districtScope,
+      requestId: ids.request,
+      serverTime: times.activated,
+      input: { source: 'prepared-activation' },
+      idempotencyKey: 'start-event-protected-0001',
+      transport: webMutationTransport,
+      connectivityEpochId: ids.connectivityEpoch,
+      requiredHumanActionIds: ['start-real-incident', 'send-real-notification'],
+      requiredConsequenceDigest: 'c'.repeat(64),
+    } as const;
+    const confirmation = {
+      id: ids.confirmation,
+      capabilityId: 'start-event',
+      actionIds: ['start-real-incident', 'send-real-notification'],
+      connectivityEpochId: ids.connectivityEpoch,
+      confirmedByUserId: ids.actor,
+      confirmedWithSessionId: ids.session,
+      consequenceDigest: 'c'.repeat(64),
+      issuedAt: times.created,
+      expiresAt: times.confirmationExpiry,
+    } as const;
+
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        actor: agentActor,
+        source: 'mcp',
+        transport: mcpMutationTransport,
+        connectivityEpochId: null,
+        humanConfirmation: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        actor: humanActor,
+        source: 'web',
+        humanConfirmation: confirmation,
+      }).success,
+    ).toBe(true);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        actor: humanActor,
+        source: 'web',
+        humanConfirmation: {
+          ...confirmation,
+          actionIds: ['start-real-incident'],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        actor: humanActor,
+        source: 'web',
+        humanConfirmation: {
+          ...confirmation,
+          consequenceDigest: 'd'.repeat(64),
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        actor: humanActor,
+        source: 'web',
+        humanConfirmation: {
+          ...confirmation,
+          connectivityEpochId: ids.previousConnectivityEpoch,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        serverTime: times.afterExpiry,
+        actor: humanActor,
+        source: 'web',
+        humanConfirmation: confirmation,
+      }).success,
+    ).toBe(false);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        actor: humanActor,
+        source: 'web',
+        transport: {
+          ...webMutationTransport,
+          method: 'GET',
+        },
+        humanConfirmation: confirmation,
+      }).success,
+    ).toBe(false);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        ...common,
+        actor: humanActor,
+        source: 'web',
+        transport: {
+          ...webMutationTransport,
+          csrfVerified: false,
+        },
+        humanConfirmation: confirmation,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('derives protected actions centrally from trusted current state', async () => {
+    const startInput = {
+      source: 'activation-preview',
+      activationPreviewId: ids.preview,
+      activeEventDecision: {
+        decision: 'start-new',
+        activeEventIdsSeen: [],
+      },
+    } as const;
+    const centralSafetyResolver = {
+      resolve: async () =>
+        ({
+          eventKind: 'incident',
+          rosterPopulation: 'staff',
+          consequenceDigest: 'e'.repeat(64),
+        }) as const,
+    };
+    const requirement = await resolveHumanActionRequirement(
+      'start-event',
+      startInput,
+      {
+        actor: humanActor,
+        source: 'web',
+        scope: districtScope,
+        requestId: ids.request,
+        serverTime: times.activated,
+        connectivityEpochId: ids.connectivityEpoch,
+      },
+      centralSafetyResolver,
+    );
+    expect(requirement).toEqual({
+      actionIds: ['start-real-incident', 'send-real-notification'],
+      consequenceDigest: 'e'.repeat(64),
+    });
+    const staffDrillCloseRequirement = await resolveHumanActionRequirement(
+      'close-event',
+      { eventId: ids.event },
+      {
+        actor: humanActor,
+        source: 'web',
+        scope: districtScope,
+        requestId: ids.request,
+        serverTime: times.activated,
+        connectivityEpochId: ids.connectivityEpoch,
+      },
+      {
+        resolve: async () => ({
+          eventKind: 'drill',
+          rosterPopulation: 'staff',
+          consequenceDigest: 'f'.repeat(64),
+        }),
+      },
+    );
+    expect(staffDrillCloseRequirement).toEqual({
+      actionIds: [],
+      consequenceDigest: null,
+    });
+    await expect(
+      resolveHumanActionRequirement(
+        'close-event',
+        { eventId: ids.event },
+        {
+          actor: agentActor,
+          source: 'mcp',
+          scope: districtScope,
+          requestId: ids.request,
+          serverTime: times.activated,
+          connectivityEpochId: null,
+        },
+        {
+          resolve: async () => ({
+            eventKind: 'drill',
+            rosterPopulation: 'staff',
+            consequenceDigest: 'f'.repeat(64),
+          }),
+        },
+      ),
+    ).rejects.toThrow();
+
+    expect(
+      await resolveHumanActionRequirement(
+        'all-clear-event',
+        { eventId: ids.event, lifecyclePreviewId: ids.preview },
+        {
+          actor: humanActor,
+          source: 'web',
+          scope: districtScope,
+          requestId: ids.request,
+          serverTime: times.activated,
+          connectivityEpochId: ids.connectivityEpoch,
+        },
+        {
+          resolve: async () => ({
+            eventKind: 'incident',
+            rosterPopulation: 'staff',
+            consequenceDigest: '1'.repeat(64),
+          }),
+        },
+      ),
+    ).toEqual({
+      actionIds: ['all-clear', 'send-real-notification'],
+      consequenceDigest: '1'.repeat(64),
+    });
+    expect(() =>
+      Reflect.apply(defineCapability, undefined, ['activate-now']),
+    ).toThrow();
+  });
+
+  test('owns one immutable signature for every callable capability ID', () => {
+    const definition = defineCapability('all-clear-event');
+    expect(definition.humanActionPolicy.kind).toBe('central');
+    expect(definition.inputSchema).toBe(
+      CAPABILITY_CATALOG['all-clear-event'].inputSchema,
+    );
+    expect(defineCapability('all-clear-event')).toBe(definition);
+    expect(
+      Reflect.apply(defineCapability, undefined, [
+        'all-clear-event',
+        { inputSchema: 'caller-declared-schema-is-ignored' },
+      ]),
+    ).toBe(definition);
+    expect(() =>
+      parseCapabilityInput('all-clear-event', { eventId: ids.event }),
+    ).toThrow();
+    expect(Object.isFrozen(definition)).toBe(true);
+    expect(Object.isFrozen(definition.humanActionPolicy)).toBe(true);
+  });
+
+  test('bounds single-use confirmation and idempotency lifecycles', () => {
+    const confirmation = {
+      id: ids.confirmation,
+      capabilityId: 'all-clear-event',
+      actionIds: ['all-clear'],
+      connectivityEpochId: ids.connectivityEpoch,
+      confirmedByUserId: ids.actor,
+      confirmedWithSessionId: ids.session,
+      consequenceDigest: 'a'.repeat(64),
+      issuedAt: times.created,
+      expiresAt: times.confirmationExpiry,
+    } as const;
+    expect(
+      HumanConfirmationRecordSchema.safeParse({
+        confirmation,
+        status: 'consumed',
+        consumedAt: times.activated,
+        consumedForRequestId: ids.request,
+        expiredAt: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      HumanConfirmationRecordSchema.safeParse({
+        confirmation,
+        status: 'consumed',
+        consumedAt: times.afterExpiry,
+        consumedForRequestId: ids.request,
+        expiredAt: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      IdempotencyRecordSchema.safeParse({
+        id: ids.request,
+        key: 'idempotency-record-0001',
+        capabilityId: 'all-clear-event',
+        principal: humanActor,
+        requestDigest: 'b'.repeat(64),
+        status: 'completed',
+        createdAt: times.created,
+        completedAt: times.later,
+        resultReference: `event:${ids.event}`,
+      }).success,
+    ).toBe(true);
+    expect(
+      IdempotencyRecordSchema.safeParse({
+        id: ids.request,
+        key: 'idempotency-record-0001',
+        capabilityId: 'all-clear-event',
+        principal: humanActor,
+        requestDigest: 'b'.repeat(64),
+        status: 'completed',
+        createdAt: times.created,
+        completedAt: times.later,
+        resultReference: null,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('keeps synthetic training available without a real confirmation', () => {
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        capabilityId: 'all-clear-event',
+        operation: 'mutation',
+        actor: agentActor,
+        source: 'mcp',
+        scope: districtScope,
+        requestId: ids.request,
+        serverTime: times.activated,
+        input: { rosterPopulation: 'synthetic' },
+        idempotencyKey: 'synthetic-training-run-0001',
+        transport: mcpMutationTransport,
+        connectivityEpochId: null,
+        requiredHumanActionIds: [],
+        requiredConsequenceDigest: null,
+        humanConfirmation: null,
+      }).success,
+    ).toBe(true);
+  });
+
+  test('requires one envelope idempotency key and truthful provenance', () => {
+    const valid = {
+      capabilityId: 'append-journal-entry',
+      operation: 'mutation',
+      actor: agentActor,
+      source: 'agent-rest',
+      scope: districtScope,
+      requestId: ids.request,
+      serverTime: times.activated,
+      input: {},
+      idempotencyKey: 'draft-message-idempotent-0001',
+      transport: agentRestMutationTransport,
+      connectivityEpochId: null,
+      requiredHumanActionIds: [],
+      requiredConsequenceDigest: null,
+      humanConfirmation: null,
+    } as const;
+    expect(CapabilityEnvelopeSchema.safeParse(valid).success).toBe(true);
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...valid,
+        input: { idempotencyKey: 'different-inner-key-0001' },
+      }).success,
+    ).toBe(false);
+    const withoutIdempotency: Record<string, unknown> = { ...valid };
+    delete withoutIdempotency.idempotencyKey;
+    expect(CapabilityEnvelopeSchema.safeParse(withoutIdempotency).success).toBe(
+      false,
+    );
+    expect(
+      CapabilityEnvelopeSchema.safeParse({ ...valid, source: 'web' }).success,
+    ).toBe(false);
+  });
+
+  test('uses a narrow verified GET envelope only for OIDC completion', () => {
+    const oidcCallback = {
+      capabilityId: 'complete-oidc-sign-in',
+      operation: 'mutation',
+      principal: {
+        kind: 'verified-oidc-claims',
+        issuer: 'https://accounts.google.com',
+        audience: 'synthetic-psd-eoc-client',
+        subject: 'synthetic-google-subject',
+        subjectDigest: '2'.repeat(64),
+        claimsDigest: '3'.repeat(64),
+        audienceVerified: true,
+        hostedDomain: 'psd401.net',
+        email: 'synthetic.staff@psd401.net',
+        emailVerified: true,
+        displayName: 'Synthetic Staff',
+      },
+      source: 'web',
+      requestId: ids.request,
+      serverTime: times.activated,
+      input: {
+        claims: {
+          issuer: 'https://accounts.google.com',
+          audience: 'synthetic-psd-eoc-client',
+          subject: 'synthetic-google-subject',
+          subjectDigest: '2'.repeat(64),
+          claimsDigest: '3'.repeat(64),
+          hostedDomain: 'psd401.net',
+          email: 'synthetic.staff@psd401.net',
+          emailVerified: true,
+          displayName: 'Synthetic Staff',
+        },
+        device: {
+          platform: 'web',
+          unlockMethod: 'secure-session-cookie',
+          installationId: 'synthetic-installation-0001',
+        },
+      },
+      idempotencyKey: 'oidc-callback-idempotent-0001',
+      transport: {
+        kind: 'oidc-code-callback',
+        method: 'GET',
+        stateVerified: true,
+        nonceVerified: true,
+        pkceVerified: true,
+        signatureVerified: true,
+      },
+    } as const;
+    expect(CapabilityEnvelopeSchema.safeParse(oidcCallback).success).toBe(true);
+    expect(() =>
+      parseCapabilityEnvelopeFor('complete-oidc-sign-in', oidcCallback),
+    ).not.toThrow();
+    expect(() =>
+      parseCapabilityEnvelopeFor('complete-oidc-sign-in', {
+        ...oidcCallback,
+        input: {
+          ...oidcCallback.input,
+          claims: {
+            ...oidcCallback.input.claims,
+            audience: 'attacker-client',
+            subject: 'different-subject',
+            subjectDigest: 'c'.repeat(64),
+            claimsDigest: 'd'.repeat(64),
+            email: 'different.staff@psd401.net',
+          },
+        },
+      }),
+    ).toThrow();
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...oidcCallback,
+        transport: { ...oidcCallback.transport, stateVerified: false },
+      }).success,
+    ).toBe(false);
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...oidcCallback,
+        capabilityId: 'start-event',
+      }).success,
+    ).toBe(false);
+    expect(
+      OidcCallbackRejectionEvidenceSchema.safeParse({
+        checkId: ids.audit,
+        issuer: 'https://accounts.google.com',
+        errorCode: 'access-denied',
+        responseDigest: '4'.repeat(64),
+        stateVerified: true,
+        checkedAt: times.activated,
+      }).success,
+    ).toBe(true);
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...oidcCallback,
+        principal: {
+          kind: 'oidc-provider-denial',
+          issuer: 'https://accounts.google.com',
+          errorCode: 'access-denied',
+          responseDigest: '4'.repeat(64),
+        },
+        transport: {
+          kind: 'oidc-denial-callback',
+          method: 'GET',
+          stateVerified: true,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('refreshes only a verified current credential without fabricating a session actor', () => {
+    const refresh = {
+      capabilityId: 'refresh-session',
+      operation: 'mutation',
+      principal: {
+        kind: 'verified-current-refresh-credential',
+        verificationId: ids.audit,
+        userId: ids.actor,
+        sessionId: ids.session,
+        deviceEnrollmentId: ids.device,
+        recordRef: {
+          kind: 'initial-issuance',
+          issuanceId: ids.tokenIssuance,
+        },
+        presentedTokenDigest: '4'.repeat(64),
+        credentialGeneration: 1,
+        credentialState: 'current',
+        sessionState: 'active',
+        deviceState: 'active',
+        sessionExpiresAt: times.sessionExpiry,
+        verifiedAt: times.activated,
+      },
+      source: 'web',
+      requestId: ids.request,
+      serverTime: times.activated,
+      input: {},
+      idempotencyKey: 'refresh-session-idempotent-0001',
+      transport: {
+        kind: 'web-refresh-cookie',
+        method: 'POST',
+        csrfVerified: true,
+        secure: true,
+        httpOnly: true,
+        sameSite: 'lax',
+      },
+    } as const;
+    expect(CapabilityEnvelopeSchema.safeParse(refresh).success).toBe(true);
+    expect(parseCapabilityInput('refresh-session', {})).toEqual({});
+    expect(() =>
+      parseCapabilityInput('refresh-session', { sessionId: ids.session }),
+    ).toThrow();
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...refresh,
+        actor: humanActor,
+      }).success,
+    ).toBe(false);
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...refresh,
+        capabilityId: 'start-event',
+      }).success,
+    ).toBe(false);
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...refresh,
+        serverTime: times.later,
+      }).success,
+    ).toBe(false);
+    expect(
+      MutationCapabilityEnvelopeSchema.safeParse({
+        capabilityId: 'refresh-session',
+        operation: 'mutation',
+        actor: humanActor,
+        source: 'web',
+        scope: districtScope,
+        requestId: ids.request,
+        serverTime: times.activated,
+        input: {},
+        idempotencyKey: 'refresh-session-idempotent-0002',
+        transport: webMutationTransport,
+        connectivityEpochId: ids.connectivityEpoch,
+        requiredHumanActionIds: [],
+        requiredConsequenceDigest: null,
+        humanConfirmation: null,
+      }).success,
+    ).toBe(false);
+
+    const rejection = {
+      checkId: ids.audit,
+      presentedTokenDigest: '5'.repeat(64),
+      checkedAt: times.activated,
+    } as const;
+    expect(
+      RefreshCredentialRejectionEvidenceSchema.safeParse({
+        ...rejection,
+        reason: 'session-expired',
+        sessionId: ids.session,
+        expiresAt: times.sessionExpiry,
+      }).success,
+    ).toBe(false);
+    expect(
+      RefreshCredentialRejectionEvidenceSchema.safeParse({
+        ...rejection,
+        reason: 'device-revoked',
+        sessionId: ids.session,
+        deviceEnrollmentId: ids.device,
+        revokedAt: times.sessionExpiry,
+      }).success,
+    ).toBe(false);
+    expect(
+      RefreshCredentialRejectionEvidenceSchema.safeParse({
+        ...rejection,
+        reason: 'device-revoked',
+        sessionId: ids.session,
+        deviceEnrollmentId: ids.device,
+        revokedAt: times.created,
+      }).success,
+    ).toBe(true);
+  });
+
+  test('rejects protected query registration and query envelopes', () => {
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        capabilityId: 'all-clear',
+        operation: 'query',
+        actor: humanActor,
+        source: 'web',
+        scope: districtScope,
+        requestId: ids.request,
+        serverTime: times.activated,
+        input: {},
+      }).success,
+    ).toBe(false);
+    expect(() =>
+      Reflect.apply(defineCapability, undefined, ['start-real-incident']),
+    ).toThrow();
+    expect(() =>
+      Reflect.apply(defineCapability, undefined, ['activate-now']),
+    ).toThrow();
+    expect(defineCapability('start-event').operation).toBe('mutation');
+    expect(Object.keys(CAPABILITY_CATALOG).sort()).toEqual(
+      [
+        ...Object.keys(CAPABILITY_MUTATION_SAFETY_MANIFEST),
+        ...Object.keys(CAPABILITY_QUERY_MANIFEST),
+      ].sort(),
+    );
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        capabilityId: 'list-active-events',
+        operation: 'query',
+        actor: humanActor,
+        source: 'web',
+        scope: districtScope,
+        requestId: ids.request,
+        serverTime: times.activated,
+        input: {},
+      }).success,
+    ).toBe(true);
+  });
+
+  test('keeps authentication and provider-truth capabilities off agent keys', () => {
+    expect(AgentCapabilityGrantSchema.safeParse('get-event').success).toBe(
+      true,
+    );
+    for (const capabilityId of [
+      'complete-oidc-sign-in',
+      'refresh-session',
+      'dispatch-outbox',
+      'record-delivery-evidence',
+      'set-user-roles',
+      'issue-agent-api-key',
+    ]) {
+      expect(AgentCapabilityGrantSchema.safeParse(capabilityId).success).toBe(
+        false,
+      );
+    }
+
+    const providerInput = {
+      subject: { kind: 'attempt', attemptId: ids.attempt },
+      state: 'delivered',
+      provider: 'synthetic-provider',
+      providerReference: 'synthetic-delivery-reference',
+      proof: {
+        kind: 'provider-delivery-receipt',
+        provider: 'synthetic-provider',
+        receiptId: 'synthetic-delivery-receipt',
+        deliveredAt: times.activated,
+      },
+      reasonCode: null,
+      diagnosticDigest: null,
+    } as const;
+    const envelope = {
+      capabilityId: 'record-delivery-evidence',
+      operation: 'mutation',
+      actor: agentActor,
+      source: 'mcp',
+      scope: districtScope,
+      requestId: ids.request,
+      serverTime: times.later,
+      input: providerInput,
+      idempotencyKey: 'provider-evidence-idempotent-0001',
+      transport: mcpMutationTransport,
+      connectivityEpochId: null,
+      requiredHumanActionIds: [],
+      requiredConsequenceDigest: null,
+      humanConfirmation: null,
+    } as const;
+    expect(CapabilityEnvelopeSchema.safeParse(envelope).success).toBe(true);
+    expect(() =>
+      parseCapabilityEnvelopeFor('record-delivery-evidence', envelope),
+    ).toThrow();
+    expect(() =>
+      parseCapabilityEnvelopeFor('record-delivery-evidence', {
+        ...envelope,
+        actor: systemActor,
+        source: 'webhook',
+        transport: { kind: 'webhook-delivery' },
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('append-only journal contract', () => {
+  const textEntry = {
+    id: ids.journal,
+    eventId: ids.event,
+    sequence: 2,
+    author: humanActor,
+    source: 'mobile',
+    serverTime: times.later,
+    clientTime: times.activated,
+    supersedes: null,
+    kind: 'text',
+    payload: { text: 'Synthetic exercise update.' },
+  } as const;
+
+  test('parses a strict frozen shape with no mutation fields', () => {
+    const parsed = JournalEntrySchema.parse(textEntry);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed.payload)).toBe(true);
+    expect(
+      JournalEntrySchema.safeParse({ ...textEntry, updatedAt: times.later })
+        .success,
+    ).toBe(false);
+    expect(
+      JournalEntrySchema.safeParse({ ...textEntry, deletedAt: times.later })
+        .success,
+    ).toBe(false);
+    expect(() => Object.assign(parsed, { sequence: 99 })).toThrow();
+  });
+
+  test('requires backward supersession and truthful actor/source provenance', () => {
+    expect(
+      JournalEntrySchema.safeParse({
+        ...textEntry,
+        supersedes: {
+          entryId: ids.earlierJournal,
+          entrySequence: 1,
+          kind: 'correction',
+          reason: 'Correct synthetic wording.',
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      JournalEntrySchema.safeParse({
+        ...textEntry,
+        supersedes: {
+          entryId: ids.earlierJournal,
+          entrySequence: 2,
+          kind: 'correction',
+          reason: 'Not earlier.',
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      JournalEntrySchema.safeParse({
+        ...textEntry,
+        author: agentActor,
+        source: 'web',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('derives lifecycle system facts only from validated transitions', () => {
+    const staffTarget = targeting('incident', 'real', 'staff');
+    const allClearTransition = {
+      id: ids.transition,
+      sequence: 2,
+      actor: humanActor,
+      source: 'web',
+      occurredAt: times.later,
+      requestId: ids.request,
+      confirmationId: ids.confirmation,
+      consequenceDigest: 'a'.repeat(64),
+      targeting: staffTarget,
+      idempotencyKey: 'all-clear-staff-event-0001',
+      transition: 'all-clear',
+      eventId: ids.event,
+      from: 'active',
+      to: 'all-clear',
+      notificationAuthorization: lifecycleAuthorization(
+        'all-clear',
+        staffTarget,
+      ),
+    } as const;
+    const lifecycleEntry = {
+      id: ids.journal,
+      eventId: ids.event,
+      sequence: 3,
+      author: humanActor,
+      source: 'web',
+      serverTime: times.later,
+      clientTime: null,
+      supersedes: null,
+      kind: 'system',
+      payload: {
+        code: 'all-clear-issued',
+        summary: 'A human issued all-clear.',
+        transition: allClearTransition,
+      },
+    } as const;
+    expect(JournalEntrySchema.safeParse(lifecycleEntry).success).toBe(true);
+    expect(
+      JournalEntrySchema.safeParse({
+        ...lifecycleEntry,
+        author: agentActor,
+        source: 'mcp',
+        payload: {
+          ...lifecycleEntry.payload,
+          transition: {
+            ...allClearTransition,
+            actor: agentActor,
+            source: 'mcp',
+            confirmationId: null,
+            consequenceDigest: null,
+          },
+        },
+      }).success,
+    ).toBe(false);
+
+    const syntheticTarget = targeting('test', 'drill', 'synthetic');
+    expect(
+      JournalEntrySchema.safeParse({
+        ...lifecycleEntry,
+        author: agentActor,
+        source: 'mcp',
+        payload: {
+          ...lifecycleEntry.payload,
+          transition: {
+            ...allClearTransition,
+            actor: agentActor,
+            source: 'mcp',
+            confirmationId: null,
+            consequenceDigest: null,
+            targeting: syntheticTarget,
+            notificationAuthorization: lifecycleAuthorization(
+              'all-clear',
+              syntheticTarget,
+            ),
+          },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      JournalEntryInputSchema.safeParse({
+        eventId: ids.event,
+        clientTime: null,
+        supersedes: null,
+        kind: 'system',
+        payload: lifecycleEntry.payload,
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('notification delivery truth', () => {
+  const commonEvidence = {
+    id: ids.evidence,
+    sequence: 1,
+    previousEvidenceId: null,
+    recordedAt: times.later,
+    provider: null,
+    providerReference: null,
+    proof: null,
+    reasonCode: null,
+    diagnosticDigest: null,
+  } as const;
+  const intentSubject = { kind: 'intent', intentId: ids.intent } as const;
+  const attemptSubject = { kind: 'attempt', attemptId: ids.attempt } as const;
+
+  test('represents every state, including unknown, at its truthful subject', () => {
+    expect(DeliveryTruthStateSchema.options).toEqual([
+      'accepted',
+      'recorded',
+      'attempted',
+      'provider-accepted',
+      'delivered',
+      'failed',
+      'expired',
+      'unknown',
+    ]);
+    for (const state of ['accepted', 'recorded'] as const) {
+      expect(
+        DeliveryEvidenceSchema.safeParse({
+          ...commonEvidence,
+          subject: intentSubject,
+          state,
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...commonEvidence,
+        subject: attemptSubject,
+        state: 'attempted',
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...commonEvidence,
+        subject: attemptSubject,
+        state: 'provider-accepted',
+        provider: 'synthetic-provider',
+        providerReference: 'synthetic-acceptance-reference',
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...commonEvidence,
+        subject: attemptSubject,
+        state: 'delivered',
+        provider: 'synthetic-provider',
+        providerReference: 'synthetic-delivery-reference',
+        proof: {
+          kind: 'provider-delivery-receipt',
+          provider: 'synthetic-provider',
+          receiptId: 'synthetic-delivery-receipt',
+          deliveredAt: times.activated,
+        },
+      }).success,
+    ).toBe(true);
+    for (const state of ['failed', 'expired', 'unknown'] as const) {
+      expect(
+        DeliveryEvidenceSchema.safeParse({
+          ...commonEvidence,
+          subject: attemptSubject,
+          state,
+          reasonCode: `SYNTHETIC_${state.toUpperCase()}`,
+          diagnosticDigest: 'd'.repeat(64),
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...commonEvidence,
+        subject: attemptSubject,
+        state: 'failed',
+        reasonCode: 'raw provider said recipient@example.com failed',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('does not overstate provider acceptance or mismatched proof', () => {
+    const delivered = {
+      ...commonEvidence,
+      subject: attemptSubject,
+      state: 'delivered',
+      provider: 'synthetic-provider',
+      providerReference: 'delivery-reference',
+      proof: {
+        kind: 'provider-delivery-receipt',
+        provider: 'synthetic-provider',
+        receiptId: 'delivery-receipt',
+        deliveredAt: times.activated,
+      },
+    } as const;
+    expect(DeliveryEvidenceSchema.safeParse(delivered).success).toBe(true);
+    expect(
+      DeliveryEvidenceSchema.safeParse({ ...delivered, proof: null }).success,
+    ).toBe(false);
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...delivered,
+        proof: { ...delivered.proof, provider: 'different-provider' },
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...delivered,
+        proof: { ...delivered.proof, deliveredAt: times.sessionExpiry },
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryEvidenceSchema.safeParse({
+        ...commonEvidence,
+        subject: attemptSubject,
+        state: 'accepted',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('allows only monotonic evidence transitions, including late truth', () => {
+    expect(
+      DeliveryTruthTransitionSchema.safeParse({
+        subjectKind: 'attempt',
+        from: 'provider-accepted',
+        to: 'unknown',
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTruthTransitionSchema.safeParse({
+        subjectKind: 'attempt',
+        from: 'unknown',
+        to: 'delivered',
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTruthTransitionSchema.safeParse({
+        subjectKind: 'attempt',
+        from: 'unknown',
+        to: 'provider-accepted',
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTruthTransitionSchema.safeParse({
+        subjectKind: 'attempt',
+        from: 'delivered',
+        to: 'unknown',
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTruthTransitionSchema.safeParse({
+        subjectKind: 'attempt',
+        from: 'failed',
+        to: 'delivered',
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('notification and outbox classification continuity', () => {
+  test('pins fresh purpose-specific all-clear authorization and copy', () => {
+    const staffTarget = targeting('incident', 'real', 'staff');
+    const allClearIntent = {
+      id: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('incident', 'real', 'staff'),
+      purpose: 'all-clear',
+      eventTypeVersion: realTypeRef,
+      rosterSnapshotId: ids.roster,
+      audienceConfig: audienceRef,
+      createdBy: humanActor,
+      source: 'web',
+      requestId: ids.request,
+      authorization: lifecycleAuthorization('all-clear', staffTarget),
+      channels: channelPlan(staffTarget, 'all-clear'),
+      createdAt: times.created,
+    } as const;
+    expect(NotificationIntentSchema.safeParse(allClearIntent).success).toBe(
+      true,
+    );
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...allClearIntent,
+        authorization: activationAuthorization(staffTarget),
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...allClearIntent,
+        channels: channelPlan(staffTarget, 'activation'),
+      }).success,
+    ).toBe(false);
+  });
+
+  test('pins type, roster, audience, and classification through fan-out', () => {
+    const staffTarget = targeting('incident', 'real', 'staff');
+    const intent = {
+      id: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('incident', 'real', 'staff'),
+      purpose: 'activation',
+      eventTypeVersion: realTypeRef,
+      rosterSnapshotId: ids.roster,
+      audienceConfig: audienceRef,
+      createdBy: humanActor,
+      source: 'web',
+      requestId: ids.request,
+      authorization: activationAuthorization(staffTarget),
+      channels: channelPlan(staffTarget),
+      createdAt: times.created,
+    } as const;
+    expect(NotificationIntentSchema.safeParse(intent).success).toBe(true);
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...intent,
+        templateMode: 'drill',
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...intent,
+        createdBy: agentActor,
+      }).success,
+    ).toBe(false);
+
+    const syntheticTarget = targeting('test', 'drill', 'synthetic');
+    const batch = {
+      id: ids.batch,
+      intentId: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('test', 'drill', 'synthetic'),
+      purpose: 'activation',
+      eventTypeVersion: drillTypeRef,
+      rosterSnapshotId: ids.roster,
+      audienceConfig: audienceRef,
+      requestId: ids.request,
+      authorization: activationAuthorization(syntheticTarget),
+      channel: 'push',
+      renderedMessage: renderedMessage('push', syntheticTarget),
+      integrationStatus: integrationStatus('push', 'synthetic'),
+      sequence: 1,
+      endpointCount: 1,
+      createdAt: times.created,
+    } as const;
+    expect(DispatchBatchSchema.safeParse(batch).success).toBe(true);
+    expect(
+      DispatchBatchSchema.safeParse({
+        ...batch,
+        rosterPopulation: 'staff',
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationStatusSchema.safeParse({
+        intent,
+        batches: [batch],
+        stateCounts: [],
+        generatedAt: times.later,
+      }).success,
+    ).toBe(false);
+
+    const attempt = {
+      id: ids.attempt,
+      batchId: ids.batch,
+      intentId: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('test', 'drill', 'synthetic'),
+      purpose: 'activation',
+      eventTypeVersion: drillTypeRef,
+      rosterSnapshotId: ids.roster,
+      recipientId: ids.recipient,
+      endpointId: ids.endpoint,
+      channel: 'push',
+      attemptNumber: 1,
+      attemptedAt: times.later,
+    } as const;
+    expect(ChannelAttemptSchema.safeParse(attempt).success).toBe(true);
+    expect(
+      ChannelAttemptSchema.safeParse({
+        ...attempt,
+        eventTypeVersion: realTypeRef,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('allows only synthetic drill/test intents for agents', () => {
+    const syntheticTarget = targeting('drill', 'drill', 'synthetic');
+    const syntheticDrill = {
+      id: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('drill', 'drill', 'synthetic'),
+      purpose: 'activation',
+      eventTypeVersion: drillTypeRef,
+      rosterSnapshotId: ids.roster,
+      audienceConfig: audienceRef,
+      createdBy: agentActor,
+      source: 'mcp',
+      requestId: ids.request,
+      authorization: activationAuthorization(syntheticTarget),
+      channels: channelPlan(syntheticTarget),
+      createdAt: times.created,
+    } as const;
+    expect(NotificationIntentSchema.safeParse(syntheticDrill).success).toBe(
+      true,
+    );
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...syntheticDrill,
+        rosterPopulation: 'staff',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('keeps the outbox destination-free and classification-pinned', () => {
+    const syntheticTarget = targeting('drill', 'drill', 'synthetic');
+    const message = {
+      version: 1,
+      outboxId: ids.outbox,
+      intentId: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('drill', 'drill', 'synthetic'),
+      purpose: 'activation',
+      eventTypeVersion: drillTypeRef,
+      rosterSnapshotId: ids.roster,
+      audienceConfig: audienceRef,
+      requestId: ids.request,
+      authorization: activationAuthorization(syntheticTarget),
+      channels: channelPlan(syntheticTarget),
+      createdAt: times.created,
+    } as const;
+    expect(NotificationOutboxMessageSchema.safeParse(message).success).toBe(
+      true,
+    );
+    expect(
+      NotificationOutboxMessageSchema.safeParse({
+        ...message,
+        templateMode: 'real',
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationOutboxMessageSchema.safeParse({
+        ...message,
+        destination: 'somebody@example.invalid',
+      }).success,
+    ).toBe(false);
+
+    const record = {
+      id: ids.outbox,
+      message,
+      status: 'pending',
+      attempts: 0,
+      availableAt: times.created,
+      lockedUntil: null,
+      publishedAt: null,
+      failedAt: null,
+      lastErrorCode: null,
+    } as const;
+    expect(OutboxRecordSchema.safeParse(record).success).toBe(true);
+    expect(
+      OutboxRecordSchema.safeParse({
+        ...record,
+        status: 'processing',
+      }).success,
+    ).toBe(false);
+    expect(
+      OutboxRecordSchema.safeParse({
+        ...record,
+        status: 'published',
+        publishedAt: times.later,
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe('roster, facility, and identity boundaries', () => {
+  const syntheticBuildingGroupRef = {
+    id: ids.group,
+    kind: 'synthetic',
+    purpose: 'building',
+    facilityId: ids.facility,
+  } as const;
+  const accessGroupRef = {
+    id: ids.group,
+    kind: 'google-group',
+    purpose: 'access',
+    facilityId: null,
+  } as const;
+  const syntheticSnapshot = {
+    id: ids.roster,
+    version: 1,
+    population: 'synthetic',
+    complete: true,
+    sourceConfiguration: { id: ids.rosterConfiguration, version: 1 },
+    facilityIds: [ids.facility],
+    expectedSourceGroupRefs: [syntheticBuildingGroupRef],
+    sourceGroupRefs: [syntheticBuildingGroupRef],
+    recipients: [
+      {
+        id: ids.recipient,
+        population: 'synthetic',
+        googleSubject: null,
+        displayName: 'Synthetic Staff One',
+        groupSourceRefs: [syntheticBuildingGroupRef],
+        endpoints: [
+          {
+            id: ids.endpoint,
+            channel: 'email',
+            status: 'active',
+            email: 'synthetic.one@example.invalid',
+            capturedAt: times.created,
+          },
+          {
+            id: ids.smsEndpoint,
+            channel: 'sms',
+            status: 'active',
+            phoneNumber: '+12025550123',
+            capturedAt: times.created,
+          },
+          {
+            id: ids.pushEndpoint,
+            channel: 'push',
+            status: 'active',
+            platform: 'ios',
+            token: 'synthetic-unroutable:device-one',
+            capturedAt: times.created,
+          },
+        ],
+      },
+    ],
+    syncStartedAt: times.created,
+    capturedAt: times.activated,
+  } as const;
+
+  test('pins neighborhood versions and rejects another building', () => {
+    const valid = {
+      id: ids.audience,
+      facilityId: ids.facility,
+      version: 1,
+      targets: [
+        { kind: 'building', facilityId: ids.facility },
+        {
+          kind: 'neighborhood',
+          neighborhood: { id: ids.neighborhood, version: 2 },
+        },
+      ],
+      createdAt: times.created,
+    } as const;
+    expect(AudienceConfigSchema.safeParse(valid).success).toBe(true);
+    expect(
+      AudienceConfigSchema.safeParse({
+        ...valid,
+        targets: [
+          { kind: 'building', facilityId: ids.otherFacility },
+          valid.targets[1],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AudienceConfigSchema.safeParse({
+        ...valid,
+        targets: [{ kind: 'neighborhood', neighborhoodId: ids.neighborhood }],
+      }).success,
+    ).toBe(false);
+    expect(
+      AudienceConfigSchema.safeParse({
+        ...valid,
+        targets: [
+          {
+            kind: 'others',
+            groupSourceRef: accessGroupRef,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      GroupSourceSchema.safeParse({
+        id: ids.group,
+        kind: 'synthetic',
+        purpose: 'access',
+        facilityId: null,
+        displayName: 'Unsafe synthetic access source',
+        active: true,
+        createdAt: times.created,
+        fixtureKey: 'unsafe-access',
+      }).success,
+    ).toBe(false);
+    expect(
+      RosterSourceConfigurationSchema.safeParse({
+        id: ids.rosterConfiguration,
+        version: 1,
+        population: 'staff',
+        facilityIds: [ids.facility],
+        groupSourceRefs: [syntheticBuildingGroupRef],
+        createdAt: times.created,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('keeps every synthetic endpoint provably unroutable', () => {
+    expect(RosterSnapshotSchema.safeParse(syntheticSnapshot).success).toBe(
+      true,
+    );
+    const recipient = syntheticSnapshot.recipients[0];
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        recipients: [{ ...recipient, googleSubject: 'real-looking-subject' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        recipients: [
+          {
+            ...recipient,
+            endpoints: [
+              {
+                ...recipient.endpoints[0],
+                email: 'real-route@example.com',
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        recipients: [
+          {
+            ...recipient,
+            endpoints: [
+              {
+                ...recipient.endpoints[1],
+                phoneNumber: '+12125550100',
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        recipients: [
+          {
+            ...recipient,
+            endpoints: [
+              {
+                ...recipient.endpoints[2],
+                token: 'ExponentPushToken[routable]',
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  test('requires internally consistent, deduplicated roster provenance', () => {
+    const recipient = syntheticSnapshot.recipients[0];
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        recipients: [
+          {
+            ...recipient,
+            groupSourceRefs: [
+              { ...syntheticBuildingGroupRef, id: ids.otherFacility },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        recipients: [
+          recipient,
+          {
+            ...recipient,
+            id: ids.secondRecipient,
+            endpoints: [{ ...recipient.endpoints[0], id: ids.secondEndpoint }],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        expectedSourceGroupRefs: [
+          syntheticBuildingGroupRef,
+          { ...syntheticBuildingGroupRef, id: ids.otherFacility },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RosterSyncResultSchema.safeParse({
+        id: ids.transition,
+        sourceConfiguration: { id: ids.rosterConfiguration, version: 1 },
+        population: 'synthetic',
+        outcome: 'complete',
+        startedAt: times.created,
+        completedAt: times.later,
+        expectedSourceGroupRefs: [syntheticBuildingGroupRef],
+        completedSourceGroupRefs: [syntheticBuildingGroupRef],
+        publishedSnapshotId: ids.roster,
+        groupFailures: [],
+      }).success,
+    ).toBe(true);
+  });
+
+  test('exposes a bounded, PII-free stale-roster report', () => {
+    expect(
+      StaleRosterReportSchema.safeParse({
+        generatedAt: times.later,
+        status: 'stale',
+        latestCompleteSnapshotId: ids.roster,
+        latestCompleteCapturedAt: times.created,
+        latestCompleteAgeSeconds: 120,
+        failedGroups: [
+          {
+            groupSourceRef: syntheticBuildingGroupRef,
+            errorCode: 'GOOGLE_UNAVAILABLE',
+            attemptedAt: times.later,
+          },
+        ],
+        staleRecipients: [
+          { recipientId: ids.recipient, reason: 'no-active-endpoint' },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      StaleRosterReportSchema.safeParse({
+        generatedAt: times.later,
+        status: 'failed',
+        latestCompleteSnapshotId: null,
+        latestCompleteCapturedAt: null,
+        latestCompleteAgeSeconds: null,
+        failedGroups: [
+          {
+            groupSourceRef: syntheticBuildingGroupRef,
+            errorCode: 'FIRST_SYNC_FAILED',
+            attemptedAt: times.later,
+          },
+        ],
+        staleRecipients: [],
+      }).success,
+    ).toBe(true);
+  });
+
+  test('pins membership evidence and keeps token history append-only', () => {
+    const session = {
+      id: ids.session,
+      userId: ids.actor,
+      deviceEnrollmentId: ids.device,
+      createdAt: times.created,
+      expiresAt: times.sessionExpiry,
+      authorization: {
+        kind: 'group-membership',
+        source: 'google-group-snapshot',
+        membershipSnapshotId: ids.membershipSnapshot,
+        membershipValidUntil: times.activated,
+        membershipGraceUntil: times.later,
+      },
+      revokedAt: null,
+    } as const;
+    expect(SessionSchema.safeParse(session).success).toBe(true);
+    expect(
+      SessionSchema.safeParse({
+        ...session,
+        authorization: {
+          ...session.authorization,
+          membershipSnapshotId: null,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      SessionSchema.safeParse({
+        ...session,
+        authorization: {
+          ...session.authorization,
+          membershipGraceUntil: times.created,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      SessionSchema.safeParse({ ...session, refreshToken: 'not-allowed' })
+        .success,
+    ).toBe(false);
+    expect(
+      SessionSchema.safeParse({
+        ...session,
+        authorization: {
+          kind: 'bootstrap-admin',
+          source: 'bootstrap-admin-subject',
+          grantedRole: 'admin',
+          subjectDigest: '8'.repeat(64),
+          configurationDigest: '9'.repeat(64),
+          authorizationReference: 'environment-bootstrap-subject-v1',
+          authorizedAt: times.created,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      AccessMembershipSnapshotSchema.safeParse({
+        id: ids.membershipSnapshot,
+        version: 1,
+        complete: true,
+        expectedAccessGroupSourceRefs: [accessGroupRef],
+        completedAccessGroupSourceRefs: [accessGroupRef],
+        members: [
+          {
+            userId: ids.actor,
+            googleSubject: 'synthetic-google-subject',
+            accessGroupSourceRefs: [accessGroupRef],
+            facilityScope: { kind: 'district' },
+          },
+        ],
+        syncStartedAt: times.created,
+        capturedAt: times.activated,
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionTokenIssuanceSchema.safeParse({
+        id: ids.tokenIssuance,
+        sessionId: ids.session,
+        tokenDigest: 'c'.repeat(64),
+        issuedAt: times.created,
+      }).success,
+    ).toBe(true);
+
+    const rotation = {
+      id: ids.rotation,
+      sessionId: ids.session,
+      previousTokenDigest: 'd'.repeat(64),
+      nextTokenDigest: 'e'.repeat(64),
+      rotatedAt: times.activated,
+    } as const;
+    expect(SessionTokenRotationSchema.safeParse(rotation).success).toBe(true);
+    expect(
+      SessionTokenRotationSchema.safeParse({
+        ...rotation,
+        replayDetectedAt: times.later,
+      }).success,
+    ).toBe(false);
+    expect(
+      SessionTokenReplaySchema.safeParse({
+        id: ids.replay,
+        sessionId: ids.session,
+        rotationId: ids.rotation,
+        detectedAt: times.later,
+      }).success,
+    ).toBe(true);
+    expect(
+      ConnectivityEpochSchema.safeParse({
+        id: ids.connectivityEpoch,
+        sessionId: ids.session,
+        establishedAt: times.activated,
+      }).success,
+    ).toBe(true);
+    expect(
+      ConnectivityEpochInvalidationSchema.safeParse({
+        id: ids.replay,
+        connectivityEpochId: ids.previousConnectivityEpoch,
+        reason: 'reconnected',
+        invalidatedAt: times.activated,
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe('security audit boundary', () => {
+  test('records minimized unknown-user denials in a hash chain', () => {
+    const entry = {
+      id: ids.audit,
+      sequence: 1,
+      previousHash: null,
+      entryHash: 'f'.repeat(64),
+      category: 'access-denial',
+      action: 'sign-in',
+      actionIds: [],
+      confirmationId: null,
+      outcome: 'denied',
+      principal: {
+        kind: 'unauthenticated',
+        subjectDigest: 'a'.repeat(64),
+      },
+      source: 'web',
+      facilityId: null,
+      target: null,
+      requestId: ids.request,
+      reasonCode: 'UNKNOWN_USER',
+      occurredAt: times.created,
+    } as const;
+    expect(SecurityAuditEntrySchema.safeParse(entry).success).toBe(true);
+    expect(
+      SecurityAuditEntrySchema.safeParse({ ...entry, email: 'not-allowed' })
+        .success,
+    ).toBe(false);
+    expect(
+      SecurityAuditEntrySchema.safeParse({
+        ...entry,
+        source: 'agent-rest',
+      }).success,
+    ).toBe(true);
+    expect(
+      SecurityAuditEntrySchema.safeParse({
+        ...entry,
+        category: 'human-only-rejection',
+        action: 'start-event',
+        actionIds: ['start-real-incident'],
+        outcome: 'success',
+        reasonCode: null,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('can query unauthenticated facts without inventing an actor', () => {
+    expect(
+      SecurityAuditQuerySchema.safeParse({
+        actorKind: 'unauthenticated',
+        principal: {
+          kind: 'unauthenticated',
+          subjectDigest: 'a'.repeat(64),
+        },
+        category: 'access-denial',
+        outcome: 'denied',
+        action: null,
+        facilityId: null,
+        occurredFrom: times.created,
+        occurredThrough: times.later,
+        cursor: null,
+        limit: 100,
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe('client-facing transient links', () => {
+  test('permits HTTPS only for private upload, read, and export grants', () => {
+    expect(
+      HttpsUrlSchema.safeParse('https://example.invalid/grant').success,
+    ).toBe(true);
+    for (const unsafeUrl of [
+      'javascript:alert(1)',
+      'ftp://example.invalid/grant',
+      'http://example.invalid/grant',
+      'not a URL',
+    ]) {
+      expect(HttpsUrlSchema.safeParse(unsafeUrl).success).toBe(false);
+      expect(
+        MediaReadGrantSchema.safeParse({
+          eventId: ids.event,
+          mediaId: ids.outbox,
+          readUrl: unsafeUrl,
+          issuedAt: times.created,
+          expiresAt: times.activated,
+        }).success,
+      ).toBe(false);
+    }
+  });
+});
+
+describe('records and report projections', () => {
+  test('cannot invent channels or overstate endpoint delivery counts', () => {
+    const syntheticTarget = targeting('test', 'drill', 'synthetic');
+    const plannedChannels = channelPlan(syntheticTarget).slice(0, 2);
+    const intent = {
+      id: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('test', 'drill', 'synthetic'),
+      purpose: 'activation',
+      eventTypeVersion: drillTypeRef,
+      rosterSnapshotId: ids.roster,
+      audienceConfig: audienceRef,
+      createdBy: agentActor,
+      source: 'mcp',
+      requestId: ids.request,
+      authorization: activationAuthorization(syntheticTarget),
+      channels: plannedChannels,
+      createdAt: times.created,
+    } as const;
+    const notification = {
+      intent,
+      batches: [],
+      stateCounts: [{ state: 'delivered', count: 14 }],
+      generatedAt: times.later,
+    } as const;
+    const channels = plannedChannels.map((channel) => ({
+      channel: channel.channel,
+      latestStateCounts: [{ state: 'delivered', count: 14 }],
+    }));
+    const report = {
+      notification,
+      channels,
+      generatedAt: times.later,
+    } as const;
+    expect(DeliveryReportSchema.safeParse(report).success).toBe(true);
+    expect(
+      DeliveryReportSchema.safeParse({
+        ...report,
+        channels: [{ channel: 'sms', latestStateCounts: [] }, channels[1]],
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryReportSchema.safeParse({
+        ...report,
+        channels: [
+          {
+            ...channels[0],
+            latestStateCounts: [{ state: 'delivered', count: 15 }],
+          },
+          channels[1],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationStatusSchema.safeParse({
+        ...notification,
+        stateCounts: [{ state: 'delivered', count: 29 }],
+      }).success,
+    ).toBe(false);
+  });
+
+  test('derives drill record status from complete lifecycle timestamps', () => {
+    const activeRecord = {
+      id: ids.outbox,
+      eventId: ids.event,
+      facilityId: ids.facility,
+      kind: 'drill',
+      eventTypeVersion: drillTypeRef,
+      eventTypeName: 'Lockdown Drill',
+      status: 'active',
+      startedAt: times.created,
+      allClearAt: null,
+      reactivatedAt: null,
+      closedAt: null,
+    } as const;
+    expect(DrillRecordSchema.safeParse(activeRecord).success).toBe(true);
+    expect(
+      DrillRecordSchema.safeParse({ ...activeRecord, status: 'draft' }).success,
+    ).toBe(false);
+    expect(
+      DrillRecordSchema.safeParse({ ...activeRecord, status: 'closed' })
+        .success,
+    ).toBe(false);
+    expect(
+      DrillRecordSchema.safeParse({
+        ...activeRecord,
+        status: 'closed',
+        allClearAt: times.activated,
+        closedAt: times.later,
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe('agent key credential boundaries', () => {
+  test('keeps persisted verifier digests out of list responses', () => {
+    const summary = {
+      id: ids.apiKey,
+      agentId: ids.agent,
+      displayName: 'Synthetic reporting agent',
+      facilityScope: { kind: 'district' },
+      capabilityIds: ['get-event'],
+      keyPrefix: 'psdeoc_key',
+      issuedByUserId: ids.actor,
+      issuedAt: times.created,
+      expiresAt: null,
+      revokedAt: null,
+    } as const;
+    const persisted = {
+      ...summary,
+      credentialDigest: 'e'.repeat(64),
+    } as const;
+    expect(AgentApiKeySchema.safeParse(persisted).success).toBe(true);
+    expect(
+      AgentApiKeyPageSchema.safeParse({
+        items: [summary],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }).success,
+    ).toBe(true);
+    expect(
+      AgentApiKeyPageSchema.safeParse({
+        items: [persisted],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('barrel exports', () => {
+  test('exposes stable downstream schemas from the package entry point', () => {
+    expect(typeof Contracts.EventSchema.parse).toBe('function');
+    expect(typeof Contracts.NotificationIntentSchema.parse).toBe('function');
+    expect(typeof Contracts.NotificationOutboxMessageSchema.parse).toBe(
+      'function',
+    );
+    expect(typeof Contracts.StaleRosterReportSchema.parse).toBe('function');
+    expect(typeof Contracts.SecurityAuditEntrySchema.parse).toBe('function');
+    expect(typeof Contracts.JournalEntrySchema.parse).toBe('function');
+    expect(typeof Contracts.defineCapability).toBe('function');
+    expect(Contracts.HUMAN_ONLY_ACTION_IDS).toHaveLength(4);
+  });
+});
