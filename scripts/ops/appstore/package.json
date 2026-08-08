@@ -1,0 +1,13 @@
+{
+  "name": "@psd-eoc/appstore-ops",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "test": "bun test asc.test.ts",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test"
+  }
+}
