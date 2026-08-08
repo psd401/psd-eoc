@@ -41,6 +41,10 @@ const ids = {
   lateRecipient: '00000000-0000-4000-8000-000000008082',
   lateEndpoint: '00000000-0000-4000-8000-000000008083',
   lateFailure: '00000000-0000-4000-8000-000000008084',
+  nonSequentialSnapshot: '00000000-0000-4000-8000-000000008085',
+  ambiguousConfiguration: '00000000-0000-4000-8000-000000008086',
+  ambiguousSnapshot: '00000000-0000-4000-8000-000000008087',
+  configurableAccessGroup: '00000000-0000-4000-8000-000000008088',
 } as const;
 
 const rosterGroups = [
@@ -563,6 +567,13 @@ describeWithDatabase('published roster graph immutability', () => {
     for (const operation of [
       () =>
         db.execute(sql`
+          update roster_source_configurations
+          set created_at = created_at + interval '1 second'
+          where id = ${ids.configuration}::uuid
+            and version = 1
+        `),
+      () =>
+        db.execute(sql`
           update roster_source_configuration_facilities
           set facility_id = ${ids.missingFacility}::uuid
           where configuration_id = ${ids.configuration}::uuid
@@ -628,14 +639,229 @@ describeWithDatabase('published roster graph immutability', () => {
   test('rejects group-source identity and facility-binding mutation', async () => {
     const db = databaseConnection().db;
 
-    await expectImmutableRejection(
-      async () =>
+    for (const operation of [
+      () =>
         db.execute(sql`
           update group_sources
           set facility_id = ${ids.missingFacility}::uuid
           where id = ${ids.groupNorth}::uuid
         `),
-      /identity, purpose, facility binding, and creation time are immutable/u,
+      () =>
+        db.execute(sql`
+          update group_sources
+          set fixture_key = 'rewritten-provider-locator'
+          where id = ${ids.groupNorth}::uuid
+        `),
+    ]) {
+      await expectImmutableRejection(
+        async () => operation(),
+        /provider locator, status, and presentation are immutable/u,
+      );
+    }
+  });
+
+  test('keeps access-group status and provider configuration mutable', async () => {
+    const db = databaseConnection().db;
+    await db.execute(sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values (
+        ${ids.configurableAccessGroup}::uuid,
+        'google-group'::group_source_kind,
+        'access'::group_purpose,
+        null,
+        'Synthetic configurable access group',
+        true,
+        'synthetic-configurable-access-primary',
+        'synthetic-configurable-access-primary@example.invalid',
+        null,
+        now()
+      )
+      on conflict do nothing
+    `);
+    const originalRows = await db.execute<{
+      active: boolean;
+      email: string;
+      google_group_id: string;
+    }>(sql`
+      select active, email, google_group_id
+      from group_sources
+      where id = ${ids.configurableAccessGroup}::uuid
+    `);
+    const original = originalRows[0];
+    if (original === undefined) {
+      throw new Error('The configurable access-group fixture is missing.');
+    }
+
+    const updatedRows = await db.execute<{
+      active: boolean;
+      email: string;
+      google_group_id: string;
+    }>(sql`
+      update group_sources
+      set
+        active = ${!original.active},
+        google_group_id = 'synthetic-configurable-access-alternate',
+        email = 'synthetic-configurable-access-alternate@example.invalid'
+      where id = ${ids.configurableAccessGroup}::uuid
+      returning active, email, google_group_id
+    `);
+    expect(
+      updatedRows.map((row) => ({
+        active: row.active,
+        email: row.email,
+        google_group_id: row.google_group_id,
+      })),
+    ).toEqual([
+      {
+        active: !original.active,
+        email: 'synthetic-configurable-access-alternate@example.invalid',
+        google_group_id: 'synthetic-configurable-access-alternate',
+      },
+    ]);
+
+    await db.execute(sql`
+      update group_sources
+      set
+        active = ${original.active},
+        google_group_id = ${original.google_group_id},
+        email = ${original.email}
+      where id = ${ids.configurableAccessGroup}::uuid
+    `);
+  });
+
+  test('enforces monotonic snapshot versions at the database boundary', async () => {
+    const db = databaseConnection().db;
+
+    await expectImmutableRejection(
+      async () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(sql`
+            select pg_advisory_xact_lock(
+              hashtextextended('psd-eoc-roster-synthetic', 0)
+            )
+          `);
+          const latest = await transaction.execute<{
+            source_configuration_id: string;
+            source_configuration_version: number;
+            version: number;
+          }>(sql`
+            select
+              version,
+              source_configuration_id::text as source_configuration_id,
+              source_configuration_version
+            from roster_snapshots
+            where population = 'synthetic'::roster_population
+            order by version desc
+            limit 1
+          `);
+          const row = latest[0];
+          if (row === undefined) {
+            throw new Error('The synthetic snapshot baseline is missing.');
+          }
+          await transaction.execute(sql`
+            insert into roster_snapshots (
+              id, version, population, complete,
+              source_configuration_id, source_configuration_version,
+              sync_started_at, captured_at
+            ) values (
+              ${ids.nonSequentialSnapshot}::uuid,
+              ${row.version},
+              'synthetic'::roster_population,
+              true,
+              ${row.source_configuration_id}::uuid,
+              ${row.source_configuration_version},
+              now(),
+              now()
+            )
+          `);
+        }),
+      /must advance beyond/u,
     );
+  });
+
+  test('rejects an ambiguous source-configuration lineage at the database boundary', async () => {
+    const db = databaseConnection().db;
+
+    await expectImmutableRejection(
+      async () =>
+        db.transaction(async (transaction) => {
+          const latest = await transaction.execute<{ version: number }>(sql`
+            select version
+            from roster_snapshots
+            where population = 'synthetic'::roster_population
+            order by version desc
+            limit 1
+          `);
+          const row = latest[0];
+          if (row === undefined) {
+            throw new Error('The synthetic snapshot baseline is missing.');
+          }
+          await transaction.execute(sql`
+            insert into roster_source_configurations (
+              id, version, population, created_at
+            ) values (
+              ${ids.ambiguousConfiguration}::uuid,
+              1,
+              'synthetic'::roster_population,
+              now()
+            )
+          `);
+          await transaction.execute(sql`
+            insert into roster_snapshots (
+              id, version, population, complete,
+              source_configuration_id, source_configuration_version,
+              sync_started_at, captured_at
+            ) values (
+              ${ids.ambiguousSnapshot}::uuid,
+              ${row.version + 1},
+              'synthetic'::roster_population,
+              true,
+              ${ids.ambiguousConfiguration}::uuid,
+              1,
+              now(),
+              now()
+            )
+          `);
+        }),
+      /configuration lineage cannot change/u,
+    );
+  });
+
+  test('removes update and delete privileges from immutable roster truth', async () => {
+    const db = databaseConnection().db;
+    const privilegeRows = await db.execute<{
+      can_delete: boolean;
+      can_update: boolean;
+      table_name: string;
+    }>(sql`
+      select
+        table_name,
+        has_table_privilege('psd_eoc_app', table_name, 'UPDATE') as can_update,
+        has_table_privilege('psd_eoc_app', table_name, 'DELETE') as can_delete
+      from unnest(array[
+        'roster_source_configurations',
+        'roster_source_configuration_facilities',
+        'roster_source_configuration_groups',
+        'roster_snapshots',
+        'roster_snapshot_facilities',
+        'roster_snapshot_sources',
+        'roster_recipients',
+        'roster_recipient_group_sources',
+        'roster_endpoints',
+        'roster_sync_results',
+        'roster_sync_result_sources',
+        'roster_sync_group_failures'
+      ]::text[]) as immutable_roster_tables(table_name)
+      order by table_name
+    `);
+
+    expect(privilegeRows).toHaveLength(12);
+    expect(
+      privilegeRows.every(
+        (row) => row.can_update === false && row.can_delete === false,
+      ),
+    ).toBe(true);
   });
 });

@@ -428,7 +428,14 @@ export function createDrizzleStaleRosterReportStore(
       queryValue: RosterHealthQuery,
       context: StaleRosterAuthorizationContext,
     ): Promise<ScopedStaleRosterEvidence> {
-      const query = RosterHealthQuerySchema.parse(queryValue);
+      const queryResult = RosterHealthQuerySchema.safeParse(queryValue);
+      if (!queryResult.success) {
+        throw new StaleRosterReportError(
+          'INVALID_REPORT_EVIDENCE',
+          'The roster-health query was invalid.',
+        );
+      }
+      const query = queryResult.data;
       const facilityId = authorizedFacilityId(query, context);
       const afterRecipientId = cursorRecipientId(query.cursor);
 
@@ -588,7 +595,8 @@ export function createDrizzleStaleRosterReportStore(
           const pageRows = staleRows
             .filter(
               ({ recipientId }) =>
-                afterRecipientId === null || recipientId > afterRecipientId,
+                afterRecipientId === null ||
+                recipientId.localeCompare(afterRecipientId) > 0,
             )
             .slice(0, query.limit);
           latestCompleteSnapshot = Object.freeze({
@@ -687,22 +695,20 @@ export function createDrizzleStaleRosterReportStore(
                 outcome: latestFailedResult.outcome,
                 completedAt: latestFailedResult.completedAt.toISOString(),
                 groupFailures: Object.freeze(
-                  latestFailureRows.map((failure) =>
-                    RosterGroupFailureSchema.parse({
-                      groupSourceRef: {
-                        id: failure.sourceId,
-                        kind: failure.sourceKind,
-                        purpose: failure.sourcePurpose,
-                        facilityId: failure.sourceFacilityId,
-                      },
-                      errorCode: failure.errorCode,
-                      attemptedAt: failure.attemptedAt.toISOString(),
-                    }),
-                  ),
+                  latestFailureRows.map((failure) => ({
+                    groupSourceRef: {
+                      id: failure.sourceId,
+                      kind: failure.sourceKind,
+                      purpose: failure.sourcePurpose,
+                      facilityId: failure.sourceFacilityId,
+                    },
+                    errorCode: failure.errorCode,
+                    attemptedAt: failure.attemptedAt.toISOString(),
+                  })),
                 ),
               });
 
-        return ScopedStaleRosterEvidenceSchema.parse({
+        return parseScopedEvidence({
           latestCompleteSnapshot,
           latestFailedSync,
         });

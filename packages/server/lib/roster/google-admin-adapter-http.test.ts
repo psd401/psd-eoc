@@ -125,10 +125,14 @@ function expectTokenThenGroupRequests(calls: readonly string[]): void {
 
 describe('Google Admin roster adapter bounded HTTP responses', () => {
   test('rejects an oversized declared content length without reading or leaking the provider body', async () => {
+    let cancelled = false;
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
         controller.enqueue(new TextEncoder().encode(PROVIDER_PAYLOAD_SECRET));
         controller.close();
+      },
+      cancel() {
+        cancelled = true;
       },
     });
     const network = syntheticFetch(
@@ -148,6 +152,7 @@ describe('Google Admin roster adapter bounded HTTP responses', () => {
     );
 
     expectTokenThenGroupRequests(network.calls);
+    expect(cancelled).toBe(true);
   });
 
   test('cancels a chunked body as soon as its observed bytes exceed 512 KiB', async () => {
