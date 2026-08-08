@@ -1,0 +1,281 @@
+{
+  "schemaVersion": 1,
+  "registrationNamePrefix": "REPLACE_ME_REGISTRATION_NAME_PREFIX",
+  "documentation": {
+    "important": "Synthetic placeholders are prefixed REPLACE_ME and submission rejects them. Copy this file to registration-data.json, replace every REPLACE_ME value using current AWS field definitions, and never commit registration-data.json or attachments/.",
+    "brandRequiredInputs": [
+      "Exact district legal name matching the EIN",
+      "Country of tax registration and EIN",
+      "Government legal organization type",
+      "Physical street, city, state, postal code, and country",
+      "Individual brand-verification email on the district domain",
+      "DBA/brand name, education vertical, district website",
+      "Individual support email and E.164 support phone"
+    ],
+    "campaignRequiredInputs": [
+      "Campaign description and education/government use case",
+      "Public terms-and-conditions and privacy-policy URLs or attachments",
+      "Complete staff opt-in workflow and evidence",
+      "HELP, STOP, and opt-in confirmation messages",
+      "Transactional SMS capability and subscriber opt-in/opt-out/help choices",
+      "Two separate realistic samples: one explicitly labeled PSD EOC REAL INCIDENT and one explicitly labeled PSD EOC DRILL; never use one ambiguous sample for both"
+    ],
+    "tollFreeRequiredInputs": [
+      "District company name, website, physical address, government business type",
+      "EIN, EIN type, and issuing country",
+      "Individual contact name, email, and E.164 support phone",
+      "Monthly volume and notification/education use case",
+      "Opt-in category, workflow description, and opt-in image",
+      "Two separate realistic samples: one explicitly labeled PSD EOC REAL INCIDENT and one explicitly labeled PSD EOC DRILL; never use one ambiguous sample for both"
+    ]
+  },
+  "brand": {
+    "fields": [
+      {
+        "fieldPath": "companyInfo.companyName",
+        "text": "REPLACE_ME_DISTRICT_LEGAL_NAME"
+      },
+      {
+        "fieldPath": "companyInfo.taxIdIssuingCountry",
+        "text": "US"
+      },
+      {
+        "fieldPath": "companyInfo.taxId",
+        "text": "REPLACE_ME_EIN"
+      },
+      {
+        "fieldPath": "companyInfo.legalType",
+        "select": ["GOVERNMENT"]
+      },
+      {
+        "fieldPath": "companyInfo.address",
+        "text": "REPLACE_ME_STREET_ADDRESS"
+      },
+      {
+        "fieldPath": "companyInfo.city",
+        "text": "REPLACE_ME_CITY"
+      },
+      {
+        "fieldPath": "companyInfo.state",
+        "text": "REPLACE_ME_STATE_OR_REGION"
+      },
+      {
+        "fieldPath": "companyInfo.zipCode",
+        "text": "REPLACE_ME_POSTAL_CODE"
+      },
+      {
+        "fieldPath": "companyInfo.isoCountryCode",
+        "text": "US"
+      },
+      {
+        "fieldPath": "companyInfo.businessContactEmail",
+        "text": "REPLACE_ME_BRAND_VERIFICATION_EMAIL"
+      },
+      {
+        "fieldPath": "contactInfo.dbaName",
+        "text": "PSD EOC"
+      },
+      {
+        "fieldPath": "contactInfo.vertical",
+        "select": ["EDUCATION"]
+      },
+      {
+        "fieldPath": "contactInfo.website",
+        "text": "https://REPLACE_ME_DISTRICT_DOMAIN/"
+      },
+      {
+        "fieldPath": "contactInfo.supportEmail",
+        "text": "REPLACE_ME_SUPPORT_EMAIL"
+      },
+      {
+        "fieldPath": "contactInfo.supportPhoneNumber",
+        "text": "REPLACE_ME_E164_SUPPORT_PHONE"
+      }
+    ]
+  },
+  "campaign": {
+    "fields": [
+      {
+        "fieldPath": "campaignInfo.campaignName",
+        "text": "REPLACE_ME_CAMPAIGN_DESCRIPTION"
+      },
+      {
+        "fieldPath": "campaignInfo.vertical",
+        "select": ["EDUCATION"]
+      },
+      {
+        "fieldPath": "campaignInfo.termsAndConditionsLink",
+        "text": "https://REPLACE_ME_DISTRICT_DOMAIN/sms-terms"
+      },
+      {
+        "fieldPath": "campaignInfo.privacyPolicyLink",
+        "text": "https://REPLACE_ME_DISTRICT_DOMAIN/privacy"
+      },
+      {
+        "fieldPath": "campaignInfo.optInWorkflow",
+        "text": "REPLACE_ME_STAFF_OPT_IN_WORKFLOW"
+      },
+      {
+        "fieldPath": "campaignInfo.optInScreenshot",
+        "attachmentFile": "attachments/REPLACE_ME_campaign-opt-in.png"
+      },
+      {
+        "fieldPath": "campaignInfo.optInMessage",
+        "text": "REPLACE_ME_OPT_IN_CONFIRMATION_MESSAGE"
+      },
+      {
+        "fieldPath": "campaignInfo.helpMessage",
+        "text": "REPLACE_ME_HELP_MESSAGE"
+      },
+      {
+        "fieldPath": "campaignInfo.stopMessage",
+        "text": "REPLACE_ME_STOP_MESSAGE"
+      },
+      {
+        "fieldPath": "campaignCapabilities.numberCapabilities",
+        "select": ["SMS"]
+      },
+      {
+        "fieldPath": "campaignCapabilities.messageType",
+        "select": ["Transactional"]
+      },
+      {
+        "fieldPath": "campaignUseCase.useCase",
+        "select": ["HIGHER_EDUCATION"]
+      },
+      {
+        "fieldPath": "campaignUseCase.subscriberOptIn",
+        "select": ["Yes"]
+      },
+      {
+        "fieldPath": "campaignUseCase.subscriberOptOut",
+        "select": ["Yes"]
+      },
+      {
+        "fieldPath": "campaignUseCase.subscriberHelp",
+        "select": ["Yes"]
+      },
+      {
+        "fieldPath": "campaignUseCase.directLending",
+        "select": ["No"]
+      },
+      {
+        "fieldPath": "campaignUseCase.embeddedLink",
+        "select": ["No"]
+      },
+      {
+        "fieldPath": "campaignUseCase.embeddedPhone",
+        "select": ["No"]
+      },
+      {
+        "fieldPath": "campaignUseCase.ageGated",
+        "select": ["No"]
+      },
+      {
+        "fieldPath": "messageSamples.messageSample1",
+        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates."
+      },
+      {
+        "fieldPath": "messageSamples.messageSample2",
+        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates."
+      }
+    ]
+  },
+  "tollFree": {
+    "optOutListName": "psd-eoc-staff",
+    "fields": [
+      {
+        "fieldPath": "companyInfo.companyName",
+        "text": "REPLACE_ME_DISTRICT_LEGAL_NAME"
+      },
+      {
+        "fieldPath": "companyInfo.website",
+        "text": "https://REPLACE_ME_DISTRICT_DOMAIN/"
+      },
+      {
+        "fieldPath": "companyInfo.address1",
+        "text": "REPLACE_ME_STREET_ADDRESS"
+      },
+      {
+        "fieldPath": "companyInfo.city",
+        "text": "REPLACE_ME_CITY"
+      },
+      {
+        "fieldPath": "companyInfo.state",
+        "text": "REPLACE_ME_STATE_OR_REGION"
+      },
+      {
+        "fieldPath": "companyInfo.zipCode",
+        "text": "REPLACE_ME_POSTAL_CODE"
+      },
+      {
+        "fieldPath": "companyInfo.isoCountryCode",
+        "text": "US"
+      },
+      {
+        "fieldPath": "companyInfo.businessType",
+        "select": ["GOVERNMENT"]
+      },
+      {
+        "fieldPath": "companyInfo.taxId",
+        "text": "REPLACE_ME_EIN"
+      },
+      {
+        "fieldPath": "companyInfo.taxIdAuthority",
+        "select": ["EIN"]
+      },
+      {
+        "fieldPath": "companyInfo.taxIdCountry",
+        "text": "US"
+      },
+      {
+        "fieldPath": "contactInfo.firstName",
+        "text": "REPLACE_ME_FIRST_NAME"
+      },
+      {
+        "fieldPath": "contactInfo.lastName",
+        "text": "REPLACE_ME_LAST_NAME"
+      },
+      {
+        "fieldPath": "contactInfo.supportEmail",
+        "text": "REPLACE_ME_SUPPORT_EMAIL"
+      },
+      {
+        "fieldPath": "contactInfo.supportPhoneNumber",
+        "text": "REPLACE_ME_E164_SUPPORT_PHONE"
+      },
+      {
+        "fieldPath": "messagingUseCase.monthlyMessageVolume",
+        "select": ["10,000"]
+      },
+      {
+        "fieldPath": "messagingUseCase.useCaseCategory",
+        "select": ["EDUCATION"]
+      },
+      {
+        "fieldPath": "messagingUseCase.useCaseDetails",
+        "text": "REPLACE_ME_TOLL_FREE_USE_CASE_DETAILS"
+      },
+      {
+        "fieldPath": "messagingUseCase.optInType",
+        "select": ["DIGITAL_FORM"]
+      },
+      {
+        "fieldPath": "messagingUseCase.optInDescription",
+        "text": "REPLACE_ME_STAFF_OPT_IN_WORKFLOW"
+      },
+      {
+        "fieldPath": "messagingUseCase.optInImage",
+        "attachmentFile": "attachments/REPLACE_ME_toll-free-opt-in.png"
+      },
+      {
+        "fieldPath": "messageSamples.messageSample1",
+        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates."
+      },
+      {
+        "fieldPath": "messageSamples.messageSample2",
+        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates."
+      }
+    ]
+  }
+}
