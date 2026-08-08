@@ -3,10 +3,34 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "main": "expo-router/entry",
   "scripts": {
-    "typecheck": "tsc --noEmit --project tsconfig.json"
+    "start": "expo start",
+    "ios": "expo run:ios",
+    "android": "expo run:android",
+    "lint": "eslint src --max-warnings 0",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "test": "bun test",
+    "expo:check": "expo install --check",
+    "prebuild:check": "expo prebuild --no-install"
   },
   "dependencies": {
-    "@psd-eoc/contracts": "workspace:*"
+    "@psd-eoc/contracts": "workspace:*",
+    "expo": "~57.0.11",
+    "expo-constants": "~57.0.9",
+    "expo-dev-client": "~57.0.10",
+    "expo-linking": "~57.0.5",
+    "expo-notifications": "~57.0.9",
+    "expo-router": "~57.0.11",
+    "expo-splash-screen": "~57.0.5",
+    "expo-status-bar": "~57.0.1",
+    "expo-system-ui": "~57.0.2",
+    "react": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.18"
   }
 }

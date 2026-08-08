@@ -45,3 +45,50 @@ jobs:
 
       - name: Run the repository gate
         run: bun run check
+
+  mobile:
+    name: Mobile lint, typecheck, test, and prebuild
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install dependencies from the lockfile
+        run: bun install --frozen-lockfile
+
+      - name: Lint the mobile app
+        working-directory: packages/mobile
+        run: bun run lint
+
+      - name: Typecheck the mobile app
+        working-directory: packages/mobile
+        run: bun run typecheck
+
+      - name: Test the mobile app
+        working-directory: packages/mobile
+        run: bun run test
+
+      - name: Check Expo dependency compatibility
+        working-directory: packages/mobile
+        run: bun run expo:check
+
+      - name: Generate native projects without installing dependencies
+        working-directory: packages/mobile
+        run: bun run prebuild:check
+
+      - name: Verify generated native safety configuration
+        working-directory: packages/mobile
+        run: |
+          set -euo pipefail
+          test -d android
+          test -d ios
+          rg --fixed-strings 'net.psd401.eoc' android/app
+          rg --fixed-strings 'net.psd401.eoc' ios
+          rg --fixed-strings 'com.google.firebase.messaging.default_notification_channel_id' android/app/src/main/AndroidManifest.xml
+          rg --glob '*.entitlements' --fixed-strings '<key>aps-environment</key>' ios

@@ -1,0 +1,28 @@
+# Expo-generated local state
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native projects are generated from app.json during prebuild.
+/ios/
+/android/
+.kotlin/
+*.orig.*
+
+# Metro and TypeScript caches
+.metro-health-check*
+*.tsbuildinfo
+
+# Signing material and provider configuration never belong in the repository.
+credentials.json
+google-services.json
+GoogleService-Info.plist
+*.cer
+*.jks
+*.keystore
+*.mobileprovision
+*.p8
+*.p12
+*.pem
+*.key
