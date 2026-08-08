@@ -1,0 +1,233 @@
+import { createHash } from 'node:crypto';
+
+import { runCommand } from './runtime';
+
+export const PROJECT_ID = 'psd401-eoc';
+export const ROSTER_READER_EMAIL =
+  'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com';
+export const GROUPS_READER_ROLE = '_GROUPS_READER_ROLE';
+export const READONLY_GROUPS_SCOPE =
+  'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
+export const MAX_GROUPS_KEY_AGE_DAYS = 30;
+
+export interface GroupsReaderContract {
+  readonly email: string;
+  readonly oauthClientId: string;
+}
+
+export function normalizeApprovedStaffGroup(value: string | undefined): string {
+  const normalized = value?.toLowerCase();
+  if (
+    normalized === undefined ||
+    !/^[a-z0-9._%+-]+@psd401\.net$/u.test(normalized)
+  ) {
+    throw new Error(
+      'An approved staff-only psd401.net test group is required.',
+    );
+  }
+  return normalized;
+}
+
+export function approvedStaffGroupHash(groupEmail: string): string {
+  return createHash('sha256').update(groupEmail, 'utf8').digest('hex');
+}
+
+export function parseUserManagedKeyIds(output: string): Set<string> {
+  const keyIds = output
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((name) => name.split('/').at(-1) ?? '');
+  if (keyIds.some((keyId) => !/^[a-f0-9]{40}$/u.test(keyId))) {
+    throw new Error('Google returned an invalid service-account key ID.');
+  }
+  return new Set(keyIds);
+}
+
+export function parseGroupsReaderContract(
+  value: unknown,
+): GroupsReaderContract {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Terraform google_groups_reader output is invalid.');
+  }
+
+  const output = value as Readonly<Record<string, unknown>>;
+  const projectIamRoles = output.project_iam_roles;
+  const oauthScopes = output.oauth_scopes;
+  if (
+    output.application_writes_google_groups !== false ||
+    output.domain_wide_delegation !== false ||
+    output.email !== ROSTER_READER_EMAIL ||
+    typeof output.oauth_client_id !== 'string' ||
+    !/^\d+$/u.test(output.oauth_client_id) ||
+    !Array.isArray(oauthScopes) ||
+    oauthScopes.length !== 1 ||
+    oauthScopes[0] !== READONLY_GROUPS_SCOPE ||
+    output.project_id !== PROJECT_ID ||
+    !Array.isArray(projectIamRoles) ||
+    projectIamRoles.length !== 0 ||
+    output.workspace_admin_role !== GROUPS_READER_ROLE ||
+    output.workspace_grant_api_managed !== true
+  ) {
+    throw new Error(
+      'Terraform google_groups_reader output does not match the fixed read-only contract.',
+    );
+  }
+
+  return {
+    email: output.email,
+    oauthClientId: output.oauth_client_id,
+  };
+}
+
+export function readGroupsReaderContract(): GroupsReaderContract {
+  const value: unknown = JSON.parse(
+    runCommand('terraform', ['output', '-json', 'google_groups_reader']),
+  );
+  return parseGroupsReaderContract(value);
+}
+
+export function listUserManagedKeys(
+  contract: GroupsReaderContract,
+): Set<string> {
+  return parseUserManagedKeyIds(
+    runCommand('gcloud', [
+      'iam',
+      'service-accounts',
+      'keys',
+      'list',
+      '--iam-account',
+      contract.email,
+      '--project',
+      PROJECT_ID,
+      '--managed-by',
+      'user',
+      '--format=value(name)',
+    ]),
+  );
+}
+
+export function validateUserManagedKeyMetadata(
+  value: unknown,
+  expectedKeyId: string,
+  now = Date.now(),
+  enforceMaximumAge = true,
+): string {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    !/^[a-f0-9]{40}$/u.test(expectedKeyId)
+  ) {
+    throw new Error('Google service-account key metadata is invalid.');
+  }
+  const key = value as Readonly<Record<string, unknown>>;
+  const validAfter =
+    typeof key.validAfterTime === 'string'
+      ? Date.parse(key.validAfterTime)
+      : Number.NaN;
+  const validBefore =
+    typeof key.validBeforeTime === 'string'
+      ? Date.parse(key.validBeforeTime)
+      : Number.NaN;
+  const maximumAge = MAX_GROUPS_KEY_AGE_DAYS * 24 * 60 * 60 * 1_000;
+  if (
+    key.name !==
+      `projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}/keys/${expectedKeyId}` ||
+    key.keyAlgorithm !== 'KEY_ALG_RSA_2048' ||
+    key.keyOrigin !== 'GOOGLE_PROVIDED' ||
+    key.keyType !== 'USER_MANAGED' ||
+    !Number.isFinite(validAfter) ||
+    !Number.isFinite(validBefore) ||
+    validAfter > now + 5 * 60 * 1_000 ||
+    (enforceMaximumAge && now - validAfter > maximumAge) ||
+    validBefore <= now
+  ) {
+    throw new Error(
+      `The roster-reader key must be Google-generated, active, and no more than ${MAX_GROUPS_KEY_AGE_DAYS} days old.`,
+    );
+  }
+  return new Date(validAfter).toISOString();
+}
+
+export function readUserManagedKeyCreatedAt(
+  contract: GroupsReaderContract,
+  keyId: string,
+  enforceMaximumAge = true,
+): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(
+      runCommand(
+        'gcloud',
+        [
+          'iam',
+          'service-accounts',
+          'keys',
+          'describe',
+          keyId,
+          '--iam-account',
+          contract.email,
+          '--project',
+          PROJECT_ID,
+          '--format=json',
+        ],
+        { redactFailureOutput: true },
+      ),
+    );
+  } catch {
+    throw new Error('Google service-account key metadata is unavailable.');
+  }
+  return validateUserManagedKeyMetadata(
+    value,
+    keyId,
+    Date.now(),
+    enforceMaximumAge,
+  );
+}
+
+export function policyHasServiceAccountBinding(
+  value: unknown,
+  serviceAccountEmail: string,
+): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Google Cloud project IAM policy is invalid.');
+  }
+  const bindings = (value as Readonly<Record<string, unknown>>).bindings;
+  if (!Array.isArray(bindings)) {
+    throw new Error('Google Cloud project IAM policy has no bindings array.');
+  }
+
+  const member = `serviceAccount:${serviceAccountEmail}`;
+  return bindings.some((binding) => {
+    if (
+      typeof binding !== 'object' ||
+      binding === null ||
+      Array.isArray(binding)
+    ) {
+      throw new Error('Google Cloud project IAM binding is invalid.');
+    }
+    const members = (binding as Readonly<Record<string, unknown>>).members;
+    if (!Array.isArray(members)) {
+      throw new Error('Google Cloud project IAM binding has no members array.');
+    }
+    return members.includes(member);
+  });
+}
+
+export function assertNoProjectIamBinding(
+  contract: GroupsReaderContract,
+): void {
+  const value: unknown = JSON.parse(
+    runCommand('gcloud', [
+      'projects',
+      'get-iam-policy',
+      PROJECT_ID,
+      '--format=json',
+    ]),
+  );
+  if (policyHasServiceAccountBinding(value, contract.email)) {
+    throw new Error(
+      'The roster-reader service account unexpectedly has a direct project IAM binding.',
+    );
+  }
+}
