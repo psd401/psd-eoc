@@ -1,0 +1,15 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl.backup
+credentials/
+client_secret_*.json
+google-services.json
+GoogleService-Info.plist
+client_secret_*.plist
+ios-client*.plist
+web-client*.json
+workspace-admin-client*.json
