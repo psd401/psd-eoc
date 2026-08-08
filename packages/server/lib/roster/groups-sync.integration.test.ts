@@ -48,6 +48,15 @@ const SOURCE_IDS = Object.freeze({
   south: '00000000-0000-4000-8000-000000000031',
   others: '00000000-0000-4000-8000-000000000032',
 });
+const STAFF_CONFIGURATION = Object.freeze({
+  id: '80000000-0000-4000-8000-000000000040',
+  version: 1,
+});
+const STAFF_SOURCE_IDS = Object.freeze({
+  north: '80000000-0000-4000-8000-000000000030',
+  south: '80000000-0000-4000-8000-000000000031',
+  others: '80000000-0000-4000-8000-000000000032',
+});
 
 const COMPLETE_FIXTURES = Object.freeze({
   [SOURCE_IDS.north]: Object.freeze([
@@ -171,6 +180,155 @@ async function syntheticSnapshotCount(
     throw new Error('The synthetic snapshot count was unavailable.');
   }
   return count;
+}
+
+async function ensureSyntheticConfigurationVersionTwo(
+  database: PostgresDatabase,
+): Promise<void> {
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into roster_source_configurations (
+        id, version, population, created_at
+      ) values (
+        ${CONFIGURATION.id}::uuid,
+        2,
+        'synthetic'::roster_population,
+        ${SYNC_TIME}::timestamptz
+      )
+      on conflict do nothing
+    `);
+    await transaction.execute(sql`
+      insert into roster_source_configuration_facilities (
+        configuration_id, configuration_version, facility_id
+      )
+      select configuration_id, 2, facility_id
+      from roster_source_configuration_facilities
+      where configuration_id = ${CONFIGURATION.id}::uuid
+        and configuration_version = 1
+      on conflict do nothing
+    `);
+    await transaction.execute(sql`
+      insert into roster_source_configuration_groups (
+        configuration_id, configuration_version, population,
+        group_source_id, group_source_kind, group_purpose
+      )
+      select
+        configuration_id, 2, population,
+        group_source_id, group_source_kind, group_purpose
+      from roster_source_configuration_groups
+      where configuration_id = ${CONFIGURATION.id}::uuid
+        and configuration_version = 1
+      on conflict do nothing
+    `);
+  });
+}
+
+async function ensureStaffConfiguration(
+  database: PostgresDatabase,
+): Promise<void> {
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values
+        (
+          ${STAFF_SOURCE_IDS.north}::uuid,
+          'google-group'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000001'::uuid,
+          'Synthetic report North staff',
+          true,
+          'synthetic-stale-report-north',
+          'stale-report-north-group@example.invalid',
+          null,
+          '2026-08-04T12:00:00.000Z'::timestamptz
+        ),
+        (
+          ${STAFF_SOURCE_IDS.south}::uuid,
+          'google-group'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000002'::uuid,
+          'Synthetic report South staff',
+          true,
+          'synthetic-stale-report-south',
+          'stale-report-south-group@example.invalid',
+          null,
+          '2026-08-04T12:00:00.000Z'::timestamptz
+        ),
+        (
+          ${STAFF_SOURCE_IDS.others}::uuid,
+          'google-group'::group_source_kind,
+          'others'::group_purpose,
+          null,
+          'Synthetic report district staff',
+          true,
+          'synthetic-stale-report-others',
+          'stale-report-others-group@example.invalid',
+          null,
+          '2026-08-04T12:00:00.000Z'::timestamptz
+        )
+      on conflict do nothing
+    `);
+    await transaction.execute(sql`
+      insert into roster_source_configurations (
+        id, version, population, created_at
+      ) values (
+        ${STAFF_CONFIGURATION.id}::uuid,
+        ${STAFF_CONFIGURATION.version},
+        'staff'::roster_population,
+        '2026-08-04T12:00:00.000Z'::timestamptz
+      )
+      on conflict do nothing
+    `);
+    await transaction.execute(sql`
+      insert into roster_source_configuration_facilities (
+        configuration_id, configuration_version, facility_id
+      ) values
+        (
+          ${STAFF_CONFIGURATION.id}::uuid,
+          ${STAFF_CONFIGURATION.version},
+          '00000000-0000-4000-8000-000000000001'::uuid
+        ),
+        (
+          ${STAFF_CONFIGURATION.id}::uuid,
+          ${STAFF_CONFIGURATION.version},
+          '00000000-0000-4000-8000-000000000002'::uuid
+        )
+      on conflict do nothing
+    `);
+    await transaction.execute(sql`
+      insert into roster_source_configuration_groups (
+        configuration_id, configuration_version, population,
+        group_source_id, group_source_kind, group_purpose
+      ) values
+        (
+          ${STAFF_CONFIGURATION.id}::uuid,
+          ${STAFF_CONFIGURATION.version},
+          'staff'::roster_population,
+          ${STAFF_SOURCE_IDS.north}::uuid,
+          'google-group'::group_source_kind,
+          'building'::group_purpose
+        ),
+        (
+          ${STAFF_CONFIGURATION.id}::uuid,
+          ${STAFF_CONFIGURATION.version},
+          'staff'::roster_population,
+          ${STAFF_SOURCE_IDS.south}::uuid,
+          'google-group'::group_source_kind,
+          'building'::group_purpose
+        ),
+        (
+          ${STAFF_CONFIGURATION.id}::uuid,
+          ${STAFF_CONFIGURATION.version},
+          'staff'::roster_population,
+          ${STAFF_SOURCE_IDS.others}::uuid,
+          'google-group'::group_source_kind,
+          'others'::group_purpose
+        )
+      on conflict do nothing
+    `);
+  });
 }
 
 function requirePublishedSnapshotId(
@@ -472,12 +630,79 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     ]);
   });
 
+  test('rejects a delayed older source configuration after a newer version publishes', async () => {
+    const database = databaseConnection().db;
+    await ensureSyntheticConfigurationVersionTwo(database);
+
+    const forwardResult = await syncRoster(
+      { sourceConfiguration: { id: CONFIGURATION.id, version: 2 } },
+      syncContext('configuration-forward'),
+      dependencies(database, createCompleteAdapter(), alertCollector().sink),
+    );
+    const latestAfterForward = await latestSyntheticSnapshot(database);
+    const snapshotCountAfterForward = await syntheticSnapshotCount(database);
+    const delayedContext = syncContext('configuration-rollback');
+    const collector = alertCollector();
+    let providerCalls = 0;
+    const baseAdapter = createCompleteAdapter();
+    const countedAdapter: RosterGroupsAdapter = Object.freeze({
+      truthLabel: baseAdapter.truthLabel,
+      fetchPage(source: GroupSource, pageToken: string | null) {
+        providerCalls += 1;
+        return baseAdapter.fetchPage(source, pageToken);
+      },
+    });
+
+    await expect(
+      syncRoster(
+        { sourceConfiguration: CONFIGURATION },
+        delayedContext,
+        dependencies(database, countedAdapter, collector.sink),
+      ),
+    ).rejects.toMatchObject({ code: 'SOURCE_CONFIGURATION_ROLLBACK' });
+
+    expect(forwardResult.sourceConfiguration).toEqual({
+      id: CONFIGURATION.id,
+      version: 2,
+    });
+    expect(providerCalls).toBe(0);
+    expect(await latestSyntheticSnapshot(database)).toEqual(latestAfterForward);
+    expect(await syntheticSnapshotCount(database)).toBe(
+      snapshotCountAfterForward,
+    );
+    expect(collector.alerts).toEqual([
+      expect.objectContaining({
+        sourceConfiguration: CONFIGURATION,
+        population: 'synthetic',
+        outcome: 'execution-failed',
+        errorCodes: ['SOURCE_CONFIGURATION_ROLLBACK'],
+      }),
+    ]);
+    const reservationRows = await database.execute<{
+      result_reference: string | null;
+      status: string;
+    }>(sql`
+      select status::text as status, result_reference
+      from idempotency_records
+      where key = ${delayedContext.idempotencyKey}
+    `);
+    expect(
+      reservationRows.map((row) => ({
+        status: row.status,
+        result_reference: row.result_reference,
+      })),
+    ).toEqual([
+      {
+        status: 'failed',
+        result_reference: 'error:SOURCE_CONFIGURATION_ROLLBACK',
+      },
+    ]);
+  });
+
   test('aborts publication when a captured push registration is unregistered before commit', async () => {
     const database = databaseConnection().db;
     const fixture = Object.freeze({
-      configurationId: randomUUID(),
       deviceId: randomUUID(),
-      groupId: randomUUID(),
       pushRegistrationId: randomUUID(),
       pushUnregistrationId: randomUUID(),
       userId: randomUUID(),
@@ -485,55 +710,8 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
       token: `synthetic-unroutable:${randomUUID()}`,
     });
     const staffEmail = `synthetic-push-race-${fixture.userId}@psd401.net`;
+    await ensureStaffConfiguration(database);
     await database.transaction(async (transaction) => {
-      await transaction.execute(sql`
-        insert into group_sources (
-          id, kind, purpose, facility_id, display_name, active,
-          google_group_id, email, fixture_key, created_at
-        ) values (
-          ${fixture.groupId}::uuid,
-          'google-group'::group_source_kind,
-          'building'::group_purpose,
-          '00000000-0000-4000-8000-000000000001'::uuid,
-          'Synthetic push-race staff',
-          true,
-          ${`synthetic-push-race-${fixture.groupId}`},
-          ${`synthetic-push-race-group-${fixture.groupId}@psd401.net`},
-          null,
-          ${SYNC_TIME}::timestamptz
-        )
-      `);
-      await transaction.execute(sql`
-        insert into roster_source_configurations (id, version, population, created_at)
-        values (
-          ${fixture.configurationId}::uuid,
-          1,
-          'staff'::roster_population,
-          ${SYNC_TIME}::timestamptz
-        )
-      `);
-      await transaction.execute(sql`
-        insert into roster_source_configuration_facilities (
-          configuration_id, configuration_version, facility_id
-        ) values (
-          ${fixture.configurationId}::uuid,
-          1,
-          '00000000-0000-4000-8000-000000000001'::uuid
-        )
-      `);
-      await transaction.execute(sql`
-        insert into roster_source_configuration_groups (
-          configuration_id, configuration_version, population,
-          group_source_id, group_source_kind, group_purpose
-        ) values (
-          ${fixture.configurationId}::uuid,
-          1,
-          'staff'::roster_population,
-          ${fixture.groupId}::uuid,
-          'google-group'::group_source_kind,
-          'building'::group_purpose
-        )
-      `);
       await transaction.execute(sql`
         insert into users (
           id, google_subject, email, display_name, facility_scope_kind, created_at
@@ -622,7 +800,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
 
     await expect(
       syncRoster(
-        { sourceConfiguration: { id: fixture.configurationId, version: 1 } },
+        { sourceConfiguration: STAFF_CONFIGURATION },
         syncContext('push-unregistration-race'),
         dependencies(database, adapter, collector.sink, racingStore),
       ),
@@ -643,8 +821,290 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
     ]);
   });
 
+  test('serializes concurrent unregistration and enrollment revocation after revalidation', async () => {
+    if (testDatabaseUrl === undefined) {
+      throw new Error('TEST_DATABASE_URL is required for the race test.');
+    }
+    const database = databaseConnection().db;
+    const fixture = Object.freeze({
+      deviceId: randomUUID(),
+      pushRegistrationId: randomUUID(),
+      pushUnregistrationId: randomUUID(),
+      userId: randomUUID(),
+      googleSubject: `synthetic-locked-push-${randomUUID()}`,
+      token: `synthetic-unroutable:${randomUUID()}`,
+    });
+    const staffEmail = `synthetic-locked-push-${fixture.userId}@psd401.net`;
+    await ensureStaffConfiguration(database);
+    await database.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into users (
+          id, google_subject, email, display_name, facility_scope_kind, created_at
+        ) values (
+          ${fixture.userId}::uuid,
+          ${fixture.googleSubject},
+          ${staffEmail},
+          'Synthetic Locked Push Staff',
+          'district'::facility_scope_kind,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+      await transaction.execute(sql`
+        insert into device_enrollments (
+          id, user_id, platform, unlock_method, installation_id,
+          enrolled_at, last_seen_at, revoked_at
+        ) values (
+          ${fixture.deviceId}::uuid,
+          ${fixture.userId}::uuid,
+          'ios'::device_platform,
+          'biometric'::device_unlock_method,
+          ${`synthetic-locked-push-${fixture.deviceId}`},
+          ${SYNC_TIME}::timestamptz,
+          ${SYNC_TIME}::timestamptz,
+          null
+        )
+      `);
+      await transaction.execute(sql`
+        insert into device_push_token_registrations (
+          id, device_enrollment_id, platform, token, registered_at
+        ) values (
+          ${fixture.pushRegistrationId}::uuid,
+          ${fixture.deviceId}::uuid,
+          'ios'::device_platform,
+          ${fixture.token},
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+    });
+
+    const publisher = createDatabaseClient({
+      driver: 'postgres',
+      url: testDatabaseUrl,
+      maxConnections: 1,
+    });
+    const unregistrationWriter = createDatabaseClient({
+      driver: 'postgres',
+      url: testDatabaseUrl,
+      maxConnections: 1,
+    });
+    const revocationWriter = createDatabaseClient({
+      driver: 'postgres',
+      url: testDatabaseUrl,
+      maxConnections: 1,
+    });
+    if (
+      publisher.driver !== 'postgres' ||
+      unregistrationWriter.driver !== 'postgres' ||
+      revocationWriter.driver !== 'postgres'
+    ) {
+      throw new Error('The contact race requires direct PostgreSQL clients.');
+    }
+
+    await database.execute(
+      sql.raw(
+        'drop trigger if exists zz_psd_eoc_test_contact_race_guard on roster_snapshots',
+      ),
+    );
+    await database.execute(
+      sql.raw('drop function if exists psd_eoc_test_contact_race_guard()'),
+    );
+    await database.execute(
+      sql.raw('drop sequence if exists psd_eoc_test_contact_race_signal'),
+    );
+    await database.execute(
+      sql.raw('create sequence psd_eoc_test_contact_race_signal'),
+    );
+    await database.execute(
+      sql.raw(`
+      create function psd_eoc_test_contact_race_guard()
+      returns trigger
+      language plpgsql
+      as $$
+      declare
+        deadline timestamptz;
+        expected_mutator_pids integer[];
+        blocked_mutator_count integer;
+      begin
+        if current_setting('psd_eoc.test_contact_race', true) is distinct from 'on' then
+          return new;
+        end if;
+        perform nextval('psd_eoc_test_contact_race_signal');
+        expected_mutator_pids := string_to_array(
+          current_setting('psd_eoc.test_contact_race_mutator_pids', true),
+          ','
+        )::integer[];
+        deadline := clock_timestamp() + interval '5 seconds';
+        loop
+          select count(*)::integer
+          into blocked_mutator_count
+          from unnest(expected_mutator_pids) as mutator(pid)
+          where pg_backend_pid() = any(pg_blocking_pids(mutator.pid));
+          if blocked_mutator_count = cardinality(expected_mutator_pids) then
+            return new;
+          end if;
+          if clock_timestamp() >= deadline then
+            raise exception 'Concurrent contact mutations did not block behind roster publication';
+          end if;
+          perform pg_sleep(0.01);
+        end loop;
+      end;
+      $$
+    `),
+    );
+    await database.execute(
+      sql.raw(`
+      create trigger zz_psd_eoc_test_contact_race_guard
+      before insert on roster_snapshots
+      for each row execute function psd_eoc_test_contact_race_guard()
+    `),
+    );
+
+    let syncPromise: Promise<Awaited<ReturnType<typeof syncRoster>>> | null =
+      null;
+    let unregistrationPromise: Promise<unknown> | null = null;
+    let revocationPromise: Promise<unknown> | null = null;
+    try {
+      const [unregistrationBackend, revocationBackend] = await Promise.all([
+        unregistrationWriter.db.execute<{ pid: number }>(sql`
+          select pg_backend_pid()::integer as pid
+        `),
+        revocationWriter.db.execute<{ pid: number }>(sql`
+          select pg_backend_pid()::integer as pid
+        `),
+      ]);
+      const unregistrationBackendPid = unregistrationBackend[0]?.pid;
+      const revocationBackendPid = revocationBackend[0]?.pid;
+      if (
+        unregistrationBackendPid === undefined ||
+        revocationBackendPid === undefined
+      ) {
+        throw new Error('Contact mutation backend IDs were unavailable.');
+      }
+      await publisher.db.execute(sql`
+        select
+          set_config('psd_eoc.test_contact_race', 'on', false),
+          set_config(
+            'psd_eoc.test_contact_race_mutator_pids',
+            ${`${unregistrationBackendPid},${revocationBackendPid}`},
+            false
+          )
+      `);
+      const adapter: RosterGroupsAdapter = Object.freeze({
+        truthLabel: 'configured-unverified' as const,
+        fetchPage(): Promise<RosterGroupPage> {
+          return Promise.resolve({
+            members: [
+              {
+                memberKey: fixture.googleSubject,
+                googleSubject: fixture.googleSubject,
+                displayName: 'Synthetic Locked Push Staff',
+                email: staffEmail,
+              },
+            ],
+            nextPageToken: null,
+          });
+        },
+      });
+      syncPromise = syncRoster(
+        { sourceConfiguration: STAFF_CONFIGURATION },
+        syncContext('locked-contact-race'),
+        dependencies(publisher.db, adapter, alertCollector().sink),
+      );
+
+      const signalDeadline = Date.now() + 5_000;
+      while (true) {
+        const signalRows = await database.execute<{ is_called: boolean }>(sql`
+          select is_called from psd_eoc_test_contact_race_signal
+        `);
+        if (signalRows[0]?.is_called === true) {
+          break;
+        }
+        if (Date.now() >= signalDeadline) {
+          throw new Error('Roster publication did not reach the race guard.');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      unregistrationPromise = unregistrationWriter.db.execute(sql`
+        insert into device_push_token_unregistrations (
+          id, registration_id, device_enrollment_id, unregistered_at
+        ) values (
+          ${fixture.pushUnregistrationId}::uuid,
+          ${fixture.pushRegistrationId}::uuid,
+          ${fixture.deviceId}::uuid,
+          ${SYNC_TIME}::timestamptz
+        )
+      `);
+      revocationPromise = revocationWriter.db.execute(sql`
+        update device_enrollments
+        set revoked_at = ${SYNC_TIME}::timestamptz
+        where id = ${fixture.deviceId}::uuid
+      `);
+
+      const [result] = await Promise.all([
+        syncPromise,
+        unregistrationPromise,
+        revocationPromise,
+      ]);
+      const publishedSnapshotId = requirePublishedSnapshotId(result);
+      const committedRows = await database.execute<{
+        endpoint_count: number;
+        revoked_at: Date | null;
+        unregistration_count: number;
+      }>(sql`
+        select
+          (
+            select count(*)::integer
+            from roster_endpoints
+            where roster_snapshot_id = ${publishedSnapshotId}::uuid
+              and id = ${fixture.pushRegistrationId}::uuid
+          ) as endpoint_count,
+          (
+            select revoked_at
+            from device_enrollments
+            where id = ${fixture.deviceId}::uuid
+          ) as revoked_at,
+          (
+            select count(*)::integer
+            from device_push_token_unregistrations
+            where registration_id = ${fixture.pushRegistrationId}::uuid
+          ) as unregistration_count
+      `);
+      expect(committedRows[0]?.endpoint_count).toBe(1);
+      expect(committedRows[0]?.revoked_at).not.toBeNull();
+      expect(committedRows[0]?.unregistration_count).toBe(1);
+    } finally {
+      await Promise.allSettled(
+        [syncPromise, unregistrationPromise, revocationPromise].filter(
+          (promise): promise is Promise<unknown> => promise !== null,
+        ),
+      );
+      await Promise.all([
+        publisher.close(),
+        unregistrationWriter.close(),
+        revocationWriter.close(),
+      ]);
+      await database.execute(
+        sql.raw(
+          'drop trigger if exists zz_psd_eoc_test_contact_race_guard on roster_snapshots',
+        ),
+      );
+      await database.execute(
+        sql.raw('drop function if exists psd_eoc_test_contact_race_guard()'),
+      );
+      await database.execute(
+        sql.raw('drop sequence if exists psd_eoc_test_contact_race_signal'),
+      );
+    }
+  });
+
   test('prevents a delayed concurrent sync from overwriting a newer snapshot', async () => {
     const database = databaseConnection().db;
+    await ensureSyntheticConfigurationVersionTwo(database);
+    const sourceConfiguration = Object.freeze({
+      id: CONFIGURATION.id,
+      version: 2,
+    });
     const latestBefore = await latestSyntheticSnapshot(database);
     const snapshotCountBefore = await syntheticSnapshotCount(database);
     const completeAdapter = createCompleteAdapter();
@@ -699,12 +1159,12 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
 
     const settled = await Promise.allSettled([
       syncRoster(
-        { sourceConfiguration: CONFIGURATION },
+        { sourceConfiguration },
         syncContext('concurrent-a'),
         syncDependencies,
       ),
       syncRoster(
-        { sourceConfiguration: CONFIGURATION },
+        { sourceConfiguration },
         syncContext('concurrent-b'),
         syncDependencies,
       ),

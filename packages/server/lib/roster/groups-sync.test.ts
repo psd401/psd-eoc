@@ -13,7 +13,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
-  createMockGoogleGroupsAdapter,
+  createMockGoogleGroupsAdapter as createRuntimeMockGoogleGroupsAdapter,
   createScheduledRosterSyncAuthorizer,
   createSyncRosterHandler,
   diffRosterGroupCounts,
@@ -128,6 +128,10 @@ function sourceReference(source: GroupSource): RosterGroupSourceRef {
 function loadedConfiguration(
   sources: readonly GroupSource[] = SOURCES,
   revisionDigest = REVISION_DIGEST,
+  reference: Readonly<{ id: string; version: number }> = Object.freeze({
+    id: IDS.configuration,
+    version: 3,
+  }),
 ): LoadedRosterSourceConfiguration {
   const facilityIds = [
     ...new Set(
@@ -137,8 +141,8 @@ function loadedConfiguration(
     ),
   ].sort();
   const configuration = RosterSourceConfigurationSchema.parse({
-    id: IDS.configuration,
-    version: 3,
+    id: reference.id,
+    version: reference.version,
     population: 'synthetic',
     facilityIds,
     groupSourceRefs: sources.map(sourceReference),
@@ -202,6 +206,15 @@ function standardFixtures(
     [NORTH_SOURCE.id]: Object.freeze([NORTH_MEMBER, SHARED_MEMBER]),
     [SOUTH_SOURCE.id]: Object.freeze([SOUTH_MEMBER]),
     [OTHERS_SOURCE.id]: Object.freeze([...othersMembers]),
+  });
+}
+
+function createMockGoogleGroupsAdapter(
+  fixtures: Readonly<Record<string, readonly RosterGroupMember[]>>,
+  pageSize = 200,
+): RosterGroupsAdapter {
+  return createRuntimeMockGoogleGroupsAdapter(fixtures, pageSize, {
+    runtimeMode: 'test',
   });
 }
 
@@ -356,6 +369,24 @@ class MemoryRosterSyncStore implements RosterSyncStore {
     const latestSnapshot = this.snapshots
       .filter((snapshot) => snapshot.population === configuration.population)
       .sort((left, right) => right.version - left.version)[0];
+    if (
+      latestSnapshot !== undefined &&
+      latestSnapshot.sourceConfiguration.id !== configuration.id
+    ) {
+      throw new RosterSyncError(
+        'SOURCE_CONFIGURATION_LINEAGE_AMBIGUOUS',
+        'The synthetic roster configuration lineage changed.',
+      );
+    }
+    if (
+      latestSnapshot !== undefined &&
+      latestSnapshot.sourceConfiguration.version > configuration.version
+    ) {
+      throw new RosterSyncError(
+        'SOURCE_CONFIGURATION_ROLLBACK',
+        'The synthetic roster configuration would roll back.',
+      );
+    }
     if ((latestSnapshot?.id ?? null) !== request.observedBaselineSnapshotId) {
       throw new RosterSyncError(
         'ROSTER_BASELINE_CHANGED',
@@ -606,6 +637,38 @@ describe('complete fail-closed roster synchronization', () => {
     expect(JSON.stringify(diff)).not.toMatch(/email|name|subject/iu);
   });
 
+  test('allows a forward source-configuration version after the latest snapshot', async () => {
+    const previousLoaded = loadedConfiguration();
+    const forwardLoaded = loadedConfiguration(SOURCES, REVISION_DIGEST, {
+      id: IDS.configuration,
+      version: 4,
+    });
+    const store = new MemoryRosterSyncStore(forwardLoaded, [
+      historicalSnapshot(previousLoaded),
+    ]);
+    const collector = alertCollector();
+
+    const result = await syncRoster(
+      { sourceConfiguration: { id: IDS.configuration, version: 4 } },
+      context('roster-sync-forward-configuration-0001'),
+      dependencies(
+        store,
+        createMockGoogleGroupsAdapter(standardFixtures(), 1),
+        collector.sink,
+      ),
+    );
+
+    expect(result.outcome).toBe('complete');
+    expect(result.sourceConfiguration).toEqual({
+      id: IDS.configuration,
+      version: 4,
+    });
+    expect(store.snapshots.at(-1)?.sourceConfiguration).toEqual(
+      result.sourceConfiguration,
+    );
+    expect(collector.alerts).toEqual([]);
+  });
+
   test('publishes immutable sequential versions from complete multi-page union', async () => {
     const loaded = loadedConfiguration();
     const store = new MemoryRosterSyncStore(loaded, [
@@ -741,6 +804,93 @@ describe('complete fail-closed roster synchronization', () => {
   });
 });
 
+describe('source-configuration monotonicity', () => {
+  test('rejects a delayed older version before provider I/O and makes the failed key terminal', async () => {
+    const candidate = loadedConfiguration(SOURCES, REVISION_DIGEST, {
+      id: IDS.configuration,
+      version: 2,
+    });
+    const latest = loadedConfiguration(SOURCES, REVISION_DIGEST, {
+      id: IDS.configuration,
+      version: 3,
+    });
+    const latestSnapshot = historicalSnapshot(latest);
+    const store = new MemoryRosterSyncStore(candidate, [latestSnapshot]);
+    const counted = countingAdapter(
+      createMockGoogleGroupsAdapter(standardFixtures(), 1),
+    );
+    const collector = alertCollector();
+    const syncDependencies = dependencies(
+      store,
+      counted.adapter,
+      collector.sink,
+    );
+    const delayedContext = context('roster-sync-delayed-configuration-0001');
+    const input = {
+      sourceConfiguration: { id: IDS.configuration, version: 2 },
+    };
+
+    await expectSyncError(
+      syncRoster(input, delayedContext, syncDependencies),
+      'SOURCE_CONFIGURATION_ROLLBACK',
+    );
+    await expectSyncError(
+      syncRoster(input, delayedContext, syncDependencies),
+      'ROSTER_SYNC_REPLAY_FAILED',
+    );
+
+    expect(counted.calls).toEqual([]);
+    expect(store.localContactLoads).toBe(0);
+    expect(store.publishCalls).toBe(0);
+    expect(store.rejectionCalls).toBe(0);
+    expect(store.snapshots).toEqual([latestSnapshot]);
+    expect(store.failedReservations).toEqual([
+      expect.objectContaining({ errorCode: 'SOURCE_CONFIGURATION_ROLLBACK' }),
+    ]);
+    expect(collector.alerts.map((alert) => alert.errorCodes)).toEqual([
+      ['SOURCE_CONFIGURATION_ROLLBACK'],
+      ['ROSTER_SYNC_REPLAY_FAILED'],
+    ]);
+    expect(JSON.stringify(collector.alerts)).not.toMatch(
+      /@|displayName|googleSubject|token/iu,
+    );
+  });
+
+  test('fails closed when a different configuration lineage cannot be ordered', async () => {
+    const candidate = loadedConfiguration();
+    const otherLineage = loadedConfiguration(SOURCES, REVISION_DIGEST, {
+      id: IDS.groupUnknown,
+      version: 99,
+    });
+    const latestSnapshot = historicalSnapshot(otherLineage);
+    const store = new MemoryRosterSyncStore(candidate, [latestSnapshot]);
+    const counted = countingAdapter(
+      createMockGoogleGroupsAdapter(standardFixtures(), 1),
+    );
+    const collector = alertCollector();
+
+    await expectSyncError(
+      syncRoster(
+        SYNC_INPUT,
+        context('roster-sync-ambiguous-lineage-0001'),
+        dependencies(store, counted.adapter, collector.sink),
+      ),
+      'SOURCE_CONFIGURATION_LINEAGE_AMBIGUOUS',
+    );
+
+    expect(counted.calls).toEqual([]);
+    expect(store.snapshots).toEqual([latestSnapshot]);
+    expect(store.publishCalls).toBe(0);
+    expect(store.rejectionCalls).toBe(0);
+    expect(collector.alerts).toEqual([
+      expect.objectContaining({
+        outcome: 'execution-failed',
+        errorCodes: ['SOURCE_CONFIGURATION_LINEAGE_AMBIGUOUS'],
+      }),
+    ]);
+  });
+});
+
 describe('rejected roster synchronization', () => {
   test('rejects an empty building group and preserves the last complete snapshot', async () => {
     const loaded = loadedConfiguration();
@@ -845,6 +995,60 @@ describe('rejected roster synchronization', () => {
     expect(collector.alerts.at(-1)?.errorCodes).toEqual([
       'SUSPICIOUS_BUILDING_GROUP_DROP',
     ]);
+  });
+
+  test('retains building-drop protection across an unrelated configuration version bump', async () => {
+    const baselineLoaded = loadedConfiguration();
+    const store = new MemoryRosterSyncStore(baselineLoaded);
+    const baselineNorthMembers = Object.freeze(
+      Array.from({ length: 10 }, (_, index) =>
+        member(`north-forward-${index}`, `Synthetic Forward North ${index}`),
+      ),
+    );
+    const collector = alertCollector();
+    await syncRoster(
+      SYNC_INPUT,
+      context('roster-sync-forward-drop-baseline-0001'),
+      dependencies(
+        store,
+        createMockGoogleGroupsAdapter({
+          [NORTH_SOURCE.id]: baselineNorthMembers,
+          [SOUTH_SOURCE.id]: [SOUTH_MEMBER],
+          [OTHERS_SOURCE.id]: [],
+        }),
+        collector.sink,
+      ),
+    );
+    const lastComplete = store.snapshots[0];
+    if (lastComplete === undefined) {
+      throw new Error('Forward-version count baseline was not published.');
+    }
+    store.loaded = loadedConfiguration(SOURCES, REVISION_DIGEST, {
+      id: IDS.configuration,
+      version: 4,
+    });
+
+    const rejected = await syncRoster(
+      { sourceConfiguration: { id: IDS.configuration, version: 4 } },
+      context('roster-sync-forward-drop-0001'),
+      dependencies(
+        store,
+        createMockGoogleGroupsAdapter({
+          [NORTH_SOURCE.id]: [baselineNorthMembers[0]!],
+          [SOUTH_SOURCE.id]: [SOUTH_MEMBER],
+          [OTHERS_SOURCE.id]: [],
+        }),
+        collector.sink,
+      ),
+    );
+
+    expect(rejected.outcome).toBe('partial-rejected');
+    expect(rejected.sourceConfiguration.version).toBe(4);
+    expect(rejected.groupFailures[0]?.errorCode).toBe(
+      'SUSPICIOUS_BUILDING_GROUP_DROP',
+    );
+    expect(store.snapshots).toEqual([lastComplete]);
+    expect(store.publishCalls).toBe(1);
   });
 
   test('rejects a partial fetch, preserves last-good, and emits only sanitized alert facts', async () => {
@@ -992,6 +1196,85 @@ describe('rejected roster synchronization', () => {
     }
   });
 
+  test('rejects sources that exceed page and member safety caps without publishing', async () => {
+    const loaded = loadedConfiguration();
+
+    const pageLimitedStore = new MemoryRosterSyncStore(loaded);
+    let pageCalls = 0;
+    const endlessAdapter: RosterGroupsAdapter = Object.freeze({
+      truthLabel: 'mocked' as const,
+      fetchPage(
+        _source: GroupSource,
+        pageToken: string | null,
+      ): Promise<RosterGroupPage> {
+        pageCalls += 1;
+        const pageIndex = pageToken === null ? 0 : Number(pageToken);
+        return Promise.resolve({
+          members: [],
+          nextPageToken: String(pageIndex + 1),
+        });
+      },
+    });
+    const pageLimited = await syncRoster(
+      SYNC_INPUT,
+      context('roster-sync-page-limit-0001'),
+      dependencies(pageLimitedStore, endlessAdapter, alertCollector().sink),
+    );
+
+    expect(pageLimited.outcome).toBe('failed');
+    expect(
+      pageLimited.groupFailures.map((failure) => failure.errorCode),
+    ).toEqual([
+      'GROUP_PAGE_LIMIT_EXCEEDED',
+      'GROUP_PAGE_LIMIT_EXCEEDED',
+      'GROUP_PAGE_LIMIT_EXCEEDED',
+    ]);
+    expect(pageCalls).toBe(300);
+    expect(pageLimitedStore.publishCalls).toBe(0);
+
+    const memberLimitedStore = new MemoryRosterSyncStore(loaded);
+    let memberPageCalls = 0;
+    const oversizedMembershipAdapter: RosterGroupsAdapter = Object.freeze({
+      truthLabel: 'mocked' as const,
+      fetchPage(
+        source: GroupSource,
+        pageToken: string | null,
+      ): Promise<RosterGroupPage> {
+        memberPageCalls += 1;
+        const pageIndex = pageToken === null ? 0 : Number(pageToken);
+        return Promise.resolve({
+          members: Array.from({ length: 200 }, (_, memberIndex) =>
+            member(
+              `${source.id}-${pageIndex}-${memberIndex}`,
+              `Synthetic bounded member ${pageIndex}-${memberIndex}`,
+            ),
+          ),
+          nextPageToken: pageIndex < 6 ? String(pageIndex + 1) : null,
+        });
+      },
+    });
+    const memberLimited = await syncRoster(
+      SYNC_INPUT,
+      context('roster-sync-member-limit-0001'),
+      dependencies(
+        memberLimitedStore,
+        oversizedMembershipAdapter,
+        alertCollector().sink,
+      ),
+    );
+
+    expect(memberLimited.outcome).toBe('failed');
+    expect(
+      memberLimited.groupFailures.map((failure) => failure.errorCode),
+    ).toEqual([
+      'GROUP_MEMBER_LIMIT_EXCEEDED',
+      'GROUP_MEMBER_LIMIT_EXCEEDED',
+      'GROUP_MEMBER_LIMIT_EXCEEDED',
+    ]);
+    expect(memberPageCalls).toBe(21);
+    expect(memberLimitedStore.publishCalls).toBe(0);
+  });
+
   test('rejects a cross-group member conflict after every source completes', async () => {
     const loaded = loadedConfiguration();
     const conflicting = member(
@@ -1078,6 +1361,28 @@ describe('rejected roster synchronization', () => {
 });
 
 describe('adapter, authorization, and configuration boundaries', () => {
+  test('enables the mock adapter only for explicit test or development runtimes', async () => {
+    for (const runtimeMode of ['production', 'staging', '']) {
+      await expectSyncError(
+        Promise.resolve().then(() =>
+          createRuntimeMockGoogleGroupsAdapter({}, 1, { runtimeMode }),
+        ),
+        'MOCK_ROSTER_DISABLED',
+      );
+    }
+
+    expect(
+      createRuntimeMockGoogleGroupsAdapter({}, 1, {
+        runtimeMode: 'test',
+      }).truthLabel,
+    ).toBe('mocked');
+    expect(
+      createRuntimeMockGoogleGroupsAdapter({}, 1, {
+        runtimeMode: 'development',
+      }).truthLabel,
+    ).toBe('mocked');
+  });
+
   test('never permits a mocked adapter to populate the staff roster', async () => {
     const loaded = staffLoadedConfiguration();
     const source = loaded.sources[0];

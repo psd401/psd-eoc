@@ -31,7 +31,7 @@ import {
   type RosterSyncResult,
   type SyncRosterInput,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
 
@@ -455,6 +455,29 @@ const RosterSyncBaselineSchema = z
   .strict()
   .readonly();
 
+function assertSourceConfigurationIsMonotonic(
+  candidateValue: RosterSourceConfigurationRef,
+  baselineValue: RosterSourceConfigurationRef | null,
+): void {
+  const candidate = RosterSourceConfigurationRefSchema.parse(candidateValue);
+  if (baselineValue === null) {
+    return;
+  }
+  const baseline = RosterSourceConfigurationRefSchema.parse(baselineValue);
+  if (candidate.id !== baseline.id) {
+    throw new RosterSyncError(
+      'SOURCE_CONFIGURATION_LINEAGE_AMBIGUOUS',
+      'The roster source configuration did not match the established version lineage.',
+    );
+  }
+  if (candidate.version < baseline.version) {
+    throw new RosterSyncError(
+      'SOURCE_CONFIGURATION_ROLLBACK',
+      'An older roster source configuration cannot supersede a newer snapshot.',
+    );
+  }
+}
+
 /**
  * Compares complete provider counts with the last published snapshot without
  * exposing member identities. A null previous count means the source is new.
@@ -856,6 +879,26 @@ export async function syncRoster(
     assertLoadedConfiguration(loaded, input.sourceConfiguration);
     alertPopulation = loaded.configuration.population;
 
+    const baseline = await dependencies.store.loadLatestCompleteBaseline(
+      loaded.configuration.population,
+    );
+    if (
+      baseline !== null &&
+      baseline.population !== loaded.configuration.population
+    ) {
+      throw new RosterSyncError(
+        'ROSTER_BASELINE_INVALID',
+        'The prior roster baseline had the wrong population.',
+      );
+    }
+    assertSourceConfigurationIsMonotonic(
+      {
+        id: loaded.configuration.id,
+        version: loaded.configuration.version,
+      },
+      baseline?.sourceConfiguration ?? null,
+    );
+
     const sources = [...loaded.sources].sort((left, right) =>
       left.id.localeCompare(right.id),
     );
@@ -909,26 +952,7 @@ export async function syncRoster(
         memberCount: group.members.length,
       }),
     );
-    const baseline =
-      fetchFailures.length === 0
-        ? await dependencies.store.loadLatestCompleteBaseline(
-            loaded.configuration.population,
-          )
-        : null;
-    if (
-      baseline !== null &&
-      baseline.population !== loaded.configuration.population
-    ) {
-      throw new RosterSyncError(
-        'ROSTER_BASELINE_INVALID',
-        'The prior roster baseline had the wrong population.',
-      );
-    }
     const groupDiff = diffRosterGroupCounts(groupCountEvidence, baseline);
-    const unchangedConfiguration =
-      baseline !== null &&
-      baseline.sourceConfiguration.id === loaded.configuration.id &&
-      baseline.sourceConfiguration.version === loaded.configuration.version;
     const suspiciousBuildingFailures: readonly FailedGroup[] =
       groupDiff.flatMap((entry) => {
         if (entry.groupSourceRef.purpose !== 'building') {
@@ -941,8 +965,7 @@ export async function syncRoster(
         const errorCode =
           entry.currentCount === 0
             ? 'EMPTY_BUILDING_GROUP'
-            : unchangedConfiguration &&
-                entry.previousCount !== null &&
+            : entry.previousCount !== null &&
                 removed >= SUSPICIOUS_BUILDING_DROP_MINIMUM_REMOVALS &&
                 entry.currentCount * 100 <
                   entry.previousCount *
@@ -1226,6 +1249,7 @@ async function boundedJson(
     (!/^\d+$/u.test(declaredLength) ||
       Number(declaredLength) > MAX_GOOGLE_RESPONSE_BYTES)
   ) {
+    await response.body?.cancel().catch(() => undefined);
     throw new RosterSyncError(
       'GOOGLE_RESPONSE_TOO_LARGE',
       'Google returned an oversized roster response.',
@@ -1491,15 +1515,14 @@ export function createMockGoogleGroupsAdapter(
   fixtures: Readonly<Record<string, readonly RosterGroupMember[]>>,
   pageSize = 200,
   options: Readonly<{
-    runtimeMode?: 'development' | 'test' | 'production';
+    runtimeMode?: string;
   }> = {},
 ): RosterGroupsAdapter {
-  const runtimeMode =
-    options.runtimeMode ?? process.env.NODE_ENV ?? 'development';
-  if (runtimeMode === 'production') {
+  const runtimeMode = options.runtimeMode ?? process.env.NODE_ENV;
+  if (runtimeMode !== 'development' && runtimeMode !== 'test') {
     throw new RosterSyncError(
       'MOCK_ROSTER_DISABLED',
-      'The mock Google Groups adapter is disabled in production.',
+      'The mock Google Groups adapter requires an explicitly non-production runtime.',
     );
   }
   const parsedPageSize = z.number().int().min(1).max(200).parse(pageSize);
@@ -1941,23 +1964,18 @@ export function createDrizzleRosterSyncStore(
       return;
     }
 
-    const observed = new Map<
-      string,
-      Readonly<{
-        googleSubject: string;
-        platform: 'ios' | 'android' | 'web';
-        token: string;
-      }>
-    >();
     const registrationIds = [...expected.keys()].sort();
+    const discoveredRegistrations = new Map<
+      string,
+      Readonly<{ deviceEnrollmentId: string; userId: string }>
+    >();
     for (let offset = 0; offset < registrationIds.length; offset += 500) {
       const batch = registrationIds.slice(offset, offset + 500);
       const rows = await transaction
         .select({
           id: devicePushTokenRegistrations.id,
-          googleSubject: users.googleSubject,
-          platform: devicePushTokenRegistrations.platform,
-          token: devicePushTokenRegistrations.token,
+          deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+          userId: deviceEnrollments.userId,
         })
         .from(devicePushTokenRegistrations)
         .innerJoin(
@@ -1967,33 +1985,144 @@ export function createDrizzleRosterSyncStore(
             deviceEnrollments.id,
           ),
         )
-        .innerJoin(users, eq(deviceEnrollments.userId, users.id))
-        .leftJoin(
-          devicePushTokenUnregistrations,
-          eq(
-            devicePushTokenUnregistrations.registrationId,
-            devicePushTokenRegistrations.id,
-          ),
-        )
-        .where(
-          and(
-            inArray(devicePushTokenRegistrations.id, batch),
-            isNull(deviceEnrollments.revokedAt),
-            isNull(devicePushTokenUnregistrations.id),
-          ),
-        );
-      rows.forEach((row) => observed.set(row.id, Object.freeze(row)));
+        .where(inArray(devicePushTokenRegistrations.id, batch))
+        .orderBy(asc(devicePushTokenRegistrations.id));
+      rows.forEach((row) =>
+        discoveredRegistrations.set(
+          row.id,
+          Object.freeze({
+            deviceEnrollmentId: row.deviceEnrollmentId,
+            userId: row.userId,
+          }),
+        ),
+      );
+    }
+    if (discoveredRegistrations.size !== expected.size) {
+      throw new RosterSyncError(
+        'LOCAL_CONTACT_CAPTURE_CHANGED',
+        'Local endpoint status changed during roster synchronization.',
+      );
+    }
+
+    const userIds = [
+      ...new Set(
+        [...discoveredRegistrations.values()].map((row) => row.userId),
+      ),
+    ].sort();
+    const googleSubjects = new Map<string, string>();
+    for (let offset = 0; offset < userIds.length; offset += 500) {
+      const batch = userIds.slice(offset, offset + 500);
+      const rows = await transaction
+        .select({ id: users.id, googleSubject: users.googleSubject })
+        .from(users)
+        .where(inArray(users.id, batch))
+        .orderBy(asc(users.id))
+        .for('share');
+      rows.forEach((row) => googleSubjects.set(row.id, row.googleSubject));
+    }
+
+    const enrollmentIds = [
+      ...new Set(
+        [...discoveredRegistrations.values()].map(
+          (row) => row.deviceEnrollmentId,
+        ),
+      ),
+    ].sort();
+    const lockedEnrollments = new Map<
+      string,
+      Readonly<{
+        userId: string;
+        revokedAt: Date | null;
+      }>
+    >();
+    for (let offset = 0; offset < enrollmentIds.length; offset += 500) {
+      const batch = enrollmentIds.slice(offset, offset + 500);
+      const rows = await transaction
+        .select({
+          id: deviceEnrollments.id,
+          userId: deviceEnrollments.userId,
+          revokedAt: deviceEnrollments.revokedAt,
+        })
+        .from(deviceEnrollments)
+        .where(inArray(deviceEnrollments.id, batch))
+        .orderBy(asc(deviceEnrollments.id))
+        .for('share');
+      rows.forEach((row) =>
+        lockedEnrollments.set(
+          row.id,
+          Object.freeze({ userId: row.userId, revokedAt: row.revokedAt }),
+        ),
+      );
+    }
+
+    const lockedRegistrations = new Map<
+      string,
+      Readonly<{
+        deviceEnrollmentId: string;
+        platform: 'ios' | 'android' | 'web';
+        token: string;
+      }>
+    >();
+    for (let offset = 0; offset < registrationIds.length; offset += 500) {
+      const batch = registrationIds.slice(offset, offset + 500);
+      const rows = await transaction
+        .select({
+          id: devicePushTokenRegistrations.id,
+          deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+          platform: devicePushTokenRegistrations.platform,
+          token: devicePushTokenRegistrations.token,
+        })
+        .from(devicePushTokenRegistrations)
+        .where(inArray(devicePushTokenRegistrations.id, batch))
+        .orderBy(asc(devicePushTokenRegistrations.id))
+        .for('update');
+      rows.forEach((row) =>
+        lockedRegistrations.set(
+          row.id,
+          Object.freeze({
+            deviceEnrollmentId: row.deviceEnrollmentId,
+            platform: row.platform,
+            token: row.token,
+          }),
+        ),
+      );
+    }
+
+    const unregisteredIds = new Set<string>();
+    for (let offset = 0; offset < registrationIds.length; offset += 500) {
+      const batch = registrationIds.slice(offset, offset + 500);
+      const rows = await transaction
+        .select({
+          registrationId: devicePushTokenUnregistrations.registrationId,
+        })
+        .from(devicePushTokenUnregistrations)
+        .where(inArray(devicePushTokenUnregistrations.registrationId, batch));
+      rows.forEach((row) => unregisteredIds.add(row.registrationId));
     }
 
     const captureChanged =
-      observed.size !== expected.size ||
+      lockedRegistrations.size !== expected.size ||
+      lockedEnrollments.size !== enrollmentIds.length ||
+      googleSubjects.size !== userIds.length ||
       [...expected].some(([id, endpoint]) => {
-        const current = observed.get(id);
+        const discoveredRegistration = discoveredRegistrations.get(id);
+        const registration = lockedRegistrations.get(id);
+        const enrollment =
+          registration === undefined
+            ? undefined
+            : lockedEnrollments.get(registration.deviceEnrollmentId);
         return (
-          current === undefined ||
-          current.googleSubject !== endpoint.googleSubject ||
-          current.platform !== endpoint.platform ||
-          current.token !== endpoint.token
+          discoveredRegistration === undefined ||
+          registration === undefined ||
+          registration.deviceEnrollmentId !==
+            discoveredRegistration.deviceEnrollmentId ||
+          enrollment === undefined ||
+          enrollment.userId !== discoveredRegistration.userId ||
+          enrollment.revokedAt !== null ||
+          googleSubjects.get(enrollment.userId) !== endpoint.googleSubject ||
+          registration.platform !== endpoint.platform ||
+          registration.token !== endpoint.token ||
+          unregisteredIds.has(id)
         );
       });
     if (captureChanged) {
@@ -2360,11 +2489,26 @@ export function createDrizzleRosterSyncStore(
         );
 
         const [latestSnapshot] = await transaction
-          .select({ id: rosterSnapshots.id, version: rosterSnapshots.version })
+          .select({
+            id: rosterSnapshots.id,
+            version: rosterSnapshots.version,
+            sourceConfigurationId: rosterSnapshots.sourceConfigurationId,
+            sourceConfigurationVersion:
+              rosterSnapshots.sourceConfigurationVersion,
+          })
           .from(rosterSnapshots)
           .where(eq(rosterSnapshots.population, population))
           .orderBy(desc(rosterSnapshots.version))
           .limit(1);
+        assertSourceConfigurationIsMonotonic(
+          reference,
+          latestSnapshot === undefined
+            ? null
+            : {
+                id: latestSnapshot.sourceConfigurationId,
+                version: latestSnapshot.sourceConfigurationVersion,
+              },
+        );
         if (
           (latestSnapshot?.id ?? null) !== request.observedBaselineSnapshotId
         ) {
