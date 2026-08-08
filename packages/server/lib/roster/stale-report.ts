@@ -487,6 +487,10 @@ export function createDrizzleStaleRosterReportStore(
         let latestCompleteSnapshot: ScopedStaleRosterEvidence['latestCompleteSnapshot'] =
           null;
         if (snapshot !== undefined) {
+          // A facility ID authorizes recipient identifiers only through that
+          // building provenance. Facility-unbound `others` members stay
+          // district-scoped unless a future contract supplies an explicit
+          // facility-to-others authorization binding.
           const recipientRows =
             facilityId === null
               ? await transaction
@@ -607,6 +611,10 @@ export function createDrizzleStaleRosterReportStore(
           });
         }
 
+        // Failure metadata contains no recipient identity. Keep an unresolved
+        // facility-unbound `others` failure visible to every facility so no
+        // facility report can claim current health, without broadening which
+        // recipient identifiers that facility is authorized to read.
         const scopedFailurePredicate =
           facilityId === null
             ? undefined

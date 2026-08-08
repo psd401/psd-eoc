@@ -65,8 +65,10 @@ const ids = Object.freeze({
   endpointStatusNorthStale: '80000000-0000-4000-8000-000000000070',
   oldNorthFailureResult: '80000000-0000-4000-8000-000000000080',
   newSouthFailureResult: '80000000-0000-4000-8000-000000000081',
+  newOthersFailureResult: '80000000-0000-4000-8000-000000000082',
   oldNorthFailure: '80000000-0000-4000-8000-000000000090',
   newSouthFailure: '80000000-0000-4000-8000-000000000091',
+  newOthersFailure: '80000000-0000-4000-8000-000000000092',
 });
 
 const CONFIGURATION_CREATED_AT = new Date('2026-08-04T12:00:00.000Z');
@@ -611,6 +613,76 @@ describeWithDatabase('PostgreSQL stale-roster report capability', () => {
         reason: 'no-endpoint',
       },
     ]);
+  });
+
+  test('surfaces shared others failures without disclosing facility-unbound recipient IDs', async () => {
+    const database = databaseConnection().db;
+    await database.transaction(async (transaction) => {
+      await transaction.insert(rosterSyncResults).values({
+        id: ids.newOthersFailureResult,
+        sourceConfigurationId: ids.configuration,
+        sourceConfigurationVersion: 1,
+        population: 'staff',
+        outcome: 'failed',
+        startedAt: new Date('2026-08-07T10:00:00.000Z'),
+        completedAt: new Date('2026-08-07T10:30:00.000Z'),
+        expectedSourceCount: 1,
+        completedSourceCount: 0,
+        groupFailureCount: 1,
+        publishedSnapshotId: null,
+      });
+      await transaction.insert(rosterSyncResultSources).values({
+        syncResultId: ids.newOthersFailureResult,
+        population: 'staff',
+        groupSourceId: ids.groupOthers,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'others',
+        setKind: 'expected',
+        expectedSetKind: 'expected',
+      });
+      await transaction.insert(rosterSyncGroupFailures).values({
+        id: ids.newOthersFailure,
+        syncResultId: ids.newOthersFailureResult,
+        population: 'staff',
+        groupSourceId: ids.groupOthers,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'others',
+        expectedSetKind: 'expected',
+        errorCode: 'SYNTHETIC_NEW_OTHERS_FAILURE',
+        attemptedAt: new Date('2026-08-07T10:15:00.000Z'),
+      });
+    });
+
+    const north = await executeReport(database, query(ids.facilityNorth), {
+      facilityScope: {
+        kind: 'facilities',
+        facilityIds: [ids.facilityNorth],
+      },
+    });
+
+    expect(north.status).toBe('failed');
+    expect(north.failedGroups).toEqual([
+      {
+        groupSourceRef: {
+          id: ids.groupOthers,
+          kind: 'google-group',
+          purpose: 'others',
+          facilityId: null,
+        },
+        errorCode: 'SYNTHETIC_NEW_OTHERS_FAILURE',
+        attemptedAt: '2026-08-07T10:15:00.000Z',
+      },
+    ]);
+    expect(north.staleRecipients).toEqual([
+      {
+        recipientId: ids.recipientNorthStale,
+        reason: 'no-active-endpoint',
+      },
+    ]);
+    expect(north.staleRecipients).not.toContainEqual({
+      recipientId: ids.recipientOthersNoEndpoint,
+      reason: 'no-endpoint',
+    });
   });
 
   test('denies an out-of-scope facility before starting a database transaction', async () => {
