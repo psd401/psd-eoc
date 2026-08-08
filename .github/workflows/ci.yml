@@ -88,7 +88,7 @@ jobs:
           set -euo pipefail
           test -d android
           test -d ios
-          rg --fixed-strings 'net.psd401.eoc' android/app
-          rg --fixed-strings 'net.psd401.eoc' ios
-          rg --fixed-strings 'com.google.firebase.messaging.default_notification_channel_id' android/app/src/main/AndroidManifest.xml
-          rg --glob '*.entitlements' --fixed-strings '<key>aps-environment</key>' ios
+          grep -RFq 'net.psd401.eoc' android/app
+          grep -RFq 'net.psd401.eoc' ios
+          grep -Fq 'com.google.firebase.messaging.default_notification_channel_id' android/app/src/main/AndroidManifest.xml
+          grep -RFq --include='*.entitlements' '<key>aps-environment</key>' ios
