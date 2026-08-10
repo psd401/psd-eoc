@@ -3938,3 +3938,26 @@ export const securityAuditEntries = pgTable(
     ),
   ],
 );
+
+/**
+ * Append-only external anchors make deletion of the audit-chain tail
+ * detectable. A database trigger, not application writers, owns inserts.
+ */
+export const securityAuditChainAnchors = pgTable(
+  'security_audit_chain_anchors',
+  {
+    sequence: integer('sequence').primaryKey(),
+    entryHash: digest('entry_hash').notNull(),
+  },
+  (table) => [
+    unique('security_audit_chain_anchors_hash_uq').on(table.entryHash),
+    check(
+      'security_audit_chain_anchors_sequence_positive',
+      sql`${table.sequence} > 0`,
+    ),
+    check(
+      'security_audit_chain_anchors_hash_format',
+      sql`${table.entryHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
