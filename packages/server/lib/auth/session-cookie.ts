@@ -108,10 +108,16 @@ export interface WebSessionCookieSink {
   readonly set: (cookie: WebSessionCookie) => void | Promise<void>;
 }
 
+/** Request-local delivery channel for a native opaque session bearer. */
+export interface MobileSessionBearerSink {
+  readonly set: (bearer: string) => void | Promise<void>;
+}
+
 /** Server-owned context used by the canonical sign-in capability handler. */
 export interface CompleteOidcSignInContext {
   readonly authorization: GroupAuthorizedWebIdentity;
-  readonly cookieSink: WebSessionCookieSink;
+  readonly cookieSink?: WebSessionCookieSink;
+  readonly bearerSink?: MobileSessionBearerSink;
   /** Full parsed pre-session envelope; the capability engine receives its input. */
   readonly envelope: RegisteredCapabilityEnvelope<'complete-oidc-sign-in'>;
   /** Digest of the callback response, never its code or raw parameters. */
@@ -350,16 +356,37 @@ function validateSignInInvocation(
   });
 }
 
-function assertWebCookieInput(input: CompleteOidcSignInInput): void {
+type CredentialDelivery =
+  | Readonly<{ kind: 'web'; sink: WebSessionCookieSink }>
+  | Readonly<{ kind: 'mobile'; sink: MobileSessionBearerSink }>;
+
+function resolveCredentialDelivery(
+  input: CompleteOidcSignInInput,
+  context: CompleteOidcSignInContext,
+): CredentialDelivery {
+  const web = context.envelope.source === 'web';
   if (
-    input.device.platform !== 'web' ||
-    input.device.unlockMethod !== 'secure-session-cookie'
+    web &&
+    input.device.platform === 'web' &&
+    input.device.unlockMethod === 'secure-session-cookie' &&
+    context.cookieSink !== undefined &&
+    context.bearerSink === undefined
   ) {
-    throw new WebSessionIssuanceError(
-      'INVALID_AUTHORIZATION_CONTEXT',
-      'The web sign-in handler accepts only secure cookie enrollments.',
-    );
+    return Object.freeze({ kind: 'web', sink: context.cookieSink });
   }
+  if (
+    !web &&
+    (input.device.platform === 'ios' || input.device.platform === 'android') &&
+    input.device.unlockMethod === 'biometric' &&
+    context.bearerSink !== undefined &&
+    context.cookieSink === undefined
+  ) {
+    return Object.freeze({ kind: 'mobile', sink: context.bearerSink });
+  }
+  throw new WebSessionIssuanceError(
+    'INVALID_AUTHORIZATION_CONTEXT',
+    'The sign-in credential transport does not match its device enrollment.',
+  );
 }
 
 function readTrustedNow(now: (() => Date) | undefined): Date {
@@ -432,7 +459,7 @@ export function createCompleteOidcSignInAuthorizer(
         );
       }
       const input = CompleteOidcSignInInputSchema.parse(request.input);
-      assertWebCookieInput(input);
+      resolveCredentialDelivery(input, request.context);
       validateSignInInvocation(input, request.context);
       assertGroupAuthorizedContext(input, request.context.authorization);
       resolveMembershipTimes(
@@ -466,8 +493,8 @@ function assertPersistedResultMatchesRequest(
       request.membershipGraceUntil.toISOString() &&
     result.session.createdAt === request.createdAt.toISOString() &&
     result.session.expiresAt === request.expiresAt.toISOString() &&
-    result.deviceEnrollment.platform === 'web' &&
-    result.deviceEnrollment.unlockMethod === 'secure-session-cookie' &&
+    result.deviceEnrollment.platform === request.device.platform &&
+    result.deviceEnrollment.unlockMethod === request.device.unlockMethod &&
     result.deviceEnrollment.installationId === request.device.installationId &&
     (expectedRoles === null ||
       [...expectedRoles].every((role) => result.user.roles.includes(role)));
@@ -481,9 +508,10 @@ function assertPersistedResultMatchesRequest(
 }
 
 /**
- * Issues one initial web session after cryptographic OIDC verification and the
+ * Issues one initial session after cryptographic OIDC verification and the
  * server authorizer have completed. The raw credential is sent only to the
- * protected cookie sink and never appears in the canonical result or store.
+ * protected request-local sink and never appears in the canonical result or
+ * store.
  */
 async function establishInitialWebSession(
   inputValue: CompleteOidcSignInInput,
@@ -491,7 +519,7 @@ async function establishInitialWebSession(
   dependencies: WebSessionIssuerDependencies,
 ): Promise<SessionEstablishmentResult> {
   const input = CompleteOidcSignInInputSchema.parse(inputValue);
-  assertWebCookieInput(input);
+  const credentialDelivery = resolveCredentialDelivery(input, context);
   const invocation = validateSignInInvocation(input, context);
 
   const policy = validatePolicy(dependencies.policy);
@@ -534,18 +562,22 @@ async function establishInitialWebSession(
   );
   assertPersistedResultMatchesRequest(result, request);
 
-  await context.cookieSink.set(
-    Object.freeze({
-      name: WEB_SESSION_COOKIE_NAME,
-      value: credential,
-      httpOnly: true,
-      secure: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: policy.sessionLifetimeSeconds,
-      expires: expiresAt,
-    }),
-  );
+  if (credentialDelivery.kind === 'web') {
+    await credentialDelivery.sink.set(
+      Object.freeze({
+        name: WEB_SESSION_COOKIE_NAME,
+        value: credential,
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: policy.sessionLifetimeSeconds,
+        expires: expiresAt,
+      }),
+    );
+  } else {
+    await credentialDelivery.sink.set(credential);
+  }
 
   return result;
 }
@@ -990,8 +1022,8 @@ export function createDrizzleInitialWebSessionStore(
               .insert(deviceEnrollments)
               .values({
                 userId: request.user.id,
-                platform: 'web',
-                unlockMethod: 'secure-session-cookie',
+                platform: request.device.platform,
+                unlockMethod: request.device.unlockMethod,
                 installationId: request.device.installationId,
                 enrolledAt: request.createdAt,
                 lastSeenAt: request.createdAt,
@@ -1011,13 +1043,13 @@ export function createDrizzleInitialWebSessionStore(
             if (
               device === undefined ||
               device.userId !== request.user.id ||
-              device.platform !== 'web' ||
-              device.unlockMethod !== 'secure-session-cookie' ||
+              device.platform !== request.device.platform ||
+              device.unlockMethod !== request.device.unlockMethod ||
               device.revokedAt !== null
             ) {
               throw new WebSessionIssuanceError(
                 'SESSION_PERSISTENCE_REJECTED',
-                'The web device enrollment is unavailable.',
+                'The device enrollment is unavailable.',
               );
             }
 
@@ -1033,7 +1065,7 @@ export function createDrizzleInitialWebSessionStore(
                 and(
                   eq(deviceEnrollments.id, device.id),
                   eq(deviceEnrollments.userId, request.user.id),
-                  eq(deviceEnrollments.platform, 'web'),
+                  eq(deviceEnrollments.platform, request.device.platform),
                   isNull(deviceEnrollments.revokedAt),
                 ),
               )
@@ -1041,7 +1073,7 @@ export function createDrizzleInitialWebSessionStore(
             if (activeDevice === undefined) {
               throw new WebSessionIssuanceError(
                 'SESSION_PERSISTENCE_REJECTED',
-                'The web device enrollment became unavailable.',
+                'The device enrollment became unavailable.',
               );
             }
 
@@ -1159,6 +1191,7 @@ export function createDrizzleInitialWebSessionStore(
                 occurredAt: request.createdAt.toISOString(),
                 userId: result.user.id,
                 sessionId: result.session.id,
+                source: request.device.platform === 'web' ? 'web' : 'mobile',
               },
               previousAuditEntry ?? null,
             );
@@ -1201,7 +1234,7 @@ export function createDrizzleInitialWebSessionStore(
             }
             throw new WebSessionIssuanceError(
               'SESSION_PERSISTENCE_REJECTED',
-              'The initial web session could not be persisted.',
+              'The initial session could not be persisted.',
             );
           }
           await new Promise<void>((resolve) => {
