@@ -449,29 +449,17 @@ describe('retained private media storage', () => {
       return value;
     };
     const scanRoleArn = { 'Fn::GetAtt': [scanRoleLogicalId, 'Arn'] };
-    const expectedScannerPrincipals = {
-      AWS: [
-        scanRoleArn,
-        {
-          'Fn::Join': [
-            '',
-            [
-              'arn:',
-              { Ref: 'AWS::Partition' },
-              `:sts::${DEPLOYMENT_ACCOUNT}:assumed-role/`,
-              { Ref: scanRoleLogicalId },
-              '/GuardDutyMalwareProtection',
-            ],
-          ],
-        },
-      ],
+    const expectedScannerRoleCondition = {
+      ArnNotEquals: {
+        'aws:PrincipalArn': scanRoleArn,
+      },
     };
     const tagMutationBoundary = bucketStatement(
       'DenyQuarantineScanTagMutationOutsideGuardDuty',
     );
     expect(tagMutationBoundary.Effect).toBe('Deny');
-    expect(tagMutationBoundary.NotPrincipal).toEqual(expectedScannerPrincipals);
-    expect(tagMutationBoundary).not.toHaveProperty('Principal');
+    expect(tagMutationBoundary.Principal).toEqual({ AWS: '*' });
+    expect(tagMutationBoundary).not.toHaveProperty('NotPrincipal');
     expect(asStringArray(tagMutationBoundary.Action).sort()).toEqual(
       [
         's3:PutObjectTagging',
@@ -483,14 +471,14 @@ describe('retained private media storage', () => {
     expect(JSON.stringify(tagMutationBoundary.Resource)).toContain(
       '/quarantine/*',
     );
-    expect(tagMutationBoundary).not.toHaveProperty('Condition');
+    expect(tagMutationBoundary.Condition).toEqual(expectedScannerRoleCondition);
 
     const cleanReadBoundary = bucketStatement(
       'DenyQuarantineReadUnlessGuardDutyMarkedClean',
     );
     expect(cleanReadBoundary.Effect).toBe('Deny');
-    expect(cleanReadBoundary.NotPrincipal).toEqual(expectedScannerPrincipals);
-    expect(cleanReadBoundary).not.toHaveProperty('Principal');
+    expect(cleanReadBoundary.Principal).toEqual({ AWS: '*' });
+    expect(cleanReadBoundary).not.toHaveProperty('NotPrincipal');
     expect(asStringArray(cleanReadBoundary.Action).sort()).toEqual(
       ['s3:GetObject', 's3:GetObjectVersion'].sort(),
     );
@@ -498,6 +486,7 @@ describe('retained private media storage', () => {
       '/quarantine/*',
     );
     expect(cleanReadBoundary.Condition).toEqual({
+      ...expectedScannerRoleCondition,
       StringNotEquals: {
         's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'NO_THREATS_FOUND',
       },

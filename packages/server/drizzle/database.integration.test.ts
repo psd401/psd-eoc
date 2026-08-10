@@ -273,72 +273,86 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       expect(events).toContain('DELETE');
     }
 
-    try {
-      await db.transaction(async (transaction) => {
-        await transaction.execute(insertSyntheticTestEvent);
-        await transaction.execute(sql`
-          insert into media_upload_intents (
-            id,
-            event_id,
-            byte_length,
-            content_sha256,
-            declared_content_type,
-            storage_key,
-            status,
-            created_at,
-            expires_at
-          ) values (
-            '00000000-0000-4000-8000-000000009970'::uuid,
-            '00000000-0000-4000-8000-000000009980'::uuid,
-            20,
-            repeat('a', 64),
-            'image/jpeg'::media_content_type,
-            'quarantine/database-test/9970',
-            'pending-upload',
-            now(),
-            now() + interval '10 minutes'
-          )
-        `);
-        await transaction.execute(sql`
-          insert into media_records (
-            id,
-            upload_intent_id,
-            event_id,
-            status,
-            detected_content_type,
-            sanitized_byte_length,
-            sanitized_content_sha256,
-            storage_key,
-            malware_scan,
-            exif_stripped,
-            created_at
-          ) values (
-            '00000000-0000-4000-8000-000000009971'::uuid,
-            '00000000-0000-4000-8000-000000009970'::uuid,
-            '00000000-0000-4000-8000-000000009980'::uuid,
-            'ready',
-            'image/jpeg'::media_content_type,
-            20,
-            repeat('b', 64),
-            'ready/database-test/9971',
-            'clean',
-            true,
-            now()
-          )
-        `);
-        await transaction.execute(sql`
-          update media_records
-          set sanitized_content_sha256 = repeat('c', 64)
-          where id = '00000000-0000-4000-8000-000000009971'::uuid
-        `);
-      });
-    } catch (error) {
-      expect(postgresErrorMessages(error).join('\n')).toContain(
-        'immutable truth cannot be changed on media_records',
-      );
-      return;
+    async function expectMediaMutationRejected(
+      mutation: 'update' | 'delete',
+    ): Promise<void> {
+      try {
+        await db.transaction(async (transaction) => {
+          await transaction.execute(insertSyntheticTestEvent);
+          await transaction.execute(sql`
+            insert into media_upload_intents (
+              id,
+              event_id,
+              byte_length,
+              content_sha256,
+              declared_content_type,
+              storage_key,
+              status,
+              created_at,
+              expires_at
+            ) values (
+              '00000000-0000-4000-8000-000000009970'::uuid,
+              '00000000-0000-4000-8000-000000009980'::uuid,
+              20,
+              repeat('a', 64),
+              'image/jpeg'::media_content_type,
+              'quarantine/database-test/9970',
+              'pending-upload',
+              now(),
+              now() + interval '10 minutes'
+            )
+          `);
+          await transaction.execute(sql`
+            insert into media_records (
+              id,
+              upload_intent_id,
+              event_id,
+              status,
+              detected_content_type,
+              sanitized_byte_length,
+              sanitized_content_sha256,
+              storage_key,
+              malware_scan,
+              exif_stripped,
+              created_at
+            ) values (
+              '00000000-0000-4000-8000-000000009971'::uuid,
+              '00000000-0000-4000-8000-000000009970'::uuid,
+              '00000000-0000-4000-8000-000000009980'::uuid,
+              'ready',
+              'image/jpeg'::media_content_type,
+              20,
+              repeat('b', 64),
+              'ready/database-test/9971',
+              'clean',
+              true,
+              now()
+            )
+          `);
+          await transaction.execute(
+            mutation === 'update'
+              ? sql`
+                  update media_records
+                  set sanitized_content_sha256 = repeat('c', 64)
+                  where id = '00000000-0000-4000-8000-000000009971'::uuid
+                `
+              : sql`
+                  delete from media_records
+                  where id = '00000000-0000-4000-8000-000000009971'::uuid
+                `,
+          );
+        });
+      } catch (error) {
+        expect(postgresErrorMessages(error).join('\n')).toContain(
+          'immutable truth cannot be changed on media_records',
+        );
+        return;
+      }
+      throw new Error(`Expected the media record ${mutation} to be rejected.`);
     }
-    throw new Error('Expected the media checksum update to be rejected.');
+
+    await expectMediaMutationRejected('update');
+    await expectMediaMutationRejected('delete');
   });
 
   test('database constraints reject real and drill substitution', async () => {
