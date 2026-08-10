@@ -6,13 +6,13 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
-    "ios": "expo run:ios",
-    "android": "expo run:android",
+    "ios": "bun run prebuild:check && expo run:ios",
+    "android": "bun run prebuild:check && expo run:android",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "tsc --noEmit --project tsconfig.json",
     "test": "bun test",
     "expo:check": "expo install --check",
-    "prebuild:check": "expo prebuild --no-install"
+    "prebuild:check": "expo prebuild --no-install && prettier --write --ignore-path .prettier-native-ignore \"ios/**/*.json\""
   },
   "dependencies": {
     "@psd-eoc/contracts": "workspace:*",
@@ -26,6 +26,7 @@
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.2",
     "react": "19.2.3",
+    "react-dom": "19.2.3",
     "react-native": "0.86.2",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0"
