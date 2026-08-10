@@ -77,4 +77,5 @@ Android channel API. None of these dependencies enables a live send by itself.
 `react-dom` is pinned beside mobile React so Expo resolves a matched 19.2.3
 runtime. The server uses the same exact React pair so Bun cannot make Next and
 the mobile dependency graph load incompatible React copies. The mobile CI job
-builds the server after a frozen install to guard that workspace invariant.
+checks that mobile, Expo Router, the server, and Next all resolve the same
+physical React and ReactDOM packages after a frozen install.
