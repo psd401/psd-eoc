@@ -20,7 +20,8 @@ export async function configureAlertChannel(): Promise<void> {
       name: 'PSD EOC incident and drill alerts',
       description: 'Incident and drill notifications from PSD EOC.',
       importance: Notifications.AndroidImportance.MAX,
-      sound: 'default',
+      // Omitting sound selects Android's default notification sound. A string
+      // is treated as the filename of a bundled custom sound by SDK 57.
       enableVibrate: true,
       vibrationPattern: [0, 500, 250, 500],
       showBadge: true,
