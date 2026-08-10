@@ -1,0 +1,21 @@
+{
+  "name": "@psd-eoc/sms-registration-ops",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "bun run format:check && bun run typecheck && bun run test",
+    "format:check": "prettier --check . ../../../docs/runbooks/sms-registration.md",
+    "test": "bun test ./registration.test.ts",
+    "typecheck": "tsc --noEmit --project tsconfig.json"
+  },
+  "dependencies": {
+    "@aws-sdk/client-pinpoint-sms-voice-v2": "3.1106.0",
+    "@aws-sdk/client-sts": "3.1106.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.23",
+    "prettier": "3.6.2",
+    "typescript": "5.9.2"
+  }
+}
