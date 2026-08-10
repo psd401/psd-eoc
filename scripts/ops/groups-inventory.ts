@@ -383,6 +383,8 @@ const COMPACT_WORD_BOUNDARIES = [
   'team',
 ] as const;
 
+const COMPACT_ORGANIZATION_PREFIXES = ['district', 'psd', 'psd401'] as const;
+
 const isCompactBoundarySequence = (value: string): boolean => {
   if (value === '') return true;
   const reachable = new Set([0]);
@@ -415,15 +417,41 @@ const hasBoundedCompactPopulationMarker = (token: string): boolean =>
     return false;
   });
 
-const hasNonStaffPopulationMarker = (tokens: readonly string[]): boolean =>
+const compactMarkerCandidates = (
+  token: string,
+  compactPrefixes: ReadonlySet<string>,
+): readonly string[] => {
+  const candidates = new Set([token]);
+  const reachableOffsets = [0];
+  for (let index = 0; index < reachableOffsets.length; index += 1) {
+    const offset = reachableOffsets[index]!;
+    for (const prefix of compactPrefixes) {
+      if (prefix !== '' && token.startsWith(prefix, offset)) {
+        const nextOffset = offset + prefix.length;
+        if (!reachableOffsets.includes(nextOffset)) {
+          reachableOffsets.push(nextOffset);
+          candidates.add(token.slice(nextOffset));
+        }
+      }
+    }
+  }
+  return [...candidates];
+};
+
+const hasNonStaffPopulationMarker = (
+  tokens: readonly string[],
+  compactPrefixes: ReadonlySet<string>,
+): boolean =>
   hasAnyToken(tokens, NON_STAFF_MARKERS) ||
-  tokens.some(
-    (token) =>
+  tokens.some((token) => {
+    const compactCandidates = compactMarkerCandidates(token, compactPrefixes);
+    return (
       /^(?:class|classroom|cohort|grade)[0-9]{1,2}$/u.test(token) ||
       /^[0-9]{1,2}(?:st|nd|rd|th)?grade$/u.test(token) ||
       /^(?:k[0-9]{1,2}|kindergarten|prek|prekindergarten)$/u.test(token) ||
-      hasBoundedCompactPopulationMarker(token),
-  ) ||
+      compactCandidates.some(hasBoundedCompactPopulationMarker)
+    );
+  }) ||
   tokens.some(
     (token, index) =>
       (token === 'pre' &&
@@ -471,11 +499,26 @@ const groupTokenFields = (
 const groupTokens = (group: CloudGroup): readonly string[] =>
   groupTokenFields(group).combined;
 
-const hasNonStaffGroupMarker = (group: CloudGroup): boolean => {
+const compactPopulationPrefixes = (
+  facilities: readonly Facility[],
+): ReadonlySet<string> =>
+  new Set([
+    ...COMPACT_ORGANIZATION_PREFIXES,
+    ...facilities.flatMap((facility) => {
+      const code = normalizeText(facility.code).replace(/ /gu, '');
+      const nameStem = facilityStemTokens(facility).join('');
+      return [code, nameStem].filter((value) => value !== '');
+    }),
+  ]);
+
+const hasNonStaffGroupMarker = (
+  group: CloudGroup,
+  compactPrefixes: ReadonlySet<string>,
+): boolean => {
   const tokenFields = groupTokenFields(group);
   return (
-    hasNonStaffPopulationMarker(tokenFields.displayName) ||
-    hasNonStaffPopulationMarker(tokenFields.localPart)
+    hasNonStaffPopulationMarker(tokenFields.displayName, compactPrefixes) ||
+    hasNonStaffPopulationMarker(tokenFields.localPart, compactPrefixes)
   );
 };
 
@@ -921,9 +964,10 @@ const buildDraft = (
       compareText(left.email, right.email) ||
       compareText(left.googleGroupId, right.googleGroupId),
   );
+  const allowedCompactPrefixes = compactPopulationPrefixes(facilities);
   const excluded = new Set(
     groups
-      .filter(hasNonStaffGroupMarker)
+      .filter((group) => hasNonStaffGroupMarker(group, allowedCompactPrefixes))
       .map(({ googleGroupId }) => googleGroupId),
   );
   const eligibleGroups = groups.filter(
@@ -1693,9 +1737,6 @@ const validateDraft = (value: unknown): ValidationSummary => {
     ) {
       throw new Error('Draft inventory contains duplicate group identity.');
     }
-    if (hasNonStaffGroupMarker(group)) {
-      throw new Error('Draft inventory contains an excluded population group.');
-    }
     inventoryById.set(group.googleGroupId, group);
     inventoryEmails.add(group.email);
   }
@@ -1800,6 +1841,16 @@ const validateDraft = (value: unknown): ValidationSummary => {
   }
   if (mappings.length !== sourceFacilityCount) {
     throw new Error('Draft facility count does not match its mappings.');
+  }
+  const draftCompactPrefixes = compactPopulationPrefixes(
+    mappings.map(({ facility }) => facility),
+  );
+  if (
+    inventoryGroups.some((group) =>
+      hasNonStaffGroupMarker(group, draftCompactPrefixes),
+    )
+  ) {
+    throw new Error('Draft inventory contains an excluded population group.');
   }
 
   if (
@@ -2565,16 +2616,30 @@ const runSelfTest = async (): Promise<void> => {
     ),
     parent,
   );
+  const facilityPrefixedCompactStudentStaff = parseCloudGroup(
+    rawGroup(
+      'synthetic-facility-prefixed-compact-population',
+      'synthetic.nbeallstudentsstaff@psd401.net',
+      'NBE Staff',
+    ),
+    parent,
+  );
   const compactPopulationDraft = buildDraft(
     [facilities[0]!],
-    [compactStudentStaff, compactScholarStaff, compactPtaStaff],
+    [
+      compactStudentStaff,
+      compactScholarStaff,
+      compactPtaStaff,
+      facilityPrefixedCompactStudentStaff,
+    ],
     1,
     generatedAt,
   );
   assertSelfTest(
     compactPopulationDraft.inventoryGroups.length === 0 &&
-      compactPopulationDraft.report.omittedNonStaffGroupCount === 3,
-    'bounded compact population markers are hard excluded',
+      compactPopulationDraft.report.omittedNonStaffGroupCount === 4 &&
+      compactPopulationDraft.buildingMappings[0]?.createGroupSource === null,
+    'bounded compact population markers after known prefixes are hard excluded',
   );
 
   const legitimateSubstringGroups = [
