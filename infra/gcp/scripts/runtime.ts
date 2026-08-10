@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 
 export const gcpRoot = fileURLToPath(new URL('..', import.meta.url));
 
+export const APPLICATION_DEFAULT_IDENTITY_SCOPES = [
+  'https://www.googleapis.com/auth/cloud-platform',
+  'openid',
+  'https://www.googleapis.com/auth/userinfo.email',
+] as const;
+
 const googleCredentialOverrides = new Set([
   'CLOUDSDK_AUTH_ACCESS_TOKEN',
   'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
@@ -181,6 +187,20 @@ export function runCommand(
   return result.stdout.trim();
 }
 
+export function validateTerraformWorkspace(workspace: string): void {
+  if (workspace !== 'default') {
+    throw new Error(
+      `Terraform workspace must be default; refusing to use ${JSON.stringify(workspace)}.`,
+    );
+  }
+}
+
+export function assertDefaultTerraformWorkspace(cwd = gcpRoot): void {
+  validateTerraformWorkspace(
+    runCommand('terraform', ['workspace', 'show'], { cwd }),
+  );
+}
+
 export function runInteractive(
   command: string,
   args: readonly string[],
@@ -347,7 +367,12 @@ export async function assertApplicationDefaultIdentity(
   assertApplicationDefaultCredentialMetadata('psd401-eoc');
   const accessToken = runCommand(
     'gcloud',
-    ['auth', 'application-default', 'print-access-token'],
+    [
+      'auth',
+      'application-default',
+      'print-access-token',
+      `--scopes=${APPLICATION_DEFAULT_IDENTITY_SCOPES.join(',')}`,
+    ],
     { redactFailureOutput: true },
   );
   let response: Response;

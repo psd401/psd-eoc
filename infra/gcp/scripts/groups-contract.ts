@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { runCommand } from './runtime';
+import { assertDefaultTerraformWorkspace, runCommand } from './runtime';
 
 export const PROJECT_ID = 'psd401-eoc';
 export const ROSTER_READER_EMAIL =
@@ -10,8 +10,12 @@ export const READONLY_GROUPS_SCOPE =
   'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
 export const MAX_GROUPS_KEY_AGE_DAYS = 30;
 
-export interface GroupsReaderContract {
+export interface TerraformGroupsReaderContract {
   readonly email: string;
+  readonly serviceAccountUniqueId: string;
+}
+
+export interface GroupsReaderContract extends TerraformGroupsReaderContract {
   readonly oauthClientId: string;
 }
 
@@ -45,7 +49,7 @@ export function parseUserManagedKeyIds(output: string): Set<string> {
 
 export function parseGroupsReaderContract(
   value: unknown,
-): GroupsReaderContract {
+): TerraformGroupsReaderContract {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Terraform google_groups_reader output is invalid.');
   }
@@ -57,8 +61,8 @@ export function parseGroupsReaderContract(
     output.application_writes_google_groups !== false ||
     output.domain_wide_delegation !== false ||
     output.email !== ROSTER_READER_EMAIL ||
-    typeof output.oauth_client_id !== 'string' ||
-    !/^\d+$/u.test(output.oauth_client_id) ||
+    typeof output.service_account_unique_id !== 'string' ||
+    !/^\d+$/u.test(output.service_account_unique_id) ||
     !Array.isArray(oauthScopes) ||
     oauthScopes.length !== 1 ||
     oauthScopes[0] !== READONLY_GROUPS_SCOPE ||
@@ -75,15 +79,68 @@ export function parseGroupsReaderContract(
 
   return {
     email: output.email,
-    oauthClientId: output.oauth_client_id,
+    serviceAccountUniqueId: output.service_account_unique_id,
+  };
+}
+
+export function validateLiveGroupsReaderServiceAccount(
+  value: unknown,
+  contract: TerraformGroupsReaderContract,
+): GroupsReaderContract {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Live roster-reader service-account metadata is invalid.');
+  }
+  const serviceAccount = value as Readonly<Record<string, unknown>>;
+  if (
+    serviceAccount.name !==
+      `projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}` ||
+    serviceAccount.projectId !== PROJECT_ID ||
+    serviceAccount.email !== ROSTER_READER_EMAIL ||
+    serviceAccount.uniqueId !== contract.serviceAccountUniqueId ||
+    typeof serviceAccount.oauth2ClientId !== 'string' ||
+    !/^\d+$/u.test(serviceAccount.oauth2ClientId) ||
+    (serviceAccount.disabled !== undefined && serviceAccount.disabled !== false)
+  ) {
+    throw new Error(
+      'Terraform google_groups_reader output does not identify the fixed live roster-reader service account.',
+    );
+  }
+  return {
+    ...contract,
+    oauthClientId: serviceAccount.oauth2ClientId,
   };
 }
 
 export function readGroupsReaderContract(): GroupsReaderContract {
+  assertDefaultTerraformWorkspace();
   const value: unknown = JSON.parse(
     runCommand('terraform', ['output', '-json', 'google_groups_reader']),
   );
-  return parseGroupsReaderContract(value);
+  const contract = parseGroupsReaderContract(value);
+  let serviceAccount: unknown;
+  try {
+    serviceAccount = JSON.parse(
+      runCommand(
+        'gcloud',
+        [
+          'iam',
+          'service-accounts',
+          'describe',
+          ROSTER_READER_EMAIL,
+          '--project',
+          PROJECT_ID,
+          '--format=json',
+          '--quiet',
+        ],
+        { redactFailureOutput: true },
+      ),
+    );
+  } catch {
+    throw new Error(
+      'Live roster-reader service-account metadata is unavailable.',
+    );
+  }
+  return validateLiveGroupsReaderServiceAccount(serviceAccount, contract);
 }
 
 export function listUserManagedKeys(
@@ -254,7 +311,7 @@ export function readRevocableUserManagedKeyCreatedAt(
   );
 }
 
-export function policyHasServiceAccountBinding(
+export function policyCouldGrantServiceAccountAccess(
   value: unknown,
   serviceAccountEmail: string,
 ): boolean {
@@ -275,11 +332,32 @@ export function policyHasServiceAccountBinding(
     ) {
       throw new Error('Google Cloud project IAM binding is invalid.');
     }
-    const members = (binding as Readonly<Record<string, unknown>>).members;
-    if (!Array.isArray(members)) {
-      throw new Error('Google Cloud project IAM binding has no members array.');
+    const record = binding as Readonly<Record<string, unknown>>;
+    const members = record.members;
+    if (
+      typeof record.role !== 'string' ||
+      record.role.length === 0 ||
+      !Array.isArray(members) ||
+      members.length === 0 ||
+      members.some((candidate) => typeof candidate !== 'string')
+    ) {
+      throw new Error('Google Cloud project IAM binding is invalid.');
     }
-    return members.includes(member);
+    return members.some(
+      (candidate) =>
+        candidate === member ||
+        candidate === 'allUsers' ||
+        candidate === 'allAuthenticatedUsers' ||
+        candidate === 'principalSet://goog/public:all' ||
+        candidate === 'principalSet://goog/public:authenticated' ||
+        candidate.startsWith('group:') ||
+        candidate.startsWith('domain:') ||
+        candidate.startsWith('principalSet://goog/') ||
+        /^principalSet:\/\/cloudresourcemanager\.googleapis\.com\/(?:projects|folders|organizations)\/\d+\/type\/ServiceAccount$/u.test(
+          candidate,
+        ) ||
+        /^project(?:Editor|Owner|Viewer):/u.test(candidate),
+    );
   });
 }
 
@@ -296,9 +374,9 @@ export function assertNoProjectIamBinding(
       '--format=json',
     ]),
   );
-  if (policyHasServiceAccountBinding(value, contract.email)) {
+  if (policyCouldGrantServiceAccountAccess(value, contract.email)) {
     throw new Error(
-      'The roster-reader service account unexpectedly has a direct project IAM binding.',
+      'The roster-reader service account unexpectedly has, or could receive through a broad principal, a direct project IAM binding.',
     );
   }
 }

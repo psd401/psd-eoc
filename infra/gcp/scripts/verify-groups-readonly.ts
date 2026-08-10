@@ -17,6 +17,7 @@ import {
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
   assertAwsAccount,
+  awsSecretExists,
   readSecretValue,
   requiredString,
 } from './runtime';
@@ -154,6 +155,18 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   const contract = readGroupsReaderContract();
   await assertExactLiveGroupsReaderRole(contract, fetcher);
   assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
+  if (
+    !awsSecretExists({
+      expectedAccountId: AWS_ACCOUNT_ID,
+      profile: AWS_PROFILE,
+      region: AWS_REGION,
+      secretName: SECRET_NAME,
+    })
+  ) {
+    throw new Error(
+      'The retained AWS Groups credential secret does not exist.',
+    );
+  }
   const credential = readSecretValue({
     profile: AWS_PROFILE,
     region: AWS_REGION,

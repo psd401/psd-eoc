@@ -80,6 +80,7 @@ variable "required_services" {
   type        = set(string)
   default = [
     "admin.googleapis.com",
+    "cloudbilling.googleapis.com",
     "cloudidentity.googleapis.com",
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
@@ -90,6 +91,7 @@ variable "required_services" {
   validation {
     condition = var.required_services == toset([
       "admin.googleapis.com",
+      "cloudbilling.googleapis.com",
       "cloudidentity.googleapis.com",
       "cloudresourcemanager.googleapis.com",
       "iam.googleapis.com",

@@ -6,8 +6,8 @@ import {
   parseProjectDescribeResult,
   parseStateListResult,
   validateBootstrapProject,
+  validateProjectOwnerPolicy,
   validateStateBucket,
-  validateTerraformWorkspace,
 } from './scripts/apply';
 import {
   findExactAssignment,
@@ -19,10 +19,11 @@ import {
   normalizeApprovedStaffGroup,
   parseGroupsReaderContract,
   parseUserManagedKeyIds,
-  policyHasServiceAccountBinding,
+  policyCouldGrantServiceAccountAccess,
   READONLY_GROUPS_SCOPE,
   ROSTER_READER_EMAIL,
   selectUserManagedKeyMetadata,
+  validateLiveGroupsReaderServiceAccount,
   validateRevocableUserManagedKeyMetadata,
   validateUserManagedKeyMetadata,
 } from './scripts/groups-contract';
@@ -33,6 +34,7 @@ import {
   parseCreatedKeyId,
 } from './scripts/provision-groups-credential';
 import {
+  APPLICATION_DEFAULT_IDENTITY_SCOPES,
   reconcileIdempotentSecretWrite,
   sanitizedAwsEnvironment,
   sanitizedGcloudEnvironment,
@@ -44,6 +46,7 @@ import {
   validateApplicationDefaultCredentialMetadata,
   validateGcloudConfiguration,
   validateGoogleUserIdentity,
+  validateTerraformWorkspace,
 } from './scripts/runtime';
 import {
   parsePlistStrings,
@@ -78,13 +81,29 @@ const validGroupsOutput = {
   application_writes_google_groups: false,
   domain_wide_delegation: false,
   email: ROSTER_READER_EMAIL,
-  oauth_client_id: '123456789012345678901',
   oauth_scopes: [READONLY_GROUPS_SCOPE],
   project_id: 'psd401-eoc',
   project_iam_roles: [],
+  service_account_unique_id: '123456789012345678901',
   workspace_admin_role: GROUPS_READER_ROLE,
   workspace_grant_api_managed: true,
 } as const;
+
+const validLiveGroupsReader = {
+  disabled: false,
+  email: ROSTER_READER_EMAIL,
+  name: `projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}`,
+  oauth2ClientId: '987654321098765432109',
+  projectId: 'psd401-eoc',
+  uniqueId: validGroupsOutput.service_account_unique_id,
+} as const;
+
+function validGroupsReaderContract() {
+  return validateLiveGroupsReaderServiceAccount(
+    validLiveGroupsReader,
+    parseGroupsReaderContract(validGroupsOutput),
+  );
+}
 
 const validProject = {
   labels: {
@@ -130,6 +149,15 @@ const validBucket = {
 const validBucketPolicy = {
   bindings: [
     {
+      members: ['user:kjh_admin@psd401.net'],
+      role: 'roles/storage.objectAdmin',
+    },
+  ],
+} as const;
+
+const bootstrapBucketPolicy = {
+  bindings: [
+    {
       members: ['projectEditor:psd401-eoc', 'projectOwner:psd401-eoc'],
       role: 'roles/storage.legacyBucketOwner',
     },
@@ -158,8 +186,31 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(variables).toContain('default     = "01760A-35A65E-94FB90"');
     expect(main).toContain('auto_create_network = false');
     expect(main).toContain('deletion_policy     = "PREVENT"');
-    expect(main.match(/prevent_destroy = true/gu)).toHaveLength(4);
+    expect(main.match(/prevent_destroy = true/gu)).toHaveLength(6);
     expect(main).toContain('deletion_policy             = "PREVENT"');
+  });
+
+  test('removes the automatic creator Owner only after narrower grants exist', () => {
+    const main = read('main.tf');
+    const readme = read('README.md');
+    const rolesStart = main.indexOf('terraform_admin_roles = toset([');
+    const rolesEnd = main.indexOf('])', rolesStart);
+    const adminRoles = main.slice(rolesStart, rolesEnd);
+
+    expect(adminRoles).not.toContain('roles/owner');
+    expect(adminRoles).toContain('roles/billing.projectManager');
+    expect(adminRoles).toContain('roles/resourcemanager.projectMover');
+    expect(adminRoles).toContain('roles/resourcemanager.projectIamAdmin');
+    expect(main).toContain(
+      'resource "google_project_iam_member_remove" "terraform_admin_owner"',
+    );
+    expect(main).toMatch(
+      /resource "google_project_iam_member_remove" "terraform_admin_owner"[\s\S]*role\s+= "roles\/owner"[\s\S]*depends_on = \[google_project_iam_member\.terraform_admin\][\s\S]*prevent_destroy = true/u,
+    );
+    expect(readme.replace(/\s+/gu, ' ')).toContain(
+      'The final live policy read requires no direct Owner binding',
+    );
+    expect(readme).not.toContain('Retaining protected `roles/owner`');
   });
 
   test('pins quota billing to the dedicated project after bootstrap', () => {
@@ -208,6 +259,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
 
     for (const service of [
       'admin.googleapis.com',
+      'cloudbilling.googleapis.com',
       'cloudidentity.googleapis.com',
       'cloudresourcemanager.googleapis.com',
       'iam.googleapis.com',
@@ -221,7 +273,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(allTerraform).not.toContain('disable_dependent_services = true');
     expect(allTerraform).not.toContain('deletion_policy            = "DELETE"');
     expect(allTerraform.match(/deletion_policy\s+= "PREVENT"/gu)).toHaveLength(
-      9,
+      11,
     );
   });
 
@@ -338,11 +390,40 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
 
   test('breaks the new-bucket backend cycle with a non-secret bootstrap root', () => {
     const bootstrap = read('bootstrap/main.tf');
+    const main = read('main.tf');
     const apply = read('scripts/apply.ts');
 
     expect(bootstrap).not.toContain('backend "gcs"');
     expect(bootstrap).not.toContain('google_service_account');
     expect(bootstrap).not.toContain('private_key');
+    for (const prerequisite of [
+      'serviceusage.googleapis.com',
+      'storage.googleapis.com',
+      'cloudresourcemanager.googleapis.com',
+      'cloudbilling.googleapis.com',
+    ]) {
+      expect(bootstrap).toContain(prerequisite);
+    }
+    expect(apply).toContain(
+      'google_project_service.required["cloudresourcemanager.googleapis.com"]',
+    );
+    expect(apply).toContain(
+      'google_project_service.required["cloudbilling.googleapis.com"]',
+    );
+    for (const terraform of [bootstrap, main]) {
+      expect(terraform).toContain(
+        'resource "google_storage_bucket_iam_policy" "terraform_state"',
+      );
+      expect(terraform).toContain('role    = "roles/storage.objectAdmin"');
+      expect(terraform).toContain('prevent_destroy = true');
+      expect(terraform).not.toContain('roles/storage.legacyBucketOwner');
+      expect(terraform).not.toContain('projectViewer:');
+    }
+    expect(apply).toContain(
+      "'google_storage_bucket_iam_policy.terraform_state'",
+    );
+    expect(apply).toContain('`b/${STATE_BUCKET}`');
+    expect(apply).toContain("bucketStatus === 'bootstrap-policy'");
     expect(apply).toContain("'terraform', ['init', '-input=false']");
     expect(apply).toContain("'import'");
     expect(apply).toContain("['state', 'rm', ...duplicateResources]");
@@ -350,16 +431,85 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
 });
 
 describe('fail-closed bootstrap and process behavior', () => {
+  test('allows only the automatic creator Owner before main apply and none after', () => {
+    const automaticCreatorOwner = {
+      bindings: [
+        {
+          members: ['user:kjh_admin@psd401.net'],
+          role: 'roles/owner',
+        },
+        {
+          members: ['user:kjh_admin@psd401.net'],
+          role: 'roles/viewer',
+        },
+      ],
+    } as const;
+    const noOwner = {
+      bindings: [
+        {
+          members: ['user:kjh_admin@psd401.net'],
+          role: 'roles/viewer',
+        },
+      ],
+    } as const;
+
+    expect(() =>
+      validateProjectOwnerPolicy(automaticCreatorOwner, true),
+    ).not.toThrow();
+    expect(() =>
+      validateProjectOwnerPolicy(automaticCreatorOwner, false),
+    ).toThrow('still contains a direct Owner grant');
+    expect(() => validateProjectOwnerPolicy(noOwner, true)).not.toThrow();
+    expect(() => validateProjectOwnerPolicy(noOwner, false)).not.toThrow();
+    expect(() =>
+      validateProjectOwnerPolicy(
+        {
+          bindings: [
+            {
+              members: ['group:cloud-admins@psd401.net'],
+              role: 'roles/owner',
+            },
+          ],
+        },
+        true,
+      ),
+    ).toThrow('other than the one automatic bootstrap grant');
+    expect(() =>
+      validateProjectOwnerPolicy(
+        {
+          bindings: [
+            {
+              members: ['user:kjh_admin@psd401.net', 'domain:psd401.net'],
+              role: 'roles/owner',
+            },
+          ],
+        },
+        true,
+      ),
+    ).toThrow('other than the one automatic bootstrap grant');
+  });
+
   test('refuses every persisted non-default Terraform workspace', () => {
     expect(() => validateTerraformWorkspace('default')).not.toThrow();
     expect(() => validateTerraformWorkspace('production-shadow')).toThrow(
       'Terraform workspace must be default',
     );
 
+    const runtime = read('scripts/runtime.ts');
+    expect(runtime).toContain("runCommand('terraform', ['workspace', 'show']");
     const apply = read('scripts/apply.ts');
-    expect(apply).toContain("runCommand('terraform', ['workspace', 'show']");
     expect(apply).toContain('assertDefaultTerraformWorkspace(bootstrapRoot)');
     expect(apply).toContain('assertDefaultTerraformWorkspace();');
+
+    for (const path of [
+      'scripts/groups-contract.ts',
+      'scripts/store-oauth-client.ts',
+    ]) {
+      const helper = read(path);
+      expect(helper).toMatch(
+        /assertDefaultTerraformWorkspace\(\);[\s\S]*runCommand\('terraform', \['output'/u,
+      );
+    }
   });
 
   test('imports into a genuinely empty remote backend without hiding errors', () => {
@@ -432,12 +582,27 @@ describe('fail-closed bootstrap and process behavior', () => {
         billingEnabled: false,
       }),
     ).toThrow('does not match');
+    expect(() =>
+      validateBootstrapProject(
+        {
+          ...validProject,
+          labels: { ...validProject.labels, unexpected: 'out-of-band' },
+        },
+        validBilling,
+      ),
+    ).toThrow('does not match');
   });
 
   test('adopts only a fully private project-owned state backend', () => {
+    expect(validateStateBucket(validBucket, validBucketPolicy)).toBe(
+      'managed-policy',
+    );
+    expect(validateStateBucket(validBucket, bootstrapBucketPolicy, true)).toBe(
+      'bootstrap-policy',
+    );
     expect(() =>
-      validateStateBucket(validBucket, validBucketPolicy),
-    ).not.toThrow();
+      validateStateBucket(validBucket, bootstrapBucketPolicy),
+    ).toThrow('single-administrator');
     expect(() =>
       validateStateBucket(
         { ...validBucket, public_access_prevention: 'inherited' },
@@ -474,7 +639,34 @@ describe('fail-closed bootstrap and process behavior', () => {
           { members: ['allUsers'], role: 'roles/storage.objectViewer' },
         ],
       }),
-    ).toThrow('project-only');
+    ).toThrow('single-administrator');
+    expect(() =>
+      validateStateBucket(validBucket, {
+        bindings: [
+          {
+            condition: {
+              expression: 'request.time < timestamp("2030-01-01T00:00:00Z")',
+              title: 'temporary',
+            },
+            members: ['user:kjh_admin@psd401.net'],
+            role: 'roles/storage.objectAdmin',
+          },
+        ],
+      }),
+    ).toThrow('invalid binding');
+    expect(() =>
+      validateStateBucket(validBucket, {
+        bindings: [
+          {
+            members: [
+              'user:kjh_admin@psd401.net',
+              'group:cloud-admins@psd401.net',
+            ],
+            role: 'roles/storage.objectAdmin',
+          },
+        ],
+      }),
+    ).toThrow('single-administrator');
   });
 
   test('removes inherited Terraform bypasses and credential overrides', () => {
@@ -625,6 +817,14 @@ describe('fail-closed bootstrap and process behavior', () => {
   });
 
   test('rejects an ADC identity other than the verified district admin', () => {
+    expect(APPLICATION_DEFAULT_IDENTITY_SCOPES).toEqual([
+      'https://www.googleapis.com/auth/cloud-platform',
+      'openid',
+      'https://www.googleapis.com/auth/userinfo.email',
+    ]);
+    expect(read('scripts/runtime.ts')).toContain(
+      "`--scopes=${APPLICATION_DEFAULT_IDENTITY_SCOPES.join(',')}`",
+    );
     expect(() =>
       validateGoogleUserIdentity(
         { email: 'kjh_admin@psd401.net', verified_email: true },
@@ -755,6 +955,13 @@ describe('fail-closed bootstrap and process behavior', () => {
       expect(helper.match(/awsSecretExists\(/gu)).toHaveLength(2);
       expect(helper).toContain('expectedAccountId: AWS_ACCOUNT_ID');
     }
+
+    const verifier = read('scripts/verify-groups-readonly.ts');
+    expect(verifier.match(/awsSecretExists\(/gu)).toHaveLength(1);
+    expect(verifier).toContain('expectedAccountId: AWS_ACCOUNT_ID');
+    expect(verifier.indexOf('awsSecretExists({')).toBeLessThan(
+      verifier.indexOf('readSecretValue({'),
+    );
   });
 
   test('retries an ambiguous secret write and retains unresolved ambiguity', async () => {
@@ -799,7 +1006,7 @@ describe('Groups least-privilege contracts', () => {
   test('accepts only the fixed Terraform reader output', () => {
     expect(parseGroupsReaderContract(validGroupsOutput)).toEqual({
       email: ROSTER_READER_EMAIL,
-      oauthClientId: '123456789012345678901',
+      serviceAccountUniqueId: '123456789012345678901',
     });
     expect(() =>
       parseGroupsReaderContract({
@@ -815,6 +1022,32 @@ describe('Groups least-privilege contracts', () => {
     ).toThrow('fixed read-only contract');
   });
 
+  test('binds the Terraform numeric assignee to the fixed live service account', () => {
+    const contract = parseGroupsReaderContract(validGroupsOutput);
+    expect(
+      validateLiveGroupsReaderServiceAccount(validLiveGroupsReader, contract),
+    ).toEqual({
+      email: ROSTER_READER_EMAIL,
+      oauthClientId: '987654321098765432109',
+      serviceAccountUniqueId: '123456789012345678901',
+    });
+    for (const invalid of [
+      { ...validLiveGroupsReader, disabled: true },
+      { ...validLiveGroupsReader, projectId: 'wrong-project' },
+      { ...validLiveGroupsReader, uniqueId: '999999999999999999999' },
+      { ...validLiveGroupsReader, oauth2ClientId: 'not-numeric' },
+    ]) {
+      expect(() =>
+        validateLiveGroupsReaderServiceAccount(invalid, contract),
+      ).toThrow('fixed live roster-reader service account');
+    }
+
+    const source = read('scripts/groups-contract.ts');
+    expect(source).toMatch(
+      /'service-accounts',\s*'describe',\s*ROSTER_READER_EMAIL,\s*'--project',\s*PROJECT_ID/gu,
+    );
+  });
+
   test('matches only an externally supplied staff-group hash', () => {
     const normalized = normalizeApprovedStaffGroup('EOC-Test-Staff@PSD401.NET');
     expect(normalized).toBe('eoc-test-staff@psd401.net');
@@ -828,7 +1061,7 @@ describe('Groups least-privilege contracts', () => {
   });
 
   test('binds the AWS credential to Terraform and the approved group', () => {
-    const contract = parseGroupsReaderContract(validGroupsOutput);
+    const contract = validGroupsReaderContract();
     const group = 'eoc-test-staff@psd401.net';
     const credentialCreatedAt = new Date().toISOString();
     const credential = {
@@ -873,7 +1106,7 @@ describe('Groups least-privilege contracts', () => {
   });
 
   test('keeps a generated Google private key in memory only', () => {
-    const contract = parseGroupsReaderContract(validGroupsOutput);
+    const contract = validGroupsReaderContract();
     const generated = {
       client_email: contract.email,
       client_id: contract.oauthClientId,
@@ -1013,24 +1246,63 @@ describe('Groups least-privilege contracts', () => {
     const contractSource = read('scripts/groups-contract.ts');
     expect(contractSource).toContain("'--managed-by'");
     expect(contractSource).toContain("'--format=json'");
-    expect(contractSource).not.toContain("'describe'");
+    expect(contractSource).not.toMatch(
+      /'service-accounts',\s*'keys',\s*'describe'/gu,
+    );
   });
 
-  test('detects any live direct project binding', () => {
+  test('detects direct and broad project principals that can include the reader', () => {
     expect(
-      policyHasServiceAccountBinding(
-        { bindings: [{ members: ['user:admin@psd401.net'] }] },
+      policyCouldGrantServiceAccountAccess(
+        {
+          bindings: [
+            { members: ['user:admin@psd401.net'], role: 'roles/viewer' },
+          ],
+        },
         ROSTER_READER_EMAIL,
       ),
     ).toBe(false);
     expect(
-      policyHasServiceAccountBinding(
+      policyCouldGrantServiceAccountAccess(
         {
-          bindings: [{ members: [`serviceAccount:${ROSTER_READER_EMAIL}`] }],
+          bindings: [
+            {
+              members: [
+                'serviceAccount:unrelated@other.iam.gserviceaccount.com',
+              ],
+              role: 'roles/viewer',
+            },
+          ],
         },
         ROSTER_READER_EMAIL,
       ),
-    ).toBe(true);
+    ).toBe(false);
+    for (const member of [
+      `serviceAccount:${ROSTER_READER_EMAIL}`,
+      'allUsers',
+      'allAuthenticatedUsers',
+      'principalSet://goog/public:all',
+      'principalSet://goog/public:authenticated',
+      'group:cloud-admins@psd401.net',
+      'domain:psd401.net',
+      'principalSet://goog/cloudIdentityCustomerId/C01234567',
+      'principalSet://cloudresourcemanager.googleapis.com/projects/123456789/type/ServiceAccount',
+      'principalSet://cloudresourcemanager.googleapis.com/organizations/482073499306/type/ServiceAccount',
+      'projectOwner:psd401-eoc',
+    ]) {
+      expect(
+        policyCouldGrantServiceAccountAccess(
+          { bindings: [{ members: [member], role: 'roles/viewer' }] },
+          ROSTER_READER_EMAIL,
+        ),
+      ).toBe(true);
+    }
+    expect(() =>
+      policyCouldGrantServiceAccountAccess(
+        { bindings: [{ members: [42], role: 'roles/viewer' }] },
+        ROSTER_READER_EMAIL,
+      ),
+    ).toThrow('binding is invalid');
   });
 
   test('redacts a network exception that contains the group URL', async () => {
@@ -1119,7 +1391,7 @@ describe('Groups least-privilege contracts', () => {
       findExactAssignment(
         [
           {
-            assignedTo: validGroupsOutput.oauth_client_id,
+            assignedTo: validGroupsOutput.service_account_unique_id,
             assigneeType: 'USER',
             condition: '',
             roleAssignmentId: 'assignment-id',
@@ -1127,11 +1399,11 @@ describe('Groups least-privilege contracts', () => {
             scopeType: 'CUSTOMER',
           },
         ],
-        validGroupsOutput.oauth_client_id,
+        validGroupsOutput.service_account_unique_id,
         role.roleId,
       ),
     ).toEqual({
-      assignedTo: validGroupsOutput.oauth_client_id,
+      assignedTo: validGroupsOutput.service_account_unique_id,
       assigneeType: 'USER',
       roleAssignmentId: 'assignment-id',
       roleId: role.roleId,
@@ -1141,14 +1413,14 @@ describe('Groups least-privilege contracts', () => {
       findExactAssignment(
         [
           {
-            assignedTo: validGroupsOutput.oauth_client_id,
+            assignedTo: validGroupsOutput.service_account_unique_id,
             assigneeType: 'USER',
             roleAssignmentId: 'wrong-assignment',
             roleId: 'writer-role-id',
             scopeType: 'CUSTOMER',
           },
         ],
-        validGroupsOutput.oauth_client_id,
+        validGroupsOutput.service_account_unique_id,
         role.roleId,
       ),
     ).toThrow('unexpected Workspace admin role');
@@ -1156,7 +1428,7 @@ describe('Groups least-privilege contracts', () => {
       findExactAssignment(
         [
           {
-            assignedTo: validGroupsOutput.oauth_client_id,
+            assignedTo: validGroupsOutput.service_account_unique_id,
             assigneeType: 'USER',
             condition: 'SECURITY_GROUPS',
             roleAssignmentId: 'conditional-assignment',
@@ -1164,7 +1436,7 @@ describe('Groups least-privilege contracts', () => {
             scopeType: 'CUSTOMER',
           },
         ],
-        validGroupsOutput.oauth_client_id,
+        validGroupsOutput.service_account_unique_id,
         role.roleId,
       ),
     ).toThrow('must be unconditional');
@@ -1179,7 +1451,7 @@ describe('Groups least-privilege contracts', () => {
             scopeType: 'CUSTOMER',
           },
         ],
-        validGroupsOutput.oauth_client_id,
+        validGroupsOutput.service_account_unique_id,
         role.roleId,
       ),
     ).toThrow('indirect or group-mediated');
