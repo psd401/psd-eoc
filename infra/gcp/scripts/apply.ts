@@ -13,12 +13,12 @@ import {
   sanitizedGcloudEnvironment,
   sanitizedTerraformEnvironment,
 } from './runtime';
+import { TERRAFORM_ADMIN, validateProjectIamPolicy } from './project-policy';
 
 const PROJECT_ID = 'psd401-eoc';
 const PROJECT_NAME = 'PSD EOC';
 const ORGANIZATION_ID = '482073499306';
 const BILLING_ACCOUNT = '<billing-account>';
-const TERRAFORM_ADMIN = 'kjh_admin@psd401.net';
 const STATE_BUCKET = 'psd401-eoc-terraform-state';
 const bootstrapRoot = join(gcpRoot, 'bootstrap');
 const bootstrapPlan = join(bootstrapRoot, '.terraform', 'bootstrap.tfplan');
@@ -74,12 +74,19 @@ const bootstrapServiceImports = [
   ['google_project_service.cloud_billing', 'cloudbilling.googleapis.com'],
 ] as const;
 
+export const BOOTSTRAP_SERVICES = new Set(
+  bootstrapServiceImports.map(([, service]) => service),
+);
+
 const bootstrapBucketImports = [
   ['google_storage_bucket.terraform_state', STATE_BUCKET],
   ['google_storage_bucket_iam_policy.terraform_state', `b/${STATE_BUCKET}`],
 ] as const;
 
-type StateBucketStatus = 'absent' | 'bootstrap-policy' | 'managed-policy';
+export type StateBucketStatus =
+  | 'absent'
+  | 'bootstrap-policy'
+  | 'managed-policy';
 
 function parseJsonObject(
   value: string,
@@ -175,62 +182,6 @@ export function validateBootstrapProject(
   ) {
     throw new Error(
       'Existing project metadata does not match the fixed PSD EOC organization, billing, and label contract.',
-    );
-  }
-}
-
-export function validateProjectOwnerPolicy(
-  policy: Readonly<Record<string, unknown>>,
-  allowBootstrapOwner: boolean,
-): void {
-  const rawBindings = policy.bindings;
-  const bindings = rawBindings === undefined ? [] : rawBindings;
-  if (!Array.isArray(bindings)) {
-    throw new Error('Project IAM policy bindings are invalid.');
-  }
-
-  const owners = new Set<string>();
-  let ownerBindingCount = 0;
-  for (const binding of bindings) {
-    if (
-      typeof binding !== 'object' ||
-      binding === null ||
-      Array.isArray(binding)
-    ) {
-      throw new Error('Project IAM policy contains an invalid binding.');
-    }
-    const record = binding as Readonly<Record<string, unknown>>;
-    if (
-      typeof record.role !== 'string' ||
-      !Array.isArray(record.members) ||
-      record.members.some((member) => typeof member !== 'string')
-    ) {
-      throw new Error('Project IAM policy contains an invalid binding.');
-    }
-    if (record.role !== 'roles/owner') {
-      continue;
-    }
-    ownerBindingCount += 1;
-    if (record.condition !== undefined) {
-      throw new Error('Project IAM Owner binding must not be conditional.');
-    }
-    for (const member of record.members as string[]) {
-      if (owners.has(member)) {
-        throw new Error('Project IAM Owner binding contains a duplicate.');
-      }
-      owners.add(member);
-    }
-  }
-
-  const bootstrapOwner = `user:${TERRAFORM_ADMIN}`;
-  const exactBootstrapOwner =
-    ownerBindingCount === 1 && owners.size === 1 && owners.has(bootstrapOwner);
-  const noOwnerBinding = ownerBindingCount === 0 && owners.size === 0;
-  if (!noOwnerBinding && !(allowBootstrapOwner && exactBootstrapOwner)) {
-    throw new Error(
-      allowBootstrapOwner
-        ? 'Project IAM contains an Owner grant other than the one automatic bootstrap grant.'
-        : 'Project IAM still contains a direct Owner grant after the main apply.',
     );
   }
 }
@@ -474,7 +425,11 @@ function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
     );
   }
   validateExistingProject(project);
-  validateProjectOwnerPolicy(projectIamPolicy(), true);
+  validateProjectIamPolicy(
+    projectIamPolicy(),
+    project.projectNumber as string,
+    'recovery',
+  );
   const projectBucketNames = runCommand('gcloud', [
     'storage',
     'buckets',
@@ -564,6 +519,16 @@ function enabledProjectServices(): Set<string> {
   );
 }
 
+export function bootstrapPrerequisitesReady(
+  bucketStatus: StateBucketStatus,
+  enabledServices: ReadonlySet<string>,
+): boolean {
+  return (
+    bucketStatus === 'managed-policy' &&
+    [...BOOTSTRAP_SERVICES].every((service) => enabledServices.has(service))
+  );
+}
+
 function recoverBootstrapState(bucketStatus: StateBucketStatus): void {
   const resources = stateResources(bootstrapRoot);
   const project = inspectProject();
@@ -577,7 +542,11 @@ function recoverBootstrapState(bucketStatus: StateBucketStatus): void {
   }
 
   validateExistingProject(project);
-  validateProjectOwnerPolicy(projectIamPolicy(), true);
+  validateProjectIamPolicy(
+    projectIamPolicy(),
+    project.projectNumber as string,
+    'recovery',
+  );
   if (!resources.has('google_project.psd_eoc')) {
     runTerraformInteractive(
       ['import', '-input=false', 'google_project.psd_eoc', PROJECT_ID],
@@ -597,7 +566,7 @@ function recoverBootstrapState(bucketStatus: StateBucketStatus): void {
     }
   }
 
-  if (bucketStatus === 'bootstrap-policy') {
+  if (bucketStatus !== 'absent') {
     for (const [address, importId] of bootstrapBucketImports) {
       if (!resources.has(address)) {
         runTerraformInteractive(
@@ -641,7 +610,11 @@ async function main(): Promise<void> {
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
 
   const initialBucketStatus = stateBucketStatus(true);
-  if (initialBucketStatus !== 'managed-policy') {
+  const initialServices =
+    initialBucketStatus === 'managed-policy'
+      ? enabledProjectServices()
+      : new Set<string>();
+  if (!bootstrapPrerequisitesReady(initialBucketStatus, initialServices)) {
     runInteractive('terraform', ['init', '-input=false'], bootstrapRoot);
     assertDefaultTerraformWorkspace(bootstrapRoot);
     recoverBootstrapState(initialBucketStatus);
@@ -652,9 +625,15 @@ async function main(): Promise<void> {
       preview:
         'Bootstrap consequence preview: create or adopt the billed psd401-eoc project directly under the district organization, enable Service Usage, Storage, Cloud Resource Manager, and Cloud Billing before quota is charged to the new project, and create a private versioned state bucket whose authoritative policy grants only the fixed human Terraform administrator Object Admin. No Groups data, OAuth credential, or notification path is touched.',
     });
-    if (stateBucketStatus(false) !== 'managed-policy') {
+    const repairedBucketStatus = stateBucketStatus(false);
+    if (
+      !bootstrapPrerequisitesReady(
+        repairedBucketStatus,
+        enabledProjectServices(),
+      )
+    ) {
       throw new Error(
-        'Bootstrap apply did not produce the exact private, single-administrator Terraform state bucket.',
+        'Bootstrap apply did not produce the exact private, single-administrator Terraform state bucket with every main-provider API prerequisite enabled.',
       );
     }
   }
@@ -676,7 +655,16 @@ async function main(): Promise<void> {
     preview:
       "Apply consequence preview: enable only the declared identity/IAM APIs, retain the single-administrator state-bucket policy, replace the project creator's automatic Owner grant with the named narrower Terraform administrator roles, and create one protected service account with no project IAM roles. This does not authorize Workspace access, create OAuth clients, read Groups, or send notifications.",
   });
-  validateProjectOwnerPolicy(projectIamPolicy(), false);
+  const finalProject = inspectProject();
+  if (finalProject === null) {
+    throw new Error('Main apply did not leave the expected project readable.');
+  }
+  validateExistingProject(finalProject);
+  validateProjectIamPolicy(
+    projectIamPolicy(),
+    finalProject.projectNumber as string,
+    'steady-state',
+  );
   if (stateBucketStatus(false) !== 'managed-policy') {
     throw new Error(
       'Main apply did not preserve the exact private, single-administrator Terraform state bucket.',

@@ -1,4 +1,5 @@
 import {
+  assertRosterReaderCredentialBoundary,
   GROUPS_READER_ROLE,
   PROJECT_ID,
   readGroupsReaderContract,
@@ -268,6 +269,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   assertActiveGcloudAccount(TERRAFORM_ADMIN);
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
   const contract = readGroupsReaderContract();
+  assertRosterReaderCredentialBoundary(contract);
   const token = accessToken();
   const role = selectGroupsReaderRole(await listAll(fetcher, token, 'roles'));
   const assignments = await listAll(
@@ -282,6 +284,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
     role.roleId,
   );
   if (existing !== undefined) {
+    assertRosterReaderCredentialBoundary(contract);
     console.log(
       'PASS: the roster-reader service account already has only the direct Workspace Groups Reader role and no indirect role assignment.',
     );
@@ -339,6 +342,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
       'Admin SDK could not verify the new Groups Reader assignment.',
     );
   }
+  assertRosterReaderCredentialBoundary(contract);
   console.log(
     'PASS: assigned and read back the Workspace Groups Reader role for the roster-reader service account.',
   );

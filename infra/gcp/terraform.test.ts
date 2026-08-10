@@ -2,11 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
 
 import {
+  BOOTSTRAP_SERVICES,
+  bootstrapPrerequisitesReady,
   parseBucketDescribeResult,
   parseProjectDescribeResult,
   parseStateListResult,
   validateBootstrapProject,
-  validateProjectOwnerPolicy,
   validateStateBucket,
 } from './scripts/apply';
 import {
@@ -27,6 +28,11 @@ import {
   validateRevocableUserManagedKeyMetadata,
   validateUserManagedKeyMetadata,
 } from './scripts/groups-contract';
+import {
+  TERRAFORM_ADMIN_ROLES,
+  validateProjectIamPolicy,
+  validateRosterReaderResourcePolicy,
+} from './scripts/project-policy';
 import {
   cleanupCredentialArtifacts,
   createdKeyIsVisible,
@@ -83,6 +89,7 @@ const validGroupsOutput = {
   email: ROSTER_READER_EMAIL,
   oauth_scopes: [READONLY_GROUPS_SCOPE],
   project_id: 'psd401-eoc',
+  project_number: '123456789',
   project_iam_roles: [],
   service_account_unique_id: '123456789012345678901',
   workspace_admin_role: GROUPS_READER_ROLE,
@@ -186,7 +193,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(variables).toContain('default     = "<billing-account>"');
     expect(main).toContain('auto_create_network = false');
     expect(main).toContain('deletion_policy     = "PREVENT"');
-    expect(main.match(/prevent_destroy = true/gu)).toHaveLength(6);
+    expect(main.match(/prevent_destroy = true/gu)).toHaveLength(7);
     expect(main).toContain('deletion_policy             = "PREVENT"');
   });
 
@@ -196,16 +203,20 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     const rolesStart = main.indexOf('terraform_admin_roles = toset([');
     const rolesEnd = main.indexOf('])', rolesStart);
     const adminRoles = main.slice(rolesStart, rolesEnd);
+    const terraformRoles = new Set(
+      [...adminRoles.matchAll(/"(roles\/[^"]+)"/gu)].map((match) => match[1]),
+    );
 
     expect(adminRoles).not.toContain('roles/owner');
-    expect(adminRoles).toContain('roles/billing.projectManager');
-    expect(adminRoles).toContain('roles/resourcemanager.projectMover');
-    expect(adminRoles).toContain('roles/resourcemanager.projectIamAdmin');
+    expect(terraformRoles).toEqual(new Set(TERRAFORM_ADMIN_ROLES));
     expect(main).toContain(
       'resource "google_project_iam_member_remove" "terraform_admin_owner"',
     );
     expect(main).toMatch(
       /resource "google_project_iam_member_remove" "terraform_admin_owner"[\s\S]*role\s+= "roles\/owner"[\s\S]*depends_on = \[google_project_iam_member\.terraform_admin\][\s\S]*prevent_destroy = true/u,
+    );
+    expect(main).toMatch(
+      /resource "google_project_iam_member_remove" "google_apis_service_agent_editor"[\s\S]*role\s+= "roles\/editor"[\s\S]*cloudservices\.gserviceaccount\.com[\s\S]*depends_on = \[google_project_iam_member\.terraform_admin\]/u,
     );
     expect(readme.replace(/\s+/gu, ' ')).toContain(
       'The final live policy read requires no direct Owner binding',
@@ -285,7 +296,9 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(allTerraform).toContain(
       'resource "google_service_account" "roster_reader"',
     );
-    expect(allTerraform).not.toContain('serviceAccount:${');
+    expect(allTerraform).not.toMatch(
+      /resource "google_(?:project|service_account)_iam_(?:binding|member|policy)"[^}]*roster_reader/u,
+    );
     expect(allTerraform).not.toContain('google_service_account_key');
     expect(allTerraform).not.toContain('private_key');
     expect(read('outputs.tf')).toContain('project_iam_roles');
@@ -404,6 +417,9 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     ]) {
       expect(bootstrap).toContain(prerequisite);
     }
+    expect(bootstrap).toMatch(
+      /resource "google_storage_bucket" "terraform_state"[\s\S]*depends_on = \[[\s\S]*google_project_service\.cloud_billing,[\s\S]*google_project_service\.cloud_resource_manager,[\s\S]*google_project_service\.storage,[\s\S]*\]/u,
+    );
     expect(apply).toContain(
       'google_project_service.required["cloudresourcemanager.googleapis.com"]',
     );
@@ -423,7 +439,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
       "'google_storage_bucket_iam_policy.terraform_state'",
     );
     expect(apply).toContain('`b/${STATE_BUCKET}`');
-    expect(apply).toContain("bucketStatus === 'bootstrap-policy'");
+    expect(apply).toContain("bucketStatus !== 'absent'");
     expect(apply).toContain("'terraform', ['init', '-input=false']");
     expect(apply).toContain("'import'");
     expect(apply).toContain("['state', 'rm', ...duplicateResources]");
@@ -431,8 +447,13 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
 });
 
 describe('fail-closed bootstrap and process behavior', () => {
-  test('allows only the automatic creator Owner before main apply and none after', () => {
-    const automaticCreatorOwner = {
+  test('allowlists the entire project IAM policy across recovery and steady state', () => {
+    const administratorBindings = TERRAFORM_ADMIN_ROLES.map((role) => ({
+      members: ['user:kjh_admin@psd401.net'],
+      role,
+    }));
+    const steadyPolicy = { bindings: administratorBindings } as const;
+    const recoveryPolicy = {
       bindings: [
         {
           members: ['user:kjh_admin@psd401.net'],
@@ -442,51 +463,131 @@ describe('fail-closed bootstrap and process behavior', () => {
           members: ['user:kjh_admin@psd401.net'],
           role: 'roles/viewer',
         },
-      ],
-    } as const;
-    const noOwner = {
-      bindings: [
         {
-          members: ['user:kjh_admin@psd401.net'],
-          role: 'roles/viewer',
+          members: [
+            'serviceAccount:123456789@cloudservices.gserviceaccount.com',
+          ],
+          role: 'roles/editor',
         },
       ],
     } as const;
 
     expect(() =>
-      validateProjectOwnerPolicy(automaticCreatorOwner, true),
+      validateProjectIamPolicy(recoveryPolicy, '123456789', 'recovery'),
     ).not.toThrow();
     expect(() =>
-      validateProjectOwnerPolicy(automaticCreatorOwner, false),
-    ).toThrow('still contains a direct Owner grant');
-    expect(() => validateProjectOwnerPolicy(noOwner, true)).not.toThrow();
-    expect(() => validateProjectOwnerPolicy(noOwner, false)).not.toThrow();
+      validateProjectIamPolicy(steadyPolicy, '123456789', 'steady-state'),
+    ).not.toThrow();
     expect(() =>
-      validateProjectOwnerPolicy(
+      validateProjectIamPolicy(recoveryPolicy, '123456789', 'steady-state'),
+    ).toThrow('unexpected role or principal');
+    expect(() =>
+      validateProjectIamPolicy(
+        { bindings: administratorBindings.slice(1) },
+        '123456789',
+        'steady-state',
+      ),
+    ).toThrow('missing one or more required');
+
+    for (const binding of [
+      {
+        members: ['user:outsider@psd401.net'],
+        role: 'roles/storage.objectViewer',
+      },
+      {
+        members: ['group:cloud-admins@psd401.net'],
+        role: 'roles/storage.admin',
+      },
+      {
+        members: ['user:outsider@psd401.net'],
+        role: 'roles/iam.serviceAccountTokenCreator',
+      },
+      {
+        members: ['user:outsider@psd401.net'],
+        role: 'projects/psd401-eoc/roles/customStateReader',
+      },
+      {
+        members: [
+          'serviceAccount:service-123456789@gcp-sa-firebase.iam.gserviceaccount.com',
+        ],
+        role: 'roles/firebase.managementServiceAgent',
+      },
+      {
+        members: ['serviceAccount:987654321@cloudservices.gserviceaccount.com'],
+        role: 'roles/editor',
+      },
+    ]) {
+      expect(() =>
+        validateProjectIamPolicy(
+          { bindings: [binding] },
+          '123456789',
+          'recovery',
+        ),
+      ).toThrow();
+    }
+
+    expect(() =>
+      validateProjectIamPolicy(
         {
           bindings: [
             {
-              members: ['group:cloud-admins@psd401.net'],
-              role: 'roles/owner',
+              condition: { expression: 'true' },
+              members: ['user:kjh_admin@psd401.net'],
+              role: 'roles/viewer',
             },
           ],
         },
-        true,
+        '123456789',
+        'recovery',
       ),
-    ).toThrow('other than the one automatic bootstrap grant');
+    ).toThrow('conditional, duplicate, or malformed');
     expect(() =>
-      validateProjectOwnerPolicy(
+      validateProjectIamPolicy(
         {
           bindings: [
+            ...administratorBindings,
             {
-              members: ['user:kjh_admin@psd401.net', 'domain:psd401.net'],
-              role: 'roles/owner',
+              members: ['user:kjh_admin@psd401.net'],
+              role: 'roles/viewer',
             },
           ],
         },
-        true,
+        '123456789',
+        'steady-state',
       ),
-    ).toThrow('other than the one automatic bootstrap grant');
+    ).toThrow('conditional, duplicate, or malformed');
+  });
+
+  test('repairs bootstrap when the bucket is managed but an API is missing', () => {
+    const allServices = new Set(BOOTSTRAP_SERVICES);
+    expect(bootstrapPrerequisitesReady('managed-policy', allServices)).toBe(
+      true,
+    );
+    expect(
+      bootstrapPrerequisitesReady(
+        'managed-policy',
+        new Set([...allServices, 'iam.googleapis.com']),
+      ),
+    ).toBe(true);
+    for (const status of ['absent', 'bootstrap-policy'] as const) {
+      expect(bootstrapPrerequisitesReady(status, allServices)).toBe(false);
+    }
+    for (const missing of [
+      'cloudresourcemanager.googleapis.com',
+      'cloudbilling.googleapis.com',
+    ]) {
+      const incomplete = new Set<string>(allServices);
+      incomplete.delete(missing);
+      expect(bootstrapPrerequisitesReady('managed-policy', incomplete)).toBe(
+        false,
+      );
+    }
+
+    const apply = read('scripts/apply.ts');
+    expect(apply).toContain(
+      'if (!bootstrapPrerequisitesReady(initialBucketStatus, initialServices))',
+    );
+    expect(apply).toContain("if (bucketStatus !== 'absent')");
   });
 
   test('refuses every persisted non-default Terraform workspace', () => {
@@ -962,6 +1063,13 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(verifier.indexOf('awsSecretExists({')).toBeLessThan(
       verifier.indexOf('readSecretValue({'),
     );
+
+    const revoker = read('scripts/revoke-groups-credential.ts');
+    expect(revoker.match(/awsSecretExists\(/gu)).toHaveLength(1);
+    expect(revoker).toContain('expectedAccountId: AWS_ACCOUNT_ID');
+    expect(revoker.indexOf('awsSecretExists({')).toBeLessThan(
+      revoker.indexOf('readSecretValue({'),
+    );
   });
 
   test('retries an ambiguous secret write and retains unresolved ambiguity', async () => {
@@ -1006,6 +1114,7 @@ describe('Groups least-privilege contracts', () => {
   test('accepts only the fixed Terraform reader output', () => {
     expect(parseGroupsReaderContract(validGroupsOutput)).toEqual({
       email: ROSTER_READER_EMAIL,
+      projectNumber: '123456789',
       serviceAccountUniqueId: '123456789012345678901',
     });
     expect(() =>
@@ -1029,6 +1138,7 @@ describe('Groups least-privilege contracts', () => {
     ).toEqual({
       email: ROSTER_READER_EMAIL,
       oauthClientId: '987654321098765432109',
+      projectNumber: '123456789',
       serviceAccountUniqueId: '123456789012345678901',
     });
     for (const invalid of [
@@ -1303,6 +1413,60 @@ describe('Groups least-privilege contracts', () => {
         ROSTER_READER_EMAIL,
       ),
     ).toThrow('binding is invalid');
+
+    for (const role of [
+      'roles/iam.serviceAccountTokenCreator',
+      'roles/iam.serviceAccountUser',
+      'roles/iam.workloadIdentityUser',
+    ]) {
+      expect(
+        policyCouldGrantServiceAccountAccess(
+          {
+            bindings: [{ members: ['user:outsider@psd401.net'], role }],
+          },
+          ROSTER_READER_EMAIL,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  test('requires an empty roster-reader resource policy and checks it around sensitive work', () => {
+    expect(() => validateRosterReaderResourcePolicy({})).not.toThrow();
+    expect(() =>
+      validateRosterReaderResourcePolicy({ bindings: [] }),
+    ).not.toThrow();
+    expect(() =>
+      validateRosterReaderResourcePolicy({
+        bindings: [
+          {
+            members: ['user:outsider@psd401.net'],
+            role: 'roles/iam.serviceAccountTokenCreator',
+          },
+        ],
+      }),
+    ).toThrow('could permit impersonation');
+    expect(() =>
+      validateRosterReaderResourcePolicy({ bindings: 'invalid' }),
+    ).toThrow('bindings are invalid');
+
+    const contract = read('scripts/groups-contract.ts');
+    expect(contract).toMatch(
+      /'service-accounts',\s*'get-iam-policy',\s*contract\.email,\s*'--project',\s*PROJECT_ID/u,
+    );
+    expect(contract).toContain('validateProjectIamPolicy(');
+    expect(contract).toContain('validateRosterReaderResourcePolicy(');
+
+    for (const [path, expectedChecks] of [
+      ['scripts/configure-workspace-role.ts', 3],
+      ['scripts/provision-groups-credential.ts', 2],
+      ['scripts/verify-groups-readonly.ts', 2],
+      ['scripts/revoke-groups-credential.ts', 3],
+    ] as const) {
+      const helper = read(path);
+      expect(
+        helper.match(/assertRosterReaderCredentialBoundary\(contract\)/gu),
+      ).toHaveLength(expectedChecks);
+    }
   });
 
   test('redacts a network exception that contains the group URL', async () => {

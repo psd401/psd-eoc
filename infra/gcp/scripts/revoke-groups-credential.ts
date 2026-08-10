@@ -1,5 +1,5 @@
 import {
-  assertNoProjectIamBinding,
+  assertRosterReaderCredentialBoundary,
   listUserManagedKeys,
   normalizeApprovedStaffGroup,
   PROJECT_ID,
@@ -10,6 +10,7 @@ import {
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
   assertAwsAccount,
+  awsSecretExists,
   readSecretValue,
   requiredString,
   requireExactConfirmation,
@@ -33,8 +34,20 @@ async function main(): Promise<void> {
   assertActiveGcloudAccount(TERRAFORM_ADMIN);
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
   const contract = readGroupsReaderContract();
-  assertNoProjectIamBinding(contract);
+  assertRosterReaderCredentialBoundary(contract);
   assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
+  if (
+    !awsSecretExists({
+      expectedAccountId: AWS_ACCOUNT_ID,
+      profile: AWS_PROFILE,
+      region: AWS_REGION,
+      secretName: SECRET_NAME,
+    })
+  ) {
+    throw new Error(
+      'The retained AWS Groups credential secret does not exist.',
+    );
+  }
   const credential = readSecretValue({
     profile: AWS_PROFILE,
     region: AWS_REGION,
@@ -62,6 +75,7 @@ async function main(): Promise<void> {
     'Groups credential revocation preview: revoke the exact live roster-reader Google key currently bound to the AWS secret. Roster sync will fail closed and must use its last versioned snapshot until provisioning and live verification of the replacement key finish. No AWS secret, group, notification, or human-only action is changed.',
     'revoke-psd-eoc-readonly-groups-key',
   );
+  assertRosterReaderCredentialBoundary(contract);
 
   try {
     runCommand(
@@ -90,6 +104,7 @@ async function main(): Promise<void> {
       'Google did not prove that only the AWS-bound roster-reader key was revoked; reconcile keys before provisioning.',
     );
   }
+  assertRosterReaderCredentialBoundary(contract);
   console.log(
     'PASS: revoked the exact AWS-bound Google key. While issue #68 is undeployed, keep this credential disconnected from scheduled roster sync; after #68, require both replacement credential proof and an application-level approved staff-only sync. No credential value was printed.',
   );

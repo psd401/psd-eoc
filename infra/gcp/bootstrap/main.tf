@@ -110,7 +110,11 @@ resource "google_storage_bucket" "terraform_state" {
     prevent_destroy = true
   }
 
-  depends_on = [google_project_service.storage]
+  depends_on = [
+    google_project_service.cloud_billing,
+    google_project_service.cloud_resource_manager,
+    google_project_service.storage,
+  ]
 }
 
 data "google_iam_policy" "terraform_state" {
