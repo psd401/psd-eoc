@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   assertAwsAccount,
   assertDefaultTerraformWorkspace,
+  assertNoAmbientTransportOverrides,
   awsServiceEndpoint,
   awsSecretExists,
   putSecretValue,
@@ -127,6 +128,7 @@ export function parsePlistStrings(
 }
 
 async function readSecureFile(path: string): Promise<string> {
+  assertNoAmbientTransportOverrides();
   const resolved = await realpath(path);
   const repositoryRelative = relative(repositoryRoot, resolved);
   if (
@@ -215,7 +217,7 @@ async function main(): Promise<void> {
     extraArguments.length > 0
   ) {
     throw new Error(
-      'Usage: bun scripts/store-oauth-client.ts /secure/web-client.json /secure/ios-client.plist',
+      'Usage: ./scripts/run-guarded.sh store-oauth-client /secure/web-client.json /secure/ios-client.plist',
     );
   }
 

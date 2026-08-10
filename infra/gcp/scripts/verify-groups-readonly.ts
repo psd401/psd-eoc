@@ -17,6 +17,7 @@ import {
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
   assertAwsAccount,
+  assertNoAmbientTransportOverrides,
   awsSecretExists,
   readSecretValue,
   requiredString,
@@ -107,6 +108,7 @@ export async function redactedFetch(
   init: RequestInit,
   operation: string,
 ): Promise<Response> {
+  assertNoAmbientTransportOverrides();
   try {
     return await fetcher(input, {
       ...init,

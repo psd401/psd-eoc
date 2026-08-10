@@ -1,10 +1,32 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
 export const gcpRoot = fileURLToPath(new URL('..', import.meta.url));
+
+const trustedHome = '/Users/hagelk';
+const trustedUsername = 'hagelk';
+const trustedPath = '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+const commandPaths = {
+  aws: '/opt/homebrew/bin/aws',
+  gcloud: '/opt/homebrew/bin/gcloud',
+  terraform: '/opt/homebrew/bin/terraform',
+} as const;
+type CloudCommand = keyof typeof commandPaths;
+
+const AWS_ACCOUNT_ID = '<aws-account-id>';
+const AWS_PROFILE = 'psd401-prr-prod';
+const AWS_REGION = 'us-west-2';
+const AWS_SSO_SESSION = 'macbookpro';
+const AWS_SSO_START_URL = 'https://psd401.awsapps.com/start';
 
 export const APPLICATION_DEFAULT_IDENTITY_SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform',
@@ -12,30 +34,491 @@ export const APPLICATION_DEFAULT_IDENTITY_SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email',
 ] as const;
 
-const googleCredentialOverrides = new Set([
-  'CLOUDSDK_AUTH_ACCESS_TOKEN',
-  'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
-  'GCLOUD_KEYFILE_JSON',
-  'GOOGLE_APPLICATION_CREDENTIALS',
-  'GOOGLE_BACKEND_ACCESS_TOKEN',
-  'GOOGLE_BACKEND_CREDENTIALS',
-  'GOOGLE_BACKEND_IMPERSONATE_SERVICE_ACCOUNT',
-  'GOOGLE_BILLING_PROJECT',
-  'GOOGLE_CLOUD_PROJECT',
-  'GOOGLE_CLOUD_QUOTA_PROJECT',
-  'GOOGLE_CLOUD_UNIVERSE_DOMAIN',
-  'GOOGLE_CLOUD_KEYFILE_JSON',
-  'GOOGLE_CREDENTIALS',
-  'GOOGLE_IMPERSONATE_SERVICE_ACCOUNT',
-  'GOOGLE_OAUTH_ACCESS_TOKEN',
-  'GOOGLE_PROJECT',
-  'GOOGLE_UNIVERSE_DOMAIN',
-]);
-
 const gcsEmulatorOverrides = [
   'STORAGE_EMULATOR_HOST',
   'STORAGE_EMULATOR_HOST_GRPC',
 ] as const;
+
+const ambientTransportOverrides = [
+  'ALL_PROXY',
+  'all_proxy',
+  'AWS_CA_BUNDLE',
+  'AWS_CLI_AUTO_PROMPT',
+  'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE',
+  'AWS_DATA_PATH',
+  'AWS_EC2_METADATA_SERVICE_ENDPOINT',
+  'AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE',
+  'AWS_SECURITY_TOKEN',
+  'BUN_OPTIONS',
+  'BUN_CONFIG_VERBOSE_FETCH',
+  'BOTO_CONFIG',
+  'BROWSER',
+  'CLOUDSDK_AUTH_DISABLE_SSL_VALIDATION',
+  'CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE',
+  'CLOUDSDK_CORE_DISABLE_SSL_VALIDATION',
+  'CLOUDSDK_PROXY_ADDRESS',
+  'CLOUDSDK_PROXY_PASSWORD',
+  'CLOUDSDK_PROXY_PORT',
+  'CLOUDSDK_PROXY_TYPE',
+  'CLOUDSDK_PROXY_USERNAME',
+  'CURL_CA_BUNDLE',
+  'ENABLE_ENTERPRISE_CERTIFICATE_LOGS',
+  'EXPERIMENTAL_GOOGLE_API_USE_S2A',
+  'GODEBUG',
+  'GOTRACEBACK',
+  'GOOGLE_SDK_GO_LOGGING_LEVEL',
+  'GOOGLE_API_CERTIFICATE_CONFIG',
+  'GOOGLE_CLOUD_DISABLE_DIRECT_PATH',
+  'GOOGLE_CLOUD_ENABLE_DIRECT_PATH_XDS',
+  'GOOGLE_API_USE_CLIENT_CERTIFICATE',
+  'GOOGLE_API_USE_MTLS',
+  'GOOGLE_API_USE_MTLS_ENDPOINT',
+  'GRPC_BINARY_LOG_FILTER',
+  'GRPC_DEFAULT_SSL_ROOTS_FILE_PATH',
+  'GRPC_GO_LOG_FORMATTER',
+  'GRPC_GO_LOG_SEVERITY_LEVEL',
+  'GRPC_GO_LOG_VERBOSITY_LEVEL',
+  'GRPC_PROXY',
+  'grpc_proxy',
+  'GRPC_TRACE',
+  'GRPC_VERBOSITY',
+  'HTTP_PROXY',
+  'http_proxy',
+  'HTTPS_PROXY',
+  'https_proxy',
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_DEBUG',
+  'NODE_DEBUG_NATIVE',
+  'NODE_OPTIONS',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'PYTHONBREAKPOINT',
+  'PYTHONCASEOK',
+  'PYTHONDEBUG',
+  'PYTHONEXECUTABLE',
+  'PYTHONFAULTHANDLER',
+  'PYTHONHOME',
+  'PYTHONINSPECT',
+  'PYTHONPATH',
+  'PYTHONPLATLIBDIR',
+  'PYTHONPROFILEIMPORTTIME',
+  'PYTHONSTARTUP',
+  'PYTHONUSERBASE',
+  'PYTHONVERBOSE',
+  'PYTHONWARNINGS',
+  'REQUESTS_CA_BUNDLE',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+  'SSLKEYLOGFILE',
+  'TF_TEMP_LOG_PATH',
+  'VIRTUAL_ENV',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+] as const;
+
+const noProxyOverrides = ['NO_PROXY', 'no_proxy'] as const;
+
+const terraformProviderOverrides = [
+  'TERRAFORM_CONFIG',
+  'TF_CLI_CONFIG_FILE',
+  'TF_PLUGIN_CACHE_DIR',
+  'TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE',
+  'TF_REATTACH_PROVIDERS',
+] as const;
+
+const dangerousBunArguments = [
+  '-i',
+  '-r',
+  '--env-file',
+  '--fetch-preconnect',
+  '--import',
+  '--inspect',
+  '--inspect-brk',
+  '--inspect-wait',
+  '--install',
+  '--preload',
+  '--redis-preconnect',
+  '--require',
+  '--sql-preconnect',
+  '--tls-keylog',
+  '--use-env-proxy',
+  '--use-openssl-ca',
+  '--use-system-ca',
+  '--verbose-fetch',
+] as const;
+
+export function assertNoAmbientTransportOverrides(
+  source: Readonly<NodeJS.ProcessEnv> = process.env,
+  execArguments: readonly string[] = process.execArgv,
+): void {
+  const configured: string[] = ambientTransportOverrides.filter(
+    (name) => source[name] !== undefined,
+  );
+  for (const name of Object.keys(source)) {
+    if (
+      (name.startsWith('TF_LOG') ||
+        name.startsWith('BUN_INSPECT') ||
+        name.startsWith('PYTHON') ||
+        name.startsWith('AWS_CSM_') ||
+        name.startsWith('GOOGLE_API_GO_EXPERIMENTAL_') ||
+        name.startsWith('GOOGLE_EXTERNAL_ACCOUNT_') ||
+        name.startsWith('GRPC_GCP_OBSERVABILITY_') ||
+        name.startsWith('GRPC_XDS_BOOTSTRAP') ||
+        name.startsWith('DYLD_') ||
+        name === 'LD_AUDIT' ||
+        name === 'LD_LIBRARY_PATH' ||
+        name === 'LD_PRELOAD') &&
+      !configured.includes(name)
+    ) {
+      configured.push(name);
+    }
+  }
+  const configuredBunArguments = dangerousBunArguments.filter((name) =>
+    execArguments.some(
+      (argument) =>
+        argument === name ||
+        argument.startsWith(`${name}=`) ||
+        (name === '-r' && argument.startsWith('-r') && argument.length > 2),
+    ),
+  );
+  if (configured.length > 0 || configuredBunArguments.length > 0) {
+    const rejected = [...configured, ...configuredBunArguments];
+    throw new Error(
+      `Guarded cloud operations reject ambient proxy, custom-CA, TLS-keylog, TLS-validation, debugger, and verbose-fetch settings; unset or omit ${rejected.join(', ')}.`,
+    );
+  }
+  validateGuardedBunInvocation(
+    execArguments,
+    process.argv[1],
+    process.cwd(),
+    source.PSD_EOC_GUARDED_LAUNCHER,
+  );
+}
+
+export function validateGuardedBunInvocation(
+  execArguments: readonly string[],
+  scriptPath: string | undefined,
+  cwd: string,
+  launcherMarker: string | undefined,
+): void {
+  if (scriptPath === undefined) {
+    return;
+  }
+  const scriptsRoot = join(gcpRoot, 'scripts');
+  const scriptRelative = relative(scriptsRoot, resolve(cwd, scriptPath));
+  if (
+    scriptRelative === '' ||
+    scriptRelative.startsWith('..') ||
+    isAbsolute(scriptRelative)
+  ) {
+    return;
+  }
+
+  const expectedConfig = join(gcpRoot, 'bunfig.toml');
+  const expectedArguments = [
+    `--config=${expectedConfig}`,
+    '--no-env-file',
+    '--no-install',
+  ];
+  const guardedEntrypoints = new Set([
+    'apply.ts',
+    'configure-workspace-role.ts',
+    'operator-access.ts',
+    'provision-groups-credential.ts',
+    'revoke-groups-credential.ts',
+    'store-oauth-client.ts',
+    'verify-groups-readonly.ts',
+  ]);
+  if (
+    launcherMarker !== '1' ||
+    resolve(cwd) !== resolve(gcpRoot) ||
+    !guardedEntrypoints.has(scriptRelative) ||
+    execArguments.length !== expectedArguments.length ||
+    execArguments.some(
+      (argument, index) => argument !== expectedArguments[index],
+    )
+  ) {
+    throw new Error(
+      'Guarded cloud scripts must be started by infra/gcp/scripts/run-guarded.sh.',
+    );
+  }
+}
+
+export function assertTrustedHome(
+  source: Readonly<NodeJS.ProcessEnv> = process.env,
+): void {
+  if (
+    (source.HOME !== undefined && source.HOME !== trustedHome) ||
+    (source.USER !== undefined && source.USER !== trustedUsername) ||
+    (source.LOGNAME !== undefined && source.LOGNAME !== trustedUsername)
+  ) {
+    throw new Error(
+      `Guarded cloud operations require the fixed ${trustedUsername} account and home directory ${trustedHome}; unset HOME, USER, and LOGNAME overrides.`,
+    );
+  }
+}
+
+function assertTrustedExecutable(command: CloudCommand): string {
+  const path = commandPaths[command];
+  try {
+    const resolved = realpathSync(path);
+    const metadata = statSync(resolved);
+    if (
+      !resolved.startsWith('/opt/homebrew/') ||
+      !metadata.isFile() ||
+      (metadata.mode & 0o111) === 0
+    ) {
+      throw new Error('invalid executable');
+    }
+  } catch {
+    throw new Error(
+      `Guarded cloud operations require the reviewed ${command} installation at ${path}.`,
+    );
+  }
+  return path;
+}
+
+function baseChildEnvironment(): NodeJS.ProcessEnv {
+  return {
+    HOME: trustedHome,
+    LANG: 'C',
+    LC_ALL: 'C',
+    LOGNAME: trustedUsername,
+    PATH: trustedPath,
+    TERM: 'dumb',
+    TMPDIR: '/private/tmp',
+    USER: trustedUsername,
+  };
+}
+
+type ParsedIni = ReadonlyMap<string, ReadonlyMap<string, string>>;
+
+function parseCliIni(contents: string, label: string): ParsedIni {
+  const sections = new Map<string, Map<string, string>>();
+  let current: Map<string, string> | undefined;
+  for (const rawLine of contents.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith('#') || line.startsWith(';')) {
+      continue;
+    }
+    const sectionMatch = /^\[([^\]\r\n]+)\]$/u.exec(line);
+    if (sectionMatch !== null && sectionMatch[1] !== undefined) {
+      const sectionName = sectionMatch[1].trim();
+      if (sectionName.length === 0 || sections.has(sectionName)) {
+        throw new Error(`${label} is invalid.`);
+      }
+      current = new Map();
+      sections.set(sectionName, current);
+      continue;
+    }
+    const propertyMatch = /^([A-Za-z0-9_.-]+)\s*=\s*(.*)$/u.exec(line);
+    if (
+      current === undefined ||
+      propertyMatch === null ||
+      propertyMatch[1] === undefined ||
+      propertyMatch[2] === undefined ||
+      current.has(propertyMatch[1])
+    ) {
+      throw new Error(`${label} is invalid.`);
+    }
+    current.set(propertyMatch[1], propertyMatch[2].trim());
+  }
+  return sections;
+}
+
+function requireExactIniSection(
+  section: ReadonlyMap<string, string> | undefined,
+  expected: Readonly<Record<string, string>>,
+  label: string,
+): void {
+  if (
+    section === undefined ||
+    section.size !== Object.keys(expected).length ||
+    Object.entries(expected).some(([key, value]) => section.get(key) !== value)
+  ) {
+    throw new Error(`${label} is invalid.`);
+  }
+}
+
+export function validateAwsSsoConfigurationFiles(
+  configContents: string,
+  credentialsContents: string,
+): void {
+  const config = parseCliIni(configContents, 'AWS configuration');
+  if (
+    config.size !== 2 ||
+    [...config.keys()].some(
+      (section) =>
+        section === 'DEFAULT' || section.trim().toLowerCase() === 'plugins',
+    )
+  ) {
+    throw new Error(
+      'AWS configuration must not load CLI plugins or inherited defaults.',
+    );
+  }
+  requireExactIniSection(
+    config.get(`profile ${AWS_PROFILE}`),
+    {
+      region: AWS_REGION,
+      sso_account_id: AWS_ACCOUNT_ID,
+      sso_role_name: 'AWSAdministratorAccess',
+      sso_session: AWS_SSO_SESSION,
+    },
+    `AWS profile ${AWS_PROFILE}`,
+  );
+  requireExactIniSection(
+    config.get(`sso-session ${AWS_SSO_SESSION}`),
+    {
+      sso_region: AWS_REGION,
+      sso_registration_scopes: 'sso:account:access',
+      sso_start_url: AWS_SSO_START_URL,
+    },
+    `AWS SSO session ${AWS_SSO_SESSION}`,
+  );
+
+  const credentials = parseCliIni(
+    credentialsContents,
+    'AWS shared credentials configuration',
+  );
+  if (
+    credentials.has(AWS_PROFILE) ||
+    credentials.has(`profile ${AWS_PROFILE}`)
+  ) {
+    throw new Error(
+      `AWS profile ${AWS_PROFILE} must not have a static shared-credentials entry.`,
+    );
+  }
+}
+
+export function validateGcloudLocalConfiguration(contents: string): void {
+  const configuration = parseCliIni(contents, 'gcloud configuration');
+  if (
+    configuration.size !== 1 ||
+    !configuration.has('core') ||
+    [...(configuration.get('core')?.keys() ?? [])].some(
+      (key) => key !== 'account' && key !== 'project',
+    )
+  ) {
+    throw new Error(
+      'gcloud local configuration may contain only the core account and project.',
+    );
+  }
+  const core = configuration.get('core');
+  const account = core?.get('account');
+  const project = core?.get('project');
+  if (
+    (account !== undefined && !/^[a-z0-9._%+-]+@[a-z0-9.-]+$/u.test(account)) ||
+    (project !== undefined && !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(project))
+  ) {
+    throw new Error('gcloud local core account or project is invalid.');
+  }
+}
+
+function readLocalConfigurationFile(
+  path: string,
+  label: string,
+  maximumSize: number,
+  required: boolean,
+  requirePrivateMode = false,
+): string {
+  if (!existsSync(path)) {
+    if (required) {
+      throw new Error(`${label} is missing.`);
+    }
+    return '';
+  }
+  try {
+    const metadata = lstatSync(path);
+    if (
+      !metadata.isFile() ||
+      metadata.size > maximumSize ||
+      (requirePrivateMode && (metadata.mode & 0o077) !== 0)
+    ) {
+      throw new Error('invalid metadata');
+    }
+    return readFileSync(path, 'utf8');
+  } catch {
+    throw new Error(`${label} could not be read safely.`);
+  }
+}
+
+function assertAwsLocalConfiguration(): void {
+  assertTrustedHome();
+  const awsDirectory = join(trustedHome, '.aws');
+  const aliasPath = join(awsDirectory, 'cli', 'alias');
+  const modelsPath = join(awsDirectory, 'models');
+  if (
+    readLocalConfigurationFile(
+      aliasPath,
+      'AWS CLI alias file',
+      64 * 1024,
+      false,
+    ).trim().length > 0
+  ) {
+    throw new Error('AWS CLI aliases must be absent or empty.');
+  }
+  if (existsSync(modelsPath)) {
+    throw new Error('AWS CLI model overrides must be absent.');
+  }
+  validateAwsSsoConfigurationFiles(
+    readLocalConfigurationFile(
+      join(gcpRoot, 'aws.config'),
+      'Reviewed AWS configuration',
+      256 * 1024,
+      true,
+    ),
+    '',
+  );
+}
+
+function assertGcloudLocalConfiguration(): void {
+  assertTrustedHome();
+  const configurationRoot = join(trustedHome, '.config', 'gcloud');
+  const activeConfiguration = readLocalConfigurationFile(
+    join(configurationRoot, 'active_config'),
+    'Active gcloud configuration selector',
+    128,
+    true,
+  ).trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/u.test(activeConfiguration)) {
+    throw new Error('Active gcloud configuration selector is invalid.');
+  }
+  validateGcloudLocalConfiguration(
+    readLocalConfigurationFile(
+      join(
+        configurationRoot,
+        'configurations',
+        `config_${activeConfiguration}`,
+      ),
+      'Active gcloud configuration',
+      64 * 1024,
+      true,
+    ),
+  );
+}
+
+function forceDirectTransport(environment: NodeJS.ProcessEnv): void {
+  for (const name of [...ambientTransportOverrides, ...noProxyOverrides]) {
+    delete environment[name];
+  }
+  // Prevent Python, Go, and AWS SDK clients from falling back to an operating-
+  // system proxy after the ambient environment has been proved clean.
+  environment.NO_PROXY = '*';
+  environment.no_proxy = '*';
+  environment.PYTHONNOUSERSITE = '1';
+}
+
+function assertNoTerraformProviderOverrides(
+  source: Readonly<NodeJS.ProcessEnv>,
+): void {
+  const configured = terraformProviderOverrides.filter(
+    (name) => source[name] !== undefined,
+  );
+  if (configured.length > 0) {
+    throw new Error(
+      `Guarded Terraform operations reject ambient CLI configuration and provider-plugin overrides; unset ${configured.join(', ')}.`,
+    );
+  }
+}
 
 function assertNoGcsEmulatorOverrides(
   source: Readonly<NodeJS.ProcessEnv> = process.env,
@@ -47,53 +530,29 @@ function assertNoGcsEmulatorOverrides(
   }
 }
 
-function isGoogleEndpointOverride(name: string): boolean {
-  return (
-    name.startsWith('CLOUDSDK_API_ENDPOINT_OVERRIDES_') ||
-    (name.startsWith('GOOGLE_') && name.endsWith('_CUSTOM_ENDPOINT'))
-  );
-}
-
-function isParentOnlyValue(name: string): boolean {
-  return (
-    name === 'PSD_EOC_APPROVED_TEST_GROUP' ||
-    name.startsWith('PSD_EOC_CONFIRM_')
-  );
-}
-
 interface RunOptions {
   readonly cwd?: string;
   readonly input?: string;
   readonly redactFailureOutput?: boolean;
 }
 
+interface CloudCommandResult {
+  readonly status: number | null;
+  readonly stderr: string;
+  readonly stdout: string;
+}
+
 export function sanitizedTerraformEnvironment(
   source: Readonly<NodeJS.ProcessEnv> = process.env,
 ): NodeJS.ProcessEnv {
   assertNoGcsEmulatorOverrides(source);
-  const environment = { ...source };
-  for (const name of Object.keys(environment)) {
-    if (
-      name === 'TF_WORKSPACE' ||
-      name === 'TF_CLI_CONFIG_FILE' ||
-      name === 'TF_DATA_DIR' ||
-      name === 'TF_LOG' ||
-      name === 'TF_LOG_PATH' ||
-      name === 'TF_REATTACH_PROVIDERS' ||
-      name === 'CLOUDSDK_CONFIG' ||
-      name === 'CLOUDSDK_CORE_ACCOUNT' ||
-      name === 'CLOUDSDK_CORE_PROJECT' ||
-      name.startsWith('TF_CLI_ARGS') ||
-      name.startsWith('TF_VAR_') ||
-      googleCredentialOverrides.has(name) ||
-      isGoogleEndpointOverride(name) ||
-      name.startsWith('CLOUDSDK_') ||
-      isParentOnlyValue(name)
-    ) {
-      delete environment[name];
-    }
-  }
+  assertNoAmbientTransportOverrides(source);
+  assertNoTerraformProviderOverrides(source);
+  const environment = baseChildEnvironment();
   environment.CLOUDSDK_CORE_DISABLE_FILE_LOGGING = '1';
+  environment.CLOUDSDK_CORE_LOG_HTTP = '0';
+  environment.TF_CLI_CONFIG_FILE = join(gcpRoot, 'terraform.tfrc');
+  forceDirectTransport(environment);
   return environment;
 }
 
@@ -101,57 +560,39 @@ export function sanitizedGcloudEnvironment(
   source: Readonly<NodeJS.ProcessEnv> = process.env,
 ): NodeJS.ProcessEnv {
   assertNoGcsEmulatorOverrides(source);
-  const environment: NodeJS.ProcessEnv = { ...source };
-  for (const name of Object.keys(environment)) {
-    if (
-      googleCredentialOverrides.has(name) ||
-      isGoogleEndpointOverride(name) ||
-      name.startsWith('CLOUDSDK_') ||
-      isParentOnlyValue(name)
-    ) {
-      delete environment[name];
-    }
-  }
+  assertNoAmbientTransportOverrides(source);
+  const environment = baseChildEnvironment();
+  environment.CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK = '1';
+  environment.CLOUDSDK_CORE_CHECK_GCE_METADATA = '0';
   environment.CLOUDSDK_CORE_DISABLE_FILE_LOGGING = '1';
+  environment.CLOUDSDK_CORE_DISABLE_USAGE_REPORTING = '1';
+  environment.CLOUDSDK_CORE_LOG_HTTP = '0';
+  environment.CLOUDSDK_CORE_LOG_HTTP_REDACT_TOKEN = '1';
+  environment.CLOUDSDK_CORE_VERBOSITY = 'warning';
+  environment.CLOUDSDK_PYTHON = '/opt/homebrew/bin/python3';
+  environment.CLOUDSDK_PYTHON_ARGS = '-I -S';
+  environment.CLOUDSDK_SURVEY_DISABLE_PROMPTS = '1';
+  forceDirectTransport(environment);
   return environment;
 }
 
 export function sanitizedAwsEnvironment(
   source: Readonly<NodeJS.ProcessEnv> = process.env,
 ): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { ...source };
-  const exactOverrides = new Set([
-    'AWS_ACCESS_KEY_ID',
-    'AWS_CA_BUNDLE',
-    'AWS_CLI_HISTORY_FILE',
-    'AWS_CONFIG_FILE',
-    'AWS_CONTAINER_AUTHORIZATION_TOKEN',
-    'AWS_CONTAINER_CREDENTIALS_FULL_URI',
-    'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
-    'AWS_DEFAULT_PROFILE',
-    'AWS_DEFAULT_REGION',
-    'AWS_IGNORE_CONFIGURED_ENDPOINT_URLS',
-    'AWS_PROFILE',
-    'AWS_REGION',
-    'AWS_ROLE_ARN',
-    'AWS_SECRET_ACCESS_KEY',
-    'AWS_SHARED_CREDENTIALS_FILE',
-    'AWS_SESSION_TOKEN',
-    'AWS_WEB_IDENTITY_TOKEN_FILE',
-  ]);
-  for (const name of Object.keys(environment)) {
-    if (
-      exactOverrides.has(name) ||
-      name.startsWith('AWS_ENDPOINT_URL') ||
-      isParentOnlyValue(name)
-    ) {
-      delete environment[name];
-    }
-  }
+  assertNoAmbientTransportOverrides(source);
+  const environment = baseChildEnvironment();
+  forceDirectTransport(environment);
+  environment.AWS_CLI_AUTO_PROMPT = 'off';
+  environment.AWS_CONFIG_FILE = join(gcpRoot, 'aws.config');
+  environment.AWS_EC2_METADATA_DISABLED = 'true';
+  environment.AWS_IGNORE_CONFIGURED_ENDPOINT_URLS = 'true';
+  environment.AWS_PAGER = '';
+  environment.AWS_SHARED_CREDENTIALS_FILE = '/dev/null';
+  environment.PAGER = '';
   return environment;
 }
 
-function commandEnvironment(command: string): NodeJS.ProcessEnv {
+function commandEnvironment(command: CloudCommand): NodeJS.ProcessEnv {
   if (command === 'terraform') {
     return sanitizedTerraformEnvironment();
   }
@@ -161,11 +602,7 @@ function commandEnvironment(command: string): NodeJS.ProcessEnv {
   if (command === 'aws') {
     return sanitizedAwsEnvironment();
   }
-  const environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    CLOUDSDK_CORE_DISABLE_FILE_LOGGING: '1',
-  };
-  return environment;
+  throw new Error(`Unsupported guarded cloud command: ${command}.`);
 }
 
 export function awsServiceEndpoint(
@@ -178,12 +615,58 @@ export function awsServiceEndpoint(
   return `https://${service}.${region}.amazonaws.com`;
 }
 
+function prepareCloudCommand(
+  command: CloudCommand,
+  args: readonly string[],
+): { readonly args: readonly string[]; readonly executable: string } {
+  assertTrustedHome();
+  assertNoAmbientTransportOverrides();
+  const executable = assertTrustedExecutable(command);
+  if (command === 'gcloud') {
+    assertGcloudLocalConfiguration();
+  }
+  if (command === 'aws') {
+    assertAwsLocalConfiguration();
+    const profileIndexes = args.flatMap((argument, index) =>
+      argument === '--profile' ? [index] : [],
+    );
+    if (
+      profileIndexes.length !== 1 ||
+      args[(profileIndexes[0] ?? -1) + 1] !== AWS_PROFILE
+    ) {
+      throw new Error(
+        `Guarded AWS commands require the exact ${AWS_PROFILE} profile.`,
+      );
+    }
+    return { args: [...args, '--no-cli-pager'], executable };
+  }
+  return { args, executable };
+}
+
 export function runCommand(
-  command: string,
+  command: CloudCommand,
   args: readonly string[],
   options: RunOptions = {},
 ): string {
-  const result = spawnSync(command, args, {
+  const result = runCommandForStatus(command, args, options);
+
+  if (result.status !== 0) {
+    const detail = options.redactFailureOutput
+      ? ''
+      : `: ${(result.stderr || result.stdout).trim().slice(0, 2_000)}`;
+    throw new Error(`${command} exited with status ${result.status}${detail}`);
+  }
+
+  return result.stdout.trim();
+}
+
+export function runCommandForStatus(
+  command: CloudCommand,
+  args: readonly string[],
+  options: RunOptions = {},
+): CloudCommandResult {
+  const prepared = prepareCloudCommand(command, args);
+  const result = spawnSync(prepared.executable, prepared.args, {
     cwd: options.cwd ?? gcpRoot,
     encoding: 'utf8',
     env: commandEnvironment(command),
@@ -194,14 +677,11 @@ export function runCommand(
   if (result.error !== undefined) {
     throw new Error(`${command} could not start: ${result.error.message}`);
   }
-  if (result.status !== 0) {
-    const detail = options.redactFailureOutput
-      ? ''
-      : `: ${(result.stderr || result.stdout).trim().slice(0, 2_000)}`;
-    throw new Error(`${command} exited with status ${result.status}${detail}`);
-  }
-
-  return result.stdout.trim();
+  return {
+    status: result.status,
+    stderr: result.stderr,
+    stdout: result.stdout,
+  };
 }
 
 export function validateTerraformWorkspace(workspace: string): void {
@@ -219,11 +699,12 @@ export function assertDefaultTerraformWorkspace(cwd = gcpRoot): void {
 }
 
 export function runInteractive(
-  command: string,
+  command: CloudCommand,
   args: readonly string[],
   cwd = gcpRoot,
 ): void {
-  const result = spawnSync(command, args, {
+  const prepared = prepareCloudCommand(command, args);
+  const result = spawnSync(prepared.executable, prepared.args, {
     cwd,
     env: commandEnvironment(command),
     stdio: 'inherit',
@@ -268,10 +749,19 @@ export function assertActiveGcloudAccount(expectedEmail: string): void {
   validateGcloudConfiguration(configuration, expectedEmail);
 }
 
-export function validateGcloudConfiguration(
-  value: unknown,
-  expectedEmail: string,
-): void {
+export function assertSafeGcloudConfiguration(): void {
+  let configuration: unknown;
+  try {
+    configuration = JSON.parse(
+      runCommand('gcloud', ['config', 'list', '--format=json']),
+    );
+  } catch {
+    throw new Error('The active gcloud configuration is invalid.');
+  }
+  validateGcloudTransportConfiguration(configuration);
+}
+
+export function validateGcloudTransportConfiguration(value: unknown): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('The active gcloud configuration is invalid.');
   }
@@ -281,29 +771,66 @@ export function validateGcloudConfiguration(
     throw new Error('The active gcloud configuration is invalid.');
   }
   const coreValues = core as Readonly<Record<string, unknown>>;
-  const forbiddenSections = [
-    configuration.api_endpoint_overrides,
-    configuration.auth,
-    configuration.billing,
-    configuration.context_aware,
-    configuration.proxy,
-    configuration.storage,
-  ];
+  const allowedCoreKeys = new Set([
+    'account',
+    'check_gce_metadata',
+    'disable_file_logging',
+    'disable_usage_reporting',
+    'log_http',
+    'log_http_redact_token',
+    'project',
+    'universe_domain',
+    'verbosity',
+  ]);
+  const componentManager = configuration.component_manager;
+  const survey = configuration.survey;
   if (
-    coreValues.account !== expectedEmail ||
-    coreValues.custom_ca_certs_file !== undefined ||
-    coreValues.disable_ssl_validation !== undefined ||
+    Object.keys(configuration).some(
+      (key) =>
+        key !== 'component_manager' && key !== 'core' && key !== 'survey',
+    ) ||
+    Object.keys(coreValues).some((key) => !allowedCoreKeys.has(key)) ||
+    (coreValues.check_gce_metadata !== undefined &&
+      coreValues.check_gce_metadata !== '0') ||
+    (coreValues.disable_file_logging !== undefined &&
+      coreValues.disable_file_logging !== '1') ||
+    (coreValues.disable_usage_reporting !== undefined &&
+      coreValues.disable_usage_reporting !== '1') ||
+    (coreValues.log_http !== undefined && coreValues.log_http !== '0') ||
+    (coreValues.log_http_redact_token !== undefined &&
+      coreValues.log_http_redact_token !== '1') ||
+    (coreValues.verbosity !== undefined &&
+      coreValues.verbosity !== 'warning') ||
     (coreValues.universe_domain !== undefined &&
       coreValues.universe_domain !== 'googleapis.com') ||
-    forbiddenSections.some(
-      (section) =>
-        section !== undefined &&
-        section !== null &&
-        (typeof section !== 'object' ||
-          Array.isArray(section) ||
-          Object.keys(section as Readonly<Record<string, unknown>>).length > 0),
-    )
+    (componentManager !== undefined &&
+      (typeof componentManager !== 'object' ||
+        componentManager === null ||
+        Array.isArray(componentManager) ||
+        Object.keys(componentManager).length !== 1 ||
+        (componentManager as Readonly<Record<string, unknown>>)
+          .disable_update_check !== '1')) ||
+    (survey !== undefined &&
+      (typeof survey !== 'object' ||
+        survey === null ||
+        Array.isArray(survey) ||
+        Object.keys(survey).length !== 1 ||
+        (survey as Readonly<Record<string, unknown>>).disable_prompts !== '1'))
   ) {
+    throw new Error(
+      'gcloud must run without impersonation, billing/quota, token-file, endpoint, proxy, or custom-CA overrides.',
+    );
+  }
+}
+
+export function validateGcloudConfiguration(
+  value: unknown,
+  expectedEmail: string,
+): void {
+  validateGcloudTransportConfiguration(value);
+  const configuration = value as Readonly<Record<string, unknown>>;
+  const coreValues = configuration.core as Readonly<Record<string, unknown>>;
+  if (coreValues.account !== expectedEmail) {
     throw new Error(
       `gcloud must use ${expectedEmail} without impersonation, billing/quota, token-file, endpoint, proxy, or custom-CA overrides.`,
     );
@@ -330,33 +857,61 @@ export function validateGoogleUserIdentity(
 export function validateApplicationDefaultCredentialMetadata(
   value: unknown,
   expectedQuotaProject: string,
+  expectedEmail: string,
 ): void {
   if (
     typeof value !== 'object' ||
     value === null ||
     Array.isArray(value) ||
-    !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(expectedQuotaProject)
+    !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(expectedQuotaProject) ||
+    !/^[a-z0-9._%+-]+@psd401\.net$/u.test(expectedEmail)
   ) {
     throw new Error('Application Default Credential metadata is invalid.');
   }
-  const quotaProject = (value as Readonly<Record<string, unknown>>)
-    .quota_project_id;
-  if (quotaProject !== undefined && quotaProject !== expectedQuotaProject) {
+  const metadata = value as Readonly<Record<string, unknown>>;
+  const allowedFields = new Set([
+    'account',
+    'client_id',
+    'client_secret',
+    'quota_project_id',
+    'refresh_token',
+    'type',
+    'universe_domain',
+  ]);
+  const quotaProject = metadata.quota_project_id;
+  if (
+    Object.keys(metadata).some((field) => !allowedFields.has(field)) ||
+    metadata.type !== 'authorized_user' ||
+    metadata.account !== expectedEmail ||
+    typeof metadata.client_id !== 'string' ||
+    !/^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/u.test(
+      metadata.client_id,
+    ) ||
+    typeof metadata.client_secret !== 'string' ||
+    metadata.client_secret.length === 0 ||
+    typeof metadata.refresh_token !== 'string' ||
+    metadata.refresh_token.length === 0 ||
+    (metadata.universe_domain !== undefined &&
+      metadata.universe_domain !== 'googleapis.com') ||
+    (quotaProject !== undefined && quotaProject !== expectedQuotaProject)
+  ) {
     throw new Error(
-      `Application Default Credentials must omit the quota project during bootstrap or bind it to ${expectedQuotaProject}; revoke and re-login with --disable-quota-project.`,
+      `Application Default Credentials must be the fixed ${expectedEmail} Google authorized-user contract, omit alternate endpoint fields, and omit the quota project during bootstrap or bind it to ${expectedQuotaProject}; revoke and re-login with --disable-quota-project.`,
     );
   }
 }
 
 function assertApplicationDefaultCredentialMetadata(
   expectedQuotaProject: string,
+  expectedEmail: string,
 ): void {
   const configDirectory = runCommand(
     'gcloud',
     ['info', '--format=value(config.paths.global_config_dir)'],
     { redactFailureOutput: true },
   );
-  if (!isAbsolute(configDirectory)) {
+  const expectedConfigDirectory = join(trustedHome, '.config', 'gcloud');
+  if (configDirectory !== expectedConfigDirectory) {
     throw new Error(
       'Application Default Credential configuration location is invalid.',
     );
@@ -364,9 +919,12 @@ function assertApplicationDefaultCredentialMetadata(
   let value: unknown;
   try {
     value = JSON.parse(
-      readFileSync(
+      readLocalConfigurationFile(
         join(configDirectory, 'application_default_credentials.json'),
-        'utf8',
+        'Application Default Credential metadata',
+        64 * 1024,
+        true,
+        true,
       ),
     );
   } catch {
@@ -374,14 +932,19 @@ function assertApplicationDefaultCredentialMetadata(
       'Application Default Credential metadata could not be read safely.',
     );
   }
-  validateApplicationDefaultCredentialMetadata(value, expectedQuotaProject);
+  validateApplicationDefaultCredentialMetadata(
+    value,
+    expectedQuotaProject,
+    expectedEmail,
+  );
 }
 
 export async function assertApplicationDefaultIdentity(
   expectedEmail: string,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
-  assertApplicationDefaultCredentialMetadata('psd401-eoc');
+  assertNoAmbientTransportOverrides();
+  assertApplicationDefaultCredentialMetadata('psd401-eoc', expectedEmail);
   const accessToken = runCommand(
     'gcloud',
     [
@@ -446,12 +1009,54 @@ export function validateAwsSsoIdentity(
   }
 }
 
+export function validateAwsSsoProfile(
+  accountId: string,
+  roleName: string,
+  region: string,
+  sessionName: string,
+  expectedAccountId: string,
+  expectedRegion: string,
+): void {
+  if (
+    accountId !== expectedAccountId ||
+    roleName !== 'AWSAdministratorAccess' ||
+    region !== expectedRegion ||
+    sessionName !== AWS_SSO_SESSION
+  ) {
+    throw new Error(
+      `AWS SSO profile must select AWSAdministratorAccess in account ${expectedAccountId}, Region ${expectedRegion}, through one named SSO session.`,
+    );
+  }
+}
+
+export function assertAwsSsoLoginConfiguration(
+  profile: string,
+  expectedAccountId: string,
+  expectedRegion: string,
+): void {
+  if (
+    profile !== AWS_PROFILE ||
+    expectedAccountId !== AWS_ACCOUNT_ID ||
+    expectedRegion !== AWS_REGION
+  ) {
+    throw new Error('AWS SSO login target is invalid.');
+  }
+  assertAwsLocalConfiguration();
+}
+
 export function assertAwsAccount(
   profile: string,
   expectedAccountId: string,
   region: string,
 ): void {
-  assertAwsCliHistoryDisabled(profile);
+  if (
+    profile !== AWS_PROFILE ||
+    expectedAccountId !== AWS_ACCOUNT_ID ||
+    region !== AWS_REGION
+  ) {
+    throw new Error('AWS account verification target is invalid.');
+  }
+  assertAwsLocalConfiguration();
   let identity: unknown;
   try {
     identity = JSON.parse(
@@ -472,41 +1077,6 @@ export function assertAwsAccount(
     throw new Error(`AWS profile ${profile} returned an invalid identity.`);
   }
   validateAwsSsoIdentity(identity, expectedAccountId);
-}
-
-function assertAwsCliHistoryDisabled(profile: string): void {
-  const result = spawnSync(
-    'aws',
-    ['configure', 'get', 'cli_history', '--profile', profile],
-    {
-      encoding: 'utf8',
-      env: commandEnvironment('aws'),
-      maxBuffer: 1024 * 1024,
-    },
-  );
-  if (result.error !== undefined) {
-    throw new Error(`aws could not start: ${result.error.message}`);
-  }
-  validateAwsCliHistoryResult(result.status, result.stdout, result.stderr);
-}
-
-export function validateAwsCliHistoryResult(
-  status: number | null,
-  stdout: string,
-  stderr: string,
-): void {
-  const value = stdout.trim().toLowerCase();
-  const detail = `${stderr}${stdout}`.trim();
-  if (
-    !(
-      (status === 1 && detail.length === 0) ||
-      (status === 0 && (value === '' || value === 'disabled'))
-    )
-  ) {
-    throw new Error(
-      'AWS CLI history must be disabled before any PSD EOC secret operation.',
-    );
-  }
 }
 
 export async function reconcileIdempotentSecretWrite(options: {
@@ -544,28 +1114,26 @@ export function awsSecretExists(options: {
   readonly region: string;
   readonly secretName: string;
 }): boolean {
-  const result = spawnSync(
-    'aws',
-    [
-      'secretsmanager',
-      'describe-secret',
-      '--secret-id',
-      options.secretName,
-      '--region',
-      options.region,
-      '--profile',
-      options.profile,
-      '--endpoint-url',
-      awsServiceEndpoint('secretsmanager', options.region),
-      '--output',
-      'json',
-    ],
-    {
-      encoding: 'utf8',
-      env: commandEnvironment('aws'),
-      maxBuffer: 1024 * 1024,
-    },
-  );
+  const prepared = prepareCloudCommand('aws', [
+    'secretsmanager',
+    'describe-secret',
+    '--secret-id',
+    options.secretName,
+    '--region',
+    options.region,
+    '--profile',
+    options.profile,
+    '--endpoint-url',
+    awsServiceEndpoint('secretsmanager', options.region),
+    '--output',
+    'json',
+  ]);
+  const result = spawnSync(prepared.executable, prepared.args, {
+    cwd: gcpRoot,
+    encoding: 'utf8',
+    env: commandEnvironment('aws'),
+    maxBuffer: 1024 * 1024,
+  });
 
   if (result.error !== undefined) {
     throw new Error(`aws could not start: ${result.error.message}`);

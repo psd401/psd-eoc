@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -9,9 +8,8 @@ import {
   gcpRoot,
   requireExactConfirmation,
   runCommand,
+  runCommandForStatus,
   runInteractive,
-  sanitizedGcloudEnvironment,
-  sanitizedTerraformEnvironment,
 } from './runtime';
 import { parseUserManagedKeyIds, ROSTER_READER_EMAIL } from './groups-contract';
 import {
@@ -428,7 +426,7 @@ export function validateStateBucket(
 }
 
 function inspectProject(): Readonly<Record<string, unknown>> | null {
-  const result = spawnSync(
+  const result = runCommandForStatus(
     'gcloud',
     [
       'projects',
@@ -439,16 +437,8 @@ function inspectProject(): Readonly<Record<string, unknown>> | null {
       '--format=json',
       '--quiet',
     ],
-    {
-      cwd: gcpRoot,
-      encoding: 'utf8',
-      env: sanitizedGcloudEnvironment(),
-      maxBuffer: 1024 * 1024,
-    },
+    { cwd: gcpRoot },
   );
-  if (result.error !== undefined) {
-    throw new Error(`gcloud could not start: ${result.error.message}`);
-  }
   return parseProjectDescribeResult(
     result.status,
     result.stdout,
@@ -459,7 +449,7 @@ function inspectProject(): Readonly<Record<string, unknown>> | null {
 function inspectRosterReaderServiceAccount(): Readonly<
   Record<string, unknown>
 > | null {
-  const result = spawnSync(
+  const result = runCommandForStatus(
     'gcloud',
     [
       'iam',
@@ -470,16 +460,8 @@ function inspectRosterReaderServiceAccount(): Readonly<
       '--format=json',
       '--quiet',
     ],
-    {
-      cwd: gcpRoot,
-      encoding: 'utf8',
-      env: sanitizedGcloudEnvironment(),
-      maxBuffer: 1024 * 1024,
-    },
+    { cwd: gcpRoot },
   );
-  if (result.error !== undefined) {
-    throw new Error(`gcloud could not start: ${result.error.message}`);
-  }
   const listed = parseServiceAccountListResult(
     result.status,
     result.stdout,
@@ -599,7 +581,7 @@ function projectIamPolicy(): Readonly<Record<string, unknown>> {
 }
 
 function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
-  const result = spawnSync(
+  const result = runCommandForStatus(
     'gcloud',
     [
       'storage',
@@ -610,16 +592,8 @@ function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
       PROJECT_ID,
       '--format=json',
     ],
-    {
-      cwd: gcpRoot,
-      encoding: 'utf8',
-      env: sanitizedGcloudEnvironment(),
-      maxBuffer: 1024 * 1024,
-    },
+    { cwd: gcpRoot },
   );
-  if (result.error !== undefined) {
-    throw new Error(`gcloud could not start: ${result.error.message}`);
-  }
   const bucket = parseBucketDescribeResult(
     result.status,
     result.stdout,
@@ -702,15 +676,7 @@ function runTerraformInteractive(args: readonly string[], cwd = gcpRoot): void {
 
 function stateResources(cwd = gcpRoot): Set<string> {
   assertDefaultTerraformWorkspace(cwd);
-  const result = spawnSync('terraform', ['state', 'list'], {
-    cwd,
-    encoding: 'utf8',
-    env: sanitizedTerraformEnvironment(),
-    maxBuffer: 1024 * 1024,
-  });
-  if (result.error !== undefined) {
-    throw new Error(`terraform could not start: ${result.error.message}`);
-  }
+  const result = runCommandForStatus('terraform', ['state', 'list'], { cwd });
   return parseStateListResult(result.status, result.stdout, result.stderr);
 }
 

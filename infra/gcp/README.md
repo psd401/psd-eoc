@@ -56,29 +56,63 @@ Authenticate as the fixed district administrator. Never use a static AWS key or
 a service-account credential for Terraform.
 
 ```sh
-gcloud auth login kjh_admin@psd401.net --force
-gcloud auth application-default login kjh_admin@psd401.net \
-  --disable-quota-project \
-  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform
-aws sso login --profile psd401-prr-prod
+./scripts/run-guarded.sh authenticate
 ```
 
-The ordinary ADC login deliberately writes no quota project, even if another
-gcloud configuration has an active project. The guarded helpers reject ADC
-metadata bound to any project other than `psd401-eoc` and discard inherited
-Google billing/quota/project overrides. They also reject persistent gcloud
-billing/quota configuration, and every project API call names `psd401-eoc`
-explicitly. After bootstrap creates the dedicated project, the main Terraform
-provider pins user-project quota and billing to `psd401-eoc`; the bootstrap
-provider cannot do so before that project exists.
+The authentication command directly parses and rejects unsafe persistent Cloud
+SDK settings before its first gcloud process. AWS uses the checked-in exact
+`aws.config` SSO profile instead of the ambient AWS config or shared-credentials
+file; the launcher also refuses AWS aliases and model overrides. It then
+performs the fixed Google user login, ordinary ADC login, AWS SSO login, and
+exact identity readbacks in their sanitized child environments. Neither CLI is
+allowed to launch a browser: it prints an authorization URL for the human to
+open in a trusted browser. That human browser session is intentionally outside
+the helpers' direct-transport boundary and never authorizes a cloud mutation by
+itself. The ordinary ADC login deliberately writes no quota project, even if
+another gcloud configuration has an active project.
+The guarded helpers reject ADC metadata bound to any project other than
+`psd401-eoc` and discard inherited Google billing/quota/project overrides. They
+also reject persistent gcloud billing/quota configuration, and every project
+API call names `psd401-eoc` explicitly. After bootstrap creates the dedicated
+project, the main Terraform provider pins user-project quota and billing to
+`psd401-eoc`; the bootstrap provider cannot do so before that project exists.
 
-Review formatting and validity, then run the guarded helper from this directory:
+Before Bun starts, the checked-in launcher pins the fixed machine account,
+home, PATH, and absolute Bun executable. It rejects every `BUN_*` variable,
+`NODE_OPTIONS`, Python and dynamic-loader startup hooks, and browser command
+overrides, then pins the exact checked-in Bun configuration, disables automatic
+environment-file loading and package installation, and permits only the seven
+reviewed TypeScript helper entrypoints. A trusted configuration preload verifies
+that exact launcher contract before any helper module executes. Every TypeScript
+helper invocation below uses `scripts/run-guarded.sh`; invoking a helper directly
+with Bun is not a guarded path.
+
+Before any credential-bearing child process, native fetch, or OAuth download
+read, the guarded helpers reject ambient HTTP/HTTPS/all-proxy settings, custom
+CA paths, TLS key logging, disabled Node TLS validation, and Bun verbose-fetch
+logging. They also reject `BUN_OPTIONS`, `NODE_OPTIONS`, effective Bun inspector
+variables, Node debug logging, and startup flags for environment files,
+preload/import hooks, preconnects, package installation, TLS key logging,
+alternate CA stores, environment proxies, verbose fetches, or the inspector.
+Terraform/provider and Go/gRPC trace, external-account executable, model,
+observability, and endpoint-bootstrap variables are rejected as well. Each
+Terraform, gcloud, and AWS child receives a minimal allowlisted environment,
+the fixed home and executable search path, and direct transport with
+`NO_PROXY=*`. Gcloud is pinned to an isolated Python interpreter, with update,
+telemetry, metadata, HTTP, and file logging disabled. AWS is pinned to the
+checked-in SSO config, `/dev/null` shared credentials, disabled metadata,
+pager, and auto-prompt paths, and every service command's fixed canonical
+`--endpoint-url`; every AWS invocation also adds `--no-cli-pager`. If a district
+proxy or custom CA is ever required, stop and add one explicit reviewed
+endpoint/certificate contract instead of inheriting shell or operating-system
+transport state.
+
+Run the guarded helper from this directory. It initializes each Terraform root
+with the pinned CLI configuration and produces a complete saved plan before it
+offers either exact human confirmation:
 
 ```sh
-terraform fmt -check -recursive
-terraform init -backend=false -input=false
-terraform validate
-bun scripts/apply.ts
+./scripts/run-guarded.sh apply
 ```
 
 The first run uses `bootstrap/` to create only the billed project, Service
@@ -108,14 +142,18 @@ unexpected metadata, a resource binding, or any existing key fail closed.
 
 Both mutations use saved Terraform plans and a helper-owned exact confirmation;
 inherited `TF_CLI_ARGS*`, `TF_WORKSPACE`, and Google credential overrides are
-discarded. `STORAGE_EMULATOR_HOST` and `STORAGE_EMULATOR_HOST_GRPC` are rejected
-rather than discarded so an operator expecting an emulator cannot unknowingly
-reach the live state bucket. Every Terraform state or output read also requires
-the persisted workspace to be exactly `default`; a stale
-`.terraform/environment` cannot redirect a helper to another workspace. The
-confirmation phrases are shown only after the complete plans. There is no
-auto-approve path. Do not confirm either plan without explicit product-owner
-approval for the billed, retained infrastructure described in the preview.
+discarded. The child process pins `TF_CLI_CONFIG_FILE` to the checked-in
+`terraform.tfrc`, which permits only direct provider installation; a home
+`.terraformrc`, legacy `TERRAFORM_CONFIG`, development override, reattached
+provider, or ambient plugin cache cannot replace a locked provider.
+`STORAGE_EMULATOR_HOST` and `STORAGE_EMULATOR_HOST_GRPC` are rejected rather
+than discarded so an operator expecting an emulator cannot unknowingly reach
+the live state bucket. Every Terraform state or output read also requires the
+persisted workspace to be exactly `default`; a stale `.terraform/environment`
+cannot redirect a helper to another workspace. The confirmation phrases are
+shown only after the complete plans. There is no auto-approve path. Do not
+confirm either plan without explicit product-owner approval for the billed,
+retained infrastructure described in the preview.
 
 No private key or OAuth secret is a Terraform resource, input, or output.
 
@@ -160,7 +198,7 @@ ID, and reads the assignment back:
 
 ```sh
 PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT=assign-groups-reader-to-roster-sync-reader \
-  bun scripts/configure-workspace-role.ts
+  ./scripts/run-guarded.sh configure-workspace-role
 ```
 
 The helper is idempotent, allows only Admin SDK GETs plus the one role-assignment
@@ -184,24 +222,30 @@ administrator tooling, authorize it from a secure, mode-`0600` download outside
 the repository:
 
 ```sh
-gcloud auth application-default login kjh_admin@psd401.net \
-  --client-id-file=/secure/workspace-admin-client.json \
-  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admin.directory.rolemanagement
+./scripts/run-guarded.sh authorize-workspace-adc \
+  /secure/workspace-admin-client.json
 ```
+
+The helper accepts only a mode-`0600`, sub-64-KiB Desktop client outside the
+repository with Google's exact authorization, token, certificate, and loopback
+redirect endpoints. It never prints the client secret. Current gcloud rejects
+`--no-launch-browser` when a custom client file is present, so this one flow
+uses its supported `--no-browser` remote bootstrap. Copy the printed
+`gcloud auth application-default login --remote-bootstrap=...` command to a
+different trusted machine with gcloud and a browser, run it there, then paste
+the resulting URL back into the guarded prompt. The helper still cannot launch
+a browser or run that external command itself.
 
 Delete the download after authorization. The live credential verifier below
 rechecks all direct and indirect role assignments, so retain this temporary ADC
 only through that immediate proof. If the proof will not run immediately,
 revoke it now and repeat the scoped authorization immediately before the
 verifier. Supplying the same account to another login is not sufficient because
-gcloud may reuse the existing refresh credential. Explicitly revoke it, then
-restore the ordinary identity/Cloud-only ADC:
+the Cloud SDK may reuse the existing refresh credential. Explicitly revoke it,
+then restore the ordinary identity/Cloud-only ADC:
 
 ```sh
-gcloud auth application-default revoke --quiet
-gcloud auth application-default login kjh_admin@psd401.net \
-  --disable-quota-project \
-  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform
+./scripts/run-guarded.sh restore-adc
 ```
 
 If no approved administrator-tool OAuth client exists, the exact residual
@@ -232,9 +276,7 @@ Delegation** and confirm that the fixed service account's OAuth 2 client ID has
 no grant. Read that non-secret ID directly from the fixed live account:
 
 ```sh
-gcloud iam service-accounts describe \
-  roster-sync-reader@psd401-eoc.iam.gserviceaccount.com \
-  --project=psd401-eoc --format='value(oauth2ClientId)'
+./scripts/run-guarded.sh show-groups-reader-client-id
 ```
 
 Do not substitute the distinct `service_account_unique_id` from Terraform: the
@@ -257,8 +299,8 @@ never printed.
 
 ```sh
 export PSD_EOC_APPROVED_TEST_GROUP='APPROVED_STAFF_TEST_GROUP@psd401.net'
-bun scripts/provision-groups-credential.ts
-bun scripts/verify-groups-readonly.ts
+./scripts/run-guarded.sh provision-groups-credential
+./scripts/run-guarded.sh verify-groups-readonly
 ```
 
 Provisioning presents a consequence preview and requires the exact phrase
@@ -353,7 +395,7 @@ tenant-wide credentials:
    If that authorization cannot be obtained, leave the existing credential in
    place and keep sync paused.
 3. With the same `PSD_EOC_APPROVED_TEST_GROUP` value, run
-   `bun scripts/revoke-groups-credential.ts`. Review its preview and type
+   `./scripts/run-guarded.sh revoke-groups-credential`. Review its preview and type
    `revoke-psd-eoc-readonly-groups-key`. It revalidates the retained secret's
    complete AWS ownership/encryption/policy contract before reading it, then
    validates Terraform, both live IAM policies, the exact key, and the group
@@ -363,9 +405,9 @@ tenant-wide credentials:
    both sides of secret readback, sole key and creation timestamp, and group
    hash; only that fresh result supplies the key ID used for deletion. It then
    proves that no user-managed key remains.
-4. Run `bun scripts/provision-groups-credential.ts`, review its preview, and
+4. Run `./scripts/run-guarded.sh provision-groups-credential`, review its preview, and
    type `store-psd-eoc-readonly-groups-key` to create and store the replacement.
-5. Run `bun scripts/verify-groups-readonly.ts` with the same temporary
+5. Run `./scripts/run-guarded.sh verify-groups-readonly` with the same temporary
    role-management ADC. While issue #68 remains undeployed,
    leave this credential disconnected from scheduled roster sync. After #68 is
    deployed, re-enable sync only after both this credential proof and an
@@ -385,12 +427,9 @@ The supported Google Terraform providers and public Google APIs still do not
 create general Google Auth Platform clients. `google_iap_client` is only for
 Identity-Aware Proxy, and `google_iam_oauth_client` is for workforce identity
 federation; neither represents PSD EOC sign-in. Google also requires a distinct
-client for each platform. Inspect the non-secret contract with:
-
-```sh
-terraform workspace show # must print exactly: default
-terraform output -json google_oauth_contract
-```
+client for each platform. The exact non-secret client contract is committed as
+the `google_oauth_contract` output in `outputs.tf`; do not bypass the guarded
+launcher with a direct Terraform output command.
 
 Complete the supported console path in project `psd401-eoc`:
 
@@ -411,7 +450,7 @@ Complete the supported console path in project `psd401-eoc`:
 
    ```sh
    chmod 600 /secure/web-client.json /secure/ios-client.plist
-   bun scripts/store-oauth-client.ts \
+   ./scripts/run-guarded.sh store-oauth-client \
      /secure/web-client.json /secure/ios-client.plist
    ```
 
@@ -469,16 +508,18 @@ authorizes a notification or provider write.
 
 ## Destroy and decommission
 
-An ordinary `terraform destroy` intentionally fails on the project, state
-bucket, and roster-reader protections. Decommissioning requires a reviewed,
-product-owner-approved change:
+Direct destruction is intentionally unsupported by this issue, and the project,
+state-bucket, and roster-reader protections make an ordinary attempt fail.
+Decommissioning requires a reviewed, product-owner-approved change:
 
 1. Export and retain remote-state and credential-rotation evidence.
 2. Disable roster sync, then unassign Groups Reader and revoke OAuth clients.
 3. Verify no application assumes the service account.
 4. Remove provider deletion policies and Terraform `prevent_destroy` guards in
    code.
-5. Apply the reviewed change, then run `terraform destroy`.
+5. Add and use a dedicated guarded decommission workflow that pins the same
+   transport, identity, CLI-configuration, provider, preview, and human-
+   confirmation boundaries. A direct Terraform destroy remains unsupported.
 6. Retain or separately dispose of the GCS state bucket and AWS secret versions
    according to district records and security requirements.
 
