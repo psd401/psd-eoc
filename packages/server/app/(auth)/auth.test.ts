@@ -331,6 +331,11 @@ describe('protected web return destination', () => {
     ['completion loop', '/signed-in'],
     ['denial loop', '/denied?reason=access'],
     ['API destination', '/api/events?mode=real'],
+    ['nested event-type API', '/event-types/api?operation=list'],
+    ['nested event-room API', '/events/synthetic-event/api'],
+    ['nested start API', '/start/api/activate'],
+    ['matrix-parameter auth loop', '/login;next=start'],
+    ['encoded path-separator ambiguity', '/%2e%2f/login'],
   ])('fails closed for %s', (_label, value) => {
     expect(validateReturnTo(value)).toBe('/');
   });
