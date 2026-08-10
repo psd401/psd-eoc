@@ -12,6 +12,9 @@
       "bundleIdentifier": "net.psd401.eoc",
       "entitlements": {
         "aps-environment": "development"
+      },
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
