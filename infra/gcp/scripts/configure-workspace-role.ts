@@ -186,8 +186,8 @@ function parseRoleAssignment(
     throw new Error('Workspace role assignment has an unexpected scope.');
   }
   let validatedAssigneeType: 'USER' | undefined;
-  if (assigneeType === 'USER') {
-    validatedAssigneeType = assigneeType;
+  if (assigneeType === 'USER' || assigneeType === 'user') {
+    validatedAssigneeType = 'USER';
   } else if (requireAssigneeType || assigneeType !== undefined) {
     throw new Error(
       'The roster-reader service account has an indirect or group-mediated Workspace admin role.',

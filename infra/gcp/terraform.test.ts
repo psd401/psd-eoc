@@ -1200,7 +1200,7 @@ describe('fail-closed bootstrap and process behavior', () => {
       'scripts/store-oauth-client.ts',
     ]) {
       const helper = read(path);
-      expect(helper.match(/awsSecretExists\(/gu)).toHaveLength(2);
+      expect(helper.match(/awsSecretExists\(/gu)).toHaveLength(1);
       expect(helper).toContain('expectedAccountId: AWS_ACCOUNT_ID');
     }
 
@@ -1216,6 +1216,155 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(revoker).toContain('expectedAccountId: AWS_ACCOUNT_ID');
     expect(revoker.indexOf('awsSecretExists({')).toBeLessThan(
       revoker.indexOf('readSecretValue({'),
+    );
+  });
+
+  test('revalidates remote boundaries after confirmations and around writes', () => {
+    const provisioner = read('scripts/provision-groups-credential.ts');
+    const provisionMain = provisioner.slice(
+      provisioner.indexOf('async function main'),
+    );
+    const provisionConfirmation = provisionMain.indexOf(
+      'await requireExactConfirmation',
+    );
+    const provisionPreflightGoogle = provisionMain.indexOf(
+      'await readKeylessGoogleProvisioningContract()',
+    );
+    const provisionPreflightAws = provisionMain.indexOf(
+      'inspectGroupsSecretDestination()',
+    );
+    const provisionPostConfirmationAws = provisionMain.indexOf(
+      'if (!inspectGroupsSecretDestination())',
+      provisionConfirmation,
+    );
+    const provisionPostConfirmationGoogle = provisionMain.indexOf(
+      'await readKeylessGoogleProvisioningContract()',
+      provisionPostConfirmationAws,
+    );
+    const keyCreation = provisionMain.indexOf(
+      'const credentialOutput = runCommand',
+      provisionPostConfirmationGoogle,
+    );
+    const provisionPreStoreGoogle = provisionMain.indexOf(
+      'await assertGoogleProvisioningAuthorization(contract)',
+      keyCreation,
+    );
+    const provisionPreStoreKey = provisionMain.indexOf(
+      'readUserManagedKeyCreatedAt(contract, createdKeyId)',
+      provisionPreStoreGoogle,
+    );
+    const provisionPreStoreAws = provisionMain.indexOf(
+      'assertGroupsSecretDestination()',
+      provisionPreStoreKey,
+    );
+    const credentialStore = provisionMain.indexOf(
+      'const writeOutcome = await storeCredential(secretValue)',
+      provisionPreStoreAws,
+    );
+    const storedOutcome = provisionMain.indexOf(
+      "storageOutcome = 'stored'",
+      credentialStore,
+    );
+    const provisionFinalGoogle = provisionMain.indexOf(
+      'await assertGoogleProvisioningAuthorization(contract)',
+      storedOutcome,
+    );
+    const provisionFinalAws = provisionMain.indexOf(
+      'assertGroupsSecretDestination()',
+      provisionFinalGoogle,
+    );
+    const provisionFinalKey = provisionMain.indexOf(
+      'readUserManagedKeyCreatedAt(contract, createdKeyId)',
+      provisionFinalAws,
+    );
+    expect(provisionPreflightGoogle).toBeGreaterThan(-1);
+    expect(provisionPreflightGoogle).toBeLessThan(provisionConfirmation);
+    expect(provisionPreflightAws).toBeLessThan(provisionConfirmation);
+    expect(provisionPostConfirmationAws).toBeGreaterThan(provisionConfirmation);
+    expect(provisionPostConfirmationGoogle).toBeGreaterThan(
+      provisionPostConfirmationAws,
+    );
+    expect(keyCreation).toBeGreaterThan(provisionPostConfirmationGoogle);
+    expect(provisionPreStoreGoogle).toBeGreaterThan(keyCreation);
+    expect(provisionPreStoreKey).toBeGreaterThan(provisionPreStoreGoogle);
+    expect(provisionPreStoreAws).toBeGreaterThan(provisionPreStoreKey);
+    expect(credentialStore).toBeGreaterThan(provisionPreStoreAws);
+    expect(provisionFinalGoogle).toBeGreaterThan(storedOutcome);
+    expect(provisionFinalAws).toBeGreaterThan(provisionFinalGoogle);
+    expect(provisionFinalKey).toBeGreaterThan(provisionFinalAws);
+    expect(provisioner).toMatch(
+      /attemptWrite: \(\) => \{\s*assertGroupsSecretDestination\(\);\s*return putSecretValue/u,
+    );
+    expect(provisioner).toMatch(
+      /versionIsCurrent: \(\) => \{\s*assertGroupsSecretDestination\(\);\s*return secretVersionIsCurrent/u,
+    );
+    expect(provisioner).toMatch(
+      /function inspectGroupsSecretDestination\(\): boolean \{\s*assertAwsAccount\(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION\);\s*return awsSecretExists/u,
+    );
+    expect(provisioner).toMatch(
+      /async function readKeylessGoogleProvisioningContract[^]*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*const contract = readGroupsReaderContract\(\);\s*await assertExactLiveGroupsReaderRole\(contract\);\s*assertRosterReaderCredentialBoundary\(contract\);\s*const existingKeys = listUserManagedKeys\(contract\);\s*if \(existingKeys\.size > 0\)/u,
+    );
+    expect(provisioner).toMatch(
+      /async function assertGoogleProvisioningAuthorization[^]*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*await assertExactLiveGroupsReaderRole\(contract\);\s*assertRosterReaderCredentialBoundary\(contract\);/u,
+    );
+
+    const oauth = read('scripts/store-oauth-client.ts');
+    const oauthMain = oauth.slice(oauth.indexOf('async function main'));
+    const oauthConfirmation = oauthMain.indexOf(
+      'await requireExactConfirmation',
+    );
+    const oauthPreflightProject = oauthMain.indexOf(
+      'readLiveTerraformProjectNumber()',
+    );
+    const oauthPreflightAws = oauthMain.indexOf(
+      'inspectOauthSecretDestination()',
+    );
+    const oauthPostConfirmationAws = oauthMain.indexOf(
+      'if (!inspectOauthSecretDestination())',
+      oauthConfirmation,
+    );
+    const oauthPostConfirmationProject = oauthMain.indexOf(
+      'const confirmedProjectNumber = readLiveTerraformProjectNumber()',
+      oauthPostConfirmationAws,
+    );
+    const oauthWrite = oauthMain.indexOf(
+      'const versionStored = await reconcileIdempotentSecretWrite',
+      oauthPostConfirmationProject,
+    );
+    const oauthPostWriteBoundary = oauthMain.indexOf(
+      'assertOauthSecretDestination()',
+      oauthMain.indexOf('if (!versionStored)'),
+    );
+    const oauthReadback = oauthMain.indexOf(
+      'assertStoredValues(secretValue)',
+      oauthPostWriteBoundary,
+    );
+    const oauthFinalBoundary = oauthMain.indexOf(
+      'assertOauthSecretDestination()',
+      oauthReadback,
+    );
+    expect(oauthPreflightProject).toBeGreaterThan(-1);
+    expect(oauthPreflightProject).toBeLessThan(oauthConfirmation);
+    expect(oauthPreflightAws).toBeLessThan(oauthConfirmation);
+    expect(oauthPostConfirmationAws).toBeGreaterThan(oauthConfirmation);
+    expect(oauthPostConfirmationProject).toBeGreaterThan(
+      oauthPostConfirmationAws,
+    );
+    expect(oauthWrite).toBeGreaterThan(oauthPostConfirmationProject);
+    expect(oauthPostWriteBoundary).toBeGreaterThan(oauthWrite);
+    expect(oauthReadback).toBeGreaterThan(oauthPostWriteBoundary);
+    expect(oauthFinalBoundary).toBeGreaterThan(oauthReadback);
+    expect(oauth).toMatch(
+      /attemptWrite: \(\) => \{\s*assertOauthSecretDestination\(\);\s*return putSecretValue/u,
+    );
+    expect(oauth).toMatch(
+      /versionIsCurrent: \(\) => \{\s*assertOauthSecretDestination\(\);\s*return secretVersionIsCurrent/u,
+    );
+    expect(oauth).toMatch(
+      /function inspectOauthSecretDestination\(\): boolean \{\s*assertAwsAccount\(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION\);\s*return awsSecretExists/u,
+    );
+    expect(oauth).toMatch(
+      /function readLiveTerraformProjectNumber\(\): string \{[^]*assertDefaultTerraformWorkspace\(\);[^]*runCommand\('terraform', \['output', '-json', 'project'\]\)[^]*return terraformProjectNumber\(liveProject\);/u,
     );
   });
 
@@ -1652,10 +1801,13 @@ describe('Groups least-privilege contracts', () => {
 
     const provisioner = read('scripts/provision-groups-credential.ts');
     expect(provisioner.match(/readUserManagedKeyCreatedAt\(/gu)).toHaveLength(
-      2,
+      3,
     );
     expect(provisioner).toMatch(
-      /storageOutcome = 'stored';\s*assertRosterReaderCredentialBoundary\(contract\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)/u,
+      /await assertGoogleProvisioningAuthorization\(contract\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)[^]*assertGroupsSecretDestination\(\);\s*const writeOutcome = await storeCredential/u,
+    );
+    expect(provisioner).toMatch(
+      /storageOutcome = 'stored';\s*await assertGoogleProvisioningAuthorization\(contract\);\s*assertGroupsSecretDestination\(\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)/u,
     );
   });
 
@@ -1737,28 +1889,30 @@ describe('Groups least-privilege contracts', () => {
         new Set(['a'.repeat(40), 'b'.repeat(40)]),
       ),
     ).toThrow('revoke every key first');
-    expect(
-      findExactAssignment(
-        [
-          {
-            assignedTo: validGroupsOutput.service_account_unique_id,
-            assigneeType: 'USER',
-            condition: '',
-            roleAssignmentId: 'assignment-id',
-            roleId: role.roleId,
-            scopeType: 'CUSTOMER',
-          },
-        ],
-        validGroupsOutput.service_account_unique_id,
-        role.roleId,
-      ),
-    ).toEqual({
-      assignedTo: validGroupsOutput.service_account_unique_id,
-      assigneeType: 'USER',
-      roleAssignmentId: 'assignment-id',
-      roleId: role.roleId,
-      scopeType: 'CUSTOMER',
-    });
+    for (const assigneeType of ['user', 'USER']) {
+      expect(
+        findExactAssignment(
+          [
+            {
+              assignedTo: validGroupsOutput.service_account_unique_id,
+              assigneeType,
+              condition: '',
+              roleAssignmentId: 'assignment-id',
+              roleId: role.roleId,
+              scopeType: 'CUSTOMER',
+            },
+          ],
+          validGroupsOutput.service_account_unique_id,
+          role.roleId,
+        ),
+      ).toEqual({
+        assignedTo: validGroupsOutput.service_account_unique_id,
+        assigneeType: 'USER',
+        roleAssignmentId: 'assignment-id',
+        roleId: role.roleId,
+        scopeType: 'CUSTOMER',
+      });
+    }
     expect(() =>
       findExactAssignment(
         [
@@ -1790,21 +1944,29 @@ describe('Groups least-privilege contracts', () => {
         role.roleId,
       ),
     ).toThrow('must be unconditional');
-    expect(() =>
-      findExactAssignment(
-        [
-          {
-            assignedTo: 'indirect-group-id',
-            assigneeType: 'GROUP',
-            roleAssignmentId: 'indirect-assignment',
-            roleId: role.roleId,
-            scopeType: 'CUSTOMER',
-          },
-        ],
-        validGroupsOutput.service_account_unique_id,
-        role.roleId,
-      ),
-    ).toThrow('indirect or group-mediated');
+    for (const assigneeType of [
+      'group',
+      'GROUP',
+      'User',
+      'unknown',
+      undefined,
+    ]) {
+      expect(() =>
+        findExactAssignment(
+          [
+            {
+              assignedTo: 'indirect-group-id',
+              ...(assigneeType === undefined ? {} : { assigneeType }),
+              roleAssignmentId: 'indirect-assignment',
+              roleId: role.roleId,
+              scopeType: 'CUSTOMER',
+            },
+          ],
+          validGroupsOutput.service_account_unique_id,
+          role.roleId,
+        ),
+      ).toThrow('indirect or group-mediated');
+    }
 
     const roleHelper = read('scripts/configure-workspace-role.ts');
     expect(roleHelper).toContain("'X-Goog-User-Project': PROJECT_ID");

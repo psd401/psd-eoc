@@ -79,6 +79,22 @@ function createGroupsSecretPlaceholder(): void {
   ]);
 }
 
+function inspectGroupsSecretDestination(): boolean {
+  assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
+  return awsSecretExists({
+    expectedAccountId: AWS_ACCOUNT_ID,
+    profile: AWS_PROFILE,
+    region: AWS_REGION,
+    secretName: SECRET_NAME,
+  });
+}
+
+function assertGroupsSecretDestination(): void {
+  if (!inspectGroupsSecretDestination()) {
+    throw new Error('The expected Groups secret is unavailable.');
+  }
+}
+
 function validateCredential(
   value: unknown,
   contract: GroupsReaderContract,
@@ -188,22 +204,26 @@ async function storeCredential(
 ): Promise<'stored' | 'unknown'> {
   const clientRequestToken = randomUUID();
   const stored = await reconcileIdempotentSecretWrite({
-    attemptWrite: () =>
-      putSecretValue({
+    attemptWrite: () => {
+      assertGroupsSecretDestination();
+      return putSecretValue({
         clientRequestToken,
         profile: AWS_PROFILE,
         region: AWS_REGION,
         secretName: SECRET_NAME,
         secretValue,
-      }),
+      });
+    },
     clientRequestToken,
-    versionIsCurrent: () =>
-      secretVersionIsCurrent({
+    versionIsCurrent: () => {
+      assertGroupsSecretDestination();
+      return secretVersionIsCurrent({
         clientRequestToken,
         profile: AWS_PROFILE,
         region: AWS_REGION,
         secretName: SECRET_NAME,
-      }),
+      });
+    },
   });
   return stored ? 'stored' : 'unknown';
 }
@@ -253,14 +273,19 @@ export function cleanupCredentialArtifacts(options: {
   return errors;
 }
 
-async function main(): Promise<void> {
-  if (process.argv.slice(2).length > 0) {
-    throw new Error('This helper accepts no command-line options.');
-  }
-  const approvedGroup = normalizeApprovedStaffGroup(
-    process.env.PSD_EOC_APPROVED_TEST_GROUP,
-  );
-  const approvedGroupHash = approvedStaffGroupHash(approvedGroup);
+async function assertGoogleProvisioningAuthorization(
+  contract: GroupsReaderContract,
+): Promise<void> {
+  assertActiveGcloudAccount(TERRAFORM_ADMIN);
+  await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
+  await assertExactLiveGroupsReaderRole(contract);
+  assertRosterReaderCredentialBoundary(contract);
+}
+
+async function readKeylessGoogleProvisioningContract(): Promise<{
+  readonly contract: GroupsReaderContract;
+  readonly existingKeys: ReadonlySet<string>;
+}> {
   assertActiveGcloudAccount(TERRAFORM_ADMIN);
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
   const contract = readGroupsReaderContract();
@@ -272,31 +297,29 @@ async function main(): Promise<void> {
       'A user-managed roster-reader key already exists; rotate it explicitly instead of creating another.',
     );
   }
+  return { contract, existingKeys };
+}
 
-  assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
-  const secretExists = awsSecretExists({
-    expectedAccountId: AWS_ACCOUNT_ID,
-    profile: AWS_PROFILE,
-    region: AWS_REGION,
-    secretName: SECRET_NAME,
-  });
+async function main(): Promise<void> {
+  if (process.argv.slice(2).length > 0) {
+    throw new Error('This helper accepts no command-line options.');
+  }
+  const approvedGroup = normalizeApprovedStaffGroup(
+    process.env.PSD_EOC_APPROVED_TEST_GROUP,
+  );
+  const approvedGroupHash = approvedStaffGroupHash(approvedGroup);
+  await readKeylessGoogleProvisioningContract();
+  inspectGroupsSecretDestination();
   await requireExactConfirmation(
     'Groups credential consequence preview: create one user-managed key for the roster-reader service account, which has no direct project IAM binding, and store it only in the retained AWS secret bound to the externally approved staff-only group hash. Inherited or group-mediated GCP IAM must be checked separately as documented. This does not read a group, send a notification, or authorize any human-only action.',
     'store-psd-eoc-readonly-groups-key',
   );
-  if (!secretExists) {
+  if (!inspectGroupsSecretDestination()) {
     createGroupsSecretPlaceholder();
-    if (
-      !awsSecretExists({
-        expectedAccountId: AWS_ACCOUNT_ID,
-        profile: AWS_PROFILE,
-        region: AWS_REGION,
-        secretName: SECRET_NAME,
-      })
-    ) {
-      throw new Error('AWS did not create the expected Groups secret.');
-    }
+    assertGroupsSecretDestination();
   }
+  const { contract, existingKeys } =
+    await readKeylessGoogleProvisioningContract();
 
   let keyCreationAttempted = false;
   let createdKeyId: string | undefined;
@@ -336,6 +359,16 @@ async function main(): Promise<void> {
       approvedGroupHash,
       credentialCreatedAt,
     );
+    await assertGoogleProvisioningAuthorization(contract);
+    if (
+      readUserManagedKeyCreatedAt(contract, createdKeyId) !==
+      credentialCreatedAt
+    ) {
+      throw new Error(
+        'Google did not preserve the exact sole roster-reader key before AWS storage.',
+      );
+    }
+    assertGroupsSecretDestination();
     const writeOutcome = await storeCredential(secretValue);
     storageOutcome = 'unknown';
     if (writeOutcome === 'unknown') {
@@ -351,7 +384,8 @@ async function main(): Promise<void> {
       );
     }
     storageOutcome = 'stored';
-    assertRosterReaderCredentialBoundary(contract);
+    await assertGoogleProvisioningAuthorization(contract);
+    assertGroupsSecretDestination();
     if (
       readUserManagedKeyCreatedAt(contract, createdKeyId) !==
       credentialCreatedAt

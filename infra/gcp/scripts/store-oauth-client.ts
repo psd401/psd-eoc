@@ -50,6 +50,19 @@ export function terraformProjectNumber(value: unknown): string {
   return output.number;
 }
 
+function readLiveTerraformProjectNumber(): string {
+  let liveProject: unknown;
+  try {
+    assertDefaultTerraformWorkspace();
+    liveProject = JSON.parse(
+      runCommand('terraform', ['output', '-json', 'project']),
+    );
+  } catch {
+    throw new Error('Terraform project output did not contain valid JSON.');
+  }
+  return terraformProjectNumber(liveProject);
+}
+
 function exactStringArray(value: unknown, expected: string): boolean {
   return (
     Array.isArray(value) &&
@@ -158,6 +171,22 @@ function createOauthSecretPlaceholder(): void {
   ]);
 }
 
+function inspectOauthSecretDestination(): boolean {
+  assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
+  return awsSecretExists({
+    expectedAccountId: AWS_ACCOUNT_ID,
+    profile: AWS_PROFILE,
+    region: AWS_REGION,
+    secretName: SECRET_NAME,
+  });
+}
+
+function assertOauthSecretDestination(): void {
+  if (!inspectOauthSecretDestination()) {
+    throw new Error('The expected OAuth secret is unavailable.');
+  }
+}
+
 function assertStoredValues(expected: Readonly<Record<string, unknown>>): void {
   const stored = readSecretValue({
     profile: AWS_PROFILE,
@@ -215,16 +244,7 @@ async function main(): Promise<void> {
   if (!oauthClientId(webClientId)) {
     throw new Error('Web OAuth client ID has an invalid format.');
   }
-  let liveProject: unknown;
-  try {
-    assertDefaultTerraformWorkspace();
-    liveProject = JSON.parse(
-      runCommand('terraform', ['output', '-json', 'project']),
-    );
-  } catch {
-    throw new Error('Terraform project output did not contain valid JSON.');
-  }
-  const liveProjectNumber = terraformProjectNumber(liveProject);
+  const liveProjectNumber = readLiveTerraformProjectNumber();
   if (oauthClientProjectNumber(webClientId) !== liveProjectNumber) {
     throw new Error(
       'Web OAuth client ID does not belong to the Terraform-managed project.',
@@ -250,29 +270,23 @@ async function main(): Promise<void> {
     );
   }
 
-  assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
-  const secretExists = awsSecretExists({
-    expectedAccountId: AWS_ACCOUNT_ID,
-    profile: AWS_PROFILE,
-    region: AWS_REGION,
-    secretName: SECRET_NAME,
-  });
+  inspectOauthSecretDestination();
   await requireExactConfirmation(
     'OAuth credential consequence preview: create or replace the live PSD EOC Google web credential in the retained AWS secret and add the public iOS client ID. This configures sign-in credentials but does not deploy the app, send a notification, or authorize any human-only action.',
     'store-psd-eoc-google-oauth',
   );
-  if (!secretExists) {
+  if (!inspectOauthSecretDestination()) {
     createOauthSecretPlaceholder();
-    if (
-      !awsSecretExists({
-        expectedAccountId: AWS_ACCOUNT_ID,
-        profile: AWS_PROFILE,
-        region: AWS_REGION,
-        secretName: SECRET_NAME,
-      })
-    ) {
-      throw new Error('AWS did not create the expected OAuth secret.');
-    }
+    assertOauthSecretDestination();
+  }
+  const confirmedProjectNumber = readLiveTerraformProjectNumber();
+  if (
+    oauthClientProjectNumber(webClientId) !== confirmedProjectNumber ||
+    oauthClientProjectNumber(iosClientId) !== confirmedProjectNumber
+  ) {
+    throw new Error(
+      'OAuth client IDs no longer belong to the Terraform-managed project.',
+    );
   }
 
   const secretValue = {
@@ -284,27 +298,33 @@ async function main(): Promise<void> {
   } as const;
   const clientRequestToken = randomUUID();
   const versionStored = await reconcileIdempotentSecretWrite({
-    attemptWrite: () =>
-      putSecretValue({
+    attemptWrite: () => {
+      assertOauthSecretDestination();
+      return putSecretValue({
         clientRequestToken,
         profile: AWS_PROFILE,
         region: AWS_REGION,
         secretName: SECRET_NAME,
         secretValue,
-      }),
+      });
+    },
     clientRequestToken,
-    versionIsCurrent: () =>
-      secretVersionIsCurrent({
+    versionIsCurrent: () => {
+      assertOauthSecretDestination();
+      return secretVersionIsCurrent({
         clientRequestToken,
         profile: AWS_PROFILE,
         region: AWS_REGION,
         secretName: SECRET_NAME,
-      }),
+      });
+    },
   });
   if (!versionStored) {
     throw new Error('AWS did not store the expected OAuth credential version.');
   }
+  assertOauthSecretDestination();
   assertStoredValues(secretValue);
+  assertOauthSecretDestination();
   console.log(
     `Stored and read back the web credential plus iOS public client ID in ${SECRET_NAME}; no credential value was printed. Securely delete both source downloads now.`,
   );
