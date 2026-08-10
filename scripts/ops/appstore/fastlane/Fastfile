@@ -1,0 +1,43 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Create the PSD EOC bundle ID and App Store Connect app record"
+  lane :produce do
+    expected_confirmation = "create net.psd401.eoc"
+
+    unless ENV["CONFIRM_APPSTORE_CREATE"] == expected_confirmation
+      UI.user_error!(
+        "Refusing to create an Apple app record. Set " \
+        "CONFIRM_APPSTORE_CREATE='#{expected_confirmation}' after reviewing the runbook."
+      )
+    end
+
+    username = ENV["APPSTORE_APPLE_ID"]
+    UI.user_error!("APPSTORE_APPLE_ID is required.") if username.to_s.strip.empty?
+
+    options = {
+      username: username,
+      app_identifier: "net.psd401.eoc",
+      app_name: "PSD EOC",
+      sku: "PSD-EOC-IOS",
+      language: "en-US",
+      platform: "ios",
+      skip_devcenter: false,
+      skip_itc: false
+    }
+
+    developer_team_id = ENV["APPLE_DEVELOPER_TEAM_ID"]
+    app_store_team_id = ENV["APPSTORE_CONNECT_TEAM_ID"]
+    options[:team_id] = developer_team_id unless developer_team_id.to_s.strip.empty?
+    options[:itc_team_id] = app_store_team_id unless app_store_team_id.to_s.strip.empty?
+
+    # `produce` is an alias for this official fastlane action. Calling the
+    # unambiguous action name avoids colliding with this lane's name.
+    create_app_online(**options)
+
+    UI.success(
+      "The app-record request completed. Run the ASC preview to verify " \
+      "name, bundle ID, and SKU before any TestFlight write."
+    )
+  end
+end
