@@ -2,6 +2,7 @@ import {
   CfnOutput,
   CfnParameter,
   Duration,
+  Fn,
   RemovalPolicy,
   Resource,
   Stack,
@@ -13,6 +14,7 @@ import {
   aws_kms as kms,
   aws_logs as logs,
   aws_rds as rds,
+  aws_route53 as route53,
   aws_s3 as s3,
   aws_secretsmanager as secretsmanager,
   aws_ses as ses,
@@ -34,7 +36,14 @@ import {
   GITHUB_REPOSITORY,
   GITHUB_REPOSITORY_ID,
   NOTIFICATION_CHANNELS,
+  SES_CONFIGURATION_SET_NAME,
+  SES_EVENT_DESTINATION_NAME,
+  SES_EVENT_TOPIC_NAME,
+  SES_EVENT_TYPES,
   SES_IDENTITY_DOMAIN,
+  SES_MAIL_FROM_DOMAIN,
+  SES_PARENT_HOSTED_ZONE_ID,
+  SES_PARENT_HOSTED_ZONE_NAME,
 } from './config';
 
 const CDK_BOOTSTRAP_QUALIFIER = 'hnb659fds';
@@ -451,7 +460,120 @@ export class PsdEocStack extends Stack {
       grant.applyBefore(appRunnerService);
     }
 
+    const emailConfigurationSetArn = `arn:aws:ses:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`;
+    operationsKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
+        conditions: {
+          StringEquals: {
+            'AWS:SourceAccount': DEPLOYMENT_ACCOUNT,
+            'AWS:SourceArn': emailConfigurationSetArn,
+          },
+        },
+        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+        resources: ['*'],
+        sid: 'AllowSesEmailEventEncryption',
+      }),
+    );
+
+    const parentHostedZone =
+      route53.PublicHostedZone.fromPublicHostedZoneAttributes(
+        this,
+        'ParentHostedZone',
+        {
+          hostedZoneId: SES_PARENT_HOSTED_ZONE_ID,
+          zoneName: SES_PARENT_HOSTED_ZONE_NAME,
+        },
+      );
+    const alertsHostedZone = new route53.PublicHostedZone(
+      this,
+      'AlertsHostedZone',
+      {
+        comment: 'Delegated DNS zone for PSD EOC transactional email.',
+        zoneName: SES_IDENTITY_DOMAIN,
+      },
+    );
+    alertsHostedZone.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const alertsNameServers = alertsHostedZone.hostedZoneNameServers;
+    if (alertsNameServers === undefined) {
+      throw new Error(
+        'The public alerts hosted zone must expose name servers.',
+      );
+    }
+    const alertsZoneDelegation = new route53.ZoneDelegationRecord(
+      this,
+      'AlertsZoneDelegation',
+      {
+        comment: 'Delegates alerts.psd401.net to the retained PSD EOC zone.',
+        nameServers: alertsNameServers,
+        recordName: SES_IDENTITY_DOMAIN,
+        ttl: Duration.minutes(5),
+        zone: parentHostedZone,
+      },
+    );
+    alertsZoneDelegation.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
+    const emailConfigurationSet = new ses.CfnConfigurationSet(
+      this,
+      'EmailConfigurationSet',
+      {
+        name: SES_CONFIGURATION_SET_NAME,
+        reputationOptions: {
+          reputationMetricsEnabled: true,
+        },
+      },
+    );
+    emailConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
+    const emailEventsTopic = new sns.Topic(this, 'EmailEventsTopic', {
+      displayName: 'PSD EOC SES delivery events',
+      enforceSSL: true,
+      masterKey: operationsKey,
+      topicName: SES_EVENT_TOPIC_NAME,
+    });
+    emailEventsTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const emailEventsPublishPolicy = emailEventsTopic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['sns:Publish'],
+        conditions: {
+          StringEquals: {
+            'AWS:SourceAccount': DEPLOYMENT_ACCOUNT,
+            'AWS:SourceArn': emailConfigurationSetArn,
+          },
+        },
+        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+        resources: [emailEventsTopic.topicArn],
+        sid: 'AllowSesConfigurationSetEvents',
+      }),
+    );
+    this.retainGeneratedPolicy(emailEventsTopic);
+
+    const emailEventDestination = new ses.CfnConfigurationSetEventDestination(
+      this,
+      'EmailEventDestination',
+      {
+        configurationSetName: emailConfigurationSet.ref,
+        eventDestination: {
+          enabled: true,
+          matchingEventTypes: [...SES_EVENT_TYPES],
+          name: SES_EVENT_DESTINATION_NAME,
+          snsDestination: {
+            topicArn: emailEventsTopic.topicArn,
+          },
+        },
+      },
+    );
+    emailEventDestination.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    if (emailEventsPublishPolicy.policyDependable !== undefined) {
+      emailEventDestination.node.addDependency(
+        emailEventsPublishPolicy.policyDependable,
+      );
+    }
+
     const emailIdentity = new ses.CfnEmailIdentity(this, 'EmailIdentity', {
+      configurationSetAttributes: {
+        configurationSetName: emailConfigurationSet.ref,
+      },
       dkimAttributes: {
         signingEnabled: true,
       },
@@ -460,10 +582,41 @@ export class PsdEocStack extends Stack {
       },
       emailIdentity: SES_IDENTITY_DOMAIN,
       feedbackAttributes: {
-        emailForwardingEnabled: true,
+        emailForwardingEnabled: false,
+      },
+      mailFromAttributes: {
+        behaviorOnMxFailure: 'REJECT_MESSAGE',
+        mailFromDomain: SES_MAIL_FROM_DOMAIN,
       },
     });
     emailIdentity.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
+    const mailFromMxRecord = new route53.CfnRecordSet(
+      this,
+      'SesMailFromMxRecord',
+      {
+        hostedZoneId: alertsHostedZone.hostedZoneId,
+        name: `${SES_MAIL_FROM_DOMAIN}.`,
+        resourceRecords: [
+          `10 feedback-smtp.${DEPLOYMENT_REGION}.amazonses.com.`,
+        ],
+        ttl: '300',
+        type: 'MX',
+      },
+    );
+    mailFromMxRecord.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const mailFromSpfRecord = new route53.CfnRecordSet(
+      this,
+      'SesMailFromSpfRecord',
+      {
+        hostedZoneId: alertsHostedZone.hostedZoneId,
+        name: `${SES_MAIL_FROM_DOMAIN}.`,
+        resourceRecords: ['"v=spf1 include:amazonses.com ~all"'],
+        ttl: '300',
+        type: 'TXT',
+      },
+    );
+    mailFromSpfRecord.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     const githubOidcProvider =
       iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(
@@ -541,6 +694,24 @@ export class PsdEocStack extends Stack {
     new CfnOutput(this, 'SesIdentityDomain', {
       value: SES_IDENTITY_DOMAIN,
     });
+    new CfnOutput(this, 'AlertsHostedZoneId', {
+      description: 'Route 53 hosted-zone ID for alerts.psd401.net.',
+      value: alertsHostedZone.hostedZoneId,
+    });
+    new CfnOutput(this, 'AlertsHostedZoneNameServers', {
+      description:
+        'Comma-separated authoritative name servers for alerts.psd401.net.',
+      value: Fn.join(',', alertsNameServers),
+    });
+    new CfnOutput(this, 'SesMailFromDomain', {
+      value: SES_MAIL_FROM_DOMAIN,
+    });
+    new CfnOutput(this, 'SesConfigurationSetName', {
+      value: emailConfigurationSet.ref,
+    });
+    new CfnOutput(this, 'SesEmailEventsTopicArn', {
+      value: emailEventsTopic.topicArn,
+    });
 
     const dkimRecords = [
       [
@@ -557,12 +728,26 @@ export class PsdEocStack extends Stack {
       ],
     ] as const;
     dkimRecords.forEach(([recordName, recordValue], index) => {
+      const dkimRecord = new route53.CfnRecordSet(
+        this,
+        `SesDkimRecord${index + 1}`,
+        {
+          hostedZoneId: alertsHostedZone.hostedZoneId,
+          name: recordName,
+          resourceRecords: [recordValue],
+          ttl: '300',
+          type: 'CNAME',
+        },
+      );
+      dkimRecord.applyRemovalPolicy(RemovalPolicy.RETAIN);
       new CfnOutput(this, `SesDkimRecordName${index + 1}`, {
-        description: 'Create this SES Easy DKIM CNAME record manually.',
+        description:
+          'SES Easy DKIM CNAME name published automatically in Route 53.',
         value: recordName,
       });
       new CfnOutput(this, `SesDkimRecordValue${index + 1}`, {
-        description: 'Value for the corresponding SES Easy DKIM CNAME record.',
+        description:
+          'SES Easy DKIM CNAME value published automatically in Route 53.',
         value: recordValue,
       });
     });
