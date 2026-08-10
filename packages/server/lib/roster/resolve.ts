@@ -1,0 +1,375 @@
+import {
+  AudienceConfigSchema,
+  NeighborhoodSchema,
+  RosterSnapshotSchema,
+  type AudienceConfig,
+  type Endpoint,
+  type Neighborhood,
+  type NeighborhoodVersionRef,
+  type RecipientId,
+  type RosterGroupSourceRef,
+  type RosterSnapshot,
+} from '@psd-eoc/contracts';
+
+/** Closed, non-PII reasons why audience resolution can fail closed. */
+export type AudienceResolutionErrorCode =
+  | 'DUPLICATE_NEIGHBORHOOD_VERSION'
+  | 'ENDPOINT_PROVENANCE_CONFLICT'
+  | 'GROUP_SOURCE_PROVENANCE_CONFLICT'
+  | 'INVALID_AUDIENCE_CONFIG'
+  | 'INVALID_NEIGHBORHOOD_VERSION'
+  | 'INVALID_ROSTER_SNAPSHOT'
+  | 'MISSING_AUDIENCE_FACILITY'
+  | 'MISSING_BUILDING_SOURCE'
+  | 'MISSING_NEIGHBORHOOD_VERSION'
+  | 'MISSING_OTHERS_SOURCE'
+  | 'MISSING_TARGET_FACILITY';
+
+const ERROR_MESSAGES = Object.freeze({
+  DUPLICATE_NEIGHBORHOOD_VERSION:
+    'Neighborhood version evidence must be unique.',
+  ENDPOINT_PROVENANCE_CONFLICT:
+    'An endpoint belongs to conflicting recipient provenance.',
+  GROUP_SOURCE_PROVENANCE_CONFLICT:
+    'Audience and roster group-source provenance conflict.',
+  INVALID_AUDIENCE_CONFIG: 'The audience configuration is invalid.',
+  INVALID_NEIGHBORHOOD_VERSION: 'A neighborhood version is invalid.',
+  INVALID_ROSTER_SNAPSHOT: 'The roster snapshot is invalid or incomplete.',
+  MISSING_AUDIENCE_FACILITY:
+    'The roster snapshot does not cover the audience facility.',
+  MISSING_BUILDING_SOURCE:
+    'A targeted facility has no complete building roster source.',
+  MISSING_NEIGHBORHOOD_VERSION:
+    'The exact audience-pinned neighborhood version is unavailable.',
+  MISSING_OTHERS_SOURCE:
+    'The exact audience-pinned others source is unavailable.',
+  MISSING_TARGET_FACILITY:
+    'The roster snapshot does not cover a targeted facility.',
+} as const satisfies Readonly<Record<AudienceResolutionErrorCode, string>>);
+
+/** Safe resolution failure that never reflects recipient or endpoint values. */
+export class AudienceResolutionError extends Error {
+  public readonly code: AudienceResolutionErrorCode;
+
+  public constructor(code: AudienceResolutionErrorCode) {
+    super(ERROR_MESSAGES[code]);
+    this.name = 'AudienceResolutionError';
+    this.code = code;
+  }
+}
+
+/** Exact immutable inputs selected before the activation critical path. */
+export interface ResolveAudienceInput {
+  readonly audienceConfig: AudienceConfig;
+  readonly neighborhoodVersions: readonly Neighborhood[];
+  readonly rosterSnapshot: RosterSnapshot;
+}
+
+/** Minimized pinned snapshot evidence retained with a resolved audience. */
+export type ResolvedRosterSnapshotRef = Readonly<
+  Pick<
+    RosterSnapshot,
+    'capturedAt' | 'id' | 'population' | 'sourceConfiguration' | 'version'
+  >
+>;
+
+/** Exact immutable audience-configuration evidence used during resolution. */
+export type ResolvedAudienceConfigRef = Readonly<
+  Pick<AudienceConfig, 'facilityId' | 'id' | 'version'>
+>;
+
+/** One selected recipient and only the active endpoints eligible for fan-out. */
+export interface ResolvedAudienceRecipient {
+  readonly recipientId: RecipientId;
+  readonly groupSourceRefs: readonly RosterGroupSourceRef[];
+  readonly endpoints: readonly Endpoint[];
+}
+
+/**
+ * Pure internal fan-out plan. It repeats every immutable version selected for
+ * the resolution so later syncs or configuration edits cannot change a send.
+ */
+export interface ResolvedAudience {
+  readonly rosterSnapshot: ResolvedRosterSnapshotRef;
+  readonly audienceConfig: ResolvedAudienceConfigRef;
+  readonly neighborhoodVersions: readonly NeighborhoodVersionRef[];
+  readonly sourceGroupRefs: readonly RosterGroupSourceRef[];
+  readonly recipients: readonly ResolvedAudienceRecipient[];
+}
+
+function fail(code: AudienceResolutionErrorCode): never {
+  throw new AudienceResolutionError(code);
+}
+
+function parseAudienceConfig(value: AudienceConfig): AudienceConfig {
+  const result = AudienceConfigSchema.safeParse(value);
+  if (!result.success) {
+    return fail('INVALID_AUDIENCE_CONFIG');
+  }
+  return result.data;
+}
+
+function parseRosterSnapshot(value: RosterSnapshot): RosterSnapshot {
+  const result = RosterSnapshotSchema.safeParse(value);
+  if (!result.success) {
+    return fail('INVALID_ROSTER_SNAPSHOT');
+  }
+  return result.data;
+}
+
+function parseNeighborhoodVersions(
+  values: readonly Neighborhood[],
+): readonly Neighborhood[] {
+  if (!Array.isArray(values)) {
+    return fail('INVALID_NEIGHBORHOOD_VERSION');
+  }
+
+  return Object.freeze(
+    values.map((value) => {
+      const result = NeighborhoodSchema.safeParse(value);
+      if (!result.success) {
+        return fail('INVALID_NEIGHBORHOOD_VERSION');
+      }
+      return result.data;
+    }),
+  );
+}
+
+function neighborhoodKey(
+  neighborhood: Pick<Neighborhood, 'id' | 'version'>,
+): string {
+  return `${neighborhood.id}:${neighborhood.version}`;
+}
+
+function groupSourceKey(source: RosterGroupSourceRef): string {
+  return [source.purpose, source.facilityId ?? '', source.kind, source.id].join(
+    ':',
+  );
+}
+
+function groupSourcesEqual(
+  left: RosterGroupSourceRef,
+  right: RosterGroupSourceRef,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.kind === right.kind &&
+    left.purpose === right.purpose &&
+    left.facilityId === right.facilityId
+  );
+}
+
+function endpointKey(endpoint: Endpoint): string {
+  return `${endpoint.channel}:${endpoint.id}`;
+}
+
+function endpointDestinationKey(endpoint: Endpoint): string {
+  switch (endpoint.channel) {
+    case 'email':
+      return `email:${endpoint.email.toLowerCase()}`;
+    case 'push':
+      return `push:${endpoint.token}`;
+    case 'sms':
+      return `sms:${endpoint.phoneNumber}`;
+  }
+}
+
+function compareGroupSources(
+  left: RosterGroupSourceRef,
+  right: RosterGroupSourceRef,
+): number {
+  return groupSourceKey(left).localeCompare(groupSourceKey(right));
+}
+
+function compareNeighborhoodRefs(
+  left: NeighborhoodVersionRef,
+  right: NeighborhoodVersionRef,
+): number {
+  return left.id.localeCompare(right.id) || left.version - right.version;
+}
+
+function compareEndpoints(left: Endpoint, right: Endpoint): number {
+  return endpointKey(left).localeCompare(endpointKey(right));
+}
+
+function addSelectedSource(
+  selectedSources: Map<string, RosterGroupSourceRef>,
+  source: RosterGroupSourceRef,
+): void {
+  const existing = selectedSources.get(source.id);
+  if (existing !== undefined && !groupSourcesEqual(existing, source)) {
+    fail('GROUP_SOURCE_PROVENANCE_CONFLICT');
+  }
+  selectedSources.set(source.id, source);
+}
+
+/**
+ * Resolves a pinned audience exclusively from supplied immutable records.
+ * There is deliberately no provider, database, or Google dependency here.
+ */
+export function resolveAudience(input: ResolveAudienceInput): ResolvedAudience {
+  const audienceConfig = parseAudienceConfig(input.audienceConfig);
+  const rosterSnapshot = parseRosterSnapshot(input.rosterSnapshot);
+  const neighborhoodVersions = parseNeighborhoodVersions(
+    input.neighborhoodVersions,
+  );
+
+  const snapshotFacilityIds = new Set(rosterSnapshot.facilityIds);
+  if (!snapshotFacilityIds.has(audienceConfig.facilityId)) {
+    fail('MISSING_AUDIENCE_FACILITY');
+  }
+
+  const neighborhoodByVersion = new Map<string, Neighborhood>();
+  for (const neighborhood of neighborhoodVersions) {
+    const key = neighborhoodKey(neighborhood);
+    if (neighborhoodByVersion.has(key)) {
+      fail('DUPLICATE_NEIGHBORHOOD_VERSION');
+    }
+    neighborhoodByVersion.set(key, neighborhood);
+  }
+
+  const snapshotSourceById = new Map<string, RosterGroupSourceRef>();
+  const buildingSourcesByFacility = new Map<
+    string,
+    readonly RosterGroupSourceRef[]
+  >();
+  for (const source of rosterSnapshot.sourceGroupRefs) {
+    snapshotSourceById.set(source.id, source);
+    if (source.purpose !== 'building') {
+      continue;
+    }
+    const existing = buildingSourcesByFacility.get(source.facilityId) ?? [];
+    buildingSourcesByFacility.set(
+      source.facilityId,
+      Object.freeze([...existing, source]),
+    );
+  }
+
+  const selectedSources = new Map<string, RosterGroupSourceRef>();
+  const selectedNeighborhoods = new Map<string, NeighborhoodVersionRef>();
+
+  const selectBuildingFacility = (facilityId: string): void => {
+    if (!snapshotFacilityIds.has(facilityId)) {
+      fail('MISSING_TARGET_FACILITY');
+    }
+    const sources = buildingSourcesByFacility.get(facilityId);
+    if (sources === undefined || sources.length === 0) {
+      fail('MISSING_BUILDING_SOURCE');
+    }
+    sources.forEach((source) => addSelectedSource(selectedSources, source));
+  };
+
+  for (const target of audienceConfig.targets) {
+    switch (target.kind) {
+      case 'building':
+        selectBuildingFacility(target.facilityId);
+        break;
+      case 'neighborhood': {
+        const key = neighborhoodKey(target.neighborhood);
+        const neighborhood = neighborhoodByVersion.get(key);
+        if (neighborhood === undefined) {
+          fail('MISSING_NEIGHBORHOOD_VERSION');
+        }
+        selectedNeighborhoods.set(
+          key,
+          Object.freeze({
+            id: neighborhood.id,
+            version: neighborhood.version,
+          }),
+        );
+        neighborhood.facilityIds.forEach(selectBuildingFacility);
+        break;
+      }
+      case 'others': {
+        const source = snapshotSourceById.get(target.groupSourceRef.id);
+        if (source === undefined) {
+          fail('MISSING_OTHERS_SOURCE');
+        }
+        if (!groupSourcesEqual(source, target.groupSourceRef)) {
+          fail('GROUP_SOURCE_PROVENANCE_CONFLICT');
+        }
+        addSelectedSource(selectedSources, source);
+        break;
+      }
+    }
+  }
+
+  const endpointOwnerById = new Map<string, RecipientId>();
+  const endpointOwnerByDestination = new Map<string, RecipientId>();
+  const recipients: ResolvedAudienceRecipient[] = [];
+
+  for (const recipient of rosterSnapshot.recipients) {
+    const matchedSources: RosterGroupSourceRef[] = [];
+    for (const recipientSource of recipient.groupSourceRefs) {
+      const selectedSource = selectedSources.get(recipientSource.id);
+      if (selectedSource === undefined) {
+        continue;
+      }
+      if (!groupSourcesEqual(selectedSource, recipientSource)) {
+        fail('GROUP_SOURCE_PROVENANCE_CONFLICT');
+      }
+      matchedSources.push(selectedSource);
+    }
+
+    if (matchedSources.length === 0) {
+      continue;
+    }
+
+    const activeEndpoints = recipient.endpoints
+      .filter((endpoint) => endpoint.status === 'active')
+      .sort(compareEndpoints);
+
+    for (const endpoint of activeEndpoints) {
+      const ownerById = endpointOwnerById.get(endpoint.id);
+      const destinationKey = endpointDestinationKey(endpoint);
+      const ownerByDestination = endpointOwnerByDestination.get(destinationKey);
+      if (
+        (ownerById !== undefined && ownerById !== recipient.id) ||
+        (ownerByDestination !== undefined &&
+          ownerByDestination !== recipient.id)
+      ) {
+        fail('ENDPOINT_PROVENANCE_CONFLICT');
+      }
+      endpointOwnerById.set(endpoint.id, recipient.id);
+      endpointOwnerByDestination.set(destinationKey, recipient.id);
+    }
+
+    recipients.push(
+      Object.freeze({
+        recipientId: recipient.id,
+        groupSourceRefs: Object.freeze(
+          [...matchedSources].sort(compareGroupSources),
+        ),
+        endpoints: Object.freeze(activeEndpoints),
+      }),
+    );
+  }
+
+  recipients.sort((left, right) =>
+    left.recipientId.localeCompare(right.recipientId),
+  );
+
+  return Object.freeze({
+    rosterSnapshot: Object.freeze({
+      id: rosterSnapshot.id,
+      version: rosterSnapshot.version,
+      population: rosterSnapshot.population,
+      sourceConfiguration: Object.freeze({
+        ...rosterSnapshot.sourceConfiguration,
+      }),
+      capturedAt: rosterSnapshot.capturedAt,
+    }),
+    audienceConfig: Object.freeze({
+      id: audienceConfig.id,
+      version: audienceConfig.version,
+      facilityId: audienceConfig.facilityId,
+    }),
+    neighborhoodVersions: Object.freeze(
+      [...selectedNeighborhoods.values()].sort(compareNeighborhoodRefs),
+    ),
+    sourceGroupRefs: Object.freeze(
+      [...selectedSources.values()].sort(compareGroupSources),
+    ),
+    recipients: Object.freeze(recipients),
+  });
+}
