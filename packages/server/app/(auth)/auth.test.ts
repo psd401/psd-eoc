@@ -36,6 +36,15 @@ import {
   PLAYWRIGHT_ACCESS_GROUP_CONFIGURATION,
   PLAYWRIGHT_MEMBER_SUBJECT,
 } from './test/auth-test-runtime';
+import {
+  clearReturnToCookieHeader,
+  createReturnToCookieHeader,
+  readReturnToCookie,
+  returnToFromRequestUrl,
+  validateReturnTo,
+  WEB_RETURN_TO_COOKIE_MAX_AGE_SECONDS,
+  WEB_RETURN_TO_COOKIE_NAME,
+} from './auth/return-to';
 
 const GOOGLE_ISSUER = 'https://accounts.google.com';
 const CLIENT_ID = 'synthetic-unit.apps.googleusercontent.com';
@@ -290,6 +299,124 @@ function expectOidcError(
     'Max-Age=0',
   );
 }
+
+describe('protected web return destination', () => {
+  const environment = Object.freeze({
+    GOOGLE_OIDC_COOKIE_SECRET: COOKIE_SECRET,
+  });
+  const issuedAt = new Date('2026-08-10T12:00:00.000Z');
+  const exactDestination =
+    '/start?facility=synthetic-harbor%20school&mode=real&next=%2Fevents%2Factive';
+
+  test('preserves an exact app-relative pathname and query', () => {
+    expect(validateReturnTo(exactDestination)).toBe(exactDestination);
+    expect(
+      returnToFromRequestUrl(
+        `https://eoc.psd401.net/auth/sign-in?returnTo=${encodeURIComponent(exactDestination)}`,
+      ),
+    ).toBe(exactDestination);
+  });
+
+  test.each([
+    ['external URL', 'https://example.invalid/start'],
+    ['protocol-relative URL', '//example.invalid/start'],
+    ['encoded protocol-relative URL', '/%2f%2fexample.invalid/start'],
+    ['malformed percent encoding', '/start?facility=%GG'],
+    ['encoded control character', '/start/%00confirmation'],
+    ['fragment-bearing URL', '/start#confirmation'],
+    ['backslash URL', '/\\example.invalid/start'],
+    ['normalized dot segment', '/events/../auth/sign-in'],
+    ['login loop', '/login?returnTo=%2Fstart'],
+    ['encoded auth loop', '/%61uth/callback'],
+    ['completion loop', '/signed-in'],
+    ['denial loop', '/denied?reason=access'],
+    ['API destination', '/api/events?mode=real'],
+  ])('fails closed for %s', (_label, value) => {
+    expect(validateReturnTo(value)).toBe('/');
+  });
+
+  test('fails closed when the return query is omitted or duplicated', () => {
+    expect(returnToFromRequestUrl('https://eoc.psd401.net/auth/sign-in')).toBe(
+      '/',
+    );
+    expect(
+      returnToFromRequestUrl(
+        'https://eoc.psd401.net/auth/sign-in?returnTo=%2Fstart&returnTo=%2Fevents',
+      ),
+    ).toBe('/');
+  });
+
+  test('issues short-lived, host-only, script-inaccessible signed state', () => {
+    const header = createReturnToCookieHeader(exactDestination, {
+      environment,
+      now: issuedAt,
+    });
+    expect(header).toContain(`${WEB_RETURN_TO_COOKIE_NAME}=`);
+    expect(header).toContain(`Max-Age=${WEB_RETURN_TO_COOKIE_MAX_AGE_SECONDS}`);
+    expect(header).toContain('Path=/');
+    expect(header).toContain('HttpOnly');
+    expect(header).toContain('Secure');
+    expect(header).toContain('SameSite=Lax');
+    expect(header).not.toContain('Domain=');
+    expect(header).not.toContain(exactDestination);
+
+    expect(
+      readReturnToCookie(cookieRequestHeader(header), {
+        environment,
+        now: new Date(issuedAt.getTime() + 599_000),
+      }),
+    ).toEqual({ destination: exactDestination, valid: true });
+  });
+
+  test('rejects tampered, expired, duplicate, and wrongly signed state', () => {
+    const header = createReturnToCookieHeader(exactDestination, {
+      environment,
+      now: issuedAt,
+    });
+    const cookie = cookieRequestHeader(header);
+    const tampered = `${cookie.slice(0, -1)}${cookie.endsWith('A') ? 'B' : 'A'}`;
+    const wrongEnvironment = Object.freeze({
+      GOOGLE_OIDC_COOKIE_SECRET: Buffer.alloc(32, 19).toString('base64url'),
+    });
+    const fallback = { destination: '/', valid: false };
+
+    expect(
+      readReturnToCookie(tampered, { environment, now: issuedAt }),
+    ).toEqual(fallback);
+    expect(
+      readReturnToCookie(cookie, {
+        environment,
+        now: new Date(
+          issuedAt.getTime() + WEB_RETURN_TO_COOKIE_MAX_AGE_SECONDS * 1_000,
+        ),
+      }),
+    ).toEqual(fallback);
+    expect(
+      readReturnToCookie(`${cookie}; ${cookie}`, {
+        environment,
+        now: issuedAt,
+      }),
+    ).toEqual(fallback);
+    expect(
+      readReturnToCookie(cookie, {
+        environment: wrongEnvironment,
+        now: issuedAt,
+      }),
+    ).toEqual(fallback);
+  });
+
+  test('clears return state with the same restrictive cookie attributes', () => {
+    const header = clearReturnToCookieHeader();
+    expect(header).toContain(`${WEB_RETURN_TO_COOKIE_NAME}=`);
+    expect(header).toContain('Max-Age=0');
+    expect(header).toContain('Expires=Thu, 01 Jan 1970 00:00:00 GMT');
+    expect(header).toContain('Path=/');
+    expect(header).toContain('HttpOnly');
+    expect(header).toContain('Secure');
+    expect(header).toContain('SameSite=Lax');
+    expect(header).not.toContain('Domain=');
+  });
+});
 
 describe('Google OIDC adapter', () => {
   test('starts exact hosted-domain code+S256 PKCE without a network call', async () => {
