@@ -212,7 +212,25 @@ function evidenceFromRow(row: DeliveryEvidenceRow): DeliveryEvidence {
 }
 
 function sameAttempt(left: ChannelAttempt, right: ChannelAttempt): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return (
+    left.id === right.id &&
+    left.batchId === right.batchId &&
+    left.intentId === right.intentId &&
+    left.eventId === right.eventId &&
+    left.eventKind === right.eventKind &&
+    left.templateMode === right.templateMode &&
+    left.purpose === right.purpose &&
+    left.eventTypeVersion.id === right.eventTypeVersion.id &&
+    left.eventTypeVersion.templateMode ===
+      right.eventTypeVersion.templateMode &&
+    left.rosterSnapshotId === right.rosterSnapshotId &&
+    left.rosterPopulation === right.rosterPopulation &&
+    left.recipientId === right.recipientId &&
+    left.endpointId === right.endpointId &&
+    left.channel === right.channel &&
+    left.attemptNumber === right.attemptNumber &&
+    Date.parse(left.attemptedAt) === Date.parse(right.attemptedAt)
+  );
 }
 
 function evidenceMatchesInput(
@@ -486,20 +504,23 @@ export function createDrizzleDeliveryEvidenceStore(
         if (evidenceMatchesInput(latest, request.evidence)) {
           return latest;
         }
+
+        // At-least-once worker and provider callbacks may replay an older
+        // immutable fact after a later recovery transition. Return the exact
+        // retained fact before considering whether the same state would be a
+        // valid transition from today's latest evidence; otherwise an older
+        // unknown replay could regress provider-accepted truth back to unknown.
+        const matching = await loadMatchingEvidence(query, request.evidence);
+        if (matching !== null) {
+          return matching;
+        }
+
         const transition = DeliveryTruthTransitionSchema.safeParse({
           subjectKind: 'attempt',
           from: latest.state,
           to: request.evidence.state,
         });
         if (!transition.success) {
-          // An at-least-once queue may replay an older fact after terminal
-          // evidence was appended. Acknowledge that immutable historical fact
-          // without treating it as a backwards transition. Allowed recovery
-          // transitions (notably unknown -> provider-accepted) still append.
-          const matching = await loadMatchingEvidence(query, request.evidence);
-          if (matching !== null) {
-            return matching;
-          }
           throw new DeliveryStateError(
             'INVALID_DELIVERY_TRANSITION',
             409,

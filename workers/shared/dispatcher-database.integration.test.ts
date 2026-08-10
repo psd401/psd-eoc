@@ -701,6 +701,12 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     if (pushBatch === undefined) {
       throw new Error('The persisted dispatch result is missing push.');
     }
+    const attemptedAtInstant = new Date();
+    const attemptedAtWithOffset = `${new Date(
+      attemptedAtInstant.getTime() - 7 * 60 * 60_000,
+    )
+      .toISOString()
+      .slice(0, -1)}-07:00`;
     const attempt = ChannelAttemptSchema.parse({
       id: ids.attempt,
       batchId: pushBatch.id,
@@ -716,7 +722,7 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       endpointId: SEEDED.pushEndpoint,
       channel: pushBatch.channel,
       attemptNumber: 1,
-      attemptedAt: new Date().toISOString(),
+      attemptedAt: attemptedAtWithOffset,
     });
     const attempted: AttemptEvidenceInput = {
       subject: { kind: 'attempt', attemptId: attempt.id },
@@ -755,6 +761,10 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
         }),
       ],
     });
+    const [reconciledUnknown] = result.appendedEvidence;
+    if (reconciledUnknown === undefined) {
+      throw new Error('Reconciliation did not append unknown evidence.');
+    }
 
     const persisted = await database
       .select({ state: deliveryEvidence.state })
@@ -765,6 +775,16 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       'attempted',
       'unknown',
     ]);
+
+    const reconciliationUnknown: AttemptEvidenceInput = {
+      subject: { kind: 'attempt', attemptId: attempt.id },
+      state: 'unknown',
+      provider: null,
+      providerReference: null,
+      proof: null,
+      reasonCode: 'RECONCILIATION_DEADLINE_EXCEEDED',
+      diagnosticDigest: null,
+    };
 
     const providerAccepted: AttemptEvidenceInput = {
       subject: { kind: 'attempt', attemptId: attempt.id },
@@ -779,6 +799,23 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       attempt,
       evidence: providerAccepted,
     });
+    const replayedUnknown = await evidenceStore.recordAttemptEvidence({
+      attempt,
+      evidence: reconciliationUnknown,
+    });
+    expect(replayedUnknown).toEqual(reconciledUnknown);
+
+    const statesAfterUnknownReplay = await database
+      .select({ state: deliveryEvidence.state })
+      .from(deliveryEvidence)
+      .where(eq(deliveryEvidence.attemptId, ids.attempt))
+      .orderBy(deliveryEvidence.sequence);
+    expect(statesAfterUnknownReplay.map((entry) => entry.state)).toEqual([
+      'attempted',
+      'unknown',
+      'provider-accepted',
+    ]);
+
     const delivered: AttemptEvidenceInput = {
       subject: { kind: 'attempt', attemptId: attempt.id },
       state: 'delivered',
