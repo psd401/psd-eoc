@@ -13,12 +13,12 @@ import {
   PutRegistrationFieldValueCommand,
   RequestPhoneNumberCommand,
   SubmitRegistrationVersionCommand,
-  type RegistrationFieldValueInformation,
 } from '@aws-sdk/client-pinpoint-sms-voice-v2';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 
 import {
   TARGET_REGION,
+  toRegistrationFieldFeedback,
   type FieldDefinition,
   type PhoneNumberRecord,
   type RegistrationAssociationRecord,
@@ -44,21 +44,6 @@ function requiredPositiveInteger(
     throw new Error(`AWS response omitted a positive ${label}.`);
   }
   return value;
-}
-
-export function toRegistrationFieldFeedback(
-  field: RegistrationFieldValueInformation,
-): RegistrationFieldFeedback | undefined {
-  if (field.DeniedReason === undefined && field.Feedback === undefined) {
-    return undefined;
-  }
-  return {
-    ...(field.DeniedReason === undefined
-      ? {}
-      : { deniedReason: field.DeniedReason }),
-    ...(field.Feedback === undefined ? {} : { feedback: field.Feedback }),
-    fieldPath: required(field.FieldPath, 'FieldPath'),
-  };
 }
 
 export function createAwsApi(): SmsRegistrationApi {
@@ -231,7 +216,11 @@ export function createAwsApi(): SmsRegistrationApi {
           }),
         );
         for (const field of output.RegistrationFieldValues ?? []) {
-          const feedback = toRegistrationFieldFeedback(field);
+          const feedback = toRegistrationFieldFeedback(
+            field.FieldPath,
+            field.DeniedReason,
+            field.Feedback,
+          );
           if (feedback !== undefined) fields.push(feedback);
         }
         nextToken = output.NextToken;
