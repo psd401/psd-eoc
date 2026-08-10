@@ -47,6 +47,35 @@ function asArray(value: unknown): unknown[] {
   return value;
 }
 
+function asStringArray(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : [value];
+  if (!values.every((item) => typeof item === 'string')) {
+    throw new TypeError(
+      `Expected a string or string array, received ${JSON.stringify(value)}`,
+    );
+  }
+  return values as string[];
+}
+
+function collectAllowedActions(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(collectAllowedActions);
+  }
+  if (typeof value !== 'object' || value === null) {
+    return [];
+  }
+  const record = value as JsonRecord;
+  const ownActions =
+    record.Effect === 'Allow' &&
+    (typeof record.Action === 'string' || Array.isArray(record.Action))
+      ? asStringArray(record.Action)
+      : [];
+  return [
+    ...ownActions,
+    ...Object.values(record).flatMap(collectAllowedActions),
+  ];
+}
+
 function resourceEntries(
   resourceType: string,
 ): Array<[string, SynthesizedResource]> {
@@ -155,6 +184,7 @@ describe('retained private media storage', () => {
     });
     expect(properties).not.toHaveProperty('LifecycleConfiguration');
     expect(properties).not.toHaveProperty('WebsiteConfiguration');
+    expect(properties).not.toHaveProperty('AccessControl');
     expect(bucket.DeletionPolicy).toBe('Retain');
     expect(bucket.UpdateReplacePolicy).toBe('Retain');
 
@@ -165,6 +195,387 @@ describe('retained private media storage', () => {
       expect(policy.DeletionPolicy).toBe('Retain');
       expect(policy.UpdateReplacePolicy).toBe('Retain');
     }
+  });
+
+  it('denies every unconditional write to immutable ready media', () => {
+    const bucketPolicy = resourceProperties(
+      onlyResource('AWS::S3::BucketPolicy'),
+    );
+    const statements = asArray(
+      asRecord(bucketPolicy.PolicyDocument).Statement,
+    ).map(asRecord);
+    const immutableReady = statements.find(
+      (statement) => statement.Sid === 'DenyUnconditionalReadyMediaWrite',
+    );
+    if (immutableReady === undefined) {
+      throw new Error('Missing immutable ready-media bucket policy.');
+    }
+    expect(immutableReady.Effect).toBe('Deny');
+    expect(immutableReady.Principal).toEqual({ AWS: '*' });
+    expect(immutableReady.Action).toBe('s3:PutObject');
+    expect(JSON.stringify(immutableReady.Resource)).toContain('/ready/*');
+    expect(immutableReady.Condition).toEqual({
+      Bool: { 's3:ObjectCreationOperation': 'true' },
+      Null: { 's3:if-none-match': 'true' },
+    });
+
+    const deleteBoundary = statements.find(
+      (statement) => statement.Sid === 'DenyReadyMediaDeletion',
+    );
+    if (deleteBoundary === undefined) {
+      throw new Error('Missing ready-media deletion boundary.');
+    }
+    expect(deleteBoundary.Effect).toBe('Deny');
+    expect(deleteBoundary.Principal).toEqual({ AWS: '*' });
+    expect(asStringArray(deleteBoundary.Action).sort()).toEqual(
+      ['s3:DeleteObject', 's3:DeleteObjectVersion'].sort(),
+    );
+    expect(JSON.stringify(deleteBoundary.Resource)).toContain('/ready/*');
+    expect(deleteBoundary).not.toHaveProperty('Condition');
+  });
+
+  it('allows only exact-origin browser PUTs with bounded checksum visibility', () => {
+    const parameters = asRecord(synthesizedTemplate.Parameters);
+    const originParameter = asRecord(parameters.MediaUploadAllowedOrigin);
+    expect(originParameter.Type).toBe('String');
+    expect(originParameter).not.toHaveProperty('Default');
+    expect(originParameter.AllowedPattern).toBeString();
+    expect(originParameter.AllowedPattern as string).toStartWith('^https://');
+    expect(originParameter.AllowedPattern as string).toEndWith('$');
+
+    const bucket = onlyResource('AWS::S3::Bucket');
+    const cors = asRecord(resourceProperties(bucket).CorsConfiguration);
+    const rules = asArray(cors.CorsRules).map(asRecord);
+    expect(rules).toHaveLength(1);
+    const rule = rules[0];
+    if (rule === undefined) {
+      throw new Error('Missing media upload CORS rule.');
+    }
+    expect(rule.AllowedMethods).toEqual(['PUT']);
+    expect(rule.AllowedOrigins).toEqual([{ Ref: 'MediaUploadAllowedOrigin' }]);
+    expect(rule.AllowedHeaders).toEqual(['content-type']);
+    expect(rule.ExposedHeaders).toEqual(['ETag', 'x-amz-checksum-sha256']);
+    expect(rule.MaxAge).toBeNumber();
+    expect(rule.MaxAge as number).toBeGreaterThan(0);
+    expect(rule.MaxAge as number).toBeLessThanOrEqual(300);
+    expect(JSON.stringify(rule.AllowedOrigins)).not.toContain('"*"');
+    expect(asStringArray(rule.AllowedHeaders)).not.toContain('*');
+  });
+
+  it('scans and tags only quarantine uploads with the official service role boundary', () => {
+    const bucketEntry = resourceEntries('AWS::S3::Bucket')[0];
+    if (bucketEntry === undefined) {
+      throw new Error('Missing media bucket.');
+    }
+    const [bucketLogicalId] = bucketEntry;
+    const scanRoleEntry = resourceEntries('AWS::IAM::Role').find(([, role]) =>
+      JSON.stringify(
+        asRecord(resourceProperties(role).AssumeRolePolicyDocument).Statement,
+      ).includes('malware-protection-plan.guardduty.amazonaws.com'),
+    );
+    if (scanRoleEntry === undefined) {
+      throw new Error('Missing GuardDuty malware scan role.');
+    }
+    const [scanRoleLogicalId, scanRole] = scanRoleEntry;
+    const scanRoleProperties = resourceProperties(scanRole);
+    expect(scanRoleProperties.AssumeRolePolicyDocument).toEqual({
+      Statement: [
+        {
+          Action: 'sts:AssumeRole',
+          Effect: 'Allow',
+          Principal: {
+            Service: 'malware-protection-plan.guardduty.amazonaws.com',
+          },
+        },
+      ],
+      Version: '2012-10-17',
+    });
+
+    const plan = onlyResource('AWS::GuardDuty::MalwareProtectionPlan');
+    const planProperties = resourceProperties(plan);
+    expect(planProperties.Actions).toEqual({
+      Tagging: { Status: 'ENABLED' },
+    });
+    expect(planProperties.ProtectedResource).toEqual({
+      S3Bucket: {
+        BucketName: { Ref: bucketLogicalId },
+        ObjectPrefixes: ['quarantine/'],
+      },
+    });
+    expect(planProperties.Role).toEqual({
+      'Fn::GetAtt': [scanRoleLogicalId, 'Arn'],
+    });
+    const dependencies = Array.isArray(plan.DependsOn)
+      ? plan.DependsOn
+      : [plan.DependsOn];
+    expect(dependencies).toContain(scanRoleLogicalId);
+
+    const policies = asArray(scanRoleProperties.Policies).map(asRecord);
+    expect(policies).toHaveLength(1);
+    const policy = policies[0];
+    if (policy === undefined) {
+      throw new Error('Missing GuardDuty inline scan policy.');
+    }
+    const statements = asArray(asRecord(policy.PolicyDocument).Statement).map(
+      asRecord,
+    );
+    expect(statements).toHaveLength(8);
+    const statementsBySid = new Map(
+      statements.map((statement) => [String(statement.Sid), statement]),
+    );
+    const statement = (sid: string): JsonRecord => {
+      const value = statementsBySid.get(sid);
+      if (value === undefined) {
+        throw new Error(`Missing GuardDuty statement ${sid}.`);
+      }
+      return value;
+    };
+    const managedRuleArn = {
+      'Fn::Join': [
+        '',
+        [
+          'arn:',
+          { Ref: 'AWS::Partition' },
+          `:events:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*`,
+        ],
+      ],
+    };
+
+    expect(
+      asStringArray(
+        statement('AllowManagedRuleToSendS3EventsToGuardDuty').Action,
+      ).sort(),
+    ).toEqual(
+      [
+        'events:PutRule',
+        'events:DeleteRule',
+        'events:PutTargets',
+        'events:RemoveTargets',
+      ].sort(),
+    );
+    expect(
+      statement('AllowManagedRuleToSendS3EventsToGuardDuty').Resource,
+    ).toEqual(managedRuleArn);
+    expect(
+      statement('AllowManagedRuleToSendS3EventsToGuardDuty').Condition,
+    ).toEqual({
+      StringLike: {
+        'events:ManagedBy': 'malware-protection-plan.guardduty.amazonaws.com',
+      },
+    });
+    expect(
+      asStringArray(
+        statement('AllowGuardDutyToMonitorEventBridgeManagedRule').Action,
+      ).sort(),
+    ).toEqual(['events:DescribeRule', 'events:ListTargetsByRule'].sort());
+    expect(
+      statement('AllowGuardDutyToMonitorEventBridgeManagedRule').Resource,
+    ).toEqual(managedRuleArn);
+
+    expect(asStringArray(statement('AllowPostScanTag').Action).sort()).toEqual(
+      [
+        's3:PutObjectTagging',
+        's3:GetObjectTagging',
+        's3:PutObjectVersionTagging',
+        's3:GetObjectVersionTagging',
+      ].sort(),
+    );
+    expect(JSON.stringify(statement('AllowPostScanTag').Resource)).toContain(
+      `${bucketLogicalId}","Arn"`,
+    );
+    expect(JSON.stringify(statement('AllowPostScanTag').Resource)).toContain(
+      '/quarantine/*',
+    );
+
+    expect(
+      asStringArray(statement('AllowEnableS3EventBridgeEvents').Action).sort(),
+    ).toEqual(['s3:PutBucketNotification', 's3:GetBucketNotification'].sort());
+    expect(statement('AllowEnableS3EventBridgeEvents').Resource).toEqual({
+      'Fn::GetAtt': [bucketLogicalId, 'Arn'],
+    });
+    expect(statement('AllowPutValidationObject').Action).toBe('s3:PutObject');
+    expect(
+      JSON.stringify(statement('AllowPutValidationObject').Resource),
+    ).toContain('/malware-protection-resource-validation-object');
+
+    expect(statement('AllowCheckBucketOwnership').Action).toBe('s3:ListBucket');
+    expect(statement('AllowCheckBucketOwnership').Resource).toEqual({
+      'Fn::GetAtt': [bucketLogicalId, 'Arn'],
+    });
+    expect(statement('AllowCheckBucketOwnership').Condition).toEqual({
+      StringLike: { 's3:prefix': 'quarantine/*' },
+    });
+    expect(asStringArray(statement('AllowMalwareScan').Action).sort()).toEqual(
+      ['s3:GetObject', 's3:GetObjectVersion'].sort(),
+    );
+    expect(JSON.stringify(statement('AllowMalwareScan').Resource)).toContain(
+      '/quarantine/*',
+    );
+
+    const dataKeyEntry = resourceEntries('AWS::KMS::Key').find(
+      ([, key]) =>
+        resourceProperties(key).Description ===
+        'Encrypts retained PSD EOC database and media data.',
+    );
+    if (dataKeyEntry === undefined) {
+      throw new Error('Missing PSD EOC data key.');
+    }
+    expect(
+      asStringArray(statement('AllowDecryptForMalwareScan').Action).sort(),
+    ).toEqual(['kms:GenerateDataKey', 'kms:Decrypt'].sort());
+    expect(statement('AllowDecryptForMalwareScan').Resource).toEqual({
+      'Fn::GetAtt': [dataKeyEntry[0], 'Arn'],
+    });
+    expect(statement('AllowDecryptForMalwareScan').Condition).toEqual({
+      StringLike: {
+        'kms:ViaService': `s3.${DEPLOYMENT_REGION}.amazonaws.com`,
+      },
+    });
+    expect(JSON.stringify(statements)).not.toMatch(
+      /s3:DeleteObject|kms:\*|s3:\*/u,
+    );
+
+    const bucketPolicy = resourceProperties(
+      onlyResource('AWS::S3::BucketPolicy'),
+    );
+    const bucketStatements = asArray(
+      asRecord(bucketPolicy.PolicyDocument).Statement,
+    ).map(asRecord);
+    const bucketStatement = (sid: string): JsonRecord => {
+      const value = bucketStatements.find((candidate) => candidate.Sid === sid);
+      if (value === undefined) {
+        throw new Error(`Missing media bucket statement ${sid}.`);
+      }
+      return value;
+    };
+    const scanRoleArn = { 'Fn::GetAtt': [scanRoleLogicalId, 'Arn'] };
+    const expectedScannerPrincipals = {
+      AWS: [
+        scanRoleArn,
+        {
+          'Fn::Join': [
+            '',
+            [
+              'arn:',
+              { Ref: 'AWS::Partition' },
+              `:sts::${DEPLOYMENT_ACCOUNT}:assumed-role/`,
+              { Ref: scanRoleLogicalId },
+              '/GuardDutyMalwareProtection',
+            ],
+          ],
+        },
+      ],
+    };
+    const tagMutationBoundary = bucketStatement(
+      'DenyQuarantineScanTagMutationOutsideGuardDuty',
+    );
+    expect(tagMutationBoundary.Effect).toBe('Deny');
+    expect(tagMutationBoundary.NotPrincipal).toEqual(expectedScannerPrincipals);
+    expect(tagMutationBoundary).not.toHaveProperty('Principal');
+    expect(asStringArray(tagMutationBoundary.Action).sort()).toEqual(
+      [
+        's3:PutObjectTagging',
+        's3:PutObjectVersionTagging',
+        's3:DeleteObjectTagging',
+        's3:DeleteObjectVersionTagging',
+      ].sort(),
+    );
+    expect(JSON.stringify(tagMutationBoundary.Resource)).toContain(
+      '/quarantine/*',
+    );
+    expect(tagMutationBoundary).not.toHaveProperty('Condition');
+
+    const cleanReadBoundary = bucketStatement(
+      'DenyQuarantineReadUnlessGuardDutyMarkedClean',
+    );
+    expect(cleanReadBoundary.Effect).toBe('Deny');
+    expect(cleanReadBoundary.NotPrincipal).toEqual(expectedScannerPrincipals);
+    expect(cleanReadBoundary).not.toHaveProperty('Principal');
+    expect(asStringArray(cleanReadBoundary.Action).sort()).toEqual(
+      ['s3:GetObject', 's3:GetObjectVersion'].sort(),
+    );
+    expect(JSON.stringify(cleanReadBoundary.Resource)).toContain(
+      '/quarantine/*',
+    );
+    expect(cleanReadBoundary.Condition).toEqual({
+      StringNotEquals: {
+        's3:ExistingObjectTag/GuardDutyMalwareScanStatus': 'NO_THREATS_FOUND',
+      },
+    });
+  });
+
+  it('gives App Runner exact media data access without scan-tag write authority', () => {
+    const serviceProperties = resourceProperties(
+      onlyResource('AWS::AppRunner::Service'),
+    );
+    const instanceConfiguration = asRecord(
+      serviceProperties.InstanceConfiguration,
+    );
+    const instanceRoleArn = asRecord(instanceConfiguration.InstanceRoleArn);
+    const instanceRoleLogicalId = String(
+      asArray(instanceRoleArn['Fn::GetAtt'])[0],
+    );
+    const runtimePolicyEntries = resourceEntries('AWS::IAM::Policy').filter(
+      ([, policy]) =>
+        JSON.stringify(resourceProperties(policy).Roles).includes(
+          instanceRoleLogicalId,
+        ),
+    );
+    if (runtimePolicyEntries.length === 0) {
+      throw new Error('Missing App Runner runtime policy.');
+    }
+    const statements = runtimePolicyEntries.flatMap(([, policy]) =>
+      asArray(
+        asRecord(resourceProperties(policy).PolicyDocument).Statement,
+      ).map(asRecord),
+    );
+    const scanTagRead = statements.find(
+      (statement) => statement.Action === 's3:GetObjectTagging',
+    );
+    if (scanTagRead === undefined) {
+      throw new Error('Missing App Runner GuardDuty scan-tag read.');
+    }
+    expect(scanTagRead.Effect).toBe('Allow');
+    expect(JSON.stringify(scanTagRead.Resource)).toContain('/quarantine/*');
+    const actions = statements.flatMap((statement) =>
+      asStringArray(statement.Action),
+    );
+    expect(actions.filter((action) => action.startsWith('s3:')).sort()).toEqual(
+      ['s3:GetObject', 's3:GetObjectTagging', 's3:PutObject'].sort(),
+    );
+    expect(actions).toContain('s3:GetObject');
+    expect(actions).toContain('s3:PutObject');
+    expect(actions).toContain('kms:Decrypt');
+    expect(actions).toContain('kms:GenerateDataKey');
+    expect(actions).not.toContain('s3:PutObjectTagging');
+    expect(actions).not.toContain('s3:PutObjectVersionTagging');
+    expect(actions).not.toContain('s3:PutObjectRetention');
+    expect(actions).not.toContain('s3:PutObjectLegalHold');
+    const mediaDataAccess = statements.find(
+      (statement) =>
+        JSON.stringify(statement.Action) ===
+        JSON.stringify(['s3:GetObject', 's3:PutObject']),
+    );
+    if (mediaDataAccess === undefined) {
+      throw new Error('Missing exact App Runner media object access.');
+    }
+    const mediaResources = JSON.stringify(mediaDataAccess.Resource);
+    expect(asArray(mediaDataAccess.Resource)).toHaveLength(2);
+    expect(mediaResources).toContain('/quarantine/*');
+    expect(mediaResources).toContain('/ready/*');
+    const mediaKmsAccess = statements.find(
+      (statement) =>
+        JSON.stringify(asStringArray(statement.Action).sort()) ===
+        JSON.stringify(['kms:Decrypt', 'kms:GenerateDataKey'].sort()),
+    );
+    if (mediaKmsAccess === undefined) {
+      throw new Error('Missing exact App Runner media KMS access.');
+    }
+    expect(mediaKmsAccess.Condition).toEqual({
+      StringEquals: {
+        'kms:ViaService': `s3.${DEPLOYMENT_REGION}.amazonaws.com`,
+      },
+    });
   });
 });
 
@@ -635,8 +1046,8 @@ describe('fail-closed integration placeholders', () => {
       Ref: eventTopicLogicalId,
     });
     template.resourceCountIs('AWS::SNS::Subscription', 0);
-    expect(JSON.stringify(synthesizedTemplate)).not.toMatch(
-      /s3:DeleteObject|ses:(?:\*|Send)|sms-voice:Send|mobiletargeting:Send/i,
+    expect(collectAllowedActions(synthesizedTemplate).join('\n')).not.toMatch(
+      /^(?:s3:DeleteObject(?:Version)?|ses:(?:\*|Send.*)|sms-voice:Send.*|mobiletargeting:Send.*)$/imu,
     );
   });
 });

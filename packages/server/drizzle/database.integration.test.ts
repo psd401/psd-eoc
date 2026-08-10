@@ -51,6 +51,25 @@ function findPostgresConstraintName(error: unknown): string | undefined {
   return undefined;
 }
 
+function postgresErrorMessages(error: unknown): readonly string[] {
+  const messages: string[] = [];
+  const visited = new Set<unknown>();
+  let current = error;
+  while (
+    typeof current === 'object' &&
+    current !== null &&
+    !visited.has(current)
+  ) {
+    visited.add(current);
+    const message = Reflect.get(current, 'message');
+    if (typeof message === 'string') {
+      messages.push(message);
+    }
+    current = Reflect.get(current, 'cause');
+  }
+  return messages;
+}
+
 async function expectConstraintViolation(
   operation: () => Promise<unknown>,
   expectedConstraintName: string,
@@ -216,12 +235,13 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       from (
         values
           ('journal_entries'),
+          ('media_records'),
           ('channel_attempts'),
           ('delivery_evidence')
       ) as immutable_tables(table_name)
       order by table_name
     `);
-    expect(privileges).toHaveLength(3);
+    expect(privileges).toHaveLength(4);
     expect(privileges.every((row) => !row.can_update && !row.can_delete)).toBe(
       true,
     );
@@ -235,12 +255,14 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       where trigger_schema = 'public'
         and event_object_table in (
           'journal_entries',
+          'media_records',
           'channel_attempts',
           'delivery_evidence'
         )
     `);
     for (const tableName of [
       'journal_entries',
+      'media_records',
       'channel_attempts',
       'delivery_evidence',
     ]) {
@@ -250,6 +272,73 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       expect(events).toContain('UPDATE');
       expect(events).toContain('DELETE');
     }
+
+    try {
+      await db.transaction(async (transaction) => {
+        await transaction.execute(insertSyntheticTestEvent);
+        await transaction.execute(sql`
+          insert into media_upload_intents (
+            id,
+            event_id,
+            byte_length,
+            content_sha256,
+            declared_content_type,
+            storage_key,
+            status,
+            created_at,
+            expires_at
+          ) values (
+            '00000000-0000-4000-8000-000000009970'::uuid,
+            '00000000-0000-4000-8000-000000009980'::uuid,
+            20,
+            repeat('a', 64),
+            'image/jpeg'::media_content_type,
+            'quarantine/database-test/9970',
+            'pending-upload',
+            now(),
+            now() + interval '10 minutes'
+          )
+        `);
+        await transaction.execute(sql`
+          insert into media_records (
+            id,
+            upload_intent_id,
+            event_id,
+            status,
+            detected_content_type,
+            sanitized_byte_length,
+            sanitized_content_sha256,
+            storage_key,
+            malware_scan,
+            exif_stripped,
+            created_at
+          ) values (
+            '00000000-0000-4000-8000-000000009971'::uuid,
+            '00000000-0000-4000-8000-000000009970'::uuid,
+            '00000000-0000-4000-8000-000000009980'::uuid,
+            'ready',
+            'image/jpeg'::media_content_type,
+            20,
+            repeat('b', 64),
+            'ready/database-test/9971',
+            'clean',
+            true,
+            now()
+          )
+        `);
+        await transaction.execute(sql`
+          update media_records
+          set sanitized_content_sha256 = repeat('c', 64)
+          where id = '00000000-0000-4000-8000-000000009971'::uuid
+        `);
+      });
+    } catch (error) {
+      expect(postgresErrorMessages(error).join('\n')).toContain(
+        'immutable truth cannot be changed on media_records',
+      );
+      return;
+    }
+    throw new Error('Expected the media checksum update to be rejected.');
   });
 
   test('database constraints reject real and drill substitution', async () => {
