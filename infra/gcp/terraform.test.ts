@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   linkSync,
   mkdtempSync,
   readFileSync,
@@ -11,12 +12,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   BOOTSTRAP_SERVICES,
   bootstrapPrerequisitesReady,
   buildApplyBoundary,
+  captureApplyBoundary,
   executeConfirmedPlan,
   missingRecoverableBootstrapApis,
   parseBucketDescribeResult,
@@ -29,6 +31,8 @@ import {
   repairInterruptedBootstrapApis,
   repairMissingBootstrapApis,
   readSavedPlanSeal,
+  recoverBootstrapState,
+  recoverOrphanedRosterReader,
   validateBootstrapProject,
   validateMainStateAddresses,
   validateRecoverableRosterReaderServiceAccount,
@@ -59,7 +63,10 @@ import {
   validateProjectIamPolicy,
   validateRosterReaderResourcePolicy,
 } from './scripts/project-policy';
-import { validateWorkspaceAdminClient } from './scripts/operator-access';
+import {
+  validateWorkspaceAdminClient,
+  withValidatedWorkspaceClientCopy,
+} from './scripts/operator-access';
 import {
   cleanupCredentialArtifacts,
   createdKeyIsVisible,
@@ -95,6 +102,9 @@ import {
 } from './scripts/runtime';
 import {
   parsePlistStrings,
+  readSecureFile,
+  readSecureFileBytes,
+  readWebClientDownload,
   terraformProjectNumber,
 } from './scripts/store-oauth-client';
 import {
@@ -848,8 +858,206 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     ]) {
       expect(capture).toContain(evidenceName);
     }
-    expect(capture).toContain('validateLiveRecoverableRosterReader');
+    expect(capture).toContain('operations.validateRosterReader');
+    expect(apply).toContain(
+      'validateRosterReader: validateLiveRecoverableRosterReader',
+    );
     expect(capture).toContain('validateProjectIamPolicy');
+  });
+
+  test('captures the apply boundary through injected, ordered live evidence', () => {
+    const trace: string[] = [];
+    const operations: Parameters<typeof captureApplyBoundary>[1] = {
+      inspectBucket: () => {
+        trace.push('bucket');
+        return {
+          projectNumber: validProject.projectNumber,
+          revision: 'synthetic-bucket-revision',
+          status: 'managed-policy',
+        };
+      },
+      inspectProject: () => {
+        trace.push('project');
+        return validProject;
+      },
+      validateExistingProject: (project) => {
+        trace.push('billing');
+        expect(project).toBe(validProject);
+        return validBilling;
+      },
+      inspectProjectIamPolicy: () => {
+        trace.push('iam');
+        return { bindings: [] };
+      },
+      inspectServices: () => {
+        trace.push('services');
+        return {
+          projectNumber: validProject.projectNumber,
+          services: new Set([
+            ...BOOTSTRAP_SERVICES,
+            'admin.googleapis.com',
+            'cloudidentity.googleapis.com',
+            'iam.googleapis.com',
+          ]),
+        };
+      },
+      inspectRosterReader: () => {
+        trace.push('roster');
+        return validLiveGroupsReader;
+      },
+      validateRosterReader: (serviceAccount) => {
+        trace.push('validate-roster');
+        expect(serviceAccount).toBe(validLiveGroupsReader);
+        return 'synthetic-roster-reader-seal';
+      },
+    };
+
+    const bootstrapBoundary = JSON.parse(
+      captureApplyBoundary(false, operations),
+    ) as Readonly<Record<string, unknown>>;
+    expect(trace).toEqual(['bucket', 'project', 'billing', 'iam', 'services']);
+    expect(bootstrapBoundary.rosterReader).toBe('iam-api-disabled');
+    expect(
+      (
+        bootstrapBoundary.serviceStates as readonly Readonly<{
+          enabled: boolean;
+          service: string;
+        }>[]
+      ).map(({ service }) => service),
+    ).toEqual([...BOOTSTRAP_SERVICES].sort());
+
+    trace.length = 0;
+    const mainBoundary = JSON.parse(
+      captureApplyBoundary(true, operations),
+    ) as Readonly<Record<string, unknown>>;
+    expect(trace).toEqual([
+      'bucket',
+      'project',
+      'billing',
+      'iam',
+      'services',
+      'roster',
+      'validate-roster',
+    ]);
+    expect(mainBoundary.rosterReader).toBe('synthetic-roster-reader-seal');
+    expect(
+      (
+        mainBoundary.serviceStates as readonly Readonly<{
+          enabled: boolean;
+          service: string;
+        }>[]
+      ).map(({ service }) => service),
+    ).toEqual(
+      [
+        ...BOOTSTRAP_SERVICES,
+        'admin.googleapis.com',
+        'cloudidentity.googleapis.com',
+        'iam.googleapis.com',
+      ].sort(),
+    );
+
+    trace.length = 0;
+    const withoutRoster = captureApplyBoundary(true, {
+      ...operations,
+      inspectRosterReader: () => {
+        trace.push('roster');
+        return null;
+      },
+    });
+    expect(
+      (JSON.parse(withoutRoster) as Readonly<Record<string, unknown>>)
+        .rosterReader,
+    ).toBeNull();
+
+    trace.length = 0;
+    const withoutIam = captureApplyBoundary(true, {
+      ...operations,
+      inspectServices: () => {
+        trace.push('services');
+        return {
+          projectNumber: validProject.projectNumber,
+          services: new Set(BOOTSTRAP_SERVICES),
+        };
+      },
+      inspectRosterReader: () => {
+        throw new Error(
+          'Roster inspection must not run while IAM is disabled.',
+        );
+      },
+    });
+    expect(
+      (JSON.parse(withoutIam) as Readonly<Record<string, unknown>>)
+        .rosterReader,
+    ).toBe('iam-api-disabled');
+  });
+
+  test('fails apply-boundary capture closed on absent or mismatched anchors', () => {
+    const forbidden = (): never => {
+      throw new Error('Unexpected late boundary operation.');
+    };
+    const absentOperations: Parameters<typeof captureApplyBoundary>[1] = {
+      inspectBucket: () => null,
+      inspectProject: () => null,
+      validateExistingProject: forbidden,
+      inspectProjectIamPolicy: forbidden,
+      inspectServices: forbidden,
+      inspectRosterReader: forbidden,
+      validateRosterReader: forbidden,
+    };
+    expect(captureApplyBoundary(false, absentOperations)).toBe(
+      buildApplyBoundary({
+        billing: null,
+        bucket: null,
+        policy: null,
+        project: null,
+        rosterReader: 'not-applicable',
+        serviceProjectNumber: null,
+        serviceStates: [],
+      }),
+    );
+    expect(() =>
+      captureApplyBoundary(false, {
+        ...absentOperations,
+        inspectBucket: () => ({
+          projectNumber: validProject.projectNumber,
+          status: 'managed-policy',
+        }),
+      }),
+    ).toThrow('state bucket exists');
+
+    const anchoredOperations: Parameters<typeof captureApplyBoundary>[1] = {
+      inspectBucket: () => ({
+        projectNumber: validProject.projectNumber,
+        status: 'managed-policy',
+      }),
+      inspectProject: () => validProject,
+      validateExistingProject: () => validBilling,
+      inspectProjectIamPolicy: () => ({ bindings: [] }),
+      inspectServices: () => ({
+        projectNumber: validProject.projectNumber,
+        services: new Set(BOOTSTRAP_SERVICES),
+      }),
+      inspectRosterReader: () => null,
+      validateRosterReader: () => 'synthetic-roster-reader-seal',
+    };
+    expect(() =>
+      captureApplyBoundary(false, {
+        ...anchoredOperations,
+        inspectBucket: () => ({
+          projectNumber: '987654321',
+          status: 'managed-policy',
+        }),
+      }),
+    ).toThrow('different Google projects');
+    expect(() =>
+      captureApplyBoundary(false, {
+        ...anchoredOperations,
+        inspectServices: () => ({
+          projectNumber: '987654321',
+          services: new Set(BOOTSTRAP_SERVICES),
+        }),
+      }),
+    ).toThrow('different Google projects');
   });
 
   test('seals only one nonempty unlinked saved-plan inode and its exact bytes', () => {
@@ -1903,6 +2111,247 @@ describe('fail-closed bootstrap and process behavior', () => {
     ]);
   });
 
+  test('recovers bucket-backed bootstrap state through exact ordered imports', () => {
+    const persistedResources = new Set<string>();
+    const imports: [string, string][] = [];
+    let bucketReads = 0;
+    let stateReads = 0;
+    const operations: Parameters<typeof recoverBootstrapState>[0] = {
+      inspectBucketStatus: () => {
+        bucketReads += 1;
+        return 'managed-policy';
+      },
+      inspectInterruptedState: () => {
+        throw new Error(
+          'Local interrupted state must not anchor bucket-backed recovery.',
+        );
+      },
+      inspectStateResources: () => {
+        stateReads += 1;
+        return new Set([
+          ...persistedResources,
+          ...(stateReads === 2
+            ? ['data.google_iam_policy.terraform_state']
+            : []),
+        ]);
+      },
+      inspectProject: () => validProject,
+      validateExistingProject: (project) => {
+        expect(project).toBe(validProject);
+        return validBilling;
+      },
+      inspectProjectIamPolicy: () => ({ bindings: [] }),
+      inspectEnabledServices: () => new Set(BOOTSTRAP_SERVICES),
+      importResource: (address, importId) => {
+        imports.push([address, importId]);
+        persistedResources.add(address);
+      },
+    };
+
+    recoverBootstrapState(operations);
+    expect(imports).toEqual([
+      ['google_project.psd_eoc', 'psd401-eoc'],
+      [
+        'google_project_service.service_usage',
+        'psd401-eoc/serviceusage.googleapis.com',
+      ],
+      ['google_project_service.storage', 'psd401-eoc/storage.googleapis.com'],
+      [
+        'google_project_service.cloud_resource_manager',
+        'psd401-eoc/cloudresourcemanager.googleapis.com',
+      ],
+      [
+        'google_project_service.cloud_billing',
+        'psd401-eoc/cloudbilling.googleapis.com',
+      ],
+      ['google_storage_bucket.terraform_state', 'psd401-eoc-terraform-state'],
+      [
+        'google_storage_bucket_iam_policy.terraform_state',
+        'b/psd401-eoc-terraform-state',
+      ],
+    ]);
+    expect(bucketReads).toBe(2);
+    expect(stateReads).toBe(2);
+    expect(persistedResources).toEqual(
+      new Set(imports.map(([address]) => address)),
+    );
+  });
+
+  test('recovers bucketless bootstrap state without importing bucket resources', () => {
+    const persistedResources = new Set<string>();
+    const imports: [string, string][] = [];
+    let interruptedStateReads = 0;
+    let stateResourceReads = 0;
+    const operations: Parameters<typeof recoverBootstrapState>[0] = {
+      inspectBucketStatus: () => 'absent',
+      inspectInterruptedState: () => {
+        interruptedStateReads += 1;
+        if (interruptedStateReads === 1) {
+          return null;
+        }
+        return {
+          fingerprint: 'synthetic-final-fingerprint',
+          lineage: '123e4567-e89b-42d3-a456-426614174000',
+          projectNumber: validProject.projectNumber,
+          resources: new Set(persistedResources),
+          serial: 1,
+        };
+      },
+      inspectStateResources: () => {
+        stateResourceReads += 1;
+        return new Set(persistedResources);
+      },
+      inspectProject: () => validProject,
+      validateExistingProject: () => validBilling,
+      inspectProjectIamPolicy: () => ({ bindings: [] }),
+      inspectEnabledServices: () => new Set(BOOTSTRAP_SERVICES),
+      importResource: (address, importId) => {
+        imports.push([address, importId]);
+        persistedResources.add(address);
+      },
+    };
+
+    recoverBootstrapState(operations);
+    expect(imports.map(([address]) => address)).toEqual([
+      'google_project.psd_eoc',
+      'google_project_service.service_usage',
+      'google_project_service.storage',
+      'google_project_service.cloud_resource_manager',
+      'google_project_service.cloud_billing',
+    ]);
+    expect(
+      imports.some(([address]) => address.includes('storage_bucket')),
+    ).toBe(false);
+    expect(interruptedStateReads).toBe(2);
+    expect(stateResourceReads).toBe(1);
+  });
+
+  test('fails bootstrap-state recovery closed on anchor and final-state drift', () => {
+    const forbiddenImport = (): never => {
+      throw new Error('No import was expected.');
+    };
+    const base: Parameters<typeof recoverBootstrapState>[0] = {
+      inspectBucketStatus: () => 'managed-policy',
+      inspectInterruptedState: () => null,
+      inspectStateResources: () => new Set(),
+      inspectProject: () => validProject,
+      validateExistingProject: () => validBilling,
+      inspectProjectIamPolicy: () => ({ bindings: [] }),
+      inspectEnabledServices: () => new Set(BOOTSTRAP_SERVICES),
+      importResource: forbiddenImport,
+    };
+
+    expect(() =>
+      recoverBootstrapState({
+        ...base,
+        inspectStateResources: () =>
+          new Set(['google_storage_bucket.unreviewed']),
+      }),
+    ).toThrow('unexpected resource');
+    expect(() =>
+      recoverBootstrapState({
+        ...base,
+        inspectStateResources: () => new Set(['google_project.psd_eoc']),
+        inspectProject: () => null,
+      }),
+    ).toThrow('contains the project but Google cannot verify it');
+
+    let bucketReads = 0;
+    const importedDuringBucketDrift = new Set<string>();
+    expect(() =>
+      recoverBootstrapState({
+        ...base,
+        inspectBucketStatus: () => {
+          bucketReads += 1;
+          return bucketReads === 1 ? 'managed-policy' : 'bootstrap-policy';
+        },
+        importResource: (address) => {
+          importedDuringBucketDrift.add(address);
+        },
+      }),
+    ).toThrow('state bucket changed during bootstrap recovery');
+    expect(bucketReads).toBe(2);
+
+    let lossyStateReads = 0;
+    const importedBeforeLoss = new Set<string>();
+    expect(() =>
+      recoverBootstrapState({
+        ...base,
+        inspectStateResources: () => {
+          lossyStateReads += 1;
+          return lossyStateReads === 1
+            ? new Set()
+            : new Set(
+                [...importedBeforeLoss].filter(
+                  (address) =>
+                    address !== 'google_project_service.cloud_billing',
+                ),
+              );
+        },
+        importResource: (address) => {
+          importedBeforeLoss.add(address);
+        },
+      }),
+    ).toThrow('Bucket-backed bootstrap state changed after recovery');
+    expect(importedBeforeLoss.has('google_project_service.cloud_billing')).toBe(
+      true,
+    );
+    expect(lossyStateReads).toBe(2);
+
+    let concurrentStateReads = 0;
+    const importedBeforeConcurrentChange = new Set<string>();
+    expect(() =>
+      recoverBootstrapState({
+        ...base,
+        inspectEnabledServices: () => new Set(),
+        inspectStateResources: () => {
+          concurrentStateReads += 1;
+          return concurrentStateReads === 1
+            ? new Set()
+            : new Set([
+                ...importedBeforeConcurrentChange,
+                'google_project_service.storage',
+              ]);
+        },
+        importResource: (address) => {
+          importedBeforeConcurrentChange.add(address);
+        },
+      }),
+    ).toThrow('Bucket-backed bootstrap state changed after recovery');
+    expect(concurrentStateReads).toBe(2);
+
+    const persistedResources = new Set<string>();
+    let interruptedStateReads = 0;
+    expect(() =>
+      recoverBootstrapState({
+        ...base,
+        inspectBucketStatus: () => 'absent',
+        inspectInterruptedState: () => {
+          interruptedStateReads += 1;
+          return interruptedStateReads === 1
+            ? null
+            : {
+                fingerprint: 'synthetic-final-fingerprint',
+                lineage: '123e4567-e89b-42d3-a456-426614174000',
+                projectNumber: validProject.projectNumber,
+                resources: new Set(
+                  [...persistedResources].filter(
+                    (address) =>
+                      address !== 'google_project_service.cloud_billing',
+                  ),
+                ),
+                serial: 1,
+              };
+        },
+        inspectStateResources: () => new Set(persistedResources),
+        importResource: (address) => {
+          persistedResources.add(address);
+        },
+      }),
+    ).toThrow('Local bootstrap state changed after recovery');
+    expect(interruptedStateReads).toBe(2);
+  });
+
   test('repairs APIs before full validation or Terraform initialization', () => {
     const apply = read('scripts/apply.ts');
     const inspection = apply.slice(
@@ -1953,7 +2402,9 @@ describe('fail-closed bootstrap and process behavior', () => {
     );
     expect(fullStateValidation).toBeLessThan(bootstrapInit);
     expect(bootstrapInit).toBeLessThan(remoteInit);
-    const recovery = main.indexOf('recoverBootstrapState()');
+    const recovery = main.indexOf(
+      'recoverBootstrapState(liveBootstrapStateRecoveryOperations)',
+    );
     expect(interruptedRepair).toBeGreaterThan(bootstrapInit);
     expect(interruptedRepair).toBeLessThan(recovery);
     expect(recovery).toBeGreaterThan(bootstrapInit);
@@ -2043,7 +2494,7 @@ describe('fail-closed bootstrap and process behavior', () => {
       /const managedResources = stateResources\(\);\s*validateMainStateAddresses\(managedResources\)/u,
     );
     expect(main).toMatch(
-      /recoverOrphanedRosterReader\(managedResources\);\s*validateMainStateAddresses\(stateResources\(\)\);\s*await applySavedPlan/u,
+      /recoverOrphanedRosterReader\(\s*managedResources,\s*liveOrphanedRosterReaderRecoveryOperations,\s*\);\s*validateMainStateAddresses\(stateResources\(\)\);\s*await applySavedPlan/u,
     );
     expect(main).toMatch(
       /const finalResources = stateResources\(\);\s*validateMainStateAddresses\(finalResources, true\)/u,
@@ -2133,9 +2584,7 @@ describe('fail-closed bootstrap and process behavior', () => {
     ).toThrow('user-managed key');
 
     const apply = read('scripts/apply.ts');
-    const recoveryCall = apply.lastIndexOf(
-      'recoverOrphanedRosterReader(managedResources)',
-    );
+    const recoveryCall = apply.lastIndexOf('recoverOrphanedRosterReader(');
     expect(recoveryCall).toBeGreaterThan(-1);
     expect(recoveryCall).toBeLessThan(
       apply.indexOf("confirmation: 'apply-psd401-eoc-gcp'"),
@@ -2144,6 +2593,116 @@ describe('fail-closed bootstrap and process behavior', () => {
       '`projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}`',
     );
     expect(apply).not.toContain('create_ignore_already_exists');
+  });
+
+  test('adopts an orphaned roster reader only through the exact injected identity', () => {
+    const address = 'google_service_account.roster_reader';
+    const resources = new Set<string>();
+    const trace: string[] = [];
+    const operations: Parameters<typeof recoverOrphanedRosterReader>[1] = {
+      inspectEnabledServices: () => {
+        trace.push('services');
+        return new Set(['iam.googleapis.com']);
+      },
+      inspectRosterReader: () => {
+        trace.push('roster');
+        return validLiveGroupsReader;
+      },
+      validateRosterReader: (serviceAccount) => {
+        trace.push('validate');
+        expect(serviceAccount).toBe(validLiveGroupsReader);
+        return 'synthetic-roster-reader-seal';
+      },
+      importResource: (resourceAddress, importId) => {
+        trace.push(`import:${resourceAddress}:${importId}`);
+        expect(resources.has(address)).toBe(false);
+      },
+    };
+
+    recoverOrphanedRosterReader(resources, operations);
+    expect(resources).toEqual(new Set([address]));
+    expect(trace).toEqual([
+      'services',
+      'roster',
+      'validate',
+      `import:${address}:projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}`,
+      'roster',
+      'validate',
+    ]);
+
+    trace.length = 0;
+    recoverOrphanedRosterReader(resources, {
+      ...operations,
+      inspectEnabledServices: () => {
+        throw new Error('A managed account must not be inspected again.');
+      },
+    });
+    expect(trace).toEqual([]);
+
+    const disabledTrace: string[] = [];
+    recoverOrphanedRosterReader(new Set(), {
+      ...operations,
+      inspectEnabledServices: () => {
+        disabledTrace.push('services');
+        return new Set();
+      },
+      inspectRosterReader: () => {
+        throw new Error(
+          'Roster inspection must not run while IAM is disabled.',
+        );
+      },
+    });
+    expect(disabledTrace).toEqual(['services']);
+
+    const absentTrace: string[] = [];
+    recoverOrphanedRosterReader(new Set(), {
+      ...operations,
+      inspectEnabledServices: () => {
+        absentTrace.push('services');
+        return new Set(['iam.googleapis.com']);
+      },
+      inspectRosterReader: () => {
+        absentTrace.push('roster');
+        return null;
+      },
+    });
+    expect(absentTrace).toEqual(['services', 'roster']);
+  });
+
+  test('fails orphaned roster-reader recovery closed after an import race', () => {
+    const address = 'google_service_account.roster_reader';
+    for (const postImportAccount of [
+      null,
+      { ...validLiveGroupsReader, uniqueId: '111111111111111111111' },
+      { ...validLiveGroupsReader, oauth2ClientId: '222222222222222222222' },
+    ]) {
+      const resources = new Set<string>();
+      let rosterReads = 0;
+      expect(() =>
+        recoverOrphanedRosterReader(resources, {
+          inspectEnabledServices: () => new Set(['iam.googleapis.com']),
+          inspectRosterReader: () => {
+            rosterReads += 1;
+            return rosterReads === 1
+              ? validLiveGroupsReader
+              : postImportAccount;
+          },
+          validateRosterReader: () => 'synthetic-roster-reader-seal',
+          importResource: (resourceAddress, importId) => {
+            expect(resourceAddress).toBe(address);
+            expect(importId).toBe(
+              `projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}`,
+            );
+          },
+        }),
+      ).toThrow(
+        postImportAccount === null
+          ? 'disappeared immediately after import'
+          : 'identity changed during import',
+      );
+      expect(resources).toEqual(new Set([address]));
+      expect(rosterReads).toBe(2);
+    }
   });
 
   test('bootstraps only on confirmed bucket absence', () => {
@@ -2750,7 +3309,7 @@ describe('fail-closed bootstrap and process behavior', () => {
       'guardedGoogleFetch(',
     );
     expect(read('scripts/store-oauth-client.ts')).toMatch(
-      /async function readSecureFile[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
+      /async function readSecureFileBytes[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
     );
   });
 
@@ -2776,19 +3335,17 @@ describe('fail-closed bootstrap and process behavior', () => {
       ),
     ).toBe(true);
 
-    for (const helperPath of [
-      'scripts/operator-access.ts',
-      'scripts/store-oauth-client.ts',
-    ]) {
-      const helper = read(helperPath);
-      expect(helper).toContain(
-        'isPathOutsideDirectory(repositoryRoot, requested)',
-      );
-      expect(helper).toContain(
-        'isPathOutsideDirectory(repositoryRoot, resolved)',
-      );
-      expect(helper).not.toContain("startsWith('..')");
-    }
+    const secureReader = read('scripts/store-oauth-client.ts');
+    expect(secureReader).toContain(
+      'isPathOutsideDirectory(repositoryRoot, requested)',
+    );
+    expect(secureReader).toContain(
+      'isPathOutsideDirectory(repositoryRoot, resolved)',
+    );
+    expect(secureReader).not.toContain("startsWith('..')");
+    expect(read('scripts/operator-access.ts')).toContain(
+      'readSecureFileBytes(path)',
+    );
   });
 
   test('starts guarded helpers only through the pre-Bun launcher', () => {
@@ -2925,7 +3482,7 @@ describe('fail-closed bootstrap and process behavior', () => {
       /function replaceWithOrdinaryAdc[^]*revokeApplicationDefaultCredentials\(\);\s*ordinaryAdcLogin\(\)/u,
     );
     expect(operatorAccess).toMatch(
-      /async function authorizeWorkspaceAdc[^]*secureWorkspaceClientPath[^]*revokeApplicationDefaultCredentials\(\);[^]*runInteractive\('gcloud'/u,
+      /async function authorizeWorkspaceAdc[^]*withValidatedWorkspaceClientCopy[^]*revokeApplicationDefaultCredentials\(\);[^]*runInteractive\('gcloud'/u,
     );
     expect(operatorAccess).toMatch(
       /function revokeApplicationDefaultCredentials[^]*'application-default',[^]*'revoke',[^]*'--quiet'[^]*not revocable/u,
@@ -2933,7 +3490,7 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(operatorAccess.match(/--no-launch-browser/gu)).toHaveLength(2);
     expect(operatorAccess.match(/--no-browser/gu)).toHaveLength(2);
     expect(operatorAccess).toMatch(
-      /async function authorizeWorkspaceAdc[^]*secureWorkspaceClientPath[^]*runInteractive\('gcloud', \[\s*'auth',\s*'application-default',\s*'login',\s*ADMIN_EMAIL,\s*`--client-id-file=\$\{secureClientPath\}`,\s*'--no-browser'[^]*WORKSPACE_ROLE_SCOPE/u,
+      /async function authorizeWorkspaceAdc[^]*withValidatedWorkspaceClientCopy[^]*runInteractive\('gcloud', \[\s*'auth',\s*'application-default',\s*'login',\s*ADMIN_EMAIL,\s*`--client-id-file=\$\{secureClientPath\}`,\s*'--no-browser'[^]*WORKSPACE_ROLE_SCOPE/u,
     );
     expect(
       operatorAccess.slice(
@@ -3319,6 +3876,22 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(() => validateWorkspaceAdminClient(validClient)).not.toThrow();
     for (const invalid of [
       { web: validClient.installed },
+      {
+        installed: {
+          ...validClient.installed,
+          auth_provider_x509_cert_url: 'https://attacker.invalid/certs',
+        },
+      },
+      {
+        installed: {
+          auth_uri: validClient.installed.auth_uri,
+          client_id: validClient.installed.client_id,
+          client_secret: validClient.installed.client_secret,
+          project_id: validClient.installed.project_id,
+          redirect_uris: validClient.installed.redirect_uris,
+          token_uri: validClient.installed.token_uri,
+        },
+      },
       {
         installed: {
           ...validClient.installed,
@@ -4113,6 +4686,7 @@ describe('Groups least-privilege contracts', () => {
       deleteKey: () => {
         throw new Error('synthetic delete failure');
       },
+      keyCreationAttempted: true,
       storageOutcome: 'not-stored',
     });
 
@@ -4126,6 +4700,7 @@ describe('Groups least-privilege contracts', () => {
       deleteKey: () => {
         remoteDeleteAttempted = true;
       },
+      keyCreationAttempted: true,
       storageOutcome: 'unknown',
     });
     expect(remoteDeleteAttempted).toBe(false);
@@ -4134,8 +4709,45 @@ describe('Groups least-privilege contracts', () => {
       deleteKey: () => {
         remoteDeleteAttempted = true;
       },
+      keyCreationAttempted: true,
       storageOutcome: 'stored',
     });
+    expect(remoteDeleteAttempted).toBe(false);
+
+    let unboundKeyId: string | undefined;
+    try {
+      unboundKeyId = parseCreatedKeyId('synthetic unparseable key output');
+    } catch {
+      // A successful remote create with unparseable output leaves no safe ID.
+    }
+    const unboundErrors = cleanupCredentialArtifacts({
+      createdKeyId: unboundKeyId,
+      deleteKey: () => {
+        remoteDeleteAttempted = true;
+      },
+      keyCreationAttempted: true,
+      storageOutcome: 'not-stored',
+    });
+    expect(unboundKeyId).toBeUndefined();
+    expect(remoteDeleteAttempted).toBe(false);
+    expect(unboundErrors).toHaveLength(1);
+    expect(String(unboundErrors[0])).toContain(
+      'Could not bind remote cleanup to the generated Google key',
+    );
+    expect(String(unboundErrors[0])).not.toContain(
+      'synthetic unparseable key output',
+    );
+
+    expect(
+      cleanupCredentialArtifacts({
+        createdKeyId: undefined,
+        deleteKey: () => {
+          remoteDeleteAttempted = true;
+        },
+        keyCreationAttempted: false,
+        storageOutcome: 'not-stored',
+      }),
+    ).toEqual([]);
     expect(remoteDeleteAttempted).toBe(false);
   });
 
@@ -4315,6 +4927,199 @@ describe('OAuth handoff validation', () => {
         '<!DOCTYPE plist [<!ENTITY unsafe SYSTEM "file:///etc/passwd">]>',
       ),
     ).toThrow('must not declare');
+  });
+
+  test('enforces credential-file location, link, size, and permission boundaries', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    delete process.env.XDG_CONFIG_HOME;
+    const directory = mkdtempSync(join(tmpdir(), 'psd-eoc-oauth-files-'));
+    try {
+      const workspaceClient = {
+        installed: {
+          auth_provider_x509_cert_url:
+            'https://www.googleapis.com/oauth2/v1/certs',
+          auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+          client_id: 'synthetic-admin.apps.googleusercontent.com',
+          client_secret: 'synthetic-secret',
+          project_id: 'synthetic-admin-tools',
+          redirect_uris: ['http://localhost'],
+          token_uri: 'https://oauth2.googleapis.com/token',
+        },
+      } as const;
+      const workspacePath = join(directory, 'workspace-client.json');
+      const workspaceContents = JSON.stringify(workspaceClient);
+      writeFileSync(workspacePath, workspaceContents);
+      chmodSync(workspacePath, 0o600);
+
+      expect(await readSecureFile(workspacePath)).toBe(workspaceContents);
+      expect(await readSecureFileBytes(workspacePath)).toEqual(
+        Buffer.from(workspaceContents),
+      );
+      let secureCopyPath = '';
+      expect(
+        await withValidatedWorkspaceClientCopy(workspacePath, (clientPath) => {
+          secureCopyPath = clientPath;
+          expect(clientPath).not.toBe(workspacePath);
+          expect(statSync(dirname(clientPath)).mode & 0o077).toBe(0);
+          expect(statSync(clientPath).mode & 0o777).toBe(0o600);
+          expect(readFileSync(clientPath, 'utf8')).toBe(workspaceContents);
+          writeFileSync(
+            workspacePath,
+            JSON.stringify({
+              installed: {
+                ...workspaceClient.installed,
+                client_id:
+                  'synthetic-replacement-admin.apps.googleusercontent.com',
+              },
+            }),
+          );
+          chmodSync(workspacePath, 0o600);
+          expect(readFileSync(clientPath, 'utf8')).toBe(workspaceContents);
+          return 'synthetic-operation-complete';
+        }),
+      ).toBe('synthetic-operation-complete');
+      expect(() => statSync(secureCopyPath)).toThrow();
+      expect(() => statSync(dirname(secureCopyPath))).toThrow();
+
+      let failedCopyPath = '';
+      await expect(
+        withValidatedWorkspaceClientCopy(workspacePath, (clientPath) => {
+          failedCopyPath = clientPath;
+          throw new Error('synthetic callback failure');
+        }),
+      ).rejects.toThrow('synthetic callback failure');
+      expect(() => statSync(failedCopyPath)).toThrow();
+      expect(() => statSync(dirname(failedCopyPath))).toThrow();
+
+      const previousTempEnvironment = {
+        TEMP: process.env.TEMP,
+        TMP: process.env.TMP,
+        TMPDIR: process.env.TMPDIR,
+      } as const;
+      process.env.TEMP = gcpRoot;
+      process.env.TMP = gcpRoot;
+      process.env.TMPDIR = gcpRoot;
+      let ambientProofCopyPath = '';
+      try {
+        await withValidatedWorkspaceClientCopy(workspacePath, (clientPath) => {
+          ambientProofCopyPath = clientPath;
+          expect(clientPath.startsWith('/tmp/psd-eoc-workspace-client-')).toBe(
+            true,
+          );
+          expect(isPathOutsideDirectory(gcpRoot, clientPath)).toBe(true);
+        });
+      } finally {
+        for (const name of ['TEMP', 'TMP', 'TMPDIR'] as const) {
+          const previous = previousTempEnvironment[name];
+          if (previous === undefined) {
+            delete process.env[name];
+          } else {
+            process.env[name] = previous;
+          }
+        }
+      }
+      expect(() => statSync(ambientProofCopyPath)).toThrow();
+      expect(() => statSync(dirname(ambientProofCopyPath))).toThrow();
+
+      const mutablePath = join(directory, 'mutable-download.json');
+      writeFileSync(mutablePath, 'a'.repeat(1_024));
+      chmodSync(mutablePath, 0o600);
+      await expect(
+        readSecureFileBytes(mutablePath, {
+          afterInitialValidation: () => {
+            writeFileSync(mutablePath, 'b'.repeat(1_024));
+          },
+        }),
+      ).rejects.toThrow('changed while it was being read');
+
+      const webClient = {
+        web: {
+          client_id: 'synthetic-web.apps.googleusercontent.com',
+          client_secret: 'synthetic-secret',
+          project_id: 'psd401-eoc',
+        },
+      } as const;
+      const webPath = join(directory, 'web-client.json');
+      writeFileSync(webPath, JSON.stringify(webClient));
+      chmodSync(webPath, 0o600);
+      expect(await readWebClientDownload(webPath)).toEqual(webClient);
+
+      const wrongModePath = join(directory, 'wrong-mode.json');
+      writeFileSync(wrongModePath, JSON.stringify(webClient));
+      chmodSync(wrongModePath, 0o640);
+      await expect(readSecureFile(wrongModePath)).rejects.toThrow(
+        'permissions must deny all group and other access',
+      );
+      await expect(readWebClientDownload(wrongModePath)).rejects.toThrow(
+        'permissions must deny all group and other access',
+      );
+      await expect(
+        withValidatedWorkspaceClientCopy(wrongModePath, () => undefined),
+      ).rejects.toThrow('mode-0600 file outside the repository');
+
+      const malformedPath = join(directory, 'malformed.json');
+      writeFileSync(malformedPath, '{not-json');
+      chmodSync(malformedPath, 0o600);
+      await expect(readWebClientDownload(malformedPath)).rejects.toThrow(
+        'did not contain valid JSON',
+      );
+      await expect(
+        withValidatedWorkspaceClientCopy(malformedPath, () => undefined),
+      ).rejects.toThrow('OAuth client is invalid');
+
+      const emptyPath = join(directory, 'empty.json');
+      writeFileSync(emptyPath, '');
+      chmodSync(emptyPath, 0o600);
+      await expect(readSecureFile(emptyPath)).rejects.toThrow(
+        'one regular file under 64 KiB',
+      );
+      await expect(
+        withValidatedWorkspaceClientCopy(emptyPath, () => undefined),
+      ).rejects.toThrow('mode-0600 file outside the repository');
+
+      const oversizedPath = join(directory, 'oversized.json');
+      writeFileSync(oversizedPath, 'x'.repeat(64 * 1024 + 1));
+      chmodSync(oversizedPath, 0o600);
+      await expect(readSecureFile(oversizedPath)).rejects.toThrow(
+        'one regular file under 64 KiB',
+      );
+      await expect(
+        withValidatedWorkspaceClientCopy(oversizedPath, () => undefined),
+      ).rejects.toThrow('mode-0600 file outside the repository');
+
+      const repositoryFile = join(gcpRoot, 'README.md');
+      await expect(readSecureFile(repositoryFile)).rejects.toThrow(
+        'outside the repository',
+      );
+      await expect(
+        withValidatedWorkspaceClientCopy(repositoryFile, () => undefined),
+      ).rejects.toThrow('mode-0600 file outside the repository');
+
+      const repositorySymlink = join(directory, 'repository-link.json');
+      symlinkSync(repositoryFile, repositorySymlink);
+      await expect(readSecureFile(repositorySymlink)).rejects.toThrow(
+        'outside the repository',
+      );
+      await expect(
+        withValidatedWorkspaceClientCopy(repositorySymlink, () => undefined),
+      ).rejects.toThrow('mode-0600 file outside the repository');
+
+      const hardlinkPath = join(directory, 'workspace-hardlink.json');
+      linkSync(workspacePath, hardlinkPath);
+      await expect(readSecureFile(hardlinkPath)).rejects.toThrow(
+        'one regular file under 64 KiB',
+      );
+      await expect(
+        withValidatedWorkspaceClientCopy(hardlinkPath, () => undefined),
+      ).rejects.toThrow('mode-0600 file outside the repository');
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+    }
   });
 
   test('pins web and iOS identifiers and stores no source file in the repo', () => {

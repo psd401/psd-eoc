@@ -1,6 +1,6 @@
-import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { constants } from 'node:fs';
+import { chmod, mkdtemp, open, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { readGroupsReaderContract } from './groups-contract';
 import {
@@ -10,10 +10,10 @@ import {
   assertAwsAccount,
   assertAwsSsoLoginConfiguration,
   assertSafeGcloudConfiguration,
-  isPathOutsideDirectory,
   runCommandForStatus,
   runInteractive,
 } from './runtime';
+import { readSecureFileBytes } from './store-oauth-client';
 
 const ADMIN_EMAIL = 'kjh_admin@psd401.net';
 const AWS_ACCOUNT_ID = '338414773271';
@@ -21,7 +21,6 @@ const AWS_PROFILE = 'psd401-prr-prod';
 const AWS_REGION = 'us-west-2';
 const WORKSPACE_ROLE_SCOPE =
   'https://www.googleapis.com/auth/admin.directory.rolemanagement';
-const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url));
 
 function exactKeys(
   value: Readonly<Record<string, unknown>>,
@@ -61,9 +60,8 @@ export function validateWorkspaceAdminClient(value: unknown): void {
     ) ||
     client.auth_uri !== 'https://accounts.google.com/o/oauth2/auth' ||
     client.token_uri !== 'https://oauth2.googleapis.com/token' ||
-    (client.auth_provider_x509_cert_url !== undefined &&
-      client.auth_provider_x509_cert_url !==
-        'https://www.googleapis.com/oauth2/v1/certs') ||
+    client.auth_provider_x509_cert_url !==
+      'https://www.googleapis.com/oauth2/v1/certs' ||
     typeof client.client_id !== 'string' ||
     !/^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/u.test(
       client.client_id,
@@ -84,24 +82,13 @@ export function validateWorkspaceAdminClient(value: unknown): void {
   }
 }
 
-function secureWorkspaceClientPath(path: string): string {
-  let resolved: string;
-  let contents: string;
+export async function withValidatedWorkspaceClientCopy<Result>(
+  path: string,
+  operation: (secureClientPath: string) => Result | Promise<Result>,
+): Promise<Result> {
+  let contents: Buffer;
   try {
-    const requested = resolve(path);
-    resolved = realpathSync(requested);
-    const metadata = statSync(resolved);
-    if (
-      !isPathOutsideDirectory(repositoryRoot, requested) ||
-      !isPathOutsideDirectory(repositoryRoot, resolved) ||
-      !metadata.isFile() ||
-      metadata.size === 0 ||
-      metadata.size > 64 * 1024 ||
-      (metadata.mode & 0o077) !== 0
-    ) {
-      throw new Error('invalid metadata');
-    }
-    contents = readFileSync(resolved, 'utf8');
+    contents = await readSecureFileBytes(path);
   } catch {
     throw new Error(
       'Workspace administrator OAuth client must be one mode-0600 file outside the repository and under 64 KiB.',
@@ -109,12 +96,53 @@ function secureWorkspaceClientPath(path: string): string {
   }
   let value: unknown;
   try {
-    value = JSON.parse(contents);
+    value = JSON.parse(contents.toString('utf8'));
   } catch {
     throw new Error('Workspace administrator OAuth client is invalid.');
   }
   validateWorkspaceAdminClient(value);
-  return resolved;
+
+  const temporaryDirectory = await mkdtemp(
+    join('/tmp', 'psd-eoc-workspace-client-'),
+  );
+  const secureClientPath = join(temporaryDirectory, 'client.json');
+  try {
+    await chmod(temporaryDirectory, 0o700);
+    const handle = await open(
+      secureClientPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await handle.writeFile(contents);
+      await handle.sync();
+      await handle.chmod(0o600);
+      const metadata = await handle.stat({ bigint: true });
+      if (
+        !metadata.isFile() ||
+        metadata.nlink !== 1n ||
+        metadata.size !== BigInt(contents.length) ||
+        (metadata.mode & 0o777n) !== 0o600n
+      ) {
+        throw new Error(
+          'Secure Workspace administrator OAuth client copy is invalid.',
+        );
+      }
+    } finally {
+      await handle.close();
+    }
+    return await operation(secureClientPath);
+  } finally {
+    await rm(temporaryDirectory, {
+      force: true,
+      maxRetries: 3,
+      recursive: true,
+      retryDelay: 50,
+    });
+  }
 }
 
 function ordinaryAdcLogin(): void {
@@ -180,21 +208,25 @@ async function authenticate(): Promise<void> {
 
 async function authorizeWorkspaceAdc(clientPath: string): Promise<void> {
   assertActiveGcloudAccount(ADMIN_EMAIL);
-  const secureClientPath = secureWorkspaceClientPath(clientPath);
-  revokeApplicationDefaultCredentials();
-  runInteractive('gcloud', [
-    'auth',
-    'application-default',
-    'login',
-    ADMIN_EMAIL,
-    `--client-id-file=${secureClientPath}`,
-    '--no-browser',
-    `--scopes=${[
-      ...APPLICATION_DEFAULT_IDENTITY_SCOPES,
-      WORKSPACE_ROLE_SCOPE,
-    ].join(',')}`,
-  ]);
-  await assertApplicationDefaultIdentity(ADMIN_EMAIL);
+  await withValidatedWorkspaceClientCopy(
+    clientPath,
+    async (secureClientPath) => {
+      revokeApplicationDefaultCredentials();
+      runInteractive('gcloud', [
+        'auth',
+        'application-default',
+        'login',
+        ADMIN_EMAIL,
+        `--client-id-file=${secureClientPath}`,
+        '--no-browser',
+        `--scopes=${[
+          ...APPLICATION_DEFAULT_IDENTITY_SCOPES,
+          WORKSPACE_ROLE_SCOPE,
+        ].join(',')}`,
+      ]);
+      await assertApplicationDefaultIdentity(ADMIN_EMAIL);
+    },
+  );
 }
 
 async function restoreOrdinaryAdc(): Promise<void> {
