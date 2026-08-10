@@ -48,6 +48,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "24753a23-d863-41e6-8511-5e44c99fa6c2"
+      }
+    },
+    "owner": "peninsula-school-district"
   }
 }
