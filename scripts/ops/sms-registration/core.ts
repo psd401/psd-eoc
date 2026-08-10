@@ -102,6 +102,22 @@ export interface RegistrationFieldFeedback {
   readonly fieldPath: string;
 }
 
+export function toRegistrationFieldFeedback(
+  fieldPath: string | undefined,
+  deniedReason: string | undefined,
+  feedback: string | undefined,
+): RegistrationFieldFeedback | undefined {
+  if (deniedReason === undefined && feedback === undefined) return undefined;
+  if (fieldPath === undefined || fieldPath.length === 0) {
+    throw new Error('AWS response omitted FieldPath.');
+  }
+  return {
+    ...(deniedReason === undefined ? {} : { deniedReason }),
+    ...(feedback === undefined ? {} : { feedback }),
+    fieldPath,
+  };
+}
+
 export interface RegistrationAttachmentRecord {
   readonly attachmentId: string;
   readonly status: string;

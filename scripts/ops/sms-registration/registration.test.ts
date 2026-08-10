@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { statusMain, submitMain } from './cli';
-import { toRegistrationFieldFeedback } from './aws-adapter';
 
 import {
   REGISTRATION_TYPES,
@@ -14,6 +13,7 @@ import {
   runStatus,
   runSubmit,
   saveState,
+  toRegistrationFieldFeedback,
   type FieldDefinition,
   type RegistrationKind,
   type Runtime,
@@ -473,38 +473,42 @@ function deferred(): {
 describe('AWS response compatibility', () => {
   it('preserves all registration field review result variants', () => {
     expect(
-      toRegistrationFieldFeedback({
-        Feedback: 'Add more detail to the synthetic opt-in description.',
-        FieldPath: 'campaignInfo.optInDescription',
-      }),
+      toRegistrationFieldFeedback(
+        'campaignInfo.optInDescription',
+        undefined,
+        'Add more detail to the synthetic opt-in description.',
+      ),
     ).toEqual({
       feedback: 'Add more detail to the synthetic opt-in description.',
       fieldPath: 'campaignInfo.optInDescription',
     });
     expect(
-      toRegistrationFieldFeedback({
-        DeniedReason: 'Missing consent disclosure.',
-        FieldPath: 'campaignInfo.optInDescription',
-      }),
+      toRegistrationFieldFeedback(
+        'campaignInfo.optInDescription',
+        'Missing consent disclosure.',
+        undefined,
+      ),
     ).toEqual({
       deniedReason: 'Missing consent disclosure.',
       fieldPath: 'campaignInfo.optInDescription',
     });
     expect(
-      toRegistrationFieldFeedback({
-        DeniedReason: 'Missing consent disclosure.',
-        Feedback: 'Add Reply STOP to unsubscribe.',
-        FieldPath: 'campaignInfo.optInDescription',
-      }),
+      toRegistrationFieldFeedback(
+        'campaignInfo.optInDescription',
+        'Missing consent disclosure.',
+        'Add Reply STOP to unsubscribe.',
+      ),
     ).toEqual({
       deniedReason: 'Missing consent disclosure.',
       feedback: 'Add Reply STOP to unsubscribe.',
       fieldPath: 'campaignInfo.optInDescription',
     });
     expect(
-      toRegistrationFieldFeedback({
-        FieldPath: 'campaignInfo.optInDescription',
-      }),
+      toRegistrationFieldFeedback(
+        'campaignInfo.optInDescription',
+        undefined,
+        undefined,
+      ),
     ).toBeUndefined();
   });
 });
