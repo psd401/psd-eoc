@@ -173,7 +173,7 @@ export function createPlaywrightAuthRuntime(): PlaywrightAuthRuntime {
         confirmationId: null,
         outcome: event.outcome,
         principal,
-        source: 'web',
+        source: event.source,
         facilityId: null,
         target,
         requestId: event.requestId,
@@ -227,8 +227,8 @@ export function createPlaywrightAuthRuntime(): PlaywrightAuthRuntime {
         deviceEnrollment: {
           id: deviceEnrollmentId,
           userId: request.user.id,
-          platform: 'web',
-          unlockMethod: 'secure-session-cookie',
+          platform: request.device.platform,
+          unlockMethod: request.device.unlockMethod,
           installationId: request.device.installationId,
           enrolledAt: request.createdAt.toISOString(),
           lastSeenAt: request.createdAt.toISOString(),
@@ -246,6 +246,7 @@ export function createPlaywrightAuthRuntime(): PlaywrightAuthRuntime {
         occurredAt: request.createdAt.toISOString(),
         userId: result.user.id,
         sessionId: result.session.id,
+        source: request.device.platform === 'web' ? 'web' : 'mobile',
       });
       return result;
     },

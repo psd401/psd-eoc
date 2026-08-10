@@ -564,6 +564,156 @@ export const SessionRevocationSchema = z
 /** Append-only session revocation fact inferred from its schema. */
 export type SessionRevocation = z.infer<typeof SessionRevocationSchema>;
 
+/** Native platforms that may enroll an application bearer after Google OIDC. */
+export const NativeDevicePlatformSchema = z.enum(['ios', 'android']);
+
+/** Native device platform inferred from its schema. */
+export type NativeDevicePlatform = z.infer<typeof NativeDevicePlatformSchema>;
+
+/** RFC 7636 S256 challenge: one SHA-256 digest encoded as base64url. */
+export const PkceCodeChallengeSchema = z
+  .string()
+  .length(43)
+  .regex(/^[A-Za-z0-9_-]{43}$/u);
+
+/** PKCE S256 challenge inferred from its schema. */
+export type PkceCodeChallenge = z.infer<typeof PkceCodeChallengeSchema>;
+
+/** RFC 7636 verifier retained only in native memory during first sign-in. */
+export const PkceCodeVerifierSchema = z
+  .string()
+  .min(43)
+  .max(128)
+  .regex(/^[A-Za-z0-9._~-]+$/u);
+
+/** PKCE verifier inferred from its schema. */
+export type PkceCodeVerifier = z.infer<typeof PkceCodeVerifierSchema>;
+
+/**
+ * Server-generated state for a native OIDC attempt. The prefix keeps the
+ * passive HTTPS callback relay disjoint from the established web-cookie flow.
+ */
+export const MobileOidcStateSchema = z
+  .string()
+  .length(46)
+  .regex(/^m1\.[A-Za-z0-9_-]{43}$/u);
+
+/** Native OIDC state inferred from its schema. */
+export type MobileOidcState = z.infer<typeof MobileOidcStateSchema>;
+
+/**
+ * Opaque, authenticated mobile-flow state. Clients may retain and return it,
+ * but its encrypted representation is deliberately not a public data model.
+ */
+export const MobileOidcFlowTokenSchema = z
+  .string()
+  .min(64)
+  .max(4_096)
+  .regex(/^m1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u);
+
+/** Opaque native OIDC flow token inferred from its schema. */
+export type MobileOidcFlowToken = z.infer<typeof MobileOidcFlowTokenSchema>;
+
+/** Transport-only Google authorization code; never a capability input. */
+export const OidcAuthorizationCodeSchema = z
+  .string()
+  .min(1)
+  .max(4_096)
+  .refine(
+    (value) => {
+      if (value !== value.trim()) {
+        return false;
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        const codeUnit = value.charCodeAt(index);
+        if (codeUnit <= 31 || codeUnit === 127) {
+          return false;
+        }
+      }
+      return true;
+    },
+    { message: 'Authorization code contains invalid characters.' },
+  );
+
+/** Google authorization code inferred from its transport schema. */
+export type OidcAuthorizationCode = z.infer<typeof OidcAuthorizationCodeSchema>;
+
+/** Begins one server-bound native OIDC attempt without accepting a redirect. */
+export const MobileOidcStartRequestSchema = z
+  .object({
+    platform: NativeDevicePlatformSchema,
+    installationId: z.string().trim().min(16).max(255),
+    codeChallenge: PkceCodeChallengeSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Native OIDC start request inferred from its schema. */
+export type MobileOidcStartRequest = z.infer<
+  typeof MobileOidcStartRequestSchema
+>;
+
+/**
+ * Response used to open the system browser. The application redirect is fixed
+ * by the server and cannot become a caller-controlled open redirect.
+ */
+export const MobileOidcStartResponseSchema = z
+  .object({
+    clientId: z.string().trim().min(1).max(255),
+    authorizationUrl: z
+      .string()
+      .url()
+      .refine((value) => {
+        const url = new URL(value);
+        const loopback =
+          url.hostname === 'localhost' ||
+          url.hostname === '::1' ||
+          url.hostname === '[::1]' ||
+          /^127(?:\.\d{1,3}){3}$/u.test(url.hostname);
+        return (
+          url.protocol === 'https:' || (url.protocol === 'http:' && loopback)
+        );
+      }, 'Authorization URL must use HTTPS or a loopback HTTP test origin.'),
+    flowToken: MobileOidcFlowTokenSchema,
+    state: MobileOidcStateSchema,
+    appRedirectUri: z.literal('psdeoc://auth/callback'),
+    expiresAt: TimestampSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Native OIDC start response inferred from its schema. */
+export type MobileOidcStartResponse = z.infer<
+  typeof MobileOidcStartResponseSchema
+>;
+
+/**
+ * Completes one native code flow. Raw provider material remains in this
+ * transport-only request and is removed before capability execution.
+ */
+export const MobileOidcExchangeRequestSchema = z
+  .object({
+    authorizationCode: OidcAuthorizationCodeSchema,
+    state: MobileOidcStateSchema,
+    codeVerifier: PkceCodeVerifierSchema,
+    flowToken: MobileOidcFlowTokenSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Native OIDC exchange request inferred from its schema. */
+export type MobileOidcExchangeRequest = z.infer<
+  typeof MobileOidcExchangeRequestSchema
+>;
+
+/** Opaque application session bearer accepted by the shared session service. */
+export const OpaqueSessionBearerSchema = z
+  .string()
+  .regex(/^(?:[A-Za-z0-9_-]{43}|[A-Za-z0-9_-]{64})$/u);
+
+/** Opaque application bearer inferred from its transport schema. */
+export type OpaqueSessionBearer = z.infer<typeof OpaqueSessionBearerSchema>;
+
 /**
  * Owns normalized, signature-verified Google claims and device facts passed
  * into session establishment after the adapter has consumed the one-time
@@ -682,6 +832,23 @@ export const SessionEstablishmentResultSchema = z
 export type SessionEstablishmentResult = z.infer<
   typeof SessionEstablishmentResultSchema
 >;
+
+/**
+ * Protected native transport response for initial exchange and rotation. The
+ * bearer is intentionally outside the canonical capability result and must
+ * never be persisted or logged in plaintext.
+ */
+export const MobileSessionResponseSchema = z
+  .object({
+    session: SessionEstablishmentResultSchema,
+    tokenType: z.literal('Bearer'),
+    refreshToken: OpaqueSessionBearerSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Native session transport response inferred from its schema. */
+export type MobileSessionResponse = z.infer<typeof MobileSessionResponseSchema>;
 
 /** Owns the current authenticated identity and online-session view. */
 export const CurrentSessionResultSchema = z
