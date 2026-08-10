@@ -6,12 +6,14 @@ import {
   NeighborhoodVersionRefSchema,
   OthersGroupSourceRefSchema,
   UpdateFacilityInputSchema,
+  UpdateGroupSourceInputSchema,
   type AudienceTarget,
   type CreateAudienceConfigVersionInput,
   type CreateFacilityInput,
   type CreateGroupSourceInput,
   type CreateNeighborhoodVersionInput,
   type UpdateFacilityInput,
+  type UpdateGroupSourceInput,
 } from '@psd-eoc/contracts';
 
 import { AdminFormError, type AdminForm } from '../admin-request';
@@ -37,6 +39,15 @@ export type FacilitiesAdminMutation =
         | 'create-synthetic-others-group';
       command: CreateGroupSourceInput;
       status: 'building-group-created' | 'others-group-created';
+    }>
+  | Readonly<{
+      intent:
+        | 'replace-google-building-group'
+        | 'replace-google-others-group'
+        | 'replace-synthetic-building-group'
+        | 'replace-synthetic-others-group';
+      command: UpdateGroupSourceInput;
+      status: 'building-group-replaced' | 'others-group-replaced';
     }>
   | Readonly<{
       intent: 'create-neighborhood-version';
@@ -118,6 +129,62 @@ function parseSyntheticGroup(
     intent,
     command,
     status: building ? 'building-group-created' : 'others-group-created',
+  };
+}
+
+function parseGoogleGroupReplacement(
+  form: AdminForm,
+  intent: 'replace-google-building-group' | 'replace-google-others-group',
+): FacilitiesAdminMutation {
+  const building = intent === 'replace-google-building-group';
+  form.assertFields([
+    ...COMMON_FIELDS,
+    'sourceId',
+    ...(building ? (['facilityId'] as const) : []),
+    'displayName',
+    'googleGroupId',
+    'email',
+  ]);
+  return {
+    intent,
+    command: UpdateGroupSourceInputSchema.parse({
+      id: form.required('sourceId'),
+      kind: 'google-group',
+      purpose: building ? 'building' : 'others',
+      facilityId: building ? form.required('facilityId') : null,
+      displayName: form.required('displayName'),
+      active: true,
+      googleGroupId: form.required('googleGroupId'),
+      email: form.required('email'),
+    }),
+    status: building ? 'building-group-replaced' : 'others-group-replaced',
+  };
+}
+
+function parseSyntheticGroupReplacement(
+  form: AdminForm,
+  intent: 'replace-synthetic-building-group' | 'replace-synthetic-others-group',
+): FacilitiesAdminMutation {
+  const building = intent === 'replace-synthetic-building-group';
+  form.assertFields([
+    ...COMMON_FIELDS,
+    'sourceId',
+    ...(building ? (['facilityId'] as const) : []),
+    'displayName',
+    'fixtureKey',
+  ]);
+  return {
+    intent,
+    command: UpdateGroupSourceInputSchema.parse({
+      id: form.required('sourceId'),
+      kind: 'synthetic',
+      purpose: building ? 'building' : 'others',
+      facilityId: building ? form.required('facilityId') : null,
+      displayName: form.required('displayName'),
+      active: true,
+      fixtureKey: form.required('fixtureKey'),
+    }),
+    status: building ? 'building-group-replaced' : 'others-group-replaced',
   };
 }
 
@@ -214,6 +281,12 @@ export function parseFacilitiesAdminMutation(
     case 'create-synthetic-building-group':
     case 'create-synthetic-others-group':
       return parseSyntheticGroup(form, intent);
+    case 'replace-google-building-group':
+    case 'replace-google-others-group':
+      return parseGoogleGroupReplacement(form, intent);
+    case 'replace-synthetic-building-group':
+    case 'replace-synthetic-others-group':
+      return parseSyntheticGroupReplacement(form, intent);
     case 'create-neighborhood-version':
       form.assertFields(
         [...COMMON_FIELDS, 'neighborhoodId', 'name', 'facilityIds'],

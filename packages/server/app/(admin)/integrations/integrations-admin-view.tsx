@@ -160,23 +160,30 @@ function ChannelStateSection({
                           </option>
                         </select>
                       </label>
-                      <label>
-                        Product-owner approval reference
-                        <input
-                          aria-describedby={`approval-${configuration.integrationId}`}
-                          autoComplete="off"
-                          maxLength={255}
-                          name="productOwnerApprovalReference"
-                          required
-                        />
-                      </label>
-                      <span
-                        className="field-help"
-                        id={`approval-${configuration.integrationId}`}
-                      >
-                        Non-secret approval evidence only. Never enter a token,
-                        credential, recipient, or provider payload.
-                      </span>
+                      {configuration.status.label === 'live-verified' ? (
+                        <>
+                          <label>
+                            Pre-issued live authorization artifact
+                            <textarea
+                              aria-describedby={`approval-${configuration.integrationId}`}
+                              autoComplete="off"
+                              maxLength={8_192}
+                              name="authorization"
+                              required
+                              rows={8}
+                            />
+                          </label>
+                          <span
+                            className="field-help"
+                            id={`approval-${configuration.integrationId}`}
+                          >
+                            Paste only the non-secret, change-specific JSON
+                            artifact issued for this integration and requested
+                            state. Never enter a token, credential, recipient,
+                            or provider payload.
+                          </span>
+                        </>
+                      ) : null}
                       <button type="submit">
                         Save {configuration.integrationId} state
                       </button>
@@ -220,10 +227,13 @@ function RosterHealthSection({
       <p>
         Generated <Timestamp value={report.generatedAt} />.
       </p>
+      <p>
+        This is a bounded page of endpoint evidence, not a district-wide total.
+      </p>
       <dl>
         <dt>Status</dt>
         <dd>{report.status}</dd>
-        <dt>Recipients without a usable endpoint</dt>
+        <dt>Recipients shown without a usable endpoint</dt>
         <dd>{report.staleRecipients.length}</dd>
         <dt>Failed group sources</dt>
         <dd>{report.failedGroups.length}</dd>

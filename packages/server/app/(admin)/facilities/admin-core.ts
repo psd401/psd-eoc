@@ -77,6 +77,8 @@ export interface AdminCapabilityTransaction
 export type AdminCapabilityStore =
   CapabilityEngineStore<AdminCapabilityTransaction>;
 
+const adminStoreDatabases = new WeakMap<AdminCapabilityStore, Database>();
+
 /** Public-safe error raised by route-owned admin capability handlers. */
 export class AdminCapabilityError extends CapabilityEngineError {
   public constructor(
@@ -117,9 +119,15 @@ function asAdminDatabase(database: unknown): AdminQueryDatabase {
 }
 
 async function readDatabaseTime(database: AdminQueryDatabase): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
-  );
+  // Use Drizzle's selected-field result shape rather than the transport's raw
+  // execute result. postgres-js returns raw rows directly, while the pinned
+  // RDS Data API driver wraps raw execute rows in an AWS response object.
+  const [row] = await database
+    .select({
+      value: sql<Date | string>`admin_database_clock.value`,
+    })
+    .from(sql`(select clock_timestamp() as value) as admin_database_clock`)
+    .limit(1);
   if (row === undefined) {
     throw conflict('The authoritative database clock is unavailable.');
   }
@@ -405,7 +413,7 @@ export function createDrizzleAdminCapabilityStore(
   database: Database,
   authenticated: AuthenticatedSession,
 ): AdminCapabilityStore {
-  return {
+  const store: AdminCapabilityStore = {
     transaction<Result>(
       operation: (transaction: AdminCapabilityTransaction) => Promise<Result>,
     ): Promise<Result> {
@@ -421,6 +429,29 @@ export function createDrizzleAdminCapabilityStore(
       );
     },
   };
+  adminStoreDatabases.set(store, database);
+  return store;
+}
+
+/**
+ * Returns the exact root database injected into a Drizzle admin store.
+ *
+ * Read-only evidence stores that own their own transaction must start it from
+ * this root rather than nesting under the capability transaction or falling
+ * back to process-global state.
+ */
+export function getAdminCapabilityStoreDatabase(
+  store: AdminCapabilityStore,
+): Database {
+  const database = adminStoreDatabases.get(store);
+  if (database === undefined) {
+    throw new AdminCapabilityError(
+      'INTERNAL_ERROR',
+      'The administrator store does not expose its injected database.',
+      500,
+    );
+  }
+  return database;
 }
 
 /**

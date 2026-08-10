@@ -77,6 +77,12 @@ const PROPS = Object.freeze({
       status: STATUSES[3],
       changedAt: AT,
     }),
+    ChannelConfigurationSchema.parse({
+      integrationId: 'google-groups',
+      enabled: false,
+      status: STATUSES[2],
+      changedAt: AT,
+    }),
   ],
   lastRosterSync: {
     population: 'synthetic' as const,
@@ -147,7 +153,10 @@ describe('integrations admin view', () => {
     expect(markup).toContain('Disabled');
     expect(markup).toContain('CARRIER_REGISTRATION_PENDING');
     expect(markup).toContain('partial-rejected');
-    expect(markup).toContain('Recipients without a usable endpoint');
+    expect(markup).toContain('Recipients shown without a usable endpoint');
+    expect(markup).toContain(
+      'This is a bounded page of endpoint evidence, not a district-wide total.',
+    );
     expect(markup).toContain('<dd>1</dd>');
     expect(markup).toContain(`<time dateTime="${AT}">${AT}</time>`);
     expect(markup).toContain(
@@ -168,8 +177,12 @@ describe('integrations admin view', () => {
       /<input[^>]*name="idempotencyKey"[^>]*value="[0-9a-f-]{36}"/u,
     );
     expect(markup).toContain(
-      'Non-secret approval evidence only. Never enter a token, credential, recipient, or provider payload.',
+      'Paste only the non-secret, change-specific JSON artifact issued for this integration and requested state.',
     );
+    expect(markup).toMatch(
+      /<textarea[^>]*name="authorization"[^>]*required=""[^>]*><\/textarea>/u,
+    );
+    expect(markup).not.toContain('productOwnerApprovalReference');
     expect(markup).toMatch(
       /name="integrationId" value="aws-eum-sms"[\s\S]*?<option disabled="" value="true">Enabled<\/option>/u,
     );

@@ -38,7 +38,7 @@ import {
   sessions,
   sessionTokenIssuances,
   userFacilityScopes,
-  userRoles,
+  userRoleChanges,
   users,
 } from '../../db/schema';
 import {
@@ -46,6 +46,7 @@ import {
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './access-gate';
+import { loadEffectiveRoles } from './role-state';
 
 /**
  * The __Host- prefix makes browsers require Secure, Path=/, and no Domain.
@@ -86,7 +87,9 @@ export interface GroupAuthorizedWebIdentity {
   readonly membershipMember: AccessMembershipMember;
   /**
    * True only after the immutable Google subject matches trusted bootstrap
-   * configuration. It may add the admin role, never bypass group membership.
+   * configuration. Persistence may add the initial admin fact only when no
+   * prior admin decision exists; later revocation remains authoritative. This
+   * flag never bypasses group membership.
    */
   readonly grantBootstrapAdmin: boolean;
 }
@@ -475,9 +478,14 @@ function assertPersistedResultMatchesRequest(
   result: SessionEstablishmentResult,
   request: PersistInitialWebSessionRequest,
 ): void {
-  const expectedRoles = request.grantBootstrapAdmin
-    ? new Set<Role>([...request.user.roles, 'admin'])
-    : null;
+  const requestedRoles = new Set<Role>(request.user.roles);
+  const rolesMatch =
+    request.user.roles.every((role) => result.user.roles.includes(role)) &&
+    result.user.roles.every(
+      (role) =>
+        requestedRoles.has(role) ||
+        (request.grantBootstrapAdmin && role === 'admin'),
+    );
   const matches =
     result.user.id === request.user.id &&
     result.user.googleSubject === request.user.googleSubject &&
@@ -496,8 +504,7 @@ function assertPersistedResultMatchesRequest(
     result.deviceEnrollment.platform === request.device.platform &&
     result.deviceEnrollment.unlockMethod === request.device.unlockMethod &&
     result.deviceEnrollment.installationId === request.device.installationId &&
-    (expectedRoles === null ||
-      [...expectedRoles].every((role) => result.user.roles.includes(role)));
+    rolesMatch;
 
   if (!matches) {
     throw new WebSessionIssuanceError(
@@ -605,11 +612,6 @@ export function createCompleteOidcSignInHandler(
 
 function toIsoString(value: Date): string {
   return value.toISOString();
-}
-
-function sortedRoles(roles: readonly Role[]): readonly Role[] {
-  const order: Readonly<Record<Role, number>> = { staff: 0, admin: 1 };
-  return [...new Set(roles)].sort((left, right) => order[left] - order[right]);
 }
 
 function accessGroupKey(source: {
@@ -955,19 +957,25 @@ export function createDrizzleInitialWebSessionStore(
               );
             }
 
-            if (request.grantBootstrapAdmin) {
-              await transaction
-                .insert(userRoles)
-                .values({ userId: request.user.id, role: 'admin' })
-                .onConflictDoNothing();
-            }
-
-            const persistedRoles = await transaction
-              .select({ role: userRoles.role })
-              .from(userRoles)
-              .where(eq(userRoles.userId, request.user.id))
-              .for('share');
-            const roles = sortedRoles(persistedRoles.map(({ role }) => role));
+            const rolesBeforeSession = await loadEffectiveRoles(
+              transaction,
+              request.user.id,
+            );
+            const [priorAdminDecision] = await transaction
+              .select({ sequence: userRoleChanges.sequence })
+              .from(userRoleChanges)
+              .where(
+                and(
+                  eq(userRoleChanges.userId, request.user.id),
+                  eq(userRoleChanges.role, 'admin'),
+                ),
+              )
+              .orderBy(desc(userRoleChanges.sequence))
+              .limit(1);
+            const shouldGrantBootstrapAdmin =
+              request.grantBootstrapAdmin &&
+              !rolesBeforeSession.includes('admin') &&
+              priorAdminDecision === undefined;
 
             const persistedFacilityScopes = await transaction
               .select({ facilityId: userFacilityScopes.facilityId })
@@ -1095,6 +1103,21 @@ export function createDrizzleInitialWebSessionStore(
                 'The session record could not be created.',
               );
             }
+
+            if (shouldGrantBootstrapAdmin) {
+              await transaction.insert(userRoleChanges).values({
+                userId: request.user.id,
+                role: 'admin',
+                granted: true,
+                changedByUserId: request.user.id,
+                changedWithSessionId: session.id,
+                requestId: request.requestId,
+                occurredAt: request.createdAt,
+              });
+            }
+            const roles = shouldGrantBootstrapAdmin
+              ? await loadEffectiveRoles(transaction, request.user.id)
+              : rolesBeforeSession;
 
             await transaction.insert(sessionTokenIssuances).values({
               sessionId: session.id,

@@ -8,6 +8,7 @@ import { desc, eq } from 'drizzle-orm';
 import { facilities, rosterSyncResults } from '../../../db/schema';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type { ServerCapabilityRegistration } from '../../../lib/capabilities/engine';
+import type { Database } from '../../../db/client';
 import {
   createDrizzleStaleRosterReportStore,
   createGetStaleRosterReportHandler,
@@ -16,6 +17,7 @@ import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
   executeAdminQueryCapability,
+  getAdminCapabilityStoreDatabase,
   getDefaultAdminDatabase,
   requireAdminCapabilityAuthorization,
   type AdminCapabilityStore,
@@ -29,6 +31,7 @@ export type LastRosterSync = Pick<
 >;
 
 function registration(
+  rootDatabase: Database,
   captureLastSync: (value: LastRosterSync | null) => void,
 ): ServerCapabilityRegistration<
   'get-stale-roster-report',
@@ -58,28 +61,30 @@ function registration(
     },
     async handler(input, context) {
       const reportHandler = createGetStaleRosterReportHandler({
-        store: createDrizzleStaleRosterReportStore(getDefaultAdminDatabase()),
+        // The stale-report store owns a repeatable-read/read-only transaction.
+        // Start it from the exact injected root database: nesting it under the
+        // capability transaction is invalid on PostgreSQL/Data API, while a
+        // process-global fallback could mix authorization and report state.
+        store: createDrizzleStaleRosterReportStore(rootDatabase),
         clock: () => new Date(context.invocation.serverTime.getTime()),
         staleThresholdSeconds: 24 * 60 * 60,
       });
-      const [report, latestRows] = await Promise.all([
-        reportHandler.handler(input, {
-          facilityScope: context.invocation.scope.facilityScope,
-        }),
-        context.transaction.database
-          .select({
-            population: rosterSyncResults.population,
-            outcome: rosterSyncResults.outcome,
-            completedAt: rosterSyncResults.completedAt,
-          })
-          .from(rosterSyncResults)
-          .where(eq(rosterSyncResults.population, input.population))
-          .orderBy(
-            desc(rosterSyncResults.completedAt),
-            desc(rosterSyncResults.id),
-          )
-          .limit(1),
-      ]);
+      const report = await reportHandler.handler(input, {
+        facilityScope: context.invocation.scope.facilityScope,
+      });
+      const latestRows = await context.transaction.database
+        .select({
+          population: rosterSyncResults.population,
+          outcome: rosterSyncResults.outcome,
+          completedAt: rosterSyncResults.completedAt,
+        })
+        .from(rosterSyncResults)
+        .where(eq(rosterSyncResults.population, input.population))
+        .orderBy(
+          desc(rosterSyncResults.completedAt),
+          desc(rosterSyncResults.id),
+        )
+        .limit(1);
       const latest = latestRows[0];
       captureLastSync(
         latest === undefined
@@ -114,8 +119,9 @@ export async function executeRosterHealthProjection(input: {
       getDefaultAdminDatabase(),
       input.authenticated,
     );
+  const rootDatabase = getAdminCapabilityStoreDatabase(store);
   const report = await executeAdminQueryCapability(
-    registration((value) => {
+    registration(rootDatabase, (value) => {
       lastSync = value;
     }),
     input.query,

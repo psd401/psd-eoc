@@ -18,6 +18,17 @@ function parseEnabled(value: string): boolean {
   throw new AdminFormError('The requested channel state is invalid.');
 }
 
+function parseAuthorization(value: string | null): unknown {
+  if (value === null) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new AdminFormError(
+      'The live channel authorization artifact is not valid JSON.',
+    );
+  }
+}
+
 export async function POST(request: Request): Promise<Response> {
   try {
     const form = await readAdminForm(request);
@@ -28,7 +39,7 @@ export async function POST(request: Request): Promise<Response> {
       'intent',
       'integrationId',
       'enabled',
-      'productOwnerApprovalReference',
+      'authorization',
     ]);
     if (form.required('intent') !== 'set-channel-enabled') {
       throw new AdminFormError(
@@ -38,9 +49,7 @@ export async function POST(request: Request): Promise<Response> {
     const command = SetChannelEnabledInputSchema.parse({
       integrationId: form.required('integrationId'),
       enabled: parseEnabled(form.required('enabled')),
-      productOwnerApprovalReference: form.required(
-        'productOwnerApprovalReference',
-      ),
+      authorization: parseAuthorization(form.optional('authorization')),
     });
     await executeSetChannelEnabledCapability({
       authenticated,

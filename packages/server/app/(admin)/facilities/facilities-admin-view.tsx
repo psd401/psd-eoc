@@ -205,7 +205,10 @@ function FacilitiesSection({
   );
 }
 
-function GoogleGroupFields({ helpId }: Readonly<{ helpId: string }>) {
+function GoogleGroupFields({
+  defaultDisplayName,
+  helpId,
+}: Readonly<{ defaultDisplayName?: string; helpId: string }>) {
   return (
     <>
       <label>
@@ -213,6 +216,7 @@ function GoogleGroupFields({ helpId }: Readonly<{ helpId: string }>) {
         <input
           aria-describedby={helpId}
           autoComplete="off"
+          defaultValue={defaultDisplayName}
           maxLength={160}
           name="displayName"
           required
@@ -246,7 +250,10 @@ function GoogleGroupFields({ helpId }: Readonly<{ helpId: string }>) {
   );
 }
 
-function SyntheticGroupFields({ helpId }: Readonly<{ helpId: string }>) {
+function SyntheticGroupFields({
+  defaultDisplayName,
+  helpId,
+}: Readonly<{ defaultDisplayName?: string; helpId: string }>) {
   return (
     <>
       <label>
@@ -254,6 +261,7 @@ function SyntheticGroupFields({ helpId }: Readonly<{ helpId: string }>) {
         <input
           aria-describedby={helpId}
           autoComplete="off"
+          defaultValue={defaultDisplayName}
           maxLength={160}
           name="displayName"
           required
@@ -387,6 +395,48 @@ function groupSourceIdentity(group: GroupSource): string {
     : group.fixtureKey;
 }
 
+function GroupSourceReplacementForm({
+  csrfToken,
+  group,
+}: Readonly<{ csrfToken: string; group: GroupSource }>) {
+  if (group.purpose === 'access' || !group.active) return null;
+  const helpId = `replace-group-${group.id}-help`;
+  const intent = `replace-${group.kind === 'google-group' ? 'google' : 'synthetic'}-${group.purpose}-group`;
+  return (
+    <details>
+      <summary>Replace {group.displayName}</summary>
+      <form action="/facilities/api" method="post">
+        <AdminMutationFields csrfToken={csrfToken} />
+        <input name="intent" type="hidden" value={intent} />
+        <input name="sourceId" type="hidden" value={group.id} />
+        {group.purpose === 'building' ? (
+          <input name="facilityId" type="hidden" value={group.facilityId} />
+        ) : null}
+        <fieldset>
+          <legend>New immutable source</legend>
+          <p id={helpId}>
+            Saving creates a new source row and appends a roster configuration
+            version. The current row and every historical configuration remain
+            unchanged. A stale replacement is refused.
+          </p>
+          {group.kind === 'google-group' ? (
+            <GoogleGroupFields
+              defaultDisplayName={group.displayName}
+              helpId={helpId}
+            />
+          ) : (
+            <SyntheticGroupFields
+              defaultDisplayName={group.displayName}
+              helpId={helpId}
+            />
+          )}
+          <button type="submit">Replace {group.displayName}</button>
+        </fieldset>
+      </form>
+    </details>
+  );
+}
+
 function GroupSourceTable({
   facilitiesById,
   groups,
@@ -469,9 +519,10 @@ function GroupSourcesSection({
     <section aria-labelledby="group-sources-heading">
       <h2 id="group-sources-heading">Building and others group sources</h2>
       <p>
-        Building and others group sources are immutable. To correct a mapping,
-        create a new source and then append a new audience version; no in-place
-        building or others update is exposed.
+        Building and others group sources are immutable. Replacing one creates a
+        new source and appends a roster configuration version; the old source
+        and historical configuration versions remain unchanged. Append a new
+        audience version separately when an others selection changes.
       </p>
       {omittedUnexpected ? (
         <p role="alert">
@@ -485,6 +536,15 @@ function GroupSourcesSection({
         groups={buildingGroups}
         label="Building"
       />
+      <div aria-label="Replace active building sources" role="group">
+        {buildingGroups.map((group) => (
+          <GroupSourceReplacementForm
+            csrfToken={csrfToken}
+            group={group}
+            key={group.id}
+          />
+        ))}
+      </div>
       {buildingPage.pageInfo.hasMore
         ? nextPageLink(
             'Next page of building sources',
@@ -510,6 +570,15 @@ function GroupSourcesSection({
         groups={othersGroups}
         label="Others"
       />
+      <div aria-label="Replace active others sources" role="group">
+        {othersGroups.map((group) => (
+          <GroupSourceReplacementForm
+            csrfToken={csrfToken}
+            group={group}
+            key={group.id}
+          />
+        ))}
+      </div>
       {othersPage.pageInfo.hasMore
         ? nextPageLink(
             'Next page of others sources',

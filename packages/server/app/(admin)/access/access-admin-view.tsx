@@ -261,20 +261,15 @@ function RoleAssignmentForm({
     const alreadyGranted = user.roles.includes(role);
     return (
       <label htmlFor={id}>
-        {alreadyGranted ? (
-          <input name="roles" type="hidden" value={role} />
-        ) : null}
         <input
           aria-describedby={helpId}
           defaultChecked={alreadyGranted}
-          disabled={alreadyGranted}
           id={id}
-          name={alreadyGranted ? undefined : 'roles'}
+          name="roles"
           type="checkbox"
           value={role}
         />
         {label}
-        {alreadyGranted ? ' (already granted)' : ''}
       </label>
     );
   };
@@ -287,15 +282,13 @@ function RoleAssignmentForm({
       <fieldset disabled={disabled}>
         <legend>Roles for {user.displayName}</legend>
         <p id={helpId}>
-          Existing grants are retained by the append-only schema. Select any
-          additional role to grant. Administrator access does not replace
-          server-side facility scope.
+          Select the complete effective role set. Changes append grant or
+          revocation facts; prior history remains immutable. Administrator
+          access does not replace server-side facility scope.
         </p>
         <RoleControl id={staffId} label="Staff" role="staff" />
         <RoleControl id={adminId} label="Administrator" role="admin" />
-        <button type="submit">
-          Grant selected roles to {user.displayName}
-        </button>
+        <button type="submit">Save roles for {user.displayName}</button>
       </fieldset>
       {disabled ? (
         <p>This account is disabled; roles cannot be changed.</p>

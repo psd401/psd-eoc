@@ -8,6 +8,7 @@ const uuid = (suffix: number): string =>
 
 const IDS = Object.freeze({
   audience: uuid(2601),
+  buildingSource: uuid(2607),
   facilityA: uuid(2602),
   facilityB: uuid(2603),
   googleOthers: uuid(2604),
@@ -127,6 +128,55 @@ describe('facilities administration form parsing', () => {
     });
   });
 
+  test('parses immutable building and others replacements through the canonical update contract', () => {
+    const building = parseFacilitiesAdminMutation(
+      adminForm('replace-google-building-group', [
+        ['sourceId', IDS.buildingSource],
+        ['facilityId', IDS.facilityA],
+        ['displayName', 'Site A staff replacement'],
+        ['googleGroupId', 'google-site-a-staff-v2'],
+        ['email', 'site-a-v2@example.invalid'],
+      ]),
+    );
+    expect(building).toEqual({
+      intent: 'replace-google-building-group',
+      command: {
+        id: IDS.buildingSource,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: IDS.facilityA,
+        displayName: 'Site A staff replacement',
+        active: true,
+        googleGroupId: 'google-site-a-staff-v2',
+        email: 'site-a-v2@example.invalid',
+      },
+      status: 'building-group-replaced',
+    });
+
+    const others = parseFacilitiesAdminMutation(
+      adminForm('replace-synthetic-others-group', [
+        ['sourceId', IDS.syntheticOthers],
+        ['displayName', 'District test response replacement'],
+        ['fixtureKey', 'district-test-response-v2'],
+      ]),
+    );
+    expect(others).toEqual({
+      intent: 'replace-synthetic-others-group',
+      command: {
+        id: IDS.syntheticOthers,
+        kind: 'synthetic',
+        purpose: 'others',
+        facilityId: null,
+        displayName: 'District test response replacement',
+        active: true,
+        fixtureKey: 'district-test-response-v2',
+      },
+      status: 'others-group-replaced',
+    });
+    expect(Object.isFrozen(building.command)).toBe(true);
+    expect(Object.isFrozen(others.command)).toBe(true);
+  });
+
   test('parses new and superseding neighborhood versions with repeated facility fields', () => {
     const created = parseFacilitiesAdminMutation(
       adminForm('create-neighborhood-version', [
@@ -216,7 +266,7 @@ describe('facilities administration form parsing', () => {
     });
   });
 
-  test('rejects unlisted fields and exposes no building or others update intent', () => {
+  test('rejects unlisted fields and exposes no in-place building or others update intent', () => {
     expect(() =>
       parseFacilitiesAdminMutation(
         adminForm('create-google-building-group', [
@@ -239,6 +289,17 @@ describe('facilities administration form parsing', () => {
     expect(() =>
       parseFacilitiesAdminMutation(
         adminForm('update-building-group', [['facilityId', IDS.facilityA]]),
+      ),
+    ).toThrow(AdminFormError);
+    expect(() =>
+      parseFacilitiesAdminMutation(
+        adminForm('replace-google-others-group', [
+          ['sourceId', IDS.googleOthers],
+          ['facilityId', IDS.facilityA],
+          ['displayName', 'Smuggled facility binding'],
+          ['googleGroupId', 'google-other-v2'],
+          ['email', 'other-v2@example.invalid'],
+        ]),
       ),
     ).toThrow(AdminFormError);
   });
