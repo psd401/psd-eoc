@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import {
   ApiErrorSchema,
   CreateMediaUploadIntentInputSchema,
@@ -41,6 +41,8 @@ interface EventRoomFixture {
   readonly photoMediaId: string;
   readonly photoUploadMediaId: string;
   readonly photoSanitizedSha256: string;
+  readonly photoStressEventId: string;
+  readonly photoStressMiddleMediaId: string;
   readonly redactedPhotoEventId: string;
   readonly redactedPhotoMediaId: string;
 }
@@ -58,6 +60,8 @@ interface SyntheticMediaRouteOptions {
   readonly mediaId: string;
   readonly sanitizedSha256: string;
   readonly completionOutcomes?: readonly CompletionOutcome[];
+  readonly holdImageResponses?: boolean;
+  readonly holdReadGrants?: boolean;
 }
 
 interface SyntheticMediaRequest {
@@ -80,6 +84,23 @@ interface SyntheticMediaLog {
       Readonly<{ eventId: string; mediaId: string; readUrl: string }>
   >;
   readonly imageRequests: SyntheticMediaRequest[];
+  concurrentImageRequests: number;
+  concurrentReadGrantRequests: number;
+  maxConcurrentImageRequests: number;
+  maxConcurrentReadGrantRequests: number;
+  readonly releaseImageResponses: () => void;
+  readonly releaseReadGrants: () => void;
+}
+
+interface PrivatePhotoIntersectionProbe {
+  readonly disconnectCalls: number;
+  readonly observeCalls: number;
+}
+
+interface PrivatePhotoDecodeProbe {
+  readonly active: number;
+  readonly maxActive: number;
+  readonly pendingAltText: readonly string[];
 }
 
 interface AxeViolation {
@@ -177,6 +198,229 @@ async function expectAxeClean(page: Page, context: string): Promise<void> {
   ).toEqual([]);
 }
 
+async function installDeterministicIntersectionObserver(
+  page: Page,
+): Promise<void> {
+  await page.addInitScript(() => {
+    interface ObserverRecord {
+      readonly callback: IntersectionObserverCallback;
+      readonly observer: IntersectionObserver;
+      readonly targets: Set<Element>;
+      connected: boolean;
+    }
+
+    const records: ObserverRecord[] = [];
+    let disconnectCalls = 0;
+    let observeCalls = 0;
+
+    class DeterministicIntersectionObserver implements IntersectionObserver {
+      readonly root: Element | Document | null;
+      readonly rootMargin: string;
+      readonly thresholds: readonly number[];
+      readonly record: ObserverRecord;
+
+      constructor(
+        callback: IntersectionObserverCallback,
+        options: IntersectionObserverInit = {},
+      ) {
+        this.root = options.root ?? null;
+        this.rootMargin = options.rootMargin ?? '0px';
+        this.thresholds = Array.isArray(options.threshold)
+          ? options.threshold
+          : [options.threshold ?? 0];
+        this.record = {
+          callback,
+          observer: this,
+          targets: new Set<Element>(),
+          connected: true,
+        };
+        records.push(this.record);
+      }
+
+      disconnect(): void {
+        disconnectCalls += 1;
+        this.record.connected = false;
+        this.record.targets.clear();
+      }
+
+      observe(target: Element): void {
+        observeCalls += 1;
+        this.record.connected = true;
+        this.record.targets.add(target);
+      }
+
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+
+      unobserve(target: Element): void {
+        this.record.targets.delete(target);
+      }
+    }
+
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: DeterministicIntersectionObserver,
+      writable: true,
+    });
+    Object.defineProperty(window, '__privatePhotoIntersectionProbe', {
+      configurable: true,
+      value: {
+        stats: () => ({ disconnectCalls, observeCalls }),
+        trigger: (target: Element, isIntersecting: boolean) => {
+          const bounds = target.getBoundingClientRect();
+          for (const record of records) {
+            if (!record.connected || !record.targets.has(target)) continue;
+            record.callback(
+              [
+                {
+                  boundingClientRect: bounds,
+                  intersectionRatio: isIntersecting ? 1 : 0,
+                  intersectionRect: isIntersecting
+                    ? bounds
+                    : new DOMRectReadOnly(),
+                  isIntersecting,
+                  rootBounds: null,
+                  target,
+                  time: performance.now(),
+                },
+              ],
+              record.observer,
+            );
+          }
+        },
+      },
+    });
+  });
+}
+
+async function privatePhotoIntersectionStats(
+  page: Page,
+): Promise<PrivatePhotoIntersectionProbe> {
+  return page.evaluate(() =>
+    (
+      window as typeof window & {
+        __privatePhotoIntersectionProbe: {
+          stats(): PrivatePhotoIntersectionProbe;
+        };
+      }
+    ).__privatePhotoIntersectionProbe.stats(),
+  );
+}
+
+async function triggerPrivatePhotoIntersection(target: Locator): Promise<void> {
+  await target.evaluate((element) => {
+    (
+      window as typeof window & {
+        __privatePhotoIntersectionProbe: {
+          trigger(target: Element, isIntersecting: boolean): void;
+        };
+      }
+    ).__privatePhotoIntersectionProbe.trigger(element, true);
+  });
+}
+
+async function installControllableImageDecode(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    interface PendingDecode {
+      readonly altText: string;
+      readonly settleSuccess: () => void;
+    }
+
+    const pending: PendingDecode[] = [];
+    let active = 0;
+    let maxActive = 0;
+    HTMLImageElement.prototype.decode = function decode(): Promise<void> {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const altText = this.alt;
+      return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const originalRemoveAttribute = this.removeAttribute;
+        const settle = (succeeded: boolean) => {
+          if (settled) return;
+          settled = true;
+          const index = pending.findIndex(
+            (candidate) => candidate.settleSuccess === settleSuccess,
+          );
+          if (index >= 0) pending.splice(index, 1);
+          active -= 1;
+          Reflect.deleteProperty(this, 'removeAttribute');
+          if (succeeded) {
+            resolve();
+          } else {
+            reject(
+              new DOMException('Synthetic decode cancelled.', 'AbortError'),
+            );
+          }
+        };
+        const settleSuccess = () => settle(true);
+        Object.defineProperty(this, 'removeAttribute', {
+          configurable: true,
+          value: function removeAttribute(
+            this: HTMLImageElement,
+            name: string,
+          ): void {
+            if (name.toLowerCase() === 'src') settle(false);
+            originalRemoveAttribute.call(this, name);
+          },
+        });
+        pending.push({ altText, settleSuccess });
+      });
+    };
+    Object.defineProperty(window, '__privatePhotoDecodeProbe', {
+      configurable: true,
+      value: {
+        release: (altText: string) => {
+          const index = pending.findIndex(
+            (candidate) => candidate.altText === altText,
+          );
+          const selected = index < 0 ? undefined : pending.splice(index, 1)[0];
+          if (selected === undefined) return false;
+          selected.settleSuccess();
+          return true;
+        },
+        stats: () => ({
+          active,
+          maxActive,
+          pendingAltText: pending.map((candidate) => candidate.altText),
+        }),
+      },
+    });
+  });
+}
+
+async function privatePhotoDecodeStats(
+  page: Page,
+): Promise<PrivatePhotoDecodeProbe> {
+  return page.evaluate(() =>
+    (
+      window as typeof window & {
+        __privatePhotoDecodeProbe: {
+          stats(): PrivatePhotoDecodeProbe;
+        };
+      }
+    ).__privatePhotoDecodeProbe.stats(),
+  );
+}
+
+async function releasePrivatePhotoDecode(
+  page: Page,
+  altText: string,
+): Promise<boolean> {
+  return page.evaluate(
+    (targetAltText) =>
+      (
+        window as typeof window & {
+          __privatePhotoDecodeProbe: {
+            release(value: string): boolean;
+          };
+        }
+      ).__privatePhotoDecodeProbe.release(targetAltText),
+    altText,
+  );
+}
+
 async function postExternalUpdate(
   page: Page,
   eventId: string,
@@ -245,6 +489,18 @@ async function installSyntheticMediaRoutes(
   page: Page,
   options: SyntheticMediaRouteOptions,
 ): Promise<SyntheticMediaLog> {
+  let holdImageResponses = options.holdImageResponses ?? false;
+  let holdReadGrants = options.holdReadGrants ?? false;
+  const pendingImageResponses: Array<() => void> = [];
+  const pendingReadGrants: Array<() => void> = [];
+  const releaseImageResponses = () => {
+    holdImageResponses = false;
+    for (const release of pendingImageResponses.splice(0)) release();
+  };
+  const releaseReadGrants = () => {
+    holdReadGrants = false;
+    for (const release of pendingReadGrants.splice(0)) release();
+  };
   const log: SyntheticMediaLog = {
     stages: [],
     createInputs: [],
@@ -253,6 +509,12 @@ async function installSyntheticMediaRoutes(
     completionRequests: [],
     readGrantRequests: [],
     imageRequests: [],
+    concurrentImageRequests: 0,
+    concurrentReadGrantRequests: 0,
+    maxConcurrentImageRequests: 0,
+    maxConcurrentReadGrantRequests: 0,
+    releaseImageResponses,
+    releaseReadGrants,
   };
   const completionOutcomes = options.completionOutcomes ?? ['ready'];
   let completionAttempt = 0;
@@ -386,6 +648,11 @@ async function installSyntheticMediaRoutes(
     if (request.method() === 'GET' && readMatch !== null) {
       const eventId = decodeURIComponent(readMatch[1] ?? '');
       const mediaId = decodeURIComponent(readMatch[2] ?? '');
+      log.concurrentReadGrantRequests += 1;
+      log.maxConcurrentReadGrantRequests = Math.max(
+        log.maxConcurrentReadGrantRequests,
+        log.concurrentReadGrantRequests,
+      );
       grantSequence += 1;
       const readUrl = `${SYNTHETIC_MEDIA_ORIGIN}/ready/${eventId}/${mediaId}?grant=${grantSequence}`;
       log.stages.push('read-grant');
@@ -396,17 +663,24 @@ async function installSyntheticMediaRoutes(
         readUrl,
         url: request.url(),
       });
-      const times = mediaTimestampWindow();
-      await route.fulfill({
-        contentType: 'application/json',
-        json: MediaReadGrantSchema.parse({
-          eventId,
-          mediaId,
-          readUrl,
-          issuedAt: times.createdAt,
-          expiresAt: times.expiresAt,
-        }),
-      });
+      try {
+        if (holdReadGrants) {
+          await new Promise<void>((resolve) => pendingReadGrants.push(resolve));
+        }
+        const times = mediaTimestampWindow();
+        await route.fulfill({
+          contentType: 'application/json',
+          json: MediaReadGrantSchema.parse({
+            eventId,
+            mediaId,
+            readUrl,
+            issuedAt: times.createdAt,
+            expiresAt: times.expiresAt,
+          }),
+        });
+      } finally {
+        log.concurrentReadGrantRequests -= 1;
+      }
       return;
     }
 
@@ -449,16 +723,30 @@ async function installSyntheticMediaRoutes(
       return;
     }
     if (request.method() === 'GET' && url.pathname.startsWith('/ready/')) {
+      log.concurrentImageRequests += 1;
+      log.maxConcurrentImageRequests = Math.max(
+        log.maxConcurrentImageRequests,
+        log.concurrentImageRequests,
+      );
       log.stages.push('read-image');
       log.imageRequests.push({ headers, url: request.url() });
-      await route.fulfill({
-        status: 200,
-        body: SYNTHETIC_PNG,
-        contentType: 'image/png',
-        headers: {
-          'Cache-Control': 'private, no-store',
-        },
-      });
+      try {
+        if (holdImageResponses) {
+          await new Promise<void>((resolve) =>
+            pendingImageResponses.push(resolve),
+          );
+        }
+        await route.fulfill({
+          status: 200,
+          body: SYNTHETIC_PNG,
+          contentType: 'image/png',
+          headers: {
+            'Cache-Control': 'private, no-store',
+          },
+        });
+      } finally {
+        log.concurrentImageRequests -= 1;
+      }
       return;
     }
     throw new Error(
@@ -635,6 +923,335 @@ test('a private photo receives a fresh authorized read grant after reload', asyn
   await expectAxeClean(page, 'authorized private photo after a fresh grant');
 });
 
+test('deterministic viewport demand authorizes only the intersecting target with unused automatic capacity', async ({
+  page,
+}) => {
+  await installDeterministicIntersectionObserver(page);
+  const fixture = await readFixture();
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  await expect(page.locator('.timeline-entry')).toHaveCount(12);
+  await page.waitForTimeout(250);
+  expect(media.readGrantRequests).toHaveLength(0);
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).observeCalls)
+    .toBeGreaterThanOrEqual(12);
+
+  const targetEntry = page.getByRole('article', {
+    name: 'Entry 6: Photo update',
+    exact: true,
+  });
+  const targetFigure = targetEntry.locator('figure.photo-entry');
+  const targetButton = targetEntry.getByRole('button', {
+    name: 'Load private photo for entry 6',
+  });
+  await targetButton.focus();
+  await expect(targetButton).toBeFocused();
+  await triggerPrivatePhotoIntersection(targetFigure);
+  await expect(targetFigure).toBeFocused();
+  await expect.poll(() => media.readGrantRequests.length).toBe(1);
+  expect(media.readGrantRequests[0]?.mediaId).toBe(
+    fixture.photoStressMiddleMediaId,
+  );
+  await expect(targetFigure).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect(targetFigure).toBeFocused();
+
+  const explicitEntry = page.getByRole('article', {
+    name: 'Entry 5: Photo update',
+    exact: true,
+  });
+  const explicitFigure = explicitEntry.locator('figure.photo-entry');
+  const explicitButton = explicitEntry.getByRole('button', {
+    name: 'Load private photo for entry 5',
+  });
+  await explicitButton.focus();
+  await page.keyboard.press('Enter');
+  await expect(explicitFigure).toBeFocused();
+  await expect.poll(() => media.readGrantRequests.length).toBe(2);
+  await expect(explicitFigure).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect(explicitFigure).toBeFocused();
+});
+
+test('offscreen private photos require viewport or explicit demand and automatic work stays capped', async ({
+  page,
+}) => {
+  const fixture = await readFixture();
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  await expect(page.locator('.timeline-entry')).toHaveCount(12);
+  await expect
+    .poll(() => media.readGrantRequests.length)
+    .toBeGreaterThanOrEqual(1);
+
+  const middleEntry = page.getByRole('article', {
+    name: 'Entry 6: Photo update',
+    exact: true,
+  });
+  const middleLoadButton = middleEntry.getByRole('button', {
+    name: 'Load private photo for entry 6',
+  });
+  await expect(middleLoadButton).toBeAttached();
+  expect(
+    media.readGrantRequests.some(
+      (request) => request.mediaId === fixture.photoStressMiddleMediaId,
+    ),
+  ).toBe(false);
+
+  await middleLoadButton.evaluate((button) =>
+    (button as HTMLButtonElement).focus({ preventScroll: true }),
+  );
+  await expect(middleLoadButton).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect
+    .poll(() =>
+      media.readGrantRequests.some(
+        (request) => request.mediaId === fixture.photoStressMiddleMediaId,
+      ),
+    )
+    .toBe(true);
+  await expect(
+    middleEntry.getByRole('img', {
+      name: 'Synthetic bounded-loader private photo 6.',
+    }),
+  ).toBeAttached();
+
+  const timeline = page.getByRole('region', {
+    name: 'Chronological event journal',
+  });
+  for (const fraction of [0, 0.5, 1]) {
+    await timeline.evaluate((region, position) => {
+      region.scrollTop =
+        (region.scrollHeight - region.clientHeight) * Number(position);
+      region.dispatchEvent(new Event('scroll'));
+    }, fraction);
+    await page.waitForTimeout(250);
+  }
+  expect(
+    media.readGrantRequests.filter(
+      (request) => request.mediaId !== fixture.photoStressMiddleMediaId,
+    ).length,
+  ).toBeLessThanOrEqual(2);
+  expect(await page.locator('.timeline-entry img').count()).toBeLessThanOrEqual(
+    2,
+  );
+  await expectAxeClean(page, 'bounded viewport-gated private photo history');
+});
+
+test('private photos use truthful explicit fallback and keep out-of-order decodes within two slots', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+  });
+  await installControllableImageDecode(page);
+  const fixture = await readFixture();
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  await expect(page.locator('.timeline-entry')).toHaveCount(12);
+  await page.waitForTimeout(250);
+  expect(media.readGrantRequests).toHaveLength(0);
+  await expect(
+    page
+      .getByText(
+        'Automatic viewport loading is unavailable in this browser. Load this private photo explicitly if it is operationally needed.',
+        { exact: true },
+      )
+      .first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: /^Load private photo for entry /u }),
+  ).toHaveCount(12);
+
+  const loadButton = (sequence: number) =>
+    page
+      .getByRole('article', {
+        name: `Entry ${sequence}: Photo update`,
+        exact: true,
+      })
+      .getByRole('button', {
+        name: `Load private photo for entry ${sequence}`,
+      });
+  const figure = (sequence: number) =>
+    page
+      .getByRole('article', {
+        name: `Entry ${sequence}: Photo update`,
+        exact: true,
+      })
+      .locator('figure.photo-entry');
+  const firstLoad = loadButton(1);
+  await firstLoad.evaluate((button) =>
+    (button as HTMLButtonElement).focus({ preventScroll: true }),
+  );
+  await expect(firstLoad).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(figure(1)).toBeFocused();
+  for (const sequence of [2, 3]) {
+    await loadButton(sequence).evaluate((button) =>
+      (button as HTMLButtonElement).click(),
+    );
+  }
+  await expect(figure(3)).toBeFocused();
+
+  await expect.poll(() => media.readGrantRequests.length).toBe(2);
+  await expect.poll(() => media.imageRequests.length).toBe(2);
+  await expect
+    .poll(async () => (await privatePhotoDecodeStats(page)).active)
+    .toBe(2);
+  expect((await privatePhotoDecodeStats(page)).maxActive).toBe(2);
+
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 2.',
+    ),
+  ).toBe(true);
+  await expect.poll(() => media.readGrantRequests.length).toBe(3);
+  await expect.poll(() => media.imageRequests.length).toBe(3);
+  await expect
+    .poll(async () => (await privatePhotoDecodeStats(page)).active)
+    .toBe(2);
+  expect((await privatePhotoDecodeStats(page)).maxActive).toBe(2);
+  await expect(figure(1).locator('img')).toBeAttached();
+  await expect(figure(2)).toHaveAttribute(
+    'data-private-photo-state',
+    'evicted',
+  );
+  await expect(figure(2).locator('img')).toHaveCount(0);
+  await expect(figure(3).locator('img')).toBeAttached();
+
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 1.',
+    ),
+  ).toBe(true);
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 3.',
+    ),
+  ).toBe(true);
+  await expect(figure(3)).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect(figure(3)).toBeFocused();
+  await expect.poll(() => page.locator('.timeline-entry img').count()).toBe(2);
+  await expectAxeClean(page, 'explicit bounded private photo fallback');
+});
+
+test('a fixed private-photo deadline fails visibly and advances queued explicit work', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+  });
+  await installControllableImageDecode(page);
+  await page.clock.install();
+  const fixture = await readFixture();
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  const entry = (sequence: number) =>
+    page.getByRole('article', {
+      name: `Entry ${sequence}: Photo update`,
+      exact: true,
+    });
+  const figure = (sequence: number) =>
+    entry(sequence).locator('figure.photo-entry');
+  const loadButton = (sequence: number) =>
+    entry(sequence).getByRole('button', {
+      name: `Load private photo for entry ${sequence}`,
+    });
+
+  for (const sequence of [1, 2]) {
+    await loadButton(sequence).evaluate((button) =>
+      (button as HTMLButtonElement).click(),
+    );
+  }
+  await loadButton(3).focus();
+  await page.keyboard.press('Enter');
+  await expect(figure(3)).toBeFocused();
+  await expect.poll(() => media.readGrantRequests.length).toBe(2);
+  await expect
+    .poll(async () => (await privatePhotoDecodeStats(page)).active)
+    .toBe(2);
+
+  await page.clock.fastForward(60_001);
+  await expect.poll(() => media.readGrantRequests.length).toBe(3);
+  await expect.poll(() => media.imageRequests.length).toBe(3);
+  await expect
+    .poll(async () =>
+      (await privatePhotoDecodeStats(page)).pendingAltText.includes(
+        'Synthetic bounded-loader private photo 3.',
+      ),
+    )
+    .toBe(true);
+  expect(await privatePhotoDecodeStats(page)).toMatchObject({
+    active: 1,
+    maxActive: 2,
+  });
+  for (const sequence of [1, 2]) {
+    await expect(figure(sequence)).toContainText(
+      'Private photo loading exceeded the 60-second safety limit and was stopped.',
+    );
+  }
+  await expect(figure(3)).toBeFocused();
+
+  await page.clock.fastForward(60_001);
+  await expect(figure(3)).toContainText(
+    'Private photo loading exceeded the 60-second safety limit and was stopped.',
+  );
+  await expect(
+    entry(3).getByRole('button', {
+      name: 'Retry private photo for entry 3',
+    }),
+  ).toBeVisible();
+  expect(await privatePhotoDecodeStats(page)).toMatchObject({
+    active: 0,
+    maxActive: 2,
+    pendingAltText: [],
+  });
+  await expect(figure(3)).toBeFocused();
+});
+
 test('photo upload is keyboard-operable and appends only canonical same-event media data', async ({
   page,
 }) => {
@@ -729,6 +1346,7 @@ test('photo upload is keyboard-operable and appends only canonical same-event me
   expect(media.uploadRequests).toHaveLength(1);
   expect(media.uploadRequests[0]?.body).toEqual(SYNTHETIC_PNG);
   expect(media.uploadRequests[0]?.headers['content-type']).toBe('image/png');
+  expect(media.uploadRequests[0]?.headers['if-none-match']).toBe('*');
   expect(media.uploadRequests[0]?.headers['authorization']).toBeUndefined();
   expect(media.uploadRequests[0]?.headers['cookie']).toBeUndefined();
   expect(media.uploadRequests[0]?.headers['idempotency-key']).toBeUndefined();

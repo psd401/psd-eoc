@@ -88,6 +88,8 @@ interface EventRoomFixture {
   readonly photoMediaId: string;
   readonly photoUploadMediaId: string;
   readonly photoSanitizedSha256: string;
+  readonly photoStressEventId: string;
+  readonly photoStressMiddleMediaId: string;
   readonly redactedPhotoEventId: string;
   readonly redactedPhotoMediaId: string;
 }
@@ -614,6 +616,7 @@ async function prepareEventFixtures(
   const recoveryOwnerEvent = makeActiveEvent();
   const lifecycleEvent = makeActiveEvent();
   const photoEvent = makeActiveEvent();
+  const photoStressEvent = makeActiveEvent();
   const redactedPhotoEvent = makeActiveEvent();
   const realDraftEvent = EventSchema.parse({
     id: randomUUID(),
@@ -670,6 +673,17 @@ async function prepareEventFixtures(
     new Date(activatedAt.getTime() + 750),
     'upload completion',
   );
+  const photoStressMedia = Array.from({ length: 12 }, (_, index) =>
+    readyMediaSeed(
+      photoStressEvent.id,
+      new Date(activatedAt.getTime() + 500 + index),
+      `bounded loader ${index + 1}`,
+    ),
+  );
+  const photoStressMiddleMedia = photoStressMedia[5];
+  if (photoStressMiddleMedia === undefined) {
+    throw new Error('The bounded private-photo fixture is incomplete.');
+  }
   const redactedPhotoMedia = readyMediaSeed(
     redactedPhotoEvent.id,
     new Date(activatedAt.getTime() + 500),
@@ -690,6 +704,27 @@ async function prepareEventFixtures(
       caption: 'Synthetic authorized-photo rendering fixture.',
     },
     supersedes: null,
+  });
+  const photoStressEntries = photoStressMedia.map((media, index) => {
+    const sequence = index + 1;
+    return JournalEntrySchema.parse({
+      id: randomUUID(),
+      eventId: photoStressEvent.id,
+      sequence,
+      kind: 'photo',
+      author: actor,
+      source: 'web',
+      serverTime: new Date(
+        activatedAt.getTime() + sequence * 1_000,
+      ).toISOString(),
+      clientTime: null,
+      payload: {
+        mediaId: media.id,
+        altText: `Synthetic bounded-loader private photo ${sequence}.`,
+        caption: `Synthetic resource-bound fixture ${sequence}.`,
+      },
+      supersedes: null,
+    });
   });
   const redactedPhotoEntry = JournalEntrySchema.parse({
     id: randomUUID(),
@@ -733,6 +768,7 @@ async function prepareEventFixtures(
     ...makeHistory(recoveryOwnerEvent, 3),
     ...makeHistory(lifecycleEvent, 3),
     photoEntry,
+    ...photoStressEntries,
     redactedPhotoEntry,
     photoRedactionEntry,
   ];
@@ -773,6 +809,7 @@ async function prepareEventFixtures(
           recoveryOwnerEvent,
           lifecycleEvent,
           photoEvent,
+          photoStressEvent,
           redactedPhotoEvent,
           realDraftEvent,
         ].map(eventInsert),
@@ -782,6 +819,7 @@ async function prepareEventFixtures(
       .values([
         photoMedia.uploadIntent,
         photoUploadMedia.uploadIntent,
+        ...photoStressMedia.map((media) => media.uploadIntent),
         redactedPhotoMedia.uploadIntent,
       ]);
     await transaction
@@ -789,6 +827,7 @@ async function prepareEventFixtures(
       .values([
         photoMedia.record,
         photoUploadMedia.record,
+        ...photoStressMedia.map((media) => media.record),
         redactedPhotoMedia.record,
       ]);
     await transaction.insert(journalEntries).values(journal.map(journalInsert));
@@ -806,6 +845,8 @@ async function prepareEventFixtures(
     photoMediaId: photoMedia.id,
     photoUploadMediaId: photoUploadMedia.id,
     photoSanitizedSha256: photoMedia.sanitizedContentSha256,
+    photoStressEventId: photoStressEvent.id,
+    photoStressMiddleMediaId: photoStressMiddleMedia.id,
     redactedPhotoEventId: redactedPhotoEvent.id,
     redactedPhotoMediaId: redactedPhotoMedia.id,
   };

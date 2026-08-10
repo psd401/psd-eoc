@@ -37,6 +37,10 @@ const RECOVERY_RECORD_VERSION = 1;
 const PHOTO_COMPLETION_RECORD_VERSION = 1;
 const MAX_MEDIA_BYTES = 25 * 1_024 * 1_024;
 const ACCEPTED_MEDIA_TYPES = 'image/jpeg,image/png,image/webp,image/heic';
+const MAX_CONCURRENT_PRIVATE_PHOTO_LOADS = 2;
+const MAX_RESIDENT_PRIVATE_PHOTOS = 2;
+const MAX_AUTOMATIC_PRIVATE_PHOTO_LOADS = 2;
+const PRIVATE_PHOTO_LOAD_DEADLINE_MILLISECONDS = 60_000;
 
 type ConnectionState = 'loading' | 'connected' | 'reconnecting' | 'offline';
 
@@ -497,7 +501,10 @@ async function putPhotoBytes(
     response = await fetch(intent.uploadUrl, {
       method: 'PUT',
       credentials: 'omit',
-      headers: { 'Content-Type': intent.declaredContentType },
+      headers: {
+        'Content-Type': intent.declaredContentType,
+        'If-None-Match': '*',
+      },
       body: file,
       mode: 'cors',
       referrerPolicy: 'no-referrer',
@@ -1242,125 +1249,597 @@ function waitForNextPoll(
   });
 }
 
+type PrivatePhotoLoadMode = 'automatic' | 'explicit';
+
+interface PrivatePhotoLoadRequest {
+  readonly key: string;
+  readonly mode: PrivatePhotoLoadMode;
+  readonly onAutomaticLimit: () => void;
+  readonly onStartError: () => void;
+  readonly start: (complete: () => void) => () => void;
+}
+
+interface ActivePrivatePhotoLoad {
+  cancel: () => void;
+}
+
+/**
+ * Per-event scheduler for untrusted private images. It bounds authorization,
+ * transfer, and decode work independently of journal length. Explicit staff
+ * requests receive priority, but never bypass the concurrency or resident-set
+ * limits.
+ */
+export class PrivatePhotoLoadCoordinator {
+  readonly #active = new Map<string, ActivePrivatePhotoLoad>();
+  readonly #automaticStarts = new Set<string>();
+  readonly #residents = new Map<string, () => void>();
+  readonly #queue: PrivatePhotoLoadRequest[] = [];
+
+  enqueue(request: PrivatePhotoLoadRequest): () => void {
+    this.cancel(request.key);
+    this.#queue.push(request);
+    this.#pump();
+    return () => this.cancel(request.key);
+  }
+
+  cancel(key: string): void {
+    let queueIndex = this.#queue.findIndex(
+      (candidate) => candidate.key === key,
+    );
+    while (queueIndex >= 0) {
+      this.#queue.splice(queueIndex, 1);
+      queueIndex = this.#queue.findIndex((candidate) => candidate.key === key);
+    }
+    const active = this.#active.get(key);
+    if (active !== undefined) {
+      this.#active.delete(key);
+      active.cancel();
+      this.#pump();
+    }
+  }
+
+  claimResident(key: string, evict: () => void): boolean {
+    this.#residents.delete(key);
+    const evictions: Array<() => void> = [];
+    while (this.#residents.size >= MAX_RESIDENT_PRIVATE_PHOTOS) {
+      let oldestKey: string | undefined;
+      for (const candidate of this.#residents.keys()) {
+        if (!this.#active.has(candidate)) {
+          oldestKey = candidate;
+          break;
+        }
+      }
+      if (oldestKey === undefined) return false;
+      const oldestEviction = this.#residents.get(oldestKey);
+      this.#residents.delete(oldestKey);
+      if (oldestEviction !== undefined) evictions.push(oldestEviction);
+    }
+    this.#residents.set(key, evict);
+    for (const runEviction of evictions) runEviction();
+    return true;
+  }
+
+  releaseResident(key: string): void {
+    this.#residents.delete(key);
+  }
+
+  remove(key: string): void {
+    this.cancel(key);
+    this.releaseResident(key);
+  }
+
+  #complete(key: string): void {
+    if (!this.#active.delete(key)) return;
+    this.#pump();
+  }
+
+  #pump(): void {
+    while (
+      this.#active.size < MAX_CONCURRENT_PRIVATE_PHOTO_LOADS &&
+      this.#queue.length > 0
+    ) {
+      const explicitIndex = this.#queue.findIndex(
+        (candidate) => candidate.mode === 'explicit',
+      );
+      const next = this.#queue.splice(
+        explicitIndex >= 0 ? explicitIndex : 0,
+        1,
+      )[0];
+      if (next === undefined) return;
+
+      if (next.mode === 'automatic') {
+        if (
+          this.#automaticStarts.has(next.key) ||
+          this.#automaticStarts.size >= MAX_AUTOMATIC_PRIVATE_PHOTO_LOADS
+        ) {
+          next.onAutomaticLimit();
+          continue;
+        }
+        this.#automaticStarts.add(next.key);
+      }
+
+      const active: ActivePrivatePhotoLoad = { cancel: () => undefined };
+      this.#active.set(next.key, active);
+      let completed = false;
+      const complete = () => {
+        if (completed) return;
+        completed = true;
+        this.#complete(next.key);
+      };
+      try {
+        const cancel = next.start(complete);
+        if (this.#active.get(next.key) === active) {
+          active.cancel = () => {
+            completed = true;
+            cancel();
+          };
+        } else {
+          cancel();
+        }
+      } catch {
+        this.#active.delete(next.key);
+        next.onStartError();
+      }
+    }
+  }
+}
+
+type PrivatePhotoPhase =
+  | 'idle'
+  | 'queued'
+  | 'authorizing'
+  | 'loading-image'
+  | 'displayed'
+  | 'manual-only'
+  | 'evicted'
+  | 'error';
+
+type PrivatePhotoObserverSupport = 'checking' | 'available' | 'unavailable';
+
 function AuthorizedPhoto({
+  entryId,
+  entrySequence,
   eventId,
   mediaId,
   altText,
   caption,
+  loadCoordinator,
+  scrollRootRef,
 }: Readonly<{
+  entryId: string;
+  entrySequence: number;
   eventId: string;
   mediaId: string;
   altText: string;
   caption: string | null;
+  loadCoordinator: PrivatePhotoLoadCoordinator;
+  scrollRootRef: Readonly<{ current: HTMLDivElement | null }>;
 }>) {
+  const photoKey = `${entryId}:${mediaId}`;
+  const statusId = `private-photo-${entryId}-status`;
+  const captionId = `private-photo-${entryId}-caption`;
   const [readUrl, setReadUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [authorizationAttempt, setAuthorizationAttempt] = useState(0);
+  const [phase, setPhase] = useState<PrivatePhotoPhase>('idle');
+  const [explicitDemand, setExplicitDemand] = useState(false);
+  const [observerSupport, setObserverSupport] =
+    useState<PrivatePhotoObserverSupport>('checking');
+  const figureRef = useRef<HTMLElement>(null);
+  const mountedRef = useRef(true);
+  const attemptRef = useRef(0);
+  const automaticStartedRef = useRef(false);
+  const controllerRef = useRef<AbortController | null>(null);
+  const finishActiveRef = useRef<(() => void) | null>(null);
+  const requestCancelRef = useRef<(() => void) | null>(null);
+  const requestModeRef = useRef<PrivatePhotoLoadMode | null>(null);
+  const loadingRef = useRef(false);
+  const readUrlRef = useRef<string | null>(null);
+  const imageElementRef = useRef<HTMLImageElement | null>(null);
 
-  const load = useCallback(
-    async (signal: AbortSignal): Promise<void> => {
-      setLoading(true);
-      setError(null);
-      setReadUrl(null);
-      let response: Response;
-      try {
-        response = await fetch(
-          `/api/media/events/${encodeURIComponent(eventId)}/${encodeURIComponent(mediaId)}/read-grant`,
-          {
-            credentials: 'same-origin',
-            cache: 'no-store',
-            signal,
-          },
-        );
-      } catch {
-        if (signal.aborted) return;
-        setError(
-          'The private photo could not be authorized. No public image URL was used.',
-        );
-        setLoading(false);
-        return;
-      }
-      let value: unknown;
-      try {
-        value = await readJson(response);
-      } catch (requestError) {
-        if (signal.aborted) return;
-        setError(
-          requestError instanceof Error
-            ? requestError.message
-            : 'The private photo authorization response was invalid.',
-        );
-        setLoading(false);
-        return;
-      }
-      if (!response.ok) {
-        setError(
-          publicErrorMessage(
-            value,
-            'The private photo could not be authorized.',
-          ),
-        );
-        setLoading(false);
-        return;
-      }
-      const parsed = MediaReadGrantSchema.safeParse(value);
+  const finishActive = useCallback(() => {
+    finishActiveRef.current?.();
+  }, []);
+
+  const cancelCurrentImage = useCallback(() => {
+    const image = imageElementRef.current;
+    imageElementRef.current = null;
+    if (image === null) return;
+    image.removeAttribute('src');
+  }, []);
+
+  const evictPhoto = useCallback(() => {
+    attemptRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    readUrlRef.current = null;
+    cancelCurrentImage();
+    requestCancelRef.current?.();
+    requestCancelRef.current = null;
+    finishActiveRef.current = null;
+    requestModeRef.current = null;
+    loadingRef.current = false;
+    if (!mountedRef.current) return;
+    setReadUrl(null);
+    setError(null);
+    setExplicitDemand(false);
+    setPhase('evicted');
+  }, [cancelCurrentImage]);
+
+  const requestLoad = useCallback(
+    (mode: PrivatePhotoLoadMode): void => {
       if (
-        !parsed.success ||
-        parsed.data.eventId !== eventId ||
-        parsed.data.mediaId !== mediaId ||
-        Date.parse(parsed.data.expiresAt) <= Date.now()
+        loadingRef.current ||
+        readUrlRef.current !== null ||
+        (mode === 'automatic' && automaticStartedRef.current)
       ) {
-        setError(
-          'PSD EOC returned a private photo authorization that does not match this event.',
-        );
-        setLoading(false);
         return;
       }
-      setReadUrl(parsed.data.readUrl);
-      setLoading(false);
+
+      const figure = figureRef.current;
+      if (
+        figure !== null &&
+        (mode === 'explicit' || figure.contains(document.activeElement))
+      ) {
+        figure.focus({ preventScroll: true });
+      }
+
+      const attempt = attemptRef.current + 1;
+      attemptRef.current = attempt;
+      loadingRef.current = true;
+      requestModeRef.current = mode;
+      setError(null);
+      setExplicitDemand(mode === 'explicit');
+      setPhase('queued');
+
+      requestCancelRef.current = loadCoordinator.enqueue({
+        key: photoKey,
+        mode,
+        onAutomaticLimit: () => {
+          if (!mountedRef.current || attemptRef.current !== attempt) return;
+          automaticStartedRef.current = true;
+          loadingRef.current = false;
+          requestCancelRef.current = null;
+          requestModeRef.current = null;
+          setPhase('manual-only');
+        },
+        onStartError: () => {
+          if (!mountedRef.current || attemptRef.current !== attempt) return;
+          loadingRef.current = false;
+          requestCancelRef.current = null;
+          requestModeRef.current = null;
+          setError(
+            'The bounded private photo loader could not start. No public image URL was used.',
+          );
+          setPhase('error');
+        },
+        start: (complete) => {
+          const controller = new AbortController();
+          controllerRef.current = controller;
+          if (mode === 'automatic') automaticStartedRef.current = true;
+          setPhase('authorizing');
+
+          let deadlineTimer: number | null = null;
+          const finish = () => {
+            if (finishActiveRef.current !== finish) return;
+            if (deadlineTimer !== null) {
+              window.clearTimeout(deadlineTimer);
+              deadlineTimer = null;
+            }
+            finishActiveRef.current = null;
+            controllerRef.current = null;
+            requestCancelRef.current = null;
+            requestModeRef.current = null;
+            loadingRef.current = false;
+            complete();
+          };
+          finishActiveRef.current = finish;
+
+          const fail = (message: string) => {
+            if (
+              controller.signal.aborted ||
+              !mountedRef.current ||
+              attemptRef.current !== attempt
+            ) {
+              return;
+            }
+            readUrlRef.current = null;
+            cancelCurrentImage();
+            loadCoordinator.releaseResident(photoKey);
+            setReadUrl(null);
+            setExplicitDemand(false);
+            setError(message);
+            setPhase('error');
+            finish();
+          };
+
+          deadlineTimer = window.setTimeout(() => {
+            if (
+              controller.signal.aborted ||
+              !mountedRef.current ||
+              attemptRef.current !== attempt
+            ) {
+              return;
+            }
+            attemptRef.current += 1;
+            controller.abort();
+            readUrlRef.current = null;
+            cancelCurrentImage();
+            loadCoordinator.releaseResident(photoKey);
+            setReadUrl(null);
+            setExplicitDemand(false);
+            setError(
+              'Private photo loading exceeded the 60-second safety limit and was stopped. Retry explicitly if the photo is still needed.',
+            );
+            setPhase('error');
+            finish();
+          }, PRIVATE_PHOTO_LOAD_DEADLINE_MILLISECONDS);
+
+          void (async () => {
+            let response: Response;
+            try {
+              response = await fetch(
+                `/api/media/events/${encodeURIComponent(eventId)}/${encodeURIComponent(mediaId)}/read-grant`,
+                {
+                  credentials: 'same-origin',
+                  cache: 'no-store',
+                  signal: controller.signal,
+                },
+              );
+            } catch {
+              fail(
+                'The private photo could not be authorized. No public image URL was used.',
+              );
+              return;
+            }
+            let value: unknown;
+            try {
+              value = await readJson(response);
+            } catch (requestError) {
+              fail(
+                requestError instanceof Error
+                  ? requestError.message
+                  : 'The private photo authorization response was invalid.',
+              );
+              return;
+            }
+            if (!response.ok) {
+              fail(
+                publicErrorMessage(
+                  value,
+                  'The private photo could not be authorized.',
+                ),
+              );
+              return;
+            }
+            const parsed = MediaReadGrantSchema.safeParse(value);
+            if (
+              !parsed.success ||
+              parsed.data.eventId !== eventId ||
+              parsed.data.mediaId !== mediaId ||
+              Date.parse(parsed.data.expiresAt) <= Date.now()
+            ) {
+              fail(
+                'PSD EOC returned a private photo authorization that does not match this event.',
+              );
+              return;
+            }
+            if (
+              controller.signal.aborted ||
+              !mountedRef.current ||
+              attemptRef.current !== attempt
+            ) {
+              return;
+            }
+            if (!loadCoordinator.claimResident(photoKey, evictPhoto)) {
+              fail(
+                'The bounded private photo working set is busy. Retry explicitly after another photo finishes loading.',
+              );
+              return;
+            }
+            readUrlRef.current = parsed.data.readUrl;
+            setReadUrl(parsed.data.readUrl);
+            setPhase('loading-image');
+          })();
+
+          return () => {
+            if (deadlineTimer !== null) {
+              window.clearTimeout(deadlineTimer);
+              deadlineTimer = null;
+            }
+            controller.abort();
+            if (controllerRef.current === controller) {
+              controllerRef.current = null;
+            }
+            if (finishActiveRef.current === finish) {
+              finishActiveRef.current = null;
+            }
+          };
+        },
+      });
     },
-    [eventId, mediaId],
+    [
+      cancelCurrentImage,
+      eventId,
+      evictPhoto,
+      loadCoordinator,
+      mediaId,
+      photoKey,
+    ],
   );
 
   useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
-  }, [authorizationAttempt, load]);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      attemptRef.current += 1;
+      controllerRef.current?.abort();
+      readUrlRef.current = null;
+      cancelCurrentImage();
+      requestCancelRef.current?.();
+      loadCoordinator.remove(photoKey);
+    };
+  }, [cancelCurrentImage, loadCoordinator, photoKey]);
 
-  function retry(): void {
-    setAuthorizationAttempt((attempt) => attempt + 1);
+  useEffect(() => {
+    const figure = figureRef.current;
+    if (figure === null || typeof window.IntersectionObserver === 'undefined') {
+      setObserverSupport('unavailable');
+      return;
+    }
+    setObserverSupport('available');
+    const observer = new window.IntersectionObserver(
+      (entries) => {
+        const visible = entries.some((entry) => entry.isIntersecting);
+        if (visible) {
+          requestLoad('automatic');
+          return;
+        }
+        if (
+          requestModeRef.current !== 'automatic' ||
+          !loadingRef.current ||
+          readUrlRef.current !== null
+        ) {
+          return;
+        }
+        attemptRef.current += 1;
+        controllerRef.current?.abort();
+        controllerRef.current = null;
+        cancelCurrentImage();
+        requestCancelRef.current?.();
+        requestCancelRef.current = null;
+        finishActiveRef.current = null;
+        requestModeRef.current = null;
+        loadingRef.current = false;
+        setPhase(automaticStartedRef.current ? 'manual-only' : 'idle');
+      },
+      {
+        root: scrollRootRef.current,
+        rootMargin: '0px',
+        threshold: 0.01,
+      },
+    );
+    observer.observe(figure);
+    return () => observer.disconnect();
+  }, [cancelCurrentImage, requestLoad, scrollRootRef]);
+
+  function failDisplayedImage(expectedUrl = readUrlRef.current): void {
+    if (expectedUrl === null || expectedUrl !== readUrlRef.current) return;
+    attemptRef.current += 1;
+    readUrlRef.current = null;
+    cancelCurrentImage();
+    loadCoordinator.releaseResident(photoKey);
+    setReadUrl(null);
+    setExplicitDemand(false);
+    setError(
+      'The authorized private photo could not be displayed. Request a fresh authorization to retry.',
+    );
+    setPhase('error');
+    finishActive();
   }
 
+  function finishDecodedImage(image: HTMLImageElement): void {
+    const expectedUrl = readUrlRef.current;
+    const expectedAttempt = attemptRef.current;
+    void (async () => {
+      try {
+        await image.decode();
+      } catch {
+        if (
+          mountedRef.current &&
+          expectedAttempt === attemptRef.current &&
+          expectedUrl === readUrlRef.current
+        ) {
+          failDisplayedImage();
+        }
+        return;
+      }
+      if (
+        !mountedRef.current ||
+        expectedAttempt !== attemptRef.current ||
+        expectedUrl !== readUrlRef.current
+      ) {
+        return;
+      }
+      setPhase('displayed');
+      finishActive();
+    })();
+  }
+
+  const loading =
+    phase === 'queued' || phase === 'authorizing' || phase === 'loading-image';
+  const idleMessage =
+    phase === 'manual-only'
+      ? 'Automatic private photo loading is capped for this event view. Load this photo explicitly if it is operationally needed.'
+      : phase === 'evicted'
+        ? 'This private photo was unloaded to keep the authorized image working set bounded. Load it explicitly to view it again.'
+        : observerSupport === 'available'
+          ? 'This private photo is not loaded. It will load when it enters the timeline viewport, or you can load it explicitly.'
+          : observerSupport === 'unavailable'
+            ? 'Automatic viewport loading is unavailable in this browser. Load this private photo explicitly if it is operationally needed.'
+            : 'This private photo is not loaded. Load it explicitly if it is operationally needed.';
+
   return (
-    <figure aria-busy={loading} className="entry-content photo-entry">
+    <figure
+      aria-busy={loading}
+      aria-labelledby={captionId}
+      className="entry-content photo-entry"
+      data-private-photo-state={phase}
+      ref={figureRef}
+      tabIndex={-1}
+    >
       {readUrl === null ? null : (
         <img
           alt={altText}
           className="timeline-photo"
-          onError={() => {
-            setReadUrl(null);
-            setError(
-              'The authorized private photo could not be displayed. Request a fresh authorization to retry.',
-            );
+          decoding="async"
+          loading={explicitDemand ? 'eager' : 'lazy'}
+          onError={(event) => failDisplayedImage(event.currentTarget.src)}
+          onLoad={(event) => finishDecodedImage(event.currentTarget)}
+          ref={(image) => {
+            imageElementRef.current = image;
           }}
           referrerPolicy="no-referrer"
           src={readUrl}
         />
       )}
-      <figcaption>
+      <figcaption id={captionId}>
         <p>
           <strong>Photo description:</strong> {altText}
         </p>
         {caption === null ? null : <p>{caption}</p>}
       </figcaption>
-      {loading ? <p role="status">Authorizing private photo…</p> : null}
+      {loading ? (
+        <p id={statusId} role="status">
+          {phase === 'queued'
+            ? 'Private photo load queued within the bounded loader…'
+            : phase === 'authorizing'
+              ? 'Authorizing private photo…'
+              : 'Loading and decoding authorized private photo…'}
+        </p>
+      ) : null}
+      {readUrl === null && error === null && !loading ? (
+        <div className="photo-read-control">
+          <p id={statusId}>{idleMessage}</p>
+          <button
+            aria-describedby={statusId}
+            className="secondary"
+            onClick={() => requestLoad('explicit')}
+            type="button"
+          >
+            Load private photo for entry {entrySequence}
+          </button>
+        </div>
+      ) : null}
       {error === null ? null : (
         <div className="photo-read-error" role="alert">
-          <p>{error}</p>
-          <button className="secondary" onClick={retry} type="button">
-            Request fresh photo authorization
+          <p id={statusId}>{error}</p>
+          <button
+            aria-describedby={statusId}
+            className="secondary"
+            onClick={() => requestLoad('explicit')}
+            type="button"
+          >
+            Retry private photo for entry {entrySequence}
           </button>
         </div>
       )}
@@ -1371,7 +1850,14 @@ function AuthorizedPhoto({
 function EntryContent({
   entry,
   redacted,
-}: Readonly<{ entry: JournalEntry; redacted: boolean }>) {
+  loadCoordinator,
+  scrollRootRef,
+}: Readonly<{
+  entry: JournalEntry;
+  redacted: boolean;
+  loadCoordinator: PrivatePhotoLoadCoordinator;
+  scrollRootRef: Readonly<{ current: HTMLDivElement | null }>;
+}>) {
   if (redacted && entry.kind !== 'system') {
     return (
       <p className="entry-content redacted-content">
@@ -1389,8 +1875,12 @@ function EntryContent({
         <AuthorizedPhoto
           altText={entry.payload.altText}
           caption={entry.payload.caption}
+          entryId={entry.id}
+          entrySequence={entry.sequence}
           eventId={entry.eventId}
+          loadCoordinator={loadCoordinator}
           mediaId={entry.payload.mediaId}
+          scrollRootRef={scrollRootRef}
         />
       );
     case 'location':
@@ -1420,6 +1910,10 @@ interface TimelineEntryProps {
   readonly entry: JournalEntry;
   readonly supersededBy: readonly JournalEntry[];
   readonly commandsBlocked: boolean;
+  readonly photoLoadCoordinator: PrivatePhotoLoadCoordinator;
+  readonly timelineScrollRef: Readonly<{
+    current: HTMLDivElement | null;
+  }>;
   readonly onCorrect: (entry: JournalEntry, opener: HTMLElement) => void;
   readonly onRedact: (entry: JournalEntry, opener: HTMLElement) => void;
 }
@@ -1428,6 +1922,8 @@ function TimelineEntry({
   entry,
   supersededBy,
   commandsBlocked,
+  photoLoadCoordinator,
+  timelineScrollRef,
   onCorrect,
   onRedact,
 }: TimelineEntryProps) {
@@ -1481,7 +1977,12 @@ function TimelineEntry({
         </p>
       )}
 
-      <EntryContent entry={entry} redacted={redacted} />
+      <EntryContent
+        entry={entry}
+        loadCoordinator={photoLoadCoordinator}
+        redacted={redacted}
+        scrollRootRef={timelineScrollRef}
+      />
       <p className="entry-meta">
         <span>{actorLabel(entry)}</span>
         <span>Source: {entry.source}</span>
@@ -1657,6 +2158,13 @@ export function EventRoom({
   const photoErrorRef = useRef<HTMLDivElement>(null);
   const photoFileRef = useRef<HTMLInputElement>(null);
   const photoWorkflowRef = useRef(false);
+  const photoLoadCoordinatorRef = useRef<PrivatePhotoLoadCoordinator | null>(
+    null,
+  );
+  if (photoLoadCoordinatorRef.current === null) {
+    photoLoadCoordinatorRef.current = new PrivatePhotoLoadCoordinator();
+  }
+  const photoLoadCoordinator = photoLoadCoordinatorRef.current;
 
   const elapsed = useElapsedLabel(currentEvent);
   const realEvent = event.templateMode === 'real';
@@ -2657,7 +3165,9 @@ export function EventRoom({
                       onRedact={(target, opener) =>
                         openDialog({ kind: 'redact', entry: target }, opener)
                       }
+                      photoLoadCoordinator={photoLoadCoordinator}
                       supersededBy={supersessionsByEntry.get(entry.id) ?? []}
+                      timelineScrollRef={timelineScrollRef}
                     />
                   </li>
                 ))}

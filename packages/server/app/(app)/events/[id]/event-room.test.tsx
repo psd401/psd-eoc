@@ -7,7 +7,7 @@ import {
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { EventRoom } from './event-room';
+import { EventRoom, PrivatePhotoLoadCoordinator } from './event-room';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -179,6 +179,55 @@ function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('private-photo coordination remains reusable across StrictMode-style effect cleanup and setup', () => {
+    const coordinator = new PrivatePhotoLoadCoordinator();
+    let cleanupCancelled = false;
+    let automaticStarted = false;
+    let explicitStarted = false;
+    let finishAutomatic: (() => void) | null = null;
+
+    const cleanup = coordinator.enqueue({
+      key: 'strict-mode-initial-effect',
+      mode: 'explicit',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: () => () => {
+        cleanupCancelled = true;
+      },
+    });
+    cleanup();
+    expect(cleanupCancelled).toBe(true);
+
+    coordinator.enqueue({
+      key: 'strict-mode-viewport-demand',
+      mode: 'automatic',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: (complete) => {
+        automaticStarted = true;
+        finishAutomatic = complete;
+        return () => undefined;
+      },
+    });
+    expect(automaticStarted).toBe(true);
+    if (finishAutomatic === null) {
+      throw new Error('The remounted automatic load did not start.');
+    }
+    (finishAutomatic as () => void)();
+
+    coordinator.enqueue({
+      key: 'strict-mode-explicit-demand',
+      mode: 'explicit',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: () => {
+        explicitStarted = true;
+        return () => undefined;
+      },
+    });
+    expect(explicitStarted).toBe(true);
+  });
+
   test('renders real and drill classification with words and symbols, not color alone', () => {
     const real = render(activeEvent('real'), []);
     const drill = render(activeEvent('drill'), []);
@@ -243,7 +292,10 @@ describe('event room server-rendered safety and history state', () => {
       'Exterior assembly area with staff accountability teams',
     );
     expect(html).toContain('Synthetic exercise photo');
-    expect(html).toContain('Authorizing private photo');
+    expect(html).toContain(
+      'This private photo is not loaded. Load it explicitly if it is operationally needed.',
+    );
+    expect(html).toContain('Load private photo for entry 5');
     expect(html).not.toContain('<img');
     expect(html).not.toContain('https://');
   });
@@ -270,7 +322,7 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).not.toContain(
       'Exterior assembly area with staff accountability teams',
     );
-    expect(html).not.toContain('Authorizing private photo');
+    expect(html).not.toContain('Load private photo for entry 5');
     expect(html).not.toContain('<img');
   });
 });
