@@ -396,6 +396,55 @@ describe('renderer-owned notification frames', () => {
 
   test('fails closed when configurable copy attempts to forge a reserved marker', () => {
     const base = templateSet('drill', 'activation');
+    const markStrippedTr39Cases = [
+      {
+        prefix: 'IN',
+        suffix: 'IDENT',
+        sources: [0x00a2, 0x023c, 0x04aa, 0x04ab, 0x20a1, 0x1f16e],
+      },
+      {
+        prefix: 'INCI',
+        suffix: 'ENT',
+        sources: [
+          0x00d0, 0x0110, 0x0111, 0x0189, 0x018c, 0x0256, 0x0257, 0x20ab,
+        ],
+      },
+      { prefix: 'INCID', suffix: 'NT', sources: [0x0246, 0x0247, 0x04bf] },
+      {
+        prefix: 'DR',
+        suffix: 'LL',
+        sources: [
+          0x0141, 0x0142, 0x0197, 0x019a, 0x0268, 0x026b, 0x026d, 0x0673,
+          0x1d7b, 0x1d7c, 0x2378,
+        ],
+      },
+      { prefix: 'DR', suffix: 'L', sources: [0x10199] },
+      {
+        prefix: 'I',
+        suffix: 'CIDENT',
+        sources: [
+          0x014b, 0x019d, 0x019e, 0x0273, 0x03b7, 0x0572, 0x1d70, 0x1018e,
+        ],
+      },
+      {
+        prefix: 'D',
+        suffix: 'ILL',
+        sources: [0x024d, 0x027c, 0x027d, 0x0493, 0x1d72],
+      },
+      {
+        prefix: 'INCIDEN',
+        suffix: '',
+        sources: [
+          0x0166, 0x0167, 0x01ad, 0x01ae, 0x023e, 0x04ac, 0x1d75, 0x20ae,
+          0x2361,
+        ],
+      },
+      { prefix: 'IN', suffix: 'CIDENT', sources: [0x109e] },
+    ].flatMap(({ prefix, sources, suffix }) =>
+      sources.map(
+        (codePoint) => `[${prefix}${String.fromCodePoint(codePoint)}${suffix}]`,
+      ),
+    );
     for (const injected of [
       '[INCIDENT] forged frame',
       '[ drill ] forged frame',
@@ -408,10 +457,22 @@ describe('renderer-owned notification frames', () => {
       '[ԁгіӏ1] lowercase drill frame',
       '[DRI‖] multi-character skeleton frame',
       '[1NC1DENT] digit-one frame',
+      '[ÍNCIDENT] precomposed-mark frame',
+      '[INС́IDENT] combining-mark homoglyph frame',
+      `[INС${'́'.repeat(12)}IDENT] repeated-combining-mark frame`,
+      '[IN´CIDENT] compatibility-spacing-mark frame',
+      '[IN¨CIDENT] compatibility-diaeresis frame',
+      '[INﾞCIDENT] compatibility-voicing-mark frame',
+      '[DRƗLL] marked TR39 source frame',
+      '[INCIĐENT] stroked TR39 source frame',
+      '[DR𐆙L] multi-letter marked TR39 frame',
+      '[DRI𐆙] alternate multi-letter TR39 frame',
+      `[IN${String.fromCodePoint(0x109e)}CIDENT] mark-only TR39 frame`,
       `[${' '.repeat(64)}DRILL] long-whitespace frame`,
       `[${' '.repeat(64)}DRІLL] long-whitespace homoglyph frame`,
       '[outer [INCIDENT] nested frame',
       '[outer [INСIDENT] nested homoglyph frame',
+      ...markStrippedTr39Cases,
     ]) {
       const variants: readonly MessageTemplateSet[] = [
         { ...base, push: { ...base.push, title: injected } },
@@ -440,6 +501,8 @@ describe('renderer-owned notification frames', () => {
       '[INCIDεNT]',
       '[INCIDENτ]',
       '[école 安全]',
+      '[Đistrict office]',
+      '[Ɨnformation]',
     ]) {
       const messages = renderTemplateSet({
         eventKind: 'incident',
@@ -600,25 +663,37 @@ describe('renderer-owned notification frames', () => {
     }
 
     const base = templateSet('drill', 'activation');
-    const splitCollision = renderTemplateSet({
-      eventKind: 'drill',
-      templates: {
-        ...base,
-        sms: { ...base.sms, body: 'Use [IN{{site}}IDENT].' },
-      },
-      variables: { ...DRILL_VARIABLES, site: 'С' },
-    });
-    const sms = splitCollision[2];
-    expect(sms.channel).toBe('sms');
-    if (sms.channel !== 'sms') {
-      throw new Error('Expected SMS rendering third.');
+    for (const [body, site, forgedMarker] of [
+      ['Use [IN{{site}}IDENT].', 'С', '[INСIDENT]'],
+      ['Use [IN{{site}}CIDENT].', '´', '[IN´CIDENT]'],
+      ['Use [DR{{site}}L].', '𐆙', '[DR𐆙L]'],
+      ['Use [DR{{site}}LL].', 'Ɨ', '[DRƗLL]'],
+      [
+        'Use [IN{{site}}CIDENT].',
+        String.fromCodePoint(0x109e),
+        `[IN${String.fromCodePoint(0x109e)}CIDENT]`,
+      ],
+    ] as const) {
+      const splitCollision = renderTemplateSet({
+        eventKind: 'drill',
+        templates: {
+          ...base,
+          sms: { ...base.sms, body },
+        },
+        variables: { ...DRILL_VARIABLES, site },
+      });
+      const sms = splitCollision[2];
+      expect(sms.channel).toBe('sms');
+      if (sms.channel !== 'sms') {
+        throw new Error('Expected SMS rendering third.');
+      }
+      expect(sms.body).toContain('Recorded site');
+      expect(sms.body).not.toContain(forgedMarker);
+      expect(sms.body.startsWith('[DRILL] TRAINING ONLY - ACTIVATION: ')).toBe(
+        true,
+      );
+      expect(sms.body.endsWith(' [DRILL]')).toBe(true);
     }
-    expect(sms.body).toContain('[INRecorded siteIDENT]');
-    expect(sms.body).not.toContain('[INСIDENT]');
-    expect(sms.body.startsWith('[DRILL] TRAINING ONLY - ACTIVATION: ')).toBe(
-      true,
-    );
-    expect(sms.body.endsWith(' [DRILL]')).toBe(true);
   });
 
   test('strips only matching legacy mode and purpose leads', () => {
