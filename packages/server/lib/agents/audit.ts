@@ -3,8 +3,8 @@ import {
   type SecurityAuditRepository,
 } from '../audit/repository';
 import { parseSecurityAuditFact } from '../audit/model';
-import type { CapabilityAuditEvent } from '../capabilities/engine';
 import type {
+  AgentGatewayAuditEvent,
   AgentGatewayAuditAppendOptions,
   AgentGatewayAuditSink,
 } from './gateway';
@@ -15,7 +15,7 @@ export function createAgentGatewayAuditSink(
 ): AgentGatewayAuditSink {
   return Object.freeze({
     async append(
-      event: CapabilityAuditEvent,
+      event: AgentGatewayAuditEvent,
       options?: AgentGatewayAuditAppendOptions,
     ) {
       try {
@@ -26,7 +26,7 @@ export function createAgentGatewayAuditSink(
             actionIds: event.actionIds,
             confirmationId: event.confirmationId,
             outcome: event.outcome,
-            principal: event.actor,
+            principal: 'actor' in event ? event.actor : event.principal,
             source: event.source,
             facilityId: event.facilityId,
             target: { kind: 'capability', id: event.action },

@@ -27,6 +27,7 @@ import {
   AGENT_API_KEY_CREDENTIAL_MARKER,
   AgentApiKeyIssuanceReplayError,
   AgentApiKeyService,
+  digestAgentApiKeyAuditSubject,
   digestAgentApiKeyCredential,
   type AgentApiKeyError,
 } from './keys';
@@ -354,6 +355,34 @@ describe('AgentApiKeyService', () => {
         errorWith('INVALID_CREDENTIAL', 401),
       );
     }
+  });
+
+  test('derives audit correlation from the public prefix without hashing the bearer', async () => {
+    const repository = new InMemoryAgentApiKeyRepository();
+    const service = new AgentApiKeyService({
+      repository,
+      now: () => new Date('2026-08-10T18:00:00.000Z'),
+    });
+    const issuance = await service.issue(
+      issueInput(),
+      IDS.issuer,
+      mutation(IDS.issuer),
+    );
+    const replacement = issuance.oneTimeCredential.endsWith('A') ? 'B' : 'A';
+    const wrongSecret = `${issuance.oneTimeCredential.slice(0, -1)}${replacement}`;
+    const subjectDigest = digestAgentApiKeyAuditSubject(
+      issuance.oneTimeCredential,
+    );
+
+    expect(subjectDigest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(digestAgentApiKeyAuditSubject(wrongSecret)).toBe(subjectDigest);
+    expect(subjectDigest).not.toBe(
+      digestAgentApiKeyCredential(issuance.oneTimeCredential),
+    );
+    expect(digestAgentApiKeyAuditSubject('not-a-key')).toBeNull();
+    expect(JSON.stringify({ subjectDigest })).not.toContain(
+      issuance.oneTimeCredential,
+    );
   });
 
   test('fails closed at the exact expiry boundary', async () => {

@@ -2,12 +2,20 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   CAPABILITY_CATALOG,
+  EventSchema,
   type AgentGrantableCapabilityId,
   type FacilityScope,
 } from '@psd-eoc/contracts';
 
 import type { EventTypeStore } from '../capabilities/event-types';
-import type { EventCapabilityRuntime } from '../capabilities/events';
+import {
+  executeEventCapability,
+  type EventCapabilityRuntime,
+  type EventCapabilityStore,
+  type EventCapabilityTransaction,
+} from '../capabilities/events';
+import type { CapabilityAuditEvent } from '../capabilities/engine';
+import type { JournalCapabilityRuntime } from '../capabilities/journal';
 import { AGENT_DEPLOYED_CAPABILITY_IDS } from './availability';
 import {
   createDefaultAgentCapabilityDispatcher,
@@ -87,8 +95,12 @@ function dispatcher(eventTypes: EventTypeStore) {
   const unavailableDependency = undefined as never;
   const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
     events: unavailableDependency,
+    journal: unavailableDependency,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
     eventTypes,
     preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
     securityAudit: unavailableDependency,
   };
   return createDefaultAgentCapabilityDispatcher(dependencies);
@@ -98,8 +110,27 @@ function dispatcherWithEvents(events: EventCapabilityRuntime) {
   const unavailableDependency = undefined as never;
   const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
     events,
+    journal: unavailableDependency,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
     preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
+    securityAudit: unavailableDependency,
+  };
+  return createDefaultAgentCapabilityDispatcher(dependencies);
+}
+
+function dispatcherWithJournal(journal: JournalCapabilityRuntime) {
+  const unavailableDependency = undefined as never;
+  const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
+    events: unavailableDependency,
+    journal,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
+    eventTypes: new StubEventTypeStore(),
+    preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
     securityAudit: unavailableDependency,
   };
   return createDefaultAgentCapabilityDispatcher(dependencies);
@@ -153,7 +184,7 @@ describe('default agent dispatcher routing', () => {
     );
   });
 
-  test('denies a staff-targeting close before the canonical mutation runs', async () => {
+  test('preserves the canonical close denial without a side-door pre-read', async () => {
     const calls: Array<{
       capabilityId: string;
       invocation: ReturnType<typeof mutationInvocation>;
@@ -168,10 +199,11 @@ describe('default agent dispatcher routing', () => {
           capabilityId,
           invocation: callInvocation as ReturnType<typeof mutationInvocation>,
         });
-        if (capabilityId === 'get-event') {
-          return { rosterPopulation: 'staff' };
-        }
-        throw new Error('The close mutation must not run for a staff roster.');
+        throw Object.assign(new Error('Canonical staff close denial.'), {
+          code: 'FORBIDDEN',
+          reasonCode: 'HUMAN_ONLY_REQUIRED',
+          status: 403,
+        });
       },
     } as unknown as EventCapabilityRuntime;
     const authenticated = authenticatedAgent({ kind: 'district' }, [
@@ -194,14 +226,14 @@ describe('default agent dispatcher routing', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      capabilityId: 'get-event',
+      capabilityId: 'close-event',
       invocation: {
         actor: authenticated.actor,
         scope: authenticated.scope,
-        mutation: null,
+        mutation: closeInvocation.mutation,
+        requestId: closeInvocation.requestId,
       },
     });
-    expect(calls[0]?.invocation.requestId).not.toBe(closeInvocation.requestId);
   });
 
   test('allows a synthetic close to continue through the canonical mutation', async () => {
@@ -210,9 +242,7 @@ describe('default agent dispatcher routing', () => {
     const events = {
       async execute(capabilityId: string) {
         calls.push(capabilityId);
-        return capabilityId === 'get-event'
-          ? { rosterPopulation: 'synthetic' }
-          : expected;
+        return expected;
       },
     } as unknown as EventCapabilityRuntime;
     const authenticated = authenticatedAgent({ kind: 'district' }, [
@@ -227,7 +257,104 @@ describe('default agent dispatcher routing', () => {
         authenticated,
       ),
     ).resolves.toBe(expected);
-    expect(calls).toEqual(['get-event', 'close-event']);
+    expect(calls).toEqual(['close-event']);
+  });
+
+  test('lets the real engine deny and audit an agent closing a staff drill', async () => {
+    const event = EventSchema.parse({
+      id: IDS.request,
+      facilityId: IDS.facility,
+      kind: 'drill',
+      templateMode: 'drill',
+      eventTypeVersion: { id: IDS.issuer, templateMode: 'drill' },
+      status: 'all-clear',
+      rosterSnapshotId: IDS.agent,
+      rosterPopulation: 'staff',
+      createdBy: {
+        kind: 'human',
+        userId: IDS.issuer,
+        sessionId: IDS.apiKey,
+      },
+      createdAt: '2026-08-10T17:00:00.000Z',
+      activatedAt: '2026-08-10T17:01:00.000Z',
+      allClearAt: '2026-08-10T17:02:00.000Z',
+      reactivatedAt: null,
+      closedAt: null,
+      correctionOfEventId: null,
+      correctionReason: null,
+      activationAuthorization: {
+        kind: 'human-confirmed',
+        activationPreviewId: IDS.apiKey,
+        preparedActivationId: null,
+        confirmationId: IDS.agent,
+        consequenceDigest: 'a'.repeat(64),
+        requestId: IDS.issuer,
+      },
+    });
+    const audits: CapabilityAuditEvent[] = [];
+    let persistLifecycleCalls = 0;
+    const transaction = {
+      async claimIdempotency() {
+        return { kind: 'new' as const, recordId: IDS.apiKey };
+      },
+      async resolveEventFacilityId(eventId: string) {
+        return eventId === event.id ? event.facilityId : null;
+      },
+      async resolveEventForUpdate(eventId: string) {
+        return eventId === event.id
+          ? { event, nextTransitionSequence: 3, nextJournalSequence: 3 }
+          : null;
+      },
+      async persistLifecycle() {
+        persistLifecycleCalls += 1;
+      },
+    } as unknown as EventCapabilityTransaction;
+    const store: EventCapabilityStore = {
+      async transaction<Result>(
+        operation: (transaction: EventCapabilityTransaction) => Promise<Result>,
+      ) {
+        return operation(transaction);
+      },
+      async appendCapabilityAudit(audit) {
+        audits.push(audit);
+      },
+    };
+    const events = {
+      store,
+      execute: (capabilityId, input, callInvocation) =>
+        executeEventCapability(capabilityId, input, callInvocation, store),
+      async close() {},
+    } satisfies EventCapabilityRuntime;
+    const authenticated = authenticatedAgent({ kind: 'district' }, [
+      'close-event',
+    ]);
+    const callInvocation = mutationInvocation(authenticated);
+
+    await expect(
+      dispatcherWithEvents(events).execute(
+        'close-event',
+        { eventId: event.id },
+        callInvocation,
+        authenticated,
+      ),
+    ).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'HUMAN_ONLY_REQUIRED',
+      status: 403,
+    });
+    expect(audits).toEqual([
+      expect.objectContaining({
+        action: 'close-event',
+        actionIds: [],
+        actor: authenticated.actor,
+        category: 'access-denial',
+        facilityId: IDS.facility,
+        outcome: 'denied',
+        reasonCode: 'HUMAN_ONLY_REQUIRED',
+        requestId: callInvocation.requestId,
+      }),
+    ]);
+    expect(persistLifecycleCalls).toBe(0);
   });
 
   test('routes an implemented query through its canonical capability', async () => {
@@ -249,6 +376,54 @@ describe('default agent dispatcher routing', () => {
       pageInfo: { hasMore: false, nextCursor: null },
     });
     expect(eventTypes.listCalls).toBe(1);
+  });
+
+  test('routes a current-main journal query through its canonical runtime', async () => {
+    const calls: Array<{
+      capabilityId: string;
+      input: unknown;
+      invocation: ReturnType<typeof invocation>;
+    }> = [];
+    const expected = {
+      items: [],
+      pageInfo: { hasMore: false, nextCursor: null },
+    };
+    const journal = {
+      async execute(
+        capabilityId: string,
+        input: unknown,
+        callInvocation: never,
+      ) {
+        calls.push({
+          capabilityId,
+          input,
+          invocation: callInvocation as ReturnType<typeof invocation>,
+        });
+        return expected;
+      },
+    } as unknown as JournalCapabilityRuntime;
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['list-journal-entries'],
+    );
+    const callInvocation = invocation(authenticated);
+    const input = { eventId: IDS.request, cursor: null, limit: 25 };
+
+    await expect(
+      dispatcherWithJournal(journal).execute(
+        'list-journal-entries',
+        input,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expected);
+    expect(calls).toEqual([
+      {
+        capabilityId: 'list-journal-entries',
+        input,
+        invocation: callInvocation,
+      },
+    ]);
   });
 
   test('preserves the authenticated scope for canonical authorization', async () => {
@@ -291,18 +466,18 @@ describe('default agent dispatcher routing', () => {
   test('fails closed with 503 when a catalog capability is not deployed', async () => {
     const authenticated = authenticatedAgent(
       { kind: 'facilities', facilityIds: [IDS.facility] },
-      ['list-journal-entries'],
+      ['search-journal-entries'],
     );
 
     await expect(
       dispatcher(new StubEventTypeStore()).execute(
-        'list-journal-entries',
-        { eventId: IDS.request, cursor: null, limit: 25 },
+        'search-journal-entries',
+        {},
         invocation(authenticated),
         authenticated,
       ),
     ).rejects.toMatchObject({
-      capabilityId: 'list-journal-entries',
+      capabilityId: 'search-journal-entries',
       code: 'INTERNAL_ERROR',
       status: 503,
       retryable: false,

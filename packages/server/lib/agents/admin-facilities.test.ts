@@ -18,6 +18,8 @@ const ids = {
   epoch: '40000000-0000-4000-8000-000000000003',
   facility: '40000000-0000-4000-8000-000000000004',
   request: '40000000-0000-4000-8000-000000000005',
+  agent: '40000000-0000-4000-8000-000000000006',
+  apiKey: '40000000-0000-4000-8000-000000000007',
 } as const;
 
 const page = FacilityPageSchema.parse({
@@ -40,6 +42,7 @@ function access(
     actor: { kind: 'human', userId: ids.user, sessionId: ids.session },
     source: 'web',
     roles: ['staff', 'admin'],
+    capabilityGrants: [],
     scope: { facilityScope: { kind: 'district' } },
     connectivityEpochId: ids.epoch,
     ...overrides,
@@ -97,7 +100,7 @@ describe('canonical agent-administration facility read', () => {
         access: access({ roles: ['staff'] }),
         value: { includeInactive: true, cursor: null, limit: 200 },
       }),
-    ).rejects.toThrow('District administrator access is required.');
+    ).rejects.toThrow('District administration capability access is required.');
 
     expect(calls()).toBe(0);
     expect(auditFacts).toHaveLength(1);
@@ -106,5 +109,82 @@ describe('canonical agent-administration facility read', () => {
       outcome: 'denied',
       reasonCode: 'AGENT_FACILITY_LIST_FORBIDDEN',
     });
+  });
+
+  test('allows an explicitly granted district agent and audits its identity', async () => {
+    const { capabilities, auditFacts, calls } = harness();
+
+    await expect(
+      capabilities.list({
+        access: access({
+          actor: {
+            kind: 'agent',
+            agentId: ids.agent,
+            apiKeyId: ids.apiKey,
+          },
+          source: 'agent-rest',
+          roles: [],
+          capabilityGrants: ['list-facilities'],
+          connectivityEpochId: null,
+        }),
+        value: { includeInactive: false, cursor: null, limit: 100 },
+        requestId: ids.request,
+        now: new Date('2026-08-10T20:00:00.000Z'),
+      }),
+    ).resolves.toEqual(page);
+
+    expect(calls()).toBe(1);
+    expect(auditFacts).toHaveLength(1);
+    expect(auditFacts[0]).toMatchObject({
+      action: 'list-facilities',
+      outcome: 'success',
+      principal: {
+        kind: 'agent',
+        agentId: ids.agent,
+        apiKeyId: ids.apiKey,
+      },
+    });
+  });
+
+  test('denies an ungranted or facility-scoped agent before storage', async () => {
+    const { capabilities, auditFacts, calls } = harness();
+    const agent = access({
+      actor: {
+        kind: 'agent',
+        agentId: ids.agent,
+        apiKeyId: ids.apiKey,
+      },
+      source: 'agent-rest',
+      roles: [],
+      capabilityGrants: [],
+      connectivityEpochId: null,
+    });
+
+    for (const deniedAccess of [
+      agent,
+      {
+        ...agent,
+        capabilityGrants: ['list-facilities'] as const,
+        scope: {
+          facilityScope: {
+            kind: 'facilities' as const,
+            facilityIds: [ids.facility],
+          },
+        },
+      },
+    ]) {
+      await expect(
+        capabilities.list({
+          access: deniedAccess,
+          value: { includeInactive: false, cursor: null, limit: 100 },
+        }),
+      ).rejects.toThrow(
+        'District administration capability access is required.',
+      );
+    }
+
+    expect(calls()).toBe(0);
+    expect(auditFacts).toHaveLength(2);
+    expect(auditFacts.every((fact) => fact.outcome === 'denied')).toBe(true);
   });
 });
