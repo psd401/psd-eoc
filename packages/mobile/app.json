@@ -47,6 +47,19 @@
           "color": "#17324d",
           "defaultChannel": "eoc-alerts"
         }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true,
+          "faceIDPermission": "Allow PSD EOC to use Face ID to unlock your enrolled device."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow PSD EOC to use Face ID to unlock your enrolled device."
+        }
       ]
     ],
     "experiments": {

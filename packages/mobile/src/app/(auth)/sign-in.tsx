@@ -1,0 +1,271 @@
+import { useState } from 'react';
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+import { useMobileAuth } from '../../lib/auth';
+
+const UNEXPECTED_SIGN_IN_ERROR =
+  'PSD EOC could not start secure sign-in. Try again or contact district technology support.';
+
+export default function SignInScreen() {
+  const { beginGoogleSignIn, isSigningIn, signInError, signOut, state } =
+    useMobileAuth();
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [isRetryingStorage, setIsRetryingStorage] = useState(false);
+  const storageBlocked = state.phase === 'blocked';
+  const busy = isSigningIn || isRetryingStorage;
+  const visibleError = localError ?? signInError ?? state.message;
+
+  async function handleSignIn(): Promise<void> {
+    setLocalError(null);
+    try {
+      await beginGoogleSignIn();
+    } catch {
+      setLocalError(UNEXPECTED_SIGN_IN_ERROR);
+    }
+  }
+
+  async function handleStorageRetry(): Promise<void> {
+    setLocalError(null);
+    setIsRetryingStorage(true);
+    try {
+      // A local sign-out clears any unusable enrollment marker. The next
+      // enrollment still has to prove that secure storage is available.
+      await signOut();
+    } catch {
+      setLocalError(
+        'Secure device storage is still unavailable. Contact district technology support.',
+      );
+    } finally {
+      setIsRetryingStorage(false);
+    }
+  }
+
+  return (
+    <SafeAreaView style={styles.page}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="automatic"
+        keyboardShouldPersistTaps="handled"
+        style={styles.page}
+      >
+        <View style={styles.brand}>
+          <Text style={styles.eyebrow}>PENINSULA SCHOOL DISTRICT</Text>
+          <Text accessibilityRole="header" style={styles.title}>
+            Sign in to PSD EOC
+          </Text>
+          <Text style={styles.subtitle}>
+            Use your district Google account to enroll this staff device. Access
+            requires current membership in a designated PSD Google Group.
+          </Text>
+        </View>
+
+        {visibleError !== null ? (
+          <View
+            accessibilityLiveRegion="assertive"
+            accessibilityRole="alert"
+            style={styles.errorNotice}
+          >
+            <Text style={styles.errorTitle}>Sign-in needs attention</Text>
+            <Text style={styles.errorBody}>{visibleError}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Secure device enrollment</Text>
+          <Text style={styles.cardBody}>
+            Google verifies your district identity, and the server checks the
+            designated PSD access group. PSD EOC then stores only its opaque
+            device session in encrypted system storage.
+          </Text>
+
+          {storageBlocked ? (
+            <Pressable
+              accessibilityHint="Checks secure device storage again before Google sign-in is allowed"
+              accessibilityLabel="Retry secure device setup"
+              accessibilityRole="button"
+              accessibilityState={{ busy, disabled: busy }}
+              disabled={busy}
+              onPress={() => {
+                void handleStorageRetry();
+              }}
+              style={({ pressed }) => [
+                styles.primaryButton,
+                pressed && !busy && styles.buttonPressed,
+                busy && styles.buttonDisabled,
+              ]}
+            >
+              {isRetryingStorage ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : null}
+              <Text style={styles.primaryButtonText}>
+                {isRetryingStorage
+                  ? 'Checking secure storage'
+                  : 'Retry secure device setup'}
+              </Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              accessibilityHint="Opens Google sign-in in the system browser; only authorized PSD staff can enroll"
+              accessibilityLabel="Sign in with Google"
+              accessibilityRole="button"
+              accessibilityState={{ busy, disabled: busy }}
+              disabled={busy}
+              onPress={() => {
+                void handleSignIn();
+              }}
+              style={({ pressed }) => [
+                styles.primaryButton,
+                pressed && !busy && styles.buttonPressed,
+                busy && styles.buttonDisabled,
+              ]}
+            >
+              {isSigningIn ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : null}
+              <Text style={styles.primaryButtonText}>
+                {isSigningIn ? 'Signing in securely' : 'Sign in with Google'}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+
+        <View accessibilityRole="summary" style={styles.deviceSecurityNotice}>
+          <Text style={styles.noticeTitle}>
+            Your device protects return access
+          </Text>
+          <Text style={styles.noticeBody}>
+            After enrollment, use Face ID, your Android biometric, or the device
+            passcode fallback supplied by the operating system. PSD EOC never
+            creates a separate app PIN.
+          </Text>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  page: {
+    backgroundColor: '#F4F7FA',
+    flex: 1,
+  },
+  content: {
+    flexGrow: 1,
+    gap: 22,
+    justifyContent: 'center',
+    padding: 24,
+    paddingBottom: 40,
+  },
+  brand: {
+    gap: 8,
+  },
+  eyebrow: {
+    color: '#3B5874',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    lineHeight: 16,
+  },
+  title: {
+    color: '#102A43',
+    fontSize: 34,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+    lineHeight: 41,
+  },
+  subtitle: {
+    color: '#486581',
+    fontSize: 17,
+    lineHeight: 25,
+  },
+  errorNotice: {
+    backgroundColor: '#FFF1F0',
+    borderColor: '#C0352B',
+    borderRadius: 14,
+    borderWidth: 2,
+    gap: 4,
+    padding: 16,
+  },
+  errorTitle: {
+    color: '#7A1E17',
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 22,
+  },
+  errorBody: {
+    color: '#7A1E17',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  card: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#BCCCDC',
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 12,
+    padding: 20,
+  },
+  cardTitle: {
+    color: '#102A43',
+    fontSize: 20,
+    fontWeight: '800',
+    lineHeight: 27,
+  },
+  cardBody: {
+    color: '#334E68',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  primaryButton: {
+    alignItems: 'center',
+    backgroundColor: '#175A8E',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'center',
+    marginTop: 8,
+    minHeight: 52,
+    paddingHorizontal: 18,
+    paddingVertical: 13,
+  },
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 22,
+    textAlign: 'center',
+  },
+  buttonPressed: {
+    opacity: 0.76,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
+  deviceSecurityNotice: {
+    backgroundColor: '#E8F1F8',
+    borderColor: '#9DB8CF',
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 5,
+    padding: 17,
+  },
+  noticeTitle: {
+    color: '#102A43',
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 22,
+  },
+  noticeBody: {
+    color: '#334E68',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+});

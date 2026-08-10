@@ -1312,7 +1312,7 @@ function invocationPolicy(
 
 const preSessionOidcInvocationPolicy = invocationPolicy(
   ['pre-session-oidc'],
-  ['web'],
+  ['web', 'mobile'],
 );
 const verifiedRefreshInvocationPolicy = invocationPolicy(
   ['verified-refresh-credential'],
