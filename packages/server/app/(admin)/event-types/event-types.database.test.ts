@@ -1383,6 +1383,7 @@ describeWithDatabase('event-type database versioning', () => {
       [1, 'Secure\u0007', 'INVALID_VARIABLE'],
       [2, 'Secure\u200B', 'INVALID_VARIABLE'],
       [3, 'Secure ［INCIDENT］', 'RESERVED_MARKER'],
+      [4, 'Secure [INСIDENT]', 'RESERVED_MARKER'],
     ] as const) {
       const key = `issue-10-unsafe-name-${index}-${randomUUID()}`;
       await expect(
