@@ -51,9 +51,11 @@ aws sso login --profile psd401-prr-prod
 The ordinary ADC login deliberately writes no quota project, even if another
 gcloud configuration has an active project. The guarded helpers reject ADC
 metadata bound to any project other than `psd401-eoc` and discard inherited
-Google billing/quota/project overrides. After bootstrap creates the dedicated
-project, the main Terraform provider pins user-project quota and billing to
-`psd401-eoc`; the bootstrap provider cannot do so before that project exists.
+Google billing/quota/project overrides. They also reject persistent gcloud
+billing/quota configuration, and every project API call names `psd401-eoc`
+explicitly. After bootstrap creates the dedicated project, the main Terraform
+provider pins user-project quota and billing to `psd401-eoc`; the bootstrap
+provider cannot do so before that project exists.
 
 Review formatting and validity, then run the guarded helper from this directory:
 

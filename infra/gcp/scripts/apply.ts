@@ -271,7 +271,15 @@ export function validateStateBucket(
 function inspectProject(): Readonly<Record<string, unknown>> | null {
   const result = spawnSync(
     'gcloud',
-    ['projects', 'describe', PROJECT_ID, '--format=json', '--quiet'],
+    [
+      'projects',
+      'describe',
+      PROJECT_ID,
+      '--project',
+      PROJECT_ID,
+      '--format=json',
+      '--quiet',
+    ],
     {
       cwd: gcpRoot,
       encoding: 'utf8',
@@ -297,6 +305,8 @@ function validateExistingProject(
       'billing',
       'projects',
       'describe',
+      PROJECT_ID,
+      '--project',
       PROJECT_ID,
       '--format=json',
       '--quiet',
@@ -369,6 +379,8 @@ function stateBucketExists(): boolean {
       'buckets',
       'get-iam-policy',
       `gs://${STATE_BUCKET}`,
+      '--project',
+      PROJECT_ID,
       '--format=json',
       '--quiet',
     ]),
