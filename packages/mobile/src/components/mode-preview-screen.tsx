@@ -1,6 +1,7 @@
 import type { TemplateMode } from '@psd-eoc/contracts';
 import { Link } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { getEventTheme } from '../theme/event-theme';
 import { ClassificationBanner } from './classification-banner';
@@ -14,60 +15,68 @@ export function ModePreviewScreen({ mode }: ModePreviewScreenProps) {
   const theme = getEventTheme(mode);
 
   return (
-    <ScrollView
-      contentContainerStyle={styles.content}
-      contentInsetAdjustmentBehavior="automatic"
-      style={{ backgroundColor: theme.colors.pageBackground }}
+    <SafeAreaView
+      edges={['left', 'right', 'bottom']}
+      style={[styles.page, { backgroundColor: theme.colors.pageBackground }]}
     >
-      <ClassificationBanner mode={mode} />
-
-      <View
-        style={[
-          styles.previewCard,
-          {
-            backgroundColor: theme.colors.surface,
-            borderColor: theme.colors.border,
-          },
-        ]}
+      <ScrollView
+        contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="automatic"
+        style={styles.page}
       >
-        <Text style={[styles.kicker, { color: theme.colors.textMuted }]}>
-          VISUAL PREVIEW ONLY
-        </Text>
-        <Text style={[styles.title, { color: theme.colors.textPrimary }]}>
-          Classification is always visible
-        </Text>
-        <Text style={[styles.body, { color: theme.colors.textMuted }]}>
-          PSD EOC repeats the classification with a distinct color, explicit
-          wording, and icon. This scaffold cannot start an event or send a
-          notification.
-        </Text>
-      </View>
+        <ClassificationBanner mode={mode} />
 
-      <Link href="/" dismissTo asChild>
-        <Pressable
-          accessibilityHint="Returns to the PSD EOC home screen"
-          accessibilityRole="link"
-          style={({ pressed }) => [
-            styles.homeLink,
+        <View
+          style={[
+            styles.previewCard,
             {
               backgroundColor: theme.colors.surface,
               borderColor: theme.colors.border,
             },
-            pressed && styles.pressed,
           ]}
         >
-          <Text
-            style={[styles.homeLinkText, { color: theme.colors.textPrimary }]}
-          >
-            Return to home
+          <Text style={[styles.kicker, { color: theme.colors.textMuted }]}>
+            VISUAL PREVIEW ONLY
           </Text>
-        </Pressable>
-      </Link>
-    </ScrollView>
+          <Text style={[styles.title, { color: theme.colors.textPrimary }]}>
+            Classification is always visible
+          </Text>
+          <Text style={[styles.body, { color: theme.colors.textMuted }]}>
+            PSD EOC repeats the classification with a distinct color, explicit
+            wording, and icon. This scaffold cannot start an event or send a
+            notification.
+          </Text>
+        </View>
+
+        <Link href="/" dismissTo asChild>
+          <Pressable
+            accessibilityHint="Returns to the PSD EOC home screen"
+            accessibilityRole="link"
+            style={({ pressed }) => [
+              styles.homeLink,
+              {
+                backgroundColor: theme.colors.surface,
+                borderColor: theme.colors.border,
+              },
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text
+              style={[styles.homeLinkText, { color: theme.colors.textPrimary }]}
+            >
+              Return to home
+            </Text>
+          </Pressable>
+        </Link>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  page: {
+    flex: 1,
+  },
   content: {
     gap: 20,
     padding: 20,
