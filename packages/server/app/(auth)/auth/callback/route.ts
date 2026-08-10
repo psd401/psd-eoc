@@ -26,6 +26,7 @@ import {
 import {
   completeGoogleOidcCallback,
   createCompleteOidcSignInEnvelope,
+  createGoogleMobileOidcCallbackRelayUrl,
   GoogleOidcCallbackError,
   readGoogleOidcConfiguration,
 } from '../../../../lib/auth/oidc';
@@ -387,11 +388,31 @@ function buildMembershipMember(
  * session-establishment capability. No callback path contacts Google Groups.
  */
 export async function GET(request: Request): Promise<NextResponse> {
+  let configuration: ReturnType<typeof readGoogleOidcConfiguration>;
+  let mobileRelayUrl: string | null;
+  try {
+    configuration = readGoogleOidcConfiguration();
+    mobileRelayUrl = createGoogleMobileOidcCallbackRelayUrl(
+      configuration,
+      request.url,
+    );
+  } catch (error) {
+    return error instanceof GoogleOidcCallbackError
+      ? deniedResponse(request, 'callback', error.clearCookieHeader)
+      : deniedResponse(request, 'configuration');
+  }
+  if (mobileRelayUrl !== null) {
+    return noStore(
+      new NextResponse(null, {
+        status: 303,
+        headers: { Location: mobileRelayUrl },
+      }),
+    );
+  }
   let clearCookieHeader: string | undefined;
   let runtime: AuthRuntime | undefined;
   let postGateAuditContext: PostGateAuditContext | undefined;
   try {
-    const configuration = readGoogleOidcConfiguration();
     const callback = await completeGoogleOidcCallback(configuration, {
       method: request.method,
       callbackUrl: request.url,
@@ -413,6 +434,7 @@ export async function GET(request: Request): Promise<NextResponse> {
         subjectDigest: callback.principal.subjectDigest,
         requestId,
         checkedAt: serverTime,
+        source: 'web',
       },
       {
         store: runtime.accessStore,
@@ -505,6 +527,7 @@ export async function GET(request: Request): Promise<NextResponse> {
             subjectDigest: null,
             reasonCode: error.code,
             userId: null,
+            source: 'web',
           });
         } catch {
           return deniedResponse(
@@ -529,6 +552,7 @@ export async function GET(request: Request): Promise<NextResponse> {
           subjectDigest: postGateAuditContext.subjectDigest,
           reasonCode,
           userId: postGateAuditContext.userId,
+          source: 'web',
         });
       } catch {
         return deniedResponse(request, 'configuration', clearCookieHeader);
