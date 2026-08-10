@@ -18,7 +18,7 @@ import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 
 import {
   SMS_CLIENT_CONFIG,
-  TARGET_REGION,
+  STS_CLIENT_CONFIG,
   assertProviderPageCapacity,
   nextProviderPageToken,
   toRegistrationDeniedReason,
@@ -52,7 +52,7 @@ function requiredPositiveInteger(
 
 export function createAwsApi(): SmsRegistrationApi {
   const sms = new PinpointSMSVoiceV2Client(SMS_CLIENT_CONFIG);
-  const sts = new STSClient({ region: TARGET_REGION });
+  const sts = new STSClient(STS_CLIENT_CONFIG);
 
   return {
     async associateRegistration(input): Promise<void> {
@@ -398,7 +398,6 @@ export function createAwsApi(): SmsRegistrationApi {
           MessageType: 'TRANSACTIONAL',
           NumberCapabilities: ['SMS'],
           NumberType: 'TOLL_FREE',
-          OptOutListName: input.optOutListName,
           RegistrationId: input.registrationId,
           Tags: [{ Key: 'Name', Value: input.name }],
         }),

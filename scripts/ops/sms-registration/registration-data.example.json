@@ -16,12 +16,12 @@
     "campaignRequiredInputs": [
       "Schema diagnostics only: a truthful provider-approved classification is unresolved, so no campaign submission is permitted",
       "Public terms include use-case description, message frequency, carrier-liability statement, opt-out instructions, customer-care contact, and a privacy-policy link",
-      "Public privacy policy says mobile numbers and consent records are not shared with unauthorized third parties or affiliates",
+      "Public privacy policy says phone numbers are collected for messaging and mobile numbers and consent records are not shared with unauthorized third parties or affiliates",
       "Complete affirmative SMS-specific staff opt-in workflow and evidence, with brand, purpose, frequency, rate disclosure, Terms/Privacy links, and STOP/HELP instructions visible at consent",
       "Opt-in confirmation identifies PSD EOC and includes frequency, message/data rates, STOP, and HELP",
-      "STOP response identifies PSD EOC, acknowledges opt-out, and confirms no further messages; HELP identifies PSD EOC and gives a district contact method",
+      "For schema diagnostics, 10DLC STOP response identifies PSD EOC, acknowledges opt-out, and confirms no further messages; HELP identifies PSD EOC and gives a district contact method",
       "Transactional SMS capability and subscriber opt-in/opt-out/help choices",
-      "Two separate realistic samples that identify PSD EOC, include Reply STOP to opt out, and distinguish one PSD EOC REAL INCIDENT from one PSD EOC DRILL; never use one ambiguous sample for both"
+      "Two separate realistic samples that identify PSD EOC, use brackets such as [facility] for variable content, include Reply STOP to opt out, and distinguish one PSD EOC REAL INCIDENT from one PSD EOC DRILL; never use one ambiguous sample for both"
     ],
     "tollFreeRequiredInputs": [
       "District company name, website, physical address, government business type",
@@ -29,7 +29,8 @@
       "Individual contact name, email, and E.164 support phone",
       "Monthly volume and notification/education use case",
       "Opt-in category, workflow description, and PNG opt-in image no larger than 400 KB",
-      "Two separate realistic samples that identify PSD EOC, include Reply STOP to opt out, and distinguish one PSD EOC REAL INCIDENT from one PSD EOC DRILL; never use one ambiguous sample for both"
+      "US toll-free carrier STOP responses cannot be customized; a recipient must text UNSTOP or START to the same toll-free number before messages can resume",
+      "Two separate realistic samples that identify PSD EOC, use brackets such as [facility] for variable content, include Reply STOP to opt out, and distinguish one PSD EOC REAL INCIDENT from one PSD EOC DRILL; never use one ambiguous sample for both"
     ]
   },
   "brand": {
@@ -176,16 +177,15 @@
       },
       {
         "fieldPath": "messageSamples.messageSample1",
-        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates. Reply STOP to opt out."
+        "text": "PSD EOC REAL INCIDENT — Lockdown at [facility]. This is a real incident. Open PSD EOC for staff updates. Reply STOP to opt out."
       },
       {
         "fieldPath": "messageSamples.messageSample2",
-        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates. Reply STOP to opt out."
+        "text": "PSD EOC DRILL — Lockdown drill at [facility]. This is only a drill. Open PSD EOC for staff updates. Reply STOP to opt out."
       }
     ]
   },
   "tollFree": {
-    "optOutListName": "psd-eoc-staff",
     "fields": [
       {
         "fieldPath": "companyInfo.companyName",
@@ -273,11 +273,11 @@
       },
       {
         "fieldPath": "messageSamples.messageSample1",
-        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates. Reply STOP to opt out."
+        "text": "PSD EOC REAL INCIDENT — Lockdown at [facility]. This is a real incident. Open PSD EOC for staff updates. Reply STOP to opt out."
       },
       {
         "fieldPath": "messageSamples.messageSample2",
-        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates. Reply STOP to opt out."
+        "text": "PSD EOC DRILL — Lockdown drill at [facility]. This is only a drill. Open PSD EOC for staff updates. Reply STOP to opt out."
       }
     ]
   }
