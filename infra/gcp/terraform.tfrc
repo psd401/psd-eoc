@@ -1,0 +1,8 @@
+# Keep provider installation on Terraform's authenticated registry path. The
+# committed dependency locks remain authoritative; local development overrides,
+# filesystem mirrors, plugin caches, and credential helpers are not configured.
+disable_checkpoint = true
+
+provider_installation {
+  direct {}
+}
