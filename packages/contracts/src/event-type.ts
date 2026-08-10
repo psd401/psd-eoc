@@ -663,9 +663,22 @@ export type EventTypeVersionDraftId = z.infer<
 >;
 
 /**
+ * Owns the opaque server-derived SHA-256 token for one exact draft revision.
+ * Clients echo this value as an optimistic-concurrency precondition and never
+ * calculate or interpret it.
+ */
+export const EventTypeDraftRevisionSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+
+/** Exact event-type draft revision token inferred from its schema. */
+export type EventTypeDraftRevision = z.infer<
+  typeof EventTypeDraftRevisionSchema
+>;
+
+/**
  * Owns an unpublished event-type revision proposal. Human and agent authors
- * may prepare it, but it has no enabled flag or published version identity and
- * cannot be selected by an activation until an authorized publication flow.
+ * may prepare exact wording and desired availability, but the proposal has no
+ * published version identity and cannot be selected by an activation until an
+ * authorized publication flow succeeds.
  */
 export const EventTypeVersionDraftSchema = z
   .object({
@@ -675,8 +688,11 @@ export const EventTypeVersionDraftSchema = z
     templateMode: TemplateModeSchema,
     name: z.string().trim().min(1).max(160),
     description: z.string().trim().max(1_000).nullable(),
+    baseVersionId: EventTypeVersionIdSchema.nullable(),
+    enabled: z.boolean(),
     templates: MessageTemplateCatalogSchema,
     draftedBy: ActorSchema,
+    draftRevision: EventTypeDraftRevisionSchema,
     createdAt: TimestampSchema,
   })
   .strict()
@@ -797,6 +813,7 @@ export type GetEventTypeDraftInput = z.infer<
 export const PreviewEventTypeRenderingInputSchema = z
   .object({
     draftId: EventTypeVersionDraftIdSchema,
+    expectedDraftRevision: EventTypeDraftRevisionSchema,
     eventKind: EventKindSchema,
     purpose: NotificationPurposeSchema,
   })
@@ -812,6 +829,7 @@ export type PreviewEventTypeRenderingInput = z.infer<
 export const EventTypeRenderingPreviewSchema = z
   .object({
     draftId: EventTypeVersionDraftIdSchema,
+    draftRevision: EventTypeDraftRevisionSchema,
     eventKind: EventKindSchema,
     templateMode: TemplateModeSchema,
     purpose: NotificationPurposeSchema,
@@ -889,6 +907,7 @@ export const EventTypeDraftTargetSchema = z
       .object({
         kind: z.literal('existing-event-type'),
         eventTypeId: EventTypeIdSchema,
+        baseVersionId: EventTypeVersionIdSchema,
       })
       .strict(),
   ])
@@ -906,6 +925,7 @@ export const CreateEventTypeDraftInputSchema = z
     target: EventTypeDraftTargetSchema,
     name: z.string().trim().min(1).max(160),
     description: z.string().trim().max(1_000).nullable(),
+    enabled: z.boolean(),
     templates: MessageTemplateCatalogSchema,
   })
   .strict()
@@ -933,12 +953,14 @@ export type CreateEventTypeDraftInput = z.infer<
   typeof CreateEventTypeDraftInputSchema
 >;
 
-/** Owns an unpublished event-type draft replacement request. */
+/** Owns a compare-and-swap replacement of one exact draft revision. */
 export const UpdateEventTypeDraftInputSchema = z
   .object({
     draftId: EventTypeVersionDraftIdSchema,
+    expectedDraftRevision: EventTypeDraftRevisionSchema,
     name: z.string().trim().min(1).max(160),
     description: z.string().trim().max(1_000).nullable(),
+    enabled: z.boolean(),
     templates: MessageTemplateCatalogSchema,
   })
   .strict()
@@ -950,12 +972,15 @@ export type UpdateEventTypeDraftInput = z.infer<
 >;
 
 /**
- * Owns a request to publish one reviewed draft. Admin authorization, publisher
- * identity, exact server time, and publication provenance are server-derived.
+ * Owns a request to publish one exact reviewed draft revision. Admin
+ * authorization, publisher identity, exact server time, bound base version,
+ * desired availability, and publication provenance remain server-derived from
+ * the persisted draft and capability context.
  */
 export const PublishEventTypeVersionInputSchema = z
   .object({
     draftId: EventTypeVersionDraftIdSchema,
+    expectedDraftRevision: EventTypeDraftRevisionSchema,
   })
   .strict()
   .readonly();

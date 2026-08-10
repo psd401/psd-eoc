@@ -26,6 +26,7 @@ import {
   EventSchema,
   EventTargetingSchema,
   EventTransitionSchema,
+  EventTypeRenderingPreviewSchema,
   EventTypeVersionSchema,
   EventTypeVersionDraftSchema,
   GroupSourceSchema,
@@ -46,6 +47,8 @@ import {
   OidcCallbackRejectionEvidenceSchema,
   OutboxRecordSchema,
   PreparedActivationSchema,
+  PreviewEventTypeRenderingInputSchema,
+  PublishEventTypeVersionInputSchema,
   RosterSnapshotSchema,
   RosterSourceConfigurationSchema,
   RosterSyncResultSchema,
@@ -60,6 +63,7 @@ import {
   SessionTokenRotationSchema,
   StaleRosterReportSchema,
   StartEventInputSchema,
+  UpdateEventTypeDraftInputSchema,
   defineCapability,
   parseCapabilityEnvelopeFor,
   parseCapabilityInput,
@@ -567,8 +571,11 @@ describe('event type, targeting, and activation contracts', () => {
         templateMode: 'drill',
         name: 'Agent proposed drill wording',
         description: null,
+        baseVersionId: ids.eventTypeVersion,
+        enabled: true,
         templates: templateCatalog('drill'),
         draftedBy: agentActor,
+        draftRevision: 'a'.repeat(64),
         createdAt: times.created,
       }).success,
     ).toBe(true);
@@ -602,6 +609,221 @@ describe('event type, targeting, and activation contracts', () => {
         },
       }).success,
     ).toBe(false);
+  });
+
+  test('binds event-type draft updates, previews, and publication to exact revisions', () => {
+    const draftRevision = 'a'.repeat(64);
+    const draft = {
+      id: ids.prepared,
+      eventTypeId: ids.eventType,
+      status: 'draft',
+      templateMode: 'drill',
+      name: 'Agent proposed drill wording',
+      description: null,
+      baseVersionId: ids.eventTypeVersion,
+      enabled: false,
+      templates: templateCatalog('drill'),
+      draftedBy: agentActor,
+      draftRevision,
+      createdAt: times.created,
+    } as const;
+    expect(EventTypeVersionDraftSchema.parse(draft).enabled).toBe(false);
+    const { draftRevision: _missingDraftRevision, ...draftWithoutRevision } =
+      draft;
+    expect(_missingDraftRevision).toBe(draftRevision);
+    expect(
+      EventTypeVersionDraftSchema.safeParse(draftWithoutRevision).success,
+    ).toBe(false);
+    expect(
+      EventTypeVersionDraftSchema.safeParse({
+        ...draft,
+        draftRevision: 'A'.repeat(64),
+      }).success,
+    ).toBe(false);
+    expect(
+      EventTypeVersionDraftSchema.safeParse({
+        ...draft,
+        draftRevision: 'a'.repeat(63),
+      }).success,
+    ).toBe(false);
+    expect(
+      EventTypeVersionDraftSchema.safeParse({
+        ...draft,
+        baseVersionId: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      EventTypeVersionDraftSchema.safeParse({
+        ...draft,
+        expectedDraftRevision: draftRevision,
+      }).success,
+    ).toBe(false);
+
+    const createExisting = {
+      target: {
+        kind: 'existing-event-type',
+        eventTypeId: ids.eventType,
+        baseVersionId: ids.eventTypeVersion,
+      },
+      name: draft.name,
+      description: draft.description,
+      enabled: false,
+      templates: draft.templates,
+    } as const;
+    expect(
+      Contracts.CreateEventTypeDraftInputSchema.parse(createExisting).enabled,
+    ).toBe(false);
+    expect(
+      Contracts.CreateEventTypeDraftInputSchema.safeParse({
+        ...createExisting,
+        target: {
+          kind: 'existing-event-type',
+          eventTypeId: ids.eventType,
+        },
+      }).success,
+    ).toBe(false);
+    const { enabled: _missingCreateEnabled, ...createWithoutEnabled } =
+      createExisting;
+    expect(_missingCreateEnabled).toBe(false);
+    expect(
+      Contracts.CreateEventTypeDraftInputSchema.safeParse(createWithoutEnabled)
+        .success,
+    ).toBe(false);
+    expect(
+      Contracts.CreateEventTypeDraftInputSchema.safeParse({
+        ...createExisting,
+        target: {
+          kind: 'new-event-type',
+          key: 'lockdown-drill',
+          familyKey: 'lockdown',
+          templateMode: 'drill',
+          baseVersionId: ids.eventTypeVersion,
+        },
+      }).success,
+    ).toBe(false);
+
+    const update = {
+      draftId: ids.prepared,
+      expectedDraftRevision: draftRevision,
+      name: draft.name,
+      description: draft.description,
+      enabled: false,
+      templates: draft.templates,
+    } as const;
+    expect(UpdateEventTypeDraftInputSchema.parse(update).enabled).toBe(false);
+    const {
+      expectedDraftRevision: _missingUpdateRevision,
+      ...updateWithoutRevision
+    } = update;
+    expect(_missingUpdateRevision).toBe(draftRevision);
+    expect(
+      UpdateEventTypeDraftInputSchema.safeParse(updateWithoutRevision).success,
+    ).toBe(false);
+    expect(
+      UpdateEventTypeDraftInputSchema.safeParse({
+        ...update,
+        baseVersionId: ids.eventTypeVersion,
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateEventTypeDraftInputSchema.safeParse({
+        ...update,
+        expectedDraftRevision: 'A'.repeat(64),
+      }).success,
+    ).toBe(false);
+    const { enabled: _missingUpdateEnabled, ...updateWithoutEnabled } = update;
+    expect(_missingUpdateEnabled).toBe(false);
+    expect(
+      UpdateEventTypeDraftInputSchema.safeParse(updateWithoutEnabled).success,
+    ).toBe(false);
+
+    const previewInput = {
+      draftId: ids.prepared,
+      expectedDraftRevision: draftRevision,
+      eventKind: 'drill',
+      purpose: 'activation',
+    } as const;
+    expect(
+      PreviewEventTypeRenderingInputSchema.safeParse(previewInput).success,
+    ).toBe(true);
+    expect(
+      PreviewEventTypeRenderingInputSchema.safeParse({
+        draftId: ids.prepared,
+        eventKind: 'drill',
+        purpose: 'activation',
+      }).success,
+    ).toBe(false);
+    expect(
+      PreviewEventTypeRenderingInputSchema.safeParse({
+        ...previewInput,
+        expectedDraftRevision: 'A'.repeat(64),
+      }).success,
+    ).toBe(false);
+    expect(
+      PreviewEventTypeRenderingInputSchema.safeParse({
+        ...previewInput,
+        draftRevision,
+      }).success,
+    ).toBe(false);
+    const preview = {
+      draftId: ids.prepared,
+      draftRevision,
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      messages: [
+        renderedMessage('push', targeting('drill', 'drill', 'synthetic')),
+        renderedMessage('email', targeting('drill', 'drill', 'synthetic')),
+        renderedMessage('sms', targeting('drill', 'drill', 'synthetic')),
+      ],
+    } as const;
+    expect(EventTypeRenderingPreviewSchema.safeParse(preview).success).toBe(
+      true,
+    );
+    expect(
+      EventTypeRenderingPreviewSchema.safeParse({
+        ...preview,
+        draftRevision: undefined,
+      }).success,
+    ).toBe(false);
+
+    const publish = {
+      draftId: ids.prepared,
+      expectedDraftRevision: draftRevision,
+    } as const;
+    expect(PublishEventTypeVersionInputSchema.safeParse(publish).success).toBe(
+      true,
+    );
+    expect(
+      PublishEventTypeVersionInputSchema.safeParse({
+        draftId: ids.prepared,
+      }).success,
+    ).toBe(false);
+    expect(
+      PublishEventTypeVersionInputSchema.safeParse({
+        ...publish,
+        expectedDraftRevision: 'A'.repeat(64),
+      }).success,
+    ).toBe(false);
+    expect(
+      PublishEventTypeVersionInputSchema.safeParse({
+        ...publish,
+        enabled: false,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      parseCapabilityInput('create-event-type-draft', createExisting),
+    ).toEqual(createExisting);
+    expect(parseCapabilityInput('update-event-type-draft', update)).toEqual(
+      update,
+    );
+    expect(
+      parseCapabilityInput('preview-event-type-rendering', previewInput),
+    ).toEqual(previewInput);
+    expect(parseCapabilityInput('publish-event-type-version', publish)).toEqual(
+      publish,
+    );
   });
 
   test('rejects Unicode controls that can visually spoof real versus drill', () => {
