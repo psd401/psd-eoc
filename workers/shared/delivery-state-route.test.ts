@@ -44,6 +44,16 @@ function sameEvidenceInput(
   );
 }
 
+function sameAttemptInput(
+  left: ChannelAttempt,
+  right: ChannelAttempt,
+): boolean {
+  return (
+    JSON.stringify({ ...left, attemptedAt: new Date(left.attemptedAt) }) ===
+    JSON.stringify({ ...right, attemptedAt: new Date(right.attemptedAt) })
+  );
+}
+
 class MemoryDeliveryEvidenceStore implements DeliveryEvidenceStore {
   readonly #attempts = new Map<string, ChannelAttempt>();
   readonly #evidence = new Map<string, DeliveryEvidence[]>();
@@ -69,9 +79,7 @@ class MemoryDeliveryEvidenceStore implements DeliveryEvidenceStore {
         );
       }
       this.#attempts.set(request.attempt.id, request.attempt);
-    } else if (
-      JSON.stringify(existingAttempt) !== JSON.stringify(request.attempt)
-    ) {
+    } else if (!sameAttemptInput(existingAttempt, request.attempt)) {
       throw new DeliveryStateError(
         'ATTEMPT_CONFLICT',
         409,
@@ -95,6 +103,12 @@ class MemoryDeliveryEvidenceStore implements DeliveryEvidenceStore {
     if (latest !== undefined && sameEvidenceInput(latest, request.evidence)) {
       return latest;
     }
+    const matching = existingEvidence.find((item) =>
+      sameEvidenceInput(item, request.evidence),
+    );
+    if (matching !== undefined) {
+      return matching;
+    }
     if (
       latest !== undefined &&
       !DeliveryTruthTransitionSchema.safeParse({
@@ -103,12 +117,6 @@ class MemoryDeliveryEvidenceStore implements DeliveryEvidenceStore {
         to: request.evidence.state,
       }).success
     ) {
-      const matching = existingEvidence.find((item) =>
-        sameEvidenceInput(item, request.evidence),
-      );
-      if (matching !== undefined) {
-        return matching;
-      }
       throw new DeliveryStateError(
         'INVALID_DELIVERY_TRANSITION',
         409,
@@ -287,6 +295,56 @@ describe('delivery-state worker route', () => {
         requestId: attempt.id,
       });
     }
+  });
+
+  test('returns a historical unknown replay without regressing recovered provider truth', async () => {
+    const harness = createHarness();
+    const attempt = attemptFor(syntheticBatch());
+    const unknown: AttemptEvidenceInput = {
+      subject: { kind: 'attempt', attemptId: attempt.id },
+      state: 'unknown',
+      provider: 'synthetic-provider',
+      providerReference: null,
+      proof: null,
+      reasonCode: 'PROVIDER_OUTCOME_AMBIGUOUS',
+      diagnosticDigest: null,
+    };
+    const providerAccepted: AttemptEvidenceInput = {
+      subject: { kind: 'attempt', attemptId: attempt.id },
+      state: 'provider-accepted',
+      provider: 'synthetic-provider',
+      providerReference: 'synthetic-late-acceptance',
+      proof: null,
+      reasonCode: null,
+      diagnosticDigest: null,
+    };
+
+    expect(
+      (
+        await harness.route(
+          requestFor({ attempt, evidence: attemptedInput(attempt) }),
+        )
+      ).status,
+    ).toBe(200);
+    const firstUnknown = await harness.route(
+      requestFor({ attempt, evidence: unknown }),
+    );
+    expect(firstUnknown.status).toBe(200);
+    const firstUnknownBody = await responseBody(firstUnknown);
+    expect(
+      (await harness.route(requestFor({ attempt, evidence: providerAccepted })))
+        .status,
+    ).toBe(200);
+
+    const replayedUnknown = await harness.route(
+      requestFor({ attempt, evidence: unknown }),
+    );
+    expect(replayedUnknown.status).toBe(200);
+    expect(await responseBody(replayedUnknown)).toEqual(firstUnknownBody);
+    expect(harness.store.appends).toBe(3);
+    expect(
+      harness.store.evidenceFor(attempt.id).map((entry) => entry.state),
+    ).toEqual(['attempted', 'unknown', 'provider-accepted']);
   });
 
   test('rejects transport additions, immutable-attempt drift, and terminal truth regressions', async () => {

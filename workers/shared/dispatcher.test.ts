@@ -673,7 +673,10 @@ describe('queue failure and terminal truth', () => {
 });
 
 describe('production SQS protocol', () => {
-  test('matches the Smithy SigV4 reference for the raw canonical batch', () => {
+  test('matches the regression-pinned SigV4 golden vector', () => {
+    // Generated independently with @smithy/signature-v4 at authoring time and
+    // pinned here so this issue does not depend on an undeclared transitive
+    // package at test runtime.
     const signed = signSqsSendMessageBatchRequest(
       {
         queueUrl: 'https://sqs.us-west-2.amazonaws.com/123456789012/test-queue',
