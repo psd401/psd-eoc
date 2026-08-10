@@ -1,4 +1,13 @@
-import { existsSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -96,10 +105,35 @@ const bootstrapApiRepairTrustServices = [
   'storage.googleapis.com',
 ] as const;
 
+const mainBoundaryServices = new Set([
+  ...BOOTSTRAP_SERVICES,
+  'admin.googleapis.com',
+  'cloudidentity.googleapis.com',
+  'iam.googleapis.com',
+]);
+
 const bootstrapBucketImports = [
   ['google_storage_bucket.terraform_state', STATE_BUCKET],
   ['google_storage_bucket_iam_policy.terraform_state', `b/${STATE_BUCKET}`],
 ] as const;
+
+const interruptedBootstrapRequiredResources = new Set([
+  'google_project.psd_eoc',
+  'google_project_service.service_usage',
+  'google_project_service.storage',
+]);
+
+const interruptedBootstrapAllowedResources = new Set([
+  ...interruptedBootstrapRequiredResources,
+  'google_project_service.cloud_resource_manager',
+  'google_project_service.cloud_billing',
+  'data.google_iam_policy.terraform_state',
+]);
+
+const bootstrapStateAllowedResources = new Set([
+  ...bootstrapResources,
+  'data.google_iam_policy.terraform_state',
+]);
 
 export type StateBucketStatus =
   | 'absent'
@@ -108,6 +142,7 @@ export type StateBucketStatus =
 
 export interface StateBucketInspection {
   readonly projectNumber: string;
+  readonly revision?: string;
   readonly status: Exclude<StateBucketStatus, 'absent'>;
 }
 
@@ -124,6 +159,30 @@ export interface BootstrapApiRepairOperations {
   readonly inspectServices: () => EnabledProjectServicesInspection;
 }
 
+export interface InterruptedBootstrapStateInspection {
+  readonly fingerprint: string;
+  readonly lineage: string;
+  readonly projectNumber: string;
+  readonly resources: ReadonlySet<string>;
+  readonly serial: number;
+}
+
+export interface InterruptedBootstrapApiRepairOperations
+  extends BootstrapApiRepairOperations {
+  readonly inspectState: () => InterruptedBootstrapStateInspection | null;
+  readonly validateProject: (expectedProjectNumber: string) => void;
+}
+
+export interface ConfirmedPlanOperations {
+  readonly apply: () => void;
+  readonly captureBoundary: () => string;
+  readonly cleanup: () => void;
+  readonly confirm: () => Promise<void>;
+  readonly plan: () => void;
+  readonly readPlanSeal: () => string;
+  readonly revalidate: () => Promise<void>;
+}
+
 function parseJsonObject(
   value: string,
   description: string,
@@ -133,6 +192,77 @@ function parseJsonObject(
     throw new Error(`${description} was not one JSON object.`);
   }
   return parsed as Readonly<Record<string, unknown>>;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === undefined) {
+    return 'undefined';
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).sort().join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as Readonly<Record<string, unknown>>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export interface ApplyBoundaryEvidence {
+  readonly billing: unknown;
+  readonly bucket: unknown;
+  readonly policy: unknown;
+  readonly project: unknown;
+  readonly rosterReader: unknown;
+  readonly serviceProjectNumber: string | null;
+  readonly serviceStates: readonly Readonly<{
+    enabled: boolean;
+    service: string;
+  }>[];
+}
+
+export function buildApplyBoundary(evidence: ApplyBoundaryEvidence): string {
+  return canonicalJson(evidence);
+}
+
+export function readSavedPlanSeal(path: string): string {
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = fstatSync(descriptor);
+    if (
+      !before.isFile() ||
+      before.nlink !== 1 ||
+      before.size <= 0 ||
+      before.size > 16 * 1024 * 1024
+    ) {
+      throw new Error(
+        'Saved Terraform plan must be one bounded regular file with no hard or symbolic links.',
+      );
+    }
+    const content = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    if (
+      content.byteLength !== before.size ||
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs
+    ) {
+      throw new Error(
+        'Saved Terraform plan changed while it was being sealed.',
+      );
+    }
+    return canonicalJson({
+      device: before.dev,
+      digest: createHash('sha256').update(content).digest('hex'),
+      inode: before.ino,
+      size: before.size,
+    });
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export function parseBucketDescribeResult(
@@ -241,6 +371,251 @@ export function parseEnabledProjectServices(
     throw new Error('Enabled project services omitted the Google project.');
   }
   return { projectNumber, services };
+}
+
+function exactExpectedLabels(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const labels = value as Readonly<Record<string, unknown>>;
+  return (
+    Object.keys(labels).length === Object.keys(expectedLabels).length &&
+    Object.entries(expectedLabels).every(
+      ([name, expected]) => labels[name] === expected,
+    )
+  );
+}
+
+function interruptedStateResource(value: unknown): Readonly<{
+  address: string;
+  attributes: Readonly<Record<string, unknown>>;
+}> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(
+      'Interrupted bootstrap state contains a malformed resource.',
+    );
+  }
+  const resource = value as Readonly<Record<string, unknown>>;
+  const mode = resource.mode;
+  const type = resource.type;
+  const name = resource.name;
+  if (
+    (mode !== 'managed' && mode !== 'data') ||
+    typeof type !== 'string' ||
+    typeof name !== 'string' ||
+    resource.module !== undefined ||
+    resource.provider !==
+      'provider["registry.terraform.io/hashicorp/google"]' ||
+    !Array.isArray(resource.instances) ||
+    resource.instances.length !== 1
+  ) {
+    throw new Error(
+      'Interrupted bootstrap state does not contain one exact root Google resource instance.',
+    );
+  }
+  const instance = resource.instances[0];
+  if (
+    typeof instance !== 'object' ||
+    instance === null ||
+    Array.isArray(instance)
+  ) {
+    throw new Error(
+      'Interrupted bootstrap state contains a malformed instance.',
+    );
+  }
+  const instanceRecord = instance as Readonly<Record<string, unknown>>;
+  const sensitive = instanceRecord.sensitive_attributes;
+  if (
+    instanceRecord.deposed !== undefined ||
+    instanceRecord.index_key !== undefined ||
+    instanceRecord.status !== undefined ||
+    (sensitive !== undefined &&
+      (!Array.isArray(sensitive) || sensitive.length !== 0)) ||
+    !Number.isSafeInteger(instanceRecord.schema_version) ||
+    (instanceRecord.schema_version as number) < 0 ||
+    typeof instanceRecord.attributes !== 'object' ||
+    instanceRecord.attributes === null ||
+    Array.isArray(instanceRecord.attributes)
+  ) {
+    throw new Error(
+      'Interrupted bootstrap state contains a deposed, indexed, tainted, sensitive, or malformed instance.',
+    );
+  }
+  return {
+    address: `${mode === 'data' ? 'data.' : ''}${type}.${name}`,
+    attributes: instanceRecord.attributes as Readonly<Record<string, unknown>>,
+  };
+}
+
+function validateInterruptedProjectState(
+  attributes: Readonly<Record<string, unknown>>,
+): string {
+  const projectNumber = attributes.number;
+  if (
+    attributes.id !== `projects/${PROJECT_ID}` ||
+    attributes.project_id !== PROJECT_ID ||
+    attributes.name !== PROJECT_NAME ||
+    attributes.org_id !== ORGANIZATION_ID ||
+    attributes.billing_account !== BILLING_ACCOUNT ||
+    attributes.auto_create_network !== false ||
+    attributes.deletion_policy !== 'PREVENT' ||
+    typeof projectNumber !== 'string' ||
+    !/^[1-9]\d*$/u.test(projectNumber) ||
+    !exactExpectedLabels(attributes.labels)
+  ) {
+    throw new Error(
+      'Interrupted bootstrap state does not contain the exact fixed project contract.',
+    );
+  }
+  return projectNumber;
+}
+
+function validateInterruptedServiceState(
+  attributes: Readonly<Record<string, unknown>>,
+  service: string,
+): void {
+  if (
+    attributes.id !== `${PROJECT_ID}/${service}` ||
+    attributes.project !== PROJECT_ID ||
+    attributes.service !== service ||
+    attributes.disable_on_destroy !== false ||
+    attributes.disable_dependent_services !== false ||
+    attributes.deletion_policy !== 'PREVENT'
+  ) {
+    throw new Error(
+      `Interrupted bootstrap state does not contain the exact ${service} contract.`,
+    );
+  }
+}
+
+function validateInterruptedPolicyData(
+  attributes: Readonly<Record<string, unknown>>,
+): void {
+  if (typeof attributes.policy_data !== 'string') {
+    throw new Error(
+      'Interrupted bootstrap state contains malformed bucket-policy data.',
+    );
+  }
+  const policy = parseJsonObject(
+    attributes.policy_data,
+    'Interrupted bootstrap bucket-policy data',
+  );
+  const bindings = policy.bindings;
+  const binding =
+    Array.isArray(bindings) && bindings.length === 1 ? bindings[0] : undefined;
+  if (
+    typeof binding !== 'object' ||
+    binding === null ||
+    Array.isArray(binding) ||
+    (binding as Readonly<Record<string, unknown>>).role !==
+      'roles/storage.objectAdmin' ||
+    !Array.isArray((binding as Readonly<Record<string, unknown>>).members) ||
+    ((binding as Readonly<Record<string, unknown>>).members as unknown[])
+      .length !== 1 ||
+    ((binding as Readonly<Record<string, unknown>>).members as unknown[])[0] !==
+      `user:${TERRAFORM_ADMIN}` ||
+    (binding as Readonly<Record<string, unknown>>).condition !== undefined ||
+    (policy.auditConfigs !== undefined &&
+      (!Array.isArray(policy.auditConfigs) || policy.auditConfigs.length !== 0))
+  ) {
+    throw new Error(
+      'Interrupted bootstrap state contains unexpected bucket-policy data.',
+    );
+  }
+}
+
+export function parseInterruptedBootstrapStateResult(
+  status: number | null,
+  stdout: string,
+  stderr: string,
+): InterruptedBootstrapStateInspection | null {
+  if (status !== 0) {
+    const detail = stderr || stdout;
+    if (detail.includes('No state file was found')) {
+      return null;
+    }
+    throw new Error(
+      `Interrupted bootstrap state inspection exited with status ${status}: ${detail.trim().slice(0, 2_000)}`,
+    );
+  }
+  const raw = stdout.trim();
+  if (raw.length === 0) {
+    return null;
+  }
+  const state = parseJsonObject(raw, 'Interrupted bootstrap state');
+  const resources = state.resources;
+  if (
+    state.version !== 4 ||
+    !Number.isSafeInteger(state.serial) ||
+    (state.serial as number) < 0 ||
+    typeof state.lineage !== 'string' ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu.test(
+      state.lineage,
+    ) ||
+    typeof state.outputs !== 'object' ||
+    state.outputs === null ||
+    Array.isArray(state.outputs) ||
+    Object.keys(state.outputs as Readonly<Record<string, unknown>>).length !==
+      0 ||
+    !Array.isArray(resources)
+  ) {
+    throw new Error(
+      'Interrupted bootstrap state does not have the expected bounded state envelope.',
+    );
+  }
+  if (resources.length === 0) {
+    return null;
+  }
+
+  const attributesByAddress = new Map<
+    string,
+    Readonly<Record<string, unknown>>
+  >();
+  for (const value of resources) {
+    const resource = interruptedStateResource(value);
+    if (
+      !interruptedBootstrapAllowedResources.has(resource.address) ||
+      attributesByAddress.has(resource.address)
+    ) {
+      throw new Error(
+        'Interrupted bootstrap state contains an unexpected or duplicate resource.',
+      );
+    }
+    attributesByAddress.set(resource.address, resource.attributes);
+  }
+  for (const address of interruptedBootstrapRequiredResources) {
+    if (!attributesByAddress.has(address)) {
+      throw new Error(
+        'Interrupted bootstrap state is missing the project, Service Usage, or Storage trust resource.',
+      );
+    }
+  }
+
+  const projectNumber = validateInterruptedProjectState(
+    attributesByAddress.get('google_project.psd_eoc') as Readonly<
+      Record<string, unknown>
+    >,
+  );
+  for (const [address, service] of bootstrapServiceImports) {
+    const attributes = attributesByAddress.get(address);
+    if (attributes !== undefined) {
+      validateInterruptedServiceState(attributes, service);
+    }
+  }
+  const policyData = attributesByAddress.get(
+    'data.google_iam_policy.terraform_state',
+  );
+  if (policyData !== undefined) {
+    validateInterruptedPolicyData(policyData);
+  }
+
+  return {
+    fingerprint: createHash('sha256').update(raw).digest('hex'),
+    lineage: state.lineage,
+    projectNumber,
+    resources: new Set(attributesByAddress.keys()),
+    serial: state.serial as number,
+  };
 }
 
 export function parseServiceAccountListResult(
@@ -563,6 +938,7 @@ function sameStateBucketInspection(
     left !== null &&
     right !== null &&
     left.projectNumber === right.projectNumber &&
+    left.revision === right.revision &&
     left.status === right.status
   );
 }
@@ -633,6 +1009,144 @@ export async function repairMissingBootstrapApis(
   ) {
     throw new Error(
       'Google did not enable the exact bootstrap inspection APIs; no Terraform backend was initialized.',
+    );
+  }
+}
+
+function sameInterruptedBootstrapState(
+  left: InterruptedBootstrapStateInspection,
+  right: InterruptedBootstrapStateInspection | null,
+): boolean {
+  return (
+    right !== null &&
+    left.fingerprint === right.fingerprint &&
+    left.lineage === right.lineage &&
+    left.projectNumber === right.projectNumber &&
+    left.serial === right.serial
+  );
+}
+
+function sameStringSet(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
+  return (
+    left.size === right.size && [...left].every((value) => right.has(value))
+  );
+}
+
+export function validateRecoveredInterruptedBootstrapState(
+  initial: InterruptedBootstrapStateInspection | null,
+  final: InterruptedBootstrapStateInspection | null,
+  expectedResources: ReadonlySet<string>,
+): void {
+  const finalResources = final?.resources ?? new Set<string>();
+  if (
+    !sameStringSet(expectedResources, finalResources) ||
+    (initial !== null &&
+      (final === null ||
+        final.lineage !== initial.lineage ||
+        final.projectNumber !== initial.projectNumber ||
+        final.serial < initial.serial))
+  ) {
+    throw new Error(
+      'Local bootstrap state changed after recovery; rerun before creating a saved plan.',
+    );
+  }
+}
+
+export async function repairInterruptedBootstrapApis(
+  operations: InterruptedBootstrapApiRepairOperations,
+): Promise<void> {
+  const initialState = operations.inspectState();
+  if (initialState === null) {
+    return;
+  }
+  if (operations.inspectBucket() !== null) {
+    throw new Error(
+      'The state bucket appeared before interrupted-bootstrap recovery; rerun for a bucket-backed preview.',
+    );
+  }
+  const initialServices = operations.inspectServices();
+  if (initialServices.projectNumber !== initialState.projectNumber) {
+    throw new Error(
+      'Interrupted bootstrap state and enabled services identify different Google projects.',
+    );
+  }
+  const initiallyMissing = missingRecoverableBootstrapApis(
+    'bootstrap-policy',
+    initialServices.services,
+  );
+  if (initiallyMissing.length === 0) {
+    return;
+  }
+
+  await operations.confirm(
+    `Interrupted-bootstrap API repair consequence preview: the fixed ${PROJECT_ID} project (numeric ID ${initialState.projectNumber}) is anchored by exact local Terraform state and live Service Usage, but ${STATE_BUCKET} does not exist yet. Persistently enable only ${initiallyMissing.join(', ')} so the helper can validate the district organization, billing association, and complete project IAM policy before any import or saved plan. API enablement can permit billable API use. If later validation fails, the helper stops and leaves these inspection APIs enabled for explicit reconciliation.`,
+    'repair-psd401-eoc-interrupted-bootstrap-apis',
+  );
+
+  await operations.assertOperatorIdentity();
+  if (operations.inspectBucket() !== null) {
+    throw new Error(
+      'The state bucket appeared during interrupted-bootstrap confirmation; rerun for a bucket-backed preview.',
+    );
+  }
+  if (!sameInterruptedBootstrapState(initialState, operations.inspectState())) {
+    throw new Error(
+      'Local bootstrap state changed during interrupted-bootstrap confirmation; rerun for a fresh preview.',
+    );
+  }
+  const confirmedServices = operations.inspectServices();
+  if (confirmedServices.projectNumber !== initialState.projectNumber) {
+    throw new Error(
+      'Interrupted bootstrap state and enabled services identify different Google projects.',
+    );
+  }
+  const confirmedMissing = missingRecoverableBootstrapApis(
+    'bootstrap-policy',
+    confirmedServices.services,
+  );
+  if (confirmedMissing.some((service) => !initiallyMissing.includes(service))) {
+    throw new Error(
+      'The missing interrupted-bootstrap API set expanded during confirmation; rerun for a fresh preview.',
+    );
+  }
+
+  if (confirmedMissing.length > 0) {
+    operations.enableServices(confirmedMissing);
+    const repairedServices = operations.inspectServices();
+    if (repairedServices.projectNumber !== initialState.projectNumber) {
+      throw new Error(
+        'Interrupted bootstrap state and repaired services identify different Google projects.',
+      );
+    }
+    if (
+      missingRecoverableBootstrapApis(
+        'bootstrap-policy',
+        repairedServices.services,
+      ).length > 0
+    ) {
+      throw new Error(
+        'Google did not enable the exact interrupted-bootstrap inspection APIs; no import or saved plan was started.',
+      );
+    }
+  }
+
+  if (!sameInterruptedBootstrapState(initialState, operations.inspectState())) {
+    throw new Error(
+      'Local bootstrap state changed during interrupted-bootstrap API repair; no import or saved plan was started.',
+    );
+  }
+  operations.validateProject(initialState.projectNumber);
+  if (operations.inspectBucket() !== null) {
+    throw new Error(
+      'The state bucket appeared during interrupted-bootstrap API repair; rerun before any import or saved plan.',
+    );
+  }
+  if (!sameInterruptedBootstrapState(initialState, operations.inspectState())) {
+    throw new Error(
+      'Local bootstrap state changed during live project validation; no import or saved plan was started.',
     );
   }
 }
@@ -712,7 +1226,7 @@ function inspectRosterReaderServiceAccount(): Readonly<
 
 function validateLiveRecoverableRosterReader(
   serviceAccount: Readonly<Record<string, unknown>>,
-): void {
+): string {
   const resourcePolicy = parseJsonObject(
     runCommand(
       'gcloud',
@@ -752,11 +1266,16 @@ function validateLiveRecoverableRosterReader(
     resourcePolicy,
     userManagedKeyOutput,
   );
+  return canonicalJson({
+    resourcePolicy,
+    serviceAccount,
+    userManagedKeyOutput,
+  });
 }
 
 function validateExistingProject(
   project: Readonly<Record<string, unknown>>,
-): void {
+): Readonly<Record<string, unknown>> {
   const billing = parseJsonObject(
     runCommand('gcloud', [
       'billing',
@@ -771,6 +1290,7 @@ function validateExistingProject(
     'Project billing metadata',
   );
   validateBootstrapProject(project, billing);
+  return billing;
 }
 
 function projectIamPolicy(): Readonly<Record<string, unknown>> {
@@ -860,6 +1380,7 @@ function inspectStateBucketForApiRepair(
   );
   return {
     projectNumber,
+    revision: canonicalJson({ bucket, policy, projectBucketNames }),
     status: validateStateBucket(bucket, policy, allowBootstrapPolicy),
   };
 }
@@ -919,6 +1440,18 @@ function stateResources(cwd = gcpRoot): Set<string> {
   return parseStateListResult(result.status, result.stdout, result.stderr);
 }
 
+function inspectInterruptedBootstrapState(): InterruptedBootstrapStateInspection | null {
+  assertDefaultTerraformWorkspace(bootstrapRoot);
+  const result = runCommandForStatus('terraform', ['state', 'pull'], {
+    cwd: bootstrapRoot,
+  });
+  return parseInterruptedBootstrapStateResult(
+    result.status,
+    result.stdout,
+    result.stderr,
+  );
+}
+
 function enabledProjectServiceInspection(): EnabledProjectServicesInspection {
   return parseEnabledProjectServices(
     runCommand(
@@ -939,6 +1472,72 @@ function enabledProjectServiceInspection(): EnabledProjectServicesInspection {
 
 function enabledProjectServices(): Set<string> {
   return new Set(enabledProjectServiceInspection().services);
+}
+
+function captureApplyBoundary(includeRosterReader: boolean): string {
+  const bucket = inspectStateBucketForApiRepair(true);
+  const project = inspectProject();
+  if (project === null) {
+    if (bucket !== null) {
+      throw new Error(
+        'The state bucket exists but the expected PSD EOC project cannot be inspected.',
+      );
+    }
+    return buildApplyBoundary({
+      billing: null,
+      bucket: null,
+      policy: null,
+      project: null,
+      rosterReader: 'not-applicable',
+      serviceProjectNumber: null,
+      serviceStates: [],
+    });
+  }
+
+  const billing = validateExistingProject(project);
+  const projectNumber = project.projectNumber as string;
+  if (bucket !== null && bucket.projectNumber !== projectNumber) {
+    throw new Error(
+      'The expected PSD EOC project and state bucket identify different Google projects.',
+    );
+  }
+  const policy = projectIamPolicy();
+  validateProjectIamPolicy(policy, projectNumber, 'recovery');
+  const serviceInspection = enabledProjectServiceInspection();
+  if (serviceInspection.projectNumber !== projectNumber) {
+    throw new Error(
+      'The live project and enabled services identify different Google projects.',
+    );
+  }
+  const expectedServices = includeRosterReader
+    ? mainBoundaryServices
+    : BOOTSTRAP_SERVICES;
+  const serviceStates = [...expectedServices].sort().map((service) => ({
+    enabled: serviceInspection.services.has(service),
+    service,
+  }));
+
+  let rosterReader: string | null | 'iam-api-disabled' = 'iam-api-disabled';
+  if (
+    includeRosterReader &&
+    serviceInspection.services.has('iam.googleapis.com')
+  ) {
+    const serviceAccount = inspectRosterReaderServiceAccount();
+    rosterReader =
+      serviceAccount === null
+        ? null
+        : validateLiveRecoverableRosterReader(serviceAccount);
+  }
+
+  return buildApplyBoundary({
+    billing,
+    bucket,
+    policy,
+    project,
+    rosterReader,
+    serviceProjectNumber: serviceInspection.projectNumber,
+    serviceStates,
+  });
 }
 
 function recoverOrphanedRosterReader(resources: Set<string>): void {
@@ -990,8 +1589,56 @@ export function bootstrapPrerequisitesReady(
   );
 }
 
-function recoverBootstrapState(bucketStatus: StateBucketStatus): void {
-  const resources = stateResources(bootstrapRoot);
+function validateRecoveryProject(expectedProjectNumber: string): void {
+  const project = inspectProject();
+  if (project === null) {
+    throw new Error(
+      'Interrupted bootstrap state identifies the project but Google cannot verify it after API repair.',
+    );
+  }
+  validateExistingProject(project);
+  if (project.projectNumber !== expectedProjectNumber) {
+    throw new Error(
+      'Interrupted bootstrap state and the live project identify different Google projects.',
+    );
+  }
+  validateProjectIamPolicy(
+    projectIamPolicy(),
+    expectedProjectNumber,
+    'recovery',
+  );
+}
+
+function validateBootstrapStateAddresses(
+  resources: ReadonlySet<string>,
+  bucketStatus: StateBucketStatus,
+): void {
+  for (const address of resources) {
+    if (!bootstrapStateAllowedResources.has(address)) {
+      throw new Error(
+        'Bootstrap state contains an unexpected resource; refusing every import and saved plan.',
+      );
+    }
+  }
+  if (
+    bucketStatus === 'absent' &&
+    bootstrapBucketImports.some(([address]) => resources.has(address))
+  ) {
+    throw new Error(
+      'Bootstrap state records a state bucket that Google reports absent; refusing every import and saved plan.',
+    );
+  }
+}
+
+function recoverBootstrapState(): void {
+  const bucketStatus = stateBucketStatus(true);
+  const interruptedState =
+    bucketStatus === 'absent' ? inspectInterruptedBootstrapState() : null;
+  const resources =
+    bucketStatus === 'absent'
+      ? new Set(interruptedState?.resources ?? [])
+      : stateResources(bootstrapRoot);
+  validateBootstrapStateAddresses(resources, bucketStatus);
   const project = inspectProject();
   if (project === null) {
     if (resources.has('google_project.psd_eoc')) {
@@ -1038,27 +1685,93 @@ function recoverBootstrapState(bucketStatus: StateBucketStatus): void {
       }
     }
   }
+
+  const finalBucketStatus = stateBucketStatus(true);
+  if (finalBucketStatus !== bucketStatus) {
+    throw new Error(
+      'The state bucket changed during bootstrap recovery; rerun before creating a saved plan.',
+    );
+  }
+  const finalResources = stateResources(bootstrapRoot);
+  validateBootstrapStateAddresses(finalResources, finalBucketStatus);
+  if (finalBucketStatus === 'absent') {
+    const finalState = inspectInterruptedBootstrapState();
+    validateRecoveredInterruptedBootstrapState(
+      interruptedState,
+      finalState,
+      resources,
+    );
+  }
+}
+
+export async function executeConfirmedPlan(
+  operations: ConfirmedPlanOperations,
+): Promise<void> {
+  try {
+    const initialBoundary = operations.captureBoundary();
+    operations.plan();
+    const planSeal = operations.readPlanSeal();
+    const plannedBoundary = operations.captureBoundary();
+    if (plannedBoundary !== initialBoundary) {
+      throw new Error(
+        'The validated GCP boundary changed while Terraform planned; rerun for a fresh plan.',
+      );
+    }
+    await operations.confirm();
+    if (operations.readPlanSeal() !== planSeal) {
+      throw new Error(
+        'The saved Terraform plan changed during confirmation; rerun and review a fresh plan.',
+      );
+    }
+    await operations.revalidate();
+    if (operations.captureBoundary() !== plannedBoundary) {
+      throw new Error(
+        'The validated GCP boundary changed during confirmation; rerun and review a fresh plan.',
+      );
+    }
+    await operations.revalidate();
+    if (operations.readPlanSeal() !== planSeal) {
+      throw new Error(
+        'The saved Terraform plan changed before apply; rerun and review a fresh plan.',
+      );
+    }
+    operations.apply();
+  } finally {
+    operations.cleanup();
+  }
 }
 
 async function applySavedPlan(options: {
+  readonly captureBoundary: () => string;
   readonly confirmation: string;
   readonly cwd: string;
   readonly planPath: string;
   readonly preview: string;
 }): Promise<void> {
-  runTerraformInteractive(
-    ['plan', '-input=false', `-out=${options.planPath}`],
-    options.cwd,
-  );
-  try {
-    await requireExactConfirmation(options.preview, options.confirmation);
-    runTerraformInteractive(
-      ['apply', '-input=false', options.planPath],
-      options.cwd,
-    );
-  } finally {
-    rmSync(options.planPath, { force: true });
-  }
+  await executeConfirmedPlan({
+    apply: () => {
+      runTerraformInteractive(
+        ['apply', '-input=false', options.planPath],
+        options.cwd,
+      );
+    },
+    captureBoundary: options.captureBoundary,
+    cleanup: () => rmSync(options.planPath, { force: true }),
+    confirm: () =>
+      requireExactConfirmation(options.preview, options.confirmation),
+    plan: () => {
+      runTerraformInteractive(
+        ['plan', '-input=false', `-out=${options.planPath}`],
+        options.cwd,
+      );
+    },
+    readPlanSeal: () => readSavedPlanSeal(options.planPath),
+    revalidate: async () => {
+      assertDefaultTerraformWorkspace(options.cwd);
+      assertActiveGcloudAccount(TERRAFORM_ADMIN);
+      await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
+    },
+  });
 }
 
 async function main(): Promise<void> {
@@ -1093,10 +1806,42 @@ async function main(): Promise<void> {
       ? enabledProjectServices()
       : new Set<string>();
   if (!bootstrapPrerequisitesReady(initialBucketStatus, initialServices)) {
-    runInteractive('terraform', ['init', '-input=false'], bootstrapRoot);
+    runInteractive(
+      'terraform',
+      ['init', '-reconfigure', '-input=false'],
+      bootstrapRoot,
+    );
     assertDefaultTerraformWorkspace(bootstrapRoot);
-    recoverBootstrapState(initialBucketStatus);
+    if (initialBucketStatus === 'absent') {
+      await repairInterruptedBootstrapApis({
+        assertOperatorIdentity: async () => {
+          assertActiveGcloudAccount(TERRAFORM_ADMIN);
+          await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
+        },
+        confirm: requireExactConfirmation,
+        enableServices: (services) => {
+          runCommand(
+            'gcloud',
+            [
+              'services',
+              'enable',
+              ...services,
+              '--project',
+              PROJECT_ID,
+              '--quiet',
+            ],
+            { redactFailureOutput: true },
+          );
+        },
+        inspectBucket: () => inspectStateBucketForApiRepair(true),
+        inspectServices: enabledProjectServiceInspection,
+        inspectState: inspectInterruptedBootstrapState,
+        validateProject: validateRecoveryProject,
+      });
+    }
+    recoverBootstrapState();
     await applySavedPlan({
+      captureBoundary: () => captureApplyBoundary(false),
       confirmation: 'create-psd401-eoc-bootstrap',
       cwd: bootstrapRoot,
       planPath: bootstrapPlan,
@@ -1129,6 +1874,7 @@ async function main(): Promise<void> {
   recoverOrphanedRosterReader(managedResources);
 
   await applySavedPlan({
+    captureBoundary: () => captureApplyBoundary(true),
     confirmation: 'apply-psd401-eoc-gcp',
     cwd: gcpRoot,
     planPath: mainPlan,

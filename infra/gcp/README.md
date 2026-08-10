@@ -147,6 +147,25 @@ Manager and/or Cloud Billing API and verifies the result. If Service Usage or
 Storage cannot support those trusted reads, recovery fails closed rather than
 guessing.
 
+An interruption after the project, Service Usage, and Storage were recorded in
+local bootstrap state but before the bucket was created has no live bucket to
+anchor that repair. After initializing only the local bootstrap root, the
+helper reads the bounded raw state and requires the exact fixed project and
+trust-service instances, numeric project, lineage, serial, settings, and labels;
+bucket resources, sensitive or deposed instances, modules, and unexpected
+resources fail closed. It cross-checks that numeric project against live
+structured Service Usage and requires both trust APIs live. Only then can it
+offer the distinct exact phrase
+`repair-psd401-eoc-interrupted-bootstrap-apis`, whose preview states that no
+bucket exists and that the enablement is persistent and potentially billable.
+After confirmation it rechecks both operator identities, bucket absence, the
+complete state fingerprint, and the service inventory before enabling only the
+still-missing Cloud Resource Manager and/or Cloud Billing API. It then verifies
+the live project, organization, billing, complete recovery IAM policy, unchanged
+state, and continued bucket absence before any import or saved plan. Missing or
+valid-empty local state remains a fresh create; incomplete or ambiguous state is
+never guessed into a recovery.
+
 This narrow enablement is persistent, can permit billable API use, and cannot
 be represented by a usable saved Terraform plan because the disabled APIs are
 required to refresh the project resources for that plan. Immediately after the
@@ -176,6 +195,20 @@ cannot redirect a helper to another workspace. Each Terraform confirmation
 phrase is shown only after its complete plan. There is no auto-approve path. Do
 not confirm the API repair or either plan without explicit product-owner
 approval for the billed, retained infrastructure described in its preview.
+Because a saved plan starts a new provider process at apply time, the helper
+captures and compares a normalized live boundary before and after planning and
+again after each unbounded confirmation. That boundary includes the exact
+project and parent organization, billing association, complete project IAM,
+bucket ownership/configuration/IAM revision, fixed API states, and, for the main
+plan, roster-reader identity/resource policy/user-managed-key state. The plan
+itself is sealed as one bounded regular inode with no symbolic or hard links;
+its SHA-256, inode, device, and size must remain unchanged. After confirmation,
+the helper checks that seal, revalidates the persisted default workspace plus
+both fixed gcloud and live ADC identities, rereads the boundary, repeats the
+identity checks, and checks the seal again immediately before invoking that
+exact saved plan. Any credential, live-boundary, or plan change aborts, removes
+the plan, and requires a fresh plan and confirmation instead of applying or
+replanning it.
 
 No private key or OAuth secret is a Terraform resource, input, or output.
 
@@ -378,7 +411,10 @@ It then uses a
 service-account JWT with no delegated subject, performs only `groups.lookup`
 and `memberships.list` GETs, requests `fields=nextPageToken` for the membership
 proof, discards the response body, and prints no group, member, token, or
-credential value.
+credential value. Immediately before PASS it rereads the complete direct and
+indirect Workspace assignment set, after the existing final GCP IAM boundary
+check, so a concurrent broader or indirect grant fails closed instead of
+producing stale live-role evidence.
 
 ### Runtime compatibility boundary
 

@@ -1,21 +1,37 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  linkSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   BOOTSTRAP_SERVICES,
   bootstrapPrerequisitesReady,
+  buildApplyBoundary,
+  executeConfirmedPlan,
   missingRecoverableBootstrapApis,
   parseBucketDescribeResult,
   parseEnabledProjectServices,
+  parseInterruptedBootstrapStateResult,
   parseProjectDescribeResult,
   parseServiceAccountListResult,
   parseStateListResult,
+  repairInterruptedBootstrapApis,
   repairMissingBootstrapApis,
+  readSavedPlanSeal,
   stateBucketProjectNumber,
   validateBootstrapProject,
   validateRecoverableRosterReaderServiceAccount,
+  validateRecoveredInterruptedBootstrapState,
   validateStateBucket,
 } from './scripts/apply';
 import {
@@ -208,10 +224,90 @@ const bootstrapBucketPolicy = {
   ],
 } as const;
 
+function interruptedBootstrapState(
+  options: {
+    readonly includeBilling?: boolean;
+    readonly includeResourceManager?: boolean;
+    readonly projectNumber?: string;
+    readonly resources?: readonly Readonly<Record<string, unknown>>[];
+    readonly serial?: number;
+  } = {},
+): Readonly<Record<string, unknown>> {
+  const projectNumber = options.projectNumber ?? '123456789';
+  const instance = (
+    attributes: Readonly<Record<string, unknown>>,
+  ): Readonly<Record<string, unknown>> => ({
+    instances: [
+      {
+        attributes,
+        schema_version: 0,
+        sensitive_attributes: [],
+      },
+    ],
+    mode: 'managed',
+    provider: 'provider["registry.terraform.io/hashicorp/google"]',
+  });
+  const service = (
+    name: string,
+    serviceName: string,
+  ): Readonly<Record<string, unknown>> => ({
+    ...instance({
+      deletion_policy: 'PREVENT',
+      disable_dependent_services: false,
+      disable_on_destroy: false,
+      id: `psd401-eoc/${serviceName}`,
+      project: 'psd401-eoc',
+      service: serviceName,
+    }),
+    name,
+    type: 'google_project_service',
+  });
+  const resources = options.resources ?? [
+    {
+      ...instance({
+        auto_create_network: false,
+        billing_account: '01760A-35A65E-94FB90',
+        deletion_policy: 'PREVENT',
+        id: 'projects/psd401-eoc',
+        labels: validProject.labels,
+        name: 'PSD EOC',
+        number: projectNumber,
+        org_id: '482073499306',
+        project_id: 'psd401-eoc',
+      }),
+      name: 'psd_eoc',
+      type: 'google_project',
+    },
+    service('service_usage', 'serviceusage.googleapis.com'),
+    service('storage', 'storage.googleapis.com'),
+    ...(options.includeResourceManager === true
+      ? [
+          service(
+            'cloud_resource_manager',
+            'cloudresourcemanager.googleapis.com',
+          ),
+        ]
+      : []),
+    ...(options.includeBilling === true
+      ? [service('cloud_billing', 'cloudbilling.googleapis.com')]
+      : []),
+  ];
+  return {
+    lineage: '123e4567-e89b-42d3-a456-426614174000',
+    outputs: {},
+    resources,
+    serial: options.serial ?? 7,
+    terraform_version: '1.14.5',
+    version: 4,
+  };
+}
+
 describe('PSD EOC GCP Terraform safety boundary', () => {
   test('binds the project to the district organization and prevents deletion', () => {
     const variables = read('variables.tf');
     const main = read('main.tf');
+    const bootstrap = read('bootstrap/main.tf');
+    const provider = read('providers.tf');
 
     expect(variables).toContain('default     = "psd401-eoc"');
     expect(variables).toContain('default     = "482073499306"');
@@ -220,6 +316,12 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(main).toContain('deletion_policy     = "PREVENT"');
     expect(main.match(/prevent_destroy = true/gu)).toHaveLength(7);
     expect(main).toContain('deletion_policy             = "PREVENT"');
+    expect(bootstrap).toMatch(
+      /provider "google" \{[\s\S]*deletion_policy\s+= "PREVENT"[\s\S]*\}/u,
+    );
+    expect(provider).toMatch(
+      /provider "google" \{[\s\S]*deletion_policy\s+= "PREVENT"[\s\S]*\}/u,
+    );
   });
 
   test('removes the automatic creator Owner only after narrower grants exist', () => {
@@ -311,7 +413,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(allTerraform).not.toContain('disable_dependent_services = true');
     expect(allTerraform).not.toContain('deletion_policy            = "DELETE"');
     expect(allTerraform.match(/deletion_policy\s+= "PREVENT"/gu)).toHaveLength(
-      11,
+      13,
     );
   });
 
@@ -461,6 +563,324 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     );
   });
 
+  test('revalidates the sealed plan, live boundary, and identities before apply', async () => {
+    const apply = read('scripts/apply.ts');
+    const trace: string[] = [];
+    const captureBoundary = (): string => {
+      trace.push('boundary');
+      return 'boundary';
+    };
+    const readPlanSeal = (): string => {
+      trace.push('seal');
+      return 'seal';
+    };
+
+    await executeConfirmedPlan({
+      apply: () => trace.push('apply'),
+      captureBoundary,
+      cleanup: () => trace.push('cleanup'),
+      confirm: async () => {
+        trace.push('confirm');
+      },
+      plan: () => trace.push('plan'),
+      readPlanSeal,
+      revalidate: async () => {
+        trace.push('revalidate');
+      },
+    });
+    expect(trace).toEqual([
+      'boundary',
+      'plan',
+      'seal',
+      'boundary',
+      'confirm',
+      'seal',
+      'revalidate',
+      'boundary',
+      'revalidate',
+      'seal',
+      'apply',
+      'cleanup',
+    ]);
+
+    trace.length = 0;
+    await expect(
+      executeConfirmedPlan({
+        apply: () => trace.push('apply'),
+        captureBoundary,
+        cleanup: () => trace.push('cleanup'),
+        confirm: async () => {
+          trace.push('confirm');
+          throw new Error('confirmation rejected');
+        },
+        plan: () => trace.push('plan'),
+        readPlanSeal,
+        revalidate: async () => {
+          trace.push('revalidate');
+        },
+      }),
+    ).rejects.toThrow('confirmation rejected');
+    expect(trace).toEqual([
+      'boundary',
+      'plan',
+      'seal',
+      'boundary',
+      'confirm',
+      'cleanup',
+    ]);
+
+    trace.length = 0;
+    await expect(
+      executeConfirmedPlan({
+        apply: () => trace.push('apply'),
+        captureBoundary,
+        cleanup: () => trace.push('cleanup'),
+        confirm: async () => {
+          trace.push('confirm');
+        },
+        plan: () => trace.push('plan'),
+        readPlanSeal,
+        revalidate: async () => {
+          trace.push('revalidate');
+          throw new Error('credential changed');
+        },
+      }),
+    ).rejects.toThrow('credential changed');
+    expect(trace).toEqual([
+      'boundary',
+      'plan',
+      'seal',
+      'boundary',
+      'confirm',
+      'seal',
+      'revalidate',
+      'cleanup',
+    ]);
+
+    trace.length = 0;
+    await expect(
+      executeConfirmedPlan({
+        apply: () => trace.push('apply'),
+        captureBoundary,
+        cleanup: () => trace.push('cleanup'),
+        confirm: async () => {
+          trace.push('confirm');
+        },
+        plan: () => {
+          trace.push('plan');
+          throw new Error('plan failed');
+        },
+        readPlanSeal,
+        revalidate: async () => {
+          trace.push('revalidate');
+        },
+      }),
+    ).rejects.toThrow('plan failed');
+    expect(trace).toEqual(['boundary', 'plan', 'cleanup']);
+
+    trace.length = 0;
+    await expect(
+      executeConfirmedPlan({
+        apply: () => {
+          trace.push('apply');
+          throw new Error('apply failed');
+        },
+        captureBoundary,
+        cleanup: () => trace.push('cleanup'),
+        confirm: async () => {
+          trace.push('confirm');
+        },
+        plan: () => trace.push('plan'),
+        readPlanSeal,
+        revalidate: async () => {
+          trace.push('revalidate');
+        },
+      }),
+    ).rejects.toThrow('apply failed');
+    expect(trace).toEqual([
+      'boundary',
+      'plan',
+      'seal',
+      'boundary',
+      'confirm',
+      'seal',
+      'revalidate',
+      'boundary',
+      'revalidate',
+      'seal',
+      'apply',
+      'cleanup',
+    ]);
+
+    const applySavedPlan = apply.slice(
+      apply.indexOf('async function applySavedPlan'),
+      apply.indexOf('async function main'),
+    );
+    expect(applySavedPlan).toMatch(
+      /captureBoundary: options\.captureBoundary,[\s\S]*readPlanSeal: \(\) => readSavedPlanSeal\(options\.planPath\),[\s\S]*revalidate: async \(\) => \{\s*assertDefaultTerraformWorkspace\(options\.cwd\);\s*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*\},/u,
+    );
+  });
+
+  test('discards a plan when its bytes or validated GCP boundary change', async () => {
+    const events: string[] = [];
+    const base = {
+      apply: () => events.push('apply'),
+      cleanup: () => events.push('cleanup'),
+      confirm: async () => {
+        events.push('confirm');
+      },
+      plan: () => events.push('plan'),
+      revalidate: async () => {
+        events.push('revalidate');
+      },
+    };
+
+    let boundaryReads = 0;
+    await expect(
+      executeConfirmedPlan({
+        ...base,
+        captureBoundary: () => {
+          boundaryReads += 1;
+          return boundaryReads === 1 ? 'before' : 'after';
+        },
+        readPlanSeal: () => 'seal',
+      }),
+    ).rejects.toThrow('changed while Terraform planned');
+    expect(events).toEqual(['plan', 'cleanup']);
+
+    events.length = 0;
+    boundaryReads = 0;
+    await expect(
+      executeConfirmedPlan({
+        ...base,
+        captureBoundary: () => {
+          boundaryReads += 1;
+          return boundaryReads < 3 ? 'planned' : 'changed';
+        },
+        readPlanSeal: () => 'seal',
+      }),
+    ).rejects.toThrow('changed during confirmation');
+    expect(events).toEqual(['plan', 'confirm', 'revalidate', 'cleanup']);
+
+    events.length = 0;
+    let sealReads = 0;
+    await expect(
+      executeConfirmedPlan({
+        ...base,
+        captureBoundary: () => 'boundary',
+        readPlanSeal: () => {
+          sealReads += 1;
+          return sealReads === 1 ? 'planned' : 'replaced';
+        },
+      }),
+    ).rejects.toThrow('changed during confirmation');
+    expect(events).toEqual(['plan', 'confirm', 'cleanup']);
+
+    events.length = 0;
+    sealReads = 0;
+    await expect(
+      executeConfirmedPlan({
+        ...base,
+        captureBoundary: () => 'boundary',
+        readPlanSeal: () => {
+          sealReads += 1;
+          return sealReads < 3 ? 'planned' : 'replaced';
+        },
+      }),
+    ).rejects.toThrow('changed before apply');
+    expect(events).toEqual([
+      'plan',
+      'confirm',
+      'revalidate',
+      'revalidate',
+      'cleanup',
+    ]);
+  });
+
+  test('binds every security-relevant live category into the apply boundary', () => {
+    const evidence = {
+      billing: { billingAccountName: 'billingAccounts/fixed' },
+      bucket: { projectNumber: '123', revision: 'bucket-and-policy' },
+      policy: { bindings: [{ members: ['user:admin'], role: 'roles/viewer' }] },
+      project: { parent: { id: 'organization' }, projectNumber: '123' },
+      rosterReader: 'service-account-policy-and-keys',
+      serviceProjectNumber: '123',
+      serviceStates: [
+        { enabled: true, service: 'serviceusage.googleapis.com' },
+      ],
+    } as const;
+    const baseline = buildApplyBoundary(evidence);
+    for (const changed of [
+      { ...evidence, billing: { billingAccountName: 'billingAccounts/other' } },
+      { ...evidence, bucket: { projectNumber: '123', revision: 'changed' } },
+      { ...evidence, policy: { bindings: [] } },
+      {
+        ...evidence,
+        project: { parent: { id: 'other' }, projectNumber: '123' },
+      },
+      { ...evidence, rosterReader: 'changed-key-policy' },
+      { ...evidence, serviceProjectNumber: '456' },
+      {
+        ...evidence,
+        serviceStates: [
+          { enabled: false, service: 'serviceusage.googleapis.com' },
+        ],
+      },
+    ]) {
+      expect(buildApplyBoundary(changed)).not.toBe(baseline);
+    }
+
+    const apply = read('scripts/apply.ts');
+    const capture = apply.slice(
+      apply.indexOf('function captureApplyBoundary'),
+      apply.indexOf('function recoverOrphanedRosterReader'),
+    );
+    for (const evidenceName of [
+      'billing',
+      'bucket',
+      'policy',
+      'project',
+      'rosterReader',
+      'serviceProjectNumber',
+      'serviceStates',
+    ]) {
+      expect(capture).toContain(evidenceName);
+    }
+    expect(capture).toContain('validateLiveRecoverableRosterReader');
+    expect(capture).toContain('validateProjectIamPolicy');
+  });
+
+  test('seals only one nonempty unlinked saved-plan inode and its exact bytes', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'psd-eoc-plan-seal-'));
+    const plan = join(directory, 'apply.tfplan');
+    const link = join(directory, 'linked.tfplan');
+    const symbolic = join(directory, 'symbolic.tfplan');
+    try {
+      writeFileSync(plan, 'synthetic-plan-one', { mode: 0o600 });
+      const initialSeal = readSavedPlanSeal(plan);
+      expect(initialSeal).toMatch(/[a-f0-9]{64}/u);
+      writeFileSync(plan, 'synthetic-plan-two', { mode: 0o600 });
+      expect(readSavedPlanSeal(plan)).not.toBe(initialSeal);
+
+      writeFileSync(plan, '', { mode: 0o600 });
+      expect(() => readSavedPlanSeal(plan)).toThrow('bounded regular file');
+
+      writeFileSync(plan, 'synthetic-plan-three', { mode: 0o600 });
+      symlinkSync(plan, symbolic);
+      expect(() => readSavedPlanSeal(symbolic)).toThrow();
+
+      linkSync(plan, link);
+      expect(() => readSavedPlanSeal(plan)).toThrow(
+        'no hard or symbolic links',
+      );
+      expect(() => readSavedPlanSeal(link)).toThrow(
+        'no hard or symbolic links',
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
   test('breaks the new-bucket backend cycle with a non-secret bootstrap root', () => {
     const bootstrap = read('bootstrap/main.tf');
     const main = read('main.tf');
@@ -500,7 +920,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     );
     expect(apply).toContain('`b/${STATE_BUCKET}`');
     expect(apply).toContain("bucketStatus !== 'absent'");
-    expect(apply).toContain("'terraform', ['init', '-input=false']");
+    expect(apply).toContain("['init', '-reconfigure', '-input=false']");
     expect(apply).toContain("'import'");
     expect(apply).toContain("['state', 'rm', ...duplicateResources]");
   });
@@ -738,6 +1158,469 @@ describe('fail-closed bootstrap and process behavior', () => {
         }),
       ).toThrow('valid owning Google project');
     }
+  });
+
+  test('accepts only exact interrupted local bootstrap state as a repair anchor', () => {
+    const state = interruptedBootstrapState({ includeResourceManager: true });
+    const inspection = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(state),
+      '',
+    );
+    expect(inspection).toMatchObject({
+      lineage: '123e4567-e89b-42d3-a456-426614174000',
+      projectNumber: '123456789',
+      serial: 7,
+    });
+    expect(inspection?.fingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(
+      parseInterruptedBootstrapStateResult(1, '', 'No state file was found!'),
+    ).toBeNull();
+    expect(parseInterruptedBootstrapStateResult(0, '', '')).toBeNull();
+    expect(
+      parseInterruptedBootstrapStateResult(
+        0,
+        JSON.stringify({ ...state, resources: [] }),
+        '',
+      ),
+    ).toBeNull();
+
+    const resources = state.resources as readonly Readonly<
+      Record<string, unknown>
+    >[];
+    const withoutStorage = resources.filter(
+      (resource) => resource.name !== 'storage',
+    );
+    expect(() =>
+      parseInterruptedBootstrapStateResult(
+        0,
+        JSON.stringify({ ...state, resources: withoutStorage }),
+        '',
+      ),
+    ).toThrow('missing the project, Service Usage, or Storage');
+
+    const project = resources[0] as Readonly<Record<string, unknown>>;
+    const projectInstances = project.instances as readonly Readonly<
+      Record<string, unknown>
+    >[];
+    const projectInstance = projectInstances[0] as Readonly<
+      Record<string, unknown>
+    >;
+    const projectAttributes = projectInstance.attributes as Readonly<
+      Record<string, unknown>
+    >;
+    expect(() =>
+      parseInterruptedBootstrapStateResult(
+        0,
+        JSON.stringify({
+          ...state,
+          resources: [
+            {
+              ...project,
+              instances: [
+                {
+                  ...projectInstance,
+                  attributes: {
+                    ...projectAttributes,
+                    id: 'psd401-eoc',
+                    number: undefined,
+                    project_number: '123456789',
+                  },
+                },
+              ],
+            },
+            ...resources.slice(1),
+          ],
+        }),
+        '',
+      ),
+    ).toThrow('exact fixed project contract');
+
+    const importedService = resources[1] as Readonly<Record<string, unknown>>;
+    const importedServiceInstances =
+      importedService.instances as readonly Readonly<Record<string, unknown>>[];
+    const importedServiceInstance = importedServiceInstances[0] as Readonly<
+      Record<string, unknown>
+    >;
+    const importedServiceAttributes =
+      importedServiceInstance.attributes as Readonly<Record<string, unknown>>;
+    expect(() =>
+      parseInterruptedBootstrapStateResult(
+        0,
+        JSON.stringify({
+          ...state,
+          resources: [
+            resources[0],
+            {
+              ...importedService,
+              instances: [
+                {
+                  ...importedServiceInstance,
+                  attributes: {
+                    ...importedServiceAttributes,
+                    deletion_policy: 'DELETE',
+                  },
+                },
+              ],
+            },
+            ...resources.slice(2),
+          ],
+        }),
+        '',
+      ),
+    ).toThrow('exact serviceusage.googleapis.com contract');
+
+    expect(() =>
+      parseInterruptedBootstrapStateResult(
+        0,
+        JSON.stringify({
+          ...state,
+          resources: [
+            {
+              ...project,
+              instances: [
+                { ...projectInstance, sensitive_attributes: [['labels']] },
+              ],
+            },
+            ...resources.slice(1),
+          ],
+        }),
+        '',
+      ),
+    ).toThrow('deposed, indexed, tainted, sensitive, or malformed');
+
+    expect(() =>
+      parseInterruptedBootstrapStateResult(
+        0,
+        JSON.stringify({
+          ...state,
+          resources: [
+            ...resources,
+            {
+              instances: [
+                {
+                  attributes: {},
+                  schema_version: 0,
+                  sensitive_attributes: [],
+                },
+              ],
+              mode: 'managed',
+              name: 'terraform_state',
+              provider: 'provider["registry.terraform.io/hashicorp/google"]',
+              type: 'google_storage_bucket',
+            },
+          ],
+        }),
+        '',
+      ),
+    ).toThrow('unexpected or duplicate resource');
+    expect(() =>
+      parseInterruptedBootstrapStateResult(
+        1,
+        '',
+        'Permission denied while reading state',
+      ),
+    ).toThrow('Permission denied');
+  });
+
+  test('accepts only the exact state constructed by bucketless recovery imports', () => {
+    const finalState = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(
+        interruptedBootstrapState({
+          includeBilling: true,
+          includeResourceManager: true,
+        }),
+      ),
+      '',
+    );
+    if (finalState === null) {
+      throw new Error('Synthetic interrupted bootstrap state was empty.');
+    }
+    expect(() =>
+      validateRecoveredInterruptedBootstrapState(
+        null,
+        finalState,
+        finalState.resources,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateRecoveredInterruptedBootstrapState(
+        null,
+        finalState,
+        new Set([...finalState.resources, 'google_storage_bucket.unexpected']),
+      ),
+    ).toThrow('changed after recovery');
+
+    const earlier = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(interruptedBootstrapState({ serial: 9 })),
+      '',
+    );
+    const rolledBack = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(interruptedBootstrapState({ serial: 8 })),
+      '',
+    );
+    if (earlier === null || rolledBack === null) {
+      throw new Error('Synthetic interrupted bootstrap state was empty.');
+    }
+    expect(() =>
+      validateRecoveredInterruptedBootstrapState(
+        earlier,
+        rolledBack,
+        rolledBack.resources,
+      ),
+    ).toThrow('changed after recovery');
+  });
+
+  test('repairs an exact bucketless interrupted bootstrap before any import or plan', async () => {
+    const inspection = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(interruptedBootstrapState()),
+      '',
+    );
+    if (inspection === null) {
+      throw new Error('Synthetic interrupted bootstrap state was empty.');
+    }
+    const services = new Set<string>(BOOTSTRAP_SERVICES);
+    services.delete('cloudresourcemanager.googleapis.com');
+    services.delete('cloudbilling.googleapis.com');
+    const trace: string[] = [];
+    let preview = '';
+    let confirmation = '';
+
+    await repairInterruptedBootstrapApis({
+      assertOperatorIdentity: async () => {
+        trace.push('identity');
+      },
+      confirm: async (value, phrase) => {
+        trace.push('confirm');
+        preview = value;
+        confirmation = phrase;
+      },
+      enableServices: (missing) => {
+        trace.push(`enable:${missing.join(',')}`);
+        for (const service of missing) {
+          services.add(service);
+        }
+      },
+      inspectBucket: () => {
+        trace.push('bucket');
+        return null;
+      },
+      inspectServices: () => {
+        trace.push('services');
+        return {
+          projectNumber: inspection.projectNumber,
+          services: new Set(services),
+        };
+      },
+      inspectState: () => {
+        trace.push('state');
+        return inspection;
+      },
+      validateProject: (projectNumber) => {
+        trace.push(`project:${projectNumber}`);
+      },
+    });
+
+    expect(trace).toEqual([
+      'state',
+      'bucket',
+      'services',
+      'confirm',
+      'identity',
+      'bucket',
+      'state',
+      'services',
+      'enable:cloudresourcemanager.googleapis.com,cloudbilling.googleapis.com',
+      'services',
+      'state',
+      'project:123456789',
+      'bucket',
+      'state',
+    ]);
+    expect(preview).toContain('does not exist yet');
+    expect(preview).toContain('billable API use');
+    expect(confirmation).toBe('repair-psd401-eoc-interrupted-bootstrap-apis');
+  });
+
+  test('bucketless interrupted-bootstrap repair fails closed on changed trust evidence', async () => {
+    const initial = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(interruptedBootstrapState()),
+      '',
+    );
+    const changed = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(interruptedBootstrapState({ serial: 8 })),
+      '',
+    );
+    if (initial === null || changed === null) {
+      throw new Error('Synthetic interrupted bootstrap state was empty.');
+    }
+    const services = new Set<string>(BOOTSTRAP_SERVICES);
+    services.delete('cloudbilling.googleapis.com');
+    const calls: string[] = [];
+    let stateReads = 0;
+    await expect(
+      repairInterruptedBootstrapApis({
+        assertOperatorIdentity: async () => {
+          calls.push('identity');
+        },
+        confirm: async () => {
+          calls.push('confirm');
+        },
+        enableServices: () => calls.push('enable'),
+        inspectBucket: () => null,
+        inspectServices: () => ({
+          projectNumber: initial.projectNumber,
+          services,
+        }),
+        inspectState: () => {
+          stateReads += 1;
+          return stateReads === 1 ? initial : changed;
+        },
+        validateProject: () => calls.push('project'),
+      }),
+    ).rejects.toThrow('Local bootstrap state changed');
+    expect(calls).toEqual(['confirm', 'identity']);
+
+    let bucketReads = 0;
+    await expect(
+      repairInterruptedBootstrapApis({
+        assertOperatorIdentity: async () => {},
+        confirm: async () => {},
+        enableServices: () => calls.push('enable'),
+        inspectBucket: () => {
+          bucketReads += 1;
+          return bucketReads === 1
+            ? null
+            : {
+                projectNumber: initial.projectNumber,
+                status: 'managed-policy',
+              };
+        },
+        inspectServices: () => ({
+          projectNumber: initial.projectNumber,
+          services,
+        }),
+        inspectState: () => initial,
+        validateProject: () => calls.push('project'),
+      }),
+    ).rejects.toThrow('appeared during interrupted-bootstrap confirmation');
+    expect(calls).not.toContain('enable');
+
+    const repairServices = new Set<string>(BOOTSTRAP_SERVICES);
+    repairServices.delete('cloudbilling.googleapis.com');
+    let currentState = initial;
+    await expect(
+      repairInterruptedBootstrapApis({
+        assertOperatorIdentity: async () => {},
+        confirm: async () => {},
+        enableServices: (missing) => {
+          for (const service of missing) {
+            repairServices.add(service);
+          }
+        },
+        inspectBucket: () => null,
+        inspectServices: () => ({
+          projectNumber: initial.projectNumber,
+          services: new Set(repairServices),
+        }),
+        inspectState: () => currentState,
+        validateProject: () => {
+          currentState = changed;
+        },
+      }),
+    ).rejects.toThrow('changed during live project validation');
+  });
+
+  test('concurrent bucketless API repair skips mutation but completes validation', async () => {
+    const inspection = parseInterruptedBootstrapStateResult(
+      0,
+      JSON.stringify(interruptedBootstrapState()),
+      '',
+    );
+    if (inspection === null) {
+      throw new Error('Synthetic interrupted bootstrap state was empty.');
+    }
+    const missingBilling = new Set<string>(BOOTSTRAP_SERVICES);
+    missingBilling.delete('cloudbilling.googleapis.com');
+    const trace: string[] = [];
+    let serviceReads = 0;
+    await repairInterruptedBootstrapApis({
+      assertOperatorIdentity: async () => {
+        trace.push('identity');
+      },
+      confirm: async () => {
+        trace.push('confirm');
+      },
+      enableServices: () => trace.push('enable'),
+      inspectBucket: () => {
+        trace.push('bucket');
+        return null;
+      },
+      inspectServices: () => {
+        trace.push('services');
+        serviceReads += 1;
+        return {
+          projectNumber: inspection.projectNumber,
+          services:
+            serviceReads === 1
+              ? new Set(missingBilling)
+              : new Set(BOOTSTRAP_SERVICES),
+        };
+      },
+      inspectState: () => {
+        trace.push('state');
+        return inspection;
+      },
+      validateProject: () => trace.push('project'),
+    });
+    expect(trace).toEqual([
+      'state',
+      'bucket',
+      'services',
+      'confirm',
+      'identity',
+      'bucket',
+      'state',
+      'services',
+      'state',
+      'project',
+      'bucket',
+      'state',
+    ]);
+    expect(trace).not.toContain('enable');
+  });
+
+  test('bucketless recovery is a no-op only for genuinely fresh state', async () => {
+    const trace: string[] = [];
+    await repairInterruptedBootstrapApis({
+      assertOperatorIdentity: async () => {
+        trace.push('identity');
+      },
+      confirm: async () => {
+        trace.push('confirm');
+      },
+      enableServices: () => trace.push('enable'),
+      inspectBucket: () => {
+        trace.push('bucket');
+        return null;
+      },
+      inspectServices: () => {
+        trace.push('services');
+        return { projectNumber: '123456789', services: BOOTSTRAP_SERVICES };
+      },
+      inspectState: () => {
+        trace.push('state');
+        return null;
+      },
+      validateProject: () => trace.push('project'),
+    });
+    expect(trace).toEqual(['state']);
   });
 
   test('repairs one missing API only after confirmation and revalidation', async () => {
@@ -1019,7 +1902,10 @@ describe('fail-closed bootstrap and process behavior', () => {
       'const initialBucketStatus = stateBucketStatus(true)',
     );
     const bootstrapInit = main.indexOf(
-      "runInteractive('terraform', ['init', '-input=false'], bootstrapRoot)",
+      "['init', '-reconfigure', '-input=false']",
+    );
+    const interruptedRepair = main.indexOf(
+      'await repairInterruptedBootstrapApis',
     );
     const remoteInit = main.indexOf(
       "runInteractive('terraform', ['init', '-reconfigure', '-input=false'])",
@@ -1031,7 +1917,9 @@ describe('fail-closed bootstrap and process behavior', () => {
     );
     expect(fullStateValidation).toBeLessThan(bootstrapInit);
     expect(bootstrapInit).toBeLessThan(remoteInit);
-    const recovery = main.indexOf('recoverBootstrapState(initialBucketStatus)');
+    const recovery = main.indexOf('recoverBootstrapState()');
+    expect(interruptedRepair).toBeGreaterThan(bootstrapInit);
+    expect(interruptedRepair).toBeLessThan(recovery);
     expect(recovery).toBeGreaterThan(bootstrapInit);
     expect(recovery).toBeLessThan(remoteInit);
     expect(apply).toContain("if (bucketStatus !== 'absent')");
@@ -3165,9 +4053,30 @@ describe('Groups least-privilege contracts', () => {
     expect(roleHelper).toMatch(
       /if \(process\.env\.PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT !== CONFIRMATION\)[^]*assertRosterReaderCredentialBoundary\(contract\);\s*assertNoUserManagedKeysBeforeRoleAssignment\(listUserManagedKeys\(contract\)\);\s*const created = parseRoleAssignment/u,
     );
-    expect(read('scripts/verify-groups-readonly.ts')).toContain(
-      'assertExactLiveGroupsReaderRole(contract, fetcher)',
+    const verifier = read('scripts/verify-groups-readonly.ts');
+    expect(
+      verifier.match(
+        /await assertExactLiveGroupsReaderRole\(contract, fetcher\);/gu,
+      ),
+    ).toHaveLength(2);
+    const firstRoleCheck = verifier.indexOf(
+      'await assertExactLiveGroupsReaderRole(contract, fetcher);',
     );
+    const membershipRead = verifier.lastIndexOf(
+      'await membershipsResponse.body?.cancel();',
+    );
+    const finalCredentialBoundary = verifier.lastIndexOf(
+      'assertRosterReaderCredentialBoundary(contract);',
+    );
+    const finalRoleCheck = verifier.lastIndexOf(
+      'await assertExactLiveGroupsReaderRole(contract, fetcher);',
+    );
+    const pass = verifier.indexOf("console.log(\n    'PASS:");
+    expect(firstRoleCheck).toBeGreaterThan(-1);
+    expect(firstRoleCheck).toBeLessThan(membershipRead);
+    expect(finalCredentialBoundary).toBeGreaterThan(membershipRead);
+    expect(finalRoleCheck).toBeGreaterThan(finalCredentialBoundary);
+    expect(finalRoleCheck).toBeLessThan(pass);
   });
 });
 

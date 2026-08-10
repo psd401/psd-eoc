@@ -241,6 +241,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   }
 
   assertRosterReaderCredentialBoundary(contract);
+  await assertExactLiveGroupsReaderRole(contract, fetcher);
 
   console.log(
     'PASS: the live Workspace assignment is exactly direct Groups Reader with no indirect role, and the service account performed approved staff-group lookup and membership-list authorization with one read-only OAuth scope; Google returned no member identity fields and no value was printed.',
