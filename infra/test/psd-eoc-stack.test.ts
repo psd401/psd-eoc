@@ -13,7 +13,13 @@ import {
   GITHUB_OWNER_ID,
   GITHUB_REPOSITORY,
   GITHUB_REPOSITORY_ID,
+  SES_CONFIGURATION_SET_NAME,
+  SES_EVENT_DESTINATION_NAME,
+  SES_EVENT_TOPIC_NAME,
+  SES_EVENT_TYPES,
   SES_IDENTITY_DOMAIN,
+  SES_MAIL_FROM_DOMAIN,
+  SES_PARENT_HOSTED_ZONE_ID,
 } from '../src/config';
 import { PsdEocStack } from '../src/psd-eoc-stack';
 
@@ -391,21 +397,246 @@ describe('fail-closed integration placeholders', () => {
     expect(expectedNames.size).toBe(0);
   });
 
-  it('outputs manual SES DKIM records without granting a send path', () => {
-    const identityProperties = resourceProperties(
-      onlyResource('AWS::SES::EmailIdentity'),
+  it('creates a retained child zone with retained same-account delegation', () => {
+    const hostedZoneEntries = resourceEntries('AWS::Route53::HostedZone');
+    expect(hostedZoneEntries).toHaveLength(1);
+    const hostedZoneEntry = hostedZoneEntries[0];
+    if (hostedZoneEntry === undefined) {
+      throw new Error('Missing alerts.psd401.net hosted zone.');
+    }
+    const [hostedZoneLogicalId, hostedZone] = hostedZoneEntry;
+    expect(resourceProperties(hostedZone).Name).toBe(`${SES_IDENTITY_DOMAIN}.`);
+    expect(hostedZone.DeletionPolicy).toBe('Retain');
+    expect(hostedZone.UpdateReplacePolicy).toBe('Retain');
+
+    const delegationEntries = resourceEntries('AWS::Route53::RecordSet').filter(
+      ([, record]) => resourceProperties(record).Type === 'NS',
     );
+    expect(delegationEntries).toHaveLength(1);
+    const delegationEntry = delegationEntries[0];
+    if (delegationEntry === undefined) {
+      throw new Error('Missing alerts.psd401.net delegation record.');
+    }
+    const delegation = delegationEntry[1];
+    expect(resourceProperties(delegation)).toEqual({
+      Comment: 'Delegates alerts.psd401.net to the retained PSD EOC zone.',
+      HostedZoneId: SES_PARENT_HOSTED_ZONE_ID,
+      Name: `${SES_IDENTITY_DOMAIN}.`,
+      ResourceRecords: {
+        'Fn::GetAtt': [hostedZoneLogicalId, 'NameServers'],
+      },
+      TTL: '300',
+      Type: 'NS',
+    });
+    expect(delegation.DeletionPolicy).toBe('Retain');
+    expect(delegation.UpdateReplacePolicy).toBe('Retain');
+
+    const outputs = asRecord(synthesizedTemplate.Outputs);
+    expect(asRecord(outputs.AlertsHostedZoneId).Value).toEqual({
+      Ref: hostedZoneLogicalId,
+    });
+    expect(asRecord(outputs.AlertsHostedZoneNameServers).Value).toEqual({
+      'Fn::Join': [',', { 'Fn::GetAtt': [hostedZoneLogicalId, 'NameServers'] }],
+    });
+  });
+
+  it('publishes retained Easy DKIM and fail-closed MAIL FROM records', () => {
+    const identityEntries = resourceEntries('AWS::SES::EmailIdentity');
+    expect(identityEntries).toHaveLength(1);
+    const identityEntry = identityEntries[0];
+    if (identityEntry === undefined) {
+      throw new Error('Missing SES email identity.');
+    }
+    const [identityLogicalId, identity] = identityEntry;
+    expect(identityLogicalId).toBe('EmailIdentity');
+    const identityProperties = resourceProperties(identity);
     expect(identityProperties.EmailIdentity).toBe(SES_IDENTITY_DOMAIN);
     expect(identityProperties.DkimAttributes).toEqual({ SigningEnabled: true });
+    expect(identityProperties.DkimSigningAttributes).toEqual({
+      NextSigningKeyLength: 'RSA_2048_BIT',
+    });
+    expect(identityProperties.FeedbackAttributes).toEqual({
+      EmailForwardingEnabled: false,
+    });
+    expect(identityProperties.MailFromAttributes).toEqual({
+      BehaviorOnMxFailure: 'REJECT_MESSAGE',
+      MailFromDomain: SES_MAIL_FROM_DOMAIN,
+    });
+    expect(identityProperties.ConfigurationSetAttributes).toEqual({
+      ConfigurationSetName: { Ref: 'EmailConfigurationSet' },
+    });
+    expect(identity.DeletionPolicy).toBe('Retain');
+    expect(identity.UpdateReplacePolicy).toBe('Retain');
+
+    const records = resourceEntries('AWS::Route53::RecordSet');
+    expect(records).toHaveLength(6);
+    const dkimRecords = records
+      .filter(([, record]) => resourceProperties(record).Type === 'CNAME')
+      .sort(([left], [right]) => left.localeCompare(right));
+    expect(dkimRecords).toHaveLength(3);
+    dkimRecords.forEach(([, record], index) => {
+      const properties = resourceProperties(record);
+      const recordNumber = index + 1;
+      expect(properties.Name).toEqual({
+        'Fn::GetAtt': [identityLogicalId, `DkimDNSTokenName${recordNumber}`],
+      });
+      expect(properties.ResourceRecords).toEqual([
+        {
+          'Fn::GetAtt': [identityLogicalId, `DkimDNSTokenValue${recordNumber}`],
+        },
+      ]);
+      expect(record.DeletionPolicy).toBe('Retain');
+      expect(record.UpdateReplacePolicy).toBe('Retain');
+    });
+
+    const mailFromRecords = records.filter(([, record]) => {
+      const properties = resourceProperties(record);
+      return properties.Name === `${SES_MAIL_FROM_DOMAIN}.`;
+    });
+    expect(mailFromRecords).toHaveLength(2);
+    const mailFromByType = new Map(
+      mailFromRecords.map(([, record]) => [
+        resourceProperties(record).Type,
+        record,
+      ]),
+    );
+    const mxRecord = mailFromByType.get('MX');
+    const txtRecord = mailFromByType.get('TXT');
+    if (mxRecord === undefined || txtRecord === undefined) {
+      throw new Error('Missing MAIL FROM MX or SPF record.');
+    }
+    expect(resourceProperties(mxRecord).ResourceRecords).toEqual([
+      `10 feedback-smtp.${DEPLOYMENT_REGION}.amazonses.com.`,
+    ]);
+    expect(resourceProperties(txtRecord).ResourceRecords).toEqual([
+      '"v=spf1 include:amazonses.com ~all"',
+    ]);
+    for (const record of [mxRecord, txtRecord]) {
+      expect(record.DeletionPolicy).toBe('Retain');
+      expect(record.UpdateReplacePolicy).toBe('Retain');
+    }
 
     const outputs = asRecord(synthesizedTemplate.Outputs);
     for (const recordNumber of [1, 2, 3]) {
-      expect(outputs).toHaveProperty(`SesDkimRecordName${recordNumber}`);
-      expect(outputs).toHaveProperty(`SesDkimRecordValue${recordNumber}`);
+      const nameOutput = asRecord(outputs[`SesDkimRecordName${recordNumber}`]);
+      const valueOutput = asRecord(
+        outputs[`SesDkimRecordValue${recordNumber}`],
+      );
+      expect(nameOutput.Description).toContain('published automatically');
+      expect(valueOutput.Description).toContain('published automatically');
     }
-    template.resourceCountIs('AWS::Route53::RecordSet', 0);
+    expect(asRecord(outputs.SesMailFromDomain).Value).toBe(
+      SES_MAIL_FROM_DOMAIN,
+    );
+  });
+
+  it('publishes exact SES delivery events to an encrypted retained topic', () => {
+    const configurationSet = onlyResource('AWS::SES::ConfigurationSet');
+    expect(resourceProperties(configurationSet)).toMatchObject({
+      Name: SES_CONFIGURATION_SET_NAME,
+      ReputationOptions: { ReputationMetricsEnabled: true },
+    });
+    expect(configurationSet.DeletionPolicy).toBe('Retain');
+    expect(configurationSet.UpdateReplacePolicy).toBe('Retain');
+
+    const eventDestination = onlyResource(
+      'AWS::SES::ConfigurationSetEventDestination',
+    );
+    const eventDestinationProperties = resourceProperties(eventDestination);
+    expect(eventDestinationProperties.ConfigurationSetName).toEqual({
+      Ref: 'EmailConfigurationSet',
+    });
+    const eventDefinition = asRecord(
+      eventDestinationProperties.EventDestination,
+    );
+    expect(eventDefinition.Enabled).toBe(true);
+    expect(eventDefinition.Name).toBe(SES_EVENT_DESTINATION_NAME);
+    expect(eventDefinition.MatchingEventTypes).toEqual([...SES_EVENT_TYPES]);
+    expect(eventDefinition.MatchingEventTypes).not.toContain('OPEN');
+    expect(eventDefinition.MatchingEventTypes).not.toContain('CLICK');
+    expect(eventDestination.DeletionPolicy).toBe('Retain');
+    expect(eventDestination.UpdateReplacePolicy).toBe('Retain');
+
+    const eventTopicEntry = resourceEntries('AWS::SNS::Topic').find(
+      ([, topic]) =>
+        resourceProperties(topic).TopicName === SES_EVENT_TOPIC_NAME,
+    );
+    if (eventTopicEntry === undefined) {
+      throw new Error('Missing SES event topic.');
+    }
+    const [eventTopicLogicalId, eventTopic] = eventTopicEntry;
+    expect(resourceProperties(eventTopic).KmsMasterKeyId).toBeDefined();
+    expect(eventTopic.DeletionPolicy).toBe('Retain');
+    expect(eventTopic.UpdateReplacePolicy).toBe('Retain');
+    expect(asRecord(eventDefinition.SnsDestination).TopicARN).toEqual({
+      Ref: eventTopicLogicalId,
+    });
+
+    const expectedSourceArn = `arn:aws:ses:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`;
+    const eventTopicPolicyEntry = resourceEntries('AWS::SNS::TopicPolicy').find(
+      ([, policy]) =>
+        JSON.stringify(resourceProperties(policy).Topics).includes(
+          eventTopicLogicalId,
+        ),
+    );
+    if (eventTopicPolicyEntry === undefined) {
+      throw new Error('Missing SES event topic policy.');
+    }
+    const topicStatements = asArray(
+      asRecord(resourceProperties(eventTopicPolicyEntry[1]).PolicyDocument)
+        .Statement,
+    ).map(asRecord);
+    const sesPublishStatement = topicStatements.find(
+      (statement) => statement.Sid === 'AllowSesConfigurationSetEvents',
+    );
+    if (sesPublishStatement === undefined) {
+      throw new Error('Missing SES publish policy statement.');
+    }
+    expect(sesPublishStatement).toEqual({
+      Action: 'sns:Publish',
+      Condition: {
+        StringEquals: {
+          'AWS:SourceAccount': DEPLOYMENT_ACCOUNT,
+          'AWS:SourceArn': expectedSourceArn,
+        },
+      },
+      Effect: 'Allow',
+      Principal: { Service: 'ses.amazonaws.com' },
+      Resource: { Ref: eventTopicLogicalId },
+      Sid: 'AllowSesConfigurationSetEvents',
+    });
+
+    const sesKmsStatement = resourceEntries('AWS::KMS::Key')
+      .flatMap(([, key]) =>
+        asArray(asRecord(resourceProperties(key).KeyPolicy).Statement).map(
+          asRecord,
+        ),
+      )
+      .find((statement) => statement.Sid === 'AllowSesEmailEventEncryption');
+    expect(sesKmsStatement).toEqual({
+      Action: ['kms:Decrypt', 'kms:GenerateDataKey*'],
+      Condition: {
+        StringEquals: {
+          'AWS:SourceAccount': DEPLOYMENT_ACCOUNT,
+          'AWS:SourceArn': expectedSourceArn,
+        },
+      },
+      Effect: 'Allow',
+      Principal: { Service: 'ses.amazonaws.com' },
+      Resource: '*',
+      Sid: 'AllowSesEmailEventEncryption',
+    });
+
+    const outputs = asRecord(synthesizedTemplate.Outputs);
+    expect(asRecord(outputs.SesConfigurationSetName).Value).toEqual({
+      Ref: 'EmailConfigurationSet',
+    });
+    expect(asRecord(outputs.SesEmailEventsTopicArn).Value).toEqual({
+      Ref: eventTopicLogicalId,
+    });
+    template.resourceCountIs('AWS::SNS::Subscription', 0);
     expect(JSON.stringify(synthesizedTemplate)).not.toMatch(
-      /s3:DeleteObject|ses:Send|ses:SendRawEmail|sms-voice:Send|mobiletargeting:Send/,
+      /s3:DeleteObject|ses:(?:\*|Send)|sms-voice:Send|mobiletargeting:Send/i,
     );
   });
 });
@@ -422,13 +653,13 @@ describe('observability skeleton', () => {
     }
 
     const topics = resourceEntries('AWS::SNS::Topic');
-    expect(topics).toHaveLength(2);
+    expect(topics).toHaveLength(3);
     for (const [, topic] of topics) {
       expect(resourceProperties(topic).KmsMasterKeyId).toBeDefined();
       expect(topic.DeletionPolicy).toBe('Retain');
     }
     const topicPolicies = resourceEntries('AWS::SNS::TopicPolicy');
-    expect(topicPolicies).toHaveLength(2);
+    expect(topicPolicies).toHaveLength(3);
     for (const [, policy] of topicPolicies) {
       expect(JSON.stringify(policy)).toContain('aws:SecureTransport');
       expect(policy.DeletionPolicy).toBe('Retain');
@@ -568,7 +799,7 @@ describe('no automated critical-action path', () => {
     template.resourceCountIs('AWS::SNS::Subscription', 0);
     template.resourceCountIs('AWS::CloudWatch::Alarm', 0);
     expect(JSON.stringify(synthesizedTemplate)).not.toMatch(
-      /ses:Send|ses:SendRawEmail|sms-voice:Send|mobiletargeting:Send/,
+      /ses:(?:\*|Send)|sms-voice:Send|mobiletargeting:Send/i,
     );
   });
 });
