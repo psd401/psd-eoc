@@ -27,8 +27,13 @@ import {
 const CLOUD_IDENTITY_ORIGIN = 'https://cloudidentity.googleapis.com';
 const CLOUD_IDENTITY_SCOPE =
   'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
-const MAX_FILE_BYTES = 5_000_000;
+const MAX_FACILITY_INPUT_BYTES = 5_000_000;
+// A bounded 20,000-group inventory can repeat safe group references in the
+// inventory, candidate, staleness, and unassigned sections. Keep draft reads
+// and writes aligned at a limit that accommodates that worst-case shape.
+const MAX_DRAFT_FILE_BYTES = 128_000_000;
 const MAX_RESPONSE_BYTES = 8_000_000;
+const FILE_READ_CHUNK_BYTES = 64 * 1_024;
 const MAX_PAGES = 100;
 const MAX_GROUPS = 20_000;
 const MAX_FACILITIES = 1_000;
@@ -364,6 +369,33 @@ const COMPACT_NON_STAFF_MARKERS = [...NON_STAFF_MARKERS].filter(
   (marker) => !NON_STAFF_SUBSTRING_EXCEPTIONS.has(marker),
 );
 
+const COMPACT_WORD_BOUNDARIES = [
+  'all',
+  'employee',
+  'employees',
+  'group',
+  'groups',
+  'list',
+  'lists',
+  'member',
+  'members',
+  'staff',
+  'team',
+] as const;
+
+const hasBoundedCompactPopulationMarker = (token: string): boolean =>
+  COMPACT_NON_STAFF_MARKERS.some(
+    (marker) =>
+      token.length > marker.length &&
+      (token.startsWith(marker) ||
+        token.endsWith(marker) ||
+        COMPACT_WORD_BOUNDARIES.some(
+          (boundary) =>
+            token.includes(`${boundary}${marker}`) ||
+            token.includes(`${marker}${boundary}`),
+        )),
+  );
+
 const hasNonStaffPopulationMarker = (tokens: readonly string[]): boolean =>
   hasAnyToken(tokens, NON_STAFF_MARKERS) ||
   tokens.some(
@@ -371,9 +403,7 @@ const hasNonStaffPopulationMarker = (tokens: readonly string[]): boolean =>
       /^(?:class|classroom|cohort|grade)[0-9]{1,2}$/u.test(token) ||
       /^[0-9]{1,2}(?:st|nd|rd|th)?grade$/u.test(token) ||
       /^(?:k[0-9]{1,2}|kindergarten|prek|prekindergarten)$/u.test(token) ||
-      COMPACT_NON_STAFF_MARKERS.some(
-        (marker) => token.length > marker.length && token.includes(marker),
-      ),
+      hasBoundedCompactPopulationMarker(token),
   ) ||
   tokens.some(
     (token, index) =>
@@ -1149,6 +1179,7 @@ const requirePathOutsideGitRepository = async (
 const readPrivateJson = async (
   path: string,
   label: string,
+  maximumBytes: number,
 ): Promise<unknown> => {
   const safePath = await requirePathOutsideGitRepository(path, label);
   const handle = await open(
@@ -1158,7 +1189,7 @@ const readPrivateJson = async (
   let text: string;
   try {
     const metadata = await handle.stat();
-    if (!metadata.isFile() || metadata.size > MAX_FILE_BYTES) {
+    if (!metadata.isFile() || metadata.size > maximumBytes) {
       throw new Error(`${label} must be a regular file within its size limit.`);
     }
     if ((metadata.mode & 0o077) !== 0) {
@@ -1166,22 +1197,21 @@ const readPrivateJson = async (
         `${label} permissions must not allow group or other access.`,
       );
     }
-    const bytes = Buffer.allocUnsafe(MAX_FILE_BYTES + 1);
-    let bytesRead = 0;
-    while (bytesRead < bytes.length) {
-      const result = await handle.read(
-        bytes,
-        bytesRead,
-        bytes.length - bytesRead,
-        bytesRead,
+    const chunks: Buffer[] = [];
+    let totalBytesRead = 0;
+    while (totalBytesRead <= maximumBytes) {
+      const bytes = Buffer.allocUnsafe(
+        Math.min(FILE_READ_CHUNK_BYTES, maximumBytes + 1 - totalBytesRead),
       );
+      const result = await handle.read(bytes, 0, bytes.length, totalBytesRead);
       if (result.bytesRead === 0) break;
-      bytesRead += result.bytesRead;
+      chunks.push(bytes.subarray(0, result.bytesRead));
+      totalBytesRead += result.bytesRead;
     }
-    if (bytesRead > MAX_FILE_BYTES) {
+    if (totalBytesRead > maximumBytes) {
       throw new Error(`${label} exceeded its size limit while being read.`);
     }
-    text = bytes.subarray(0, bytesRead).toString('utf8');
+    text = Buffer.concat(chunks, totalBytesRead).toString('utf8');
   } finally {
     await handle.close();
   }
@@ -1255,10 +1285,22 @@ const createDefaultOutputPath = async (): Promise<string> => {
   return join(directory, 'groups-mapping.draft.json');
 };
 
+const serializeDraft = (
+  draft: MappingDraft,
+  maximumBytes = MAX_DRAFT_FILE_BYTES,
+): string => {
+  const serialized = `${JSON.stringify(draft, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, 'utf8') > maximumBytes) {
+    throw new Error('Draft output exceeds its bounded file-size limit.');
+  }
+  return serialized;
+};
+
 const writePrivateDraft = async (
   path: string,
   draft: MappingDraft,
 ): Promise<void> => {
+  const serialized = serializeDraft(draft);
   const destination = await resolveOutputPath(path);
   const temporary = join(
     dirname(destination),
@@ -1268,7 +1310,7 @@ const writePrivateDraft = async (
   let temporaryExists = true;
   let published = false;
   try {
-    await handle.writeFile(`${JSON.stringify(draft, null, 2)}\n`, 'utf8');
+    await handle.writeFile(serialized, 'utf8');
     await handle.chmod(0o600);
     await handle.sync();
     await handle.close();
@@ -2454,6 +2496,16 @@ const runSelfTest = async (): Promise<void> => {
       !validation.importAuthorized,
     'structural validation cannot imply source verification or import authority',
   );
+  const serializedDraft = serializeDraft(draft);
+  const serializedDraftBytes = Buffer.byteLength(serializedDraft, 'utf8');
+  assertSelfTest(
+    serializedDraftBytes <= MAX_DRAFT_FILE_BYTES,
+    'generated drafts fit the aligned read and write bound',
+  );
+  expectSelfTestThrow(
+    () => serializeDraft(draft, serializedDraftBytes - 1),
+    'oversized drafts fail before a file is opened or published',
+  );
 
   const studentStaff = parseCloudGroup(
     rawGroup(
@@ -2486,16 +2538,53 @@ const runSelfTest = async (): Promise<void> => {
     ),
     parent,
   );
+  const compactPtaStaff = parseCloudGroup(
+    rawGroup(
+      'synthetic-compact-pta-population',
+      'synthetic.nbe.allptastaff@psd401.net',
+      'NBE Staff',
+    ),
+    parent,
+  );
   const compactPopulationDraft = buildDraft(
     [facilities[0]!],
-    [compactStudentStaff, compactScholarStaff],
+    [compactStudentStaff, compactScholarStaff, compactPtaStaff],
     1,
     generatedAt,
   );
   assertSelfTest(
     compactPopulationDraft.inventoryGroups.length === 0 &&
-      compactPopulationDraft.report.omittedNonStaffGroupCount === 2,
-    'all authoritative compact population markers are hard excluded',
+      compactPopulationDraft.report.omittedNonStaffGroupCount === 3,
+    'bounded compact population markers are hard excluded',
+  );
+
+  const legitimateSubstringGroups = [
+    rawGroup(
+      'synthetic-laptop-staff',
+      'synthetic.nbe.laptop.staff@psd401.net',
+      'NBE Laptop Staff',
+    ),
+    rawGroup(
+      'synthetic-captains-staff',
+      'synthetic.nbe.captains.staff@psd401.net',
+      'NBE Captains Staff',
+    ),
+    rawGroup(
+      'synthetic-skidmore-staff',
+      'synthetic.nbe.skidmore.staff@psd401.net',
+      'NBE Skidmore Staff',
+    ),
+  ].map((group) => parseCloudGroup(group, parent));
+  const legitimateSubstringDraft = buildDraft(
+    [facilities[0]!],
+    legitimateSubstringGroups,
+    1,
+    generatedAt,
+  );
+  assertSelfTest(
+    legitimateSubstringDraft.inventoryGroups.length === 3 &&
+      legitimateSubstringDraft.report.omittedNonStaffGroupCount === 0,
+    'incidental pta, pto, and kid substrings never hide staff groups',
   );
 
   const subsetGroup = parseCloudGroup(
@@ -2719,6 +2808,7 @@ const runSelfTest = async (): Promise<void> => {
     const privateInputValue = await readPrivateJson(
       privateInputPath,
       'Self-test private input',
+      MAX_FACILITY_INPUT_BYTES,
     );
     assertSelfTest(
       isRecord(privateInputValue) && privateInputValue.synthetic === true,
@@ -2731,6 +2821,7 @@ const runSelfTest = async (): Promise<void> => {
     const writtenDraft = await readPrivateJson(
       privateOutputPath,
       'Self-test private output',
+      MAX_DRAFT_FILE_BYTES,
     );
     assertSelfTest(
       (outputMetadata.mode & 0o777) === 0o600 &&
@@ -2762,13 +2853,21 @@ const main = async (arguments_: readonly string[]): Promise<void> => {
     return;
   }
   if (options.command === 'validate') {
-    const draft = await readPrivateJson(options.draftPath, 'Mapping draft');
+    const draft = await readPrivateJson(
+      options.draftPath,
+      'Mapping draft',
+      MAX_DRAFT_FILE_BYTES,
+    );
     console.log(JSON.stringify(validateDraft(draft), null, 2));
     return;
   }
 
   const facilities = parseFacilities(
-    await readPrivateJson(options.facilitiesPath, 'Facility input'),
+    await readPrivateJson(
+      options.facilitiesPath,
+      'Facility input',
+      MAX_FACILITY_INPUT_BYTES,
+    ),
   );
   const accessToken = await obtainImpersonatedToken(options.serviceAccount);
   const inventory = await inventoryAllGroups(
