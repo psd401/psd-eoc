@@ -43,7 +43,7 @@ export function ModePreviewScreen({ mode }: ModePreviewScreenProps) {
         </Text>
       </View>
 
-      <Link href="/" asChild>
+      <Link href="/" dismissTo asChild>
         <Pressable
           accessibilityHint="Returns to the PSD EOC home screen"
           accessibilityRole="link"
