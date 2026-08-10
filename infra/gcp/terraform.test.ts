@@ -30,6 +30,7 @@ import {
   cleanupCredentialArtifacts,
   createdKeyIsVisible,
   parseCreatedCredential,
+  parseCreatedKeyId,
 } from './scripts/provision-groups-credential';
 import {
   reconcileIdempotentSecretWrite,
@@ -40,6 +41,7 @@ import {
   validateAwsSecretResourcePolicy,
   validateAwsCliHistoryResult,
   validateAwsSsoIdentity,
+  validateApplicationDefaultCredentialMetadata,
   validateGcloudConfiguration,
   validateGoogleUserIdentity,
 } from './scripts/runtime';
@@ -158,6 +160,18 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(main).toContain('deletion_policy     = "PREVENT"');
     expect(main.match(/prevent_destroy = true/gu)).toHaveLength(4);
     expect(main).toContain('deletion_policy             = "PREVENT"');
+  });
+
+  test('pins quota billing to the dedicated project after bootstrap', () => {
+    const provider = read('providers.tf');
+    const bootstrap = read('bootstrap/main.tf');
+    const readme = read('README.md');
+
+    expect(provider).toContain('billing_project       = var.project_id');
+    expect(provider).toContain('user_project_override = true');
+    expect(bootstrap).not.toContain('billing_project');
+    expect(bootstrap).not.toContain('user_project_override');
+    expect(readme.match(/--disable-quota-project/gu)).toHaveLength(2);
   });
 
   test('does not place an object-retention lock on Terraform lock files', () => {
@@ -456,6 +470,9 @@ describe('fail-closed bootstrap and process behavior', () => {
       CLOUDSDK_CONFIG: '/tmp/wrong-gcloud',
       GOOGLE_APPLICATION_CREDENTIALS: '/tmp/wrong.json',
       GOOGLE_BACKEND_ACCESS_TOKEN: 'wrong-backend-token',
+      GOOGLE_BILLING_PROJECT: 'wrong-billing-project',
+      GOOGLE_CLOUD_PROJECT: 'wrong-project',
+      GOOGLE_CLOUD_QUOTA_PROJECT: 'wrong-quota-project',
       GOOGLE_CLOUD_UNIVERSE_DOMAIN: 'attacker.invalid',
       GOOGLE_STORAGE_CUSTOM_ENDPOINT: 'https://attacker.invalid',
       GOOGLE_OAUTH_ACCESS_TOKEN: 'wrong-token',
@@ -483,6 +500,9 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(environment.TF_WORKSPACE).toBeUndefined();
     expect(environment.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
     expect(environment.GOOGLE_BACKEND_ACCESS_TOKEN).toBeUndefined();
+    expect(environment.GOOGLE_BILLING_PROJECT).toBeUndefined();
+    expect(environment.GOOGLE_CLOUD_PROJECT).toBeUndefined();
+    expect(environment.GOOGLE_CLOUD_QUOTA_PROJECT).toBeUndefined();
     expect(environment.GOOGLE_CLOUD_UNIVERSE_DOMAIN).toBeUndefined();
     expect(environment.GOOGLE_STORAGE_CUSTOM_ENDPOINT).toBeUndefined();
     expect(environment.GOOGLE_OAUTH_ACCESS_TOKEN).toBeUndefined();
@@ -498,6 +518,8 @@ describe('fail-closed bootstrap and process behavior', () => {
       CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE: 'https://attacker.invalid',
       CLOUDSDK_CONFIG: '/tmp/wrong-gcloud',
       GOOGLE_APPLICATION_CREDENTIALS: '/tmp/wrong.json',
+      GOOGLE_BILLING_PROJECT: 'wrong-billing-project',
+      GOOGLE_CLOUD_QUOTA_PROJECT: 'wrong-quota-project',
       GOOGLE_CLOUD_UNIVERSE_DOMAIN: 'attacker.invalid',
       PATH: '/usr/bin',
     });
@@ -511,6 +533,8 @@ describe('fail-closed bootstrap and process behavior', () => {
       gcloudEnvironment.CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE,
     ).toBeUndefined();
     expect(gcloudEnvironment.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
+    expect(gcloudEnvironment.GOOGLE_BILLING_PROJECT).toBeUndefined();
+    expect(gcloudEnvironment.GOOGLE_CLOUD_QUOTA_PROJECT).toBeUndefined();
     expect(gcloudEnvironment.GOOGLE_CLOUD_UNIVERSE_DOMAIN).toBeUndefined();
 
     const awsEnvironment = sanitizedAwsEnvironment({
@@ -590,6 +614,25 @@ describe('fail-closed bootstrap and process behavior', () => {
         'kjh_admin@psd401.net',
       ),
     ).toThrow('must identify');
+
+    expect(() =>
+      validateApplicationDefaultCredentialMetadata(
+        { type: 'authorized_user' },
+        'psd401-eoc',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateApplicationDefaultCredentialMetadata(
+        { quota_project_id: 'psd401-eoc', type: 'authorized_user' },
+        'psd401-eoc',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateApplicationDefaultCredentialMetadata(
+        { quota_project_id: 'aistudio-462612', type: 'authorized_user' },
+        'psd401-eoc',
+      ),
+    ).toThrow('must omit the quota project');
   });
 
   test('accepts only the fixed AWS SSO administrator identity', () => {
@@ -820,12 +863,23 @@ describe('Groups least-privilege contracts', () => {
     expect(parseCreatedCredential(JSON.stringify(generated), contract)).toEqual(
       generated,
     );
+    expect(parseCreatedKeyId(JSON.stringify(generated))).toBe('a'.repeat(40));
     expect(() =>
       parseCreatedCredential(
         JSON.stringify({ ...generated, project_id: 'wrong-project' }),
         contract,
       ),
     ).toThrow('fixed Terraform service-account contract');
+    expect(
+      parseCreatedKeyId(
+        JSON.stringify({ ...generated, project_id: 'wrong-project' }),
+      ),
+    ).toBe('a'.repeat(40));
+    expect(() =>
+      parseCreatedKeyId(
+        JSON.stringify({ ...generated, private_key_id: 'invalid-key-id' }),
+      ),
+    ).toThrow('valid private key ID');
 
     const provisioner = read('scripts/provision-groups-credential.ts');
     expect(provisioner).toContain("'create',\n        '-'");
@@ -999,6 +1053,7 @@ describe('Groups least-privilege contracts', () => {
 
     expect(errors).toHaveLength(1);
     expect(String(errors[0])).toContain('could not be deleted');
+    expect(String(errors[0])).toContain('a'.repeat(40));
 
     let remoteDeleteAttempted = false;
     cleanupCredentialArtifacts({

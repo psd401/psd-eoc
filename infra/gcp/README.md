@@ -43,9 +43,17 @@ a service-account credential for Terraform.
 ```sh
 gcloud auth login kjh_admin@psd401.net --force
 gcloud auth application-default login kjh_admin@psd401.net \
+  --disable-quota-project \
   --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform
 aws sso login --profile psd401-prr-prod
 ```
+
+The ordinary ADC login deliberately writes no quota project, even if another
+gcloud configuration has an active project. The guarded helpers reject ADC
+metadata bound to any project other than `psd401-eoc` and discard inherited
+Google billing/quota/project overrides. After bootstrap creates the dedicated
+project, the main Terraform provider pins user-project quota and billing to
+`psd401-eoc`; the bootstrap provider cannot do so before that project exists.
 
 Review formatting and validity, then run the guarded helper from this directory:
 
@@ -128,6 +136,7 @@ restore the ordinary identity/Cloud-only ADC:
 ```sh
 gcloud auth application-default revoke --quiet
 gcloud auth application-default login kjh_admin@psd401.net \
+  --disable-quota-project \
   --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform
 ```
 

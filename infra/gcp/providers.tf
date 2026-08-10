@@ -1,3 +1,5 @@
 provider "google" {
-  region = var.region
+  billing_project       = var.project_id
+  region                = var.region
+  user_project_override = true
 }
