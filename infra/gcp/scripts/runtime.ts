@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -12,11 +14,15 @@ const googleCredentialOverrides = new Set([
   'GOOGLE_BACKEND_ACCESS_TOKEN',
   'GOOGLE_BACKEND_CREDENTIALS',
   'GOOGLE_BACKEND_IMPERSONATE_SERVICE_ACCOUNT',
+  'GOOGLE_BILLING_PROJECT',
+  'GOOGLE_CLOUD_PROJECT',
+  'GOOGLE_CLOUD_QUOTA_PROJECT',
   'GOOGLE_CLOUD_UNIVERSE_DOMAIN',
   'GOOGLE_CLOUD_KEYFILE_JSON',
   'GOOGLE_CREDENTIALS',
   'GOOGLE_IMPERSONATE_SERVICE_ACCOUNT',
   'GOOGLE_OAUTH_ACCESS_TOKEN',
+  'GOOGLE_PROJECT',
   'GOOGLE_UNIVERSE_DOMAIN',
 ]);
 
@@ -283,10 +289,61 @@ export function validateGoogleUserIdentity(
   }
 }
 
+export function validateApplicationDefaultCredentialMetadata(
+  value: unknown,
+  expectedQuotaProject: string,
+): void {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(expectedQuotaProject)
+  ) {
+    throw new Error('Application Default Credential metadata is invalid.');
+  }
+  const quotaProject = (value as Readonly<Record<string, unknown>>)
+    .quota_project_id;
+  if (quotaProject !== undefined && quotaProject !== expectedQuotaProject) {
+    throw new Error(
+      `Application Default Credentials must omit the quota project during bootstrap or bind it to ${expectedQuotaProject}; revoke and re-login with --disable-quota-project.`,
+    );
+  }
+}
+
+function assertApplicationDefaultCredentialMetadata(
+  expectedQuotaProject: string,
+): void {
+  const configDirectory = runCommand(
+    'gcloud',
+    ['info', '--format=value(config.paths.global_config_dir)'],
+    { redactFailureOutput: true },
+  );
+  if (!isAbsolute(configDirectory)) {
+    throw new Error(
+      'Application Default Credential configuration location is invalid.',
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(
+      readFileSync(
+        join(configDirectory, 'application_default_credentials.json'),
+        'utf8',
+      ),
+    );
+  } catch {
+    throw new Error(
+      'Application Default Credential metadata could not be read safely.',
+    );
+  }
+  validateApplicationDefaultCredentialMetadata(value, expectedQuotaProject);
+}
+
 export async function assertApplicationDefaultIdentity(
   expectedEmail: string,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
+  assertApplicationDefaultCredentialMetadata('psd401-eoc');
   const accessToken = runCommand(
     'gcloud',
     ['auth', 'application-default', 'print-access-token'],

@@ -121,6 +121,29 @@ export function parseCreatedCredential(
   return validateCredential(value, contract);
 }
 
+export function parseCreatedKeyId(output: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(output);
+  } catch {
+    throw new Error('Created Google credential did not contain valid JSON.');
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Created Google credential is not one JSON object.');
+  }
+  const privateKeyId = (value as Readonly<Record<string, unknown>>)
+    .private_key_id;
+  if (
+    typeof privateKeyId !== 'string' ||
+    !/^[a-f0-9]{40}$/u.test(privateKeyId)
+  ) {
+    throw new Error(
+      'Created Google credential does not contain a valid private key ID.',
+    );
+  }
+  return privateKeyId;
+}
+
 async function waitForCreatedKey(
   contract: GroupsReaderContract,
   existingKeys: ReadonlySet<string>,
@@ -221,7 +244,9 @@ export function cleanupCredentialArtifacts(options: {
       options.deleteKey(options.createdKeyId);
     } catch {
       errors.push(
-        new Error('The newly created Google key could not be deleted.'),
+        new Error(
+          `The newly created Google key ${options.createdKeyId} could not be deleted; manual reconciliation is required.`,
+        ),
       );
     }
   }
@@ -298,9 +323,10 @@ async function main(): Promise<void> {
       { redactFailureOutput: true },
     );
 
+    const candidateCreatedKeyId = parseCreatedKeyId(credentialOutput);
+    await waitForCreatedKey(contract, existingKeys, candidateCreatedKeyId);
+    createdKeyId = candidateCreatedKeyId;
     const credential = parseCreatedCredential(credentialOutput, contract);
-    createdKeyId = requiredString(credential, 'private_key_id');
-    await waitForCreatedKey(contract, existingKeys, createdKeyId);
     const credentialCreatedAt = readUserManagedKeyCreatedAt(
       contract,
       createdKeyId,
