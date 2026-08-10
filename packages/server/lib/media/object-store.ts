@@ -90,6 +90,7 @@ export interface RawUploadGrant {
   readonly uploadUrl: string;
   readonly requiredHeaders: Readonly<{
     'content-type': MediaContentType;
+    'if-none-match': '*';
   }>;
   readonly byteLength: number;
   readonly contentSha256: string;
@@ -610,19 +611,23 @@ export function createMediaObjectStore(
         ContentLength: input.byteLength,
         ContentType: contentType,
         ChecksumSHA256: sha256Base64(input.contentSha256),
+        IfNoneMatch: '*',
       });
 
       try {
         const uploadUrl = parseHttpsUrl(
           await signer(command, {
             expiresIn: expiresInSeconds,
-            signableHeaders: new Set(['content-type']),
+            signableHeaders: new Set(['content-type', 'if-none-match']),
           }),
         );
         return Object.freeze({
           method: 'PUT' as const,
           uploadUrl,
-          requiredHeaders: Object.freeze({ 'content-type': contentType }),
+          requiredHeaders: Object.freeze({
+            'content-type': contentType,
+            'if-none-match': '*' as const,
+          }),
           byteLength: input.byteLength,
           contentSha256: input.contentSha256,
           expiresInSeconds,

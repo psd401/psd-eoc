@@ -144,7 +144,7 @@ describe('media object-store configuration', () => {
 });
 
 describe('raw private media uploads', () => {
-  test('presigns exact length, checksum, and content type without ACL or encryption overrides', async () => {
+  test('presigns exact content evidence and a create-only precondition without ACL or encryption overrides', async () => {
     const bytes = new TextEncoder().encode('synthetic photo bytes');
     const digest = hexDigest(bytes);
     const syntheticAwsClient = new S3Client({
@@ -181,27 +181,70 @@ describe('raw private media uploads', () => {
     });
 
     expect(grant.method).toBe('PUT');
-    expect(grant.requiredHeaders).toEqual({ 'content-type': 'image/jpeg' });
+    expect(grant.requiredHeaders).toEqual({
+      'content-type': 'image/jpeg',
+      'if-none-match': '*',
+    });
     expect(grant.expiresInSeconds).toBe(300);
-    expect(capturedOptions?.signableHeaders).toEqual(new Set(['content-type']));
+    expect(capturedOptions?.signableHeaders).toEqual(
+      new Set(['content-type', 'if-none-match']),
+    );
     expect(capturedCommand?.input).toMatchObject({
       Bucket: ENVIRONMENT.MEDIA_BUCKET_NAME,
       Key: RAW_KEY,
       ContentLength: bytes.byteLength,
       ContentType: 'image/jpeg',
       ChecksumSHA256: base64Digest(digest),
+      IfNoneMatch: '*',
     });
     expect(capturedCommand?.input).not.toHaveProperty('ACL');
     expect(capturedCommand?.input).not.toHaveProperty('ServerSideEncryption');
 
     const signedUrl = new URL(grant.uploadUrl);
     expect(signedUrl.searchParams.get('X-Amz-SignedHeaders')).toBe(
-      'content-length;content-type;host',
+      'content-length;content-type;host;if-none-match',
     );
     expect(signedUrl.searchParams.get('x-amz-checksum-sha256')).toBe(
       base64Digest(digest),
     );
     expect(signedUrl.searchParams.get('X-Amz-Expires')).toBe('300');
+  });
+
+  test('keeps same-key replay grants create-only so S3 rejects a second version', async () => {
+    const commands: PutObjectCommand[] = [];
+    const options: MediaObjectStoreSignOptions[] = [];
+    const store = createMediaObjectStore({
+      environment: ENVIRONMENT,
+      client: emptyClient(),
+      signer: async (command, signOptions) => {
+        expect(command).toBeInstanceOf(PutObjectCommand);
+        commands.push(command as PutObjectCommand);
+        options.push(signOptions);
+        return 'https://private-media.example/replay-create-only';
+      },
+    });
+    const input = {
+      storageKey: RAW_KEY,
+      byteLength: 1,
+      contentSha256: 'a'.repeat(64),
+      contentType: 'image/png' as const,
+    };
+
+    const first = await store.createRawUploadGrant(input);
+    const replay = await store.createRawUploadGrant(input);
+
+    expect(commands).toHaveLength(2);
+    expect(commands.every((command) => command.input.IfNoneMatch === '*')).toBe(
+      true,
+    );
+    expect(
+      options.every((candidate) =>
+        candidate.signableHeaders?.has('if-none-match'),
+      ),
+    ).toBe(true);
+    expect(first.requiredHeaders['if-none-match']).toBe('*');
+    expect(replay.requiredHeaders['if-none-match']).toBe('*');
+    expect(replay.uploadUrl).toBe(first.uploadUrl);
   });
 
   test('rejects invalid sizes, digests, keys, and non-HTTPS signer output', async () => {

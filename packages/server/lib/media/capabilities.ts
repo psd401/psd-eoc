@@ -4,6 +4,7 @@ import {
   MediaReadGrantSchema,
   MediaRecordSchema,
   MediaUploadIntentSchema,
+  type Actor,
   type CapabilityOutput,
   type MediaReadGrant,
   type MediaRecord,
@@ -12,6 +13,7 @@ import {
 
 import {
   CapabilityEngineError,
+  digestCapabilityValue,
   executeCapability,
   readCapabilityTime,
   type CapabilityHandlerContext,
@@ -35,6 +37,7 @@ import {
   MEDIA_UPLOAD_GRANT_SECONDS,
   quarantineStorageKey,
   readyStorageKey,
+  type MediaBudgetPrincipal,
   type StoredMediaRecord,
 } from './model';
 import {
@@ -80,6 +83,35 @@ const INTENT_CACHE_PREFIX = 'media:intent:';
 const LOCKED_INTENT_CACHE_PREFIX = 'media:intent:locked:';
 const READY_CACHE_PREFIX = 'media:ready:';
 const defaultMediaProcessingGate = createMediaProcessingGate();
+
+function mediaBudgetPrincipal(actor: Actor): MediaBudgetPrincipal {
+  switch (actor.kind) {
+    case 'human': {
+      const identity = { kind: actor.kind, userId: actor.userId } as const;
+      return Object.freeze({
+        ...identity,
+        digest: digestCapabilityValue(identity),
+      });
+    }
+    case 'agent': {
+      const identity = { kind: actor.kind, agentId: actor.agentId } as const;
+      return Object.freeze({
+        ...identity,
+        digest: digestCapabilityValue(identity),
+      });
+    }
+    case 'system': {
+      const identity = {
+        kind: actor.kind,
+        serviceId: actor.serviceId,
+      } as const;
+      return Object.freeze({
+        ...identity,
+        digest: digestCapabilityValue(identity),
+      });
+    }
+  }
+}
 
 function resolveDependencies(
   dependencies: MediaCapabilityDependencies,
@@ -346,6 +378,8 @@ function createRegistrations(
       await context.transaction.insertUploadIntent({
         id,
         eventId: input.eventId,
+        facilityId: context.authorization?.facilityId ?? '',
+        budgetPrincipal: mediaBudgetPrincipal(context.invocation.actor),
         byteLength: input.byteLength,
         contentSha256: input.contentSha256,
         declaredContentType: input.declaredContentType,

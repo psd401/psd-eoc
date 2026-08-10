@@ -5,9 +5,38 @@ import { getTableConfig } from 'drizzle-orm/pg-core';
 import * as relations from '../../db/relations';
 import * as tables from '../../db/schema';
 import { journalEntries, mediaRecords } from '../../db/schema';
-import { buildPhotoChecksumExportQuery } from './repository';
+import {
+  MEDIA_EVENT_ACTIVE_BYTE_LIMIT,
+  MEDIA_EVENT_ACTIVE_INTENT_LIMIT,
+  MEDIA_EVENT_ROLLING_BYTE_LIMIT,
+  MEDIA_EVENT_ROLLING_INTENT_LIMIT,
+  MEDIA_FACILITY_ACTIVE_BYTE_LIMIT,
+  MEDIA_FACILITY_ACTIVE_INTENT_LIMIT,
+  MEDIA_FACILITY_ROLLING_BYTE_LIMIT,
+  MEDIA_FACILITY_ROLLING_INTENT_LIMIT,
+  MEDIA_PRINCIPAL_ROLLING_BYTE_LIMIT,
+  MEDIA_PRINCIPAL_ROLLING_INTENT_LIMIT,
+} from './model';
+import {
+  buildPhotoChecksumExportQuery,
+  mediaUploadBudgetViolation,
+  type MediaUploadResourceUsage,
+} from './repository';
 
 const EVENT_ID = '00000000-0000-4000-8000-000000000701';
+
+const EMPTY_USAGE: MediaUploadResourceUsage = Object.freeze({
+  principalRollingIntents: 0,
+  principalRollingBytes: 0,
+  eventActiveIntents: 0,
+  eventActiveBytes: 0,
+  eventRollingIntents: 0,
+  eventRollingBytes: 0,
+  facilityActiveIntents: 0,
+  facilityActiveBytes: 0,
+  facilityRollingIntents: 0,
+  facilityRollingBytes: 0,
+});
 
 describe('photo checksum journal/export binding', () => {
   test('binds every photo media reference to the same event at the schema boundary', () => {
@@ -39,4 +68,87 @@ describe('photo checksum journal/export binding', () => {
     expect(query.sql).toContain('order by "journal_entries"."sequence"');
     expect(query.params).toEqual([EVENT_ID, 'photo']);
   });
+});
+
+describe('media upload allocation budgets', () => {
+  test('allows the exact inclusive boundary at every scope', () => {
+    expect(
+      mediaUploadBudgetViolation(
+        {
+          principalRollingIntents: MEDIA_PRINCIPAL_ROLLING_INTENT_LIMIT - 1,
+          principalRollingBytes: MEDIA_PRINCIPAL_ROLLING_BYTE_LIMIT - 1,
+          eventActiveIntents: MEDIA_EVENT_ACTIVE_INTENT_LIMIT - 1,
+          eventActiveBytes: MEDIA_EVENT_ACTIVE_BYTE_LIMIT - 1,
+          eventRollingIntents: MEDIA_EVENT_ROLLING_INTENT_LIMIT - 1,
+          eventRollingBytes: MEDIA_EVENT_ROLLING_BYTE_LIMIT - 1,
+          facilityActiveIntents: MEDIA_FACILITY_ACTIVE_INTENT_LIMIT - 1,
+          facilityActiveBytes: MEDIA_FACILITY_ACTIVE_BYTE_LIMIT - 1,
+          facilityRollingIntents: MEDIA_FACILITY_ROLLING_INTENT_LIMIT - 1,
+          facilityRollingBytes: MEDIA_FACILITY_ROLLING_BYTE_LIMIT - 1,
+        },
+        1,
+      ),
+    ).toBeNull();
+  });
+
+  const blockedCases = [
+    [
+      'principal-rolling-intents',
+      { principalRollingIntents: MEDIA_PRINCIPAL_ROLLING_INTENT_LIMIT },
+      1,
+    ],
+    [
+      'principal-rolling-bytes',
+      { principalRollingBytes: MEDIA_PRINCIPAL_ROLLING_BYTE_LIMIT },
+      1,
+    ],
+    [
+      'event-active-intents',
+      { eventActiveIntents: MEDIA_EVENT_ACTIVE_INTENT_LIMIT },
+      1,
+    ],
+    [
+      'event-active-bytes',
+      { eventActiveBytes: MEDIA_EVENT_ACTIVE_BYTE_LIMIT },
+      1,
+    ],
+    [
+      'event-rolling-intents',
+      { eventRollingIntents: MEDIA_EVENT_ROLLING_INTENT_LIMIT },
+      1,
+    ],
+    [
+      'event-rolling-bytes',
+      { eventRollingBytes: MEDIA_EVENT_ROLLING_BYTE_LIMIT },
+      1,
+    ],
+    [
+      'facility-active-intents',
+      { facilityActiveIntents: MEDIA_FACILITY_ACTIVE_INTENT_LIMIT },
+      1,
+    ],
+    [
+      'facility-active-bytes',
+      { facilityActiveBytes: MEDIA_FACILITY_ACTIVE_BYTE_LIMIT },
+      1,
+    ],
+    [
+      'facility-rolling-intents',
+      { facilityRollingIntents: MEDIA_FACILITY_ROLLING_INTENT_LIMIT },
+      1,
+    ],
+    [
+      'facility-rolling-bytes',
+      { facilityRollingBytes: MEDIA_FACILITY_ROLLING_BYTE_LIMIT },
+      1,
+    ],
+  ] as const;
+
+  for (const [dimension, usage, proposedBytes] of blockedCases) {
+    test(`blocks ${dimension} before reserving the proposed grant`, () => {
+      expect(
+        mediaUploadBudgetViolation({ ...EMPTY_USAGE, ...usage }, proposedBytes),
+      ).toBe(dimension);
+    });
+  }
 });

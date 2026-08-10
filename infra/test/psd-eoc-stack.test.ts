@@ -160,7 +160,7 @@ describe('Aurora high-availability baseline', () => {
 });
 
 describe('retained private media storage', () => {
-  it('blocks public access and enables KMS, TLS, and versioning without deletion', () => {
+  it('retains ready media while bounding quarantine object reclamation', () => {
     const bucket = onlyResource('AWS::S3::Bucket');
     const properties = resourceProperties(bucket);
 
@@ -182,7 +182,21 @@ describe('retained private media storage', () => {
         },
       ],
     });
-    expect(properties).not.toHaveProperty('LifecycleConfiguration');
+    expect(properties.LifecycleConfiguration).toEqual({
+      Rules: [
+        {
+          AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+          ExpirationInDays: 1,
+          Id: 'ExpireAbandonedQuarantineMedia',
+          NoncurrentVersionExpiration: { NoncurrentDays: 1 },
+          Prefix: 'quarantine/',
+          Status: 'Enabled',
+        },
+      ],
+    });
+    expect(JSON.stringify(properties.LifecycleConfiguration)).not.toContain(
+      'ready/',
+    );
     expect(properties).not.toHaveProperty('WebsiteConfiguration');
     expect(properties).not.toHaveProperty('AccessControl');
     expect(bucket.DeletionPolicy).toBe('Retain');
@@ -197,13 +211,30 @@ describe('retained private media storage', () => {
     }
   });
 
-  it('denies every unconditional write to immutable ready media', () => {
+  it('denies unconditional writes to create-only quarantine and ready media', () => {
     const bucketPolicy = resourceProperties(
       onlyResource('AWS::S3::BucketPolicy'),
     );
     const statements = asArray(
       asRecord(bucketPolicy.PolicyDocument).Statement,
     ).map(asRecord);
+    const createOnlyQuarantine = statements.find(
+      (statement) => statement.Sid === 'DenyUnconditionalQuarantineMediaWrite',
+    );
+    if (createOnlyQuarantine === undefined) {
+      throw new Error('Missing create-only quarantine-media bucket policy.');
+    }
+    expect(createOnlyQuarantine.Effect).toBe('Deny');
+    expect(createOnlyQuarantine.Principal).toEqual({ AWS: '*' });
+    expect(createOnlyQuarantine.Action).toBe('s3:PutObject');
+    expect(JSON.stringify(createOnlyQuarantine.Resource)).toContain(
+      '/quarantine/*',
+    );
+    expect(createOnlyQuarantine.Condition).toEqual({
+      Bool: { 's3:ObjectCreationOperation': 'true' },
+      Null: { 's3:if-none-match': 'true' },
+    });
+
     const immutableReady = statements.find(
       (statement) => statement.Sid === 'DenyUnconditionalReadyMediaWrite',
     );
@@ -253,7 +284,7 @@ describe('retained private media storage', () => {
     }
     expect(rule.AllowedMethods).toEqual(['PUT']);
     expect(rule.AllowedOrigins).toEqual([{ Ref: 'MediaUploadAllowedOrigin' }]);
-    expect(rule.AllowedHeaders).toEqual(['content-type']);
+    expect(rule.AllowedHeaders).toEqual(['content-type', 'if-none-match']);
     expect(rule.ExposedHeaders).toEqual(['ETag', 'x-amz-checksum-sha256']);
     expect(rule.MaxAge).toBeNumber();
     expect(rule.MaxAge as number).toBeGreaterThan(0);
