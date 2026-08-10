@@ -2,6 +2,7 @@ import {
   GROUPS_READER_ROLE,
   PROJECT_ID,
   readGroupsReaderContract,
+  type GroupsReaderContract,
 } from './groups-contract';
 import {
   assertActiveGcloudAccount,
@@ -23,12 +24,16 @@ interface GroupsReaderRole {
 
 interface RoleAssignment {
   readonly assignedTo: string;
+  readonly assigneeType?: 'USER';
   readonly roleAssignmentId: string;
   readonly roleId: string;
   readonly scopeType: string;
 }
 
-type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
+export type Fetcher = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<Response>;
 
 async function responseJson(
   response: Response,
@@ -96,12 +101,22 @@ async function listAll(
   fetcher: Fetcher,
   accessToken: string,
   collection: 'roles' | 'roleassignments',
+  userKey?: string,
 ): Promise<ReadonlyArray<Readonly<Record<string, unknown>>>> {
   const items: Array<Readonly<Record<string, unknown>>> = [];
   let pageToken: string | undefined;
   for (let page = 0; page < 100; page += 1) {
     const url = new URL(`${ADMIN_SDK_ROOT}/${collection}`);
     url.searchParams.set('maxResults', '200');
+    if (collection === 'roleassignments') {
+      if (userKey === undefined) {
+        throw new Error(
+          'Admin SDK role-assignment checks require one exact assignee.',
+        );
+      }
+      url.searchParams.set('userKey', userKey);
+      url.searchParams.set('includeIndirectRoleAssignments', 'true');
+    }
     if (pageToken !== undefined) {
       url.searchParams.set('pageToken', pageToken);
     }
@@ -142,6 +157,7 @@ export function selectGroupsReaderRole(
 
 function parseRoleAssignment(
   value: Readonly<Record<string, unknown>>,
+  requireAssigneeType = true,
 ): RoleAssignment {
   if (
     value.condition !== undefined &&
@@ -153,11 +169,23 @@ function parseRoleAssignment(
     );
   }
   const scopeType = requiredString(value, 'scopeType');
+  const assigneeType = value.assigneeType;
   if (scopeType !== 'CUSTOMER') {
     throw new Error('Workspace role assignment has an unexpected scope.');
   }
+  let validatedAssigneeType: 'USER' | undefined;
+  if (assigneeType === 'USER') {
+    validatedAssigneeType = assigneeType;
+  } else if (requireAssigneeType || assigneeType !== undefined) {
+    throw new Error(
+      'The roster-reader service account has an indirect or group-mediated Workspace admin role.',
+    );
+  }
   return {
     assignedTo: requiredString(value, 'assignedTo'),
+    ...(validatedAssigneeType === undefined
+      ? {}
+      : { assigneeType: validatedAssigneeType }),
     roleAssignmentId: requiredString(value, 'roleAssignmentId'),
     roleId: requiredString(value, 'roleId'),
     scopeType,
@@ -169,11 +197,14 @@ export function findExactAssignment(
   assignedTo: string,
   roleId: string,
 ): RoleAssignment | undefined {
-  const serviceAccountAssignments = assignments
-    .filter((assignment) => assignment.assignedTo === assignedTo)
-    .map(parseRoleAssignment);
+  const serviceAccountAssignments = assignments.map((assignment) =>
+    parseRoleAssignment(assignment),
+  );
   if (
-    serviceAccountAssignments.some((assignment) => assignment.roleId !== roleId)
+    serviceAccountAssignments.some(
+      (assignment) =>
+        assignment.assignedTo !== assignedTo || assignment.roleId !== roleId,
+    )
   ) {
     throw new Error(
       'The roster-reader service account has an unexpected Workspace admin role.',
@@ -186,6 +217,24 @@ export function findExactAssignment(
     throw new Error('The Groups Reader role is assigned more than once.');
   }
   return matches[0];
+}
+
+export async function assertExactLiveGroupsReaderRole(
+  contract: GroupsReaderContract,
+  fetcher: Fetcher = fetch,
+): Promise<void> {
+  const token = accessToken();
+  const role = selectGroupsReaderRole(await listAll(fetcher, token, 'roles'));
+  const assignment = findExactAssignment(
+    await listAll(fetcher, token, 'roleassignments', contract.oauthClientId),
+    contract.oauthClientId,
+    role.roleId,
+  );
+  if (assignment === undefined) {
+    throw new Error(
+      'The roster-reader service account does not have exactly the live Workspace Groups Reader role.',
+    );
+  }
 }
 
 function accessToken(): string {
@@ -202,7 +251,7 @@ function accessToken(): string {
     );
   } catch {
     throw new Error(
-      'Google ADC is not authorized for the exact Workspace role-management scope; follow the README authentication step.',
+      'Google ADC is not authorized for the required Workspace role-management scope; follow the README authentication step.',
     );
   }
 }
@@ -216,7 +265,12 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   const contract = readGroupsReaderContract();
   const token = accessToken();
   const role = selectGroupsReaderRole(await listAll(fetcher, token, 'roles'));
-  const assignments = await listAll(fetcher, token, 'roleassignments');
+  const assignments = await listAll(
+    fetcher,
+    token,
+    'roleassignments',
+    contract.oauthClientId,
+  );
   const existing = findExactAssignment(
     assignments,
     contract.oauthClientId,
@@ -224,7 +278,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   );
   if (existing !== undefined) {
     console.log(
-      'PASS: the roster-reader service account already has only the Workspace Groups Reader role.',
+      'PASS: the roster-reader service account already has only the direct Workspace Groups Reader role and no indirect role assignment.',
     );
     return;
   }
@@ -255,6 +309,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
         method: 'POST',
       },
     ),
+    false,
   );
   if (
     created.assignedTo !== contract.oauthClientId ||
@@ -265,7 +320,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   }
 
   const verified = findExactAssignment(
-    await listAll(fetcher, token, 'roleassignments'),
+    await listAll(fetcher, token, 'roleassignments', contract.oauthClientId),
     contract.oauthClientId,
     role.roleId,
   );

@@ -12,6 +12,7 @@ const googleCredentialOverrides = new Set([
   'GOOGLE_BACKEND_ACCESS_TOKEN',
   'GOOGLE_BACKEND_CREDENTIALS',
   'GOOGLE_BACKEND_IMPERSONATE_SERVICE_ACCOUNT',
+  'GOOGLE_CLOUD_UNIVERSE_DOMAIN',
   'GOOGLE_CLOUD_KEYFILE_JSON',
   'GOOGLE_CREDENTIALS',
   'GOOGLE_IMPERSONATE_SERVICE_ACCOUNT',
@@ -438,6 +439,7 @@ export async function reconcileIdempotentSecretWrite(options: {
 }
 
 export function awsSecretExists(options: {
+  readonly expectedAccountId: string;
   readonly profile: string;
   readonly region: string;
   readonly secretName: string;
@@ -470,6 +472,43 @@ export function awsSecretExists(options: {
   }
 
   if (result.status === 0) {
+    let metadata: unknown;
+    try {
+      metadata = JSON.parse(result.stdout);
+    } catch {
+      throw new Error(
+        `AWS returned invalid metadata for ${options.secretName}.`,
+      );
+    }
+    validateAwsSecretMetadata(metadata, options);
+    let policy: unknown;
+    try {
+      policy = JSON.parse(
+        runCommand(
+          'aws',
+          [
+            'secretsmanager',
+            'get-resource-policy',
+            '--secret-id',
+            options.secretName,
+            '--region',
+            options.region,
+            '--profile',
+            options.profile,
+            '--endpoint-url',
+            awsServiceEndpoint('secretsmanager', options.region),
+            '--output',
+            'json',
+          ],
+          { redactFailureOutput: true },
+        ),
+      );
+    } catch {
+      throw new Error(
+        `AWS could not verify the resource policy for ${options.secretName}.`,
+      );
+    }
+    validateAwsSecretResourcePolicy(policy, options);
     return true;
   }
   if (result.stderr?.includes('ResourceNotFoundException') === true) {
@@ -478,6 +517,116 @@ export function awsSecretExists(options: {
   throw new Error(
     `AWS could not inspect ${options.secretName}: ${(result.stderr ?? result.stdout ?? '').trim().slice(0, 2_000)}`,
   );
+}
+
+interface AwsSecretContract {
+  readonly expectedAccountId: string;
+  readonly region: string;
+  readonly secretName: string;
+}
+
+function secretArnMatches(
+  value: unknown,
+  contract: AwsSecretContract,
+): boolean {
+  const escapedName = contract.secretName.replace(
+    /[.*+?^${}()|[\]\\]/gu,
+    '\\$&',
+  );
+  return (
+    typeof value === 'string' &&
+    new RegExp(
+      `^arn:aws:secretsmanager:${contract.region}:${contract.expectedAccountId}:secret:${escapedName}-[A-Za-z0-9]{6}$`,
+      'u',
+    ).test(value)
+  );
+}
+
+function validateSecretTags(value: unknown): void {
+  if (!Array.isArray(value)) {
+    throw new Error('AWS secret ownership tags are invalid.');
+  }
+  const tags = new Map<string, string>();
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error('AWS secret ownership tags are invalid.');
+    }
+    const tag = item as Readonly<Record<string, unknown>>;
+    if (
+      typeof tag.Key !== 'string' ||
+      typeof tag.Value !== 'string' ||
+      tags.has(tag.Key)
+    ) {
+      throw new Error('AWS secret ownership tags are invalid.');
+    }
+    tags.set(tag.Key, tag.Value);
+  }
+  if (
+    tags.get('Application') !== 'PSD EOC' ||
+    !['infra/gcp', 'AWS CDK'].includes(tags.get('ManagedBy') ?? '') ||
+    (tags.has('DataScope') && tags.get('DataScope') !== 'staff-minimized')
+  ) {
+    throw new Error('AWS secret ownership tags are invalid.');
+  }
+}
+
+export function validateAwsSecretMetadata(
+  value: unknown,
+  contract: AwsSecretContract,
+): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('AWS secret metadata is invalid.');
+  }
+  const metadata = value as Readonly<Record<string, unknown>>;
+  const replicationStatus = metadata.ReplicationStatus;
+  const externalRotationMetadata = metadata.ExternalSecretRotationMetadata;
+  if (
+    metadata.Name !== contract.secretName ||
+    !secretArnMatches(metadata.ARN, contract) ||
+    metadata.DeletedDate !== undefined ||
+    metadata.KmsKeyId !== undefined ||
+    metadata.OwningService !== undefined ||
+    metadata.PrimaryRegion !== undefined ||
+    (replicationStatus !== undefined &&
+      (!Array.isArray(replicationStatus) || replicationStatus.length > 0)) ||
+    (metadata.RotationEnabled !== undefined &&
+      metadata.RotationEnabled !== false) ||
+    metadata.RotationLambdaARN !== undefined ||
+    metadata.NextRotationDate !== undefined ||
+    metadata.ExternalSecretRotationRoleArn !== undefined ||
+    metadata.Type !== undefined ||
+    (externalRotationMetadata !== undefined &&
+      (!Array.isArray(externalRotationMetadata) ||
+        externalRotationMetadata.length > 0))
+  ) {
+    throw new Error(
+      'AWS secret must be local, AWS-managed encrypted, unrotated, and retained in the fixed account and region.',
+    );
+  }
+  validateSecretTags(metadata.Tags);
+}
+
+export function validateAwsSecretResourcePolicy(
+  value: unknown,
+  contract: AwsSecretContract,
+): void {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    (value as Readonly<Record<string, unknown>>).Name !== contract.secretName ||
+    !secretArnMatches(
+      (value as Readonly<Record<string, unknown>>).ARN,
+      contract,
+    ) ||
+    ((value as Readonly<Record<string, unknown>>).ResourcePolicy !==
+      undefined &&
+      (value as Readonly<Record<string, unknown>>).ResourcePolicy !== null)
+  ) {
+    throw new Error(
+      'AWS secret must have no resource-based policy or cross-account access.',
+    );
+  }
 }
 
 export function putSecretValue(options: {

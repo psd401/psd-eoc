@@ -77,8 +77,9 @@ resource "google_storage_bucket" "terraform_state" {
     }
 
     condition {
-      age        = 90
-      with_state = "ARCHIVED"
+      days_since_noncurrent_time = 90
+      send_age_if_zero           = false
+      with_state                 = "ARCHIVED"
     }
   }
 

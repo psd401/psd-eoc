@@ -250,6 +250,7 @@ async function main(): Promise<void> {
 
   assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
   const secretExists = awsSecretExists({
+    expectedAccountId: AWS_ACCOUNT_ID,
     profile: AWS_PROFILE,
     region: AWS_REGION,
     secretName: SECRET_NAME,
@@ -260,6 +261,16 @@ async function main(): Promise<void> {
   );
   if (!secretExists) {
     createOauthSecretPlaceholder();
+    if (
+      !awsSecretExists({
+        expectedAccountId: AWS_ACCOUNT_ID,
+        profile: AWS_PROFILE,
+        region: AWS_REGION,
+        secretName: SECRET_NAME,
+      })
+    ) {
+      throw new Error('AWS did not create the expected OAuth secret.');
+    }
   }
 
   const secretValue = {

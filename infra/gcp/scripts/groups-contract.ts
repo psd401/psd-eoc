@@ -106,11 +106,12 @@ export function listUserManagedKeys(
   );
 }
 
-export function validateUserManagedKeyMetadata(
+function validateKeyMetadata(
   value: unknown,
   expectedKeyId: string,
-  now = Date.now(),
-  enforceMaximumAge = true,
+  now: number,
+  enforceMaximumAge: boolean,
+  requireActive: boolean,
 ): string {
   if (
     typeof value !== 'object' ||
@@ -129,6 +130,7 @@ export function validateUserManagedKeyMetadata(
     typeof key.validBeforeTime === 'string'
       ? Date.parse(key.validBeforeTime)
       : Number.NaN;
+  const extendedStatus = key.extendedStatus;
   const maximumAge = MAX_GROUPS_KEY_AGE_DAYS * 24 * 60 * 60 * 1_000;
   if (
     key.name !==
@@ -136,17 +138,97 @@ export function validateUserManagedKeyMetadata(
     key.keyAlgorithm !== 'KEY_ALG_RSA_2048' ||
     key.keyOrigin !== 'GOOGLE_PROVIDED' ||
     key.keyType !== 'USER_MANAGED' ||
+    (requireActive &&
+      ((key.disabled !== undefined && key.disabled !== false) ||
+        key.disableReason !== undefined ||
+        (extendedStatus !== undefined &&
+          (!Array.isArray(extendedStatus) || extendedStatus.length > 0)))) ||
     !Number.isFinite(validAfter) ||
     !Number.isFinite(validBefore) ||
     validAfter > now + 5 * 60 * 1_000 ||
     (enforceMaximumAge && now - validAfter > maximumAge) ||
-    validBefore <= now
+    validBefore <= validAfter ||
+    (requireActive && validBefore <= now)
   ) {
     throw new Error(
-      `The roster-reader key must be Google-generated, active, and no more than ${MAX_GROUPS_KEY_AGE_DAYS} days old.`,
+      requireActive
+        ? `The roster-reader key must be Google-generated, active, and no more than ${MAX_GROUPS_KEY_AGE_DAYS} days old.`
+        : 'The revocable roster-reader key must be the exact Google-generated user-managed key with valid identity metadata.',
     );
   }
   return new Date(validAfter).toISOString();
+}
+
+export function validateUserManagedKeyMetadata(
+  value: unknown,
+  expectedKeyId: string,
+  now = Date.now(),
+  enforceMaximumAge = true,
+): string {
+  return validateKeyMetadata(
+    value,
+    expectedKeyId,
+    now,
+    enforceMaximumAge,
+    true,
+  );
+}
+
+export function validateRevocableUserManagedKeyMetadata(
+  value: unknown,
+  expectedKeyId: string,
+  now = Date.now(),
+): string {
+  return validateKeyMetadata(value, expectedKeyId, now, false, false);
+}
+
+export function selectUserManagedKeyMetadata(
+  value: unknown,
+): Readonly<Record<string, unknown>> {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 1 ||
+    typeof value[0] !== 'object' ||
+    value[0] === null ||
+    Array.isArray(value[0])
+  ) {
+    throw new Error(
+      'Google must return exactly one user-managed service-account key.',
+    );
+  }
+  return value[0] as Readonly<Record<string, unknown>>;
+}
+
+function readUserManagedKeyMetadata(
+  contract: GroupsReaderContract,
+): Readonly<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = selectUserManagedKeyMetadata(
+      JSON.parse(
+        runCommand(
+          'gcloud',
+          [
+            'iam',
+            'service-accounts',
+            'keys',
+            'list',
+            '--iam-account',
+            contract.email,
+            '--project',
+            PROJECT_ID,
+            '--managed-by',
+            'user',
+            '--format=json',
+          ],
+          { redactFailureOutput: true },
+        ),
+      ),
+    );
+  } catch {
+    throw new Error('Google service-account key metadata is unavailable.');
+  }
+  return value as Readonly<Record<string, unknown>>;
 }
 
 export function readUserManagedKeyCreatedAt(
@@ -154,34 +236,21 @@ export function readUserManagedKeyCreatedAt(
   keyId: string,
   enforceMaximumAge = true,
 ): string {
-  let value: unknown;
-  try {
-    value = JSON.parse(
-      runCommand(
-        'gcloud',
-        [
-          'iam',
-          'service-accounts',
-          'keys',
-          'describe',
-          keyId,
-          '--iam-account',
-          contract.email,
-          '--project',
-          PROJECT_ID,
-          '--format=json',
-        ],
-        { redactFailureOutput: true },
-      ),
-    );
-  } catch {
-    throw new Error('Google service-account key metadata is unavailable.');
-  }
   return validateUserManagedKeyMetadata(
-    value,
+    readUserManagedKeyMetadata(contract),
     keyId,
     Date.now(),
     enforceMaximumAge,
+  );
+}
+
+export function readRevocableUserManagedKeyCreatedAt(
+  contract: GroupsReaderContract,
+  keyId: string,
+): string {
+  return validateRevocableUserManagedKeyMetadata(
+    readUserManagedKeyMetadata(contract),
+    keyId,
   );
 }
 

@@ -200,7 +200,8 @@ export function validateStateBucket(
       bucket.retention_policy !== null) ||
     !labelsMatch ||
     action?.type !== 'Delete' ||
-    condition?.age !== 90 ||
+    condition?.daysSinceNoncurrentTime !== 90 ||
+    condition?.age !== undefined ||
     condition?.isLive !== false
   ) {
     throw new Error(

@@ -1,5 +1,6 @@
 import { createSign, timingSafeEqual } from 'node:crypto';
 
+import { assertExactLiveGroupsReaderRole } from './configure-workspace-role';
 import {
   approvedStaffGroupHash,
   assertNoProjectIamBinding,
@@ -151,6 +152,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   assertActiveGcloudAccount(TERRAFORM_ADMIN);
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
   const contract = readGroupsReaderContract();
+  await assertExactLiveGroupsReaderRole(contract, fetcher);
   assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
   const credential = readSecretValue({
     profile: AWS_PROFILE,
@@ -254,7 +256,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   }
 
   console.log(
-    'PASS: the service account performed approved staff-group lookup and membership-list authorization with Groups Reader plus one read-only OAuth scope; Google returned no member identity fields and no value was printed.',
+    'PASS: the live Workspace assignment is exactly direct Groups Reader with no indirect role, and the service account performed approved staff-group lookup and membership-list authorization with one read-only OAuth scope; Google returned no member identity fields and no value was printed.',
   );
 }
 

@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
+import { assertExactLiveGroupsReaderRole } from './configure-workspace-role';
 import {
   assertNoProjectIamBinding,
   approvedStaffGroupHash,
@@ -110,13 +108,13 @@ function validateCredential(
   return credential;
 }
 
-async function readCreatedCredential(
-  keyPath: string,
+export function parseCreatedCredential(
+  output: string,
   contract: GroupsReaderContract,
-): Promise<Readonly<Record<string, unknown>>> {
+): Readonly<Record<string, unknown>> {
   let value: unknown;
   try {
-    value = JSON.parse(await readFile(keyPath, 'utf8'));
+    value = JSON.parse(output);
   } catch {
     throw new Error('Created Google credential did not contain valid JSON.');
   }
@@ -209,12 +207,11 @@ function assertStoredCredential(
   }
 }
 
-export async function cleanupCredentialArtifacts(options: {
+export function cleanupCredentialArtifacts(options: {
   readonly createdKeyId: string | undefined;
   readonly deleteKey: (keyId: string) => void;
-  readonly removeTemporaryDirectory: () => Promise<void>;
   readonly storageOutcome: 'stored' | 'not-stored' | 'unknown';
-}): Promise<unknown[]> {
+}): unknown[] {
   const errors: unknown[] = [];
   if (
     options.storageOutcome === 'not-stored' &&
@@ -227,13 +224,6 @@ export async function cleanupCredentialArtifacts(options: {
         new Error('The newly created Google key could not be deleted.'),
       );
     }
-  }
-  try {
-    await options.removeTemporaryDirectory();
-  } catch {
-    errors.push(
-      new Error('The temporary credential directory could not be removed.'),
-    );
   }
   return errors;
 }
@@ -249,6 +239,7 @@ async function main(): Promise<void> {
   assertActiveGcloudAccount(TERRAFORM_ADMIN);
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
   const contract = readGroupsReaderContract();
+  await assertExactLiveGroupsReaderRole(contract);
   assertNoProjectIamBinding(contract);
   const existingKeys = listUserManagedKeys(contract);
   if (existingKeys.size > 0) {
@@ -259,6 +250,7 @@ async function main(): Promise<void> {
 
   assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
   const secretExists = awsSecretExists({
+    expectedAccountId: AWS_ACCOUNT_ID,
     profile: AWS_PROFILE,
     region: AWS_REGION,
     secretName: SECRET_NAME,
@@ -269,12 +261,18 @@ async function main(): Promise<void> {
   );
   if (!secretExists) {
     createGroupsSecretPlaceholder();
+    if (
+      !awsSecretExists({
+        expectedAccountId: AWS_ACCOUNT_ID,
+        profile: AWS_PROFILE,
+        region: AWS_REGION,
+        secretName: SECRET_NAME,
+      })
+    ) {
+      throw new Error('AWS did not create the expected Groups secret.');
+    }
   }
 
-  const temporaryDirectory = await mkdtemp(
-    join(tmpdir(), 'psd-eoc-groups-key-'),
-  );
-  const keyPath = join(temporaryDirectory, 'credential.json');
   let keyCreationAttempted = false;
   let createdKeyId: string | undefined;
   let storageOutcome: 'stored' | 'not-stored' | 'unknown' = 'not-stored';
@@ -283,14 +281,14 @@ async function main(): Promise<void> {
 
   try {
     keyCreationAttempted = true;
-    runCommand(
+    const credentialOutput = runCommand(
       'gcloud',
       [
         'iam',
         'service-accounts',
         'keys',
         'create',
-        keyPath,
+        '-',
         '--iam-account',
         contract.email,
         '--project',
@@ -300,8 +298,7 @@ async function main(): Promise<void> {
       { redactFailureOutput: true },
     );
 
-    await chmod(keyPath, 0o600);
-    const credential = await readCreatedCredential(keyPath, contract);
+    const credential = parseCreatedCredential(credentialOutput, contract);
     createdKeyId = requiredString(credential, 'private_key_id');
     await waitForCreatedKey(contract, existingKeys, createdKeyId);
     const credentialCreatedAt = readUserManagedKeyCreatedAt(
@@ -333,20 +330,15 @@ async function main(): Promise<void> {
   }
 
   if (keyCreationAttempted && createdKeyId === undefined) {
-    try {
-      const credential = await readCreatedCredential(keyPath, contract);
-      createdKeyId = requiredString(credential, 'private_key_id');
-    } catch {
-      cleanupErrors.push(
-        new Error(
-          'Could not bind remote cleanup to the downloaded Google key; manual reconciliation is required.',
-        ),
-      );
-    }
+    cleanupErrors.push(
+      new Error(
+        'Could not bind remote cleanup to the generated Google key; manual reconciliation is required.',
+      ),
+    );
   }
 
   cleanupErrors.push(
-    ...(await cleanupCredentialArtifacts({
+    ...cleanupCredentialArtifacts({
       createdKeyId,
       deleteKey: (keyId) => {
         runCommand(
@@ -366,10 +358,8 @@ async function main(): Promise<void> {
           { redactFailureOutput: true },
         );
       },
-      removeTemporaryDirectory: async () =>
-        rm(temporaryDirectory, { force: true, recursive: true }),
       storageOutcome,
-    })),
+    }),
   );
 
   if (operationError !== undefined || cleanupErrors.length > 0) {
