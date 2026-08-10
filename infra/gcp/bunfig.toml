@@ -1,0 +1,9 @@
+# The launcher rejects Bun startup environment overrides before this trusted
+# preload can run. The preload then validates the remaining process contract
+# before any guarded helper module executes.
+preload = ["./scripts/preload-guard.ts"]
+env = false
+telemetry = false
+
+[install]
+auto = "disable"
