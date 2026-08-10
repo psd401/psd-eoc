@@ -1,0 +1,6 @@
+.env
+.env.*
+*.csv
+*.p8
+*review*.json
+vendor/bundle/
