@@ -166,12 +166,26 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     const provider = read('providers.tf');
     const bootstrap = read('bootstrap/main.tf');
     const readme = read('README.md');
+    const apply = read('scripts/apply.ts');
+    const groups = read('scripts/groups-contract.ts');
 
     expect(provider).toContain('billing_project       = var.project_id');
     expect(provider).toContain('user_project_override = true');
     expect(bootstrap).not.toContain('billing_project');
     expect(bootstrap).not.toContain('user_project_override');
     expect(readme.match(/--disable-quota-project/gu)).toHaveLength(2);
+    expect(apply).toMatch(
+      /'projects',\s*'describe',\s*PROJECT_ID,\s*'--project',\s*PROJECT_ID/gu,
+    );
+    expect(apply).toMatch(
+      /'billing',\s*'projects',\s*'describe',\s*PROJECT_ID,\s*'--project',\s*PROJECT_ID/gu,
+    );
+    expect(apply).toMatch(
+      /'get-iam-policy',\s*`gs:\/\/\$\{STATE_BUCKET\}`,\s*'--project',\s*PROJECT_ID/gu,
+    );
+    expect(groups).toMatch(
+      /'get-iam-policy',\s*PROJECT_ID,\s*'--project',\s*PROJECT_ID/gu,
+    );
   });
 
   test('does not place an object-retention lock on Terraform lock files', () => {
@@ -573,6 +587,15 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(() =>
       validateGcloudConfiguration(
         {
+          billing: { quota_project: 'aistudio-462612' },
+          core: { account: 'kjh_admin@psd401.net' },
+        },
+        'kjh_admin@psd401.net',
+      ),
+    ).toThrow('billing/quota');
+    expect(() =>
+      validateGcloudConfiguration(
+        {
           api_endpoint_overrides: { storage: 'https://attacker.invalid' },
           core: { account: 'kjh_admin@psd401.net' },
         },
@@ -885,6 +908,9 @@ describe('Groups least-privilege contracts', () => {
     expect(provisioner).toContain("'create',\n        '-'");
     expect(provisioner).toContain(
       'await assertExactLiveGroupsReaderRole(contract)',
+    );
+    expect(provisioner).toMatch(
+      /createdKeyId = candidateCreatedKeyId;\s*await waitForCreatedKey\(contract, existingKeys, createdKeyId\);/u,
     );
     for (const forbidden of ['tmpdir', 'mkdtemp', 'credential.json']) {
       expect(provisioner).not.toContain(forbidden);

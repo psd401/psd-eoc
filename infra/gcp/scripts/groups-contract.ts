@@ -291,6 +291,8 @@ export function assertNoProjectIamBinding(
       'projects',
       'get-iam-policy',
       PROJECT_ID,
+      '--project',
+      PROJECT_ID,
       '--format=json',
     ]),
   );

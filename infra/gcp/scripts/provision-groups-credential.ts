@@ -324,8 +324,8 @@ async function main(): Promise<void> {
     );
 
     const candidateCreatedKeyId = parseCreatedKeyId(credentialOutput);
-    await waitForCreatedKey(contract, existingKeys, candidateCreatedKeyId);
     createdKeyId = candidateCreatedKeyId;
+    await waitForCreatedKey(contract, existingKeys, createdKeyId);
     const credential = parseCreatedCredential(credentialOutput, contract);
     const credentialCreatedAt = readUserManagedKeyCreatedAt(
       contract,

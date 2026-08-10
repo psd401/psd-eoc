@@ -247,6 +247,7 @@ export function validateGcloudConfiguration(
   const forbiddenSections = [
     configuration.api_endpoint_overrides,
     configuration.auth,
+    configuration.billing,
     configuration.context_aware,
     configuration.proxy,
     configuration.storage,
@@ -267,7 +268,7 @@ export function validateGcloudConfiguration(
     )
   ) {
     throw new Error(
-      `gcloud must use ${expectedEmail} without impersonation, token-file, endpoint, proxy, or custom-CA overrides.`,
+      `gcloud must use ${expectedEmail} without impersonation, billing/quota, token-file, endpoint, proxy, or custom-CA overrides.`,
     );
   }
 }
