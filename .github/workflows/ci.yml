@@ -45,3 +45,59 @@ jobs:
 
       - name: Run the repository gate
         run: bun run check
+
+  mobile:
+    name: Mobile lint, typecheck, test, and prebuild
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install dependencies from the lockfile
+        run: bun install --frozen-lockfile
+
+      - name: Lint the mobile app
+        working-directory: packages/mobile
+        run: bun run lint
+
+      - name: Typecheck the mobile app
+        working-directory: packages/mobile
+        run: bun run typecheck
+
+      - name: Test the mobile app
+        working-directory: packages/mobile
+        run: bun run test
+
+      - name: Check Expo dependency compatibility
+        working-directory: packages/mobile
+        run: bun run expo:check
+
+      - name: Verify the shared React runtime resolution
+        working-directory: packages/mobile
+        run: bun run react:check
+
+      - name: Generate native projects without installing dependencies
+        working-directory: packages/mobile
+        run: bun run prebuild:check
+
+      - name: Verify generated native safety configuration
+        working-directory: packages/mobile
+        run: |
+          set -euo pipefail
+          test -d android
+          test -d ios
+          grep -RFq 'net.psd401.eoc' android/app
+          grep -RFq 'net.psd401.eoc' ios
+          grep -Fq 'com.google.firebase.messaging.default_notification_channel_id' android/app/src/main/AndroidManifest.xml
+          grep -Fq '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml
+          grep -Fq '<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml
+          grep -Fq '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml
+          grep -Fq '<string name="expo_system_ui_user_interface_style" translatable="false">light</string>' android/app/src/main/res/values/strings.xml
+          grep -A1 -F '<key>UIUserInterfaceStyle</key>' ios/PSDEOC/Info.plist | grep -Fq '<string>Light</string>'
+          grep -RFq --include='*.entitlements' '<key>aps-environment</key>' ios
