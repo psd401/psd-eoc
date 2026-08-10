@@ -352,6 +352,14 @@ async function main(): Promise<void> {
     }
     storageOutcome = 'stored';
     assertRosterReaderCredentialBoundary(contract);
+    if (
+      readUserManagedKeyCreatedAt(contract, createdKeyId) !==
+      credentialCreatedAt
+    ) {
+      throw new Error(
+        'Google did not preserve the exact sole AWS-stored roster-reader key; manual reconciliation is required.',
+      );
+    }
   } catch (error) {
     operationError = error;
   }

@@ -1,6 +1,7 @@
 import {
   assertRosterReaderCredentialBoundary,
   GROUPS_READER_ROLE,
+  listUserManagedKeys,
   PROJECT_ID,
   readGroupsReaderContract,
   type GroupsReaderContract,
@@ -148,12 +149,22 @@ export function selectGroupsReaderRole(
   if (matches.length !== 1 || role === undefined) {
     throw new Error('Workspace must expose exactly one Groups Reader role.');
   }
-  if (role.isSystemRole !== true || role.isSuperAdminRole === true) {
+  if (role.isSystemRole !== true || role.isSuperAdminRole !== false) {
     throw new Error(
       'Workspace Groups Reader is not the expected non-super-admin system role.',
     );
   }
   return { roleId: requiredString(role, 'roleId') };
+}
+
+export function assertNoUserManagedKeysBeforeRoleAssignment(
+  userManagedKeys: ReadonlySet<string>,
+): void {
+  if (userManagedKeys.size !== 0) {
+    throw new Error(
+      'Workspace Groups Reader cannot be assigned while the roster-reader service account has a user-managed key; revoke every key first.',
+    );
+  }
 }
 
 function parseRoleAssignment(
@@ -299,6 +310,8 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
       `Set PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT=${CONFIRMATION} only after reviewing the consequence preview.`,
     );
   }
+  assertRosterReaderCredentialBoundary(contract);
+  assertNoUserManagedKeysBeforeRoleAssignment(listUserManagedKeys(contract));
 
   const created = parseRoleAssignment(
     await authorizedFetch(

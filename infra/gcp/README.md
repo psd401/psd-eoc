@@ -165,8 +165,11 @@ PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT=assign-groups-reader-to-roster-sync-re
 
 The helper is idempotent, allows only Admin SDK GETs plus the one role-assignment
 POST, and refuses any other direct or indirect administrator role affecting
-that service account. It requires Super Admin Application Default Credentials
-with one non-Cloud scope:
+that service account. Immediately before the first assignment POST, it rechecks
+both IAM boundaries and requires zero user-managed service-account keys. An
+existing key is treated as unowned: the helper refuses the assignment and never
+deletes it. It requires Super Admin Application Default Credentials with one
+non-Cloud scope:
 `https://www.googleapis.com/auth/admin.directory.rolemanagement`. The login
 also retains `openid`, `userinfo.email`, and `cloud-platform` so gcloud can
 verify the fixed administrator identity and run the other guarded checks. The
@@ -271,7 +274,11 @@ new placeholder is read back against the same contract. It creates
 Secrets Manager version, and captures gcloud's supported stdout output so the
 private key is never written to a local file. A failed AWS write deletes only
 the newly identified key; an ambiguous AWS result is read back before cleanup,
-and ambiguous key identity is never deleted.
+and ambiguous key identity is never deleted. After exact AWS readback marks the
+credential stored, the final remote check again requires the same key to be the
+sole active user-managed key with the same creation timestamp. A missing,
+changed, or concurrent key fails the run but retains the AWS-bound key and any
+unknown key for explicit reconciliation.
 
 The project-policy check rejects the exact service-account member plus direct
 project bindings to universal principals, domains, groups, project convenience
