@@ -23,6 +23,9 @@ const IDS = {
   correction: '10000000-0000-4000-8000-000000000011',
   redactedOriginal: '10000000-0000-4000-8000-000000000012',
   redaction: '10000000-0000-4000-8000-000000000013',
+  photo: '10000000-0000-4000-8000-000000000014',
+  media: '10000000-0000-4000-8000-000000000015',
+  photoRedaction: '10000000-0000-4000-8000-000000000016',
 } as const;
 
 const ACTOR = {
@@ -92,6 +95,25 @@ function textEntry(
   });
 }
 
+function photoEntry(): JournalEntry {
+  return JournalEntrySchema.parse({
+    id: IDS.photo,
+    eventId: IDS.event,
+    sequence: 5,
+    author: ACTOR,
+    source: 'web',
+    serverTime: '2026-08-10T16:06:00.000Z',
+    clientTime: '2026-08-10T16:05:30.000Z',
+    supersedes: null,
+    kind: 'photo',
+    payload: {
+      mediaId: IDS.media,
+      altText: 'Exterior assembly area with staff accountability teams',
+      caption: 'Synthetic exercise photo',
+    },
+  });
+}
+
 const ENTRIES = [
   textEntry({
     id: IDS.original,
@@ -141,6 +163,7 @@ function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
   return renderToStaticMarkup(
     <EventRoom
       apiUrl={`/events/${event.id}/api`}
+      authorDisplayName="Synthetic Event Room Operator"
       csrfCookieName="__Host-psd-eoc-csrf"
       event={event}
       eventTypeLabel={
@@ -211,5 +234,43 @@ describe('event room server-rendered safety and history state', () => {
     expect(closedHtml).toContain(
       'The event is closed. Its complete journal remains retained.',
     );
+  });
+
+  test('renders private photo description without embedding a public URL', () => {
+    const html = render(activeEvent('real'), [photoEntry()]);
+
+    expect(html).toContain(
+      'Exterior assembly area with staff accountability teams',
+    );
+    expect(html).toContain('Synthetic exercise photo');
+    expect(html).toContain('Authorizing private photo');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('https://');
+  });
+
+  test('never mounts private photo rendering for an append-only redacted photo', () => {
+    const redaction = textEntry({
+      id: IDS.photoRedaction,
+      sequence: 6,
+      text: '[Content redacted — original retained in journal]',
+      serverTime: '2026-08-10T16:07:00.000Z',
+      clientTime: null,
+      supersedes: {
+        entryId: IDS.photo,
+        entrySequence: 5,
+        kind: 'redaction',
+        reason: 'Synthetic photo no longer needed for operations.',
+      },
+    });
+    const html = render(activeEvent('real'), [photoEntry(), redaction]);
+
+    expect(html).toContain(
+      'Original content is hidden because a later append-only redaction',
+    );
+    expect(html).not.toContain(
+      'Exterior assembly area with staff accountability teams',
+    );
+    expect(html).not.toContain('Authorizing private photo');
+    expect(html).not.toContain('<img');
   });
 });

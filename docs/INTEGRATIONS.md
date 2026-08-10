@@ -30,7 +30,9 @@ does not establish that the plan exists, is active, can read the KMS-encrypted
 quarantine object, or can write `GuardDutyMalwareScanStatus`. Application code
 must treat a missing tag and every result other than `NO_THREATS_FOUND` as a
 closed gate. The App Runner role can read that quarantine tag but has no S3
-tag-write permission. Bucket policy reserves quarantine tag mutations to the
-dedicated GuardDuty scanner identities and denies non-scanner reads of any
-current object without the exact clean tag, so another broad same-account role
-cannot manufacture or bypass a clean verdict.
+tag-write permission. Bucket policy reserves quarantine tag mutations to
+sessions issued from the dedicated GuardDuty scanner role, matching the stable
+IAM role ARN through `aws:PrincipalArn`, and denies non-scanner reads of any
+current object without the exact clean tag. It does not depend on an
+AWS-controlled role-session name, so another broad same-account role cannot
+manufacture or bypass a clean verdict.

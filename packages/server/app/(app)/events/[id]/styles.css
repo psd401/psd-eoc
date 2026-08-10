@@ -447,6 +447,61 @@ dd {
   text-align: right;
 }
 
+.photo-entry {
+  display: grid;
+  gap: 0.65rem;
+  white-space: normal;
+}
+
+.photo-entry figcaption p {
+  margin: 0.25rem 0;
+}
+
+.timeline-photo {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: 32rem;
+  border: 1px solid #64748b;
+  border-radius: 0.45rem;
+  background: #f1f5f9;
+  object-fit: contain;
+}
+
+.photo-status {
+  min-height: 1.5rem;
+  margin-bottom: 0;
+  font-weight: 700;
+}
+
+.photo-workflow-error,
+.photo-read-error {
+  margin-top: 0.8rem;
+  border: 2px solid #b91c1c;
+  border-radius: 0.45rem;
+  background: #fef2f2;
+  color: #7f1d1d;
+  padding: 0.75rem;
+}
+
+.photo-workflow-error p,
+.photo-read-error p {
+  margin: 0.4rem 0;
+}
+
+.photo-pending {
+  margin-top: 0.8rem;
+  border: 2px solid #9a3412;
+  border-radius: 0.45rem;
+  background: #fff7ed;
+  color: #7c2d12;
+  padding: 0.75rem;
+}
+
+.photo-pending p {
+  margin-top: 0;
+}
+
 .lifecycle-panel {
   border-width: 2px;
 }

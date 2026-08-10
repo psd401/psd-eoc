@@ -382,18 +382,6 @@ export class PsdEocStack extends Stack {
         }),
       },
     });
-    const guardDutyScanSessionArn = Stack.of(this).formatArn({
-      account: DEPLOYMENT_ACCOUNT,
-      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-      region: '',
-      resource: 'assumed-role',
-      resourceName: `${mediaMalwareScanRole.roleName}/GuardDutyMalwareProtection`,
-      service: 'sts',
-    });
-    const guardDutyScannerPrincipals = [
-      new iam.ArnPrincipal(mediaMalwareScanRole.roleArn),
-      new iam.ArnPrincipal(guardDutyScanSessionArn),
-    ];
     mediaBucket.addToResourcePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -402,8 +390,13 @@ export class PsdEocStack extends Stack {
           's3:DeleteObjectTagging',
           's3:DeleteObjectVersionTagging',
         ],
+        conditions: {
+          ArnNotEquals: {
+            'aws:PrincipalArn': mediaMalwareScanRole.roleArn,
+          },
+        },
         effect: iam.Effect.DENY,
-        notPrincipals: guardDutyScannerPrincipals,
+        principals: [new iam.AnyPrincipal()],
         resources: [mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`)],
         sid: 'DenyQuarantineScanTagMutationOutsideGuardDuty',
       }),
@@ -412,13 +405,16 @@ export class PsdEocStack extends Stack {
       new iam.PolicyStatement({
         actions: ['s3:GetObject', 's3:GetObjectVersion'],
         conditions: {
+          ArnNotEquals: {
+            'aws:PrincipalArn': mediaMalwareScanRole.roleArn,
+          },
           StringNotEquals: {
             's3:ExistingObjectTag/GuardDutyMalwareScanStatus':
               'NO_THREATS_FOUND',
           },
         },
         effect: iam.Effect.DENY,
-        notPrincipals: guardDutyScannerPrincipals,
+        principals: [new iam.AnyPrincipal()],
         resources: [mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`)],
         sid: 'DenyQuarantineReadUnlessGuardDutyMarkedClean',
       }),

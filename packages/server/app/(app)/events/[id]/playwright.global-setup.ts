@@ -11,6 +11,7 @@ import {
   IdempotencyPrincipalSchema,
   IntegrationStatusSchema,
   JournalEntrySchema,
+  MediaRecordSchema,
   type Actor,
   type Event,
   type JournalEntry,
@@ -32,6 +33,8 @@ import {
   groupSources,
   integrationStatuses,
   journalEntries,
+  mediaRecords,
+  mediaUploadIntents,
   userRoles,
   users,
 } from '../../../../db/schema';
@@ -39,6 +42,10 @@ import {
   createDrizzleInitialWebSessionStore,
   digestWebSessionCredential,
 } from '../../../../lib/auth/session-cookie';
+import {
+  quarantineStorageKey,
+  readyStorageKey,
+} from '../../../../lib/media/model';
 import {
   EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH,
   EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH,
@@ -70,12 +77,19 @@ interface AccessFixture {
 }
 
 interface EventRoomFixture {
+  readonly sessionId: string;
   readonly historyEventId: string;
   readonly keyboardEventId: string;
   readonly recoveryEventId: string;
   readonly recoveryOwnerEventId: string;
   readonly lifecycleEventId: string;
   readonly realDraftEventId: string;
+  readonly photoEventId: string;
+  readonly photoMediaId: string;
+  readonly photoUploadMediaId: string;
+  readonly photoSanitizedSha256: string;
+  readonly redactedPhotoEventId: string;
+  readonly redactedPhotoMediaId: string;
 }
 
 interface ChannelConfigurationState {
@@ -387,12 +401,12 @@ function journalInsert(
     serverTime: new Date(entry.serverTime),
     clientTime: entry.clientTime === null ? null : new Date(entry.clientTime),
     payload: entry.payload,
-    mediaId: null,
+    mediaId: entry.kind === 'photo' ? entry.payload.mediaId : null,
     transitionId: null,
-    supersedesEntryId: null,
-    supersedesEntrySequence: null,
-    supersessionKind: null,
-    supersessionReason: null,
+    supersedesEntryId: entry.supersedes?.entryId ?? null,
+    supersedesEntrySequence: entry.supersedes?.entrySequence ?? null,
+    supersessionKind: entry.supersedes?.kind ?? null,
+    supersessionReason: entry.supersedes?.reason ?? null,
   };
 }
 
@@ -417,6 +431,64 @@ function eventInsert(event: Event): typeof events.$inferInsert {
     correctionOfEventId: event.correctionOfEventId,
     correctionReason: event.correctionReason,
     activationAuthorization: event.activationAuthorization,
+  };
+}
+
+interface SyntheticReadyMediaSeed {
+  readonly id: string;
+  readonly sanitizedContentSha256: string;
+  readonly uploadIntent: typeof mediaUploadIntents.$inferInsert;
+  readonly record: typeof mediaRecords.$inferInsert;
+}
+
+function readyMediaSeed(
+  eventId: string,
+  createdAt: Date,
+  label: string,
+): SyntheticReadyMediaSeed {
+  const uploadIntentId = randomUUID();
+  const mediaId = randomUUID();
+  const rawContent = `synthetic raw ${label} photo ${uploadIntentId}`;
+  const sanitizedContent = `synthetic sanitized ${label} photo ${mediaId}`;
+  const canonicalRecord = MediaRecordSchema.parse({
+    id: mediaId,
+    uploadIntentId,
+    eventId,
+    status: 'ready',
+    detectedContentType: 'image/jpeg',
+    sanitizedByteLength: Buffer.byteLength(sanitizedContent, 'utf8'),
+    sanitizedContentSha256: digest(sanitizedContent),
+    malwareScan: 'clean',
+    exifStripped: true,
+    createdAt: createdAt.toISOString(),
+  });
+  return {
+    id: canonicalRecord.id,
+    sanitizedContentSha256: canonicalRecord.sanitizedContentSha256,
+    uploadIntent: {
+      id: uploadIntentId,
+      eventId,
+      byteLength: Buffer.byteLength(rawContent, 'utf8'),
+      contentSha256: digest(rawContent),
+      declaredContentType: 'image/jpeg',
+      storageKey: quarantineStorageKey(eventId, uploadIntentId),
+      status: 'completed',
+      createdAt,
+      expiresAt: new Date(createdAt.getTime() + 10 * 60_000),
+    },
+    record: {
+      id: canonicalRecord.id,
+      uploadIntentId: canonicalRecord.uploadIntentId,
+      eventId: canonicalRecord.eventId,
+      status: canonicalRecord.status,
+      detectedContentType: canonicalRecord.detectedContentType,
+      sanitizedByteLength: canonicalRecord.sanitizedByteLength,
+      sanitizedContentSha256: canonicalRecord.sanitizedContentSha256,
+      storageKey: readyStorageKey(eventId, canonicalRecord.id),
+      malwareScan: canonicalRecord.malwareScan,
+      exifStripped: canonicalRecord.exifStripped,
+      createdAt,
+    },
   };
 }
 
@@ -541,6 +613,8 @@ async function prepareEventFixtures(
   const recoveryEvent = makeActiveEvent();
   const recoveryOwnerEvent = makeActiveEvent();
   const lifecycleEvent = makeActiveEvent();
+  const photoEvent = makeActiveEvent();
+  const redactedPhotoEvent = makeActiveEvent();
   const realDraftEvent = EventSchema.parse({
     id: randomUUID(),
     facilityId: FACILITY_ID,
@@ -586,12 +660,81 @@ async function prepareEventFixtures(
         supersedes: null,
       });
     });
+  const photoMedia = readyMediaSeed(
+    photoEvent.id,
+    new Date(activatedAt.getTime() + 500),
+    'visible',
+  );
+  const photoUploadMedia = readyMediaSeed(
+    photoEvent.id,
+    new Date(activatedAt.getTime() + 750),
+    'upload completion',
+  );
+  const redactedPhotoMedia = readyMediaSeed(
+    redactedPhotoEvent.id,
+    new Date(activatedAt.getTime() + 500),
+    'redacted',
+  );
+  const photoEntry = JournalEntrySchema.parse({
+    id: randomUUID(),
+    eventId: photoEvent.id,
+    sequence: 1,
+    kind: 'photo',
+    author: actor,
+    source: 'web',
+    serverTime: new Date(activatedAt.getTime() + 1_000).toISOString(),
+    clientTime: null,
+    payload: {
+      mediaId: photoMedia.id,
+      altText: 'Synthetic emergency operations scene; no people are shown.',
+      caption: 'Synthetic authorized-photo rendering fixture.',
+    },
+    supersedes: null,
+  });
+  const redactedPhotoEntry = JournalEntrySchema.parse({
+    id: randomUUID(),
+    eventId: redactedPhotoEvent.id,
+    sequence: 1,
+    kind: 'photo',
+    author: actor,
+    source: 'web',
+    serverTime: new Date(activatedAt.getTime() + 1_000).toISOString(),
+    clientTime: null,
+    payload: {
+      mediaId: redactedPhotoMedia.id,
+      altText: 'Synthetic photo hidden by a later append-only redaction.',
+      caption: null,
+    },
+    supersedes: null,
+  });
+  const photoRedactionEntry = JournalEntrySchema.parse({
+    id: randomUUID(),
+    eventId: redactedPhotoEvent.id,
+    sequence: 2,
+    kind: 'text',
+    author: actor,
+    source: 'web',
+    serverTime: new Date(activatedAt.getTime() + 2_000).toISOString(),
+    clientTime: null,
+    payload: {
+      text: '[Content redacted — original retained in journal]',
+    },
+    supersedes: {
+      entryId: redactedPhotoEntry.id,
+      entrySequence: redactedPhotoEntry.sequence,
+      kind: 'redaction',
+      reason: 'Synthetic privacy-safe photo redaction fixture.',
+    },
+  });
   const journal = [
     ...makeHistory(historyEvent, 105),
     ...makeHistory(keyboardEvent, 3),
     ...makeHistory(recoveryEvent, 3),
     ...makeHistory(recoveryOwnerEvent, 3),
     ...makeHistory(lifecycleEvent, 3),
+    photoEntry,
+    redactedPhotoEntry,
+    photoRedactionEntry,
   ];
 
   await database.transaction(async (transaction) => {
@@ -629,19 +772,42 @@ async function prepareEventFixtures(
           recoveryEvent,
           recoveryOwnerEvent,
           lifecycleEvent,
+          photoEvent,
+          redactedPhotoEvent,
           realDraftEvent,
         ].map(eventInsert),
       );
+    await transaction
+      .insert(mediaUploadIntents)
+      .values([
+        photoMedia.uploadIntent,
+        photoUploadMedia.uploadIntent,
+        redactedPhotoMedia.uploadIntent,
+      ]);
+    await transaction
+      .insert(mediaRecords)
+      .values([
+        photoMedia.record,
+        photoUploadMedia.record,
+        redactedPhotoMedia.record,
+      ]);
     await transaction.insert(journalEntries).values(journal.map(journalInsert));
   });
 
   return {
+    sessionId: actor.sessionId,
     historyEventId: historyEvent.id,
     keyboardEventId: keyboardEvent.id,
     recoveryEventId: recoveryEvent.id,
     recoveryOwnerEventId: recoveryOwnerEvent.id,
     lifecycleEventId: lifecycleEvent.id,
     realDraftEventId: realDraftEvent.id,
+    photoEventId: photoEvent.id,
+    photoMediaId: photoMedia.id,
+    photoUploadMediaId: photoUploadMedia.id,
+    photoSanitizedSha256: photoMedia.sanitizedContentSha256,
+    redactedPhotoEventId: redactedPhotoEvent.id,
+    redactedPhotoMediaId: redactedPhotoMedia.id,
   };
 }
 

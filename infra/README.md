@@ -126,8 +126,10 @@ scanned object. The application must continue to fail closed unless the exact
 object has `NO_THREATS_FOUND`; a synthesized plan, an active plan, a missing
 tag, or any other result does not make media readable or journal-visible.
 Bucket policy enforces that gate on quarantine object reads for every
-principal except the dedicated GuardDuty role and its scanner session. It also
-reserves all quarantine tag mutations to those two scanner identities.
+principal except sessions issued from the dedicated GuardDuty role. It matches
+the stable IAM role ARN through `aws:PrincipalArn` rather than guessing an
+AWS-controlled session name, and reserves all quarantine tag mutations to that
+role.
 
 The plan depends explicitly on its IAM role because AWS validates the role
 while creating the plan and recommends an IaC dependency for propagation. The

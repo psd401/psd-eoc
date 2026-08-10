@@ -100,6 +100,7 @@ export default async function EventRoomPage({
     return (
       <EventRoom
         apiUrl={`/events/${encodeURIComponent(event.id)}/api`}
+        authorDisplayName={authenticated.result.user.displayName}
         csrfCookieName={WEB_CSRF_COOKIE_NAME}
         event={event}
         eventTypeLabel={eventTypeVersion.name}
