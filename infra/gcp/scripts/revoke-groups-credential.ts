@@ -5,6 +5,7 @@ import {
   PROJECT_ID,
   readGroupsReaderContract,
   readRevocableUserManagedKeyCreatedAt,
+  type GroupsReaderContract,
 } from './groups-contract';
 import {
   assertActiveGcloudAccount,
@@ -24,17 +25,12 @@ const AWS_REGION = 'us-west-2';
 const SECRET_NAME = '/psd-eoc/google-groups';
 const TERRAFORM_ADMIN = 'kjh_admin@psd401.net';
 
-async function main(): Promise<void> {
-  if (process.argv.slice(2).length > 0) {
-    throw new Error('This helper accepts no command-line options.');
-  }
-  const approvedGroup = normalizeApprovedStaffGroup(
-    process.env.PSD_EOC_APPROVED_TEST_GROUP,
-  );
-  assertActiveGcloudAccount(TERRAFORM_ADMIN);
-  await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
-  const contract = readGroupsReaderContract();
-  assertRosterReaderCredentialBoundary(contract);
+interface RevocationContract {
+  readonly contract: GroupsReaderContract;
+  readonly privateKeyId: string;
+}
+
+function assertGroupsSecretDestination(): void {
   assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
   if (
     !awsSecretExists({
@@ -48,11 +44,22 @@ async function main(): Promise<void> {
       'The retained AWS Groups credential secret does not exist.',
     );
   }
+}
+
+async function readRevocationContract(
+  approvedGroup: string,
+): Promise<RevocationContract> {
+  assertActiveGcloudAccount(TERRAFORM_ADMIN);
+  await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
+  const contract = readGroupsReaderContract();
+  assertRosterReaderCredentialBoundary(contract);
+  assertGroupsSecretDestination();
   const credential = readSecretValue({
     profile: AWS_PROFILE,
     region: AWS_REGION,
     secretName: SECRET_NAME,
   });
+  assertGroupsSecretDestination();
   const privateKeyId = requiredString(credential, 'private_key_id');
   const liveKeys = listUserManagedKeys(contract);
   if (liveKeys.size !== 1 || !liveKeys.has(privateKeyId)) {
@@ -70,12 +77,26 @@ async function main(): Promise<void> {
     approvedGroup,
     liveCredentialCreatedAt,
   );
+  assertRosterReaderCredentialBoundary(contract);
+  assertGroupsSecretDestination();
+  return { contract, privateKeyId };
+}
+
+async function main(): Promise<void> {
+  if (process.argv.slice(2).length > 0) {
+    throw new Error('This helper accepts no command-line options.');
+  }
+  const approvedGroup = normalizeApprovedStaffGroup(
+    process.env.PSD_EOC_APPROVED_TEST_GROUP,
+  );
+  await readRevocationContract(approvedGroup);
 
   await requireExactConfirmation(
     'Groups credential revocation preview: revoke the exact live roster-reader Google key currently bound to the AWS secret. Roster sync will fail closed and must use its last versioned snapshot until provisioning and live verification of the replacement key finish. No AWS secret, group, notification, or human-only action is changed.',
     'revoke-psd-eoc-readonly-groups-key',
   );
-  assertRosterReaderCredentialBoundary(contract);
+  const { contract, privateKeyId } =
+    await readRevocationContract(approvedGroup);
 
   try {
     runCommand(

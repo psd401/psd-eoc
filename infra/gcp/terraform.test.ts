@@ -1366,6 +1366,30 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(oauth).toMatch(
       /function readLiveTerraformProjectNumber\(\): string \{[^]*assertDefaultTerraformWorkspace\(\);[^]*runCommand\('terraform', \['output', '-json', 'project'\]\)[^]*return terraformProjectNumber\(liveProject\);/u,
     );
+
+    const revoker = read('scripts/revoke-groups-credential.ts');
+    const revokeMain = revoker.slice(revoker.indexOf('async function main'));
+    const revokeConfirmation = revokeMain.indexOf(
+      'await requireExactConfirmation',
+    );
+    const revokePreflight = revokeMain.indexOf(
+      'await readRevocationContract(approvedGroup)',
+    );
+    const revokePostConfirmation = revokeMain.indexOf(
+      'await readRevocationContract(approvedGroup)',
+      revokeConfirmation,
+    );
+    const keyDeletion = revokeMain.indexOf("'delete'", revokePostConfirmation);
+    expect(revokePreflight).toBeGreaterThan(-1);
+    expect(revokePreflight).toBeLessThan(revokeConfirmation);
+    expect(revokePostConfirmation).toBeGreaterThan(revokeConfirmation);
+    expect(keyDeletion).toBeGreaterThan(revokePostConfirmation);
+    expect(revoker).toMatch(
+      /function assertGroupsSecretDestination\(\): void \{\s*assertAwsAccount\(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION\);[^]*awsSecretExists/u,
+    );
+    expect(revoker).toMatch(
+      /async function readRevocationContract[^]*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*const contract = readGroupsReaderContract\(\);\s*assertRosterReaderCredentialBoundary\(contract\);\s*assertGroupsSecretDestination\(\);\s*const credential = readSecretValue[^]*assertGroupsSecretDestination\(\);\s*const privateKeyId = requiredString[^]*const liveKeys = listUserManagedKeys\(contract\)[^]*readRevocableUserManagedKeyCreatedAt[^]*validateStoredCredential[^]*assertRosterReaderCredentialBoundary\(contract\);\s*assertGroupsSecretDestination\(\);\s*return \{ contract, privateKeyId \};/u,
+    );
   });
 
   test('retries an ambiguous secret write and retains unresolved ambiguity', async () => {
