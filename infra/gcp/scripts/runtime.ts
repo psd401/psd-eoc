@@ -32,6 +32,21 @@ const googleCredentialOverrides = new Set([
   'GOOGLE_UNIVERSE_DOMAIN',
 ]);
 
+const gcsEmulatorOverrides = [
+  'STORAGE_EMULATOR_HOST',
+  'STORAGE_EMULATOR_HOST_GRPC',
+] as const;
+
+function assertNoGcsEmulatorOverrides(
+  source: Readonly<NodeJS.ProcessEnv> = process.env,
+): void {
+  if (gcsEmulatorOverrides.some((name) => source[name] !== undefined)) {
+    throw new Error(
+      'Guarded Google Cloud runs require real Google Cloud Storage endpoints; unset STORAGE_EMULATOR_HOST and STORAGE_EMULATOR_HOST_GRPC.',
+    );
+  }
+}
+
 function isGoogleEndpointOverride(name: string): boolean {
   return (
     name.startsWith('CLOUDSDK_API_ENDPOINT_OVERRIDES_') ||
@@ -55,6 +70,7 @@ interface RunOptions {
 export function sanitizedTerraformEnvironment(
   source: Readonly<NodeJS.ProcessEnv> = process.env,
 ): NodeJS.ProcessEnv {
+  assertNoGcsEmulatorOverrides(source);
   const environment = { ...source };
   for (const name of Object.keys(environment)) {
     if (
@@ -84,6 +100,7 @@ export function sanitizedTerraformEnvironment(
 export function sanitizedGcloudEnvironment(
   source: Readonly<NodeJS.ProcessEnv> = process.env,
 ): NodeJS.ProcessEnv {
+  assertNoGcsEmulatorOverrides(source);
   const environment: NodeJS.ProcessEnv = { ...source };
   for (const name of Object.keys(environment)) {
     if (

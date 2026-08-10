@@ -99,16 +99,23 @@ managed bucket is later found with any bootstrap API missing, recovery imports
 the existing bucket and policy into bootstrap state and repairs the APIs before
 the main backend is initialized. Recovery also validates the exact
 organization, billing account, labels, whole direct project IAM policy, and
-already-enabled APIs before importing anything.
+already-enabled APIs before importing anything. If an interrupted provider
+create left the fixed roster-reader service account outside Terraform state,
+recovery adopts it only after a successful project-scoped account listing and
+an exact identity, display-name, description, enabled-state, empty resource IAM
+policy, and zero-user-managed-key check. Permission or inspection failures,
+unexpected metadata, a resource binding, or any existing key fail closed.
 
 Both mutations use saved Terraform plans and a helper-owned exact confirmation;
 inherited `TF_CLI_ARGS*`, `TF_WORKSPACE`, and Google credential overrides are
-discarded. Every Terraform state or output read also requires the persisted
-workspace to be exactly `default`; a stale `.terraform/environment` cannot
-redirect a helper to another workspace. The confirmation phrases are shown only
-after the complete plans. There is no auto-approve path. Do not confirm either
-plan without explicit product-owner approval for the billed, retained
-infrastructure described in the preview.
+discarded. `STORAGE_EMULATOR_HOST` and `STORAGE_EMULATOR_HOST_GRPC` are rejected
+rather than discarded so an operator expecting an emulator cannot unknowingly
+reach the live state bucket. Every Terraform state or output read also requires
+the persisted workspace to be exactly `default`; a stale
+`.terraform/environment` cannot redirect a helper to another workspace. The
+confirmation phrases are shown only after the complete plans. There is no
+auto-approve path. Do not confirm either plan without explicit product-owner
+approval for the billed, retained infrastructure described in the preview.
 
 No private key or OAuth secret is a Terraform resource, input, or output.
 
@@ -325,22 +332,27 @@ tenant-wide credentials:
 1. Pause scheduled roster sync and verify the application has an approved,
    versioned cached roster snapshot. Notifications continue to resolve only
    from that snapshot; Google is never called in the activation path.
-2. With the same `PSD_EOC_APPROVED_TEST_GROUP` value, run
+2. Temporarily authorize the role-management ADC described above and retain it
+   only through the immediate revoke, provision, and verification steps below.
+   If that authorization cannot be obtained, leave the existing credential in
+   place and keep sync paused.
+3. With the same `PSD_EOC_APPROVED_TEST_GROUP` value, run
    `bun scripts/revoke-groups-credential.ts`. Review its preview and type
    `revoke-psd-eoc-readonly-groups-key`. It revalidates the retained secret's
    complete AWS ownership/encryption/policy contract before reading it, then
    validates Terraform, both live IAM policies, the exact key, and the group
    hash before revoking only the exact AWS-bound key.
-3. Run `bun scripts/provision-groups-credential.ts`, review its preview, and
+4. Run `bun scripts/provision-groups-credential.ts`, review its preview, and
    type `store-psd-eoc-readonly-groups-key` to create and store the replacement.
-4. Temporarily authorize the role-management ADC described above, then run
-   `bun scripts/verify-groups-readonly.ts`. While issue #68 remains undeployed,
+5. Run `bun scripts/verify-groups-readonly.ts` with the same temporary
+   role-management ADC. While issue #68 remains undeployed,
    leave this credential disconnected from scheduled roster sync. After #68 is
    deployed, re-enable sync only after both this credential proof and an
-   application-level approved staff-only sync succeed. Explicitly revoke the
-   role-management ADC and restore the ordinary scopes afterward. If any step
-   is ambiguous or fails, leave sync paused and reconcile the key list; the
-   helpers retain uncertain keys and never guess which key to delete.
+   application-level approved staff-only sync succeed.
+6. Explicitly revoke the role-management ADC and restore the ordinary scopes.
+   If any step is ambiguous or fails, leave sync paused, revoke the temporary
+   role-management ADC, and reconcile the key list; the helpers retain
+   uncertain keys and never guess which key to delete.
 
 The revoked credential remains encrypted in older Secrets Manager versions for
 audit evidence but can no longer mint Google tokens. Never delete or bypass
