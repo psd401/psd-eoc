@@ -23,7 +23,9 @@ function positiveSequence(value: unknown): number | null {
     : null;
 }
 
-function invalid(firstInvalidSequence: number): SecurityAuditVerification {
+export function invalidSecurityAuditVerification(
+  firstInvalidSequence: number,
+): SecurityAuditVerification {
   return SecurityAuditVerificationSchema.parse({
     valid: false,
     firstInvalidSequence,
@@ -64,7 +66,7 @@ export class SecurityAuditChainVerifier {
     for (const rawEntry of entryValues) {
       const rawSequence = positiveSequence(rawEntry);
       if (rawSequence !== this.expectedSequence) {
-        this.failure = invalid(
+        this.failure = invalidSecurityAuditVerification(
           rawSequence === null
             ? this.expectedSequence
             : Math.min(rawSequence, this.expectedSequence),
@@ -73,14 +75,14 @@ export class SecurityAuditChainVerifier {
       }
       const parsed = SecurityAuditEntrySchema.safeParse(rawEntry);
       if (!parsed.success) {
-        this.failure = invalid(this.expectedSequence);
+        this.failure = invalidSecurityAuditVerification(this.expectedSequence);
         return this.failure;
       }
       const entry: SecurityAuditEntry = parsed.data;
       try {
         parseSecurityAuditFact(securityAuditFactFromEntry(entry));
       } catch {
-        this.failure = invalid(this.expectedSequence);
+        this.failure = invalidSecurityAuditVerification(this.expectedSequence);
         return this.failure;
       }
       const predecessorMatches =
@@ -93,7 +95,7 @@ export class SecurityAuditChainVerifier {
         calculateSecurityAuditHash(securityAuditHashPayload(entry)) !==
           entry.entryHash
       ) {
-        this.failure = invalid(entry.sequence);
+        this.failure = invalidSecurityAuditVerification(entry.sequence);
         return this.failure;
       }
 
@@ -111,16 +113,35 @@ export class SecurityAuditChainVerifier {
   /** Completes a bounded or full scan with only contract-safe result data. */
   public finish(): SecurityAuditVerification {
     if (this.failure !== null) return this.failure;
-    if (this.anchorPending) return invalid(this.expectedSequence);
+    if (this.anchorPending) {
+      return invalidSecurityAuditVerification(this.expectedSequence);
+    }
     if (
       this.input.throughSequence !== null &&
       this.verifiedThroughSequence < this.input.throughSequence
     ) {
-      return invalid(this.expectedSequence);
+      return invalidSecurityAuditVerification(this.expectedSequence);
     }
     return SecurityAuditVerificationSchema.parse({
       valid: true,
       verifiedThroughSequence: this.verifiedThroughSequence,
+    });
+  }
+
+  /** Last fully verified commitment, used to reconcile external high water. */
+  public verifiedAnchor(): Readonly<{
+    sequence: number;
+    entryHash: string;
+  }> | null {
+    if (
+      this.verifiedThroughSequence < 1 ||
+      this.expectedPreviousHash === null
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      sequence: this.verifiedThroughSequence,
+      entryHash: this.expectedPreviousHash,
     });
   }
 }
