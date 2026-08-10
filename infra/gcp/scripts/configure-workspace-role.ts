@@ -9,6 +9,7 @@ import {
 import {
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
+  assertNoAmbientTransportOverrides,
   requiredString,
   runCommand,
 } from './runtime';
@@ -63,6 +64,7 @@ async function authorizedFetch(
   operation: string,
   init: RequestInit = {},
 ): Promise<Readonly<Record<string, unknown>>> {
+  assertNoAmbientTransportOverrides();
   let response: Response;
   try {
     response = await fetcher(url, {

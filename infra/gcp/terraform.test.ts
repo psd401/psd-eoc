@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   BOOTSTRAP_SERVICES,
@@ -36,6 +38,7 @@ import {
   validateProjectIamPolicy,
   validateRosterReaderResourcePolicy,
 } from './scripts/project-policy';
+import { validateWorkspaceAdminClient } from './scripts/operator-access';
 import {
   cleanupCredentialArtifacts,
   createdKeyIsVisible,
@@ -44,16 +47,23 @@ import {
 } from './scripts/provision-groups-credential';
 import {
   APPLICATION_DEFAULT_IDENTITY_SCOPES,
+  assertNoAmbientTransportOverrides,
+  assertTrustedHome,
+  gcpRoot,
   reconcileIdempotentSecretWrite,
   sanitizedAwsEnvironment,
   sanitizedGcloudEnvironment,
   sanitizedTerraformEnvironment,
   validateAwsSecretMetadata,
   validateAwsSecretResourcePolicy,
-  validateAwsCliHistoryResult,
+  validateAwsSsoConfigurationFiles,
   validateAwsSsoIdentity,
+  validateAwsSsoProfile,
   validateApplicationDefaultCredentialMetadata,
   validateGcloudConfiguration,
+  validateGcloudLocalConfiguration,
+  validateGcloudTransportConfiguration,
+  validateGuardedBunInvocation,
   validateGoogleUserIdentity,
   validateTerraformWorkspace,
 } from './scripts/runtime';
@@ -233,15 +243,17 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
   test('pins quota billing to the dedicated project after bootstrap', () => {
     const provider = read('providers.tf');
     const bootstrap = read('bootstrap/main.tf');
-    const readme = read('README.md');
     const apply = read('scripts/apply.ts');
     const groups = read('scripts/groups-contract.ts');
+    const operatorAccess = read('scripts/operator-access.ts');
 
     expect(provider).toContain('billing_project       = var.project_id');
     expect(provider).toContain('user_project_override = true');
     expect(bootstrap).not.toContain('billing_project');
     expect(bootstrap).not.toContain('user_project_override');
-    expect(readme.match(/--disable-quota-project/gu)).toHaveLength(2);
+    expect(operatorAccess).toMatch(
+      /'application-default',\s*'login',\s*ADMIN_EMAIL,\s*'--disable-quota-project'/u,
+    );
     expect(apply).toMatch(
       /'projects',\s*'describe',\s*PROJECT_ID,\s*'--project',\s*PROJECT_ID/gu,
     );
@@ -328,6 +340,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
 
   test('documents the roster runtime mismatch as a fail-closed blocker', () => {
     const readme = read('README.md');
+    const operatorAccess = read('scripts/operator-access.ts');
     const normalizedReadme = readme.replace(/\s+/gu, ' ');
 
     for (const evidence of [
@@ -342,9 +355,12 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     ]) {
       expect(normalizedReadme).toContain(evidence);
     }
-    expect(readme).toContain('gcloud auth application-default revoke --quiet');
-    expect(readme).toContain(
-      '--scopes=openid,https://www.googleapis.com/auth/userinfo.email',
+    expect(readme).toContain('./scripts/run-guarded.sh restore-adc');
+    expect(operatorAccess).toMatch(
+      /'application-default',\s*'revoke',\s*'--quiet'[\s\S]*ordinaryAdcLogin\(\)/u,
+    );
+    expect(operatorAccess).toContain(
+      "`--scopes=${APPLICATION_DEFAULT_IDENTITY_SCOPES.join(',')}`",
     );
     expect(readme).not.toContain(
       'Google Groups moves to `configured-unverified` only after',
@@ -368,11 +384,15 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     const authorize = rotation.indexOf(
       'Temporarily authorize the role-management ADC',
     );
-    const revoke = rotation.indexOf('bun scripts/revoke-groups-credential.ts');
-    const provision = rotation.indexOf(
-      'bun scripts/provision-groups-credential.ts',
+    const revoke = rotation.indexOf(
+      './scripts/run-guarded.sh revoke-groups-credential',
     );
-    const verify = rotation.indexOf('bun scripts/verify-groups-readonly.ts');
+    const provision = rotation.indexOf(
+      './scripts/run-guarded.sh provision-groups-credential',
+    );
+    const verify = rotation.indexOf(
+      './scripts/run-guarded.sh verify-groups-readonly',
+    );
     const restore = rotation.indexOf(
       'Explicitly revoke the role-management ADC',
     );
@@ -913,22 +933,27 @@ describe('fail-closed bootstrap and process behavior', () => {
       PATH: '/usr/bin',
       PSD_EOC_APPROVED_TEST_GROUP: 'staff-group@psd401.net',
       PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT: 'wrong-confirmation',
+      PSD_EOC_GUARDED_LAUNCHER: '1',
       TF_CLI_ARGS: '-auto-approve',
       TF_CLI_ARGS_apply: '-auto-approve',
-      TF_CLI_CONFIG_FILE: '/tmp/wrong.tfrc',
       TF_DATA_DIR: '/tmp/wrong-plugins',
       TF_VAR_project_id: 'wrong-project',
       TF_WORKSPACE: 'wrong',
     });
 
-    expect(environment.PATH).toBe('/usr/bin');
+    expect(environment.HOME).toBe('/Users/hagelk');
+    expect(environment.PATH).toBe(
+      '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    );
     expect(
       environment.CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT,
     ).toBeUndefined();
     expect(environment.CLOUDSDK_CONFIG).toBeUndefined();
     expect(environment.TF_CLI_ARGS).toBeUndefined();
     expect(environment.TF_CLI_ARGS_apply).toBeUndefined();
-    expect(environment.TF_CLI_CONFIG_FILE).toBeUndefined();
+    expect(environment.TF_CLI_CONFIG_FILE).toBe(
+      join(gcpRoot, 'terraform.tfrc'),
+    );
     expect(environment.TF_DATA_DIR).toBeUndefined();
     expect(environment.TF_VAR_project_id).toBeUndefined();
     expect(environment.TF_WORKSPACE).toBeUndefined();
@@ -944,6 +969,10 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(
       environment.PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT,
     ).toBeUndefined();
+    expect(environment.PSD_EOC_GUARDED_LAUNCHER).toBeUndefined();
+    expect(environment.CLOUDSDK_CORE_LOG_HTTP).toBe('0');
+    expect(environment.NO_PROXY).toBe('*');
+    expect(environment.no_proxy).toBe('*');
 
     const gcloudEnvironment = sanitizedGcloudEnvironment({
       CLOUDSDK_ACTIVE_CONFIG_NAME: 'wrong',
@@ -957,7 +986,10 @@ describe('fail-closed bootstrap and process behavior', () => {
       GOOGLE_CLOUD_UNIVERSE_DOMAIN: 'attacker.invalid',
       PATH: '/usr/bin',
     });
-    expect(gcloudEnvironment.PATH).toBe('/usr/bin');
+    expect(gcloudEnvironment.HOME).toBe('/Users/hagelk');
+    expect(gcloudEnvironment.PATH).toBe(
+      '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    );
     expect(gcloudEnvironment.CLOUDSDK_CONFIG).toBeUndefined();
     expect(gcloudEnvironment.CLOUDSDK_ACTIVE_CONFIG_NAME).toBeUndefined();
     expect(
@@ -970,6 +1002,11 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(gcloudEnvironment.GOOGLE_BILLING_PROJECT).toBeUndefined();
     expect(gcloudEnvironment.GOOGLE_CLOUD_QUOTA_PROJECT).toBeUndefined();
     expect(gcloudEnvironment.GOOGLE_CLOUD_UNIVERSE_DOMAIN).toBeUndefined();
+    expect(gcloudEnvironment.CLOUDSDK_CORE_LOG_HTTP).toBe('0');
+    expect(gcloudEnvironment.CLOUDSDK_PYTHON).toBe('/opt/homebrew/bin/python3');
+    expect(gcloudEnvironment.CLOUDSDK_PYTHON_ARGS).toBe('-I -S');
+    expect(gcloudEnvironment.NO_PROXY).toBe('*');
+    expect(gcloudEnvironment.no_proxy).toBe('*');
 
     const awsEnvironment = sanitizedAwsEnvironment({
       AWS_ACCESS_KEY_ID: 'wrong-key',
@@ -978,11 +1015,448 @@ describe('fail-closed bootstrap and process behavior', () => {
       PATH: '/usr/bin',
       PSD_EOC_APPROVED_TEST_GROUP: 'staff-group@psd401.net',
     });
-    expect(awsEnvironment.PATH).toBe('/usr/bin');
+    expect(awsEnvironment.HOME).toBe('/Users/hagelk');
+    expect(awsEnvironment.PATH).toBe(
+      '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    );
     expect(awsEnvironment.AWS_ACCESS_KEY_ID).toBeUndefined();
-    expect(awsEnvironment.AWS_CONFIG_FILE).toBeUndefined();
+    expect(awsEnvironment.AWS_CONFIG_FILE).toBe(join(gcpRoot, 'aws.config'));
     expect(awsEnvironment.AWS_ENDPOINT_URL_SECRETS_MANAGER).toBeUndefined();
+    expect(awsEnvironment.AWS_IGNORE_CONFIGURED_ENDPOINT_URLS).toBe('true');
+    expect(awsEnvironment.AWS_CLI_AUTO_PROMPT).toBe('off');
+    expect(awsEnvironment.AWS_SHARED_CREDENTIALS_FILE).toBe('/dev/null');
+    expect(awsEnvironment.AWS_EC2_METADATA_DISABLED).toBe('true');
+    expect(awsEnvironment.AWS_PAGER).toBe('');
     expect(awsEnvironment.PSD_EOC_APPROVED_TEST_GROUP).toBeUndefined();
+    expect(awsEnvironment.NO_PROXY).toBe('*');
+    expect(awsEnvironment.no_proxy).toBe('*');
+  });
+
+  test('rejects ambient credential transport and debug overrides', () => {
+    expect(() =>
+      assertTrustedHome({
+        HOME: '/Users/hagelk',
+        LOGNAME: 'hagelk',
+        USER: 'hagelk',
+      }),
+    ).not.toThrow();
+    for (const source of [
+      { HOME: '/tmp/untrusted' },
+      { HOME: '/Users/hagelk', USER: 'attacker' },
+      { HOME: '/Users/hagelk', LOGNAME: 'attacker' },
+    ]) {
+      expect(() => assertTrustedHome(source)).toThrow('fixed hagelk');
+    }
+
+    for (const name of [
+      'ALL_PROXY',
+      'all_proxy',
+      'AWS_CA_BUNDLE',
+      'AWS_CLI_AUTO_PROMPT',
+      'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE',
+      'AWS_CSM_ENABLED',
+      'AWS_DATA_PATH',
+      'AWS_EC2_METADATA_SERVICE_ENDPOINT',
+      'AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE',
+      'AWS_SECURITY_TOKEN',
+      'BOTO_CONFIG',
+      'BROWSER',
+      'BUN_INSPECT',
+      'BUN_INSPECT_CONNECT_TO',
+      'BUN_INSPECT_NOTIFY',
+      'BUN_INSPECT_PRELOAD',
+      'BUN_OPTIONS',
+      'BUN_CONFIG_VERBOSE_FETCH',
+      'CLOUDSDK_AUTH_DISABLE_SSL_VALIDATION',
+      'CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE',
+      'CLOUDSDK_CORE_DISABLE_SSL_VALIDATION',
+      'CLOUDSDK_PROXY_ADDRESS',
+      'CLOUDSDK_PROXY_PASSWORD',
+      'CLOUDSDK_PROXY_PORT',
+      'CLOUDSDK_PROXY_TYPE',
+      'CLOUDSDK_PROXY_USERNAME',
+      'CURL_CA_BUNDLE',
+      'ENABLE_ENTERPRISE_CERTIFICATE_LOGS',
+      'EXPERIMENTAL_GOOGLE_API_USE_S2A',
+      'GODEBUG',
+      'GOTRACEBACK',
+      'GOOGLE_SDK_GO_LOGGING_LEVEL',
+      'GOOGLE_API_CERTIFICATE_CONFIG',
+      'GOOGLE_API_GO_EXPERIMENTAL_ENABLE_NEW_AUTH_LIB',
+      'GOOGLE_API_USE_CLIENT_CERTIFICATE',
+      'GOOGLE_API_USE_MTLS',
+      'GOOGLE_API_USE_MTLS_ENDPOINT',
+      'GOOGLE_CLOUD_DISABLE_DIRECT_PATH',
+      'GOOGLE_CLOUD_ENABLE_DIRECT_PATH_XDS',
+      'GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES',
+      'GRPC_BINARY_LOG_FILTER',
+      'GRPC_DEFAULT_SSL_ROOTS_FILE_PATH',
+      'GRPC_GO_LOG_FORMATTER',
+      'GRPC_GO_LOG_SEVERITY_LEVEL',
+      'GRPC_GO_LOG_VERBOSITY_LEVEL',
+      'GRPC_PROXY',
+      'grpc_proxy',
+      'GRPC_TRACE',
+      'GRPC_VERBOSITY',
+      'GRPC_GCP_OBSERVABILITY_CONFIG_FILE',
+      'GRPC_XDS_BOOTSTRAP',
+      'HTTP_PROXY',
+      'http_proxy',
+      'HTTPS_PROXY',
+      'https_proxy',
+      'NODE_EXTRA_CA_CERTS',
+      'NODE_DEBUG',
+      'NODE_DEBUG_NATIVE',
+      'NODE_OPTIONS',
+      'NODE_TLS_REJECT_UNAUTHORIZED',
+      'PYTHONBREAKPOINT',
+      'PYTHONCASEOK',
+      'PYTHONDEBUG',
+      'PYTHONEXECUTABLE',
+      'PYTHONFAULTHANDLER',
+      'PYTHONHOME',
+      'PYTHONINSPECT',
+      'PYTHONPATH',
+      'PYTHONPLATLIBDIR',
+      'PYTHONPROFILEIMPORTTIME',
+      'PYTHONSTARTUP',
+      'PYTHONUSERBASE',
+      'PYTHONVERBOSE',
+      'PYTHONWARNINGS',
+      'REQUESTS_CA_BUNDLE',
+      'SSL_CERT_DIR',
+      'SSL_CERT_FILE',
+      'SSLKEYLOGFILE',
+      'TF_LOG_CORE',
+      'TF_LOG_PROVIDER',
+      'TF_LOG_SDK_PROTO',
+      'TF_LOG_UNREVIEWED',
+      'TF_TEMP_LOG_PATH',
+      'VIRTUAL_ENV',
+      'XDG_CONFIG_HOME',
+      'XDG_DATA_HOME',
+      'DYLD_INSERT_LIBRARIES',
+      'LD_PRELOAD',
+    ]) {
+      const source = { PATH: '/usr/bin', [name]: 'configured' };
+      expect(() => assertNoAmbientTransportOverrides(source)).toThrow(
+        'reject ambient proxy',
+      );
+      expect(() => sanitizedTerraformEnvironment(source)).toThrow(
+        'reject ambient proxy',
+      );
+      expect(() => sanitizedGcloudEnvironment(source)).toThrow(
+        'reject ambient proxy',
+      );
+      expect(() => sanitizedAwsEnvironment(source)).toThrow(
+        'reject ambient proxy',
+      );
+    }
+
+    for (const argument of [
+      '-i',
+      '-r',
+      '-r./instrumentation.ts',
+      '--env-file',
+      '--env-file=/tmp/ambient.env',
+      '--fetch-preconnect',
+      '--fetch-preconnect=https://attacker.invalid',
+      '--import',
+      '--import=./instrumentation.ts',
+      '--inspect',
+      '--inspect=0.0.0.0:9229',
+      '--inspect-brk',
+      '--inspect-wait=127.0.0.1:9229',
+      '--install',
+      '--install=force',
+      '--preload',
+      '--preload=./instrumentation.ts',
+      '--redis-preconnect',
+      '--require',
+      '--require=./instrumentation.ts',
+      '--sql-preconnect',
+      '--tls-keylog',
+      '--tls-keylog=/tmp/psd-eoc-synthetic.keys',
+      '--use-env-proxy',
+      '--use-openssl-ca',
+      '--use-system-ca',
+      '--verbose-fetch',
+      '--verbose-fetch=curl',
+    ]) {
+      expect(() =>
+        assertNoAmbientTransportOverrides({ PATH: '/usr/bin' }, [argument]),
+      ).toThrow('debugger, and verbose-fetch');
+    }
+    expect(() =>
+      assertNoAmbientTransportOverrides({ PATH: '/usr/bin' }, [
+        'test',
+        'infra/gcp/terraform.test.ts',
+      ]),
+    ).not.toThrow();
+
+    for (const sanitizer of [
+      sanitizedTerraformEnvironment,
+      sanitizedGcloudEnvironment,
+      sanitizedAwsEnvironment,
+    ]) {
+      const environment = sanitizer({
+        NO_PROXY: 'localhost',
+        PATH: '/usr/bin',
+        no_proxy: '127.0.0.1',
+      });
+      expect(environment.NO_PROXY).toBe('*');
+      expect(environment.no_proxy).toBe('*');
+      expect(environment.PYTHONNOUSERSITE).toBe('1');
+    }
+
+    const runtime = read('scripts/runtime.ts');
+    expect(runtime).toMatch(
+      /export async function assertApplicationDefaultIdentity[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
+    );
+    expect(runtime).toMatch(
+      /function prepareCloudCommand[^]*if \(command === 'aws'\) \{\s*assertAwsLocalConfiguration\(\);[^]*return \{ args: \[\.\.\.args, '--no-cli-pager'\], executable \};/u,
+    );
+    expect(runtime).not.toContain("['configure', 'get'");
+    expect(runtime).toContain("aws: '/opt/homebrew/bin/aws'");
+    expect(runtime).toContain("gcloud: '/opt/homebrew/bin/gcloud'");
+    expect(runtime).toContain("terraform: '/opt/homebrew/bin/terraform'");
+    expect(read('scripts/configure-workspace-role.ts')).toMatch(
+      /async function authorizedFetch[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
+    );
+    expect(read('scripts/verify-groups-readonly.ts')).toMatch(
+      /export async function redactedFetch[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
+    );
+    expect(read('scripts/store-oauth-client.ts')).toMatch(
+      /async function readSecureFile[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
+    );
+  });
+
+  test('starts guarded helpers only through the pre-Bun launcher', () => {
+    const configPath = join(gcpRoot, 'bunfig.toml');
+    const safeArguments = [
+      `--config=${configPath}`,
+      '--no-env-file',
+      '--no-install',
+    ];
+    const entrypoints = [
+      'apply.ts',
+      'configure-workspace-role.ts',
+      'operator-access.ts',
+      'provision-groups-credential.ts',
+      'revoke-groups-credential.ts',
+      'store-oauth-client.ts',
+      'verify-groups-readonly.ts',
+    ];
+    for (const entrypoint of entrypoints) {
+      expect(() =>
+        validateGuardedBunInvocation(
+          safeArguments,
+          join(gcpRoot, 'scripts', entrypoint),
+          gcpRoot,
+          '1',
+        ),
+      ).not.toThrow();
+    }
+    for (const invalid of [
+      { arguments: safeArguments, cwd: gcpRoot, marker: undefined },
+      { arguments: safeArguments, cwd: join(gcpRoot, 'scripts'), marker: '1' },
+      {
+        arguments: ['--config=bunfig.toml', '--no-env-file', '--no-install'],
+        cwd: gcpRoot,
+        marker: '1',
+      },
+      {
+        arguments: [`--config=${configPath}`, '--no-install'],
+        cwd: gcpRoot,
+        marker: '1',
+      },
+      {
+        arguments: [...safeArguments, '--inspect'],
+        cwd: gcpRoot,
+        marker: '1',
+      },
+    ]) {
+      expect(() =>
+        validateGuardedBunInvocation(
+          invalid.arguments,
+          join(gcpRoot, 'scripts', 'apply.ts'),
+          invalid.cwd,
+          invalid.marker,
+        ),
+      ).toThrow('run-guarded.sh');
+    }
+    expect(() =>
+      validateGuardedBunInvocation([], 'terraform.test.ts', gcpRoot, undefined),
+    ).not.toThrow();
+
+    const launcher = read('scripts/run-guarded.sh');
+    const bunfig = read('bunfig.toml');
+    const readme = read('README.md');
+    expect(
+      statSync(new URL('scripts/run-guarded.sh', root)).mode & 0o111,
+    ).not.toBe(0);
+    expect(launcher).toContain('/usr/bin/env');
+    expect(launcher).toContain('/usr/bin/awk');
+    expect(launcher).toContain('/usr/bin/dirname');
+    expect(launcher).toContain('exec /opt/homebrew/bin/bun');
+    expect(launcher).toContain('$1 == "NODE_OPTIONS" ||');
+    expect(launcher).toContain('$1 ~ /^BUN_');
+    expect(launcher).toContain('$1 ~ /^DYLD_');
+    expect(launcher).toContain('PSD_EOC_GUARDED_LAUNCHER=1');
+    expect(launcher).toContain('"--config=$gcp_root/bunfig.toml"');
+    expect(launcher).toContain('--no-env-file');
+    expect(launcher).toContain('--no-install');
+    expect(launcher).not.toContain('eval ');
+    expect(bunfig).toContain('preload = ["./scripts/preload-guard.ts"]');
+    expect(bunfig).toContain('env = false');
+    expect(bunfig).toContain('auto = "disable"');
+    expect(read('scripts/preload-guard.ts')).toContain(
+      'assertNoAmbientTransportOverrides();',
+    );
+    expect(read('scripts/preload-guard.ts')).toContain('assertTrustedHome();');
+    expect(readme).not.toMatch(/\bbun scripts\//u);
+    expect(readme).not.toMatch(/^[ \t]*(?:aws|gcloud)\s/gmu);
+    expect(readme).not.toMatch(
+      /^[ \t]*terraform (?:apply|console|destroy|force-unlock|graph|import|init|output|plan|providers|refresh|show|state|taint|test|untaint|validate|workspace)\b/gmu,
+    );
+    expect(readme).not.toContain('run `terraform destroy`');
+
+    const operatorAccess = read('scripts/operator-access.ts');
+    expect(operatorAccess).toMatch(
+      /async function authenticate[^]*assertSafeGcloudConfiguration\(\);[^]*runInteractive\('gcloud', \[\s*'auth',\s*'login'[^]*assertAwsSsoLoginConfiguration[^]*runInteractive\('aws', \[\s*'sso',\s*'login'/u,
+    );
+    expect(operatorAccess.match(/--no-launch-browser/gu)).toHaveLength(2);
+    expect(operatorAccess.match(/--no-browser/gu)).toHaveLength(2);
+    expect(operatorAccess).toMatch(
+      /async function authorizeWorkspaceAdc[^]*secureWorkspaceClientPath[^]*runInteractive\('gcloud', \[\s*'auth',\s*'application-default',\s*'login',\s*ADMIN_EMAIL,\s*`--client-id-file=\$\{secureClientPath\}`,\s*'--no-browser'[^]*WORKSPACE_ROLE_SCOPE/u,
+    );
+    expect(
+      operatorAccess.slice(
+        operatorAccess.indexOf('async function authorizeWorkspaceAdc'),
+        operatorAccess.indexOf('async function restoreOrdinaryAdc'),
+      ),
+    ).not.toContain('--no-launch-browser');
+
+    const terraformCliConfig = read('terraform.tfrc');
+    expect(terraformCliConfig).toContain('provider_installation {');
+    expect(terraformCliConfig).toContain('direct {}');
+    expect(terraformCliConfig).not.toMatch(
+      /dev_overrides|filesystem_mirror|plugin_cache_dir|credentials_helper|credentials\s/u,
+    );
+    expect(read('aws.config')).toBe(
+      '[profile psd401-prr-prod]\n' +
+        'sso_session = macbookpro\n' +
+        'sso_account_id = 338414773271\n' +
+        'sso_role_name = AWSAdministratorAccess\n' +
+        'region = us-west-2\n\n' +
+        '[sso-session macbookpro]\n' +
+        'sso_start_url = https://psd401.awsapps.com/start\n' +
+        'sso_region = us-west-2\n' +
+        'sso_registration_scopes = sso:account:access\n',
+    );
+
+    if (process.platform !== 'darwin') {
+      return;
+    }
+
+    const launcherEnvironment: NodeJS.ProcessEnv = {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      TMPDIR: process.env.TMPDIR,
+    };
+    const launched = spawnSync(
+      join(gcpRoot, 'scripts', 'run-guarded.sh'),
+      ['store-oauth-client'],
+      {
+        cwd: gcpRoot,
+        encoding: 'utf8',
+        env: launcherEnvironment,
+      },
+    );
+    expect(launched.status).toBe(1);
+    expect(launched.stderr).toContain(
+      'Usage: ./scripts/run-guarded.sh store-oauth-client',
+    );
+
+    const rejectedBeforeBun = spawnSync(
+      join(gcpRoot, 'scripts', 'run-guarded.sh'),
+      ['store-oauth-client'],
+      {
+        cwd: gcpRoot,
+        encoding: 'utf8',
+        env: {
+          ...launcherEnvironment,
+          BUN_OPTIONS: '--preload=/definitely-not-present/ambient.ts',
+        },
+      },
+    );
+    expect(rejectedBeforeBun.status).toBe(64);
+    expect(rejectedBeforeBun.stderr).toContain(
+      'reject startup hooks and executable overrides; unset: BUN_OPTIONS',
+    );
+    expect(rejectedBeforeBun.stderr).not.toContain('definitely-not-present');
+
+    const rejectedHome = spawnSync(
+      join(gcpRoot, 'scripts', 'run-guarded.sh'),
+      ['store-oauth-client'],
+      {
+        cwd: gcpRoot,
+        encoding: 'utf8',
+        env: { ...launcherEnvironment, HOME: '/tmp/untrusted-home' },
+      },
+    );
+    expect(rejectedHome.status).toBe(64);
+    expect(rejectedHome.stderr).toContain(
+      'require the fixed hagelk account and /Users/hagelk home directory',
+    );
+
+    const directBun = spawnSync(
+      'bun',
+      [
+        `--config=${configPath}`,
+        '--no-env-file',
+        '--no-install',
+        join(gcpRoot, 'scripts', 'store-oauth-client.ts'),
+      ],
+      {
+        cwd: gcpRoot,
+        encoding: 'utf8',
+        env: launcherEnvironment,
+      },
+    );
+    expect(directBun.status).toBe(1);
+    expect(directBun.stderr).toContain(
+      'must be started by infra/gcp/scripts/run-guarded.sh',
+    );
+  });
+
+  test('pins Terraform provider installation away from ambient overrides', () => {
+    for (const name of [
+      'TERRAFORM_CONFIG',
+      'TF_CLI_CONFIG_FILE',
+      'TF_PLUGIN_CACHE_DIR',
+      'TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE',
+      'TF_REATTACH_PROVIDERS',
+    ]) {
+      expect(() =>
+        sanitizedTerraformEnvironment({
+          PATH: '/usr/bin',
+          [name]: '/tmp/ambient-provider-override',
+        }),
+      ).toThrow('reject ambient CLI configuration and provider-plugin');
+    }
+
+    const environment = sanitizedTerraformEnvironment({
+      HOME: '/tmp/synthetic-home-with-terraformrc',
+      PATH: '/usr/bin',
+    });
+    expect(environment.HOME).toBe('/Users/hagelk');
+    expect(environment.TERRAFORM_CONFIG).toBeUndefined();
+    expect(environment.TF_PLUGIN_CACHE_DIR).toBeUndefined();
+    expect(environment.TF_REATTACH_PROVIDERS).toBeUndefined();
+    expect(environment.TF_CLI_CONFIG_FILE).toBe(
+      join(gcpRoot, 'terraform.tfrc'),
+    );
   });
 
   test('rejects GCS emulator routing before guarded Google commands', () => {
@@ -1006,6 +1480,29 @@ describe('fail-closed bootstrap and process behavior', () => {
   });
 
   test('rejects persistent gcloud impersonation and endpoint overrides', () => {
+    expect(() =>
+      validateGcloudLocalConfiguration(
+        '[core]\naccount = kjh_admin@psd401.net\nproject = psd401-eoc\n',
+      ),
+    ).not.toThrow();
+    for (const invalidConfiguration of [
+      '[auth]\nimpersonate_service_account = attacker@invalid\n',
+      '[core]\naccount = kjh_admin@psd401.net\nverbosity = debug\n',
+      '[core]\naccount = kjh_admin@psd401.net\n\n[proxy]\naddress = attacker.invalid\n',
+    ]) {
+      expect(() =>
+        validateGcloudLocalConfiguration(invalidConfiguration),
+      ).toThrow('gcloud');
+    }
+    expect(() =>
+      validateGcloudTransportConfiguration({ core: {} }),
+    ).not.toThrow();
+    expect(() =>
+      validateGcloudTransportConfiguration({
+        core: {},
+        proxy: { address: 'attacker.invalid' },
+      }),
+    ).toThrow('without impersonation');
     expect(() =>
       validateGcloudConfiguration(
         { core: { account: 'kjh_admin@psd401.net' } },
@@ -1086,27 +1583,74 @@ describe('fail-closed bootstrap and process behavior', () => {
       ),
     ).toThrow('must identify');
 
+    const validAdc = {
+      account: 'kjh_admin@psd401.net',
+      client_id: 'synthetic-gcloud.apps.googleusercontent.com',
+      client_secret: 'synthetic-client-secret',
+      refresh_token: 'synthetic-refresh-token',
+      type: 'authorized_user',
+      universe_domain: 'googleapis.com',
+    } as const;
     expect(() =>
       validateApplicationDefaultCredentialMetadata(
-        { type: 'authorized_user' },
+        validAdc,
         'psd401-eoc',
+        'kjh_admin@psd401.net',
       ),
     ).not.toThrow();
     expect(() =>
       validateApplicationDefaultCredentialMetadata(
-        { quota_project_id: 'psd401-eoc', type: 'authorized_user' },
+        { ...validAdc, quota_project_id: 'psd401-eoc' },
         'psd401-eoc',
+        'kjh_admin@psd401.net',
       ),
     ).not.toThrow();
-    expect(() =>
-      validateApplicationDefaultCredentialMetadata(
-        { quota_project_id: 'aistudio-462612', type: 'authorized_user' },
-        'psd401-eoc',
-      ),
-    ).toThrow('must omit the quota project');
+    for (const invalid of [
+      { ...validAdc, account: 'other@psd401.net' },
+      { ...validAdc, credential_source: { file: '/tmp/credential' } },
+      {
+        ...validAdc,
+        service_account_impersonation_url: 'https://evil.invalid',
+      },
+      { ...validAdc, token_uri: 'https://oauth2.googleapis.com/token' },
+      { ...validAdc, token_url: 'https://evil.invalid/token' },
+      { ...validAdc, type: 'external_account' },
+      { ...validAdc, universe_domain: 'evil.invalid' },
+      { ...validAdc, client_secret: '' },
+      { ...validAdc, refresh_token: '' },
+      { ...validAdc, quota_project_id: 'aistudio-462612' },
+    ]) {
+      expect(() =>
+        validateApplicationDefaultCredentialMetadata(
+          invalid,
+          'psd401-eoc',
+          'kjh_admin@psd401.net',
+        ),
+      ).toThrow('authorized-user contract');
+    }
   });
 
   test('accepts only the fixed AWS SSO administrator identity', () => {
+    expect(() =>
+      validateAwsSsoProfile(
+        '338414773271',
+        'AWSAdministratorAccess',
+        'us-west-2',
+        'macbookpro',
+        '338414773271',
+        'us-west-2',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateAwsSsoProfile(
+        '338414773271',
+        'ReadOnlyAccess',
+        'us-west-2',
+        'macbookpro',
+        '338414773271',
+        'us-west-2',
+      ),
+    ).toThrow('AWSAdministratorAccess');
     expect(() =>
       validateAwsSsoIdentity(
         {
@@ -1125,13 +1669,74 @@ describe('fail-closed bootstrap and process behavior', () => {
         '338414773271',
       ),
     ).toThrow('SSO administrator role');
-    expect(() => validateAwsCliHistoryResult(1, '', '')).not.toThrow();
+
+    const validConfiguration = read('aws.config');
     expect(() =>
-      validateAwsCliHistoryResult(0, 'disabled\n', ''),
+      validateAwsSsoConfigurationFiles(validConfiguration, ''),
     ).not.toThrow();
-    expect(() => validateAwsCliHistoryResult(0, 'enabled\n', '')).toThrow(
-      'history must be disabled',
-    );
+    for (const invalidConfiguration of [
+      `[DEFAULT]\ncredential_process = /tmp/untrusted\n\n${validConfiguration}`,
+      `${validConfiguration}\n[plugins]\nuntrusted = module\n`,
+      validConfiguration.replace(
+        'region = us-west-2',
+        'region = us-west-2\ncredential_process = /tmp/untrusted',
+      ),
+      validConfiguration.replace(
+        'sso_start_url = https://psd401.awsapps.com/start',
+        'sso_start_url = https://attacker.invalid/start',
+      ),
+    ]) {
+      expect(() =>
+        validateAwsSsoConfigurationFiles(invalidConfiguration, ''),
+      ).toThrow('AWS');
+    }
+    expect(() =>
+      validateAwsSsoConfigurationFiles(
+        validConfiguration,
+        '[psd401-prr-prod]\naws_access_key_id = synthetic\naws_secret_access_key = synthetic\n',
+      ),
+    ).toThrow('must not have a static');
+  });
+
+  test('accepts only a fixed-endpoint Desktop client for Workspace authorization', () => {
+    const validClient = {
+      installed: {
+        auth_provider_x509_cert_url:
+          'https://www.googleapis.com/oauth2/v1/certs',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        client_id: 'synthetic-admin.apps.googleusercontent.com',
+        client_secret: 'synthetic-secret',
+        project_id: 'synthetic-admin-tools',
+        redirect_uris: ['http://localhost'],
+        token_uri: 'https://oauth2.googleapis.com/token',
+      },
+    } as const;
+    expect(() => validateWorkspaceAdminClient(validClient)).not.toThrow();
+    for (const invalid of [
+      { web: validClient.installed },
+      {
+        installed: {
+          ...validClient.installed,
+          token_uri: 'https://attacker.invalid/token',
+        },
+      },
+      {
+        installed: {
+          ...validClient.installed,
+          redirect_uris: ['https://attacker.invalid/callback'],
+        },
+      },
+      {
+        installed: {
+          ...validClient.installed,
+          extra_endpoint: 'https://attacker.invalid',
+        },
+      },
+    ]) {
+      expect(() => validateWorkspaceAdminClient(invalid)).toThrow(
+        'OAuth client is invalid',
+      );
+    }
   });
 
   test('adopts only local retained AWS secrets with no resource policy', () => {
