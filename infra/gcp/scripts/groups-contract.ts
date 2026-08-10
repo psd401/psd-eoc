@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 
+import {
+  validateProjectIamPolicy,
+  validateRosterReaderResourcePolicy,
+} from './project-policy';
 import { assertDefaultTerraformWorkspace, runCommand } from './runtime';
 
 export const PROJECT_ID = 'psd401-eoc';
@@ -12,6 +16,7 @@ export const MAX_GROUPS_KEY_AGE_DAYS = 30;
 
 export interface TerraformGroupsReaderContract {
   readonly email: string;
+  readonly projectNumber: string;
   readonly serviceAccountUniqueId: string;
 }
 
@@ -67,6 +72,8 @@ export function parseGroupsReaderContract(
     oauthScopes.length !== 1 ||
     oauthScopes[0] !== READONLY_GROUPS_SCOPE ||
     output.project_id !== PROJECT_ID ||
+    typeof output.project_number !== 'string' ||
+    !/^\d+$/u.test(output.project_number) ||
     !Array.isArray(projectIamRoles) ||
     projectIamRoles.length !== 0 ||
     output.workspace_admin_role !== GROUPS_READER_ROLE ||
@@ -79,6 +86,7 @@ export function parseGroupsReaderContract(
 
   return {
     email: output.email,
+    projectNumber: output.project_number,
     serviceAccountUniqueId: output.service_account_unique_id,
   };
 }
@@ -343,6 +351,15 @@ export function policyCouldGrantServiceAccountAccess(
     ) {
       throw new Error('Google Cloud project IAM binding is invalid.');
     }
+    if (
+      new Set([
+        'roles/iam.serviceAccountTokenCreator',
+        'roles/iam.serviceAccountUser',
+        'roles/iam.workloadIdentityUser',
+      ]).has(record.role)
+    ) {
+      return true;
+    }
     return members.some(
       (candidate) =>
         candidate === member ||
@@ -361,22 +378,50 @@ export function policyCouldGrantServiceAccountAccess(
   });
 }
 
-export function assertNoProjectIamBinding(
+export function assertRosterReaderCredentialBoundary(
   contract: GroupsReaderContract,
 ): void {
-  const value: unknown = JSON.parse(
-    runCommand('gcloud', [
-      'projects',
-      'get-iam-policy',
-      PROJECT_ID,
-      '--project',
-      PROJECT_ID,
-      '--format=json',
-    ]),
+  const projectPolicy: unknown = JSON.parse(
+    runCommand(
+      'gcloud',
+      [
+        'projects',
+        'get-iam-policy',
+        PROJECT_ID,
+        '--project',
+        PROJECT_ID,
+        '--format=json',
+        '--quiet',
+      ],
+      { redactFailureOutput: true },
+    ),
   );
-  if (policyCouldGrantServiceAccountAccess(value, contract.email)) {
+  if (policyCouldGrantServiceAccountAccess(projectPolicy, contract.email)) {
     throw new Error(
-      'The roster-reader service account unexpectedly has, or could receive through a broad principal, a direct project IAM binding.',
+      'The roster-reader service account unexpectedly has a project role or an unreviewed principal can impersonate it.',
     );
   }
+  validateProjectIamPolicy(
+    projectPolicy,
+    contract.projectNumber,
+    'steady-state',
+  );
+
+  const serviceAccountPolicy: unknown = JSON.parse(
+    runCommand(
+      'gcloud',
+      [
+        'iam',
+        'service-accounts',
+        'get-iam-policy',
+        contract.email,
+        '--project',
+        PROJECT_ID,
+        '--format=json',
+        '--quiet',
+      ],
+      { redactFailureOutput: true },
+    ),
+  );
+  validateRosterReaderResourcePolicy(serviceAccountPolicy);
 }

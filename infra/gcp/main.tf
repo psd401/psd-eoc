@@ -89,6 +89,21 @@ resource "google_project_iam_member_remove" "terraform_admin_owner" {
   }
 }
 
+# Older project-creation paths can grant Editor to the Google APIs service
+# agent. Remove that inherited state-bucket access in steady state. Current
+# service agents use purpose-built roles and do not need this basic role.
+resource "google_project_iam_member_remove" "google_apis_service_agent_editor" {
+  project = google_project.psd_eoc.project_id
+  role    = "roles/editor"
+  member  = "serviceAccount:${google_project.psd_eoc.number}@cloudservices.gserviceaccount.com"
+
+  depends_on = [google_project_iam_member.terraform_admin]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "google_storage_bucket" "terraform_state" {
   project                     = google_project.psd_eoc.project_id
   name                        = var.terraform_state_bucket

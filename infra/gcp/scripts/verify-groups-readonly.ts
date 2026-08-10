@@ -3,7 +3,7 @@ import { createSign, timingSafeEqual } from 'node:crypto';
 import { assertExactLiveGroupsReaderRole } from './configure-workspace-role';
 import {
   approvedStaffGroupHash,
-  assertNoProjectIamBinding,
+  assertRosterReaderCredentialBoundary,
   GROUPS_READER_ROLE,
   listUserManagedKeys,
   normalizeApprovedStaffGroup,
@@ -154,6 +154,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
   const contract = readGroupsReaderContract();
   await assertExactLiveGroupsReaderRole(contract, fetcher);
+  assertRosterReaderCredentialBoundary(contract);
   assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
   if (
     !awsSecretExists({
@@ -172,7 +173,6 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
     region: AWS_REGION,
     secretName: SECRET_NAME,
   });
-  assertNoProjectIamBinding(contract);
   const privateKeyId = requiredString(credential, 'private_key_id');
   const liveKeys = listUserManagedKeys(contract);
   if (liveKeys.size !== 1 || !liveKeys.has(privateKeyId)) {
@@ -267,6 +267,8 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
       'Cloud Identity membership response could not be discarded safely.',
     );
   }
+
+  assertRosterReaderCredentialBoundary(contract);
 
   console.log(
     'PASS: the live Workspace assignment is exactly direct Groups Reader with no indirect role, and the service account performed approved staff-group lookup and membership-list authorization with one read-only OAuth scope; Google returned no member identity fields and no value was printed.',

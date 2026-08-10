@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { assertExactLiveGroupsReaderRole } from './configure-workspace-role';
 import {
-  assertNoProjectIamBinding,
+  assertRosterReaderCredentialBoundary,
   approvedStaffGroupHash,
   GROUPS_READER_ROLE,
   listUserManagedKeys,
@@ -265,7 +265,7 @@ async function main(): Promise<void> {
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
   const contract = readGroupsReaderContract();
   await assertExactLiveGroupsReaderRole(contract);
-  assertNoProjectIamBinding(contract);
+  assertRosterReaderCredentialBoundary(contract);
   const existingKeys = listUserManagedKeys(contract);
   if (existingKeys.size > 0) {
     throw new Error(
@@ -351,6 +351,7 @@ async function main(): Promise<void> {
       );
     }
     storageOutcome = 'stored';
+    assertRosterReaderCredentialBoundary(contract);
   } catch (error) {
     operationError = error;
   }

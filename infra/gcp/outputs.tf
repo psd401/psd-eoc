@@ -22,6 +22,7 @@ output "google_groups_reader" {
     service_account_unique_id        = google_service_account.roster_reader.unique_id
     oauth_scopes                     = [local.cloud_identity_groups_readonly_scope]
     project_id                       = google_project.psd_eoc.project_id
+    project_number                   = google_project.psd_eoc.number
     project_iam_roles                = []
     workspace_admin_role             = "_GROUPS_READER_ROLE"
     workspace_grant_api_managed      = true

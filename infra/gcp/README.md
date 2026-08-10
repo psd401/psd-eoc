@@ -35,9 +35,20 @@ later than the eligibility threshold. The bucket deliberately has no retention
 policy because the GCS backend must delete its short-lived lock object when each
 operation ends. Its authoritative bucket policy grants only the fixed human
 Terraform administrator `roles/storage.objectAdmin`, the minimum role required
-by the GCS backend. Legacy project Owner/Editor/Viewer convenience principals,
-groups, domains, service accounts, public principals, extra roles, and
-conditional bindings are not accepted in that bucket policy.
+by the GCS backend. The same human intentionally holds project-level
+`roles/storage.admin` so this root can create and maintain the bucket; that
+broader inherited grant is not represented by the direct bucket-policy
+readback. Legacy project Owner/Editor/Viewer convenience principals, groups,
+domains, service accounts, public principals, extra roles, and conditional
+bindings are not accepted in the direct bucket policy.
+Because project grants inherit into the bucket, the guarded apply also
+allowlists the entire direct project IAM policy. Recovery permits only a subset
+of the declared human administrator roles, the exact automatic creator Owner,
+and the exact same-project Google APIs service-agent Editor grant long enough
+for the main apply to remove both basic roles. Steady state requires every
+declared narrower administrator role and rejects every other role, principal,
+condition, or custom grant. This prevents an unexpected principal or role from
+using project inheritance to bypass the reviewed single-human boundary.
 
 ## Apply from this machine
 
@@ -83,8 +94,12 @@ legacy project convenience bindings with a bucket. The same saved bootstrap
 plan replaces them with the single administrator Object Admin binding before
 the main backend is initialized. An interrupted run can adopt only that exact
 known initial policy and immediately finish the replacement; any other policy
-fails closed. Recovery also validates the exact organization, billing account,
-labels, Owner policy, and already-enabled APIs before importing anything.
+fails closed. Bucket creation waits for all four bootstrap APIs. If an existing
+managed bucket is later found with any bootstrap API missing, recovery imports
+the existing bucket and policy into bootstrap state and repairs the APIs before
+the main backend is initialized. Recovery also validates the exact
+organization, billing account, labels, whole direct project IAM policy, and
+already-enabled APIs before importing anything.
 
 Both mutations use saved Terraform plans and a helper-owned exact confirmation;
 inherited `TF_CLI_ARGS*`, `TF_WORKSPACE`, and Google credential overrides are
@@ -115,6 +130,18 @@ while this human-run root manages its own IAM bindings; it is narrower than a
 standing basic Owner role and cannot be replaced by an unapproved automation
 principal in this issue. This human administrator access does not grant any
 role to the roster-reader service account.
+
+### Firebase project isolation boundary
+
+Do not add Firebase to `psd401-eoc` under issue #40's current same-project
+wording. Firebase automatically grants its primary management service agent a
+project role that can change both project IAM and bucket IAM policies. In this
+project that authority could bypass the roster-reader credential boundary and
+the Terraform state-bucket boundary. The project-policy guard intentionally
+rejects that binding. Issue #40 must be amended either to create an isolated
+Firebase project (recommended) or to own a separately reviewed isolation
+design plus the provider, lockfile, helper, test, and documentation files it
+needs. A plain allowlist exception is not safe.
 
 ## Workspace Groups Reader assignment
 
@@ -225,9 +252,11 @@ Provisioning presents a consequence preview and requires the exact phrase
 `store-psd-eoc-readonly-groups-key` before it creates either the AWS secret or
 Google key. Enter it only with explicit product-owner approval.
 
-Provisioning verifies the Terraform output, live project IAM policy, AWS account
+Provisioning verifies the Terraform output, the exact allowlisted live project
+IAM policy, an empty IAM policy on the roster-reader resource, AWS account
 `338414773271`, the exact live direct/indirect Workspace role state, and absence
-of any existing user-managed key. Before writing, it requires the secret's
+of any existing user-managed key. It repeats both IAM checks immediately before
+reporting success. Before writing, it requires the secret's
 fixed account/Region ARN and ownership tags, AWS-managed encryption, no pending
 deletion, automatic rotation, replica, external owner, or resource policy; a
 new placeholder is read back against the same contract. It creates
@@ -239,13 +268,16 @@ and ambiguous key identity is never deleted.
 
 The project-policy check rejects the exact service-account member plus direct
 project bindings to universal principals, domains, groups, project convenience
-principals, Google public principal sets, and Resource Manager service-account
-sets that could include it. Google does not expose group-expanded ancestor IAM
-in that project-policy response. Before `live-verified`, a district
-administrator must still confirm the service account is not a member of a
-Google Group granted a role on an ancestor and is not otherwise covered by an
-ancestor IAM binding. Record only that result, not unrelated group membership or
-IAM identities. The helper and PR must not describe the direct-policy check as
+principals, Google public principal sets, Resource Manager service-account sets,
+Token Creator, Service Account User, Workload Identity User, custom roles, and
+every other unreviewed role or principal. The roster-reader's own IAM policy
+must have no binding, so no principal can mint a token through a resource-level
+grant. Google does not expose group-expanded ancestor IAM in either response.
+Before `live-verified`, a district administrator must still confirm the service
+account is not covered by ancestor token-minting, signing, `actAs`, key-creation,
+or project-role authority and is not a member of a Google Group granted such
+authority. Record only that result, not unrelated group membership or IAM
+identities. The helper and PR must not describe the direct-policy checks as
 proof of no effective inherited access.
 
 The verifier binds the AWS credential back to the exact Terraform project,
@@ -295,8 +327,10 @@ tenant-wide credentials:
    from that snapshot; Google is never called in the activation path.
 2. With the same `PSD_EOC_APPROVED_TEST_GROUP` value, run
    `bun scripts/revoke-groups-credential.ts`. Review its preview and type
-   `revoke-psd-eoc-readonly-groups-key`. It validates AWS, Terraform, the live
-   key, and the group hash before revoking only the exact AWS-bound key.
+   `revoke-psd-eoc-readonly-groups-key`. It revalidates the retained secret's
+   complete AWS ownership/encryption/policy contract before reading it, then
+   validates Terraform, both live IAM policies, the exact key, and the group
+   hash before revoking only the exact AWS-bound key.
 3. Run `bun scripts/provision-groups-credential.ts`, review its preview, and
    type `store-psd-eoc-readonly-groups-key` to create and store the replacement.
 4. Temporarily authorize the role-management ADC described above, then run
