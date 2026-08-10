@@ -1,6 +1,7 @@
 import type { TemplateMode } from '@psd-eoc/contracts';
 import { Link, type Href } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ClassificationBanner } from '../components/classification-banner';
 import { getEventTheme } from '../theme/event-theme';
@@ -39,38 +40,41 @@ function PreviewLink({ href, mode }: PreviewLinkProps) {
 
 export default function HomeScreen() {
   return (
-    <ScrollView
-      contentContainerStyle={styles.content}
-      contentInsetAdjustmentBehavior="automatic"
-      style={styles.page}
-    >
-      <View style={styles.introduction}>
-        <Text style={styles.eyebrow}>PENINSULA SCHOOL DISTRICT</Text>
-        <Text style={styles.title}>PSD EOC</Text>
-        <Text style={styles.subtitle}>
-          Emergency notification and operations mobile foundation
-        </Text>
-      </View>
+    <SafeAreaView edges={['left', 'right', 'bottom']} style={styles.page}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="automatic"
+        style={styles.page}
+      >
+        <View style={styles.introduction}>
+          <Text style={styles.eyebrow}>PENINSULA SCHOOL DISTRICT</Text>
+          <Text style={styles.title}>PSD EOC</Text>
+          <Text style={styles.subtitle}>
+            Emergency notification and operations mobile foundation
+          </Text>
+        </View>
 
-      <View accessibilityRole="summary" style={styles.notice}>
-        <Text style={styles.noticeTitle}>Scaffold preview</Text>
-        <Text style={styles.noticeBody}>
-          These links demonstrate classification styling and navigation only. No
-          incident, drill, or notification can be started here.
-        </Text>
-      </View>
+        <View accessibilityRole="summary" style={styles.notice}>
+          <Text style={styles.noticeTitle}>Scaffold preview</Text>
+          <Text style={styles.noticeBody}>
+            These links demonstrate classification styling and navigation only.
+            No incident, drill, or notification can be started here.
+          </Text>
+        </View>
 
-      <View style={styles.previews}>
-        <PreviewLink href="/preview/real" mode="real" />
-        <PreviewLink href="/preview/drill" mode="drill" />
-      </View>
-    </ScrollView>
+        <View style={styles.previews}>
+          <PreviewLink href="/preview/real" mode="real" />
+          <PreviewLink href="/preview/drill" mode="drill" />
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   page: {
     backgroundColor: '#F4F7FA',
+    flex: 1,
   },
   content: {
     gap: 24,
