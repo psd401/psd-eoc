@@ -13,6 +13,7 @@ import {
   PutRegistrationFieldValueCommand,
   RequestPhoneNumberCommand,
   SubmitRegistrationVersionCommand,
+  type RegistrationFieldValueInformation,
 } from '@aws-sdk/client-pinpoint-sms-voice-v2';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 
@@ -43,6 +44,21 @@ function requiredPositiveInteger(
     throw new Error(`AWS response omitted a positive ${label}.`);
   }
   return value;
+}
+
+export function toRegistrationFieldFeedback(
+  field: RegistrationFieldValueInformation,
+): RegistrationFieldFeedback | undefined {
+  if (field.DeniedReason === undefined && field.Feedback === undefined) {
+    return undefined;
+  }
+  return {
+    ...(field.DeniedReason === undefined
+      ? {}
+      : { deniedReason: field.DeniedReason }),
+    ...(field.Feedback === undefined ? {} : { feedback: field.Feedback }),
+    fieldPath: required(field.FieldPath, 'FieldPath'),
+  };
 }
 
 export function createAwsApi(): SmsRegistrationApi {
@@ -215,12 +231,8 @@ export function createAwsApi(): SmsRegistrationApi {
           }),
         );
         for (const field of output.RegistrationFieldValues ?? []) {
-          if (field.DeniedReason !== undefined) {
-            fields.push({
-              deniedReason: field.DeniedReason,
-              fieldPath: required(field.FieldPath, 'FieldPath'),
-            });
-          }
+          const feedback = toRegistrationFieldFeedback(field);
+          if (feedback !== undefined) fields.push(feedback);
         }
         nextToken = output.NextToken;
       } while (nextToken !== undefined);
@@ -239,9 +251,6 @@ export function createAwsApi(): SmsRegistrationApi {
           }),
         );
         for (const version of output.RegistrationVersions ?? []) {
-          const versionWithFeedback = version as typeof version & {
-            readonly Feedback?: string;
-          };
           versions.push({
             deniedReasons: (version.DeniedReasons ?? []).map((reason) => {
               const code = required(reason.Reason, 'denied Reason');
@@ -255,9 +264,9 @@ export function createAwsApi(): SmsRegistrationApi {
               version.RegistrationVersionStatus,
               'RegistrationVersionStatus',
             ),
-            ...(versionWithFeedback.Feedback === undefined
+            ...(version.Feedback === undefined
               ? {}
-              : { feedback: versionWithFeedback.Feedback }),
+              : { feedback: version.Feedback }),
             versionNumber: requiredPositiveInteger(
               version.VersionNumber,
               'VersionNumber',

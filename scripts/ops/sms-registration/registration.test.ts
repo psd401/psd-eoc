@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { statusMain, submitMain } from './cli';
+import { toRegistrationFieldFeedback } from './aws-adapter';
 
 import {
   REGISTRATION_TYPES,
@@ -69,11 +70,11 @@ async function writeData(directory: string): Promise<string> {
           },
           {
             fieldPath: 'messageSamples.messageSample1',
-            text: 'PSD EOC REAL INCIDENT — synthetic staff safety alert.',
+            text: 'PSD EOC REAL INCIDENT — synthetic staff safety alert. Reply STOP to opt out.',
           },
           {
             fieldPath: 'messageSamples.messageSample2',
-            text: 'PSD EOC DRILL — synthetic staff exercise alert.',
+            text: 'PSD EOC DRILL — synthetic staff exercise alert. Reply STOP to opt out.',
           },
         ],
       },
@@ -88,11 +89,11 @@ async function writeData(directory: string): Promise<string> {
           },
           {
             fieldPath: 'messageSamples.messageSample1',
-            text: 'PSD EOC REAL INCIDENT — synthetic staff safety alert.',
+            text: 'PSD EOC REAL INCIDENT — synthetic staff safety alert. Reply STOP to opt out.',
           },
           {
             fieldPath: 'messageSamples.messageSample2',
-            text: 'PSD EOC DRILL — synthetic staff exercise alert.',
+            text: 'PSD EOC DRILL — synthetic staff exercise alert. Reply STOP to opt out.',
           },
         ],
         optOutListName: 'psd-eoc-staff',
@@ -148,11 +149,18 @@ class FakeApi implements SmsRegistrationApi {
   readonly registrationStatuses = new Map<string, string>();
   readonly submittedRegistrations = new Set<string>();
   accountId = TARGET_ACCOUNT;
+  attachmentCreateStatus = 'UPLOAD_COMPLETE';
+  attachmentDescribeStatus = 'UPLOAD_COMPLETE';
   associationCrashAfterWrite = false;
   brandStatus = 'COMPLETE';
   createRegistrationStarted?: () => void;
   createRegistrationWait?: Promise<void>;
   definitionOverride?: readonly FieldDefinition[];
+  fieldFeedbackOverride: readonly {
+    readonly deniedReason?: string;
+    readonly feedback?: string;
+    readonly fieldPath: string;
+  }[] = [];
   hideAssociations = false;
   hideSubmittedState = false;
   registrationReadError = false;
@@ -186,7 +194,7 @@ class FakeApi implements SmsRegistrationApi {
     this.attachmentBodies.push(Uint8Array.from(input.attachmentBody));
     return {
       attachmentId: 'attachment-1',
-      attachmentStatus: 'UPLOAD_COMPLETE',
+      attachmentStatus: this.attachmentCreateStatus,
     };
   }
 
@@ -219,7 +227,9 @@ class FakeApi implements SmsRegistrationApi {
 
   async describeAttachments() {
     this.calls.push('describe-attachments');
-    return [{ attachmentId: 'attachment-1', status: 'UPLOAD_COMPLETE' }];
+    return [
+      { attachmentId: 'attachment-1', status: this.attachmentDescribeStatus },
+    ];
   }
 
   async describePhoneNumbers() {
@@ -236,7 +246,7 @@ class FakeApi implements SmsRegistrationApi {
 
   async describeRegistrationFieldFeedback() {
     this.calls.push('describe-field-feedback');
-    return [];
+    return this.fieldFeedbackOverride;
   }
 
   async describeRegistrationVersions(registrationId: string) {
@@ -460,6 +470,45 @@ function deferred(): {
   };
 }
 
+describe('AWS response compatibility', () => {
+  it('preserves all registration field review result variants', () => {
+    expect(
+      toRegistrationFieldFeedback({
+        Feedback: 'Add more detail to the synthetic opt-in description.',
+        FieldPath: 'campaignInfo.optInDescription',
+      }),
+    ).toEqual({
+      feedback: 'Add more detail to the synthetic opt-in description.',
+      fieldPath: 'campaignInfo.optInDescription',
+    });
+    expect(
+      toRegistrationFieldFeedback({
+        DeniedReason: 'Missing consent disclosure.',
+        FieldPath: 'campaignInfo.optInDescription',
+      }),
+    ).toEqual({
+      deniedReason: 'Missing consent disclosure.',
+      fieldPath: 'campaignInfo.optInDescription',
+    });
+    expect(
+      toRegistrationFieldFeedback({
+        DeniedReason: 'Missing consent disclosure.',
+        Feedback: 'Add Reply STOP to unsubscribe.',
+        FieldPath: 'campaignInfo.optInDescription',
+      }),
+    ).toEqual({
+      deniedReason: 'Missing consent disclosure.',
+      feedback: 'Add Reply STOP to unsubscribe.',
+      fieldPath: 'campaignInfo.optInDescription',
+    });
+    expect(
+      toRegistrationFieldFeedback({
+        FieldPath: 'campaignInfo.optInDescription',
+      }),
+    ).toBeUndefined();
+  });
+});
+
 describe('offline safety boundary', () => {
   it('runs a dry-run without creating an AWS client or state file', async () => {
     const directory = await fixtureDirectory();
@@ -611,6 +660,123 @@ describe('attachment trust boundary', () => {
     expect(harness.apiCreations()).toBe(0);
     expect(api.calls).toEqual([]);
   });
+
+  it('rejects JPEG toll-free opt-in evidence before registration or lease mutation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    await writeFile(
+      join(directory, 'toll-free-opt-in.jpg'),
+      jpegWithExifMetadata(),
+    );
+    await replaceDataValue(
+      dataPath,
+      '{"fieldPath":"tollFree.required","text":"District toll-free value"}',
+      '{"fieldPath":"tollFree.required","text":"District toll-free value"},{"attachmentFile":"toll-free-opt-in.jpg","fieldPath":"messagingUseCase.optInImage"}',
+    );
+    const api = new FakeApi();
+    api.definitionOverride = [
+      ...definitions('tollFree'),
+      {
+        fieldPath: 'messagingUseCase.optInImage',
+        fieldRequirement: 'OPTIONAL',
+        fieldType: 'ATTACHMENT',
+      },
+    ];
+    const harness = testRuntime(api);
+
+    await expect(
+      runSubmit(
+        'tollFree',
+        submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
+        harness.runtime,
+      ),
+    ).rejects.toThrow('must be a PNG image no larger than 400 KB');
+    expect(harness.apiCreations()).toBe(0);
+    expect(mutationCalls(api)).toEqual([]);
+  });
+
+  it('rejects toll-free opt-in evidence larger than 400 KB before mutation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    await writeFile(
+      join(directory, 'toll-free-opt-in.png'),
+      Buffer.alloc(400_001),
+    );
+    await replaceDataValue(
+      dataPath,
+      '{"fieldPath":"tollFree.required","text":"District toll-free value"}',
+      '{"fieldPath":"tollFree.required","text":"District toll-free value"},{"attachmentFile":"toll-free-opt-in.png","fieldPath":"messagingUseCase.optInImage"}',
+    );
+    const api = new FakeApi();
+    api.definitionOverride = [
+      ...definitions('tollFree'),
+      {
+        fieldPath: 'messagingUseCase.optInImage',
+        fieldRequirement: 'OPTIONAL',
+        fieldType: 'ATTACHMENT',
+      },
+    ];
+    const harness = testRuntime(api);
+
+    await expect(
+      runSubmit(
+        'tollFree',
+        submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
+        harness.runtime,
+      ),
+    ).rejects.toThrow('must be between 1 byte and 400 KB');
+    expect(harness.apiCreations()).toBe(0);
+    expect(mutationCalls(api)).toEqual([]);
+  });
+
+  it('stops when AWS reports an attachment upload failure', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    const statePath = join(directory, 'registration-state.json');
+    await seedCompletedBrand(statePath);
+    const api = new FakeApi();
+    api.attachmentCreateStatus = 'PENDING';
+    api.attachmentDescribeStatus = 'UPLOAD_FAILED';
+
+    await expect(
+      runSubmit(
+        'campaign',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+        testRuntime(api).runtime,
+      ),
+    ).rejects.toThrow('is UPLOAD_FAILED; submission stopped');
+
+    expect(api.calls).toContain('describe-attachments');
+    expect(api.calls).not.toContain('submit:registration-campaign');
+    expect(
+      (await loadState(statePath)).campaign?.attachments[
+        'campaignInfo.optInScreenshot'
+      ]?.attachmentStatus,
+    ).toBe('UPLOAD_FAILED');
+  });
+
+  it('times out closed while an attachment remains pending', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    const statePath = join(directory, 'registration-state.json');
+    await seedCompletedBrand(statePath);
+    const api = new FakeApi();
+    api.attachmentCreateStatus = 'PENDING';
+    api.attachmentDescribeStatus = 'PENDING';
+
+    await expect(
+      runSubmit(
+        'campaign',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+        testRuntime(api).runtime,
+      ),
+    ).rejects.toThrow('not UPLOAD_COMPLETE');
+
+    expect(
+      api.calls.filter((call) => call === 'describe-attachments'),
+    ).toHaveLength(10);
+    expect(api.calls).not.toContain('submit:registration-campaign');
+  });
 });
 
 describe('live validation before mutation', () => {
@@ -651,8 +817,8 @@ describe('live validation before mutation', () => {
     const dataPath = await writeData(directory);
     await replaceDataValue(
       dataPath,
-      'PSD EOC REAL INCIDENT — synthetic staff safety alert.',
-      'PSD EOC DRILL — second synthetic staff exercise alert.',
+      'PSD EOC REAL INCIDENT — synthetic staff safety alert. Reply STOP to opt out.',
+      'PSD EOC DRILL — second synthetic staff exercise alert. Reply STOP to opt out.',
     );
     const api = new FakeApi();
     const harness = testRuntime(api);
@@ -664,6 +830,98 @@ describe('live validation before mutation', () => {
         harness.runtime,
       ),
     ).rejects.toThrow('separate, unmistakable REAL INCIDENT and DRILL');
+    expect(mutationCalls(api)).toEqual([]);
+  });
+
+  it('requires an explicit STOP instruction in the message samples before mutation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    await replaceDataValue(
+      dataPath,
+      'PSD EOC REAL INCIDENT — synthetic staff safety alert. Reply STOP to opt out.',
+      'PSD EOC REAL INCIDENT — synthetic staff safety alert.',
+    );
+    await replaceDataValue(
+      dataPath,
+      'PSD EOC DRILL — synthetic staff exercise alert. Reply STOP to opt out.',
+      'PSD EOC DRILL — synthetic staff exercise alert.',
+    );
+    const api = new FakeApi();
+
+    await expect(
+      runSubmit(
+        'campaign',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+        testRuntime(api).runtime,
+      ),
+    ).rejects.toThrow(
+      'must include an explicit Reply STOP opt-out instruction in at least one sample',
+    );
+    expect(mutationCalls(api)).toEqual([]);
+  });
+
+  it('requires stock details for a public-profit brand before mutation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    await replaceDataValue(
+      dataPath,
+      '{"fieldPath":"brand.required","text":"District legal value"}',
+      '{"fieldPath":"brand.required","text":"District legal value"},{"fieldPath":"companyInfo.legalType","select":["PUBLIC_PROFIT"]}',
+    );
+    const api = new FakeApi();
+    api.definitionOverride = [
+      ...definitions('brand'),
+      {
+        fieldPath: 'companyInfo.legalType',
+        fieldRequirement: 'OPTIONAL',
+        fieldType: 'SELECT',
+        selectValidation: {
+          maxChoices: 1,
+          minChoices: 1,
+          options: ['PUBLIC_PROFIT'],
+        },
+      },
+    ];
+
+    await expect(
+      runSubmit(
+        'brand',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+        testRuntime(api).runtime,
+      ),
+    ).rejects.toThrow(
+      'PUBLIC_PROFIT brand registrations require the conditional company fields',
+    );
+    expect(mutationCalls(api)).toEqual([]);
+  });
+
+  it('requires tax details for a non-sole-proprietor before mutation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    await replaceDataValue(dataPath, 'SOLE_PROPRIETOR', 'CORPORATION');
+    const api = new FakeApi();
+    api.definitionOverride = definitions('tollFree').map((definition) =>
+      definition.fieldPath === 'companyInfo.businessType'
+        ? {
+            ...definition,
+            selectValidation: {
+              maxChoices: 1,
+              minChoices: 1,
+              options: ['CORPORATION'],
+            },
+          }
+        : definition,
+    );
+
+    await expect(
+      runSubmit(
+        'tollFree',
+        submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
+        testRuntime(api).runtime,
+      ),
+    ).rejects.toThrow(
+      'Non-sole-proprietor toll-free registrations require the conditional company-identification fields',
+    );
     expect(mutationCalls(api)).toEqual([]);
   });
 });
@@ -821,6 +1079,38 @@ describe('state isolation and concurrency', () => {
     );
     expect(await stateFailureCause(statePath)).toContain(
       `targetAccount must be ${TARGET_ACCOUNT}`,
+    );
+  });
+
+  it('refuses input drift against account-bound state before mutation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    const statePath = join(directory, 'registration-state.json');
+    await saveState(statePath, {
+      brand: {
+        attachments: {},
+        clientToken: 'synthetic-token',
+        inputFingerprint: 'a'.repeat(64),
+        kind: 'brand',
+        registrationId: 'registration-brand',
+      },
+      schemaVersion: 2,
+      targetAccount: TARGET_ACCOUNT,
+      targetRegion: TARGET_REGION,
+    });
+    const api = new FakeApi();
+
+    await expect(
+      runSubmit(
+        'brand',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+        testRuntime(api).runtime,
+      ),
+    ).rejects.toThrow('input no longer matches');
+
+    expect(mutationCalls(api)).toEqual([]);
+    expect((await loadState(statePath)).brand?.inputFingerprint).toBe(
+      'a'.repeat(64),
     );
   });
 
@@ -1033,6 +1323,13 @@ describe('truthful status output', () => {
         versionNumber: 1,
       },
     ];
+    api.fieldFeedbackOverride = [
+      {
+        deniedReason: '\u001b[35mFIELD DENIED\u001b[0m\nsecond line',
+        feedback: '\u001b[36mField advice\u001b[0m\n\u202ereversed',
+        fieldPath: 'campaignInfo.optInDescription',
+      },
+    ];
     const harness = testRuntime(api);
 
     await runStatus(
@@ -1054,6 +1351,11 @@ describe('truthful status output', () => {
     const deniedLine =
       harness.stdout.find((line) => line.includes('denied reason:')) ?? '';
     expect(deniedLine).toContain('DENIED second line');
+    const fieldLine =
+      harness.stdout.find((line) => line.includes('brand field ')) ?? '';
+    expect(fieldLine).not.toContain('\u001b');
+    expect(fieldLine).not.toContain('\n');
+    expect(fieldLine).toContain('FIELD DENIED second line');
   });
 });
 
