@@ -3,9 +3,11 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   linkSync,
+  lstatSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -19,6 +21,7 @@ import {
   bootstrapPrerequisitesReady,
   buildApplyBoundary,
   captureApplyBoundary,
+  createSavedPlanWorkspace,
   executeConfirmedPlan,
   missingRecoverableBootstrapApis,
   parseBucketDescribeResult,
@@ -35,6 +38,8 @@ import {
   recoverOrphanedRosterReader,
   validateBootstrapProject,
   validateMainStateAddresses,
+  validateManagedRosterReaderBoundary,
+  validateManagedRosterReaderServiceAccount,
   validateRecoverableRosterReaderServiceAccount,
   validateRecoveredInterruptedBootstrapState,
   validateStateBucket,
@@ -115,6 +120,7 @@ import {
 const root = new URL('.', import.meta.url);
 const read = (path: string): string =>
   readFileSync(new URL(path, root), 'utf8');
+const policyDataSourceAddress = 'data.google_iam_policy.terraform_state';
 
 function terraformFiles(directory = root): URL[] {
   const files: URL[] = [];
@@ -563,8 +569,13 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     const apply = read('scripts/apply.ts');
 
     expect(apply).toContain(
-      "['plan', '-input=false', `-out=${options.planPath}`]",
+      "['plan', '-input=false', `-out=${savedPlan.planPath}`]",
     );
+    expect(apply).toContain("['apply', '-input=false', savedPlan.planPath]");
+    expect(apply).toContain('cleanup: savedPlan.cleanup');
+    expect(apply).not.toContain('bootstrapPlan');
+    expect(apply).not.toContain('mainPlan');
+    expect(apply).not.toContain('options.planPath');
     expect(apply).toContain('requireExactConfirmation');
     expect(apply).not.toContain('auto-approve');
     expect(read('scripts/provision-groups-credential.ts')).toContain(
@@ -573,6 +584,61 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(read('scripts/store-oauth-client.ts')).toContain(
       'store-psd-eoc-google-oauth',
     );
+  });
+
+  test('creates saved plans in private fixed-root workspaces before planning', () => {
+    const ambientDirectory = mkdtempSync(
+      join(tmpdir(), 'psd-eoc-ambient-plan-root-'),
+    );
+    const sentinel = join(ambientDirectory, 'sentinel.txt');
+    writeFileSync(sentinel, 'KEEP', { mode: 0o600 });
+    const previousTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = gcpRoot;
+    const first = createSavedPlanWorkspace();
+    const second = createSavedPlanWorkspace();
+    const firstDirectory = dirname(first.planPath);
+    const secondDirectory = dirname(second.planPath);
+    try {
+      expect(firstDirectory).not.toBe(secondDirectory);
+      expect(dirname(firstDirectory)).toBe(realpathSync('/tmp'));
+      expect(dirname(secondDirectory)).toBe(realpathSync('/tmp'));
+      expect(first.planPath.startsWith(gcpRoot)).toBe(false);
+      expect(second.planPath.startsWith(gcpRoot)).toBe(false);
+
+      for (const workspace of [first, second]) {
+        const directoryMetadata = lstatSync(dirname(workspace.planPath));
+        const planMetadata = lstatSync(workspace.planPath);
+        expect(directoryMetadata.isDirectory()).toBe(true);
+        expect(directoryMetadata.mode & 0o777).toBe(0o700);
+        expect(realpathSync(dirname(workspace.planPath))).toBe(
+          dirname(workspace.planPath),
+        );
+        expect(planMetadata.isFile()).toBe(true);
+        expect(planMetadata.mode & 0o777).toBe(0o600);
+        expect(planMetadata.nlink).toBe(1);
+        expect(planMetadata.size).toBe(0);
+      }
+
+      expect(() => symlinkSync(sentinel, first.planPath)).toThrow();
+      expect(() => linkSync(sentinel, second.planPath)).toThrow();
+      writeFileSync(first.planPath, 'synthetic-plan-one');
+      writeFileSync(second.planPath, 'synthetic-plan-two');
+      expect(readSavedPlanSeal(first.planPath)).not.toBe(
+        readSavedPlanSeal(second.planPath),
+      );
+      expect(readFileSync(sentinel, 'utf8')).toBe('KEEP');
+    } finally {
+      first.cleanup();
+      second.cleanup();
+      if (previousTmpdir === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = previousTmpdir;
+      }
+      rmSync(ambientDirectory, { force: true, recursive: true });
+    }
+    expect(() => lstatSync(firstDirectory)).toThrow();
+    expect(() => lstatSync(secondDirectory)).toThrow();
   });
 
   test('revalidates the sealed plan, live boundary, and identities before apply', async () => {
@@ -729,7 +795,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
       apply.indexOf('async function main'),
     );
     expect(applySavedPlan).toMatch(
-      /captureBoundary: options\.captureBoundary,[\s\S]*readPlanSeal: \(\) => readSavedPlanSeal\(options\.planPath\),[\s\S]*revalidate: async \(\) => \{\s*assertDefaultTerraformWorkspace\(options\.cwd\);\s*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*\},/u,
+      /const savedPlan = createSavedPlanWorkspace\(\);[\s\S]*captureBoundary: options\.captureBoundary,[\s\S]*cleanup: savedPlan\.cleanup,[\s\S]*readPlanSeal: \(\) => readSavedPlanSeal\(savedPlan\.planPath\),[\s\S]*revalidate: async \(\) => \{\s*assertDefaultTerraformWorkspace\(options\.cwd\);\s*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*\},/u,
     );
   });
 
@@ -860,7 +926,10 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     }
     expect(capture).toContain('operations.validateRosterReader');
     expect(apply).toContain(
-      'validateRosterReader: validateLiveRecoverableRosterReader',
+      'validateRosterReader: validateLiveManagedRosterReader',
+    );
+    expect(apply).toMatch(
+      /const liveOrphanedRosterReaderRecoveryOperations =[\s\S]*validateRosterReader: validateLiveRecoverableRosterReader/u,
     );
     expect(capture).toContain('validateProjectIamPolicy');
   });
@@ -1076,6 +1145,9 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
       expect(() => readSavedPlanSeal(plan)).toThrow('bounded regular file');
 
       writeFileSync(plan, 'synthetic-plan-three', { mode: 0o600 });
+      chmodSync(plan, 0o644);
+      expect(() => readSavedPlanSeal(plan)).toThrow('private bounded');
+      chmodSync(plan, 0o600);
       symlinkSync(plan, symbolic);
       expect(() => readSavedPlanSeal(symbolic)).toThrow();
 
@@ -1566,31 +1638,66 @@ describe('fail-closed bootstrap and process behavior', () => {
   });
 
   test('accepts only the exact state constructed by bucketless recovery imports', () => {
+    const managedState = interruptedBootstrapState({
+      includeBilling: true,
+      includeResourceManager: true,
+    });
+    const managedResources = managedState.resources;
+    if (!Array.isArray(managedResources)) {
+      throw new Error('Synthetic interrupted bootstrap resources were absent.');
+    }
     const finalState = parseInterruptedBootstrapStateResult(
       0,
-      JSON.stringify(
-        interruptedBootstrapState({
-          includeBilling: true,
-          includeResourceManager: true,
-        }),
-      ),
+      JSON.stringify({
+        ...managedState,
+        resources: [
+          ...managedResources,
+          {
+            instances: [
+              {
+                attributes: {
+                  policy_data: JSON.stringify({
+                    bindings: [
+                      {
+                        members: ['user:kjh_admin@psd401.net'],
+                        role: 'roles/storage.objectAdmin',
+                      },
+                    ],
+                  }),
+                },
+                schema_version: 0,
+                sensitive_attributes: [],
+              },
+            ],
+            mode: 'data',
+            name: 'terraform_state',
+            provider: 'provider["registry.terraform.io/hashicorp/google"]',
+            type: 'google_iam_policy',
+          },
+        ],
+      }),
       '',
     );
     if (finalState === null) {
       throw new Error('Synthetic interrupted bootstrap state was empty.');
     }
+    const expectedManagedResources = new Set(finalState.resources);
+    expectedManagedResources.delete(policyDataSourceAddress);
     expect(() =>
       validateRecoveredInterruptedBootstrapState(
         null,
         finalState,
-        finalState.resources,
+        expectedManagedResources,
       ),
     ).not.toThrow();
     expect(() =>
       validateRecoveredInterruptedBootstrapState(
         null,
         finalState,
-        new Set([...finalState.resources, 'google_storage_bucket.unexpected']),
+        new Set([
+          ...expectedManagedResources,
+          'google_storage_bucket.unexpected',
+        ]),
       ),
     ).toThrow('changed after recovery');
 
@@ -1612,6 +1719,23 @@ describe('fail-closed bootstrap and process behavior', () => {
         earlier,
         rolledBack,
         rolledBack.resources,
+      ),
+    ).toThrow('changed after recovery');
+    expect(() =>
+      validateRecoveredInterruptedBootstrapState(
+        finalState,
+        {
+          ...finalState,
+          lineage: '223e4567-e89b-42d3-a456-426614174000',
+        },
+        expectedManagedResources,
+      ),
+    ).toThrow('changed after recovery');
+    expect(() =>
+      validateRecoveredInterruptedBootstrapState(
+        finalState,
+        { ...finalState, projectNumber: '987654321' },
+        expectedManagedResources,
       ),
     ).toThrow('changed after recovery');
   });
@@ -2193,13 +2317,13 @@ describe('fail-closed bootstrap and process behavior', () => {
           fingerprint: 'synthetic-final-fingerprint',
           lineage: '123e4567-e89b-42d3-a456-426614174000',
           projectNumber: validProject.projectNumber,
-          resources: new Set(persistedResources),
+          resources: new Set([...persistedResources, policyDataSourceAddress]),
           serial: 1,
         };
       },
       inspectStateResources: () => {
         stateResourceReads += 1;
-        return new Set(persistedResources);
+        return new Set([...persistedResources, policyDataSourceAddress]);
       },
       inspectProject: () => validProject,
       validateExistingProject: () => validBilling,
@@ -2334,12 +2458,13 @@ describe('fail-closed bootstrap and process behavior', () => {
                 fingerprint: 'synthetic-final-fingerprint',
                 lineage: '123e4567-e89b-42d3-a456-426614174000',
                 projectNumber: validProject.projectNumber,
-                resources: new Set(
-                  [...persistedResources].filter(
+                resources: new Set([
+                  ...[...persistedResources].filter(
                     (address) =>
                       address !== 'google_project_service.cloud_billing',
                   ),
-                ),
+                  policyDataSourceAddress,
+                ]),
                 serial: 1,
               };
         },
@@ -2547,6 +2672,78 @@ describe('fail-closed bootstrap and process behavior', () => {
         '',
       ),
     ).not.toThrow();
+    const firstManagedKey = `projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}/keys/${'a'.repeat(40)}`;
+    const secondManagedKey = `projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}/keys/${'b'.repeat(40)}`;
+    expect(
+      validateManagedRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        firstManagedKey,
+      ),
+    ).toEqual(new Set(['a'.repeat(40)]));
+    const zeroKeyBoundary = validateManagedRosterReaderBoundary(
+      validLiveGroupsReader,
+      {},
+      '',
+    );
+    const firstKeyBoundary = validateManagedRosterReaderBoundary(
+      validLiveGroupsReader,
+      {},
+      firstManagedKey,
+    );
+    const secondKeyBoundary = validateManagedRosterReaderBoundary(
+      validLiveGroupsReader,
+      {},
+      secondManagedKey,
+    );
+    expect(zeroKeyBoundary.userManagedKeyIds).toEqual(new Set());
+    expect(firstKeyBoundary.userManagedKeyIds).toEqual(
+      new Set(['a'.repeat(40)]),
+    );
+    expect(zeroKeyBoundary.seal).not.toBe(firstKeyBoundary.seal);
+    expect(firstKeyBoundary.seal).not.toBe(secondKeyBoundary.seal);
+    expect(
+      validateManagedRosterReaderBoundary(
+        { ...validLiveGroupsReader },
+        {},
+        firstManagedKey,
+      ).seal,
+    ).toBe(firstKeyBoundary.seal);
+    expect(() =>
+      validateManagedRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        `${firstManagedKey}\n${secondManagedKey}`,
+      ),
+    ).toThrow('more than one user-managed key');
+    expect(() =>
+      validateManagedRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        'malformed-key-response',
+      ),
+    ).toThrow('invalid service-account key');
+    expect(() =>
+      validateManagedRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        `projects/wrong/serviceAccounts/${ROSTER_READER_EMAIL}/keys/${'a'.repeat(40)}`,
+      ),
+    ).toThrow('invalid service-account key resource name');
+    expect(() =>
+      validateManagedRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        `${firstManagedKey}\n${firstManagedKey}`,
+      ),
+    ).toThrow('duplicate service-account key record');
+    expect(() =>
+      validateRecoverableRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        firstManagedKey,
+      ),
+    ).toThrow('cannot be adopted');
     for (const invalid of [
       { ...validLiveGroupsReader, name: 'projects/wrong/serviceAccounts/fake' },
       { ...validLiveGroupsReader, email: 'lookalike@example.invalid' },
@@ -4657,7 +4854,10 @@ describe('Groups least-privilege contracts', () => {
   test('binds key cleanup to the downloaded key and rejects concurrency', () => {
     const first = 'a'.repeat(40);
     const second = 'b'.repeat(40);
-    expect(parseUserManagedKeyIds(`${first}\n`)).toEqual(new Set([first]));
+    const firstResource = `projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}/keys/${first}`;
+    expect(parseUserManagedKeyIds(`${firstResource}\n`)).toEqual(
+      new Set([first]),
+    );
     expect(createdKeyIsVisible(new Set(), new Set([first]), first)).toBe(true);
     expect(createdKeyIsVisible(new Set(), new Set(), first)).toBe(false);
     expect(() =>
@@ -4667,6 +4867,14 @@ describe('Groups least-privilege contracts', () => {
       createdKeyIsVisible(new Set([first]), new Set([first]), first),
     ).toThrow('new Google key');
     expect(() => parseUserManagedKeyIds('not-a-key')).toThrow('invalid');
+    expect(() =>
+      parseUserManagedKeyIds(
+        `projects/wrong/serviceAccounts/${ROSTER_READER_EMAIL}/keys/${first}`,
+      ),
+    ).toThrow('invalid service-account key resource name');
+    expect(() =>
+      parseUserManagedKeyIds(`${firstResource}\n${firstResource}`),
+    ).toThrow('duplicate service-account key record');
 
     const provisioner = read('scripts/provision-groups-credential.ts');
     expect(provisioner.match(/readUserManagedKeyCreatedAt\(/gu)).toHaveLength(

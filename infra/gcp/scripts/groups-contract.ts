@@ -42,12 +42,22 @@ export function approvedStaffGroupHash(groupEmail: string): string {
 }
 
 export function parseUserManagedKeyIds(output: string): Set<string> {
-  const keyIds = output
-    .split('\n')
-    .filter((line) => line.length > 0)
-    .map((name) => name.split('/').at(-1) ?? '');
-  if (keyIds.some((keyId) => !/^[a-f0-9]{40}$/u.test(keyId))) {
-    throw new Error('Google returned an invalid service-account key ID.');
+  const keyResourcePrefix = `projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}/keys/`;
+  const keyResources = output.split('\n').filter((line) => line.length > 0);
+  const keyIds = keyResources.map((name) => {
+    if (!name.startsWith(keyResourcePrefix)) {
+      throw new Error(
+        'Google returned an invalid service-account key resource name.',
+      );
+    }
+    const keyId = name.slice(keyResourcePrefix.length);
+    if (!/^[a-f0-9]{40}$/u.test(keyId)) {
+      throw new Error('Google returned an invalid service-account key ID.');
+    }
+    return keyId;
+  });
+  if (new Set(keyResources).size !== keyResources.length) {
+    throw new Error('Google returned a duplicate service-account key record.');
   }
   return new Set(keyIds);
 }

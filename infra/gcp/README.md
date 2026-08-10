@@ -114,7 +114,11 @@ transport state.
 
 Run the guarded helper from this directory. It initializes each Terraform root
 with the pinned CLI configuration and produces a complete saved plan before it
-offers either Terraform confirmation. The one pre-plan exception is the
+offers either Terraform confirmation. Each plan is written through a mode-0600
+placeholder inside a fresh mode-0700 helper-owned directory beneath the
+canonical system `/tmp`; ambient temp variables and pre-positioned regular,
+symbolic, or hard-linked plan paths cannot redirect Terraform's write. The one
+pre-plan exception is the
 separately confirmed repair of disabled bootstrap inspection APIs documented
 below:
 
@@ -184,6 +188,14 @@ recovery adopts it only after a successful project-scoped account listing and
 an exact identity, display-name, description, enabled-state, empty resource IAM
 policy, and zero-user-managed-key check. Permission or inspection failures,
 unexpected metadata, a resource binding, or any existing key fail closed.
+Terraform imports may refresh the one declared, read-only bucket-policy data
+source into local state. Bucketless local-state recovery validates that data
+source's exact policy content plus the retained lineage, project number, and
+serial before comparing the exact managed-resource set. Both recovery paths
+ignore only that data-source address for managed-resource equality;
+bucket-backed recovery separately revalidates the authoritative live bucket
+policy and status before and after imports. Every other added or missing
+address fails closed.
 
 The bootstrap and main Terraform mutations use saved plans and helper-owned
 exact confirmations; the exceptional API repair uses its own consequence
@@ -210,9 +222,13 @@ captures and compares a normalized live boundary before and after planning and
 again after each unbounded confirmation. That boundary includes the exact
 project and parent organization, billing association, complete project IAM,
 bucket ownership/configuration/IAM revision, fixed API states, and, for the main
-plan, roster-reader identity/resource policy/user-managed-key state. The plan
-itself is sealed as one bounded regular inode with no symbolic or hard links;
-its SHA-256, inode, device, and size must remain unchanged. After confirmation,
+plan, roster-reader identity/resource policy and normalized user-managed-key
+IDs. A managed account may have the zero-key pre-provisioning state or the one
+documented retained key; more than one key fails closed, while any key addition,
+removal, or replacement changes the boundary and invalidates the plan. Orphan
+adoption still requires zero keys. The plan itself is sealed as one private
+bounded regular inode with no symbolic or hard links; its SHA-256, inode,
+device, permissions, timestamps, and size must remain unchanged. After confirmation,
 the helper checks that seal, revalidates the persisted default workspace plus
 both fixed gcloud and live ADC identities, rereads the boundary, repeats the
 identity checks, and checks the seal again immediately before invoking that

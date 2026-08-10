@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
   constants,
   existsSync,
   fstatSync,
+  lstatSync,
+  mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  rmdirSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
@@ -39,8 +44,8 @@ const ROSTER_READER_DISPLAY_NAME = 'PSD EOC roster sync reader';
 const ROSTER_READER_DESCRIPTION =
   'Reads configured staff Google Groups for roster snapshots; never writes Groups or sends notifications.';
 const bootstrapRoot = join(gcpRoot, 'bootstrap');
-const bootstrapPlan = join(bootstrapRoot, '.terraform', 'bootstrap.tfplan');
-const mainPlan = join(gcpRoot, '.terraform', 'apply.tfplan');
+const savedPlanRoot = realpathSync('/tmp');
+const POLICY_DATA_SOURCE_ADDRESS = 'data.google_iam_policy.terraform_state';
 
 const expectedLabels = {
   application: 'psd-eoc',
@@ -128,12 +133,12 @@ const interruptedBootstrapAllowedResources = new Set([
   ...interruptedBootstrapRequiredResources,
   'google_project_service.cloud_resource_manager',
   'google_project_service.cloud_billing',
-  'data.google_iam_policy.terraform_state',
+  POLICY_DATA_SOURCE_ADDRESS,
 ]);
 
 const bootstrapStateAllowedResources = new Set([
   ...bootstrapResources,
-  'data.google_iam_policy.terraform_state',
+  POLICY_DATA_SOURCE_ADDRESS,
 ]);
 
 const mainStateAllowedResources = new Set([
@@ -148,7 +153,7 @@ const mainStateAllowedResources = new Set([
   'google_project_iam_member_remove.terraform_admin_owner',
   'google_project_iam_member_remove.google_apis_service_agent_editor',
   'google_storage_bucket.terraform_state',
-  'data.google_iam_policy.terraform_state',
+  POLICY_DATA_SOURCE_ADDRESS,
   'google_storage_bucket_iam_policy.terraform_state',
   ROSTER_READER_ADDRESS,
 ]);
@@ -286,6 +291,64 @@ export function buildApplyBoundary(evidence: ApplyBoundaryEvidence): string {
   return canonicalJson(evidence);
 }
 
+export interface SavedPlanWorkspace {
+  readonly cleanup: () => void;
+  readonly planPath: string;
+}
+
+export function createSavedPlanWorkspace(): SavedPlanWorkspace {
+  const directory = mkdtempSync(join(savedPlanRoot, 'psd-eoc-terraform-plan-'));
+  const planPath = join(directory, 'saved.tfplan');
+  try {
+    chmodSync(directory, 0o700);
+    const directoryMetadata = lstatSync(directory);
+    if (
+      !directoryMetadata.isDirectory() ||
+      (directoryMetadata.mode & 0o777) !== 0o700 ||
+      realpathSync(directory) !== directory
+    ) {
+      throw new Error(
+        'Saved Terraform plan workspace must be one private canonical directory.',
+      );
+    }
+
+    const descriptor = openSync(
+      planPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      const metadata = fstatSync(descriptor);
+      if (
+        !metadata.isFile() ||
+        metadata.nlink !== 1 ||
+        metadata.size !== 0 ||
+        (metadata.mode & 0o777) !== 0o600
+      ) {
+        throw new Error(
+          'Saved Terraform plan placeholder must be one empty private unlinked file.',
+        );
+      }
+    } finally {
+      closeSync(descriptor);
+    }
+
+    return {
+      cleanup: () => {
+        rmSync(planPath, { force: true });
+        rmdirSync(directory);
+      },
+      planPath,
+    };
+  } catch (error) {
+    rmSync(directory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
 export function readSavedPlanSeal(path: string): string {
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -293,11 +356,12 @@ export function readSavedPlanSeal(path: string): string {
     if (
       !before.isFile() ||
       before.nlink !== 1 ||
+      (before.mode & 0o077) !== 0 ||
       before.size <= 0 ||
       before.size > 16 * 1024 * 1024
     ) {
       throw new Error(
-        'Saved Terraform plan must be one bounded regular file with no hard or symbolic links.',
+        'Saved Terraform plan must be one private bounded regular file with no hard or symbolic links.',
       );
     }
     const content = readFileSync(descriptor);
@@ -306,7 +370,10 @@ export function readSavedPlanSeal(path: string): string {
       content.byteLength !== before.size ||
       after.dev !== before.dev ||
       after.ino !== before.ino ||
+      after.mode !== before.mode ||
+      after.nlink !== before.nlink ||
       after.size !== before.size ||
+      after.ctimeMs !== before.ctimeMs ||
       after.mtimeMs !== before.mtimeMs
     ) {
       throw new Error(
@@ -314,9 +381,12 @@ export function readSavedPlanSeal(path: string): string {
       );
     }
     return canonicalJson({
+      ctimeMs: before.ctimeMs,
       device: before.dev,
       digest: createHash('sha256').update(content).digest('hex'),
       inode: before.ino,
+      mode: before.mode,
+      mtimeMs: before.mtimeMs,
       size: before.size,
     });
   } finally {
@@ -661,9 +731,7 @@ export function parseInterruptedBootstrapStateResult(
       validateInterruptedServiceState(attributes, service);
     }
   }
-  const policyData = attributesByAddress.get(
-    'data.google_iam_policy.terraform_state',
-  );
+  const policyData = attributesByAddress.get(POLICY_DATA_SOURCE_ADDRESS);
   if (policyData !== undefined) {
     validateInterruptedPolicyData(policyData);
   }
@@ -738,11 +806,11 @@ export function parseServiceAccountListResult(
   return matches[0];
 }
 
-export function validateRecoverableRosterReaderServiceAccount(
+export function validateManagedRosterReaderServiceAccount(
   value: unknown,
   resourcePolicy: unknown,
   userManagedKeyOutput: string,
-): void {
+): ReadonlySet<string> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(
       'Existing roster-reader service-account metadata is invalid.',
@@ -766,7 +834,52 @@ export function validateRecoverableRosterReaderServiceAccount(
     );
   }
   validateRosterReaderResourcePolicy(resourcePolicy);
-  if (parseUserManagedKeyIds(userManagedKeyOutput).size !== 0) {
+  const userManagedKeyIds = parseUserManagedKeyIds(userManagedKeyOutput);
+  if (userManagedKeyIds.size > 1) {
+    throw new Error(
+      'Managed roster-reader service account has more than one user-managed key.',
+    );
+  }
+  return userManagedKeyIds;
+}
+
+export interface ManagedRosterReaderBoundary {
+  readonly seal: string;
+  readonly userManagedKeyIds: ReadonlySet<string>;
+}
+
+export function validateManagedRosterReaderBoundary(
+  value: unknown,
+  resourcePolicy: unknown,
+  userManagedKeyOutput: string,
+): ManagedRosterReaderBoundary {
+  const userManagedKeyIds = validateManagedRosterReaderServiceAccount(
+    value,
+    resourcePolicy,
+    userManagedKeyOutput,
+  );
+  return {
+    seal: canonicalJson({
+      resourcePolicy,
+      serviceAccount: value,
+      userManagedKeyIds: [...userManagedKeyIds].sort(),
+    }),
+    userManagedKeyIds,
+  };
+}
+
+export function validateRecoverableRosterReaderServiceAccount(
+  value: unknown,
+  resourcePolicy: unknown,
+  userManagedKeyOutput: string,
+): void {
+  if (
+    validateManagedRosterReaderServiceAccount(
+      value,
+      resourcePolicy,
+      userManagedKeyOutput,
+    ).size !== 0
+  ) {
     throw new Error(
       'Existing roster-reader service account has a user-managed key and cannot be adopted.',
     );
@@ -1121,6 +1234,14 @@ function sameStringSet(
   );
 }
 
+function managedBootstrapResourceSet(
+  resources: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const managedResources = new Set(resources);
+  managedResources.delete(POLICY_DATA_SOURCE_ADDRESS);
+  return managedResources;
+}
+
 export function validateRecoveredInterruptedBootstrapState(
   initial: InterruptedBootstrapStateInspection | null,
   final: InterruptedBootstrapStateInspection | null,
@@ -1128,7 +1249,10 @@ export function validateRecoveredInterruptedBootstrapState(
 ): void {
   const finalResources = final?.resources ?? new Set<string>();
   if (
-    !sameStringSet(expectedResources, finalResources) ||
+    !sameStringSet(
+      managedBootstrapResourceSet(expectedResources),
+      managedBootstrapResourceSet(finalResources),
+    ) ||
     (initial !== null &&
       (final === null ||
         final.lineage !== initial.lineage ||
@@ -1310,9 +1434,9 @@ function inspectRosterReaderServiceAccount(): Readonly<
   return described;
 }
 
-function validateLiveRecoverableRosterReader(
+function inspectLiveRosterReaderBoundary(
   serviceAccount: Readonly<Record<string, unknown>>,
-): string {
+): ManagedRosterReaderBoundary {
   const resourcePolicy = parseJsonObject(
     runCommand(
       'gcloud',
@@ -1347,16 +1471,29 @@ function validateLiveRecoverableRosterReader(
     ],
     { redactFailureOutput: true },
   );
-  validateRecoverableRosterReaderServiceAccount(
+  return validateManagedRosterReaderBoundary(
     serviceAccount,
     resourcePolicy,
     userManagedKeyOutput,
   );
-  return canonicalJson({
-    resourcePolicy,
-    serviceAccount,
-    userManagedKeyOutput,
-  });
+}
+
+function validateLiveManagedRosterReader(
+  serviceAccount: Readonly<Record<string, unknown>>,
+): string {
+  return inspectLiveRosterReaderBoundary(serviceAccount).seal;
+}
+
+function validateLiveRecoverableRosterReader(
+  serviceAccount: Readonly<Record<string, unknown>>,
+): string {
+  const boundary = inspectLiveRosterReaderBoundary(serviceAccount);
+  if (boundary.userManagedKeyIds.size !== 0) {
+    throw new Error(
+      'Existing roster-reader service account has a user-managed key and cannot be adopted.',
+    );
+  }
+  return boundary.seal;
 }
 
 function validateExistingProject(
@@ -1713,12 +1850,12 @@ function validateRecoveredBucketBackedBootstrapState(
   expectedResources: ReadonlySet<string>,
   finalResources: ReadonlySet<string>,
 ): void {
-  const policyDataSource = 'data.google_iam_policy.terraform_state';
-  const expectedManagedResources = new Set(expectedResources);
-  const finalManagedResources = new Set(finalResources);
-  expectedManagedResources.delete(policyDataSource);
-  finalManagedResources.delete(policyDataSource);
-  if (!sameStringSet(expectedManagedResources, finalManagedResources)) {
+  if (
+    !sameStringSet(
+      managedBootstrapResourceSet(expectedResources),
+      managedBootstrapResourceSet(finalResources),
+    )
+  ) {
     throw new Error(
       'Bucket-backed bootstrap state changed after recovery; rerun before creating a saved plan.',
     );
@@ -1823,7 +1960,7 @@ const liveApplyBoundaryOperations = {
   inspectProjectIamPolicy: projectIamPolicy,
   inspectServices: enabledProjectServiceInspection,
   inspectRosterReader: inspectRosterReaderServiceAccount,
-  validateRosterReader: validateLiveRecoverableRosterReader,
+  validateRosterReader: validateLiveManagedRosterReader,
 } as const satisfies ApplyBoundaryOperations;
 
 const liveOrphanedRosterReaderRecoveryOperations = {
@@ -1892,27 +2029,27 @@ async function applySavedPlan(options: {
   readonly captureBoundary: () => string;
   readonly confirmation: string;
   readonly cwd: string;
-  readonly planPath: string;
   readonly preview: string;
 }): Promise<void> {
+  const savedPlan = createSavedPlanWorkspace();
   await executeConfirmedPlan({
     apply: () => {
       runTerraformInteractive(
-        ['apply', '-input=false', options.planPath],
+        ['apply', '-input=false', savedPlan.planPath],
         options.cwd,
       );
     },
     captureBoundary: options.captureBoundary,
-    cleanup: () => rmSync(options.planPath, { force: true }),
+    cleanup: savedPlan.cleanup,
     confirm: () =>
       requireExactConfirmation(options.preview, options.confirmation),
     plan: () => {
       runTerraformInteractive(
-        ['plan', '-input=false', `-out=${options.planPath}`],
+        ['plan', '-input=false', `-out=${savedPlan.planPath}`],
         options.cwd,
       );
     },
-    readPlanSeal: () => readSavedPlanSeal(options.planPath),
+    readPlanSeal: () => readSavedPlanSeal(savedPlan.planPath),
     revalidate: async () => {
       assertDefaultTerraformWorkspace(options.cwd);
       assertActiveGcloudAccount(TERRAFORM_ADMIN);
@@ -1992,7 +2129,6 @@ async function main(): Promise<void> {
         captureApplyBoundary(false, liveApplyBoundaryOperations),
       confirmation: 'create-psd401-eoc-bootstrap',
       cwd: bootstrapRoot,
-      planPath: bootstrapPlan,
       preview:
         'Bootstrap consequence preview: create or adopt the billed psd401-eoc project directly under the district organization, enable Service Usage, Storage, Cloud Resource Manager, and Cloud Billing before quota is charged to the new project, and create a private versioned state bucket whose authoritative policy grants only the fixed human Terraform administrator Object Admin. No Groups data, OAuth credential, or notification path is touched.',
     });
@@ -2031,7 +2167,6 @@ async function main(): Promise<void> {
       captureApplyBoundary(true, liveApplyBoundaryOperations),
     confirmation: 'apply-psd401-eoc-gcp',
     cwd: gcpRoot,
-    planPath: mainPlan,
     preview:
       "Apply consequence preview: enable only the declared identity/IAM APIs, retain the single-administrator state-bucket policy, replace the project creator's automatic Owner grant with the named narrower Terraform administrator roles, and create one protected service account with no project IAM roles. This does not authorize Workspace access, create OAuth clients, read Groups, or send notifications.",
   });
