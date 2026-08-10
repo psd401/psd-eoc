@@ -78,8 +78,9 @@ jobs:
         working-directory: packages/mobile
         run: bun run expo:check
 
-      - name: Verify the shared React runtime with a server production build
-        run: bun run --cwd packages/server build
+      - name: Verify the shared React runtime resolution
+        working-directory: packages/mobile
+        run: bun run react:check
 
       - name: Generate native projects without installing dependencies
         working-directory: packages/mobile
