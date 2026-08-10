@@ -54,13 +54,22 @@ function isForbiddenDestinationPath(pathname: string): boolean {
     decoded === null ||
     hasControlCharacter(decoded) ||
     decoded.includes('\\') ||
-    decoded.startsWith('//')
+    decoded.includes('//')
   ) {
     return true;
   }
-  const normalized = decoded.toLowerCase();
-  return ['/api', '/auth', '/login', '/signed-in', '/denied', '/_next'].some(
-    (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
+  const segments = decoded
+    .split('/')
+    .slice(1)
+    .map((segment) => segment.split(';', 1)[0]?.toLowerCase() ?? '');
+  if (segments.some((segment) => segment === '.' || segment === '..')) {
+    return true;
+  }
+  const firstSegment = segments[0] ?? '';
+  return (
+    ['api', 'auth', 'login', 'signed-in', 'denied', '_next'].includes(
+      firstSegment,
+    ) || segments.includes('api')
   );
 }
 
