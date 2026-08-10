@@ -18,15 +18,15 @@
       "Complete staff opt-in workflow and evidence",
       "HELP, STOP, and opt-in confirmation messages",
       "Transactional SMS capability and subscriber opt-in/opt-out/help choices",
-      "Two separate realistic samples: one explicitly labeled PSD EOC REAL INCIDENT and one explicitly labeled PSD EOC DRILL; never use one ambiguous sample for both"
+      "Two separate realistic samples that identify PSD EOC, include Reply STOP to opt out, and distinguish one PSD EOC REAL INCIDENT from one PSD EOC DRILL; never use one ambiguous sample for both"
     ],
     "tollFreeRequiredInputs": [
       "District company name, website, physical address, government business type",
       "EIN, EIN type, and issuing country",
       "Individual contact name, email, and E.164 support phone",
       "Monthly volume and notification/education use case",
-      "Opt-in category, workflow description, and opt-in image",
-      "Two separate realistic samples: one explicitly labeled PSD EOC REAL INCIDENT and one explicitly labeled PSD EOC DRILL; never use one ambiguous sample for both"
+      "Opt-in category, workflow description, and PNG opt-in image no larger than 400 KB",
+      "Two separate realistic samples that identify PSD EOC, include Reply STOP to opt out, and distinguish one PSD EOC REAL INCIDENT from one PSD EOC DRILL; never use one ambiguous sample for both"
     ]
   },
   "brand": {
@@ -173,11 +173,11 @@
       },
       {
         "fieldPath": "messageSamples.messageSample1",
-        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates."
+        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates. Reply STOP to opt out."
       },
       {
         "fieldPath": "messageSamples.messageSample2",
-        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates."
+        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates. Reply STOP to opt out."
       }
     ]
   },
@@ -270,11 +270,11 @@
       },
       {
         "fieldPath": "messageSamples.messageSample1",
-        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates."
+        "text": "PSD EOC REAL INCIDENT — Lockdown at REPLACE_ME_FACILITY. This is a real incident. Open PSD EOC for staff updates. Reply STOP to opt out."
       },
       {
         "fieldPath": "messageSamples.messageSample2",
-        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates."
+        "text": "PSD EOC DRILL — Lockdown drill at REPLACE_ME_FACILITY. This is only a drill. Open PSD EOC for staff updates. Reply STOP to opt out."
       }
     ]
   }

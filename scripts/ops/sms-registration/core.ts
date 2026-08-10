@@ -242,8 +242,8 @@ const CONFIRMATIONS: Readonly<Record<RegistrationKind, string>> = {
   tollFree: 'LEASE_TOLL_FREE_AND_SUBMIT',
 };
 
-const MAX_ATTACHMENT_BYTES = 500 * 1024;
-const MAX_TOLL_FREE_OPT_IN_BYTES = 400 * 1024;
+const MAX_ATTACHMENT_BYTES = 500_000;
+const MAX_TOLL_FREE_OPT_IN_BYTES = 400_000;
 const ALLOWED_ATTACHMENT_EXTENSIONS = new Set(['.jpeg', '.jpg', '.png']);
 const MAX_PROVIDER_TEXT_LENGTH = 512;
 
@@ -1105,6 +1105,11 @@ function validateKnownConditionalRules(
         `${kind} message samples must include separate, unmistakable REAL INCIDENT and DRILL examples.`,
       );
     }
+    if (!samples.some((sample) => /\b(?:REPLY|TEXT)\s+STOP\b/u.test(sample))) {
+      throw new Error(
+        `${kind} message samples must include an explicit Reply STOP opt-out instruction in at least one sample.`,
+      );
+    }
   }
 }
 
@@ -1347,19 +1352,25 @@ async function attachmentBody(
 ): Promise<Uint8Array> {
   const absolutePath = resolvedAttachmentPath(dataDirectory, attachmentPath);
   const extension = extname(absolutePath).toLowerCase();
+  const isTollFreeOptIn =
+    kind === 'tollFree' && fieldPath === 'messagingUseCase.optInImage';
+  if (isTollFreeOptIn && extension !== '.png') {
+    throw new Error(
+      `Toll-free opt-in evidence ${absolutePath} must be a PNG image no larger than 400 KB.`,
+    );
+  }
   if (!ALLOWED_ATTACHMENT_EXTENSIONS.has(extension)) {
     throw new Error(
       `Attachment ${absolutePath} must be JPEG, JPG, or PNG. PDF and S3 inputs are intentionally unsupported so metadata can be stripped locally.`,
     );
   }
   const body = await readFile(absolutePath);
-  const maximumBytes =
-    kind === 'tollFree' && fieldPath === 'messagingUseCase.optInImage'
-      ? MAX_TOLL_FREE_OPT_IN_BYTES
-      : MAX_ATTACHMENT_BYTES;
+  const maximumBytes = isTollFreeOptIn
+    ? MAX_TOLL_FREE_OPT_IN_BYTES
+    : MAX_ATTACHMENT_BYTES;
   if (body.byteLength === 0 || body.byteLength > maximumBytes) {
     throw new Error(
-      `Attachment ${absolutePath} must be between 1 byte and ${String(maximumBytes / 1024)} KiB.`,
+      `Attachment ${absolutePath} must be between 1 byte and ${isTollFreeOptIn ? '400 KB' : '500 KB'}.`,
     );
   }
   const sanitized =
@@ -1845,13 +1856,13 @@ export async function runSubmit(
   assertSubmitAuthorized(kind, options, runtime);
   const fields = fieldsForKind(data, kind);
   assertNoPlaceholders(data, fields);
+  const preparedAttachments = await prepareAttachments(data, fields, kind);
   const api = await runtime.createApi();
   await assertCallerAccount(api);
   const definitions = await api.describeFieldDefinitions(
     REGISTRATION_TYPES[kind],
   );
   validateAgainstDefinitions(kind, fields, definitions);
-  const preparedAttachments = await prepareAttachments(data, fields, kind);
   const fingerprint = inputFingerprint(data, fields, kind, preparedAttachments);
 
   await withExclusiveSubmitLock(options.statePath, async () => {

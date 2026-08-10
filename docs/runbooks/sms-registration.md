@@ -72,12 +72,27 @@ map directly to AWS `FieldPath` values. Each entry has exactly one of:
 - `attachmentFile` (relative to `registration-data.json`)
 
 S3 and PDF attachments are rejected because the script must inspect and
-sanitize the bytes locally. Attachments must be JPEG, JPG, or PNG images no
-larger than 500 KiB; toll-free opt-in evidence is limited to 400 KiB. The script
-checks the declared extension and image structure, strips EXIF, comments, text,
-timestamps, and other non-visual metadata, and uploads only sanitized bytes.
-Keep source images in the ignored `attachments/` directory and never include
-recipient data.
+sanitize the bytes locally. Campaign evidence may be a JPEG, JPG, or PNG image
+no larger than 500 KB. Toll-free `messagingUseCase.optInImage` evidence must be
+PNG and no larger than 400 KB. The script checks the declared extension and
+image structure, strips EXIF, comments, text, timestamps, and other non-visual
+metadata, and uploads only sanitized bytes. Keep source images in the ignored
+`attachments/` directory and never include recipient data.
+
+Before submission, confirm the staff opt-in material and public policy pages
+meet AWS's current readiness checklist:
+
+- Consent is an affirmative, SMS-specific action and is not preselected or
+  bundled as a condition of another service.
+- The consent disclosure identifies PSD EOC and the message purpose, gives the
+  expected frequency, says message and data rates may apply, links directly to
+  the terms and privacy policy, and gives STOP and HELP instructions.
+- The opt-in confirmation includes the PSD EOC name, frequency, rate disclosure,
+  and STOP/HELP instructions. Prepare at least two distinct registration samples
+  that identify PSD EOC; at least one includes an explicit `Reply STOP` opt-out
+  instruction.
+- The public privacy policy states that mobile opt-in data and consent are not
+  shared with third parties for their own marketing or messaging.
 
 To print AWS's current field paths, types, requirements, and display names using
 read-only calls:
@@ -268,4 +283,7 @@ and authenticated human confirmation in the app.
 - [10DLC registration process](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-10dlc-setup.html)
 - [10DLC campaign form](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-10dlc-register-campaign.html)
 - [Toll-free registration process](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-tfn.html)
+- [Toll-free registration form](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-tfn-register.html)
+- [Opt-in requirements checklist](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-quickstart.html)
+- [Registration rejection troubleshooting](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-rejection-troubleshooting.html)
 - [Registration status truth](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations.html)
