@@ -1,0 +1,715 @@
+import { execFile } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { rm, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+import {
+  ActivationPreviewSchema,
+  EventSchema,
+  IdempotencyPrincipalSchema,
+  IntegrationStatusSchema,
+  JournalEntrySchema,
+  type Actor,
+  type Event,
+  type JournalEntry,
+} from '@psd-eoc/contracts';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+
+import {
+  createDatabaseClient,
+  type PostgresDatabaseConnection,
+} from '../../../../db/client';
+import {
+  accessMembershipMemberGroups,
+  accessMembershipMembers,
+  accessMembershipSnapshotGroups,
+  accessMembershipSnapshots,
+  activationPreviews,
+  channelConfigurations,
+  events,
+  groupSources,
+  integrationStatuses,
+  journalEntries,
+  userRoles,
+  users,
+} from '../../../../db/schema';
+import {
+  createDrizzleInitialWebSessionStore,
+  digestWebSessionCredential,
+} from '../../../../lib/auth/session-cookie';
+import {
+  EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH,
+  EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH,
+  EVENT_ROOM_PLAYWRIGHT_STORAGE_STATE_PATH,
+  requireSyntheticEventRoomTestDatabaseUrl,
+} from './test-database';
+
+const ACCESS_GROUP_ID = '16000000-0000-4000-8000-000000000110';
+const MEMBER_USER_ID = '16000000-0000-4000-8000-000000000120';
+const MEMBER_SUBJECT = 'mock-google-subject-event-room';
+const FACILITY_ID = '00000000-0000-4000-8000-000000000001';
+const ROSTER_SNAPSHOT_ID = '00000000-0000-4000-8000-000000000041';
+const AUDIENCE_CONFIGURATION_ID = '00000000-0000-4000-8000-000000000020';
+const DRILL_EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000201';
+const REAL_EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000200';
+const REQUIRED_INTEGRATIONS = ['expo-push', 'ses-email'] as const;
+const runFile = promisify(execFile);
+const serverRoot = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../..',
+);
+
+interface AccessFixture {
+  readonly snapshotId: string;
+  readonly snapshotVersion: number;
+  readonly syncStartedAt: Date;
+  readonly capturedAt: Date;
+  readonly userCreatedAt: Date;
+}
+
+interface EventRoomFixture {
+  readonly historyEventId: string;
+  readonly keyboardEventId: string;
+  readonly recoveryEventId: string;
+  readonly recoveryOwnerEventId: string;
+  readonly lifecycleEventId: string;
+  readonly realDraftEventId: string;
+}
+
+interface ChannelConfigurationState {
+  readonly integrationId: string;
+  readonly enabled: boolean;
+  readonly changedAt: string;
+}
+
+async function restoreChannelConfigurations(
+  connection: PostgresDatabaseConnection,
+  state: readonly ChannelConfigurationState[],
+): Promise<void> {
+  await connection.db.transaction(async (transaction) => {
+    for (const configuration of state) {
+      const restored = await transaction
+        .update(channelConfigurations)
+        .set({
+          enabled: configuration.enabled,
+          changedAt: new Date(configuration.changedAt),
+        })
+        .where(
+          eq(channelConfigurations.integrationId, configuration.integrationId),
+        )
+        .returning({ integrationId: channelConfigurations.integrationId });
+      if (restored.length !== 1) {
+        throw new Error(
+          'The event-room channel configuration could not be restored.',
+        );
+      }
+    }
+  });
+}
+
+function digest(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function iso(value: Date | string): string {
+  return (value instanceof Date ? value : new Date(value)).toISOString();
+}
+
+async function prepareDatabase(databaseUrl: string): Promise<void> {
+  const environment = {
+    ...process.env,
+    DATABASE_DRIVER: 'postgres',
+    DATABASE_URL: databaseUrl,
+  };
+  await runFile('bun', ['drizzle/migrate.ts'], {
+    cwd: serverRoot,
+    env: environment,
+  });
+  await runFile('bun', ['db/seed.ts'], {
+    cwd: serverRoot,
+    env: environment,
+  });
+}
+
+async function prepareAccessEvidence(
+  connection: PostgresDatabaseConnection,
+): Promise<AccessFixture> {
+  const database = connection.db;
+  const [latestVersionSnapshot] = await database
+    .select({ version: accessMembershipSnapshots.version })
+    .from(accessMembershipSnapshots)
+    .orderBy(desc(accessMembershipSnapshots.version))
+    .limit(1);
+  const [latestCapturedSnapshot] = await database
+    .select({ capturedAt: accessMembershipSnapshots.capturedAt })
+    .from(accessMembershipSnapshots)
+    .orderBy(desc(accessMembershipSnapshots.capturedAt))
+    .limit(1);
+  const now = new Date(
+    Math.max(
+      Date.now(),
+      (latestCapturedSnapshot?.capturedAt.getTime() ?? 0) + 3_000,
+    ),
+  );
+  const syncStartedAt = new Date(now.getTime() - 2_000);
+  const capturedAt = new Date(now.getTime() - 1_000);
+  const snapshotId = randomUUID();
+  const version = (latestVersionSnapshot?.version ?? 0) + 1;
+
+  return database.transaction(async (transaction) => {
+    await transaction
+      .insert(groupSources)
+      .values({
+        id: ACCESS_GROUP_ID,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: 'Synthetic Event Room Playwright Access',
+        active: true,
+        googleGroupId: 'synthetic-event-room-playwright-access',
+        email: 'synthetic-event-room-playwright@psd401.net',
+        fixtureKey: null,
+        createdAt: now,
+      })
+      .onConflictDoNothing();
+    await transaction
+      .insert(users)
+      .values({
+        id: MEMBER_USER_ID,
+        googleSubject: MEMBER_SUBJECT,
+        email: 'synthetic-event-room-playwright@psd401.net',
+        displayName: 'Synthetic Event Room Operator',
+        facilityScopeKind: 'district',
+        createdAt: now,
+        disabledAt: null,
+      })
+      .onConflictDoNothing();
+    await transaction
+      .insert(userRoles)
+      .values([
+        { userId: MEMBER_USER_ID, role: 'staff' },
+        { userId: MEMBER_USER_ID, role: 'admin' },
+      ])
+      .onConflictDoNothing();
+    await transaction.insert(accessMembershipSnapshots).values({
+      id: snapshotId,
+      version,
+      complete: true,
+      syncStartedAt,
+      capturedAt,
+    });
+    const activeAccessGroups = await transaction
+      .select({ id: groupSources.id })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.active, true),
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+        ),
+      );
+    await transaction.insert(accessMembershipSnapshotGroups).values(
+      activeAccessGroups.flatMap(({ id }) => [
+        {
+          snapshotId,
+          groupSourceId: id,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'expected' as const,
+        },
+        {
+          snapshotId,
+          groupSourceId: id,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'completed' as const,
+        },
+      ]),
+    );
+    await transaction.insert(accessMembershipMembers).values({
+      snapshotId,
+      userId: MEMBER_USER_ID,
+      googleSubject: MEMBER_SUBJECT,
+      facilityScopeKind: 'district',
+    });
+    await transaction.insert(accessMembershipMemberGroups).values({
+      snapshotId,
+      userId: MEMBER_USER_ID,
+      groupSourceId: ACCESS_GROUP_ID,
+      groupSourceKind: 'google-group',
+      groupPurpose: 'access',
+    });
+    const [persistedUser] = await transaction
+      .select({ createdAt: users.createdAt })
+      .from(users)
+      .where(eq(users.id, MEMBER_USER_ID))
+      .limit(1);
+    if (persistedUser === undefined) {
+      throw new Error('The synthetic Playwright user was not retained.');
+    }
+    return {
+      snapshotId,
+      snapshotVersion: version,
+      syncStartedAt,
+      capturedAt,
+      userCreatedAt: persistedUser.createdAt,
+    };
+  });
+}
+
+async function issueSyntheticOperatorSession(
+  connection: PostgresDatabaseConnection,
+  fixture: AccessFixture,
+): Promise<Extract<Actor, { kind: 'human' }>> {
+  const now = new Date(
+    Math.max(Date.now(), fixture.capturedAt.getTime() + 1_000),
+  );
+  const credential = randomBytes(48).toString('base64url');
+  const csrf = randomBytes(32).toString('base64url');
+  const responseDigest = digest(randomUUID());
+  const principal = IdempotencyPrincipalSchema.parse({
+    kind: 'oidc-callback',
+    subjectDigest: digest(MEMBER_SUBJECT),
+    responseDigest,
+  });
+  const result = await createDrizzleInitialWebSessionStore(
+    connection.db,
+  ).persist({
+    user: {
+      id: MEMBER_USER_ID,
+      googleSubject: MEMBER_SUBJECT,
+      email: 'synthetic-event-room-playwright@psd401.net',
+      displayName: 'Synthetic Event Room Operator',
+      roles: ['admin', 'staff'],
+      facilityScope: { kind: 'district' },
+      createdAt: fixture.userCreatedAt.toISOString(),
+      disabledAt: null,
+    },
+    membershipSnapshot: {
+      id: fixture.snapshotId,
+      version: fixture.snapshotVersion,
+      complete: true,
+      syncStartedAt: fixture.syncStartedAt.toISOString(),
+      capturedAt: fixture.capturedAt.toISOString(),
+    },
+    membershipMember: {
+      userId: MEMBER_USER_ID,
+      googleSubject: MEMBER_SUBJECT,
+      accessGroupSourceRefs: [
+        {
+          id: ACCESS_GROUP_ID,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+        },
+      ],
+      facilityScope: { kind: 'district' },
+    },
+    device: {
+      platform: 'web',
+      unlockMethod: 'secure-session-cookie',
+      installationId: `synthetic-event-room-${randomUUID()}`,
+    },
+    credentialDigest: digestWebSessionCredential(credential),
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1_000),
+    membershipValidUntil: new Date(
+      fixture.capturedAt.getTime() + 24 * 60 * 60 * 1_000,
+    ),
+    membershipGraceUntil: new Date(
+      fixture.capturedAt.getTime() + 72 * 60 * 60 * 1_000,
+    ),
+    grantBootstrapAdmin: false,
+    requestId: randomUUID(),
+    idempotency: {
+      key: `oidc:${responseDigest}`,
+      principal,
+      principalDigest: digest(JSON.stringify(principal)),
+      requestDigest: digest(`synthetic-event-room:${randomUUID()}`),
+    },
+  });
+  if (!result.user.roles.includes('admin')) {
+    throw new Error(
+      'The synthetic event-room session is not an administrator.',
+    );
+  }
+  const expires = Math.floor(
+    new Date(result.session.expiresAt).getTime() / 1_000,
+  );
+  await writeFile(
+    EVENT_ROOM_PLAYWRIGHT_STORAGE_STATE_PATH,
+    JSON.stringify({
+      cookies: [
+        {
+          name: '__Host-psd-eoc-session',
+          value: credential,
+          domain: 'localhost',
+          path: '/',
+          expires,
+          httpOnly: true,
+          secure: true,
+          sameSite: 'Lax',
+        },
+        {
+          name: '__Host-psd-eoc-csrf',
+          value: csrf,
+          domain: 'localhost',
+          path: '/',
+          expires,
+          httpOnly: false,
+          secure: true,
+          sameSite: 'Strict',
+        },
+      ],
+      origins: [],
+    }),
+    { encoding: 'utf8', mode: 0o600 },
+  );
+  return {
+    kind: 'human',
+    userId: MEMBER_USER_ID,
+    sessionId: result.session.id,
+  };
+}
+
+function journalInsert(
+  entry: JournalEntry,
+): typeof journalEntries.$inferInsert {
+  return {
+    id: entry.id,
+    eventId: entry.eventId,
+    sequence: entry.sequence,
+    kind: entry.kind,
+    author: entry.author,
+    source: entry.source,
+    serverTime: new Date(entry.serverTime),
+    clientTime: entry.clientTime === null ? null : new Date(entry.clientTime),
+    payload: entry.payload,
+    mediaId: null,
+    transitionId: null,
+    supersedesEntryId: null,
+    supersedesEntrySequence: null,
+    supersessionKind: null,
+    supersessionReason: null,
+  };
+}
+
+function eventInsert(event: Event): typeof events.$inferInsert {
+  return {
+    id: event.id,
+    facilityId: event.facilityId,
+    kind: event.kind,
+    templateMode: event.templateMode,
+    eventTypeVersionId: event.eventTypeVersion.id,
+    status: event.status,
+    rosterSnapshotId: event.rosterSnapshotId,
+    rosterPopulation: event.rosterPopulation,
+    createdBy: event.createdBy,
+    createdAt: new Date(event.createdAt),
+    activatedAt:
+      event.activatedAt === null ? null : new Date(event.activatedAt),
+    allClearAt: event.allClearAt === null ? null : new Date(event.allClearAt),
+    reactivatedAt:
+      event.reactivatedAt === null ? null : new Date(event.reactivatedAt),
+    closedAt: event.closedAt === null ? null : new Date(event.closedAt),
+    correctionOfEventId: event.correctionOfEventId,
+    correctionReason: event.correctionReason,
+    activationAuthorization: event.activationAuthorization,
+  };
+}
+
+async function prepareEventFixtures(
+  connection: PostgresDatabaseConnection,
+  actor: Extract<Actor, { kind: 'human' }>,
+): Promise<EventRoomFixture> {
+  const database = connection.db;
+  const statusRows = await database
+    .select()
+    .from(integrationStatuses)
+    .where(inArray(integrationStatuses.integrationId, REQUIRED_INTEGRATIONS));
+  if (statusRows.length !== REQUIRED_INTEGRATIONS.length) {
+    throw new Error('The synthetic notification integrations are incomplete.');
+  }
+  const statusFor = (integrationId: (typeof REQUIRED_INTEGRATIONS)[number]) => {
+    const row = statusRows.find(
+      (candidate) => candidate.integrationId === integrationId,
+    );
+    if (row === undefined) {
+      throw new Error(`Missing synthetic integration ${integrationId}.`);
+    }
+    return IntegrationStatusSchema.parse({
+      integrationId: row.integrationId,
+      label: row.label,
+      verifiedAt: row.verifiedAt === null ? null : iso(row.verifiedAt),
+      verifiedByUserId: row.verifiedByUserId,
+      authorizationReference: row.authorizationReference,
+      reasonCode: row.reasonCode,
+      observedAt: iso(row.observedAt),
+    });
+  };
+
+  const now = new Date();
+  const previewCreatedAt = new Date(now.getTime() - 5 * 60_000);
+  const activatedAt = new Date(now.getTime() - 4 * 60_000);
+  const previewId = randomUUID();
+  const consequenceDigest = digest(`event-room-preview:${previewId}`);
+  const preview = ActivationPreviewSchema.parse({
+    id: previewId,
+    facilityId: FACILITY_ID,
+    kind: 'drill',
+    templateMode: 'drill',
+    eventTypeVersion: {
+      id: DRILL_EVENT_TYPE_VERSION_ID,
+      templateMode: 'drill',
+    },
+    rosterSnapshotId: ROSTER_SNAPSHOT_ID,
+    rosterPopulation: 'synthetic',
+    audienceConfig: { id: AUDIENCE_CONFIGURATION_ID, version: 1 },
+    recipientCount: 4,
+    channels: [
+      {
+        channel: 'push',
+        endpointCount: 4,
+        renderedMessage: {
+          channel: 'push',
+          eventKind: 'drill',
+          templateMode: 'drill',
+          purpose: 'activation',
+          classificationMarker: 'DRILL',
+          title: '[DRILL] Synthetic event-room activation',
+          body: '[DRILL] Synthetic event-room activation fixture.',
+        },
+        integrationStatus: statusFor('expo-push'),
+      },
+      {
+        channel: 'email',
+        endpointCount: 4,
+        renderedMessage: {
+          channel: 'email',
+          eventKind: 'drill',
+          templateMode: 'drill',
+          purpose: 'activation',
+          classificationMarker: 'DRILL',
+          subject: '[DRILL] Synthetic event-room activation',
+          textBody: '[DRILL] Synthetic event-room activation fixture.',
+        },
+        integrationStatus: statusFor('ses-email'),
+      },
+    ],
+    sendReadiness: 'ready',
+    blockingReasonCodes: [],
+    activeEventIds: [],
+    consequenceDigest,
+    createdAt: previewCreatedAt.toISOString(),
+    expiresAt: new Date(previewCreatedAt.getTime() + 15 * 60_000).toISOString(),
+  });
+
+  const makeActiveEvent = (): Event => {
+    const requestId = randomUUID();
+    return EventSchema.parse({
+      id: randomUUID(),
+      facilityId: FACILITY_ID,
+      kind: 'drill',
+      templateMode: 'drill',
+      eventTypeVersion: {
+        id: DRILL_EVENT_TYPE_VERSION_ID,
+        templateMode: 'drill',
+      },
+      status: 'active',
+      rosterSnapshotId: ROSTER_SNAPSHOT_ID,
+      rosterPopulation: 'synthetic',
+      createdBy: actor,
+      createdAt: activatedAt.toISOString(),
+      activatedAt: activatedAt.toISOString(),
+      allClearAt: null,
+      reactivatedAt: null,
+      closedAt: null,
+      correctionOfEventId: null,
+      correctionReason: null,
+      activationAuthorization: {
+        kind: 'synthetic-training',
+        activationPreviewId: preview.id,
+        consequenceDigest: preview.consequenceDigest,
+        requestId,
+      },
+    });
+  };
+  const historyEvent = makeActiveEvent();
+  const keyboardEvent = makeActiveEvent();
+  const recoveryEvent = makeActiveEvent();
+  const recoveryOwnerEvent = makeActiveEvent();
+  const lifecycleEvent = makeActiveEvent();
+  const realDraftEvent = EventSchema.parse({
+    id: randomUUID(),
+    facilityId: FACILITY_ID,
+    kind: 'incident',
+    templateMode: 'real',
+    eventTypeVersion: {
+      id: REAL_EVENT_TYPE_VERSION_ID,
+      templateMode: 'real',
+    },
+    status: 'draft',
+    rosterSnapshotId: null,
+    rosterPopulation: null,
+    createdBy: actor,
+    createdAt: now.toISOString(),
+    activatedAt: null,
+    allClearAt: null,
+    reactivatedAt: null,
+    closedAt: null,
+    correctionOfEventId: null,
+    correctionReason: null,
+    activationAuthorization: null,
+  });
+
+  const makeHistory = (event: Event, count: number): readonly JournalEntry[] =>
+    Array.from({ length: count }, (_, index) => {
+      const sequence = index + 1;
+      return JournalEntrySchema.parse({
+        id: randomUUID(),
+        eventId: event.id,
+        sequence,
+        kind: 'text',
+        author: actor,
+        source: 'web',
+        serverTime: new Date(
+          activatedAt.getTime() + sequence * 1_000,
+        ).toISOString(),
+        clientTime: new Date(
+          activatedAt.getTime() + (count - sequence) * 1_000,
+        ).toISOString(),
+        payload: {
+          text: `Synthetic ordered history ${String(sequence).padStart(3, '0')}`,
+        },
+        supersedes: null,
+      });
+    });
+  const journal = [
+    ...makeHistory(historyEvent, 105),
+    ...makeHistory(keyboardEvent, 3),
+    ...makeHistory(recoveryEvent, 3),
+    ...makeHistory(recoveryOwnerEvent, 3),
+    ...makeHistory(lifecycleEvent, 3),
+  ];
+
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(channelConfigurations)
+      .set({ enabled: true, changedAt: now })
+      .where(
+        inArray(channelConfigurations.integrationId, REQUIRED_INTEGRATIONS),
+      );
+    await transaction.insert(activationPreviews).values({
+      id: preview.id,
+      facilityId: preview.facilityId,
+      kind: preview.kind,
+      templateMode: preview.templateMode,
+      eventTypeVersionId: preview.eventTypeVersion.id,
+      rosterSnapshotId: preview.rosterSnapshotId,
+      rosterPopulation: preview.rosterPopulation,
+      audienceConfigId: preview.audienceConfig.id,
+      audienceConfigVersion: preview.audienceConfig.version,
+      recipientCount: preview.recipientCount,
+      channels: preview.channels,
+      sendReadiness: preview.sendReadiness,
+      blockingReasonCodes: preview.blockingReasonCodes,
+      activeEventIds: preview.activeEventIds,
+      consequenceDigest: preview.consequenceDigest,
+      createdAt: new Date(preview.createdAt),
+      expiresAt: new Date(preview.expiresAt),
+    });
+    await transaction
+      .insert(events)
+      .values(
+        [
+          historyEvent,
+          keyboardEvent,
+          recoveryEvent,
+          recoveryOwnerEvent,
+          lifecycleEvent,
+          realDraftEvent,
+        ].map(eventInsert),
+      );
+    await transaction.insert(journalEntries).values(journal.map(journalInsert));
+  });
+
+  return {
+    historyEventId: historyEvent.id,
+    keyboardEventId: keyboardEvent.id,
+    recoveryEventId: recoveryEvent.id,
+    recoveryOwnerEventId: recoveryOwnerEvent.id,
+    lifecycleEventId: lifecycleEvent.id,
+    realDraftEventId: realDraftEvent.id,
+  };
+}
+
+export default async function globalSetup(): Promise<void> {
+  const databaseUrl = requireSyntheticEventRoomTestDatabaseUrl(
+    process.env.TEST_DATABASE_URL,
+  );
+  await rm(EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH, { force: true });
+  await prepareDatabase(databaseUrl);
+  const created = createDatabaseClient({
+    driver: 'postgres',
+    url: databaseUrl,
+    maxConnections: 2,
+  });
+  if (created.driver !== 'postgres') {
+    throw new Error('Event-room Playwright requires PostgreSQL.');
+  }
+  try {
+    const originalChannelConfigurations: readonly ChannelConfigurationState[] =
+      await created.db
+        .select({
+          integrationId: channelConfigurations.integrationId,
+          enabled: channelConfigurations.enabled,
+          changedAt: channelConfigurations.changedAt,
+        })
+        .from(channelConfigurations)
+        .where(
+          inArray(channelConfigurations.integrationId, REQUIRED_INTEGRATIONS),
+        )
+        .then((rows) =>
+          rows.map((row) => ({
+            integrationId: row.integrationId,
+            enabled: row.enabled,
+            changedAt: row.changedAt.toISOString(),
+          })),
+        );
+    if (
+      originalChannelConfigurations.length !== REQUIRED_INTEGRATIONS.length ||
+      originalChannelConfigurations.some((configuration) =>
+        Boolean(configuration.enabled),
+      )
+    ) {
+      throw new Error(
+        'Event-room Playwright requires inert mocked channel configurations.',
+      );
+    }
+    await writeFile(
+      EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH,
+      JSON.stringify(originalChannelConfigurations),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    try {
+      const access = await prepareAccessEvidence(created);
+      const actor = await issueSyntheticOperatorSession(created, access);
+      const fixture = await prepareEventFixtures(created, actor);
+      await writeFile(
+        EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH,
+        JSON.stringify(fixture),
+        { encoding: 'utf8', mode: 0o600 },
+      );
+    } catch (error) {
+      await restoreChannelConfigurations(
+        created,
+        originalChannelConfigurations,
+      );
+      throw error;
+    }
+  } finally {
+    await created.close();
+  }
+}
