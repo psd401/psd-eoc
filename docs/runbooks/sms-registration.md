@@ -3,7 +3,7 @@
 This runbook prepares the AWS End User Messaging SMS registrations required by
 PSD EOC. It does **not** enable the SMS worker or authorize a live staff send.
 Registration submissions are provider-configuration writes with fees and
-external review; Kris Hagel must run the explicit `--submit` commands.
+external review; Kris Hagel must run each permitted explicit `--submit` command.
 
 Development, CI, and code review use only the default offline dry-run and
 injected mocks. Never use student data, a real roster, or a real recipient list
@@ -25,6 +25,11 @@ submitting anything:
 - A 10DLC campaign must be associated with a completed brand before it is
   submitted.
 - A toll-free number must be associated before its registration is submitted.
+- AWS's current review criteria, checked 2026-08-09, say emergency-alert use
+  cases are not permitted through A2P 10DLC. The campaign script therefore
+  blocks every submission before credentials, local state, or AWS access. PSD
+  EOC traffic must not be relabeled as education, government, or another use
+  case to evade that rule. Toll-free is the current viable registration path.
 
 AWS can change carrier forms. The scripts retrieve every live field definition
 and reject missing, unknown, mistyped, invalid, or pattern-mismatched fields
@@ -69,7 +74,7 @@ map directly to AWS `FieldPath` values. Each entry has exactly one of:
 
 - `text`
 - `select` (an array, even for one choice)
-- `attachmentFile` (relative to `registration-data.json`)
+- `attachmentFile` (a relative path beneath `attachments/`)
 
 S3 and PDF attachments are rejected because the script must inspect and
 sanitize the bytes locally. Campaign evidence may be a JPEG, JPG, or PNG image
@@ -77,7 +82,13 @@ no larger than 500 KB. Toll-free `messagingUseCase.optInImage` evidence must be
 PNG and no larger than 400 KB. The script checks the declared extension and
 image structure, strips EXIF, comments, text, timestamps, and other non-visual
 metadata, and uploads only sanitized bytes. Keep source images in the ignored
-`attachments/` directory and never include recipient data.
+`attachments/` directory and never include recipient data. Absolute paths,
+traversal outside that directory, symlink escapes, and non-regular files are
+rejected before an AWS client is created.
+
+Keep `registrationNamePrefix` to 239 characters or fewer. The account-local
+`tollFree.optOutListName` must contain 1-64 letters, digits, underscores, or
+hyphens. Placeholder values are rejected before AWS access.
 
 Before submission, confirm the staff opt-in material and public policy pages
 meet AWS's current readiness checklist:
@@ -88,9 +99,15 @@ meet AWS's current readiness checklist:
   expected frequency, says message and data rates may apply, links directly to
   the terms and privacy policy, and gives STOP and HELP instructions.
 - The opt-in confirmation includes the PSD EOC name, frequency, rate disclosure,
-  and STOP/HELP instructions. Prepare at least two distinct registration samples
-  that identify PSD EOC; at least one includes an explicit `Reply STOP` opt-out
-  instruction.
+  and STOP/HELP instructions.
+- The STOP response identifies PSD EOC, acknowledges the opt-out, and confirms
+  that no further messages will be sent. The HELP response identifies PSD EOC
+  and provides a district-domain email address, phone number, or public URL.
+- The terms identify the use case and include message frequency, opt-out
+  instructions, customer-care contact information, a privacy-policy link, and
+  the carrier-liability statement required by AWS review criteria.
+- Prepare at least two distinct registration samples that identify PSD EOC;
+  at least one includes an explicit `Reply STOP` opt-out instruction.
 - The public privacy policy states that mobile opt-in data and consent are not
   shared with third parties for their own marketing or messaging.
 
@@ -140,6 +157,10 @@ AWS_PROFILE=psd401-prr-prod bun scripts/ops/sms-registration/status.ts \
   --confirm-region us-west-2
 ```
 
+The campaign definition and validation commands are schema-only, read-only
+diagnostics. They do not establish provider eligibility and do not remove the
+campaign submission block.
+
 ## Offline consequence previews
 
 These commands are the development and review path. They create no AWS client,
@@ -153,7 +174,8 @@ bun scripts/ops/sms-registration/status.ts
 ```
 
 The previews show registration type, field/attachment counts, target account
-and region, and the external consequence without printing business values.
+and region, and the external consequence without printing business values. The
+campaign preview reports `BLOCKED` and deliberately provides no submit command.
 
 ## Human-only submission sequence
 
@@ -180,25 +202,22 @@ AWS_PROFILE=psd401-prr-prod bun scripts/ops/sms-registration/submit-brand.ts \
 
 The script retrieves the live schema, validates all input, and prepares
 sanitized attachments before mutation. It then creates or reconciles the brand,
-writes every field, and submits the version. Do not proceed to campaign
-creation until status is `COMPLETE`. `SUBMITTED`, `AWS_REVIEWING`, `REVIEWING`,
-and `REQUIRES_AUTHENTICATION` are not approval.
+writes every field, and submits the version. `SUBMITTED`, `AWS_REVIEWING`,
+`REVIEWING`, and `REQUIRES_AUTHENTICATION` are not approval. Even a `COMPLETE`
+brand does not remove the campaign policy block below.
 
-### 10DLC campaign
+### Blocked 10DLC campaign path
 
-```sh
-AWS_PROFILE=psd401-prr-prod bun scripts/ops/sms-registration/submit-campaign.ts \
-  --submit \
-  --confirm-account 338414773271 \
-  --confirm-region us-west-2 \
-  --confirm-action SUBMIT_10DLC_CAMPAIGN
-```
+Do not run a 10DLC campaign submission for PSD EOC. AWS currently states that
+emergency-alert notifications are not permitted through A2P 10DLC. The script
+has no override and fails before credentials, state, or AWS access even if
+`--submit` and the former confirmation phrase are supplied.
 
-The script validates the campaign against the live schema, verifies that the
-recorded brand exists with the expected type and `COMPLETE` status, creates or
-reconciles the campaign and live brand association, writes every field, and
-submits the version. It does not lease a 10DLC number; number request and
-association happen only after campaign approval.
+Do not disguise actual incident and drill traffic as `HIGHER_EDUCATION`,
+government, security software, or another category. Re-enabling this path
+requires written AWS/provider guidance that truthfully classifies PSD's
+staff-only traffic, product-owner review, and a reviewed code change. Until
+then, use the toll-free path below.
 
 ### Toll-free interim path
 
@@ -234,14 +253,14 @@ workflows are rejected. Normal completion removes the lock. If a process
 crashes, first verify it is no longer running, preserve the state file, and
 reconcile all recorded AWS IDs before a human removes a stale lock.
 
-Retries read the live registration type and version status, campaign
-association, and toll-free phone association before deciding whether another
-write is safe. The state records intent before the non-idempotent campaign
-association and registration submission calls. If `associationAttempted` or
-`submissionAttempted` remains after a crash and AWS does not yet show the
-expected result, the retry fails closed instead of replaying the call. Wait for
-provider consistency and reconcile manually; do not edit the marker or state
-file. Once the live result is visible, the retry records success without
+Retries read the live registration type, version status, and toll-free phone
+association before deciding whether another write is safe. The state records
+intent before registration submission. The write-capable SMS SDK client is
+pinned to one attempt so its internal retry layer cannot replay a
+non-idempotent write behind that marker. If `submissionAttempted` remains after
+a crash and AWS does not yet show the expected result, the retry fails closed.
+Wait for provider consistency and reconcile manually; do not edit the marker or
+state file. Once the live result is visible, the retry records success without
 duplicating the write. If the state file is lost after any write, stop and
 recover the IDs from AWS before running a submit script again.
 
@@ -271,11 +290,11 @@ is printed as `unknown`; the command continues checking other recorded
 resources and then exits nonzero. Partial success never implies approval.
 
 The integration remains `blocked` in `docs/INTEGRATIONS.md` until either the
-toll-free registration or the complete 10DLC path is approved and separately
-reviewed evidence supports a truth-label change. Registration never authorizes
-a live notification send. Enabling SMS still requires verified credentials, an
-approved synthetic target list, a consequence preview, product-owner approval,
-and authenticated human confirmation in the app.
+toll-free registration or a future provider-approved 10DLC path is approved and
+separately reviewed evidence supports a truth-label change. Registration never
+authorizes a live notification send. Enabling SMS still requires verified
+credentials, an approved synthetic target list, a consequence preview,
+product-owner approval, and authenticated human confirmation in the app.
 
 ## AWS references
 
@@ -285,5 +304,6 @@ and authenticated human confirmation in the app.
 - [Toll-free registration process](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-tfn.html)
 - [Toll-free registration form](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-tfn-register.html)
 - [Opt-in requirements checklist](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-quickstart.html)
+- [Registration review criteria](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-review-criteria.html)
 - [Registration rejection troubleshooting](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-rejection-troubleshooting.html)
 - [Registration status truth](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations.html)

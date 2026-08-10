@@ -17,7 +17,11 @@ import {
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 
 import {
+  SMS_CLIENT_CONFIG,
   TARGET_REGION,
+  assertProviderPageCapacity,
+  nextProviderPageToken,
+  toRegistrationDeniedReason,
   toRegistrationFieldFeedback,
   type FieldDefinition,
   type PhoneNumberRecord,
@@ -47,7 +51,7 @@ function requiredPositiveInteger(
 }
 
 export function createAwsApi(): SmsRegistrationApi {
-  const sms = new PinpointSMSVoiceV2Client({ region: TARGET_REGION });
+  const sms = new PinpointSMSVoiceV2Client(SMS_CLIENT_CONFIG);
   const sts = new STSClient({ region: TARGET_REGION });
 
   return {
@@ -92,6 +96,7 @@ export function createAwsApi(): SmsRegistrationApi {
 
     async describeFieldDefinitions(registrationType) {
       const definitions: FieldDefinition[] = [];
+      const seenTokens = new Set<string>();
       let nextToken: string | undefined;
       do {
         const output = await sms.send(
@@ -101,7 +106,9 @@ export function createAwsApi(): SmsRegistrationApi {
             RegistrationType: registrationType,
           }),
         );
-        for (const definition of output.RegistrationFieldDefinitions ?? []) {
+        const page = output.RegistrationFieldDefinitions ?? [];
+        assertProviderPageCapacity(definitions.length, page.length);
+        for (const definition of page) {
           definitions.push({
             fieldPath: required(definition.FieldPath, 'FieldPath'),
             fieldRequirement: required(
@@ -148,7 +155,7 @@ export function createAwsApi(): SmsRegistrationApi {
               : { title: definition.DisplayHints.Title }),
           });
         }
-        nextToken = output.NextToken;
+        nextToken = nextProviderPageToken(seenTokens, output.NextToken);
       } while (nextToken !== undefined);
       return definitions;
     },
@@ -156,6 +163,7 @@ export function createAwsApi(): SmsRegistrationApi {
     async describeAttachments(attachmentIds) {
       const attachments: RegistrationAttachmentRecord[] = [];
       for (let offset = 0; offset < attachmentIds.length; offset += 5) {
+        const seenTokens = new Set<string>();
         let nextToken: string | undefined;
         do {
           const output = await sms.send(
@@ -168,7 +176,9 @@ export function createAwsApi(): SmsRegistrationApi {
               ),
             }),
           );
-          for (const attachment of output.RegistrationAttachments ?? []) {
+          const page = output.RegistrationAttachments ?? [];
+          assertProviderPageCapacity(attachments.length, page.length);
+          for (const attachment of page) {
             attachments.push({
               attachmentId: required(
                 attachment.RegistrationAttachmentId,
@@ -177,32 +187,46 @@ export function createAwsApi(): SmsRegistrationApi {
               status: required(attachment.AttachmentStatus, 'AttachmentStatus'),
             });
           }
-          nextToken = output.NextToken;
+          nextToken = nextProviderPageToken(seenTokens, output.NextToken);
         } while (nextToken !== undefined);
       }
       return attachments;
     },
 
     async describePhoneNumbers(phoneNumberIds) {
-      const output = await sms.send(
-        new DescribePhoneNumbersCommand({
-          PhoneNumberIds: [...phoneNumberIds],
-        }),
-      );
-      return (output.PhoneNumbers ?? []).map(
-        (phone): PhoneNumberRecord => ({
-          phoneNumberId: required(phone.PhoneNumberId, 'PhoneNumberId'),
-          ...(phone.RegistrationId === undefined
-            ? {}
-            : { registrationId: phone.RegistrationId }),
-          numberType: required(phone.NumberType, 'phone number NumberType'),
-          status: required(phone.Status, 'phone number Status'),
-        }),
-      );
+      const phones: PhoneNumberRecord[] = [];
+      const seenTokens = new Set<string>();
+      let nextToken: string | undefined;
+      do {
+        const output = await sms.send(
+          new DescribePhoneNumbersCommand({
+            MaxResults: 100,
+            ...(nextToken === undefined ? {} : { NextToken: nextToken }),
+            PhoneNumberIds: [...phoneNumberIds],
+          }),
+        );
+        const page = output.PhoneNumbers ?? [];
+        assertProviderPageCapacity(phones.length, page.length);
+        phones.push(
+          ...page.map(
+            (phone): PhoneNumberRecord => ({
+              phoneNumberId: required(phone.PhoneNumberId, 'PhoneNumberId'),
+              ...(phone.RegistrationId === undefined
+                ? {}
+                : { registrationId: phone.RegistrationId }),
+              numberType: required(phone.NumberType, 'phone number NumberType'),
+              status: required(phone.Status, 'phone number Status'),
+            }),
+          ),
+        );
+        nextToken = nextProviderPageToken(seenTokens, output.NextToken);
+      } while (nextToken !== undefined);
+      return phones;
     },
 
     async describeRegistrationFieldFeedback(input) {
       const fields: RegistrationFieldFeedback[] = [];
+      const seenTokens = new Set<string>();
       let nextToken: string | undefined;
       do {
         const output = await sms.send(
@@ -215,7 +239,9 @@ export function createAwsApi(): SmsRegistrationApi {
               : { VersionNumber: input.versionNumber }),
           }),
         );
-        for (const field of output.RegistrationFieldValues ?? []) {
+        const page = output.RegistrationFieldValues ?? [];
+        assertProviderPageCapacity(fields.length, page.length);
+        for (const field of page) {
           const feedback = toRegistrationFieldFeedback(
             field.FieldPath,
             field.DeniedReason,
@@ -223,13 +249,14 @@ export function createAwsApi(): SmsRegistrationApi {
           );
           if (feedback !== undefined) fields.push(feedback);
         }
-        nextToken = output.NextToken;
+        nextToken = nextProviderPageToken(seenTokens, output.NextToken);
       } while (nextToken !== undefined);
       return fields;
     },
 
     async describeRegistrationVersions(registrationId) {
       const versions: RegistrationVersionRecord[] = [];
+      const seenTokens = new Set<string>();
       let nextToken: string | undefined;
       do {
         const output = await sms.send(
@@ -239,16 +266,19 @@ export function createAwsApi(): SmsRegistrationApi {
             RegistrationId: registrationId,
           }),
         );
-        for (const version of output.RegistrationVersions ?? []) {
+        const page = output.RegistrationVersions ?? [];
+        assertProviderPageCapacity(versions.length, page.length);
+        for (const version of page) {
           versions.push({
-            deniedReasons: (version.DeniedReasons ?? []).map((reason) => {
-              const code = required(reason.Reason, 'denied Reason');
-              const description = required(
+            deniedReasons: (version.DeniedReasons ?? []).map((reason) =>
+              toRegistrationDeniedReason(
+                reason.Reason,
                 reason.ShortDescription,
-                'denied ShortDescription',
-              );
-              return `${code}: ${description}`;
-            }),
+                reason.LongDescription,
+                reason.DocumentationTitle,
+                reason.DocumentationLink,
+              ),
+            ),
             status: required(
               version.RegistrationVersionStatus,
               'RegistrationVersionStatus',
@@ -262,36 +292,51 @@ export function createAwsApi(): SmsRegistrationApi {
             ),
           });
         }
-        nextToken = output.NextToken;
+        nextToken = nextProviderPageToken(seenTokens, output.NextToken);
       } while (nextToken !== undefined);
       return versions;
     },
 
     async describeRegistrations(registrationIds) {
-      const output = await sms.send(
-        new DescribeRegistrationsCommand({
-          RegistrationIds: [...registrationIds],
-        }),
-      );
-      return (output.Registrations ?? []).map(
-        (registration): RegistrationRecord => ({
-          registrationId: required(
-            registration.RegistrationId,
-            'RegistrationId',
+      const registrations: RegistrationRecord[] = [];
+      const seenTokens = new Set<string>();
+      let nextToken: string | undefined;
+      do {
+        const output = await sms.send(
+          new DescribeRegistrationsCommand({
+            MaxResults: 100,
+            ...(nextToken === undefined ? {} : { NextToken: nextToken }),
+            RegistrationIds: [...registrationIds],
+          }),
+        );
+        const page = output.Registrations ?? [];
+        assertProviderPageCapacity(registrations.length, page.length);
+        registrations.push(
+          ...page.map(
+            (registration): RegistrationRecord => ({
+              registrationId: required(
+                registration.RegistrationId,
+                'RegistrationId',
+              ),
+              registrationStatus: required(
+                registration.RegistrationStatus,
+                'RegistrationStatus',
+              ),
+              registrationType: required(
+                registration.RegistrationType,
+                'RegistrationType',
+              ),
+              ...(registration.CurrentVersionNumber === undefined
+                ? {}
+                : {
+                    currentVersionNumber: registration.CurrentVersionNumber,
+                  }),
+            }),
           ),
-          registrationStatus: required(
-            registration.RegistrationStatus,
-            'RegistrationStatus',
-          ),
-          registrationType: required(
-            registration.RegistrationType,
-            'RegistrationType',
-          ),
-          ...(registration.CurrentVersionNumber === undefined
-            ? {}
-            : { currentVersionNumber: registration.CurrentVersionNumber }),
-        }),
-      );
+        );
+        nextToken = nextProviderPageToken(seenTokens, output.NextToken);
+      } while (nextToken !== undefined);
+      return registrations;
     },
 
     async getCallerIdentity() {
@@ -320,6 +365,7 @@ export function createAwsApi(): SmsRegistrationApi {
 
     async listRegistrationAssociations(registrationId) {
       const associations: RegistrationAssociationRecord[] = [];
+      const seenTokens = new Set<string>();
       let nextToken: string | undefined;
       do {
         const output = await sms.send(
@@ -329,13 +375,15 @@ export function createAwsApi(): SmsRegistrationApi {
             RegistrationId: registrationId,
           }),
         );
-        for (const association of output.RegistrationAssociations ?? []) {
+        const page = output.RegistrationAssociations ?? [];
+        assertProviderPageCapacity(associations.length, page.length);
+        for (const association of page) {
           associations.push({
             resourceId: required(association.ResourceId, 'ResourceId'),
             resourceType: required(association.ResourceType, 'ResourceType'),
           });
         }
-        nextToken = output.NextToken;
+        nextToken = nextProviderPageToken(seenTokens, output.NextToken);
       } while (nextToken !== undefined);
       return associations;
     },
