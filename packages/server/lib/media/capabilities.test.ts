@@ -5,6 +5,7 @@ import type { HumanConfirmationRecord } from '@psd-eoc/contracts';
 
 import {
   CapabilityEngineError,
+  digestCapabilityValue,
   type CapabilityAuditEvent,
   type ClaimIdempotencyInput,
   type CompleteIdempotencyInput,
@@ -299,7 +300,10 @@ function createObjectStore(
       return {
         method: 'PUT',
         uploadUrl: `https://media.example.test/${input.storageKey}?signature=test`,
-        requiredHeaders: { 'content-type': input.contentType },
+        requiredHeaders: {
+          'content-type': input.contentType,
+          'if-none-match': '*',
+        },
         byteLength: input.byteLength,
         contentSha256: input.contentSha256,
         expiresInSeconds: input.expiresInSeconds ?? 300,
@@ -479,6 +483,14 @@ describe('media capabilities', () => {
       status: 'pending-upload',
     });
     expect(store.state.insertedIntents).toHaveLength(1);
+    expect(store.state.insertedIntents[0]).toMatchObject({
+      facilityId: IDS.facility,
+      budgetPrincipal: {
+        kind: 'human',
+        userId: IDS.user,
+        digest: digestCapabilityValue({ kind: 'human', userId: IDS.user }),
+      },
+    });
     expect(object.calls.uploadKeys).toEqual([
       `quarantine/${IDS.event}/${IDS.intent}`,
     ]);

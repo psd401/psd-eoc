@@ -51,6 +51,7 @@ import {
 const CDK_BOOTSTRAP_QUALIFIER = 'hnb659fds';
 const MAX_QUEUE_RECEIVES = 5;
 const MEDIA_QUARANTINE_PREFIX = 'quarantine/';
+const MEDIA_QUARANTINE_RETENTION_DAYS = 1;
 const MEDIA_UPLOAD_CORS_MAX_AGE_SECONDS = 300;
 const GUARDDUTY_MANAGED_RULE_PREFIX =
   'DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*';
@@ -245,7 +246,7 @@ export class PsdEocStack extends Stack {
       bucketKeyEnabled: true,
       cors: [
         {
-          allowedHeaders: ['content-type'],
+          allowedHeaders: ['content-type', 'if-none-match'],
           allowedMethods: [s3.HttpMethods.PUT],
           allowedOrigins: [mediaUploadAllowedOrigin.valueAsString],
           exposedHeaders: ['ETag', 'x-amz-checksum-sha256'],
@@ -255,11 +256,41 @@ export class PsdEocStack extends Stack {
       encryption: s3.BucketEncryption.KMS,
       encryptionKey: dataKey,
       enforceSSL: true,
+      lifecycleRules: [
+        {
+          abortIncompleteMultipartUploadAfter: Duration.days(
+            MEDIA_QUARANTINE_RETENTION_DAYS,
+          ),
+          expiration: Duration.days(MEDIA_QUARANTINE_RETENTION_DAYS),
+          id: 'ExpireAbandonedQuarantineMedia',
+          noncurrentVersionExpiration: Duration.days(
+            MEDIA_QUARANTINE_RETENTION_DAYS,
+          ),
+          prefix: MEDIA_QUARANTINE_PREFIX,
+        },
+      ],
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
       removalPolicy: RemovalPolicy.RETAIN,
       versioned: true,
     });
     this.retainGeneratedPolicy(mediaBucket);
+    mediaBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObject'],
+        conditions: {
+          Bool: {
+            's3:ObjectCreationOperation': 'true',
+          },
+          Null: {
+            's3:if-none-match': 'true',
+          },
+        },
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        resources: [mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`)],
+        sid: 'DenyUnconditionalQuarantineMediaWrite',
+      }),
+    );
     mediaBucket.addToResourcePolicy(
       new iam.PolicyStatement({
         actions: ['s3:PutObject'],

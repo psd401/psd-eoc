@@ -4,6 +4,7 @@ export type MediaFailureKind =
   | 'conflict'
   | 'invalid'
   | 'not-found'
+  | 'rate-limited'
   | 'scan-pending'
   | 'unavailable';
 
@@ -18,19 +19,25 @@ export class MediaPipelineError extends CapabilityEngineError {
         ? 'VALIDATION_ERROR'
         : kind === 'not-found'
           ? 'NOT_FOUND'
-          : kind === 'unavailable'
-            ? 'INTERNAL_ERROR'
-            : 'CONFLICT',
+          : kind === 'rate-limited'
+            ? 'RATE_LIMITED'
+            : kind === 'unavailable'
+              ? 'INTERNAL_ERROR'
+              : 'CONFLICT',
       'PERSISTENCE_CONFLICT',
       message,
       kind === 'invalid'
         ? 400
         : kind === 'not-found'
           ? 404
-          : kind === 'unavailable'
-            ? 503
-            : 409,
-      kind === 'scan-pending' || kind === 'unavailable',
+          : kind === 'rate-limited'
+            ? 429
+            : kind === 'unavailable'
+              ? 503
+              : 409,
+      kind === 'rate-limited' ||
+        kind === 'scan-pending' ||
+        kind === 'unavailable',
     );
     this.name = 'MediaPipelineError';
   }
@@ -46,6 +53,13 @@ export function mediaNotFound(message: string): MediaPipelineError {
 
 export function mediaConflict(message: string): MediaPipelineError {
   return new MediaPipelineError('conflict', message);
+}
+
+export function mediaRateLimited(): MediaPipelineError {
+  return new MediaPipelineError(
+    'rate-limited',
+    'Photo upload capacity is temporarily limited. Try again shortly.',
+  );
 }
 
 export function mediaScanPending(): MediaPipelineError {

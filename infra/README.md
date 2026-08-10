@@ -33,11 +33,12 @@ evidence and approval.
   storage, retained backups, and deletion protection. No auto-pause setting is
   present.
 - A versioned, KMS-encrypted media bucket with every public-access block,
-  TLS-only access, retained data, and no lifecycle deletion. Browser uploads
-  require the no-default `MediaUploadAllowedOrigin` HTTPS parameter. CORS
-  permits only `PUT` from that exact origin with the `content-type` request
-  header, exposes only `ETag` and `x-amz-checksum-sha256`, and caches preflight
-  results for five minutes.
+  TLS-only access, immutable retained `ready/` data, and a `quarantine/`-only
+  one-day lifecycle for current, noncurrent, and incomplete abandoned uploads.
+  Browser uploads require the no-default `MediaUploadAllowedOrigin` HTTPS
+  parameter. CORS permits only `PUT` from that exact origin with the
+  `content-type` and `if-none-match` request headers, exposes only `ETag` and
+  `x-amz-checksum-sha256`, and caches preflight results for five minutes.
 - A GuardDuty Malware Protection for S3 plan restricted to `quarantine/`, with
   scan-result tagging enabled. Its dedicated service role follows the AWS
   prerequisite policy: only the GuardDuty-managed EventBridge rule, bucket
@@ -120,6 +121,12 @@ wildcard. It must be the reviewed browser origin that receives PSD EOC's
 presigned private upload URLs. Adding another origin or request header is a
 reviewed infrastructure change, not a runtime fallback.
 
+Every quarantine PUT is signed with and must send `If-None-Match: *`. Bucket
+policy denies a quarantine write that omits that create-only precondition, so
+reusing either the original URL or an idempotent replay grant after the first
+successful PUT fails S3's precondition instead of creating another object
+version and another malware scan.
+
 Only objects whose keys begin with `quarantine/` enter the GuardDuty plan.
 Tagging is enabled so GuardDuty can set `GuardDutyMalwareScanStatus` on the
 scanned object. The application must continue to fail closed unless the exact
@@ -130,6 +137,12 @@ principal except sessions issued from the dedicated GuardDuty role. It matches
 the stable IAM role ARN through `aws:PrincipalArn` rather than guessing an
 AWS-controlled session name, and reserves all quarantine tag mutations to that
 role.
+
+The bucket lifecycle is also restricted to `quarantine/`: current and
+noncurrent raw versions expire after one day, and incomplete multipart uploads
+are aborted after one day. Upload grants themselves expire after ten minutes,
+so this is bounded reclamation for abandoned untrusted bytes, not an extension
+of upload authority. No lifecycle rule targets immutable `ready/` media.
 
 The plan depends explicitly on its IAM role because AWS validates the role
 while creating the plan and recommends an IaC dependency for propagation. The
