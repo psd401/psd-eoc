@@ -189,11 +189,13 @@ describe('AccessAdminView semantics', () => {
     expect(html).toMatch(
       /<input[^>]*id="user-10000000-0000-4000-8000-000000000003-admin"[^>]*checked=""[^>]*value="admin"/u,
     );
-    expect(html).toContain('Grant selected roles to Alex Staff');
+    expect(html).toContain('Save roles for Alex Staff');
     expect(html).toContain(
-      'Existing grants are retained by the append-only schema.',
+      'Changes append grant or revocation facts; prior history remains immutable.',
     );
-    expect(html).toContain('Administrator (already granted)');
+    expect(html).toContain('>Administrator</label>');
+    expect(html).not.toMatch(/name="roles" type="hidden"/u);
+    expect(html).not.toMatch(/id="user-[^"]+-admin"[^>]*disabled/u);
     expect(html).toContain('District-wide');
     expect(html).toContain('1 facility');
     expect(html).toContain(

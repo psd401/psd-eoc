@@ -4,6 +4,7 @@ import {
   executeCreateGroupSourceCapability,
   executeCreateNeighborhoodVersionCapability,
   executeUpdateFacilityCapability,
+  executeUpdateGroupSourceCapability,
 } from '../capabilities';
 import {
   adminFormErrorResponse,
@@ -44,6 +45,16 @@ export async function POST(request: Request): Promise<Response> {
       case 'create-synthetic-building-group':
       case 'create-synthetic-others-group':
         await executeCreateGroupSourceCapability({
+          authenticated,
+          command: mutation.command,
+          metadata,
+        });
+        break;
+      case 'replace-google-building-group':
+      case 'replace-google-others-group':
+      case 'replace-synthetic-building-group':
+      case 'replace-synthetic-others-group':
+        await executeUpdateGroupSourceCapability({
           authenticated,
           command: mutation.command,
           metadata,

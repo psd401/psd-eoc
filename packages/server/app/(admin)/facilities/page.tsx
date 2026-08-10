@@ -26,10 +26,14 @@ export const revalidate = 0;
 const STATUS_MESSAGES = Object.freeze({
   'audience-version-created': 'The facility audience version was saved.',
   'building-group-created': 'The immutable building source was added.',
+  'building-group-replaced':
+    'The building source was replaced with a new immutable source and roster configuration version.',
   'facility-created': 'The facility was added.',
   'facility-updated': 'The facility settings were updated.',
   'neighborhood-version-created': 'The neighborhood version was saved.',
   'others-group-created': 'The immutable others source was added.',
+  'others-group-replaced':
+    'The others source was replaced with a new immutable source and roster configuration version.',
 } as const);
 
 function statusMessage(value: string | undefined): string | null {

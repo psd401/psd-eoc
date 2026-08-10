@@ -20,6 +20,7 @@ const AT = '2026-08-10T18:00:00.000Z';
 const IDS = Object.freeze({
   audience: uuid(2650),
   buildingGoogle: uuid(2651),
+  buildingSuperseded: uuid(2658),
   buildingSynthetic: uuid(2652),
   facilityA: uuid(2653),
   facilityB: uuid(2654),
@@ -82,6 +83,17 @@ const AUTHORIZED_VIEW = Object.freeze({
         displayName: 'Ridge test staff',
         active: true,
         fixtureKey: 'ridge-test-staff',
+        createdAt: AT,
+      },
+      {
+        id: IDS.buildingSuperseded,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: IDS.facilityA,
+        displayName: 'Harbor staff historical source',
+        active: false,
+        googleGroupId: 'google-harbor-staff-old',
+        email: 'harbor-staff-old@example.invalid',
         createdAt: AT,
       },
     ],
@@ -174,6 +186,10 @@ describe('facilities administration view', () => {
       'create-synthetic-building-group',
       'create-google-others-group',
       'create-synthetic-others-group',
+      'replace-google-building-group',
+      'replace-synthetic-building-group',
+      'replace-google-others-group',
+      'replace-synthetic-others-group',
       'create-neighborhood-version',
       'create-audience-version',
     ]) {
@@ -188,10 +204,14 @@ describe('facilities administration view', () => {
       'Building and others group sources are immutable.',
     );
     expect(markup).toContain(
-      'create a new source and then append a new audience version',
+      'Replacing one creates a new source and appends a roster configuration version',
     );
     expect(markup).not.toContain('update-building-group');
     expect(markup).not.toContain('update-others-group');
+    expect(markup).toContain('A stale replacement is refused.');
+    expect(markup).toContain(`name="sourceId" value="${IDS.buildingGoogle}"`);
+    expect(markup).toContain(`name="sourceId" value="${IDS.othersGoogle}"`);
+    expect(markup).not.toContain(`value="${IDS.buildingSuperseded}"`);
     expect(markup).toContain('Building target (always included):');
     expect(markup).toContain(
       'The server always includes this facility&#x27;s building target',

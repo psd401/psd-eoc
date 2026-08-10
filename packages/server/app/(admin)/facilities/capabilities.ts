@@ -25,7 +25,18 @@ import {
   type Neighborhood,
   type NeighborhoodPage,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  ne,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 
 import {
   audienceConfigurations,
@@ -151,6 +162,17 @@ async function lockAdminIdentity(
   await database.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${identity}, 0))`,
   );
+}
+
+async function lockRosterConfigurationPopulations(
+  database: AdminQueryDatabase,
+): Promise<void> {
+  // Audience validation spans both staff and synthetic configurations. Hold
+  // both serialization keys in one deterministic order until the audience
+  // version commits so a concurrent source replacement cannot make a newly
+  // inserted audience version stale between validation and persistence.
+  await lockAdminIdentity(database, 'psd-eoc-roster-staff');
+  await lockAdminIdentity(database, 'psd-eoc-roster-synthetic');
 }
 
 async function listFacilities(
@@ -294,15 +316,14 @@ async function listNeighborhoods(
     .orderBy(asc(neighborhoodVersions.id))
     .offset(offset)
     .limit(input.limit + 1);
-  const items = await Promise.all(
-    headers.slice(0, input.limit).map(async ({ id }) => {
-      const item = await latestNeighborhoodVersion(database, id);
-      if (item === null) {
-        throw conflict('Neighborhood version history is incomplete.');
-      }
-      return item;
-    }),
-  );
+  const items: Neighborhood[] = [];
+  for (const { id } of headers.slice(0, input.limit)) {
+    const item = await latestNeighborhoodVersion(database, id);
+    if (item === null) {
+      throw conflict('Neighborhood version history is incomplete.');
+    }
+    items.push(item);
+  }
   return NeighborhoodPageSchema.parse({
     items,
     pageInfo: pageInfo(offset, input.limit, headers.length),
@@ -321,19 +342,18 @@ async function listNeighborhoodVersions(
     .orderBy(desc(neighborhoodVersions.version))
     .offset(offset)
     .limit(input.limit + 1);
-  const items = await Promise.all(
-    rows.slice(0, input.limit).map(async ({ version }) => {
-      const item = await neighborhoodByVersion(
-        database,
-        input.neighborhoodId,
-        version,
-      );
-      if (item === null) {
-        throw conflict('Neighborhood version history is incomplete.');
-      }
-      return item;
-    }),
-  );
+  const items: Neighborhood[] = [];
+  for (const { version } of rows.slice(0, input.limit)) {
+    const item = await neighborhoodByVersion(
+      database,
+      input.neighborhoodId,
+      version,
+    );
+    if (item === null) {
+      throw conflict('Neighborhood version history is incomplete.');
+    }
+    items.push(item);
+  }
   return NeighborhoodPageSchema.parse({
     items,
     pageInfo: pageInfo(offset, input.limit, rows.length),
@@ -404,6 +424,7 @@ async function createNeighborhoodVersion(
 
 function groupSourceFromRow(
   row: typeof groupSources.$inferSelect,
+  effectiveActive: boolean = row.active,
 ): GroupSource {
   const common = {
     id: row.id,
@@ -411,7 +432,7 @@ function groupSourceFromRow(
     purpose: row.purpose,
     facilityId: row.facilityId,
     displayName: row.displayName,
-    active: row.active,
+    active: effectiveActive,
     createdAt: dateIso(row.createdAt),
   };
   return GroupSourceSchema.parse(
@@ -428,13 +449,110 @@ function groupSourceFromRow(
 async function getGroupSource(
   database: AdminQueryDatabase,
   id: string,
+  lock = false,
 ): Promise<GroupSource | null> {
-  const [row] = await database
+  const query = database
     .select()
     .from(groupSources)
     .where(eq(groupSources.id, id))
     .limit(1);
+  const [row] = lock ? await query.for('update') : await query;
   return row === undefined ? null : groupSourceFromRow(row);
+}
+
+type RosterPopulation = 'staff' | 'synthetic';
+
+interface RosterConfigurationState {
+  readonly id: string;
+  readonly version: number;
+  readonly population: RosterPopulation;
+  readonly facilityIds: readonly string[];
+  readonly sources: readonly GroupSource[];
+}
+
+async function latestRosterConfiguration(
+  database: AdminQueryDatabase,
+  population: RosterPopulation,
+  lock: boolean,
+): Promise<RosterConfigurationState | null> {
+  const lineages = await database
+    .select({ id: rosterSourceConfigurations.id })
+    .from(rosterSourceConfigurations)
+    .where(eq(rosterSourceConfigurations.population, population))
+    .groupBy(rosterSourceConfigurations.id)
+    .limit(2);
+  if (lineages.length > 1) {
+    throw conflict(
+      `The ${population} roster source configuration has conflicting lineages.`,
+    );
+  }
+  const latestQuery = database
+    .select({
+      id: rosterSourceConfigurations.id,
+      version: rosterSourceConfigurations.version,
+    })
+    .from(rosterSourceConfigurations)
+    .where(eq(rosterSourceConfigurations.population, population))
+    .orderBy(desc(rosterSourceConfigurations.version))
+    .limit(1);
+  const [latest] = lock ? await latestQuery.for('update') : await latestQuery;
+  if (latest === undefined) return null;
+
+  const facilityRows = await database
+    .select({ facilityId: rosterSourceConfigurationFacilities.facilityId })
+    .from(rosterSourceConfigurationFacilities)
+    .where(
+      and(
+        eq(rosterSourceConfigurationFacilities.configurationId, latest.id),
+        eq(
+          rosterSourceConfigurationFacilities.configurationVersion,
+          latest.version,
+        ),
+      ),
+    )
+    .orderBy(asc(rosterSourceConfigurationFacilities.facilityId));
+  const sourceRows = await database
+    .select({ source: groupSources })
+    .from(rosterSourceConfigurationGroups)
+    .innerJoin(
+      groupSources,
+      eq(rosterSourceConfigurationGroups.groupSourceId, groupSources.id),
+    )
+    .where(
+      and(
+        eq(rosterSourceConfigurationGroups.configurationId, latest.id),
+        eq(
+          rosterSourceConfigurationGroups.configurationVersion,
+          latest.version,
+        ),
+        eq(rosterSourceConfigurationGroups.population, population),
+      ),
+    )
+    .orderBy(asc(rosterSourceConfigurationGroups.groupSourceId));
+
+  return {
+    id: latest.id,
+    version: latest.version,
+    population,
+    facilityIds: facilityRows.map(({ facilityId }) => facilityId),
+    sources: sourceRows.map(({ source }) => groupSourceFromRow(source, true)),
+  };
+}
+
+async function effectiveRosterSourceIds(
+  database: AdminQueryDatabase,
+): Promise<ReadonlySet<string>> {
+  const staff = await latestRosterConfiguration(database, 'staff', false);
+  const synthetic = await latestRosterConfiguration(
+    database,
+    'synthetic',
+    false,
+  );
+  return new Set(
+    [...(staff?.sources ?? []), ...(synthetic?.sources ?? [])].map(
+      ({ id }) => id,
+    ),
+  );
 }
 
 async function listGroupSources(
@@ -442,6 +560,7 @@ async function listGroupSources(
   input: CapabilityInput<'list-group-sources'>,
 ): Promise<GroupSourcePage> {
   const offset = decodeOffset(input.cursor);
+  const effectiveSourceIds = await effectiveRosterSourceIds(database);
   const conditions: SQL[] = [];
   if (input.kind !== null) conditions.push(eq(groupSources.kind, input.kind));
   if (input.purpose !== null) {
@@ -451,7 +570,23 @@ async function listGroupSources(
     conditions.push(eq(groupSources.facilityId, input.facilityId));
   }
   if (input.active !== null) {
-    conditions.push(eq(groupSources.active, input.active));
+    const effectiveIds = [...effectiveSourceIds];
+    const effectiveNonAccess =
+      input.active === true
+        ? effectiveIds.length === 0
+          ? sql`false`
+          : inArray(groupSources.id, effectiveIds)
+        : effectiveIds.length === 0
+          ? sql`true`
+          : notInArray(groupSources.id, effectiveIds);
+    const activeCondition = or(
+      and(
+        eq(groupSources.purpose, 'access'),
+        eq(groupSources.active, input.active),
+      ),
+      and(ne(groupSources.purpose, 'access'), effectiveNonAccess),
+    );
+    if (activeCondition !== undefined) conditions.push(activeCondition);
   }
   const rows = await database
     .select()
@@ -461,14 +596,25 @@ async function listGroupSources(
     .offset(offset)
     .limit(input.limit + 1);
   return GroupSourcePageSchema.parse({
-    items: rows.slice(0, input.limit).map(groupSourceFromRow),
+    items: rows
+      .slice(0, input.limit)
+      .map((row) =>
+        groupSourceFromRow(
+          row,
+          row.purpose === 'access'
+            ? row.active
+            : effectiveSourceIds.has(row.id),
+        ),
+      ),
     pageInfo: pageInfo(offset, input.limit, rows.length),
   });
 }
 
 async function assertGroupIdentityAvailable(
   database: AdminQueryDatabase,
-  source: CapabilityInput<'create-group-source'>,
+  source:
+    | CapabilityInput<'create-group-source'>
+    | CapabilityInput<'update-group-source'>,
   exceptId: string | null,
 ): Promise<void> {
   const identity =
@@ -492,58 +638,74 @@ async function assertGroupIdentityAvailable(
   }
 }
 
-function sourcePopulation(source: GroupSource): 'staff' | 'synthetic' | null {
+function sourcePopulation(source: GroupSource): RosterPopulation | null {
   if (source.purpose === 'access') return null;
   return source.kind === 'google-group' ? 'staff' : 'synthetic';
 }
 
 async function refreshRosterSourceConfiguration(
   database: AdminQueryDatabase,
-  population: 'staff' | 'synthetic',
+  population: RosterPopulation,
+  options: Readonly<{
+    additions?: readonly GroupSource[];
+    requiredEffectiveSourceId?: string | null;
+    supersededSourceIds?: readonly string[];
+  }> = {},
 ): Promise<void> {
   await lockAdminIdentity(database, `psd-eoc-roster-${population}`);
-  const lineages = await database
-    .select({ id: rosterSourceConfigurations.id })
-    .from(rosterSourceConfigurations)
-    .where(eq(rosterSourceConfigurations.population, population))
-    .groupBy(rosterSourceConfigurations.id)
-    .limit(2);
-  if (lineages.length > 1) {
+  const latest = await latestRosterConfiguration(database, population, true);
+  if (
+    options.requiredEffectiveSourceId !== undefined &&
+    options.requiredEffectiveSourceId !== null &&
+    (latest === null ||
+      !latest.sources.some(
+        ({ id }) => id === options.requiredEffectiveSourceId,
+      ))
+  ) {
     throw conflict(
-      `The ${population} roster source configuration has conflicting lineages.`,
+      'The group source has already been superseded; reload before replacing it.',
     );
   }
-  const [latest] = await database
-    .select({
-      id: rosterSourceConfigurations.id,
-      version: rosterSourceConfigurations.version,
-    })
-    .from(rosterSourceConfigurations)
-    .where(eq(rosterSourceConfigurations.population, population))
-    .orderBy(desc(rosterSourceConfigurations.version))
-    .limit(1)
-    .for('update');
   const sourceKind = population === 'staff' ? 'google-group' : 'synthetic';
+  let baseSources: readonly GroupSource[];
+  if (latest === null) {
+    const initialRows = await database
+      .select()
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.kind, sourceKind),
+          ne(groupSources.purpose, 'access'),
+          eq(groupSources.active, true),
+        ),
+      )
+      .orderBy(asc(groupSources.id));
+    baseSources = initialRows.map((row) => groupSourceFromRow(row, true));
+  } else {
+    baseSources = latest.sources;
+  }
+  const byId = new Map(baseSources.map((source) => [source.id, source]));
+  for (const sourceId of options.supersededSourceIds ?? []) {
+    byId.delete(sourceId);
+  }
+  for (const source of options.additions ?? []) {
+    if (source.active) byId.set(source.id, source);
+  }
   const activeFacilities = await database
     .select({ id: facilities.id })
     .from(facilities)
     .where(eq(facilities.active, true));
   const activeFacilityIds = new Set(activeFacilities.map(({ id }) => id));
-  const rows = await database
-    .select()
-    .from(groupSources)
-    .where(
-      and(eq(groupSources.kind, sourceKind), eq(groupSources.active, true)),
-    )
-    .orderBy(asc(groupSources.id));
-  const sources = rows
-    .map(groupSourceFromRow)
+  const sources = [...byId.values()]
     .filter(
       (source) =>
+        source.kind === sourceKind &&
+        source.active &&
         source.purpose !== 'access' &&
         (source.purpose === 'others' ||
           activeFacilityIds.has(source.facilityId)),
-    );
+    )
+    .sort((left, right) => left.id.localeCompare(right.id));
   const facilityIds = [
     ...new Set(
       sources.flatMap((source) =>
@@ -552,19 +714,25 @@ async function refreshRosterSourceConfiguration(
     ),
   ].sort();
   if (facilityIds.length === 0) {
-    if (latest !== undefined) {
+    if (latest !== null) {
       throw conflict(
         `The final active ${population} roster facility cannot be removed without an explicit empty-state contract.`,
       );
     }
     return;
   }
-  const configuredSources = sources.filter(
-    (source) =>
-      source.purpose === 'others' ||
-      (source.purpose === 'building' &&
-        facilityIds.includes(source.facilityId)),
-  );
+  const configuredSources = sources;
+  const unchanged =
+    latest !== null &&
+    latest.facilityIds.length === facilityIds.length &&
+    latest.facilityIds.every(
+      (facilityId, index) => facilityId === facilityIds[index],
+    ) &&
+    latest.sources.length === configuredSources.length &&
+    latest.sources.every(
+      (source, index) => source.id === configuredSources[index]?.id,
+    );
+  if (unchanged) return;
   const configuration = RosterSourceConfigurationSchema.parse({
     id: latest?.id ?? randomUUID(),
     version: (latest?.version ?? 0) + 1,
@@ -639,7 +807,9 @@ async function createGroupSource(
   const source = groupSourceFromRow(row);
   const population = sourcePopulation(source);
   if (population !== null) {
-    await refreshRosterSourceConfiguration(database, population);
+    await refreshRosterSourceConfiguration(database, population, {
+      additions: [source],
+    });
   }
   return source;
 }
@@ -649,7 +819,7 @@ async function updateGroupSource(
   inputValue: CapabilityInput<'update-group-source'>,
 ): Promise<GroupSource> {
   const input = UpdateGroupSourceInputSchema.parse(inputValue);
-  const current = await getGroupSource(database, input.id);
+  const current = await getGroupSource(database, input.id, true);
   if (current === null) {
     throw notFound('The group source was not found.');
   }
@@ -661,9 +831,35 @@ async function updateGroupSource(
     throw conflict('Group kind, purpose, and facility cannot be changed.');
   }
   if (current.purpose !== 'access') {
-    throw conflict(
-      'Building and others group sources are immutable; this schema does not support in-place edits or deactivation.',
-    );
+    await assertGroupIdentityAvailable(database, input, null);
+    const [row] = await database
+      .insert(groupSources)
+      .values({
+        kind: input.kind,
+        purpose: input.purpose,
+        facilityId: input.facilityId,
+        displayName: input.displayName,
+        active: input.active,
+        googleGroupId:
+          input.kind === 'google-group' ? input.googleGroupId : null,
+        email: input.kind === 'google-group' ? input.email : null,
+        fixtureKey: input.kind === 'synthetic' ? input.fixtureKey : null,
+      })
+      .returning();
+    if (row === undefined) {
+      throw conflict('The replacement group source could not be created.');
+    }
+    const replacement = groupSourceFromRow(row);
+    const population = sourcePopulation(replacement);
+    if (population === null) {
+      throw conflict('The replacement source population is unavailable.');
+    }
+    await refreshRosterSourceConfiguration(database, population, {
+      additions: [replacement],
+      requiredEffectiveSourceId: current.id,
+      supersededSourceIds: [current.id],
+    });
+    return replacement;
   }
   if (current.active && !input.active) {
     await lockAdminIdentity(database, 'admin-access-group-active-set');
@@ -729,49 +925,48 @@ async function audienceByVersion(
       ),
     )
     .orderBy(asc(audienceTargets.ordinal));
-  const targets = await Promise.all(
-    rows.map(async (row) => {
-      switch (row.targetKind) {
-        case 'building':
-          if (row.targetFacilityId === null) {
-            throw conflict('The building audience target is incomplete.');
-          }
-          return {
-            kind: 'building' as const,
-            facilityId: row.targetFacilityId,
-          };
-        case 'neighborhood':
-          if (row.neighborhoodId === null || row.neighborhoodVersion === null) {
-            throw conflict('The neighborhood audience target is incomplete.');
-          }
-          return {
-            kind: 'neighborhood' as const,
-            neighborhood: {
-              id: row.neighborhoodId,
-              version: row.neighborhoodVersion,
-            },
-          };
-        case 'others': {
-          if (row.groupSourceId === null) {
-            throw conflict('The others audience target is incomplete.');
-          }
-          const source = await getGroupSource(database, row.groupSourceId);
-          if (source === null || source.purpose !== 'others') {
-            throw conflict('The others audience source is unavailable.');
-          }
-          return {
-            kind: 'others' as const,
-            groupSourceRef: {
-              id: source.id,
-              kind: source.kind,
-              purpose: source.purpose,
-              facilityId: source.facilityId,
-            },
-          };
+  const targets: Array<AudienceConfig['targets'][number]> = [];
+  for (const row of rows) {
+    switch (row.targetKind) {
+      case 'building':
+        if (row.targetFacilityId === null) {
+          throw conflict('The building audience target is incomplete.');
         }
+        targets.push({ kind: 'building', facilityId: row.targetFacilityId });
+        break;
+      case 'neighborhood':
+        if (row.neighborhoodId === null || row.neighborhoodVersion === null) {
+          throw conflict('The neighborhood audience target is incomplete.');
+        }
+        targets.push({
+          kind: 'neighborhood',
+          neighborhood: {
+            id: row.neighborhoodId,
+            version: row.neighborhoodVersion,
+          },
+        });
+        break;
+      case 'others': {
+        if (row.groupSourceId === null) {
+          throw conflict('The others audience target is incomplete.');
+        }
+        const source = await getGroupSource(database, row.groupSourceId);
+        if (source === null || source.purpose !== 'others') {
+          throw conflict('The others audience source is unavailable.');
+        }
+        targets.push({
+          kind: 'others',
+          groupSourceRef: {
+            id: source.id,
+            kind: source.kind,
+            purpose: source.purpose,
+            facilityId: source.facilityId,
+          },
+        });
+        break;
       }
-    }),
-  );
+    }
+  }
   return AudienceConfigSchema.parse({
     id: header.id,
     facilityId: header.facilityId,
@@ -827,6 +1022,7 @@ async function validateAudienceTargets(
   if (facility === null || !facility.active) {
     throw conflict('Audience configuration requires an active facility.');
   }
+  const effectiveSourceIds = await effectiveRosterSourceIds(database);
   const targetFacilityIds = new Set([input.facilityId]);
   const othersKinds = new Set<'google-group' | 'synthetic'>();
   for (const target of input.targets) {
@@ -852,7 +1048,7 @@ async function validateAudienceTargets(
       const source = await getGroupSource(database, target.groupSourceRef.id);
       if (
         source === null ||
-        !source.active ||
+        !effectiveSourceIds.has(source.id) ||
         source.kind !== target.groupSourceRef.kind ||
         source.purpose !== 'others'
       ) {
@@ -877,19 +1073,23 @@ async function validateAudienceTargets(
   ) {
     throw conflict('Every audience facility must be active and available.');
   }
-  const buildingSources = await database
-    .select({
-      facilityId: groupSources.facilityId,
-      kind: groupSources.kind,
-    })
-    .from(groupSources)
-    .where(
-      and(
-        eq(groupSources.purpose, 'building'),
-        eq(groupSources.active, true),
-        inArray(groupSources.facilityId, [...targetFacilityIds]),
-      ),
-    );
+  const configuredSourceIds = [...effectiveSourceIds];
+  const buildingSources =
+    configuredSourceIds.length === 0
+      ? []
+      : await database
+          .select({
+            facilityId: groupSources.facilityId,
+            kind: groupSources.kind,
+          })
+          .from(groupSources)
+          .where(
+            and(
+              eq(groupSources.purpose, 'building'),
+              inArray(groupSources.id, configuredSourceIds),
+              inArray(groupSources.facilityId, [...targetFacilityIds]),
+            ),
+          );
   const requiredKind = [...othersKinds][0];
   const missingBuildingSource = [...targetFacilityIds].some(
     (facilityId) =>
@@ -913,7 +1113,6 @@ async function createAudienceConfigVersion(
   inputValue: CapabilityInput<'create-audience-config-version'>,
 ): Promise<AudienceConfig> {
   const input = CreateAudienceConfigVersionInputSchema.parse(inputValue);
-  await validateAudienceTargets(database, input);
   const [lockedFacility] = await database
     .select({ id: facilities.id })
     .from(facilities)
@@ -923,6 +1122,10 @@ async function createAudienceConfigVersion(
   if (lockedFacility === undefined) {
     throw notFound('The audience facility was not found.');
   }
+  // Match updateFacility's facility -> staff roster -> synthetic roster lock
+  // order so concurrent facility and audience changes cannot deadlock.
+  await lockRosterConfigurationPopulations(database);
+  await validateAudienceTargets(database, input);
   const id = input.audienceConfigId ?? randomUUID();
   let version = 1;
   if (input.audienceConfigId === null) {

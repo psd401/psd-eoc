@@ -121,12 +121,25 @@ export const audienceTargetsRelations = relations(
 /** Navigable staff identity, access evidence, session, and agent-key graph. */
 export const usersRelations = relations(schema.users, ({ many }) => ({
   roles: many(schema.userRoles),
+  roleChanges: many(schema.userRoleChanges, {
+    relationName: 'userRoleChangeTarget',
+  }),
+  roleChangesMade: many(schema.userRoleChanges, {
+    relationName: 'userRoleChangeChanger',
+  }),
   facilityScopes: many(schema.userFacilityScopes),
   deviceEnrollments: many(schema.deviceEnrollments),
   accessMemberships: many(schema.accessMembershipMembers),
   issuedAgentApiKeys: many(schema.agentApiKeys),
   agentApiKeyRevocations: many(schema.agentApiKeyRevocations),
   integrationVerifications: many(schema.integrationStatuses),
+  channelChangesAuthorized: many(
+    schema.integrationChannelChangeAuthorizations,
+    { relationName: 'channelChangeAuthorizer' },
+  ),
+  channelChangesConsumed: many(schema.integrationChannelChangeAuthorizations, {
+    relationName: 'channelChangeConsumer',
+  }),
   humanConfirmationRecords: many(schema.humanConfirmationRecords),
 }));
 
@@ -136,6 +149,26 @@ export const userRolesRelations = relations(schema.userRoles, ({ one }) => ({
     references: [schema.users.id],
   }),
 }));
+
+export const userRoleChangesRelations = relations(
+  schema.userRoleChanges,
+  ({ one }) => ({
+    user: one(schema.users, {
+      fields: [schema.userRoleChanges.userId],
+      references: [schema.users.id],
+      relationName: 'userRoleChangeTarget',
+    }),
+    changedBy: one(schema.users, {
+      fields: [schema.userRoleChanges.changedByUserId],
+      references: [schema.users.id],
+      relationName: 'userRoleChangeChanger',
+    }),
+    changedWithSession: one(schema.sessions, {
+      fields: [schema.userRoleChanges.changedWithSessionId],
+      references: [schema.sessions.id],
+    }),
+  }),
+);
 
 export const userFacilityScopesRelations = relations(
   schema.userFacilityScopes,
@@ -262,6 +295,15 @@ export const sessionsRelations = relations(
     tokenRotations: many(schema.sessionTokenRotations),
     tokenReplays: many(schema.sessionTokenReplays),
     revocations: many(schema.sessionRevocations),
+    roleChangesMade: many(schema.userRoleChanges),
+    channelChangesAuthorized: many(
+      schema.integrationChannelChangeAuthorizations,
+      { relationName: 'channelChangeAuthorizerSession' },
+    ),
+    channelChangesConsumed: many(
+      schema.integrationChannelChangeAuthorizations,
+      { relationName: 'channelChangeConsumerSession' },
+    ),
     humanConfirmationRecords: many(schema.humanConfirmationRecords),
   }),
 );
@@ -766,6 +808,9 @@ export const integrationStatusesRelations = relations(
       references: [schema.users.id],
     }),
     channelConfigurations: many(schema.channelConfigurations),
+    channelChangeAuthorizations: many(
+      schema.integrationChannelChangeAuthorizations,
+    ),
     notificationIntentChannels: many(schema.notificationIntentChannels),
     dispatchBatches: many(schema.dispatchBatches),
   }),
@@ -777,6 +822,44 @@ export const channelConfigurationsRelations = relations(
     status: one(schema.integrationStatuses, {
       fields: [schema.channelConfigurations.statusId],
       references: [schema.integrationStatuses.id],
+    }),
+  }),
+);
+
+export const integrationChannelChangeAuthorizationsRelations = relations(
+  schema.integrationChannelChangeAuthorizations,
+  ({ one }) => ({
+    status: one(schema.integrationStatuses, {
+      fields: [
+        schema.integrationChannelChangeAuthorizations.integrationStatusId,
+      ],
+      references: [schema.integrationStatuses.id],
+    }),
+    authorizedBy: one(schema.users, {
+      fields: [
+        schema.integrationChannelChangeAuthorizations.authorizedByUserId,
+      ],
+      references: [schema.users.id],
+      relationName: 'channelChangeAuthorizer',
+    }),
+    authorizedWithSession: one(schema.sessions, {
+      fields: [
+        schema.integrationChannelChangeAuthorizations.authorizedWithSessionId,
+      ],
+      references: [schema.sessions.id],
+      relationName: 'channelChangeAuthorizerSession',
+    }),
+    consumedBy: one(schema.users, {
+      fields: [schema.integrationChannelChangeAuthorizations.consumedByUserId],
+      references: [schema.users.id],
+      relationName: 'channelChangeConsumer',
+    }),
+    consumedWithSession: one(schema.sessions, {
+      fields: [
+        schema.integrationChannelChangeAuthorizations.consumedWithSessionId,
+      ],
+      references: [schema.sessions.id],
+      relationName: 'channelChangeConsumerSession',
     }),
   }),
 );

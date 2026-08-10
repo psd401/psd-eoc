@@ -3,7 +3,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   AccessGroupSourceRefSchema,
   FacilityScopeSchema,
-  RoleSchema,
   SecurityAuditEntrySchema,
   SecurityAuditHashSchema,
   TimestampSchema,
@@ -27,10 +26,10 @@ import {
   groupSources,
   securityAuditEntries,
   userFacilityScopes,
-  userRoles,
   users,
 } from '../../db/schema';
 import type { GoogleOidcCallbackErrorCode } from './oidc';
+import { loadEffectiveRoles } from './role-state';
 import type { WebSessionIssuanceErrorCode } from './session-cookie';
 
 /** Environment variable containing comma-separated immutable Google subjects. */
@@ -515,11 +514,7 @@ export function createDrizzleAccessGateStore(
           };
         }
 
-        const roleRows = await transaction
-          .select({ role: userRoles.role })
-          .from(userRoles)
-          .where(eq(userRoles.userId, userRow.id));
-        const roles = roleRows.map((row) => RoleSchema.parse(row.role));
+        const roles = await loadEffectiveRoles(transaction, userRow.id);
 
         const userScopeRows = await transaction
           .select({ facilityId: userFacilityScopes.facilityId })

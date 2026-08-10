@@ -8,12 +8,22 @@ import {
   type User,
   type UserPage,
 } from '@psd-eoc/contracts';
-import { and, asc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
-import { userFacilityScopes, userRoles, users } from '../../../db/schema';
+import {
+  userFacilityScopes,
+  userRoleChanges,
+  userRoles,
+  users,
+} from '../../../db/schema';
+import {
+  loadEffectiveAdministratorUserIds,
+  loadEffectiveRoles,
+} from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import {
   digestCapabilityValue,
+  readCapabilityTime,
   type ServerCapabilityRegistration,
 } from '../../../lib/capabilities/engine';
 import {
@@ -119,24 +129,20 @@ async function loadUser(
     .where(eq(users.id, userId))
     .limit(1);
   if (row === undefined) return null;
-  const [roleRows, facilityRows] = await Promise.all([
-    database
-      .select({ role: userRoles.role })
-      .from(userRoles)
-      .where(eq(userRoles.userId, userId))
-      .orderBy(asc(userRoles.role)),
-    database
-      .select({ facilityId: userFacilityScopes.facilityId })
-      .from(userFacilityScopes)
-      .where(eq(userFacilityScopes.userId, userId))
-      .orderBy(asc(userFacilityScopes.facilityId)),
-  ]);
+  // Aurora Data API rejects concurrent statements that share a transaction
+  // ID, so every read on this capability transaction is deliberately serial.
+  const roles = await loadEffectiveRoles(database, userId);
+  const facilityRows = await database
+    .select({ facilityId: userFacilityScopes.facilityId })
+    .from(userFacilityScopes)
+    .where(eq(userFacilityScopes.userId, userId))
+    .orderBy(asc(userFacilityScopes.facilityId));
   return UserSchema.parse({
     id: row.id,
     googleSubject: row.googleSubject,
     email: row.email,
     displayName: row.displayName,
-    roles: roleRows.map(({ role }) => role),
+    roles,
     facilityScope:
       row.facilityScopeKind === 'district'
         ? { kind: 'district' }
@@ -186,15 +192,14 @@ async function listUsers(
     .offset(offset)
     .limit(input.limit + 1);
   const selected = rows.slice(0, input.limit);
-  const items = await Promise.all(
-    selected.map(async ({ id }) => {
-      const user = await loadUser(database, id);
-      if (user === null) {
-        throw conflict('A listed user could not be reloaded.');
-      }
-      return user;
-    }),
-  );
+  const items: User[] = [];
+  for (const { id } of selected) {
+    const user = await loadUser(database, id);
+    if (user === null) {
+      throw conflict('A listed user could not be reloaded.');
+    }
+    items.push(user);
+  }
   const hasMore = rows.length > input.limit;
   return UserPageSchema.parse({
     items,
@@ -209,8 +214,13 @@ async function setUserRoles(
   database: AdminQueryDatabase,
   inputValue: CapabilityInput<'set-user-roles'>,
   actor: Actor,
+  requestId: string,
+  readOccurredAt: () => Promise<Date>,
 ): Promise<User> {
   const input = SetUserRolesInputSchema.parse(inputValue);
+  await database.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended('psd-eoc-effective-admin-role', 0))`,
+  );
   const [lockedUser] = await database
     .select({ id: users.id })
     .from(users)
@@ -224,29 +234,53 @@ async function setUserRoles(
   if (current.disabledAt !== null) {
     throw conflict('Roles cannot be changed for a disabled account.');
   }
+  if (actor.kind !== 'human') {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'A human administrator is required to change roles.',
+      403,
+    );
+  }
+  const effectiveAdministratorIds =
+    await loadEffectiveAdministratorUserIds(database);
+  if (!effectiveAdministratorIds.includes(actor.userId)) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'The administrator role changed before this request could commit.',
+      403,
+    );
+  }
   if (
-    actor.kind === 'human' &&
-    actor.userId === input.userId &&
-    !input.roles.includes('admin')
+    current.roles.includes('admin') &&
+    !input.roles.includes('admin') &&
+    effectiveAdministratorIds.includes(input.userId) &&
+    effectiveAdministratorIds.length <= 1
   ) {
-    throw conflict('An administrator cannot remove their own admin role.');
+    throw conflict('The final effective administrator cannot be removed.');
   }
   const removedRoles = current.roles.filter(
     (role) => !input.roles.includes(role),
   );
-  if (removedRoles.length > 0) {
-    throw conflict(
-      'Existing role grants are retained by the append-only schema and cannot be removed from this administration surface.',
-    );
-  }
   const addedRoles = input.roles.filter(
     (role) => !current.roles.includes(role),
   );
-  if (addedRoles.length > 0) {
-    await database
-      .insert(userRoles)
-      .values(addedRoles.map((role) => ({ userId: input.userId, role })))
-      .onConflictDoNothing();
+  const changes = [
+    ...removedRoles.map((role) => ({ role, granted: false })),
+    ...addedRoles.map((role) => ({ role, granted: true })),
+  ];
+  if (changes.length > 0) {
+    const occurredAt = await readOccurredAt();
+    await database.insert(userRoleChanges).values(
+      changes.map(({ role, granted }) => ({
+        userId: input.userId,
+        role,
+        granted,
+        changedByUserId: actor.userId,
+        changedWithSessionId: actor.sessionId,
+        requestId,
+        occurredAt,
+      })),
+    );
   }
   const updated = await loadUser(database, input.userId);
   if (updated === null)
@@ -269,8 +303,15 @@ export const setUserRolesRegistration: ServerCapabilityRegistration<
 > = {
   id: 'set-user-roles',
   resolveFacilityId: (_input, context) => guard(context),
-  handler: (input, context) =>
-    setUserRoles(context.transaction.database, input, context.invocation.actor),
+  async handler(input, context) {
+    return setUserRoles(
+      context.transaction.database,
+      input,
+      context.invocation.actor,
+      context.invocation.requestId,
+      () => readCapabilityTime(context),
+    );
+  },
   resultReference: userResultReference,
   async loadReplay(reference, context) {
     const parsed = parseUserResultReference(reference);
