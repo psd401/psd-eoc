@@ -1,0 +1,486 @@
+import { describe, expect, test } from 'bun:test';
+
+import {
+  CAPABILITY_CATALOG,
+  EventSchema,
+  type AgentGrantableCapabilityId,
+  type FacilityScope,
+} from '@psd-eoc/contracts';
+
+import type { EventTypeStore } from '../capabilities/event-types';
+import {
+  executeEventCapability,
+  type EventCapabilityRuntime,
+  type EventCapabilityStore,
+  type EventCapabilityTransaction,
+} from '../capabilities/events';
+import type { CapabilityAuditEvent } from '../capabilities/engine';
+import type { JournalCapabilityRuntime } from '../capabilities/journal';
+import { AGENT_DEPLOYED_CAPABILITY_IDS } from './availability';
+import {
+  createDefaultAgentCapabilityDispatcher,
+  type DefaultAgentCapabilityDispatcherDependencies,
+} from './dispatcher';
+import type { AuthenticatedAgentApiKey } from './keys';
+
+const IDS = Object.freeze({
+  agent: '00000000-0000-4000-8000-000000000301',
+  apiKey: '00000000-0000-4000-8000-000000000302',
+  issuer: '00000000-0000-4000-8000-000000000303',
+  facility: '00000000-0000-4000-8000-000000000304',
+  request: '00000000-0000-4000-8000-000000000305',
+});
+
+class StubEventTypeStore implements EventTypeStore {
+  public listCalls = 0;
+
+  public constructor(private readonly failure: Error | null = null) {}
+
+  public async list(): ReturnType<EventTypeStore['list']> {
+    this.listCalls += 1;
+    if (this.failure !== null) throw this.failure;
+    return { items: [], pageInfo: { hasMore: false, nextCursor: null } };
+  }
+
+  public readonly getVersion: EventTypeStore['getVersion'] = async () => {
+    throw new Error('Unexpected getVersion call.');
+  };
+
+  public readonly getDraft: EventTypeStore['getDraft'] = async () => {
+    throw new Error('Unexpected getDraft call.');
+  };
+
+  public readonly createDraft: EventTypeStore['createDraft'] = async () => {
+    throw new Error('Unexpected createDraft call.');
+  };
+
+  public readonly updateDraft: EventTypeStore['updateDraft'] = async () => {
+    throw new Error('Unexpected updateDraft call.');
+  };
+
+  public readonly publishVersion: EventTypeStore['publishVersion'] =
+    async () => {
+      throw new Error('Unexpected publishVersion call.');
+    };
+}
+
+function authenticatedAgent(
+  facilityScope: FacilityScope,
+  capabilityIds: readonly AgentGrantableCapabilityId[],
+): AuthenticatedAgentApiKey {
+  return Object.freeze({
+    actor: {
+      kind: 'agent' as const,
+      agentId: IDS.agent,
+      apiKeyId: IDS.apiKey,
+    },
+    scope: { facilityScope },
+    capabilityIds,
+    key: {
+      id: IDS.apiKey,
+      agentId: IDS.agent,
+      displayName: 'Synthetic dispatcher routing agent',
+      facilityScope,
+      capabilityIds,
+      keyPrefix: 'abcdefghijkl',
+      issuedByUserId: IDS.issuer,
+      issuedAt: '2026-08-10T18:00:00.000Z',
+      expiresAt: null,
+      revokedAt: null,
+    },
+  });
+}
+
+function dispatcher(eventTypes: EventTypeStore) {
+  const unavailableDependency = undefined as never;
+  const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
+    events: unavailableDependency,
+    journal: unavailableDependency,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
+    eventTypes,
+    preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
+    securityAudit: unavailableDependency,
+  };
+  return createDefaultAgentCapabilityDispatcher(dependencies);
+}
+
+function dispatcherWithEvents(events: EventCapabilityRuntime) {
+  const unavailableDependency = undefined as never;
+  const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
+    events,
+    journal: unavailableDependency,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
+    eventTypes: new StubEventTypeStore(),
+    preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
+    securityAudit: unavailableDependency,
+  };
+  return createDefaultAgentCapabilityDispatcher(dependencies);
+}
+
+function dispatcherWithJournal(journal: JournalCapabilityRuntime) {
+  const unavailableDependency = undefined as never;
+  const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
+    events: unavailableDependency,
+    journal,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
+    eventTypes: new StubEventTypeStore(),
+    preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
+    securityAudit: unavailableDependency,
+  };
+  return createDefaultAgentCapabilityDispatcher(dependencies);
+}
+
+function invocation(authenticated: AuthenticatedAgentApiKey) {
+  return {
+    actor: authenticated.actor,
+    source: 'agent-rest' as const,
+    scope: authenticated.scope,
+    requestId: IDS.request,
+    serverTime: new Date('2026-08-10T18:01:00.000Z'),
+    connectivityEpochId: null,
+    mutation: null,
+  };
+}
+
+function mutationInvocation(authenticated: AuthenticatedAgentApiKey) {
+  return {
+    ...invocation(authenticated),
+    mutation: {
+      idempotencyKey: 'synthetic-close-event-request',
+      transport: {
+        kind: 'agent-rest-command' as const,
+        method: 'POST' as const,
+      },
+      humanConfirmationId: null,
+    },
+  };
+}
+
+describe('default agent dispatcher routing', () => {
+  test('keeps every deployed mutation on canonical atomic audit ownership', () => {
+    const subject = dispatcher(new StubEventTypeStore());
+    const deployedMutations = AGENT_DEPLOYED_CAPABILITY_IDS.filter(
+      (capabilityId) =>
+        CAPABILITY_CATALOG[capabilityId].operation === 'mutation',
+    );
+
+    expect(deployedMutations.length).toBeGreaterThan(0);
+    expect(
+      deployedMutations.map((capabilityId) => ({
+        capabilityId,
+        auditOwnership: subject.auditOwnership(capabilityId),
+      })),
+    ).toEqual(
+      deployedMutations.map((capabilityId) => ({
+        capabilityId,
+        auditOwnership: 'canonical',
+      })),
+    );
+  });
+
+  test('preserves the canonical close denial without a side-door pre-read', async () => {
+    const calls: Array<{
+      capabilityId: string;
+      invocation: ReturnType<typeof mutationInvocation>;
+    }> = [];
+    const events = {
+      async execute(
+        capabilityId: string,
+        _input: unknown,
+        callInvocation: never,
+      ) {
+        calls.push({
+          capabilityId,
+          invocation: callInvocation as ReturnType<typeof mutationInvocation>,
+        });
+        throw Object.assign(new Error('Canonical staff close denial.'), {
+          code: 'FORBIDDEN',
+          reasonCode: 'HUMAN_ONLY_REQUIRED',
+          status: 403,
+        });
+      },
+    } as unknown as EventCapabilityRuntime;
+    const authenticated = authenticatedAgent({ kind: 'district' }, [
+      'close-event',
+    ]);
+    const closeInvocation = mutationInvocation(authenticated);
+
+    await expect(
+      dispatcherWithEvents(events).execute(
+        'close-event',
+        { eventId: IDS.request },
+        closeInvocation,
+        authenticated,
+      ),
+    ).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'HUMAN_ONLY_REQUIRED',
+      status: 403,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      capabilityId: 'close-event',
+      invocation: {
+        actor: authenticated.actor,
+        scope: authenticated.scope,
+        mutation: closeInvocation.mutation,
+        requestId: closeInvocation.requestId,
+      },
+    });
+  });
+
+  test('allows a synthetic close to continue through the canonical mutation', async () => {
+    const calls: string[] = [];
+    const expected = { synthetic: 'close-result' };
+    const events = {
+      async execute(capabilityId: string) {
+        calls.push(capabilityId);
+        return expected;
+      },
+    } as unknown as EventCapabilityRuntime;
+    const authenticated = authenticatedAgent({ kind: 'district' }, [
+      'close-event',
+    ]);
+
+    await expect(
+      dispatcherWithEvents(events).execute(
+        'close-event',
+        { eventId: IDS.request },
+        mutationInvocation(authenticated),
+        authenticated,
+      ),
+    ).resolves.toBe(expected);
+    expect(calls).toEqual(['close-event']);
+  });
+
+  test('lets the real engine deny and audit an agent closing a staff drill', async () => {
+    const event = EventSchema.parse({
+      id: IDS.request,
+      facilityId: IDS.facility,
+      kind: 'drill',
+      templateMode: 'drill',
+      eventTypeVersion: { id: IDS.issuer, templateMode: 'drill' },
+      status: 'all-clear',
+      rosterSnapshotId: IDS.agent,
+      rosterPopulation: 'staff',
+      createdBy: {
+        kind: 'human',
+        userId: IDS.issuer,
+        sessionId: IDS.apiKey,
+      },
+      createdAt: '2026-08-10T17:00:00.000Z',
+      activatedAt: '2026-08-10T17:01:00.000Z',
+      allClearAt: '2026-08-10T17:02:00.000Z',
+      reactivatedAt: null,
+      closedAt: null,
+      correctionOfEventId: null,
+      correctionReason: null,
+      activationAuthorization: {
+        kind: 'human-confirmed',
+        activationPreviewId: IDS.apiKey,
+        preparedActivationId: null,
+        confirmationId: IDS.agent,
+        consequenceDigest: 'a'.repeat(64),
+        requestId: IDS.issuer,
+      },
+    });
+    const audits: CapabilityAuditEvent[] = [];
+    let persistLifecycleCalls = 0;
+    const transaction = {
+      async claimIdempotency() {
+        return { kind: 'new' as const, recordId: IDS.apiKey };
+      },
+      async resolveEventFacilityId(eventId: string) {
+        return eventId === event.id ? event.facilityId : null;
+      },
+      async resolveEventForUpdate(eventId: string) {
+        return eventId === event.id
+          ? { event, nextTransitionSequence: 3, nextJournalSequence: 3 }
+          : null;
+      },
+      async persistLifecycle() {
+        persistLifecycleCalls += 1;
+      },
+    } as unknown as EventCapabilityTransaction;
+    const store: EventCapabilityStore = {
+      async transaction<Result>(
+        operation: (transaction: EventCapabilityTransaction) => Promise<Result>,
+      ) {
+        return operation(transaction);
+      },
+      async appendCapabilityAudit(audit) {
+        audits.push(audit);
+      },
+    };
+    const events = {
+      store,
+      execute: (capabilityId, input, callInvocation) =>
+        executeEventCapability(capabilityId, input, callInvocation, store),
+      async close() {},
+    } satisfies EventCapabilityRuntime;
+    const authenticated = authenticatedAgent({ kind: 'district' }, [
+      'close-event',
+    ]);
+    const callInvocation = mutationInvocation(authenticated);
+
+    await expect(
+      dispatcherWithEvents(events).execute(
+        'close-event',
+        { eventId: event.id },
+        callInvocation,
+        authenticated,
+      ),
+    ).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'HUMAN_ONLY_REQUIRED',
+      status: 403,
+    });
+    expect(audits).toEqual([
+      expect.objectContaining({
+        action: 'close-event',
+        actionIds: [],
+        actor: authenticated.actor,
+        category: 'access-denial',
+        facilityId: IDS.facility,
+        outcome: 'denied',
+        reasonCode: 'HUMAN_ONLY_REQUIRED',
+        requestId: callInvocation.requestId,
+      }),
+    ]);
+    expect(persistLifecycleCalls).toBe(0);
+  });
+
+  test('routes an implemented query through its canonical capability', async () => {
+    const eventTypes = new StubEventTypeStore();
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['list-event-types'],
+    );
+
+    const result = await dispatcher(eventTypes).execute(
+      'list-event-types',
+      { templateMode: null, enabled: true, cursor: null, limit: 25 },
+      invocation(authenticated),
+      authenticated,
+    );
+
+    expect(result).toEqual({
+      items: [],
+      pageInfo: { hasMore: false, nextCursor: null },
+    });
+    expect(eventTypes.listCalls).toBe(1);
+  });
+
+  test('routes a current-main journal query through its canonical runtime', async () => {
+    const calls: Array<{
+      capabilityId: string;
+      input: unknown;
+      invocation: ReturnType<typeof invocation>;
+    }> = [];
+    const expected = {
+      items: [],
+      pageInfo: { hasMore: false, nextCursor: null },
+    };
+    const journal = {
+      async execute(
+        capabilityId: string,
+        input: unknown,
+        callInvocation: never,
+      ) {
+        calls.push({
+          capabilityId,
+          input,
+          invocation: callInvocation as ReturnType<typeof invocation>,
+        });
+        return expected;
+      },
+    } as unknown as JournalCapabilityRuntime;
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['list-journal-entries'],
+    );
+    const callInvocation = invocation(authenticated);
+    const input = { eventId: IDS.request, cursor: null, limit: 25 };
+
+    await expect(
+      dispatcherWithJournal(journal).execute(
+        'list-journal-entries',
+        input,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expected);
+    expect(calls).toEqual([
+      {
+        capabilityId: 'list-journal-entries',
+        input,
+        invocation: callInvocation,
+      },
+    ]);
+  });
+
+  test('preserves the authenticated scope for canonical authorization', async () => {
+    const eventTypes = new StubEventTypeStore();
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['list-event-types'],
+    );
+
+    await expect(
+      dispatcher(eventTypes).execute(
+        'list-event-types',
+        { templateMode: null, enabled: null, cursor: null, limit: 25 },
+        invocation(authenticated),
+        authenticated,
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+
+    expect(eventTypes.listCalls).toBe(0);
+  });
+
+  test('does not convert an implementation failure into a successful result', async () => {
+    const eventTypes = new StubEventTypeStore(
+      new Error('Synthetic persistence failure.'),
+    );
+    const authenticated = authenticatedAgent({ kind: 'district' }, [
+      'list-event-types',
+    ]);
+
+    await expect(
+      dispatcher(eventTypes).execute(
+        'list-event-types',
+        { templateMode: null, enabled: true, cursor: null, limit: 25 },
+        invocation(authenticated),
+        authenticated,
+      ),
+    ).rejects.toThrow('Synthetic persistence failure.');
+  });
+
+  test('fails closed with 503 when a catalog capability is not deployed', async () => {
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['search-journal-entries'],
+    );
+
+    await expect(
+      dispatcher(new StubEventTypeStore()).execute(
+        'search-journal-entries',
+        {},
+        invocation(authenticated),
+        authenticated,
+      ),
+    ).rejects.toMatchObject({
+      capabilityId: 'search-journal-entries',
+      code: 'INTERNAL_ERROR',
+      status: 503,
+      retryable: false,
+    });
+  });
+});
