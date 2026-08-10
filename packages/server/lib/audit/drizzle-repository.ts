@@ -26,11 +26,16 @@ import {
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
-import { securityAuditEntries } from '../../db/schema';
+import {
+  securityAuditChainAnchors,
+  securityAuditEntries,
+} from '../../db/schema';
 import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/access-gate';
 import {
   calculateCanonicalSecurityAuditDigest,
+  calculateSecurityAuditHash,
   canonicalSecurityAuditJson,
+  securityAuditHashPayload,
 } from './canonical';
 import { buildSecurityAuditEntry } from './entry';
 import {
@@ -40,11 +45,14 @@ import {
 } from './model';
 import {
   SecurityAuditCursorError,
+  SecurityAuditIntegrityError,
   SecurityAuditRequestConflictError,
   SecurityAuditScopeError,
+  type SecurityAuditChainAnchor,
   type SecurityAuditChainPage,
   type SecurityAuditChainPageInput,
   type SecurityAuditRepository,
+  type SecurityAuditVerificationStore,
 } from './repository';
 
 /** Same PostgreSQL transaction lock used by the existing sign-in writer. */
@@ -79,7 +87,51 @@ const rowSelection = {
   occurredAt: securityAuditEntries.occurredAt,
 } as const;
 
+const anchorSelection = {
+  sequence: securityAuditChainAnchors.sequence,
+  entryHash: securityAuditChainAnchors.entryHash,
+} as const;
+
 type SecurityAuditRow = typeof securityAuditEntries.$inferSelect;
+
+function parseChainAnchor(value: unknown): SecurityAuditChainAnchor {
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError('Security audit chain anchor is malformed.');
+  }
+  const sequence = Reflect.get(value, 'sequence');
+  if (!Number.isSafeInteger(sequence) || Number(sequence) < 1) {
+    throw new TypeError('Security audit chain anchor sequence is malformed.');
+  }
+  return Object.freeze({
+    sequence: Number(sequence),
+    entryHash: SecurityAuditHashSchema.parse(Reflect.get(value, 'entryHash')),
+  });
+}
+
+function validateChainPageInput(input: SecurityAuditChainPageInput): void {
+  if (
+    !Number.isSafeInteger(input.afterSequence) ||
+    input.afterSequence < 0 ||
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 200
+  ) {
+    throw new TypeError('Security audit verification page is invalid.');
+  }
+}
+
+function firstAnchorMismatchSequence(
+  anchor: SecurityAuditChainAnchor | null,
+  head: Pick<SecurityAuditEntry, 'sequence' | 'entryHash'> | null,
+): number | null {
+  if (anchor === null && head === null) return null;
+  if (anchor === null) return 1;
+  if (head === null) return 1;
+  if (anchor.sequence !== head.sequence) {
+    return Math.min(anchor.sequence, head.sequence) + 1;
+  }
+  return anchor.entryHash === head.entryHash ? null : anchor.sequence;
+}
 
 function rowToEntry(row: SecurityAuditRow): SecurityAuditEntry {
   if (
@@ -115,6 +167,17 @@ function rowToEntry(row: SecurityAuditRow): SecurityAuditEntry {
     occurredAt: row.occurredAt.toISOString(),
   });
   parseSecurityAuditFact(securityAuditFactFromEntry(entry));
+  return entry;
+}
+
+function rowToVerifiedEntry(row: SecurityAuditRow): SecurityAuditEntry {
+  const entry = rowToEntry(row);
+  if (
+    calculateSecurityAuditHash(securityAuditHashPayload(entry)) !==
+    entry.entryHash
+  ) {
+    throw new SecurityAuditIntegrityError(entry.sequence);
+  }
   return entry;
 }
 
@@ -154,6 +217,43 @@ function rowToVerificationCandidate(row: SecurityAuditRow): unknown {
     };
   }
   return candidate;
+}
+
+function chainPageFromRows(
+  anchorValues: readonly unknown[],
+  rows: readonly SecurityAuditRow[],
+  input: SecurityAuditChainPageInput,
+): SecurityAuditChainPage {
+  const visibleAnchors = anchorValues
+    .slice(0, input.limit)
+    .map(parseChainAnchor);
+  const rowsBySequence = new Map(rows.map((row) => [row.sequence, row]));
+  let expectedSequence = input.afterSequence + 1;
+  let firstAnchorMismatchSequence: number | null = null;
+  const visibleRows: SecurityAuditRow[] = [];
+
+  for (const anchor of visibleAnchors) {
+    if (
+      firstAnchorMismatchSequence === null &&
+      anchor.sequence !== expectedSequence
+    ) {
+      firstAnchorMismatchSequence = expectedSequence;
+    }
+    const row = rowsBySequence.get(anchor.sequence);
+    if (row === undefined || row.entryHash !== anchor.entryHash) {
+      firstAnchorMismatchSequence ??= anchor.sequence;
+    } else {
+      visibleRows.push(row);
+    }
+    expectedSequence = anchor.sequence + 1;
+  }
+
+  return Object.freeze({
+    entries: Object.freeze(visibleRows.map(rowToVerificationCandidate)),
+    lastSequence: visibleAnchors.at(-1)?.sequence ?? null,
+    hasMore: anchorValues.length > input.limit,
+    firstAnchorMismatchSequence,
+  });
 }
 
 /** Maps a validated entry to the sole permitted database mutation: INSERT. */
@@ -318,11 +418,34 @@ export function createDrizzleSecurityAuditRepository(
       return database.transaction(async (transaction) => {
         await transaction.execute(SECURITY_AUDIT_APPEND_LOCK_SQL);
 
+        const anchorRows = await transaction
+          .select(anchorSelection)
+          .from(securityAuditChainAnchors)
+          .orderBy(desc(securityAuditChainAnchors.sequence))
+          .limit(1)
+          .for('share');
+        const anchor =
+          anchorRows[0] === undefined ? null : parseChainAnchor(anchorRows[0]);
+
+        const headRows = await transaction
+          .select(rowSelection)
+          .from(securityAuditEntries)
+          .orderBy(desc(securityAuditEntries.sequence))
+          .limit(1)
+          .for('share');
+        const head =
+          headRows[0] === undefined ? null : rowToVerifiedEntry(headRows[0]);
+        const mismatchSequence = firstAnchorMismatchSequence(anchor, head);
+        if (mismatchSequence !== null) {
+          throw new SecurityAuditIntegrityError(mismatchSequence);
+        }
+
         const existingRows = await transaction
           .select(rowSelection)
           .from(securityAuditEntries)
           .where(eq(securityAuditEntries.requestId, fact.requestId))
-          .limit(1);
+          .limit(1)
+          .for('share');
         const existingRow = existingRows[0];
         if (existingRow !== undefined) {
           const existing = rowToEntry(existingRow);
@@ -335,15 +458,7 @@ export function createDrizzleSecurityAuditRepository(
           throw new SecurityAuditRequestConflictError();
         }
 
-        const previousRows = await transaction
-          .select({
-            sequence: securityAuditEntries.sequence,
-            entryHash: securityAuditEntries.entryHash,
-          })
-          .from(securityAuditEntries)
-          .orderBy(desc(securityAuditEntries.sequence))
-          .limit(1);
-        const entry = buildSecurityAuditEntry(fact, previousRows[0] ?? null);
+        const entry = buildSecurityAuditEntry(fact, anchor);
         await transaction
           .insert(securityAuditEntries)
           .values(toSecurityAuditInsertValues(entry));
@@ -382,38 +497,193 @@ export function createDrizzleSecurityAuditRepository(
       });
     },
 
+    async readChainAnchor(throughSequence: number | null) {
+      const rows = await database
+        .select(anchorSelection)
+        .from(securityAuditChainAnchors)
+        .where(
+          throughSequence === null
+            ? undefined
+            : eq(securityAuditChainAnchors.sequence, throughSequence),
+        )
+        .orderBy(desc(securityAuditChainAnchors.sequence))
+        .limit(1);
+      return rows[0] === undefined ? null : parseChainAnchor(rows[0]);
+    },
+
     async readChainPage(
       input: SecurityAuditChainPageInput,
     ): Promise<SecurityAuditChainPage> {
-      if (
-        !Number.isSafeInteger(input.afterSequence) ||
-        input.afterSequence < 0 ||
-        !Number.isSafeInteger(input.limit) ||
-        input.limit < 1 ||
-        input.limit > 200
-      ) {
-        throw new TypeError('Security audit verification page is invalid.');
-      }
+      validateChainPageInput(input);
       const conditions = [
-        gt(securityAuditEntries.sequence, input.afterSequence),
+        gt(securityAuditChainAnchors.sequence, input.afterSequence),
       ];
       if (input.throughSequence !== null) {
         conditions.push(
-          lte(securityAuditEntries.sequence, input.throughSequence),
+          lte(securityAuditChainAnchors.sequence, input.throughSequence),
         );
       }
-      const rows = await database
-        .select(rowSelection)
-        .from(securityAuditEntries)
+      const anchorRows = await database
+        .select(anchorSelection)
+        .from(securityAuditChainAnchors)
         .where(and(...conditions))
-        .orderBy(asc(securityAuditEntries.sequence))
+        .orderBy(asc(securityAuditChainAnchors.sequence))
         .limit(input.limit + 1);
-      const visibleRows = rows.slice(0, input.limit);
-      return Object.freeze({
-        entries: Object.freeze(visibleRows.map(rowToVerificationCandidate)),
-        lastSequence: visibleRows.at(-1)?.sequence ?? null,
-        hasMore: rows.length > input.limit,
-      });
+      const visibleSequences = anchorRows
+        .slice(0, input.limit)
+        .map((anchor) => anchor.sequence);
+      const rows =
+        visibleSequences.length === 0
+          ? []
+          : await database
+              .select(rowSelection)
+              .from(securityAuditEntries)
+              .where(inArray(securityAuditEntries.sequence, visibleSequences))
+              .orderBy(asc(securityAuditEntries.sequence));
+      return chainPageFromRows(anchorRows, rows, input);
+    },
+
+    async runVerificationSession<T>(
+      operation: (store: SecurityAuditVerificationStore) => Promise<T>,
+    ): Promise<T> {
+      return database.transaction(
+        async (transaction) => {
+          const store: SecurityAuditVerificationStore = Object.freeze({
+            async append(factValue: SecurityAuditFact | unknown) {
+              const fact = parseSecurityAuditFact(factValue);
+              if (
+                fact.category !== 'audit-query' ||
+                fact.action !== 'verify-security-audit-chain' ||
+                (fact.outcome !== 'success' && fact.outcome !== 'failure')
+              ) {
+                throw new TypeError(
+                  'Only a verification result may append in this transaction.',
+                );
+              }
+
+              await transaction.execute(SECURITY_AUDIT_APPEND_LOCK_SQL);
+
+              const anchorRows = await transaction
+                .select(anchorSelection)
+                .from(securityAuditChainAnchors)
+                .orderBy(desc(securityAuditChainAnchors.sequence))
+                .limit(1)
+                .for('share');
+              const anchor =
+                anchorRows[0] === undefined
+                  ? null
+                  : parseChainAnchor(anchorRows[0]);
+              const headRows = await transaction
+                .select(rowSelection)
+                .from(securityAuditEntries)
+                .orderBy(desc(securityAuditEntries.sequence))
+                .limit(1)
+                .for('share');
+              const head =
+                headRows[0] === undefined
+                  ? null
+                  : fact.outcome === 'success'
+                    ? rowToVerifiedEntry(headRows[0])
+                    : headRows[0];
+              const mismatchSequence = firstAnchorMismatchSequence(
+                anchor,
+                head,
+              );
+              if (fact.outcome === 'success' && mismatchSequence !== null) {
+                throw new SecurityAuditIntegrityError(mismatchSequence);
+              }
+              if (anchor === null && head !== null) {
+                throw new SecurityAuditIntegrityError(1);
+              }
+
+              const existingRows = await transaction
+                .select(rowSelection)
+                .from(securityAuditEntries)
+                .where(eq(securityAuditEntries.requestId, fact.requestId))
+                .limit(1)
+                .for('share');
+              const existingRow = existingRows[0];
+              if (existingRow !== undefined) {
+                const existing = rowToEntry(existingRow);
+                if (
+                  canonicalSecurityAuditJson(
+                    securityAuditFactFromEntry(existing),
+                  ) === canonicalSecurityAuditJson(fact)
+                ) {
+                  return existing;
+                }
+                throw new SecurityAuditRequestConflictError();
+              }
+
+              const entry = buildSecurityAuditEntry(fact, anchor);
+              await transaction
+                .insert(securityAuditEntries)
+                .values(toSecurityAuditInsertValues(entry));
+              return entry;
+            },
+
+            async readChainAnchor(throughSequence: number | null) {
+              const rows = await transaction
+                .select(anchorSelection)
+                .from(securityAuditChainAnchors)
+                .where(
+                  throughSequence === null
+                    ? undefined
+                    : eq(securityAuditChainAnchors.sequence, throughSequence),
+                )
+                .orderBy(desc(securityAuditChainAnchors.sequence))
+                .limit(1)
+                .for('share');
+              return rows[0] === undefined ? null : parseChainAnchor(rows[0]);
+            },
+
+            async readChainPage(
+              input: SecurityAuditChainPageInput,
+            ): Promise<SecurityAuditChainPage> {
+              validateChainPageInput(input);
+              const conditions = [
+                gt(securityAuditChainAnchors.sequence, input.afterSequence),
+              ];
+              if (input.throughSequence !== null) {
+                conditions.push(
+                  lte(
+                    securityAuditChainAnchors.sequence,
+                    input.throughSequence,
+                  ),
+                );
+              }
+              const anchorRows = await transaction
+                .select(anchorSelection)
+                .from(securityAuditChainAnchors)
+                .where(and(...conditions))
+                .orderBy(asc(securityAuditChainAnchors.sequence))
+                .limit(input.limit + 1)
+                .for('share');
+              const visibleSequences = anchorRows
+                .slice(0, input.limit)
+                .map((anchor) => anchor.sequence);
+              const rows =
+                visibleSequences.length === 0
+                  ? []
+                  : await transaction
+                      .select(rowSelection)
+                      .from(securityAuditEntries)
+                      .where(
+                        inArray(
+                          securityAuditEntries.sequence,
+                          visibleSequences,
+                        ),
+                      )
+                      .orderBy(asc(securityAuditEntries.sequence))
+                      .for('share');
+              return chainPageFromRows(anchorRows, rows, input);
+            },
+          });
+
+          return operation(store);
+        },
+        { isolationLevel: 'read committed' },
+      );
     },
   });
 }

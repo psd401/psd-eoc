@@ -24,10 +24,14 @@ import {
 import { parseSecurityAuditFact, type SecurityAuditFact } from './model';
 import {
   SecurityAuditCursorError,
+  SecurityAuditIntegrityError,
   SecurityAuditScopeError,
   type SecurityAuditRepository,
 } from './repository';
-import { SecurityAuditChainVerifier } from './verification';
+import {
+  SecurityAuditChainVerifier,
+  invalidSecurityAuditVerification,
+} from './verification';
 
 const VERIFICATION_PAGE_SIZE = 200;
 
@@ -286,30 +290,101 @@ export class SecurityAuditService {
       'verify-security-audit-chain',
       contextValue,
     );
-    let verification: SecurityAuditVerification;
     try {
-      const verifier = new SecurityAuditChainVerifier(input);
-      let afterSequence = verifier.afterSequence();
-      for (;;) {
-        const page = await this.repository.readChainPage({
-          afterSequence,
-          throughSequence: input.throughSequence,
-          limit: VERIFICATION_PAGE_SIZE,
+      return await this.repository.runVerificationSession(async (store) => {
+        const persistedAnchor = await store.readChainAnchor(
+          input.throughSequence,
+        );
+        const effectiveThroughSequence =
+          input.throughSequence ?? persistedAnchor?.sequence ?? null;
+        const verifier = new SecurityAuditChainVerifier({
+          fromSequence: input.fromSequence,
+          throughSequence: effectiveThroughSequence,
         });
-        const failure = verifier.add(page.entries);
-        if (failure !== null) {
-          verification = failure;
-          break;
+        let verification: SecurityAuditVerification;
+        let afterSequence = verifier.afterSequence();
+        const capturedEmptyChain =
+          input.throughSequence === null && persistedAnchor === null;
+        for (;;) {
+          if (capturedEmptyChain) {
+            verification = verifier.finish();
+            break;
+          }
+          const page = await store.readChainPage({
+            afterSequence,
+            throughSequence: effectiveThroughSequence,
+            limit: VERIFICATION_PAGE_SIZE,
+          });
+          if (page.firstAnchorMismatchSequence !== null) {
+            verification = invalidSecurityAuditVerification(
+              page.firstAnchorMismatchSequence,
+            );
+            break;
+          }
+          const failure = verifier.add(page.entries);
+          if (failure !== null) {
+            verification = failure;
+            break;
+          }
+          if (!page.hasMore) {
+            verification = verifier.finish();
+            break;
+          }
+          if (
+            page.lastSequence === null ||
+            page.lastSequence <= afterSequence
+          ) {
+            throw new TypeError('Security audit verification did not advance.');
+          }
+          afterSequence = page.lastSequence;
         }
-        if (!page.hasMore) {
-          verification = verifier.finish();
-          break;
+
+        if (verification.valid) {
+          const verifiedAnchor = verifier.verifiedAnchor();
+          if (persistedAnchor === null) {
+            if (verifiedAnchor !== null || input.throughSequence !== null) {
+              verification = invalidSecurityAuditVerification(
+                input.throughSequence ?? verifiedAnchor?.sequence ?? 1,
+              );
+            }
+          } else if (
+            verifiedAnchor === null ||
+            verifiedAnchor.sequence !== persistedAnchor.sequence ||
+            verifiedAnchor.entryHash !== persistedAnchor.entryHash
+          ) {
+            verification = invalidSecurityAuditVerification(
+              persistedAnchor.sequence,
+            );
+          }
         }
-        if (page.lastSequence === null || page.lastSequence <= afterSequence) {
-          throw new TypeError('Security audit verification did not advance.');
+
+        const appendResult = (result: SecurityAuditVerification) =>
+          store.append(
+            queryAuditFact(
+              context,
+              'verify-security-audit-chain',
+              result.valid ? 'success' : 'failure',
+              result.valid ? null : 'AUDIT_CHAIN_INVALID',
+              null,
+            ),
+          );
+
+        try {
+          await appendResult(verification);
+        } catch (error) {
+          if (
+            !(error instanceof SecurityAuditIntegrityError) ||
+            !verification.valid
+          ) {
+            throw error;
+          }
+          verification = invalidSecurityAuditVerification(
+            error.firstInvalidSequence,
+          );
+          await appendResult(verification);
         }
-        afterSequence = page.lastSequence;
-      }
+        return verification;
+      });
     } catch (error) {
       await this.repository.append(
         queryAuditFact(
@@ -322,16 +397,5 @@ export class SecurityAuditService {
       );
       throw error;
     }
-
-    await this.repository.append(
-      queryAuditFact(
-        context,
-        'verify-security-audit-chain',
-        verification.valid ? 'success' : 'failure',
-        verification.valid ? null : 'AUDIT_CHAIN_INVALID',
-        null,
-      ),
-    );
-    return verification;
   }
 }

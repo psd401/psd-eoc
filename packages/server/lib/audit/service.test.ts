@@ -13,13 +13,25 @@ import {
   executeQuerySecurityAuditCapability,
   executeVerifySecurityAuditChainCapability,
 } from './capabilities';
+import {
+  calculateSecurityAuditHash,
+  canonicalSecurityAuditJson,
+  securityAuditHashPayload,
+} from './canonical';
 import { buildSecurityAuditEntry } from './entry';
-import { parseSecurityAuditFact, type SecurityAuditFact } from './model';
+import {
+  parseSecurityAuditFact,
+  securityAuditFactFromEntry,
+  type SecurityAuditFact,
+} from './model';
 import {
   SecurityAuditCursorError,
+  SecurityAuditIntegrityError,
+  type SecurityAuditChainAnchor,
   type SecurityAuditChainPage,
   type SecurityAuditChainPageInput,
   type SecurityAuditRepository,
+  type SecurityAuditVerificationStore,
 } from './repository';
 import {
   SecurityAuditService,
@@ -51,19 +63,56 @@ const BASE_QUERY = SecurityAuditQuerySchema.parse({
 
 class MemoryAuditRepository implements SecurityAuditRepository {
   public readonly entries: SecurityAuditEntry[] = [];
+  public readonly anchors: SecurityAuditChainAnchor[] = [];
   public queryCalls = 0;
   public readChainCalls = 0;
+  public verificationSessionReadCallsAtAppend: number | null = null;
+  public onReadChainPage: (() => Promise<void>) | null = null;
+  public onVerificationAppend: (() => Promise<void>) | null = null;
   public queryError: Error | null = null;
 
-  public async append(factValue: SecurityAuditFact | unknown) {
+  private async appendFromAnchor(
+    factValue: SecurityAuditFact | unknown,
+    allowDamagedChain: boolean,
+  ) {
     const fact = parseSecurityAuditFact(factValue);
+    const anchor = this.anchors.at(-1) ?? null;
+    const head = this.entries.at(-1) ?? null;
+    if (
+      (!allowDamagedChain || fact.outcome === 'success') &&
+      ((anchor === null) !== (head === null) ||
+        (anchor !== null &&
+          head !== null &&
+          (anchor.sequence !== head.sequence ||
+            anchor.entryHash !== head.entryHash)))
+    ) {
+      throw new SecurityAuditIntegrityError(
+        Math.min(anchor?.sequence ?? 1, head?.sequence ?? 1),
+      );
+    }
     const existing = this.entries.find(
       (entry) => entry.requestId === fact.requestId,
     );
-    if (existing !== undefined) return existing;
-    const entry = buildSecurityAuditEntry(fact, this.entries.at(-1) ?? null);
+    if (existing !== undefined) {
+      if (
+        canonicalSecurityAuditJson(securityAuditFactFromEntry(existing)) ===
+        canonicalSecurityAuditJson(fact)
+      ) {
+        return existing;
+      }
+      throw new TypeError('Synthetic security audit request conflicts.');
+    }
+    const entry = buildSecurityAuditEntry(fact, anchor);
     this.entries.push(entry);
+    this.anchors.push({
+      sequence: entry.sequence,
+      entryHash: entry.entryHash,
+    });
     return entry;
+  }
+
+  public append(factValue: SecurityAuditFact | unknown) {
+    return this.appendFromAnchor(factValue, false);
   }
 
   public async query(
@@ -96,21 +145,78 @@ class MemoryAuditRepository implements SecurityAuditRepository {
     });
   }
 
-  public readChainPage(
+  public async readChainPage(
     input: SecurityAuditChainPageInput,
   ): Promise<SecurityAuditChainPage> {
     this.readChainCalls += 1;
-    const candidates = this.entries.filter(
-      (entry) =>
-        entry.sequence > input.afterSequence &&
+    if (this.onReadChainPage !== null) {
+      const hook = this.onReadChainPage;
+      this.onReadChainPage = null;
+      await hook();
+    }
+    const candidates = this.anchors.filter(
+      (anchor) =>
+        anchor.sequence > input.afterSequence &&
         (input.throughSequence === null ||
-          entry.sequence <= input.throughSequence),
+          anchor.sequence <= input.throughSequence),
     );
-    const entries = candidates.slice(0, input.limit);
-    return Promise.resolve({
+    const visibleAnchors = candidates.slice(0, input.limit);
+    const entries: SecurityAuditEntry[] = [];
+    let expectedSequence = input.afterSequence + 1;
+    let firstAnchorMismatchSequence: number | null = null;
+    for (const anchor of visibleAnchors) {
+      if (
+        firstAnchorMismatchSequence === null &&
+        anchor.sequence !== expectedSequence
+      ) {
+        firstAnchorMismatchSequence = expectedSequence;
+      }
+      const entry = this.entries.find(
+        (candidate) => candidate.sequence === anchor.sequence,
+      );
+      if (entry === undefined || entry.entryHash !== anchor.entryHash) {
+        firstAnchorMismatchSequence ??= anchor.sequence;
+      } else {
+        entries.push(entry);
+      }
+      expectedSequence = anchor.sequence + 1;
+    }
+    return {
       entries,
-      lastSequence: entries.at(-1)?.sequence ?? null,
+      lastSequence: visibleAnchors.at(-1)?.sequence ?? null,
       hasMore: candidates.length > input.limit,
+      firstAnchorMismatchSequence,
+    };
+  }
+
+  public readChainAnchor(
+    throughSequence: number | null,
+  ): Promise<SecurityAuditChainAnchor | null> {
+    const anchor =
+      throughSequence === null
+        ? (this.anchors.at(-1) ?? null)
+        : (this.anchors.find(
+            (candidate) => candidate.sequence === throughSequence,
+          ) ?? null);
+    return Promise.resolve(anchor);
+  }
+
+  public runVerificationSession<T>(
+    operation: (store: SecurityAuditVerificationStore) => Promise<T>,
+  ): Promise<T> {
+    return operation({
+      append: async (fact) => {
+        if (this.onVerificationAppend !== null) {
+          const hook = this.onVerificationAppend;
+          this.onVerificationAppend = null;
+          await hook();
+        }
+        this.verificationSessionReadCallsAtAppend = this.readChainCalls;
+        return this.appendFromAnchor(fact, true);
+      },
+      readChainAnchor: (throughSequence) =>
+        this.readChainAnchor(throughSequence),
+      readChainPage: (input) => this.readChainPage(input),
     });
   }
 
@@ -122,6 +228,10 @@ class MemoryAuditRepository implements SecurityAuditRepository {
     if (entry !== undefined) {
       this.entries[index] = { ...entry, action: 'get-event' };
     }
+  }
+
+  public deleteTailWithoutAnchor(): void {
+    this.entries.pop();
   }
 }
 
@@ -371,6 +481,204 @@ describe('security audit capabilities', () => {
     });
   });
 
+  test('detects a tail deleted before the scheduled verification starts', async () => {
+    const repository = new MemoryAuditRepository();
+    await seed(repository);
+    const deletedTail = repository.entries.at(-1);
+    if (deletedTail === undefined)
+      throw new Error('Synthetic tail is missing.');
+    repository.deleteTailWithoutAnchor();
+
+    const result = await runSecurityAuditVerificationJob({
+      service: new SecurityAuditService(repository),
+      requestId: '00000000-0000-4000-8000-000000000530',
+    });
+
+    expect(result).toEqual({
+      valid: false,
+      firstInvalidSequence: deletedTail.sequence,
+    });
+    expect(
+      repository.entries.some(
+        (entry) => entry.sequence === deletedTail.sequence,
+      ),
+    ).toBe(false);
+    expect(repository.entries.at(-1)).toMatchObject({
+      sequence: deletedTail.sequence + 1,
+      previousHash: deletedTail.entryHash,
+      action: 'verify-security-audit-chain',
+      outcome: 'failure',
+      reasonCode: 'AUDIT_CHAIN_INVALID',
+    });
+    expect(repository.anchors.at(-1)?.sequence).toBe(deletedTail.sequence + 1);
+  });
+
+  test('does not let an idempotent append hide a missing anchored tail', async () => {
+    const repository = new MemoryAuditRepository();
+    await seed(repository);
+    const existing = repository.entries[0];
+    if (existing === undefined) throw new Error('Synthetic entry is missing.');
+    repository.deleteTailWithoutAnchor();
+
+    await expect(
+      repository.append(securityAuditFactFromEntry(existing)),
+    ).rejects.toBeInstanceOf(SecurityAuditIntegrityError);
+    expect(repository.entries).toHaveLength(2);
+    expect(repository.anchors).toHaveLength(3);
+  });
+
+  test('rejects a hash-consistent rewritten tail that disagrees with its anchor', async () => {
+    const repository = new MemoryAuditRepository();
+    await seed(repository);
+    const originalTail = repository.entries.at(-1);
+    if (originalTail === undefined)
+      throw new Error('Synthetic tail is missing.');
+    const rewrittenPayload = {
+      ...originalTail,
+      facilityId: FACILITY_A,
+    };
+    repository.entries[repository.entries.length - 1] = {
+      ...rewrittenPayload,
+      entryHash: calculateSecurityAuditHash(
+        securityAuditHashPayload(rewrittenPayload),
+      ),
+    };
+
+    const result = await runSecurityAuditVerificationJob({
+      service: new SecurityAuditService(repository),
+      requestId: '00000000-0000-4000-8000-000000000531',
+    });
+
+    expect(result).toEqual({
+      valid: false,
+      firstInvalidSequence: originalTail.sequence,
+    });
+    expect(repository.entries.at(-1)).toMatchObject({
+      sequence: originalTail.sequence + 1,
+      previousHash: originalTail.entryHash,
+      outcome: 'failure',
+      reasonCode: 'AUDIT_CHAIN_INVALID',
+    });
+  });
+
+  test('reports the first anchor mismatch in a coherently rewritten suffix', async () => {
+    const repository = new MemoryAuditRepository();
+    await seed(repository);
+    const first = repository.entries[0];
+    const second = repository.entries[1];
+    const third = repository.entries[2];
+    if (first === undefined || second === undefined || third === undefined) {
+      throw new Error('Synthetic audit chain is incomplete.');
+    }
+    const rewrittenSecondPayload = {
+      ...second,
+      occurredAt: '2026-08-08T13:00:01.000Z',
+    };
+    const rewrittenSecond = {
+      ...rewrittenSecondPayload,
+      entryHash: calculateSecurityAuditHash(
+        securityAuditHashPayload(rewrittenSecondPayload),
+      ),
+    };
+    const rewrittenThirdPayload = {
+      ...third,
+      previousHash: rewrittenSecond.entryHash,
+    };
+    repository.entries[1] = rewrittenSecond;
+    repository.entries[2] = {
+      ...rewrittenThirdPayload,
+      entryHash: calculateSecurityAuditHash(
+        securityAuditHashPayload(rewrittenThirdPayload),
+      ),
+    };
+
+    const result = await runSecurityAuditVerificationJob({
+      service: new SecurityAuditService(repository),
+      requestId: '00000000-0000-4000-8000-000000000532',
+    });
+
+    expect(result).toEqual({ valid: false, firstInvalidSequence: 2 });
+    expect(repository.entries.at(-1)).toMatchObject({
+      sequence: 4,
+      previousHash: third.entryHash,
+      outcome: 'failure',
+      reasonCode: 'AUDIT_CHAIN_INVALID',
+    });
+  });
+
+  test('does not hold the append critical section while scanning', async () => {
+    const repository = new MemoryAuditRepository();
+    await seed(repository);
+    let concurrentEntry: SecurityAuditEntry | undefined;
+    repository.onReadChainPage = async () => {
+      concurrentEntry = await repository.append({
+        category: 'agent-access',
+        action: 'list-facilities',
+        actionIds: [],
+        confirmationId: null,
+        outcome: 'success',
+        principal: { kind: 'system', serviceId: 'concurrent-audit-writer' },
+        source: 'scheduled-job',
+        facilityId: null,
+        target: { kind: 'capability', id: 'list-facilities' },
+        requestId: '00000000-0000-4000-8000-000000000533',
+        reasonCode: null,
+        occurredAt: OCCURRED_AT,
+      });
+    };
+
+    const result = await runSecurityAuditVerificationJob({
+      service: new SecurityAuditService(repository),
+      requestId: '00000000-0000-4000-8000-000000000534',
+    });
+
+    expect(result).toEqual({ valid: true, verifiedThroughSequence: 3 });
+    expect(concurrentEntry).toMatchObject({ sequence: 4 });
+    expect(repository.verificationSessionReadCallsAtAppend).toBe(1);
+    expect(repository.entries.at(-1)).toMatchObject({
+      sequence: 5,
+      previousHash: concurrentEntry?.entryHash,
+      action: 'verify-security-audit-chain',
+      outcome: 'success',
+    });
+  });
+
+  test('keeps an empty captured boundary stable across a concurrent genesis append', async () => {
+    const repository = new MemoryAuditRepository();
+    let genesisEntry: SecurityAuditEntry | undefined;
+    repository.onVerificationAppend = async () => {
+      genesisEntry = await repository.append({
+        category: 'agent-access',
+        action: 'list-facilities',
+        actionIds: [],
+        confirmationId: null,
+        outcome: 'success',
+        principal: { kind: 'system', serviceId: 'concurrent-genesis-writer' },
+        source: 'scheduled-job',
+        facilityId: null,
+        target: { kind: 'capability', id: 'list-facilities' },
+        requestId: '00000000-0000-4000-8000-000000000535',
+        reasonCode: null,
+        occurredAt: OCCURRED_AT,
+      });
+    };
+
+    const result = await runSecurityAuditVerificationJob({
+      service: new SecurityAuditService(repository),
+      requestId: '00000000-0000-4000-8000-000000000536',
+    });
+
+    expect(result).toEqual({ valid: true, verifiedThroughSequence: 0 });
+    expect(repository.readChainCalls).toBe(0);
+    expect(genesisEntry).toMatchObject({ sequence: 1, previousHash: null });
+    expect(repository.entries.at(-1)).toMatchObject({
+      sequence: 2,
+      previousHash: genesisEntry?.entryHash,
+      action: 'verify-security-audit-chain',
+      outcome: 'success',
+    });
+  });
+
   test('verifies long chains through bounded repository pages', async () => {
     const repository = new MemoryAuditRepository();
     for (let index = 1; index <= 205; index += 1) {
@@ -397,6 +705,7 @@ describe('security audit capabilities', () => {
 
     expect(result).toEqual({ valid: true, verifiedThroughSequence: 205 });
     expect(repository.readChainCalls).toBe(2);
+    expect(repository.verificationSessionReadCallsAtAppend).toBe(2);
     expect(repository.entries.at(-1)).toMatchObject({
       sequence: 206,
       action: 'verify-security-audit-chain',
