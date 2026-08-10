@@ -2397,18 +2397,28 @@ describe('Groups least-privilege contracts', () => {
   test('redacts a network exception that contains the group URL', async () => {
     const privateUrl =
       'https://cloudidentity.googleapis.com/v1/groups:lookup?groupKey.id=eoc-test-staff%40psd401.net';
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
     let message = '';
+    delete process.env.XDG_CONFIG_HOME;
     try {
-      await redactedFetch(
-        async () => {
-          throw new Error(privateUrl);
-        },
-        privateUrl,
-        { method: 'GET' },
-        'Cloud Identity group lookup',
-      );
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      try {
+        await redactedFetch(
+          async () => {
+            throw new Error(privateUrl);
+          },
+          privateUrl,
+          { method: 'GET' },
+          'Cloud Identity group lookup',
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
     }
     expect(message).toBe('Cloud Identity group lookup could not reach Google.');
     expect(message).not.toContain('eoc-test-staff');
