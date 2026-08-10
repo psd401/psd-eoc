@@ -189,6 +189,27 @@ test.beforeEach(async ({ context }) => {
   await installAxe(context);
 });
 
+test('unauthenticated deep links preserve each exact validated start-flow return target', async ({
+  context,
+  page,
+}) => {
+  await context.clearCookies();
+  const targets = [
+    `/start?facilityId=${PLAYWRIGHT_IDS.mismatchedFacility}&mode=real`,
+    `/start/confirm?facilityId=${PLAYWRIGHT_IDS.mismatchedFacility}&mode=drill&eventTypeVersionId=${PLAYWRIGHT_IDS.activeEventTypeVersion}`,
+  ] as const;
+
+  for (const target of targets) {
+    await page.goto(target);
+    const login = new URL(page.url());
+    expect(login.pathname).toBe('/login');
+    expect([...login.searchParams.keys()]).toEqual(['reason', 'returnTo']);
+    expect(login.searchParams.getAll('reason')).toEqual(['session-required']);
+    expect(login.searchParams.getAll('returnTo')).toEqual([target]);
+  }
+  await assertAxeClean(page, 'deep-link session redirect');
+});
+
 test('dashboard exposes unmistakable choices, 911, skip navigation, and AA-clean semantics', async ({
   page,
 }) => {

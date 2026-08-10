@@ -3,6 +3,10 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import { eventTypesForMode, loadOperationalViewData } from './_lib/data';
+import {
+  startConfirmationReturnPath,
+  startSelectionReturnPath,
+} from './_lib/return-path';
 import { requirePageSession } from './_lib/session';
 import { Call911Affordance } from './components/call-911-affordance';
 import { ClassificationBanner } from './components/classification-banner';
@@ -31,7 +35,11 @@ export default async function SelectEventTypePage({
     redirect('/');
   }
 
-  const authenticated = await requirePageSession('/start');
+  const returnPath = startSelectionReturnPath({
+    facilityId: facilityResult.data,
+    mode,
+  });
+  const authenticated = await requirePageSession(returnPath);
   const data = await loadOperationalViewData(authenticated);
   const facility = data.facilities.find(
     (candidate) => candidate.id === facilityResult.data,
@@ -78,14 +86,20 @@ export default async function SelectEventTypePage({
         <Link
           aria-current={mode === 'real' ? 'page' : undefined}
           className="mode-switch__real"
-          href={`/start?facilityId=${facility.id}&mode=real`}
+          href={startSelectionReturnPath({
+            facilityId: facility.id,
+            mode: 'real',
+          })}
         >
           <ClassificationIcon mode="real" /> REAL incident
         </Link>
         <Link
           aria-current={mode === 'drill' ? 'page' : undefined}
           className="mode-switch__drill"
-          href={`/start?facilityId=${facility.id}&mode=drill`}
+          href={startSelectionReturnPath({
+            facilityId: facility.id,
+            mode: 'drill',
+          })}
         >
           <ClassificationIcon mode="drill" /> DRILL — training only
         </Link>
@@ -114,7 +128,11 @@ export default async function SelectEventTypePage({
                 className={`choice-card ${
                   mode === 'real' ? 'choice-card--real' : 'choice-card--drill'
                 }`}
-                href={`/start/confirm?facilityId=${facility.id}&mode=${mode}&eventTypeVersionId=${item.latestVersion.id}`}
+                href={startConfirmationReturnPath({
+                  eventTypeVersionId: item.latestVersion.id,
+                  facilityId: facility.id,
+                  mode,
+                })}
                 key={item.eventType.id}
               >
                 <span className="choice-card__icon" aria-hidden="true">

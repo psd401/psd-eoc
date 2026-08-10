@@ -7,10 +7,11 @@ import {
   getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../../lib/auth/sessions';
+import type { StartFlowReturnPath } from './return-path';
 
 /** Resolves a fresh server-side session without any Google dependency. */
 export async function requirePageSession(
-  returnTo: '/' | '/start' | '/start/confirm',
+  returnTo: '/' | StartFlowReturnPath,
 ): Promise<AuthenticatedSession> {
   const token = (await cookies()).get(WEB_SESSION_COOKIE_NAME)?.value;
   if (token === undefined) {
