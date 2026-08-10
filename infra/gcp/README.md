@@ -165,11 +165,14 @@ PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT=assign-groups-reader-to-roster-sync-re
 
 The helper is idempotent, allows only Admin SDK GETs plus the one role-assignment
 POST, and refuses any other direct or indirect administrator role affecting
-that service account. Immediately before the first assignment POST, it rechecks
-both IAM boundaries and requires zero user-managed service-account keys. An
-existing key is treated as unowned: the helper refuses the assignment and never
-deletes it. It requires Super Admin Application Default Credentials with one
-non-Cloud scope:
+that service account. Google has exposed the direct-assignee wire value as both
+`user` and the documented enum spelling `USER`; the helper accepts only those
+two exact values, normalizes them to one direct-user state, and rejects either
+case of `group` plus every malformed value. Immediately before the first
+assignment POST, it rechecks both IAM boundaries and requires zero user-managed
+service-account keys. An existing key is treated as unowned: the helper refuses
+the assignment and never deletes it. It requires Super Admin Application
+Default Credentials with one non-Cloud scope:
 `https://www.googleapis.com/auth/admin.directory.rolemanagement`. The login
 also retains `openid`, `userinfo.email`, and `cloud-platform` so gcloud can
 verify the fixed administrator identity and run the other guarded checks. The
@@ -265,11 +268,17 @@ Google key. Enter it only with explicit product-owner approval.
 Provisioning verifies the Terraform output, the exact allowlisted live project
 IAM policy, an empty IAM policy on the roster-reader resource, AWS account
 `338414773271`, the exact live direct/indirect Workspace role state, and absence
-of any existing user-managed key. It repeats both IAM checks immediately before
-reporting success. Before writing, it requires the secret's
-fixed account/Region ARN and ownership tags, AWS-managed encryption, no pending
-deletion, automatic rotation, replica, external owner, or resource policy; a
-new placeholder is read back against the same contract. It creates
+of any existing user-managed key. Because the consequence prompt has no time
+limit, it repeats the active Google/ADC identity, Terraform/live account,
+Workspace role, both GCP IAM policies, zero-key, AWS caller, and secret-policy
+checks after confirmation before creating the key. It rechecks Google
+authorization and the exact sole key immediately before storage, repeats the
+AWS boundary before every idempotent secret-write and reconciliation attempt,
+and repeats both remote boundaries after exact readback before reporting
+success. Before writing, it requires the secret's fixed account/Region ARN and
+ownership tags, AWS-managed encryption, no pending deletion, automatic
+rotation, replica, external owner, or resource policy; a new placeholder is
+read back against the same contract. It creates
 `/psd-eoc/google-groups` when absent, writes one key directly to an idempotent
 Secrets Manager version, and captures gcloud's supported stdout output so the
 private key is never written to a local file. A failed AWS write deletes only
@@ -409,8 +418,11 @@ Complete the supported console path in project `psd401-eoc`:
    iOS client IDs. It refuses files inside this repository.
    After validation it presents a consequence preview and requires the exact
    phrase `store-psd-eoc-google-oauth` before any AWS mutation. Enter it only
-   with explicit product-owner approval. Securely delete both downloads after
-   the helper succeeds.
+   with explicit product-owner approval. After that unbounded prompt, it
+   re-reads the Terraform project identity and revalidates the AWS caller plus
+   complete secret contract. It repeats the AWS check immediately before every
+   idempotent write/reconciliation attempt and around exact readback. Securely
+   delete both downloads after the helper succeeds.
 
 7. Create **Android** client `PSD EOC Android` with package `net.psd401.eoc`
    only after issue #40/EAS supplies the release signing certificate SHA-1. Do
