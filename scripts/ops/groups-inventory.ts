@@ -383,18 +383,37 @@ const COMPACT_WORD_BOUNDARIES = [
   'team',
 ] as const;
 
+const isCompactBoundarySequence = (value: string): boolean => {
+  if (value === '') return true;
+  const reachable = new Set([0]);
+  for (let offset = 0; offset < value.length; offset += 1) {
+    if (!reachable.has(offset)) continue;
+    for (const boundary of COMPACT_WORD_BOUNDARIES) {
+      if (value.startsWith(boundary, offset)) {
+        reachable.add(offset + boundary.length);
+      }
+    }
+  }
+  return reachable.has(value.length);
+};
+
 const hasBoundedCompactPopulationMarker = (token: string): boolean =>
-  COMPACT_NON_STAFF_MARKERS.some(
-    (marker) =>
-      token.length > marker.length &&
-      (token.startsWith(marker) ||
-        token.endsWith(marker) ||
-        COMPACT_WORD_BOUNDARIES.some(
-          (boundary) =>
-            token.includes(`${boundary}${marker}`) ||
-            token.includes(`${marker}${boundary}`),
-        )),
-  );
+  COMPACT_NON_STAFF_MARKERS.some((marker) => {
+    if (token.length <= marker.length) return false;
+    let offset = token.indexOf(marker);
+    while (offset >= 0) {
+      const before = token.slice(0, offset);
+      const after = token.slice(offset + marker.length);
+      if (
+        isCompactBoundarySequence(before) &&
+        isCompactBoundarySequence(after)
+      ) {
+        return true;
+      }
+      offset = token.indexOf(marker, offset + 1);
+    }
+    return false;
+  });
 
 const hasNonStaffPopulationMarker = (tokens: readonly string[]): boolean =>
   hasAnyToken(tokens, NON_STAFF_MARKERS) ||
@@ -2574,6 +2593,21 @@ const runSelfTest = async (): Promise<void> => {
       'synthetic.nbe.skidmore.staff@psd401.net',
       'NBE Skidmore Staff',
     ),
+    rawGroup(
+      'synthetic-scholarship-staff',
+      'synthetic.nbe.scholarship.staff@psd401.net',
+      'NBE Scholarship Staff',
+    ),
+    rawGroup(
+      'synthetic-parenting-staff',
+      'synthetic.nbe.parenting.staff@psd401.net',
+      'NBE Parenting Staff',
+    ),
+    rawGroup(
+      'synthetic-staff-kidney',
+      'synthetic.nbe.staffkidney@psd401.net',
+      'NBE Staff Kidney',
+    ),
   ].map((group) => parseCloudGroup(group, parent));
   const legitimateSubstringDraft = buildDraft(
     [facilities[0]!],
@@ -2582,9 +2616,9 @@ const runSelfTest = async (): Promise<void> => {
     generatedAt,
   );
   assertSelfTest(
-    legitimateSubstringDraft.inventoryGroups.length === 3 &&
+    legitimateSubstringDraft.inventoryGroups.length === 6 &&
       legitimateSubstringDraft.report.omittedNonStaffGroupCount === 0,
-    'incidental pta, pto, and kid substrings never hide staff groups',
+    'incidental population-marker substrings never hide staff groups',
   );
 
   const subsetGroup = parseCloudGroup(
