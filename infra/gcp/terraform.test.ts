@@ -22,17 +22,22 @@ import {
   policyHasServiceAccountBinding,
   READONLY_GROUPS_SCOPE,
   ROSTER_READER_EMAIL,
+  selectUserManagedKeyMetadata,
+  validateRevocableUserManagedKeyMetadata,
   validateUserManagedKeyMetadata,
 } from './scripts/groups-contract';
 import {
   cleanupCredentialArtifacts,
   createdKeyIsVisible,
+  parseCreatedCredential,
 } from './scripts/provision-groups-credential';
 import {
   reconcileIdempotentSecretWrite,
   sanitizedAwsEnvironment,
   sanitizedGcloudEnvironment,
   sanitizedTerraformEnvironment,
+  validateAwsSecretMetadata,
+  validateAwsSecretResourcePolicy,
   validateAwsCliHistoryResult,
   validateAwsSsoIdentity,
   validateGcloudConfiguration,
@@ -107,7 +112,7 @@ const validBucket = {
     rule: [
       {
         action: { type: 'Delete' },
-        condition: { age: 90, isLive: false },
+        condition: { daysSinceNoncurrentTime: 90, isLive: false },
       },
     ],
   },
@@ -156,10 +161,15 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
   });
 
   test('does not place an object-retention lock on Terraform lock files', () => {
-    expect(read('main.tf')).not.toContain('retention_policy');
-    expect(read('bootstrap/main.tf')).not.toContain('retention_policy');
-    expect(read('main.tf')).toContain('versioning');
-    expect(read('bootstrap/main.tf')).toContain('versioning');
+    for (const path of ['main.tf', 'bootstrap/main.tf']) {
+      const terraform = read(path);
+      expect(terraform).not.toContain('retention_policy');
+      expect(terraform).toContain('versioning');
+      expect(terraform).toContain('days_since_noncurrent_time = 90');
+      expect(terraform).toContain('send_age_if_zero           = false');
+      expect(terraform).toContain('with_state                 = "ARCHIVED"');
+      expect(terraform).not.toMatch(/^\s*age\s+=/mu);
+    }
   });
 
   test('enables the fixed identity API allow-list without disabling APIs', () => {
@@ -215,6 +225,39 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     expect(roleHelper.match(/method: 'POST'/gu)).toHaveLength(1);
     expect(roleHelper).not.toMatch(/method: '(?:DELETE|PATCH|PUT)'/u);
     expect(verifier).not.toContain('sub:');
+  });
+
+  test('documents the roster runtime mismatch as a fail-closed blocker', () => {
+    const readme = read('README.md');
+    const normalizedReadme = readme.replace(/\s+/gu, ' ');
+
+    for (const evidence of [
+      'admin.directory.group.member.readonly',
+      'GOOGLE_ROSTER_DELEGATED_SUBJECT',
+      '/psd-eoc/google-groups',
+      'https://github.com/psd401/psd-eoc/issues/68',
+      'end-to-end Google Groups roster integration',
+      'is `blocked`',
+      'Do not add domain-wide delegation',
+      'does not prove that the application can sync a roster',
+    ]) {
+      expect(normalizedReadme).toContain(evidence);
+    }
+    expect(readme).toContain('gcloud auth application-default revoke --quiet');
+    expect(readme).toContain(
+      '--scopes=openid,https://www.googleapis.com/auth/userinfo.email',
+    );
+    expect(readme).not.toContain(
+      'Google Groups moves to `configured-unverified` only after',
+    );
+    expect(readme).not.toContain('Re-enable roster sync only after it passes.');
+    for (const oidcEvidence of [
+      'https://github.com/psd401/psd-eoc/issues/69',
+      'Google OIDC is `blocked`, not `configured-unverified`',
+      'exact wiring and readback support `configured-unverified`',
+    ]) {
+      expect(normalizedReadme).toContain(oidcEvidence);
+    }
   });
 
   test('makes only read-only Groups calls and requests no member fields', () => {
@@ -379,6 +422,23 @@ describe('fail-closed bootstrap and process behavior', () => {
         validBucketPolicy,
       ),
     ).toThrow('private, versioned');
+    for (const condition of [
+      { age: 90, isLive: false },
+      { daysSinceNoncurrentTime: 89, isLive: false },
+      { age: 90, daysSinceNoncurrentTime: 90, isLive: false },
+    ]) {
+      expect(() =>
+        validateStateBucket(
+          {
+            ...validBucket,
+            lifecycle_config: {
+              rule: [{ action: { type: 'Delete' }, condition }],
+            },
+          },
+          validBucketPolicy,
+        ),
+      ).toThrow('private, versioned');
+    }
     expect(() =>
       validateStateBucket(validBucket, {
         bindings: [
@@ -396,6 +456,7 @@ describe('fail-closed bootstrap and process behavior', () => {
       CLOUDSDK_CONFIG: '/tmp/wrong-gcloud',
       GOOGLE_APPLICATION_CREDENTIALS: '/tmp/wrong.json',
       GOOGLE_BACKEND_ACCESS_TOKEN: 'wrong-backend-token',
+      GOOGLE_CLOUD_UNIVERSE_DOMAIN: 'attacker.invalid',
       GOOGLE_STORAGE_CUSTOM_ENDPOINT: 'https://attacker.invalid',
       GOOGLE_OAUTH_ACCESS_TOKEN: 'wrong-token',
       PATH: '/usr/bin',
@@ -422,6 +483,7 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(environment.TF_WORKSPACE).toBeUndefined();
     expect(environment.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
     expect(environment.GOOGLE_BACKEND_ACCESS_TOKEN).toBeUndefined();
+    expect(environment.GOOGLE_CLOUD_UNIVERSE_DOMAIN).toBeUndefined();
     expect(environment.GOOGLE_STORAGE_CUSTOM_ENDPOINT).toBeUndefined();
     expect(environment.GOOGLE_OAUTH_ACCESS_TOKEN).toBeUndefined();
     expect(environment.PSD_EOC_APPROVED_TEST_GROUP).toBeUndefined();
@@ -436,6 +498,7 @@ describe('fail-closed bootstrap and process behavior', () => {
       CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE: 'https://attacker.invalid',
       CLOUDSDK_CONFIG: '/tmp/wrong-gcloud',
       GOOGLE_APPLICATION_CREDENTIALS: '/tmp/wrong.json',
+      GOOGLE_CLOUD_UNIVERSE_DOMAIN: 'attacker.invalid',
       PATH: '/usr/bin',
     });
     expect(gcloudEnvironment.PATH).toBe('/usr/bin');
@@ -448,6 +511,7 @@ describe('fail-closed bootstrap and process behavior', () => {
       gcloudEnvironment.CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE,
     ).toBeUndefined();
     expect(gcloudEnvironment.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
+    expect(gcloudEnvironment.GOOGLE_CLOUD_UNIVERSE_DOMAIN).toBeUndefined();
 
     const awsEnvironment = sanitizedAwsEnvironment({
       AWS_ACCESS_KEY_ID: 'wrong-key',
@@ -554,6 +618,77 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(() => validateAwsCliHistoryResult(0, 'enabled\n', '')).toThrow(
       'history must be disabled',
     );
+  });
+
+  test('adopts only local retained AWS secrets with no resource policy', () => {
+    const contract = {
+      expectedAccountId: '<aws-account-id>',
+      region: 'us-west-2',
+      secretName: '/psd-eoc/google-groups',
+    } as const;
+    const arn =
+      'arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/google-groups-a1B2c3';
+    const metadata = {
+      ARN: arn,
+      Name: contract.secretName,
+      RotationEnabled: false,
+      Tags: [
+        { Key: 'Application', Value: 'PSD EOC' },
+        { Key: 'ManagedBy', Value: 'infra/gcp' },
+      ],
+    } as const;
+    expect(() => validateAwsSecretMetadata(metadata, contract)).not.toThrow();
+    expect(() =>
+      validateAwsSecretMetadata(
+        {
+          ...metadata,
+          Tags: [
+            { Key: 'Application', Value: 'PSD EOC' },
+            { Key: 'DataScope', Value: 'staff-minimized' },
+            { Key: 'ManagedBy', Value: 'AWS CDK' },
+          ],
+        },
+        contract,
+      ),
+    ).not.toThrow();
+    for (const invalid of [
+      { ...metadata, DeletedDate: '2026-08-09T00:00:00Z' },
+      { ...metadata, KmsKeyId: 'attacker-controlled-key' },
+      { ...metadata, ReplicationStatus: [{ Region: 'us-east-1' }] },
+      { ...metadata, RotationEnabled: true },
+      { ...metadata, ARN: arn.replace('<aws-account-id>', '000000000000') },
+      { ...metadata, Tags: [] },
+    ]) {
+      expect(() => validateAwsSecretMetadata(invalid, contract)).toThrow();
+    }
+
+    expect(() =>
+      validateAwsSecretResourcePolicy(
+        { ARN: arn, Name: contract.secretName },
+        contract,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateAwsSecretResourcePolicy(
+        {
+          ARN: arn,
+          Name: contract.secretName,
+          ResourcePolicy: '{"Statement":[]}',
+        },
+        contract,
+      ),
+    ).toThrow('no resource-based policy');
+
+    const runtime = read('scripts/runtime.ts');
+    expect(runtime).toContain("'get-resource-policy'");
+    for (const path of [
+      'scripts/provision-groups-credential.ts',
+      'scripts/store-oauth-client.ts',
+    ]) {
+      const helper = read(path);
+      expect(helper.match(/awsSecretExists\(/gu)).toHaveLength(2);
+      expect(helper).toContain('expectedAccountId: AWS_ACCOUNT_ID');
+    }
   });
 
   test('retries an ambiguous secret write and retains unresolved ambiguity', async () => {
@@ -671,6 +806,37 @@ describe('Groups least-privilege contracts', () => {
     ).toThrow('does not match');
   });
 
+  test('keeps a generated Google private key in memory only', () => {
+    const contract = parseGroupsReaderContract(validGroupsOutput);
+    const generated = {
+      client_email: contract.email,
+      client_id: contract.oauthClientId,
+      private_key: '-----BEGIN PRIVATE KEY-----\nsynthetic-only\n',
+      private_key_id: 'a'.repeat(40),
+      project_id: 'psd401-eoc',
+      token_uri: 'https://oauth2.googleapis.com/token',
+      type: 'service_account',
+    };
+    expect(parseCreatedCredential(JSON.stringify(generated), contract)).toEqual(
+      generated,
+    );
+    expect(() =>
+      parseCreatedCredential(
+        JSON.stringify({ ...generated, project_id: 'wrong-project' }),
+        contract,
+      ),
+    ).toThrow('fixed Terraform service-account contract');
+
+    const provisioner = read('scripts/provision-groups-credential.ts');
+    expect(provisioner).toContain("'create',\n        '-'");
+    expect(provisioner).toContain(
+      'await assertExactLiveGroupsReaderRole(contract)',
+    );
+    for (const forbidden of ['tmpdir', 'mkdtemp', 'credential.json']) {
+      expect(provisioner).not.toContain(forbidden);
+    }
+  });
+
   test('enforces the 30-day Google key rotation window', () => {
     const keyId = 'a'.repeat(40);
     const now = Date.parse('2026-08-08T20:00:00.000Z');
@@ -682,9 +848,13 @@ describe('Groups least-privilege contracts', () => {
       validAfterTime: '2026-08-08T19:00:00.000Z',
       validBeforeTime: '9999-12-31T23:59:59.999Z',
     } as const;
-    expect(validateUserManagedKeyMetadata(metadata, keyId, now)).toBe(
-      metadata.validAfterTime,
-    );
+    expect(
+      validateUserManagedKeyMetadata(
+        { ...metadata, disabled: false, extendedStatus: [] },
+        keyId,
+        now,
+      ),
+    ).toBe(metadata.validAfterTime);
     expect(() =>
       validateUserManagedKeyMetadata(
         { ...metadata, validAfterTime: '2026-06-01T00:00:00.000Z' },
@@ -700,6 +870,70 @@ describe('Groups least-privilege contracts', () => {
         false,
       ),
     ).toBe('2026-06-01T00:00:00.000Z');
+    for (const invalid of [
+      { ...metadata, disabled: true },
+      {
+        ...metadata,
+        disableReason: 'SERVICE_ACCOUNT_KEY_DISABLE_REASON_EXPOSED',
+      },
+      {
+        ...metadata,
+        extendedStatus: [
+          { key: 'SERVICE_ACCOUNT_KEY_EXTENDED_STATUS_KEY_EXPOSED' },
+        ],
+      },
+      { ...metadata, name: `${metadata.name}-wrong` },
+      { ...metadata, validAfterTime: 'not-a-date' },
+      { ...metadata, validAfterTime: '2026-08-08T20:06:00.000Z' },
+      {
+        ...metadata,
+        validAfterTime: '2026-08-08T19:00:00.000Z',
+        validBeforeTime: '2026-08-08T18:00:00.000Z',
+      },
+      { ...metadata, validBeforeTime: '2026-08-08T20:00:00.000Z' },
+    ]) {
+      expect(() => validateUserManagedKeyMetadata(invalid, keyId, now)).toThrow(
+        'Google-generated, active',
+      );
+    }
+
+    expect(
+      validateRevocableUserManagedKeyMetadata(
+        {
+          ...metadata,
+          disabled: true,
+          disableReason: 'SERVICE_ACCOUNT_KEY_DISABLE_REASON_EXPOSED',
+          extendedStatus: [
+            { key: 'SERVICE_ACCOUNT_KEY_EXTENDED_STATUS_KEY_EXPOSED' },
+          ],
+          validBeforeTime: '2026-08-08T19:30:00.000Z',
+        },
+        keyId,
+        now,
+      ),
+    ).toBe(metadata.validAfterTime);
+    expect(() =>
+      validateRevocableUserManagedKeyMetadata(
+        { ...metadata, name: `${metadata.name}-wrong` },
+        keyId,
+        now,
+      ),
+    ).toThrow('exact Google-generated user-managed key');
+  });
+
+  test('requires exactly one full user-managed key metadata record', () => {
+    const key = { name: 'synthetic-key' };
+    expect(selectUserManagedKeyMetadata([key])).toBe(key);
+    for (const invalid of [null, {}, [], [key, key], ['not-an-object']]) {
+      expect(() => selectUserManagedKeyMetadata(invalid)).toThrow(
+        'exactly one user-managed',
+      );
+    }
+
+    const contractSource = read('scripts/groups-contract.ts');
+    expect(contractSource).toContain("'--managed-by'");
+    expect(contractSource).toContain("'--format=json'");
+    expect(contractSource).not.toContain("'describe'");
   });
 
   test('detects any live direct project binding', () => {
@@ -754,30 +988,24 @@ describe('Groups least-privilege contracts', () => {
     expect(() => parseUserManagedKeyIds('not-a-key')).toThrow('invalid');
   });
 
-  test('removes the local key even when remote key cleanup fails', async () => {
-    let temporaryDirectoryRemoved = false;
-    const errors = await cleanupCredentialArtifacts({
+  test('retains unknown keys and reports failed bound-key cleanup', () => {
+    const errors = cleanupCredentialArtifacts({
       createdKeyId: 'a'.repeat(40),
       deleteKey: () => {
         throw new Error('synthetic delete failure');
       },
-      removeTemporaryDirectory: async () => {
-        temporaryDirectoryRemoved = true;
-      },
       storageOutcome: 'not-stored',
     });
 
-    expect(temporaryDirectoryRemoved).toBe(true);
     expect(errors).toHaveLength(1);
     expect(String(errors[0])).toContain('could not be deleted');
 
     let remoteDeleteAttempted = false;
-    await cleanupCredentialArtifacts({
+    cleanupCredentialArtifacts({
       createdKeyId: 'a'.repeat(40),
       deleteKey: () => {
         remoteDeleteAttempted = true;
       },
-      removeTemporaryDirectory: async () => {},
       storageOutcome: 'unknown',
     });
     expect(remoteDeleteAttempted).toBe(false);
@@ -789,6 +1017,9 @@ describe('Groups least-privilege contracts', () => {
     expect(revoke).toContain('revoke-psd-eoc-readonly-groups-key');
     expect(revoke.match(/'delete'/gu)).toHaveLength(1);
     expect(revoke).toContain('remainingKeys.size !== 0');
+    expect(revoke).toContain('readRevocableUserManagedKeyCreatedAt');
+    expect(revoke).toContain('issue #68 is undeployed');
+    expect(revoke).not.toContain('before re-enabling roster sync');
     expect(revoke).not.toContain('delete-secret');
     expect(revoke).not.toContain('delete-project');
   });
@@ -808,6 +1039,7 @@ describe('Groups least-privilege contracts', () => {
         [
           {
             assignedTo: validGroupsOutput.oauth_client_id,
+            assigneeType: 'USER',
             condition: '',
             roleAssignmentId: 'assignment-id',
             roleId: role.roleId,
@@ -819,6 +1051,7 @@ describe('Groups least-privilege contracts', () => {
       ),
     ).toEqual({
       assignedTo: validGroupsOutput.oauth_client_id,
+      assigneeType: 'USER',
       roleAssignmentId: 'assignment-id',
       roleId: role.roleId,
       scopeType: 'CUSTOMER',
@@ -828,6 +1061,7 @@ describe('Groups least-privilege contracts', () => {
         [
           {
             assignedTo: validGroupsOutput.oauth_client_id,
+            assigneeType: 'USER',
             roleAssignmentId: 'wrong-assignment',
             roleId: 'writer-role-id',
             scopeType: 'CUSTOMER',
@@ -842,6 +1076,7 @@ describe('Groups least-privilege contracts', () => {
         [
           {
             assignedTo: validGroupsOutput.oauth_client_id,
+            assigneeType: 'USER',
             condition: 'SECURITY_GROUPS',
             roleAssignmentId: 'conditional-assignment',
             roleId: role.roleId,
@@ -852,8 +1087,30 @@ describe('Groups least-privilege contracts', () => {
         role.roleId,
       ),
     ).toThrow('must be unconditional');
-    expect(read('scripts/configure-workspace-role.ts')).toContain(
-      "'X-Goog-User-Project': PROJECT_ID",
+    expect(() =>
+      findExactAssignment(
+        [
+          {
+            assignedTo: 'indirect-group-id',
+            assigneeType: 'GROUP',
+            roleAssignmentId: 'indirect-assignment',
+            roleId: role.roleId,
+            scopeType: 'CUSTOMER',
+          },
+        ],
+        validGroupsOutput.oauth_client_id,
+        role.roleId,
+      ),
+    ).toThrow('indirect or group-mediated');
+
+    const roleHelper = read('scripts/configure-workspace-role.ts');
+    expect(roleHelper).toContain("'X-Goog-User-Project': PROJECT_ID");
+    expect(roleHelper).toContain("url.searchParams.set('userKey', userKey)");
+    expect(roleHelper).toContain(
+      "url.searchParams.set('includeIndirectRoleAssignments', 'true')",
+    );
+    expect(read('scripts/verify-groups-readonly.ts')).toContain(
+      'assertExactLiveGroupsReaderRole(contract, fetcher)',
     );
   });
 });

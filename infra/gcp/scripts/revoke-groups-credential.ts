@@ -4,7 +4,7 @@ import {
   normalizeApprovedStaffGroup,
   PROJECT_ID,
   readGroupsReaderContract,
-  readUserManagedKeyCreatedAt,
+  readRevocableUserManagedKeyCreatedAt,
 } from './groups-contract';
 import {
   assertActiveGcloudAccount,
@@ -47,10 +47,9 @@ async function main(): Promise<void> {
       'Rotation requires exactly the one Google key stored in AWS.',
     );
   }
-  const liveCredentialCreatedAt = readUserManagedKeyCreatedAt(
+  const liveCredentialCreatedAt = readRevocableUserManagedKeyCreatedAt(
     contract,
     privateKeyId,
-    false,
   );
   validateStoredCredential(
     credential,
@@ -92,7 +91,7 @@ async function main(): Promise<void> {
     );
   }
   console.log(
-    'PASS: revoked the exact AWS-bound Google key. Provision and live-verify its replacement before re-enabling roster sync; no credential value was printed.',
+    'PASS: revoked the exact AWS-bound Google key. While issue #68 is undeployed, keep this credential disconnected from scheduled roster sync; after #68, require both replacement credential proof and an application-level approved staff-only sync. No credential value was printed.',
   );
 }
 

@@ -28,9 +28,12 @@ Reader** role instead of domain-wide delegation, and the runtime requests only
 Project and service-account deletion are blocked in both the provider and
 Terraform lifecycle. State-bucket destruction is blocked by Terraform
 `prevent_destroy` and `force_destroy=false`. The bucket has uniform access,
-public-access prevention, and versioning; only archived object versions older
-than 90 days expire. It deliberately has no bucket retention policy because the
-GCS backend must delete its short-lived lock object when each operation ends.
+public-access prevention, and versioning; archived object versions become
+eligible for deletion only after 90 days have elapsed since that version became
+noncurrent. Object creation age is not used, and lifecycle execution may occur
+later than the eligibility threshold. The bucket deliberately has no retention
+policy because the GCS backend must delete its short-lived lock object when each
+operation ends.
 
 ## Apply from this machine
 
@@ -39,7 +42,8 @@ a service-account credential for Terraform.
 
 ```sh
 gcloud auth login kjh_admin@psd401.net --force
-gcloud auth application-default login kjh_admin@psd401.net
+gcloud auth application-default login kjh_admin@psd401.net \
+  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform
 aws sso login --profile psd401-prr-prod
 ```
 
@@ -94,10 +98,13 @@ PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT=assign-groups-reader-to-roster-sync-re
 ```
 
 The helper is idempotent, allows only Admin SDK GETs plus the one role-assignment
-POST, and refuses any other administrator role on that service account. It
-requires super-admin Application Default Credentials with exactly
-`https://www.googleapis.com/auth/admin.directory.rolemanagement`. The ordinary
-Cloud-only ADC above does not contain that Workspace scope.
+POST, and refuses any other direct or indirect administrator role affecting
+that service account. It requires Super Admin Application Default Credentials
+with one non-Cloud scope:
+`https://www.googleapis.com/auth/admin.directory.rolemanagement`. The login
+also retains `openid`, `userinfo.email`, and `cloud-platform` so gcloud can
+verify the fixed administrator identity and run the other guarded checks. The
+ordinary Cloud-only ADC above does not contain the Workspace scope.
 
 Google requires a separately authorized OAuth client for non-Cloud ADC scopes.
 If the district already has an approved internal Desktop OAuth client for
@@ -107,12 +114,22 @@ the repository:
 ```sh
 gcloud auth application-default login kjh_admin@psd401.net \
   --client-id-file=/secure/workspace-admin-client.json \
-  --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admin.directory.rolemanagement
+  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/admin.directory.rolemanagement
 ```
 
-Delete the download after authorization. Once the assignment is complete,
-re-run the ordinary Cloud-only ADC login to remove the Workspace scope from the
-long-lived local refresh credential.
+Delete the download after authorization. The live credential verifier below
+rechecks all direct and indirect role assignments, so retain this temporary ADC
+only through that immediate proof. If the proof will not run immediately,
+revoke it now and repeat the scoped authorization immediately before the
+verifier. Supplying the same account to another login is not sufficient because
+gcloud may reuse the existing refresh credential. Explicitly revoke it, then
+restore the ordinary identity/Cloud-only ADC:
+
+```sh
+gcloud auth application-default revoke --quiet
+gcloud auth application-default login kjh_admin@psd401.net \
+  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/cloud-platform
+```
 
 If no approved administrator-tool OAuth client exists, the exact residual
 console fallback is:
@@ -131,6 +148,9 @@ needed to call it as a Super Admin, not an API gap. Direct Groups Reader avoids
 person impersonation and records runtime reads as the service account. The role
 can read groups across the tenant, so the application-side approved staff-group
 allowlist remains mandatory and is checked before every verification request.
+The console fallback alone cannot satisfy the automated live-role recheck: an
+approved administrator-tool OAuth client and temporary role-management ADC are
+still required before the verifier can report PASS.
 
 Workspace exposes no supported API that lists domain-wide delegation grants.
 Before recording a live verification, a Super Admin must therefore open
@@ -160,11 +180,16 @@ Provisioning presents a consequence preview and requires the exact phrase
 Google key. Enter it only with explicit product-owner approval.
 
 Provisioning verifies the Terraform output, live project IAM policy, AWS account
-`<aws-account-id>`, and absence of any existing user-managed key. It creates
+`<aws-account-id>`, the exact live direct/indirect Workspace role state, and absence
+of any existing user-managed key. Before writing, it requires the secret's
+fixed account/Region ARN and ownership tags, AWS-managed encryption, no pending
+deletion, automatic rotation, replica, external owner, or resource policy; a
+new placeholder is read back against the same contract. It creates
 `/psd-eoc/google-groups` when absent, writes one key directly to an idempotent
-Secrets Manager version, and removes its mode-`0700` temporary directory. A
-failed AWS write deletes only the newly identified key; an ambiguous AWS result
-is read back before cleanup, and ambiguous key identity is never deleted.
+Secrets Manager version, and captures gcloud's supported stdout output so the
+private key is never written to a local file. A failed AWS write deletes only
+the newly identified key; an ambiguous AWS result is read back before cleanup,
+and ambiguous key identity is never deleted.
 
 The project-policy check proves only that the service account is not a direct
 member in this project's IAM policy. Google does not expose group-expanded
@@ -177,12 +202,36 @@ describe this narrower check as proof of no effective inherited access.
 The verifier binds the AWS credential back to the exact Terraform project,
 service-account email, numeric client ID, Groups Reader role, one OAuth scope,
 approved group hash, and Google's live key creation timestamp. It rejects a key
-older than 30 days and requires exactly that one user-managed key. It uses a
+older than 30 days and requires exactly that one user-managed key. Using the
+temporary administrator ADC described above, it also queries Workspace role
+assignments by the service-account unique ID with indirect assignments included
+and requires exactly one direct Groups Reader assignment. It then uses a
 service-account JWT with no delegated subject, performs only `groups.lookup`
 and `memberships.list` GETs, requests `fields=nextPageToken` for the membership
 proof, discards the response body, and prints no group, member, token, or
-credential value. A pass proves current read authorization only; it does not
-prove roster freshness or notification delivery.
+credential value.
+
+### Runtime compatibility boundary
+
+The infrastructure contract in this directory is not currently the contract
+consumed by the merged production roster job.
+`packages/server/lib/roster/groups-sync.ts` calls the Admin SDK Directory API
+with `admin.directory.group.member.readonly`, requires
+`GOOGLE_ROSTER_DELEGATED_SUBJECT`, and signs a JWT with a `sub` claim.
+`packages/server/app/api/jobs/roster-sync/route.ts` uses only that adapter,
+while the AWS App Runner stack does not inject `/psd-eoc/google-groups`.
+[Issue #68](https://github.com/psd401/psd-eoc/issues/68) owns replacing that
+path with this non-delegated Cloud Identity contract and wiring the existing
+secret into the runtime.
+
+Until issue #68 is deployed, the end-to-end Google Groups roster integration
+is `blocked`. A pass from the helper in this directory proves only that this
+credential has the exact live Workspace role and can perform the approved
+read-only Cloud Identity calls against the approved test group; it does not
+prove that the application can sync a roster. Do not add domain-wide delegation,
+a delegated subject, or the broader Admin Directory scope as a workaround. Do
+not enable the scheduled roster job with this credential. The application must
+fail closed and retain its last complete, versioned snapshot.
 
 ### Credential rotation and revocation
 
@@ -200,10 +249,14 @@ tenant-wide credentials:
    key, and the group hash before revoking only the exact AWS-bound key.
 3. Run `bun scripts/provision-groups-credential.ts`, review its preview, and
    type `store-psd-eoc-readonly-groups-key` to create and store the replacement.
-4. Run `bun scripts/verify-groups-readonly.ts`. Re-enable roster sync only after
-   it passes. If any step is ambiguous or fails, leave sync paused and reconcile
-   the key list; the helpers retain uncertain keys and never guess which key to
-   delete.
+4. Temporarily authorize the role-management ADC described above, then run
+   `bun scripts/verify-groups-readonly.ts`. While issue #68 remains undeployed,
+   leave this credential disconnected from scheduled roster sync. After #68 is
+   deployed, re-enable sync only after both this credential proof and an
+   application-level approved staff-only sync succeed. Explicitly revoke the
+   role-management ADC and restore the ordinary scopes afterward. If any step
+   is ambiguous or fails, leave sync paused and reconcile the key list; the
+   helpers retain uncertain keys and never guess which key to delete.
 
 The revoked credential remains encrypted in older Secrets Manager versions for
 audit evidence but can no longer mint Google tokens. Never delete or bypass
@@ -245,9 +298,11 @@ Complete the supported console path in project `psd401-eoc`:
    ```
 
    The helper verifies the project, exact origin/callback, bundle ID, and AWS
-   account. It creates `/psd-eoc/google-oauth` when absent and preserves the
-   existing P0.4 secret-schema keys `clientId`/`clientSecret` while adding the
-   public web and iOS client IDs. It refuses files inside this repository.
+   account. It also requires the same local, AWS-managed encrypted, unreplicated,
+   unrotated, policy-free secret contract used for the Groups credential. It
+   creates `/psd-eoc/google-oauth` when absent and preserves the existing P0.4
+   secret-schema keys `clientId`/`clientSecret` while adding the public web and
+   iOS client IDs. It refuses files inside this repository.
    After validation it presents a consequence preview and requires the exact
    phrase `store-psd-eoc-google-oauth` before any AWS mutation. Enter it only
    with explicit product-owner approval. Securely delete both downloads after
@@ -272,18 +327,24 @@ SSO account before every read or write. Before a future first CDK deployment,
 the existing `/psd-eoc/google-oauth` secret must be adopted/imported rather than
 recreated; never delete a live credential to make a deployment pass.
 
-Bare Terraform apply does not advance an integration label. Google Groups moves
-to `configured-unverified` only after the exact Workspace role and AWS
-credential are both present; a successful approved test-group read is required
-for `live-verified`, together with the recorded no-domain-wide-delegation check.
-The ancestor/group-mediated IAM confirmation above is also required. Google
-OIDC moves to `configured-unverified` after the console-created clients
-are validated and stored; only an exercised deployed sign-in supports
-`live-verified`. The current P0.4 CDK injects the whole secret as
-`GOOGLE_OAUTH_CONFIG`, while the server requires separate `GOOGLE_OIDC_*`
-variables. That runtime wiring is outside #39's owned files and must be fixed by
-its owning issue before deployment can prove sign-in. Neither label authorizes
-a notification or provider write.
+Bare Terraform apply does not advance an integration label. The canonical
+Google Groups label remains `mocked` while only synthetic data is connected. If
+the Workspace role and AWS credential are configured before issue #68 is
+deployed, the correct label is `blocked`, not `configured-unverified`, because
+the merged production roster job cannot consume this credential. After #68 is
+deployed, the integration may move to `configured-unverified` only when runtime
+wiring is present and read back. Only an approved staff-only read through the
+deployed roster job supports `live-verified`; the standalone verifier is
+supporting credential evidence, not an end-to-end runtime test. The recorded
+no-domain-wide-delegation and ancestor/group-mediated IAM checks remain required.
+The current P0.4 CDK injects the whole OAuth secret as `GOOGLE_OAUTH_CONFIG`,
+while the server requires separate `GOOGLE_OIDC_*` variables. If the
+console-created clients are validated and stored before
+[issue #69](https://github.com/psd401/psd-eoc/issues/69) fixes that runtime
+wiring, Google OIDC is `blocked`, not `configured-unverified`. After #69 is
+deployed, exact wiring and readback support `configured-unverified`; only an
+approved exercised deployed sign-in supports `live-verified`. Neither label
+authorizes a notification or provider write.
 
 ## Destroy and decommission
 
