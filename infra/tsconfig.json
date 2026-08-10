@@ -4,7 +4,12 @@
     "lib": ["ES2022"],
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "**/*.ts"],
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "../scripts/ops/ses-production-access.ts",
+    "../scripts/ops/ses-verification.ts"
+  ],
   "exclude": ["node_modules"],
   "references": []
 }
