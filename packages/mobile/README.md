@@ -32,8 +32,11 @@ bun run --cwd packages/mobile expo:check
 bun run --cwd packages/mobile prebuild:check
 ```
 
-`prebuild:check` runs `expo prebuild --no-install`. The generated `ios/` and
-`android/` directories are local sanity-check artifacts and are ignored.
+`prebuild:check` runs `expo prebuild --no-install`, then normalizes generated
+iOS JSON so the repository format gate remains usable while native artifacts
+exist. The generated `ios/` and `android/` directories are local sanity-check
+artifacts and are ignored. The platform run commands prepare those artifacts
+through the same path before compiling and launching the app.
 
 ## EAS build profiles
 
@@ -70,3 +73,8 @@ profile, `expo-splash-screen` supplies the generated launch screen, and
 `expo-system-ui` applies the configured platform color scheme.
 `expo-notifications` supplies native notification configuration plus the local
 Android channel API. None of these dependencies enables a live send by itself.
+
+`react-dom` is pinned beside mobile React so Expo resolves a matched 19.2.3
+runtime. The server uses the same exact React pair so Bun cannot make Next and
+the mobile dependency graph load incompatible React copies. The mobile CI job
+builds the server after a frozen install to guard that workspace invariant.
