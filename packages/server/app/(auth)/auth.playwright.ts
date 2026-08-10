@@ -160,14 +160,17 @@ test('mocked Google IdP returns a member to the exact pathname and query', async
     secure: true,
     sameSite: 'Lax',
   });
-  await page
-    .getByRole('link', { name: 'Continue as access-group member' })
-    .click();
-
-  await expect.poll(() => new URL(page.url()).pathname).toBe('/start');
-  expect(`${new URL(page.url()).pathname}${new URL(page.url()).search}`).toBe(
-    returnTo,
-  );
+  const [callbackResponse] = await Promise.all([
+    page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/auth/callback' && response.status() === 303;
+    }),
+    page.getByRole('link', { name: 'Continue as access-group member' }).click(),
+  ]);
+  const callbackLocation = callbackResponse.headers()['location'];
+  expect(callbackLocation).toBeDefined();
+  const returnedUrl = new URL(callbackLocation ?? '/', callbackResponse.url());
+  expect(`${returnedUrl.pathname}${returnedUrl.search}`).toBe(returnTo);
   const cookies = await context.cookies();
   expect(cookies.some((cookie) => cookie.name === RETURN_TO_COOKIE_NAME)).toBe(
     false,
