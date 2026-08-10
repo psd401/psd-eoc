@@ -32,6 +32,7 @@ export default defineConfig({
   reporter: [['line']],
   use: {
     baseURL: `http://localhost:${appPort}`,
+    channel: process.env.CI === 'true' ? 'chrome' : undefined,
     storageState: EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH,
     trace: 'retain-on-failure',
   },

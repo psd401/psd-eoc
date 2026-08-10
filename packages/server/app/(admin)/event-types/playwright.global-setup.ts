@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { IdempotencyPrincipalSchema } from '@psd-eoc/contracts';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -68,16 +68,26 @@ async function prepareAccessEvidence(
   connection: PostgresDatabaseConnection,
 ): Promise<AccessFixture> {
   const database = connection.db;
-  const now = new Date();
-  const syncStartedAt = new Date(now.getTime() - 2_000);
-  const capturedAt = new Date(now.getTime() - 1_000);
-  const [latestSnapshot] = await database
+  const [latestVersionSnapshot] = await database
     .select({ version: accessMembershipSnapshots.version })
     .from(accessMembershipSnapshots)
     .orderBy(desc(accessMembershipSnapshots.version))
     .limit(1);
+  const [latestCapturedSnapshot] = await database
+    .select({ capturedAt: accessMembershipSnapshots.capturedAt })
+    .from(accessMembershipSnapshots)
+    .orderBy(desc(accessMembershipSnapshots.capturedAt))
+    .limit(1);
+  const now = new Date(
+    Math.max(
+      Date.now(),
+      (latestCapturedSnapshot?.capturedAt.getTime() ?? 0) + 3_000,
+    ),
+  );
+  const syncStartedAt = new Date(now.getTime() - 2_000);
+  const capturedAt = new Date(now.getTime() - 1_000);
   const snapshotId = randomUUID();
-  const version = (latestSnapshot?.version ?? 0) + 1;
+  const version = (latestVersionSnapshot?.version ?? 0) + 1;
 
   return database.transaction(async (transaction) => {
     await transaction
@@ -118,22 +128,34 @@ async function prepareAccessEvidence(
       syncStartedAt,
       capturedAt,
     });
-    await transaction.insert(accessMembershipSnapshotGroups).values([
-      {
-        snapshotId,
-        groupSourceId: ACCESS_GROUP_ID,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'expected',
-      },
-      {
-        snapshotId,
-        groupSourceId: ACCESS_GROUP_ID,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'completed',
-      },
-    ]);
+    const activeAccessGroups = await transaction
+      .select({ id: groupSources.id })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.active, true),
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+        ),
+      );
+    await transaction.insert(accessMembershipSnapshotGroups).values(
+      activeAccessGroups.flatMap(({ id }) => [
+        {
+          snapshotId,
+          groupSourceId: id,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'expected' as const,
+        },
+        {
+          snapshotId,
+          groupSourceId: id,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'completed' as const,
+        },
+      ]),
+    );
     await transaction.insert(accessMembershipMembers).values({
       snapshotId,
       userId: MEMBER_USER_ID,
@@ -169,7 +191,9 @@ async function issueSyntheticAdministratorSession(
   connection: PostgresDatabaseConnection,
   fixture: AccessFixture,
 ): Promise<void> {
-  const now = new Date();
+  const now = new Date(
+    Math.max(Date.now(), fixture.capturedAt.getTime() + 1_000),
+  );
   const credential = randomBytes(48).toString('base64url');
   const responseDigest = digest(randomUUID());
   const principal = IdempotencyPrincipalSchema.parse({

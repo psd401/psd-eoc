@@ -14,6 +14,7 @@ import {
 const TEMPLATE_TOKEN_PATTERN = /\{\{(site|eventType|startTime|initiator)\}\}/gu;
 const FORMAT_CHARACTER_PATTERN = /\p{Format}/u;
 const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
+const WHITESPACE_PATTERN = /\s/u;
 const SMS_CONTRACT_MAX_CODE_UNITS = 1_000;
 const SINGLE_PART_GSM_MAX_SEPTETS = 160;
 const SINGLE_PART_UCS2_MAX_CODE_UNITS = 70;
@@ -22,6 +23,57 @@ const SAFE_CONTEXT_FALLBACKS = Object.freeze({
   site: 'Recorded site',
   initiator: 'Recorded initiator',
 });
+
+/**
+ * Exact Unicode 17.0 TR39 MA mappings whose skeleton can contribute to
+ * INCIDENT or DRILL. Three sources must be mapped before NFKC would erase
+ * their confusable identity; every other source is matched after NFKC.
+ *
+ * This is a deliberately closed, renderer-local subset rather than a general
+ * transliterator. It preserves arbitrary Unicode wording while making the two
+ * renderer-owned bracketed markers impossible to imitate with homoglyphs.
+ */
+const RESERVED_MARKER_PRE_NFKC_CONFUSABLE_CODE_POINTS = Object.freeze({
+  C: Object.freeze([0x03f2, 0x03f9]),
+  L: Object.freeze([0x02db, 0x037a, 0xffe8]),
+});
+
+const RESERVED_MARKER_CONFUSABLE_CODE_POINTS = Object.freeze({
+  C: Object.freeze([
+    0x1d04, 0x2ca5, 0x0441, 0x1004, 0x105a, 0xabaf, 0x1043d, 0x1f74c, 0x118e9,
+    0x118f2, 0x2ca4, 0x0421, 0x13df, 0xa4da, 0x102a2, 0x10302, 0x10415, 0x1051c,
+  ]),
+  D: Object.freeze([
+    0x0501, 0x13e7, 0x146f, 0xa4d2, 0x13a0, 0x15de, 0x15ea, 0xa4d3,
+  ]),
+  E: Object.freeze([
+    0x212e, 0xab32, 0x0435, 0x04bd, 0x22ff, 0x0395, 0x0415, 0x2d39, 0x13ac,
+    0xa4f0, 0x118a6, 0x118ae, 0x10286,
+  ]),
+  L: Object.freeze([
+    0x2373, 0x0131, 0x026a, 0x0269, 0x03b9, 0x2c93, 0x0456, 0xa647, 0x0582,
+    0xab75, 0x13a5, 0x118c3, 0x05c0, 0x007c, 0x2223, 0x23fd, 0x0031, 0x0661,
+    0x06f1, 0x10320, 0x1e8c7, 0x0049, 0x0196, 0x01c0, 0x0399, 0x2c92, 0x0406,
+    0x04cf, 0x04c0, 0x05d5, 0x05df, 0x0627, 0x07ca, 0x2d4f, 0x16c1, 0xa4f2,
+    0x16f28, 0x1028a, 0x10309, 0x11dda, 0x11de1, 0x16eaa, 0x1d22a, 0x2cd0,
+    0x13de, 0x14aa, 0xa4e1, 0x16f16, 0x118a3, 0x118b2, 0x1041b, 0x10526,
+  ]),
+  LL: Object.freeze([0x2016, 0x2225, 0x01c1, 0x05f0]),
+  N: Object.freeze([0x0578, 0x057c, 0x039d, 0x2c9a, 0xa4e0, 0x10513]),
+  R: Object.freeze([
+    0xab47, 0xab48, 0x1d26, 0x2c85, 0x0433, 0xab81, 0x1d216, 0x01a6, 0x13a1,
+    0x13d2, 0x104b4, 0x1587, 0xa4e3, 0x16f35,
+  ]),
+  T: Object.freeze([
+    0x22a4, 0x27d9, 0x1f768, 0x03a4, 0x2ca6, 0x0422, 0x13a2, 0xa4d4, 0x16f0a,
+    0x118bc, 0x10297, 0x102b1, 0x10315,
+  ]),
+});
+
+const RESERVED_MARKER_SKELETONS = new Set(['LNCLDENT', 'DRLLL']);
+const RESERVED_MARKER_MAX_SOURCE_CODE_POINTS = Math.max(
+  ...[...RESERVED_MARKER_SKELETONS].map((skeleton) => skeleton.length),
+);
 
 const RENDERED_FIELD_LIMITS = Object.freeze({
   pushTitle: 120,
@@ -225,10 +277,90 @@ function containsUnsafeVisibleCodePoint(value: string): boolean {
   });
 }
 
-/** Exact bracketed classification markers remain renderer-owned. */
+function buildReservedMarkerConfusableMap(
+  groups: Readonly<Record<string, readonly number[]>>,
+): ReadonlyMap<number, string> {
+  const map = new Map<number, string>();
+  for (const [skeleton, codePoints] of Object.entries(groups)) {
+    for (const codePoint of codePoints) {
+      map.set(codePoint, skeleton);
+    }
+  }
+  return map;
+}
+
+const RESERVED_MARKER_PRE_NFKC_CONFUSABLE_MAP =
+  buildReservedMarkerConfusableMap(
+    RESERVED_MARKER_PRE_NFKC_CONFUSABLE_CODE_POINTS,
+  );
+const RESERVED_MARKER_CONFUSABLE_MAP = buildReservedMarkerConfusableMap(
+  RESERVED_MARKER_CONFUSABLE_CODE_POINTS,
+);
+
+function canonicalAsciiMarkerLetters(value: string): string {
+  return value
+    .replace(/[a-z]/gu, (character) => character.toLocaleUpperCase('en-US'))
+    .replace(/[IL]/gu, 'L');
+}
+
+function reservedMarkerSkeleton(value: string): string {
+  let protectedValue = '';
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    protectedValue +=
+      codePoint === undefined
+        ? character
+        : (RESERVED_MARKER_PRE_NFKC_CONFUSABLE_MAP.get(codePoint) ?? character);
+  }
+
+  let skeleton = '';
+  for (const character of protectedValue.normalize('NFKC').normalize('NFD')) {
+    if (WHITESPACE_PATTERN.test(character)) {
+      continue;
+    }
+    const codePoint = character.codePointAt(0);
+    skeleton +=
+      codePoint === undefined
+        ? character
+        : (RESERVED_MARKER_CONFUSABLE_MAP.get(codePoint) ?? character);
+  }
+  return canonicalAsciiMarkerLetters(skeleton.normalize('NFD'));
+}
+
+/** Exact or TR39-confusable bracketed classification markers stay owned. */
 function containsReservedRendererMarker(value: string): boolean {
-  const compatible = value.normalize('NFKC');
-  return /\[\s*(?:INCIDENT|DRILL)\s*\]/iu.test(compatible);
+  let bracketCompatible = '';
+  for (const character of value) {
+    const compatible = character.normalize('NFKC');
+    bracketCompatible +=
+      compatible === '[' || compatible === ']' ? compatible : character;
+  }
+  for (let start = 0; start < bracketCompatible.length; start += 1) {
+    if (bracketCompatible[start] !== '[') {
+      continue;
+    }
+    const end = bracketCompatible.indexOf(']', start + 1);
+    if (end < start + 2) {
+      continue;
+    }
+    const candidate = bracketCompatible.slice(start + 1, end);
+    let sourceCodePoints = 0;
+    for (const character of candidate) {
+      if (!WHITESPACE_PATTERN.test(character)) {
+        sourceCodePoints += 1;
+      }
+      if (sourceCodePoints > RESERVED_MARKER_MAX_SOURCE_CODE_POINTS) {
+        break;
+      }
+    }
+    if (sourceCodePoints > RESERVED_MARKER_MAX_SOURCE_CODE_POINTS) {
+      continue;
+    }
+    if (RESERVED_MARKER_SKELETONS.has(reservedMarkerSkeleton(candidate))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function validateConfiguredValue(
@@ -388,11 +520,14 @@ function stripMatchingLegacyLeads(
 function interpolate(
   value: string,
   variables: TemplateRenderVariables,
+  templateMode: TemplateMode,
 ): string {
-  const rendered = value.replace(
-    TEMPLATE_TOKEN_PATTERN,
-    (_token, name: TemplateVariable) => variables[name],
-  );
+  const replaceTokens = (values: TemplateRenderVariables) =>
+    value.replace(
+      TEMPLATE_TOKEN_PATTERN,
+      (_token, name: TemplateVariable) => values[name],
+    );
+  const rendered = replaceTokens(variables);
   if (containsUnsafeVisibleCodePoint(rendered)) {
     throw new TemplateRenderError(
       'RENDERED_MESSAGE_INVALID',
@@ -400,10 +535,25 @@ function interpolate(
     );
   }
   if (containsReservedRendererMarker(rendered)) {
-    throw new TemplateRenderError(
-      'RESERVED_MARKER',
-      'Classification markers [INCIDENT] and [DRILL] are owned by the renderer.',
-    );
+    const recovered = replaceTokens({
+      ...variables,
+      site: SAFE_CONTEXT_FALLBACKS.site,
+      eventType:
+        templateMode === 'real'
+          ? 'Configured response'
+          : 'Configured drill response',
+      initiator: SAFE_CONTEXT_FALLBACKS.initiator,
+    });
+    if (
+      containsUnsafeVisibleCodePoint(recovered) ||
+      containsReservedRendererMarker(recovered)
+    ) {
+      throw new TemplateRenderError(
+        'RESERVED_MARKER',
+        'Classification markers [INCIDENT] and [DRILL] are owned by the renderer.',
+      );
+    }
+    return recovered;
   }
   return rendered;
 }
@@ -418,6 +568,7 @@ function renderEditableInterior(
   return interpolate(
     stripMatchingLegacyLeads(value, templateMode, purpose),
     variables,
+    templateMode,
   );
 }
 

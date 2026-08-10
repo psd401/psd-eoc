@@ -400,6 +400,18 @@ describe('renderer-owned notification frames', () => {
       '[INCIDENT] forged frame',
       '[ drill ] forged frame',
       '［ＤＲＩＬＬ］ compatibility frame',
+      '[INСIDENT] Cyrillic-C frame',
+      '[DRІLL] Cyrillic-I frame',
+      '[ІΝϹІᎠΕΝΤ] cross-script frame',
+      '[ᎠᎡІᏞᏞ] cross-script drill frame',
+      '[іոсіԁеոt] lowercase-source frame',
+      '[ԁгіӏ1] lowercase drill frame',
+      '[DRI‖] multi-character skeleton frame',
+      '[1NC1DENT] digit-one frame',
+      `[${' '.repeat(64)}DRILL] long-whitespace frame`,
+      `[${' '.repeat(64)}DRІLL] long-whitespace homoglyph frame`,
+      '[outer [INCIDENT] nested frame',
+      '[outer [INСIDENT] nested homoglyph frame',
     ]) {
       const variants: readonly MessageTemplateSet[] = [
         { ...base, push: { ...base.push, title: injected } },
@@ -417,6 +429,36 @@ describe('renderer-owned notification frames', () => {
           }),
         ).toThrow('markers [INCIDENT] and [DRILL] are owned by the renderer');
       }
+    }
+  });
+
+  test('does not reject marker-shaped bracketed text without a TR39 match', () => {
+    const base = templateSet('real', 'activation');
+    for (const configuredCopy of [
+      '[INΣIDENT]',
+      '[IνCIDENT]',
+      '[INCIDεNT]',
+      '[INCIDENτ]',
+      '[école 安全]',
+    ]) {
+      const messages = renderTemplateSet({
+        eventKind: 'incident',
+        templates: {
+          ...base,
+          push: { ...base.push, title: configuredCopy },
+        },
+        variables: VARIABLES,
+      });
+      const push = messages[0];
+      expect(push.channel).toBe('push');
+      if (push.channel !== 'push') {
+        throw new Error('Expected push rendering first.');
+      }
+      expect(push.title).toContain(configuredCopy);
+      expect(
+        push.title.startsWith('[INCIDENT] REAL INCIDENT - ACTIVATION: '),
+      ).toBe(true);
+      expect(push.title.endsWith(' [INCIDENT]')).toBe(true);
     }
   });
 
@@ -491,6 +533,92 @@ describe('renderer-owned notification frames', () => {
     expect(visible).not.toContain(eventType);
     expect(visible).not.toContain(site);
     expect(visible).not.toContain(initiator);
+  });
+
+  test('uses non-leaking fallbacks for homoglyph marker variables', () => {
+    const eventType = '[INСIDENT] forged historical label';
+    const site = '[DRІLL] forged historical site';
+    const initiator = '[іոсіԁеոt] forged historical initiator';
+    const messages = renderTemplateSet({
+      eventKind: 'drill',
+      templates: catalog('drill').activation,
+      variables: { ...DRILL_VARIABLES, eventType, site, initiator },
+    });
+    const visible = messages.flatMap(visibleFields).join(' ');
+    expect(visible).toContain('Configured drill response');
+    expect(visible).toContain('Recorded site');
+    expect(visible).toContain('Recorded initiator');
+    expect(visible).not.toContain(eventType);
+    expect(visible).not.toContain(site);
+    expect(visible).not.toContain(initiator);
+  });
+
+  test('uses truth-neutral fallbacks when interpolation would forge a marker', () => {
+    for (const [eventKind, mode, collision] of [
+      ['incident', 'real', 'Incident'],
+      ['drill', 'drill', 'Drill'],
+    ] as const) {
+      const base = templateSet(mode, 'activation');
+      const messages = renderTemplateSet({
+        eventKind,
+        templates: {
+          ...base,
+          push: {
+            ...base.push,
+            title: '[{{site}}]',
+            body: '[{{eventType}}]',
+          },
+          email: {
+            ...base.email,
+            subject: '[{{initiator}}]',
+            textBody: '[{{site}}]',
+          },
+          sms: { ...base.sms, body: '[{{eventType}}]' },
+        },
+        variables: {
+          ...(mode === 'real' ? VARIABLES : DRILL_VARIABLES),
+          site: collision,
+          eventType: collision,
+          initiator: collision,
+        },
+      });
+      const frame = expectedFrame(mode, 'activation');
+      const visible = messages.flatMap(visibleFields);
+      expect(visible.join('\n')).toContain('[Recorded site]');
+      expect(visible.join('\n')).toContain('[Recorded initiator]');
+      expect(visible.join('\n')).toContain(
+        mode === 'real'
+          ? '[Configured response]'
+          : '[Configured drill response]',
+      );
+      for (const field of visible) {
+        expect(field.startsWith(frame.prefix)).toBe(true);
+        expect(field.endsWith(frame.suffix)).toBe(true);
+        const interior = field.slice(frame.prefix.length, -frame.suffix.length);
+        expect(interior).not.toMatch(/\[\s*(?:incident|drill)\s*\]/iu);
+      }
+    }
+
+    const base = templateSet('drill', 'activation');
+    const splitCollision = renderTemplateSet({
+      eventKind: 'drill',
+      templates: {
+        ...base,
+        sms: { ...base.sms, body: 'Use [IN{{site}}IDENT].' },
+      },
+      variables: { ...DRILL_VARIABLES, site: 'С' },
+    });
+    const sms = splitCollision[2];
+    expect(sms.channel).toBe('sms');
+    if (sms.channel !== 'sms') {
+      throw new Error('Expected SMS rendering third.');
+    }
+    expect(sms.body).toContain('[INRecorded siteIDENT]');
+    expect(sms.body).not.toContain('[INСIDENT]');
+    expect(sms.body.startsWith('[DRILL] TRAINING ONLY - ACTIVATION: ')).toBe(
+      true,
+    );
+    expect(sms.body.endsWith(' [DRILL]')).toBe(true);
   });
 
   test('strips only matching legacy mode and purpose leads', () => {
