@@ -64,6 +64,17 @@ export interface IssueStartConfirmationInput {
   readonly startInput: ActivationPreviewStartInput;
 }
 
+/**
+ * Server-only evidence handed directly from confirmation issuance to the
+ * capability invocation. `executionTime` comes from the authoritative
+ * database clock after a fresh confirmation is persisted.
+ */
+export interface StartConfirmationReceipt {
+  readonly confirmationId: string;
+  readonly confirmationIssuedAt: Date;
+  readonly executionTime: Date;
+}
+
 export const ACTIVATION_RATE_LIMIT_MAX_SUBMISSIONS = 3;
 export const ACTIVATION_RATE_LIMIT_WINDOW_MS = 60 * 1_000;
 
@@ -157,7 +168,7 @@ function protectedActions(
 export async function issueStartEventConfirmation(
   input: IssueStartConfirmationInput,
   store: StartConfirmationStore,
-): Promise<string | null> {
+): Promise<StartConfirmationReceipt> {
   const result = await store.transaction(async (transaction) => {
     const preview = await transaction.loadPreview(
       input.startInput.activationPreviewId,
@@ -239,6 +250,7 @@ export async function issueStartEventConfirmation(
         prior.confirmedWithSessionId !== input.authenticated.actor.sessionId ||
         prior.connectivityEpochId !== connectivityEpochId ||
         prior.consequenceDigest !== preview.consequenceDigest ||
+        priorIssuedAt > now.getTime() ||
         priorIssuedAt < Date.parse(preview.createdAt) ||
         priorIssuedAt > Date.parse(preview.expiresAt) ||
         priorExpiresAt > Date.parse(preview.expiresAt)
@@ -248,7 +260,14 @@ export async function issueStartEventConfirmation(
       if (record.status === 'consumed') {
         // A consumed confirmation proves the event transaction reached the
         // engine. Its completed idempotency result is resolved before safety.
-        return { kind: 'accepted' as const, confirmationId };
+        return {
+          kind: 'accepted' as const,
+          receipt: {
+            confirmationId,
+            confirmationIssuedAt: new Date(priorIssuedAt),
+            executionTime: new Date(now),
+          },
+        };
       }
       if (
         now.getTime() < Date.parse(preview.createdAt) ||
@@ -257,7 +276,14 @@ export async function issueStartEventConfirmation(
       ) {
         throw invalidPriorConfirmation();
       }
-      return { kind: 'accepted' as const, confirmationId };
+      return {
+        kind: 'accepted' as const,
+        receipt: {
+          confirmationId,
+          confirmationIssuedAt: new Date(priorIssuedAt),
+          executionTime: new Date(now),
+        },
+      };
     }
 
     if (
@@ -285,16 +311,29 @@ export async function issueStartEventConfirmation(
       expiresAt: new Date(Math.min(previewExpiry, maximumExpiry)).toISOString(),
     });
     await transaction.persistConfirmation(confirmation);
+    const executionTime = await transaction.readCurrentTime();
+    if (
+      !Number.isFinite(executionTime.getTime()) ||
+      executionTime.getTime() < now.getTime()
+    ) {
+      throw unavailable(
+        'The authoritative execution time is unavailable after confirmation.',
+      );
+    }
     return {
       kind: 'accepted' as const,
-      confirmationId: confirmation.id,
+      receipt: {
+        confirmationId: confirmation.id,
+        confirmationIssuedAt: new Date(now),
+        executionTime: new Date(executionTime),
+      },
     };
   });
   if (result.kind === 'rate-limited') {
     // The denial audit must commit before this public 429 escapes.
     throw rateLimited();
   }
-  return result.confirmationId;
+  return result.receipt;
 }
 
 type ConfirmationQueryDatabase = PostgresDatabase;
@@ -538,7 +577,7 @@ export function createDrizzleStartConfirmationStore(
 }
 
 export interface StartConfirmationRuntime {
-  issue(input: IssueStartConfirmationInput): Promise<string | null>;
+  issue(input: IssueStartConfirmationInput): Promise<StartConfirmationReceipt>;
   close(): Promise<void>;
 }
 

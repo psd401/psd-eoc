@@ -145,6 +145,7 @@ class MemoryConfirmationStore implements StartConfirmationStore {
   >[0][] = [];
   public readonly rateChecks: ActivationRateLimitReservationInput[] = [];
   public denialCount = 0;
+  public queuedCurrentTimes: Date[] = [];
 
   private readonly statuses = new Map<
     string,
@@ -173,7 +174,8 @@ class MemoryConfirmationStore implements StartConfirmationStore {
     await previous;
     try {
       return await operation({
-        readCurrentTime: async () => this.currentTime,
+        readCurrentTime: async () =>
+          this.queuedCurrentTimes.shift() ?? this.currentTime,
         loadPreview: async () => this.previewValue,
         loadConfirmation: async (confirmationId) => {
           const confirmation = this.persisted.find(
@@ -253,7 +255,7 @@ describe('start-event human confirmation boundary', () => {
   test('derives both protected actions for a real staff incident', async () => {
     const store = new MemoryConfirmationStore(preview('incident', 'staff'));
 
-    const confirmationId = await issueStartEventConfirmation(
+    const receipt = await issueStartEventConfirmation(
       {
         authenticated: authenticated(),
         idempotencyKey: IDEMPOTENCY_KEY,
@@ -262,10 +264,14 @@ describe('start-event human confirmation boundary', () => {
       store,
     );
 
-    expect(confirmationId).not.toBeNull();
+    expect(receipt).toEqual({
+      confirmationId: expect.any(String),
+      confirmationIssuedAt: NOW,
+      executionTime: NOW,
+    });
     expect(store.persisted).toEqual([
       expect.objectContaining({
-        id: confirmationId,
+        id: receipt.confirmationId,
         capabilityId: 'start-event',
         actionIds: ['start-real-incident', 'send-real-notification'],
         confirmedByUserId: IDS.user,
@@ -280,7 +286,7 @@ describe('start-event human confirmation boundary', () => {
       expect.objectContaining({
         actionIds: ['start-real-incident', 'send-real-notification'],
         actor: expect.objectContaining({ userId: IDS.user }),
-        confirmationId,
+        confirmationId: receipt.confirmationId,
         consequenceDigest: 'a'.repeat(64),
         facilityId: IDS.facility,
         idempotencyKey: IDEMPOTENCY_KEY,
@@ -288,6 +294,33 @@ describe('start-event human confirmation boundary', () => {
         source: 'web',
       }),
     ]);
+  });
+
+  test('returns a DB execution time read after fresh confirmation persistence', async () => {
+    const store = new MemoryConfirmationStore(preview('incident', 'staff'));
+    const issuedAt = new Date('2026-08-10T18:00:01.000Z');
+    const executionTime = new Date('2026-08-10T18:00:02.000Z');
+    store.queuedCurrentTimes.push(NOW, issuedAt, executionTime);
+
+    const receipt = await issueStartEventConfirmation(
+      {
+        authenticated: authenticated(),
+        idempotencyKey: IDEMPOTENCY_KEY,
+        startInput: startInput(),
+      },
+      store,
+    );
+
+    expect(store.persisted[0]?.issuedAt).toBe(issuedAt.toISOString());
+    expect(store.persisted[0]?.id).toBe(receipt.confirmationId);
+    expect(receipt).toEqual({
+      confirmationId: receipt.confirmationId,
+      confirmationIssuedAt: issuedAt,
+      executionTime,
+    });
+    expect(receipt.executionTime.getTime()).toBeGreaterThanOrEqual(
+      receipt.confirmationIssuedAt.getTime(),
+    );
   });
 
   test('derives only notification authorization for a staff drill', async () => {
@@ -308,7 +341,7 @@ describe('start-event human confirmation boundary', () => {
   test('recovers the committed confirmation when the engine was never entered', async () => {
     const store = new MemoryConfirmationStore(preview('incident', 'staff'));
 
-    const firstConfirmationId = await issueStartEventConfirmation(
+    const firstReceipt = await issueStartEventConfirmation(
       {
         authenticated: authenticated(),
         idempotencyKey: IDEMPOTENCY_KEY,
@@ -316,7 +349,7 @@ describe('start-event human confirmation boundary', () => {
       },
       store,
     );
-    expect(firstConfirmationId).not.toBeNull();
+    expect(store.persisted[0]?.id).toBe(firstReceipt.confirmationId);
     await expect(
       issueStartEventConfirmation(
         {
@@ -326,7 +359,11 @@ describe('start-event human confirmation boundary', () => {
         },
         store,
       ),
-    ).resolves.toBe(firstConfirmationId);
+    ).resolves.toMatchObject({
+      confirmationId: firstReceipt.confirmationId,
+      confirmationIssuedAt: NOW,
+      executionTime: NOW,
+    });
 
     expect(store.rateChecks).toHaveLength(2);
     expect(store.persisted).toHaveLength(1);
@@ -334,7 +371,7 @@ describe('start-event human confirmation boundary', () => {
 
   test('hands a consumed expired replay to engine idempotency resolution', async () => {
     const store = new MemoryConfirmationStore(preview('incident', 'staff'));
-    const confirmationId = await issueStartEventConfirmation(
+    const receipt = await issueStartEventConfirmation(
       {
         authenticated: authenticated(),
         idempotencyKey: IDEMPOTENCY_KEY,
@@ -342,10 +379,7 @@ describe('start-event human confirmation boundary', () => {
       },
       store,
     );
-    if (confirmationId === null) {
-      throw new Error('Expected staff confirmation evidence.');
-    }
-    store.markConsumed(confirmationId, '2026-08-10T18:01:00.000Z');
+    store.markConsumed(receipt.confirmationId, '2026-08-10T18:01:00.000Z');
     store.currentTime = new Date('2026-08-10T18:11:00.000Z');
 
     await expect(
@@ -357,7 +391,7 @@ describe('start-event human confirmation boundary', () => {
         },
         store,
       ),
-    ).resolves.toBe(confirmationId);
+    ).resolves.toMatchObject({ confirmationId: receipt.confirmationId });
     expect(store.persisted).toHaveLength(1);
   });
 
@@ -448,7 +482,7 @@ describe('start-event human confirmation boundary', () => {
     const store = new MemoryConfirmationStore(preview('drill', 'staff'));
 
     for (let index = 1; index <= 3; index += 1) {
-      const confirmationId = await issueStartEventConfirmation(
+      const receipt = await issueStartEventConfirmation(
         {
           authenticated: authenticated(),
           idempotencyKey: `confirmation-boundary-key-000${index}`,
@@ -456,7 +490,7 @@ describe('start-event human confirmation boundary', () => {
         },
         store,
       );
-      expect(confirmationId).not.toBeNull();
+      expect(store.persisted.at(-1)?.id).toBe(receipt.confirmationId);
     }
     const firstConfirmationId = store.persisted[0]?.id;
     if (firstConfirmationId === undefined) {
@@ -471,7 +505,7 @@ describe('start-event human confirmation boundary', () => {
         },
         store,
       ),
-    ).resolves.toBe(firstConfirmationId);
+    ).resolves.toMatchObject({ confirmationId: firstConfirmationId });
     expect(store.persisted).toHaveLength(3);
 
     await expect(
@@ -490,7 +524,7 @@ describe('start-event human confirmation boundary', () => {
     store.currentTime = new Date(
       NOW.getTime() + ACTIVATION_RATE_LIMIT_WINDOW_MS + 1,
     );
-    const fourthConfirmationId = await issueStartEventConfirmation(
+    const fourthReceipt = await issueStartEventConfirmation(
       {
         authenticated: authenticated(),
         idempotencyKey: 'confirmation-boundary-key-0004',
@@ -498,7 +532,7 @@ describe('start-event human confirmation boundary', () => {
       },
       store,
     );
-    expect(fourthConfirmationId).not.toBeNull();
+    expect(store.persisted.at(-1)?.id).toBe(fourthReceipt.confirmationId);
     expect(store.persisted).toHaveLength(4);
   });
 

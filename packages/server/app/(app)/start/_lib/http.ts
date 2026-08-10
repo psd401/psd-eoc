@@ -30,6 +30,7 @@ import { getDefaultStartFlowCapabilityRuntime } from './capabilities';
 import {
   getDefaultStartConfirmationRuntime,
   type IssueStartConfirmationInput,
+  type StartConfirmationReceipt,
 } from './confirmation';
 
 export const START_FLOW_IDEMPOTENCY_HEADER = 'idempotency-key' as const;
@@ -54,7 +55,9 @@ export interface StartFlowRouteRuntime {
   createRequestId(): string;
   now(): Date;
   authenticate(request: Request, now: Date): Promise<AuthenticatedSession>;
-  issueConfirmation(input: IssueStartConfirmationInput): Promise<string | null>;
+  issueConfirmation(
+    input: IssueStartConfirmationInput,
+  ): Promise<StartConfirmationReceipt>;
   executePreview(
     input: CapabilityInput<'create-activation-preview'>,
     invocation: TrustedCapabilityInvocation,
@@ -296,6 +299,25 @@ function mutationInvocation(
   });
 }
 
+function confirmedExecutionTime(receipt: StartConfirmationReceipt): Date {
+  const issuedAt = receipt.confirmationIssuedAt.getTime();
+  const executionTime = receipt.executionTime.getTime();
+  if (
+    !Number.isFinite(issuedAt) ||
+    !Number.isFinite(executionTime) ||
+    executionTime < issuedAt
+  ) {
+    throw new CapabilityEngineError(
+      'LIVE_ACTION_UNAVAILABLE',
+      'CONFIRMATION_INVALID',
+      'The confirmed activation time is unavailable.',
+      503,
+      true,
+    );
+  }
+  return new Date(executionTime);
+}
+
 async function routeContext(
   request: Request,
   runtimeValue: StartFlowRouteRuntime | undefined,
@@ -354,20 +376,21 @@ export async function handleActivateEvent(
       );
     }
     const startInput: ActivationPreviewStartInput = parsedInput;
-    const humanConfirmationId = await context.runtime.issueConfirmation({
+    const confirmation = await context.runtime.issueConfirmation({
       authenticated: context.authenticated,
       idempotencyKey,
       startInput,
     });
+    const executionTime = confirmedExecutionTime(confirmation);
     const result = await context.runtime.executeEvent(
       'start-event',
       startInput,
       mutationInvocation(
         context.authenticated,
         context.requestId,
-        context.serverTime,
+        executionTime,
         idempotencyKey,
-        humanConfirmationId,
+        confirmation.confirmationId,
       ),
     );
     return successResponse(result);
