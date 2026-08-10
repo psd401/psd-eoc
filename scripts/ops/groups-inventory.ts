@@ -401,7 +401,7 @@ const isCompactBoundarySequence = (value: string): boolean => {
 
 const hasBoundedCompactPopulationMarker = (token: string): boolean =>
   COMPACT_NON_STAFF_MARKERS.some((marker) => {
-    if (token.length <= marker.length) return false;
+    if (token.length < marker.length) return false;
     let offset = token.indexOf(marker);
     while (offset >= 0) {
       const before = token.slice(0, offset);
@@ -438,20 +438,22 @@ const compactMarkerCandidates = (
   return [...candidates];
 };
 
+const isCompactPopulationToken = (token: string): boolean =>
+  NON_STAFF_MARKERS.has(token) ||
+  /^(?:class|classroom|cohort|grade)[0-9]{1,2}$/u.test(token) ||
+  /^[0-9]{1,2}(?:st|nd|rd|th)?grade$/u.test(token) ||
+  /^(?:k[0-9]{1,2}|kindergarten|prek|prekindergarten)$/u.test(token) ||
+  hasBoundedCompactPopulationMarker(token);
+
 const hasNonStaffPopulationMarker = (
   tokens: readonly string[],
   compactPrefixes: ReadonlySet<string>,
 ): boolean =>
-  hasAnyToken(tokens, NON_STAFF_MARKERS) ||
-  tokens.some((token) => {
-    const compactCandidates = compactMarkerCandidates(token, compactPrefixes);
-    return (
-      /^(?:class|classroom|cohort|grade)[0-9]{1,2}$/u.test(token) ||
-      /^[0-9]{1,2}(?:st|nd|rd|th)?grade$/u.test(token) ||
-      /^(?:k[0-9]{1,2}|kindergarten|prek|prekindergarten)$/u.test(token) ||
-      compactCandidates.some(hasBoundedCompactPopulationMarker)
-    );
-  }) ||
+  tokens.some((token) =>
+    compactMarkerCandidates(token, compactPrefixes).some(
+      isCompactPopulationToken,
+    ),
+  ) ||
   tokens.some(
     (token, index) =>
       (token === 'pre' &&
@@ -2624,6 +2626,38 @@ const runSelfTest = async (): Promise<void> => {
     ),
     parent,
   );
+  const facilityPrefixedStudent = parseCloudGroup(
+    rawGroup(
+      'synthetic-facility-prefixed-population',
+      'synthetic.nbestudents@psd401.net',
+      'NBE Staff',
+    ),
+    parent,
+  );
+  const facilityPrefixedGrade = parseCloudGroup(
+    rawGroup(
+      'synthetic-facility-prefixed-grade-population',
+      'synthetic.nbegrade5@psd401.net',
+      'NBE Staff',
+    ),
+    parent,
+  );
+  const facilityPrefixedOrdinalGrade = parseCloudGroup(
+    rawGroup(
+      'synthetic-facility-prefixed-ordinal-grade-population',
+      'synthetic.nbe1stgrade@psd401.net',
+      'NBE Staff',
+    ),
+    parent,
+  );
+  const facilityPrefixedKindergarten = parseCloudGroup(
+    rawGroup(
+      'synthetic-facility-prefixed-kindergarten-population',
+      'synthetic.nbek5@psd401.net',
+      'NBE Staff',
+    ),
+    parent,
+  );
   const compactPopulationDraft = buildDraft(
     [facilities[0]!],
     [
@@ -2631,13 +2665,17 @@ const runSelfTest = async (): Promise<void> => {
       compactScholarStaff,
       compactPtaStaff,
       facilityPrefixedCompactStudentStaff,
+      facilityPrefixedStudent,
+      facilityPrefixedGrade,
+      facilityPrefixedOrdinalGrade,
+      facilityPrefixedKindergarten,
     ],
     1,
     generatedAt,
   );
   assertSelfTest(
     compactPopulationDraft.inventoryGroups.length === 0 &&
-      compactPopulationDraft.report.omittedNonStaffGroupCount === 4 &&
+      compactPopulationDraft.report.omittedNonStaffGroupCount === 8 &&
       compactPopulationDraft.buildingMappings[0]?.createGroupSource === null,
     'bounded compact population markers after known prefixes are hard excluded',
   );
