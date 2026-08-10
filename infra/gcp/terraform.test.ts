@@ -2862,9 +2862,21 @@ describe('fail-closed bootstrap and process behavior', () => {
     );
     try {
       const linkedEntrypoint = join(linkedDirectory, 'apply.ts');
-      symlinkSync(join(gcpRoot, 'scripts', 'apply.ts'), linkedEntrypoint);
+      const guardedEntrypoint = join(gcpRoot, 'scripts', 'apply.ts');
+      symlinkSync(guardedEntrypoint, linkedEntrypoint);
       expect(() =>
         validateGuardedBunInvocation([], linkedEntrypoint, gcpRoot, undefined),
+      ).toThrow('run-guarded.sh');
+
+      const hardlinkedEntrypoint = join(linkedDirectory, 'hardlinked-apply.ts');
+      linkSync(guardedEntrypoint, hardlinkedEntrypoint);
+      expect(() =>
+        validateGuardedBunInvocation(
+          [],
+          hardlinkedEntrypoint,
+          gcpRoot,
+          undefined,
+        ),
       ).toThrow('run-guarded.sh');
     } finally {
       rmSync(linkedDirectory, { force: true, recursive: true });

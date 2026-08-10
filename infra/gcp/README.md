@@ -86,7 +86,9 @@ home, PATH, and absolute Bun executable. It rejects every `BUN_*` variable,
 overrides, then pins the exact checked-in Bun configuration, disables automatic
 environment-file loading and package installation, and permits only the seven
 reviewed TypeScript helper entrypoints. A trusted configuration preload verifies
-that exact launcher contract before any helper module executes. Every TypeScript
+that exact launcher contract before any helper module executes. It resolves
+symbolic entrypoint aliases and matches multiply linked entrypoint inodes before
+allowing an out-of-tree script to bypass the launcher check. Every TypeScript
 helper invocation below uses `scripts/run-guarded.sh`; invoking a helper directly
 with Bun is not a guarded path.
 
