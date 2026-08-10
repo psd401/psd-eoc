@@ -116,6 +116,8 @@ export interface AccessGateCheckInput {
   readonly subjectDigest: string;
   readonly requestId: string;
   readonly checkedAt: string;
+  /** Trusted authentication adapter source; never accepted from a body. */
+  readonly source: 'web' | 'mobile';
 }
 
 /** Pinned membership provenance used when the session is issued. */
@@ -158,6 +160,7 @@ export type AccessGateAuditEvent =
         | WebSessionIssuanceErrorCode
         | typeof POST_GATE_SIGN_IN_FAILED_REASON;
       userId: string | null;
+      source: 'web' | 'mobile';
     }>
   | Readonly<{
       outcome: 'success';
@@ -165,6 +168,7 @@ export type AccessGateAuditEvent =
       occurredAt: string;
       userId: string;
       sessionId: string;
+      source: 'web' | 'mobile';
     }>;
 
 /** Append-only writer seam; implementations must never retain raw OIDC claims. */
@@ -218,6 +222,11 @@ function validateCheckInput(input: AccessGateCheckInput): void {
   SecurityAuditHashSchema.parse(input.subjectDigest);
   UuidSchema.parse(input.requestId);
   TimestampSchema.parse(input.checkedAt);
+  if (input.source !== 'web' && input.source !== 'mobile') {
+    throw new AccessGateConfigurationError(
+      'Access-gate source must be a trusted interactive authentication adapter',
+    );
+  }
 }
 
 function accessGroupKey(source: AccessGroupSourceRef): string {
@@ -375,6 +384,7 @@ async function deny(
     subjectDigest: input.subjectDigest,
     reasonCode,
     userId,
+    source: input.source,
   });
   return Object.freeze({ granted: false, reasonCode });
 }
@@ -663,6 +673,11 @@ export function buildAccessGateAuditEntry(
 ): SecurityAuditEntry {
   UuidSchema.parse(event.requestId);
   TimestampSchema.parse(event.occurredAt);
+  if (event.source !== 'web' && event.source !== 'mobile') {
+    throw new AccessGateConfigurationError(
+      'Access audit source must be web or mobile',
+    );
+  }
   if (event.outcome === 'denied') {
     if (event.subjectDigest !== null) {
       SecurityAuditHashSchema.parse(event.subjectDigest);
@@ -707,7 +722,7 @@ export function buildAccessGateAuditEntry(
     confirmationId: null,
     outcome: event.outcome,
     principal,
-    source: 'web',
+    source: event.source,
     facilityId: null,
     target,
     requestId: event.requestId,

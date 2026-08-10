@@ -40,11 +40,15 @@ import {
   LifecycleConsequencePreviewSchema,
   MediaReadGrantSchema,
   MutationCapabilityEnvelopeSchema,
+  MobileOidcExchangeRequestSchema,
+  MobileOidcStartRequestSchema,
+  MobileOidcStartResponseSchema,
   MessageTemplateCatalogSchema,
   NotificationIntentSchema,
   NotificationOutboxMessageSchema,
   NotificationStatusSchema,
   OidcCallbackRejectionEvidenceSchema,
+  OpaqueSessionBearerSchema,
   OutboxRecordSchema,
   PreparedActivationSchema,
   PreviewEventTypeRenderingInputSchema,
@@ -1711,6 +1715,170 @@ describe('human-only capability boundary', () => {
           stateVerified: true,
         },
       }).success,
+    ).toBe(false);
+  });
+
+  test('accepts only strict native OIDC transport request shapes', () => {
+    const challenge = 'A'.repeat(43);
+    const state = `m1.${'B'.repeat(43)}`;
+    const flowToken = `m1.${'C'.repeat(16)}.${'D'.repeat(80)}`;
+    expect(
+      MobileOidcStartRequestSchema.parse({
+        platform: 'ios',
+        installationId: 'native-installation-0001',
+        codeChallenge: challenge,
+      }),
+    ).toEqual({
+      platform: 'ios',
+      installationId: 'native-installation-0001',
+      codeChallenge: challenge,
+    });
+    expect(
+      MobileOidcStartRequestSchema.safeParse({
+        platform: 'web',
+        installationId: 'native-installation-0001',
+        codeChallenge: challenge,
+      }).success,
+    ).toBe(false);
+    expect(
+      MobileOidcStartRequestSchema.safeParse({
+        platform: 'android',
+        installationId: 'native-installation-0001',
+        codeChallenge: challenge,
+        redirectUri: 'https://attacker.invalid/callback',
+      }).success,
+    ).toBe(false);
+    expect(
+      MobileOidcStartResponseSchema.safeParse({
+        clientId: 'synthetic-client.apps.googleusercontent.com',
+        authorizationUrl: 'http://127.0.0.1:4106/authorize',
+        flowToken,
+        state,
+        appRedirectUri: 'psdeoc://auth/callback',
+        expiresAt: times.previewExpiry,
+      }).success,
+    ).toBe(true);
+    expect(
+      MobileOidcStartResponseSchema.safeParse({
+        clientId: 'synthetic-client.apps.googleusercontent.com',
+        authorizationUrl: 'http://[::1]:4106/authorize',
+        flowToken,
+        state,
+        appRedirectUri: 'psdeoc://auth/callback',
+        expiresAt: times.previewExpiry,
+      }).success,
+    ).toBe(true);
+    expect(
+      MobileOidcStartResponseSchema.safeParse({
+        clientId: 'synthetic-client.apps.googleusercontent.com',
+        authorizationUrl: 'http://attacker.invalid/authorize',
+        flowToken,
+        state,
+        appRedirectUri: 'psdeoc://auth/callback',
+        expiresAt: times.previewExpiry,
+      }).success,
+    ).toBe(false);
+    expect(
+      MobileOidcExchangeRequestSchema.safeParse({
+        authorizationCode: 'synthetic-one-time-code',
+        state,
+        codeVerifier: 'v'.repeat(64),
+        flowToken,
+      }).success,
+    ).toBe(true);
+    expect(
+      MobileOidcExchangeRequestSchema.safeParse({
+        authorizationCode: 'synthetic-one-time-code',
+        state,
+        codeVerifier: 'too-short',
+        flowToken,
+      }).success,
+    ).toBe(false);
+    expect(OpaqueSessionBearerSchema.safeParse('z'.repeat(43)).success).toBe(
+      true,
+    );
+    expect(OpaqueSessionBearerSchema.safeParse('plain-token').success).toBe(
+      false,
+    );
+  });
+
+  test('admits verified native OIDC only through the mobile exchange transport', () => {
+    const claims = {
+      issuer: 'https://accounts.google.com',
+      audience: 'synthetic-psd-eoc-client',
+      subject: 'synthetic-google-subject',
+      subjectDigest: '2'.repeat(64),
+      claimsDigest: '3'.repeat(64),
+      hostedDomain: 'psd401.net',
+      email: 'synthetic.staff@psd401.net',
+      emailVerified: true,
+      displayName: 'Synthetic Staff',
+    } as const;
+    const mobileExchange = {
+      capabilityId: 'complete-oidc-sign-in',
+      operation: 'mutation',
+      principal: {
+        kind: 'verified-oidc-claims',
+        ...claims,
+        audienceVerified: true,
+      },
+      source: 'mobile',
+      requestId: ids.request,
+      serverTime: times.activated,
+      input: {
+        claims,
+        device: {
+          platform: 'android',
+          unlockMethod: 'biometric',
+          installationId: 'native-installation-0001',
+        },
+      },
+      idempotencyKey: 'oidc-mobile-idempotent-0001',
+      transport: {
+        kind: 'mobile-oidc-code-exchange',
+        method: 'POST',
+        stateVerified: true,
+        nonceVerified: true,
+        pkceVerified: true,
+        signatureVerified: true,
+      },
+    } as const;
+    expect(() =>
+      parseCapabilityEnvelopeFor('complete-oidc-sign-in', mobileExchange),
+    ).not.toThrow();
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...mobileExchange,
+        source: 'web',
+      }).success,
+    ).toBe(false);
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...mobileExchange,
+        transport: {
+          ...mobileExchange.transport,
+          pkceVerified: false,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      (() => {
+        try {
+          parseCapabilityEnvelopeFor('complete-oidc-sign-in', {
+            ...mobileExchange,
+            input: {
+              ...mobileExchange.input,
+              device: {
+                ...mobileExchange.input.device,
+                unlockMethod: 'secure-session-cookie',
+              },
+            },
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      })(),
     ).toBe(false);
   });
 

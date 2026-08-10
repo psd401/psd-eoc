@@ -564,6 +564,7 @@ describe('configured Groups access and initial session', () => {
         subjectDigest: 'e'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
+        source: 'web',
       },
       { store: runtime.accessStore, audit: runtime.auditSink },
     );
@@ -596,6 +597,7 @@ describe('configured Groups access and initial session', () => {
         subjectDigest: 'f'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
+        source: 'web',
       },
       {
         store: {
@@ -641,6 +643,7 @@ describe('configured Groups access and initial session', () => {
         subjectDigest,
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
+        source: 'web',
       },
       {
         store: {
@@ -682,6 +685,7 @@ describe('configured Groups access and initial session', () => {
         subjectDigest: '1'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
+        source: 'web',
       },
       {
         store: {
@@ -708,7 +712,7 @@ describe('configured Groups access and initial session', () => {
     );
   });
 
-  test('denies and audits a non-member without invoking session issuance', async () => {
+  test('denies and truthfully audits a mobile non-member without session issuance', async () => {
     const runtime = createPlaywrightAuthRuntime();
     const decision = await checkAccessGate(
       {
@@ -716,6 +720,7 @@ describe('configured Groups access and initial session', () => {
         subjectDigest: 'a'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
+        source: 'mobile',
       },
       { store: runtime.accessStore, audit: runtime.auditSink },
     );
@@ -727,6 +732,7 @@ describe('configured Groups access and initial session', () => {
     expect(runtime.auditEntries[0]).toMatchObject({
       category: 'access-denial',
       outcome: 'denied',
+      source: 'mobile',
       principal: { kind: 'unauthenticated', subjectDigest: 'a'.repeat(64) },
     });
   });
@@ -739,6 +745,7 @@ describe('configured Groups access and initial session', () => {
         subjectDigest: 'b'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
+        source: 'web',
       },
       {
         store: runtime.accessStore,
@@ -759,6 +766,7 @@ describe('configured Groups access and initial session', () => {
         subjectDigest: 'c'.repeat(64),
         requestId: randomUUID(),
         checkedAt,
+        source: 'web',
       },
       {
         store: runtime.accessStore,

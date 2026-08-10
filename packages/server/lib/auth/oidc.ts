@@ -1,10 +1,21 @@
 import {
   AuthenticationCapabilityEnvelopeSchema,
   CompleteOidcSignInInputSchema,
+  MobileOidcCodeExchangeTransportSchema,
+  MobileOidcExchangeRequestSchema,
+  MobileOidcFlowTokenSchema,
+  MobileOidcStartRequestSchema,
+  MobileOidcStartResponseSchema,
+  MobileOidcStateSchema,
+  OidcAuthorizationCodeSchema,
   OidcCallbackTransportSchema,
   PreSessionOidcPrincipalSchema,
   type AuthenticationCapabilityEnvelope,
   type CompleteOidcSignInInput,
+  type MobileOidcCodeExchangeTransport,
+  type MobileOidcExchangeRequest,
+  type MobileOidcStartRequest,
+  type MobileOidcStartResponse,
   type OidcCallbackTransport,
   type PreSessionOidcPrincipal,
 } from '@psd-eoc/contracts';
@@ -24,6 +35,9 @@ const MAX_ID_TOKEN_LENGTH = 24 * 1024;
 const DEFAULT_HTTP_TIMEOUT_MILLISECONDS = 10_000;
 const COOKIE_FORMAT_VERSION = 'v1';
 const TRANSIENT_STATE_VERSION = 1;
+const MOBILE_FLOW_FORMAT_VERSION = 'm1';
+const MOBILE_FLOW_STATE_VERSION = 1;
+export const MOBILE_OIDC_APP_REDIRECT_URI = 'psdeoc://auth/callback' as const;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -81,6 +95,8 @@ export type GoogleOidcCallbackErrorCode =
   | 'OIDC_PROVIDER_LOGIN_REQUIRED'
   | 'OIDC_PROVIDER_REJECTED'
   | 'OIDC_PROVIDER_UNAVAILABLE'
+  | 'OIDC_FLOW_TOKEN_INVALID'
+  | 'OIDC_PKCE_MISMATCH'
   | 'OIDC_STATE_MISMATCH'
   | 'OIDC_TOKEN_EXCHANGE_FAILED'
   | 'OIDC_TOKEN_RESPONSE_INVALID'
@@ -96,6 +112,8 @@ const CALLBACK_ERROR_MESSAGES: Readonly<
   OIDC_PROVIDER_LOGIN_REQUIRED: 'Google requires a new sign-in.',
   OIDC_PROVIDER_REJECTED: 'Google could not complete sign-in.',
   OIDC_PROVIDER_UNAVAILABLE: 'Google sign-in is temporarily unavailable.',
+  OIDC_FLOW_TOKEN_INVALID: 'The sign-in request could not be verified.',
+  OIDC_PKCE_MISMATCH: 'The sign-in request could not be verified.',
   OIDC_STATE_MISMATCH: 'The sign-in request could not be verified.',
   OIDC_TOKEN_EXCHANGE_FAILED: 'Google rejected the sign-in response.',
   OIDC_TOKEN_RESPONSE_INVALID: 'Google returned an invalid sign-in response.',
@@ -153,6 +171,38 @@ export interface CompleteGoogleOidcCallbackResult {
 export interface CompleteOidcEnvelopeContext {
   readonly requestId: string;
   readonly serverTime: string;
+}
+
+export interface BeginGoogleMobileOidcSignInInput
+  extends MobileOidcStartRequest {
+  /** Trusted clock override used only by deterministic tests. */
+  readonly now?: Date;
+}
+
+/** Verified native adapter output ready for the canonical sign-in capability. */
+export interface CompleteGoogleMobileOidcExchangeResult {
+  readonly capabilityInput: CompleteOidcSignInInput;
+  readonly principal: PreSessionOidcPrincipal;
+  readonly transport: MobileOidcCodeExchangeTransport;
+  readonly idempotencyKey: string;
+  readonly responseDigest: string;
+}
+
+export interface CompleteGoogleMobileOidcExchangeInput
+  extends MobileOidcExchangeRequest {
+  /** Trusted clock override used only by deterministic tests. */
+  readonly now?: Date;
+}
+
+interface MobileTransientOidcState {
+  readonly version: typeof MOBILE_FLOW_STATE_VERSION;
+  readonly state: string;
+  readonly nonce: string;
+  readonly codeChallenge: string;
+  readonly platform: MobileOidcStartRequest['platform'];
+  readonly installationId: string;
+  readonly issuedAt: number;
+  readonly expiresAt: number;
 }
 
 interface TransientOidcState {
@@ -692,6 +742,173 @@ async function decryptTransientState(
   }
 }
 
+async function deriveMobileFlowKey(
+  configuration: GoogleOidcConfiguration,
+): Promise<CryptoKey> {
+  const privateConfiguration = getPrivateConfiguration(configuration);
+  const context = textEncoder.encode(
+    'psd-eoc/google-oidc/mobile-flow/aes-256-gcm/m1',
+  );
+  const combined = new Uint8Array(
+    privateConfiguration.cookieKeyMaterial.byteLength + context.byteLength,
+  );
+  combined.set(privateConfiguration.cookieKeyMaterial, 0);
+  combined.set(context, privateConfiguration.cookieKeyMaterial.byteLength);
+  const keyBytes = await sha256Bytes(combined);
+  return requireWebCrypto().subtle.importKey(
+    'raw',
+    copyToArrayBuffer(keyBytes),
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+function mobileFlowAdditionalData(
+  configuration: GoogleOidcConfiguration,
+): Uint8Array {
+  return textEncoder.encode(
+    [
+      MOBILE_FLOW_FORMAT_VERSION,
+      configuration.clientId,
+      configuration.redirectUri,
+      configuration.authorizationEndpoint,
+      configuration.tokenEndpoint,
+      configuration.jwksUri,
+      MOBILE_OIDC_APP_REDIRECT_URI,
+    ].join('\n'),
+  );
+}
+
+function parseMobileTransientState(
+  value: unknown,
+  nowInSeconds: number,
+): MobileTransientOidcState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const keys = Object.keys(value).sort();
+  const expectedKeys = [
+    'codeChallenge',
+    'expiresAt',
+    'installationId',
+    'issuedAt',
+    'nonce',
+    'platform',
+    'state',
+    'version',
+  ];
+  const device = MobileOidcStartRequestSchema.safeParse({
+    platform: value.platform,
+    installationId: value.installationId,
+    codeChallenge: value.codeChallenge,
+  });
+  const state = MobileOidcStateSchema.safeParse(value.state);
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index]) ||
+    value.version !== MOBILE_FLOW_STATE_VERSION ||
+    !device.success ||
+    !state.success ||
+    typeof value.nonce !== 'string' ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(value.nonce) ||
+    typeof value.issuedAt !== 'number' ||
+    !Number.isSafeInteger(value.issuedAt) ||
+    typeof value.expiresAt !== 'number' ||
+    !Number.isSafeInteger(value.expiresAt) ||
+    value.expiresAt - value.issuedAt !== TRANSIENT_COOKIE_LIFETIME_SECONDS ||
+    value.issuedAt > nowInSeconds + CLOCK_TOLERANCE_SECONDS ||
+    value.expiresAt <= nowInSeconds
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    version: MOBILE_FLOW_STATE_VERSION,
+    state: state.data,
+    nonce: value.nonce,
+    codeChallenge: device.data.codeChallenge,
+    platform: device.data.platform,
+    installationId: device.data.installationId,
+    issuedAt: value.issuedAt,
+    expiresAt: value.expiresAt,
+  });
+}
+
+async function encryptMobileTransientState(
+  configuration: GoogleOidcConfiguration,
+  transientState: MobileTransientOidcState,
+): Promise<string> {
+  const initializationVector = randomBytes(12);
+  const ciphertext = await requireWebCrypto().subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: copyToArrayBuffer(initializationVector),
+      additionalData: copyToArrayBuffer(
+        mobileFlowAdditionalData(configuration),
+      ),
+      tagLength: 128,
+    },
+    await deriveMobileFlowKey(configuration),
+    copyToArrayBuffer(textEncoder.encode(JSON.stringify(transientState))),
+  );
+  return MobileOidcFlowTokenSchema.parse(
+    [
+      MOBILE_FLOW_FORMAT_VERSION,
+      encodeBase64Url(initializationVector),
+      encodeBase64Url(new Uint8Array(ciphertext)),
+    ].join('.'),
+  );
+}
+
+async function decryptMobileTransientState(
+  configuration: GoogleOidcConfiguration,
+  flowToken: string,
+  nowInSeconds: number,
+): Promise<MobileTransientOidcState | null> {
+  const parsedToken = MobileOidcFlowTokenSchema.safeParse(flowToken);
+  if (!parsedToken.success) {
+    return null;
+  }
+  const parts = parsedToken.data.split('.');
+  if (
+    parts.length !== 3 ||
+    parts[0] !== MOBILE_FLOW_FORMAT_VERSION ||
+    parts[1] === undefined ||
+    parts[2] === undefined
+  ) {
+    return null;
+  }
+  try {
+    const initializationVector = decodeBase64Url(parts[1]);
+    const ciphertext = decodeBase64Url(parts[2]);
+    if (
+      initializationVector.byteLength !== 12 ||
+      ciphertext.byteLength < 17 ||
+      ciphertext.byteLength > 4_096
+    ) {
+      return null;
+    }
+    const plaintext = await requireWebCrypto().subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: copyToArrayBuffer(initializationVector),
+        additionalData: copyToArrayBuffer(
+          mobileFlowAdditionalData(configuration),
+        ),
+        tagLength: 128,
+      },
+      await deriveMobileFlowKey(configuration),
+      copyToArrayBuffer(ciphertext),
+    );
+    return parseMobileTransientState(
+      JSON.parse(textDecoder.decode(plaintext)) as unknown,
+      nowInSeconds,
+    );
+  } catch {
+    return null;
+  }
+}
+
 function serializeTransientCookie(
   configuration: GoogleOidcConfiguration,
   value: string,
@@ -790,6 +1007,67 @@ export async function beginGoogleOidcSignIn(
   });
 }
 
+/**
+ * Starts a native authorization-code flow. The server binds app-generated S256
+ * material to an authenticated, short-lived flow token while Google continues
+ * to use the district HTTPS callback.
+ */
+export async function beginGoogleMobileOidcSignIn(
+  configuration: GoogleOidcConfiguration,
+  input: BeginGoogleMobileOidcSignInInput,
+): Promise<MobileOidcStartResponse> {
+  getPrivateConfiguration(configuration);
+  const request = MobileOidcStartRequestSchema.parse({
+    platform: input.platform,
+    installationId: input.installationId,
+    codeChallenge: input.codeChallenge,
+  });
+  const now = input.now ?? new Date();
+  const nowMilliseconds = now.getTime();
+  if (!Number.isFinite(nowMilliseconds)) {
+    return configurationError('The mobile OIDC clock is invalid.');
+  }
+  const issuedAt = Math.floor(nowMilliseconds / 1_000);
+  const expiresAt = issuedAt + TRANSIENT_COOKIE_LIFETIME_SECONDS;
+  const state = MobileOidcStateSchema.parse(
+    `${MOBILE_FLOW_FORMAT_VERSION}.${encodeBase64Url(randomBytes(32))}`,
+  );
+  const nonce = encodeBase64Url(randomBytes(32));
+  const transientState: MobileTransientOidcState = Object.freeze({
+    version: MOBILE_FLOW_STATE_VERSION,
+    state,
+    nonce,
+    codeChallenge: request.codeChallenge,
+    platform: request.platform,
+    installationId: request.installationId,
+    issuedAt,
+    expiresAt,
+  });
+  const flowToken = await encryptMobileTransientState(
+    configuration,
+    transientState,
+  );
+  const authorizationUrl = new URL(configuration.authorizationEndpoint);
+  authorizationUrl.searchParams.set('client_id', configuration.clientId);
+  authorizationUrl.searchParams.set('redirect_uri', configuration.redirectUri);
+  authorizationUrl.searchParams.set('response_type', 'code');
+  authorizationUrl.searchParams.set('scope', 'openid email profile');
+  authorizationUrl.searchParams.set('state', state);
+  authorizationUrl.searchParams.set('nonce', nonce);
+  authorizationUrl.searchParams.set('code_challenge', request.codeChallenge);
+  authorizationUrl.searchParams.set('code_challenge_method', 'S256');
+  authorizationUrl.searchParams.set('hd', PSD_HOSTED_DOMAIN);
+
+  return MobileOidcStartResponseSchema.parse({
+    clientId: configuration.clientId,
+    authorizationUrl: authorizationUrl.toString(),
+    flowToken,
+    state,
+    appRedirectUri: MOBILE_OIDC_APP_REDIRECT_URI,
+    expiresAt: new Date(expiresAt * 1_000).toISOString(),
+  });
+}
+
 function callbackError(options: {
   readonly configuration: GoogleOidcConfiguration;
   readonly code: GoogleOidcCallbackErrorCode;
@@ -852,6 +1130,70 @@ function singleQueryValue(
     return null;
   }
   return values[0];
+}
+
+/**
+ * Converts only server-prefixed mobile callbacks into a fixed application deep
+ * link. It performs no token exchange, access decision, or capability call, so
+ * passive GETs and link previews cannot establish a session.
+ */
+export function createGoogleMobileOidcCallbackRelayUrl(
+  configuration: GoogleOidcConfiguration,
+  callbackUrl: string | URL,
+): string | null {
+  getPrivateConfiguration(configuration);
+  let candidate: URL;
+  try {
+    candidate = new URL(callbackUrl.toString());
+  } catch {
+    return null;
+  }
+  const hasBoundedMobileState = candidate.searchParams
+    .getAll('state')
+    .some(
+      (value) =>
+        value.length <= 512 &&
+        !hasAsciiControlCharacter(value) &&
+        value.startsWith(`${MOBILE_FLOW_FORMAT_VERSION}.`),
+    );
+  if (!hasBoundedMobileState) {
+    return null;
+  }
+  const parsed = parseCallbackUrl(configuration, candidate);
+  const relay = new URL(MOBILE_OIDC_APP_REDIRECT_URI);
+  const state = singleQueryValue(parsed.searchParams, 'state', 512);
+  const parsedState = MobileOidcStateSchema.safeParse(state);
+  const code = singleQueryValue(parsed.searchParams, 'code', 4_096);
+  const providerError = singleQueryValue(parsed.searchParams, 'error', 128);
+  if (
+    !parsedState.success ||
+    code === null ||
+    providerError === null ||
+    (code !== undefined && providerError !== undefined) ||
+    (code === undefined && providerError === undefined)
+  ) {
+    relay.searchParams.set('error', 'callback_invalid');
+    return relay.toString();
+  }
+  relay.searchParams.set('state', parsedState.data);
+  if (providerError !== undefined) {
+    relay.searchParams.set(
+      'error',
+      providerError === 'access_denied'
+        ? 'access_denied'
+        : providerError === 'login_required'
+          ? 'login_required'
+          : 'provider_rejected',
+    );
+    return relay.toString();
+  }
+  const parsedCode = OidcAuthorizationCodeSchema.safeParse(code);
+  if (!parsedCode.success) {
+    relay.searchParams.set('error', 'callback_invalid');
+    return relay.toString();
+  }
+  relay.searchParams.set('code', parsedCode.data);
+  return relay.toString();
 }
 
 async function callbackResponseDigest(callbackUrl: URL): Promise<string> {
@@ -1240,6 +1582,94 @@ export async function completeGoogleOidcCallback(
   });
 }
 
+/**
+ * Exchanges one native authorization code only after its server-issued flow,
+ * callback state, and app-held PKCE verifier agree. Provider credentials are
+ * normalized to verified claims before the canonical capability sees them.
+ */
+export async function completeGoogleMobileOidcExchange(
+  configuration: GoogleOidcConfiguration,
+  input: CompleteGoogleMobileOidcExchangeInput,
+): Promise<CompleteGoogleMobileOidcExchangeResult> {
+  getPrivateConfiguration(configuration);
+  const request = MobileOidcExchangeRequestSchema.parse({
+    authorizationCode: input.authorizationCode,
+    state: input.state,
+    codeVerifier: input.codeVerifier,
+    flowToken: input.flowToken,
+  });
+  const now = input.now ?? new Date();
+  if (!Number.isFinite(now.getTime())) {
+    return configurationError('The mobile OIDC clock is invalid.');
+  }
+  const transientState = await decryptMobileTransientState(
+    configuration,
+    request.flowToken,
+    Math.floor(now.getTime() / 1_000),
+  );
+  if (transientState === null) {
+    return callbackError({
+      configuration,
+      code: 'OIDC_FLOW_TOKEN_INVALID',
+    });
+  }
+  if (!constantTimeEqual(request.state, transientState.state)) {
+    return callbackError({
+      configuration,
+      code: 'OIDC_STATE_MISMATCH',
+    });
+  }
+  const presentedChallenge = encodeBase64Url(
+    await sha256Bytes(request.codeVerifier),
+  );
+  if (!constantTimeEqual(presentedChallenge, transientState.codeChallenge)) {
+    return callbackError({
+      configuration,
+      code: 'OIDC_PKCE_MISMATCH',
+      stateVerified: true,
+    });
+  }
+  const flowTokenDigest = await sha256Hex(request.flowToken);
+  const responseDigest = await sha256Hex(
+    ['mobile-oidc-exchange-v1', request.state, flowTokenDigest].join('\n'),
+  );
+  const idToken = await exchangeAuthorizationCode(
+    configuration,
+    request.authorizationCode,
+    request.codeVerifier,
+    responseDigest,
+  );
+  const verified = await verifyIdToken(
+    configuration,
+    idToken,
+    transientState.nonce,
+    responseDigest,
+  );
+  const capabilityInput = CompleteOidcSignInInputSchema.parse({
+    claims: verified.claims,
+    device: {
+      platform: transientState.platform,
+      unlockMethod: 'biometric',
+      installationId: transientState.installationId,
+    },
+  });
+  const transport = MobileOidcCodeExchangeTransportSchema.parse({
+    kind: 'mobile-oidc-code-exchange',
+    method: 'POST',
+    stateVerified: true,
+    nonceVerified: true,
+    pkceVerified: true,
+    signatureVerified: true,
+  });
+  return Object.freeze({
+    capabilityInput,
+    principal: verified.principal,
+    transport,
+    idempotencyKey: `oidc:${responseDigest}`,
+    responseDigest,
+  });
+}
+
 /** Builds the sole canonical pre-session capability envelope for a callback. */
 export function createCompleteOidcSignInEnvelope(
   callback: CompleteGoogleOidcCallbackResult,
@@ -1255,5 +1685,23 @@ export function createCompleteOidcSignInEnvelope(
     input: callback.capabilityInput,
     idempotencyKey: callback.idempotencyKey,
     transport: callback.transport,
+  });
+}
+
+/** Builds the canonical pre-session envelope for a verified native exchange. */
+export function createCompleteMobileOidcSignInEnvelope(
+  exchange: CompleteGoogleMobileOidcExchangeResult,
+  context: CompleteOidcEnvelopeContext,
+): AuthenticationCapabilityEnvelope {
+  return AuthenticationCapabilityEnvelopeSchema.parse({
+    capabilityId: 'complete-oidc-sign-in',
+    operation: 'mutation',
+    principal: exchange.principal,
+    source: 'mobile',
+    requestId: context.requestId,
+    serverTime: context.serverTime,
+    input: exchange.capabilityInput,
+    idempotencyKey: exchange.idempotencyKey,
+    transport: exchange.transport,
   });
 }
