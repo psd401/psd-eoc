@@ -38,6 +38,8 @@ const IDS = {
 } as const;
 
 const NOW = new Date('2026-08-10T18:00:00.000Z');
+const CONFIRMATION_ISSUED_AT = new Date('2026-08-10T18:00:01.000Z');
+const EXECUTION_TIME = new Date('2026-08-10T18:00:02.000Z');
 const IDEMPOTENCY_KEY = 'start-flow-idempotency-0001';
 
 function authenticated(source: 'mobile' | 'web' = 'web') {
@@ -69,7 +71,8 @@ function testRuntime(
     authenticationError?: unknown;
     confirmationError?: unknown;
     executionError?: unknown;
-    confirmationId?: string | null;
+    confirmationIssuedAt?: Date;
+    executionTime?: Date;
   }> = {},
 ) {
   const authentications: Request[] = [];
@@ -90,9 +93,12 @@ function testRuntime(
       if (options.confirmationError !== undefined) {
         throw options.confirmationError;
       }
-      return options.confirmationId === undefined
-        ? IDS.confirmation
-        : options.confirmationId;
+      return {
+        confirmationId: IDS.confirmation,
+        confirmationIssuedAt:
+          options.confirmationIssuedAt ?? CONFIRMATION_ISSUED_AT,
+        executionTime: options.executionTime ?? EXECUTION_TIME,
+      };
     },
     async executePreview(input, invocation) {
       executions.push({
@@ -209,6 +215,7 @@ describe('start-flow route handlers', () => {
         capabilityId: 'start-event',
         input: startInput(),
         invocation: expect.objectContaining({
+          serverTime: EXECUTION_TIME,
           mutation: expect.objectContaining({
             idempotencyKey: IDEMPOTENCY_KEY,
             humanConfirmationId: IDS.confirmation,
@@ -222,6 +229,20 @@ describe('start-flow route handlers', () => {
       }),
     ]);
     expect(await response.text()).not.toContain(IDS.confirmation);
+  });
+
+  test('fails closed when execution time predates DB confirmation issuance', async () => {
+    const { confirmations, executions, runtime } = testRuntime({
+      executionTime: new Date(CONFIRMATION_ISSUED_AT.getTime() - 1),
+    });
+    const response = await handleActivateEvent(
+      postRequest('/start/api/activate', startInput()),
+      runtime,
+    );
+
+    expect(response.status).toBe(503);
+    expect(confirmations).toHaveLength(1);
+    expect(executions).toEqual([]);
   });
 
   test('does not execute when the boundary rejects a synthetic preview', async () => {

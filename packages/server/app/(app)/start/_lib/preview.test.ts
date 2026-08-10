@@ -19,6 +19,7 @@ import {
   buildActivationPreview,
   type ActivationPreviewEvidence,
 } from './preview';
+import { formatNotificationStartTime } from '../../../../lib/notify/render';
 
 const CREATED_AT = new Date('2026-08-10T17:00:00.000Z');
 const CREATED_AT_ISO = CREATED_AT.toISOString();
@@ -146,7 +147,7 @@ function templates(templateMode: TemplateMode): MessageTemplateCatalog {
         purpose,
         classificationMarker,
         channel: 'push' as const,
-        title: '{{eventType}} at {{site}}',
+        title: '{{eventType}} at {{site}} — {{startTime}}',
         body: 'Started {{startTime}} by {{initiator}}.',
       }),
       email: Object.freeze({
@@ -154,7 +155,7 @@ function templates(templateMode: TemplateMode): MessageTemplateCatalog {
         purpose,
         classificationMarker,
         channel: 'email' as const,
-        subject: '{{eventType}} at {{site}}',
+        subject: '{{eventType}} at {{site}} — {{startTime}}',
         textBody: 'Started {{startTime}} by {{initiator}}.',
       }),
       sms: Object.freeze({
@@ -162,7 +163,7 @@ function templates(templateMode: TemplateMode): MessageTemplateCatalog {
         purpose,
         classificationMarker,
         channel: 'sms' as const,
-        body: '{{eventType}} at {{site}}.',
+        body: '{{eventType}} at {{site}} once {{startTime}}.',
       }),
     });
   return Object.freeze({
@@ -308,6 +309,55 @@ describe('activation consequence preview', () => {
           renderedMessage.eventKind === 'incident',
       ),
     ).toBe(true);
+  });
+
+  test('keeps exact persisted activation copy independent of preview creation time', () => {
+    const laterCreatedAt = new Date('2026-08-10T18:00:00.000Z');
+    const first = buildActivationPreview(evidence('real', 'staff'));
+    const later = buildActivationPreview({
+      ...evidence('real', 'staff'),
+      createdAt: laterCreatedAt,
+    });
+
+    expect(
+      first.channels.map(({ renderedMessage }) => renderedMessage),
+    ).toEqual(later.channels.map(({ renderedMessage }) => renderedMessage));
+    const persistedChannels = JSON.stringify(first.channels);
+    expect(persistedChannels).toContain('once confirmed');
+    expect(persistedChannels).not.toContain(
+      formatNotificationStartTime(CREATED_AT_ISO),
+    );
+    expect(persistedChannels).not.toContain(
+      formatNotificationStartTime(laterCreatedAt.toISOString()),
+    );
+    expect(first.createdAt).toBe(CREATED_AT_ISO);
+    expect(later.createdAt).toBe(laterCreatedAt.toISOString());
+  });
+
+  test('removes deferred start-time tokens from every exact channel field', () => {
+    const base = evidence('real', 'staff');
+    const preview = buildActivationPreview({
+      ...base,
+      channelConfigurations: base.channelConfigurations.map((configuration) =>
+        configuration.integrationId === 'aws-eum-sms'
+          ? { ...configuration, enabled: true }
+          : configuration,
+      ),
+    });
+
+    expect(preview.channels.map(({ channel }) => channel)).toEqual([
+      'push',
+      'email',
+      'sms',
+    ]);
+    for (const { renderedMessage } of preview.channels) {
+      const exactPayload = JSON.stringify(renderedMessage);
+      expect(exactPayload).toContain('once confirmed');
+      expect(exactPayload).not.toContain('{{startTime}}');
+      expect(exactPayload).not.toContain(
+        formatNotificationStartTime(CREATED_AT_ISO),
+      );
+    }
   });
 
   test('rejects an event-type version whose mode differs from the selection', () => {

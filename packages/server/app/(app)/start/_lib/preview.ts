@@ -38,6 +38,8 @@ const ALL_CHANNELS = Object.freeze([
   'sms',
 ] as const satisfies readonly NotificationChannel[]);
 
+const CONFIRMATION_BOUND_START_TIME_COPY = 'once confirmed';
+
 /** Safe, non-recipient-bearing reasons a preview cannot be assembled. */
 export type ActivationPreviewBuildErrorCode =
   | 'AUDIENCE_UNAVAILABLE'
@@ -110,6 +112,30 @@ function blockingCodeForTruth(
 
 function compareStrings(left: string, right: string): number {
   return left.localeCompare(right);
+}
+
+function confirmationBoundActivationTemplates(
+  templates: EventTypeVersion['templates']['activation'],
+): EventTypeVersion['templates']['activation'] {
+  const replaceStartTime = (text: string) =>
+    text.replaceAll('{{startTime}}', CONFIRMATION_BOUND_START_TIME_COPY);
+  return Object.freeze({
+    ...templates,
+    push: Object.freeze({
+      ...templates.push,
+      title: replaceStartTime(templates.push.title),
+      body: replaceStartTime(templates.push.body),
+    }),
+    email: Object.freeze({
+      ...templates.email,
+      subject: replaceStartTime(templates.email.subject),
+      textBody: replaceStartTime(templates.email.textBody),
+    }),
+    sms: Object.freeze({
+      ...templates.sms,
+      body: replaceStartTime(templates.sms.body),
+    }),
+  });
 }
 
 /**
@@ -190,7 +216,13 @@ export function buildActivationPreview(
 
   const renderedMessages = renderTemplateSet({
     eventKind: selection.kind,
-    templates: eventTypeVersion.templates.activation,
+    // The exact preview is also the exact worker payload. A concrete event
+    // time does not exist until the later explicit confirmation, so activation
+    // copy is intentionally causal instead of backdating the event to preview
+    // creation. The renderer still validates this required, now-unused value.
+    templates: confirmationBoundActivationTemplates(
+      eventTypeVersion.templates.activation,
+    ),
     variables: {
       site: facility.name,
       eventType: eventTypeVersion.name,
