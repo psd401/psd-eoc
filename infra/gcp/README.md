@@ -128,7 +128,9 @@ legacy project convenience bindings with a bucket. The same saved bootstrap
 plan replaces them with the single administrator Object Admin binding before
 the main backend is initialized. An interrupted run can adopt only that exact
 known initial policy and immediately finish the replacement; any other policy
-fails closed. Bucket creation waits for all four bootstrap APIs. If an existing
+fails closed. Requester Pays is explicitly disabled, and recovery rejects an
+enabled or malformed Requester Pays value before treating the bucket as usable
+by the backend. Bucket creation waits for all four bootstrap APIs. If an existing
 managed bucket is later found with any bootstrap API missing, recovery imports
 the existing bucket and policy into bootstrap state and repairs the APIs before
 the main backend is initialized. Recovery also validates the exact

@@ -333,6 +333,7 @@ export function validateStateBucket(
     bucket.default_storage_class !== 'STANDARD' ||
     bucket.public_access_prevention !== 'enforced' ||
     bucket.uniform_bucket_level_access !== true ||
+    (bucket.requester_pays !== undefined && bucket.requester_pays !== false) ||
     bucket.versioning_enabled !== true ||
     bucket.default_event_based_hold === true ||
     (bucket.retention_policy !== undefined &&

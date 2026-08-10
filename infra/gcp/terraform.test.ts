@@ -49,7 +49,10 @@ import {
   APPLICATION_DEFAULT_IDENTITY_SCOPES,
   assertNoAmbientTransportOverrides,
   assertTrustedHome,
+  boundedGoogleJsonObject,
   gcpRoot,
+  guardedGoogleFetch,
+  MAX_GOOGLE_RESPONSE_BYTES,
   reconcileIdempotentSecretWrite,
   sanitizedAwsEnvironment,
   sanitizedGcloudEnvironment,
@@ -164,6 +167,7 @@ const validBucket = {
   location_type: 'region',
   name: 'psd401-eoc-terraform-state',
   public_access_prevention: 'enforced',
+  requester_pays: false,
   storage_url: 'gs://psd401-eoc-terraform-state/',
   uniform_bucket_level_access: true,
   versioning_enabled: true,
@@ -845,6 +849,12 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(validateStateBucket(validBucket, validBucketPolicy)).toBe(
       'managed-policy',
     );
+    const { requester_pays: requesterPays, ...withoutRequesterPays } =
+      validBucket;
+    expect(requesterPays).toBe(false);
+    expect(validateStateBucket(withoutRequesterPays, validBucketPolicy)).toBe(
+      'managed-policy',
+    );
     expect(validateStateBucket(validBucket, bootstrapBucketPolicy, true)).toBe(
       'bootstrap-policy',
     );
@@ -863,6 +873,17 @@ describe('fail-closed bootstrap and process behavior', () => {
         validBucketPolicy,
       ),
     ).toThrow('private, versioned');
+    for (const requester_pays of [true, null, 0, 'false']) {
+      expect(() =>
+        validateStateBucket(
+          { ...validBucket, requester_pays },
+          validBucketPolicy,
+        ),
+      ).toThrow('private, versioned');
+    }
+    for (const path of ['main.tf', 'bootstrap/main.tf']) {
+      expect(read(path)).toMatch(/requester_pays\s+= false/u);
+    }
     for (const condition of [
       { age: 90, isLive: false },
       { daysSinceNoncurrentTime: 89, isLive: false },
@@ -1030,6 +1051,142 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(awsEnvironment.PSD_EOC_APPROVED_TEST_GROUP).toBeUndefined();
     expect(awsEnvironment.NO_PROXY).toBe('*');
     expect(awsEnvironment.no_proxy).toBe('*');
+  });
+
+  test('bounds untrusted Google JSON and rejects credential redirects', async () => {
+    await expect(
+      boundedGoogleJsonObject(
+        new Response(JSON.stringify({ result: 'synthetic' }), {
+          status: 200,
+        }),
+        'Synthetic Google read',
+      ),
+    ).resolves.toEqual({ result: 'synthetic' });
+
+    let declaredBodyCancelled = false;
+    const declaredOversizedBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode('provider-secret'));
+        controller.close();
+      },
+      cancel() {
+        declaredBodyCancelled = true;
+      },
+    });
+    await expect(
+      boundedGoogleJsonObject(
+        new Response(declaredOversizedBody, {
+          headers: {
+            'Content-Length': String(MAX_GOOGLE_RESPONSE_BYTES + 1),
+          },
+          status: 200,
+        }),
+        'Synthetic Google read',
+      ),
+    ).rejects.toThrow('invalid or oversized');
+    expect(declaredBodyCancelled).toBe(true);
+
+    let streamedBodyCancelled = false;
+    let streamedChunk = 0;
+    const streamedOversizedBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (streamedChunk === 0) {
+          streamedChunk += 1;
+          controller.enqueue(new Uint8Array(MAX_GOOGLE_RESPONSE_BYTES));
+          return;
+        }
+        controller.enqueue(new TextEncoder().encode('provider-secret'));
+      },
+      cancel() {
+        streamedBodyCancelled = true;
+      },
+    });
+    await expect(
+      boundedGoogleJsonObject(
+        new Response(streamedOversizedBody, { status: 200 }),
+        'Synthetic Google read',
+      ),
+    ).rejects.toThrow('invalid or oversized');
+    expect(streamedBodyCancelled).toBe(true);
+
+    let errorBodyCancelled = false;
+    const errorBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode('provider-secret'));
+        controller.close();
+      },
+      cancel() {
+        errorBodyCancelled = true;
+      },
+    });
+    await expect(
+      boundedGoogleJsonObject(
+        new Response(errorBody, { status: 503 }),
+        'Synthetic Google read',
+      ),
+    ).rejects.toThrow('failed with HTTP 503');
+    expect(errorBodyCancelled).toBe(true);
+
+    for (const invalidBody of [
+      'provider-secret',
+      JSON.stringify(['provider-secret']),
+      JSON.stringify('provider-secret'),
+    ]) {
+      let message = '';
+      try {
+        await boundedGoogleJsonObject(
+          new Response(invalidBody, { status: 200 }),
+          'Synthetic Google read',
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain('invalid or oversized');
+      expect(message).not.toContain('provider-secret');
+    }
+
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    let observedInit: RequestInit | undefined;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      const response = await guardedGoogleFetch(
+        async (_input, init) => {
+          observedInit = init;
+          return new Response('{}', { status: 200 });
+        },
+        'https://www.googleapis.com/synthetic',
+        { redirect: 'follow' },
+        'Synthetic Google read',
+      );
+      await response.body?.cancel();
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+    }
+    expect(observedInit?.redirect).toBe('error');
+
+    const runtime = read('scripts/runtime.ts');
+    const roleHelper = read('scripts/configure-workspace-role.ts');
+    const verifier = read('scripts/verify-groups-readonly.ts');
+    for (const source of [runtime, roleHelper, verifier]) {
+      expect(source).not.toContain('response.json()');
+    }
+    expect(runtime).toMatch(
+      /export async function guardedGoogleFetch[^]*assertNoAmbientTransportOverrides\(\);[^]*\.\.\.init,\s*redirect: 'error'/u,
+    );
+    expect(runtime).toMatch(
+      /export async function assertApplicationDefaultIdentity[^]*guardedGoogleFetch\([^]*boundedGoogleJsonObject\(/u,
+    );
+    expect(roleHelper).toMatch(
+      /async function authorizedFetch[^]*guardedGoogleFetch\([^]*boundedGoogleJsonObject\(/u,
+    );
+    expect(verifier).toMatch(
+      /export async function redactedFetch[^]*guardedGoogleFetch\(/u,
+    );
+    expect(verifier.match(/boundedGoogleJsonObject\(/gu)).toHaveLength(2);
   });
 
   test('rejects ambient credential transport and debug overrides', () => {
@@ -1220,11 +1377,11 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(runtime).toContain("aws: '/opt/homebrew/bin/aws'");
     expect(runtime).toContain("gcloud: '/opt/homebrew/bin/gcloud'");
     expect(runtime).toContain("terraform: '/opt/homebrew/bin/terraform'");
-    expect(read('scripts/configure-workspace-role.ts')).toMatch(
-      /async function authorizedFetch[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
+    expect(read('scripts/configure-workspace-role.ts')).toContain(
+      'guardedGoogleFetch(',
     );
-    expect(read('scripts/verify-groups-readonly.ts')).toMatch(
-      /export async function redactedFetch[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,
+    expect(read('scripts/verify-groups-readonly.ts')).toContain(
+      'guardedGoogleFetch(',
     );
     expect(read('scripts/store-oauth-client.ts')).toMatch(
       /async function readSecureFile[^]*\{\s*assertNoAmbientTransportOverrides\(\);/u,

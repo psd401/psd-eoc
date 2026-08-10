@@ -615,6 +615,114 @@ export function awsServiceEndpoint(
   return `https://${service}.${region}.amazonaws.com`;
 }
 
+export type GoogleFetcher = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export const MAX_GOOGLE_RESPONSE_BYTES = 512 * 1024;
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Preserve the sanitized provider error without exposing response details.
+  }
+}
+
+export async function guardedGoogleFetch(
+  fetcher: GoogleFetcher,
+  input: string | URL,
+  init: RequestInit,
+  operation: string,
+): Promise<Response> {
+  assertNoAmbientTransportOverrides();
+  try {
+    return await fetcher(input, {
+      ...init,
+      redirect: 'error',
+      signal: init.signal ?? AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new Error(`${operation} could not reach Google.`);
+  }
+}
+
+export async function boundedGoogleJsonObject(
+  response: Response,
+  operation: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  if (!response.ok) {
+    await cancelResponseBody(response);
+    throw new Error(`${operation} failed with HTTP ${response.status}.`);
+  }
+
+  const declaredLength = response.headers.get('content-length');
+  if (
+    declaredLength !== null &&
+    (!/^\d+$/u.test(declaredLength) ||
+      Number(declaredLength) > MAX_GOOGLE_RESPONSE_BYTES)
+  ) {
+    await cancelResponseBody(response);
+    throw new Error(`${operation} returned an invalid or oversized response.`);
+  }
+  if (response.body === null) {
+    throw new Error(`${operation} returned an invalid or oversized response.`);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value === undefined) {
+        throw new Error('Google returned an invalid response chunk.');
+      }
+      byteLength += value.byteLength;
+      if (byteLength > MAX_GOOGLE_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error('Google returned an oversized response.');
+      }
+      chunks.push(value);
+    }
+  } catch {
+    try {
+      await reader.cancel();
+    } catch {
+      // Preserve the bounded, sanitized response error.
+    }
+    throw new Error(`${operation} returned an invalid or oversized response.`);
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A failed or cancelled stream can retain the reader lock safely.
+    }
+  }
+
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error(`${operation} returned an invalid or oversized response.`);
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${operation} returned an invalid or oversized response.`);
+  }
+  return value as Readonly<Record<string, unknown>>;
+}
+
 function prepareCloudCommand(
   command: CloudCommand,
   args: readonly string[],
@@ -955,35 +1063,18 @@ export async function assertApplicationDefaultIdentity(
     ],
     { redactFailureOutput: true },
   );
-  let response: Response;
-  try {
-    response = await fetcher('https://www.googleapis.com/oauth2/v2/userinfo', {
+  const response = await guardedGoogleFetch(
+    fetcher,
+    'https://www.googleapis.com/oauth2/v2/userinfo',
+    {
       headers: { Authorization: `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch {
-    throw new Error(
-      'Application Default Credential identity verification could not reach Google.',
-    );
-  }
-  if (!response.ok) {
-    try {
-      await response.body?.cancel();
-    } catch {
-      // Keep credential and response details out of the error path.
-    }
-    throw new Error(
-      `Application Default Credential identity verification failed with HTTP ${response.status}.`,
-    );
-  }
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    throw new Error(
-      'Application Default Credential identity verification returned invalid JSON.',
-    );
-  }
+    },
+    'Application Default Credential identity verification',
+  );
+  const value = await boundedGoogleJsonObject(
+    response,
+    'Application Default Credential identity verification',
+  );
   validateGoogleUserIdentity(value, expectedEmail);
 }
 

@@ -9,9 +9,11 @@ import {
 import {
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
-  assertNoAmbientTransportOverrides,
+  boundedGoogleJsonObject,
+  guardedGoogleFetch,
   requiredString,
   runCommand,
+  type GoogleFetcher,
 } from './runtime';
 
 export const ROLE_MANAGEMENT_SCOPE =
@@ -33,29 +35,7 @@ interface RoleAssignment {
   readonly scopeType: string;
 }
 
-export type Fetcher = (
-  input: string | URL,
-  init?: RequestInit,
-) => Promise<Response>;
-
-async function responseJson(
-  response: Response,
-  operation: string,
-): Promise<Readonly<Record<string, unknown>>> {
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    throw new Error(`${operation} returned an invalid response.`);
-  }
-  if (!response.ok) {
-    throw new Error(`${operation} failed with HTTP ${response.status}.`);
-  }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`${operation} returned an invalid response.`);
-  }
-  return value as Readonly<Record<string, unknown>>;
-}
+export type Fetcher = GoogleFetcher;
 
 async function authorizedFetch(
   fetcher: Fetcher,
@@ -64,10 +44,10 @@ async function authorizedFetch(
   operation: string,
   init: RequestInit = {},
 ): Promise<Readonly<Record<string, unknown>>> {
-  assertNoAmbientTransportOverrides();
-  let response: Response;
-  try {
-    response = await fetcher(url, {
+  const response = await guardedGoogleFetch(
+    fetcher,
+    url,
+    {
       ...init,
       headers: {
         ...init.headers,
@@ -75,12 +55,10 @@ async function authorizedFetch(
         Authorization: `Bearer ${accessToken}`,
         'X-Goog-User-Project': PROJECT_ID,
       },
-      signal: init.signal ?? AbortSignal.timeout(15_000),
-    });
-  } catch {
-    throw new Error(`${operation} could not reach Google.`);
-  }
-  return responseJson(response, operation);
+    },
+    operation,
+  );
+  return boundedGoogleJsonObject(response, operation);
 }
 
 function records(
