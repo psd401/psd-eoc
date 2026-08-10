@@ -95,6 +95,9 @@ jobs:
           grep -RFq 'net.psd401.eoc' android/app
           grep -RFq 'net.psd401.eoc' ios
           grep -Fq 'com.google.firebase.messaging.default_notification_channel_id' android/app/src/main/AndroidManifest.xml
+          grep -Fq '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml
+          grep -Fq '<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml
+          grep -Fq '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove"/>' android/app/src/main/AndroidManifest.xml
           grep -Fq '<string name="expo_system_ui_user_interface_style" translatable="false">light</string>' android/app/src/main/res/values/strings.xml
           grep -A1 -F '<key>UIUserInterfaceStyle</key>' ios/PSDEOC/Info.plist | grep -Fq '<string>Light</string>'
           grep -RFq --include='*.entitlements' '<key>aps-environment</key>' ios
