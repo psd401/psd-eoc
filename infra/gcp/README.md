@@ -357,7 +357,12 @@ tenant-wide credentials:
    `revoke-psd-eoc-readonly-groups-key`. It revalidates the retained secret's
    complete AWS ownership/encryption/policy contract before reading it, then
    validates Terraform, both live IAM policies, the exact key, and the group
-   hash before revoking only the exact AWS-bound key.
+   hash. The preview check is discarded. After the unbounded confirmation it
+   repeats the gcloud and ADC identities, fresh Terraform/live service-account
+   contract, both IAM policies, AWS caller/secret metadata/resource policy on
+   both sides of secret readback, sole key and creation timestamp, and group
+   hash; only that fresh result supplies the key ID used for deletion. It then
+   proves that no user-managed key remains.
 4. Run `bun scripts/provision-groups-credential.ts`, review its preview, and
    type `store-psd-eoc-readonly-groups-key` to create and store the replacement.
 5. Run `bun scripts/verify-groups-readonly.ts` with the same temporary
