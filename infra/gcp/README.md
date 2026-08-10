@@ -33,9 +33,10 @@ eligible for deletion only after 90 days have elapsed since that version became
 noncurrent. Object creation age is not used, and lifecycle execution may occur
 later than the eligibility threshold. The bucket deliberately has no retention
 policy because the GCS backend must delete its short-lived lock object when each
-operation ends. Its authoritative bucket policy grants only the fixed human
-Terraform administrator `roles/storage.objectAdmin`, the minimum role required
-by the GCS backend. The same human intentionally holds project-level
+operation ends. It uses Google-managed encryption and has no configured
+customer-managed encryption key. Its authoritative bucket policy grants only
+the fixed human Terraform administrator `roles/storage.objectAdmin`, the
+minimum role required by the GCS backend. The same human intentionally holds project-level
 `roles/storage.admin` so this root can create and maintain the bucket; that
 broader inherited grant is not represented by the direct bucket-policy
 readback. Legacy project Owner/Editor/Viewer convenience principals, groups,
@@ -141,8 +142,9 @@ the main backend is initialized. An interrupted run can adopt only that exact
 known initial policy and immediately finish the replacement; any other policy
 fails closed. Requester Pays and default event-based holds are explicitly
 disabled. Recovery accepts only omitted or literal-false metadata for either
-setting and rejects enabled or malformed values before treating the bucket as
-usable by the backend. Bucket creation waits for all four bootstrap APIs. If an existing
+setting, accepts only omitted or literal-null default KMS metadata, and rejects
+configured or malformed values before treating the bucket as usable by the
+backend. Bucket creation waits for all four bootstrap APIs. If an existing
 bootstrap or managed bucket is later found with Cloud Resource Manager or Cloud
 Billing disabled, the helper first uses Storage alone to validate the bucket's
 complete standardized metadata, the raw `projectNumber` from a listing scoped
