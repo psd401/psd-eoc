@@ -253,9 +253,17 @@ function assertStoredCredential(
 export function cleanupCredentialArtifacts(options: {
   readonly createdKeyId: string | undefined;
   readonly deleteKey: (keyId: string) => void;
+  readonly keyCreationAttempted: boolean;
   readonly storageOutcome: 'stored' | 'not-stored' | 'unknown';
 }): unknown[] {
   const errors: unknown[] = [];
+  if (options.keyCreationAttempted && options.createdKeyId === undefined) {
+    errors.push(
+      new Error(
+        'Could not bind remote cleanup to the generated Google key; manual reconciliation is required.',
+      ),
+    );
+  }
   if (
     options.storageOutcome === 'not-stored' &&
     options.createdKeyId !== undefined
@@ -398,14 +406,6 @@ async function main(): Promise<void> {
     operationError = error;
   }
 
-  if (keyCreationAttempted && createdKeyId === undefined) {
-    cleanupErrors.push(
-      new Error(
-        'Could not bind remote cleanup to the generated Google key; manual reconciliation is required.',
-      ),
-    );
-  }
-
   cleanupErrors.push(
     ...cleanupCredentialArtifacts({
       createdKeyId,
@@ -427,6 +427,7 @@ async function main(): Promise<void> {
           { redactFailureOutput: true },
         );
       },
+      keyCreationAttempted,
       storageOutcome,
     }),
   );

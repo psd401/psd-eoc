@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, realpath, type FileHandle } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,12 +28,17 @@ const PROJECT_ID = 'psd401-eoc';
 const MOBILE_APPLICATION_ID = 'net.psd401.eoc';
 const EXPECTED_ORIGIN = 'https://eoc.psd401.net';
 const EXPECTED_REDIRECT = 'https://eoc.psd401.net/auth/callback';
+const MAX_OAUTH_DOWNLOAD_BYTES = 64 * 1024;
 const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url));
 const standardPlistDoctype =
   /<!DOCTYPE\s+plist\s+PUBLIC\s+"-\/\/Apple\/\/DTD PLIST 1\.0\/\/EN"\s+"http:\/\/www\.apple\.com\/DTDs\/PropertyList-1\.0\.dtd"\s*>/giu;
 
 interface GoogleWebClientDownload {
   readonly web?: Readonly<Record<string, unknown>>;
+}
+
+export interface SecureFileReadOperations {
+  readonly afterInitialValidation: () => void | Promise<void>;
 }
 
 export function terraformProjectNumber(value: unknown): string {
@@ -128,26 +134,105 @@ export function parsePlistStrings(
   return parsed;
 }
 
-async function readSecureFile(path: string): Promise<string> {
+async function descriptorRealpath(handle: FileHandle): Promise<string> {
+  try {
+    return await realpath(`/proc/self/fd/${handle.fd}`);
+  } catch {
+    return realpath(`/dev/fd/${handle.fd}`);
+  }
+}
+
+async function readBoundedDescriptor(handle: FileHandle): Promise<Buffer> {
+  const buffer = Buffer.alloc(MAX_OAUTH_DOWNLOAD_BYTES + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      offset,
+      buffer.length - offset,
+      offset,
+    );
+    if (bytesRead === 0) {
+      break;
+    }
+    offset += bytesRead;
+  }
+  return Buffer.from(buffer.subarray(0, offset));
+}
+
+export async function readSecureFileBytes(
+  path: string,
+  operations?: SecureFileReadOperations,
+): Promise<Buffer> {
   assertNoAmbientTransportOverrides();
   const requested = resolve(path);
-  const resolved = await realpath(requested);
-  if (
-    !isPathOutsideDirectory(repositoryRoot, requested) ||
-    !isPathOutsideDirectory(repositoryRoot, resolved)
-  ) {
+  if (!isPathOutsideDirectory(repositoryRoot, requested)) {
     throw new Error('OAuth downloads must remain outside the repository.');
   }
-  const metadata = await stat(resolved);
-  if (!metadata.isFile() || metadata.size === 0 || metadata.size > 64 * 1024) {
-    throw new Error('OAuth download must be one regular file under 64 KiB.');
+  const preflightResolved = await realpath(requested);
+  if (!isPathOutsideDirectory(repositoryRoot, preflightResolved)) {
+    throw new Error('OAuth downloads must remain outside the repository.');
   }
-  if ((metadata.mode & 0o077) !== 0) {
-    throw new Error(
-      'OAuth download permissions must deny all group and other access (for example, chmod 600).',
-    );
+
+  const handle = await open(
+    requested,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const resolved = await descriptorRealpath(handle);
+    if (!isPathOutsideDirectory(repositoryRoot, resolved)) {
+      throw new Error('OAuth downloads must remain outside the repository.');
+    }
+
+    const before = await handle.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size === 0n ||
+      before.size > BigInt(MAX_OAUTH_DOWNLOAD_BYTES)
+    ) {
+      throw new Error('OAuth download must be one regular file under 64 KiB.');
+    }
+    if ((before.mode & 0o077n) !== 0n) {
+      throw new Error(
+        'OAuth download permissions must deny all group and other access (for example, chmod 600).',
+      );
+    }
+
+    await operations?.afterInitialValidation();
+    const contents = await readBoundedDescriptor(handle);
+    const after = await handle.stat({ bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.mode !== after.mode ||
+      before.nlink !== after.nlink ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      BigInt(contents.length) !== before.size
+    ) {
+      throw new Error('OAuth download changed while it was being read.');
+    }
+    return contents;
+  } finally {
+    await handle.close();
   }
-  return readFile(resolved, 'utf8');
+}
+
+export async function readSecureFile(path: string): Promise<string> {
+  return (await readSecureFileBytes(path)).toString('utf8');
+}
+
+export async function readWebClientDownload(
+  path: string,
+): Promise<GoogleWebClientDownload> {
+  const contents = await readSecureFile(path);
+  try {
+    return JSON.parse(contents) as GoogleWebClientDownload;
+  } catch {
+    throw new Error('Web OAuth client download did not contain valid JSON.');
+  }
 }
 
 function createOauthSecretPlaceholder(): void {
@@ -222,14 +307,7 @@ async function main(): Promise<void> {
     );
   }
 
-  let downloaded: GoogleWebClientDownload;
-  try {
-    downloaded = JSON.parse(
-      await readSecureFile(webClientPath),
-    ) as GoogleWebClientDownload;
-  } catch {
-    throw new Error('Web OAuth client download did not contain valid JSON.');
-  }
+  const downloaded = await readWebClientDownload(webClientPath);
   if (
     downloaded.web === undefined ||
     downloaded.web.project_id !== PROJECT_ID ||

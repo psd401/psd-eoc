@@ -206,6 +206,42 @@ export interface ConfirmedPlanOperations {
   readonly revalidate: () => Promise<void>;
 }
 
+export interface ApplyBoundaryOperations {
+  readonly inspectBucket: () => StateBucketInspection | null;
+  readonly inspectProject: () => Readonly<Record<string, unknown>> | null;
+  readonly validateExistingProject: (
+    project: Readonly<Record<string, unknown>>,
+  ) => Readonly<Record<string, unknown>>;
+  readonly inspectProjectIamPolicy: () => Readonly<Record<string, unknown>>;
+  readonly inspectServices: () => EnabledProjectServicesInspection;
+  readonly inspectRosterReader: () => Readonly<Record<string, unknown>> | null;
+  readonly validateRosterReader: (
+    serviceAccount: Readonly<Record<string, unknown>>,
+  ) => string;
+}
+
+export interface OrphanedRosterReaderRecoveryOperations {
+  readonly inspectEnabledServices: () => ReadonlySet<string>;
+  readonly inspectRosterReader: () => Readonly<Record<string, unknown>> | null;
+  readonly validateRosterReader: (
+    serviceAccount: Readonly<Record<string, unknown>>,
+  ) => string;
+  readonly importResource: (address: string, importId: string) => void;
+}
+
+export interface BootstrapStateRecoveryOperations {
+  readonly inspectBucketStatus: () => StateBucketStatus;
+  readonly inspectInterruptedState: () => InterruptedBootstrapStateInspection | null;
+  readonly inspectStateResources: () => ReadonlySet<string>;
+  readonly inspectProject: () => Readonly<Record<string, unknown>> | null;
+  readonly validateExistingProject: (
+    project: Readonly<Record<string, unknown>>,
+  ) => Readonly<Record<string, unknown>>;
+  readonly inspectProjectIamPolicy: () => Readonly<Record<string, unknown>>;
+  readonly inspectEnabledServices: () => ReadonlySet<string>;
+  readonly importResource: (address: string, importId: string) => void;
+}
+
 function parseJsonObject(
   value: string,
   description: string,
@@ -1516,9 +1552,12 @@ function enabledProjectServices(): Set<string> {
   return new Set(enabledProjectServiceInspection().services);
 }
 
-function captureApplyBoundary(includeRosterReader: boolean): string {
-  const bucket = inspectStateBucketForApiRepair(true);
-  const project = inspectProject();
+export function captureApplyBoundary(
+  includeRosterReader: boolean,
+  operations: ApplyBoundaryOperations,
+): string {
+  const bucket = operations.inspectBucket();
+  const project = operations.inspectProject();
   if (project === null) {
     if (bucket !== null) {
       throw new Error(
@@ -1536,16 +1575,16 @@ function captureApplyBoundary(includeRosterReader: boolean): string {
     });
   }
 
-  const billing = validateExistingProject(project);
+  const billing = operations.validateExistingProject(project);
   const projectNumber = project.projectNumber as string;
   if (bucket !== null && bucket.projectNumber !== projectNumber) {
     throw new Error(
       'The expected PSD EOC project and state bucket identify different Google projects.',
     );
   }
-  const policy = projectIamPolicy();
+  const policy = operations.inspectProjectIamPolicy();
   validateProjectIamPolicy(policy, projectNumber, 'recovery');
-  const serviceInspection = enabledProjectServiceInspection();
+  const serviceInspection = operations.inspectServices();
   if (serviceInspection.projectNumber !== projectNumber) {
     throw new Error(
       'The live project and enabled services identify different Google projects.',
@@ -1564,11 +1603,11 @@ function captureApplyBoundary(includeRosterReader: boolean): string {
     includeRosterReader &&
     serviceInspection.services.has('iam.googleapis.com')
   ) {
-    const serviceAccount = inspectRosterReaderServiceAccount();
+    const serviceAccount = operations.inspectRosterReader();
     rosterReader =
       serviceAccount === null
         ? null
-        : validateLiveRecoverableRosterReader(serviceAccount);
+        : operations.validateRosterReader(serviceAccount);
   }
 
   return buildApplyBoundary({
@@ -1582,35 +1621,33 @@ function captureApplyBoundary(includeRosterReader: boolean): string {
   });
 }
 
-function recoverOrphanedRosterReader(resources: Set<string>): void {
+export function recoverOrphanedRosterReader(
+  resources: Set<string>,
+  operations: OrphanedRosterReaderRecoveryOperations,
+): void {
   if (
     resources.has(ROSTER_READER_ADDRESS) ||
-    !enabledProjectServices().has('iam.googleapis.com')
+    !operations.inspectEnabledServices().has('iam.googleapis.com')
   ) {
     return;
   }
-  const serviceAccount = inspectRosterReaderServiceAccount();
+  const serviceAccount = operations.inspectRosterReader();
   if (serviceAccount === null) {
     return;
   }
-  validateLiveRecoverableRosterReader(serviceAccount);
+  operations.validateRosterReader(serviceAccount);
   const expectedUniqueId = serviceAccount.uniqueId;
   const expectedOauth2ClientId = serviceAccount.oauth2ClientId;
-  runTerraformInteractive([
-    'import',
-    '-input=false',
-    ROSTER_READER_ADDRESS,
-    ROSTER_READER_RESOURCE,
-  ]);
+  operations.importResource(ROSTER_READER_ADDRESS, ROSTER_READER_RESOURCE);
   resources.add(ROSTER_READER_ADDRESS);
 
-  const importedServiceAccount = inspectRosterReaderServiceAccount();
+  const importedServiceAccount = operations.inspectRosterReader();
   if (importedServiceAccount === null) {
     throw new Error(
       'The roster-reader service account disappeared immediately after import.',
     );
   }
-  validateLiveRecoverableRosterReader(importedServiceAccount);
+  operations.validateRosterReader(importedServiceAccount);
   if (
     importedServiceAccount.uniqueId !== expectedUniqueId ||
     importedServiceAccount.oauth2ClientId !== expectedOauth2ClientId
@@ -1672,6 +1709,22 @@ function validateBootstrapStateAddresses(
   }
 }
 
+function validateRecoveredBucketBackedBootstrapState(
+  expectedResources: ReadonlySet<string>,
+  finalResources: ReadonlySet<string>,
+): void {
+  const policyDataSource = 'data.google_iam_policy.terraform_state';
+  const expectedManagedResources = new Set(expectedResources);
+  const finalManagedResources = new Set(finalResources);
+  expectedManagedResources.delete(policyDataSource);
+  finalManagedResources.delete(policyDataSource);
+  if (!sameStringSet(expectedManagedResources, finalManagedResources)) {
+    throw new Error(
+      'Bucket-backed bootstrap state changed after recovery; rerun before creating a saved plan.',
+    );
+  }
+}
+
 export function validateMainStateAddresses(
   resources: ReadonlySet<string>,
   requireComplete = false,
@@ -1694,16 +1747,18 @@ export function validateMainStateAddresses(
   }
 }
 
-function recoverBootstrapState(): void {
-  const bucketStatus = stateBucketStatus(true);
+export function recoverBootstrapState(
+  operations: BootstrapStateRecoveryOperations,
+): void {
+  const bucketStatus = operations.inspectBucketStatus();
   const interruptedState =
-    bucketStatus === 'absent' ? inspectInterruptedBootstrapState() : null;
+    bucketStatus === 'absent' ? operations.inspectInterruptedState() : null;
   const resources =
     bucketStatus === 'absent'
       ? new Set(interruptedState?.resources ?? [])
-      : stateResources(bootstrapRoot);
+      : new Set(operations.inspectStateResources());
   validateBootstrapStateAddresses(resources, bucketStatus);
-  const project = inspectProject();
+  const project = operations.inspectProject();
   if (project === null) {
     if (resources.has('google_project.psd_eoc')) {
       throw new Error(
@@ -1713,27 +1768,21 @@ function recoverBootstrapState(): void {
     return;
   }
 
-  validateExistingProject(project);
+  operations.validateExistingProject(project);
   validateProjectIamPolicy(
-    projectIamPolicy(),
+    operations.inspectProjectIamPolicy(),
     project.projectNumber as string,
     'recovery',
   );
   if (!resources.has('google_project.psd_eoc')) {
-    runTerraformInteractive(
-      ['import', '-input=false', 'google_project.psd_eoc', PROJECT_ID],
-      bootstrapRoot,
-    );
+    operations.importResource('google_project.psd_eoc', PROJECT_ID);
     resources.add('google_project.psd_eoc');
   }
 
-  const services = enabledProjectServices();
+  const services = operations.inspectEnabledServices();
   for (const [address, service] of bootstrapServiceImports) {
     if (services.has(service) && !resources.has(address)) {
-      runTerraformInteractive(
-        ['import', '-input=false', address, `${PROJECT_ID}/${service}`],
-        bootstrapRoot,
-      );
+      operations.importResource(address, `${PROJECT_ID}/${service}`);
       resources.add(address);
     }
   }
@@ -1741,32 +1790,66 @@ function recoverBootstrapState(): void {
   if (bucketStatus !== 'absent') {
     for (const [address, importId] of bootstrapBucketImports) {
       if (!resources.has(address)) {
-        runTerraformInteractive(
-          ['import', '-input=false', address, importId],
-          bootstrapRoot,
-        );
+        operations.importResource(address, importId);
         resources.add(address);
       }
     }
   }
 
-  const finalBucketStatus = stateBucketStatus(true);
+  const finalBucketStatus = operations.inspectBucketStatus();
   if (finalBucketStatus !== bucketStatus) {
     throw new Error(
       'The state bucket changed during bootstrap recovery; rerun before creating a saved plan.',
     );
   }
-  const finalResources = stateResources(bootstrapRoot);
+  const finalResources = operations.inspectStateResources();
   validateBootstrapStateAddresses(finalResources, finalBucketStatus);
   if (finalBucketStatus === 'absent') {
-    const finalState = inspectInterruptedBootstrapState();
+    const finalState = operations.inspectInterruptedState();
     validateRecoveredInterruptedBootstrapState(
       interruptedState,
       finalState,
       resources,
     );
+  } else {
+    validateRecoveredBucketBackedBootstrapState(resources, finalResources);
   }
 }
+
+const liveApplyBoundaryOperations = {
+  inspectBucket: () => inspectStateBucketForApiRepair(true),
+  inspectProject,
+  validateExistingProject,
+  inspectProjectIamPolicy: projectIamPolicy,
+  inspectServices: enabledProjectServiceInspection,
+  inspectRosterReader: inspectRosterReaderServiceAccount,
+  validateRosterReader: validateLiveRecoverableRosterReader,
+} as const satisfies ApplyBoundaryOperations;
+
+const liveOrphanedRosterReaderRecoveryOperations = {
+  inspectEnabledServices: enabledProjectServices,
+  inspectRosterReader: inspectRosterReaderServiceAccount,
+  validateRosterReader: validateLiveRecoverableRosterReader,
+  importResource: (address: string, importId: string) => {
+    runTerraformInteractive(['import', '-input=false', address, importId]);
+  },
+} as const satisfies OrphanedRosterReaderRecoveryOperations;
+
+const liveBootstrapStateRecoveryOperations = {
+  inspectBucketStatus: () => stateBucketStatus(true),
+  inspectInterruptedState: inspectInterruptedBootstrapState,
+  inspectStateResources: () => stateResources(bootstrapRoot),
+  inspectProject,
+  validateExistingProject,
+  inspectProjectIamPolicy: projectIamPolicy,
+  inspectEnabledServices: enabledProjectServices,
+  importResource: (address: string, importId: string) => {
+    runTerraformInteractive(
+      ['import', '-input=false', address, importId],
+      bootstrapRoot,
+    );
+  },
+} as const satisfies BootstrapStateRecoveryOperations;
 
 export async function executeConfirmedPlan(
   operations: ConfirmedPlanOperations,
@@ -1903,9 +1986,10 @@ async function main(): Promise<void> {
         validateProject: validateRecoveryProject,
       });
     }
-    recoverBootstrapState();
+    recoverBootstrapState(liveBootstrapStateRecoveryOperations);
     await applySavedPlan({
-      captureBoundary: () => captureApplyBoundary(false),
+      captureBoundary: () =>
+        captureApplyBoundary(false, liveApplyBoundaryOperations),
       confirmation: 'create-psd401-eoc-bootstrap',
       cwd: bootstrapRoot,
       planPath: bootstrapPlan,
@@ -1936,11 +2020,15 @@ async function main(): Promise<void> {
       managedResources.add(address);
     }
   }
-  recoverOrphanedRosterReader(managedResources);
+  recoverOrphanedRosterReader(
+    managedResources,
+    liveOrphanedRosterReaderRecoveryOperations,
+  );
   validateMainStateAddresses(stateResources());
 
   await applySavedPlan({
-    captureBoundary: () => captureApplyBoundary(true),
+    captureBoundary: () =>
+      captureApplyBoundary(true, liveApplyBoundaryOperations),
     confirmation: 'apply-psd401-eoc-gcp',
     cwd: gcpRoot,
     planPath: mainPlan,
