@@ -10,7 +10,8 @@ terraform {
 }
 
 provider "google" {
-  region = "us-west1"
+  region          = "us-west1"
+  deletion_policy = "PREVENT"
 }
 
 locals {
