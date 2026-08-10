@@ -6,8 +6,10 @@ import {
   bootstrapPrerequisitesReady,
   parseBucketDescribeResult,
   parseProjectDescribeResult,
+  parseServiceAccountListResult,
   parseStateListResult,
   validateBootstrapProject,
+  validateRecoverableRosterReaderServiceAccount,
   validateStateBucket,
 } from './scripts/apply';
 import {
@@ -97,7 +99,10 @@ const validGroupsOutput = {
 } as const;
 
 const validLiveGroupsReader = {
+  description:
+    'Reads configured staff Google Groups for roster snapshots; never writes Groups or sends notifications.',
   disabled: false,
+  displayName: 'PSD EOC roster sync reader',
   email: ROSTER_READER_EMAIL,
   name: `projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}`,
   oauth2ClientId: '987654321098765432109',
@@ -351,6 +356,31 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     ]) {
       expect(normalizedReadme).toContain(oidcEvidence);
     }
+  });
+
+  test('authorizes role-management ADC before credential rotation', () => {
+    const readme = read('README.md');
+    const rotation = readme.slice(
+      readme.indexOf('### Credential rotation and revocation'),
+      readme.indexOf('## Google Auth Platform residual steps'),
+    );
+    const authorize = rotation.indexOf(
+      'Temporarily authorize the role-management ADC',
+    );
+    const revoke = rotation.indexOf('bun scripts/revoke-groups-credential.ts');
+    const provision = rotation.indexOf(
+      'bun scripts/provision-groups-credential.ts',
+    );
+    const verify = rotation.indexOf('bun scripts/verify-groups-readonly.ts');
+    const restore = rotation.indexOf(
+      'Explicitly revoke the role-management ADC',
+    );
+
+    expect(authorize).toBeGreaterThan(-1);
+    expect(authorize).toBeLessThan(revoke);
+    expect(revoke).toBeLessThan(provision);
+    expect(provision).toBeLessThan(verify);
+    expect(verify).toBeLessThan(restore);
   });
 
   test('makes only read-only Groups calls and requests no member fields', () => {
@@ -629,6 +659,102 @@ describe('fail-closed bootstrap and process behavior', () => {
     ).toThrow('Error acquiring the state lock');
   });
 
+  test('recovers only the exact harmless orphaned roster-reader account', () => {
+    expect(parseServiceAccountListResult(0, '[]', '')).toBeNull();
+    expect(
+      parseServiceAccountListResult(
+        0,
+        JSON.stringify([
+          {
+            email: 'unrelated@psd401-eoc.iam.gserviceaccount.com',
+          },
+          validLiveGroupsReader,
+        ]),
+        '',
+      ),
+    ).toEqual(validLiveGroupsReader);
+    expect(() =>
+      parseServiceAccountListResult(
+        1,
+        '',
+        'PERMISSION_DENIED: caller cannot list service accounts',
+      ),
+    ).toThrow('PERMISSION_DENIED');
+    expect(() =>
+      parseServiceAccountListResult(
+        0,
+        JSON.stringify([{ displayName: 'missing email' }]),
+        '',
+      ),
+    ).toThrow('malformed metadata');
+    expect(() =>
+      parseServiceAccountListResult(0, JSON.stringify({}), ''),
+    ).toThrow('one JSON array');
+    expect(() =>
+      parseServiceAccountListResult(
+        0,
+        JSON.stringify([validLiveGroupsReader, validLiveGroupsReader]),
+        '',
+      ),
+    ).toThrow('exactly the fixed account');
+
+    expect(() =>
+      validateRecoverableRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        '',
+      ),
+    ).not.toThrow();
+    for (const invalid of [
+      { ...validLiveGroupsReader, name: 'projects/wrong/serviceAccounts/fake' },
+      { ...validLiveGroupsReader, email: 'lookalike@example.invalid' },
+      { ...validLiveGroupsReader, projectId: 'wrong-project' },
+      { ...validLiveGroupsReader, displayName: 'Lookalike reader' },
+      { ...validLiveGroupsReader, description: 'Unexpected purpose' },
+      { ...validLiveGroupsReader, disabled: true },
+      { ...validLiveGroupsReader, uniqueId: 'not-numeric' },
+      { ...validLiveGroupsReader, oauth2ClientId: 'not-numeric' },
+    ]) {
+      expect(() =>
+        validateRecoverableRosterReaderServiceAccount(invalid, {}, ''),
+      ).toThrow('exact Terraform identity');
+    }
+    expect(() =>
+      validateRecoverableRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {
+          bindings: [
+            {
+              members: ['user:attacker@example.invalid'],
+              role: 'roles/iam.serviceAccountTokenCreator',
+            },
+          ],
+        },
+        '',
+      ),
+    ).toThrow('direct resource IAM binding');
+    expect(() =>
+      validateRecoverableRosterReaderServiceAccount(
+        validLiveGroupsReader,
+        {},
+        `projects/psd401-eoc/serviceAccounts/${ROSTER_READER_EMAIL}/keys/${'a'.repeat(40)}`,
+      ),
+    ).toThrow('user-managed key');
+
+    const apply = read('scripts/apply.ts');
+    const recoveryCall = apply.lastIndexOf(
+      'recoverOrphanedRosterReader(managedResources)',
+    );
+    expect(recoveryCall).toBeGreaterThan(-1);
+    expect(recoveryCall).toBeLessThan(
+      apply.indexOf("confirmation: 'apply-psd401-eoc-gcp'"),
+    );
+    expect(apply).toContain(
+      '`projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}`',
+    );
+    expect(apply).not.toContain('create_ignore_already_exists');
+  });
+
   test('bootstraps only on confirmed bucket absence', () => {
     expect(
       parseBucketDescribeResult(
@@ -856,6 +982,26 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(awsEnvironment.AWS_CONFIG_FILE).toBeUndefined();
     expect(awsEnvironment.AWS_ENDPOINT_URL_SECRETS_MANAGER).toBeUndefined();
     expect(awsEnvironment.PSD_EOC_APPROVED_TEST_GROUP).toBeUndefined();
+  });
+
+  test('rejects GCS emulator routing before guarded Google commands', () => {
+    for (const name of [
+      'STORAGE_EMULATOR_HOST',
+      'STORAGE_EMULATOR_HOST_GRPC',
+    ]) {
+      expect(() =>
+        sanitizedTerraformEnvironment({
+          PATH: '/usr/bin',
+          [name]: 'http://127.0.0.1:4443',
+        }),
+      ).toThrow('require real Google Cloud Storage endpoints');
+      expect(() =>
+        sanitizedGcloudEnvironment({
+          PATH: '/usr/bin',
+          [name]: '',
+        }),
+      ).toThrow('require real Google Cloud Storage endpoints');
+    }
   });
 
   test('rejects persistent gcloud impersonation and endpoint overrides', () => {

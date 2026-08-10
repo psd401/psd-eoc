@@ -13,13 +13,23 @@ import {
   sanitizedGcloudEnvironment,
   sanitizedTerraformEnvironment,
 } from './runtime';
-import { TERRAFORM_ADMIN, validateProjectIamPolicy } from './project-policy';
+import { parseUserManagedKeyIds, ROSTER_READER_EMAIL } from './groups-contract';
+import {
+  TERRAFORM_ADMIN,
+  validateProjectIamPolicy,
+  validateRosterReaderResourcePolicy,
+} from './project-policy';
 
 const PROJECT_ID = 'psd401-eoc';
 const PROJECT_NAME = 'PSD EOC';
 const ORGANIZATION_ID = '482073499306';
 const BILLING_ACCOUNT = '<billing-account>';
 const STATE_BUCKET = 'psd401-eoc-terraform-state';
+const ROSTER_READER_ADDRESS = 'google_service_account.roster_reader';
+const ROSTER_READER_RESOURCE = `projects/${PROJECT_ID}/serviceAccounts/${ROSTER_READER_EMAIL}`;
+const ROSTER_READER_DISPLAY_NAME = 'PSD EOC roster sync reader';
+const ROSTER_READER_DESCRIPTION =
+  'Reads configured staff Google Groups for roster snapshots; never writes Groups or sends notifications.';
 const bootstrapRoot = join(gcpRoot, 'bootstrap');
 const bootstrapPlan = join(bootstrapRoot, '.terraform', 'bootstrap.tfplan');
 const mainPlan = join(gcpRoot, '.terraform', 'apply.tfplan');
@@ -138,6 +148,102 @@ export function parseProjectDescribeResult(
   throw new Error(
     `Project inspection exited with status ${status}: ${detail.trim().slice(0, 2_000)}`,
   );
+}
+
+export function parseServiceAccountListResult(
+  status: number | null,
+  stdout: string,
+  stderr: string,
+): Readonly<Record<string, unknown>> | null {
+  if (status !== 0) {
+    const detail = stderr || stdout;
+    throw new Error(
+      `Roster-reader service-account listing exited with status ${status}: ${detail.trim().slice(0, 2_000)}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(
+      'Roster-reader service-account listing did not contain valid JSON.',
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      'Roster-reader service-account listing was not one JSON array.',
+    );
+  }
+  if (parsed.length === 0) {
+    return null;
+  }
+  const matches: Readonly<Record<string, unknown>>[] = [];
+  for (const value of parsed) {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value) ||
+      typeof (value as Readonly<Record<string, unknown>>).email !== 'string'
+    ) {
+      throw new Error(
+        'Roster-reader service-account listing contained malformed metadata.',
+      );
+    }
+    const serviceAccount = value as Readonly<Record<string, unknown>>;
+    if (serviceAccount.email === ROSTER_READER_EMAIL) {
+      matches.push(serviceAccount);
+    }
+  }
+  if (matches.length === 0) {
+    return null;
+  }
+  if (
+    matches.length !== 1 ||
+    typeof matches[0]?.uniqueId !== 'string' ||
+    !/^\d+$/u.test(matches[0].uniqueId) ||
+    typeof matches[0].oauth2ClientId !== 'string' ||
+    !/^\d+$/u.test(matches[0].oauth2ClientId)
+  ) {
+    throw new Error(
+      'Roster-reader service-account listing did not contain exactly the fixed account.',
+    );
+  }
+  return matches[0];
+}
+
+export function validateRecoverableRosterReaderServiceAccount(
+  value: unknown,
+  resourcePolicy: unknown,
+  userManagedKeyOutput: string,
+): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(
+      'Existing roster-reader service-account metadata is invalid.',
+    );
+  }
+  const serviceAccount = value as Readonly<Record<string, unknown>>;
+  if (
+    serviceAccount.name !== ROSTER_READER_RESOURCE ||
+    serviceAccount.projectId !== PROJECT_ID ||
+    serviceAccount.email !== ROSTER_READER_EMAIL ||
+    serviceAccount.displayName !== ROSTER_READER_DISPLAY_NAME ||
+    serviceAccount.description !== ROSTER_READER_DESCRIPTION ||
+    typeof serviceAccount.uniqueId !== 'string' ||
+    !/^\d+$/u.test(serviceAccount.uniqueId) ||
+    typeof serviceAccount.oauth2ClientId !== 'string' ||
+    !/^\d+$/u.test(serviceAccount.oauth2ClientId) ||
+    (serviceAccount.disabled !== undefined && serviceAccount.disabled !== false)
+  ) {
+    throw new Error(
+      'Existing roster-reader service account does not match the exact Terraform identity and metadata contract.',
+    );
+  }
+  validateRosterReaderResourcePolicy(resourcePolicy);
+  if (parseUserManagedKeyIds(userManagedKeyOutput).size !== 0) {
+    throw new Error(
+      'Existing roster-reader service account has a user-managed key and cannot be adopted.',
+    );
+  }
 }
 
 function recordField(
@@ -350,6 +456,110 @@ function inspectProject(): Readonly<Record<string, unknown>> | null {
   );
 }
 
+function inspectRosterReaderServiceAccount(): Readonly<
+  Record<string, unknown>
+> | null {
+  const result = spawnSync(
+    'gcloud',
+    [
+      'iam',
+      'service-accounts',
+      'list',
+      '--project',
+      PROJECT_ID,
+      '--format=json',
+      '--quiet',
+    ],
+    {
+      cwd: gcpRoot,
+      encoding: 'utf8',
+      env: sanitizedGcloudEnvironment(),
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  if (result.error !== undefined) {
+    throw new Error(`gcloud could not start: ${result.error.message}`);
+  }
+  const listed = parseServiceAccountListResult(
+    result.status,
+    result.stdout,
+    result.stderr,
+  );
+  if (listed === null) {
+    return null;
+  }
+  const described = parseJsonObject(
+    runCommand(
+      'gcloud',
+      [
+        'iam',
+        'service-accounts',
+        'describe',
+        ROSTER_READER_EMAIL,
+        '--project',
+        PROJECT_ID,
+        '--format=json',
+        '--quiet',
+      ],
+      { redactFailureOutput: true },
+    ),
+    'Roster-reader service-account metadata',
+  );
+  if (
+    described.uniqueId !== listed.uniqueId ||
+    described.oauth2ClientId !== listed.oauth2ClientId
+  ) {
+    throw new Error(
+      'Roster-reader service-account identity changed between list and describe.',
+    );
+  }
+  return described;
+}
+
+function validateLiveRecoverableRosterReader(
+  serviceAccount: Readonly<Record<string, unknown>>,
+): void {
+  const resourcePolicy = parseJsonObject(
+    runCommand(
+      'gcloud',
+      [
+        'iam',
+        'service-accounts',
+        'get-iam-policy',
+        ROSTER_READER_EMAIL,
+        '--project',
+        PROJECT_ID,
+        '--format=json',
+        '--quiet',
+      ],
+      { redactFailureOutput: true },
+    ),
+    'Roster-reader service-account IAM policy',
+  );
+  const userManagedKeyOutput = runCommand(
+    'gcloud',
+    [
+      'iam',
+      'service-accounts',
+      'keys',
+      'list',
+      '--iam-account',
+      ROSTER_READER_EMAIL,
+      '--project',
+      PROJECT_ID,
+      '--managed-by',
+      'user',
+      '--format=value(name)',
+    ],
+    { redactFailureOutput: true },
+  );
+  validateRecoverableRosterReaderServiceAccount(
+    serviceAccount,
+    resourcePolicy,
+    userManagedKeyOutput,
+  );
+}
+
 function validateExistingProject(
   project: Readonly<Record<string, unknown>>,
 ): void {
@@ -519,6 +729,45 @@ function enabledProjectServices(): Set<string> {
   );
 }
 
+function recoverOrphanedRosterReader(resources: Set<string>): void {
+  if (
+    resources.has(ROSTER_READER_ADDRESS) ||
+    !enabledProjectServices().has('iam.googleapis.com')
+  ) {
+    return;
+  }
+  const serviceAccount = inspectRosterReaderServiceAccount();
+  if (serviceAccount === null) {
+    return;
+  }
+  validateLiveRecoverableRosterReader(serviceAccount);
+  const expectedUniqueId = serviceAccount.uniqueId;
+  const expectedOauth2ClientId = serviceAccount.oauth2ClientId;
+  runTerraformInteractive([
+    'import',
+    '-input=false',
+    ROSTER_READER_ADDRESS,
+    ROSTER_READER_RESOURCE,
+  ]);
+  resources.add(ROSTER_READER_ADDRESS);
+
+  const importedServiceAccount = inspectRosterReaderServiceAccount();
+  if (importedServiceAccount === null) {
+    throw new Error(
+      'The roster-reader service account disappeared immediately after import.',
+    );
+  }
+  validateLiveRecoverableRosterReader(importedServiceAccount);
+  if (
+    importedServiceAccount.uniqueId !== expectedUniqueId ||
+    importedServiceAccount.oauth2ClientId !== expectedOauth2ClientId
+  ) {
+    throw new Error(
+      'Roster-reader service-account identity changed during import.',
+    );
+  }
+}
+
 export function bootstrapPrerequisitesReady(
   bucketStatus: StateBucketStatus,
   enabledServices: ReadonlySet<string>,
@@ -645,8 +894,10 @@ async function main(): Promise<void> {
   for (const [address, importId] of mainImports) {
     if (!managedResources.has(address)) {
       runTerraformInteractive(['import', '-input=false', address, importId]);
+      managedResources.add(address);
     }
   }
+  recoverOrphanedRosterReader(managedResources);
 
   await applySavedPlan({
     confirmation: 'apply-psd401-eoc-gcp',
