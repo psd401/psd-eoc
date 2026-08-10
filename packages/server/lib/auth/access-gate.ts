@@ -446,7 +446,12 @@ function parseAccessGroupRef(value: {
   readonly kind: 'google-group' | 'synthetic';
   readonly purpose: 'access' | 'building' | 'others';
 }): AccessGroupSourceRef {
-  return AccessGroupSourceRefSchema.parse({ ...value, facilityId: null });
+  return AccessGroupSourceRefSchema.parse({
+    id: value.id,
+    kind: value.kind,
+    purpose: value.purpose,
+    facilityId: null,
+  });
 }
 
 /** Creates a production access-evidence adapter over the committed schema. */
