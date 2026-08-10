@@ -24,12 +24,13 @@ import {
   parseInterruptedBootstrapStateResult,
   parseProjectDescribeResult,
   parseServiceAccountListResult,
+  parseStateBucketOwner,
   parseStateListResult,
   repairInterruptedBootstrapApis,
   repairMissingBootstrapApis,
   readSavedPlanSeal,
-  stateBucketProjectNumber,
   validateBootstrapProject,
+  validateMainStateAddresses,
   validateRecoverableRosterReaderServiceAccount,
   validateRecoveredInterruptedBootstrapState,
   validateStateBucket,
@@ -72,7 +73,9 @@ import {
   boundedGoogleJsonObject,
   gcpRoot,
   guardedGoogleFetch,
+  isPathOutsideDirectory,
   MAX_GOOGLE_RESPONSE_BYTES,
+  parseCurrentSecretVersionMetadata,
   reconcileIdempotentSecretWrite,
   sanitizedAwsEnvironment,
   sanitizedGcloudEnvironment,
@@ -187,7 +190,6 @@ const validBucket = {
   location_type: 'region',
   name: 'psd401-eoc-terraform-state',
   public_access_prevention: 'enforced',
-  project_number: 123456789,
   requester_pays: false,
   storage_url: 'gs://psd401-eoc-terraform-state/',
   uniform_bucket_level_access: true,
@@ -1104,7 +1106,7 @@ describe('fail-closed bootstrap and process behavior', () => {
     }
   });
 
-  test('parses enabled services only from one structured numeric project', () => {
+  test('parses enabled services and raw bucket ownership from one numeric project', () => {
     const projectNumber = '123456789';
     const serviceNames = [...BOOTSTRAP_SERVICES, 'iam.googleapis.com'];
     const serviceOutput = JSON.stringify(
@@ -1117,13 +1119,26 @@ describe('fail-closed bootstrap and process behavior', () => {
     const parsed = parseEnabledProjectServices(serviceOutput);
     expect(parsed.projectNumber).toBe(projectNumber);
     expect(parsed.services).toEqual(new Set(serviceNames));
-    expect(stateBucketProjectNumber(validBucket)).toBe(projectNumber);
     expect(
-      stateBucketProjectNumber({
-        ...validBucket,
-        project_number: projectNumber,
-      }),
-    ).toBe(projectNumber);
+      parseStateBucketOwner(
+        JSON.stringify([
+          {
+            name: 'psd401-eoc-terraform-state',
+            projectNumber,
+          },
+        ]),
+      ),
+    ).toEqual({ name: 'psd401-eoc-terraform-state', projectNumber });
+    expect(
+      parseStateBucketOwner(
+        JSON.stringify([
+          {
+            name: 'psd401-eoc-terraform-state',
+            projectNumber: 123456789,
+          },
+        ]),
+      ),
+    ).toEqual({ name: 'psd401-eoc-terraform-state', projectNumber });
 
     for (const invalid of [
       'not-json',
@@ -1150,13 +1165,32 @@ describe('fail-closed bootstrap and process behavior', () => {
     ]) {
       expect(() => parseEnabledProjectServices(invalid)).toThrow();
     }
-    for (const invalidProjectNumber of [0, -1, 1.5, '0', 'abc', null]) {
-      expect(() =>
-        stateBucketProjectNumber({
-          ...validBucket,
-          project_number: invalidProjectNumber,
-        }),
-      ).toThrow('valid owning Google project');
+    for (const invalidOwner of [
+      'not-json',
+      '[]',
+      JSON.stringify([
+        {
+          name: 'other-bucket',
+          projectNumber,
+        },
+      ]),
+      JSON.stringify([
+        {
+          name: 'psd401-eoc-terraform-state',
+          projectNumber,
+          unexpected: true,
+        },
+      ]),
+      ...[0, -1, 1.5, '0', 'abc', null].map((invalidProjectNumber) =>
+        JSON.stringify([
+          {
+            name: 'psd401-eoc-terraform-state',
+            projectNumber: invalidProjectNumber,
+          },
+        ]),
+      ),
+    ]) {
+      expect(() => parseStateBucketOwner(invalidOwner)).toThrow();
     }
   });
 
@@ -1876,11 +1910,13 @@ describe('fail-closed bootstrap and process behavior', () => {
       apply.indexOf('function stateBucketStatus'),
     );
     expect(inspection).toContain("'storage'");
-    expect(inspection).toContain('stateBucketProjectNumber(bucket)');
+    expect(inspection).toContain('parseStateBucketOwner(');
     expect(inspection).toContain('validateStateBucket(');
     expect(inspection).toMatch(
       /'buckets',[\s\S]*'list',[\s\S]*'--project',[\s\S]*PROJECT_ID/u,
     );
+    expect(inspection).toContain("'--raw'");
+    expect(inspection).toContain("'--format=json(name,projectNumber)'");
     expect(inspection).toContain("'get-iam-policy'");
     expect(inspection).toContain('`gs://${STATE_BUCKET}`');
     expect(inspection).not.toContain('inspectProject()');
@@ -1962,6 +1998,56 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(() =>
       parseStateListResult(1, '', 'Error acquiring the state lock'),
     ).toThrow('Error acquiring the state lock');
+  });
+
+  test('allowlists every main-state address before planning and after apply', () => {
+    const complete = new Set([
+      'google_project.psd_eoc',
+      'google_project_service.service_usage',
+      ...[
+        'admin.googleapis.com',
+        'cloudbilling.googleapis.com',
+        'cloudidentity.googleapis.com',
+        'cloudresourcemanager.googleapis.com',
+        'iam.googleapis.com',
+        'storage.googleapis.com',
+      ].map((service) => `google_project_service.required["${service}"]`),
+      ...TERRAFORM_ADMIN_ROLES.map(
+        (role) => `google_project_iam_member.terraform_admin["${role}"]`,
+      ),
+      'google_project_iam_member_remove.terraform_admin_owner',
+      'google_project_iam_member_remove.google_apis_service_agent_editor',
+      'google_storage_bucket.terraform_state',
+      'data.google_iam_policy.terraform_state',
+      'google_storage_bucket_iam_policy.terraform_state',
+      'google_service_account.roster_reader',
+    ]);
+    expect(complete.size).toBe(23);
+    expect(() => validateMainStateAddresses(complete, true)).not.toThrow();
+    expect(() =>
+      validateMainStateAddresses(
+        new Set([...complete, 'google_storage_bucket.unreviewed']),
+      ),
+    ).toThrow('unexpected resource');
+    const incomplete = new Set(complete);
+    incomplete.delete('google_service_account.roster_reader');
+    expect(() => validateMainStateAddresses(incomplete)).not.toThrow();
+    expect(() => validateMainStateAddresses(incomplete, true)).toThrow(
+      'complete reviewed resource set',
+    );
+
+    const main = read('scripts/apply.ts').slice(
+      read('scripts/apply.ts').indexOf('async function main'),
+    );
+    expect(main).toMatch(
+      /const managedResources = stateResources\(\);\s*validateMainStateAddresses\(managedResources\)/u,
+    );
+    expect(main).toMatch(
+      /recoverOrphanedRosterReader\(managedResources\);\s*validateMainStateAddresses\(stateResources\(\)\);\s*await applySavedPlan/u,
+    );
+    expect(main).toMatch(
+      /const finalResources = stateResources\(\);\s*validateMainStateAddresses\(finalResources, true\)/u,
+    );
   });
 
   test('recovers only the exact harmless orphaned roster-reader account', () => {
@@ -2668,6 +2754,43 @@ describe('fail-closed bootstrap and process behavior', () => {
     );
   });
 
+  test('treats two dots as a parent only when they are a complete path component', () => {
+    const repository = join(tmpdir(), 'psd-eoc-synthetic-repository');
+    expect(isPathOutsideDirectory(repository, repository)).toBe(false);
+    expect(
+      isPathOutsideDirectory(
+        repository,
+        join(repository, '..credentials', 'client.json'),
+      ),
+    ).toBe(false);
+    expect(
+      isPathOutsideDirectory(
+        repository,
+        join(repository, 'credentials', 'client.json'),
+      ),
+    ).toBe(false);
+    expect(
+      isPathOutsideDirectory(
+        repository,
+        join(repository, '..', 'secure', 'client.json'),
+      ),
+    ).toBe(true);
+
+    for (const helperPath of [
+      'scripts/operator-access.ts',
+      'scripts/store-oauth-client.ts',
+    ]) {
+      const helper = read(helperPath);
+      expect(helper).toContain(
+        'isPathOutsideDirectory(repositoryRoot, requested)',
+      );
+      expect(helper).toContain(
+        'isPathOutsideDirectory(repositoryRoot, resolved)',
+      );
+      expect(helper).not.toContain("startsWith('..')");
+    }
+  });
+
   test('starts guarded helpers only through the pre-Bun launcher', () => {
     const configPath = join(gcpRoot, 'bunfig.toml');
     const safeArguments = [
@@ -2725,6 +2848,27 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(() =>
       validateGuardedBunInvocation([], 'terraform.test.ts', gcpRoot, undefined),
     ).not.toThrow();
+    expect(() =>
+      validateGuardedBunInvocation(
+        [],
+        join(gcpRoot, 'scripts', '..credentials', 'bypass.ts'),
+        gcpRoot,
+        undefined,
+      ),
+    ).toThrow('run-guarded.sh');
+
+    const linkedDirectory = mkdtempSync(
+      join(tmpdir(), 'psd-eoc-guarded-entrypoint-'),
+    );
+    try {
+      const linkedEntrypoint = join(linkedDirectory, 'apply.ts');
+      symlinkSync(join(gcpRoot, 'scripts', 'apply.ts'), linkedEntrypoint);
+      expect(() =>
+        validateGuardedBunInvocation([], linkedEntrypoint, gcpRoot, undefined),
+      ).toThrow('run-guarded.sh');
+    } finally {
+      rmSync(linkedDirectory, { force: true, recursive: true });
+    }
 
     const launcher = read('scripts/run-guarded.sh');
     const bunfig = read('bunfig.toml');
@@ -2761,6 +2905,18 @@ describe('fail-closed bootstrap and process behavior', () => {
     const operatorAccess = read('scripts/operator-access.ts');
     expect(operatorAccess).toMatch(
       /async function authenticate[^]*assertSafeGcloudConfiguration\(\);[^]*runInteractive\('gcloud', \[\s*'auth',\s*'login'[^]*assertAwsSsoLoginConfiguration[^]*runInteractive\('aws', \[\s*'sso',\s*'login'/u,
+    );
+    expect(operatorAccess).toMatch(
+      /async function authenticate[^]*replaceWithOrdinaryAdc\(\);[^]*assertApplicationDefaultIdentity/u,
+    );
+    expect(operatorAccess).toMatch(
+      /function replaceWithOrdinaryAdc[^]*revokeApplicationDefaultCredentials\(\);\s*ordinaryAdcLogin\(\)/u,
+    );
+    expect(operatorAccess).toMatch(
+      /async function authorizeWorkspaceAdc[^]*secureWorkspaceClientPath[^]*revokeApplicationDefaultCredentials\(\);[^]*runInteractive\('gcloud'/u,
+    );
+    expect(operatorAccess).toMatch(
+      /function revokeApplicationDefaultCredentials[^]*'application-default',[^]*'revoke',[^]*'--quiet'[^]*not revocable/u,
     );
     expect(operatorAccess.match(/--no-launch-browser/gu)).toHaveLength(2);
     expect(operatorAccess.match(/--no-browser/gu)).toHaveLength(2);
@@ -3452,13 +3608,22 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(recovered).toBe(true);
     expect(attempts).toBe(3);
 
+    const retryDelays: number[] = [];
+    let lostCurrentAttempts = 0;
     const lostCurrent = await reconcileIdempotentSecretWrite({
-      attemptWrite: () => token,
+      attemptWrite: () => {
+        lostCurrentAttempts += 1;
+        return token;
+      },
       clientRequestToken: token,
       versionIsCurrent: () => false,
-      wait: async () => {},
+      wait: async (delayMs) => {
+        retryDelays.push(delayMs);
+      },
     });
     expect(lostCurrent).toBe(false);
+    expect(lostCurrentAttempts).toBe(7);
+    expect(retryDelays).toEqual([500, 1_000, 2_000, 4_000, 8_000, 16_000]);
 
     const unresolved = await reconcileIdempotentSecretWrite({
       attemptWrite: () => {
@@ -3469,6 +3634,49 @@ describe('fail-closed bootstrap and process behavior', () => {
       wait: async () => {},
     });
     expect(unresolved).toBe(false);
+
+    expect(
+      parseCurrentSecretVersionMetadata(
+        JSON.stringify({
+          VersionId: token,
+          VersionStages: ['AWSCURRENT'],
+        }),
+        token,
+      ),
+    ).toBe(true);
+    expect(
+      parseCurrentSecretVersionMetadata(
+        JSON.stringify({
+          VersionId: 'another-version',
+          VersionStages: ['AWSCURRENT'],
+        }),
+        token,
+      ),
+    ).toBe(false);
+    for (const invalid of [
+      'not-json',
+      '{}',
+      JSON.stringify({ VersionId: token, VersionStages: [] }),
+      JSON.stringify({
+        SecretString: 'must-never-be-queried',
+        VersionId: token,
+        VersionStages: ['AWSCURRENT'],
+      }),
+    ]) {
+      expect(() => parseCurrentSecretVersionMetadata(invalid, token)).toThrow(
+        'current secret version metadata',
+      );
+    }
+
+    const runtime = read('scripts/runtime.ts');
+    expect(runtime).toContain("'get-secret-value'");
+    expect(runtime).toContain("'--version-id'");
+    expect(runtime).toContain("'--version-stage'");
+    expect(runtime).toContain("'AWSCURRENT'");
+    expect(runtime).toContain(
+      "'{VersionId:VersionId,VersionStages:VersionStages}'",
+    );
+    expect(runtime).not.toContain("'list-secret-version-ids'");
   });
 });
 

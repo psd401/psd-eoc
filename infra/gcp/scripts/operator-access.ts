@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readGroupsReaderContract } from './groups-contract';
@@ -10,6 +10,8 @@ import {
   assertAwsAccount,
   assertAwsSsoLoginConfiguration,
   assertSafeGcloudConfiguration,
+  isPathOutsideDirectory,
+  runCommandForStatus,
   runInteractive,
 } from './runtime';
 
@@ -86,13 +88,12 @@ function secureWorkspaceClientPath(path: string): string {
   let resolved: string;
   let contents: string;
   try {
-    resolved = realpathSync(path);
-    const repositoryRelative = relative(repositoryRoot, resolved);
+    const requested = resolve(path);
+    resolved = realpathSync(requested);
     const metadata = statSync(resolved);
     if (
-      repositoryRelative === '' ||
-      (!repositoryRelative.startsWith('..') &&
-        !isAbsolute(repositoryRelative)) ||
+      !isPathOutsideDirectory(repositoryRoot, requested) ||
+      !isPathOutsideDirectory(repositoryRoot, resolved) ||
       !metadata.isFile() ||
       metadata.size === 0 ||
       metadata.size > 64 * 1024 ||
@@ -128,6 +129,31 @@ function ordinaryAdcLogin(): void {
   ]);
 }
 
+function revokeApplicationDefaultCredentials(): void {
+  const result = runCommandForStatus('gcloud', [
+    'auth',
+    'application-default',
+    'revoke',
+    '--quiet',
+  ]);
+  const detail = `${result.stderr}\n${result.stdout}`;
+  if (
+    result.status !== 0 ||
+    /cannot be revoked|could not revoke|failed to revoke|not revocable/iu.test(
+      detail,
+    )
+  ) {
+    throw new Error(
+      'Existing Application Default Credentials could not be revoked safely.',
+    );
+  }
+}
+
+function replaceWithOrdinaryAdc(): void {
+  revokeApplicationDefaultCredentials();
+  ordinaryAdcLogin();
+}
+
 async function authenticate(): Promise<void> {
   assertSafeGcloudConfiguration();
   runInteractive('gcloud', [
@@ -138,7 +164,7 @@ async function authenticate(): Promise<void> {
     '--no-launch-browser',
   ]);
   assertActiveGcloudAccount(ADMIN_EMAIL);
-  ordinaryAdcLogin();
+  replaceWithOrdinaryAdc();
   await assertApplicationDefaultIdentity(ADMIN_EMAIL);
 
   assertAwsSsoLoginConfiguration(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
@@ -155,6 +181,7 @@ async function authenticate(): Promise<void> {
 async function authorizeWorkspaceAdc(clientPath: string): Promise<void> {
   assertActiveGcloudAccount(ADMIN_EMAIL);
   const secureClientPath = secureWorkspaceClientPath(clientPath);
+  revokeApplicationDefaultCredentials();
   runInteractive('gcloud', [
     'auth',
     'application-default',
@@ -172,13 +199,7 @@ async function authorizeWorkspaceAdc(clientPath: string): Promise<void> {
 
 async function restoreOrdinaryAdc(): Promise<void> {
   assertActiveGcloudAccount(ADMIN_EMAIL);
-  runInteractive('gcloud', [
-    'auth',
-    'application-default',
-    'revoke',
-    '--quiet',
-  ]);
-  ordinaryAdcLogin();
+  replaceWithOrdinaryAdc();
   await assertApplicationDefaultIdentity(ADMIN_EMAIL);
 }
 

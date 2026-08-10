@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -9,6 +9,7 @@ import {
   assertNoAmbientTransportOverrides,
   awsServiceEndpoint,
   awsSecretExists,
+  isPathOutsideDirectory,
   putSecretValue,
   readSecretValue,
   reconcileIdempotentSecretWrite,
@@ -129,11 +130,11 @@ export function parsePlistStrings(
 
 async function readSecureFile(path: string): Promise<string> {
   assertNoAmbientTransportOverrides();
-  const resolved = await realpath(path);
-  const repositoryRelative = relative(repositoryRoot, resolved);
+  const requested = resolve(path);
+  const resolved = await realpath(requested);
   if (
-    repositoryRelative === '' ||
-    (!repositoryRelative.startsWith('..') && !isAbsolute(repositoryRelative))
+    !isPathOutsideDirectory(repositoryRoot, requested) ||
+    !isPathOutsideDirectory(repositoryRoot, resolved)
   ) {
     throw new Error('OAuth downloads must remain outside the repository.');
   }
