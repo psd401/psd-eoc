@@ -2778,13 +2778,28 @@ const shortYearValue = (
   return year;
 };
 
-// PSD's operational school year turns over in summer. Treat July 1 as the
-// conservative boundary so a just-ended academic-year label is not presented
-// as current during summer preparation for the next year.
-const academicStartYearAt = (timestamp: Date): number =>
-  timestamp.getUTCMonth() >= 6
-    ? timestamp.getUTCFullYear()
-    : timestamp.getUTCFullYear() - 1;
+const PSD_ACADEMIC_TIME_ZONE = 'America/Los_Angeles';
+const PSD_ACADEMIC_DATE_FORMAT = new Intl.DateTimeFormat(
+  'en-US-u-ca-gregory-nu-latn',
+  {
+    month: 'numeric',
+    timeZone: PSD_ACADEMIC_TIME_ZONE,
+    year: 'numeric',
+  },
+);
+
+// PSD's operational school year turns over at July 1 in the district's local
+// time zone. A UTC boundary would mark the new year seven or eight hours too
+// early and could misclassify a just-ended academic-year group as current.
+const academicStartYearAt = (timestamp: Date): number => {
+  const parts = PSD_ACADEMIC_DATE_FORMAT.formatToParts(timestamp);
+  const year = Number(parts.find(({ type }) => type === 'year')?.value);
+  const month = Number(parts.find(({ type }) => type === 'month')?.value);
+  if (!Number.isInteger(year) || !Number.isInteger(month)) {
+    throw new Error('Could not determine the PSD academic year.');
+  }
+  return month >= 7 ? year : year - 1;
+};
 
 const academicYearAliases = (
   academicStartYear: number,
@@ -3299,6 +3314,54 @@ const verifyInteractiveUserAdc = async (
   return adcPath;
 };
 
+interface GcloudPathMetadata {
+  readonly mode: number;
+  readonly uid: number;
+  isDirectory(): boolean;
+  isFile(): boolean;
+}
+
+const hasTrustedGcloudOwner = (
+  metadata: GcloudPathMetadata,
+  currentUid: number,
+): boolean => metadata.uid === 0 || metadata.uid === currentUid;
+
+const isTrustedGcloudExecutableMetadata = (
+  metadata: GcloudPathMetadata,
+  currentUid: number,
+): boolean =>
+  metadata.isFile() &&
+  hasTrustedGcloudOwner(metadata, currentUid) &&
+  (metadata.mode & 0o111) !== 0 &&
+  (metadata.mode & 0o022) === 0;
+
+const isTrustedGcloudAncestorMetadata = (
+  metadata: GcloudPathMetadata,
+  currentUid: number,
+): boolean =>
+  metadata.isDirectory() &&
+  hasTrustedGcloudOwner(metadata, currentUid) &&
+  (metadata.mode & 0o022) === 0;
+
+const isTrustedGcloudExecutablePath = async (
+  actualPath: string,
+): Promise<boolean> => {
+  const currentUid = userInfo().uid;
+  const executableMetadata = await lstat(actualPath);
+  if (!isTrustedGcloudExecutableMetadata(executableMetadata, currentUid)) {
+    return false;
+  }
+
+  let ancestor = dirname(actualPath);
+  while (true) {
+    const metadata = await lstat(ancestor);
+    if (!isTrustedGcloudAncestorMetadata(metadata, currentUid)) return false;
+    const parent = dirname(ancestor);
+    if (parent === ancestor) return true;
+    ancestor = parent;
+  }
+};
+
 const resolveGcloudExecutable = async (
   operatingSystemHome: string,
 ): Promise<string> => {
@@ -3316,17 +3379,12 @@ const resolveGcloudExecutable = async (
       candidate,
       'gcloud executable',
     );
-    const metadata = await stat(actualPath);
-    if (
-      metadata.isFile() &&
-      (metadata.mode & 0o111) !== 0 &&
-      (metadata.mode & 0o022) === 0
-    ) {
+    if (await isTrustedGcloudExecutablePath(actualPath)) {
       return actualPath;
     }
   }
   throw new Error(
-    'gcloud was not found in an approved installation location or was not safely permissioned.',
+    'gcloud was not found in an approved installation location or its ownership and permission chain was not trusted.',
   );
 };
 
@@ -3336,9 +3394,13 @@ const obtainImpersonatedToken = async (
   assertSafeAuthenticationEnvironment(process.env);
   const operatingSystemHome = userInfo().homedir;
   const adcPath = await verifyInteractiveUserAdc(operatingSystemHome);
-  const gcloudExecutable = await resolveGcloudExecutable(operatingSystemHome);
   const isolatedGcloudConfigPath = await createIsolatedGcloudConfigPath();
   try {
+    // Resolve and verify immediately before the synchronous spawn call. Bun
+    // cannot execute an already-open file descriptor on every supported OS;
+    // the trusted, non-writable ownership chain prevents an untrusted actor
+    // from replacing the resolved executable in this remaining interval.
+    const gcloudExecutable = await resolveGcloudExecutable(operatingSystemHome);
     const environment = createHumanAdcEnvironment(
       process.env,
       adcPath,
@@ -5878,6 +5940,11 @@ const expectSelfTestReject = async (
 const runSelfTest = async (): Promise<void> => {
   const generatedAt = '2026-08-08T12:00:00.000Z';
   const parent = 'customers/C1234567';
+  assertSelfTest(
+    academicStartYearAt(new Date('2026-07-01T06:59:59.999Z')) === 2025 &&
+      academicStartYearAt(new Date('2026-07-01T07:00:00.000Z')) === 2026,
+    'the academic year turns over at local midnight between June 30 and July 1 in America/Los_Angeles',
+  );
   const parseCloudGroup = (
     value: unknown,
     expectedParent: string,
@@ -6199,6 +6266,59 @@ const runSelfTest = async (): Promise<void> => {
       tokenArguments[0] === '/approved/synthetic/gcloud' &&
       !tokenArguments.some((argument) => argument.includes('delegat')),
     'gcloud uses short-lived read-only impersonation without delegation',
+  );
+  const currentUid = userInfo().uid;
+  const syntheticMetadata = (
+    kind: 'directory' | 'file',
+    uid: number,
+    mode: number,
+  ): GcloudPathMetadata => ({
+    isDirectory: () => kind === 'directory',
+    isFile: () => kind === 'file',
+    mode,
+    uid,
+  });
+  assertSelfTest(
+    isTrustedGcloudExecutableMetadata(
+      syntheticMetadata('file', currentUid, 0o100755),
+      currentUid,
+    ) &&
+      isTrustedGcloudExecutableMetadata(
+        syntheticMetadata('file', 0, 0o100755),
+        currentUid,
+      ) &&
+      !isTrustedGcloudExecutableMetadata(
+        syntheticMetadata('file', currentUid + 1, 0o100755),
+        currentUid,
+      ) &&
+      !isTrustedGcloudExecutableMetadata(
+        syntheticMetadata('file', currentUid, 0o100775),
+        currentUid,
+      ) &&
+      !isTrustedGcloudExecutableMetadata(
+        syntheticMetadata('file', currentUid, 0o100644),
+        currentUid,
+      ),
+    'gcloud must be executable, non-writable by other principals, and owned by root or the current user',
+  );
+  assertSelfTest(
+    isTrustedGcloudAncestorMetadata(
+      syntheticMetadata('directory', currentUid, 0o040755),
+      currentUid,
+    ) &&
+      isTrustedGcloudAncestorMetadata(
+        syntheticMetadata('directory', 0, 0o040755),
+        currentUid,
+      ) &&
+      !isTrustedGcloudAncestorMetadata(
+        syntheticMetadata('directory', currentUid + 1, 0o040755),
+        currentUid,
+      ) &&
+      !isTrustedGcloudAncestorMetadata(
+        syntheticMetadata('directory', currentUid, 0o040777),
+        currentUid,
+      ),
+    'every gcloud ancestor must be non-writable by other principals and owned by root or the current user',
   );
   parseInteractiveUserAdc({
     client_id: 'synthetic-interactive-client',
