@@ -6,7 +6,9 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   ApiErrorSchema,
   CreateEventTypeDraftInputSchema,
+  EventTypeDraftRevisionSchema,
   EventTypeRenderingPreviewSchema,
+  EventTypeVersionIdSchema,
   EventTypeVersionDraftSchema,
   EventTypeVersionSchema,
   PublishEventTypeVersionInputSchema,
@@ -83,6 +85,16 @@ class BrowserRecoveryError extends Error {
   }
 }
 
+class ConfirmedCommandBrowserStateError extends Error {
+  public constructor(
+    public readonly successKind: 'draft' | 'version',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ConfirmedCommandBrowserStateError';
+  }
+}
+
 interface RetainedCommand {
   readonly version: 1;
   readonly sessionId: string;
@@ -99,6 +111,9 @@ interface RetainedDraft {
   readonly editorId: string;
   readonly draftId: string;
   readonly eventTypeId: string;
+  readonly baseVersionId: string | null;
+  readonly enabled: boolean;
+  readonly draftRevision: string;
   readonly savedAt: string;
 }
 
@@ -127,14 +142,14 @@ function storageKey(prefix: string, sessionId: string): string {
 function getSessionStorage(): Storage {
   if (typeof window === 'undefined') {
     throw new BrowserRecoveryError(
-      'Browser recovery storage is not available. No change was sent.',
+      'Browser recovery storage is not available. No new request was sent while checking recovery state; a prior outcome may still be unresolved.',
     );
   }
   try {
     return window.sessionStorage;
   } catch {
     throw new BrowserRecoveryError(
-      'Browser recovery storage is unavailable. No change was sent.',
+      'Browser recovery storage is unavailable. No new request was sent while checking recovery state; a prior outcome may still be unresolved.',
     );
   }
 }
@@ -177,7 +192,7 @@ function parseRetainedCommand(
     value = JSON.parse(rawValue);
   } catch {
     throw new BrowserRecoveryError(
-      'The saved browser recovery record is damaged. No change was sent.',
+      'The saved browser recovery record is damaged. No new request was sent while restoring it; a prior outcome may still be unresolved.',
     );
   }
   if (
@@ -199,7 +214,7 @@ function parseRetainedCommand(
     typeof value.createdAt !== 'string'
   ) {
     throw new BrowserRecoveryError(
-      'The saved browser recovery record is invalid. No change was sent.',
+      'The saved browser recovery record is invalid. No new request was sent while restoring it; a prior outcome may still be unresolved.',
     );
   }
   let body: unknown;
@@ -207,13 +222,13 @@ function parseRetainedCommand(
     body = JSON.parse(value.bodyJson);
   } catch {
     throw new BrowserRecoveryError(
-      'The saved browser recovery command is damaged. No change was sent.',
+      'The saved browser recovery command is damaged. No new request was sent while restoring it; a prior outcome may still be unresolved.',
     );
   }
   const command = parseCommand(body);
   if (command === null) {
     throw new BrowserRecoveryError(
-      'The saved browser recovery command is invalid. No change was sent.',
+      'The saved browser recovery command is invalid. No new request was sent while restoring it; a prior outcome may still be unresolved.',
     );
   }
   return {
@@ -330,7 +345,7 @@ function parseRetainedDraft(
     value = JSON.parse(rawValue);
   } catch {
     throw new BrowserRecoveryError(
-      'The saved draft recovery record is damaged. No change was sent.',
+      'The saved draft recovery record is damaged. No new request was sent while restoring it; the server may still hold an unpublished draft.',
     );
   }
   if (
@@ -346,11 +361,26 @@ function parseRetainedDraft(
     typeof value.draftId !== 'string' ||
     !('eventTypeId' in value) ||
     typeof value.eventTypeId !== 'string' ||
+    !('baseVersionId' in value) ||
+    !('enabled' in value) ||
+    typeof value.enabled !== 'boolean' ||
+    !('draftRevision' in value) ||
     !('savedAt' in value) ||
     typeof value.savedAt !== 'string'
   ) {
     throw new BrowserRecoveryError(
-      'The saved draft recovery record is invalid. No change was sent.',
+      'The saved draft recovery record is invalid. No new request was sent while restoring it; the server may still hold an unpublished draft.',
+    );
+  }
+  const baseVersionId = EventTypeVersionIdSchema.nullable().safeParse(
+    value.baseVersionId,
+  );
+  const draftRevision = EventTypeDraftRevisionSchema.safeParse(
+    value.draftRevision,
+  );
+  if (!baseVersionId.success || !draftRevision.success) {
+    throw new BrowserRecoveryError(
+      'The saved draft recovery record is invalid. No new request was sent while restoring it; the server may still hold an unpublished draft.',
     );
   }
   return {
@@ -359,6 +389,9 @@ function parseRetainedDraft(
     editorId: value.editorId,
     draftId: value.draftId,
     eventTypeId: value.eventTypeId,
+    baseVersionId: baseVersionId.data,
+    enabled: value.enabled,
+    draftRevision: draftRevision.data,
     savedAt: value.savedAt,
   };
 }
@@ -383,7 +416,8 @@ function retainDraft(
     if (
       existing.editorId !== editorId ||
       existing.draftId !== draft.id ||
-      existing.eventTypeId !== draft.eventTypeId
+      existing.eventTypeId !== draft.eventTypeId ||
+      existing.baseVersionId !== draft.baseVersionId
     ) {
       throw new BrowserRecoveryError(
         'Another unpublished event-type draft is already retained in this browser session. Finish that draft before creating another.',
@@ -396,14 +430,24 @@ function retainDraft(
     editorId,
     draftId: draft.id,
     eventTypeId: draft.eventTypeId,
+    baseVersionId: draft.baseVersionId,
+    enabled: draft.enabled,
+    draftRevision: draft.draftRevision,
     savedAt: new Date().toISOString(),
   };
   try {
     storage.setItem(key, JSON.stringify(record));
     const verified = storage.getItem(key);
+    if (verified === null) {
+      throw new Error('Draft recovery verification failed.');
+    }
+    const verifiedRecord = parseRetainedDraft(verified, sessionId);
     if (
-      verified === null ||
-      parseRetainedDraft(verified, sessionId).draftId !== draft.id
+      verifiedRecord.draftId !== draft.id ||
+      verifiedRecord.eventTypeId !== draft.eventTypeId ||
+      verifiedRecord.baseVersionId !== draft.baseVersionId ||
+      verifiedRecord.enabled !== draft.enabled ||
+      verifiedRecord.draftRevision !== draft.draftRevision
     ) {
       throw new Error('Draft recovery verification failed.');
     }
@@ -457,6 +501,7 @@ function fieldIdForPath(path: readonly (string | number)[]): string | null {
   const directIds: Readonly<Record<string, string>> = {
     name: 'event-type-name',
     description: 'event-type-description',
+    enabled: 'event-type-enabled',
     'target.key': 'new-event-type-key',
     'target.familyKey': 'new-event-type-family',
     'target.templateMode': 'new-event-type-mode',
@@ -574,14 +619,16 @@ function apiErrorMessage(value: unknown): string {
     : 'PSD EOC could not complete the event-type request.';
 }
 
-function commandWasDefinitivelyRejected(value: unknown): boolean {
+function commandWasDefinitivelyRejected(
+  value: unknown,
+  status: number,
+): boolean {
   const parsed = ApiErrorSchema.safeParse(value);
   return (
     parsed.success &&
-    (parsed.data.code === 'VALIDATION_ERROR' ||
-      parsed.data.code === 'NOT_FOUND' ||
-      parsed.data.code === 'CONFLICT' ||
-      parsed.data.code === 'IDEMPOTENCY_CONFLICT')
+    status >= 400 &&
+    status < 500 &&
+    parsed.data.retryable === false
   );
 }
 
@@ -630,7 +677,10 @@ async function sendCommand(
   const json = await readJson(response);
   if (!response.ok) {
     const value = json.parsed ? json.value : null;
-    const definitelyRejected = commandWasDefinitivelyRejected(value);
+    const definitelyRejected = commandWasDefinitivelyRejected(
+      value,
+      response.status,
+    );
     const outcome: RequestOutcome = definitelyRejected
       ? 'definite'
       : 'ambiguous';
@@ -715,6 +765,7 @@ async function requestPreviews(
       const parameters = new URLSearchParams({
         operation: 'preview',
         draftId: draft.id,
+        expectedDraftRevision: draft.draftRevision,
         eventKind,
         purpose,
       });
@@ -727,6 +778,7 @@ async function requestPreviews(
         if (
           !parsed.success ||
           parsed.data.draftId !== draft.id ||
+          parsed.data.draftRevision !== draft.draftRevision ||
           parsed.data.templateMode !== draft.templateMode ||
           parsed.data.purpose !== purpose
         ) {
@@ -770,47 +822,47 @@ function templateSet(
             title: 'REAL INCIDENT: {{eventType}} at {{site}}',
             body: 'Follow district safety procedures. Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
             email:
-              'A real {{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nFollow district safety procedures and open PSD EOC for current instructions. PSD EOC does not contact 911; call 911 first if emergency assistance is needed.',
+              '{{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nFollow district safety procedures and open PSD EOC for current instructions. PSD EOC does not contact 911; call 911 first if emergency assistance is needed.',
             sms: 'REAL INCIDENT: {{eventType}} at {{site}}. Follow district safety procedures. Open PSD EOC.',
           }
         : {
             title: 'TRAINING ONLY: {{eventType}} at {{site}}',
-            body: 'This is a drill, not a real incident alert. Started {{startTime}} by {{initiator}}. Open PSD EOC for drill instructions.',
+            body: 'Started {{startTime}} by {{initiator}}. Open PSD EOC for current instructions.',
             email:
-              'TRAINING ONLY. A {{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}. This message is a drill, not a real incident alert.\n\nFollow district drill procedures and open PSD EOC for drill instructions.',
-            sms: 'TRAINING ONLY: {{eventType}} at {{site}}. This is a drill, not a real incident alert. Open PSD EOC.',
+              'TRAINING ONLY. {{eventType}} was started at {{site}} at {{startTime}} by {{initiator}}.\n\nFollow district safety procedures and open PSD EOC for current instructions.',
+            sms: 'TRAINING ONLY: {{eventType}} at {{site}}. Open PSD EOC for current instructions.',
           },
     'all-clear':
       mode === 'real'
         ? {
             title: 'ALL CLEAR: {{eventType}} at {{site}}',
-            body: 'The event is all clear. Open PSD EOC for current information.',
+            body: '{{eventType}} at {{site}} is all clear. Open PSD EOC for current information.',
             email:
-              'The {{eventType}} at {{site}} is all clear. The event began {{startTime}}. Open PSD EOC for current information.',
+              'The {{eventType}} at {{site}} is all clear. The notification began {{startTime}}. Open PSD EOC for current information.',
             sms: 'ALL CLEAR: {{eventType}} at {{site}}. Open PSD EOC for current information.',
           }
         : {
-            title: 'TRAINING ONLY: DRILL COMPLETE at {{site}}',
-            body: 'The drill is complete. This is not a real incident all-clear.',
+            title: 'TRAINING ONLY: {{eventType}} complete at {{site}}',
+            body: '{{eventType}} is complete. Open PSD EOC for current information.',
             email:
-              'TRAINING ONLY. The {{eventType}} at {{site}} is complete. The drill began {{startTime}}. This message closes the drill only.',
-            sms: 'TRAINING ONLY: DRILL COMPLETE at {{site}}. This closes the drill only.',
+              'TRAINING ONLY. The {{eventType}} at {{site}} is complete. The notification began {{startTime}}. Open PSD EOC for current information.',
+            sms: 'TRAINING ONLY: {{eventType}} complete at {{site}}. Open PSD EOC for current information.',
           },
     reactivation:
       mode === 'real'
         ? {
-            title: 'REACTIVATED: {{eventType}} at {{site}}',
-            body: 'The event is active again. Open PSD EOC for current instructions.',
+            title: 'REACTIVATION: {{eventType}} at {{site}}',
+            body: '{{eventType}} is active again. Open PSD EOC for current instructions.',
             email:
-              'The {{eventType}} at {{site}} is active again. The event originally began {{startTime}} and was initiated by {{initiator}}. Open PSD EOC for current instructions.',
-            sms: 'REACTIVATED: {{eventType}} at {{site}}. Open PSD EOC for current instructions.',
+              'The {{eventType}} at {{site}} is active again. The notification originally began {{startTime}} and was initiated by {{initiator}}. Open PSD EOC for current instructions.',
+            sms: 'REACTIVATION: {{eventType}} at {{site}}. Open PSD EOC for current instructions.',
           }
         : {
-            title: 'TRAINING ONLY: DRILL REACTIVATED at {{site}}',
-            body: 'The drill is active again. This is not a real incident alert.',
+            title: 'TRAINING ONLY: {{eventType}} reactivated at {{site}}',
+            body: '{{eventType}} is active again. Open PSD EOC for current instructions.',
             email:
-              'TRAINING ONLY. The {{eventType}} at {{site}} is active again. The drill originally began {{startTime}} and was initiated by {{initiator}}. This message concerns the drill only.',
-            sms: 'TRAINING ONLY: DRILL REACTIVATED at {{site}}. This concerns the drill only.',
+              'TRAINING ONLY. The {{eventType}} at {{site}} is active again. The notification originally began {{startTime}} and was initiated by {{initiator}}. Open PSD EOC for current instructions.',
+            sms: 'TRAINING ONLY: {{eventType}} reactivated at {{site}}. Open PSD EOC for current instructions.',
           },
   }[purpose];
   return {
@@ -853,6 +905,10 @@ function defaultCatalog(mode: TemplateMode): MessageTemplateCatalog {
 function requiredText(form: FormData, name: string): string {
   const value = form.get(name);
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function checked(form: FormData, name: string): boolean {
+  return form.get(name) === 'on';
 }
 
 function catalogFromForm(
@@ -958,8 +1014,10 @@ export function TemplateFields({
             <legend>{PURPOSE_LABELS[purpose]} messages</legend>
             <p className="field-help" id={helpId}>
               Allowed variables: {'{{site}}'}, {'{{eventType}}'},{' '}
-              {'{{startTime}}'}, and {'{{initiator}}'}. PSD EOC adds the
-              classification prefix; do not type [INCIDENT] or [DRILL].
+              {'{{startTime}}'}, and {'{{initiator}}'}. PSD EOC wraps every
+              rendered field in immutable real-or-drill and lifecycle markers.
+              Write clear district-approved instructions; the seeded wording is
+              a starting point and can be changed without rebuilding PSD EOC.
             </p>
             <section
               className="channel-editor"
@@ -982,7 +1040,7 @@ export function TemplateFields({
                   }
                   defaultValue={set.push.title}
                   id={`${purpose}-push-title`}
-                  maxLength={105}
+                  maxLength={120}
                   name={`${purpose}.push.title`}
                   required
                 />
@@ -1005,7 +1063,7 @@ export function TemplateFields({
                   }
                   defaultValue={set.push.body}
                   id={`${purpose}-push-body`}
-                  maxLength={485}
+                  maxLength={500}
                   name={`${purpose}.push.body`}
                   required
                   rows={3}
@@ -1035,7 +1093,7 @@ export function TemplateFields({
                   }
                   defaultValue={set.sms.body}
                   id={`${purpose}-sms-body`}
-                  maxLength={980}
+                  maxLength={1_000}
                   name={`${purpose}.sms.body`}
                   required
                   rows={3}
@@ -1045,9 +1103,9 @@ export function TemplateFields({
                   fieldIssues={fieldIssues}
                 />
                 <p className="field-help" id={smsHelpId}>
-                  The renderer keeps the complete [INCIDENT] or [DRILL] prefix
-                  and safely shortens only the editable tail so the entire
-                  message fits in one SMS part.
+                  The renderer keeps the complete [INCIDENT] or [DRILL]
+                  beginning and ending markers and safely shortens only the
+                  editable middle so the entire message fits in one SMS part.
                 </p>
               </div>
             </section>
@@ -1072,7 +1130,7 @@ export function TemplateFields({
                   }
                   defaultValue={set.email.subject}
                   id={`${purpose}-email-subject`}
-                  maxLength={185}
+                  maxLength={200}
                   name={`${purpose}.email.subject`}
                   required
                 />
@@ -1097,7 +1155,7 @@ export function TemplateFields({
                   }
                   defaultValue={set.email.textBody}
                   id={`${purpose}-email-body`}
-                  maxLength={9_980}
+                  maxLength={10_000}
                   name={`${purpose}.email.textBody`}
                   required
                   rows={7}
@@ -1202,15 +1260,20 @@ function EventTypeEditor({
     readonly EventTypeRenderingPreview[]
   >([]);
   const [previewReady, setPreviewReady] = useState(false);
+  const [previewedDraftRevision, setPreviewedDraftRevision] = useState<
+    string | null
+  >(null);
   const [dirty, setDirty] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [retainedCommand, setRetainedCommand] =
     useState<RetainedCommand | null>(null);
+  const [recoveryReadBlocked, setRecoveryReadBlocked] = useState(false);
   const [published, setPublished] = useState(false);
   const [formEpoch, setFormEpoch] = useState(0);
   const [status, setStatus] = useState('');
   const [error, setError] = useState<UiError | null>(null);
   const errorRef = useRef<HTMLDivElement>(null);
+  const recoveryRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (error !== null) {
@@ -1219,13 +1282,19 @@ function EventTypeEditor({
   }, [error]);
 
   useEffect(() => {
+    if (retainedCommand?.editorId === editorId) {
+      recoveryRef.current?.focus();
+    }
+  }, [editorId, retainedCommand]);
+
+  useEffect(() => {
     let active = true;
     const controller = new AbortController();
     let pendingRecord: RetainedCommand | null = null;
     let draftRecord: RetainedDraft | null = null;
+    let recoveryReadFailure: unknown = null;
     try {
       pendingRecord = readRetainedCommand(sessionId);
-      draftRecord = readRetainedDraft(sessionId);
       if (pendingRecord?.editorId === editorId) {
         setRetainedCommand(pendingRecord);
         setStatus(
@@ -1233,14 +1302,34 @@ function EventTypeEditor({
         );
       }
     } catch (caught) {
+      recoveryReadFailure = caught;
+      setRecoveryReadBlocked(true);
       setError(
         uiError(
-          'Browser recovery unavailable',
+          'Browser recovery needs manual verification',
           caught,
-          'PSD EOC could not read browser recovery state. No change was sent.',
+          'PSD EOC could not read a prior browser recovery record.',
         ),
       );
-      return () => controller.abort();
+      setStatus(
+        'No new request was sent during restoration. A prior server outcome may still be unresolved; verify current server state before clearing browser recovery data.',
+      );
+    }
+    try {
+      draftRecord = readRetainedDraft(sessionId);
+    } catch (caught) {
+      recoveryReadFailure ??= caught;
+      setRecoveryReadBlocked(true);
+      setError(
+        uiError(
+          'Browser recovery needs manual verification',
+          caught,
+          'PSD EOC could not read a prior draft recovery record.',
+        ),
+      );
+      setStatus(
+        'No new request was sent during restoration. A prior server outcome may still be unresolved; verify current server state before clearing browser recovery data.',
+      );
     }
 
     if (draftRecord?.editorId === editorId) {
@@ -1267,17 +1356,22 @@ function EventTypeEditor({
             );
           }
           const restored = parsed.data;
+          const restoredNewerRevision =
+            restored.draftRevision !== draftRecord.draftRevision;
           if (!active) {
             return;
           }
           setDraft(restored);
-          setDraftRetained(true);
+          setDraftRetained(false);
           setMode(restored.templateMode);
           setDirty(false);
           setPublished(false);
           setPreviews([]);
           setPreviewReady(false);
+          setPreviewedDraftRevision(null);
           setFormEpoch((value) => value + 1);
+          retainDraft(sessionId, editorId, restored);
+          setDraftRetained(true);
           const restoredPreviews = await requestPreviews(
             restored,
             controller.signal,
@@ -1287,17 +1381,23 @@ function EventTypeEditor({
           }
           setPreviews(restoredPreviews);
           setPreviewReady(true);
-          setError(null);
-          setStatus(
-            pendingRecord?.editorId === editorId
-              ? 'Unpublished draft restored and previewed. Resolve the previous retained change before continuing.'
-              : 'Unpublished draft restored and previewed. Review every channel before publishing.',
-          );
+          setPreviewedDraftRevision(restored.draftRevision);
+          if (recoveryReadFailure === null) {
+            setError(null);
+            setStatus(
+              pendingRecord?.editorId === editorId
+                ? 'Unpublished draft restored and previewed. Resolve the previous retained change before continuing.'
+                : restoredNewerRevision
+                  ? 'A newer saved draft revision was restored and previewed. Review every channel before publishing.'
+                  : 'Unpublished draft restored and previewed. Review every channel before publishing.',
+            );
+          }
         } catch (caught) {
           if (controller.signal.aborted || !active) {
             return;
           }
           setPreviewReady(false);
+          setPreviewedDraftRevision(null);
           setPreviews([]);
           setError(
             uiError(
@@ -1326,23 +1426,33 @@ function EventTypeEditor({
   const editorName = draft?.name ?? item?.latestVersion.name ?? '';
   const editorDescription =
     draft?.description ?? item?.latestVersion.description ?? '';
+  const editorEnabled = draft?.enabled ?? item?.latestVersion.enabled ?? true;
   const fieldIssues = error?.fieldIssues ?? [];
   const commandRetainedForEditor = retainedCommand?.editorId === editorId;
   const formBlocked =
-    pendingAction !== null || published || commandRetainedForEditor;
+    pendingAction !== null ||
+    published ||
+    commandRetainedForEditor ||
+    recoveryReadBlocked;
   const canPublish =
     draft !== null &&
     draftRetained &&
     !dirty &&
     previewReady &&
+    previewedDraftRevision === draft.draftRevision &&
     previews.length === PURPOSES.length &&
+    previews.every(
+      (preview) => preview.draftRevision === draft.draftRevision,
+    ) &&
     pendingAction === null &&
+    !recoveryReadBlocked &&
     !published &&
     !commandRetainedForEditor;
 
   function markDirty(): void {
     setDirty(true);
     setPreviewReady(false);
+    setPreviewedDraftRevision(null);
     setPreviews([]);
     setError(null);
     setStatus('Unsaved changes. Save and preview again before publishing.');
@@ -1381,24 +1491,39 @@ function EventTypeEditor({
     setPublished(false);
     setDirty(false);
     setPreviewReady(false);
+    setPreviewedDraftRevision(null);
     setPreviews([]);
     if (recovered) {
       setFormEpoch((value) => value + 1);
     }
-    retainDraft(sessionId, editorId, savedDraft);
-    setDraftRetained(true);
-    clearRetainedCommand(sessionId, record.idempotencyKey);
-    setRetainedCommand(null);
+    let recoveryRetained = false;
+    try {
+      retainDraft(sessionId, editorId, savedDraft);
+      recoveryRetained = true;
+      setDraftRetained(true);
+      clearRetainedCommand(sessionId, record.idempotencyKey);
+      setRetainedCommand(null);
+    } catch (caught) {
+      setDraftRetained(recoveryRetained);
+      throw new ConfirmedCommandBrowserStateError(
+        'draft',
+        caught instanceof Error
+          ? `The draft was saved, but browser recovery needs attention. ${caught.message}`
+          : 'The draft was saved, but browser recovery needs attention.',
+      );
+    }
     try {
       const results = await requestPreviews(savedDraft);
       setPreviews(results);
       setPreviewReady(true);
+      setPreviewedDraftRevision(savedDraft.draftRevision);
       setError(null);
       setStatus(
         'Draft saved and retained for recovery. Review every renderer-produced channel below before publishing.',
       );
     } catch (caught) {
       setPreviewReady(false);
+      setPreviewedDraftRevision(null);
       setPreviews([]);
       setError(
         uiError(
@@ -1423,11 +1548,10 @@ function EventTypeEditor({
         'ambiguous',
       );
     }
-    clearRetainedDraft(sessionId, record.command.input.draftId);
-    clearRetainedCommand(sessionId, record.idempotencyKey);
-    setRetainedCommand(null);
     setDraftRetained(false);
     setPreviewReady(false);
+    setPreviewedDraftRevision(null);
+    setPreviews([]);
     setDirty(false);
     setPublished(true);
     setError(null);
@@ -1435,6 +1559,18 @@ function EventTypeEditor({
       `Version ${version.version} published. Historical events remain pinned to the versions they used.`,
     );
     router.refresh();
+    try {
+      clearRetainedDraft(sessionId, record.command.input.draftId);
+      clearRetainedCommand(sessionId, record.idempotencyKey);
+      setRetainedCommand(null);
+    } catch (caught) {
+      throw new ConfirmedCommandBrowserStateError(
+        'version',
+        caught instanceof Error
+          ? `Version ${version.version} was published, but browser recovery needs attention. ${caught.message}`
+          : `Version ${version.version} was published, but browser recovery needs attention.`,
+      );
+    }
   }
 
   async function completeCommand(
@@ -1472,9 +1608,11 @@ function EventTypeEditor({
                   : {
                       kind: 'existing-event-type',
                       eventTypeId: item.eventType.id,
+                      baseVersionId: item.latestVersion.id,
                     },
               name,
               description: rawDescription.length === 0 ? null : rawDescription,
+              enabled: checked(form, 'enabled'),
               templates,
             },
           }
@@ -1482,14 +1620,17 @@ function EventTypeEditor({
             action: 'update-draft',
             input: {
               draftId: draft.id,
+              expectedDraftRevision: draft.draftRevision,
               name,
               description: rawDescription.length === 0 ? null : rawDescription,
+              enabled: checked(form, 'enabled'),
               templates,
             },
           };
     setPendingAction('save');
     setError(null);
     setPreviewReady(false);
+    setPreviewedDraftRevision(null);
     setPreviews([]);
     setStatus(draft === null ? 'Saving draft…' : 'Updating draft…');
     try {
@@ -1512,18 +1653,25 @@ function EventTypeEditor({
       setRetainedCommand(record);
       await completeCommand(record, false);
     } catch (caught) {
+      const confirmed = caught instanceof ConfirmedCommandBrowserStateError;
       setError(
         uiError(
-          draft === null ? 'Draft not saved' : 'Draft not updated',
+          confirmed
+            ? 'Draft saved; browser recovery needs attention'
+            : draft === null
+              ? 'Draft not saved'
+              : 'Draft not updated',
           caught,
           'The event-type draft could not be saved.',
         ),
       );
       setStatus(
-        caught instanceof EventTypeRequestError &&
-          caught.outcome === 'ambiguous'
-          ? 'The outcome is unresolved. Use the explicit recovery button; no automatic retry will occur.'
-          : '',
+        confirmed
+          ? 'The server confirmed the draft save. Publication remains blocked until browser recovery is resolved.'
+          : caught instanceof EventTypeRequestError &&
+              caught.outcome === 'ambiguous'
+            ? 'The outcome is unresolved. Use the explicit recovery button; no automatic retry will occur.'
+            : '',
       );
     } finally {
       setPendingAction(null);
@@ -1542,7 +1690,10 @@ function EventTypeEditor({
     }
     const command: EventTypeCommand = {
       action: 'publish-version',
-      input: { draftId: draft.id },
+      input: {
+        draftId: draft.id,
+        expectedDraftRevision: draft.draftRevision,
+      },
     };
     setPendingAction('publish');
     setError(null);
@@ -1556,18 +1707,23 @@ function EventTypeEditor({
       setRetainedCommand(record);
       await completeCommand(record, false);
     } catch (caught) {
+      const confirmed = caught instanceof ConfirmedCommandBrowserStateError;
       setError(
         uiError(
-          'Version not published',
+          confirmed
+            ? 'Version published; browser recovery needs attention'
+            : 'Version not published',
           caught,
           'The event-type version could not be published.',
         ),
       );
       setStatus(
-        caught instanceof EventTypeRequestError &&
-          caught.outcome === 'ambiguous'
-          ? 'The publish outcome is unresolved. Use the explicit recovery button; no automatic retry will occur.'
-          : '',
+        confirmed
+          ? 'The server confirmed publication. Resolve the retained browser recovery record before continuing.'
+          : caught instanceof EventTypeRequestError &&
+              caught.outcome === 'ambiguous'
+            ? 'The publish outcome is unresolved. Use the explicit recovery button; no automatic retry will occur.'
+            : '',
       );
     } finally {
       setPendingAction(null);
@@ -1587,27 +1743,37 @@ function EventTypeEditor({
         persisted.editorId !== editorId
       ) {
         throw new BrowserRecoveryError(
-          'The retained change no longer matches this editor. No change was sent.',
+          'The retained change no longer matches this editor. No retry was sent; the prior outcome may still be unresolved.',
         );
       }
       if (persisted.command.action !== 'publish-version') {
         setPreviewReady(false);
+        setPreviewedDraftRevision(null);
         setPreviews([]);
       }
       await completeCommand(persisted, true);
     } catch (caught) {
+      const confirmed = caught instanceof ConfirmedCommandBrowserStateError;
       setError(
         uiError(
-          'Previous change not recovered',
+          confirmed
+            ? caught.successKind === 'version'
+              ? 'Version published; browser recovery needs attention'
+              : 'Draft saved; browser recovery needs attention'
+            : 'Previous change not recovered',
           caught,
           'PSD EOC could not recover the previous change.',
         ),
       );
       setStatus(
-        caught instanceof EventTypeRequestError &&
-          caught.outcome === 'ambiguous'
-          ? 'The outcome remains unresolved. The exact command is still retained for an explicit retry.'
-          : '',
+        confirmed
+          ? caught.successKind === 'version'
+            ? 'The server confirmed publication. Resolve the retained browser recovery record before continuing.'
+            : 'The server confirmed the draft save. Publication remains blocked until browser recovery is resolved.'
+          : caught instanceof EventTypeRequestError &&
+              caught.outcome === 'ambiguous'
+            ? 'The outcome remains unresolved. The exact command is still retained for an explicit retry.'
+            : '',
       );
     } finally {
       setPendingAction(null);
@@ -1631,7 +1797,7 @@ function EventTypeEditor({
       return;
     }
     const confirmed = window.confirm(
-      `Stop recovering draft ${draft.id} in this browser tab? This does not delete the server draft, but this admin page will no longer remember its ID and any unsaved edits will be discarded.`,
+      `Stop recovering draft ${draft.id} in this browser tab? This does not delete the append-only server draft, but this page will no longer remember its ID and any unsaved edits will be discarded. If the identity remains unpublished, entering the same stable key can start a fresh recovery draft.`,
     );
     if (!confirmed) {
       return;
@@ -1643,12 +1809,13 @@ function EventTypeEditor({
       setMode(item?.eventType.templateMode ?? 'real');
       setPreviews([]);
       setPreviewReady(false);
+      setPreviewedDraftRevision(null);
       setDirty(false);
       setPublished(false);
       setError(null);
       setFormEpoch((value) => value + 1);
       setStatus(
-        `Local recovery stopped for draft ${draft.id}. The server draft was not deleted.`,
+        `Local recovery stopped for draft ${draft.id}. The append-only server draft was not deleted; if the identity remains unpublished, entering the same stable key can start a fresh recovery draft.`,
       );
     } catch (caught) {
       setError(
@@ -1678,8 +1845,9 @@ function EventTypeEditor({
         {mode === 'real' ? 'REAL INCIDENT TYPE' : 'DRILL — TRAINING ONLY TYPE'}
       </p>
       <p className="classification-note">
-        Real-versus-drill mode is immutable. The renderer—not this form—adds
-        [INCIDENT] or [DRILL] to every visible channel field.
+        Real-versus-drill mode is immutable. The renderer—not this form—starts
+        every visible channel field with [INCIDENT] or [DRILL] plus its
+        lifecycle label, then repeats the mode marker at the end.
       </p>
       {item !== null ? (
         <dl className="version-facts">
@@ -1689,10 +1857,21 @@ function EventTypeEditor({
           <dd>{item.eventType.key}</dd>
           <dt>Family</dt>
           <dd>{item.eventType.familyKey}</dd>
+          <dt>Availability</dt>
+          <dd>
+            {item.latestVersion.enabled
+              ? 'Available for activation'
+              : 'Not available for activation'}
+          </dd>
         </dl>
       ) : null}
       {commandRetainedForEditor ? (
-        <div className="error-summary" role="alert">
+        <div
+          className="error-summary"
+          ref={recoveryRef}
+          role="alert"
+          tabIndex={-1}
+        >
           <h3>Previous change needs explicit recovery</h3>
           <p>
             PSD EOC retained the exact request and its idempotency key because
@@ -1853,7 +2032,7 @@ function EventTypeEditor({
             <label htmlFor="event-type-name">Display name</label>
             <input
               aria-describedby={describedBy(
-                null,
+                'event-type-name-help',
                 fieldIssues,
                 'event-type-name',
               )}
@@ -1866,6 +2045,12 @@ function EventTypeEditor({
               name="name"
               required
             />
+            <p className="field-help" id="event-type-name-help">
+              Event names are district-configurable labels, so new response
+              vocabulary does not require a rebuild. Reserved renderer markers,
+              control characters, and invisible formatting are blocked
+              server-side.
+            </p>
             <InlineFieldErrors
               fieldId="event-type-name"
               fieldIssues={fieldIssues}
@@ -1890,6 +2075,33 @@ function EventTypeEditor({
             />
             <InlineFieldErrors
               fieldId="event-type-description"
+              fieldIssues={fieldIssues}
+            />
+          </div>
+          <div className="field checkbox-field">
+            <label htmlFor="event-type-enabled">
+              <input
+                aria-describedby={describedBy(
+                  'event-type-enabled-help',
+                  fieldIssues,
+                  'event-type-enabled',
+                )}
+                aria-invalid={
+                  issuesForField(fieldIssues, 'event-type-enabled').length > 0
+                }
+                defaultChecked={editorEnabled}
+                id="event-type-enabled"
+                name="enabled"
+                type="checkbox"
+              />
+              Available for new activations
+            </label>
+            <p className="field-help" id="event-type-enabled-help">
+              Turning this off publishes a new unavailable version. Historical
+              events remain pinned to the exact version they used.
+            </p>
+            <InlineFieldErrors
+              fieldId="event-type-enabled"
               fieldIssues={fieldIssues}
             />
           </div>
@@ -1949,24 +2161,30 @@ export function EventTypeAdmin({
   const [recoveryOutsideFilter, setRecoveryOutsideFilter] = useState(false);
 
   useEffect(() => {
+    setRecoveryOutsideFilter(false);
+    let retainedCommand: RetainedCommand | null = null;
+    let retainedDraft: RetainedDraft | null = null;
     try {
-      setRecoveryOutsideFilter(false);
-      const retainedCommand = readRetainedCommand(sessionId);
-      const retainedDraft = readRetainedDraft(sessionId);
-      const preferredEditor =
-        retainedCommand?.editorId ?? retainedDraft?.editorId ?? null;
-      if (preferredEditor !== null) {
-        if (
-          preferredEditor === 'new' ||
-          items.some((item) => item.eventType.id === preferredEditor)
-        ) {
-          setSelectedId(preferredEditor);
-        } else {
-          setRecoveryOutsideFilter(true);
-        }
-      }
+      retainedCommand = readRetainedCommand(sessionId);
     } catch {
-      // The selected editor reports bounded storage failures and blocks writes.
+      // The selected editor reports and blocks on the damaged command record.
+    }
+    try {
+      retainedDraft = readRetainedDraft(sessionId);
+    } catch {
+      // A valid pending command must remain selectable independently.
+    }
+    const preferredEditor =
+      retainedCommand?.editorId ?? retainedDraft?.editorId ?? null;
+    if (preferredEditor !== null) {
+      if (
+        preferredEditor === 'new' ||
+        items.some((item) => item.eventType.id === preferredEditor)
+      ) {
+        setSelectedId(preferredEditor);
+      } else {
+        setRecoveryOutsideFilter(true);
+      }
     }
   }, [items, sessionId]);
 

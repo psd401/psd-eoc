@@ -5,16 +5,23 @@ import {
   type EventKind,
   type MessageTemplateSet,
   type NotificationChannel,
+  type NotificationPurpose,
   type RenderedMessage,
   type TemplateMode,
   type TemplateVariable,
 } from '@psd-eoc/contracts';
 
-const CLASSIFICATION_MARKER_PATTERN = /\[(?:INCIDENT|DRILL)\]/iu;
 const TEMPLATE_TOKEN_PATTERN = /\{\{(site|eventType|startTime|initiator)\}\}/gu;
+const FORMAT_CHARACTER_PATTERN = /\p{Format}/u;
+const DEFAULT_IGNORABLE_PATTERN = /\p{Default_Ignorable_Code_Point}/u;
 const SMS_CONTRACT_MAX_CODE_UNITS = 1_000;
 const SINGLE_PART_GSM_MAX_SEPTETS = 160;
 const SINGLE_PART_UCS2_MAX_CODE_UNITS = 70;
+const TRUNCATION_MARKER = '...';
+const SAFE_CONTEXT_FALLBACKS = Object.freeze({
+  site: 'Recorded site',
+  initiator: 'Recorded initiator',
+});
 
 const RENDERED_FIELD_LIMITS = Object.freeze({
   pushTitle: 120,
@@ -118,7 +125,7 @@ const START_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZoneName: 'short',
 });
 
-/** Structured, trusted values accepted by the closed contract token grammar. */
+/** Structured values accepted by the closed contract token grammar. */
 export type TemplateRenderVariables = Readonly<
   Record<TemplateVariable, string>
 >;
@@ -159,40 +166,79 @@ export class TemplateRenderError extends Error {
   }
 }
 
-function classificationFor(eventKind: EventKind): Readonly<{
+type Classification = Readonly<{
   templateMode: TemplateMode;
   marker: 'INCIDENT' | 'DRILL';
-}> {
+}>;
+
+type RendererFrame = Readonly<{
+  prefix: string;
+  suffix: string;
+}>;
+
+function classificationFor(eventKind: EventKind): Classification {
   return eventKind === 'incident'
     ? Object.freeze({ templateMode: 'real', marker: 'INCIDENT' })
     : Object.freeze({ templateMode: 'drill', marker: 'DRILL' });
+}
+
+function purposeLabel(purpose: NotificationPurpose): string {
+  switch (purpose) {
+    case 'activation':
+      return 'ACTIVATION';
+    case 'all-clear':
+      return 'ALL CLEAR';
+    case 'reactivation':
+      return 'REACTIVATION';
+  }
+}
+
+/**
+ * Both boundaries are renderer-owned. Configurable text can say anything, but
+ * it can neither remove nor impersonate the immutable mode and purpose frame.
+ */
+function rendererOwnedFrame(
+  classification: Classification,
+  purpose: NotificationPurpose,
+): RendererFrame {
+  const modeLabel =
+    classification.templateMode === 'real' ? 'REAL INCIDENT' : 'TRAINING ONLY';
+  return Object.freeze({
+    prefix: `[${classification.marker}] ${modeLabel} - ${purposeLabel(purpose)}: `,
+    suffix: ` [${classification.marker}]`,
+  });
 }
 
 function containsUnsafeVisibleCodePoint(value: string): boolean {
   return [...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
     return (
+      FORMAT_CHARACTER_PATTERN.test(character) ||
+      DEFAULT_IGNORABLE_PATTERN.test(character) ||
       codePoint <= 0x09 ||
       (codePoint >= 0x0b && codePoint <= 0x1f) ||
       (codePoint >= 0x7f && codePoint <= 0x9f) ||
-      codePoint === 0x061c ||
-      (codePoint >= 0x200b && codePoint <= 0x200f) ||
-      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
       codePoint === 0x2028 ||
-      codePoint === 0x2029 ||
-      (codePoint >= 0x2060 && codePoint <= 0x206f) ||
-      codePoint === 0xfeff
+      codePoint === 0x2029
     );
   });
 }
 
-function validateDisplayVariable(
+/** Exact bracketed classification markers remain renderer-owned. */
+function containsReservedRendererMarker(value: string): boolean {
+  const compatible = value.normalize('NFKC');
+  return /\[\s*(?:INCIDENT|DRILL)\s*\]/iu.test(compatible);
+}
+
+function validateConfiguredValue(
   name: Exclude<TemplateVariable, 'startTime'>,
   value: string,
+  maxCodeUnits: number,
 ): string {
   if (
     value.length === 0 ||
-    value.length > 500 ||
+    value.length > maxCodeUnits ||
     value !== value.trim() ||
     value !== value.normalize('NFC') ||
     value.includes('\n') ||
@@ -204,13 +250,32 @@ function validateDisplayVariable(
       `The ${name} rendering variable is not safe visible text.`,
     );
   }
-  if (CLASSIFICATION_MARKER_PATTERN.test(value.normalize('NFKC'))) {
+  if (containsReservedRendererMarker(value)) {
     throw new TemplateRenderError(
       'RESERVED_MARKER',
-      'Classification markers are owned by the renderer.',
+      'Classification markers [INCIDENT] and [DRILL] are owned by the renderer.',
     );
   }
   return value;
+}
+
+function assertEditableTextSafe(value: string): void {
+  if (
+    value.length === 0 ||
+    value !== value.normalize('NFC') ||
+    containsUnsafeVisibleCodePoint(value)
+  ) {
+    throw new TemplateRenderError(
+      'RENDERED_MESSAGE_INVALID',
+      'Editable template wording contains unsafe invisible or control text.',
+    );
+  }
+  if (containsReservedRendererMarker(value)) {
+    throw new TemplateRenderError(
+      'RESERVED_MARKER',
+      'Classification markers [INCIDENT] and [DRILL] are owned by the renderer.',
+    );
+  }
 }
 
 /** Formats an absolute event time consistently for district recipients. */
@@ -225,102 +290,59 @@ export function formatNotificationStartTime(value: string): string {
   return START_TIME_FORMATTER.format(new Date(parsed.data));
 }
 
+/**
+ * Names are deliberately semantic-free here. The immutable frame, rather than
+ * an incomplete natural-language filter, owns real-versus-drill meaning.
+ */
+export function assertApprovedEventTypeName(
+  value: string,
+  templateMode: TemplateMode,
+): void {
+  void templateMode;
+  validateConfiguredValue('eventType', value, 160);
+}
+
+function rendererOwnedEventTypeName(
+  value: string,
+  templateMode: TemplateMode,
+): string {
+  try {
+    assertApprovedEventTypeName(value, templateMode);
+    return value;
+  } catch (error) {
+    if (error instanceof TemplateRenderError) {
+      return templateMode === 'real'
+        ? 'Configured response'
+        : 'Configured drill response';
+    }
+    throw error;
+  }
+}
+
+function safeContextVariable(
+  name: 'initiator' | 'site',
+  value: string,
+): string {
+  try {
+    return validateConfiguredValue(name, value, 500);
+  } catch (error) {
+    if (error instanceof TemplateRenderError) {
+      return SAFE_CONTEXT_FALLBACKS[name];
+    }
+    throw error;
+  }
+}
+
 function validatedVariables(
   variables: TemplateRenderVariables,
+  templateMode: TemplateMode,
 ): TemplateRenderVariables {
   return Object.freeze({
-    site: validateDisplayVariable('site', variables.site),
-    eventType: validateDisplayVariable('eventType', variables.eventType),
+    site: safeContextVariable('site', variables.site),
+    eventType: rendererOwnedEventTypeName(variables.eventType, templateMode),
     startTime: formatNotificationStartTime(variables.startTime),
-    initiator: validateDisplayVariable('initiator', variables.initiator),
+    initiator: safeContextVariable('initiator', variables.initiator),
   });
-}
-
-function assertRendererOwnsMarkers(value: string): void {
-  if (containsUnsafeVisibleCodePoint(value)) {
-    throw new TemplateRenderError(
-      'RENDERED_MESSAGE_INVALID',
-      'Editable template wording contains unsafe invisible or control text.',
-    );
-  }
-  if (CLASSIFICATION_MARKER_PATTERN.test(value.normalize('NFKC'))) {
-    throw new TemplateRenderError(
-      'RESERVED_MARKER',
-      'Editable template wording cannot contain a reserved classification marker.',
-    );
-  }
-}
-
-function assertClassificationLanguage(
-  value: string,
-  templateMode: TemplateMode,
-): void {
-  const normalized = value
-    .normalize('NFKC')
-    .toLocaleLowerCase('en-US')
-    .replace(/\bisn(?:['’])?t\b/gu, 'is not');
-  if (templateMode === 'real') {
-    const withoutReinforcingNegation = normalized.replace(
-      /\b(?:(?:not|never)\s+(?:a\s+|an\s+)?|no\s+)(?:drill|test|training(?:\s+(?:exercise|message))?|practice|exercise|simulation|rehearsal|mock(?:\s+(?:incident|message))?|fake(?:\s+(?:incident|alert))?)\b/gu,
-      '',
-    );
-    if (
-      /\b(?:drill|test|training|practice|exercise|simulat\w*|rehearsal|mock|fake|(?:not|never)\s+(?:a\s+|an\s+)?(?:(?:real|actual|live)\s+)?(?:incident|emergency|alert))\b/u.test(
-        withoutReinforcingNegation,
-      )
-    ) {
-      throw new TemplateRenderError(
-        'CLASSIFICATION_MISMATCH',
-        'Real-incident wording cannot contradict its real classification.',
-      );
-    }
-  }
-  if (templateMode === 'drill') {
-    const withoutExplicitNegation = normalized
-      .replace(
-        /\b(?:not|never)\s+(?:a\s+|an\s+)?(?:(?:real|actual|live)\s+)?(?:incident|emergency|alert)(?:\s+(?:alert|all-clear))?\b/gu,
-        '',
-      )
-      .replace(/\bemergency\s+assistance\b/gu, '');
-    if (
-      /\b(?:(?:(?:not|never)\s+(?:a\s+|an\s+)?|no\s+)(?:drill|test|training|practice|exercise|simulation|rehearsal)|(?:real|actual|live|genuine)\s+(?:incident|emergency|alert|event)|(?:this|message|alert|event)\s+is\s+(?:a\s+|an\s+)?(?:(?:real|actual|live|genuine)\s+)?(?:incident|emergency|alert)|this\s+is\s+(?:real|actual|live)|emergency\s+(?:alert|incident|message))\b/u.test(
-        withoutExplicitNegation,
-      )
-    ) {
-      throw new TemplateRenderError(
-        'CLASSIFICATION_MISMATCH',
-        'Drill wording cannot claim to be a real incident.',
-      );
-    }
-  }
-}
-
-function assertEventTypeNameClassification(
-  value: string,
-  templateMode: TemplateMode,
-): void {
-  const normalized = value
-    .normalize('NFKC')
-    .toLocaleLowerCase('en-US')
-    .replace(/\b(?:isn't|isn’t|isnt)\b/gu, 'is not');
-  const visiblyDrillNamed =
-    /\b(?:drill|test|training|practice|exercise|simulat\w*|mock|rehearsal)\b/u.test(
-      normalized,
-    );
-  const deniesDrillClassification =
-    /\b(?:(?:not|never)\s+(?:a\s+|an\s+)?|no\s+)(?:drill|test|training|practice|exercise|simulat\w*|mock|rehearsal)\b/u.test(
-      normalized,
-    );
-  if (
-    (templateMode === 'real' && visiblyDrillNamed) ||
-    (templateMode === 'drill' &&
-      (!visiblyDrillNamed || deniesDrillClassification))
-  ) {
-    throw new TemplateRenderError(
-      'CLASSIFICATION_MISMATCH',
-      'The event-type name must visibly match its immutable real-or-drill mode.',
-    );
-  }
 }
 
 function stripEditableClassificationLead(
@@ -329,26 +351,74 @@ function stripEditableClassificationLead(
 ): string {
   return templateMode === 'real'
     ? value.replace(
-        /^REAL\s+INCIDENT(?:\s*[-:—]\s*|\s+(?=(?:ACTIVATION|ALL-CLEAR|REACTIVATION)\b))/iu,
+        /^REAL\s+INCIDENT(?:\s*[-:—]\s*|\s+(?=(?:ACTIVATION|ALL-CLEAR|ALL CLEAR|REACTIVATION)\b))/iu,
         '',
       )
     : value.replace(
-        /^(?:DRILL\s*[-—]\s*)?TRAINING\s+ONLY(?:\s*[-.:—]\s*|\s+(?=(?:ACTIVATION|ALL-CLEAR|REACTIVATION)\b))/iu,
+        /^(?:DRILL\s*[-—]\s*)?TRAINING\s+ONLY(?:\s*[-.:—]\s*|\s+(?=(?:ACTIVATION|ALL-CLEAR|ALL CLEAR|REACTIVATION)\b))/iu,
         '',
       );
+}
+
+function stripEditablePurposeLead(
+  value: string,
+  purpose: NotificationPurpose,
+): string {
+  const pattern =
+    purpose === 'activation'
+      ? /^ACTIVATION(?:\s*[-:—]\s*)/iu
+      : purpose === 'all-clear'
+        ? /^ALL[- ]CLEAR(?:\s*[-:—]\s*)/iu
+        : /^REACTIVATION(?:\s*[-:—]\s*)/iu;
+  return value.replace(pattern, '');
+}
+
+function stripMatchingLegacyLeads(
+  value: string,
+  templateMode: TemplateMode,
+  purpose: NotificationPurpose,
+): string {
+  const stripped = stripEditablePurposeLead(
+    stripEditableClassificationLead(value, templateMode),
+    purpose,
+  );
+  return stripped.length === 0 ? value : stripped;
 }
 
 function interpolate(
   value: string,
   variables: TemplateRenderVariables,
 ): string {
-  assertRendererOwnsMarkers(value);
   const rendered = value.replace(
     TEMPLATE_TOKEN_PATTERN,
     (_token, name: TemplateVariable) => variables[name],
   );
-  assertRendererOwnsMarkers(rendered);
+  if (containsUnsafeVisibleCodePoint(rendered)) {
+    throw new TemplateRenderError(
+      'RENDERED_MESSAGE_INVALID',
+      'Rendered notification wording contains unsafe invisible or control text.',
+    );
+  }
+  if (containsReservedRendererMarker(rendered)) {
+    throw new TemplateRenderError(
+      'RESERVED_MARKER',
+      'Classification markers [INCIDENT] and [DRILL] are owned by the renderer.',
+    );
+  }
   return rendered;
+}
+
+function renderEditableInterior(
+  value: string,
+  variables: TemplateRenderVariables,
+  templateMode: TemplateMode,
+  purpose: NotificationPurpose,
+): string {
+  assertEditableTextSafe(value);
+  return interpolate(
+    stripMatchingLegacyLeads(value, templateMode, purpose),
+    variables,
+  );
 }
 
 /** Measures AWS SMS encoding units and multipart behavior without sending. */
@@ -396,32 +466,21 @@ function smsFitsOnePart(value: string): boolean {
   );
 }
 
-function truncateVisibleField(
-  prefix: string,
+function retainGraphemePrefix(
   editable: string,
-  maxCodeUnits: number,
+  candidateFits: (retained: string) => boolean,
 ): string {
-  const complete = `${prefix}${editable}`;
-  if (complete.length <= maxCodeUnits) {
-    return complete;
-  }
-  const suffix = '...';
-  const budget = maxCodeUnits - prefix.length - suffix.length;
-  if (budget < 1) {
-    throw new TemplateRenderError(
-      'RENDERED_MESSAGE_INVALID',
-      'The renderer-owned classification prefix exceeds channel limits.',
-    );
-  }
   let retained = '';
   for (const segment of new Intl.Segmenter('en', {
     granularity: 'grapheme',
   }).segment(editable)) {
-    if (retained.length + segment.segment.length > budget) {
+    const candidate = `${retained}${segment.segment}`;
+    if (!candidateFits(candidate)) {
       break;
     }
-    retained += segment.segment;
+    retained = candidate;
   }
+
   retained = retained.trimEnd();
   const finalWhitespace = Math.max(
     retained.lastIndexOf(' '),
@@ -430,41 +489,51 @@ function truncateVisibleField(
   if (finalWhitespace >= Math.floor(retained.length * 0.7)) {
     retained = retained.slice(0, finalWhitespace).trimEnd();
   }
-  return `${prefix}${retained}${suffix}`;
+  return retained;
 }
 
-/** Keeps the renderer-owned classification visible in one complete SMS part. */
-function truncateSmsBody(prefix: string, editableBody: string): string {
-  const complete = `${prefix}${editableBody}`;
+/** Truncation can remove only configurable interior, never either frame edge. */
+function frameVisibleField(
+  frame: RendererFrame,
+  editable: string,
+  maxCodeUnits: number,
+): string {
+  const complete = `${frame.prefix}${editable}${frame.suffix}`;
+  if (complete.length <= maxCodeUnits) {
+    return complete;
+  }
+  const fixedLength =
+    frame.prefix.length + frame.suffix.length + TRUNCATION_MARKER.length;
+  if (fixedLength > maxCodeUnits) {
+    throw new TemplateRenderError(
+      'RENDERED_MESSAGE_INVALID',
+      'The renderer-owned notification frame exceeds channel limits.',
+    );
+  }
+  const retained = retainGraphemePrefix(
+    editable,
+    (candidate) => fixedLength + candidate.length <= maxCodeUnits,
+  );
+  return `${frame.prefix}${retained}${TRUNCATION_MARKER}${frame.suffix}`;
+}
+
+/** Keeps both renderer-owned frame edges visible in one complete SMS part. */
+function frameSmsBody(frame: RendererFrame, editableBody: string): string {
+  const complete = `${frame.prefix}${editableBody}${frame.suffix}`;
   if (smsFitsOnePart(complete)) {
     return complete;
   }
 
-  const suffix = '...';
-  const segments = [
-    ...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(
-      editableBody,
+  const retained = retainGraphemePrefix(editableBody, (candidate) =>
+    smsFitsOnePart(
+      `${frame.prefix}${candidate}${TRUNCATION_MARKER}${frame.suffix}`,
     ),
-  ].map((segment) => segment.segment);
-  let retained = '';
-  for (const segment of segments) {
-    const candidate = `${prefix}${retained}${segment}${suffix}`;
-    if (!smsFitsOnePart(candidate)) {
-      break;
-    }
-    retained += segment;
-  }
-
-  retained = retained.trimEnd();
-  const finalWhitespace = retained.lastIndexOf(' ');
-  if (finalWhitespace >= Math.floor(retained.length * 0.7)) {
-    retained = retained.slice(0, finalWhitespace).trimEnd();
-  }
-  const truncated = `${prefix}${retained}${suffix}`;
+  );
+  const truncated = `${frame.prefix}${retained}${TRUNCATION_MARKER}${frame.suffix}`;
   if (!smsFitsOnePart(truncated)) {
     throw new TemplateRenderError(
       'RENDERED_MESSAGE_INVALID',
-      'The renderer-owned SMS classification prefix exceeds channel limits.',
+      'The renderer-owned SMS notification frame exceeds one-part limits.',
     );
   }
   return truncated;
@@ -482,14 +551,17 @@ function parseRenderedMessage(value: unknown): RenderedMessage {
 }
 
 /**
- * Renders one channel while deriving, prefixing, and validating classification
- * outside all administrator-editable wording.
+ * Renders one channel while deriving both immutable frame boundaries outside
+ * all administrator-configurable wording.
  */
 export function renderMessageTemplate(
   input: RenderMessageTemplateInput,
 ): RenderedMessage {
-  const variables = validatedVariables(input.variables);
   const classification = classificationFor(input.eventKind);
+  const variables = validatedVariables(
+    input.variables,
+    classification.templateMode,
+  );
   const templateSet = MessageTemplateSetSchema.parse({
     templateMode: input.template.templateMode,
     purpose: input.template.purpose,
@@ -537,107 +609,58 @@ export function renderMessageTemplate(
     );
   }
 
-  const prefix =
-    classification.templateMode === 'real'
-      ? '[INCIDENT] REAL INCIDENT: '
-      : '[DRILL] TRAINING ONLY: ';
+  const frame = rendererOwnedFrame(classification, template.purpose);
   const common = {
     eventKind: input.eventKind,
     templateMode: classification.templateMode,
     purpose: template.purpose,
     classificationMarker: classification.marker,
   } as const;
-  assertEventTypeNameClassification(
-    variables.eventType,
-    classification.templateMode,
-  );
+  const renderInterior = (value: string) =>
+    renderEditableInterior(
+      value,
+      variables,
+      classification.templateMode,
+      template.purpose,
+    );
 
   switch (template.channel) {
-    case 'push': {
-      assertClassificationLanguage(template.title, classification.templateMode);
-      assertClassificationLanguage(template.body, classification.templateMode);
-      const title = interpolate(
-        stripEditableClassificationLead(
-          template.title,
-          classification.templateMode,
-        ),
-        variables,
-      );
-      const body = interpolate(
-        stripEditableClassificationLead(
-          template.body,
-          classification.templateMode,
-        ),
-        variables,
-      );
+    case 'push':
       return parseRenderedMessage({
         ...common,
         channel: 'push',
-        title: truncateVisibleField(
-          prefix,
-          title,
+        title: frameVisibleField(
+          frame,
+          renderInterior(template.title),
           RENDERED_FIELD_LIMITS.pushTitle,
         ),
-        body: truncateVisibleField(
-          prefix,
-          body,
+        body: frameVisibleField(
+          frame,
+          renderInterior(template.body),
           RENDERED_FIELD_LIMITS.pushBody,
         ),
       });
-    }
-    case 'email': {
-      assertClassificationLanguage(
-        template.subject,
-        classification.templateMode,
-      );
-      assertClassificationLanguage(
-        template.textBody,
-        classification.templateMode,
-      );
-      const subject = interpolate(
-        stripEditableClassificationLead(
-          template.subject,
-          classification.templateMode,
-        ),
-        variables,
-      );
-      const textBody = interpolate(
-        stripEditableClassificationLead(
-          template.textBody,
-          classification.templateMode,
-        ),
-        variables,
-      );
+    case 'email':
       return parseRenderedMessage({
         ...common,
         channel: 'email',
-        subject: truncateVisibleField(
-          prefix,
-          subject,
+        subject: frameVisibleField(
+          frame,
+          renderInterior(template.subject),
           RENDERED_FIELD_LIMITS.emailSubject,
         ),
-        textBody: truncateVisibleField(
-          prefix,
-          textBody,
+        textBody: frameVisibleField(
+          frame,
+          renderInterior(template.textBody),
           RENDERED_FIELD_LIMITS.emailBody,
         ),
       });
-    }
-    case 'sms': {
-      assertClassificationLanguage(template.body, classification.templateMode);
-      const editableBody = interpolate(
-        stripEditableClassificationLead(
-          template.body,
-          classification.templateMode,
-        ),
-        variables,
-      );
+    case 'sms':
       return parseRenderedMessage({
         ...common,
         channel: 'sms',
-        body: truncateSmsBody(prefix, editableBody),
+        body: frameSmsBody(frame, renderInterior(template.body)),
       });
-    }
   }
 }
 

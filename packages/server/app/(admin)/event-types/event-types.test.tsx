@@ -51,10 +51,10 @@ const IDS = {
 
 const NOW = new Date('2026-08-08T17:00:00.000Z');
 const VARIABLES = {
-  site: 'Synthetic Harbor High School',
+  site: 'Harbor Ridge High School',
   eventType: 'Lockdown',
   startTime: '2026-08-08T16:30:00.000Z',
-  initiator: 'Synthetic Staff Member',
+  initiator: 'Taylor Morgan',
 } as const;
 const DRILL_VARIABLES = { ...VARIABLES, eventType: 'Lockdown Drill' } as const;
 
@@ -139,6 +139,30 @@ function templateSet(
   overrides: Readonly<{ smsBody?: string }> = {},
 ): MessageTemplateSet {
   const classificationMarker = mode === 'real' ? 'INCIDENT' : 'DRILL';
+  const wording =
+    purpose === 'activation'
+      ? {
+          title: '{{eventType}} at {{site}}',
+          body: 'Started {{startTime}} by {{initiator}}. Open PSD EOC.',
+          textBody:
+            '{{eventType}} at {{site}} started {{startTime}} by {{initiator}}.',
+          sms: '{{eventType}} at {{site}}. Open PSD EOC.',
+        }
+      : purpose === 'all-clear'
+        ? {
+            title: 'ALL CLEAR: {{eventType}} at {{site}}',
+            body: '{{eventType}} at {{site}} is all clear. Open PSD EOC for current information.',
+            textBody:
+              'The {{eventType}} at {{site}} is complete. The notification began {{startTime}}.',
+            sms: '{{eventType}} complete at {{site}}. Open PSD EOC for current information.',
+          }
+        : {
+            title: 'REACTIVATION: {{eventType}} at {{site}}',
+            body: '{{eventType}} at {{site}} is active again. Open PSD EOC for current instructions.',
+            textBody:
+              'The {{eventType}} at {{site}} is active again. The notification originally began {{startTime}} and was initiated by {{initiator}}.',
+            sms: '{{eventType}} reactivated at {{site}}. Open PSD EOC for current instructions.',
+          };
   return {
     templateMode: mode,
     purpose,
@@ -147,24 +171,23 @@ function templateSet(
       templateMode: mode,
       purpose,
       classificationMarker,
-      title: '{{eventType}} at {{site}}',
-      body: 'Started {{startTime}} by {{initiator}}. Open PSD EOC.',
+      title: wording.title,
+      body: wording.body,
     },
     email: {
       channel: 'email',
       templateMode: mode,
       purpose,
       classificationMarker,
-      subject: '{{eventType}} at {{site}}',
-      textBody:
-        '{{eventType}} at {{site}} started {{startTime}} by {{initiator}}.',
+      subject: wording.title,
+      textBody: wording.textBody,
     },
     sms: {
       channel: 'sms',
       templateMode: mode,
       purpose,
       classificationMarker,
-      body: overrides.smsBody ?? '{{eventType}} at {{site}}. Open PSD EOC.',
+      body: overrides.smsBody ?? wording.sms,
     },
   };
 }
@@ -231,290 +254,385 @@ function visibleFields(
   }
 }
 
-describe('renderer-owned real-versus-drill classification', () => {
-  for (const [eventKind, mode, prefix] of [
-    ['incident', 'real', '[INCIDENT] REAL INCIDENT: '],
-    ['drill', 'drill', '[DRILL] TRAINING ONLY: '],
-    ['test', 'drill', '[DRILL] TRAINING ONLY: '],
-  ] as const) {
-    test(`${eventKind} prefixes every visible channel field with the full canonical statement`, () => {
-      const messages = renderTemplateSet({
-        eventKind,
-        templates: catalog(mode).activation,
-        variables: mode === 'drill' ? DRILL_VARIABLES : VARIABLES,
-      });
-      expect(messages.map((message) => message.channel)).toEqual([
-        'push',
-        'email',
-        'sms',
-      ]);
-      for (const message of messages) {
-        expect(message.templateMode).toBe(mode);
-        for (const field of visibleFields(message)) {
-          expect(field.startsWith(prefix)).toBe(true);
-        }
-      }
-    });
+describe('renderer-owned notification frames', () => {
+  const purposes = [
+    'activation',
+    'all-clear',
+    'reactivation',
+  ] as const satisfies readonly NotificationPurpose[];
+
+  function expectedFrame(
+    mode: TemplateMode,
+    purpose: NotificationPurpose,
+  ): Readonly<{ prefix: string; suffix: string }> {
+    const marker = mode === 'real' ? 'INCIDENT' : 'DRILL';
+    const modeLabel = mode === 'real' ? 'REAL INCIDENT' : 'TRAINING ONLY';
+    const purposeLabel =
+      purpose === 'activation'
+        ? 'ACTIVATION'
+        : purpose === 'all-clear'
+          ? 'ALL CLEAR'
+          : 'REACTIVATION';
+    return {
+      prefix: `[${marker}] ${modeLabel} - ${purposeLabel}: `,
+      suffix: ` [${marker}]`,
+    };
   }
 
-  test('drill marking cannot be removed through editable wording', () => {
-    const plain = templateSet('drill', 'activation');
-    const messages = renderTemplateSet({
-      eventKind: 'drill',
-      templates: {
-        ...plain,
-        push: { ...plain.push, title: 'Proceed at {{site}}' },
-        email: { ...plain.email, subject: 'Proceed at {{site}}' },
-        sms: { ...plain.sms, body: 'Proceed at {{site}}' },
-      },
-      variables: DRILL_VARIABLES,
-    });
-    for (const message of messages) {
-      for (const field of visibleFields(message)) {
-        expect(field.startsWith('[DRILL] TRAINING ONLY: ')).toBe(true);
+  test('frames every independently visible field for every mode and purpose', () => {
+    for (const [eventKind, mode, variables] of [
+      ['incident', 'real', VARIABLES],
+      ['drill', 'drill', DRILL_VARIABLES],
+      ['test', 'drill', DRILL_VARIABLES],
+    ] as const) {
+      for (const purpose of purposes) {
+        const frame = expectedFrame(mode, purpose);
+        const messages = renderTemplateSet({
+          eventKind,
+          templates: templateSet(mode, purpose),
+          variables,
+        });
+        expect(messages.map((message) => message.channel)).toEqual([
+          'push',
+          'email',
+          'sms',
+        ]);
+        for (const message of messages) {
+          expect(message.templateMode).toBe(mode);
+          expect(message.purpose).toBe(purpose);
+          for (const field of visibleFields(message)) {
+            expect(field.startsWith(frame.prefix)).toBe(true);
+            expect(field.endsWith(frame.suffix)).toBe(true);
+          }
+        }
       }
     }
   });
 
-  test('preserves classification-like prose unless it is a delimited editable label', () => {
-    const real = templateSet('real', 'activation');
-    const realMessages = renderTemplateSet({
-      eventKind: 'incident',
-      templates: {
-        ...real,
-        push: {
-          ...real.push,
-          title: 'Real incident response at {{site}}',
-        },
+  test('preserves arbitrary safe Unicode names, context, and configured copy', () => {
+    const base = templateSet('drill', 'activation');
+    const templates: MessageTemplateSet = {
+      ...base,
+      push: {
+        ...base.push,
+        title: '自由な管理文言 🚨 — {{eventType}}',
+        body: 'Это реальное происшествие. Site: {{site}}. By {{initiator}}.',
       },
-      variables: VARIABLES,
-    });
-    expect(realMessages[0].channel).toBe('push');
-    expect(
-      realMessages[0].channel === 'push' ? realMessages[0].title : '',
-    ).toContain('Real incident response at Synthetic Harbor High School');
-
-    const drill = templateSet('drill', 'activation');
-    const drillMessages = renderTemplateSet({
+      email: {
+        ...base.email,
+        subject: 'Aviso configurable — {{eventType}}',
+        textBody:
+          'هذا حادث حقيقي وفق النص الإداري.\n場所: {{site}}\nAuteur: {{initiator}}',
+      },
+      sms: {
+        ...base.sms,
+        body: 'これは実際の事件です — {{eventType}}',
+      },
+    };
+    const variables = {
+      ...DRILL_VARIABLES,
+      eventType: 'Évacuation / 避難 / إخلاء 🚨',
+      site: 'École 東京 — مبنى 🚒',
+      initiator: 'José 李 — أمل 🙂',
+    };
+    const messages = renderTemplateSet({
       eventKind: 'drill',
-      templates: {
-        ...drill,
-        push: {
-          ...drill.push,
-          title: 'Training only staff should respond',
-        },
-      },
-      variables: DRILL_VARIABLES,
+      templates,
+      variables,
     });
-    expect(drillMessages[0].channel).toBe('push');
-    expect(
-      drillMessages[0].channel === 'push' ? drillMessages[0].title : '',
-    ).toContain('Training only staff should respond');
+    const visible = messages.flatMap(visibleFields).join('\n');
+    expect(visible).toContain(variables.eventType);
+    expect(visible).toContain(variables.site);
+    expect(visible).toContain(variables.initiator);
+    expect(visible).toContain('Это реальное происшествие');
+    expect(visible).toContain('هذا حادث حقيقي وفق النص الإداري');
+    expect(visible).toContain('これは実際の事件です');
+    for (const field of messages.flatMap(visibleFields)) {
+      expect(field.startsWith('[DRILL] TRAINING ONLY - ACTIVATION: ')).toBe(
+        true,
+      );
+      expect(field.endsWith(' [DRILL]')).toBe(true);
+    }
   });
 
-  test('replaces seed-shaped classification leads while retaining purpose labels', () => {
-    for (const [eventKind, mode, variables, editableLead, renderedLead] of [
+  test('allows arbitrary contradictory semantics only inside immutable frames', () => {
+    for (const [eventKind, mode, variables, configuredCopy] of [
       [
         'incident',
         'real',
-        VARIABLES,
-        'REAL INCIDENT ACTIVATION',
-        '[INCIDENT] REAL INCIDENT: ACTIVATION',
+        { ...VARIABLES, eventType: 'Training Exercise / Simulacro' },
+        'THIS IS ONLY A DRILL. Ceci est un exercice.',
       ],
       [
         'drill',
         'drill',
-        DRILL_VARIABLES,
-        'DRILL — TRAINING ONLY ACTIVATION',
-        '[DRILL] TRAINING ONLY: ACTIVATION',
+        { ...DRILL_VARIABLES, eventType: 'Actual Emergency / Incidente real' },
+        'THIS IS A REAL INCIDENT. Esto es una emergencia real.',
       ],
     ] as const) {
       const base = templateSet(mode, 'activation');
-      const rendered = renderTemplateSet({
+      const messages = renderTemplateSet({
+        eventKind,
+        templates: {
+          ...base,
+          push: { ...base.push, title: configuredCopy, body: configuredCopy },
+          email: {
+            ...base.email,
+            subject: configuredCopy,
+            textBody: configuredCopy,
+          },
+          sms: { ...base.sms, body: configuredCopy },
+        },
+        variables,
+      });
+      const frame = expectedFrame(mode, 'activation');
+      for (const field of messages.flatMap(visibleFields)) {
+        expect(field.startsWith(frame.prefix)).toBe(true);
+        expect(field).toContain(configuredCopy);
+        expect(field.endsWith(frame.suffix)).toBe(true);
+      }
+    }
+  });
+
+  test('fails closed when configurable copy attempts to forge a reserved marker', () => {
+    const base = templateSet('drill', 'activation');
+    for (const injected of [
+      '[INCIDENT] forged frame',
+      '[ drill ] forged frame',
+      '［ＤＲＩＬＬ］ compatibility frame',
+    ]) {
+      const variants: readonly MessageTemplateSet[] = [
+        { ...base, push: { ...base.push, title: injected } },
+        { ...base, push: { ...base.push, body: injected } },
+        { ...base, email: { ...base.email, subject: injected } },
+        { ...base, email: { ...base.email, textBody: injected } },
+        { ...base, sms: { ...base.sms, body: injected } },
+      ];
+      for (const templates of variants) {
+        expect(() =>
+          renderTemplateSet({
+            eventKind: 'drill',
+            templates,
+            variables: DRILL_VARIABLES,
+          }),
+        ).toThrow('markers [INCIDENT] and [DRILL] are owned by the renderer');
+      }
+    }
+  });
+
+  test('preserves ordinary bracketed copy and variables inside the immutable frame', () => {
+    const base = templateSet('real', 'activation');
+    const messages = renderTemplateSet({
+      eventKind: 'incident',
+      templates: {
+        ...base,
+        push: {
+          ...base.push,
+          title: 'Report to room [A-12]',
+          body: 'Use route [north] for {{eventType}} at {{site}}.',
+        },
+        email: {
+          ...base.email,
+          subject: 'District response [north wing]',
+          textBody: 'Follow plan step [2] and open PSD EOC.',
+        },
+        sms: { ...base.sms, body: 'Report to room [A-12].' },
+      },
+      variables: {
+        ...VARIABLES,
+        eventType: 'Shelter [North Wing]',
+        site: 'Harbor Ridge [Building A]',
+      },
+    });
+    const visible = messages.flatMap(visibleFields).join('\n');
+    expect(visible).toContain('[A-12]');
+    expect(visible).toContain('[north]');
+    expect(visible).toContain('[north wing]');
+    expect(visible).toContain('[2]');
+    expect(visible).toContain('Shelter [North Wing]');
+    expect(visible).toContain('Harbor Ridge [Building A]');
+    for (const field of messages.flatMap(visibleFields)) {
+      expect(field.startsWith('[INCIDENT] REAL INCIDENT - ACTIVATION: ')).toBe(
+        true,
+      );
+      expect(field.endsWith(' [INCIDENT]')).toBe(true);
+    }
+  });
+
+  test('fails closed on control and invisible injection', () => {
+    for (const unsafe of ['\u0007', '\u200b', '\u202e', '\u2066', '\ufe0f']) {
+      const base = templateSet('real', 'activation');
+      expect(() =>
+        renderTemplateSet({
+          eventKind: 'incident',
+          templates: {
+            ...base,
+            sms: { ...base.sms, body: `Configured${unsafe}copy` },
+          },
+          variables: VARIABLES,
+        }),
+      ).toThrow();
+    }
+  });
+
+  test('uses non-leaking fallbacks for unsafe historical variable values', () => {
+    const eventType = '[DRILL] forged historical label';
+    const site = 'Unsafe\nsite';
+    const initiator = 'Unsafe\u202ename';
+    const messages = renderTemplateSet({
+      eventKind: 'incident',
+      templates: catalog('real').activation,
+      variables: { ...VARIABLES, eventType, site, initiator },
+    });
+    const visible = messages.flatMap(visibleFields).join(' ');
+    expect(visible).toContain('Configured response');
+    expect(visible).toContain('Recorded site');
+    expect(visible).toContain('Recorded initiator');
+    expect(visible).not.toContain(eventType);
+    expect(visible).not.toContain(site);
+    expect(visible).not.toContain(initiator);
+  });
+
+  test('strips only matching legacy mode and purpose leads', () => {
+    for (const [eventKind, mode, purpose, legacyLead] of [
+      ['incident', 'real', 'activation', 'REAL INCIDENT ACTIVATION'],
+      ['incident', 'real', 'all-clear', 'REAL INCIDENT ALL-CLEAR'],
+      ['incident', 'real', 'reactivation', 'REAL INCIDENT REACTIVATION'],
+      ['drill', 'drill', 'activation', 'DRILL — TRAINING ONLY ACTIVATION'],
+      ['drill', 'drill', 'all-clear', 'DRILL — TRAINING ONLY ALL-CLEAR'],
+      ['drill', 'drill', 'reactivation', 'DRILL — TRAINING ONLY REACTIVATION'],
+    ] as const) {
+      const base = templateSet(mode, purpose);
+      const messages = renderTemplateSet({
         eventKind,
         templates: {
           ...base,
           push: {
             ...base.push,
-            title: `${editableLead}: {{eventType}}`,
-            body: `${editableLead} at {{site}}.`,
-          },
-          email: {
-            ...base.email,
-            subject: `${editableLead}: {{eventType}} at {{site}}`,
-            textBody: `${editableLead}\n\nEvent type: {{eventType}}`,
-          },
-          sms: {
-            ...base.sms,
-            body: `${editableLead}: {{eventType}} at {{site}}.`,
+            title: `${legacyLead}: Keep this configured text`,
           },
         },
-        variables,
+        variables: mode === 'real' ? VARIABLES : DRILL_VARIABLES,
       });
-      for (const message of rendered) {
-        for (const field of visibleFields(message)) {
-          expect(field.startsWith(renderedLead)).toBe(true);
-          expect(field).not.toContain(editableLead);
+      const push = messages[0];
+      if (push.channel !== 'push') {
+        throw new Error('Expected push rendering first.');
+      }
+      expect(push.title).not.toContain(legacyLead);
+      expect(push.title).toContain('Keep this configured text');
+      expect(push.title.startsWith(expectedFrame(mode, purpose).prefix)).toBe(
+        true,
+      );
+      expect(push.title.endsWith(expectedFrame(mode, purpose).suffix)).toBe(
+        true,
+      );
+    }
+
+    const base = templateSet('drill', 'activation');
+    const mismatched = renderTemplateSet({
+      eventKind: 'drill',
+      templates: {
+        ...base,
+        sms: { ...base.sms, body: 'REAL INCIDENT: retained admin wording' },
+      },
+      variables: DRILL_VARIABLES,
+    });
+    const sms = mismatched[2];
+    if (sms.channel !== 'sms') {
+      throw new Error('Expected SMS rendering last.');
+    }
+    expect(sms.body).toContain('REAL INCIDENT: retained admin wording');
+    expect(
+      sms.body.startsWith(expectedFrame('drill', 'activation').prefix),
+    ).toBe(true);
+    expect(sms.body.endsWith(expectedFrame('drill', 'activation').suffix)).toBe(
+      true,
+    );
+  });
+
+  test('truncates only interiors while preserving both frame edges in all fields', () => {
+    for (const [eventKind, mode, variables] of [
+      ['incident', 'real', VARIABLES],
+      ['drill', 'drill', DRILL_VARIABLES],
+    ] as const) {
+      for (const purpose of purposes) {
+        const base = templateSet(mode, purpose);
+        const messages = renderTemplateSet({
+          eventKind,
+          templates: {
+            ...base,
+            push: {
+              ...base.push,
+              title: 'T'.repeat(120),
+              body: 'B'.repeat(500),
+            },
+            email: {
+              ...base.email,
+              subject: 'S'.repeat(200),
+              textBody: 'E'.repeat(10_000),
+            },
+            sms: { ...base.sms, body: 'M'.repeat(1_000) },
+          },
+          variables,
+        });
+        const frame = expectedFrame(mode, purpose);
+        const [push, email, sms] = messages;
+        if (
+          push.channel !== 'push' ||
+          email.channel !== 'email' ||
+          sms.channel !== 'sms'
+        ) {
+          throw new Error('Expected stable push, email, and SMS ordering.');
         }
+        for (const [field, limit] of [
+          [push.title, 120],
+          [push.body, 500],
+          [email.subject, 200],
+          [email.textBody, 10_000],
+        ] as const) {
+          expect(field.length).toBeLessThanOrEqual(limit);
+          expect(field.startsWith(frame.prefix)).toBe(true);
+          expect(field.endsWith(frame.suffix)).toBe(true);
+          expect(field).toContain(`...${frame.suffix}`);
+        }
+        expect(sms.body.startsWith(frame.prefix)).toBe(true);
+        expect(sms.body.endsWith(frame.suffix)).toBe(true);
+        expect(sms.body).toContain(`...${frame.suffix}`);
+        expect(measureSmsLength(sms.body)).toMatchObject({
+          parts: 1,
+          exceedsProviderLimit: false,
+        });
       }
     }
   });
 
-  test('rejects editable prose that contradicts real or drill classification', () => {
-    const drill = templateSet('drill', 'activation');
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'drill',
-        templates: {
-          ...drill,
-          sms: {
-            ...drill.sms,
-            body: 'REAL INCIDENT — NOT A DRILL. Follow emergency directions.',
-          },
-        },
-        variables: DRILL_VARIABLES,
-      }),
-    ).toThrow('Drill wording cannot claim to be a real incident');
-
-    const real = templateSet('real', 'activation');
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'incident',
-        templates: {
-          ...real,
-          push: {
-            ...real.push,
-            title: 'TRAINING ONLY exercise at {{site}}',
-          },
-        },
-        variables: VARIABLES,
-      }),
-    ).toThrow(
-      'Real-incident wording cannot contradict its real classification',
-    );
-
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'incident',
-        templates: {
-          ...real,
-          sms: { ...real.sms, body: 'This is not a real emergency.' },
-        },
-        variables: VARIABLES,
-      }),
-    ).toThrow(
-      'Real-incident wording cannot contradict its real classification',
-    );
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'drill',
-        templates: {
-          ...drill,
-          sms: { ...drill.sms, body: 'This is an emergency.' },
-        },
-        variables: DRILL_VARIABLES,
-      }),
-    ).toThrow('Drill wording cannot claim to be a real incident');
-    for (const body of [
-      'This is only a test.',
-      'This is a training exercise.',
-      'This is a simulated incident.',
-      'This is a rehearsal.',
-    ]) {
-      expect(() =>
-        renderTemplateSet({
-          eventKind: 'incident',
-          templates: { ...real, sms: { ...real.sms, body } },
-          variables: VARIABLES,
-        }),
-      ).toThrow(
-        'Real-incident wording cannot contradict its real classification',
-      );
+  test('keeps Unicode SMS truncation grapheme-safe and in one part', () => {
+    const base = templateSet('drill', 'reactivation');
+    const messages = renderTemplateSet({
+      eventKind: 'drill',
+      templates: {
+        ...base,
+        sms: { ...base.sms, body: '避難🚨'.repeat(200) },
+      },
+      variables: DRILL_VARIABLES,
+    });
+    const sms = messages[2];
+    if (sms.channel !== 'sms') {
+      throw new Error('Expected SMS rendering last.');
     }
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'drill',
-        templates: {
-          ...drill,
-          sms: { ...drill.sms, body: 'This is no drill.' },
-        },
-        variables: DRILL_VARIABLES,
-      }),
-    ).toThrow('Drill wording cannot claim to be a real incident');
-
-    for (const body of [
-      'This is not a drill.',
-      'This is not a test.',
-      'This is no drill.',
-      'This isn’t a drill.',
-    ]) {
-      expect(() =>
-        renderTemplateSet({
-          eventKind: 'incident',
-          templates: { ...real, sms: { ...real.sms, body } },
-          variables: VARIABLES,
-        }),
-      ).not.toThrow();
-    }
-    for (const body of [
-      'Open PSD EOC for live updates.',
-      'Practice the actual response procedure.',
-      'This is a rehearsal.',
-    ]) {
-      expect(() =>
-        renderTemplateSet({
-          eventKind: 'drill',
-          templates: { ...drill, sms: { ...drill.sms, body } },
-          variables: DRILL_VARIABLES,
-        }),
-      ).not.toThrow();
-    }
-    for (const body of [
-      'This is not a test.',
-      'This is not an exercise.',
-      'This is not a rehearsal.',
-    ]) {
-      expect(() =>
-        renderTemplateSet({
-          eventKind: 'drill',
-          templates: { ...drill, sms: { ...drill.sms, body } },
-          variables: DRILL_VARIABLES,
-        }),
-      ).toThrow('Drill wording cannot claim to be a real incident');
-    }
+    const frame = expectedFrame('drill', 'reactivation');
+    expect(sms.body.startsWith(frame.prefix)).toBe(true);
+    expect(sms.body.endsWith(frame.suffix)).toBe(true);
+    expect(sms.body).toContain(`...${frame.suffix}`);
+    expect(sms.body).not.toContain('\ud83d...');
+    expect(measureSmsLength(sms.body)).toMatchObject({
+      encoding: 'ucs-2',
+      parts: 1,
+      exceedsProviderLimit: false,
+    });
   });
 
-  test('rejects U+2028 and U+2029 in editable templates and variables', () => {
-    for (const separator of ['\u2028', '\u2029']) {
-      const template = templateSet('drill', 'activation');
-      expect(() =>
-        renderTemplateSet({
-          eventKind: 'drill',
-          templates: {
-            ...template,
-            push: {
-              ...template.push,
-              title: `Proceed${separator}at {{site}}`,
-            },
-          },
-          variables: DRILL_VARIABLES,
-        }),
-      ).toThrow('unsafe invisible or control text');
-
-      expect(() =>
-        renderTemplateSet({
-          eventKind: 'drill',
-          templates: template,
-          variables: {
-            ...DRILL_VARIABLES,
-            site: `Synthetic${separator}Campus`,
-          },
-        }),
-      ).toThrow('site rendering variable is not safe visible text');
-    }
-  });
-
-  test('rejects mode substitution and reserved marker injection before truncation', () => {
+  test('rejects mode substitution while formatting time deterministically', () => {
     expect(() =>
       renderTemplateSet({
         eventKind: 'incident',
@@ -522,201 +640,16 @@ describe('renderer-owned real-versus-drill classification', () => {
         variables: DRILL_VARIABLES,
       }),
     ).toThrow(TemplateRenderError);
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'drill',
-        templates: catalog('drill', {
-          activationSmsBody: `${'A'.repeat(980)} [INCIDENT]`,
-        }).activation,
-        variables: DRILL_VARIABLES,
-      }),
-    ).toThrow('reserved classification marker');
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'drill',
-        templates: catalog('drill', {
-          activationSmsBody: 'Proceed ［INCIDENT］ at {{site}}',
-        }).activation,
-        variables: DRILL_VARIABLES,
-      }),
-    ).toThrow('reserved classification marker');
-  });
-
-  test('interpolates tokens once and rejects multiline roster values', () => {
-    const rendered = renderTemplateSet({
-      eventKind: 'incident',
-      templates: catalog('real').activation,
-      variables: { ...VARIABLES, site: '{{eventType}}' },
-    });
-    const push = rendered[0];
-    if (push.channel !== 'push') {
-      throw new Error('Expected push rendering first.');
-    }
-    expect(push.title).toContain('{{eventType}}');
-    expect(() =>
-      renderTemplateSet({
-        eventKind: 'incident',
-        templates: catalog('real').activation,
-        variables: { ...VARIABLES, initiator: 'Synthetic\nInjected' },
-      }),
-    ).toThrow('initiator rendering variable is not safe visible text');
-  });
-
-  test('never strips classification-like words from dynamic event names', () => {
-    const real = renderTemplateSet({
-      eventKind: 'incident',
-      templates: catalog('real').activation,
-      variables: { ...VARIABLES, eventType: 'Real Incident Response' },
-    });
-    const drill = renderTemplateSet({
-      eventKind: 'drill',
-      templates: catalog('drill').activation,
-      variables: { ...VARIABLES, eventType: 'Training Only Readiness Drill' },
-    });
-    expect(visibleFields(real[0]).join(' ')).toContain(
-      'Real Incident Response',
-    );
-    expect(visibleFields(drill[0]).join(' ')).toContain(
-      'Training Only Readiness Drill',
-    );
-    for (const eventType of [
-      'Emergency Evacuation Drill',
-      'Actual Incident Tabletop Drill',
-      'Real Alert Recognition Drill',
-    ]) {
-      const rendered = renderTemplateSet({
-        eventKind: 'drill',
-        templates: catalog('drill').activation,
-        variables: { ...DRILL_VARIABLES, eventType },
-      });
-      expect(visibleFields(rendered[0]).join(' ')).toContain(eventType);
-    }
-    for (const eventType of [
-      'REAL INCIDENT — NOT A DRILL Training Exercise',
-      'This Isn’t a Drill Training Exercise',
-      'No Test Training Exercise',
-      'Not a Mock Incident Exercise',
-      'Not a Simulated Incident Exercise',
-    ]) {
-      expect(() =>
-        renderTemplateSet({
-          eventKind: 'drill',
-          templates: catalog('drill').activation,
-          variables: { ...DRILL_VARIABLES, eventType },
-        }),
-      ).toThrow(
-        'The event-type name must visibly match its immutable real-or-drill mode',
-      );
-    }
-  });
-
-  test('formats district time deterministically across standard and daylight time', () => {
     expect(formatNotificationStartTime('2026-01-15T20:00:00.000Z')).toContain(
       '12:00 PM PST',
     );
     expect(formatNotificationStartTime('2026-07-15T19:00:00.000Z')).toContain(
       '12:00 PM PDT',
     );
-  });
-
-  test('measures GSM extension septets and truncates without splitting Unicode', () => {
     expect(measureSmsLength('[ ]')).toMatchObject({
       encoding: 'gsm-7',
       units: 5,
       parts: 1,
-      exceedsProviderLimit: false,
-    });
-    const gsm = renderTemplateSet({
-      eventKind: 'incident',
-      templates: catalog('real', {
-        activationSmsBody: 'A'.repeat(1_000),
-      }).activation,
-      variables: VARIABLES,
-    })[2];
-    expect(gsm.channel).toBe('sms');
-    if (gsm.channel !== 'sms') {
-      throw new Error('Expected SMS rendering.');
-    }
-    expect(measureSmsLength(gsm.body).parts).toBe(1);
-    expect(gsm.body.startsWith('[INCIDENT] REAL INCIDENT: ')).toBe(true);
-    expect(gsm.body.endsWith('...')).toBe(true);
-
-    const unicode = renderTemplateSet({
-      eventKind: 'drill',
-      templates: catalog('drill', {
-        activationSmsBody: '😀'.repeat(490),
-      }).activation,
-      variables: DRILL_VARIABLES,
-    })[2];
-    if (unicode.channel !== 'sms') {
-      throw new Error('Expected SMS rendering.');
-    }
-    expect(measureSmsLength(unicode.body).parts).toBe(1);
-    expect(measureSmsLength(unicode.body).exceedsProviderLimit).toBe(false);
-    expect(unicode.body.startsWith('[DRILL] TRAINING ONLY: ')).toBe(true);
-    expect(unicode.body.endsWith('...')).toBe(true);
-    expect(unicode.body.slice(0, -3)).not.toMatch(/[\uD800-\uDBFF]$/u);
-  });
-
-  test('truncates long valid variables in every bounded field and keeps SMS single-part', () => {
-    const base = templateSet('real', 'activation');
-    const longTemplates: MessageTemplateSet = {
-      ...base,
-      push: {
-        ...base.push,
-        title: '{{eventType}}',
-        body: '{{initiator}}',
-      },
-      email: {
-        ...base.email,
-        subject: '{{site}}',
-        textBody: `${'A'.repeat(9_510)}{{site}}`,
-      },
-      sms: {
-        ...base.sms,
-        body: '{{site}}',
-      },
-    };
-    const longValue = 'A'.repeat(500);
-    const [push, email, sms] = renderTemplateSet({
-      eventKind: 'incident',
-      templates: longTemplates,
-      variables: {
-        ...VARIABLES,
-        site: longValue,
-        eventType: longValue,
-        initiator: longValue,
-      },
-    });
-
-    expect(push.channel).toBe('push');
-    expect(email.channel).toBe('email');
-    expect(sms.channel).toBe('sms');
-    if (
-      push.channel !== 'push' ||
-      email.channel !== 'email' ||
-      sms.channel !== 'sms'
-    ) {
-      throw new Error('Expected push, email, and SMS rendering in order.');
-    }
-    expect(push.title).toHaveLength(120);
-    expect(push.body).toHaveLength(500);
-    expect(email.subject).toHaveLength(200);
-    expect(email.textBody).toHaveLength(10_000);
-    for (const field of [
-      push.title,
-      push.body,
-      email.subject,
-      email.textBody,
-      sms.body,
-    ]) {
-      expect(field.startsWith('[INCIDENT] REAL INCIDENT: ')).toBe(true);
-      expect(field.endsWith('...')).toBe(true);
-    }
-    expect(measureSmsLength(sms.body)).toMatchObject({
-      encoding: 'gsm-7',
-      parts: 1,
-      exceedsProviderLimit: false,
     });
   });
 });
@@ -756,8 +689,9 @@ describe('capability-level administrator authorization', () => {
         familyKey: 'synthetic-secure',
         templateMode: 'real',
       },
-      name: 'Synthetic Secure',
+      name: 'Secure',
       description: null,
+      enabled: true,
       templates: catalog('real'),
     };
     const nonAdminStore = new CountingStore();
@@ -833,8 +767,9 @@ describe('capability-level administrator authorization', () => {
         familyKey: 'synthetic-agent-config',
         templateMode: 'real',
       },
-      name: 'Synthetic Agent Configuration',
+      name: 'Medical',
       description: null,
+      enabled: true,
       templates: catalog('real'),
     };
     const execute = (
@@ -930,6 +865,7 @@ describe('admin UI semantics', () => {
     });
     const preview = EventTypeRenderingPreviewSchema.parse({
       draftId: '20000000-0000-4000-8000-000000000001',
+      draftRevision: 'a'.repeat(64),
       eventKind: 'drill',
       templateMode: 'drill',
       purpose: 'activation',

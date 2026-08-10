@@ -37,7 +37,7 @@ import {
   type RegisteredCapabilityId,
   type UpdateEventTypeDraftInput,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, like, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -54,7 +54,10 @@ import {
   idempotencyRecords,
 } from '../../db/schema';
 import type { AuthenticatedSession } from '../auth/sessions';
-import { renderTemplateSet } from '../notify/render';
+import {
+  assertApprovedEventTypeName,
+  renderTemplateSet,
+} from '../notify/render';
 
 const EVENT_TYPE_MUTATION_IDS = [
   'create-event-type-draft',
@@ -82,14 +85,38 @@ const CHANNELS = [
   'sms',
 ] as const satisfies readonly NotificationChannel[];
 
-const DRAFT_RESULT_PREFIX = 'event-type-draft-v1';
+const DRAFT_RESULT_PREFIX = 'event-type-draft-v2';
 const VERSION_RESULT_PREFIX = 'event-type-version-v1';
+const ROOT_DRAFT_REVISION = 'root';
+const NO_BASE_VERSION = 'none';
+const SHA_256_PATTERN = /^[a-f0-9]{64}$/u;
+
+const DRAFT_MUTATION_IDS = [
+  'create-event-type-draft',
+  'update-event-type-draft',
+] as const;
+
+type DraftMutationId = (typeof DRAFT_MUTATION_IDS)[number];
+
+type DraftLedgerEntry = Readonly<{
+  capabilityId: DraftMutationId;
+  draftId: string;
+  baseVersionId: string | null;
+  enabled: boolean;
+  previousDraftRevision: string | null;
+  draftRevision: string;
+}>;
+
+type DraftLedgerRow = Readonly<{
+  capabilityId: string;
+  resultReference: string | null;
+}>;
 
 export const EVENT_TYPE_PREVIEW_VARIABLES = Object.freeze({
   site: 'Harbor Ridge High School',
   eventType: 'Lockdown Drill',
   startTime: '2026-08-08T16:30:00.000Z',
-  initiator: 'Synthetic Staff Member',
+  initiator: 'Taylor Morgan',
 });
 
 export type EventTypeCapabilityErrorCode =
@@ -314,13 +341,27 @@ function versionFromRows(
 function draftFromRows(
   row: typeof eventTypeVersionDrafts.$inferSelect,
   templates: readonly StoredTemplateRow[],
+  ledger: DraftLedgerEntry,
 ): EventTypeVersionDraft {
-  return EventTypeVersionDraftSchema.parse({
+  const parsed = EventTypeVersionDraftSchema.safeParse({
     ...row,
     status: 'draft',
+    baseVersionId: ledger.baseVersionId,
+    enabled: ledger.enabled,
     templates: templateCatalogFromRows(templates),
+    draftRevision: ledger.draftRevision,
     createdAt: row.createdAt.toISOString(),
   });
+  if (!parsed.success) {
+    throwDraftStateConflict();
+  }
+  if (
+    calculateDraftRevision(parsed.data, ledger.previousDraftRevision) !==
+    ledger.draftRevision
+  ) {
+    throwDraftStateConflict();
+  }
+  return parsed.data;
 }
 
 function encodeCursor(offset: number): string {
@@ -366,37 +407,220 @@ function parseResultReference(
   return parsed.success ? parsed.data : null;
 }
 
-function approvalReference(draftId: string): string {
-  return `event-type-draft:${UuidSchema.parse(draftId)}`;
+function throwDraftStateConflict(): never {
+  throw new EventTypeCapabilityError(
+    'CONFLICT',
+    'The event-type draft revision history is incomplete or inconsistent.',
+  );
+}
+
+function draftLedgerReference(
+  entry: Omit<DraftLedgerEntry, 'capabilityId'>,
+): string {
+  return [
+    DRAFT_RESULT_PREFIX,
+    UuidSchema.parse(entry.draftId),
+    entry.baseVersionId === null
+      ? NO_BASE_VERSION
+      : UuidSchema.parse(entry.baseVersionId),
+    entry.enabled ? '1' : '0',
+    entry.previousDraftRevision ?? ROOT_DRAFT_REVISION,
+    entry.draftRevision,
+  ].join(':');
+}
+
+function parseDraftLedgerEntry(row: DraftLedgerRow): DraftLedgerEntry | null {
+  if (!DRAFT_MUTATION_IDS.includes(row.capabilityId as DraftMutationId)) {
+    return null;
+  }
+  const parts = row.resultReference?.split(':');
+  if (
+    parts === undefined ||
+    parts.length !== 6 ||
+    parts[0] !== DRAFT_RESULT_PREFIX
+  ) {
+    return null;
+  }
+  const draftId = UuidSchema.safeParse(parts[1]);
+  const baseVersionId =
+    parts[2] === NO_BASE_VERSION
+      ? { success: true as const, data: null }
+      : UuidSchema.safeParse(parts[2]);
+  const previousDraftRevision =
+    parts[4] === ROOT_DRAFT_REVISION
+      ? null
+      : SHA_256_PATTERN.test(parts[4] ?? '')
+        ? parts[4]
+        : undefined;
+  const draftRevision = parts[5];
+  if (
+    !draftId.success ||
+    !baseVersionId.success ||
+    (parts[3] !== '0' && parts[3] !== '1') ||
+    previousDraftRevision === undefined ||
+    draftRevision === undefined ||
+    !SHA_256_PATTERN.test(draftRevision)
+  ) {
+    return null;
+  }
+  return {
+    capabilityId: row.capabilityId as DraftMutationId,
+    draftId: draftId.data,
+    baseVersionId: baseVersionId.data,
+    enabled: parts[3] === '1',
+    previousDraftRevision,
+    draftRevision,
+  };
+}
+
+function currentDraftLedgerEntry(
+  draftId: string,
+  rows: readonly DraftLedgerRow[],
+): DraftLedgerEntry {
+  const entries = rows.map(parseDraftLedgerEntry);
+  if (
+    entries.length === 0 ||
+    entries.some((entry) => entry === null || entry.draftId !== draftId)
+  ) {
+    throwDraftStateConflict();
+  }
+  const parsedEntries = entries as DraftLedgerEntry[];
+  const byRevision = new Map<string, DraftLedgerEntry>();
+  const childrenByRevision = new Map<string, DraftLedgerEntry[]>();
+  const rootEntries: DraftLedgerEntry[] = [];
+  const baseVersionId = parsedEntries[0]?.baseVersionId;
+
+  for (const entry of parsedEntries) {
+    if (
+      byRevision.has(entry.draftRevision) ||
+      entry.baseVersionId !== baseVersionId
+    ) {
+      throwDraftStateConflict();
+    }
+    byRevision.set(entry.draftRevision, entry);
+    if (entry.previousDraftRevision === null) {
+      rootEntries.push(entry);
+    } else {
+      const children =
+        childrenByRevision.get(entry.previousDraftRevision) ?? [];
+      children.push(entry);
+      childrenByRevision.set(entry.previousDraftRevision, children);
+    }
+  }
+  if (
+    rootEntries.length !== 1 ||
+    rootEntries[0]?.capabilityId !== 'create-event-type-draft' ||
+    parsedEntries.some(
+      (entry) =>
+        (entry.previousDraftRevision === null) !==
+          (entry.capabilityId === 'create-event-type-draft') ||
+        (entry.previousDraftRevision !== null &&
+          !byRevision.has(entry.previousDraftRevision)),
+    ) ||
+    [...childrenByRevision.values()].some((children) => children.length !== 1)
+  ) {
+    throwDraftStateConflict();
+  }
+
+  const heads = parsedEntries.filter(
+    (entry) => !childrenByRevision.has(entry.draftRevision),
+  );
+  if (heads.length !== 1 || heads[0] === undefined) {
+    throwDraftStateConflict();
+  }
+  const visited = new Set<string>();
+  let cursor: DraftLedgerEntry | undefined = heads[0];
+  while (cursor !== undefined) {
+    if (visited.has(cursor.draftRevision)) {
+      throwDraftStateConflict();
+    }
+    visited.add(cursor.draftRevision);
+    cursor =
+      cursor.previousDraftRevision === null
+        ? undefined
+        : byRevision.get(cursor.previousDraftRevision);
+  }
+  if (visited.size !== parsedEntries.length) {
+    throwDraftStateConflict();
+  }
+  return heads[0];
+}
+
+function calculateDraftRevision(
+  draft: Omit<EventTypeVersionDraft, 'draftRevision'>,
+  previousDraftRevision: string | null,
+): string {
+  return digest({
+    format: 'event-type-draft-revision-v1',
+    previousDraftRevision,
+    draft: {
+      id: draft.id,
+      eventTypeId: draft.eventTypeId,
+      status: draft.status,
+      templateMode: draft.templateMode,
+      name: draft.name,
+      description: draft.description,
+      baseVersionId: draft.baseVersionId,
+      enabled: draft.enabled,
+      templates: draft.templates,
+      draftedBy: draft.draftedBy,
+      createdAt: draft.createdAt,
+    },
+  });
+}
+
+function approvalReference(draftId: string, draftRevision: string): string {
+  if (!SHA_256_PATTERN.test(draftRevision)) {
+    throwDraftStateConflict();
+  }
+  return `event-type-draft:${UuidSchema.parse(draftId)}:revision:${draftRevision}`;
+}
+
+function authorizationReference(
+  authorization: EventTypeVersion['publicationAuthorization'],
+): string {
+  return authorization.kind === 'agent-configuration'
+    ? authorization.authorizationReference
+    : authorization.approvalReference;
 }
 
 function publicationReferencesDraft(
   authorization: EventTypeVersion['publicationAuthorization'],
   draftId: string,
 ): boolean {
-  const reference = approvalReference(draftId);
-  switch (authorization.kind) {
-    case 'human-admin':
-    case 'repository-seed':
-      return authorization.approvalReference === reference;
-    case 'agent-configuration':
-      return authorization.authorizationReference === reference;
-  }
+  return authorizationReference(authorization).startsWith(
+    `event-type-draft:${UuidSchema.parse(draftId)}:revision:`,
+  );
 }
 
-function publicationAuthorization(actor: ConfigurationActor, draftId: string) {
+function publicationReferencesDraftRevision(
+  authorization: EventTypeVersion['publicationAuthorization'],
+  draftId: string,
+  draftRevision: string,
+): boolean {
+  return (
+    authorizationReference(authorization) ===
+    approvalReference(draftId, draftRevision)
+  );
+}
+
+function publicationAuthorization(
+  actor: ConfigurationActor,
+  draftId: string,
+  draftRevision: string,
+) {
   if (actor.kind === 'human') {
     return {
       kind: 'human-admin' as const,
       approvedByUserId: actor.userId,
-      approvalReference: approvalReference(draftId),
+      approvalReference: approvalReference(draftId, draftRevision),
     };
   }
   return {
     kind: 'agent-configuration' as const,
     agentId: actor.agentId,
     apiKeyId: actor.apiKeyId,
-    authorizationReference: approvalReference(draftId),
+    authorizationReference: approvalReference(draftId, draftRevision),
   };
 }
 
@@ -420,6 +644,27 @@ function existingIdempotentResult(
     );
   }
   return resultId;
+}
+
+function existingIdempotentDraftResult(
+  existing: typeof idempotencyRecords.$inferSelect | undefined,
+  requestDigest: string,
+): DraftLedgerEntry | null {
+  if (existing === undefined) {
+    return null;
+  }
+  const parsed = parseDraftLedgerEntry(existing);
+  if (
+    existing.requestDigest !== requestDigest ||
+    existing.status !== 'completed' ||
+    parsed === null
+  ) {
+    throw new EventTypeCapabilityError(
+      'IDEMPOTENCY_CONFLICT',
+      'The idempotency key is already bound to another request.',
+    );
+  }
+  return parsed;
 }
 
 export function isDatabaseConstraintError(error: unknown): boolean {
@@ -454,23 +699,60 @@ function draftResultFromInput(
     typeof eventTypeVersionDrafts.$inferSelect,
     'id' | 'eventTypeId' | 'templateMode' | 'createdAt'
   >,
-  input: Pick<
-    CreateEventTypeDraftInput | UpdateEventTypeDraftInput,
-    'name' | 'description' | 'templates'
-  >,
+  input: CreateEventTypeDraftInput | UpdateEventTypeDraftInput,
   draftedBy: ConfigurationActor,
+  ledger: DraftLedgerEntry,
 ): EventTypeVersionDraft {
-  return EventTypeVersionDraftSchema.parse({
+  const parsed = EventTypeVersionDraftSchema.safeParse({
     id: row.id,
     eventTypeId: row.eventTypeId,
     status: 'draft',
     templateMode: row.templateMode,
     name: input.name,
     description: input.description,
+    baseVersionId: ledger.baseVersionId,
+    enabled: input.enabled,
     templates: input.templates,
     draftedBy,
+    draftRevision: ledger.draftRevision,
     createdAt: row.createdAt.toISOString(),
   });
+  if (
+    !parsed.success ||
+    ledger.draftId !== row.id ||
+    ledger.enabled !== input.enabled ||
+    ('draftId' in input && input.draftId !== ledger.draftId) ||
+    ('expectedDraftRevision' in input &&
+      input.expectedDraftRevision !== ledger.previousDraftRevision) ||
+    ('target' in input &&
+      (ledger.baseVersionId !==
+        (input.target.kind === 'existing-event-type'
+          ? input.target.baseVersionId
+          : null) ||
+        (input.target.kind === 'existing-event-type' &&
+          input.target.eventTypeId !== row.eventTypeId))) ||
+    calculateDraftRevision(parsed.data, ledger.previousDraftRevision) !==
+      ledger.draftRevision
+  ) {
+    throwDraftStateConflict();
+  }
+  return parsed.data;
+}
+
+function assertExpectedDraftRevision(actual: string, expected: string): void {
+  if (actual !== expected) {
+    throw new EventTypeCapabilityError(
+      'CONFLICT',
+      'The event-type draft changed after this copy was loaded. Reload the draft before continuing.',
+    );
+  }
+}
+
+function throwBaseVersionConflict(): never {
+  throw new EventTypeCapabilityError(
+    'CONFLICT',
+    'The event type changed after this draft was started. Reload the latest version and create a new draft.',
+  );
 }
 
 function assertTemplateCatalogRenderable(
@@ -478,6 +760,7 @@ function assertTemplateCatalogRenderable(
   eventTypeName: string,
   templates: MessageTemplateCatalog,
 ): void {
+  assertApprovedEventTypeName(eventTypeName, templateMode);
   const eventKind = templateMode === 'real' ? 'incident' : 'drill';
   for (const purpose of PURPOSES) {
     renderTemplateSet({
@@ -625,7 +908,27 @@ export class DrizzleEventTypeStore implements EventTypeStore {
         .select()
         .from(eventTypeDraftTemplates)
         .where(eq(eventTypeDraftTemplates.eventTypeVersionDraftId, row.id));
-      return draftFromRows(row, templates);
+      const ledgerRows = await transaction
+        .select({
+          capabilityId: idempotencyRecords.capabilityId,
+          resultReference: idempotencyRecords.resultReference,
+        })
+        .from(idempotencyRecords)
+        .where(
+          and(
+            eq(idempotencyRecords.status, 'completed'),
+            inArray(idempotencyRecords.capabilityId, DRAFT_MUTATION_IDS),
+            like(
+              idempotencyRecords.resultReference,
+              `${DRAFT_RESULT_PREFIX}:${row.id}:%`,
+            ),
+          ),
+        );
+      return draftFromRows(
+        row,
+        templates,
+        currentDraftLedgerEntry(row.id, ledgerRows),
+      );
     });
   }
 
@@ -633,7 +936,7 @@ export class DrizzleEventTypeStore implements EventTypeStore {
     input: CreateEventTypeDraftInput,
     metadata: EventTypeMutationMetadata,
   ): Promise<EventTypeVersionDraft> {
-    const eventTypeId =
+    let eventTypeId =
       input.target.kind === 'new-event-type'
         ? randomUUID()
         : input.target.eventTypeId;
@@ -657,11 +960,7 @@ export class DrizzleEventTypeStore implements EventTypeStore {
             ),
           )
           .limit(1);
-        const replay = existingIdempotentResult(
-          existing,
-          requestDigest,
-          DRAFT_RESULT_PREFIX,
-        );
+        const replay = existingIdempotentDraftResult(existing, requestDigest);
         if (replay !== null) {
           const [replayedDraft] = await transaction
             .select({
@@ -671,7 +970,7 @@ export class DrizzleEventTypeStore implements EventTypeStore {
               createdAt: eventTypeVersionDrafts.createdAt,
             })
             .from(eventTypeVersionDrafts)
-            .where(eq(eventTypeVersionDrafts.id, replay))
+            .where(eq(eventTypeVersionDrafts.id, replay.draftId))
             .for('share')
             .limit(1);
           if (replayedDraft === undefined) {
@@ -680,7 +979,19 @@ export class DrizzleEventTypeStore implements EventTypeStore {
               'The idempotent draft result is no longer available.',
             );
           }
-          return draftResultFromInput(replayedDraft, input, metadata.actor);
+          return draftResultFromInput(
+            replayedDraft,
+            input,
+            metadata.actor,
+            replay,
+          );
+        }
+        if (input.target.kind === 'new-event-type') {
+          // The key row may not exist yet, so its unique index cannot provide
+          // the serialization needed by concurrent create-or-recover calls.
+          await transaction.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`event-type-key:${input.target.key}`}, 4010))`,
+          );
         }
         const idempotencyId = randomUUID();
         await transaction.insert(idempotencyRecords).values({
@@ -697,21 +1008,56 @@ export class DrizzleEventTypeStore implements EventTypeStore {
         });
 
         let templateMode: 'real' | 'drill';
+        let baseVersionId: string | null;
         if (input.target.kind === 'new-event-type') {
           templateMode = input.target.templateMode;
-          await transaction.insert(eventTypes).values({
-            id: eventTypeId,
-            key: input.target.key,
-            familyKey: input.target.familyKey,
-            templateMode,
-            createdAt: metadata.now,
-          });
+          baseVersionId = null;
+          const [existingIdentity] = await transaction
+            .select()
+            .from(eventTypes)
+            .where(eq(eventTypes.key, input.target.key))
+            .for('update')
+            .limit(1);
+          if (existingIdentity === undefined) {
+            await transaction.insert(eventTypes).values({
+              id: eventTypeId,
+              key: input.target.key,
+              familyKey: input.target.familyKey,
+              templateMode,
+              createdAt: metadata.now,
+            });
+          } else {
+            if (
+              existingIdentity.familyKey !== input.target.familyKey ||
+              existingIdentity.templateMode !== input.target.templateMode
+            ) {
+              throw new EventTypeCapabilityError(
+                'CONFLICT',
+                'The stable event-type key belongs to a different immutable family or mode.',
+              );
+            }
+            const [publishedVersion] = await transaction
+              .select({ id: eventTypeVersions.id })
+              .from(eventTypeVersions)
+              .where(eq(eventTypeVersions.eventTypeId, existingIdentity.id))
+              .limit(1);
+            if (publishedVersion !== undefined) {
+              throw new EventTypeCapabilityError(
+                'CONFLICT',
+                'The stable event-type key already belongs to a published event type.',
+              );
+            }
+            // Preserve the unreachable draft and its ledger root. The caller
+            // receives a fresh draft that remains publishable until the usual
+            // base-version concurrency rule detects a later publication.
+            eventTypeId = existingIdentity.id;
+          }
         } else {
           const [identity] = await transaction
             .select()
             .from(eventTypes)
             .where(eq(eventTypes.id, eventTypeId))
-            .for('share')
+            .for('update')
             .limit(1);
           if (identity === undefined) {
             throw new EventTypeCapabilityError(
@@ -720,6 +1066,16 @@ export class DrizzleEventTypeStore implements EventTypeStore {
             );
           }
           templateMode = identity.templateMode;
+          const [latest] = await transaction
+            .select({ id: eventTypeVersions.id })
+            .from(eventTypeVersions)
+            .where(eq(eventTypeVersions.eventTypeId, identity.id))
+            .orderBy(desc(eventTypeVersions.version))
+            .limit(1);
+          if (latest?.id !== input.target.baseVersionId) {
+            throwBaseVersionConflict();
+          }
+          baseVersionId = latest.id;
         }
         if (
           Object.values(input.templates).some(
@@ -742,6 +1098,25 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           templateMode,
           createdAt: metadata.now,
         } as const;
+        const draftWithoutRevision = {
+          ...draftRow,
+          status: 'draft' as const,
+          name: input.name,
+          description: input.description,
+          baseVersionId,
+          enabled: input.enabled,
+          templates: input.templates,
+          draftedBy: metadata.actor,
+          createdAt: metadata.now.toISOString(),
+        } satisfies Omit<EventTypeVersionDraft, 'draftRevision'>;
+        const ledger: DraftLedgerEntry = {
+          capabilityId: 'create-event-type-draft',
+          draftId,
+          baseVersionId,
+          enabled: input.enabled,
+          previousDraftRevision: null,
+          draftRevision: calculateDraftRevision(draftWithoutRevision, null),
+        };
         await transaction.insert(eventTypeVersionDrafts).values({
           ...draftRow,
           name: input.name,
@@ -761,10 +1136,10 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           .set({
             status: 'completed',
             completedAt: metadata.now,
-            resultReference: resultReference(DRAFT_RESULT_PREFIX, draftId),
+            resultReference: draftLedgerReference(ledger),
           })
           .where(eq(idempotencyRecords.id, idempotencyId));
-        return draftResultFromInput(draftRow, input, metadata.actor);
+        return draftResultFromInput(draftRow, input, metadata.actor, ledger);
       });
     } catch (error) {
       if (error instanceof EventTypeCapabilityError) {
@@ -802,11 +1177,7 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           ),
         )
         .limit(1);
-      const replay = existingIdempotentResult(
-        existing,
-        requestDigest,
-        DRAFT_RESULT_PREFIX,
-      );
+      const replay = existingIdempotentDraftResult(existing, requestDigest);
       if (replay !== null) {
         const [replayedDraft] = await transaction
           .select({
@@ -816,7 +1187,7 @@ export class DrizzleEventTypeStore implements EventTypeStore {
             createdAt: eventTypeVersionDrafts.createdAt,
           })
           .from(eventTypeVersionDrafts)
-          .where(eq(eventTypeVersionDrafts.id, replay))
+          .where(eq(eventTypeVersionDrafts.id, replay.draftId))
           .for('share')
           .limit(1);
         if (replayedDraft === undefined) {
@@ -825,7 +1196,12 @@ export class DrizzleEventTypeStore implements EventTypeStore {
             'The idempotent draft result is no longer available.',
           );
         }
-        return draftResultFromInput(replayedDraft, input, metadata.actor);
+        return draftResultFromInput(
+          replayedDraft,
+          input,
+          metadata.actor,
+          replay,
+        );
       }
       const [draft] = await transaction
         .select()
@@ -839,6 +1215,32 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           'The event-type draft was not found.',
         );
       }
+      const storedTemplates = await transaction
+        .select()
+        .from(eventTypeDraftTemplates)
+        .where(eq(eventTypeDraftTemplates.eventTypeVersionDraftId, draft.id));
+      const ledgerRows = await transaction
+        .select({
+          capabilityId: idempotencyRecords.capabilityId,
+          resultReference: idempotencyRecords.resultReference,
+        })
+        .from(idempotencyRecords)
+        .where(
+          and(
+            eq(idempotencyRecords.status, 'completed'),
+            inArray(idempotencyRecords.capabilityId, DRAFT_MUTATION_IDS),
+            like(
+              idempotencyRecords.resultReference,
+              `${DRAFT_RESULT_PREFIX}:${draft.id}:%`,
+            ),
+          ),
+        );
+      const currentLedger = currentDraftLedgerEntry(draft.id, ledgerRows);
+      const currentDraft = draftFromRows(draft, storedTemplates, currentLedger);
+      assertExpectedDraftRevision(
+        currentDraft.draftRevision,
+        input.expectedDraftRevision,
+      );
       const [identity] = await transaction
         .select({ id: eventTypes.id, templateMode: eventTypes.templateMode })
         .from(eventTypes)
@@ -891,6 +1293,31 @@ export class DrizzleEventTypeStore implements EventTypeStore {
         input.templates,
       );
 
+      const updatedWithoutRevision = {
+        id: draft.id,
+        eventTypeId: draft.eventTypeId,
+        status: 'draft' as const,
+        templateMode: draft.templateMode,
+        name: input.name,
+        description: input.description,
+        baseVersionId: currentDraft.baseVersionId,
+        enabled: input.enabled,
+        templates: input.templates,
+        draftedBy: metadata.actor,
+        createdAt: draft.createdAt.toISOString(),
+      } satisfies Omit<EventTypeVersionDraft, 'draftRevision'>;
+      const nextLedger: DraftLedgerEntry = {
+        capabilityId: 'update-event-type-draft',
+        draftId: draft.id,
+        baseVersionId: currentDraft.baseVersionId,
+        enabled: input.enabled,
+        previousDraftRevision: currentDraft.draftRevision,
+        draftRevision: calculateDraftRevision(
+          updatedWithoutRevision,
+          currentDraft.draftRevision,
+        ),
+      };
+
       const idempotencyId = randomUUID();
       await transaction.insert(idempotencyRecords).values({
         id: idempotencyId,
@@ -937,10 +1364,10 @@ export class DrizzleEventTypeStore implements EventTypeStore {
         .set({
           status: 'completed',
           completedAt: metadata.now,
-          resultReference: resultReference(DRAFT_RESULT_PREFIX, draft.id),
+          resultReference: draftLedgerReference(nextLedger),
         })
         .where(eq(idempotencyRecords.id, idempotencyId));
-      return draftResultFromInput(draft, input, metadata.actor);
+      return draftResultFromInput(draft, input, metadata.actor, nextLedger);
     });
   }
 
@@ -987,7 +1414,36 @@ export class DrizzleEventTypeStore implements EventTypeStore {
             'The event-type draft was not found.',
           );
         }
-        if (digest(draft.draftedBy) !== digest(metadata.actor)) {
+        const draftTemplateRows = await transaction
+          .select()
+          .from(eventTypeDraftTemplates)
+          .where(eq(eventTypeDraftTemplates.eventTypeVersionDraftId, draft.id));
+        const ledgerRows = await transaction
+          .select({
+            capabilityId: idempotencyRecords.capabilityId,
+            resultReference: idempotencyRecords.resultReference,
+          })
+          .from(idempotencyRecords)
+          .where(
+            and(
+              eq(idempotencyRecords.status, 'completed'),
+              inArray(idempotencyRecords.capabilityId, DRAFT_MUTATION_IDS),
+              like(
+                idempotencyRecords.resultReference,
+                `${DRAFT_RESULT_PREFIX}:${draft.id}:%`,
+              ),
+            ),
+          );
+        const currentDraft = draftFromRows(
+          draft,
+          draftTemplateRows,
+          currentDraftLedgerEntry(draft.id, ledgerRows),
+        );
+        assertExpectedDraftRevision(
+          currentDraft.draftRevision,
+          input.expectedDraftRevision,
+        );
+        if (digest(currentDraft.draftedBy) !== digest(metadata.actor)) {
           throw new EventTypeCapabilityError(
             'CONFLICT',
             'Only the actor who last saved this draft can publish it.',
@@ -1014,11 +1470,12 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           .where(eq(eventTypeVersions.eventTypeId, identity.id))
           .orderBy(desc(eventTypeVersions.version));
         const alreadyPublished = allVersions.find((version) => {
-          return publicationReferencesDraft(
+          return publicationReferencesDraftRevision(
             EventTypePublicationAuthorizationSchema.parse(
               version.publicationAuthorization,
             ),
             draft.id,
+            currentDraft.draftRevision,
           );
         });
         const idempotencyId = randomUUID();
@@ -1049,17 +1506,16 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           return alreadyPublished.id;
         }
 
-        const draftTemplateRows = await transaction
-          .select()
-          .from(eventTypeDraftTemplates)
-          .where(eq(eventTypeDraftTemplates.eventTypeVersionDraftId, draft.id));
-        const templates = templateCatalogFromRows(draftTemplateRows);
+        const latest = allVersions[0];
+        if ((latest?.id ?? null) !== currentDraft.baseVersionId) {
+          throwBaseVersionConflict();
+        }
+        const templates = currentDraft.templates;
         assertTemplateCatalogRenderable(
           draft.templateMode,
           draft.name,
           templates,
         );
-        const latest = allVersions[0];
         const versionId = randomUUID();
         const version = EventTypeVersionSchema.parse({
           id: versionId,
@@ -1068,13 +1524,14 @@ export class DrizzleEventTypeStore implements EventTypeStore {
           templateMode: identity.templateMode,
           name: draft.name,
           description: draft.description,
-          enabled: latest?.enabled ?? true,
+          enabled: currentDraft.enabled,
           templates,
-          supersedesVersionId: latest?.id ?? null,
+          supersedesVersionId: currentDraft.baseVersionId,
           createdBy: metadata.actor,
           publicationAuthorization: publicationAuthorization(
             metadata.actor,
             draft.id,
+            currentDraft.draftRevision,
           ),
           createdAt: metadata.now.toISOString(),
         });
@@ -1190,6 +1647,10 @@ const previewEventTypeRenderingHandler = registerCapabilityHandler(
     context: EventTypeCapabilityContext,
   ): Promise<EventTypeRenderingPreview> => {
     const draft = await context.store.getDraft({ draftId: input.draftId });
+    assertExpectedDraftRevision(
+      draft.draftRevision,
+      input.expectedDraftRevision,
+    );
     const expectedMode = input.eventKind === 'incident' ? 'real' : 'drill';
     if (draft.templateMode !== expectedMode) {
       throw new EventTypeCapabilityError(
@@ -1199,6 +1660,7 @@ const previewEventTypeRenderingHandler = registerCapabilityHandler(
     }
     return EventTypeRenderingPreviewSchema.parse({
       draftId: draft.id,
+      draftRevision: draft.draftRevision,
       eventKind: input.eventKind,
       templateMode: draft.templateMode,
       purpose: input.purpose,
