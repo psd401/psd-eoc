@@ -6,15 +6,32 @@ import { requireSyntheticTestDatabaseUrl } from '../../(admin)/event-types/test-
 import { START_FLOW_PLAYWRIGHT_STORAGE_STATE_PATH } from './test/playwright.global-setup';
 
 const appPort = Number(process.env.PSD_EOC_START_APP_PORT ?? '3115');
+const idpPort = Number(process.env.PSD_EOC_START_IDP_PORT ?? '4115');
 const databaseUrl = requireSyntheticTestDatabaseUrl(
   process.env.TEST_DATABASE_URL,
 );
-if (!Number.isSafeInteger(appPort) || appPort < 1_024 || appPort > 65_535) {
-  throw new Error('The start-flow Playwright app port must be a user port.');
+if (
+  ![appPort, idpPort].every(
+    (port) => Number.isSafeInteger(port) && port >= 1_024 && port <= 65_535,
+  ) ||
+  appPort === idpPort
+) {
+  throw new Error(
+    'The start-flow Playwright app and IdP ports must be distinct user ports.',
+  );
 }
 
 const startRoot = dirname(fileURLToPath(import.meta.url));
 const serverRoot = resolve(startRoot, '../../..');
+const sharedAuthEnvironment = {
+  GOOGLE_OIDC_CLIENT_ID: 'synthetic-client.apps.googleusercontent.com',
+  GOOGLE_OIDC_CLIENT_SECRET: 'synthetic-client-secret',
+  GOOGLE_OIDC_REDIRECT_URI: `http://localhost:${appPort}/auth/callback`,
+  GOOGLE_OIDC_COOKIE_SECRET: Buffer.alloc(32, 15).toString('base64url'),
+  GOOGLE_OIDC_AUTHORIZATION_ENDPOINT: `http://localhost:${idpPort}/authorize`,
+  GOOGLE_OIDC_TOKEN_ENDPOINT: `http://localhost:${idpPort}/token`,
+  GOOGLE_OIDC_JWKS_URI: `http://localhost:${idpPort}/jwks`,
+} as const;
 
 export default defineConfig({
   testDir: './test',
@@ -32,16 +49,30 @@ export default defineConfig({
     storageState: START_FLOW_PLAYWRIGHT_STORAGE_STATE_PATH,
     trace: 'retain-on-failure',
   },
-  webServer: {
-    command: `bun run dev --hostname localhost --port ${appPort}`,
-    cwd: serverRoot,
-    env: {
-      DATABASE_DRIVER: 'postgres',
-      DATABASE_URL: databaseUrl,
-      NODE_ENV: 'development',
+  webServer: [
+    {
+      command: "bun 'app/(auth)/test/mock-google-idp.ts'",
+      cwd: serverRoot,
+      env: {
+        ...sharedAuthEnvironment,
+        MOCK_GOOGLE_OIDC_PORT: String(idpPort),
+      },
+      port: idpPort,
+      reuseExistingServer: false,
+      timeout: 120_000,
     },
-    url: `http://localhost:${appPort}/login`,
-    reuseExistingServer: false,
-    timeout: 120_000,
-  },
+    {
+      command: `bun run dev --hostname localhost --port ${appPort}`,
+      cwd: serverRoot,
+      env: {
+        ...sharedAuthEnvironment,
+        DATABASE_DRIVER: 'postgres',
+        DATABASE_URL: databaseUrl,
+        NODE_ENV: 'development',
+      },
+      url: `http://localhost:${appPort}/login`,
+      reuseExistingServer: false,
+      timeout: 120_000,
+    },
+  ],
 });

@@ -23,6 +23,8 @@ import {
 } from './playwright.fixtures';
 
 const SYNTHETIC_FACILITY = 'Synthetic North Campus';
+const SYNTHETIC_FACILITY_ID = '00000000-0000-4000-8000-000000000001';
+const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 
 interface PreviewInterception {
   readonly activationRequests: () => number;
@@ -193,21 +195,43 @@ test('unauthenticated deep links preserve each exact validated start-flow return
   context,
   page,
 }) => {
-  await context.clearCookies();
   const targets = [
-    `/start?facilityId=${PLAYWRIGHT_IDS.mismatchedFacility}&mode=real`,
-    `/start/confirm?facilityId=${PLAYWRIGHT_IDS.mismatchedFacility}&mode=drill&eventTypeVersionId=${PLAYWRIGHT_IDS.activeEventTypeVersion}`,
+    {
+      heading: 'Choose event type',
+      target: `/start?facilityId=${SYNTHETIC_FACILITY_ID}&mode=real`,
+    },
+    {
+      heading: 'Review and confirm',
+      target: `/start/confirm?facilityId=${SYNTHETIC_FACILITY_ID}&mode=drill&eventTypeVersionId=${SYNTHETIC_DRILL_VERSION_ID}`,
+    },
   ] as const;
 
-  for (const target of targets) {
+  for (const { heading, target } of targets) {
+    await context.clearCookies();
     await page.goto(target);
     const login = new URL(page.url());
     expect(login.pathname).toBe('/login');
     expect([...login.searchParams.keys()]).toEqual(['reason', 'returnTo']);
     expect(login.searchParams.getAll('reason')).toEqual(['session-required']);
     expect(login.searchParams.getAll('returnTo')).toEqual([target]);
+    await assertAxeClean(page, `${target} login redirect`);
+
+    await page.getByRole('link', { name: 'Continue with Google' }).click();
+    await expect(
+      page.getByRole('heading', { name: 'Synthetic Google sign-in' }),
+    ).toBeVisible();
+    await page
+      .getByRole('link', { name: 'Continue as access-group member' })
+      .click();
+
+    await expect
+      .poll(
+        () => `${new URL(page.url()).pathname}${new URL(page.url()).search}`,
+      )
+      .toBe(target);
+    await expect(page.getByRole('heading', { name: heading })).toBeVisible();
+    await assertAxeClean(page, `${target} after Google OIDC`);
   }
-  await assertAxeClean(page, 'deep-link session redirect');
 });
 
 test('dashboard exposes unmistakable choices, 911, skip navigation, and AA-clean semantics', async ({
