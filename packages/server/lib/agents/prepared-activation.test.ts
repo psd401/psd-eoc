@@ -225,6 +225,18 @@ class MemoryPreparedActivationStore
   public async createPreparedActivation(
     input: PersistPreparedActivationInput,
   ): Promise<PreparedActivation> {
+    if (
+      [...this.prepared.values()].some(
+        (candidate) => candidate.preview.id === input.preview.id,
+      )
+    ) {
+      throw new CapabilityEngineError(
+        'CONFLICT',
+        'PERSISTENCE_CONFLICT',
+        'The prepared activation could not be retained.',
+        409,
+      );
+    }
     const prepared = PreparedActivationSchema.parse({
       id: IDS.prepared,
       preview: input.preview,
@@ -583,6 +595,44 @@ describe('prepared activation capability', () => {
         actor: { kind: 'agent', agentId: IDS.agent, apiKeyId: IDS.apiKey },
       }),
     ]);
+  });
+
+  test('returns a bounded conflict when a preview was already prepared', async () => {
+    const store = new MemoryPreparedActivationStore();
+    store.previews.set(IDS.preview, realActivationPreview());
+
+    const prepared = await executePreparedActivationCapability(
+      'prepare-activation',
+      { activationPreviewId: IDS.preview },
+      agentInvocation(),
+      store,
+    );
+
+    await expect(
+      executePreparedActivationCapability(
+        'prepare-activation',
+        { activationPreviewId: IDS.preview },
+        agentInvocation({
+          requestId: IDS.agentStartRequest,
+          idempotencyKey: 'prepare-activation-agent-duplicate-preview',
+        }),
+        store,
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      status: 409,
+      retryable: false,
+    });
+
+    expect(store.prepared).toHaveLength(1);
+    expect(store.prepared.get(prepared.id)).toEqual(prepared);
+    expect(store.audits.at(-1)).toMatchObject({
+      action: 'prepare-activation',
+      outcome: 'failure',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      facilityId: IDS.facility,
+    });
   });
 
   test('returns the retained handoff through the canonical scoped read', async () => {

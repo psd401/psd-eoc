@@ -124,6 +124,8 @@ function createManifest(): Readonly<
   Record<AgentRestCapabilityId, AgentRestCapabilityManifestEntry>
 > {
   const entries = AGENT_REST_CAPABILITY_IDS.map((capabilityId) => {
+    // Defense in depth beside the load-bearing serialized-document assertion
+    // below; the current closed vocabularies are intentionally disjoint.
     if (humanOnlyActionIdSet.has(capabilityId)) {
       throw new TypeError(
         'A human-only action ID cannot appear in the agent REST manifest.',
@@ -443,4 +445,5 @@ export function assertAgentRestOpenApiDocument(
 }
 
 export const AGENT_REST_OPENAPI_DOCUMENT = createAgentRestOpenApiDocument();
+// This runtime assertion is the final guard over the actual served document.
 assertAgentRestOpenApiDocument(AGENT_REST_OPENAPI_DOCUMENT);

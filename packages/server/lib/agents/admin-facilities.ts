@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  AgentCapabilityGrantSchema,
   ActorSchema,
   CapabilityScopeSchema,
   FacilityPageSchema,
@@ -25,6 +26,7 @@ import { parseSecurityAuditFact } from '../audit/model';
 import type { SecurityAuditRepository } from '../audit/repository';
 import {
   AgentApiKeyAdministrationError,
+  hasAgentAdministrationReadAccess,
   type AgentApiKeyAdministrationAccess,
 } from './admin-capabilities';
 
@@ -158,12 +160,9 @@ const listFacilitiesAuthorizer: CapabilityExecutionAuthorizer<AgentAdministratio
       const { access } = request.context;
       if (
         request.definition.id !== 'list-facilities' ||
-        access.actor.kind !== 'human' ||
-        access.source !== 'web' ||
-        !access.roles.includes('admin') ||
-        access.scope.facilityScope.kind !== 'district' ||
-        !request.invocationPolicy.principalKinds.includes('human') ||
-        !request.invocationPolicy.sources.includes('web')
+        !hasAgentAdministrationReadAccess(access, 'list-facilities') ||
+        !request.invocationPolicy.principalKinds.includes(access.actor.kind) ||
+        !request.invocationPolicy.sources.includes(access.source)
       ) {
         throw new AgentApiKeyAdministrationError();
       }
@@ -189,6 +188,11 @@ export class AgentAdministrationFacilityCapabilities {
       source: InvocationSourceSchema.parse(input.access.source),
       roles: Object.freeze(
         input.access.roles.map((role) => RoleSchema.parse(role)),
+      ),
+      capabilityGrants: Object.freeze(
+        input.access.capabilityGrants.map((capabilityId) =>
+          AgentCapabilityGrantSchema.parse(capabilityId),
+        ),
       ),
       scope: CapabilityScopeSchema.parse(input.access.scope),
       connectivityEpochId:

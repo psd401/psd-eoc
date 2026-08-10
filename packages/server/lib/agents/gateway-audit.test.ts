@@ -14,7 +14,12 @@ import { parseSecurityAuditFact, type SecurityAuditFact } from '../audit/model';
 import { CapabilityEngineError } from '../capabilities/engine';
 import { createAgentGatewayAuditSink } from './audit';
 import { AgentRestGateway, type AgentCapabilityDispatcher } from './gateway';
-import type { AuthenticatedAgentApiKey } from './keys';
+import {
+  AgentApiKeyError,
+  digestAgentApiKeyAuditSubject,
+  digestAgentApiKeyCredential,
+  type AuthenticatedAgentApiKey,
+} from './keys';
 
 const IDS = Object.freeze({
   agent: '00000000-0000-4000-8000-000000000501',
@@ -22,6 +27,7 @@ const IDS = Object.freeze({
   issuer: '00000000-0000-4000-8000-000000000503',
   facility: '00000000-0000-4000-8000-000000000504',
   request: '00000000-0000-4000-8000-000000000505',
+  otherFacility: '00000000-0000-4000-8000-000000000506',
 });
 
 const CAPABILITY_IDS = Object.freeze([
@@ -29,34 +35,35 @@ const CAPABILITY_IDS = Object.freeze([
   'list-active-events',
 ] as const);
 
-const authenticated: AuthenticatedAgentApiKey = Object.freeze({
-  actor: {
-    kind: 'agent' as const,
-    agentId: IDS.agent,
-    apiKeyId: IDS.apiKey,
-  },
-  scope: {
-    facilityScope: {
-      kind: 'facilities' as const,
-      facilityIds: [IDS.facility],
+function authenticatedWithScope(
+  facilityScope: AuthenticatedAgentApiKey['scope']['facilityScope'],
+): AuthenticatedAgentApiKey {
+  return Object.freeze({
+    actor: {
+      kind: 'agent' as const,
+      agentId: IDS.agent,
+      apiKeyId: IDS.apiKey,
     },
-  },
-  capabilityIds: CAPABILITY_IDS,
-  key: {
-    id: IDS.apiKey,
-    agentId: IDS.agent,
-    displayName: 'Synthetic audit ownership agent',
-    facilityScope: {
-      kind: 'facilities' as const,
-      facilityIds: [IDS.facility],
-    },
+    scope: { facilityScope },
     capabilityIds: CAPABILITY_IDS,
-    keyPrefix: 'abcdefghijkl',
-    issuedByUserId: IDS.issuer,
-    issuedAt: '2026-08-10T18:00:00.000Z',
-    expiresAt: null,
-    revokedAt: null,
-  },
+    key: {
+      id: IDS.apiKey,
+      agentId: IDS.agent,
+      displayName: 'Synthetic audit ownership agent',
+      facilityScope,
+      capabilityIds: CAPABILITY_IDS,
+      keyPrefix: 'abcdefghijkl',
+      issuedByUserId: IDS.issuer,
+      issuedAt: '2026-08-10T18:00:00.000Z',
+      expiresAt: null,
+      revokedAt: null,
+    },
+  });
+}
+
+const authenticated = authenticatedWithScope({
+  kind: 'facilities',
+  facilityIds: [IDS.facility],
 });
 
 class UniqueRequestAuditRepository implements SecurityAuditRepository {
@@ -107,12 +114,13 @@ class UniqueRequestAuditRepository implements SecurityAuditRepository {
 function gateway(
   repository: UniqueRequestAuditRepository,
   dispatcher: AgentCapabilityDispatcher,
+  agent: AuthenticatedAgentApiKey = authenticated,
 ): AgentRestGateway {
   return new AgentRestGateway({
     keys: {
-      authenticate: async () => authenticated,
+      authenticate: async () => agent,
       authorizeCapability(_authenticated, capabilityId) {
-        if (!authenticated.capabilityIds.includes(capabilityId as never)) {
+        if (!agent.capabilityIds.includes(capabilityId as never)) {
           throw new Error('Unexpected capability grant.');
         }
         return capabilityId as AgentGrantableCapabilityId;
@@ -124,6 +132,58 @@ function gateway(
 }
 
 describe('agent gateway audit ownership', () => {
+  test('records invalid credentials with a minimized unauthenticated principal', async () => {
+    const repository = new UniqueRequestAuditRepository();
+    const credential = `psd_eoc_agent_v1_abcdefghijkl.${'A'.repeat(43)}`;
+    const subjectDigest = digestAgentApiKeyAuditSubject(credential);
+    const dispatcher: AgentCapabilityDispatcher = {
+      auditOwnership: () => 'gateway',
+      async execute() {
+        throw new Error('Authentication denial must not dispatch.');
+      },
+    };
+    const subject = new AgentRestGateway({
+      keys: {
+        async authenticate() {
+          throw new AgentApiKeyError(
+            'INVALID_CREDENTIAL',
+            'The agent API key is invalid.',
+          );
+        },
+        authorizeCapability() {
+          throw new Error('Authentication denial must not authorize.');
+        },
+      },
+      dispatcher,
+      audit: createAgentGatewayAuditSink(repository),
+    });
+
+    await expect(
+      subject.authorize({
+        credential,
+        capabilityId: 'list-active-events',
+        requestId: IDS.request,
+        serverTime: new Date('2026-08-10T18:01:00.000Z'),
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_CREDENTIAL', status: 401 });
+
+    expect(subjectDigest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(subjectDigest).not.toBe(digestAgentApiKeyCredential(credential));
+    expect(repository.retained.get(IDS.request)).toMatchObject({
+      category: 'access-denial',
+      action: 'list-active-events',
+      actionIds: [],
+      outcome: 'denied',
+      principal: { kind: 'unauthenticated', subjectDigest },
+      facilityId: null,
+      reasonCode: 'INVALID_CREDENTIAL',
+    });
+    expect(JSON.stringify(repository.attempts)).not.toContain(credential);
+    expect(JSON.stringify(repository.attempts)).not.toContain(
+      digestAgentApiKeyCredential(credential),
+    );
+  });
+
   test('preserves a canonical human-only 403 when the generic fact conflicts', async () => {
     const repository = new UniqueRequestAuditRepository();
     const dispatcher: AgentCapabilityDispatcher = {
@@ -211,6 +271,60 @@ describe('agent gateway audit ownership', () => {
       action: 'list-active-events',
       outcome: 'success',
       principal: authenticated.actor,
+      facilityId: IDS.facility,
     });
+  });
+
+  test('records an unambiguous parsed target for broad agent scopes', async () => {
+    const dispatcher: AgentCapabilityDispatcher = {
+      auditOwnership: () => 'canonical',
+      async execute() {
+        return { items: [], pageInfo: { hasMore: false, nextCursor: null } };
+      },
+    };
+
+    for (const agent of [
+      authenticatedWithScope({ kind: 'district' }),
+      authenticatedWithScope({
+        kind: 'facilities',
+        facilityIds: [IDS.facility, IDS.otherFacility],
+      }),
+    ]) {
+      const repository = new UniqueRequestAuditRepository();
+      await gateway(repository, dispatcher, agent).execute({
+        credential: 'synthetic',
+        capabilityId: 'list-active-events',
+        input: { facilityId: IDS.otherFacility, cursor: null, limit: 25 },
+        idempotencyKey: null,
+        requestId: IDS.request,
+        serverTime: new Date('2026-08-10T18:01:00.000Z'),
+      });
+
+      expect(repository.retained.get(IDS.request)?.facilityId).toBe(
+        IDS.otherFacility,
+      );
+    }
+  });
+
+  test('keeps a genuinely district-wide call facility-neutral', async () => {
+    const repository = new UniqueRequestAuditRepository();
+    const districtAgent = authenticatedWithScope({ kind: 'district' });
+    const dispatcher: AgentCapabilityDispatcher = {
+      auditOwnership: () => 'gateway',
+      async execute() {
+        return { items: [], pageInfo: { hasMore: false, nextCursor: null } };
+      },
+    };
+
+    await gateway(repository, dispatcher, districtAgent).execute({
+      credential: 'synthetic',
+      capabilityId: 'list-active-events',
+      input: { facilityId: null, cursor: null, limit: 25 },
+      idempotencyKey: null,
+      requestId: IDS.request,
+      serverTime: new Date('2026-08-10T18:01:00.000Z'),
+    });
+
+    expect(repository.retained.get(IDS.request)?.facilityId).toBeNull();
   });
 });

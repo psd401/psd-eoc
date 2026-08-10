@@ -247,10 +247,16 @@ async function loadRelatedRows(
 }
 
 function hasPostgresCode(error: unknown, code: string): boolean {
+  const seen = new Set<object>();
   let candidate: unknown = error;
-  for (let depth = 0; depth < 4; depth += 1) {
-    if (typeof candidate !== 'object' || candidate === null) return false;
+  while (
+    typeof candidate === 'object' &&
+    candidate !== null &&
+    !seen.has(candidate) &&
+    seen.size < 16
+  ) {
     if (Reflect.get(candidate, 'code') === code) return true;
+    seen.add(candidate);
     candidate = Reflect.get(candidate, 'cause');
   }
   return false;

@@ -7,15 +7,16 @@ import {
   type FacilityScope,
 } from '@psd-eoc/contracts';
 
-import type { CapabilityAuditEvent } from '../../../../lib/capabilities/engine';
 import {
   SecurityAuditCursorError,
   SecurityAuditScopeError,
 } from '../../../../lib/audit';
+import { AgentApiKeyAdministrationError } from '../../../../lib/agents/admin-capabilities';
 import { AgentCapabilityUnavailableError } from '../../../../lib/agents/dispatcher';
 import {
   AgentRestGateway,
   type AgentCapabilityDispatcher,
+  type AgentGatewayAuditEvent,
 } from '../../../../lib/agents/gateway';
 import {
   AgentApiKeyError,
@@ -68,7 +69,7 @@ function authenticatedAgent(
 
 interface GatewayHarness {
   readonly runtime: AgentRestRouteRuntime;
-  readonly audits: CapabilityAuditEvent[];
+  readonly audits: AgentGatewayAuditEvent[];
   readonly authenticationAttempts: string[];
   readonly dispatches: Array<{
     readonly capabilityId: string;
@@ -80,14 +81,17 @@ interface GatewayHarness {
 function gatewayHarness(
   facilityScope: FacilityScope,
   capabilityIds: readonly AgentGrantableCapabilityId[] = ['list-active-events'],
+  auditFailure: Error | null = null,
+  dispatchFailure: Error | null = null,
 ): GatewayHarness {
   const authenticated = authenticatedAgent(facilityScope, capabilityIds);
-  const audits: CapabilityAuditEvent[] = [];
+  const audits: AgentGatewayAuditEvent[] = [];
   const authenticationAttempts: string[] = [];
   const dispatches: GatewayHarness['dispatches'][number][] = [];
   const dispatcher: AgentCapabilityDispatcher = {
     auditOwnership: () => 'gateway',
     async execute(capabilityId, input, invocation) {
+      if (dispatchFailure !== null) throw dispatchFailure;
       dispatches.push({ capabilityId, input, invocation });
       if (capabilityId === 'list-active-events') {
         return {
@@ -134,6 +138,7 @@ function gatewayHarness(
     dispatcher,
     audit: {
       async append(event) {
+        if (auditFailure !== null) throw auditFailure;
         audits.push(event);
       },
     },
@@ -154,15 +159,18 @@ function agentRequest(
   capabilityId: string,
   body: unknown,
   input: Readonly<{
+    authorization?: string | null;
     credential?: string;
     idempotencyKey?: string;
     humanConfirmationId?: string;
   }> = {},
 ): Request {
-  const headers = new Headers({
-    authorization: `Bearer ${input.credential ?? CREDENTIAL}`,
-    'content-type': 'application/json',
-  });
+  const headers = new Headers({ 'content-type': 'application/json' });
+  const authorization =
+    input.authorization === undefined
+      ? `Bearer ${input.credential ?? CREDENTIAL}`
+      : input.authorization;
+  if (authorization !== null) headers.set('authorization', authorization);
   if (input.idempotencyKey !== undefined) {
     headers.set('idempotency-key', input.idempotencyKey);
   }
@@ -308,6 +316,138 @@ describe('agent REST capability route', () => {
     expect(response.headers.get('www-authenticate')).toBe('Bearer');
     expect(responseText).not.toContain(credential);
     expect(harness.dispatches).toEqual([]);
+    expect(harness.audits).toEqual([
+      expect.objectContaining({
+        category: 'access-denial',
+        action: 'list-active-events',
+        actionIds: [],
+        outcome: 'denied',
+        principal: { kind: 'unauthenticated', subjectDigest: null },
+        facilityId: null,
+        reasonCode: 'INVALID_CREDENTIAL',
+      }),
+    ]);
+  });
+
+  test('audits missing and malformed bearer headers through the gateway', async () => {
+    for (const authorization of [null, 'Basic synthetic-not-a-bearer']) {
+      const harness = gatewayHarness({ kind: 'district' });
+      const response = await handleAgentCapability(
+        agentRequest(
+          'list-active-events',
+          { facilityId: null, cursor: null, limit: 25 },
+          { authorization },
+        ),
+        'list-active-events',
+        harness.runtime,
+      );
+
+      expect(response.status).toBe(401);
+      expect(harness.authenticationAttempts).toEqual(['']);
+      expect(harness.dispatches).toEqual([]);
+      expect(harness.audits).toEqual([
+        expect.objectContaining({
+          category: 'access-denial',
+          action: 'list-active-events',
+          principal: { kind: 'unauthenticated', subjectDigest: null },
+          reasonCode: 'INVALID_CREDENTIAL',
+        }),
+      ]);
+    }
+  });
+
+  test('fails closed when invalid-credential audit evidence cannot be retained', async () => {
+    const credential = 'malformed-secret-value';
+    const harness = gatewayHarness(
+      { kind: 'district' },
+      ['list-active-events'],
+      new Error('Synthetic audit persistence failure.'),
+    );
+
+    const response = await handleAgentCapability(
+      agentRequest(
+        'list-active-events',
+        { facilityId: null, cursor: null, limit: 25 },
+        { credential },
+      ),
+      'list-active-events',
+      harness.runtime,
+    );
+    const responseText = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(responseText).not.toContain(credential);
+    expect(harness.dispatches).toEqual([]);
+    expect(harness.audits).toEqual([]);
+  });
+
+  test('never reflects an unexpected internal failure message', async () => {
+    const internalSecret =
+      'postgres://synthetic-user:synthetic-pass@db.invalid/eoc';
+    const harness = gatewayHarness(
+      { kind: 'district' },
+      ['list-active-events'],
+      null,
+      new Error(`Synthetic driver failure at ${internalSecret}`),
+    );
+
+    const response = await handleAgentCapability(
+      agentRequest('list-active-events', {
+        facilityId: null,
+        cursor: null,
+        limit: 25,
+      }),
+      'list-active-events',
+      harness.runtime,
+    );
+    const responseText = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(responseText).not.toContain(internalSecret);
+    expect(responseText).not.toContain('Synthetic driver failure');
+    expect(responseText).toContain('The agent capability request failed.');
+    expect(harness.audits).toEqual([
+      expect.objectContaining({
+        action: 'list-active-events',
+        outcome: 'failure',
+        reasonCode: 'AGENT_CAPABILITY_FAILED',
+      }),
+    ]);
+  });
+
+  test('returns a bounded 403 for district-only administration reads', async () => {
+    const harness = gatewayHarness(
+      {
+        kind: 'facilities',
+        facilityIds: [IDS.facility],
+      },
+      ['list-active-events'],
+      null,
+      new AgentApiKeyAdministrationError(),
+    );
+
+    const response = await handleAgentCapability(
+      agentRequest('list-active-events', {
+        facilityId: IDS.facility,
+        cursor: null,
+        limit: 25,
+      }),
+      'list-active-events',
+      harness.runtime,
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      code: 'FORBIDDEN',
+      message: 'District administration capability access is required.',
+      retryable: false,
+    });
+    expect(harness.audits).toEqual([
+      expect.objectContaining({
+        outcome: 'denied',
+        reasonCode: 'FORBIDDEN',
+      }),
+    ]);
   });
 
   test('rejects unregistered route IDs before they become authenticated agent calls', async () => {
@@ -328,6 +468,26 @@ describe('agent REST capability route', () => {
     expect(harness.dispatches).toEqual([]);
     expect(harness.audits).toEqual([]);
     expect(harness.authenticationAttempts).toEqual([]);
+  });
+
+  test('guards direct gateway callers from unregistered IDs before authentication', async () => {
+    const harness = gatewayHarness({ kind: 'district' });
+
+    await expect(
+      harness.runtime.gateway.authorize({
+        credential: CREDENTIAL,
+        capabilityId: 'not-a-capability',
+        requestId: IDS.request,
+        serverTime: new Date('2026-08-10T18:01:00.000Z'),
+      }),
+    ).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      status: 404,
+      retryable: false,
+    });
+    expect(harness.authenticationAttempts).toEqual([]);
+    expect(harness.audits).toEqual([]);
+    expect(harness.dispatches).toEqual([]);
   });
 
   test('rejects human confirmation metadata before capability dispatch', async () => {

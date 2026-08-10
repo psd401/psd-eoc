@@ -9,7 +9,7 @@ import type {
   SecurityAuditEntry,
 } from '@psd-eoc/contracts';
 import { isHumanOnlyActionId } from '@psd-eoc/contracts';
-import { useActionState } from 'react';
+import { useActionState, useEffect, useRef } from 'react';
 
 export interface AgentAdminIssueState {
   readonly issuedKey: AgentApiKeyIssuance | null;
@@ -155,12 +155,20 @@ function FacilityScopeDisplay({
 function OneTimeCredential({
   issuance,
 }: Readonly<{ issuance: AgentApiKeyIssuance }>) {
+  const credentialAlertRef = useRef<HTMLElement>(null);
   const helpId = `credential-help-${issuance.key.id}`;
+
+  useEffect(() => {
+    credentialAlertRef.current?.focus();
+  }, [issuance.key.id]);
+
   return (
     <section
       aria-labelledby="one-time-credential-heading"
       className="credential-alert"
+      ref={credentialAlertRef}
       role="alert"
+      tabIndex={-1}
     >
       <h2 id="one-time-credential-heading">Store this API key now</h2>
       <p id={helpId}>

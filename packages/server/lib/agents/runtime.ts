@@ -7,8 +7,9 @@ import {
   createDrizzleSecurityAuditRepository,
   SecurityAuditService,
 } from '../audit';
-import { DrizzleEventTypeStore } from '../capabilities/event-types';
 import { createEventCapabilityRuntime } from '../capabilities/events';
+import { createJournalCapabilityRuntime } from '../capabilities/journal';
+import { createDrizzleStaleRosterReportStore } from '../roster/stale-report';
 import { AgentApiKeyAdministration } from './admin-capabilities';
 import {
   AgentAdministrationFacilityCapabilities,
@@ -19,8 +20,10 @@ import { createAgentGatewayAuditSink } from './audit';
 import { createDefaultAgentCapabilityDispatcher } from './dispatcher';
 import { createDrizzleAgentApiKeyRepository } from './drizzle-key-repository';
 import { createDrizzlePreparedActivationCapabilityStore } from './drizzle-prepared-activation-store';
+import { createAtomicAgentEventTypeStore } from './event-types';
 import { AgentRestGateway } from './gateway';
 import { AgentApiKeyService } from './keys';
+import { createAgentRosterReportRuntime } from './roster-report';
 
 export interface AgentRestRuntime {
   readonly gateway: AgentRestGateway;
@@ -54,12 +57,19 @@ export function createAgentRestRuntime(
     securityAudit,
   });
   const events = createEventCapabilityRuntime(connection);
+  const journal = createJournalCapabilityRuntime(connection);
   const dispatcher = createDefaultAgentCapabilityDispatcher({
     events,
-    eventTypes: new DrizzleEventTypeStore(connection.db),
+    journal,
+    administration,
+    administrationFacilities,
+    eventTypes: createAtomicAgentEventTypeStore(connection.db),
     preparedActivations: createDrizzlePreparedActivationCapabilityStore(
       connection.db,
     ),
+    rosterReport: createAgentRosterReportRuntime({
+      store: createDrizzleStaleRosterReportStore(connection.db),
+    }),
     securityAudit,
   });
   const gateway = new AgentRestGateway({ keys, dispatcher, audit });

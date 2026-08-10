@@ -129,6 +129,9 @@ describe('agent administration presentation', () => {
     expect(markup).toContain('Store this API key now');
     expect(markup).toContain('shown once and cannot be recovered');
     expect(markup).toContain('readOnly=""');
+    expect(markup).toMatch(
+      /<section[^>]*class="credential-alert"[^>]*role="alert"[^>]*tabindex="-1"/u,
+    );
     expect(markup).not.toContain(verifierDigestThatMustNeverRender);
     expect(markup).not.toContain('credentialDigest');
   });
@@ -212,7 +215,10 @@ describe('agent administration presentation', () => {
 
     expect(componentSource).not.toContain('onClick=');
     expect(componentSource).not.toContain('onKeyDown=');
+    expect(componentSource).toContain('credentialAlertRef.current?.focus()');
+    expect(componentSource).toContain('[issuance.key.id]');
     expect(layoutSource).toContain('href="#main-content"');
+    expect(styles).toContain('.credential-alert:focus');
     expect(styles).toContain(':focus-visible');
     expect(styles).toContain('.skip-link:focus');
     expect(styles).toContain('@media (forced-colors: active)');

@@ -360,6 +360,7 @@ th {
   padding-left: 0.75rem;
 }
 
+.credential-alert:focus,
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,

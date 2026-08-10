@@ -19,7 +19,9 @@ import {
   isSecurityAuditForbiddenError,
 } from '../../../../../lib/audit';
 import { AgentCapabilityUnavailableError } from '../../../../../lib/agents/dispatcher';
+import { AgentApiKeyAdministrationError } from '../../../../../lib/agents/admin-capabilities';
 import {
+  AgentGatewayCapabilityNotFoundError,
   AgentGatewayError,
   AgentGatewayOutputError,
   type AuthorizedAgentGatewayCall,
@@ -58,17 +60,6 @@ export interface AgentRestRouteRuntime {
   now(): Date;
 }
 
-class AgentCapabilityRouteNotFoundError extends Error {
-  public readonly code = 'NOT_FOUND' as const;
-  public readonly status = 404 as const;
-  public readonly retryable = false as const;
-
-  public constructor() {
-    super('The requested agent capability route does not exist.');
-    this.name = 'AgentCapabilityRouteNotFoundError';
-  }
-}
-
 export function getDefaultAgentRestRouteRuntime(): AgentRestRouteRuntime {
   return Object.freeze({
     gateway: getDefaultAgentRestGateway(),
@@ -80,13 +71,7 @@ export function getDefaultAgentRestRouteRuntime(): AgentRestRouteRuntime {
 function readBearerCredential(request: Request): string {
   const authorization = request.headers.get('authorization');
   const match = /^Bearer ([A-Za-z0-9_.-]{1,512})$/u.exec(authorization ?? '');
-  if (match?.[1] === undefined) {
-    throw new AgentApiKeyError(
-      'INVALID_CREDENTIAL',
-      'A valid agent API key is required.',
-    );
-  }
-  return match[1];
+  return match?.[1] ?? '';
 }
 
 function assertNoQueryParameters(request: Request): void {
@@ -201,7 +186,7 @@ export function agentApiErrorResponse(
   const unavailableError =
     error instanceof AgentCapabilityUnavailableError ? error : null;
   const routeNotFoundError =
-    error instanceof AgentCapabilityRouteNotFoundError ? error : null;
+    error instanceof AgentGatewayCapabilityNotFoundError ? error : null;
   const auditForbiddenError = isSecurityAuditForbiddenError(error)
     ? error
     : null;
@@ -211,6 +196,8 @@ export function agentApiErrorResponse(
     error instanceof SecurityAuditScopeError ? error : null;
   const eventTypeError =
     error instanceof EventTypeCapabilityError ? error : null;
+  const administrationError =
+    error instanceof AgentApiKeyAdministrationError ? error : null;
   const validationError =
     error instanceof ZodError ||
     error instanceof SyntaxError ||
@@ -223,6 +210,7 @@ export function agentApiErrorResponse(
       gatewayOutputError?.status ??
       unavailableError?.status ??
       routeNotFoundError?.status ??
+      administrationError?.status ??
       auditForbiddenError?.status ??
       (auditCursorError === null ? undefined : 400) ??
       (auditScopeError === null ? undefined : 403) ??
@@ -239,6 +227,7 @@ export function agentApiErrorResponse(
     engineError?.code ??
     routeNotFoundError?.code ??
     gatewayOutputError?.code ??
+    administrationError?.code ??
     auditForbiddenError?.code ??
     apiCodeForStatus(status);
   const message =
@@ -248,6 +237,7 @@ export function agentApiErrorResponse(
     gatewayOutputError?.message ??
     unavailableError?.message ??
     routeNotFoundError?.message ??
+    administrationError?.message ??
     auditForbiddenError?.message ??
     (auditCursorError === null
       ? undefined
@@ -273,6 +263,7 @@ export function agentApiErrorResponse(
         gatewayOutputError?.retryable ??
         unavailableError?.retryable ??
         routeNotFoundError?.retryable ??
+        administrationError?.retryable ??
         (auditForbiddenError === null ? undefined : false) ??
         (auditCursorError === null ? undefined : false) ??
         (auditScopeError === null ? undefined : false) ??
@@ -297,7 +288,7 @@ export async function handleAgentCapability(
       !isHumanOnlyActionId(capabilityId) &&
       !isAgentGrantableCapabilityId(capabilityId)
     ) {
-      throw new AgentCapabilityRouteNotFoundError();
+      throw new AgentGatewayCapabilityNotFoundError();
     }
     const authorized = await resolvedRuntime.gateway.authorize({
       credential: readBearerCredential(request),

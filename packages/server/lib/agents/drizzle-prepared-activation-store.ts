@@ -305,6 +305,7 @@ async function createPreparedActivation(
       preparedBy: input.preparedBy,
       preparedAt: input.preparedAt,
     })
+    .onConflictDoNothing({ target: preparedActivations.activationPreviewId })
     .returning({ id: preparedActivations.id });
   if (inserted === undefined) {
     throw conflict('The prepared activation could not be retained.');

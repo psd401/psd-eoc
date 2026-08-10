@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  AgentCapabilityGrantSchema,
   ActorSchema,
   CapabilityScopeSchema,
   InvocationSourceSchema,
@@ -10,6 +11,7 @@ import {
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
   type Actor,
+  type AgentCapabilityGrant,
   type AgentApiKeyIssuance,
   type AgentApiKeyPage,
   type AgentApiKeyRevocation,
@@ -31,7 +33,11 @@ import {
 import type { AuthenticatedSession } from '../auth/sessions';
 import { parseSecurityAuditFact } from '../audit/model';
 import type { SecurityAuditRepository } from '../audit/repository';
-import { AgentApiKeyError, type AgentApiKeyService } from './keys';
+import {
+  AgentApiKeyError,
+  type AgentApiKeyService,
+  type AuthenticatedAgentApiKey,
+} from './keys';
 
 export type AgentApiKeyAdministrationCapabilityId =
   | 'issue-agent-api-key'
@@ -43,6 +49,7 @@ export interface AgentApiKeyAdministrationAccess {
   readonly actor: Actor;
   readonly source: InvocationSource;
   readonly roles: readonly Role[];
+  readonly capabilityGrants: readonly AgentCapabilityGrant[];
   readonly scope: CapabilityScope;
   readonly connectivityEpochId: string | null;
 }
@@ -61,8 +68,11 @@ interface AgentApiKeyAdministrationContext {
 export class AgentApiKeyAdministrationError extends Error {
   public readonly code = 'FORBIDDEN' as const;
   public readonly status = 403 as const;
+  public readonly retryable = false as const;
 
-  public constructor(message = 'District administrator access is required.') {
+  public constructor(
+    message = 'District administration capability access is required.',
+  ) {
     super(message);
     this.name = 'AgentApiKeyAdministrationError';
   }
@@ -139,6 +149,31 @@ function hasDistrictAdministratorAccess(
   );
 }
 
+function hasDistrictAgentReadAccess(
+  access: AgentApiKeyAdministrationAccess,
+  capabilityId: 'list-agent-api-keys' | 'list-facilities',
+): boolean {
+  return (
+    access.actor.kind === 'agent' &&
+    (access.source === 'agent-rest' || access.source === 'mcp') &&
+    access.roles.length === 0 &&
+    access.connectivityEpochId === null &&
+    access.scope.facilityScope.kind === 'district' &&
+    access.capabilityGrants.includes(capabilityId)
+  );
+}
+
+/** Shared district-wide read policy for agent key and facility metadata. */
+export function hasAgentAdministrationReadAccess(
+  access: AgentApiKeyAdministrationAccess,
+  capabilityId: 'list-agent-api-keys' | 'list-facilities',
+): boolean {
+  return (
+    hasDistrictAdministratorAccess(access) ||
+    hasDistrictAgentReadAccess(access, capabilityId)
+  );
+}
+
 const administrationAuthorizer: CapabilityExecutionAuthorizer<AgentApiKeyAdministrationContext> =
   Object.freeze({
     authorize(
@@ -152,11 +187,15 @@ const administrationAuthorizer: CapabilityExecutionAuthorizer<AgentApiKeyAdminis
         request.definition.id === 'issue-agent-api-key' ||
         request.definition.id === 'revoke-agent-api-key' ||
         request.definition.id === 'list-agent-api-keys';
+      const authorized =
+        request.definition.id === 'list-agent-api-keys'
+          ? hasAgentAdministrationReadAccess(access, 'list-agent-api-keys')
+          : hasDistrictAdministratorAccess(access);
       if (
         !recognized ||
-        !hasDistrictAdministratorAccess(access) ||
-        !request.invocationPolicy.principalKinds.includes('human') ||
-        !request.invocationPolicy.sources.includes('web')
+        !authorized ||
+        !request.invocationPolicy.principalKinds.includes(access.actor.kind) ||
+        !request.invocationPolicy.sources.includes(access.source)
       ) {
         throw new AgentApiKeyAdministrationError();
       }
@@ -169,18 +208,28 @@ function parseAccess(
   const actor = ActorSchema.parse(value.actor);
   const source = InvocationSourceSchema.parse(value.source);
   const roles = value.roles.map((role) => RoleSchema.parse(role));
+  const capabilityGrants = value.capabilityGrants.map((capabilityId) =>
+    AgentCapabilityGrantSchema.parse(capabilityId),
+  );
   const scope = CapabilityScopeSchema.parse(value.scope);
   const connectivityEpochId =
     value.connectivityEpochId === null
       ? null
       : UuidSchema.parse(value.connectivityEpochId);
-  if (new Set(roles).size !== roles.length) {
+  if (
+    new Set(roles).size !== roles.length ||
+    new Set(capabilityGrants).size !== capabilityGrants.length ||
+    (actor.kind === 'agent' &&
+      (roles.length !== 0 || connectivityEpochId !== null)) ||
+    (actor.kind !== 'agent' && capabilityGrants.length !== 0)
+  ) {
     throw new AgentApiKeyAdministrationError();
   }
   return Object.freeze({
     actor,
     source,
     roles: Object.freeze(roles),
+    capabilityGrants: Object.freeze(capabilityGrants),
     scope,
     connectivityEpochId,
   });
@@ -194,8 +243,23 @@ export function agentApiKeyAdministrationAccessFromSession(
     actor: authenticated.actor,
     source: authenticated.source,
     roles: authenticated.roles,
+    capabilityGrants: [],
     scope: authenticated.scope,
     connectivityEpochId: authenticated.result.connectivityEpoch.id,
+  });
+}
+
+/** Converts an authenticated API key into trusted read-only admin context. */
+export function agentApiKeyAdministrationAccessFromAgent(
+  authenticated: AuthenticatedAgentApiKey,
+): AgentApiKeyAdministrationAccess {
+  return parseAccess({
+    actor: authenticated.actor,
+    source: 'agent-rest',
+    roles: [],
+    capabilityGrants: authenticated.capabilityIds,
+    scope: authenticated.scope,
+    connectivityEpochId: null,
   });
 }
 
@@ -512,7 +576,10 @@ export class AgentApiKeyAdministration {
         },
       );
     } catch (error) {
-      const reportedError = hasDistrictAdministratorAccess(access)
+      const reportedError = hasAgentAdministrationReadAccess(
+        access,
+        'list-agent-api-keys',
+      )
         ? error
         : new AgentApiKeyAdministrationError();
       const failure = reasonFor(reportedError);

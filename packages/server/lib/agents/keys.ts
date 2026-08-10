@@ -47,6 +47,7 @@ const KEY_PREFIX_LENGTH = 12;
 const KEY_SECRET_LENGTH = 43;
 const SHA_256_BYTES = 32;
 const LIST_CURSOR_VERSION = 1;
+const AUDIT_SUBJECT_DOMAIN = 'psd-eoc-agent-api-key-prefix-v1';
 
 /** Public format marker; the complete bearer remains secret. */
 export const AGENT_API_KEY_CREDENTIAL_MARKER = 'psd_eoc_agent_v1_';
@@ -196,6 +197,21 @@ export function digestAgentApiKeyCredential(credential: string): string {
 function credentialPrefix(value: unknown): string | null {
   if (typeof value !== 'string' || value.length > 512) return null;
   return credentialPattern.exec(value)?.[1] ?? null;
+}
+
+/**
+ * Correlates failed attempts against the non-secret public key prefix only.
+ * The full bearer and its verifier digest must never enter security audit.
+ */
+export function digestAgentApiKeyAuditSubject(
+  credentialValue: unknown,
+): string | null {
+  const prefix = credentialPrefix(credentialValue);
+  return prefix === null
+    ? null
+    : createHash('sha256')
+        .update(`${AUDIT_SUBJECT_DOMAIN}:${prefix}`, 'utf8')
+        .digest('hex');
 }
 
 function constantTimeDigestMatch(

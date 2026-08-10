@@ -69,13 +69,16 @@ function humanAccess(
     actor: { kind: 'human', userId: ids.user, sessionId: ids.session },
     source: 'web',
     roles: ['staff', 'admin'],
+    capabilityGrants: [],
     scope: { facilityScope: { kind: 'district' } },
     connectivityEpochId: ids.epoch,
     ...overrides,
   };
 }
 
-function agentAccess(): AgentApiKeyAdministrationAccess {
+function agentAccess(
+  overrides: Partial<AgentApiKeyAdministrationAccess> = {},
+): AgentApiKeyAdministrationAccess {
   return {
     actor: {
       kind: 'agent',
@@ -84,8 +87,10 @@ function agentAccess(): AgentApiKeyAdministrationAccess {
     },
     source: 'agent-rest',
     roles: [],
+    capabilityGrants: [],
     scope: { facilityScope: { kind: 'district' } },
     connectivityEpochId: null,
+    ...overrides,
   };
 }
 
@@ -238,6 +243,72 @@ describe('canonical agent API-key administration', () => {
       });
     },
   );
+
+  test('allows only an explicitly granted district agent to list non-secret key metadata', async () => {
+    const allowedHarness = harness();
+    const allowed = agentAccess({
+      capabilityGrants: ['list-agent-api-keys'],
+    });
+
+    await expect(
+      allowedHarness.administration.list({
+        access: allowed,
+        value: {
+          agentId: null,
+          includeRevoked: true,
+          cursor: null,
+          limit: 200,
+        },
+        requestId: ids.requestList,
+        now,
+      }),
+    ).resolves.toEqual(page);
+    expect(allowedHarness.calls.list).toBe(1);
+    expect(allowedHarness.auditFacts[0]).toMatchObject({
+      action: 'list-agent-api-keys',
+      outcome: 'success',
+      principal: {
+        kind: 'agent',
+        agentId: ids.apiAgent,
+        apiKeyId: ids.apiAgentKey,
+      },
+    });
+    expect(JSON.stringify(allowedHarness.auditFacts)).not.toContain(
+      oneTimeCredential,
+    );
+
+    for (const deniedAccess of [
+      agentAccess(),
+      agentAccess({
+        capabilityGrants: ['list-agent-api-keys'],
+        scope: {
+          facilityScope: {
+            kind: 'facilities',
+            facilityIds: ['30000000-0000-4000-8000-000000000012'],
+          },
+        },
+      }),
+    ]) {
+      const deniedHarness = harness();
+      await expect(
+        deniedHarness.administration.list({
+          access: deniedAccess,
+          value: {
+            agentId: null,
+            includeRevoked: true,
+            cursor: null,
+            limit: 200,
+          },
+          now,
+        }),
+      ).rejects.toBeInstanceOf(AgentApiKeyAdministrationError);
+      expect(deniedHarness.calls.list).toBe(0);
+      expect(deniedHarness.auditFacts[0]).toMatchObject({
+        action: 'list-agent-api-keys',
+        outcome: 'denied',
+      });
+    }
+  });
 
   test('denies an unverified browser mutation before key issuance', async () => {
     const { administration, calls, auditFacts } = harness();
