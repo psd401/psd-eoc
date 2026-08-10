@@ -168,6 +168,7 @@ export async function GET(request: Request): Promise<Response> {
             requestId,
             query: parseRequestInput(PreviewEventTypeRenderingInputSchema, {
               draftId: parameters.get('draftId'),
+              expectedDraftRevision: parameters.get('expectedDraftRevision'),
               eventKind: parameters.get('eventKind'),
               purpose: parameters.get('purpose'),
             }),
