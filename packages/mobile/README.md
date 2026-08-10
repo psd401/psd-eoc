@@ -7,6 +7,9 @@ Expo Router owns navigation. Shared domain types come from
 This scaffold does not register a push token, request notification permission,
 or contact a notification provider. It only creates the local Android alert
 channel. Expo Push remains `mocked`, as recorded in `docs/INTEGRATIONS.md`.
+The native appearance stays light until the app has complete dark navigation,
+screen, and system-bar colors; this prevents unreadable system controls when a
+device itself uses dark mode.
 
 ## Local development
 
