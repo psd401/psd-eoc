@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   assertAwsAccount,
+  assertDefaultTerraformWorkspace,
   awsServiceEndpoint,
   awsSecretExists,
   putSecretValue,
@@ -216,6 +217,7 @@ async function main(): Promise<void> {
   }
   let liveProject: unknown;
   try {
+    assertDefaultTerraformWorkspace();
     liveProject = JSON.parse(
       runCommand('terraform', ['output', '-json', 'project']),
     );

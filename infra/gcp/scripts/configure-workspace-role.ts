@@ -226,8 +226,13 @@ export async function assertExactLiveGroupsReaderRole(
   const token = accessToken();
   const role = selectGroupsReaderRole(await listAll(fetcher, token, 'roles'));
   const assignment = findExactAssignment(
-    await listAll(fetcher, token, 'roleassignments', contract.oauthClientId),
-    contract.oauthClientId,
+    await listAll(
+      fetcher,
+      token,
+      'roleassignments',
+      contract.serviceAccountUniqueId,
+    ),
+    contract.serviceAccountUniqueId,
     role.roleId,
   );
   if (assignment === undefined) {
@@ -269,11 +274,11 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
     fetcher,
     token,
     'roleassignments',
-    contract.oauthClientId,
+    contract.serviceAccountUniqueId,
   );
   const existing = findExactAssignment(
     assignments,
-    contract.oauthClientId,
+    contract.serviceAccountUniqueId,
     role.roleId,
   );
   if (existing !== undefined) {
@@ -300,7 +305,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
       'Admin SDK Groups Reader assignment',
       {
         body: JSON.stringify({
-          assignedTo: contract.oauthClientId,
+          assignedTo: contract.serviceAccountUniqueId,
           kind: 'admin#directory#roleAssignment',
           roleId: role.roleId,
           scopeType: 'CUSTOMER',
@@ -312,7 +317,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
     false,
   );
   if (
-    created.assignedTo !== contract.oauthClientId ||
+    created.assignedTo !== contract.serviceAccountUniqueId ||
     created.roleId !== role.roleId ||
     created.scopeType !== 'CUSTOMER'
   ) {
@@ -320,8 +325,13 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   }
 
   const verified = findExactAssignment(
-    await listAll(fetcher, token, 'roleassignments', contract.oauthClientId),
-    contract.oauthClientId,
+    await listAll(
+      fetcher,
+      token,
+      'roleassignments',
+      contract.serviceAccountUniqueId,
+    ),
+    contract.serviceAccountUniqueId,
     role.roleId,
   );
   if (verified?.roleAssignmentId !== created.roleAssignmentId) {

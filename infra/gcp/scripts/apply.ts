@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
+  assertDefaultTerraformWorkspace,
   gcpRoot,
   requireExactConfirmation,
   runCommand,
@@ -35,7 +36,10 @@ const bootstrapResources = [
   'google_project.psd_eoc',
   'google_project_service.service_usage',
   'google_project_service.storage',
+  'google_project_service.cloud_resource_manager',
+  'google_project_service.cloud_billing',
   'google_storage_bucket.terraform_state',
+  'google_storage_bucket_iam_policy.terraform_state',
 ] as const;
 
 const mainImports = [
@@ -48,13 +52,34 @@ const mainImports = [
     'google_project_service.required["storage.googleapis.com"]',
     `${PROJECT_ID}/storage.googleapis.com`,
   ],
+  [
+    'google_project_service.required["cloudresourcemanager.googleapis.com"]',
+    `${PROJECT_ID}/cloudresourcemanager.googleapis.com`,
+  ],
+  [
+    'google_project_service.required["cloudbilling.googleapis.com"]',
+    `${PROJECT_ID}/cloudbilling.googleapis.com`,
+  ],
   ['google_storage_bucket.terraform_state', STATE_BUCKET],
+  ['google_storage_bucket_iam_policy.terraform_state', `b/${STATE_BUCKET}`],
 ] as const;
 
 const bootstrapServiceImports = [
   ['google_project_service.service_usage', 'serviceusage.googleapis.com'],
   ['google_project_service.storage', 'storage.googleapis.com'],
+  [
+    'google_project_service.cloud_resource_manager',
+    'cloudresourcemanager.googleapis.com',
+  ],
+  ['google_project_service.cloud_billing', 'cloudbilling.googleapis.com'],
 ] as const;
+
+const bootstrapBucketImports = [
+  ['google_storage_bucket.terraform_state', STATE_BUCKET],
+  ['google_storage_bucket_iam_policy.terraform_state', `b/${STATE_BUCKET}`],
+] as const;
+
+type StateBucketStatus = 'absent' | 'bootstrap-policy' | 'managed-policy';
 
 function parseJsonObject(
   value: string,
@@ -130,9 +155,11 @@ export function validateBootstrapProject(
 ): void {
   const parent = recordField(project, 'parent', 'Project parent');
   const labels = recordField(project, 'labels', 'Project labels');
-  const labelsMatch = Object.entries(expectedLabels).every(
-    ([name, expected]) => labels[name] === expected,
-  );
+  const labelsMatch =
+    Object.keys(labels).length === Object.keys(expectedLabels).length &&
+    Object.entries(expectedLabels).every(
+      ([name, expected]) => labels[name] === expected,
+    );
   if (
     project.projectId !== PROJECT_ID ||
     project.name !== PROJECT_NAME ||
@@ -152,10 +179,67 @@ export function validateBootstrapProject(
   }
 }
 
+export function validateProjectOwnerPolicy(
+  policy: Readonly<Record<string, unknown>>,
+  allowBootstrapOwner: boolean,
+): void {
+  const rawBindings = policy.bindings;
+  const bindings = rawBindings === undefined ? [] : rawBindings;
+  if (!Array.isArray(bindings)) {
+    throw new Error('Project IAM policy bindings are invalid.');
+  }
+
+  const owners = new Set<string>();
+  let ownerBindingCount = 0;
+  for (const binding of bindings) {
+    if (
+      typeof binding !== 'object' ||
+      binding === null ||
+      Array.isArray(binding)
+    ) {
+      throw new Error('Project IAM policy contains an invalid binding.');
+    }
+    const record = binding as Readonly<Record<string, unknown>>;
+    if (
+      typeof record.role !== 'string' ||
+      !Array.isArray(record.members) ||
+      record.members.some((member) => typeof member !== 'string')
+    ) {
+      throw new Error('Project IAM policy contains an invalid binding.');
+    }
+    if (record.role !== 'roles/owner') {
+      continue;
+    }
+    ownerBindingCount += 1;
+    if (record.condition !== undefined) {
+      throw new Error('Project IAM Owner binding must not be conditional.');
+    }
+    for (const member of record.members as string[]) {
+      if (owners.has(member)) {
+        throw new Error('Project IAM Owner binding contains a duplicate.');
+      }
+      owners.add(member);
+    }
+  }
+
+  const bootstrapOwner = `user:${TERRAFORM_ADMIN}`;
+  const exactBootstrapOwner =
+    ownerBindingCount === 1 && owners.size === 1 && owners.has(bootstrapOwner);
+  const noOwnerBinding = ownerBindingCount === 0 && owners.size === 0;
+  if (!noOwnerBinding && !(allowBootstrapOwner && exactBootstrapOwner)) {
+    throw new Error(
+      allowBootstrapOwner
+        ? 'Project IAM contains an Owner grant other than the one automatic bootstrap grant.'
+        : 'Project IAM still contains a direct Owner grant after the main apply.',
+    );
+  }
+}
+
 export function validateStateBucket(
   bucket: Readonly<Record<string, unknown>>,
   policy: Readonly<Record<string, unknown>>,
-): void {
+  allowBootstrapPolicy = false,
+): Exclude<StateBucketStatus, 'absent'> {
   const labels = recordField(bucket, 'labels', 'State bucket labels');
   const labelsMatch =
     Object.keys(labels).length === Object.keys(expectedLabels).length &&
@@ -209,7 +293,10 @@ export function validateStateBucket(
     );
   }
 
-  const expectedBindings = new Map<string, ReadonlySet<string>>([
+  const managedBindings = new Map<string, ReadonlySet<string>>([
+    ['roles/storage.objectAdmin', new Set([`user:${TERRAFORM_ADMIN}`])],
+  ]);
+  const bootstrapBindings = new Map<string, ReadonlySet<string>>([
     [
       'roles/storage.legacyBucketOwner',
       new Set([`projectEditor:${PROJECT_ID}`, `projectOwner:${PROJECT_ID}`]),
@@ -228,12 +315,10 @@ export function validateStateBucket(
     ],
   ]);
   const bindings = policy.bindings;
-  if (!Array.isArray(bindings) || bindings.length !== expectedBindings.size) {
-    throw new Error(
-      'Existing state bucket IAM does not match the project-only backend contract.',
-    );
+  if (!Array.isArray(bindings)) {
+    throw new Error('Existing state bucket IAM contains invalid bindings.');
   }
-  const seenRoles = new Set<string>();
+  const actualBindings = new Map<string, ReadonlySet<string>>();
   for (const binding of bindings) {
     if (
       typeof binding !== 'object' ||
@@ -247,25 +332,42 @@ export function validateStateBucket(
     const members = record.members;
     if (
       typeof role !== 'string' ||
-      seenRoles.has(role) ||
+      actualBindings.has(role) ||
+      record.condition !== undefined ||
       !Array.isArray(members) ||
       members.some((member) => typeof member !== 'string')
     ) {
       throw new Error('Existing state bucket IAM contains an invalid binding.');
     }
-    const expectedMembers = expectedBindings.get(role);
     const actualMembers = new Set(members as string[]);
-    if (
-      expectedMembers === undefined ||
-      actualMembers.size !== expectedMembers.size ||
-      [...actualMembers].some((member) => !expectedMembers.has(member))
-    ) {
-      throw new Error(
-        'Existing state bucket IAM does not match the project-only backend contract.',
-      );
+    if (actualMembers.size !== members.length) {
+      throw new Error('Existing state bucket IAM contains a duplicate member.');
     }
-    seenRoles.add(role);
+    actualBindings.set(role, actualMembers);
   }
+
+  const matches = (
+    expected: ReadonlyMap<string, ReadonlySet<string>>,
+  ): boolean =>
+    actualBindings.size === expected.size &&
+    [...actualBindings].every(([role, actualMembers]) => {
+      const expectedMembers = expected.get(role);
+      return (
+        expectedMembers !== undefined &&
+        actualMembers.size === expectedMembers.size &&
+        [...actualMembers].every((member) => expectedMembers.has(member))
+      );
+    });
+
+  if (matches(managedBindings)) {
+    return 'managed-policy';
+  }
+  if (allowBootstrapPolicy && matches(bootstrapBindings)) {
+    return 'bootstrap-policy';
+  }
+  throw new Error(
+    'Existing state bucket IAM does not match the single-administrator least-privilege backend contract.',
+  );
 }
 
 function inspectProject(): Readonly<Record<string, unknown>> | null {
@@ -316,7 +418,26 @@ function validateExistingProject(
   validateBootstrapProject(project, billing);
 }
 
-function stateBucketExists(): boolean {
+function projectIamPolicy(): Readonly<Record<string, unknown>> {
+  return parseJsonObject(
+    runCommand(
+      'gcloud',
+      [
+        'projects',
+        'get-iam-policy',
+        PROJECT_ID,
+        '--project',
+        PROJECT_ID,
+        '--format=json',
+        '--quiet',
+      ],
+      { redactFailureOutput: true },
+    ),
+    'Project IAM policy',
+  );
+}
+
+function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
   const result = spawnSync(
     'gcloud',
     [
@@ -344,7 +465,7 @@ function stateBucketExists(): boolean {
     result.stderr,
   );
   if (bucket === null) {
-    return false;
+    return 'absent';
   }
   const project = inspectProject();
   if (project === null) {
@@ -353,6 +474,7 @@ function stateBucketExists(): boolean {
     );
   }
   validateExistingProject(project);
+  validateProjectOwnerPolicy(projectIamPolicy(), true);
   const projectBucketNames = runCommand('gcloud', [
     'storage',
     'buckets',
@@ -386,8 +508,7 @@ function stateBucketExists(): boolean {
     ]),
     'State bucket IAM policy',
   );
-  validateStateBucket(bucket, policy);
-  return true;
+  return validateStateBucket(bucket, policy, allowBootstrapPolicy);
 }
 
 export function parseStateListResult(
@@ -406,20 +527,6 @@ export function parseStateListResult(
   }
   throw new Error(
     `terraform state list exited with status ${status}: ${detail.trim().slice(0, 2_000)}`,
-  );
-}
-
-export function validateTerraformWorkspace(workspace: string): void {
-  if (workspace !== 'default') {
-    throw new Error(
-      `Terraform workspace must be default; refusing to use ${JSON.stringify(workspace)}.`,
-    );
-  }
-}
-
-function assertDefaultTerraformWorkspace(cwd = gcpRoot): void {
-  validateTerraformWorkspace(
-    runCommand('terraform', ['workspace', 'show'], { cwd }),
   );
 }
 
@@ -457,7 +564,7 @@ function enabledProjectServices(): Set<string> {
   );
 }
 
-function recoverBootstrapState(): void {
+function recoverBootstrapState(bucketStatus: StateBucketStatus): void {
   const resources = stateResources(bootstrapRoot);
   const project = inspectProject();
   if (project === null) {
@@ -470,6 +577,7 @@ function recoverBootstrapState(): void {
   }
 
   validateExistingProject(project);
+  validateProjectOwnerPolicy(projectIamPolicy(), true);
   if (!resources.has('google_project.psd_eoc')) {
     runTerraformInteractive(
       ['import', '-input=false', 'google_project.psd_eoc', PROJECT_ID],
@@ -486,6 +594,18 @@ function recoverBootstrapState(): void {
         bootstrapRoot,
       );
       resources.add(address);
+    }
+  }
+
+  if (bucketStatus === 'bootstrap-policy') {
+    for (const [address, importId] of bootstrapBucketImports) {
+      if (!resources.has(address)) {
+        runTerraformInteractive(
+          ['import', '-input=false', address, importId],
+          bootstrapRoot,
+        );
+        resources.add(address);
+      }
     }
   }
 }
@@ -520,21 +640,21 @@ async function main(): Promise<void> {
   assertActiveGcloudAccount(TERRAFORM_ADMIN);
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
 
-  const bucketExists = stateBucketExists();
-  if (!bucketExists) {
+  const initialBucketStatus = stateBucketStatus(true);
+  if (initialBucketStatus !== 'managed-policy') {
     runInteractive('terraform', ['init', '-input=false'], bootstrapRoot);
     assertDefaultTerraformWorkspace(bootstrapRoot);
-    recoverBootstrapState();
+    recoverBootstrapState(initialBucketStatus);
     await applySavedPlan({
       confirmation: 'create-psd401-eoc-bootstrap',
       cwd: bootstrapRoot,
       planPath: bootstrapPlan,
       preview:
-        'Bootstrap consequence preview: create or adopt the billed psd401-eoc project directly under the district organization, enable Service Usage and Storage, and create a private versioned state bucket. No Groups data, OAuth credential, or notification path is touched.',
+        'Bootstrap consequence preview: create or adopt the billed psd401-eoc project directly under the district organization, enable Service Usage, Storage, Cloud Resource Manager, and Cloud Billing before quota is charged to the new project, and create a private versioned state bucket whose authoritative policy grants only the fixed human Terraform administrator Object Admin. No Groups data, OAuth credential, or notification path is touched.',
     });
-    if (!stateBucketExists()) {
+    if (stateBucketStatus(false) !== 'managed-policy') {
       throw new Error(
-        'Bootstrap apply did not produce the exact private Terraform state bucket.',
+        'Bootstrap apply did not produce the exact private, single-administrator Terraform state bucket.',
       );
     }
   }
@@ -554,8 +674,14 @@ async function main(): Promise<void> {
     cwd: gcpRoot,
     planPath: mainPlan,
     preview:
-      'Apply consequence preview: enable only the declared identity/IAM APIs, grant the named district Terraform administrator roles, and create one protected service account with no project IAM roles. This does not authorize Workspace access, create OAuth clients, read Groups, or send notifications.',
+      "Apply consequence preview: enable only the declared identity/IAM APIs, retain the single-administrator state-bucket policy, replace the project creator's automatic Owner grant with the named narrower Terraform administrator roles, and create one protected service account with no project IAM roles. This does not authorize Workspace access, create OAuth clients, read Groups, or send notifications.",
   });
+  validateProjectOwnerPolicy(projectIamPolicy(), false);
+  if (stateBucketStatus(false) !== 'managed-policy') {
+    throw new Error(
+      'Main apply did not preserve the exact private, single-administrator Terraform state bucket.',
+    );
+  }
   runTerraformInteractive(['plan', '-detailed-exitcode', '-input=false']);
 
   const finalResources = stateResources();

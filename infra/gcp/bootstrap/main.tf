@@ -56,6 +56,29 @@ resource "google_project_service" "storage" {
   depends_on = [google_project_service.service_usage]
 }
 
+# The main provider bills API requests to the new project. Enable every API
+# that provider initialization and google_project refresh require before the
+# main root can enable project-charged quota without a first-run cycle.
+resource "google_project_service" "cloud_resource_manager" {
+  project                    = google_project.psd_eoc.project_id
+  service                    = "cloudresourcemanager.googleapis.com"
+  disable_on_destroy         = false
+  disable_dependent_services = false
+  deletion_policy            = "PREVENT"
+
+  depends_on = [google_project_service.service_usage]
+}
+
+resource "google_project_service" "cloud_billing" {
+  project                    = google_project.psd_eoc.project_id
+  service                    = "cloudbilling.googleapis.com"
+  disable_on_destroy         = false
+  disable_dependent_services = false
+  deletion_policy            = "PREVENT"
+
+  depends_on = [google_project_service.service_usage]
+}
+
 resource "google_storage_bucket" "terraform_state" {
   project                     = google_project.psd_eoc.project_id
   name                        = "psd401-eoc-terraform-state"
@@ -88,4 +111,20 @@ resource "google_storage_bucket" "terraform_state" {
   }
 
   depends_on = [google_project_service.storage]
+}
+
+data "google_iam_policy" "terraform_state" {
+  binding {
+    role    = "roles/storage.objectAdmin"
+    members = ["user:kjh_admin@psd401.net"]
+  }
+}
+
+resource "google_storage_bucket_iam_policy" "terraform_state" {
+  bucket      = google_storage_bucket.terraform_state.name
+  policy_data = data.google_iam_policy.terraform_state.policy_data
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }

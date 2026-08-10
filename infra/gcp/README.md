@@ -33,7 +33,11 @@ eligible for deletion only after 90 days have elapsed since that version became
 noncurrent. Object creation age is not used, and lifecycle execution may occur
 later than the eligibility threshold. The bucket deliberately has no retention
 policy because the GCS backend must delete its short-lived lock object when each
-operation ends.
+operation ends. Its authoritative bucket policy grants only the fixed human
+Terraform administrator `roles/storage.objectAdmin`, the minimum role required
+by the GCS backend. Legacy project Owner/Editor/Viewer convenience principals,
+groups, domains, service accounts, public principals, extra roles, and
+conditional bindings are not accepted in that bucket policy.
 
 ## Apply from this machine
 
@@ -67,32 +71,50 @@ bun scripts/apply.ts
 ```
 
 The first run uses `bootstrap/` to create only the billed project, Service
-Usage/Storage prerequisites, and private state bucket in local bootstrap state.
-It then initializes the main GCS backend, imports those four resources, applies
-the remaining APIs/IAM/service account remotely, proves zero drift, and removes
-the duplicate resource addresses from bootstrap state. Interrupted bootstrap
-runs recover by validating the exact organization, billing account, labels, and
-already-enabled APIs before importing anything.
+Usage, Storage, Cloud Resource Manager, and Cloud Billing API prerequisites,
+and the private state bucket in local bootstrap state. Cloud Resource Manager
+and Cloud Billing must be enabled before the main provider charges its project
+refreshes to `psd401-eoc`; enabling them in the main root would create a fresh-
+project quota cycle. The helper then initializes the main GCS backend, imports
+those six resources plus the authoritative bucket policy, applies the remaining
+APIs/IAM/service account remotely, proves zero drift, and removes the duplicate
+resource addresses from bootstrap state. Google initially creates its four
+legacy project convenience bindings with a bucket. The same saved bootstrap
+plan replaces them with the single administrator Object Admin binding before
+the main backend is initialized. An interrupted run can adopt only that exact
+known initial policy and immediately finish the replacement; any other policy
+fails closed. Recovery also validates the exact organization, billing account,
+labels, Owner policy, and already-enabled APIs before importing anything.
 
 Both mutations use saved Terraform plans and a helper-owned exact confirmation;
 inherited `TF_CLI_ARGS*`, `TF_WORKSPACE`, and Google credential overrides are
-discarded. The confirmation phrases are shown only after the complete plans.
-There is no auto-approve path. Do not confirm either plan without explicit
-product-owner approval for the billed, retained infrastructure described in the
-preview.
+discarded. Every Terraform state or output read also requires the persisted
+workspace to be exactly `default`; a stale `.terraform/environment` cannot
+redirect a helper to another workspace. The confirmation phrases are shown only
+after the complete plans. There is no auto-approve path. Do not confirm either
+plan without explicit product-owner approval for the billed, retained
+infrastructure described in the preview.
 
 No private key or OAuth secret is a Terraform resource, input, or output.
 
-Google automatically grants a new project's creator `roles/owner`. Matching the
-existing `psd401-maps` district convention, the main root explicitly adopts and
-protects that binding instead of leaving it as untracked implicit access. It
-also records the narrower service-account administration and key-rotation roles
-used by these helpers so a later reviewed IAM reduction has an exact target.
-This human administrator access does not grant any role to the roster-reader
-service account. Retaining protected `roles/owner` is a broad, explicitly
-accepted residual that matches the current district Maps pattern and permits
-out-of-band human changes; Cloud Audit Logs remain the evidence. Removing it is
-a separate reviewed IAM reduction, never an ad-hoc change during this apply.
+Google automatically grants a new project's creator `roles/owner`. The bootstrap
+preflight permits only that exact automatic grant to the fixed administrator;
+any other direct Owner blocks the apply. The saved main plan first grants the
+declared narrower roles, including Project Mover for project-metadata updates
+and Project Billing Manager for the fixed billing association, plus Project IAM
+Admin for Terraform-managed allow-policy changes, then
+`google_project_iam_member_remove` removes the creator's Owner membership. The
+billing-account-side permission needed to keep that association is an existing
+organization prerequisite, not a project grant from this root. The final live
+policy read requires no direct Owner binding, and the negative resource removes
+that exact membership again if it is restored out of band.
+
+Project IAM Admin can change the project's allow policy and therefore remains a
+privilege-escalation-capable administration role. That authority is unavoidable
+while this human-run root manages its own IAM bindings; it is narrower than a
+standing basic Owner role and cannot be replaced by an unapproved automation
+principal in this issue. This human administrator access does not grant any
+role to the roster-reader service account.
 
 ## Workspace Groups Reader assignment
 
@@ -166,10 +188,23 @@ still required before the verifier can report PASS.
 Workspace exposes no supported API that lists domain-wide delegation grants.
 Before recording a live verification, a Super Admin must therefore open
 **Menu → Security → Access and data control → API Controls → Manage Domain Wide
-Delegation** and confirm that the numeric OAuth client ID from
-`terraform output -json google_groups_reader` has no grant. This is a negative
-safety check only; do not add a grant. Record the human confirmation as PR
-evidence without copying any unrelated tenant client IDs.
+Delegation** and confirm that the fixed service account's OAuth 2 client ID has
+no grant. Read that non-secret ID directly from the fixed live account:
+
+```sh
+gcloud iam service-accounts describe \
+  roster-sync-reader@psd401-eoc.iam.gserviceaccount.com \
+  --project=psd401-eoc --format='value(oauth2ClientId)'
+```
+
+Do not substitute the distinct `service_account_unique_id` from Terraform: the
+Workspace role-assignment API uses that stable IAM unique ID, while credentials
+and domain-wide delegation use the OAuth 2 client ID. The helpers read both from
+the same fixed live service account, require its unique ID to match the guarded
+Terraform output, and require every generated credential's client ID to match
+the live OAuth 2 client ID. This is a negative safety check only; do not add a
+grant. Record the human confirmation as PR evidence without copying any
+unrelated tenant client IDs.
 
 ## Read-only Groups credential and live proof
 
@@ -202,21 +237,25 @@ private key is never written to a local file. A failed AWS write deletes only
 the newly identified key; an ambiguous AWS result is read back before cleanup,
 and ambiguous key identity is never deleted.
 
-The project-policy check proves only that the service account is not a direct
-member in this project's IAM policy. Google does not expose group-expanded
-effective IAM in that response. Before `live-verified`, a district administrator
-must also confirm the service account is not a member of a Google Group granted
-a GCP role and is not named in an ancestor IAM binding. Record only that result,
-not unrelated group membership or IAM identities. The helper and PR must not
-describe this narrower check as proof of no effective inherited access.
+The project-policy check rejects the exact service-account member plus direct
+project bindings to universal principals, domains, groups, project convenience
+principals, Google public principal sets, and Resource Manager service-account
+sets that could include it. Google does not expose group-expanded ancestor IAM
+in that project-policy response. Before `live-verified`, a district
+administrator must still confirm the service account is not a member of a
+Google Group granted a role on an ancestor and is not otherwise covered by an
+ancestor IAM binding. Record only that result, not unrelated group membership or
+IAM identities. The helper and PR must not describe the direct-policy check as
+proof of no effective inherited access.
 
 The verifier binds the AWS credential back to the exact Terraform project,
-service-account email, numeric client ID, Groups Reader role, one OAuth scope,
-approved group hash, and Google's live key creation timestamp. It rejects a key
-older than 30 days and requires exactly that one user-managed key. Using the
-temporary administrator ADC described above, it also queries Workspace role
-assignments by the service-account unique ID with indirect assignments included
-and requires exactly one direct Groups Reader assignment. It then uses a
+service-account email and unique ID, live OAuth 2 client ID, Groups Reader role,
+one OAuth scope, approved group hash, and Google's live key creation timestamp.
+It rejects a key older than 30 days and requires exactly that one user-managed
+key. Using the temporary administrator ADC described above, it also queries
+Workspace role assignments by the service-account unique ID with indirect
+assignments included and requires exactly one direct Groups Reader assignment.
+It then uses a
 service-account JWT with no delegated subject, performs only `groups.lookup`
 and `memberships.list` GETs, requests `fields=nextPageToken` for the membership
 proof, discards the response body, and prints no group, member, token, or
@@ -282,6 +321,7 @@ federation; neither represents PSD EOC sign-in. Google also requires a distinct
 client for each platform. Inspect the non-secret contract with:
 
 ```sh
+terraform workspace show # must print exactly: default
 terraform output -json google_oauth_contract
 ```
 

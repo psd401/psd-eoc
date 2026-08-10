@@ -10,11 +10,12 @@ locals {
   cloud_identity_groups_readonly_scope = "https://www.googleapis.com/auth/cloud-identity.groups.readonly"
 
   terraform_admin_roles = toset([
+    "roles/billing.projectManager",
     "roles/iam.serviceAccountAdmin",
     "roles/iam.serviceAccountKeyAdmin",
     "roles/oauthconfig.editor",
-    "roles/owner",
     "roles/resourcemanager.projectIamAdmin",
+    "roles/resourcemanager.projectMover",
     "roles/serviceusage.serviceUsageAdmin",
     "roles/storage.admin",
     "roles/viewer",
@@ -73,6 +74,21 @@ resource "google_project_iam_member" "terraform_admin" {
   }
 }
 
+# Google grants a new project's creator roles/owner automatically. Keep that
+# bootstrap privilege out of steady state after the narrower grants above are
+# present, and remove it again if it is ever restored out of band.
+resource "google_project_iam_member_remove" "terraform_admin_owner" {
+  project = google_project.psd_eoc.project_id
+  role    = "roles/owner"
+  member  = "user:${lower(var.terraform_admin_email)}"
+
+  depends_on = [google_project_iam_member.terraform_admin]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "google_storage_bucket" "terraform_state" {
   project                     = google_project.psd_eoc.project_id
   name                        = var.terraform_state_bucket
@@ -105,6 +121,22 @@ resource "google_storage_bucket" "terraform_state" {
   }
 
   depends_on = [google_project_service.required["storage.googleapis.com"]]
+}
+
+data "google_iam_policy" "terraform_state" {
+  binding {
+    role    = "roles/storage.objectAdmin"
+    members = ["user:${lower(var.terraform_admin_email)}"]
+  }
+}
+
+resource "google_storage_bucket_iam_policy" "terraform_state" {
+  bucket      = google_storage_bucket.terraform_state.name
+  policy_data = data.google_iam_policy.terraform_state.policy_data
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_service_account" "roster_reader" {
