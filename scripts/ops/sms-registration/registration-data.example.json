@@ -3,6 +3,7 @@
   "registrationNamePrefix": "REPLACE_ME_REGISTRATION_NAME_PREFIX",
   "documentation": {
     "important": "Synthetic placeholders are prefixed REPLACE_ME and submission rejects them. Copy this file to registration-data.json, replace every REPLACE_ME value using current AWS field definitions, and never commit registration-data.json or attachments/.",
+    "campaignStatus": "SCHEMA-ONLY AND BLOCKED: AWS currently says emergency-alert traffic is not permitted through A2P 10DLC. The script rejects every campaign submission before AWS access. Never relabel actual PSD EOC incident or drill traffic as education, government, or another use case. Use toll-free unless written provider guidance and a reviewed code change explicitly re-enable 10DLC.",
     "brandRequiredInputs": [
       "Exact district legal name matching the EIN",
       "Country of tax registration and EIN",
@@ -13,10 +14,12 @@
       "Individual support email and E.164 support phone"
     ],
     "campaignRequiredInputs": [
-      "Campaign description and education/government use case",
-      "Public terms-and-conditions and privacy-policy URLs or attachments",
-      "Complete staff opt-in workflow and evidence",
-      "HELP, STOP, and opt-in confirmation messages",
+      "Schema diagnostics only: a truthful provider-approved classification is unresolved, so no campaign submission is permitted",
+      "Public terms include use-case description, message frequency, carrier-liability statement, opt-out instructions, customer-care contact, and a privacy-policy link",
+      "Public privacy policy says mobile numbers and consent records are not shared with unauthorized third parties or affiliates",
+      "Complete affirmative SMS-specific staff opt-in workflow and evidence, with brand, purpose, frequency, rate disclosure, Terms/Privacy links, and STOP/HELP instructions visible at consent",
+      "Opt-in confirmation identifies PSD EOC and includes frequency, message/data rates, STOP, and HELP",
+      "STOP response identifies PSD EOC, acknowledges opt-out, and confirms no further messages; HELP identifies PSD EOC and gives a district contact method",
       "Transactional SMS capability and subscriber opt-in/opt-out/help choices",
       "Two separate realistic samples that identify PSD EOC, include Reply STOP to opt out, and distinguish one PSD EOC REAL INCIDENT from one PSD EOC DRILL; never use one ambiguous sample for both"
     ],
@@ -141,7 +144,7 @@
       },
       {
         "fieldPath": "campaignUseCase.useCase",
-        "select": ["HIGHER_EDUCATION"]
+        "select": ["REPLACE_ME_PROVIDER_APPROVED_USE_CASE"]
       },
       {
         "fieldPath": "campaignUseCase.subscriberOptIn",

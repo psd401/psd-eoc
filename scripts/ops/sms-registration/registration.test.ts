@@ -1,18 +1,31 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { statusMain, submitMain } from './cli';
 
 import {
+  MAX_PROVIDER_ITEMS,
+  MAX_PROVIDER_PAGES,
   REGISTRATION_TYPES,
+  SMS_CLIENT_CONFIG,
   TARGET_ACCOUNT,
   TARGET_REGION,
+  assertProviderPageCapacity,
   loadState,
+  nextProviderPageToken,
   runStatus,
   runSubmit,
   saveState,
+  toRegistrationDeniedReason,
   toRegistrationFieldFeedback,
   type FieldDefinition,
   type RegistrationKind,
@@ -20,6 +33,7 @@ import {
   type SmsRegistrationApi,
   type StatusOptions,
   type SubmitOptions,
+  type RegistrationVersionRecord,
 } from './core';
 
 const temporaryDirectories: string[] = [];
@@ -40,8 +54,9 @@ async function fixtureDirectory(): Promise<string> {
 
 async function writeData(directory: string): Promise<string> {
   const dataPath = join(directory, 'registration-data.json');
+  await mkdir(join(directory, 'attachments'));
   await writeFile(
-    join(directory, 'campaign-opt-in.png'),
+    join(directory, 'attachments', 'campaign-opt-in.png'),
     Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
       'base64',
@@ -65,7 +80,7 @@ async function writeData(directory: string): Promise<string> {
             text: 'https://www.psd401.net/privacy',
           },
           {
-            attachmentFile: 'campaign-opt-in.png',
+            attachmentFile: 'attachments/campaign-opt-in.png',
             fieldPath: 'campaignInfo.optInScreenshot',
           },
           {
@@ -165,12 +180,7 @@ class FakeApi implements SmsRegistrationApi {
   hideSubmittedState = false;
   registrationReadError = false;
   submitCrashAfterWrite = false;
-  versionOverride?: readonly {
-    readonly deniedReasons: readonly string[];
-    readonly feedback?: string;
-    readonly status: string;
-    readonly versionNumber: number;
-  }[];
+  versionOverride?: readonly RegistrationVersionRecord[];
 
   async associateRegistration(input: {
     readonly registrationId: string;
@@ -414,6 +424,30 @@ async function replaceDataValue(
   await writeFile(dataPath, original.replace(search, replacement));
 }
 
+async function addBrandAttachment(
+  dataPath: string,
+  attachmentFile: string,
+): Promise<void> {
+  const requiredField =
+    '{"fieldPath":"brand.required","text":"District legal value"}';
+  await replaceDataValue(
+    dataPath,
+    requiredField,
+    `${requiredField},${JSON.stringify({ attachmentFile, fieldPath: 'brand.evidence' })}`,
+  );
+}
+
+function enableBrandAttachment(api: FakeApi): void {
+  api.definitionOverride = [
+    ...definitions('brand'),
+    {
+      fieldPath: 'brand.evidence',
+      fieldRequirement: 'OPTIONAL',
+      fieldType: 'ATTACHMENT',
+    },
+  ];
+}
+
 function pngWithTextMetadata(body: Uint8Array): Uint8Array {
   const bytes = Buffer.from(body);
   const typeOffset = bytes.indexOf(Buffer.from('IEND', 'ascii'));
@@ -471,6 +505,74 @@ function deferred(): {
 }
 
 describe('AWS response compatibility', () => {
+  it('pins the write-capable SMS client to one attempt', () => {
+    expect(SMS_CLIENT_CONFIG).toEqual({
+      maxAttempts: 1,
+      region: TARGET_REGION,
+    });
+  });
+
+  it('preserves every registration denial remediation field', () => {
+    expect(
+      toRegistrationDeniedReason(
+        'SYNTHETIC_DENIAL',
+        'Short description',
+        'Long remediation detail',
+        'AWS guidance',
+        'https://docs.aws.amazon.com/example',
+      ),
+    ).toEqual({
+      documentationLink: 'https://docs.aws.amazon.com/example',
+      documentationTitle: 'AWS guidance',
+      longDescription: 'Long remediation detail',
+      reason: 'SYNTHETIC_DENIAL',
+      shortDescription: 'Short description',
+    });
+    expect(toRegistrationDeniedReason('DENIED', 'Short')).toEqual({
+      reason: 'DENIED',
+      shortDescription: 'Short',
+    });
+    expect(() => toRegistrationDeniedReason(undefined, 'Short')).toThrow(
+      'omitted denied Reason',
+    );
+    expect(() => toRegistrationDeniedReason('DENIED', undefined)).toThrow(
+      'omitted denied ShortDescription',
+    );
+  });
+
+  it('bounds and de-duplicates untrusted provider pagination tokens', () => {
+    const tokens = new Set<string>();
+    expect(nextProviderPageToken(tokens, 'secret-a')).toBe('secret-a');
+    expect(nextProviderPageToken(tokens, 'secret-b')).toBe('secret-b');
+    let cycleMessage = '';
+    try {
+      nextProviderPageToken(tokens, 'secret-a');
+    } catch (error) {
+      cycleMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(cycleMessage).toContain('pagination');
+    expect(cycleMessage).not.toContain('secret-a');
+    expect(cycleMessage).not.toContain('secret-b');
+    expect(() => nextProviderPageToken(new Set(), '')).toThrow('pagination');
+    expect(() => nextProviderPageToken(new Set(), 42)).toThrow('pagination');
+
+    const uniqueTokens = new Set<string>();
+    for (let index = 1; index < MAX_PROVIDER_PAGES; index += 1) {
+      expect(nextProviderPageToken(uniqueTokens, `synthetic-${index}`)).toBe(
+        `synthetic-${index}`,
+      );
+    }
+    expect(() =>
+      nextProviderPageToken(uniqueTokens, 'secret-over-limit'),
+    ).toThrow(`${MAX_PROVIDER_PAGES}-page safety limit`);
+    expect(() => assertProviderPageCapacity(MAX_PROVIDER_ITEMS - 1, 2)).toThrow(
+      `${MAX_PROVIDER_ITEMS}-item safety limit`,
+    );
+    expect(() =>
+      assertProviderPageCapacity(MAX_PROVIDER_ITEMS - 1, 1),
+    ).not.toThrow();
+  });
+
   it('preserves all registration field review result variants', () => {
     expect(
       toRegistrationFieldFeedback(
@@ -597,6 +699,52 @@ describe('offline safety boundary', () => {
     ).rejects.toThrow('placeholder values remain');
     expect(harness.apiCreations()).toBe(0);
   });
+
+  it('validates the shared AWS Name tag length before client creation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    await replaceDataValue(
+      dataPath,
+      'PSD EOC district staff alerts',
+      'x'.repeat(240),
+    );
+    const api = new FakeApi();
+    const harness = testRuntime(api);
+
+    await expect(
+      runSubmit(
+        'brand',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+        harness.runtime,
+      ),
+    ).rejects.toThrow('no longer than 239 characters');
+    expect(harness.apiCreations()).toBe(0);
+    expect(api.calls).toEqual([]);
+  });
+
+  it('rejects placeholder and invalid opt-out list names before client creation', async () => {
+    for (const optOutListName of [
+      'REPLACE_ME_OPT_OUT_LIST',
+      'invalid/list',
+      'x'.repeat(65),
+    ]) {
+      const directory = await fixtureDirectory();
+      const dataPath = await writeData(directory);
+      await replaceDataValue(dataPath, 'psd-eoc-staff', optOutListName);
+      const api = new FakeApi();
+      const harness = testRuntime(api);
+
+      await expect(
+        runSubmit(
+          'tollFree',
+          submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
+          harness.runtime,
+        ),
+      ).rejects.toThrow();
+      expect(harness.apiCreations()).toBe(0);
+      expect(api.calls).toEqual([]);
+    }
+  });
 });
 
 describe('attachment trust boundary', () => {
@@ -616,23 +764,21 @@ describe('attachment trust boundary', () => {
       const directory = await fixtureDirectory();
       const dataPath = await writeData(directory);
       const originalPng = await readFile(
-        join(directory, 'campaign-opt-in.png'),
+        join(directory, 'attachments', 'campaign-opt-in.png'),
       );
-      const attachmentName = `campaign-opt-in.${fixture.extension}`;
+      const attachmentName = `attachments/brand-evidence.${fixture.extension}`;
       await writeFile(
         join(directory, attachmentName),
         fixture.prepare(originalPng),
       );
-      if (fixture.extension !== 'png') {
-        await replaceDataValue(dataPath, 'campaign-opt-in.png', attachmentName);
-      }
-      await seedCompletedBrand(join(directory, 'registration-state.json'));
+      await addBrandAttachment(dataPath, attachmentName);
       const api = new FakeApi();
+      enableBrandAttachment(api);
       const harness = testRuntime(api);
 
       await runSubmit(
-        'campaign',
-        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+        'brand',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
         harness.runtime,
       );
 
@@ -648,7 +794,7 @@ describe('attachment trust boundary', () => {
     const dataPath = await writeData(directory);
     await replaceDataValue(
       dataPath,
-      '"attachmentFile":"campaign-opt-in.png"',
+      '"attachmentFile":"attachments/campaign-opt-in.png"',
       '"attachmentS3Uri":"s3://synthetic-bucket/opt-in.png"',
     );
     const api = new FakeApi();
@@ -669,13 +815,13 @@ describe('attachment trust boundary', () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
     await writeFile(
-      join(directory, 'toll-free-opt-in.jpg'),
+      join(directory, 'attachments', 'toll-free-opt-in.jpg'),
       jpegWithExifMetadata(),
     );
     await replaceDataValue(
       dataPath,
       '{"fieldPath":"tollFree.required","text":"District toll-free value"}',
-      '{"fieldPath":"tollFree.required","text":"District toll-free value"},{"attachmentFile":"toll-free-opt-in.jpg","fieldPath":"messagingUseCase.optInImage"}',
+      '{"fieldPath":"tollFree.required","text":"District toll-free value"},{"attachmentFile":"attachments/toll-free-opt-in.jpg","fieldPath":"messagingUseCase.optInImage"}',
     );
     const api = new FakeApi();
     api.definitionOverride = [
@@ -703,13 +849,13 @@ describe('attachment trust boundary', () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
     await writeFile(
-      join(directory, 'toll-free-opt-in.png'),
+      join(directory, 'attachments', 'toll-free-opt-in.png'),
       Buffer.alloc(400_001),
     );
     await replaceDataValue(
       dataPath,
       '{"fieldPath":"tollFree.required","text":"District toll-free value"}',
-      '{"fieldPath":"tollFree.required","text":"District toll-free value"},{"attachmentFile":"toll-free-opt-in.png","fieldPath":"messagingUseCase.optInImage"}',
+      '{"fieldPath":"tollFree.required","text":"District toll-free value"},{"attachmentFile":"attachments/toll-free-opt-in.png","fieldPath":"messagingUseCase.optInImage"}',
     );
     const api = new FakeApi();
     api.definitionOverride = [
@@ -733,45 +879,114 @@ describe('attachment trust boundary', () => {
     expect(mutationCalls(api)).toEqual([]);
   });
 
+  for (const pathKind of ['traversal', 'absolute'] as const) {
+    it(`rejects ${pathKind} attachment paths before creating an AWS client`, async () => {
+      const directory = await fixtureDirectory();
+      const dataPath = await writeData(directory);
+      const outsidePath = join(directory, 'private-outside.png');
+      await writeFile(
+        outsidePath,
+        await readFile(join(directory, 'attachments', 'campaign-opt-in.png')),
+      );
+      const configuredPath =
+        pathKind === 'absolute'
+          ? outsidePath
+          : 'attachments/../private-outside.png';
+      await addBrandAttachment(dataPath, configuredPath);
+      const api = new FakeApi();
+      const harness = testRuntime(api);
+
+      let message = '';
+      try {
+        await runSubmit(
+          'brand',
+          submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+          harness.runtime,
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain('beneath the private attachments directory');
+      expect(message).not.toContain('private-outside.png');
+      expect(message).not.toContain(directory);
+      expect(harness.apiCreations()).toBe(0);
+      expect(api.calls).toEqual([]);
+    });
+  }
+
+  it('rejects an attachment symlink that escapes the private directory', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    const outsidePath = join(directory, 'private-outside.png');
+    await writeFile(
+      outsidePath,
+      await readFile(join(directory, 'attachments', 'campaign-opt-in.png')),
+    );
+    await symlink(
+      outsidePath,
+      join(directory, 'attachments', 'private-link.png'),
+    );
+    await addBrandAttachment(dataPath, 'attachments/private-link.png');
+    const api = new FakeApi();
+    const harness = testRuntime(api);
+
+    let message = '';
+    try {
+      await runSubmit(
+        'brand',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+        harness.runtime,
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain('beneath the private attachments directory');
+    expect(message).not.toContain('private-link.png');
+    expect(message).not.toContain('private-outside.png');
+    expect(message).not.toContain(directory);
+    expect(harness.apiCreations()).toBe(0);
+    expect(api.calls).toEqual([]);
+  });
+
   it('stops when AWS reports an attachment upload failure', async () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
     const statePath = join(directory, 'registration-state.json');
-    await seedCompletedBrand(statePath);
+    await addBrandAttachment(dataPath, 'attachments/campaign-opt-in.png');
     const api = new FakeApi();
+    enableBrandAttachment(api);
     api.attachmentCreateStatus = 'PENDING';
     api.attachmentDescribeStatus = 'UPLOAD_FAILED';
 
     await expect(
       runSubmit(
-        'campaign',
-        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+        'brand',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
         testRuntime(api).runtime,
       ),
     ).rejects.toThrow('is UPLOAD_FAILED; submission stopped');
 
     expect(api.calls).toContain('describe-attachments');
-    expect(api.calls).not.toContain('submit:registration-campaign');
+    expect(api.calls).not.toContain('submit:registration-brand');
     expect(
-      (await loadState(statePath)).campaign?.attachments[
-        'campaignInfo.optInScreenshot'
-      ]?.attachmentStatus,
+      (await loadState(statePath)).brand?.attachments['brand.evidence']
+        ?.attachmentStatus,
     ).toBe('UPLOAD_FAILED');
   });
 
   it('times out closed while an attachment remains pending', async () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
-    const statePath = join(directory, 'registration-state.json');
-    await seedCompletedBrand(statePath);
+    await addBrandAttachment(dataPath, 'attachments/campaign-opt-in.png');
     const api = new FakeApi();
+    enableBrandAttachment(api);
     api.attachmentCreateStatus = 'PENDING';
     api.attachmentDescribeStatus = 'PENDING';
 
     await expect(
       runSubmit(
-        'campaign',
-        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+        'brand',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
         testRuntime(api).runtime,
       ),
     ).rejects.toThrow('not UPLOAD_COMPLETE');
@@ -779,7 +994,7 @@ describe('attachment trust boundary', () => {
     expect(
       api.calls.filter((call) => call === 'describe-attachments'),
     ).toHaveLength(10);
-    expect(api.calls).not.toContain('submit:registration-campaign');
+    expect(api.calls).not.toContain('submit:registration-brand');
   });
 });
 
@@ -828,13 +1043,23 @@ describe('live validation before mutation', () => {
     const harness = testRuntime(api);
 
     await expect(
-      runSubmit(
-        'campaign',
-        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+      runStatus(
+        {
+          check: true,
+          confirmedAccount: TARGET_ACCOUNT,
+          confirmedRegion: TARGET_REGION,
+          dataPath,
+          statePath: join(directory, 'registration-state.json'),
+          validateData: 'campaign',
+        },
         harness.runtime,
       ),
     ).rejects.toThrow('separate, unmistakable REAL INCIDENT and DRILL');
     expect(mutationCalls(api)).toEqual([]);
+    expect(api.calls).toEqual([
+      'identity',
+      `definitions:${REGISTRATION_TYPES.campaign}`,
+    ]);
   });
 
   it('requires an explicit STOP instruction in the message samples before mutation', async () => {
@@ -853,15 +1078,25 @@ describe('live validation before mutation', () => {
     const api = new FakeApi();
 
     await expect(
-      runSubmit(
-        'campaign',
-        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+      runStatus(
+        {
+          check: true,
+          confirmedAccount: TARGET_ACCOUNT,
+          confirmedRegion: TARGET_REGION,
+          dataPath,
+          statePath: join(directory, 'registration-state.json'),
+          validateData: 'campaign',
+        },
         testRuntime(api).runtime,
       ),
     ).rejects.toThrow(
       'must include an explicit Reply STOP opt-out instruction in at least one sample',
     );
     expect(mutationCalls(api)).toEqual([]);
+    expect(api.calls).toEqual([
+      'identity',
+      `definitions:${REGISTRATION_TYPES.campaign}`,
+    ]);
   });
 
   it('requires stock details for a public-profit brand before mutation', async () => {
@@ -959,49 +1194,35 @@ describe('registration API ordering', () => {
     expect(harness.stdout.at(-1)).toContain('does not mean approved');
   });
 
-  it('requires a COMPLETE brand before associating and submitting a campaign', async () => {
+  it('blocks 10DLC campaign submission before AWS or local-state access', async () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
     const statePath = join(directory, 'registration-state.json');
-    await saveState(statePath, {
-      brand: {
-        attachments: {},
-        clientToken: 'brand-token',
-        inputFingerprint: 'a'.repeat(64),
-        kind: 'brand',
-        registrationId: 'registration-brand',
-        submitted: true,
-      },
-      schemaVersion: 2,
-      targetAccount: TARGET_ACCOUNT,
-      targetRegion: TARGET_REGION,
-    });
+    await seedCompletedBrand(statePath);
+    const originalState = await readFile(statePath);
     const api = new FakeApi();
     const harness = testRuntime(api);
 
     await runSubmit(
       'campaign',
-      submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+      submitOptions(directory, dataPath, '', false),
       harness.runtime,
     );
+    expect(harness.stdout.join('\n')).toContain('availability: BLOCKED');
+    expect(harness.stdout.join('\n')).not.toContain(
+      '--confirm-action SUBMIT_10DLC_CAMPAIGN',
+    );
 
-    expect(api.calls).toEqual([
-      'identity',
-      `definitions:${REGISTRATION_TYPES.campaign}`,
-      'describe-registrations:registration-brand',
-      `create:${REGISTRATION_TYPES.campaign}`,
-      'list-associations:registration-campaign',
-      'associate:registration-campaign:registration-brand',
-      'list-associations:registration-campaign',
-      'put:campaign.required',
-      'put:campaignInfo.termsAndConditionsLink',
-      'put:campaignInfo.privacyPolicyLink',
-      'create-attachment',
-      'put:campaignInfo.optInScreenshot',
-      'put:messageSamples.messageSample1',
-      'put:messageSamples.messageSample2',
-      'submit:registration-campaign',
-    ]);
+    await expect(
+      runSubmit(
+        'campaign',
+        submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN'),
+        harness.runtime,
+      ),
+    ).rejects.toThrow('AWS currently does not permit emergency-alert');
+    expect(harness.apiCreations()).toBe(0);
+    expect(api.calls).toEqual([]);
+    expect(await readFile(statePath)).toEqual(originalState);
   });
 
   it('fills the toll-free registration before leasing and submitting', async () => {
@@ -1158,45 +1379,6 @@ describe('state isolation and concurrency', () => {
 });
 
 describe('crash-safe live reconciliation', () => {
-  it('does not replay a campaign association with unresolved intent', async () => {
-    const directory = await fixtureDirectory();
-    const dataPath = await writeData(directory);
-    const statePath = join(directory, 'registration-state.json');
-    await seedCompletedBrand(statePath);
-    const api = new FakeApi();
-    api.associationCrashAfterWrite = true;
-    const options = submitOptions(directory, dataPath, 'SUBMIT_10DLC_CAMPAIGN');
-
-    await expect(
-      runSubmit('campaign', options, testRuntime(api).runtime),
-    ).rejects.toThrow('synthetic crash after association write');
-    expect((await loadState(statePath)).campaign).toMatchObject({
-      associationAttempted: true,
-      registrationId: 'registration-campaign',
-    });
-
-    api.hideAssociations = true;
-    await expect(
-      runSubmit('campaign', options, testRuntime(api).runtime),
-    ).rejects.toThrow('unresolved prior association intent');
-    expect(
-      api.calls.filter((call) => call.startsWith('associate:')),
-    ).toHaveLength(1);
-
-    api.hideAssociations = false;
-    await runSubmit('campaign', options, testRuntime(api).runtime);
-    expect((await loadState(statePath)).campaign).toMatchObject({
-      associatedBrand: true,
-      submitted: true,
-    });
-    expect((await loadState(statePath)).campaign?.associationAttempted).toBe(
-      undefined,
-    );
-    expect(
-      api.calls.filter((call) => call.startsWith('associate:')),
-    ).toHaveLength(1);
-  });
-
   it('does not replay submission while prior intent is live-ambiguous', async () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
@@ -1321,7 +1503,18 @@ describe('truthful status output', () => {
     const api = new FakeApi();
     api.versionOverride = [
       {
-        deniedReasons: ['\u001b[33mDENIED\u001b[0m\nsecond line'],
+        deniedReasons: [
+          {
+            documentationLink:
+              '\u001b[34mhttps://docs.aws.amazon.com/example\u001b[0m\n\u202elink',
+            documentationTitle: '\u001b[35mAWS guidance\u001b[0m\n\u202etitle',
+            longDescription:
+              '\u001b[36mLong remediation\u001b[0m\n\u202edetail',
+            reason: '\u001b[33mDENIED\u001b[0m\nsecond line',
+            shortDescription:
+              '\u001b[32mShort remediation\u001b[0m\n\u202edetail',
+          },
+        ],
         feedback: '\u001b[31mUnsafe\u001b[0m\n\u202ereversed',
         status: 'DENIED',
         versionNumber: 1,
@@ -1355,11 +1548,33 @@ describe('truthful status output', () => {
     const deniedLine =
       harness.stdout.find((line) => line.includes('denied reason:')) ?? '';
     expect(deniedLine).toContain('DENIED second line');
+    for (const [label, expected] of [
+      ['denied short description:', 'Short remediation <U+202E>detail'],
+      ['denied long description:', 'Long remediation <U+202E>detail'],
+      ['denial documentation title:', 'AWS guidance <U+202E>title'],
+      [
+        'denial documentation link:',
+        'https://docs.aws.amazon.com/example <U+202E>link',
+      ],
+    ] as const) {
+      const line =
+        harness.stdout.find((output) => output.includes(label)) ?? '';
+      expect(line).not.toContain('\u001b');
+      expect(line).not.toContain('\n');
+      expect(line).toContain(expected);
+    }
     const fieldLine =
       harness.stdout.find((line) => line.includes('brand field ')) ?? '';
     expect(fieldLine).not.toContain('\u001b');
     expect(fieldLine).not.toContain('\n');
     expect(fieldLine).toContain('FIELD DENIED second line');
+    const fieldFeedbackLine =
+      harness.stdout.find(
+        (line) => line.includes('brand field ') && line.includes(' feedback:'),
+      ) ?? '';
+    expect(fieldFeedbackLine).not.toContain('\u001b');
+    expect(fieldFeedbackLine).not.toContain('\n');
+    expect(fieldFeedbackLine).toContain('Field advice <U+202E>reversed');
   });
 });
 
@@ -1374,6 +1589,17 @@ describe('CLI entrypoint gates', () => {
     expect(
       await submitMain('brand', ['--unknown-flag'], directory, harness.runtime),
     ).toBe(1);
+    expect(
+      await submitMain(
+        'brand',
+        ['synthetic-private@example.invalid'],
+        directory,
+        harness.runtime,
+      ),
+    ).toBe(1);
+    expect(await statusMain(['+12065550100'], directory, harness.runtime)).toBe(
+      1,
+    );
     expect(
       await submitMain(
         'brand',
@@ -1395,5 +1621,12 @@ describe('CLI entrypoint gates', () => {
     expect(await statusMain(['--check'], directory, harness.runtime)).toBe(1);
     expect(harness.apiCreations()).toBe(0);
     expect(api.calls).toEqual([]);
+    expect(harness.stderr.join('\n')).toContain(
+      'Unknown argument (value redacted)',
+    );
+    expect(harness.stderr.join('\n')).not.toContain(
+      'synthetic-private@example.invalid',
+    );
+    expect(harness.stderr.join('\n')).not.toContain('+12065550100');
   });
 });

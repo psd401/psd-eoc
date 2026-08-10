@@ -1,17 +1,33 @@
 import { createHash } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import {
   chmod,
   mkdir,
   open,
   readFile,
+  realpath,
   rename,
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import {
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 
 export const TARGET_ACCOUNT = '<aws-account-id>';
 export const TARGET_REGION = 'us-west-2';
+export const SMS_CLIENT_CONFIG = {
+  maxAttempts: 1,
+  region: TARGET_REGION,
+} as const;
+export const MAX_PROVIDER_ITEMS = 10_000;
+export const MAX_PROVIDER_PAGES = 100;
 
 export const REGISTRATION_TYPES = {
   brand: 'US_TEN_DLC_BRAND_REGISTRATION',
@@ -89,8 +105,16 @@ export interface RegistrationAssociationRecord {
   readonly resourceType: string;
 }
 
+export interface RegistrationDeniedReasonRecord {
+  readonly documentationLink?: string;
+  readonly documentationTitle?: string;
+  readonly longDescription?: string;
+  readonly reason: string;
+  readonly shortDescription: string;
+}
+
 export interface RegistrationVersionRecord {
-  readonly deniedReasons: readonly string[];
+  readonly deniedReasons: readonly RegistrationDeniedReasonRecord[];
   readonly feedback?: string;
   readonly status: string;
   readonly versionNumber: number;
@@ -116,6 +140,64 @@ export function toRegistrationFieldFeedback(
     ...(feedback === undefined ? {} : { feedback }),
     fieldPath,
   };
+}
+
+export function toRegistrationDeniedReason(
+  reason: string | undefined,
+  shortDescription: string | undefined,
+  longDescription?: string,
+  documentationTitle?: string,
+  documentationLink?: string,
+): RegistrationDeniedReasonRecord {
+  if (reason === undefined || reason.length === 0) {
+    throw new Error('AWS response omitted denied Reason.');
+  }
+  if (shortDescription === undefined || shortDescription.length === 0) {
+    throw new Error('AWS response omitted denied ShortDescription.');
+  }
+  return {
+    ...(documentationLink === undefined ? {} : { documentationLink }),
+    ...(documentationTitle === undefined ? {} : { documentationTitle }),
+    ...(longDescription === undefined ? {} : { longDescription }),
+    reason,
+    shortDescription,
+  };
+}
+
+export function nextProviderPageToken(
+  seenTokens: Set<string>,
+  nextToken: unknown,
+): string | undefined {
+  if (nextToken === undefined) return undefined;
+  if (
+    typeof nextToken !== 'string' ||
+    nextToken.length === 0 ||
+    seenTokens.has(nextToken) ||
+    seenTokens.size >= MAX_PROVIDER_PAGES - 1
+  ) {
+    throw new Error(
+      `AWS pagination was cyclic, empty, or exceeded the ${MAX_PROVIDER_PAGES}-page safety limit.`,
+    );
+  }
+  seenTokens.add(nextToken);
+  return nextToken;
+}
+
+export function assertProviderPageCapacity(
+  collectedItems: number,
+  pageItems: number,
+): void {
+  if (
+    !Number.isSafeInteger(collectedItems) ||
+    !Number.isSafeInteger(pageItems) ||
+    collectedItems < 0 ||
+    pageItems < 0 ||
+    collectedItems + pageItems > MAX_PROVIDER_ITEMS
+  ) {
+    throw new Error(
+      `AWS pagination exceeded the ${MAX_PROVIDER_ITEMS}-item safety limit.`,
+    );
+  }
 }
 
 export interface RegistrationAttachmentRecord {
@@ -402,7 +484,7 @@ export async function loadRegistrationData(
   try {
     parsed = JSON.parse(await readFile(absolutePath, 'utf8')) as unknown;
   } catch (error) {
-    throw new Error(`Unable to read registration data at ${absolutePath}.`, {
+    throw new Error('Unable to read the private registration data file.', {
       cause: error,
     });
   }
@@ -490,7 +572,7 @@ export function parseSubmitOptions(
       (name) => argument === name || argument?.startsWith(`${name}=`) === true,
     );
     if (supported === undefined) {
-      throw new TypeError(`Unknown argument: ${argument ?? '<missing>'}`);
+      throw new TypeError('Unknown argument (value redacted).');
     }
     const parsed = flagValue(args, index, supported);
     index += parsed.consumed;
@@ -540,7 +622,7 @@ export function parseStatusOptions(
       (name) => argument === name || argument?.startsWith(`${name}=`) === true,
     );
     if (supported === undefined) {
-      throw new TypeError(`Unknown argument: ${argument ?? '<missing>'}`);
+      throw new TypeError('Unknown argument (value redacted).');
     }
     const parsed = flagValue(args, index, supported);
     index += parsed.consumed;
@@ -1010,6 +1092,9 @@ function assertNoPlaceholders(
   if (containsPlaceholder(data.registrationNamePrefix)) {
     offenders.push('registrationNamePrefix');
   }
+  if (containsPlaceholder(data.tollFree.optOutListName)) {
+    offenders.push('tollFree.optOutListName');
+  }
   for (const field of fields) {
     const values =
       'text' in field && field.text !== undefined
@@ -1226,15 +1311,6 @@ function validateAgainstDefinitions(
   validateKnownConditionalRules(kind, fields);
 }
 
-function resolvedAttachmentPath(
-  dataDirectory: string,
-  attachmentPath: string,
-): string {
-  return isAbsolute(attachmentPath)
-    ? attachmentPath
-    : resolve(dataDirectory, attachmentPath);
-}
-
 function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -1360,43 +1436,109 @@ function sanitizeJpeg(body: Uint8Array, path: string): Uint8Array {
   throw new Error(`Attachment ${path} is missing complete JPEG image data.`);
 }
 
+function isStrictDescendant(root: string, candidate: string): boolean {
+  const pathFromRoot = relative(root, candidate);
+  return (
+    pathFromRoot.length > 0 &&
+    pathFromRoot !== '..' &&
+    !pathFromRoot.startsWith(`..${sep}`) &&
+    !isAbsolute(pathFromRoot)
+  );
+}
+
+async function confinedAttachmentPath(
+  dataDirectory: string,
+  attachmentPath: string,
+  fieldPath: string,
+): Promise<string> {
+  const configuredRoot = resolve(dataDirectory, 'attachments');
+  const configuredPath = resolve(dataDirectory, attachmentPath);
+  const errorMessage = `Attachment for ${terminalSafeText(fieldPath)} must be a relative file beneath the private attachments directory; absolute paths, traversal, and symlink escapes are rejected.`;
+  if (
+    isAbsolute(attachmentPath) ||
+    !isStrictDescendant(configuredRoot, configuredPath)
+  ) {
+    throw new Error(errorMessage);
+  }
+  try {
+    const [canonicalDataDirectory, canonicalRoot, canonicalPath] =
+      await Promise.all([
+        realpath(dataDirectory),
+        realpath(configuredRoot),
+        realpath(configuredPath),
+      ]);
+    if (
+      canonicalRoot !== resolve(canonicalDataDirectory, 'attachments') ||
+      !isStrictDescendant(canonicalRoot, canonicalPath)
+    ) {
+      throw new Error(errorMessage);
+    }
+    return canonicalPath;
+  } catch (error) {
+    if (error instanceof Error && error.message === errorMessage) throw error;
+    throw new Error(errorMessage, { cause: error });
+  }
+}
+
 async function attachmentBody(
   dataDirectory: string,
   attachmentPath: string,
   kind: RegistrationKind,
   fieldPath: string,
 ): Promise<Uint8Array> {
-  const absolutePath = resolvedAttachmentPath(dataDirectory, attachmentPath);
+  const absolutePath = await confinedAttachmentPath(
+    dataDirectory,
+    attachmentPath,
+    fieldPath,
+  );
   const extension = extname(absolutePath).toLowerCase();
+  const attachmentLabel = `for ${terminalSafeText(fieldPath)}`;
   const isTollFreeOptIn =
     kind === 'tollFree' && fieldPath === 'messagingUseCase.optInImage';
   if (isTollFreeOptIn && extension !== '.png') {
     throw new Error(
-      `Toll-free opt-in evidence ${absolutePath} must be a PNG image no larger than 400 KB.`,
+      'Toll-free opt-in evidence must be a PNG image no larger than 400 KB.',
     );
   }
   if (!ALLOWED_ATTACHMENT_EXTENSIONS.has(extension)) {
     throw new Error(
-      `Attachment ${absolutePath} must be JPEG, JPG, or PNG. PDF and S3 inputs are intentionally unsupported so metadata can be stripped locally.`,
+      `Attachment ${attachmentLabel} must be JPEG, JPG, or PNG. PDF and S3 inputs are intentionally unsupported so metadata can be stripped locally.`,
     );
   }
-  const body = await readFile(absolutePath);
+  let body: Uint8Array;
+  try {
+    const attachment = await open(
+      absolutePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    try {
+      if (!(await attachment.stat()).isFile()) {
+        throw new Error('Attachment is not a regular file.');
+      }
+      body = await attachment.readFile();
+    } finally {
+      await attachment.close();
+    }
+  } catch (error) {
+    throw new Error(
+      `Unable to read confined attachment for ${terminalSafeText(fieldPath)}.`,
+      { cause: error },
+    );
+  }
   const maximumBytes = isTollFreeOptIn
     ? MAX_TOLL_FREE_OPT_IN_BYTES
     : MAX_ATTACHMENT_BYTES;
   if (body.byteLength === 0 || body.byteLength > maximumBytes) {
     throw new Error(
-      `Attachment ${absolutePath} must be between 1 byte and ${isTollFreeOptIn ? '400 KB' : '500 KB'}.`,
+      `Attachment ${attachmentLabel} must be between 1 byte and ${isTollFreeOptIn ? '400 KB' : '500 KB'}.`,
     );
   }
   const sanitized =
     extension === '.png'
-      ? sanitizePng(body, absolutePath)
-      : sanitizeJpeg(body, absolutePath);
+      ? sanitizePng(body, attachmentLabel)
+      : sanitizeJpeg(body, attachmentLabel);
   if (sanitized.byteLength === 0 || sanitized.byteLength > maximumBytes) {
-    throw new Error(
-      `Sanitized attachment ${absolutePath} exceeds its size limit.`,
-    );
+    throw new Error(`Sanitized attachment ${attachmentLabel} is too large.`);
   }
   return sanitized;
 }
@@ -1596,6 +1738,32 @@ function registrationName(
   return `${data.registrationNamePrefix} — ${suffix}`;
 }
 
+function assertAwsIdentifiers(
+  data: RegistrationData,
+  kind: RegistrationKind,
+): void {
+  if ([...data.registrationNamePrefix].length > 239) {
+    throw new Error(
+      'registrationNamePrefix must be no longer than 239 characters so every AWS Name tag stays within 256 characters.',
+    );
+  }
+  if (
+    kind === 'tollFree' &&
+    !/^[A-Za-z0-9_-]{1,64}$/u.test(data.tollFree.optOutListName)
+  ) {
+    throw new Error(
+      'tollFree.optOutListName must be 1-64 letters, digits, underscores, or hyphens.',
+    );
+  }
+}
+
+const TEN_DLC_CAMPAIGN_BLOCK =
+  '10DLC campaign submission is blocked: AWS currently does not permit emergency-alert use cases, and PSD EOC traffic must not be relabeled. Use the toll-free path. Re-enabling requires documented provider eligibility and a reviewed code change.';
+
+function assertCampaignSubmissionAvailable(kind: RegistrationKind): void {
+  if (kind === 'campaign') throw new Error(TEN_DLC_CAMPAIGN_BLOCK);
+}
+
 function describePreview(
   kind: RegistrationKind,
   data: RegistrationData,
@@ -1619,7 +1787,14 @@ function describePreview(
   runtime.stdout(
     'Business, tax, contact, and message values are intentionally redacted.',
   );
-  if (kind === 'tollFree') {
+  if (kind === 'campaign') {
+    runtime.stdout(
+      'availability: BLOCKED — AWS currently does not permit emergency-alert traffic through A2P 10DLC.',
+    );
+    runtime.stdout(
+      'PSD EOC traffic must not be relabeled; use the toll-free registration path.',
+    );
+  } else if (kind === 'tollFree') {
     runtime.stdout(
       'CONSEQUENCE: RequestPhoneNumber starts a recurring toll-free number lease charge before registration review.',
     );
@@ -1630,9 +1805,11 @@ function describePreview(
   }
   if (!options.submit) {
     runtime.stdout('No AWS client was created and no AWS request was made.');
-    runtime.stdout(
-      `To submit, add --submit --confirm-account ${TARGET_ACCOUNT} --confirm-region ${TARGET_REGION} --confirm-action ${CONFIRMATIONS[kind]}.`,
-    );
+    if (kind !== 'campaign') {
+      runtime.stdout(
+        `To submit, add --submit --confirm-account ${TARGET_ACCOUNT} --confirm-region ${TARGET_REGION} --confirm-action ${CONFIRMATIONS[kind]}.`,
+      );
+    }
   }
 }
 
@@ -1868,10 +2045,12 @@ export async function runSubmit(
   const data = await loadRegistrationData(options.dataPath);
   describePreview(kind, data, options, runtime);
   if (!options.submit) return;
+  assertCampaignSubmissionAvailable(kind);
 
   assertSubmitAuthorized(kind, options, runtime);
   const fields = fieldsForKind(data, kind);
   assertNoPlaceholders(data, fields);
+  assertAwsIdentifiers(data, kind);
   const preparedAttachments = await prepareAttachments(data, fields, kind);
   const api = await runtime.createApi();
   await assertCallerAccount(api);
@@ -2053,12 +2232,18 @@ export async function runStatus(
     const registrationType = REGISTRATION_TYPES[options.validateData];
     const fields = fieldsForKind(data, options.validateData);
     assertNoPlaceholders(data, fields);
+    assertAwsIdentifiers(data, options.validateData);
     const definitions = await api.describeFieldDefinitions(registrationType);
     validateAgainstDefinitions(options.validateData, fields, definitions);
     await prepareAttachments(data, fields, options.validateData);
     runtime.stdout(
       `${options.validateData} configured fields and sanitized local attachments match the current ${registrationType} schema. No registration was created or submitted.`,
     );
+    if (options.validateData === 'campaign') {
+      runtime.stdout(
+        '10DLC campaign submission remains BLOCKED by current AWS emergency-alert policy; schema validation is not provider eligibility.',
+      );
+    }
     return;
   }
 
@@ -2106,8 +2291,26 @@ export async function runStatus(
       }
       for (const reason of version.deniedReasons) {
         runtime.stdout(
-          `${item.kind} denied reason: ${terminalSafeText(reason)}`,
+          `${item.kind} denied reason: ${terminalSafeText(reason.reason)}`,
         );
+        runtime.stdout(
+          `${item.kind} denied short description: ${terminalSafeText(reason.shortDescription)}`,
+        );
+        if (reason.longDescription !== undefined) {
+          runtime.stdout(
+            `${item.kind} denied long description: ${terminalSafeText(reason.longDescription)}`,
+          );
+        }
+        if (reason.documentationTitle !== undefined) {
+          runtime.stdout(
+            `${item.kind} denial documentation title: ${terminalSafeText(reason.documentationTitle)}`,
+          );
+        }
+        if (reason.documentationLink !== undefined) {
+          runtime.stdout(
+            `${item.kind} denial documentation link: ${terminalSafeText(reason.documentationLink)}`,
+          );
+        }
       }
     } catch {
       runtime.stdout(`${item.kind} latest version: unknown`);
@@ -2130,9 +2333,23 @@ export async function runStatus(
           runtime.stdout(`${item.kind} field feedback: none returned by AWS`);
         }
         for (const field of feedback) {
-          runtime.stdout(
-            `${item.kind} field ${terminalSafeText(field.fieldPath)}: ${field.deniedReason !== undefined ? terminalSafeText(field.deniedReason) : field.feedback !== undefined ? terminalSafeText(field.feedback) : 'no reason returned'}`,
-          );
+          const fieldLabel = `${item.kind} field ${terminalSafeText(field.fieldPath)}`;
+          if (field.deniedReason !== undefined) {
+            runtime.stdout(
+              `${fieldLabel} denied reason: ${terminalSafeText(field.deniedReason)}`,
+            );
+          }
+          if (field.feedback !== undefined) {
+            runtime.stdout(
+              `${fieldLabel} feedback: ${terminalSafeText(field.feedback)}`,
+            );
+          }
+          if (
+            field.deniedReason === undefined &&
+            field.feedback === undefined
+          ) {
+            runtime.stdout(`${fieldLabel}: no reason returned`);
+          }
         }
       } catch {
         runtime.stdout(`${item.kind} field feedback: unknown`);
