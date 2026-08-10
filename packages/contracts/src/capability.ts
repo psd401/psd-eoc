@@ -202,6 +202,38 @@ export const OidcCallbackTransportSchema = z
 export type OidcCallbackTransport = z.infer<typeof OidcCallbackTransportSchema>;
 
 /**
+ * Trusted evidence for a native authorization-code exchange. Raw codes,
+ * verifiers, flow tokens, and provider tokens are removed by the adapter before
+ * this transport can reach the capability layer.
+ */
+export const MobileOidcCodeExchangeTransportSchema = z
+  .object({
+    kind: z.literal('mobile-oidc-code-exchange'),
+    method: z.literal('POST'),
+    stateVerified: z.literal(true),
+    nonceVerified: z.literal(true),
+    pkceVerified: z.literal(true),
+    signatureVerified: z.literal(true),
+  })
+  .strict()
+  .readonly();
+
+/** Trusted native OIDC exchange transport inferred from its schema. */
+export type MobileOidcCodeExchangeTransport = z.infer<
+  typeof MobileOidcCodeExchangeTransportSchema
+>;
+
+/** Complete set of trusted transports that may establish an OIDC session. */
+export const OidcCompletionTransportSchema = z
+  .union([OidcCallbackTransportSchema, MobileOidcCodeExchangeTransportSchema])
+  .readonly();
+
+/** Trusted OIDC completion transport inferred from its schema. */
+export type OidcCompletionTransport = z.infer<
+  typeof OidcCompletionTransportSchema
+>;
+
+/**
  * Owns provenance for the persisted record that issued the currently valid
  * refresh credential. A current credential is either the initial issuance or
  * the successor of one append-only rotation record.
@@ -1021,14 +1053,27 @@ export const AuthenticationCapabilityEnvelopeSchema = z
     capabilityId: z.literal('complete-oidc-sign-in'),
     operation: z.literal('mutation'),
     principal: PreSessionOidcPrincipalSchema,
-    source: z.literal('web'),
+    source: z.enum(['web', 'mobile']),
     requestId: UuidSchema,
     serverTime: TimestampSchema,
     input: z.unknown(),
     idempotencyKey: IdempotencyKeySchema,
-    transport: OidcCallbackTransportSchema,
+    transport: OidcCompletionTransportSchema,
   })
   .strict()
+  .superRefine((envelope, context) => {
+    const expectedTransport =
+      envelope.source === 'web'
+        ? 'oidc-code-callback'
+        : 'mobile-oidc-code-exchange';
+    if (envelope.transport.kind !== expectedTransport) {
+      context.addIssue({
+        code: 'custom',
+        message: 'OIDC completion transport must match its invocation source.',
+        path: ['transport'],
+      });
+    }
+  })
   .readonly();
 
 /** Narrow pre-session OIDC capability envelope inferred from its schema. */

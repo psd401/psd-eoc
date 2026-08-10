@@ -25,14 +25,42 @@ The platform commands generate and build the local native project as needed,
 start Metro, and open the selected simulator or emulator. They do not send
 notifications or connect provider credentials.
 
+## Authentication configuration
+
+Mobile authentication uses one non-secret public build value:
+
+- `EXPO_PUBLIC_PSD_EOC_API_BASE_URL`: the PSD EOC server origin. Production
+  and distributed builds require HTTPS; local development may use a loopback
+  HTTP origin.
+
+Configure this value in the local process environment or the matching EAS
+environment. `EXPO_PUBLIC_` values are compiled into the app and are visible
+to users, so the value must never contain a Google client secret, bearer token,
+provider credential, or other secret. The server's native-auth start endpoint
+returns the public client ID, fixed app redirect, state, and authorization URL;
+none of those values are mobile build configuration. Missing or malformed API
+configuration must fail closed at sign-in. Development and CI use the
+synthetic loopback server and mocked OIDC provider; automated tests must never
+call live Google endpoints.
+
+The `psdeoc` app scheme returns the authorization-code + PKCE flow to the
+native app. OAuth redirects and Face ID cannot be validated in Expo Go; use a
+development build. SecureStore's device authentication behavior also requires
+a real iOS or Android device for release evidence because simulator and
+emulator behavior is not equivalent. Device passcode fallback is provided by
+the operating system; PSD EOC does not define or store a custom PIN.
+
 Run the mobile checks from the repository root:
 
 ```sh
+bun install --frozen-lockfile
 bun run --cwd packages/mobile lint
 bun run --cwd packages/mobile typecheck
 bun run --cwd packages/mobile test
 bun run --cwd packages/mobile expo:check
+bun run --cwd packages/mobile react:check
 bun run --cwd packages/mobile prebuild:check
+bun run check
 ```
 
 `prebuild:check` runs `expo prebuild --no-install`, then normalizes generated
@@ -76,6 +104,16 @@ profile, `expo-splash-screen` supplies the generated launch screen, and
 `expo-system-ui` applies the configured platform color scheme.
 `expo-notifications` supplies native notification configuration plus the local
 Android channel API. None of these dependencies enables a live send by itself.
+
+`expo-auth-session` owns the native browser authorization-code + PKCE flow,
+and its required `expo-crypto` peer generates the PKCE material without a
+client secret. `expo-secure-store` encrypts the opaque PSD EOC session bearer
+in platform storage and excludes its Android entries from unusable restored
+backups. `expo-local-authentication` provides the operating-system Face ID,
+Touch ID, Android biometric, and device-passcode prompt. Both native config
+plugins use the same plain-language Face ID permission. `expo-web-browser` is
+an AuthSession transitive dependency; the native app does not import it
+directly.
 
 `react-dom` is pinned beside mobile React so Expo resolves a matched 19.2.3
 runtime. The server uses the same exact React pair so Bun cannot make Next and

@@ -60,6 +60,7 @@ function compatibleChain(): readonly [SecurityAuditEntry, SecurityAuditEntry] {
       subjectDigest: 'a'.repeat(64),
       reasonCode: 'UNKNOWN_USER',
       userId: null,
+      source: 'web',
     },
     null,
   );
@@ -84,6 +85,50 @@ function fourEntryChain(): readonly [
 }
 
 describe('security audit hash chain', () => {
+  test('preserves native source for post-gate denial and successful sign-in facts', () => {
+    const denial = buildAccessGateAuditEntry(
+      {
+        outcome: 'denied',
+        requestId: REQUEST_ONE,
+        occurredAt: OCCURRED_AT,
+        subjectDigest: 'b'.repeat(64),
+        reasonCode: 'SESSION_REPLAY_REJECTED',
+        userId: REQUEST_THREE,
+        source: 'mobile',
+      },
+      null,
+    );
+    const success = buildAccessGateAuditEntry(
+      {
+        outcome: 'success',
+        requestId: REQUEST_TWO,
+        occurredAt: OCCURRED_AT,
+        userId: REQUEST_THREE,
+        sessionId: REQUEST_FOUR,
+        source: 'mobile',
+      },
+      { sequence: denial.sequence, entryHash: denial.entryHash },
+    );
+
+    expect(denial).toMatchObject({
+      category: 'access-denial',
+      outcome: 'denied',
+      source: 'mobile',
+      target: { kind: 'user', id: REQUEST_THREE },
+      reasonCode: 'SESSION_REPLAY_REJECTED',
+    });
+    expect(success).toMatchObject({
+      category: 'sign-in',
+      outcome: 'success',
+      source: 'mobile',
+      target: { kind: 'session', id: REQUEST_FOUR },
+    });
+    expect(verifySecurityAuditEntries([denial, success])).toEqual({
+      valid: true,
+      verifiedThroughSequence: 2,
+    });
+  });
+
   test('verifies existing sign-in entries and generic entries together', () => {
     const entries = compatibleChain();
     expect(entries[1].sequence).toBe(2);
