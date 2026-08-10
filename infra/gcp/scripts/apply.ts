@@ -977,7 +977,8 @@ export function validateStateBucket(
     bucket.uniform_bucket_level_access !== true ||
     (bucket.requester_pays !== undefined && bucket.requester_pays !== false) ||
     bucket.versioning_enabled !== true ||
-    bucket.default_event_based_hold === true ||
+    (bucket.default_event_based_hold !== undefined &&
+      bucket.default_event_based_hold !== false) ||
     (bucket.retention_policy !== undefined &&
       bucket.retention_policy !== null) ||
     !labelsMatch ||

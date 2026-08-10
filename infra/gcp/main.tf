@@ -112,6 +112,7 @@ resource "google_storage_bucket" "terraform_state" {
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
   requester_pays              = false
+  default_event_based_hold    = false
   force_destroy               = false
   deletion_policy             = "PREVENT"
   labels                      = local.application_labels

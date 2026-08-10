@@ -73,6 +73,7 @@ import {
   withValidatedWorkspaceClientCopy,
 } from './scripts/operator-access';
 import {
+  assertCurrentStoredCredentialEvidence,
   cleanupCredentialArtifacts,
   createdKeyIsVisible,
   parseCreatedCredential,
@@ -113,7 +114,10 @@ import {
   terraformProjectNumber,
 } from './scripts/store-oauth-client';
 import {
+  assertVerifiedStoredCredentialUnchanged,
+  readVerifiedStoredCredentialEvidence,
   redactedFetch,
+  sameVerifiedStoredCredential,
   validateStoredCredential,
 } from './scripts/verify-groups-readonly';
 
@@ -192,6 +196,7 @@ const validBilling = {
 } as const;
 
 const validBucket = {
+  default_event_based_hold: false,
   default_storage_class: 'STANDARD',
   labels: validProject.labels,
   lifecycle_config: {
@@ -2971,12 +2976,16 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(validateStateBucket(validBucket, validBucketPolicy)).toBe(
       'managed-policy',
     );
-    const { requester_pays: requesterPays, ...withoutRequesterPays } =
-      validBucket;
+    const {
+      default_event_based_hold: defaultEventBasedHold,
+      requester_pays: requesterPays,
+      ...withoutExplicitFalseValues
+    } = validBucket;
+    expect(defaultEventBasedHold).toBe(false);
     expect(requesterPays).toBe(false);
-    expect(validateStateBucket(withoutRequesterPays, validBucketPolicy)).toBe(
-      'managed-policy',
-    );
+    expect(
+      validateStateBucket(withoutExplicitFalseValues, validBucketPolicy),
+    ).toBe('managed-policy');
     expect(validateStateBucket(validBucket, bootstrapBucketPolicy, true)).toBe(
       'bootstrap-policy',
     );
@@ -3003,8 +3012,17 @@ describe('fail-closed bootstrap and process behavior', () => {
         ),
       ).toThrow('private, versioned');
     }
+    for (const default_event_based_hold of [true, null, 0, 'false', {}, []]) {
+      expect(() =>
+        validateStateBucket(
+          { ...validBucket, default_event_based_hold },
+          validBucketPolicy,
+        ),
+      ).toThrow('private, versioned');
+    }
     for (const path of ['main.tf', 'bootstrap/main.tf']) {
       expect(read(path)).toMatch(/requester_pays\s+= false/u);
+      expect(read(path)).toMatch(/default_event_based_hold\s+= false/u);
     }
     for (const condition of [
       { age: 90, isLive: false },
@@ -4238,24 +4256,28 @@ describe('fail-closed bootstrap and process behavior', () => {
       provisionPreStoreKey,
     );
     const credentialStore = provisionMain.indexOf(
-      'const writeOutcome = await storeCredential(secretValue)',
+      'const storedVersionId = await storeCredential(secretValue)',
       provisionPreStoreAws,
+    );
+    const provisionInitialStoredCredential = provisionMain.indexOf(
+      'assertCurrentStoredCredential(secretValue, storedVersionId)',
+      credentialStore,
     );
     const storedOutcome = provisionMain.indexOf(
       "storageOutcome = 'stored'",
-      credentialStore,
+      provisionInitialStoredCredential,
     );
     const provisionFinalGoogle = provisionMain.indexOf(
       'await assertGoogleProvisioningAuthorization(contract)',
       storedOutcome,
     );
-    const provisionFinalAws = provisionMain.indexOf(
-      'assertGroupsSecretDestination()',
-      provisionFinalGoogle,
-    );
     const provisionFinalKey = provisionMain.indexOf(
       'readUserManagedKeyCreatedAt(contract, createdKeyId)',
-      provisionFinalAws,
+      provisionFinalGoogle,
+    );
+    const provisionFinalStoredCredential = provisionMain.indexOf(
+      'assertCurrentStoredCredential(secretValue, storedVersionId)',
+      provisionFinalKey,
     );
     expect(provisionPreflightGoogle).toBeGreaterThan(-1);
     expect(provisionPreflightGoogle).toBeLessThan(provisionConfirmation);
@@ -4269,9 +4291,10 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(provisionPreStoreKey).toBeGreaterThan(provisionPreStoreGoogle);
     expect(provisionPreStoreAws).toBeGreaterThan(provisionPreStoreKey);
     expect(credentialStore).toBeGreaterThan(provisionPreStoreAws);
+    expect(provisionInitialStoredCredential).toBeGreaterThan(credentialStore);
     expect(provisionFinalGoogle).toBeGreaterThan(storedOutcome);
-    expect(provisionFinalAws).toBeGreaterThan(provisionFinalGoogle);
-    expect(provisionFinalKey).toBeGreaterThan(provisionFinalAws);
+    expect(provisionFinalKey).toBeGreaterThan(provisionFinalGoogle);
+    expect(provisionFinalStoredCredential).toBeGreaterThan(provisionFinalKey);
     expect(provisioner).toMatch(
       /attemptWrite: \(\) => \{\s*assertGroupsSecretDestination\(\);\s*return putSecretValue/u,
     );
@@ -4280,6 +4303,12 @@ describe('fail-closed bootstrap and process behavior', () => {
     );
     expect(provisioner).toMatch(
       /function inspectGroupsSecretDestination\(\): boolean \{\s*assertAwsAccount\(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION\);\s*return awsSecretExists/u,
+    );
+    expect(provisioner).toMatch(
+      /function assertCurrentStoredCredential[^]*assertCurrentStoredCredentialEvidence\(expected, \{\s*assertDestination: assertGroupsSecretDestination,[^]*readSecretValue\([^]*versionIsCurrent: \(\) =>\s*secretVersionIsCurrent/u,
+    );
+    expect(provisioner).toContain(
+      'return stored ? clientRequestToken : undefined;',
     );
     expect(provisioner).toMatch(
       /async function readKeylessGoogleProvisioningContract[^]*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*const contract = readGroupsReaderContract\(\);\s*await assertExactLiveGroupsReaderRole\(contract\);\s*assertRosterReaderCredentialBoundary\(contract\);\s*const existingKeys = listUserManagedKeys\(contract\);\s*if \(existingKeys\.size > 0\)/u,
@@ -4370,6 +4399,61 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(revoker).toMatch(
       /async function readRevocationContract[^]*assertActiveGcloudAccount\(TERRAFORM_ADMIN\);\s*await assertApplicationDefaultIdentity\(TERRAFORM_ADMIN\);\s*const contract = readGroupsReaderContract\(\);\s*assertRosterReaderCredentialBoundary\(contract\);\s*assertGroupsSecretDestination\(\);\s*const credential = readSecretValue[^]*assertGroupsSecretDestination\(\);\s*const privateKeyId = requiredString[^]*const liveKeys = listUserManagedKeys\(contract\)[^]*readRevocableUserManagedKeyCreatedAt[^]*validateStoredCredential[^]*assertRosterReaderCredentialBoundary\(contract\);\s*assertGroupsSecretDestination\(\);\s*return \{ contract, privateKeyId \};/u,
     );
+  });
+
+  test('proves the exact stored version and contents through final readback', () => {
+    const expected = {
+      client_email: 'psd-eoc-roster-reader@psd401-eoc.iam.gserviceaccount.com',
+      private_key: 'synthetic-private-key',
+      private_key_id: 'a'.repeat(40),
+    } as const;
+    const events: string[] = [];
+    const versions = [true, true];
+    expect(() =>
+      assertCurrentStoredCredentialEvidence(expected, {
+        assertDestination: () => events.push('destination'),
+        readCurrentCredential: () => {
+          events.push('credential');
+          return { ...expected };
+        },
+        versionIsCurrent: () => {
+          events.push('version');
+          return versions.shift() ?? false;
+        },
+      }),
+    ).not.toThrow();
+    expect(events).toEqual([
+      'destination',
+      'version',
+      'credential',
+      'destination',
+      'version',
+    ]);
+
+    const assertRejectedVersions = (
+      versions: boolean[],
+      message: string,
+    ): void => {
+      expect(() =>
+        assertCurrentStoredCredentialEvidence(expected, {
+          assertDestination: () => {},
+          readCurrentCredential: () => ({ ...expected }),
+          versionIsCurrent: () => versions.shift() ?? false,
+        }),
+      ).toThrow(message);
+    };
+    assertRejectedVersions([false], 'no longer AWSCURRENT');
+    assertRejectedVersions([true, false], 'changed during readback');
+    expect(() =>
+      assertCurrentStoredCredentialEvidence(expected, {
+        assertDestination: () => {},
+        readCurrentCredential: () => ({
+          ...expected,
+          private_key: 'concurrently-rotated-private-key',
+        }),
+        versionIsCurrent: () => true,
+      }),
+    ).toThrow('exact roster-reader credential');
   });
 
   test('retries an ambiguous secret write and retains unresolved ambiguity', async () => {
@@ -4565,6 +4649,95 @@ describe('Groups least-privilege contracts', () => {
         credentialCreatedAt,
       ),
     ).toThrow('does not match');
+
+    const verifiedCredential = {
+      credential,
+      credentialCreatedAt,
+      privateKeyId: credential.private_key_id,
+    } as const;
+    const stableReads = [{ ...credential }, { ...credential }];
+    const observedCredential = readVerifiedStoredCredentialEvidence({
+      listLiveKeyIds: () => new Set([credential.private_key_id]),
+      readCurrentCredential: () => stableReads.shift() ?? credential,
+      readKeyCreatedAt: () => credentialCreatedAt,
+      validateCredential: (observed, observedCreatedAt) =>
+        validateStoredCredential(observed, contract, group, observedCreatedAt),
+    });
+    expect(observedCredential).toEqual(verifiedCredential);
+    expect(
+      sameVerifiedStoredCredential(verifiedCredential, {
+        ...verifiedCredential,
+        credential: { ...credential },
+      }),
+    ).toBe(true);
+    for (const changed of [
+      {
+        ...verifiedCredential,
+        credential: { ...credential, private_key: 'changed-private-key' },
+      },
+      {
+        ...verifiedCredential,
+        credential: { ...credential, unexpected: true },
+      },
+      { ...verifiedCredential, credentialCreatedAt: new Date(0).toISOString() },
+      { ...verifiedCredential, privateKeyId: 'b'.repeat(40) },
+    ]) {
+      expect(sameVerifiedStoredCredential(verifiedCredential, changed)).toBe(
+        false,
+      );
+      expect(() =>
+        assertVerifiedStoredCredentialUnchanged(verifiedCredential, changed),
+      ).toThrow('changed during live verification');
+    }
+
+    const rotatedCredential = {
+      ...credential,
+      credential_created_at: new Date(Date.now() + 1_000).toISOString(),
+      private_key: 'concurrently-rotated-private-key',
+      private_key_id: 'b'.repeat(40),
+    } as const;
+    const rotatedReads = [{ ...rotatedCredential }, { ...rotatedCredential }];
+    const rotatedObservation = readVerifiedStoredCredentialEvidence({
+      listLiveKeyIds: () => new Set([rotatedCredential.private_key_id]),
+      readCurrentCredential: () => rotatedReads.shift() ?? rotatedCredential,
+      readKeyCreatedAt: () => rotatedCredential.credential_created_at,
+      validateCredential: (observed, observedCreatedAt) =>
+        validateStoredCredential(observed, contract, group, observedCreatedAt),
+    });
+    expect(() =>
+      assertVerifiedStoredCredentialUnchanged(
+        observedCredential,
+        rotatedObservation,
+      ),
+    ).toThrow('changed during live verification');
+
+    for (const liveKeyIds of [
+      new Set<string>(),
+      new Set(['b'.repeat(40)]),
+      new Set([credential.private_key_id, 'b'.repeat(40)]),
+    ]) {
+      expect(() =>
+        readVerifiedStoredCredentialEvidence({
+          listLiveKeyIds: () => liveKeyIds,
+          readCurrentCredential: () => credential,
+          readKeyCreatedAt: () => credentialCreatedAt,
+          validateCredential: () => {},
+        }),
+      ).toThrow('exactly the one user-managed key');
+    }
+
+    const changingReads = [
+      credential,
+      { ...credential, private_key: 'concurrently-rotated-private-key' },
+    ];
+    expect(() =>
+      readVerifiedStoredCredentialEvidence({
+        listLiveKeyIds: () => new Set([credential.private_key_id]),
+        readCurrentCredential: () => changingReads.shift() ?? credential,
+        readKeyCreatedAt: () => credentialCreatedAt,
+        validateCredential: () => {},
+      }),
+    ).toThrow('changed while its Google key was validated');
   });
 
   test('keeps a generated Google private key in memory only', () => {
@@ -4881,10 +5054,10 @@ describe('Groups least-privilege contracts', () => {
       3,
     );
     expect(provisioner).toMatch(
-      /await assertGoogleProvisioningAuthorization\(contract\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)[^]*assertGroupsSecretDestination\(\);\s*const writeOutcome = await storeCredential/u,
+      /await assertGoogleProvisioningAuthorization\(contract\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)[^]*assertGroupsSecretDestination\(\);\s*storageOutcome = 'unknown';\s*const storedVersionId = await storeCredential/u,
     );
     expect(provisioner).toMatch(
-      /storageOutcome = 'stored';\s*await assertGoogleProvisioningAuthorization\(contract\);\s*assertGroupsSecretDestination\(\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)/u,
+      /storageOutcome = 'stored';\s*await assertGoogleProvisioningAuthorization\(contract\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)[^]*assertCurrentStoredCredential\(secretValue, storedVersionId\)/u,
     );
   });
 
@@ -5111,12 +5284,28 @@ describe('Groups least-privilege contracts', () => {
     const finalRoleCheck = verifier.lastIndexOf(
       'await assertExactLiveGroupsReaderRole(contract, fetcher);',
     );
+    const initialCredentialRead = verifier.indexOf(
+      'const initialCredential = readVerifiedStoredCredential',
+    );
+    const finalCredentialRead = verifier.indexOf(
+      'const finalCredential = readVerifiedStoredCredential',
+    );
+    const finalCredentialComparison = verifier.indexOf(
+      'assertVerifiedStoredCredentialUnchanged(initialCredential, finalCredential)',
+    );
     const pass = verifier.indexOf("console.log(\n    'PASS:");
     expect(firstRoleCheck).toBeGreaterThan(-1);
     expect(firstRoleCheck).toBeLessThan(membershipRead);
+    expect(initialCredentialRead).toBeLessThan(membershipRead);
     expect(finalCredentialBoundary).toBeGreaterThan(membershipRead);
     expect(finalRoleCheck).toBeGreaterThan(finalCredentialBoundary);
+    expect(finalCredentialRead).toBeGreaterThan(finalRoleCheck);
+    expect(finalCredentialComparison).toBeGreaterThan(finalCredentialRead);
+    expect(finalCredentialComparison).toBeLessThan(pass);
     expect(finalRoleCheck).toBeLessThan(pass);
+    expect(verifier).toMatch(
+      /function readVerifiedStoredCredential[^]*return readVerifiedStoredCredentialEvidence\(\{[^]*listUserManagedKeys[^]*readSecretValue[^]*readUserManagedKeyCreatedAt[^]*validateStoredCredential/u,
+    );
   });
 });
 

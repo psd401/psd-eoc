@@ -139,9 +139,10 @@ legacy project convenience bindings with a bucket. The same saved bootstrap
 plan replaces them with the single administrator Object Admin binding before
 the main backend is initialized. An interrupted run can adopt only that exact
 known initial policy and immediately finish the replacement; any other policy
-fails closed. Requester Pays is explicitly disabled, and recovery rejects an
-enabled or malformed Requester Pays value before treating the bucket as usable
-by the backend. Bucket creation waits for all four bootstrap APIs. If an existing
+fails closed. Requester Pays and default event-based holds are explicitly
+disabled. Recovery accepts only omitted or literal-false metadata for either
+setting and rejects enabled or malformed values before treating the bucket as
+usable by the backend. Bucket creation waits for all four bootstrap APIs. If an existing
 bootstrap or managed bucket is later found with Cloud Resource Manager or Cloud
 Billing disabled, the helper first uses Storage alone to validate the bucket's
 complete standardized metadata, the raw `projectNumber` from a listing scoped
@@ -415,7 +416,9 @@ write deletes only the newly identified key; an ambiguous AWS result is read
 back before cleanup, and ambiguous key identity is never deleted. After exact
 AWS readback marks the credential stored, the final remote check again requires
 the same key to be the sole active user-managed key with the same creation
-timestamp. A missing, changed, or concurrent key fails the run but retains the
+timestamp, then proves that the exact idempotency-token version remains
+`AWSCURRENT` and its current contents remain exact. A missing, changed, or
+concurrent key or AWS current-version change fails the run but retains the
 AWS-bound key and any unknown key for explicit reconciliation.
 
 The project-policy check rejects the exact service-account member plus direct
@@ -445,8 +448,10 @@ and `memberships.list` GETs, requests `fields=nextPageToken` for the membership
 proof, discards the response body, and prints no group, member, token, or
 credential value. Immediately before PASS it rereads the complete direct and
 indirect Workspace assignment set, after the existing final GCP IAM boundary
-check, so a concurrent broader or indirect grant fails closed instead of
-producing stale live-role evidence.
+check, then rereads `AWSCURRENT` around exact sole-key metadata validation and
+requires the complete credential to remain identical to the one that signed the
+successful request. A concurrent role, key, or current-secret change therefore
+fails closed instead of producing stale live evidence.
 
 ### Runtime compatibility boundary
 
