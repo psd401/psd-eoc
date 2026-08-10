@@ -359,15 +359,7 @@ const hasAnyToken = (
   choices: ReadonlySet<string>,
 ): boolean => tokens.some((token) => choices.has(token));
 
-const NON_STAFF_SUBSTRING_EXCEPTIONS = new Set([
-  // `classified` is a staff subset and must stay visible as uncertain rather
-  // than being omitted as though it were a student/family population.
-  'class',
-]);
-
-const COMPACT_NON_STAFF_MARKERS = [...NON_STAFF_MARKERS].filter(
-  (marker) => !NON_STAFF_SUBSTRING_EXCEPTIONS.has(marker),
-);
+const COMPACT_NON_STAFF_MARKERS = [...NON_STAFF_MARKERS];
 
 const COMPACT_WORD_BOUNDARIES = [
   'all',
@@ -2658,6 +2650,14 @@ const runSelfTest = async (): Promise<void> => {
     ),
     parent,
   );
+  const facilityPrefixedClass = parseCloudGroup(
+    rawGroup(
+      'synthetic-facility-prefixed-class-population',
+      'synthetic.nbeclassstaff@psd401.net',
+      'NBE Staff',
+    ),
+    parent,
+  );
   const compactPopulationDraft = buildDraft(
     [facilities[0]!],
     [
@@ -2669,13 +2669,14 @@ const runSelfTest = async (): Promise<void> => {
       facilityPrefixedGrade,
       facilityPrefixedOrdinalGrade,
       facilityPrefixedKindergarten,
+      facilityPrefixedClass,
     ],
     1,
     generatedAt,
   );
   assertSelfTest(
     compactPopulationDraft.inventoryGroups.length === 0 &&
-      compactPopulationDraft.report.omittedNonStaffGroupCount === 8 &&
+      compactPopulationDraft.report.omittedNonStaffGroupCount === 9 &&
       compactPopulationDraft.buildingMappings[0]?.createGroupSource === null,
     'bounded compact population markers after known prefixes are hard excluded',
   );
@@ -2711,6 +2712,11 @@ const runSelfTest = async (): Promise<void> => {
       'synthetic.nbe.staffkidney@psd401.net',
       'NBE Staff Kidney',
     ),
+    rawGroup(
+      'synthetic-classified-staff',
+      'synthetic.nbeclassifiedstaff@psd401.net',
+      'NBE Classified Staff',
+    ),
   ].map((group) => parseCloudGroup(group, parent));
   const legitimateSubstringDraft = buildDraft(
     [facilities[0]!],
@@ -2719,7 +2725,7 @@ const runSelfTest = async (): Promise<void> => {
     generatedAt,
   );
   assertSelfTest(
-    legitimateSubstringDraft.inventoryGroups.length === 6 &&
+    legitimateSubstringDraft.inventoryGroups.length === 7 &&
       legitimateSubstringDraft.report.omittedNonStaffGroupCount === 0,
     'incidental population-marker substrings never hide staff groups',
   );
