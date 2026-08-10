@@ -201,7 +201,7 @@ function storedCredentialValue(
 
 async function storeCredential(
   secretValue: Readonly<Record<string, unknown>>,
-): Promise<'stored' | 'unknown'> {
+): Promise<string | undefined> {
   const clientRequestToken = randomUUID();
   const stored = await reconcileIdempotentSecretWrite({
     attemptWrite: () => {
@@ -225,17 +225,13 @@ async function storeCredential(
       });
     },
   });
-  return stored ? 'stored' : 'unknown';
+  return stored ? clientRequestToken : undefined;
 }
 
 function assertStoredCredential(
   expected: Readonly<Record<string, unknown>>,
+  actual: Readonly<Record<string, unknown>>,
 ): void {
-  const actual = readSecretValue({
-    profile: AWS_PROFILE,
-    region: AWS_REGION,
-    secretName: SECRET_NAME,
-  });
   const expectedNames = Object.keys(expected).sort();
   const actualNames = Object.keys(actual).sort();
   if (
@@ -248,6 +244,53 @@ function assertStoredCredential(
       'AWS did not read back the exact roster-reader credential contract.',
     );
   }
+}
+
+export interface CurrentStoredCredentialProbe {
+  readonly assertDestination: () => void;
+  readonly readCurrentCredential: () => Readonly<Record<string, unknown>>;
+  readonly versionIsCurrent: () => boolean;
+}
+
+export function assertCurrentStoredCredentialEvidence(
+  expected: Readonly<Record<string, unknown>>,
+  probe: CurrentStoredCredentialProbe,
+): void {
+  probe.assertDestination();
+  if (!probe.versionIsCurrent()) {
+    throw new Error(
+      'The stored roster-reader credential version is no longer AWSCURRENT.',
+    );
+  }
+  assertStoredCredential(expected, probe.readCurrentCredential());
+  probe.assertDestination();
+  if (!probe.versionIsCurrent()) {
+    throw new Error(
+      'The stored roster-reader credential version changed during readback.',
+    );
+  }
+}
+
+function assertCurrentStoredCredential(
+  expected: Readonly<Record<string, unknown>>,
+  storedVersionId: string,
+): void {
+  assertCurrentStoredCredentialEvidence(expected, {
+    assertDestination: assertGroupsSecretDestination,
+    readCurrentCredential: () =>
+      readSecretValue({
+        profile: AWS_PROFILE,
+        region: AWS_REGION,
+        secretName: SECRET_NAME,
+      }),
+    versionIsCurrent: () =>
+      secretVersionIsCurrent({
+        clientRequestToken: storedVersionId,
+        profile: AWS_PROFILE,
+        region: AWS_REGION,
+        secretName: SECRET_NAME,
+      }),
+  });
 }
 
 export function cleanupCredentialArtifacts(options: {
@@ -377,15 +420,15 @@ async function main(): Promise<void> {
       );
     }
     assertGroupsSecretDestination();
-    const writeOutcome = await storeCredential(secretValue);
     storageOutcome = 'unknown';
-    if (writeOutcome === 'unknown') {
+    const storedVersionId = await storeCredential(secretValue);
+    if (storedVersionId === undefined) {
       throw new Error(
         'AWS credential storage could not be verified; the remote key is retained for manual reconciliation.',
       );
     }
     try {
-      assertStoredCredential(secretValue);
+      assertCurrentStoredCredential(secretValue, storedVersionId);
     } catch {
       throw new Error(
         'AWS credential readback could not be verified; the remote key is retained for manual reconciliation.',
@@ -393,13 +436,19 @@ async function main(): Promise<void> {
     }
     storageOutcome = 'stored';
     await assertGoogleProvisioningAuthorization(contract);
-    assertGroupsSecretDestination();
     if (
       readUserManagedKeyCreatedAt(contract, createdKeyId) !==
       credentialCreatedAt
     ) {
       throw new Error(
         'Google did not preserve the exact sole AWS-stored roster-reader key; manual reconciliation is required.',
+      );
+    }
+    try {
+      assertCurrentStoredCredential(secretValue, storedVersionId);
+    } catch {
+      throw new Error(
+        'The exact AWS credential version or contents changed after final Google verification; the remote key is retained for manual reconciliation.',
       );
     }
   } catch (error) {

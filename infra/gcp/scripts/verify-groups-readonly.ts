@@ -1,4 +1,5 @@
 import { createSign, timingSafeEqual } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import { assertExactLiveGroupsReaderRole } from './configure-workspace-role';
 import {
@@ -104,6 +105,103 @@ function serviceAccountAssertion(
   return `${unsigned}.${base64Url(signer.sign(privateKey))}`;
 }
 
+export interface VerifiedStoredCredential {
+  readonly credential: Readonly<Record<string, unknown>>;
+  readonly credentialCreatedAt: string;
+  readonly privateKeyId: string;
+}
+
+export function sameVerifiedStoredCredential(
+  left: VerifiedStoredCredential,
+  right: VerifiedStoredCredential,
+): boolean {
+  return (
+    left.privateKeyId === right.privateKeyId &&
+    left.credentialCreatedAt === right.credentialCreatedAt &&
+    isDeepStrictEqual(left.credential, right.credential)
+  );
+}
+
+export function assertVerifiedStoredCredentialUnchanged(
+  initial: VerifiedStoredCredential,
+  final: VerifiedStoredCredential,
+): void {
+  if (!sameVerifiedStoredCredential(initial, final)) {
+    throw new Error(
+      'The current AWS-backed roster-reader credential changed during live verification.',
+    );
+  }
+}
+
+export interface StoredCredentialEvidenceProbe {
+  readonly listLiveKeyIds: () => ReadonlySet<string>;
+  readonly readCurrentCredential: () => Readonly<Record<string, unknown>>;
+  readonly readKeyCreatedAt: (privateKeyId: string) => string;
+  readonly validateCredential: (
+    credential: Readonly<Record<string, unknown>>,
+    credentialCreatedAt: string,
+  ) => void;
+}
+
+export function readVerifiedStoredCredentialEvidence(
+  probe: StoredCredentialEvidenceProbe,
+): VerifiedStoredCredential {
+  const credential = probe.readCurrentCredential();
+  const privateKeyId = requiredString(credential, 'private_key_id');
+  const liveKeys = probe.listLiveKeyIds();
+  if (liveKeys.size !== 1 || !liveKeys.has(privateKeyId)) {
+    throw new Error(
+      'The roster-reader must have exactly the one user-managed key stored in AWS.',
+    );
+  }
+  const credentialCreatedAt = probe.readKeyCreatedAt(privateKeyId);
+  probe.validateCredential(credential, credentialCreatedAt);
+  const confirmedCredential = probe.readCurrentCredential();
+  if (!isDeepStrictEqual(confirmedCredential, credential)) {
+    throw new Error(
+      'The current AWS-backed roster-reader credential changed while its Google key was validated.',
+    );
+  }
+  return { credential: confirmedCredential, credentialCreatedAt, privateKeyId };
+}
+
+function readVerifiedStoredCredential(
+  contract: GroupsReaderContract,
+  approvedGroup: string,
+): VerifiedStoredCredential {
+  assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
+  if (
+    !awsSecretExists({
+      expectedAccountId: AWS_ACCOUNT_ID,
+      profile: AWS_PROFILE,
+      region: AWS_REGION,
+      secretName: SECRET_NAME,
+    })
+  ) {
+    throw new Error(
+      'The retained AWS Groups credential secret does not exist.',
+    );
+  }
+  return readVerifiedStoredCredentialEvidence({
+    listLiveKeyIds: () => listUserManagedKeys(contract),
+    readCurrentCredential: () =>
+      readSecretValue({
+        profile: AWS_PROFILE,
+        region: AWS_REGION,
+        secretName: SECRET_NAME,
+      }),
+    readKeyCreatedAt: (privateKeyId) =>
+      readUserManagedKeyCreatedAt(contract, privateKeyId),
+    validateCredential: (credential, credentialCreatedAt) =>
+      validateStoredCredential(
+        credential,
+        contract,
+        approvedGroup,
+        credentialCreatedAt,
+      ),
+  });
+}
+
 export async function redactedFetch(
   fetcher: Fetcher,
   input: string | URL,
@@ -127,43 +225,12 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   const contract = readGroupsReaderContract();
   await assertExactLiveGroupsReaderRole(contract, fetcher);
   assertRosterReaderCredentialBoundary(contract);
-  assertAwsAccount(AWS_PROFILE, AWS_ACCOUNT_ID, AWS_REGION);
-  if (
-    !awsSecretExists({
-      expectedAccountId: AWS_ACCOUNT_ID,
-      profile: AWS_PROFILE,
-      region: AWS_REGION,
-      secretName: SECRET_NAME,
-    })
-  ) {
-    throw new Error(
-      'The retained AWS Groups credential secret does not exist.',
-    );
-  }
-  const credential = readSecretValue({
-    profile: AWS_PROFILE,
-    region: AWS_REGION,
-    secretName: SECRET_NAME,
-  });
-  const privateKeyId = requiredString(credential, 'private_key_id');
-  const liveKeys = listUserManagedKeys(contract);
-  if (liveKeys.size !== 1 || !liveKeys.has(privateKeyId)) {
-    throw new Error(
-      'The roster-reader must have exactly the one user-managed key stored in AWS.',
-    );
-  }
-  const liveCredentialCreatedAt = readUserManagedKeyCreatedAt(
-    contract,
-    privateKeyId,
-  );
-  validateStoredCredential(
-    credential,
+  const initialCredential = readVerifiedStoredCredential(
     contract,
     approvedGroup,
-    liveCredentialCreatedAt,
   );
 
-  const assertion = serviceAccountAssertion(credential);
+  const assertion = serviceAccountAssertion(initialCredential.credential);
   const tokenResponse = await redactedFetch(
     fetcher,
     TOKEN_ENDPOINT,
@@ -242,6 +309,8 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
 
   assertRosterReaderCredentialBoundary(contract);
   await assertExactLiveGroupsReaderRole(contract, fetcher);
+  const finalCredential = readVerifiedStoredCredential(contract, approvedGroup);
+  assertVerifiedStoredCredentialUnchanged(initialCredential, finalCredential);
 
   console.log(
     'PASS: the live Workspace assignment is exactly direct Groups Reader with no indirect role, and the service account performed approved staff-group lookup and membership-list authorization with one read-only OAuth scope; Google returned no member identity fields and no value was printed.',
