@@ -6,7 +6,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -33,6 +33,18 @@ export const APPLICATION_DEFAULT_IDENTITY_SCOPES = [
   'openid',
   'https://www.googleapis.com/auth/userinfo.email',
 ] as const;
+
+export function isPathOutsideDirectory(
+  directory: string,
+  candidate: string,
+): boolean {
+  const candidateRelative = relative(resolve(directory), resolve(candidate));
+  return (
+    candidateRelative === '..' ||
+    candidateRelative.startsWith(`..${sep}`) ||
+    isAbsolute(candidateRelative)
+  );
+}
 
 const gcsEmulatorOverrides = [
   'STORAGE_EMULATOR_HOST',
@@ -204,14 +216,37 @@ export function validateGuardedBunInvocation(
     return;
   }
   const scriptsRoot = join(gcpRoot, 'scripts');
-  const scriptRelative = relative(scriptsRoot, resolve(cwd, scriptPath));
-  if (
-    scriptRelative === '' ||
-    scriptRelative.startsWith('..') ||
-    isAbsolute(scriptRelative)
-  ) {
+  const resolvedScript = resolve(cwd, scriptPath);
+  let canonicalScript: string | null = null;
+  try {
+    canonicalScript = realpathSync(resolvedScript);
+  } catch {
+    // A lexical path inside scripts still fails closed below even if missing.
+  }
+  const resolvedInsideScripts =
+    resolvedScript !== scriptsRoot &&
+    !isPathOutsideDirectory(scriptsRoot, resolvedScript);
+  const canonicalInsideScripts =
+    canonicalScript !== null &&
+    canonicalScript !== scriptsRoot &&
+    !isPathOutsideDirectory(scriptsRoot, canonicalScript);
+  if (!resolvedInsideScripts && !canonicalInsideScripts) {
     return;
   }
+  if (
+    canonicalScript !== null &&
+    resolvedInsideScripts &&
+    !canonicalInsideScripts
+  ) {
+    throw new Error(
+      'Guarded cloud helpers must start through ./scripts/run-guarded.sh.',
+    );
+  }
+  const guardedScript =
+    canonicalInsideScripts && canonicalScript !== null
+      ? canonicalScript
+      : resolvedScript;
+  const scriptRelative = relative(scriptsRoot, guardedScript);
 
   const expectedConfig = join(gcpRoot, 'bunfig.toml');
   const expectedArguments = [
@@ -1174,14 +1209,18 @@ export async function reconcileIdempotentSecretWrite(options: {
   readonly attemptWrite: () => string;
   readonly clientRequestToken: string;
   readonly versionIsCurrent: () => boolean;
-  readonly wait?: () => Promise<void>;
+  readonly wait?: (delayMs: number) => Promise<void>;
 }): Promise<boolean> {
   const wait =
     options.wait ??
-    (async () => new Promise((resolve) => setTimeout(resolve, 500)));
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+    (async (delayMs: number) =>
+      new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const retryDelays = [500, 1_000, 2_000, 4_000, 8_000, 16_000] as const;
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
     try {
-      options.attemptWrite();
+      if (options.attemptWrite() !== options.clientRequestToken) {
+        throw new Error('AWS returned an unexpected secret version.');
+      }
     } catch {
       // Reconcile the idempotency token without exposing provider output.
     }
@@ -1192,8 +1231,9 @@ export async function reconcileIdempotentSecretWrite(options: {
     } catch {
       // A failed read is still ambiguous and must never authorize cleanup.
     }
-    if (attempt < 2) {
-      await wait();
+    const retryDelay = retryDelays[attempt];
+    if (retryDelay !== undefined) {
+      await wait(retryDelay);
     }
   }
   return false;
@@ -1430,46 +1470,62 @@ export function secretVersionIsCurrent(options: {
   readonly region: string;
   readonly secretName: string;
 }): boolean {
-  const raw = runCommand('aws', [
-    'secretsmanager',
-    'list-secret-version-ids',
-    '--secret-id',
-    options.secretName,
-    '--include-deprecated',
-    '--region',
-    options.region,
-    '--profile',
-    options.profile,
-    '--endpoint-url',
-    awsServiceEndpoint('secretsmanager', options.region),
-    '--output',
-    'json',
-  ]);
-  const value: unknown = JSON.parse(raw);
+  const raw = runCommand(
+    'aws',
+    [
+      'secretsmanager',
+      'get-secret-value',
+      '--secret-id',
+      options.secretName,
+      '--version-id',
+      options.clientRequestToken,
+      '--version-stage',
+      'AWSCURRENT',
+      '--region',
+      options.region,
+      '--profile',
+      options.profile,
+      '--endpoint-url',
+      awsServiceEndpoint('secretsmanager', options.region),
+      '--query',
+      '{VersionId:VersionId,VersionStages:VersionStages}',
+      '--output',
+      'json',
+    ],
+    { redactFailureOutput: true },
+  );
+  return parseCurrentSecretVersionMetadata(raw, options.clientRequestToken);
+}
+
+export function parseCurrentSecretVersionMetadata(
+  raw: string,
+  expectedVersionId: string,
+): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error('AWS current secret version metadata is invalid.');
+  }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('AWS secret version metadata is invalid.');
+    throw new Error('AWS current secret version metadata is invalid.');
   }
-  const versions = (value as Readonly<Record<string, unknown>>).Versions;
-  if (!Array.isArray(versions)) {
-    throw new Error('AWS secret version metadata has no Versions array.');
+  const metadata = value as Readonly<Record<string, unknown>>;
+  const versionStages = metadata.VersionStages;
+  if (
+    Object.keys(metadata).sort().join(',') !== 'VersionId,VersionStages' ||
+    typeof metadata.VersionId !== 'string' ||
+    !Array.isArray(versionStages) ||
+    versionStages.length === 0 ||
+    versionStages.some((stage) => typeof stage !== 'string') ||
+    new Set(versionStages).size !== versionStages.length
+  ) {
+    throw new Error('AWS current secret version metadata is invalid.');
   }
-  return versions.some((version) => {
-    if (
-      typeof version !== 'object' ||
-      version === null ||
-      Array.isArray(version)
-    ) {
-      throw new Error(
-        'AWS secret version metadata contains an invalid version.',
-      );
-    }
-    const record = version as Readonly<Record<string, unknown>>;
-    return (
-      record.VersionId === options.clientRequestToken &&
-      Array.isArray(record.VersionStages) &&
-      record.VersionStages.includes('AWSCURRENT')
-    );
-  });
+  return (
+    metadata.VersionId === expectedVersionId &&
+    versionStages.includes('AWSCURRENT')
+  );
 }
 
 export function readSecretValue(options: {

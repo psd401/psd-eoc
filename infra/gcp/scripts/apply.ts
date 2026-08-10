@@ -23,6 +23,7 @@ import {
 import { parseUserManagedKeyIds, ROSTER_READER_EMAIL } from './groups-contract';
 import {
   TERRAFORM_ADMIN,
+  TERRAFORM_ADMIN_ROLES,
   validateProjectIamPolicy,
   validateRosterReaderResourcePolicy,
 } from './project-policy';
@@ -135,6 +136,23 @@ const bootstrapStateAllowedResources = new Set([
   'data.google_iam_policy.terraform_state',
 ]);
 
+const mainStateAllowedResources = new Set([
+  'google_project.psd_eoc',
+  'google_project_service.service_usage',
+  ...[...mainBoundaryServices]
+    .filter((service) => service !== 'serviceusage.googleapis.com')
+    .map((service) => `google_project_service.required["${service}"]`),
+  ...TERRAFORM_ADMIN_ROLES.map(
+    (role) => `google_project_iam_member.terraform_admin["${role}"]`,
+  ),
+  'google_project_iam_member_remove.terraform_admin_owner',
+  'google_project_iam_member_remove.google_apis_service_agent_editor',
+  'google_storage_bucket.terraform_state',
+  'data.google_iam_policy.terraform_state',
+  'google_storage_bucket_iam_policy.terraform_state',
+  ROSTER_READER_ADDRESS,
+]);
+
 export type StateBucketStatus =
   | 'absent'
   | 'bootstrap-policy'
@@ -144,6 +162,11 @@ export interface StateBucketInspection {
   readonly projectNumber: string;
   readonly revision?: string;
   readonly status: Exclude<StateBucketStatus, 'absent'>;
+}
+
+export interface StateBucketOwnerInspection {
+  readonly name: string;
+  readonly projectNumber: string;
 }
 
 export interface EnabledProjectServicesInspection {
@@ -896,19 +919,46 @@ export function validateStateBucket(
   );
 }
 
-export function stateBucketProjectNumber(
-  bucket: Readonly<Record<string, unknown>>,
-): string {
-  const value = bucket.project_number;
+export function parseStateBucketOwner(
+  output: string,
+): StateBucketOwnerInspection {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error(
+      'Expected-project state bucket listing did not contain valid JSON.',
+    );
+  }
+  const owner = Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : null;
+  if (
+    typeof owner !== 'object' ||
+    owner === null ||
+    Array.isArray(owner) ||
+    Object.keys(owner).sort().join(',') !== 'name,projectNumber'
+  ) {
+    throw new Error(
+      'The globally named state bucket is not owned by the expected PSD EOC project.',
+    );
+  }
+  const record = owner as Readonly<Record<string, unknown>>;
+  const value = record.projectNumber;
+  let projectNumber: string;
   if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
-    return String(value);
+    projectNumber = String(value);
+  } else if (typeof value === 'string' && /^[1-9]\d*$/u.test(value)) {
+    projectNumber = value;
+  } else {
+    throw new Error(
+      'Existing state bucket does not identify one valid owning Google project.',
+    );
   }
-  if (typeof value === 'string' && /^[1-9]\d*$/u.test(value)) {
-    return value;
+  if (record.name !== STATE_BUCKET) {
+    throw new Error(
+      'The globally named state bucket is not owned by the expected PSD EOC project.',
+    );
   }
-  throw new Error(
-    'Existing state bucket does not identify one valid owning Google project.',
-  );
+  return { name: STATE_BUCKET, projectNumber };
 }
 
 export function missingRecoverableBootstrapApis(
@@ -1336,31 +1386,23 @@ function inspectStateBucketForApiRepair(
   if (bucket === null) {
     return null;
   }
-  const projectNumber = stateBucketProjectNumber(bucket);
-  const projectBucketNames = runCommand(
-    'gcloud',
-    [
-      'storage',
-      'buckets',
-      'list',
-      '--project',
-      PROJECT_ID,
-      '--filter',
-      `name=${STATE_BUCKET}`,
-      '--format=value(name)',
-    ],
-    { redactFailureOutput: true },
-  )
-    .split('\n')
-    .filter((name) => name.length > 0);
-  if (
-    projectBucketNames.length !== 1 ||
-    projectBucketNames[0] !== STATE_BUCKET
-  ) {
-    throw new Error(
-      'The globally named state bucket is not owned by the expected PSD EOC project.',
-    );
-  }
+  const bucketOwner = parseStateBucketOwner(
+    runCommand(
+      'gcloud',
+      [
+        'storage',
+        'buckets',
+        'list',
+        '--project',
+        PROJECT_ID,
+        '--filter',
+        `name=${STATE_BUCKET}`,
+        '--raw',
+        '--format=json(name,projectNumber)',
+      ],
+      { redactFailureOutput: true },
+    ),
+  );
   const policy = parseJsonObject(
     runCommand(
       'gcloud',
@@ -1379,8 +1421,8 @@ function inspectStateBucketForApiRepair(
     'State bucket IAM policy',
   );
   return {
-    projectNumber,
-    revision: canonicalJson({ bucket, policy, projectBucketNames }),
+    projectNumber: bucketOwner.projectNumber,
+    revision: canonicalJson({ bucket, bucketOwner, policy }),
     status: validateStateBucket(bucket, policy, allowBootstrapPolicy),
   };
 }
@@ -1630,6 +1672,28 @@ function validateBootstrapStateAddresses(
   }
 }
 
+export function validateMainStateAddresses(
+  resources: ReadonlySet<string>,
+  requireComplete = false,
+): void {
+  if (
+    [...resources].some((address) => !mainStateAllowedResources.has(address))
+  ) {
+    throw new Error(
+      'Main state contains an unexpected resource; refusing every import and saved plan.',
+    );
+  }
+  if (
+    requireComplete &&
+    (resources.size !== mainStateAllowedResources.size ||
+      [...mainStateAllowedResources].some((address) => !resources.has(address)))
+  ) {
+    throw new Error(
+      'Main state does not contain the complete reviewed resource set.',
+    );
+  }
+}
+
 function recoverBootstrapState(): void {
   const bucketStatus = stateBucketStatus(true);
   const interruptedState =
@@ -1865,6 +1929,7 @@ async function main(): Promise<void> {
   assertDefaultTerraformWorkspace();
 
   const managedResources = stateResources();
+  validateMainStateAddresses(managedResources);
   for (const [address, importId] of mainImports) {
     if (!managedResources.has(address)) {
       runTerraformInteractive(['import', '-input=false', address, importId]);
@@ -1872,6 +1937,7 @@ async function main(): Promise<void> {
     }
   }
   recoverOrphanedRosterReader(managedResources);
+  validateMainStateAddresses(stateResources());
 
   await applySavedPlan({
     captureBoundary: () => captureApplyBoundary(true),
@@ -1899,6 +1965,7 @@ async function main(): Promise<void> {
   runTerraformInteractive(['plan', '-detailed-exitcode', '-input=false']);
 
   const finalResources = stateResources();
+  validateMainStateAddresses(finalResources, true);
   if (
     existsSync(join(bootstrapRoot, 'terraform.tfstate')) &&
     mainImports.every(([address]) => finalResources.has(address))

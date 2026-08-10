@@ -63,9 +63,12 @@ The authentication command directly parses and rejects unsafe persistent Cloud
 SDK settings before its first gcloud process. AWS uses the checked-in exact
 `aws.config` SSO profile instead of the ambient AWS config or shared-credentials
 file; the launcher also refuses AWS aliases and model overrides. It then
-performs the fixed Google user login, ordinary ADC login, AWS SSO login, and
-exact identity readbacks in their sanitized child environments. Neither CLI is
-allowed to launch a browser: it prints an authorization URL for the human to
+performs the fixed Google user login, revokes any existing ADC before replacing
+it, performs the ordinary ADC login, runs the AWS SSO login, and completes exact
+identity readbacks in their sanitized child environments. A reported ADC server
+revocation failure stops the replacement instead of leaving an overwritten
+refresh credential usable. Neither CLI is allowed to launch a browser: it
+prints an authorization URL for the human to
 open in a trusted browser. That human browser session is intentionally outside
 the helpers' direct-transport boundary and never authorizes a cloud mutation by
 itself. The ordinary ADC login deliberately writes no quota project, even if
@@ -135,7 +138,8 @@ enabled or malformed Requester Pays value before treating the bucket as usable
 by the backend. Bucket creation waits for all four bootstrap APIs. If an existing
 bootstrap or managed bucket is later found with Cloud Resource Manager or Cloud
 Billing disabled, the helper first uses Storage alone to validate the bucket's
-complete metadata, project-scoped ownership, and exact known IAM policy. It then
+complete standardized metadata, the raw `projectNumber` from a listing scoped
+to the fixed project, and the exact known IAM policy. It then
 parses a structured Service Usage inventory, requires both Service Usage and
 Storage to remain enabled, and requires the inventory's numeric project to equal
 the bucket owner. It previews only the fixed missing APIs and requires the
@@ -191,8 +195,12 @@ provider, or ambient plugin cache cannot replace a locked provider.
 than discarded so an operator expecting an emulator cannot unknowingly reach
 the live state bucket. Every Terraform state or output read also requires the
 persisted workspace to be exactly `default`; a stale `.terraform/environment`
-cannot redirect a helper to another workspace. Each Terraform confirmation
-phrase is shown only after its complete plan. There is no auto-approve path. Do
+cannot redirect a helper to another workspace. Before the main plan, every
+persisted address must be a member of the exact reviewed main-root resource set;
+an obsolete or foreign state-only resource cannot be silently planned for
+deletion. The complete set is required again after apply. Each Terraform
+confirmation phrase is shown only after its complete plan. There is no
+auto-approve path. Do
 not confirm the API repair or either plan without explicit product-owner
 approval for the billed, retained infrastructure described in its preview.
 Because a saved plan starts a new provider process at apply time, the helper
@@ -281,9 +289,12 @@ the repository:
   /secure/workspace-admin-client.json
 ```
 
-The helper accepts only a mode-`0600`, sub-64-KiB Desktop client outside the
-repository with Google's exact authorization, token, certificate, and loopback
-redirect endpoints. It never prints the client secret. Current gcloud rejects
+The helper accepts only a mode-`0600`, sub-64-KiB Desktop client whose requested
+path and canonical target are both outside the repository, with Google's exact
+authorization, token, certificate, and loopback redirect endpoints. Before the
+custom-client login it revokes the current ADC, refusing a reported server
+revocation failure so an overwritten refresh credential is not left active. It
+never prints the client secret. Current gcloud rejects
 `--no-launch-browser` when a custom client file is present, so this one flow
 uses its supported `--no-browser` remote bootstrap. Copy the printed
 `gcloud auth application-default login --remote-bootstrap=...` command to a
@@ -378,13 +389,16 @@ rotation, replica, external owner, or resource policy; a new placeholder is
 read back against the same contract. It creates
 `/psd-eoc/google-groups` when absent, writes one key directly to an idempotent
 Secrets Manager version, and captures gcloud's supported stdout output so the
-private key is never written to a local file. A failed AWS write deletes only
-the newly identified key; an ambiguous AWS result is read back before cleanup,
-and ambiguous key identity is never deleted. After exact AWS readback marks the
-credential stored, the final remote check again requires the same key to be the
-sole active user-managed key with the same creation timestamp. A missing,
-changed, or concurrent key fails the run but retains the AWS-bound key and any
-unknown key for explicit reconciliation.
+private key is never written to a local file. It reconciles an ambiguous write
+through a bounded exponential backoff and `GetSecretValue` request pinned to
+both the idempotency-token version and `AWSCURRENT`; the query returns only
+version metadata, and exact secret content is checked separately. A failed AWS
+write deletes only the newly identified key; an ambiguous AWS result is read
+back before cleanup, and ambiguous key identity is never deleted. After exact
+AWS readback marks the credential stored, the final remote check again requires
+the same key to be the sole active user-managed key with the same creation
+timestamp. A missing, changed, or concurrent key fails the run but retains the
+AWS-bound key and any unknown key for explicit reconciliation.
 
 The project-policy check rejects the exact service-account member plus direct
 project bindings to universal principals, domains, groups, project convenience
