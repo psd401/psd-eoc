@@ -216,6 +216,15 @@ export function validateGuardedBunInvocation(
     return;
   }
   const scriptsRoot = join(gcpRoot, 'scripts');
+  const guardedEntrypoints = new Set([
+    'apply.ts',
+    'configure-workspace-role.ts',
+    'operator-access.ts',
+    'provision-groups-credential.ts',
+    'revoke-groups-credential.ts',
+    'store-oauth-client.ts',
+    'verify-groups-readonly.ts',
+  ]);
   const resolvedScript = resolve(cwd, scriptPath);
   let canonicalScript: string | null = null;
   try {
@@ -230,8 +239,36 @@ export function validateGuardedBunInvocation(
     canonicalScript !== null &&
     canonicalScript !== scriptsRoot &&
     !isPathOutsideDirectory(scriptsRoot, canonicalScript);
+  let hardlinkedEntrypoint: string | null = null;
   if (!resolvedInsideScripts && !canonicalInsideScripts) {
-    return;
+    let invokedMetadata: ReturnType<typeof statSync>;
+    try {
+      invokedMetadata = statSync(resolvedScript);
+    } catch {
+      return;
+    }
+    if (invokedMetadata.nlink > 1) {
+      for (const entrypoint of guardedEntrypoints) {
+        let guardedMetadata: ReturnType<typeof statSync>;
+        try {
+          guardedMetadata = statSync(join(scriptsRoot, entrypoint));
+        } catch {
+          throw new Error(
+            'Guarded cloud helpers must start through ./scripts/run-guarded.sh.',
+          );
+        }
+        if (
+          invokedMetadata.dev === guardedMetadata.dev &&
+          invokedMetadata.ino === guardedMetadata.ino
+        ) {
+          hardlinkedEntrypoint = entrypoint;
+          break;
+        }
+      }
+    }
+    if (hardlinkedEntrypoint === null) {
+      return;
+    }
   }
   if (
     canonicalScript !== null &&
@@ -242,11 +279,14 @@ export function validateGuardedBunInvocation(
       'Guarded cloud helpers must start through ./scripts/run-guarded.sh.',
     );
   }
-  const guardedScript =
-    canonicalInsideScripts && canonicalScript !== null
-      ? canonicalScript
-      : resolvedScript;
-  const scriptRelative = relative(scriptsRoot, guardedScript);
+  const scriptRelative =
+    hardlinkedEntrypoint ??
+    relative(
+      scriptsRoot,
+      canonicalInsideScripts && canonicalScript !== null
+        ? canonicalScript
+        : resolvedScript,
+    );
 
   const expectedConfig = join(gcpRoot, 'bunfig.toml');
   const expectedArguments = [
@@ -254,15 +294,6 @@ export function validateGuardedBunInvocation(
     '--no-env-file',
     '--no-install',
   ];
-  const guardedEntrypoints = new Set([
-    'apply.ts',
-    'configure-workspace-role.ts',
-    'operator-access.ts',
-    'provision-groups-credential.ts',
-    'revoke-groups-credential.ts',
-    'store-oauth-client.ts',
-    'verify-groups-readonly.ts',
-  ]);
   if (
     launcherMarker !== '1' ||
     resolve(cwd) !== resolve(gcpRoot) ||
