@@ -2986,6 +2986,12 @@ describe('fail-closed bootstrap and process behavior', () => {
     expect(
       validateStateBucket(withoutExplicitFalseValues, validBucketPolicy),
     ).toBe('managed-policy');
+    expect(
+      validateStateBucket(
+        { ...validBucket, default_kms_key: null },
+        validBucketPolicy,
+      ),
+    ).toBe('managed-policy');
     expect(validateStateBucket(validBucket, bootstrapBucketPolicy, true)).toBe(
       'bootstrap-policy',
     );
@@ -3016,6 +3022,21 @@ describe('fail-closed bootstrap and process behavior', () => {
       expect(() =>
         validateStateBucket(
           { ...validBucket, default_event_based_hold },
+          validBucketPolicy,
+        ),
+      ).toThrow('private, versioned');
+    }
+    for (const default_kms_key of [
+      'projects/example/locations/us-west1/keyRings/example/cryptoKeys/example',
+      '',
+      false,
+      0,
+      {},
+      [],
+    ]) {
+      expect(() =>
+        validateStateBucket(
+          { ...validBucket, default_kms_key },
           validBucketPolicy,
         ),
       ).toThrow('private, versioned');

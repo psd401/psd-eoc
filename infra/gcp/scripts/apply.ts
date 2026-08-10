@@ -979,6 +979,7 @@ export function validateStateBucket(
     bucket.versioning_enabled !== true ||
     (bucket.default_event_based_hold !== undefined &&
       bucket.default_event_based_hold !== false) ||
+    (bucket.default_kms_key !== undefined && bucket.default_kms_key !== null) ||
     (bucket.retention_policy !== undefined &&
       bucket.retention_policy !== null) ||
     !labelsMatch ||
