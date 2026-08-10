@@ -95,7 +95,7 @@ export function parseVerificationOptions(
       index += 1;
       continue;
     }
-    throw new Error(`Unknown argument: ${terminalSafeText(argument ?? '')}`);
+    throw new Error('Unknown argument (value redacted).');
   }
 
   if (mode === 'preview') {

@@ -190,6 +190,22 @@ describe('SES production-access operation', () => {
     expect(harness.output.join(' ')).toContain('OFFLINE PREVIEW');
   });
 
+  it('redacts address-shaped unknown arguments before constructing a client', async () => {
+    const unknownAddress = 'approved-contact@example.test';
+    const harness = createHarness();
+
+    expect(await productionAccessMain([unknownAddress], harness.runtime)).toBe(
+      1,
+    );
+
+    expect(harness.errors.join(' ')).toContain(
+      'Unknown argument (value redacted).',
+    );
+    expect(harness.errors.join(' ')).not.toContain(unknownAddress);
+    expect(harness.calls.createApi).toBe(0);
+    expect(harness.calls.putAccountDetails).toHaveLength(0);
+  });
+
   it('rejects CI and non-TTY submissions before constructing a client', async () => {
     const ciHarness = createHarness({
       env: { CI: '' },
@@ -408,6 +424,20 @@ describe('SES verification operation', () => {
     expect(harness.calls.getEmailIdentity).toHaveLength(0);
     expect(harness.calls.sendTestEmail).toHaveLength(0);
     expect(harness.output.join(' ')).toContain('OFFLINE PREVIEW');
+  });
+
+  it('redacts address-shaped unknown arguments before constructing a client', async () => {
+    const unknownAddress = 'approved-recipient@example.test';
+    const harness = createHarness();
+
+    expect(await verificationMain([unknownAddress], harness.runtime)).toBe(1);
+
+    expect(harness.errors.join(' ')).toContain(
+      'Unknown argument (value redacted).',
+    );
+    expect(harness.errors.join(' ')).not.toContain(unknownAddress);
+    expect(harness.calls.createApi).toBe(0);
+    expect(harness.calls.sendTestEmail).toHaveLength(0);
   });
 
   it('permits a read-only readiness check without production access', async () => {
