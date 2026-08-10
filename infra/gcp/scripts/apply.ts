@@ -86,6 +86,16 @@ export const BOOTSTRAP_SERVICES = new Set(
   bootstrapServiceImports.map(([, service]) => service),
 );
 
+const bootstrapApiRepairServices = [
+  'cloudresourcemanager.googleapis.com',
+  'cloudbilling.googleapis.com',
+] as const;
+
+const bootstrapApiRepairTrustServices = [
+  'serviceusage.googleapis.com',
+  'storage.googleapis.com',
+] as const;
+
 const bootstrapBucketImports = [
   ['google_storage_bucket.terraform_state', STATE_BUCKET],
   ['google_storage_bucket_iam_policy.terraform_state', `b/${STATE_BUCKET}`],
@@ -95,6 +105,24 @@ export type StateBucketStatus =
   | 'absent'
   | 'bootstrap-policy'
   | 'managed-policy';
+
+export interface StateBucketInspection {
+  readonly projectNumber: string;
+  readonly status: Exclude<StateBucketStatus, 'absent'>;
+}
+
+export interface EnabledProjectServicesInspection {
+  readonly projectNumber: string;
+  readonly services: ReadonlySet<string>;
+}
+
+export interface BootstrapApiRepairOperations {
+  readonly assertOperatorIdentity: () => Promise<void>;
+  readonly confirm: (preview: string, confirmation: string) => Promise<void>;
+  readonly enableServices: (services: readonly string[]) => void;
+  readonly inspectBucket: () => StateBucketInspection | null;
+  readonly inspectServices: () => EnabledProjectServicesInspection;
+}
 
 function parseJsonObject(
   value: string,
@@ -146,6 +174,73 @@ export function parseProjectDescribeResult(
   throw new Error(
     `Project inspection exited with status ${status}: ${detail.trim().slice(0, 2_000)}`,
   );
+}
+
+export function parseEnabledProjectServices(
+  output: string,
+): EnabledProjectServicesInspection {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error(
+      'Enabled project services did not contain valid structured JSON.',
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error(
+      'Enabled project services did not contain one non-empty service array.',
+    );
+  }
+
+  let projectNumber: string | undefined;
+  const services = new Set<string>();
+  for (const value of parsed) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error('Enabled project service metadata is malformed.');
+    }
+    const service = value as Readonly<Record<string, unknown>>;
+    const config = service.config;
+    if (
+      Object.keys(service).sort().join(',') !== 'config,name,state' ||
+      typeof config !== 'object' ||
+      config === null ||
+      Array.isArray(config) ||
+      Object.keys(config).join(',') !== 'name'
+    ) {
+      throw new Error('Enabled project service metadata is malformed.');
+    }
+    const configuredName = (config as Readonly<Record<string, unknown>>).name;
+    const match =
+      typeof service.name === 'string'
+        ? /^projects\/([1-9]\d*)\/services\/([a-z][a-z0-9.-]*\.googleapis\.com)$/u.exec(
+            service.name,
+          )
+        : null;
+    if (
+      match === null ||
+      configuredName !== match[2] ||
+      service.state !== 'ENABLED' ||
+      services.has(match[2] as string)
+    ) {
+      throw new Error('Enabled project service metadata is malformed.');
+    }
+    const observedProjectNumber = match[1] as string;
+    if (
+      projectNumber !== undefined &&
+      projectNumber !== observedProjectNumber
+    ) {
+      throw new Error(
+        'Enabled project services identify more than one Google project.',
+      );
+    }
+    projectNumber = observedProjectNumber;
+    services.add(match[2] as string);
+  }
+  if (projectNumber === undefined) {
+    throw new Error('Enabled project services omitted the Google project.');
+  }
+  return { projectNumber, services };
 }
 
 export function parseServiceAccountListResult(
@@ -426,6 +521,122 @@ export function validateStateBucket(
   );
 }
 
+export function stateBucketProjectNumber(
+  bucket: Readonly<Record<string, unknown>>,
+): string {
+  const value = bucket.project_number;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+    return String(value);
+  }
+  if (typeof value === 'string' && /^[1-9]\d*$/u.test(value)) {
+    return value;
+  }
+  throw new Error(
+    'Existing state bucket does not identify one valid owning Google project.',
+  );
+}
+
+export function missingRecoverableBootstrapApis(
+  bucketStatus: StateBucketStatus,
+  enabledServices: ReadonlySet<string>,
+): readonly string[] {
+  if (bucketStatus === 'absent') {
+    return [];
+  }
+  for (const service of bootstrapApiRepairTrustServices) {
+    if (!enabledServices.has(service)) {
+      throw new Error(
+        'Service Usage and Storage must remain enabled for safe bootstrap API recovery.',
+      );
+    }
+  }
+  return bootstrapApiRepairServices.filter(
+    (service) => !enabledServices.has(service),
+  );
+}
+
+function sameStateBucketInspection(
+  left: StateBucketInspection | null,
+  right: StateBucketInspection | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.projectNumber === right.projectNumber &&
+    left.status === right.status
+  );
+}
+
+function assertServiceInspectionMatchesBucket(
+  bucket: StateBucketInspection,
+  services: EnabledProjectServicesInspection,
+): void {
+  if (services.projectNumber !== bucket.projectNumber) {
+    throw new Error(
+      'The state bucket and enabled services identify different Google projects.',
+    );
+  }
+}
+
+export async function repairMissingBootstrapApis(
+  operations: BootstrapApiRepairOperations,
+): Promise<void> {
+  const initialBucket = operations.inspectBucket();
+  if (initialBucket === null) {
+    return;
+  }
+  const initialServices = operations.inspectServices();
+  assertServiceInspectionMatchesBucket(initialBucket, initialServices);
+  const initiallyMissing = missingRecoverableBootstrapApis(
+    initialBucket.status,
+    initialServices.services,
+  );
+  if (initiallyMissing.length === 0) {
+    return;
+  }
+
+  await operations.confirm(
+    `Bootstrap API repair consequence preview: the fixed ${PROJECT_ID} project (numeric ID ${initialBucket.projectNumber}) owns the exact ${STATE_BUCKET} bucket with ${initialBucket.status}. Persistently enable only ${initiallyMissing.join(', ')} so the helper can inspect the district organization, billing association, and complete project IAM policy before any Terraform backend is initialized. API enablement can permit billable API use. If the post-repair project contract is wrong, the helper stops and leaves these inspection APIs enabled for explicit reconciliation.`,
+    'repair-psd401-eoc-bootstrap-apis',
+  );
+
+  await operations.assertOperatorIdentity();
+  const confirmedBucket = operations.inspectBucket();
+  if (!sameStateBucketInspection(initialBucket, confirmedBucket)) {
+    throw new Error(
+      'The state bucket identity or policy changed during bootstrap API repair confirmation; rerun for a fresh preview.',
+    );
+  }
+  const confirmedServices = operations.inspectServices();
+  assertServiceInspectionMatchesBucket(initialBucket, confirmedServices);
+  const confirmedMissing = missingRecoverableBootstrapApis(
+    initialBucket.status,
+    confirmedServices.services,
+  );
+  if (confirmedMissing.some((service) => !initiallyMissing.includes(service))) {
+    throw new Error(
+      'The missing bootstrap API set expanded during confirmation; rerun for a fresh preview.',
+    );
+  }
+  if (confirmedMissing.length === 0) {
+    return;
+  }
+
+  operations.enableServices(confirmedMissing);
+  const repairedServices = operations.inspectServices();
+  assertServiceInspectionMatchesBucket(initialBucket, repairedServices);
+  if (
+    missingRecoverableBootstrapApis(
+      initialBucket.status,
+      repairedServices.services,
+    ).length > 0
+  ) {
+    throw new Error(
+      'Google did not enable the exact bootstrap inspection APIs; no Terraform backend was initialized.',
+    );
+  }
+}
+
 function inspectProject(): Readonly<Record<string, unknown>> | null {
   const result = runCommandForStatus(
     'gcloud',
@@ -581,7 +792,9 @@ function projectIamPolicy(): Readonly<Record<string, unknown>> {
   );
 }
 
-function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
+function inspectStateBucketForApiRepair(
+  allowBootstrapPolicy: boolean,
+): StateBucketInspection | null {
   const result = runCommandForStatus(
     'gcloud',
     [
@@ -601,30 +814,23 @@ function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
     result.stderr,
   );
   if (bucket === null) {
-    return 'absent';
+    return null;
   }
-  const project = inspectProject();
-  if (project === null) {
-    throw new Error(
-      'The state bucket exists but the expected PSD EOC project cannot be inspected.',
-    );
-  }
-  validateExistingProject(project);
-  validateProjectIamPolicy(
-    projectIamPolicy(),
-    project.projectNumber as string,
-    'recovery',
-  );
-  const projectBucketNames = runCommand('gcloud', [
-    'storage',
-    'buckets',
-    'list',
-    '--project',
-    PROJECT_ID,
-    '--filter',
-    `name=${STATE_BUCKET}`,
-    '--format=value(name)',
-  ])
+  const projectNumber = stateBucketProjectNumber(bucket);
+  const projectBucketNames = runCommand(
+    'gcloud',
+    [
+      'storage',
+      'buckets',
+      'list',
+      '--project',
+      PROJECT_ID,
+      '--filter',
+      `name=${STATE_BUCKET}`,
+      '--format=value(name)',
+    ],
+    { redactFailureOutput: true },
+  )
     .split('\n')
     .filter((name) => name.length > 0);
   if (
@@ -636,19 +842,51 @@ function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
     );
   }
   const policy = parseJsonObject(
-    runCommand('gcloud', [
-      'storage',
-      'buckets',
-      'get-iam-policy',
-      `gs://${STATE_BUCKET}`,
-      '--project',
-      PROJECT_ID,
-      '--format=json',
-      '--quiet',
-    ]),
+    runCommand(
+      'gcloud',
+      [
+        'storage',
+        'buckets',
+        'get-iam-policy',
+        `gs://${STATE_BUCKET}`,
+        '--project',
+        PROJECT_ID,
+        '--format=json',
+        '--quiet',
+      ],
+      { redactFailureOutput: true },
+    ),
     'State bucket IAM policy',
   );
-  return validateStateBucket(bucket, policy, allowBootstrapPolicy);
+  return {
+    projectNumber,
+    status: validateStateBucket(bucket, policy, allowBootstrapPolicy),
+  };
+}
+
+function stateBucketStatus(allowBootstrapPolicy: boolean): StateBucketStatus {
+  const bucket = inspectStateBucketForApiRepair(allowBootstrapPolicy);
+  if (bucket === null) {
+    return 'absent';
+  }
+  const project = inspectProject();
+  if (project === null) {
+    throw new Error(
+      'The state bucket exists but the expected PSD EOC project cannot be inspected.',
+    );
+  }
+  validateExistingProject(project);
+  if (project.projectNumber !== bucket.projectNumber) {
+    throw new Error(
+      'The expected PSD EOC project and state bucket identify different Google projects.',
+    );
+  }
+  validateProjectIamPolicy(
+    projectIamPolicy(),
+    bucket.projectNumber,
+    'recovery',
+  );
+  return bucket.status;
 }
 
 export function parseStateListResult(
@@ -681,19 +919,26 @@ function stateResources(cwd = gcpRoot): Set<string> {
   return parseStateListResult(result.status, result.stdout, result.stderr);
 }
 
-function enabledProjectServices(): Set<string> {
-  return new Set(
-    runCommand('gcloud', [
-      'services',
-      'list',
-      '--enabled',
-      '--project',
-      PROJECT_ID,
-      '--format=value(config.name)',
-    ])
-      .split('\n')
-      .filter((service) => service.length > 0),
+function enabledProjectServiceInspection(): EnabledProjectServicesInspection {
+  return parseEnabledProjectServices(
+    runCommand(
+      'gcloud',
+      [
+        'services',
+        'list',
+        '--enabled',
+        '--project',
+        PROJECT_ID,
+        '--format=json(name,config.name,state)',
+        '--quiet',
+      ],
+      { redactFailureOutput: true },
+    ),
   );
+}
+
+function enabledProjectServices(): Set<string> {
+  return new Set(enabledProjectServiceInspection().services);
 }
 
 function recoverOrphanedRosterReader(resources: Set<string>): void {
@@ -824,6 +1069,23 @@ async function main(): Promise<void> {
 
   assertActiveGcloudAccount(TERRAFORM_ADMIN);
   await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
+
+  await repairMissingBootstrapApis({
+    assertOperatorIdentity: async () => {
+      assertActiveGcloudAccount(TERRAFORM_ADMIN);
+      await assertApplicationDefaultIdentity(TERRAFORM_ADMIN);
+    },
+    confirm: requireExactConfirmation,
+    enableServices: (services) => {
+      runCommand(
+        'gcloud',
+        ['services', 'enable', ...services, '--project', PROJECT_ID, '--quiet'],
+        { redactFailureOutput: true },
+      );
+    },
+    inspectBucket: () => inspectStateBucketForApiRepair(true),
+    inspectServices: enabledProjectServiceInspection,
+  });
 
   const initialBucketStatus = stateBucketStatus(true);
   const initialServices =

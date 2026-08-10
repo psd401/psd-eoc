@@ -6,10 +6,14 @@ import { join } from 'node:path';
 import {
   BOOTSTRAP_SERVICES,
   bootstrapPrerequisitesReady,
+  missingRecoverableBootstrapApis,
   parseBucketDescribeResult,
+  parseEnabledProjectServices,
   parseProjectDescribeResult,
   parseServiceAccountListResult,
   parseStateListResult,
+  repairMissingBootstrapApis,
+  stateBucketProjectNumber,
   validateBootstrapProject,
   validateRecoverableRosterReaderServiceAccount,
   validateStateBucket,
@@ -167,6 +171,7 @@ const validBucket = {
   location_type: 'region',
   name: 'psd401-eoc-terraform-state',
   public_access_prevention: 'enforced',
+  project_number: 123456789,
   requester_pays: false,
   storage_url: 'gs://psd401-eoc-terraform-state/',
   uniform_bucket_level_access: true,
@@ -613,8 +618,8 @@ describe('fail-closed bootstrap and process behavior', () => {
     ).toThrow('conditional, duplicate, or malformed');
   });
 
-  test('repairs bootstrap when the bucket is managed but an API is missing', () => {
-    const allServices = new Set(BOOTSTRAP_SERVICES);
+  test('classifies only fixed recoverable bootstrap API gaps', () => {
+    const allServices = new Set<string>(BOOTSTRAP_SERVICES);
     expect(bootstrapPrerequisitesReady('managed-policy', allServices)).toBe(
       true,
     );
@@ -638,10 +643,397 @@ describe('fail-closed bootstrap and process behavior', () => {
       );
     }
 
-    const apply = read('scripts/apply.ts');
-    expect(apply).toContain(
-      'if (!bootstrapPrerequisitesReady(initialBucketStatus, initialServices))',
+    const missingResourceManager = new Set(allServices);
+    missingResourceManager.delete('cloudresourcemanager.googleapis.com');
+    expect(
+      missingRecoverableBootstrapApis('managed-policy', missingResourceManager),
+    ).toEqual(['cloudresourcemanager.googleapis.com']);
+
+    const missingBilling = new Set(allServices);
+    missingBilling.delete('cloudbilling.googleapis.com');
+    expect(
+      missingRecoverableBootstrapApis('bootstrap-policy', missingBilling),
+    ).toEqual(['cloudbilling.googleapis.com']);
+
+    const missingBoth = new Set(allServices);
+    missingBoth.delete('cloudresourcemanager.googleapis.com');
+    missingBoth.delete('cloudbilling.googleapis.com');
+    expect(
+      missingRecoverableBootstrapApis('managed-policy', missingBoth),
+    ).toEqual([
+      'cloudresourcemanager.googleapis.com',
+      'cloudbilling.googleapis.com',
+    ]);
+    expect(
+      missingRecoverableBootstrapApis(
+        'managed-policy',
+        new Set([...allServices, 'iam.googleapis.com']),
+      ),
+    ).toEqual([]);
+    expect(missingRecoverableBootstrapApis('absent', new Set())).toEqual([]);
+
+    for (const trustService of [
+      'serviceusage.googleapis.com',
+      'storage.googleapis.com',
+    ]) {
+      const unavailableTrustRoot = new Set(allServices);
+      unavailableTrustRoot.delete(trustService);
+      expect(() =>
+        missingRecoverableBootstrapApis('managed-policy', unavailableTrustRoot),
+      ).toThrow('Service Usage and Storage');
+    }
+  });
+
+  test('parses enabled services only from one structured numeric project', () => {
+    const projectNumber = '123456789';
+    const serviceNames = [...BOOTSTRAP_SERVICES, 'iam.googleapis.com'];
+    const serviceOutput = JSON.stringify(
+      serviceNames.map((name) => ({
+        config: { name },
+        name: `projects/${projectNumber}/services/${name}`,
+        state: 'ENABLED',
+      })),
     );
+    const parsed = parseEnabledProjectServices(serviceOutput);
+    expect(parsed.projectNumber).toBe(projectNumber);
+    expect(parsed.services).toEqual(new Set(serviceNames));
+    expect(stateBucketProjectNumber(validBucket)).toBe(projectNumber);
+    expect(
+      stateBucketProjectNumber({
+        ...validBucket,
+        project_number: projectNumber,
+      }),
+    ).toBe(projectNumber);
+
+    for (const invalid of [
+      'not-json',
+      '[]',
+      JSON.stringify([
+        {
+          config: { name: 'storage.googleapis.com' },
+          name: 'projects/123456789/services/storage.googleapis.com',
+          state: 'DISABLED',
+        },
+      ]),
+      JSON.stringify([
+        {
+          config: { name: 'storage.googleapis.com' },
+          name: 'projects/123456789/services/storage.googleapis.com',
+          state: 'ENABLED',
+        },
+        {
+          config: { name: 'serviceusage.googleapis.com' },
+          name: 'projects/987654321/services/serviceusage.googleapis.com',
+          state: 'ENABLED',
+        },
+      ]),
+    ]) {
+      expect(() => parseEnabledProjectServices(invalid)).toThrow();
+    }
+    for (const invalidProjectNumber of [0, -1, 1.5, '0', 'abc', null]) {
+      expect(() =>
+        stateBucketProjectNumber({
+          ...validBucket,
+          project_number: invalidProjectNumber,
+        }),
+      ).toThrow('valid owning Google project');
+    }
+  });
+
+  test('repairs one missing API only after confirmation and revalidation', async () => {
+    const projectNumber = '123456789';
+    const bucket = {
+      projectNumber,
+      status: 'managed-policy' as const,
+    };
+    const services = new Set<string>(BOOTSTRAP_SERVICES);
+    services.delete('cloudresourcemanager.googleapis.com');
+    const trace: string[] = [];
+    let preview = '';
+    let confirmation = '';
+
+    await repairMissingBootstrapApis({
+      assertOperatorIdentity: async () => {
+        trace.push('identity');
+      },
+      confirm: async (value, phrase) => {
+        trace.push('confirm');
+        preview = value;
+        confirmation = phrase;
+      },
+      enableServices: (missing) => {
+        trace.push(`enable:${missing.join(',')}`);
+        expect(missing).toEqual(['cloudresourcemanager.googleapis.com']);
+        for (const service of missing) {
+          services.add(service);
+        }
+      },
+      inspectBucket: () => {
+        trace.push('bucket');
+        return bucket;
+      },
+      inspectServices: () => {
+        trace.push('services');
+        return { projectNumber, services: new Set(services) };
+      },
+    });
+
+    expect(trace).toEqual([
+      'bucket',
+      'services',
+      'confirm',
+      'identity',
+      'bucket',
+      'services',
+      'enable:cloudresourcemanager.googleapis.com',
+      'services',
+    ]);
+    expect(preview).toContain('psd401-eoc');
+    expect(preview).toContain(projectNumber);
+    expect(preview).toContain('cloudresourcemanager.googleapis.com');
+    expect(preview).toContain('billable API use');
+    expect(confirmation).toBe('repair-psd401-eoc-bootstrap-apis');
+  });
+
+  test('aborts API repair when post-confirmation evidence changes', async () => {
+    const projectNumber = '123456789';
+    const bucket = {
+      projectNumber,
+      status: 'managed-policy' as const,
+    };
+    const initialServices = new Set(BOOTSTRAP_SERVICES);
+    initialServices.delete('cloudresourcemanager.googleapis.com');
+    let bucketReads = 0;
+    const enabled: string[][] = [];
+
+    await expect(
+      repairMissingBootstrapApis({
+        assertOperatorIdentity: async () => {},
+        confirm: async () => {},
+        enableServices: (services) => enabled.push([...services]),
+        inspectBucket: () => {
+          bucketReads += 1;
+          return bucketReads === 1
+            ? bucket
+            : { ...bucket, status: 'bootstrap-policy' };
+        },
+        inspectServices: () => ({
+          projectNumber,
+          services: new Set(initialServices),
+        }),
+      }),
+    ).rejects.toThrow('changed during bootstrap API repair confirmation');
+    expect(enabled).toEqual([]);
+
+    let serviceReads = 0;
+    await expect(
+      repairMissingBootstrapApis({
+        assertOperatorIdentity: async () => {},
+        confirm: async () => {},
+        enableServices: (services) => enabled.push([...services]),
+        inspectBucket: () => bucket,
+        inspectServices: () => {
+          serviceReads += 1;
+          const services = new Set(initialServices);
+          if (serviceReads > 1) {
+            services.delete('cloudbilling.googleapis.com');
+          }
+          return { projectNumber, services };
+        },
+      }),
+    ).rejects.toThrow('expanded during confirmation');
+    expect(enabled).toEqual([]);
+  });
+
+  test('rejects untrusted repair evidence before confirmation or enable', async () => {
+    const calls: string[] = [];
+    const bucket = {
+      projectNumber: '123456789',
+      status: 'managed-policy' as const,
+    };
+    const missingStorage = new Set(BOOTSTRAP_SERVICES);
+    missingStorage.delete('storage.googleapis.com');
+    const operations = {
+      assertOperatorIdentity: async () => {
+        calls.push('identity');
+      },
+      confirm: async () => {
+        calls.push('confirm');
+      },
+      enableServices: () => calls.push('enable'),
+      inspectBucket: () => bucket,
+    };
+
+    await expect(
+      repairMissingBootstrapApis({
+        ...operations,
+        inspectServices: () => ({
+          projectNumber: bucket.projectNumber,
+          services: missingStorage,
+        }),
+      }),
+    ).rejects.toThrow('Service Usage and Storage');
+    expect(calls).toEqual([]);
+
+    await expect(
+      repairMissingBootstrapApis({
+        ...operations,
+        inspectServices: () => ({
+          projectNumber: '987654321',
+          services: BOOTSTRAP_SERVICES,
+        }),
+      }),
+    ).rejects.toThrow('different Google projects');
+    expect(calls).toEqual([]);
+  });
+
+  test('API repair is a no-op when absent or concurrently repaired', async () => {
+    const trace: string[] = [];
+    await repairMissingBootstrapApis({
+      assertOperatorIdentity: async () => {
+        trace.push('identity');
+      },
+      confirm: async () => {
+        trace.push('confirm');
+      },
+      enableServices: () => trace.push('enable'),
+      inspectBucket: () => {
+        trace.push('bucket');
+        return null;
+      },
+      inspectServices: () => {
+        trace.push('services');
+        return { projectNumber: '123456789', services: BOOTSTRAP_SERVICES };
+      },
+    });
+    expect(trace).toEqual(['bucket']);
+
+    const projectNumber = '123456789';
+    let serviceReads = 0;
+    const concurrentTrace: string[] = [];
+    const initiallyMissing = new Set(BOOTSTRAP_SERVICES);
+    initiallyMissing.delete('cloudbilling.googleapis.com');
+    await repairMissingBootstrapApis({
+      assertOperatorIdentity: async () => {
+        concurrentTrace.push('identity');
+      },
+      confirm: async () => {
+        concurrentTrace.push('confirm');
+      },
+      enableServices: () => concurrentTrace.push('enable'),
+      inspectBucket: () => {
+        concurrentTrace.push('bucket');
+        return {
+          projectNumber,
+          status: 'managed-policy',
+        };
+      },
+      inspectServices: () => {
+        concurrentTrace.push('services');
+        serviceReads += 1;
+        return {
+          projectNumber,
+          services:
+            serviceReads === 1
+              ? new Set(initiallyMissing)
+              : new Set(BOOTSTRAP_SERVICES),
+        };
+      },
+    });
+    expect(concurrentTrace).toEqual([
+      'bucket',
+      'services',
+      'confirm',
+      'identity',
+      'bucket',
+      'services',
+    ]);
+  });
+
+  test('partially completed API repair retries only the remaining service', async () => {
+    const projectNumber = '123456789';
+    const services = new Set<string>(BOOTSTRAP_SERVICES);
+    services.delete('cloudresourcemanager.googleapis.com');
+    services.delete('cloudbilling.googleapis.com');
+    const enabled: string[][] = [];
+    const operations = {
+      assertOperatorIdentity: async () => {},
+      confirm: async () => {},
+      enableServices: (missing: readonly string[]) => {
+        enabled.push([...missing]);
+        const firstMissing = missing[0];
+        if (firstMissing !== undefined) {
+          services.add(firstMissing);
+        }
+      },
+      inspectBucket: () => ({
+        projectNumber,
+        status: 'managed-policy' as const,
+      }),
+      inspectServices: () => ({
+        projectNumber,
+        services: new Set(services),
+      }),
+    };
+
+    await expect(repairMissingBootstrapApis(operations)).rejects.toThrow(
+      'did not enable the exact bootstrap inspection APIs',
+    );
+    await repairMissingBootstrapApis(operations);
+    expect(enabled).toEqual([
+      ['cloudresourcemanager.googleapis.com', 'cloudbilling.googleapis.com'],
+      ['cloudbilling.googleapis.com'],
+    ]);
+  });
+
+  test('repairs APIs before full validation or Terraform initialization', () => {
+    const apply = read('scripts/apply.ts');
+    const inspection = apply.slice(
+      apply.indexOf('function inspectStateBucketForApiRepair'),
+      apply.indexOf('function stateBucketStatus'),
+    );
+    expect(inspection).toContain("'storage'");
+    expect(inspection).toContain('stateBucketProjectNumber(bucket)');
+    expect(inspection).toContain('validateStateBucket(');
+    expect(inspection).toMatch(
+      /'buckets',[\s\S]*'list',[\s\S]*'--project',[\s\S]*PROJECT_ID/u,
+    );
+    expect(inspection).toContain("'get-iam-policy'");
+    expect(inspection).toContain('`gs://${STATE_BUCKET}`');
+    expect(inspection).not.toContain('inspectProject()');
+    expect(inspection).not.toContain('validateExistingProject(');
+    expect(inspection).not.toContain('projectIamPolicy()');
+
+    const fullValidation = apply.slice(
+      apply.indexOf('function stateBucketStatus'),
+      apply.indexOf('export function parseStateListResult'),
+    );
+    expect(fullValidation).toContain('inspectStateBucketForApiRepair(');
+    expect(fullValidation).toContain('inspectProject()');
+    expect(fullValidation).toContain('validateExistingProject(project)');
+    expect(fullValidation).toContain('projectIamPolicy()');
+
+    const main = apply.slice(apply.indexOf('async function main'));
+    const repair = main.indexOf('await repairMissingBootstrapApis');
+    const fullStateValidation = main.indexOf(
+      'const initialBucketStatus = stateBucketStatus(true)',
+    );
+    const bootstrapInit = main.indexOf(
+      "runInteractive('terraform', ['init', '-input=false'], bootstrapRoot)",
+    );
+    const remoteInit = main.indexOf(
+      "runInteractive('terraform', ['init', '-reconfigure', '-input=false'])",
+    );
+    expect(repair).toBeGreaterThan(-1);
+    expect(repair).toBeLessThan(fullStateValidation);
+    expect(main).toContain(
+      "['services', 'enable', ...services, '--project', PROJECT_ID, '--quiet']",
+    );
+    expect(fullStateValidation).toBeLessThan(bootstrapInit);
+    expect(bootstrapInit).toBeLessThan(remoteInit);
+    const recovery = main.indexOf('recoverBootstrapState(initialBucketStatus)');
+    expect(recovery).toBeGreaterThan(bootstrapInit);
+    expect(recovery).toBeLessThan(remoteInit);
     expect(apply).toContain("if (bucketStatus !== 'absent')");
   });
 

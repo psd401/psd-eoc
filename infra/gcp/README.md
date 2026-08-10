@@ -109,7 +109,9 @@ transport state.
 
 Run the guarded helper from this directory. It initializes each Terraform root
 with the pinned CLI configuration and produces a complete saved plan before it
-offers either exact human confirmation:
+offers either Terraform confirmation. The one pre-plan exception is the
+separately confirmed repair of disabled bootstrap inspection APIs documented
+below:
 
 ```sh
 ./scripts/run-guarded.sh apply
@@ -131,20 +133,38 @@ known initial policy and immediately finish the replacement; any other policy
 fails closed. Requester Pays is explicitly disabled, and recovery rejects an
 enabled or malformed Requester Pays value before treating the bucket as usable
 by the backend. Bucket creation waits for all four bootstrap APIs. If an existing
-managed bucket is later found with any bootstrap API missing, recovery imports
-the existing bucket and policy into bootstrap state and repairs the APIs before
-the main backend is initialized. Recovery also validates the exact
-organization, billing account, labels, whole direct project IAM policy, and
-already-enabled APIs before importing anything. If an interrupted provider
+bootstrap or managed bucket is later found with Cloud Resource Manager or Cloud
+Billing disabled, the helper first uses Storage alone to validate the bucket's
+complete metadata, project-scoped ownership, and exact known IAM policy. It then
+parses a structured Service Usage inventory, requires both Service Usage and
+Storage to remain enabled, and requires the inventory's numeric project to equal
+the bucket owner. It previews only the fixed missing APIs and requires the
+separate exact phrase `repair-psd401-eoc-bootstrap-apis`. After that prompt it
+rechecks the gcloud and ADC identities, bucket contract, numeric project, and
+service inventory; a changed bucket or newly missing API requires a fresh
+preview. It then synchronously enables only the still-missing Cloud Resource
+Manager and/or Cloud Billing API and verifies the result. If Service Usage or
+Storage cannot support those trusted reads, recovery fails closed rather than
+guessing.
+
+This narrow enablement is persistent, can permit billable API use, and cannot
+be represented by a usable saved Terraform plan because the disabled APIs are
+required to refresh the project resources for that plan. Immediately after the
+repair, the helper validates the exact organization, billing account, labels,
+whole direct project IAM policy, bucket contract, and enabled APIs before any
+Terraform backend is initialized or anything is imported. Terraform then
+imports and reconciles the enabled services. If an interrupted provider
 create left the fixed roster-reader service account outside Terraform state,
 recovery adopts it only after a successful project-scoped account listing and
 an exact identity, display-name, description, enabled-state, empty resource IAM
 policy, and zero-user-managed-key check. Permission or inspection failures,
 unexpected metadata, a resource binding, or any existing key fail closed.
 
-Both mutations use saved Terraform plans and a helper-owned exact confirmation;
-inherited `TF_CLI_ARGS*`, `TF_WORKSPACE`, and Google credential overrides are
-discarded. The child process pins `TF_CLI_CONFIG_FILE` to the checked-in
+The bootstrap and main Terraform mutations use saved plans and helper-owned
+exact confirmations; the exceptional API repair uses its own consequence
+preview and exact confirmation before any Terraform initialization. Inherited
+`TF_CLI_ARGS*`, `TF_WORKSPACE`, and Google credential overrides are discarded.
+The child process pins `TF_CLI_CONFIG_FILE` to the checked-in
 `terraform.tfrc`, which permits only direct provider installation; a home
 `.terraformrc`, legacy `TERRAFORM_CONFIG`, development override, reattached
 provider, or ambient plugin cache cannot replace a locked provider.
@@ -152,10 +172,10 @@ provider, or ambient plugin cache cannot replace a locked provider.
 than discarded so an operator expecting an emulator cannot unknowingly reach
 the live state bucket. Every Terraform state or output read also requires the
 persisted workspace to be exactly `default`; a stale `.terraform/environment`
-cannot redirect a helper to another workspace. The confirmation phrases are
-shown only after the complete plans. There is no auto-approve path. Do not
-confirm either plan without explicit product-owner approval for the billed,
-retained infrastructure described in the preview.
+cannot redirect a helper to another workspace. Each Terraform confirmation
+phrase is shown only after its complete plan. There is no auto-approve path. Do
+not confirm the API repair or either plan without explicit product-owner
+approval for the billed, retained infrastructure described in its preview.
 
 No private key or OAuth secret is a Terraform resource, input, or output.
 
