@@ -6,6 +6,10 @@ import { redirect } from 'next/navigation';
 
 import { WEB_CSRF_COOKIE_NAME } from '../../../../lib/auth/sessions';
 import { eventTypesForMode, loadOperationalViewData } from '../_lib/data';
+import {
+  startConfirmationReturnPath,
+  startSelectionReturnPath,
+} from '../_lib/return-path';
 import { requirePageSession } from '../_lib/session';
 import {
   ActivationConfirm,
@@ -47,7 +51,12 @@ export default async function ConfirmStartPage({
     redirect('/');
   }
 
-  const authenticated = await requirePageSession('/start/confirm');
+  const returnPath = startConfirmationReturnPath({
+    eventTypeVersionId: eventTypeVersionResult.data,
+    facilityId: facilityResult.data,
+    mode,
+  });
+  const authenticated = await requirePageSession(returnPath);
   const data = await loadOperationalViewData(authenticated);
   const facility = data.facilities.find(
     (candidate) => candidate.id === facilityResult.data,
@@ -65,9 +74,10 @@ export default async function ConfirmStartPage({
       event,
       label: eventTypeName,
     }));
-  const selectionHref = `/start?facilityId=${encodeURIComponent(
-    facility.id,
-  )}&mode=${mode}`;
+  const selectionHref = startSelectionReturnPath({
+    facilityId: facility.id,
+    mode,
+  });
 
   return (
     <main className="page-shell start-flow" id="main-content" tabIndex={-1}>

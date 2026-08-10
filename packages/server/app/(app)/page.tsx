@@ -1,5 +1,6 @@
 import { WEB_CSRF_COOKIE_NAME } from '../../lib/auth/sessions';
 import { loadOperationalViewData } from './start/_lib/data';
+import { startSelectionReturnPath } from './start/_lib/return-path';
 import { requirePageSession } from './start/_lib/session';
 import { Call911Affordance } from './start/components/call-911-affordance';
 import { ClassificationIcon } from './start/components/classification-icon';
@@ -104,9 +105,10 @@ export default async function DashboardPage() {
               <div className="action-grid">
                 <a
                   className="action-link action-link--real"
-                  href={`/start?facilityId=${encodeURIComponent(
-                    facility.id,
-                  )}&mode=real`}
+                  href={startSelectionReturnPath({
+                    facilityId: facility.id,
+                    mode: 'real',
+                  })}
                 >
                   <ClassificationIcon mode="real" />
                   <span>
@@ -115,9 +117,10 @@ export default async function DashboardPage() {
                 </a>
                 <a
                   className="action-link action-link--drill"
-                  href={`/start?facilityId=${encodeURIComponent(
-                    facility.id,
-                  )}&mode=drill`}
+                  href={startSelectionReturnPath({
+                    facilityId: facility.id,
+                    mode: 'drill',
+                  })}
                 >
                   <ClassificationIcon mode="drill" />
                   <span>
