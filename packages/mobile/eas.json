@@ -1,0 +1,29 @@
+{
+  "cli": {
+    "version": ">= 21.7.0",
+    "appVersionSource": "remote",
+    "promptToConfigurePushNotifications": false
+  },
+  "build": {
+    "development": {
+      "bun": "1.2.23",
+      "credentialsSource": "remote",
+      "developmentClient": true,
+      "distribution": "internal",
+      "environment": "development"
+    },
+    "preview": {
+      "bun": "1.2.23",
+      "credentialsSource": "remote",
+      "distribution": "internal",
+      "environment": "preview"
+    },
+    "production": {
+      "bun": "1.2.23",
+      "credentialsSource": "remote",
+      "distribution": "store",
+      "environment": "production",
+      "autoIncrement": true
+    }
+  }
+}
