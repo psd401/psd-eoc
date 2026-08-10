@@ -17,6 +17,7 @@ import {
   MAX_PROVIDER_PAGES,
   REGISTRATION_TYPES,
   SMS_CLIENT_CONFIG,
+  STS_CLIENT_CONFIG,
   TARGET_ACCOUNT,
   TARGET_REGION,
   assertProviderPageCapacity,
@@ -111,7 +112,6 @@ async function writeData(directory: string): Promise<string> {
             text: 'PSD EOC DRILL — synthetic staff exercise alert. Reply STOP to opt out.',
           },
         ],
-        optOutListName: 'psd-eoc-staff',
       },
     }),
   );
@@ -179,6 +179,7 @@ class FakeApi implements SmsRegistrationApi {
   hideAssociations = false;
   hideSubmittedState = false;
   registrationReadError = false;
+  phoneStatus = 'ACTIVE';
   submitCrashAfterWrite = false;
   versionOverride?: readonly RegistrationVersionRecord[];
 
@@ -249,7 +250,7 @@ class FakeApi implements SmsRegistrationApi {
         phoneNumberId: 'phone-1',
         registrationId: 'registration-toll-free',
         numberType: 'TOLL_FREE',
-        status: 'ACTIVE',
+        status: this.phoneStatus,
       },
     ] as const;
   }
@@ -505,9 +506,14 @@ function deferred(): {
 }
 
 describe('AWS response compatibility', () => {
-  it('pins the write-capable SMS client to one attempt', () => {
+  it('pins write retries and ignores ambient endpoint overrides', () => {
     expect(SMS_CLIENT_CONFIG).toEqual({
+      ignoreConfiguredEndpointUrls: true,
       maxAttempts: 1,
+      region: TARGET_REGION,
+    });
+    expect(STS_CLIENT_CONFIG).toEqual({
+      ignoreConfiguredEndpointUrls: true,
       region: TARGET_REGION,
     });
   });
@@ -722,28 +728,27 @@ describe('offline safety boundary', () => {
     expect(api.calls).toEqual([]);
   });
 
-  it('rejects placeholder and invalid opt-out list names before client creation', async () => {
-    for (const optOutListName of [
-      'REPLACE_ME_OPT_OUT_LIST',
-      'invalid/list',
-      'x'.repeat(65),
-    ]) {
-      const directory = await fixtureDirectory();
-      const dataPath = await writeData(directory);
-      await replaceDataValue(dataPath, 'psd-eoc-staff', optOutListName);
-      const api = new FakeApi();
-      const harness = testRuntime(api);
+  it('rejects a legacy custom opt-out list before client creation', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    const data = JSON.parse(await readFile(dataPath, 'utf8')) as {
+      tollFree: Record<string, unknown>;
+    };
+    data.tollFree.optOutListName = 'private-legacy-list';
+    await writeFile(dataPath, JSON.stringify(data));
+    const api = new FakeApi();
+    const harness = testRuntime(api);
 
-      await expect(
-        runSubmit(
-          'tollFree',
-          submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
-          harness.runtime,
-        ),
-      ).rejects.toThrow();
-      expect(harness.apiCreations()).toBe(0);
-      expect(api.calls).toEqual([]);
-    }
+    await expect(
+      runSubmit(
+        'tollFree',
+        submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
+        harness.runtime,
+      ),
+    ).rejects.toThrow('tollFree.optOutListName is no longer supported');
+
+    expect(harness.apiCreations()).toBe(0);
+    expect(api.calls).toEqual([]);
   });
 });
 
@@ -999,6 +1004,49 @@ describe('attachment trust boundary', () => {
 });
 
 describe('live validation before mutation', () => {
+  it('rejects unknown and duplicate provider field definitions before writes', async () => {
+    const cases: readonly (readonly FieldDefinition[])[] = [
+      [
+        ...definitions('brand'),
+        {
+          fieldPath: 'future.required',
+          fieldRequirement: 'FUTURE_REQUIRED',
+          fieldType: 'TEXT',
+        },
+      ],
+      [
+        ...definitions('brand'),
+        {
+          fieldPath: 'future.type',
+          fieldRequirement: 'OPTIONAL',
+          fieldType: 'FUTURE_TYPE',
+        },
+      ],
+      [...definitions('brand'), ...definitions('brand')],
+    ];
+
+    for (const definitionOverride of cases) {
+      const directory = await fixtureDirectory();
+      const dataPath = await writeData(directory);
+      const api = new FakeApi();
+      api.definitionOverride = definitionOverride;
+
+      await expect(
+        runSubmit(
+          'brand',
+          submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+          testRuntime(api).runtime,
+        ),
+      ).rejects.toThrow('refusing mutation');
+
+      expect(mutationCalls(api)).toEqual([]);
+      expect(api.calls).toEqual([
+        'identity',
+        `definitions:${REGISTRATION_TYPES.brand}`,
+      ]);
+    }
+  });
+
   it('enforces a provider regex before any registration write', async () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
@@ -1257,9 +1305,99 @@ describe('registration API ordering', () => {
     });
     expect(harness.stdout.join('\n')).toContain('monthly lease price: 2.00');
   });
+
+  it('refuses toll-free submission unless the phone status is safely associated', async () => {
+    for (const phoneStatus of [
+      'DISASSOCIATING',
+      'DELETED',
+      'FUTURE_PROVIDER_STATUS',
+    ]) {
+      const directory = await fixtureDirectory();
+      const dataPath = await writeData(directory);
+      const api = new FakeApi();
+      api.phoneStatus = phoneStatus;
+
+      await expect(
+        runSubmit(
+          'tollFree',
+          submitOptions(directory, dataPath, 'LEASE_TOLL_FREE_AND_SUBMIT'),
+          testRuntime(api).runtime,
+        ),
+      ).rejects.toThrow('not safe for registration submission');
+
+      expect(api.calls).toContain('describe-phone');
+      expect(api.calls).not.toContain('submit:registration-toll-free');
+    }
+  });
 });
 
 describe('state isolation and concurrency', () => {
+  it('redacts private state paths from read and persist failures', async () => {
+    const directory = await fixtureDirectory();
+    const readPath = join(directory, 'private-state-read.json');
+    await writeFile(readPath, '{');
+    let readMessage = '';
+    try {
+      await loadState(readPath);
+    } catch (error) {
+      readMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(readMessage).toBe(
+      'Unable to read the private registration state file.',
+    );
+    expect(readMessage).not.toContain('private-state-read.json');
+    expect(readMessage).not.toContain(directory);
+
+    const persistPath = join(directory, 'private-state-persist');
+    await mkdir(persistPath);
+    let persistMessage = '';
+    try {
+      await saveState(persistPath, {
+        schemaVersion: 2,
+        targetAccount: TARGET_ACCOUNT,
+        targetRegion: TARGET_REGION,
+      });
+    } catch (error) {
+      persistMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(persistMessage).toBe(
+      'Unable to persist the private registration state file.',
+    );
+    expect(persistMessage).not.toContain('private-state-persist');
+    expect(persistMessage).not.toContain(directory);
+  });
+
+  it('redacts private paths when state-lock setup fails', async () => {
+    const directory = await fixtureDirectory();
+    const dataPath = await writeData(directory);
+    const privateParent = join(directory, 'private-lock-parent');
+    const privateStatePath = join(privateParent, 'private-state.json');
+    await writeFile(privateParent, 'not a directory');
+    const api = new FakeApi();
+    let message = '';
+
+    try {
+      await runSubmit(
+        'brand',
+        {
+          ...submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+          statePath: privateStatePath,
+        },
+        testRuntime(api).runtime,
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toBe(
+      'Unable to prepare the private registration state lock.',
+    );
+    expect(message).not.toContain('private-lock-parent');
+    expect(message).not.toContain('private-state.json');
+    expect(message).not.toContain(directory);
+    expect(mutationCalls(api)).toEqual([]);
+  });
+
   it('rejects cross-kind, unexpected, and cross-account state', async () => {
     const directory = await fixtureDirectory();
     const statePath = join(directory, 'registration-state.json');
@@ -1342,6 +1480,7 @@ describe('state isolation and concurrency', () => {
   it('allows only one submit workflow to hold the state lock', async () => {
     const directory = await fixtureDirectory();
     const dataPath = await writeData(directory);
+    const privateStatePath = join(directory, 'private-state-lock.json');
     const api = new FakeApi();
     const started = deferred();
     const release = deferred();
@@ -1349,19 +1488,31 @@ describe('state isolation and concurrency', () => {
     api.createRegistrationWait = release.promise;
     const first = runSubmit(
       'brand',
-      submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+      {
+        ...submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+        statePath: privateStatePath,
+      },
       testRuntime(api).runtime,
     );
     await started.promise;
 
     try {
-      await expect(
-        runSubmit(
+      let lockMessage = '';
+      try {
+        await runSubmit(
           'brand',
-          submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+          {
+            ...submitOptions(directory, dataPath, 'SUBMIT_10DLC_BRAND'),
+            statePath: privateStatePath,
+          },
           testRuntime(api).runtime,
-        ),
-      ).rejects.toThrow('Another submit workflow holds');
+        );
+      } catch (error) {
+        lockMessage = error instanceof Error ? error.message : String(error);
+      }
+      expect(lockMessage).toContain('Another submit workflow holds');
+      expect(lockMessage).not.toContain('private-state-lock.json');
+      expect(lockMessage).not.toContain(directory);
     } finally {
       release.resolve();
     }

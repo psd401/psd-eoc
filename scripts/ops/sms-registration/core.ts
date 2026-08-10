@@ -22,7 +22,12 @@ import {
 
 export const TARGET_ACCOUNT = '338414773271';
 export const TARGET_REGION = 'us-west-2';
+export const STS_CLIENT_CONFIG = {
+  ignoreConfiguredEndpointUrls: true,
+  region: TARGET_REGION,
+} as const;
 export const SMS_CLIENT_CONFIG = {
+  ignoreConfiguredEndpointUrls: true,
   maxAttempts: 1,
   region: TARGET_REGION,
 } as const;
@@ -82,7 +87,6 @@ export interface RegistrationData {
   readonly schemaVersion: 1;
   readonly tollFree: {
     readonly fields: readonly FieldValue[];
-    readonly optOutListName: string;
   };
 }
 
@@ -259,7 +263,6 @@ export interface SmsRegistrationApi {
   requestTollFreeNumber(input: {
     readonly clientToken: string;
     readonly name: string;
-    readonly optOutListName: string;
     readonly registrationId: string;
   }): Promise<{
     readonly monthlyLeasingPrice?: string;
@@ -495,6 +498,11 @@ export async function loadRegistrationData(
   const brand = asRecord(root.brand, 'brand');
   const campaign = asRecord(root.campaign, 'campaign');
   const tollFree = asRecord(root.tollFree, 'tollFree');
+  if ('optOutListName' in tollFree) {
+    throw new TypeError(
+      'tollFree.optOutListName is no longer supported. Remove it so the request uses the documented AWS Default opt-out list behavior.',
+    );
+  }
 
   return {
     brand: { fields: parseFields(brand.fields, 'brand.fields') },
@@ -507,10 +515,6 @@ export async function loadRegistrationData(
     schemaVersion: 1,
     tollFree: {
       fields: parseFields(tollFree.fields, 'tollFree.fields'),
-      optOutListName: requiredString(
-        tollFree.optOutListName,
-        'tollFree.optOutListName',
-      ),
     },
   };
 }
@@ -977,7 +981,7 @@ export async function loadState(path: string): Promise<RegistrationState> {
     ) {
       return emptyState();
     }
-    throw new Error(`Unable to read registration state at ${resolve(path)}.`, {
+    throw new Error('Unable to read the private registration state file.', {
       cause: error,
     });
   }
@@ -989,13 +993,19 @@ export async function saveState(
 ): Promise<void> {
   const absolutePath = resolve(path);
   const temporaryPath = `${absolutePath}.tmp`;
-  await mkdir(dirname(absolutePath), { recursive: true });
-  await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
-  await chmod(temporaryPath, 0o600);
-  await rename(temporaryPath, absolutePath);
+  try {
+    await mkdir(dirname(absolutePath), { recursive: true });
+    await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, absolutePath);
+  } catch (error) {
+    throw new Error('Unable to persist the private registration state file.', {
+      cause: error,
+    });
+  }
 }
 
 async function withExclusiveSubmitLock<T>(
@@ -1004,7 +1014,13 @@ async function withExclusiveSubmitLock<T>(
 ): Promise<T> {
   const absoluteStatePath = resolve(statePath);
   const lockPath = `${absoluteStatePath}.lock`;
-  await mkdir(dirname(absoluteStatePath), { recursive: true });
+  try {
+    await mkdir(dirname(absoluteStatePath), { recursive: true });
+  } catch (error) {
+    throw new Error('Unable to prepare the private registration state lock.', {
+      cause: error,
+    });
+  }
   let lockHandle: Awaited<ReturnType<typeof open>>;
   try {
     lockHandle = await open(lockPath, 'wx', 0o600);
@@ -1016,11 +1032,13 @@ async function withExclusiveSubmitLock<T>(
       error.code === 'EEXIST'
     ) {
       throw new Error(
-        `Another submit workflow holds ${lockPath}. If a prior process crashed, verify its AWS state before removing the stale lock.`,
+        'Another submit workflow holds the private state lock. If a prior process crashed, verify its AWS state before removing the stale lock.',
         { cause: error },
       );
     }
-    throw error;
+    throw new Error('Unable to acquire the private registration state lock.', {
+      cause: error,
+    });
   }
   const releaseLock = async (): Promise<void> => {
     const failures: unknown[] = [];
@@ -1044,15 +1062,25 @@ async function withExclusiveSubmitLock<T>(
       }
     }
     if (failures.length > 0) {
-      throw new AggregateError(failures, `Unable to release ${lockPath}.`);
+      throw new AggregateError(
+        failures,
+        'Unable to release the private registration state lock.',
+      );
     }
   };
   try {
-    await lockHandle.writeFile(
-      `${JSON.stringify({ acquiredAt: new Date().toISOString(), pid: process.pid })}\n`,
-      { encoding: 'utf8' },
-    );
-    await lockHandle.chmod(0o600);
+    try {
+      await lockHandle.writeFile(
+        `${JSON.stringify({ acquiredAt: new Date().toISOString(), pid: process.pid })}\n`,
+        { encoding: 'utf8' },
+      );
+      await lockHandle.chmod(0o600);
+    } catch (error) {
+      throw new Error(
+        'Unable to initialize the private registration state lock.',
+        { cause: error },
+      );
+    }
     const result = await operation();
     await releaseLock();
     return result;
@@ -1062,7 +1090,7 @@ async function withExclusiveSubmitLock<T>(
     } catch (releaseError) {
       throw new AggregateError(
         [operationError, releaseError],
-        `Submit workflow failed and ${lockPath} could not be released.`,
+        'Submit workflow failed and the private state lock could not be released.',
       );
     }
     throw operationError;
@@ -1091,9 +1119,6 @@ function assertNoPlaceholders(
   const offenders: string[] = [];
   if (containsPlaceholder(data.registrationNamePrefix)) {
     offenders.push('registrationNamePrefix');
-  }
-  if (containsPlaceholder(data.tollFree.optOutListName)) {
-    offenders.push('tollFree.optOutListName');
   }
   for (const field of fields) {
     const values =
@@ -1214,11 +1239,44 @@ function validateKnownConditionalRules(
   }
 }
 
+const SUPPORTED_FIELD_REQUIREMENTS = new Set([
+  'CONDITIONAL',
+  'OPTIONAL',
+  'REQUIRED',
+]);
+const SUPPORTED_FIELD_TYPES = new Set(['ATTACHMENT', 'SELECT', 'TEXT']);
+
+function assertSupportedFieldDefinitions(
+  definitions: readonly FieldDefinition[],
+): void {
+  const seenPaths = new Set<string>();
+  for (const definition of definitions) {
+    const safePath = terminalSafeText(definition.fieldPath);
+    if (seenPaths.has(definition.fieldPath)) {
+      throw new Error(
+        `AWS returned duplicate field definition ${safePath}; refusing mutation.`,
+      );
+    }
+    seenPaths.add(definition.fieldPath);
+    if (!SUPPORTED_FIELD_REQUIREMENTS.has(definition.fieldRequirement)) {
+      throw new Error(
+        `AWS returned unsupported requirement ${terminalSafeText(definition.fieldRequirement)} for ${safePath}; refusing mutation.`,
+      );
+    }
+    if (!SUPPORTED_FIELD_TYPES.has(definition.fieldType)) {
+      throw new Error(
+        `AWS returned unsupported field type ${terminalSafeText(definition.fieldType)} for ${safePath}; refusing mutation.`,
+      );
+    }
+  }
+}
+
 function validateAgainstDefinitions(
   kind: RegistrationKind,
   fields: readonly FieldValue[],
   definitions: readonly FieldDefinition[],
 ): void {
+  assertSupportedFieldDefinitions(definitions);
   const definitionsByPath = new Map(
     definitions.map((definition) => [definition.fieldPath, definition]),
   );
@@ -1601,9 +1659,6 @@ function inputFingerprint(
       fields: canonicalFields,
       kind,
       registrationNamePrefix: data.registrationNamePrefix,
-      ...(kind === 'tollFree'
-        ? { optOutListName: data.tollFree.optOutListName }
-        : {}),
       registrationType: REGISTRATION_TYPES[kind],
       targetAccount: TARGET_ACCOUNT,
       targetRegion: TARGET_REGION,
@@ -1738,21 +1793,10 @@ function registrationName(
   return `${data.registrationNamePrefix} — ${suffix}`;
 }
 
-function assertAwsIdentifiers(
-  data: RegistrationData,
-  kind: RegistrationKind,
-): void {
+function assertAwsIdentifiers(data: RegistrationData): void {
   if ([...data.registrationNamePrefix].length > 239) {
     throw new Error(
       'registrationNamePrefix must be no longer than 239 characters so every AWS Name tag stays within 256 characters.',
-    );
-  }
-  if (
-    kind === 'tollFree' &&
-    !/^[A-Za-z0-9_-]{1,64}$/u.test(data.tollFree.optOutListName)
-  ) {
-    throw new Error(
-      'tollFree.optOutListName must be 1-64 letters, digits, underscores, or hyphens.',
     );
   }
 }
@@ -1871,6 +1915,11 @@ const SUBMITTED_VERSION_STATUSES = new Set([
   'REQUIRES_OFFLINE_REVIEW',
   'REVIEWING',
   'SUBMITTED',
+]);
+const SAFE_TOLL_FREE_PHONE_STATUSES = new Set([
+  'ACTIVE',
+  'ASSOCIATING',
+  'PENDING',
 ]);
 
 function latestVersion(
@@ -2029,9 +2078,9 @@ async function verifyTollFreeNumberAssociation(input: {
       `Phone resource ${input.phoneNumberId} is not associated with the expected toll-free registration.`,
     );
   }
-  if (phone.status === 'DELETED') {
+  if (!SAFE_TOLL_FREE_PHONE_STATUSES.has(phone.status)) {
     throw new Error(
-      `Toll-free phone resource ${input.phoneNumberId} is DELETED.`,
+      `Toll-free phone resource ${input.phoneNumberId} has status ${terminalSafeText(phone.status)}, which is not safe for registration submission.`,
     );
   }
   return phone;
@@ -2050,7 +2099,7 @@ export async function runSubmit(
   assertSubmitAuthorized(kind, options, runtime);
   const fields = fieldsForKind(data, kind);
   assertNoPlaceholders(data, fields);
-  assertAwsIdentifiers(data, kind);
+  assertAwsIdentifiers(data);
   const preparedAttachments = await prepareAttachments(data, fields, kind);
   const api = await runtime.createApi();
   await assertCallerAccount(api);
@@ -2137,7 +2186,6 @@ export async function runSubmit(
         const number = await api.requestTollFreeNumber({
           clientToken: tollFree.phoneClientToken,
           name: registrationName(data, kind),
-          optOutListName: data.tollFree.optOutListName,
           registrationId,
         });
         tollFree.phoneNumberId = number.phoneNumberId;
@@ -2232,7 +2280,7 @@ export async function runStatus(
     const registrationType = REGISTRATION_TYPES[options.validateData];
     const fields = fieldsForKind(data, options.validateData);
     assertNoPlaceholders(data, fields);
-    assertAwsIdentifiers(data, options.validateData);
+    assertAwsIdentifiers(data);
     const definitions = await api.describeFieldDefinitions(registrationType);
     validateAgainstDefinitions(options.validateData, fields, definitions);
     await prepareAttachments(data, fields, options.validateData);

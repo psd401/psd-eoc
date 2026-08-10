@@ -86,9 +86,8 @@ metadata, and uploads only sanitized bytes. Keep source images in the ignored
 traversal outside that directory, symlink escapes, and non-regular files are
 rejected before an AWS client is created.
 
-Keep `registrationNamePrefix` to 239 characters or fewer. The account-local
-`tollFree.optOutListName` must contain 1-64 letters, digits, underscores, or
-hyphens. Placeholder values are rejected before AWS access.
+Keep `registrationNamePrefix` to 239 characters or fewer. Placeholder values
+are rejected before AWS access.
 
 Before submission, confirm the staff opt-in material and public policy pages
 meet AWS's current readiness checklist:
@@ -100,16 +99,23 @@ meet AWS's current readiness checklist:
   the terms and privacy policy, and gives STOP and HELP instructions.
 - The opt-in confirmation includes the PSD EOC name, frequency, rate disclosure,
   and STOP/HELP instructions.
-- The STOP response identifies PSD EOC, acknowledges the opt-out, and confirms
-  that no further messages will be sent. The HELP response identifies PSD EOC
-  and provides a district-domain email address, phone number, or public URL.
+- For the blocked, schema-diagnostic 10DLC campaign only, the STOP response
+  identifies PSD EOC, acknowledges the opt-out, and confirms that no further
+  messages will be sent. Its HELP response identifies PSD EOC and provides a
+  district-domain email address, phone number, or public URL.
+- US toll-free STOP handling is carrier-managed and its response cannot be
+  customized. A recipient who opts out must text `UNSTOP` or `START` to the
+  same toll-free number before messages can resume; a later action in PSD EOC
+  is not enough to re-enable delivery.
 - The terms identify the use case and include message frequency, opt-out
   instructions, customer-care contact information, a privacy-policy link, and
   the carrier-liability statement required by AWS review criteria.
 - Prepare at least two distinct registration samples that identify PSD EOC;
-  at least one includes an explicit `Reply STOP` opt-out instruction.
-- The public privacy policy states that mobile opt-in data and consent are not
-  shared with third parties for their own marketing or messaging.
+  use brackets such as `[facility]` for variable content, and include an
+  explicit `Reply STOP` opt-out instruction in at least one sample.
+- The public privacy policy states that phone numbers are collected for
+  messaging and that mobile opt-in data and consent are not shared with third
+  parties for their own marketing or messaging.
 
 To print AWS's current field paths, types, requirements, and display names using
 read-only calls:
@@ -236,7 +242,11 @@ it call `RequestPhoneNumber` with the registration ID and deletion protection,
 immediately persist the returned phone-number ID, verify the live registration
 association, and submit the registration. The recurring lease begins when AWS
 accepts the number request, even while review is pending. International sending
-and self-managed opt-out handling are not enabled.
+and self-managed opt-out handling are not enabled. The request deliberately
+omits the optional custom opt-out-list field, so AWS assigns the account's
+`Default` list instead of depending on an unverified custom resource. AWS and
+the US carriers manage toll-free STOP handling. A recipient must text `UNSTOP`
+or `START` to that same toll-free number to resume messages after opting out.
 
 ## State, retry, and status truth
 
@@ -303,6 +313,7 @@ product-owner approval, and authenticated human confirmation in the app.
 - [10DLC campaign form](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-10dlc-register-campaign.html)
 - [Toll-free registration process](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-tfn.html)
 - [Toll-free registration form](https://docs.aws.amazon.com/sms-voice/latest/userguide/registrations-tfn-register.html)
+- [Default phone-number opt-out list behavior](https://docs.aws.amazon.com/sms-voice/latest/userguide/phone-numbers-manage-opt-out-list.html)
 - [Opt-in requirements checklist](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-quickstart.html)
 - [Registration review criteria](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-review-criteria.html)
 - [Registration rejection troubleshooting](https://docs.aws.amazon.com/sms-voice/latest/userguide/registration-help-rejection-troubleshooting.html)
