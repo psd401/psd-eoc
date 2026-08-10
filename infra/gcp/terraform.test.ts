@@ -13,6 +13,7 @@ import {
   validateStateBucket,
 } from './scripts/apply';
 import {
+  assertNoUserManagedKeysBeforeRoleAssignment,
   findExactAssignment,
   selectGroupsReaderRole,
 } from './scripts/configure-workspace-role';
@@ -1603,7 +1604,7 @@ describe('Groups least-privilege contracts', () => {
     expect(contract).toContain('validateRosterReaderResourcePolicy(');
 
     for (const [path, expectedChecks] of [
-      ['scripts/configure-workspace-role.ts', 3],
+      ['scripts/configure-workspace-role.ts', 4],
       ['scripts/provision-groups-credential.ts', 2],
       ['scripts/verify-groups-readonly.ts', 2],
       ['scripts/revoke-groups-credential.ts', 3],
@@ -1648,6 +1649,14 @@ describe('Groups least-privilege contracts', () => {
       createdKeyIsVisible(new Set([first]), new Set([first]), first),
     ).toThrow('new Google key');
     expect(() => parseUserManagedKeyIds('not-a-key')).toThrow('invalid');
+
+    const provisioner = read('scripts/provision-groups-credential.ts');
+    expect(provisioner.match(/readUserManagedKeyCreatedAt\(/gu)).toHaveLength(
+      2,
+    );
+    expect(provisioner).toMatch(
+      /storageOutcome = 'stored';\s*assertRosterReaderCredentialBoundary\(contract\);\s*if \(\s*readUserManagedKeyCreatedAt\(contract, createdKeyId\) !==\s*credentialCreatedAt\s*\)/u,
+    );
   });
 
   test('retains unknown keys and reports failed bound-key cleanup', () => {
@@ -1670,6 +1679,14 @@ describe('Groups least-privilege contracts', () => {
         remoteDeleteAttempted = true;
       },
       storageOutcome: 'unknown',
+    });
+    expect(remoteDeleteAttempted).toBe(false);
+    cleanupCredentialArtifacts({
+      createdKeyId: 'a'.repeat(40),
+      deleteKey: () => {
+        remoteDeleteAttempted = true;
+      },
+      storageOutcome: 'stored',
     });
     expect(remoteDeleteAttempted).toBe(false);
   });
@@ -1697,6 +1714,29 @@ describe('Groups least-privilege contracts', () => {
       },
     ]);
     expect(role).toEqual({ roleId: 'reader-role-id' });
+    for (const isSuperAdminRole of [true, 'false', undefined, null, 0, {}]) {
+      expect(() =>
+        selectGroupsReaderRole([
+          {
+            isSuperAdminRole,
+            isSystemRole: true,
+            roleId: 'reader-role-id',
+            roleName: GROUPS_READER_ROLE,
+          },
+        ]),
+      ).toThrow('non-super-admin system role');
+    }
+    expect(() =>
+      assertNoUserManagedKeysBeforeRoleAssignment(new Set()),
+    ).not.toThrow();
+    expect(() =>
+      assertNoUserManagedKeysBeforeRoleAssignment(new Set(['a'.repeat(40)])),
+    ).toThrow('revoke every key first');
+    expect(() =>
+      assertNoUserManagedKeysBeforeRoleAssignment(
+        new Set(['a'.repeat(40), 'b'.repeat(40)]),
+      ),
+    ).toThrow('revoke every key first');
     expect(
       findExactAssignment(
         [
@@ -1771,6 +1811,9 @@ describe('Groups least-privilege contracts', () => {
     expect(roleHelper).toContain("url.searchParams.set('userKey', userKey)");
     expect(roleHelper).toContain(
       "url.searchParams.set('includeIndirectRoleAssignments', 'true')",
+    );
+    expect(roleHelper).toMatch(
+      /if \(process\.env\.PSD_EOC_CONFIRM_WORKSPACE_ROLE_ASSIGNMENT !== CONFIRMATION\)[^]*assertRosterReaderCredentialBoundary\(contract\);\s*assertNoUserManagedKeysBeforeRoleAssignment\(listUserManagedKeys\(contract\)\);\s*const created = parseRoleAssignment/u,
     );
     expect(read('scripts/verify-groups-readonly.ts')).toContain(
       'assertExactLiveGroupsReaderRole(contract, fetcher)',
