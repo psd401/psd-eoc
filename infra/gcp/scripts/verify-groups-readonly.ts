@@ -17,10 +17,12 @@ import {
   assertActiveGcloudAccount,
   assertApplicationDefaultIdentity,
   assertAwsAccount,
-  assertNoAmbientTransportOverrides,
   awsSecretExists,
+  boundedGoogleJsonObject,
+  guardedGoogleFetch,
   readSecretValue,
   requiredString,
+  type GoogleFetcher,
 } from './runtime';
 
 const AWS_ACCOUNT_ID = '338414773271';
@@ -31,7 +33,7 @@ const TERRAFORM_ADMIN = 'kjh_admin@psd401.net';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const CLOUD_IDENTITY_ENDPOINT = 'https://cloudidentity.googleapis.com/v1';
 
-type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
+type Fetcher = GoogleFetcher;
 
 function base64Url(value: string | Uint8Array): string {
   return Buffer.from(value)
@@ -108,39 +110,7 @@ export async function redactedFetch(
   init: RequestInit,
   operation: string,
 ): Promise<Response> {
-  assertNoAmbientTransportOverrides();
-  try {
-    return await fetcher(input, {
-      ...init,
-      signal: init.signal ?? AbortSignal.timeout(15_000),
-    });
-  } catch {
-    throw new Error(`${operation} could not reach Google.`);
-  }
-}
-
-async function responseJson(
-  response: Response,
-  operation: string,
-): Promise<Readonly<Record<string, unknown>>> {
-  if (!response.ok) {
-    try {
-      await response.body?.cancel();
-    } catch {
-      // Preserve the original HTTP failure without exposing a response body.
-    }
-    throw new Error(`${operation} failed with HTTP ${response.status}.`);
-  }
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    throw new Error(`${operation} returned an invalid response.`);
-  }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`${operation} returned an invalid response.`);
-  }
-  return value as Readonly<Record<string, unknown>>;
+  return guardedGoogleFetch(fetcher, input, init, operation);
 }
 
 async function main(fetcher: Fetcher = fetch): Promise<void> {
@@ -207,7 +177,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
     },
     'Service-account token exchange',
   );
-  const token = await responseJson(
+  const token = await boundedGoogleJsonObject(
     tokenResponse,
     'Service-account token exchange',
   );
@@ -226,7 +196,7 @@ async function main(fetcher: Fetcher = fetch): Promise<void> {
   const lookupUrl = new URL(`${CLOUD_IDENTITY_ENDPOINT}/groups:lookup`);
   lookupUrl.searchParams.set('groupKey.id', approvedGroup);
   lookupUrl.searchParams.set('fields', 'name');
-  const group = await responseJson(
+  const group = await boundedGoogleJsonObject(
     await redactedFetch(
       fetcher,
       lookupUrl,
