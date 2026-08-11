@@ -1411,3 +1411,26 @@ REVOKE UPDATE, DELETE ON TABLE
 	public."neighborhood_versions",
 	public."neighborhood_facilities"
 FROM "psd_eoc_app";--> statement-breakpoint
+
+-- PostgreSQL row-locking SELECTs require UPDATE on at least one column of
+-- every locked relation. Preserve the production FOR SHARE/FOR UPDATE reads
+-- without restoring mutable-table authority: each granted identity column is
+-- protected by an unconditional immutable UPDATE trigger, while table-wide
+-- UPDATE remains revoked.
+GRANT UPDATE ("id") ON TABLE
+	public."integration_statuses",
+	public."access_membership_snapshots",
+	public."roster_source_configurations",
+	public."neighborhood_versions",
+	public."audience_configurations"
+TO "psd_eoc_app";--> statement-breakpoint
+GRANT UPDATE ("snapshot_id") ON TABLE
+	public."access_membership_snapshot_groups",
+	public."access_membership_members",
+	public."access_membership_member_groups",
+	public."access_membership_member_facilities"
+TO "psd_eoc_app";--> statement-breakpoint
+GRANT UPDATE ("configuration_id") ON TABLE
+	public."roster_source_configuration_facilities",
+	public."roster_source_configuration_groups"
+TO "psd_eoc_app";

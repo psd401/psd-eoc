@@ -25,6 +25,7 @@ import {
   deviceEnrollments,
   groupSources,
   sessions,
+  sessionTokenIssuances,
   userRoleChanges,
   userRoles,
   users,
@@ -64,6 +65,16 @@ interface MarkerRow extends Record<string, unknown> {
 
 interface AdvisoryWaitRow extends Record<string, unknown> {
   readonly waiting_count: number;
+}
+
+interface ApplicationRoleRow extends Record<string, unknown> {
+  readonly application_role: string;
+}
+
+interface SnapshotUpdatePrivilegeRow extends Record<string, unknown> {
+  readonly table_name: string;
+  readonly table_update: boolean;
+  readonly update_columns: readonly string[];
 }
 
 interface DeferredSignal {
@@ -379,6 +390,280 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       sessionId,
     );
     expect(context?.result.user.roles).toEqual(['admin']);
+  });
+
+  test('issues a session as the production role with only immutable snapshot lock-column privileges', async () => {
+    const testContext = context;
+    if (testContext === undefined) {
+      throw new Error('The session integration test context is unavailable.');
+    }
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const userId = randomUUID();
+    const groupSourceId = randomUUID();
+    const snapshotId = randomUUID();
+    const snapshotVersion =
+      2_117_000_000 + Number.parseInt(suffix.slice(0, 3), 16);
+    const googleSubject = `issue-26-app-role-session-${suffix}`;
+    const snapshotAt = new Date(Date.now() + 30_000);
+    const createdAt = new Date(snapshotAt.getTime() + 1_000);
+
+    await database.insert(groupSources).values({
+      id: groupSourceId,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+      displayName: `Issue 26 app role session ${suffix.slice(0, 8)}`,
+      active: true,
+      googleGroupId: `issue-26-app-role-session-${suffix}`,
+      email: `issue-26-app-role-session-${suffix}@example.invalid`,
+      fixtureKey: null,
+      createdAt: snapshotAt,
+    });
+    await database.insert(users).values({
+      id: userId,
+      googleSubject,
+      email: `issue-26-app-role-session-${suffix}@psd401.net`,
+      displayName: `Issue 26 app role user ${suffix.slice(0, 8)}`,
+      facilityScopeKind: 'district',
+      createdAt: snapshotAt,
+    });
+    await database.insert(userRoles).values({ userId, role: 'staff' });
+
+    const activeAccessGroups = await database
+      .select({
+        id: groupSources.id,
+        kind: groupSources.kind,
+        purpose: groupSources.purpose,
+      })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.active, true),
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+        ),
+      );
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: snapshotVersion,
+        complete: true,
+        syncStartedAt: snapshotAt,
+        capturedAt: snapshotAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        activeAccessGroups.flatMap((source) => [
+          {
+            snapshotId,
+            groupSourceId: source.id,
+            groupSourceKind: source.kind,
+            groupPurpose: source.purpose,
+            completionKind: 'expected' as const,
+          },
+          {
+            snapshotId,
+            groupSourceId: source.id,
+            groupSourceKind: source.kind,
+            groupPurpose: source.purpose,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(accessMembershipMembers).values({
+        snapshotId,
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
+      });
+      await transaction.insert(accessMembershipMemberGroups).values({
+        snapshotId,
+        userId,
+        groupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      });
+    });
+
+    const responseDigest = digest(`issue-26-app-role-response:${suffix}`);
+    const principal = {
+      kind: 'oidc-callback' as const,
+      subjectDigest: digest(googleSubject),
+      responseDigest,
+    };
+    const credentialDigest = digest(`issue-26-app-role-credential:${suffix}`);
+    const request: PersistInitialWebSessionRequest = Object.freeze({
+      user: Object.freeze({
+        id: userId,
+        googleSubject,
+        email: `issue-26-app-role-session-${suffix}@psd401.net`,
+        displayName: `Issue 26 app role user ${suffix.slice(0, 8)}`,
+        roles: Object.freeze(['staff'] as const),
+        facilityScope: Object.freeze({ kind: 'district' as const }),
+        createdAt: snapshotAt.toISOString(),
+        disabledAt: null,
+      }),
+      membershipSnapshot: Object.freeze({
+        id: snapshotId,
+        version: snapshotVersion,
+        complete: true as const,
+        syncStartedAt: snapshotAt.toISOString(),
+        capturedAt: snapshotAt.toISOString(),
+      }),
+      membershipMember: Object.freeze({
+        userId,
+        googleSubject,
+        accessGroupSourceRefs: Object.freeze([
+          Object.freeze({
+            id: groupSourceId,
+            kind: 'google-group' as const,
+            purpose: 'access' as const,
+            facilityId: null,
+          }),
+        ]),
+        facilityScope: Object.freeze({ kind: 'district' as const }),
+      }),
+      device: Object.freeze({
+        platform: 'web' as const,
+        unlockMethod: 'secure-session-cookie' as const,
+        installationId: `issue-26-app-role-session-${suffix}`,
+      }),
+      credentialDigest,
+      createdAt,
+      expiresAt: new Date(createdAt.getTime() + 3 * 60 * 60 * 1_000),
+      membershipValidUntil: new Date(createdAt.getTime() + 60 * 60 * 1_000),
+      membershipGraceUntil: new Date(createdAt.getTime() + 2 * 60 * 60 * 1_000),
+      grantBootstrapAdmin: false,
+      requestId: randomUUID(),
+      idempotency: Object.freeze({
+        key: `oidc:${responseDigest}`,
+        principal,
+        principalDigest: digest(JSON.stringify(principal)),
+        requestDigest: digest(`issue-26-app-role-request:${suffix}`),
+      }),
+    });
+
+    const roleConnection = openPostgresConnection(testContext.databaseUrl, 1);
+    let roleSet = false;
+    try {
+      await roleConnection.db.execute(sql`set role psd_eoc_app`);
+      roleSet = true;
+      const [applicationRole] = databaseExecuteRows<ApplicationRoleRow>(
+        await roleConnection.db.execute<ApplicationRoleRow>(sql`
+          select current_user::text as application_role
+        `),
+      );
+      expect(applicationRole).toEqual({ application_role: 'psd_eoc_app' });
+
+      const result = await createDrizzleInitialWebSessionStore(
+        roleConnection.db,
+      ).persist(request);
+      expect(result.user.roles).toEqual(['staff']);
+      expect(result.session.authorization.membershipSnapshotId).toBe(
+        snapshotId,
+      );
+
+      const updatePrivileges = databaseExecuteRows<SnapshotUpdatePrivilegeRow>(
+        await roleConnection.db.execute<SnapshotUpdatePrivilegeRow>(sql`
+            with snapshot_tables(table_name) as (
+              values
+                ('access_membership_snapshots'::text),
+                ('access_membership_snapshot_groups'::text),
+                ('access_membership_members'::text),
+                ('access_membership_member_groups'::text),
+                ('access_membership_member_facilities'::text)
+            )
+            select
+              snapshot_tables.table_name,
+              has_table_privilege(
+                'psd_eoc_app',
+                relations.oid,
+                'UPDATE'
+              ) as table_update,
+              coalesce(
+                jsonb_agg(attributes.attname order by attributes.attnum)
+                  filter (
+                    where has_column_privilege(
+                      'psd_eoc_app',
+                      relations.oid,
+                      attributes.attnum,
+                      'UPDATE'
+                    )
+                  ),
+                '[]'::jsonb
+              ) as update_columns
+            from snapshot_tables
+            inner join pg_catalog.pg_namespace namespaces
+              on namespaces.nspname = 'public'
+            inner join pg_catalog.pg_class relations
+              on relations.relnamespace = namespaces.oid
+              and relations.relname = snapshot_tables.table_name
+            inner join pg_catalog.pg_attribute attributes
+              on attributes.attrelid = relations.oid
+              and attributes.attnum > 0
+              and not attributes.attisdropped
+            group by snapshot_tables.table_name, relations.oid
+            order by snapshot_tables.table_name
+        `),
+      );
+      expect(updatePrivileges).toEqual([
+        {
+          table_name: 'access_membership_member_facilities',
+          table_update: false,
+          update_columns: ['snapshot_id'],
+        },
+        {
+          table_name: 'access_membership_member_groups',
+          table_update: false,
+          update_columns: ['snapshot_id'],
+        },
+        {
+          table_name: 'access_membership_members',
+          table_update: false,
+          update_columns: ['snapshot_id'],
+        },
+        {
+          table_name: 'access_membership_snapshot_groups',
+          table_update: false,
+          update_columns: ['snapshot_id'],
+        },
+        {
+          table_name: 'access_membership_snapshots',
+          table_update: false,
+          update_columns: ['id'],
+        },
+      ]);
+
+      const [persistedSession] = await database
+        .select({
+          id: sessions.id,
+          userId: sessions.userId,
+          membershipSnapshotId: sessions.membershipSnapshotId,
+        })
+        .from(sessions)
+        .where(eq(sessions.id, result.session.id));
+      expect(persistedSession).toEqual({
+        id: result.session.id,
+        userId,
+        membershipSnapshotId: snapshotId,
+      });
+      const [tokenIssuance] = await database
+        .select({
+          sessionId: sessionTokenIssuances.sessionId,
+          tokenDigest: sessionTokenIssuances.tokenDigest,
+        })
+        .from(sessionTokenIssuances)
+        .where(eq(sessionTokenIssuances.sessionId, result.session.id));
+      expect(tokenIssuance).toEqual({
+        sessionId: result.session.id,
+        tokenDigest: credentialDigest,
+      });
+    } finally {
+      if (roleSet) {
+        await roleConnection.db.execute(sql`reset role`);
+      }
+      await roleConnection.close();
+    }
   });
 
   test('takes the administrator lock before bootstrap issuance row locks', async () => {

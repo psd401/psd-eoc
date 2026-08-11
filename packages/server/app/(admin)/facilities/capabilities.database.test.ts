@@ -260,6 +260,56 @@ async function cleanupResources(): Promise<void> {
   }
 }
 
+async function withIsolatedFacilitiesDatabase<Result>(
+  baseDatabaseUrl: string,
+  operation: (
+    isolatedContext: FacilitiesTestContext,
+    isolatedConnection: PostgresDatabaseConnection,
+  ) => Promise<Result>,
+): Promise<Result> {
+  const isolatedContext = buildContext(baseDatabaseUrl);
+  let isolatedConnection: PostgresDatabaseConnection | undefined;
+  let isolatedDatabaseCreated = false;
+  let result: Result | undefined;
+  const operationErrors: unknown[] = [];
+  try {
+    await createOwnedDatabase(isolatedContext);
+    isolatedDatabaseCreated = true;
+    isolatedConnection = openPostgresConnection(isolatedContext.databaseUrl, 6);
+    await migrateDatabase(isolatedConnection);
+    await seedDatabase(isolatedConnection.db);
+    result = await operation(isolatedContext, isolatedConnection);
+  } catch (error) {
+    operationErrors.push(error);
+  }
+
+  const cleanupErrors: unknown[] = [];
+  if (isolatedConnection !== undefined) {
+    try {
+      await isolatedConnection.close();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (isolatedDatabaseCreated) {
+    try {
+      await dropOwnedDatabase(isolatedContext);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (operationErrors.length > 0 || cleanupErrors.length > 0) {
+    if (operationErrors.length === 1 && cleanupErrors.length === 0) {
+      throw operationErrors[0];
+    }
+    throw new AggregateError(
+      [...operationErrors, ...cleanupErrors],
+      'The isolated issue #26 application-role proof or its cleanup failed.',
+    );
+  }
+  return result as Result;
+}
+
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
     throw new Error('The facilities integration database is not open.');
@@ -509,6 +559,23 @@ async function persistCompleteAccessSnapshotGeneration(
     }
     return snapshot;
   });
+}
+
+async function nextFreshAccessSnapshotTime(
+  database: PostgresDatabaseConnection['db'],
+): Promise<Date> {
+  const [latest] = await database
+    .select({ capturedAt: accessMembershipSnapshots.capturedAt })
+    .from(accessMembershipSnapshots)
+    .orderBy(
+      desc(accessMembershipSnapshots.version),
+      desc(accessMembershipSnapshots.capturedAt),
+      desc(accessMembershipSnapshots.id),
+    )
+    .limit(1);
+  return new Date(
+    Math.max(Date.now(), (latest?.capturedAt.getTime() ?? 0) + 1_000),
+  );
 }
 
 async function copyLatestAccessSnapshotWithMember(
@@ -1056,6 +1123,301 @@ describeWithDatabase('facilities administrator database flow', () => {
     }
   });
 
+  test('executes every owned row-lock capability through the production application role', async () => {
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    await withIsolatedFacilitiesDatabase(
+      currentContext.baseDatabaseUrl,
+      async (isolatedContext, ownerConnection) => {
+        const ownerDatabase = ownerConnection.db;
+        const authenticated = authenticatedAdministrator();
+        const suffix = randomUUID();
+        const requestIds: string[] = [];
+        const accessGroupId = randomUUID();
+        await ownerDatabase.insert(groupSources).values({
+          id: accessGroupId,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          displayName: `Application role access ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId: `app-role-access-${suffix}`,
+          email: `app-role-access-${suffix}@example.invalid`,
+          fixtureKey: null,
+        });
+        await persistAuthenticatedAdministrator(
+          ownerDatabase,
+          authenticated,
+          accessGroupId,
+          suffix,
+        );
+        if (authenticated.actor.kind !== 'human') {
+          throw new Error('The app-role lock proof requires a human actor.');
+        }
+        const integrationId = `synthetic-app-role-${suffix}`;
+        const integrationStatusId = randomUUID();
+        const issuedAt = new Date(Date.now() - 1_000);
+        const authorization = liveAuthorizationFor({
+          authenticated,
+          integrationId,
+          integrationStatusId,
+          previousConfiguration: null,
+          issuedAt,
+        });
+        await ownerDatabase.insert(integrationStatuses).values({
+          id: integrationStatusId,
+          integrationId,
+          label: 'live-verified',
+          verifiedAt: issuedAt,
+          verifiedByUserId: authenticated.actor.userId,
+          authorizationReference:
+            liveChannelChangeAuthorizationCommitment(authorization),
+          reasonCode: null,
+          observedAt: issuedAt,
+        });
+
+        const dedicated = openPostgresConnection(
+          isolatedContext.databaseUrl,
+          1,
+        );
+        try {
+          await assumeApplicationRole(dedicated);
+          const store = createDrizzleAdminCapabilityStore(
+            dedicated.db,
+            authenticated,
+          );
+          const facility = await executeCreateFacilityCapability({
+            authenticated,
+            store,
+            command: {
+              code: `ROLE-${suffix.slice(0, 8).toUpperCase()}`,
+              name: `Application role facility ${suffix.slice(0, 8)}`,
+            },
+            metadata: metadata('app-role-facility-create', requestIds),
+          });
+          const googleBuilding = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'google-group',
+              purpose: 'building',
+              facilityId: facility.id,
+              displayName: `Application role staff ${suffix.slice(0, 8)}`,
+              active: true,
+              googleGroupId: `app-role-building-${suffix}`,
+              email: `app-role-building-${suffix}@example.invalid`,
+            },
+            metadata: metadata('app-role-google-building', requestIds),
+          });
+          const syntheticBuilding = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'synthetic',
+              purpose: 'building',
+              facilityId: facility.id,
+              displayName: `Application role test staff ${suffix.slice(0, 8)}`,
+              active: true,
+              fixtureKey: `app-role-building-${suffix}`,
+            },
+            metadata: metadata('app-role-synthetic-building', requestIds),
+          });
+          const googleOthers = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'google-group',
+              purpose: 'others',
+              facilityId: null,
+              displayName: `Application role responders ${suffix.slice(0, 8)}`,
+              active: true,
+              googleGroupId: `app-role-others-${suffix}`,
+              email: `app-role-others-${suffix}@example.invalid`,
+            },
+            metadata: metadata('app-role-google-others', requestIds),
+          });
+          const syntheticOthers = await executeCreateGroupSourceCapability({
+            authenticated,
+            store,
+            command: {
+              kind: 'synthetic',
+              purpose: 'others',
+              facilityId: null,
+              displayName: `Application role test responders ${suffix.slice(0, 8)}`,
+              active: true,
+              fixtureKey: `app-role-others-${suffix}`,
+            },
+            metadata: metadata('app-role-synthetic-others', requestIds),
+          });
+
+          expect(
+            await executeUpdateFacilityCapability({
+              authenticated,
+              store,
+              command: {
+                facilityId: facility.id,
+                code: facility.code,
+                name: `${facility.name} revised`,
+                active: true,
+              },
+              metadata: metadata('app-role-facility-update', requestIds),
+            }),
+          ).toMatchObject({ id: facility.id, active: true });
+
+          for (const replacement of [
+            {
+              source: googleBuilding,
+              command: {
+                id: googleBuilding.id,
+                kind: 'google-group' as const,
+                purpose: 'building' as const,
+                facilityId: facility.id,
+                displayName: `${googleBuilding.displayName} replacement`,
+                active: true,
+                googleGroupId: `app-role-building-replacement-${suffix}`,
+                email: `app-role-building-replacement-${suffix}@example.invalid`,
+              },
+              label: 'app-role-google-building-replacement',
+            },
+            {
+              source: syntheticBuilding,
+              command: {
+                id: syntheticBuilding.id,
+                kind: 'synthetic' as const,
+                purpose: 'building' as const,
+                facilityId: facility.id,
+                displayName: `${syntheticBuilding.displayName} replacement`,
+                active: true,
+                fixtureKey: `app-role-building-replacement-${suffix}`,
+              },
+              label: 'app-role-synthetic-building-replacement',
+            },
+            {
+              source: googleOthers,
+              command: {
+                id: googleOthers.id,
+                kind: 'google-group' as const,
+                purpose: 'others' as const,
+                facilityId: null,
+                displayName: `${googleOthers.displayName} replacement`,
+                active: true,
+                googleGroupId: `app-role-others-replacement-${suffix}`,
+                email: `app-role-others-replacement-${suffix}@example.invalid`,
+              },
+              label: 'app-role-google-others-replacement',
+            },
+            {
+              source: syntheticOthers,
+              command: {
+                id: syntheticOthers.id,
+                kind: 'synthetic' as const,
+                purpose: 'others' as const,
+                facilityId: null,
+                displayName: `${syntheticOthers.displayName} replacement`,
+                active: true,
+                fixtureKey: `app-role-others-replacement-${suffix}`,
+              },
+              label: 'app-role-synthetic-others-replacement',
+            },
+          ] as const) {
+            const replaced = await executeUpdateGroupSourceCapability({
+              authenticated,
+              store,
+              command: replacement.command,
+              metadata: metadata(replacement.label, requestIds),
+            });
+            expect(replaced.id).not.toBe(replacement.source.id);
+            expect(replaced.active).toBe(true);
+          }
+
+          const neighborhood = await executeCreateNeighborhoodVersionCapability(
+            {
+              authenticated,
+              store,
+              command: {
+                neighborhoodId: null,
+                name: `Application role neighborhood ${suffix.slice(0, 8)}`,
+                facilityIds: [facility.id],
+              },
+              metadata: metadata('app-role-neighborhood-first', requestIds),
+            },
+          );
+          expect(
+            await executeCreateNeighborhoodVersionCapability({
+              authenticated,
+              store,
+              command: {
+                neighborhoodId: neighborhood.id,
+                name: `${neighborhood.name} revised`,
+                facilityIds: [facility.id],
+              },
+              metadata: metadata('app-role-neighborhood-next', requestIds),
+            }),
+          ).toMatchObject({ id: neighborhood.id, version: 2 });
+
+          const audience = await executeCreateAudienceConfigVersionCapability({
+            authenticated,
+            store,
+            command: {
+              audienceConfigId: null,
+              facilityId: facility.id,
+              targets: [{ kind: 'building', facilityId: facility.id }],
+            },
+            metadata: metadata('app-role-audience-first', requestIds),
+          });
+          expect(
+            await executeCreateAudienceConfigVersionCapability({
+              authenticated,
+              store,
+              command: {
+                audienceConfigId: audience.id,
+                facilityId: facility.id,
+                targets: [{ kind: 'building', facilityId: facility.id }],
+              },
+              metadata: metadata('app-role-audience-next', requestIds),
+            }),
+          ).toMatchObject({ id: audience.id, version: 2 });
+
+          expect(
+            await executeSetChannelEnabledCapability({
+              authenticated,
+              store,
+              command: {
+                integrationId,
+                enabled: true,
+                authorization,
+              },
+              metadata: metadata('app-role-live-channel', requestIds),
+            }),
+          ).toMatchObject({
+            integrationId,
+            enabled: true,
+            status: { integrationId, label: 'live-verified' },
+          });
+
+          const audits = await dedicated.db
+            .select({
+              outcome: securityAuditEntries.outcome,
+              requestId: securityAuditEntries.requestId,
+            })
+            .from(securityAuditEntries)
+            .where(inArray(securityAuditEntries.requestId, requestIds));
+          expect(audits).toHaveLength(requestIds.length);
+          expect(audits.map(({ requestId }) => requestId).sort()).toEqual(
+            [...requestIds].sort(),
+          );
+          expect(audits.every(({ outcome }) => outcome === 'success')).toBe(
+            true,
+          );
+        } finally {
+          await dedicated.close();
+        }
+      },
+    );
+  });
+
   test('rolls the first access group back to an empty bootstrap state', async () => {
     const database = databaseConnection().db;
     const authenticated = authenticatedAdministrator();
@@ -1559,6 +1921,86 @@ describeWithDatabase('facilities administrator database flow', () => {
       `locator-rotation-${suffix}`,
     );
 
+    const inactiveSourceId = randomUUID();
+    const inactiveGoogleGroupId = `issue-26-retired-access-${suffix}`;
+    const inactiveEmail = `issue-26-retired-access-${suffix}@example.invalid`;
+    await database.insert(groupSources).values({
+      id: inactiveSourceId,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+      displayName: `Retired access source ${suffix.slice(0, 8)}`,
+      active: false,
+      googleGroupId: inactiveGoogleGroupId,
+      email: inactiveEmail,
+      fixtureKey: null,
+    });
+    const inactiveReplacementGoogleGroupId = `issue-26-retired-access-replacement-${suffix}`;
+    const inactiveReplacementMetadata = metadata(
+      'locator-rotation-retired-origin',
+      requestIds,
+    );
+    await expect(
+      executeUpdateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          id: inactiveSourceId,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          displayName: `Invalid retired access replacement ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId: inactiveReplacementGoogleGroupId,
+          email: `${inactiveReplacementGoogleGroupId}@example.invalid`,
+        },
+        metadata: inactiveReplacementMetadata,
+      }),
+    ).rejects.toMatchObject({
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      status: 409,
+    });
+    expect(
+      await database
+        .select({ id: groupSources.id })
+        .from(groupSources)
+        .where(
+          eq(groupSources.googleGroupId, inactiveReplacementGoogleGroupId),
+        ),
+    ).toEqual([]);
+    const [retainedInactiveSource] = await database
+      .select({
+        active: groupSources.active,
+        email: groupSources.email,
+        googleGroupId: groupSources.googleGroupId,
+      })
+      .from(groupSources)
+      .where(eq(groupSources.id, inactiveSourceId))
+      .limit(1);
+    expect(retainedInactiveSource).toEqual({
+      active: false,
+      email: inactiveEmail,
+      googleGroupId: inactiveGoogleGroupId,
+    });
+    const inactiveReplacementAudits = await database
+      .select({
+        outcome: securityAuditEntries.outcome,
+        reasonCode: securityAuditEntries.reasonCode,
+      })
+      .from(securityAuditEntries)
+      .where(
+        eq(
+          securityAuditEntries.requestId,
+          inactiveReplacementMetadata.requestId,
+        ),
+      );
+    expect(inactiveReplacementAudits).toEqual([
+      {
+        outcome: 'failure',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+      },
+    ]);
+
     const rejectedGoogleGroupId = `issue-26-inactive-locator-${suffix}`;
     const rejectedEmail = `issue-26-inactive-locator-${suffix}@example.invalid`;
     await expect(
@@ -1676,6 +2118,190 @@ describeWithDatabase('facilities administrator database flow', () => {
       (await loadAccessConfigurationSnapshotState(database))
         ?.activeAccessGroupSourceIds,
     ).toEqual(provenGroupRows.map(({ id }) => id).sort());
+  });
+
+  test('completes a locator rotation after fresh replacement evidence and restores strict reachability', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const suffix = randomUUID();
+    const requestIds: string[] = [];
+    const [original] = await database
+      .select({
+        id: groupSources.id,
+        displayName: groupSources.displayName,
+        googleGroupId: groupSources.googleGroupId,
+        email: groupSources.email,
+      })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.active, true),
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+        ),
+      )
+      .orderBy(groupSources.id)
+      .limit(1);
+    if (
+      original === undefined ||
+      original.googleGroupId === null ||
+      original.email === null
+    ) {
+      throw new Error('The completed locator rotation needs an active source.');
+    }
+    const googleSubject = `issue-26-admin-subject-locator-complete-${suffix}`;
+    await persistAuthenticatedAdministrator(
+      database,
+      authenticated,
+      original.id,
+      `locator-complete-${suffix}`,
+    );
+
+    const replacement = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        id: original.id,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `${original.displayName} verified replacement`,
+        active: true,
+        googleGroupId: `issue-26-locator-complete-${suffix}`,
+        email: `issue-26-locator-complete-${suffix}@example.invalid`,
+      },
+      metadata: metadata('locator-complete-stage', requestIds),
+    });
+    if (
+      replacement.kind !== 'google-group' ||
+      replacement.purpose !== 'access'
+    ) {
+      throw new Error('The completed locator replacement lost its variant.');
+    }
+
+    const stagedActiveGroups = await database
+      .select({
+        id: groupSources.id,
+        kind: groupSources.kind,
+        purpose: groupSources.purpose,
+      })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.active, true),
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+        ),
+      )
+      .orderBy(groupSources.id);
+    const stagedSnapshot = await persistCompleteAccessSnapshotGeneration(
+      database,
+      {
+        groups: stagedActiveGroups.map(({ id }) => ({
+          id,
+          kind: 'google-group' as const,
+          purpose: 'access' as const,
+        })),
+        members: [
+          {
+            userId: authenticated.actor.userId,
+            googleSubject,
+            facilityScopeKind: 'district',
+            accessGroupIds: [replacement.id],
+          },
+        ],
+        capturedAt: await nextFreshAccessSnapshotTime(database),
+      },
+    );
+    const stagedState = await loadAccessConfigurationSnapshotState(database);
+    expect(stagedState).toEqual({
+      snapshotId: stagedSnapshot.id,
+      snapshotVersion: stagedSnapshot.version,
+      activeAccessGroupSourceIds: stagedActiveGroups.map(({ id }) => id).sort(),
+    });
+    if (stagedState === null) {
+      throw new Error(
+        'The staged locator snapshot is not strict and complete.',
+      );
+    }
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: stagedState,
+        eligibleAccessGroupSourceIds: stagedActiveGroups
+          .map(({ id }) => id)
+          .filter((id) => id !== original.id),
+      }),
+    ).toContain(authenticated.actor.userId);
+
+    const retired = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        id: original.id,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: original.displayName,
+        active: false,
+        googleGroupId: original.googleGroupId,
+        email: original.email,
+      },
+      metadata: metadata('locator-complete-retire', requestIds),
+    });
+    expect(retired.active).toBe(false);
+    const [retiredRow, replacementRow] = await Promise.all([
+      database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, original.id))
+        .limit(1),
+      database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, replacement.id))
+        .limit(1),
+    ]);
+    expect(retiredRow[0]).toEqual({ active: false });
+    expect(replacementRow[0]).toEqual({ active: true });
+    expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
+
+    const finalActiveGroups = stagedActiveGroups.filter(
+      ({ id }) => id !== original.id,
+    );
+    const finalSnapshot = await persistCompleteAccessSnapshotGeneration(
+      database,
+      {
+        groups: finalActiveGroups.map(({ id }) => ({
+          id,
+          kind: 'google-group' as const,
+          purpose: 'access' as const,
+        })),
+        members: [
+          {
+            userId: authenticated.actor.userId,
+            googleSubject,
+            facilityScopeKind: 'district',
+            accessGroupIds: [replacement.id],
+          },
+        ],
+        capturedAt: await nextFreshAccessSnapshotTime(database),
+      },
+    );
+    const finalState = await loadAccessConfigurationSnapshotState(database);
+    expect(finalState).toEqual({
+      snapshotId: finalSnapshot.id,
+      snapshotVersion: finalSnapshot.version,
+      activeAccessGroupSourceIds: finalActiveGroups.map(({ id }) => id).sort(),
+    });
+    if (finalState === null) {
+      throw new Error('The final locator snapshot is not strict and complete.');
+    }
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: finalState,
+      }),
+    ).toContain(authenticated.actor.userId);
   });
 
   test('configures a complete new site and records every mutation', async () => {
@@ -4346,30 +4972,83 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(firstVersionsPage.items.map(({ version }) => version)).toEqual([2]);
     expect(secondVersionsPage.items.map(({ version }) => version)).toEqual([1]);
 
+    const projectionQueries = Object.freeze({
+      facilities: { includeInactive: true, cursor: null, limit: 1 },
+      neighborhoods: { cursor: null, limit: 1 },
+      buildingGroups: {
+        kind: null,
+        purpose: 'building' as const,
+        facilityId: null,
+        active: null,
+        cursor: null,
+        limit: 1,
+      },
+      othersGroups: {
+        kind: null,
+        purpose: 'others' as const,
+        facilityId: null,
+        active: null,
+        cursor: null,
+        limit: 1,
+      },
+    });
+    for (const invalidProjection of [
+      {
+        label: 'malformed-neighborhood',
+        queries: {
+          ...projectionQueries,
+          neighborhoods: {
+            ...projectionQueries.neighborhoods,
+            cursor: '*',
+          },
+        },
+      },
+      {
+        label: 'repeated-building',
+        queries: {
+          ...projectionQueries,
+          buildingGroups: {
+            ...projectionQueries.buildingGroups,
+            cursor: ['first', 'second'] as unknown as string,
+          },
+        },
+      },
+    ] as const) {
+      const requestId = randomUUID();
+      await expect(
+        executeFacilitiesAdminProjection({
+          authenticated,
+          store,
+          queries: invalidProjection.queries,
+          metadata: { requestId, now: new Date() },
+        }),
+      ).rejects.toMatchObject({
+        code: 'VALIDATION_ERROR',
+        reasonCode: 'CAPABILITY_INPUT_INVALID',
+        status: 400,
+      });
+      const audits = await database
+        .select({
+          action: securityAuditEntries.action,
+          outcome: securityAuditEntries.outcome,
+          reasonCode: securityAuditEntries.reasonCode,
+        })
+        .from(securityAuditEntries)
+        .where(eq(securityAuditEntries.requestId, requestId));
+      expect(audits, invalidProjection.label).toEqual([
+        {
+          action: 'list-facilities',
+          outcome: 'failure',
+          reasonCode: 'CAPABILITY_INPUT_INVALID',
+        },
+      ]);
+    }
+
     const projectionRequestId = randomUUID();
     const projection = await executeFacilitiesAdminProjection({
       authenticated,
       store,
-      queries: {
-        facilities: { includeInactive: true, cursor: null, limit: 1 },
-        neighborhoods: { cursor: null, limit: 1 },
-        buildingGroups: {
-          kind: null,
-          purpose: 'building',
-          facilityId: null,
-          active: null,
-          cursor: null,
-          limit: 1,
-        },
-        othersGroups: {
-          kind: null,
-          purpose: 'others',
-          facilityId: null,
-          active: null,
-          cursor: null,
-          limit: 1,
-        },
-      },
+      queries: projectionQueries,
       metadata: { requestId: projectionRequestId, now: new Date() },
     });
     expect(projection.facilities.items).toHaveLength(1);
