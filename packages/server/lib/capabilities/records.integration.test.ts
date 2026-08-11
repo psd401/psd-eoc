@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -16,17 +16,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import { seedDatabase } from '../../db/seed';
-import {
-  events,
-  journalEntries,
-  rosterSnapshotFacilities,
-  rosterSnapshotSources,
-  rosterSnapshots,
-  rosterSourceConfigurationFacilities,
-  rosterSourceConfigurationGroups,
-  rosterSourceConfigurations,
-  securityAuditEntries,
-} from '../../db/schema';
+import { events, journalEntries, securityAuditEntries } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
 import type { TrustedCapabilityInvocation } from './engine';
@@ -68,9 +58,6 @@ function runTimestamp(minutesAfterStart: number): string {
 
 const RUN = Object.freeze({
   token: `issue-25-${randomUUID()}`,
-  rosterConfigurationAt: runTime(0),
-  rosterSyncStartedAt: runTime(1),
-  rosterCapturedAt: runTime(2),
   windowFrom: runTimestamp(5),
   northDrillAt: runTimestamp(10),
   northVisibleEntryAt: runTime(11),
@@ -79,8 +66,6 @@ const RUN = Object.freeze({
   northTestAt: runTimestamp(60),
   southDrillAt: runTimestamp(90),
   southEntryAt: runTime(91),
-  northIncidentCreatedAt: runTime(104),
-  northIncidentAt: runTime(105),
   northDraftAt: runTime(120),
   northNewerDrillAt: runTimestamp(150),
   windowThrough: runTimestamp(180),
@@ -97,7 +82,6 @@ const SEEDED = Object.freeze({
   facilityNorth: '00000000-0000-4000-8000-000000000001',
   facilitySouth: '00000000-0000-4000-8000-000000000002',
   rosterSnapshot: '00000000-0000-4000-8000-000000000041',
-  realEventTypeVersion: '00000000-0000-4000-8000-000000000200',
   drillEventTypeVersion: '00000000-0000-4000-8000-000000000201',
 });
 
@@ -107,22 +91,10 @@ const ACTOR = Object.freeze({
   apiKeyId: randomUUID(),
 });
 
-const HUMAN_ACTOR = Object.freeze({
-  kind: 'human' as const,
-  userId: randomUUID(),
-  sessionId: randomUUID(),
-});
-
-const STAFF_ROSTER = Object.freeze({
-  configurationId: randomUUID(),
-  snapshotId: randomUUID(),
-});
-
 const FIXTURE = Object.freeze({
   northDrill: randomUUID(),
   northTest: randomUUID(),
   northDraft: randomUUID(),
-  northIncident: randomUUID(),
   southDrill: randomUUID(),
   northNewerDrill: randomUUID(),
   northVisibleEntry: randomUUID(),
@@ -133,7 +105,6 @@ const FIXTURE = Object.freeze({
 
 let connection: PostgresDatabaseConnection | undefined;
 let store: JournalCapabilityStore | undefined;
-let staffRosterSnapshotId: string | undefined;
 
 function database(): PostgresDatabase {
   if (connection === undefined) {
@@ -215,237 +186,6 @@ function activatedEvent(
   };
 }
 
-function activatedIncident() {
-  if (staffRosterSnapshotId === undefined) {
-    throw new Error('The staff roster fixture has not been prepared.');
-  }
-  return {
-    id: FIXTURE.northIncident,
-    facilityId: SEEDED.facilityNorth,
-    kind: 'incident' as const,
-    templateMode: 'real' as const,
-    eventTypeVersionId: SEEDED.realEventTypeVersion,
-    status: 'active' as const,
-    rosterSnapshotId: staffRosterSnapshotId,
-    rosterPopulation: 'staff' as const,
-    createdBy: HUMAN_ACTOR,
-    createdAt: RUN.northIncidentCreatedAt,
-    activatedAt: RUN.northIncidentAt,
-    allClearAt: null,
-    reactivatedAt: null,
-    closedAt: null,
-    correctionOfEventId: null,
-    correctionReason: null,
-    activationAuthorization: {
-      kind: 'human-confirmed' as const,
-      activationPreviewId: randomUUID(),
-      preparedActivationId: null,
-      confirmationId: randomUUID(),
-      consequenceDigest: 'b'.repeat(64),
-      requestId: randomUUID(),
-    },
-  };
-}
-
-async function ensureNorthStaffRosterSnapshot(
-  database: PostgresDatabase,
-): Promise<string> {
-  return database.transaction(async (transaction) => {
-    await transaction.execute(sql`
-      select pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtextextended('psd-eoc-roster-staff', 0)
-      )
-    `);
-
-    const [latestConfiguration] = await transaction
-      .select({
-        id: rosterSourceConfigurations.id,
-        version: rosterSourceConfigurations.version,
-      })
-      .from(rosterSourceConfigurations)
-      .where(eq(rosterSourceConfigurations.population, 'staff'))
-      .orderBy(desc(rosterSourceConfigurations.version))
-      .limit(1);
-
-    let configuration: Readonly<{ id: string; version: number }>;
-    if (latestConfiguration === undefined) {
-      configuration = {
-        id: STAFF_ROSTER.configurationId,
-        version: 1,
-      };
-      await transaction.insert(rosterSourceConfigurations).values({
-        ...configuration,
-        population: 'staff',
-        createdAt: RUN.rosterConfigurationAt,
-      });
-      await transaction.insert(rosterSourceConfigurationFacilities).values({
-        configurationId: configuration.id,
-        configurationVersion: configuration.version,
-        facilityId: SEEDED.facilityNorth,
-      });
-    } else {
-      configuration = latestConfiguration;
-      const [northFacility] = await transaction
-        .select({ facilityId: rosterSourceConfigurationFacilities.facilityId })
-        .from(rosterSourceConfigurationFacilities)
-        .where(
-          and(
-            eq(
-              rosterSourceConfigurationFacilities.configurationId,
-              configuration.id,
-            ),
-            eq(
-              rosterSourceConfigurationFacilities.configurationVersion,
-              configuration.version,
-            ),
-            eq(
-              rosterSourceConfigurationFacilities.facilityId,
-              SEEDED.facilityNorth,
-            ),
-          ),
-        )
-        .limit(1);
-      if (northFacility === undefined) {
-        const previousFacilities = await transaction
-          .select({
-            facilityId: rosterSourceConfigurationFacilities.facilityId,
-          })
-          .from(rosterSourceConfigurationFacilities)
-          .where(
-            and(
-              eq(
-                rosterSourceConfigurationFacilities.configurationId,
-                configuration.id,
-              ),
-              eq(
-                rosterSourceConfigurationFacilities.configurationVersion,
-                configuration.version,
-              ),
-            ),
-          );
-        const previousGroups = await transaction
-          .select({
-            population: rosterSourceConfigurationGroups.population,
-            groupSourceId: rosterSourceConfigurationGroups.groupSourceId,
-            groupSourceKind: rosterSourceConfigurationGroups.groupSourceKind,
-            groupPurpose: rosterSourceConfigurationGroups.groupPurpose,
-          })
-          .from(rosterSourceConfigurationGroups)
-          .where(
-            and(
-              eq(
-                rosterSourceConfigurationGroups.configurationId,
-                configuration.id,
-              ),
-              eq(
-                rosterSourceConfigurationGroups.configurationVersion,
-                configuration.version,
-              ),
-            ),
-          );
-        configuration = {
-          id: configuration.id,
-          version: configuration.version + 1,
-        };
-        await transaction.insert(rosterSourceConfigurations).values({
-          ...configuration,
-          population: 'staff',
-          createdAt: RUN.rosterConfigurationAt,
-        });
-        await transaction.insert(rosterSourceConfigurationFacilities).values(
-          [...previousFacilities, { facilityId: SEEDED.facilityNorth }].map(
-            ({ facilityId }) => ({
-              configurationId: configuration.id,
-              configurationVersion: configuration.version,
-              facilityId,
-            }),
-          ),
-        );
-        if (previousGroups.length > 0) {
-          await transaction.insert(rosterSourceConfigurationGroups).values(
-            previousGroups.map((group) => ({
-              configurationId: configuration.id,
-              configurationVersion: configuration.version,
-              ...group,
-            })),
-          );
-        }
-      }
-    }
-
-    const configurationFacilities = await transaction
-      .select({
-        facilityId: rosterSourceConfigurationFacilities.facilityId,
-      })
-      .from(rosterSourceConfigurationFacilities)
-      .where(
-        and(
-          eq(
-            rosterSourceConfigurationFacilities.configurationId,
-            configuration.id,
-          ),
-          eq(
-            rosterSourceConfigurationFacilities.configurationVersion,
-            configuration.version,
-          ),
-        ),
-      );
-    const configurationGroups = await transaction
-      .select({
-        population: rosterSourceConfigurationGroups.population,
-        groupSourceId: rosterSourceConfigurationGroups.groupSourceId,
-        groupSourceKind: rosterSourceConfigurationGroups.groupSourceKind,
-        groupPurpose: rosterSourceConfigurationGroups.groupPurpose,
-      })
-      .from(rosterSourceConfigurationGroups)
-      .where(
-        and(
-          eq(rosterSourceConfigurationGroups.configurationId, configuration.id),
-          eq(
-            rosterSourceConfigurationGroups.configurationVersion,
-            configuration.version,
-          ),
-        ),
-      );
-    const [latestSnapshot] = await transaction
-      .select({ version: rosterSnapshots.version })
-      .from(rosterSnapshots)
-      .where(eq(rosterSnapshots.population, 'staff'))
-      .orderBy(desc(rosterSnapshots.version))
-      .limit(1);
-    const snapshotVersion = (latestSnapshot?.version ?? 0) + 1;
-
-    await transaction.insert(rosterSnapshots).values({
-      id: STAFF_ROSTER.snapshotId,
-      version: snapshotVersion,
-      population: 'staff',
-      complete: true,
-      sourceConfigurationId: configuration.id,
-      sourceConfigurationVersion: configuration.version,
-      syncStartedAt: RUN.rosterSyncStartedAt,
-      capturedAt: RUN.rosterCapturedAt,
-    });
-    await transaction.insert(rosterSnapshotFacilities).values(
-      configurationFacilities.map(({ facilityId }) => ({
-        rosterSnapshotId: STAFF_ROSTER.snapshotId,
-        facilityId,
-      })),
-    );
-    if (configurationGroups.length > 0) {
-      await transaction.insert(rosterSnapshotSources).values(
-        configurationGroups.flatMap((group) =>
-          (['expected', 'completed'] as const).map((completionKind) => ({
-            rosterSnapshotId: STAFF_ROSTER.snapshotId,
-            completionKind,
-            ...group,
-          })),
-        ),
-      );
-    }
-    return STAFF_ROSTER.snapshotId;
-  });
-}
-
 describeWithDatabase('canonical records and journal-search persistence', () => {
   beforeAll(async () => {
     const opened = createDatabaseClient({
@@ -460,7 +200,6 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     await migrateDatabase(opened);
     await seedDatabase(opened.db);
     store = createDrizzleJournalCapabilityStore(opened.db);
-    staffRosterSnapshotId = await ensureNorthStaffRosterSnapshot(opened.db);
 
     await opened.db.insert(events).values([
       activatedEvent({
@@ -482,7 +221,6 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         kind: 'drill',
         activatedAt: RUN.southDrillAt,
       }),
-      activatedIncident(),
       {
         id: FIXTURE.northDraft,
         facilityId: SEEDED.facilityNorth,
@@ -578,7 +316,6 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
 
   afterAll(async () => {
     store = undefined;
-    staffRosterSnapshotId = undefined;
     await connection?.close();
     connection = undefined;
   });
@@ -601,9 +338,6 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
       FIXTURE.northTest,
       FIXTURE.northDrill,
     ]);
-    expect(all.items.map((record) => record.eventId)).not.toContain(
-      FIXTURE.northIncident,
-    );
     expect(all.items.map((record) => record.eventId)).not.toContain(
       FIXTURE.northDraft,
     );

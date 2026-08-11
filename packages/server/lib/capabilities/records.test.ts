@@ -168,6 +168,52 @@ describe('canonical drill-record reads', () => {
     expect(harness.calls[0]?.scope).toEqual(call.scope);
   });
 
+  test('fails closed if persistence ever projects a real incident as a drill record', async () => {
+    const valid = drillPage();
+    const harness = recordsHarness({
+      ...valid,
+      items: [
+        {
+          ...valid.items[0]!,
+          kind: 'incident',
+          eventTypeVersion: {
+            ...valid.items[0]!.eventTypeVersion,
+            templateMode: 'real',
+          },
+        },
+      ],
+    } as unknown as DrillRecordPage);
+    const call = invocation({
+      kind: 'facilities',
+      facilityIds: [IDS.facility],
+    });
+
+    await expect(
+      executeRecordsCapability(
+        {
+          facilityId: IDS.facility,
+          startedFrom: null,
+          startedThrough: null,
+          cursor: null,
+          limit: 25,
+        },
+        call,
+        harness.store,
+      ),
+    ).rejects.toThrow();
+
+    expect(harness.calls).toHaveLength(1);
+    expect(harness.audits).toEqual([
+      expect.objectContaining({
+        action: 'list-drill-records',
+        category: 'capability-execution',
+        facilityId: IDS.facility,
+        outcome: 'failure',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+      }),
+    ]);
+  });
+
   test('denies an explicit out-of-scope site before any records are read', async () => {
     const harness = recordsHarness();
     const call = invocation({
