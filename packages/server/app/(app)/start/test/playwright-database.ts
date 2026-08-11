@@ -1,34 +1,76 @@
 import postgres from 'postgres';
 
-import { requireSyntheticTestDatabaseUrl } from '../../../(admin)/event-types/test-database';
+import {
+  START_FLOW_PLAYWRIGHT_RUN_ID_ENV,
+  requireStartFlowPlaywrightRunId,
+} from './playwright-run';
 
-const START_FLOW_DATABASE_NAME = 'psd_eoc_issue15_playwright_test';
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
+const SYNTHETIC_DATABASE_PATTERN = /^[A-Za-z0-9_-]+[-_]test$/u;
 
 function databaseName(databaseUrl: string): string {
   return decodeURIComponent(new URL(databaseUrl).pathname.slice(1));
 }
 
+function normalizedHostname(url: URL): string {
+  return url.hostname.startsWith('[') && url.hostname.endsWith(']')
+    ? url.hostname.slice(1, -1)
+    : url.hostname;
+}
+
 function requireLoopbackBaseDatabase(value: string | undefined): URL {
-  const baseUrl = new URL(requireSyntheticTestDatabaseUrl(value));
-  if (!LOOPBACK_HOSTS.has(baseUrl.hostname)) {
+  if (value === undefined || value.length === 0) {
+    throw new Error('TEST_DATABASE_URL is required for start-flow tests.');
+  }
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(value);
+  } catch {
+    throw new Error('TEST_DATABASE_URL must be a valid PostgreSQL URL.');
+  }
+  let baseName: string;
+  try {
+    baseName = decodeURIComponent(baseUrl.pathname.slice(1));
+  } catch {
+    throw new Error('TEST_DATABASE_URL must name a synthetic test database.');
+  }
+  if (
+    (baseUrl.protocol !== 'postgres:' && baseUrl.protocol !== 'postgresql:') ||
+    !LOOPBACK_HOSTS.has(normalizedHostname(baseUrl)) ||
+    !SYNTHETIC_DATABASE_PATTERN.test(baseName) ||
+    baseUrl.search.length > 0 ||
+    baseUrl.hash.length > 0
+  ) {
     throw new Error(
-      'Start-flow Playwright database isolation is restricted to loopback PostgreSQL.',
+      'TEST_DATABASE_URL must target a loopback PostgreSQL database whose name ends in _test.',
     );
   }
   return baseUrl;
 }
 
+/** Exact PostgreSQL identifier owned by one validated browser run. */
+export function startFlowPlaywrightDatabaseName(
+  runIdValue: string | undefined = process.env[
+    START_FLOW_PLAYWRIGHT_RUN_ID_ENV
+  ],
+): string {
+  const runId = requireStartFlowPlaywrightRunId(runIdValue);
+  return `psd_eoc_i15_pw_${runId}_test`;
+}
+
 /**
  * Keeps browser mutations out of the shared Bun integration-test database.
- * The fixed child name is synthetic, loopback-only, and still ends in `_test`.
+ * Every run receives a distinct synthetic, loopback-only child database.
  */
 export function startFlowPlaywrightDatabaseUrl(
   value: string | undefined = process.env.TEST_DATABASE_URL,
+  runIdValue: string | undefined = process.env[
+    START_FLOW_PLAYWRIGHT_RUN_ID_ENV
+  ],
 ): string {
   const databaseUrl = requireLoopbackBaseDatabase(value);
-  databaseUrl.pathname = `/${START_FLOW_DATABASE_NAME}`;
-  return requireSyntheticTestDatabaseUrl(databaseUrl.toString());
+  databaseUrl.pathname = `/${startFlowPlaywrightDatabaseName(runIdValue)}`;
+  return databaseUrl.toString();
 }
 
 async function withMaintenanceConnection(
@@ -50,31 +92,40 @@ async function withMaintenanceConnection(
 
 export async function recreateStartFlowPlaywrightDatabase(
   baseDatabaseUrl: string | undefined = process.env.TEST_DATABASE_URL,
+  runIdValue: string | undefined = process.env[
+    START_FLOW_PLAYWRIGHT_RUN_ID_ENV
+  ],
 ): Promise<string> {
-  const isolatedUrl = startFlowPlaywrightDatabaseUrl(baseDatabaseUrl);
-  const isolatedName = databaseName(isolatedUrl);
-  if (isolatedName !== START_FLOW_DATABASE_NAME) {
+  const isolatedName = startFlowPlaywrightDatabaseName(runIdValue);
+  const isolatedUrl = startFlowPlaywrightDatabaseUrl(
+    baseDatabaseUrl,
+    runIdValue,
+  );
+  if (databaseName(isolatedUrl) !== isolatedName) {
     throw new Error('Refusing to recreate an unexpected database.');
   }
   await withMaintenanceConnection(baseDatabaseUrl, async (sql) => {
-    await sql.unsafe(
-      `drop database if exists "${START_FLOW_DATABASE_NAME}" with (force)`,
-    );
-    await sql.unsafe(`create database "${START_FLOW_DATABASE_NAME}"`);
+    await sql.unsafe(`drop database if exists "${isolatedName}" with (force)`);
+    await sql.unsafe(`create database "${isolatedName}"`);
   });
   return isolatedUrl;
 }
 
 export async function dropStartFlowPlaywrightDatabase(
   baseDatabaseUrl: string | undefined = process.env.TEST_DATABASE_URL,
+  runIdValue: string | undefined = process.env[
+    START_FLOW_PLAYWRIGHT_RUN_ID_ENV
+  ],
 ): Promise<void> {
-  const isolatedUrl = startFlowPlaywrightDatabaseUrl(baseDatabaseUrl);
-  if (databaseName(isolatedUrl) !== START_FLOW_DATABASE_NAME) {
+  const isolatedName = startFlowPlaywrightDatabaseName(runIdValue);
+  const isolatedUrl = startFlowPlaywrightDatabaseUrl(
+    baseDatabaseUrl,
+    runIdValue,
+  );
+  if (databaseName(isolatedUrl) !== isolatedName) {
     throw new Error('Refusing to drop an unexpected database.');
   }
   await withMaintenanceConnection(baseDatabaseUrl, async (sql) => {
-    await sql.unsafe(
-      `drop database if exists "${START_FLOW_DATABASE_NAME}" with (force)`,
-    );
+    await sql.unsafe(`drop database if exists "${isolatedName}" with (force)`);
   });
 }

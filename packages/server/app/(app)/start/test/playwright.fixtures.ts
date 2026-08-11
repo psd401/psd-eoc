@@ -4,6 +4,8 @@ import {
   EventSchema,
   JoinEventResultSchema,
   StartEventResultSchema,
+  TimestampSchema,
+  UuidSchema,
   type ActivationPreview,
   type CreateActivationPreviewInput,
   type Event,
@@ -11,13 +13,12 @@ import {
   type StartEventResult,
   type TemplateMode,
 } from '@psd-eoc/contracts';
+import { z } from 'zod';
 
 const uuid = (suffix: number): string =>
   `15000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
 
 export const PLAYWRIGHT_IDS = Object.freeze({
-  activeEvent: uuid(1),
-  activeEventSecond: uuid(16),
   activeEventTypeVersion: uuid(10),
   activatedEvent: uuid(11),
   activationConfirmation: uuid(12),
@@ -33,16 +34,55 @@ export const PLAYWRIGHT_IDS = Object.freeze({
   staffBuildingGroup: '80000000-0000-4000-8000-000000000030',
   staffSouthBuildingGroup: '80000000-0000-4000-8000-000000000031',
   staffOthersGroup: '80000000-0000-4000-8000-000000000032',
-  staffRecipientOne: uuid(20),
-  staffRecipientTwo: uuid(21),
-  staffRecipientOnePush: uuid(22),
-  staffRecipientOneEmail: uuid(23),
-  staffRecipientTwoPush: uuid(24),
+  staffRecipientNorth: uuid(20),
+  staffRecipientSouth: uuid(21),
+  staffRecipientOthers: uuid(22),
+  staffRecipientNorthPush: uuid(23),
+  staffRecipientSouthEmail: uuid(24),
+  staffRecipientOthersPush: uuid(25),
+  staffRecipientOthersEmail: uuid(26),
   request: uuid(6),
   user: uuid(7),
   session: uuid(8),
   mismatchedFacility: uuid(9),
 });
+
+const StartFlowPlaywrightEventSchema = z
+  .object({
+    id: UuidSchema,
+    activatedAt: TimestampSchema,
+    previewId: UuidSchema,
+    requestId: UuidSchema,
+    journalEntryIds: z.array(UuidSchema).length(3).readonly(),
+    notificationIntentId: UuidSchema,
+    outboxId: UuidSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Non-secret, run-owned evidence produced by canonical setup capabilities. */
+export const StartFlowPlaywrightFixtureSchema = z
+  .object({
+    runId: z.string().regex(/^[0-9a-f]{32}$/u),
+    actor: z
+      .object({
+        kind: z.literal('human'),
+        userId: UuidSchema,
+        sessionId: UuidSchema,
+      })
+      .strict()
+      .readonly(),
+    connectivityEpochId: UuidSchema,
+    activeEvents: z
+      .tuple([StartFlowPlaywrightEventSchema, StartFlowPlaywrightEventSchema])
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
+export type StartFlowPlaywrightFixture = z.infer<
+  typeof StartFlowPlaywrightFixtureSchema
+>;
 
 /**
  * Contract-valid browser-only activation result. The matching POST is

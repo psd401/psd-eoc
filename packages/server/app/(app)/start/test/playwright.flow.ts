@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import {
   ActivationPreviewSchema,
   CreateActivationPreviewInputSchema,
@@ -16,7 +18,7 @@ import {
   type Page,
   type Route,
 } from '@playwright/test';
-import { count, eq } from 'drizzle-orm';
+import { asc, count, eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -25,8 +27,11 @@ import {
 import {
   activationPreviews,
   events,
+  journalEntries,
   notificationIntents,
   outbox,
+  rosterEndpoints,
+  rosterRecipientGroupSources,
   rosterSnapshots,
 } from '../../../../db/schema';
 
@@ -34,40 +39,51 @@ import { assertAxeClean, installAxe } from './axe-playwright';
 import { startFlowPlaywrightDatabaseUrl } from './playwright-database';
 import {
   PLAYWRIGHT_IDS,
+  StartFlowPlaywrightFixtureSchema,
   activationPreviewFixture,
   activationResultFixture,
   interceptedActivationError,
   interruptedActivationError,
   joinEventResultFixture,
+  type StartFlowPlaywrightFixture,
 } from './playwright.fixtures';
 import {
   START_FLOW_STAFF_AUDIENCE_ID,
   START_FLOW_STAFF_AUDIENCE_VERSION,
   START_FLOW_STAFF_ROSTER_VERSION,
 } from './playwright.global-setup';
+import { startFlowPlaywrightPaths } from './playwright-run';
 
 const SYNTHETIC_FACILITY = 'Synthetic North Campus';
 const SYNTHETIC_FACILITY_ID = '00000000-0000-4000-8000-000000000001';
 const SYNTHETIC_SOUTH_FACILITY = 'Synthetic South Campus';
 const SYNTHETIC_REAL_VERSION_ID = '00000000-0000-4000-8000-000000000200';
 const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
-const FIRST_ACTIVE_EVENT_TIME = '2026-08-10T18:00:00.000Z';
-const SECOND_ACTIVE_EVENT_TIME = '2026-08-10T18:05:00.000Z';
-
-const ACTIVE_EVENT_NAMES = Object.freeze({
-  first: Object.freeze({
-    confirmation:
-      'Join Lockdown Drill — DRILL — TRAINING ONLY Started Aug 10, 2026, 11:00 AM — event 00000001',
-    dashboard:
-      'Join DRILL — TRAINING ONLY — Lockdown Drill at Synthetic North Campus — started Aug 10, 2026, 11:00 AM — event 00000001',
-  }),
-  second: Object.freeze({
-    confirmation:
-      'Join Lockdown Drill — DRILL — TRAINING ONLY Started Aug 10, 2026, 11:05 AM — event 00000016',
-    dashboard:
-      'Join DRILL — TRAINING ONLY — Lockdown Drill at Synthetic North Campus — started Aug 10, 2026, 11:05 AM — event 00000016',
-  }),
+let PLAYWRIGHT_FIXTURE: StartFlowPlaywrightFixture;
+let FIRST_ACTIVE_EVENT: StartFlowPlaywrightFixture['activeEvents'][number];
+let SECOND_ACTIVE_EVENT: StartFlowPlaywrightFixture['activeEvents'][number];
+let ACTIVE_EVENT_NAMES: Readonly<{
+  first: ReturnType<typeof activeEventNames>;
+  second: ReturnType<typeof activeEventNames>;
+}>;
+const ACTIVE_EVENT_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Los_Angeles',
+  dateStyle: 'medium',
+  timeStyle: 'short',
 });
+
+function activeEventNames(
+  event: StartFlowPlaywrightFixture['activeEvents'][number],
+) {
+  const started = ACTIVE_EVENT_TIME_FORMATTER.format(
+    new Date(event.activatedAt),
+  );
+  const shortId = event.id.slice(-8);
+  return Object.freeze({
+    confirmation: `Join Lockdown Drill — DRILL — TRAINING ONLY Started ${started} — event ${shortId}`,
+    dashboard: `Join DRILL — TRAINING ONLY — Lockdown Drill at ${SYNTHETIC_FACILITY} — started ${started} — event ${shortId}`,
+  });
+}
 
 const REAL_CONFIRMATION_PATH = `/start/confirm?facilityId=${SYNTHETIC_FACILITY_ID}&mode=real&eventTypeVersionId=${SYNTHETIC_REAL_VERSION_ID}`;
 
@@ -250,6 +266,86 @@ async function operationalMutationCounts(database: PostgresDatabase) {
   });
 }
 
+async function expectCanonicalActiveEventFixture(
+  database: PostgresDatabase,
+): Promise<void> {
+  for (const fixture of PLAYWRIGHT_FIXTURE.activeEvents) {
+    const [
+      [event],
+      [preview],
+      persistedJournals,
+      persistedIntents,
+      persistedOutbox,
+    ] = await Promise.all([
+      database
+        .select({
+          id: events.id,
+          createdBy: events.createdBy,
+          activationAuthorization: events.activationAuthorization,
+        })
+        .from(events)
+        .where(eq(events.id, fixture.id))
+        .limit(1),
+      database
+        .select({ id: activationPreviews.id })
+        .from(activationPreviews)
+        .where(eq(activationPreviews.id, fixture.previewId))
+        .limit(1),
+      database
+        .select({ id: journalEntries.id })
+        .from(journalEntries)
+        .where(eq(journalEntries.eventId, fixture.id))
+        .orderBy(asc(journalEntries.sequence)),
+      database
+        .select({
+          id: notificationIntents.id,
+          requestId: notificationIntents.requestId,
+        })
+        .from(notificationIntents)
+        .where(eq(notificationIntents.eventId, fixture.id)),
+      database
+        .select({
+          id: outbox.id,
+          intentId: outbox.intentId,
+          requestId: outbox.requestId,
+          status: outbox.status,
+          publishedAt: outbox.publishedAt,
+        })
+        .from(outbox)
+        .where(eq(outbox.eventId, fixture.id)),
+    ]);
+
+    expect(event).toMatchObject({
+      id: fixture.id,
+      createdBy: PLAYWRIGHT_FIXTURE.actor,
+      activationAuthorization: {
+        kind: 'synthetic-training',
+        activationPreviewId: fixture.previewId,
+        requestId: fixture.requestId,
+      },
+    });
+    expect(preview?.id).toBe(fixture.previewId);
+    expect(persistedJournals.map((entry) => entry.id)).toEqual(
+      fixture.journalEntryIds,
+    );
+    expect(persistedIntents).toEqual([
+      {
+        id: fixture.notificationIntentId,
+        requestId: fixture.requestId,
+      },
+    ]);
+    expect(persistedOutbox).toEqual([
+      {
+        id: fixture.outboxId,
+        intentId: fixture.notificationIntentId,
+        requestId: fixture.requestId,
+        status: 'pending',
+        publishedAt: null,
+      },
+    ]);
+  }
+}
+
 async function expectEmergencyAffordance(page: Page): Promise<void> {
   const emergency = page.getByRole('complementary', {
     name: 'Emergency assistance',
@@ -261,6 +357,14 @@ async function expectEmergencyAffordance(page: Page): Promise<void> {
   await expect(call911).toHaveAttribute('href', 'tel:911');
   const target = await call911.boundingBox();
   expect(target?.height).toBeGreaterThanOrEqual(44);
+}
+
+async function expectNoHorizontalDocumentOverflow(page: Page): Promise<void> {
+  const dimensions = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 }
 
 async function expectPreviewCounts(
@@ -323,6 +427,19 @@ async function activateByKeyboard(page: Page, target: Locator): Promise<void> {
   throw new Error('Keyboard focus did not reach the expected control.');
 }
 
+test.beforeAll(async () => {
+  PLAYWRIGHT_FIXTURE = StartFlowPlaywrightFixtureSchema.parse(
+    JSON.parse(
+      await readFile(startFlowPlaywrightPaths().fixture, { encoding: 'utf8' }),
+    ) as unknown,
+  );
+  [FIRST_ACTIVE_EVENT, SECOND_ACTIVE_EVENT] = PLAYWRIGHT_FIXTURE.activeEvents;
+  ACTIVE_EVENT_NAMES = Object.freeze({
+    first: activeEventNames(FIRST_ACTIVE_EVENT),
+    second: activeEventNames(SECOND_ACTIVE_EVENT),
+  });
+});
+
 test.beforeEach(async ({ context }) => {
   await installAxe(context);
 });
@@ -374,7 +491,7 @@ test('dashboard exposes unmistakable choices, 911, skip navigation, and AA-clean
   page,
 }) => {
   await page.goto('/');
-  await expect(page).toHaveTitle('Active events');
+  await expect(page).toHaveTitle('Active events | PSD EOC');
   await expect(
     page.getByRole('heading', { level: 1, name: 'Active events' }),
   ).toBeVisible();
@@ -416,6 +533,41 @@ test('dashboard exposes unmistakable choices, 911, skip navigation, and AA-clean
   ]);
   expect(realBackground).not.toBe(drillBackground);
   await assertAxeClean(page, 'active-events dashboard');
+});
+
+test('contract-maximum dynamic copy retains separated names and 320px reflow', async ({
+  page,
+}) => {
+  const maximumEventTypeName = 'N'.repeat(160);
+  const maximumDescription = 'D'.repeat(1_000);
+  const maximumFacilityName = 'F'.repeat(160);
+  await page.setViewportSize({ width: 320, height: 800 });
+
+  await page.goto('/');
+  const eventCard = page.locator('.event-card').first();
+  await eventCard
+    .getByRole('heading', { level: 3 })
+    .evaluate((element, value) => {
+      element.textContent = value;
+    }, maximumEventTypeName);
+  await eventCard.locator('p strong').evaluate((element, value) => {
+    element.textContent = value;
+  }, maximumFacilityName);
+  await expectNoHorizontalDocumentOverflow(page);
+
+  await page.goto(`/start?facilityId=${SYNTHETIC_FACILITY_ID}&mode=real`);
+  const choice = page.locator('a.choice-card').first();
+  await choice.locator('.choice-card__label').evaluate((element, value) => {
+    element.textContent = value;
+  }, maximumEventTypeName);
+  await choice.locator('.choice-card__detail').evaluate((element, value) => {
+    element.textContent = value;
+  }, maximumDescription);
+  await expect(choice).toHaveAccessibleName(
+    `${maximumEventTypeName} ${maximumDescription}`,
+  );
+  await expectNoHorizontalDocumentOverflow(page);
+  await assertAxeClean(page, '320px contract-maximum event type copy');
 });
 
 test('real incident path reaches a current, fail-closed consequence preview in two clicks', async ({
@@ -695,12 +847,12 @@ test('join-existing shows the actual cross-classification event and never invoke
   page,
 }) => {
   const intercepted = await installPreviewInterception(page, {
-    activeEventIds: [PLAYWRIGHT_IDS.activeEvent],
+    activeEventIds: [FIRST_ACTIVE_EVENT.id],
   });
   let interactionCount = 0;
   let joinRequests = 0;
   await page.goto('/');
-  const expectedEvent = await readServerEvent(page, PLAYWRIGHT_IDS.activeEvent);
+  const expectedEvent = await readServerEvent(page, FIRST_ACTIVE_EVENT.id);
   await page.route('**/start/api/join', async (route) => {
     joinRequests += 1;
     await fulfillMatchingJoin(route, expectedEvent);
@@ -767,6 +919,80 @@ test('database-backed staff preview pins minimized roster evidence without creat
   }
 
   try {
+    await expectCanonicalActiveEventFixture(connection.db);
+    const [staffMemberships, staffEndpoints] = await Promise.all([
+      connection.db
+        .select({
+          recipientId: rosterRecipientGroupSources.recipientId,
+          groupSourceId: rosterRecipientGroupSources.groupSourceId,
+          groupPurpose: rosterRecipientGroupSources.groupPurpose,
+        })
+        .from(rosterRecipientGroupSources)
+        .where(
+          eq(
+            rosterRecipientGroupSources.rosterSnapshotId,
+            PLAYWRIGHT_IDS.staffRosterSnapshot,
+          ),
+        )
+        .orderBy(asc(rosterRecipientGroupSources.recipientId)),
+      connection.db
+        .select({
+          recipientId: rosterEndpoints.recipientId,
+          channel: rosterEndpoints.channel,
+        })
+        .from(rosterEndpoints)
+        .where(
+          eq(
+            rosterEndpoints.rosterSnapshotId,
+            PLAYWRIGHT_IDS.staffRosterSnapshot,
+          ),
+        )
+        .orderBy(
+          asc(rosterEndpoints.recipientId),
+          asc(rosterEndpoints.channel),
+        ),
+    ]);
+    expect(staffMemberships).toEqual([
+      {
+        recipientId: PLAYWRIGHT_IDS.staffRecipientNorth,
+        groupSourceId: PLAYWRIGHT_IDS.staffBuildingGroup,
+        groupPurpose: 'building',
+      },
+      {
+        recipientId: PLAYWRIGHT_IDS.staffRecipientSouth,
+        groupSourceId: PLAYWRIGHT_IDS.staffSouthBuildingGroup,
+        groupPurpose: 'building',
+      },
+      {
+        recipientId: PLAYWRIGHT_IDS.staffRecipientOthers,
+        groupSourceId: PLAYWRIGHT_IDS.staffOthersGroup,
+        groupPurpose: 'others',
+      },
+    ]);
+    expect(
+      [...staffEndpoints].sort((left, right) =>
+        `${left.recipientId}:${left.channel}`.localeCompare(
+          `${right.recipientId}:${right.channel}`,
+        ),
+      ),
+    ).toEqual([
+      {
+        recipientId: PLAYWRIGHT_IDS.staffRecipientNorth,
+        channel: 'push',
+      },
+      {
+        recipientId: PLAYWRIGHT_IDS.staffRecipientSouth,
+        channel: 'email',
+      },
+      {
+        recipientId: PLAYWRIGHT_IDS.staffRecipientOthers,
+        channel: 'email',
+      },
+      {
+        recipientId: PLAYWRIGHT_IDS.staffRecipientOthers,
+        channel: 'push',
+      },
+    ]);
     const before = await operationalMutationCounts(connection.db);
     const responsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url());
@@ -800,8 +1026,7 @@ test('database-backed staff preview pins minimized roster evidence without creat
       recipientCount: 2,
       sendReadiness: 'blocked',
       activeEventIds: [
-        PLAYWRIGHT_IDS.activeEvent,
-        PLAYWRIGHT_IDS.activeEventSecond,
+        ...[FIRST_ACTIVE_EVENT.id, SECOND_ACTIVE_EVENT.id].sort(),
       ],
     });
     expect(preview.blockingReasonCodes).toEqual([
@@ -819,7 +1044,7 @@ test('database-backed staff preview pins minimized roster evidence without creat
       ActivationPreview['channels'][number]
     >(preview.channels.map((channel) => [channel.channel, channel]));
     expect(channelByName.get('push')).toMatchObject({
-      endpointCount: 2,
+      endpointCount: 1,
       integrationStatus: { integrationId: 'expo-push', label: 'mocked' },
       renderedMessage: {
         channel: 'push',
@@ -847,7 +1072,15 @@ test('database-backed staff preview pins minimized roster evidence without creat
       expect(rendered).toContain('once confirmed');
     }
     const minimizedPreview = JSON.stringify(preview);
-    expect(minimizedPreview).not.toContain('Synthetic Browser Staff One');
+    expect(minimizedPreview).not.toContain(
+      'Synthetic Browser North-only Staff',
+    );
+    expect(minimizedPreview).not.toContain(
+      'Synthetic Browser South-only Staff',
+    );
+    expect(minimizedPreview).not.toContain(
+      'Synthetic Browser Others-only Staff',
+    );
     expect(minimizedPreview).not.toContain('example.invalid');
     expect(minimizedPreview).not.toContain('synthetic-unroutable');
 
@@ -913,7 +1146,7 @@ test('database-backed staff preview pins minimized roster evidence without creat
     const smsCard = page.locator('.channel-card').filter({
       has: page.getByRole('heading', { name: 'Text messages' }),
     });
-    await expect(pushCard).toContainText('2 active endpoints');
+    await expect(pushCard).toContainText('1 active endpoint');
     await expect(emailCard).toContainText('1 active endpoint');
     await expect(pushCard).toContainText('Mocked — training data only');
     await expect(emailCard).toContainText('Mocked — training data only');
@@ -950,8 +1183,8 @@ test('dashboard gives concurrent same-type events unique names and joins the exa
   await expect(firstJoin.locator('svg.classification-icon')).toHaveCount(1);
   await expect(secondJoin.locator('svg.classification-icon')).toHaveCount(1);
 
-  const expectedEvent = await readServerEvent(page, PLAYWRIGHT_IDS.activeEvent);
-  expect(expectedEvent.activatedAt).toBe(FIRST_ACTIVE_EVENT_TIME);
+  const expectedEvent = await readServerEvent(page, FIRST_ACTIVE_EVENT.id);
+  expect(expectedEvent.activatedAt).toBe(FIRST_ACTIVE_EVENT.activatedAt);
   let joinRequests = 0;
   await page.route('**/start/api/join', async (route) => {
     joinRequests += 1;
@@ -989,8 +1222,8 @@ test('dashboard treats a schema-valid response for different event truth as outc
   });
   const mismatched = joinEventResultFixture(
     prospectiveSelection,
-    PLAYWRIGHT_IDS.activeEventSecond,
-    { activatedAt: SECOND_ACTIVE_EVENT_TIME },
+    SECOND_ACTIVE_EVENT.id,
+    { activatedAt: SECOND_ACTIVE_EVENT.activatedAt },
   );
   let joinRequests = 0;
   await page.route('**/start/api/join', async (route) => {
@@ -998,7 +1231,7 @@ test('dashboard treats a schema-valid response for different event truth as outc
     const submitted = JoinEventInputSchema.parse(
       route.request().postDataJSON(),
     );
-    expect(submitted.eventId).toBe(PLAYWRIGHT_IDS.activeEventSecond);
+    expect(submitted.eventId).toBe(SECOND_ACTIVE_EVENT.id);
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -1026,10 +1259,7 @@ test('confirmation distinguishes concurrent same-type choices by time and event 
   page,
 }) => {
   const intercepted = await installPreviewInterception(page, {
-    activeEventIds: [
-      PLAYWRIGHT_IDS.activeEvent,
-      PLAYWRIGHT_IDS.activeEventSecond,
-    ],
+    activeEventIds: [FIRST_ACTIVE_EVENT.id, SECOND_ACTIVE_EVENT.id],
     simulatedReadyStaff: true,
   });
   await page.goto(REAL_CONFIRMATION_PATH);
@@ -1063,14 +1293,11 @@ test('delayed confirmation join submits once, identifies only that operation, an
   page,
 }) => {
   const intercepted = await installPreviewInterception(page, {
-    activeEventIds: [
-      PLAYWRIGHT_IDS.activeEvent,
-      PLAYWRIGHT_IDS.activeEventSecond,
-    ],
+    activeEventIds: [FIRST_ACTIVE_EVENT.id, SECOND_ACTIVE_EVENT.id],
     simulatedReadyStaff: true,
   });
   await page.goto('/');
-  const expectedEvent = await readServerEvent(page, PLAYWRIGHT_IDS.activeEvent);
+  const expectedEvent = await readServerEvent(page, FIRST_ACTIVE_EVENT.id);
   let releaseJoin = () => {};
   const joinGate = new Promise<void>((resolve) => {
     releaseJoin = resolve;
@@ -1095,10 +1322,10 @@ test('delayed confirmation join submits once, identifies only that operation, an
   await page.goto(REAL_CONFIRMATION_PATH);
   const chosen = page
     .locator('button.join-choice')
-    .filter({ hasText: 'event 00000001' });
+    .filter({ hasText: `event ${FIRST_ACTIVE_EVENT.id.slice(-8)}` });
   const other = page
     .locator('button.join-choice')
-    .filter({ hasText: 'event 00000016' });
+    .filter({ hasText: `event ${SECOND_ACTIVE_EVENT.id.slice(-8)}` });
   const activate = page.locator('button.button--real');
   await expect(chosen).toHaveAccessibleName(
     ACTIVE_EVENT_NAMES.first.confirmation,
@@ -1131,7 +1358,7 @@ test('delayed confirmation join submits once, identifies only that operation, an
   });
   await expect(rejected).toBeFocused();
   await expect(rejected).toContainText(
-    'Attempted action: Join DRILL — TRAINING ONLY event Lockdown Drill — event 00000001.',
+    `Attempted action: Join DRILL — TRAINING ONLY event Lockdown Drill — event ${FIRST_ACTIVE_EVENT.id.slice(-8)}.`,
   );
   await expect(chosen).toBeEnabled();
 
@@ -1148,10 +1375,7 @@ test('delayed activation double-click submits once and preserves the full pendin
   page,
 }) => {
   const intercepted = await installPreviewInterception(page, {
-    activeEventIds: [
-      PLAYWRIGHT_IDS.activeEvent,
-      PLAYWRIGHT_IDS.activeEventSecond,
-    ],
+    activeEventIds: [FIRST_ACTIVE_EVENT.id, SECOND_ACTIVE_EVENT.id],
     activationDelayMs: 750,
     activationOutcome: 'success',
     simulatedReadyStaff: true,
@@ -1160,7 +1384,7 @@ test('delayed activation double-click submits once and preserves the full pendin
   const submit = page.locator('button.button--real');
   const firstJoin = page
     .locator('button.join-choice')
-    .filter({ hasText: 'event 00000001' });
+    .filter({ hasText: `event ${FIRST_ACTIVE_EVENT.id.slice(-8)}` });
   await expect(submit).toHaveAccessibleName(
     'Start a separate REAL incident and create notification intents for 4 selected staff recipients',
   );
