@@ -10,10 +10,13 @@ import {
 } from 'bun:test';
 import {
   ActivationPreviewSchema,
+  EventTransitionSchema,
+  HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
   IntegrationStatusSchema,
+  SessionEstablishmentResultSchema,
   type JournalEntry,
 } from '@psd-eoc/contracts';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -21,20 +24,38 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../../db/client';
 import {
+  accessMembershipMembers,
+  accessMembershipSnapshots,
   activationPreviews,
   audienceConfigurations,
+  channelAttempts,
   channelConfigurations,
+  connectivityEpochs,
+  deliveryEvidence,
+  deviceEnrollments,
+  dispatchBatches,
   eventTypeVersions,
+  eventTransitions,
   events,
   facilities,
+  humanConfirmationActions,
+  humanConfirmationRecords,
   integrationStatuses,
   journalEntries,
+  lifecycleConsequencePreviews,
+  mediaRecords,
+  mediaUploadIntents,
   notificationIntentChannels,
   notificationIntents,
   outbox,
   rosterEndpoints,
   rosterRecipients,
+  rosterSnapshotFacilities,
   rosterSnapshots,
+  rosterSourceConfigurations,
+  securityAuditEntries,
+  sessions,
+  users,
 } from '../../../../db/schema';
 import { seedDatabase } from '../../../../db/seed';
 import { migrateDatabase } from '../../../../drizzle/migrate';
@@ -47,17 +68,20 @@ import {
   executeEventCapability,
 } from '../../../../lib/capabilities/events';
 import {
+  EVENT_CONFIRMATION_PHRASES,
+  createJournalCapabilityRuntime,
   createDrizzleJournalCapabilityStore,
   executeJournalCapability,
   type JournalCapabilityStore,
 } from '../../../../lib/capabilities/journal';
-import { requireSyntheticTestDatabaseUrl } from '../../../(admin)/event-types/test-database';
+import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
+import { requireSyntheticEventRoomTestDatabaseUrl } from './test-database';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
   configuredTestDatabaseUrl === undefined
     ? undefined
-    : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
+    : requireSyntheticEventRoomTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
   testDatabaseUrl === undefined ? describe.skip : describe;
 
@@ -138,6 +162,37 @@ function humanQueryInvocation(
     serverTime: new Date(),
     connectivityEpochId: CONNECTIVITY_EPOCH_ID,
     mutation: null,
+  };
+}
+
+function confirmedHumanMutationInvocation(input: {
+  readonly idempotencyKey: string;
+  readonly confirmationId: string;
+  readonly requestId?: string;
+  readonly actor?: Extract<
+    TrustedCapabilityInvocation['actor'],
+    { readonly kind: 'human' }
+  >;
+  readonly connectivityEpochId?: string;
+  readonly serverTime?: Date;
+}): TrustedCapabilityInvocation {
+  return {
+    actor: input.actor ?? HUMAN_ACTOR,
+    source: 'web',
+    scope: DISTRICT_SCOPE,
+    requestId: input.requestId ?? randomUUID(),
+    serverTime: input.serverTime ?? new Date(),
+    connectivityEpochId: input.connectivityEpochId ?? CONNECTIVITY_EPOCH_ID,
+    mutation: {
+      idempotencyKey: input.idempotencyKey,
+      transport: {
+        kind: 'web-interactive',
+        method: 'POST',
+        interaction: 'explicit-user-submit',
+        csrfVerified: true,
+      },
+      humanConfirmationId: input.confirmationId,
+    },
   };
 }
 
@@ -323,7 +378,7 @@ describeWithDatabase('event journal database guarantees', () => {
     }
 
     const firstPage = await listJournal(journalStore, eventId, null, 2);
-    expect(firstPage.items.map((entry) => entry.id)).toEqual(
+    expect(firstPage.items.map(({ entry }) => entry.id)).toEqual(
       initialEntries.slice(0, 2).map((entry) => entry.id),
     );
     expect(firstPage.pageInfo.hasMore).toBe(true);
@@ -350,7 +405,7 @@ describeWithDatabase('event journal database guarantees', () => {
       firstPage.pageInfo.nextCursor,
       2,
     );
-    expect(secondPage.items.map((entry) => entry.id)).toEqual(
+    expect(secondPage.items.map(({ entry }) => entry.id)).toEqual(
       initialEntries.slice(2).map((entry) => entry.id),
     );
     expect(secondPage.pageInfo.hasMore).toBe(true);
@@ -362,27 +417,27 @@ describeWithDatabase('event journal database guarantees', () => {
       secondPage.pageInfo.nextCursor,
       2,
     );
-    expect(thirdPage.items.map((entry) => entry.id).sort()).toEqual(
+    expect(thirdPage.items.map(({ entry }) => entry.id).sort()).toEqual(
       concurrentEntries.map((entry) => entry.id).sort(),
     );
-    expect(thirdPage.items.map((entry) => entry.sequence)).toEqual([5, 6]);
+    expect(thirdPage.items.map(({ entry }) => entry.sequence)).toEqual([5, 6]);
     expect(thirdPage.pageInfo).toEqual({ hasMore: false, nextCursor: null });
 
     const lateJoin = await listJournal(journalStore, eventId, null, 200);
     expect(lateJoin.items).toHaveLength(6);
-    expect(lateJoin.items.map((entry) => entry.sequence)).toEqual([
+    expect(lateJoin.items.map(({ entry }) => entry.sequence)).toEqual([
       1, 2, 3, 4, 5, 6,
     ]);
-    expect(lateJoin.items.slice(0, 4).map((entry) => entry.clientTime)).toEqual(
-      [...deliberatelyReversedClientTimes],
-    );
+    expect(
+      lateJoin.items.slice(0, 4).map(({ entry }) => entry.clientTime),
+    ).toEqual([...deliberatelyReversedClientTimes]);
     for (let index = 1; index < lateJoin.items.length; index += 1) {
       const previous = lateJoin.items[index - 1];
       const current = lateJoin.items[index];
       expect(previous).toBeDefined();
       expect(current).toBeDefined();
-      expect(Date.parse(previous!.serverTime)).toBeLessThanOrEqual(
-        Date.parse(current!.serverTime),
+      expect(Date.parse(previous!.entry.serverTime)).toBeLessThanOrEqual(
+        Date.parse(current!.entry.serverTime),
       );
     }
 
@@ -448,19 +503,12 @@ describeWithDatabase('event journal database guarantees', () => {
       'Initial accountability count is three.',
       '2026-08-10T18:20:00.000Z',
     );
-    const redactedOriginal = await appendText(
-      journalStore,
-      eventId,
-      'Synthetic content requiring redaction.',
-      '2026-08-10T18:21:00.000Z',
-    );
-
     const correction = await executeJournalCapability(
       'correct-journal-entry',
       textInput(
         eventId,
         'Corrected accountability count is four.',
-        '2026-08-10T18:22:00.000Z',
+        '2026-08-10T18:21:00.000Z',
         {
           entryId: correctedOriginal.id,
           entrySequence: correctedOriginal.sequence,
@@ -471,15 +519,37 @@ describeWithDatabase('event journal database guarantees', () => {
       humanMutationInvocation(`issue16-correct-${randomUUID()}`),
       journalStore,
     );
+    await expect(
+      executeJournalCapability(
+        'correct-journal-entry',
+        textInput(
+          eventId,
+          'A second correction must not fork the supersession history.',
+          '2026-08-10T18:21:30.000Z',
+          {
+            entryId: correctedOriginal.id,
+            entrySequence: correctedOriginal.sequence,
+            kind: 'correction',
+            reason: 'Synthetic duplicate correction attempt.',
+          },
+        ),
+        humanMutationInvocation(`issue77-duplicate-correct-${randomUUID()}`),
+        journalStore,
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message:
+        'A journal correction cannot target an entry that is already superseded.',
+    });
     const redaction = await executeJournalCapability(
       'redact-journal-entry',
       textInput(
         eventId,
         '[Content redacted; original retained in append-only history.]',
-        '2026-08-10T18:23:00.000Z',
+        '2026-08-10T18:22:00.000Z',
         {
-          entryId: redactedOriginal.id,
-          entrySequence: redactedOriginal.sequence,
+          entryId: correctedOriginal.id,
+          entrySequence: correctedOriginal.sequence,
           kind: 'redaction',
           reason: 'Synthetic sensitive detail was posted unnecessarily.',
         },
@@ -487,22 +557,51 @@ describeWithDatabase('event journal database guarantees', () => {
       humanMutationInvocation(`issue16-redact-${randomUUID()}`),
       journalStore,
     );
+    await expect(
+      executeJournalCapability(
+        'redact-journal-entry',
+        textInput(
+          eventId,
+          '[Content redacted; original retained in append-only history.]',
+          '2026-08-10T18:22:30.000Z',
+          {
+            entryId: correctedOriginal.id,
+            entrySequence: correctedOriginal.sequence,
+            kind: 'redaction',
+            reason: 'Synthetic duplicate redaction attempt.',
+          },
+        ),
+        humanMutationInvocation(`issue77-duplicate-redact-${randomUUID()}`),
+        journalStore,
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message: 'The journal entry already has an append-only redaction.',
+    });
 
     const lateJoin = await listJournal(journalStore, eventId, null, 200);
-    expect(lateJoin.items.map((entry) => entry.id)).toEqual([
+    expect(lateJoin.items.map(({ entry }) => entry.id)).toEqual([
       correctedOriginal.id,
-      redactedOriginal.id,
       correction.id,
       redaction.id,
     ]);
-    expect(lateJoin.items[0]).toMatchObject({
-      payload: { text: 'Initial accountability count is three.' },
-      supersedes: null,
+    expect(lateJoin.items[0]).toEqual({
+      visibility: 'redacted',
+      entry: {
+        id: correctedOriginal.id,
+        eventId,
+        sequence: correctedOriginal.sequence,
+        kind: correctedOriginal.kind,
+        author: correctedOriginal.author,
+        source: correctedOriginal.source,
+        serverTime: correctedOriginal.serverTime,
+        clientTime: correctedOriginal.clientTime,
+        supersedes: null,
+      },
     });
-    expect(lateJoin.items[1]).toMatchObject({
-      payload: { text: 'Synthetic content requiring redaction.' },
-      supersedes: null,
-    });
+    expect(JSON.stringify(lateJoin.items[0])).not.toContain(
+      'Initial accountability count is three.',
+    );
     expect(correction.supersedes).toEqual({
       entryId: correctedOriginal.id,
       entrySequence: correctedOriginal.sequence,
@@ -510,8 +609,8 @@ describeWithDatabase('event journal database guarantees', () => {
       reason: 'The fourth synthetic staff member checked in.',
     });
     expect(redaction.supersedes).toEqual({
-      entryId: redactedOriginal.id,
-      entrySequence: redactedOriginal.sequence,
+      entryId: correctedOriginal.id,
+      entrySequence: correctedOriginal.sequence,
       kind: 'redaction',
       reason: 'Synthetic sensitive detail was posted unnecessarily.',
     });
@@ -528,30 +627,293 @@ describeWithDatabase('event journal database guarantees', () => {
       .from(journalEntries)
       .where(eq(journalEntries.eventId, eventId))
       .orderBy(asc(journalEntries.sequence));
-    expect(persisted).toHaveLength(4);
+    expect(persisted).toHaveLength(3);
     expect(persisted[0]).toMatchObject({
       id: correctedOriginal.id,
       supersedesEntryId: null,
     });
     expect(persisted[1]).toMatchObject({
-      id: redactedOriginal.id,
-      supersedesEntryId: null,
-    });
-    expect(persisted[2]).toMatchObject({
       id: correction.id,
       supersedesEntryId: correctedOriginal.id,
       supersedesEntrySequence: correctedOriginal.sequence,
       supersessionKind: 'correction',
       supersessionReason: 'The fourth synthetic staff member checked in.',
     });
-    expect(persisted[3]).toMatchObject({
+    expect(persisted[2]).toMatchObject({
       id: redaction.id,
-      supersedesEntryId: redactedOriginal.id,
-      supersedesEntrySequence: redactedOriginal.sequence,
+      supersedesEntryId: correctedOriginal.id,
+      supersedesEntrySequence: correctedOriginal.sequence,
       supersessionKind: 'redaction',
       supersessionReason:
         'Synthetic sensitive detail was posted unnecessarily.',
     });
+  });
+
+  test('serializes a winning redaction before concurrent correction and duplicate redaction attempts', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const original = await appendText(
+      journalStore,
+      eventId,
+      'Synthetic detail that must remain hidden after redaction.',
+      '2026-08-10T18:24:00.000Z',
+    );
+
+    let releaseWinningRedaction: () => void = () => undefined;
+    const winningRedactionRelease = new Promise<void>((resolve) => {
+      releaseWinningRedaction = resolve;
+    });
+    let markWinningRedactionLocked: () => void = () => undefined;
+    const winningRedactionLocked = new Promise<void>((resolve) => {
+      markWinningRedactionLocked = resolve;
+    });
+    const winningRedactionStore: JournalCapabilityStore = {
+      ...journalStore,
+      transaction(operation) {
+        return journalStore.transaction((transaction) =>
+          operation({
+            ...transaction,
+            async lockEventForJournal(candidateEventId) {
+              const locked =
+                await transaction.lockEventForJournal(candidateEventId);
+              if (candidateEventId === eventId) {
+                markWinningRedactionLocked();
+                await winningRedactionRelease;
+              }
+              return locked;
+            },
+          }),
+        );
+      },
+    };
+
+    const winningRedactionPromise = executeJournalCapability(
+      'redact-journal-entry',
+      textInput(
+        eventId,
+        '[Content redacted; original retained in append-only history.]',
+        '2026-08-10T18:25:00.000Z',
+        {
+          entryId: original.id,
+          entrySequence: original.sequence,
+          kind: 'redaction',
+          reason: 'Synthetic concurrent redaction winner.',
+        },
+      ),
+      humanMutationInvocation(`issue77-winning-redact-${randomUUID()}`),
+      winningRedactionStore,
+    );
+    await winningRedactionLocked;
+
+    const lockAttemptStore = (
+      markAttempted: () => void,
+    ): JournalCapabilityStore => ({
+      ...journalStore,
+      transaction(operation) {
+        return journalStore.transaction((transaction) =>
+          operation({
+            ...transaction,
+            lockEventForJournal(candidateEventId) {
+              const locked = transaction.lockEventForJournal(candidateEventId);
+              if (candidateEventId === eventId) markAttempted();
+              return locked;
+            },
+          }),
+        );
+      },
+    });
+    let markCorrectionWaiting: () => void = () => undefined;
+    const correctionWaiting = new Promise<void>((resolve) => {
+      markCorrectionWaiting = resolve;
+    });
+    let markDuplicateRedactionWaiting: () => void = () => undefined;
+    const duplicateRedactionWaiting = new Promise<void>((resolve) => {
+      markDuplicateRedactionWaiting = resolve;
+    });
+
+    const correctionResultPromise = executeJournalCapability(
+      'correct-journal-entry',
+      textInput(
+        eventId,
+        'This stale correction must never become visible.',
+        '2026-08-10T18:25:01.000Z',
+        {
+          entryId: original.id,
+          entrySequence: original.sequence,
+          kind: 'correction',
+          reason: 'Synthetic correction racing a redaction.',
+        },
+      ),
+      humanMutationInvocation(`issue77-racing-correct-${randomUUID()}`),
+      lockAttemptStore(markCorrectionWaiting),
+    ).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    const duplicateRedactionResultPromise = executeJournalCapability(
+      'redact-journal-entry',
+      textInput(
+        eventId,
+        '[Content redacted; original retained in append-only history.]',
+        '2026-08-10T18:25:02.000Z',
+        {
+          entryId: original.id,
+          entrySequence: original.sequence,
+          kind: 'redaction',
+          reason: 'Synthetic redaction racing the winning redaction.',
+        },
+      ),
+      humanMutationInvocation(`issue77-racing-redact-${randomUUID()}`),
+      lockAttemptStore(markDuplicateRedactionWaiting),
+    ).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+
+    await Promise.all([correctionWaiting, duplicateRedactionWaiting]);
+    releaseWinningRedaction();
+
+    const [winningRedaction, correctionResult, duplicateRedactionResult] =
+      await Promise.all([
+        winningRedactionPromise,
+        correctionResultPromise,
+        duplicateRedactionResultPromise,
+      ]);
+    expect(correctionResult).toMatchObject({
+      code: 'CONFLICT',
+      message:
+        'A journal correction cannot target an entry that is already superseded.',
+    });
+    expect(duplicateRedactionResult).toMatchObject({
+      code: 'CONFLICT',
+      message: 'The journal entry already has an append-only redaction.',
+    });
+
+    const persisted = await databaseConnection()
+      .db.select({ id: journalEntries.id, sequence: journalEntries.sequence })
+      .from(journalEntries)
+      .where(eq(journalEntries.eventId, eventId))
+      .orderBy(asc(journalEntries.sequence));
+    expect(persisted).toEqual([
+      { id: original.id, sequence: 1 },
+      { id: winningRedaction.id, sequence: 2 },
+    ]);
+  });
+
+  test('agent-grantable list reads omit photo and location payloads redacted on a later page', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const mediaId = randomUUID();
+    const uploadIntentId = randomUUID();
+    const mediaCreatedAt = new Date();
+    await databaseConnection()
+      .db.insert(mediaUploadIntents)
+      .values({
+        id: uploadIntentId,
+        eventId,
+        byteLength: 128,
+        contentSha256: 'd'.repeat(64),
+        declaredContentType: 'image/jpeg',
+        storageKey: `synthetic/journal/${uploadIntentId}/upload`,
+        status: 'completed',
+        createdAt: mediaCreatedAt,
+        expiresAt: new Date(mediaCreatedAt.getTime() + 5 * 60_000),
+      });
+    await databaseConnection()
+      .db.insert(mediaRecords)
+      .values({
+        id: mediaId,
+        uploadIntentId,
+        eventId,
+        status: 'ready',
+        detectedContentType: 'image/jpeg',
+        sanitizedByteLength: 120,
+        sanitizedContentSha256: 'e'.repeat(64),
+        storageKey: `synthetic/journal/${uploadIntentId}/sanitized`,
+        malwareScan: 'clean',
+        exifStripped: true,
+        createdAt: mediaCreatedAt,
+      });
+    const photo = await executeJournalCapability(
+      'append-journal-entry',
+      {
+        eventId,
+        kind: 'photo',
+        payload: {
+          mediaId,
+          altText: 'synthetic-list-redacted-photo-alt',
+          caption: 'synthetic-list-redacted-photo-caption',
+        },
+        clientTime: null,
+        supersedes: null,
+      },
+      humanMutationInvocation(`issue77-photo-${randomUUID()}`),
+      journalStore,
+    );
+    const location = await executeJournalCapability(
+      'append-journal-entry',
+      {
+        eventId,
+        kind: 'location',
+        payload: {
+          state: 'known',
+          latitude: 47.391,
+          longitude: -122.591,
+          accuracyMeters: 4,
+          label: 'synthetic-list-redacted-location',
+        },
+        clientTime: null,
+        supersedes: null,
+      },
+      humanMutationInvocation(`issue77-location-${randomUUID()}`),
+      journalStore,
+    );
+    for (const target of [photo, location]) {
+      await executeJournalCapability(
+        'redact-journal-entry',
+        textInput(
+          eventId,
+          '[Content redacted — original retained in journal]',
+          null,
+          {
+            entryId: target.id,
+            entrySequence: target.sequence,
+            kind: 'redaction',
+            reason: 'Synthetic list projection regression.',
+          },
+        ),
+        humanMutationInvocation(`issue77-redact-${randomUUID()}`),
+        journalStore,
+      );
+    }
+
+    const firstPage = await listJournal(journalStore, eventId, null, 2);
+    expect(firstPage.pageInfo.hasMore).toBe(true);
+    expect(firstPage.items.map(({ visibility }) => visibility)).toEqual([
+      'redacted',
+      'redacted',
+    ]);
+    const outwardJson = JSON.stringify(firstPage.items);
+    for (const forbidden of [
+      mediaId,
+      'synthetic-list-redacted-photo-alt',
+      'synthetic-list-redacted-photo-caption',
+      '47.391',
+      '-122.591',
+      'synthetic-list-redacted-location',
+      'payload',
+    ]) {
+      expect(outwardJson).not.toContain(forbidden);
+    }
+
+    const persisted = await databaseConnection()
+      .db.select({ payload: journalEntries.payload })
+      .from(journalEntries)
+      .where(inArray(journalEntries.id, [photo.id, location.id]));
+    expect(JSON.stringify(persisted)).toContain(mediaId);
+    expect(JSON.stringify(persisted)).toContain(
+      'synthetic-list-redacted-location',
+    );
   });
 
   test('records synthetic all-clear fan-out and close as distinct append-only lifecycle facts', async () => {
@@ -762,12 +1124,92 @@ describeWithDatabase('event journal database guarantees', () => {
           templateMode: 'drill',
         });
 
+        const previewIdempotencyKey = `issue77-preview-${randomUUID()}`;
+        const previewInvocation = humanMutationInvocation(
+          previewIdempotencyKey,
+        );
         const lifecyclePreview = await executeJournalCapability(
           'create-lifecycle-consequence-preview',
           { eventId, purpose: 'all-clear' },
-          humanQueryInvocation(),
+          previewInvocation,
           journalStore,
         );
+        const previewReplayInvocation = humanMutationInvocation(
+          previewIdempotencyKey,
+        );
+        const lifecyclePreviewReplay = await executeJournalCapability(
+          'create-lifecycle-consequence-preview',
+          { eventId, purpose: 'all-clear' },
+          previewReplayInvocation,
+          journalStore,
+        );
+        expect(lifecyclePreviewReplay).toEqual(lifecyclePreview);
+        expect(previewReplayInvocation.requestId).not.toBe(
+          previewInvocation.requestId,
+        );
+
+        const deniedReplayInvocation = humanMutationInvocation(
+          previewIdempotencyKey,
+          {
+            facilityScope: {
+              kind: 'facilities',
+              facilityIds: [ids.southFacilityId],
+            },
+          },
+        );
+        await expect(
+          executeJournalCapability(
+            'create-lifecycle-consequence-preview',
+            { eventId, purpose: 'all-clear' },
+            deniedReplayInvocation,
+            journalStore,
+          ),
+        ).rejects.toMatchObject({
+          code: 'FORBIDDEN',
+          reasonCode: 'CAPABILITY_SCOPE_DENIED',
+        });
+
+        const persistedPreviews = await transaction
+          .select({ id: lifecycleConsequencePreviews.id })
+          .from(lifecycleConsequencePreviews)
+          .where(eq(lifecycleConsequencePreviews.eventId, eventId));
+        expect(persistedPreviews).toEqual([{ id: lifecyclePreview.id }]);
+        const previewAuditRows = await transaction
+          .select({
+            action: securityAuditEntries.action,
+            outcome: securityAuditEntries.outcome,
+            requestId: securityAuditEntries.requestId,
+            reasonCode: securityAuditEntries.reasonCode,
+          })
+          .from(securityAuditEntries)
+          .where(
+            inArray(securityAuditEntries.requestId, [
+              previewInvocation.requestId,
+              previewReplayInvocation.requestId,
+              deniedReplayInvocation.requestId,
+            ]),
+          );
+        expect(previewAuditRows).toHaveLength(3);
+        expect(
+          previewAuditRows
+            .filter((row) => row.outcome === 'success')
+            .map((row) => row.requestId)
+            .sort(),
+        ).toEqual(
+          [
+            previewInvocation.requestId,
+            previewReplayInvocation.requestId,
+          ].sort(),
+        );
+        expect(
+          previewAuditRows.find(
+            (row) => row.requestId === deniedReplayInvocation.requestId,
+          ),
+        ).toMatchObject({
+          action: 'create-lifecycle-consequence-preview',
+          outcome: 'denied',
+          reasonCode: 'CAPABILITY_SCOPE_DENIED',
+        });
         expect(lifecyclePreview).toMatchObject({
           eventId,
           purpose: 'all-clear',
@@ -880,10 +1322,17 @@ describeWithDatabase('event journal database guarantees', () => {
           humanQueryInvocation(),
           journalStore,
         );
-        expect(retainedJournal.items.map((entry) => entry.sequence)).toEqual([
-          1, 2, 3, 4, 5, 6,
-        ]);
-        expect(retainedJournal.items.map(systemJournalCode)).toEqual([
+        expect(
+          retainedJournal.items.map(({ entry }) => entry.sequence),
+        ).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(
+          retainedJournal.items.map((projection) => {
+            if (projection.visibility !== 'visible') {
+              throw new Error('Lifecycle system facts cannot be redacted.');
+            }
+            return systemJournalCode(projection.entry);
+          }),
+        ).toEqual([
           'event-created',
           'event-activated',
           'notification-intent-recorded',
@@ -994,6 +1443,984 @@ describeWithDatabase('event journal database guarantees', () => {
         }
       }
     });
+  });
+
+  test('binds one real staff all-clear to exact fresh human confirmation without dispatching it', async () => {
+    const ids = syntheticFixtureIds();
+    const rollbackFixture = new Error(
+      'Rollback the isolated real/staff confirmation fixture.',
+    );
+    try {
+      await databaseConnection().db.transaction(async (transaction) => {
+        const transactionalDatabase = transaction as unknown as Database;
+        const journalStore = createDrizzleJournalCapabilityStore(
+          transactionalDatabase,
+        );
+        const eventStore = createDrizzleEventCapabilityStore(
+          transactionalDatabase,
+        );
+        const journalRuntime = createJournalCapabilityRuntime({
+          driver: 'postgres',
+          db: transaction as unknown as PostgresDatabaseConnection['db'],
+          close: async () => {},
+        });
+        const suffix = randomUUID().replaceAll('-', '');
+        const membershipSnapshotVersion =
+          Number.parseInt(suffix.slice(0, 7), 16) + 1;
+        const fixtureTime = new Date();
+        const identityCreatedAt = new Date(fixtureTime.getTime() - 60_000);
+        const membershipSnapshotId = randomUUID();
+        const deviceEnrollmentId = randomUUID();
+        const staffRosterSnapshotId = randomUUID();
+        const staffRecipientId = randomUUID();
+        const sourcePreviewId = randomUUID();
+        const eventId = randomUUID();
+
+        const [realEventTypeVersion] = await transaction
+          .select({ id: eventTypeVersions.id })
+          .from(eventTypeVersions)
+          .where(eq(eventTypeVersions.templateMode, 'real'))
+          .orderBy(asc(eventTypeVersions.id))
+          .limit(1);
+        if (realEventTypeVersion === undefined) {
+          throw new Error('The seed is missing a real incident event type.');
+        }
+
+        const [latestStaffRosterSnapshot] = await transaction
+          .select({
+            version: rosterSnapshots.version,
+            sourceConfigurationId: rosterSnapshots.sourceConfigurationId,
+            sourceConfigurationVersion:
+              rosterSnapshots.sourceConfigurationVersion,
+          })
+          .from(rosterSnapshots)
+          .where(eq(rosterSnapshots.population, 'staff'))
+          .orderBy(desc(rosterSnapshots.version))
+          .limit(1);
+        const [unpublishedStaffConfiguration] =
+          latestStaffRosterSnapshot === undefined
+            ? await transaction
+                .select({
+                  id: rosterSourceConfigurations.id,
+                  version: rosterSourceConfigurations.version,
+                })
+                .from(rosterSourceConfigurations)
+                .where(eq(rosterSourceConfigurations.population, 'staff'))
+                .orderBy(
+                  desc(rosterSourceConfigurations.version),
+                  asc(rosterSourceConfigurations.id),
+                )
+                .limit(1)
+            : [];
+        const staffRosterConfigurationId =
+          latestStaffRosterSnapshot?.sourceConfigurationId ??
+          unpublishedStaffConfiguration?.id ??
+          randomUUID();
+        const staffRosterConfigurationVersion =
+          latestStaffRosterSnapshot?.sourceConfigurationVersion ??
+          unpublishedStaffConfiguration?.version ??
+          1;
+        const staffRosterSnapshotVersion =
+          (latestStaffRosterSnapshot?.version ?? 0) + 1;
+
+        await transaction.insert(users).values({
+          id: HUMAN_ACTOR.userId,
+          googleSubject: `synthetic-issue77-${suffix}`,
+          email: `synthetic.issue77.${suffix}@psd401.net`,
+          displayName: 'Synthetic Issue 77 Staff Operator',
+          facilityScopeKind: 'district',
+          createdAt: identityCreatedAt,
+          disabledAt: null,
+        });
+        await transaction.insert(accessMembershipSnapshots).values({
+          id: membershipSnapshotId,
+          version: membershipSnapshotVersion,
+          complete: true,
+          syncStartedAt: identityCreatedAt,
+          capturedAt: identityCreatedAt,
+        });
+        await transaction.insert(accessMembershipMembers).values({
+          snapshotId: membershipSnapshotId,
+          userId: HUMAN_ACTOR.userId,
+          googleSubject: `synthetic-issue77-${suffix}`,
+          facilityScopeKind: 'district',
+        });
+        await transaction.insert(deviceEnrollments).values({
+          id: deviceEnrollmentId,
+          userId: HUMAN_ACTOR.userId,
+          platform: 'web',
+          unlockMethod: 'secure-session-cookie',
+          installationId: `synthetic-issue77-${suffix}`,
+          enrolledAt: identityCreatedAt,
+          lastSeenAt: fixtureTime,
+          revokedAt: null,
+        });
+        const membershipValidUntil = new Date(
+          fixtureTime.getTime() + 60 * 60_000,
+        );
+        const membershipGraceUntil = new Date(
+          fixtureTime.getTime() + 2 * 60 * 60_000,
+        );
+        const sessionExpiresAt = new Date(
+          fixtureTime.getTime() + 24 * 60 * 60_000,
+        );
+        await transaction.insert(sessions).values({
+          id: HUMAN_ACTOR.sessionId,
+          userId: HUMAN_ACTOR.userId,
+          deviceEnrollmentId,
+          membershipSnapshotId,
+          membershipValidUntil,
+          membershipGraceUntil,
+          createdAt: identityCreatedAt,
+          expiresAt: sessionExpiresAt,
+          revokedAt: null,
+        });
+        await transaction.insert(connectivityEpochs).values({
+          id: CONNECTIVITY_EPOCH_ID,
+          sessionId: HUMAN_ACTOR.sessionId,
+          establishedAt: fixtureTime,
+        });
+
+        const sessionResult = SessionEstablishmentResultSchema.parse({
+          user: {
+            id: HUMAN_ACTOR.userId,
+            googleSubject: `synthetic-issue77-${suffix}`,
+            email: `synthetic.issue77.${suffix}@psd401.net`,
+            displayName: 'Synthetic Issue 77 Staff Operator',
+            roles: ['staff'],
+            facilityScope: { kind: 'district' },
+            createdAt: identityCreatedAt.toISOString(),
+            disabledAt: null,
+          },
+          session: {
+            id: HUMAN_ACTOR.sessionId,
+            userId: HUMAN_ACTOR.userId,
+            deviceEnrollmentId,
+            createdAt: identityCreatedAt.toISOString(),
+            expiresAt: sessionExpiresAt.toISOString(),
+            authorization: {
+              kind: 'group-membership',
+              source: 'google-group-snapshot',
+              membershipSnapshotId,
+              membershipValidUntil: membershipValidUntil.toISOString(),
+              membershipGraceUntil: membershipGraceUntil.toISOString(),
+            },
+            revokedAt: null,
+          },
+          deviceEnrollment: {
+            id: deviceEnrollmentId,
+            userId: HUMAN_ACTOR.userId,
+            platform: 'web',
+            unlockMethod: 'secure-session-cookie',
+            installationId: `synthetic-issue77-${suffix}`,
+            enrolledAt: identityCreatedAt.toISOString(),
+            lastSeenAt: fixtureTime.toISOString(),
+            revokedAt: null,
+          },
+          connectivityEpoch: {
+            id: CONNECTIVITY_EPOCH_ID,
+            sessionId: HUMAN_ACTOR.sessionId,
+            establishedAt: fixtureTime.toISOString(),
+          },
+        });
+        const authenticated: AuthenticatedSession = Object.freeze({
+          actor: HUMAN_ACTOR,
+          source: 'web',
+          roles: ['staff'] as const,
+          scope: DISTRICT_SCOPE,
+          membershipState: 'fresh',
+          result: sessionResult,
+        });
+
+        if (
+          latestStaffRosterSnapshot === undefined &&
+          unpublishedStaffConfiguration === undefined
+        ) {
+          await transaction.insert(rosterSourceConfigurations).values({
+            id: staffRosterConfigurationId,
+            version: staffRosterConfigurationVersion,
+            population: 'staff',
+            createdAt: identityCreatedAt,
+          });
+        }
+        await transaction.insert(rosterSnapshots).values({
+          id: staffRosterSnapshotId,
+          version: staffRosterSnapshotVersion,
+          population: 'staff',
+          complete: true,
+          sourceConfigurationId: staffRosterConfigurationId,
+          sourceConfigurationVersion: staffRosterConfigurationVersion,
+          syncStartedAt: identityCreatedAt,
+          capturedAt: fixtureTime,
+        });
+        await transaction.insert(rosterSnapshotFacilities).values({
+          rosterSnapshotId: staffRosterSnapshotId,
+          facilityId: ids.northFacilityId,
+        });
+        await transaction.insert(rosterRecipients).values({
+          id: staffRecipientId,
+          rosterSnapshotId: staffRosterSnapshotId,
+          population: 'staff',
+          googleSubject: `synthetic-staff-target-${suffix}`,
+          displayName: 'Synthetic Staff Notification Target',
+        });
+        await transaction.insert(rosterEndpoints).values([
+          {
+            id: randomUUID(),
+            rosterSnapshotId: staffRosterSnapshotId,
+            recipientId: staffRecipientId,
+            population: 'staff',
+            channel: 'push',
+            status: 'active',
+            capturedAt: fixtureTime,
+            platform: 'ios',
+            token: `synthetic-unroutable:issue77-${suffix}`,
+            email: null,
+            phoneNumber: null,
+          },
+          {
+            id: randomUUID(),
+            rosterSnapshotId: staffRosterSnapshotId,
+            recipientId: staffRecipientId,
+            population: 'staff',
+            channel: 'email',
+            status: 'active',
+            capturedAt: fixtureTime,
+            platform: null,
+            token: null,
+            email: `issue77-${suffix}@example.invalid`,
+            phoneNumber: null,
+          },
+        ]);
+
+        const integrationIds = ['expo-push', 'ses-email'] as const;
+        const originalConfigurations = await transaction
+          .select()
+          .from(channelConfigurations)
+          .where(inArray(channelConfigurations.integrationId, integrationIds));
+        if (originalConfigurations.length !== integrationIds.length) {
+          throw new Error(
+            'The synthetic seed is missing push/email channel configurations.',
+          );
+        }
+        const verifiedAt = new Date(fixtureTime.getTime() - 5_000);
+        const observedAt = new Date(fixtureTime.getTime() - 4_000);
+        const liveStatuses = integrationIds.map((integrationId) => ({
+          id: randomUUID(),
+          value: IntegrationStatusSchema.parse({
+            integrationId,
+            label: 'live-verified',
+            verifiedAt: verifiedAt.toISOString(),
+            verifiedByUserId: HUMAN_ACTOR.userId,
+            authorizationReference: 'synthetic-issue77-test-authorization',
+            reasonCode: null,
+            observedAt: observedAt.toISOString(),
+          }),
+        }));
+        await transaction.insert(integrationStatuses).values(
+          liveStatuses.map(({ id, value }) => ({
+            id,
+            integrationId: value.integrationId,
+            label: value.label,
+            verifiedAt,
+            verifiedByUserId: value.verifiedByUserId,
+            authorizationReference: value.authorizationReference,
+            reasonCode: value.reasonCode,
+            observedAt,
+          })),
+        );
+        for (const status of liveStatuses) {
+          await transaction
+            .update(channelConfigurations)
+            .set({
+              enabled: true,
+              statusId: status.id,
+              statusLabel: status.value.label,
+              changedAt: fixtureTime,
+            })
+            .where(
+              eq(
+                channelConfigurations.integrationId,
+                status.value.integrationId,
+              ),
+            );
+        }
+
+        try {
+          const sourceCreatedAt = new Date(fixtureTime.getTime() - 3_000);
+          const activatedAt = new Date(fixtureTime.getTime() - 2_000);
+          const sourceConsequenceDigest = digestCapabilityValue({
+            fixture: 'issue-77-real-staff-activation',
+            sourcePreviewId,
+          });
+          const statusFor = (
+            integrationId: (typeof integrationIds)[number],
+          ) => {
+            const status = liveStatuses.find(
+              (candidate) => candidate.value.integrationId === integrationId,
+            );
+            if (status === undefined) {
+              throw new Error(
+                `The ${integrationId} status fixture is missing.`,
+              );
+            }
+            return status.value;
+          };
+          const sourcePreview = ActivationPreviewSchema.parse({
+            id: sourcePreviewId,
+            facilityId: ids.northFacilityId,
+            kind: 'incident',
+            templateMode: 'real',
+            eventTypeVersion: {
+              id: realEventTypeVersion.id,
+              templateMode: 'real',
+            },
+            rosterSnapshotId: staffRosterSnapshotId,
+            rosterPopulation: 'staff',
+            audienceConfig: {
+              id: ids.audienceConfigId,
+              version: ids.audienceConfigVersion,
+            },
+            recipientCount: 1,
+            channels: [
+              {
+                channel: 'push',
+                endpointCount: 1,
+                renderedMessage: {
+                  channel: 'push',
+                  eventKind: 'incident',
+                  templateMode: 'real',
+                  purpose: 'activation',
+                  classificationMarker: 'INCIDENT',
+                  title: '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
+                  body: '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
+                },
+                integrationStatus: statusFor('expo-push'),
+              },
+              {
+                channel: 'email',
+                endpointCount: 1,
+                renderedMessage: {
+                  channel: 'email',
+                  eventKind: 'incident',
+                  templateMode: 'real',
+                  purpose: 'activation',
+                  classificationMarker: 'INCIDENT',
+                  subject:
+                    '[INCIDENT] REAL INCIDENT ACTIVATION: Synthetic test',
+                  textBody:
+                    '[INCIDENT] REAL INCIDENT — NOT A DRILL. Synthetic database proof only.',
+                },
+                integrationStatus: statusFor('ses-email'),
+              },
+            ],
+            sendReadiness: 'ready',
+            blockingReasonCodes: [],
+            activeEventIds: [],
+            consequenceDigest: sourceConsequenceDigest,
+            createdAt: sourceCreatedAt.toISOString(),
+            expiresAt: new Date(
+              sourceCreatedAt.getTime() + 15 * 60_000,
+            ).toISOString(),
+          });
+          await transaction.insert(activationPreviews).values({
+            id: sourcePreview.id,
+            facilityId: sourcePreview.facilityId,
+            kind: sourcePreview.kind,
+            templateMode: sourcePreview.templateMode,
+            eventTypeVersionId: sourcePreview.eventTypeVersion.id,
+            rosterSnapshotId: sourcePreview.rosterSnapshotId,
+            rosterPopulation: sourcePreview.rosterPopulation,
+            audienceConfigId: sourcePreview.audienceConfig.id,
+            audienceConfigVersion: sourcePreview.audienceConfig.version,
+            recipientCount: sourcePreview.recipientCount,
+            channels: sourcePreview.channels,
+            sendReadiness: sourcePreview.sendReadiness,
+            blockingReasonCodes: sourcePreview.blockingReasonCodes,
+            activeEventIds: sourcePreview.activeEventIds,
+            consequenceDigest: sourcePreview.consequenceDigest,
+            createdAt: sourceCreatedAt,
+            expiresAt: new Date(sourcePreview.expiresAt),
+          });
+          const activationRequestId = randomUUID();
+          const activationConfirmationId = randomUUID();
+          const activationAuthorization = {
+            kind: 'human-confirmed' as const,
+            activationPreviewId: sourcePreview.id,
+            preparedActivationId: null,
+            confirmationId: activationConfirmationId,
+            consequenceDigest: sourcePreview.consequenceDigest,
+            requestId: activationRequestId,
+          };
+          const activationTransition = EventTransitionSchema.parse({
+            id: randomUUID(),
+            sequence: 1,
+            transition: 'activate',
+            eventId,
+            from: 'draft',
+            to: 'active',
+            actor: HUMAN_ACTOR,
+            source: 'web',
+            occurredAt: activatedAt.toISOString(),
+            requestId: activationRequestId,
+            confirmationId: activationConfirmationId,
+            consequenceDigest: sourcePreview.consequenceDigest,
+            targeting: {
+              kind: 'incident',
+              templateMode: 'real',
+              rosterPopulation: 'staff',
+            },
+            idempotencyKey: `issue77-real-activation-${suffix}`,
+            activationAuthorization,
+          });
+          if (activationTransition.transition !== 'activate') {
+            throw new Error('The fixture transition was not activation.');
+          }
+          await transaction.insert(humanConfirmationRecords).values({
+            id: activationConfirmationId,
+            capabilityId: 'start-event',
+            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+            confirmedByUserId: HUMAN_ACTOR.userId,
+            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+            consequenceDigest: sourcePreview.consequenceDigest,
+            issuedAt: sourceCreatedAt,
+            expiresAt: new Date(sourceCreatedAt.getTime() + 5 * 60_000),
+            status: 'consumed',
+            consumedAt: activatedAt,
+            consumedForRequestId: activationRequestId,
+            expiredAt: null,
+          });
+          await transaction.insert(humanConfirmationActions).values([
+            {
+              confirmationId: activationConfirmationId,
+              actionId: 'start-real-incident',
+            },
+            {
+              confirmationId: activationConfirmationId,
+              actionId: 'send-real-notification',
+            },
+          ]);
+          await transaction.insert(events).values({
+            id: eventId,
+            facilityId: ids.northFacilityId,
+            kind: 'incident',
+            templateMode: 'real',
+            eventTypeVersionId: realEventTypeVersion.id,
+            status: 'active',
+            rosterSnapshotId: staffRosterSnapshotId,
+            rosterPopulation: 'staff',
+            createdBy: HUMAN_ACTOR,
+            createdAt: sourceCreatedAt,
+            activatedAt,
+            allClearAt: null,
+            reactivatedAt: null,
+            closedAt: null,
+            correctionOfEventId: null,
+            correctionReason: null,
+            activationAuthorization,
+          });
+          await transaction.insert(eventTransitions).values({
+            id: activationTransition.id,
+            sequence: activationTransition.sequence,
+            transition: activationTransition.transition,
+            eventId: activationTransition.eventId,
+            sourceEventId: null,
+            correctionEventId: null,
+            journalEventId: activationTransition.eventId,
+            fromStatus: activationTransition.from,
+            toStatus: activationTransition.to,
+            kind: activationTransition.targeting.kind,
+            templateMode: activationTransition.targeting.templateMode,
+            rosterPopulation: activationTransition.targeting.rosterPopulation,
+            actor: activationTransition.actor,
+            source: activationTransition.source,
+            occurredAt: activatedAt,
+            requestId: activationTransition.requestId,
+            confirmationId: activationTransition.confirmationId,
+            confirmationStatus: 'consumed',
+            consequenceDigest: activationTransition.consequenceDigest,
+            idempotencyKey: activationTransition.idempotencyKey,
+            activationAuthorization:
+              activationTransition.activationAuthorization,
+            notificationAuthorization: null,
+            correctionReason: null,
+          });
+          await transaction.insert(journalEntries).values({
+            id: randomUUID(),
+            eventId,
+            sequence: 1,
+            kind: 'system',
+            author: HUMAN_ACTOR,
+            source: 'web',
+            serverTime: activatedAt,
+            clientTime: null,
+            payload: {
+              code: 'event-activated',
+              summary: 'Synthetic real/staff fixture activation recorded.',
+              transition: activationTransition,
+            },
+            mediaId: null,
+            transitionId: activationTransition.id,
+            supersedesEntryId: null,
+            supersedesEntrySequence: null,
+            supersessionKind: null,
+            supersessionReason: null,
+          });
+
+          const firstPreview = await executeJournalCapability(
+            'create-lifecycle-consequence-preview',
+            { eventId, purpose: 'all-clear' },
+            humanMutationInvocation(`issue77-real-preview-a-${suffix}`),
+            journalStore,
+          );
+          const secondPreview = await executeJournalCapability(
+            'create-lifecycle-consequence-preview',
+            { eventId, purpose: 'all-clear' },
+            humanMutationInvocation(`issue77-real-preview-b-${suffix}`),
+            journalStore,
+          );
+          expect(firstPreview).toMatchObject({
+            eventId,
+            purpose: 'all-clear',
+            kind: 'incident',
+            templateMode: 'real',
+            rosterPopulation: 'staff',
+            sendReadiness: 'ready',
+            blockingReasonCodes: [],
+          });
+          expect(
+            firstPreview.channels.map((channel) => ({
+              marker: channel.renderedMessage.classificationMarker,
+              integration: channel.integrationStatus.label,
+            })),
+          ).toEqual([
+            { marker: 'INCIDENT', integration: 'live-verified' },
+            { marker: 'INCIDENT', integration: 'live-verified' },
+          ]);
+          expect(secondPreview.consequenceDigest).not.toBe(
+            firstPreview.consequenceDigest,
+          );
+
+          expect(EVENT_CONFIRMATION_PHRASES['all-clear']).toBe('ALL CLEAR');
+          await expect(
+            journalRuntime.issueHumanConfirmation({
+              authenticated,
+              eventId,
+              action: 'all-clear',
+              lifecyclePreviewId: firstPreview.id,
+              confirmationPhrase: 'ALL CLEAR ',
+              requestId: randomUUID(),
+              now: new Date(),
+            }),
+          ).rejects.toMatchObject({
+            code: 'VALIDATION_ERROR',
+            status: 400,
+          });
+          const rejectedPhraseRows = await transaction
+            .select({ id: humanConfirmationRecords.id })
+            .from(humanConfirmationRecords)
+            .where(
+              and(
+                eq(
+                  humanConfirmationRecords.confirmedByUserId,
+                  HUMAN_ACTOR.userId,
+                ),
+                eq(humanConfirmationRecords.capabilityId, 'all-clear-event'),
+              ),
+            );
+          expect(rejectedPhraseRows).toEqual([]);
+
+          const actionRequestId = randomUUID();
+          const issued = await journalRuntime.issueHumanConfirmation({
+            authenticated,
+            eventId,
+            action: 'all-clear',
+            lifecyclePreviewId: firstPreview.id,
+            confirmationPhrase: EVENT_CONFIRMATION_PHRASES['all-clear'],
+            requestId: actionRequestId,
+            now: new Date(),
+          });
+          if (issued.confirmationId === null) {
+            throw new Error('The real staff all-clear omitted confirmation.');
+          }
+          const confirmationId = issued.confirmationId;
+          const [confirmationBeforeUse] = await transaction
+            .select()
+            .from(humanConfirmationRecords)
+            .where(eq(humanConfirmationRecords.id, confirmationId))
+            .limit(1);
+          if (confirmationBeforeUse === undefined) {
+            throw new Error('The issued confirmation was not persisted.');
+          }
+          const confirmationActionRows = await transaction
+            .select({ actionId: humanConfirmationActions.actionId })
+            .from(humanConfirmationActions)
+            .where(eq(humanConfirmationActions.confirmationId, confirmationId));
+          expect(confirmationBeforeUse).toMatchObject({
+            capabilityId: 'all-clear-event',
+            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+            confirmedByUserId: HUMAN_ACTOR.userId,
+            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+            consequenceDigest: firstPreview.consequenceDigest,
+            status: 'issued',
+            consumedAt: null,
+            consumedForRequestId: null,
+            expiredAt: null,
+          });
+          expect(
+            confirmationActionRows.map(({ actionId }) => actionId).sort(),
+          ).toEqual(['all-clear', 'send-real-notification']);
+          expect(
+            confirmationBeforeUse.expiresAt.getTime() -
+              confirmationBeforeUse.issuedAt.getTime(),
+          ).toBeLessThanOrEqual(HUMAN_CONFIRMATION_MAX_AGE_SECONDS * 1_000);
+          expect(confirmationBeforeUse.expiresAt.getTime()).toBeLessThanOrEqual(
+            Date.parse(firstPreview.expiresAt),
+          );
+          expect(confirmationBeforeUse.expiresAt.getTime()).toBeGreaterThan(
+            confirmationBeforeUse.issuedAt.getTime(),
+          );
+
+          const bindingCases = [
+            {
+              name: 'user',
+              lifecyclePreviewId: firstPreview.id,
+              invocation: confirmedHumanMutationInvocation({
+                idempotencyKey: `issue77-real-wrong-user-${suffix}`,
+                confirmationId,
+                actor: {
+                  kind: 'human',
+                  userId: randomUUID(),
+                  sessionId: HUMAN_ACTOR.sessionId,
+                },
+              }),
+            },
+            {
+              name: 'session',
+              lifecyclePreviewId: firstPreview.id,
+              invocation: confirmedHumanMutationInvocation({
+                idempotencyKey: `issue77-real-wrong-session-${suffix}`,
+                confirmationId,
+                actor: {
+                  kind: 'human',
+                  userId: HUMAN_ACTOR.userId,
+                  sessionId: randomUUID(),
+                },
+              }),
+            },
+            {
+              name: 'connectivity epoch',
+              lifecyclePreviewId: firstPreview.id,
+              invocation: confirmedHumanMutationInvocation({
+                idempotencyKey: `issue77-real-wrong-epoch-${suffix}`,
+                confirmationId,
+                connectivityEpochId: randomUUID(),
+              }),
+            },
+            {
+              name: 'consequence digest',
+              lifecyclePreviewId: secondPreview.id,
+              invocation: confirmedHumanMutationInvocation({
+                idempotencyKey: `issue77-real-wrong-digest-${suffix}`,
+                confirmationId,
+              }),
+            },
+          ] as const;
+          for (const bindingCase of bindingCases) {
+            await expect(
+              executeEventCapability(
+                'all-clear-event',
+                {
+                  eventId,
+                  lifecyclePreviewId: bindingCase.lifecyclePreviewId,
+                },
+                bindingCase.invocation,
+                eventStore,
+              ),
+              bindingCase.name,
+            ).rejects.toMatchObject({
+              code: 'FORBIDDEN',
+              reasonCode: 'CONFIRMATION_INVALID',
+              status: 403,
+            });
+          }
+          const [confirmationAfterBindingFailures] = await transaction
+            .select({ status: humanConfirmationRecords.status })
+            .from(humanConfirmationRecords)
+            .where(eq(humanConfirmationRecords.id, confirmationId))
+            .limit(1);
+          expect(confirmationAfterBindingFailures?.status).toBe('issued');
+
+          const expiredConfirmationId = randomUUID();
+          const expiredIssuedAt = new Date(fixtureTime.getTime() - 6 * 60_000);
+          const expiredAt = new Date(fixtureTime.getTime() - 60_000);
+          await transaction.insert(humanConfirmationRecords).values({
+            id: expiredConfirmationId,
+            capabilityId: 'all-clear-event',
+            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+            confirmedByUserId: HUMAN_ACTOR.userId,
+            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+            consequenceDigest: firstPreview.consequenceDigest,
+            issuedAt: expiredIssuedAt,
+            expiresAt: expiredAt,
+            status: 'issued',
+            consumedAt: null,
+            consumedForRequestId: null,
+            expiredAt: null,
+          });
+          await transaction.insert(humanConfirmationActions).values([
+            { confirmationId: expiredConfirmationId, actionId: 'all-clear' },
+            {
+              confirmationId: expiredConfirmationId,
+              actionId: 'send-real-notification',
+            },
+          ]);
+          await expect(
+            executeEventCapability(
+              'all-clear-event',
+              { eventId, lifecyclePreviewId: firstPreview.id },
+              confirmedHumanMutationInvocation({
+                idempotencyKey: `issue77-real-expired-${suffix}`,
+                confirmationId: expiredConfirmationId,
+              }),
+              eventStore,
+            ),
+          ).rejects.toMatchObject({
+            code: 'FORBIDDEN',
+            reasonCode: 'CONFIRMATION_INVALID',
+            status: 403,
+          });
+
+          const pushStatus = liveStatuses.find(
+            (status) => status.value.integrationId === 'expo-push',
+          );
+          if (pushStatus === undefined) {
+            throw new Error('The live push fixture is unavailable.');
+          }
+          const newerPushStatusId = randomUUID();
+          const newerObservedAt = new Date(fixtureTime.getTime() - 1_000);
+          await transaction.insert(integrationStatuses).values({
+            id: newerPushStatusId,
+            integrationId: 'expo-push',
+            label: 'live-verified',
+            verifiedAt,
+            verifiedByUserId: HUMAN_ACTOR.userId,
+            authorizationReference:
+              'synthetic-issue77-newer-test-authorization',
+            reasonCode: null,
+            observedAt: newerObservedAt,
+          });
+          await transaction
+            .update(channelConfigurations)
+            .set({
+              enabled: true,
+              statusId: newerPushStatusId,
+              statusLabel: 'live-verified',
+              changedAt: newerObservedAt,
+            })
+            .where(eq(channelConfigurations.integrationId, 'expo-push'));
+          await expect(
+            executeEventCapability(
+              'all-clear-event',
+              { eventId, lifecyclePreviewId: firstPreview.id },
+              confirmedHumanMutationInvocation({
+                idempotencyKey: `issue77-real-stale-integration-${suffix}`,
+                confirmationId,
+              }),
+              eventStore,
+            ),
+          ).rejects.toMatchObject({
+            code: 'CONFLICT',
+            reasonCode: 'PERSISTENCE_CONFLICT',
+            status: 409,
+          });
+          const [confirmationAfterStaleIntegration] = await transaction
+            .select({ status: humanConfirmationRecords.status })
+            .from(humanConfirmationRecords)
+            .where(eq(humanConfirmationRecords.id, confirmationId))
+            .limit(1);
+          expect(confirmationAfterStaleIntegration?.status).toBe('issued');
+          await transaction
+            .update(channelConfigurations)
+            .set({
+              enabled: true,
+              statusId: pushStatus.id,
+              statusLabel: pushStatus.value.label,
+              changedAt: fixtureTime,
+            })
+            .where(eq(channelConfigurations.integrationId, 'expo-push'));
+
+          const allClearIdempotencyKey = `issue77-real-all-clear-${suffix}`;
+          const allClear = await executeEventCapability(
+            'all-clear-event',
+            { eventId, lifecyclePreviewId: firstPreview.id },
+            confirmedHumanMutationInvocation({
+              idempotencyKey: allClearIdempotencyKey,
+              confirmationId,
+              requestId: actionRequestId,
+            }),
+            eventStore,
+          );
+          expect(allClear.event).toMatchObject({
+            id: eventId,
+            status: 'all-clear',
+            kind: 'incident',
+            templateMode: 'real',
+            rosterPopulation: 'staff',
+          });
+          expect(allClear.transition).toMatchObject({
+            transition: 'all-clear',
+            confirmationId,
+            consequenceDigest: firstPreview.consequenceDigest,
+            requestId: actionRequestId,
+          });
+          if (allClear.transition.transition !== 'all-clear') {
+            throw new Error('The real staff transition was not all-clear.');
+          }
+          expect(allClear.transition.notificationAuthorization).toMatchObject({
+            kind: 'human-confirmed-lifecycle',
+            purpose: 'all-clear',
+            actionIds: ['all-clear', 'send-real-notification'],
+            confirmationId,
+            consequenceDigest: firstPreview.consequenceDigest,
+            requestId: actionRequestId,
+          });
+          const allClearIntent = allClear.notificationIntent;
+          if (allClearIntent === null) {
+            throw new Error('The real staff all-clear omitted its intent.');
+          }
+          expect(allClearIntent).toMatchObject({
+            eventId,
+            eventKind: 'incident',
+            templateMode: 'real',
+            purpose: 'all-clear',
+            rosterPopulation: 'staff',
+            authorization: {
+              kind: 'human-confirmed-lifecycle',
+              confirmationId,
+              consequenceDigest: firstPreview.consequenceDigest,
+            },
+          });
+          expect(
+            allClearIntent.channels.every(
+              (channel) =>
+                channel.renderedMessage.classificationMarker === 'INCIDENT' &&
+                channel.integrationStatus.label === 'live-verified',
+            ),
+          ).toBe(true);
+
+          const replay = await executeEventCapability(
+            'all-clear-event',
+            { eventId, lifecyclePreviewId: firstPreview.id },
+            humanMutationInvocation(allClearIdempotencyKey),
+            eventStore,
+          );
+          expect(replay).toEqual(allClear);
+
+          const [consumedConfirmation] = await transaction
+            .select()
+            .from(humanConfirmationRecords)
+            .where(eq(humanConfirmationRecords.id, confirmationId))
+            .limit(1);
+          expect(consumedConfirmation).toMatchObject({
+            status: 'consumed',
+            consumedForRequestId: actionRequestId,
+            expiredAt: null,
+          });
+          expect(consumedConfirmation?.consumedAt).not.toBeNull();
+          const persistedTransitions = await transaction
+            .select({
+              confirmationId: eventTransitions.confirmationId,
+              confirmationStatus: eventTransitions.confirmationStatus,
+              consequenceDigest: eventTransitions.consequenceDigest,
+              requestId: eventTransitions.requestId,
+            })
+            .from(eventTransitions)
+            .where(
+              and(
+                eq(eventTransitions.eventId, eventId),
+                eq(eventTransitions.transition, 'all-clear'),
+              ),
+            );
+          expect(persistedTransitions).toEqual([
+            {
+              confirmationId,
+              confirmationStatus: 'consumed',
+              consequenceDigest: firstPreview.consequenceDigest,
+              requestId: actionRequestId,
+            },
+          ]);
+          const persistedIntents = await transaction
+            .select({ id: notificationIntents.id })
+            .from(notificationIntents)
+            .where(eq(notificationIntents.eventId, eventId));
+          expect(persistedIntents).toHaveLength(1);
+          const persistedOutbox = await transaction
+            .select({
+              id: outbox.id,
+              intentId: outbox.intentId,
+              status: outbox.status,
+              attempts: outbox.attempts,
+              lockedUntil: outbox.lockedUntil,
+              publishedAt: outbox.publishedAt,
+              failedAt: outbox.failedAt,
+            })
+            .from(outbox)
+            .where(eq(outbox.eventId, eventId));
+          expect(persistedOutbox).toEqual([
+            {
+              id: expect.any(String),
+              intentId: allClearIntent.id,
+              status: 'pending',
+              attempts: 0,
+              lockedUntil: null,
+              publishedAt: null,
+              failedAt: null,
+            },
+          ]);
+          expect(
+            await transaction
+              .select({ id: dispatchBatches.id })
+              .from(dispatchBatches)
+              .where(eq(dispatchBatches.eventId, eventId)),
+          ).toEqual([]);
+          expect(
+            await transaction
+              .select({ id: channelAttempts.id })
+              .from(channelAttempts)
+              .where(eq(channelAttempts.eventId, eventId)),
+          ).toEqual([]);
+          expect(
+            await transaction
+              .select({ id: deliveryEvidence.id })
+              .from(deliveryEvidence)
+              .where(eq(deliveryEvidence.intentId, allClearIntent.id)),
+          ).toEqual([]);
+        } finally {
+          for (const configuration of originalConfigurations) {
+            await transaction
+              .update(channelConfigurations)
+              .set({
+                enabled: configuration.enabled,
+                statusId: configuration.statusId,
+                statusLabel: configuration.statusLabel,
+                changedAt: configuration.changedAt,
+              })
+              .where(
+                eq(
+                  channelConfigurations.integrationId,
+                  configuration.integrationId,
+                ),
+              );
+          }
+        }
+        throw rollbackFixture;
+      });
+    } catch (error) {
+      if (error !== rollbackFixture) {
+        throw error;
+      }
+    }
   });
 
   test('denies journal writes outside the authenticated facility scope', async () => {
