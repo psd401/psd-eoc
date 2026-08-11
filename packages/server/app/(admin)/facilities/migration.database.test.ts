@@ -1032,10 +1032,12 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     const db = databaseConnection().db;
     const triggers = databaseExecuteRows<TextSnapshotRow>(
       await db.execute<TextSnapshotRow>(sql`
-        select trigger_name as snapshot
+        select distinct trigger_name as snapshot
         from information_schema.triggers
         where trigger_schema = 'public'
           and trigger_name in (
+            'access_membership_snapshots_admin_availability_lock',
+            'group_sources_admin_availability_lock',
             'integration_statuses_monotonic_insert_guard',
             'integration_statuses_channel_configuration_sync',
             'roster_source_configurations_monotonic_insert_guard',
@@ -1050,8 +1052,10 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       `),
     ).map((row) => row.snapshot);
     expect(triggers).toEqual([
+      'access_membership_snapshots_admin_availability_lock',
       'audience_configurations_monotonic_insert_guard',
       'audience_targets_construction_guard',
+      'group_sources_admin_availability_lock',
       'integration_statuses_channel_configuration_sync',
       'integration_statuses_monotonic_insert_guard',
       'neighborhood_facilities_construction_guard',
@@ -1115,6 +1119,255 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           and role = 'staff'::role
       `),
     );
+  });
+
+  test('requires access locator corrections to create a replacement identity', async () => {
+    const db = databaseConnection().db;
+    const sourceId = randomUUID();
+    const originalGoogleGroupId = `issue-26-access-${sourceId}`;
+    const originalEmail = `${sourceId}@example.invalid`;
+    await db.execute(sql`
+      insert into group_sources (
+        id,
+        kind,
+        purpose,
+        facility_id,
+        display_name,
+        active,
+        google_group_id,
+        email,
+        fixture_key
+      )
+      values (
+        ${sourceId}::uuid,
+        'google-group'::group_source_kind,
+        'access'::group_purpose,
+        null,
+        'Synthetic access source',
+        true,
+        ${originalGoogleGroupId},
+        ${originalEmail},
+        null
+      )
+    `);
+
+    await db.execute(sql`
+      update group_sources
+      set display_name = 'Synthetic access source renamed', active = false
+      where id = ${sourceId}::uuid
+    `);
+    const rows = databaseExecuteRows<TextSnapshotRow>(
+      await db.execute<TextSnapshotRow>(sql`
+        select display_name || ':' || active::text as snapshot
+        from group_sources
+        where id = ${sourceId}::uuid
+      `),
+    );
+    expect(rows).toEqual([
+      { snapshot: 'Synthetic access source renamed:false' },
+    ]);
+
+    await expectOperationalRejection(() =>
+      db.execute(sql`
+        update group_sources
+        set google_group_id = ${`${originalGoogleGroupId}-changed`}
+        where id = ${sourceId}::uuid
+      `),
+    );
+    await expectOperationalRejection(() =>
+      db.execute(sql`
+        update group_sources
+        set email = ${`changed-${originalEmail}`}
+        where id = ${sourceId}::uuid
+      `),
+    );
+  });
+
+  test('serializes access snapshot publication with admin availability changes', async () => {
+    if (context === undefined) {
+      throw new Error('The issue #26 migration test context is unavailable.');
+    }
+    const observer = databaseConnection().db;
+    const firstWriter = openPostgresConnection(context.databaseUrl, 1);
+    const secondWriter = openPostgresConnection(context.databaseUrl, 1);
+    const [versionRow] = databaseExecuteRows<CountRow>(
+      await observer.execute<CountRow>(sql`
+        select coalesce(max(version), 0)::integer as count
+        from access_membership_snapshots
+      `),
+    );
+    const secondVersion = (versionRow?.count ?? 0) + 1;
+    const secondSnapshotId = randomUUID();
+    let firstInserted: (() => void) | undefined;
+    const firstInsertGate = new Promise<void>((resolve) => {
+      firstInserted = resolve;
+    });
+    let releaseFirst: (() => void) | undefined;
+    const releaseGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstWrite = firstWriter.db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        select pg_advisory_xact_lock(
+          hashtextextended('psd-eoc-admin-availability', 0)
+        )
+      `);
+      firstInserted?.();
+      await releaseGate;
+    });
+
+    try {
+      await firstInsertGate;
+      const processRows = databaseExecuteRows<ProcessRow>(
+        await secondWriter.db.execute<ProcessRow>(sql`
+          select pg_backend_pid()::integer as pid
+        `),
+      );
+      const pid = processRows[0]?.pid;
+      if (pid === undefined) {
+        throw new Error('The competing access-snapshot writer PID is absent.');
+      }
+      const secondOutcome = Promise.resolve(
+        secondWriter.db.execute(sql`
+          insert into access_membership_snapshots (
+            id,
+            version,
+            complete,
+            sync_started_at,
+            captured_at
+          )
+          values (
+            ${secondSnapshotId}::uuid,
+            ${secondVersion},
+            true,
+            ${times.adminTwo}::timestamptz,
+            ${times.adminTwo}::timestamptz
+          )
+        `),
+      ).then(
+        () => ({ error: undefined }),
+        (error: unknown) => ({ error }),
+      );
+      await waitForAdvisoryLock(observer, pid);
+      releaseFirst?.();
+      await firstWrite;
+      expect((await secondOutcome).error).toBeUndefined();
+    } finally {
+      releaseFirst?.();
+      await Promise.allSettled([firstWrite]);
+      await Promise.all([firstWriter.close(), secondWriter.close()]);
+    }
+  });
+
+  test('serializes direct active access-group writes on the shared availability lock', async () => {
+    if (context === undefined) {
+      throw new Error('The issue #26 migration test context is unavailable.');
+    }
+    const observer = databaseConnection().db;
+    const sourceId = randomUUID();
+    await observer.execute(sql`
+      insert into group_sources (
+        id,
+        kind,
+        purpose,
+        facility_id,
+        display_name,
+        active,
+        google_group_id,
+        email,
+        fixture_key
+      )
+      values (
+        ${sourceId}::uuid,
+        'google-group'::group_source_kind,
+        'access'::group_purpose,
+        null,
+        'Synthetic serialized access source',
+        false,
+        ${`issue-26-serialized-${sourceId}`},
+        ${`${sourceId}@example.invalid`},
+        null
+      )
+    `);
+    const rowBlocker = openPostgresConnection(context.databaseUrl, 1);
+    const blocker = openPostgresConnection(context.databaseUrl, 1);
+    const writer = openPostgresConnection(context.databaseUrl, 1);
+    let releaseRowBlocker: (() => void) | undefined;
+    const releaseRowGate = new Promise<void>((resolve) => {
+      releaseRowBlocker = resolve;
+    });
+    let rowLockHeld: (() => void) | undefined;
+    const rowLockGate = new Promise<void>((resolve) => {
+      rowLockHeld = resolve;
+    });
+    const rowBlockingTransaction = rowBlocker.db.transaction(
+      async (transaction) => {
+        await transaction.execute(sql`
+          select id
+          from group_sources
+          where id = ${sourceId}::uuid
+          for update
+        `);
+        rowLockHeld?.();
+        await releaseRowGate;
+      },
+    );
+    let releaseBlocker: (() => void) | undefined;
+    const releaseGate = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    let lockHeld: (() => void) | undefined;
+    const lockGate = new Promise<void>((resolve) => {
+      lockHeld = resolve;
+    });
+    const blockingTransaction = blocker.db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        select pg_advisory_xact_lock(
+          hashtextextended('psd-eoc-admin-availability', 0)
+        )
+      `);
+      lockHeld?.();
+      await releaseGate;
+    });
+    try {
+      await rowLockGate;
+      await lockGate;
+      const processRows = databaseExecuteRows<ProcessRow>(
+        await writer.db.execute<ProcessRow>(sql`
+          select pg_backend_pid()::integer as pid
+        `),
+      );
+      const pid = processRows[0]?.pid;
+      if (pid === undefined) {
+        throw new Error('The competing access-group writer PID is absent.');
+      }
+      const update = Promise.resolve(
+        writer.db.execute(sql`
+          update group_sources
+          set active = true
+          where id = ${sourceId}::uuid
+        `),
+      );
+      await waitForAdvisoryLock(observer, pid);
+      releaseBlocker?.();
+      await blockingTransaction;
+      releaseRowBlocker?.();
+      await rowBlockingTransaction;
+      await update;
+      const rows = databaseExecuteRows<TextSnapshotRow>(
+        await observer.execute<TextSnapshotRow>(sql`
+          select active::text as snapshot
+          from group_sources
+          where id = ${sourceId}::uuid
+        `),
+      );
+      expect(rows).toEqual([{ snapshot: 'true' }]);
+    } finally {
+      releaseBlocker?.();
+      releaseRowBlocker?.();
+      await Promise.allSettled([blockingTransaction, rowBlockingTransaction]);
+      await Promise.all([rowBlocker.close(), blocker.close(), writer.close()]);
+    }
   });
 
   test('accepts exact status retries but rejects older, equal, and mismatched observations', async () => {

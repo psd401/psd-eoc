@@ -24,7 +24,17 @@ export type FacilitiesAdminViewModel =
       neighborhoods: NeighborhoodPage;
       buildingGroups: GroupSourcePage;
       othersGroups: GroupSourcePage;
+      facilityOptions: readonly Facility[];
+      neighborhoodOptions: readonly Neighborhood[];
+      buildingGroupOptions: readonly GroupSource[];
+      othersGroupOptions: readonly GroupSource[];
       audienceConfigs: readonly AudienceConfig[];
+      currentCursors: Readonly<{
+        buildingGroupCursor: string | null;
+        facilityCursor: string | null;
+        neighborhoodCursor: string | null;
+        othersGroupCursor: string | null;
+      }>;
     }>;
 
 type FacilitiesAdminViewProps =
@@ -39,17 +49,35 @@ type FacilitiesAdminViewProps =
       statusMessage?: string | null;
     }>;
 
+type FacilitiesAdminCursorState = Readonly<{
+  buildingGroupCursor: string | null;
+  facilityCursor: string | null;
+  neighborhoodCursor: string | null;
+  othersGroupCursor: string | null;
+}>;
+
+type FacilitiesAdminCursorParameter = keyof FacilitiesAdminCursorState;
+
+const CURSOR_PARAMETERS = Object.freeze([
+  'facilityCursor',
+  'neighborhoodCursor',
+  'buildingGroupCursor',
+  'othersGroupCursor',
+] as const satisfies readonly FacilitiesAdminCursorParameter[]);
+
 function nextPageLink(
   label: string,
-  parameter:
-    | 'buildingGroupCursor'
-    | 'facilityCursor'
-    | 'neighborhoodCursor'
-    | 'othersGroupCursor',
+  parameter: FacilitiesAdminCursorParameter,
   cursor: string | null,
+  currentCursors: FacilitiesAdminCursorState,
 ) {
   if (cursor === null) return null;
-  const parameters = new URLSearchParams({ [parameter]: cursor });
+  const parameters = new URLSearchParams();
+  for (const cursorParameter of CURSOR_PARAMETERS) {
+    const value =
+      cursorParameter === parameter ? cursor : currentCursors[cursorParameter];
+    if (value !== null) parameters.set(cursorParameter, value);
+  }
   return <a href={`/facilities?${parameters.toString()}`}>{label}</a>;
 }
 
@@ -110,8 +138,13 @@ function FacilityEditor({
 
 function FacilitiesSection({
   csrfToken,
+  currentCursors,
   page,
-}: Readonly<{ csrfToken: string; page: FacilityPage }>) {
+}: Readonly<{
+  csrfToken: string;
+  currentCursors: FacilitiesAdminCursorState;
+  page: FacilityPage;
+}>) {
   return (
     <section aria-labelledby="facilities-heading">
       <h2 id="facilities-heading">Facilities</h2>
@@ -165,6 +198,7 @@ function FacilitiesSection({
             'Next page of facilities',
             'facilityCursor',
             page.pageInfo.nextCursor,
+            currentCursors,
           )
         : null}
       <form action="/facilities/api" method="post">
@@ -495,11 +529,13 @@ function GroupSourceTable({
 function GroupSourcesSection({
   buildingPage,
   csrfToken,
+  currentCursors,
   facilities,
   othersPage,
 }: Readonly<{
   buildingPage: GroupSourcePage;
   csrfToken: string;
+  currentCursors: FacilitiesAdminCursorState;
   facilities: readonly Facility[];
   othersPage: GroupSourcePage;
 }>) {
@@ -550,6 +586,7 @@ function GroupSourcesSection({
             'Next page of building sources',
             'buildingGroupCursor',
             buildingPage.pageInfo.nextCursor,
+            currentCursors,
           )
         : null}
       <div className="admin-grid">
@@ -584,6 +621,7 @@ function GroupSourcesSection({
             'Next page of others sources',
             'othersGroupCursor',
             othersPage.pageInfo.nextCursor,
+            currentCursors,
           )
         : null}
       <div className="admin-grid">
@@ -676,10 +714,12 @@ function NeighborhoodForm({
 
 function NeighborhoodsSection({
   csrfToken,
+  currentCursors,
   facilities,
   page,
 }: Readonly<{
   csrfToken: string;
+  currentCursors: FacilitiesAdminCursorState;
   facilities: readonly Facility[];
   page: NeighborhoodPage;
 }>) {
@@ -736,6 +776,7 @@ function NeighborhoodsSection({
             'Next page of neighborhoods',
             'neighborhoodCursor',
             page.pageInfo.nextCursor,
+            currentCursors,
           )
         : null}
       <div aria-label="Create neighborhood versions" role="group">
@@ -836,9 +877,27 @@ function AudienceForm({
   const currentNeighborhood = audience?.targets.find(
     (target) => target.kind === 'neighborhood',
   );
-  const selectedLatestNeighborhood = availableNeighborhoods.find(
-    (neighborhood) => neighborhood.id === currentNeighborhood?.neighborhood.id,
+  const currentNeighborhoodReference =
+    currentNeighborhood === undefined
+      ? ''
+      : `${currentNeighborhood.neighborhood.id}:${currentNeighborhood.neighborhood.version}`;
+  const currentNeighborhoodIsAvailable = availableNeighborhoods.some(
+    (neighborhood) =>
+      neighborhoodReference(neighborhood) === currentNeighborhoodReference,
   );
+  const currentNeighborhoodName = neighborhoods.find(
+    (neighborhood) => neighborhood.id === currentNeighborhood?.neighborhood.id,
+  )?.name;
+  const pinnedCurrentNeighborhood =
+    currentNeighborhood === undefined || currentNeighborhoodIsAvailable
+      ? null
+      : {
+          name:
+            currentNeighborhoodName ??
+            `Neighborhood ${currentNeighborhood.neighborhood.id}`,
+          reference: currentNeighborhoodReference,
+          version: currentNeighborhood.neighborhood.version,
+        };
   const currentOthersIds = new Set(
     audience?.targets.flatMap((target) =>
       target.kind === 'others' ? [target.groupSourceRef.id] : [],
@@ -871,17 +930,19 @@ function AudienceForm({
           Latest neighborhood version (optional)
           <select
             aria-describedby={helpId}
-            defaultValue={
-              selectedLatestNeighborhood === undefined
-                ? ''
-                : neighborhoodReference(selectedLatestNeighborhood)
-            }
+            defaultValue={currentNeighborhoodReference}
             name="neighborhoodReference"
           >
             <option value="">No neighborhood</option>
+            {pinnedCurrentNeighborhood === null ? null : (
+              <option value={pinnedCurrentNeighborhood.reference}>
+                {pinnedCurrentNeighborhood.name} — version{' '}
+                {pinnedCurrentNeighborhood.version} (current pinned version)
+              </option>
+            )}
             {availableNeighborhoods.map((neighborhood) => (
               <option
-                key={neighborhood.id}
+                key={neighborhoodReference(neighborhood)}
                 value={neighborhoodReference(neighborhood)}
               >
                 {neighborhood.name} — version {neighborhood.version}
@@ -897,10 +958,11 @@ function AudienceForm({
             rejects a cross-population audience.
           </p>
           {othersGroups.length === 0 ? (
-            <p>No active others sources are available.</p>
+            <p>No others sources are available.</p>
           ) : (
             othersGroups.map((group) => {
               const inputId = `audience-${facility.id}-others-${group.id}`;
+              const selected = currentOthersIds.has(group.id);
               return (
                 <label
                   className="checkbox-label"
@@ -908,7 +970,8 @@ function AudienceForm({
                   key={group.id}
                 >
                   <input
-                    defaultChecked={currentOthersIds.has(group.id)}
+                    defaultChecked={selected}
+                    disabled={!group.active && !selected}
                     id={inputId}
                     name={
                       group.kind === 'google-group'
@@ -920,6 +983,11 @@ function AudienceForm({
                   />
                   <span>
                     {group.displayName} ({group.kind})
+                    {group.active
+                      ? ''
+                      : selected
+                        ? ' — inactive, currently selected'
+                        : ' — inactive, unavailable'}
                   </span>
                 </label>
               );
@@ -1028,11 +1096,11 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
     throw new Error('Authorized facilities administration requires CSRF data.');
   }
 
-  const buildingGroups = props.view.buildingGroups.items.filter(
+  const buildingGroups = props.view.buildingGroupOptions.filter(
     (group) => group.purpose === 'building',
   );
-  const othersGroups = props.view.othersGroups.items.filter(
-    (group) => group.purpose === 'others' && group.active,
+  const othersGroups = props.view.othersGroupOptions.filter(
+    (group) => group.purpose === 'others',
   );
   return (
     <main
@@ -1058,16 +1126,22 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
           {props.statusMessage}
         </p>
       )}
-      <FacilitiesSection csrfToken={csrfToken} page={props.view.facilities} />
+      <FacilitiesSection
+        csrfToken={csrfToken}
+        currentCursors={props.view.currentCursors}
+        page={props.view.facilities}
+      />
       <GroupSourcesSection
         buildingPage={props.view.buildingGroups}
         csrfToken={csrfToken}
-        facilities={props.view.facilities.items}
+        currentCursors={props.view.currentCursors}
+        facilities={props.view.facilityOptions}
         othersPage={props.view.othersGroups}
       />
       <NeighborhoodsSection
         csrfToken={csrfToken}
-        facilities={props.view.facilities.items}
+        currentCursors={props.view.currentCursors}
+        facilities={props.view.facilityOptions}
         page={props.view.neighborhoods}
       />
       <AudiencesSection
@@ -1075,7 +1149,7 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
         buildingGroups={buildingGroups}
         csrfToken={csrfToken}
         facilities={props.view.facilities.items}
-        neighborhoods={props.view.neighborhoods.items}
+        neighborhoods={props.view.neighborhoodOptions}
         othersGroups={othersGroups}
       />
     </main>

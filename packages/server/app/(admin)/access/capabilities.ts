@@ -9,7 +9,7 @@ import {
   type User,
   type UserPage,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 
 import {
   userFacilityScopes,
@@ -18,6 +18,8 @@ import {
   users,
 } from '../../../db/schema';
 import {
+  ADMIN_AVAILABILITY_LOCK_SQL,
+  loadAccessConfigurationSnapshotState,
   loadEffectiveAdministratorUserIds,
   loadEffectiveRoles,
   projectEffectiveRoles,
@@ -105,21 +107,109 @@ function guard(
   return null;
 }
 
-function decodeOffset(cursor: string | null): number {
-  if (cursor === null) return 0;
-  try {
-    const value = Buffer.from(cursor, 'base64url').toString('utf8');
-    if (!/^\d+$/u.test(value)) throw new TypeError();
-    const offset = Number(value);
-    if (!Number.isSafeInteger(offset) || offset < 0) throw new TypeError();
-    return offset;
-  } catch {
-    throw invalid('The user pagination cursor is invalid.');
-  }
+export interface UserPageCursorFilters {
+  readonly facilityId: string | null;
+  readonly includeDisabled: boolean;
 }
 
-function encodeOffset(offset: number): string {
-  return Buffer.from(String(offset), 'utf8').toString('base64url');
+interface UserPageCursorPayload extends UserPageCursorFilters {
+  readonly v: 1;
+  readonly collection: 'users';
+  readonly after: string;
+}
+
+function invalidUserCursor(): never {
+  throw invalid('The user pagination cursor is invalid.');
+}
+
+function canonicalUserCursorPayload(
+  after: string,
+  filters: UserPageCursorFilters,
+): UserPageCursorPayload {
+  return Object.freeze({
+    v: 1 as const,
+    collection: 'users' as const,
+    facilityId: filters.facilityId,
+    includeDisabled: filters.includeDisabled,
+    after,
+  });
+}
+
+/** Encodes one strict, filter-bound continuation after an immutable user ID. */
+export function encodeUserPageCursor(
+  afterValue: string,
+  filters: UserPageCursorFilters,
+): string {
+  const after = UuidSchema.parse(afterValue);
+  const facilityId =
+    filters.facilityId === null ? null : UuidSchema.parse(filters.facilityId);
+  return Buffer.from(
+    JSON.stringify(
+      canonicalUserCursorPayload(after, {
+        facilityId,
+        includeDisabled: filters.includeDisabled,
+      }),
+    ),
+    'utf8',
+  ).toString('base64url');
+}
+
+/** Decodes only the canonical v1 users cursor for the exact active filters. */
+export function decodeUserPageCursor(
+  cursor: string | null,
+  filters: UserPageCursorFilters,
+): string | null {
+  if (cursor === null) return null;
+  try {
+    const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+    if (Buffer.from(decoded, 'utf8').toString('base64url') !== cursor) {
+      return invalidUserCursor();
+    }
+    const parsed: unknown = JSON.parse(decoded);
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return invalidUserCursor();
+    }
+    const keys = Object.keys(parsed);
+    const expectedKeys = [
+      'v',
+      'collection',
+      'facilityId',
+      'includeDisabled',
+      'after',
+    ];
+    if (
+      keys.length !== expectedKeys.length ||
+      keys.some((key, index) => key !== expectedKeys[index]) ||
+      Reflect.get(parsed, 'v') !== 1 ||
+      Reflect.get(parsed, 'collection') !== 'users' ||
+      typeof Reflect.get(parsed, 'includeDisabled') !== 'boolean'
+    ) {
+      return invalidUserCursor();
+    }
+    const facilityIdValue = Reflect.get(parsed, 'facilityId');
+    const facilityId =
+      facilityIdValue === null ? null : UuidSchema.parse(facilityIdValue);
+    const includeDisabled = Reflect.get(parsed, 'includeDisabled') as boolean;
+    const after = UuidSchema.parse(Reflect.get(parsed, 'after'));
+    const canonical = canonicalUserCursorPayload(after, {
+      facilityId,
+      includeDisabled,
+    });
+    if (
+      facilityId !== filters.facilityId ||
+      includeDisabled !== filters.includeDisabled ||
+      JSON.stringify(canonical) !== decoded
+    ) {
+      return invalidUserCursor();
+    }
+    return after;
+  } catch {
+    return invalidUserCursor();
+  }
 }
 
 async function loadUser(
@@ -246,7 +336,11 @@ async function listUsers(
   database: AdminQueryDatabase,
   input: CapabilityInput<'list-users'>,
 ): Promise<UserPage> {
-  const offset = decodeOffset(input.cursor);
+  const cursorFilters = {
+    facilityId: input.facilityId,
+    includeDisabled: input.includeDisabled,
+  } as const;
+  const afterUserId = decodeUserPageCursor(input.cursor, cursorFilters);
   const facilityUserIds =
     input.facilityId === null
       ? null
@@ -266,6 +360,7 @@ async function listUsers(
     .where(
       and(
         input.includeDisabled ? undefined : isNull(users.disabledAt),
+        afterUserId === null ? undefined : gt(users.id, afterUserId),
         inArray(users.id, accessAccountUserIds),
         facilityUserIds === null
           ? undefined
@@ -275,8 +370,7 @@ async function listUsers(
             ),
       ),
     )
-    .orderBy(asc(users.displayName), asc(users.id))
-    .offset(offset)
+    .orderBy(asc(users.id))
     .limit(input.limit + 1);
   const selected = rows.slice(0, input.limit);
   const items = await projectUserPage(database, selected);
@@ -285,7 +379,9 @@ async function listUsers(
     items,
     pageInfo: {
       hasMore,
-      nextCursor: hasMore ? encodeOffset(offset + input.limit) : null,
+      nextCursor: hasMore
+        ? encodeUserPageCursor(selected[selected.length - 1]!.id, cursorFilters)
+        : null,
     },
   });
 }
@@ -298,9 +394,13 @@ async function setUserRoles(
   readOccurredAt: () => Promise<Date>,
 ): Promise<User> {
   const input = SetUserRolesInputSchema.parse(inputValue);
-  await database.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended('psd-eoc-effective-admin-role', 0))`,
-  );
+  await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+  const accessState = await loadAccessConfigurationSnapshotState(database);
+  if (accessState === null) {
+    throw conflict(
+      'Roles cannot be changed until the latest access snapshot exactly matches the active access groups.',
+    );
+  }
   const [lockedUser] = await database
     .select({ id: users.id })
     .from(users)
@@ -321,23 +421,17 @@ async function setUserRoles(
       403,
     );
   }
-  const effectiveAdministratorIds =
-    await loadEffectiveAdministratorUserIds(database);
-  if (!effectiveAdministratorIds.includes(actor.userId)) {
-    throw new AdminCapabilityError(
-      'FORBIDDEN',
-      'The administrator role changed before this request could commit.',
-      403,
-    );
-  }
-  if (
-    current.roles.includes('admin') &&
-    !input.roles.includes('admin') &&
-    effectiveAdministratorIds.includes(input.userId) &&
-    effectiveAdministratorIds.length <= 1
-  ) {
-    throw conflict('The final effective administrator cannot be removed.');
-  }
+  const effectiveAdministratorIds = await loadEffectiveAdministratorUserIds(
+    database,
+    { accessState },
+  );
+  assertReachableAdministratorTransition({
+    actorUserId: actor.userId,
+    targetUserId: input.userId,
+    currentRoles: current.roles,
+    requestedRoles: input.roles,
+    reachableAdministratorUserIds: effectiveAdministratorIds,
+  });
   const removedRoles = current.roles.filter(
     (role) => !input.roles.includes(role),
   );
@@ -366,6 +460,33 @@ async function setUserRoles(
   if (updated === null)
     throw conflict('The updated user could not be reloaded.');
   return updated;
+}
+
+/** Applies the role-transition invariants after one exact locked DB projection. */
+export function assertReachableAdministratorTransition(
+  input: Readonly<{
+    actorUserId: string;
+    targetUserId: string;
+    currentRoles: readonly Role[];
+    requestedRoles: readonly Role[];
+    reachableAdministratorUserIds: readonly string[];
+  }>,
+): void {
+  if (!input.reachableAdministratorUserIds.includes(input.actorUserId)) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'The administrator role or access membership changed before this request could commit.',
+      403,
+    );
+  }
+  if (
+    input.currentRoles.includes('admin') &&
+    !input.requestedRoles.includes('admin') &&
+    input.reachableAdministratorUserIds.includes(input.targetUserId) &&
+    input.reachableAdministratorUserIds.length <= 1
+  ) {
+    throw conflict('The final reachable administrator cannot be removed.');
+  }
 }
 
 export const listUsersRegistration: ServerCapabilityRegistration<

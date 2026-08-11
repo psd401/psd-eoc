@@ -660,7 +660,7 @@ describeWithDatabase('published roster graph immutability', () => {
     }
   });
 
-  test('keeps access-group status and provider configuration mutable', async () => {
+  test('keeps access-group status mutable while provider locators remain immutable', async () => {
     const db = databaseConnection().db;
     await db.execute(sql`
       insert into group_sources (
@@ -694,21 +694,18 @@ describeWithDatabase('published roster graph immutability', () => {
       throw new Error('The configurable access-group fixture is missing.');
     }
 
-    const updatedRows = await db.execute<{
+    const statusRows = await db.execute<{
       active: boolean;
       email: string;
       google_group_id: string;
     }>(sql`
       update group_sources
-      set
-        active = ${!original.active},
-        google_group_id = 'synthetic-configurable-access-alternate',
-        email = 'synthetic-configurable-access-alternate@example.invalid'
+      set active = ${!original.active}
       where id = ${ids.configurableAccessGroup}::uuid
       returning active, email, google_group_id
     `);
     expect(
-      updatedRows.map((row) => ({
+      statusRows.map((row) => ({
         active: row.active,
         email: row.email,
         google_group_id: row.google_group_id,
@@ -716,17 +713,49 @@ describeWithDatabase('published roster graph immutability', () => {
     ).toEqual([
       {
         active: !original.active,
-        email: 'synthetic-configurable-access-alternate@example.invalid',
-        google_group_id: 'synthetic-configurable-access-alternate',
+        email: original.email,
+        google_group_id: original.google_group_id,
+      },
+    ]);
+
+    await expectImmutableRejection(
+      async () =>
+        db.execute(sql`
+          update group_sources
+          set
+            google_group_id = 'synthetic-configurable-access-alternate',
+            email = 'synthetic-configurable-access-alternate@example.invalid'
+          where id = ${ids.configurableAccessGroup}::uuid
+        `),
+      /Access group provider locators are immutable; create a replacement identity/u,
+    );
+
+    const retainedRows = await db.execute<{
+      active: boolean;
+      email: string;
+      google_group_id: string;
+    }>(sql`
+      select active, email, google_group_id
+      from group_sources
+      where id = ${ids.configurableAccessGroup}::uuid
+    `);
+    expect(
+      retainedRows.map((row) => ({
+        active: row.active,
+        email: row.email,
+        google_group_id: row.google_group_id,
+      })),
+    ).toEqual([
+      {
+        active: !original.active,
+        email: original.email,
+        google_group_id: original.google_group_id,
       },
     ]);
 
     await db.execute(sql`
       update group_sources
-      set
-        active = ${original.active},
-        google_group_id = ${original.google_group_id},
-        email = ${original.email}
+      set active = ${original.active}
       where id = ${ids.configurableAccessGroup}::uuid
     `);
   });

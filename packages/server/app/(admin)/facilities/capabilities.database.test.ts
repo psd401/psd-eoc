@@ -72,11 +72,14 @@ import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
   executeCreateNeighborhoodVersionCapability,
+  executeFacilitiesAdminProjection,
   executeGetAudienceConfigCapability,
   executeGetAudienceConfigVersionCapability,
   executeGetNeighborhoodVersionCapability,
+  executeListFacilitiesCapability,
   executeListGroupSourcesCapability,
   executeListNeighborhoodsCapability,
+  executeListNeighborhoodVersionsCapability,
   executeUpdateFacilityCapability,
   executeUpdateGroupSourceCapability,
 } from './capabilities';
@@ -384,7 +387,7 @@ function bootstrapSessionRequest(input: {
 async function persistAuthenticatedAdministrator(
   database: PostgresDatabaseConnection['db'],
   authenticated: AuthenticatedSession,
-  accessGroupId: string,
+  accessGroupIdsValue: string | readonly string[],
   suffix: string,
 ): Promise<void> {
   if (authenticated.actor.kind !== 'human') {
@@ -396,20 +399,17 @@ async function persistAuthenticatedAdministrator(
   const expiresAt = new Date(now.getTime() + 72 * 60 * 60 * 1_000);
   const snapshotId = randomUUID();
   const deviceId = randomUUID();
-  const snapshotVersion = Number.parseInt(suffix.slice(0, 7), 16) + 1;
+  const accessGroupIds = Array.isArray(accessGroupIdsValue)
+    ? accessGroupIdsValue
+    : [accessGroupIdsValue];
+  const [latestSnapshot] = await database
+    .select({
+      version: sql<number>`coalesce(max(${accessMembershipSnapshots.version}), 0)::integer`,
+    })
+    .from(accessMembershipSnapshots);
+  const snapshotVersion = (latestSnapshot?.version ?? 0) + 1;
 
-  await database.insert(users).values({
-    id: authenticated.actor.userId,
-    googleSubject: `issue-26-admin-subject-${suffix}`,
-    email: `issue-26-admin-${suffix}@psd401.net`,
-    displayName: `Issue 26 synthetic administrator ${suffix.slice(0, 8)}`,
-    facilityScopeKind: 'district',
-    createdAt: now,
-  });
-  await database.insert(userRoles).values({
-    userId: authenticated.actor.userId,
-    role: 'admin',
-  });
+  await persistAdministratorIdentity(database, authenticated, suffix, now);
   await database.insert(accessMembershipSnapshots).values({
     id: snapshotId,
     version: snapshotVersion,
@@ -417,35 +417,39 @@ async function persistAuthenticatedAdministrator(
     syncStartedAt: now,
     capturedAt: now,
   });
-  await database.insert(accessMembershipSnapshotGroups).values([
-    {
-      snapshotId,
-      groupSourceId: accessGroupId,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-      completionKind: 'expected',
-    },
-    {
-      snapshotId,
-      groupSourceId: accessGroupId,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-      completionKind: 'completed',
-    },
-  ]);
+  await database.insert(accessMembershipSnapshotGroups).values(
+    accessGroupIds.flatMap((accessGroupId) => [
+      {
+        snapshotId,
+        groupSourceId: accessGroupId,
+        groupSourceKind: 'google-group' as const,
+        groupPurpose: 'access' as const,
+        completionKind: 'expected' as const,
+      },
+      {
+        snapshotId,
+        groupSourceId: accessGroupId,
+        groupSourceKind: 'google-group' as const,
+        groupPurpose: 'access' as const,
+        completionKind: 'completed' as const,
+      },
+    ]),
+  );
   await database.insert(accessMembershipMembers).values({
     snapshotId,
     userId: authenticated.actor.userId,
     googleSubject: `issue-26-admin-subject-${suffix}`,
     facilityScopeKind: 'district',
   });
-  await database.insert(accessMembershipMemberGroups).values({
-    snapshotId,
-    userId: authenticated.actor.userId,
-    groupSourceId: accessGroupId,
-    groupSourceKind: 'google-group',
-    groupPurpose: 'access',
-  });
+  await database.insert(accessMembershipMemberGroups).values(
+    accessGroupIds.map((accessGroupId) => ({
+      snapshotId,
+      userId: authenticated.actor.userId,
+      groupSourceId: accessGroupId,
+      groupSourceKind: 'google-group' as const,
+      groupPurpose: 'access' as const,
+    })),
+  );
   await database.insert(deviceEnrollments).values({
     id: deviceId,
     userId: authenticated.actor.userId,
@@ -465,6 +469,32 @@ async function persistAuthenticatedAdministrator(
     createdAt: now,
     expiresAt,
   });
+}
+
+async function persistAdministratorIdentity(
+  database: PostgresDatabaseConnection['db'],
+  authenticated: AuthenticatedSession,
+  suffix: string,
+  createdAt = new Date(),
+): Promise<void> {
+  await database
+    .insert(users)
+    .values({
+      id: authenticated.actor.userId,
+      googleSubject: `issue-26-admin-subject-${suffix}`,
+      email: `issue-26-admin-${suffix}@psd401.net`,
+      displayName: `Issue 26 synthetic administrator ${suffix.slice(0, 8)}`,
+      facilityScopeKind: 'district',
+      createdAt,
+    })
+    .onConflictDoNothing();
+  await database
+    .insert(userRoles)
+    .values({
+      userId: authenticated.actor.userId,
+      role: 'admin',
+    })
+    .onConflictDoNothing();
 }
 
 async function persistLiveAuthorizationActor(
@@ -604,10 +634,9 @@ describeWithDatabase('facilities administrator database flow', () => {
     const store = createDrizzleAdminCapabilityStore(database, authenticated);
     const suffix = randomUUID();
     const requestIds: string[] = [];
-    const first = await executeCreateGroupSourceCapability({
-      authenticated,
-      store,
-      command: {
+    const accessFixtures = [
+      {
+        id: randomUUID(),
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
@@ -615,13 +644,10 @@ describeWithDatabase('facilities administrator database flow', () => {
         active: true,
         googleGroupId: `issue-26-access-race-a-${suffix}`,
         email: `issue-26-access-race-a-${suffix}@example.invalid`,
+        fixtureKey: null,
       },
-      metadata: metadata('access-race-a', requestIds),
-    });
-    const second = await executeCreateGroupSourceCapability({
-      authenticated,
-      store,
-      command: {
+      {
+        id: randomUUID(),
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
@@ -629,9 +655,16 @@ describeWithDatabase('facilities administrator database flow', () => {
         active: true,
         googleGroupId: `issue-26-access-race-b-${suffix}`,
         email: `issue-26-access-race-b-${suffix}@example.invalid`,
+        fixtureKey: null,
       },
-      metadata: metadata('access-race-b', requestIds),
-    });
+    ] as const;
+    await database.insert(groupSources).values([...accessFixtures]);
+    await persistAuthenticatedAdministrator(
+      database,
+      authenticated,
+      accessFixtures.map(({ id }) => id),
+      suffix,
+    );
 
     let releaseActiveSetLock: (() => void) | undefined;
     const activeSetLockReleased = new Promise<void>((resolve) => {
@@ -643,17 +676,14 @@ describeWithDatabase('facilities administrator database flow', () => {
     });
     const activeSetBlocker = database.transaction(async (transaction) => {
       await transaction.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended('admin-access-group-active-set', 0))`,
+        sql`select pg_advisory_xact_lock(hashtextextended('psd-eoc-admin-availability', 0))`,
       );
       confirmActiveSetLock?.();
       await activeSetLockReleased;
     });
     await activeSetLockHeld;
 
-    const deactivations = [first, second].map((source, index) => {
-      if (source.kind !== 'google-group' || source.purpose !== 'access') {
-        throw new Error('The access-group race fixture is invalid.');
-      }
+    const deactivations = accessFixtures.map((source, index) => {
       return executeUpdateGroupSourceCapability({
         authenticated,
         store,
@@ -694,11 +724,23 @@ describeWithDatabase('facilities administrator database flow', () => {
       .from(groupSources)
       .where(
         and(
-          inArray(groupSources.id, [first.id, second.id]),
+          inArray(
+            groupSources.id,
+            accessFixtures.map(({ id }) => id),
+          ),
           eq(groupSources.active, true),
         ),
       );
     expect(activeRows).toHaveLength(1);
+    await database
+      .update(groupSources)
+      .set({ active: false })
+      .where(
+        inArray(
+          groupSources.id,
+          accessFixtures.map(({ id }) => id),
+        ),
+      );
   });
 
   test('configures a complete new site and records every mutation', async () => {
@@ -707,6 +749,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     const store = createDrizzleAdminCapabilityStore(database, authenticated);
     const suffix = randomUUID();
     const requestIds: string[] = [];
+    await persistAdministratorIdentity(database, authenticated, suffix);
 
     const facilityMetadata = metadata('facility', requestIds);
     const facility = await executeCreateFacilityCapability({
@@ -3134,5 +3177,235 @@ describeWithDatabase('facilities administrator database flow', () => {
       expect(error).toBeInstanceOf(AdminCapabilityError);
       expect((error as AdminCapabilityError).status).toBe(409);
     }
+  });
+
+  test('uses immutable filter-bound keysets and one audited complete facilities projection', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+
+    const firstFacilitiesPage = await executeListFacilitiesCapability({
+      authenticated,
+      store,
+      query: { includeInactive: true, cursor: null, limit: 1 },
+      metadata: { requestId: randomUUID(), now: new Date() },
+    });
+    const facilityCursor = firstFacilitiesPage.pageInfo.nextCursor;
+    const firstFacility = firstFacilitiesPage.items[0];
+    if (facilityCursor === null || firstFacility === undefined) {
+      throw new Error('The facility keyset fixture requires two facilities.');
+    }
+    await database.execute(sql`
+      update facilities
+      set code = ${`KEYSET-${randomUUID().slice(0, 8).toUpperCase()}`}
+      where id = ${firstFacility.id}::uuid
+    `);
+    const secondFacilitiesPage = await executeListFacilitiesCapability({
+      authenticated,
+      store,
+      query: {
+        includeInactive: true,
+        cursor: facilityCursor,
+        limit: 1,
+      },
+      metadata: { requestId: randomUUID(), now: new Date() },
+    });
+    expect(secondFacilitiesPage.items.map(({ id }) => id)).not.toContain(
+      firstFacility.id,
+    );
+
+    for (const query of [
+      {
+        includeInactive: false,
+        cursor: facilityCursor,
+        limit: 1,
+      },
+      {
+        includeInactive: true,
+        cursor: `${facilityCursor}A`,
+        limit: 1,
+      },
+    ] as const) {
+      try {
+        await executeListFacilitiesCapability({
+          authenticated,
+          store,
+          query,
+          metadata: { requestId: randomUUID(), now: new Date() },
+        });
+        throw new Error('Expected the facility cursor to fail closed.');
+      } catch (error) {
+        expect(error).toBeInstanceOf(AdminCapabilityError);
+        expect((error as AdminCapabilityError).status).toBe(400);
+      }
+    }
+    try {
+      await executeListNeighborhoodsCapability({
+        authenticated,
+        store,
+        query: { cursor: facilityCursor, limit: 1 },
+        metadata: { requestId: randomUUID(), now: new Date() },
+      });
+      throw new Error('Expected a cross-collection cursor to fail closed.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AdminCapabilityError);
+      expect((error as AdminCapabilityError).status).toBe(400);
+    }
+
+    const firstGroupsPage = await executeListGroupSourcesCapability({
+      authenticated,
+      store,
+      query: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        active: null,
+        cursor: null,
+        limit: 1,
+      },
+      metadata: { requestId: randomUUID(), now: new Date() },
+    });
+    const groupCursor = firstGroupsPage.pageInfo.nextCursor;
+    const firstGroup = firstGroupsPage.items[0];
+    if (groupCursor === null || firstGroup === undefined) {
+      throw new Error('The group-source keyset fixture requires two groups.');
+    }
+    await database
+      .update(groupSources)
+      .set({ displayName: `Renamed cursor source ${randomUUID()}` })
+      .where(eq(groupSources.id, firstGroup.id));
+    const secondGroupsPage = await executeListGroupSourcesCapability({
+      authenticated,
+      store,
+      query: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        active: null,
+        cursor: groupCursor,
+        limit: 1,
+      },
+      metadata: { requestId: randomUUID(), now: new Date() },
+    });
+    expect(secondGroupsPage.items.map(({ id }) => id)).not.toContain(
+      firstGroup.id,
+    );
+    try {
+      await executeListGroupSourcesCapability({
+        authenticated,
+        store,
+        query: {
+          kind: 'google-group',
+          purpose: 'others',
+          facilityId: null,
+          active: null,
+          cursor: groupCursor,
+          limit: 1,
+        },
+        metadata: { requestId: randomUUID(), now: new Date() },
+      });
+      throw new Error('Expected a cross-filter group cursor to fail closed.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AdminCapabilityError);
+      expect((error as AdminCapabilityError).status).toBe(400);
+    }
+
+    const neighborhoodOne = await executeCreateNeighborhoodVersionCapability({
+      authenticated,
+      store,
+      command: {
+        neighborhoodId: null,
+        name: `Keyset neighborhood ${randomUUID()}`,
+        facilityIds: [firstFacility.id],
+      },
+      metadata: metadata('keyset-neighborhood-one', []),
+    });
+    await executeCreateNeighborhoodVersionCapability({
+      authenticated,
+      store,
+      command: {
+        neighborhoodId: neighborhoodOne.id,
+        name: `${neighborhoodOne.name} v2`,
+        facilityIds: [firstFacility.id],
+      },
+      metadata: metadata('keyset-neighborhood-two', []),
+    });
+    const firstVersionsPage = await executeListNeighborhoodVersionsCapability({
+      authenticated,
+      store,
+      query: {
+        neighborhoodId: neighborhoodOne.id,
+        cursor: null,
+        limit: 1,
+      },
+      metadata: { requestId: randomUUID(), now: new Date() },
+    });
+    const versionCursor = firstVersionsPage.pageInfo.nextCursor;
+    if (versionCursor === null) {
+      throw new Error('The version keyset fixture requires a continuation.');
+    }
+    await executeCreateNeighborhoodVersionCapability({
+      authenticated,
+      store,
+      command: {
+        neighborhoodId: neighborhoodOne.id,
+        name: `${neighborhoodOne.name} v3`,
+        facilityIds: [firstFacility.id],
+      },
+      metadata: metadata('keyset-neighborhood-three', []),
+    });
+    const secondVersionsPage = await executeListNeighborhoodVersionsCapability({
+      authenticated,
+      store,
+      query: {
+        neighborhoodId: neighborhoodOne.id,
+        cursor: versionCursor,
+        limit: 1,
+      },
+      metadata: { requestId: randomUUID(), now: new Date() },
+    });
+    expect(firstVersionsPage.items.map(({ version }) => version)).toEqual([2]);
+    expect(secondVersionsPage.items.map(({ version }) => version)).toEqual([1]);
+
+    const projectionRequestId = randomUUID();
+    const projection = await executeFacilitiesAdminProjection({
+      authenticated,
+      store,
+      queries: {
+        facilities: { includeInactive: true, cursor: null, limit: 1 },
+        neighborhoods: { cursor: null, limit: 1 },
+        buildingGroups: {
+          kind: null,
+          purpose: 'building',
+          facilityId: null,
+          active: null,
+          cursor: null,
+          limit: 1,
+        },
+        othersGroups: {
+          kind: null,
+          purpose: 'others',
+          facilityId: null,
+          active: null,
+          cursor: null,
+          limit: 1,
+        },
+      },
+      metadata: { requestId: projectionRequestId, now: new Date() },
+    });
+    expect(projection.facilities.items).toHaveLength(1);
+    expect(projection.facilityOptions.length).toBeGreaterThan(1);
+    expect(projection.neighborhoodOptions.length).toBeGreaterThan(1);
+    expect(projection.buildingGroupOptions.length).toBeGreaterThanOrEqual(
+      projection.buildingGroups.items.length,
+    );
+    expect(projection.othersGroupOptions.length).toBeGreaterThanOrEqual(
+      projection.othersGroups.items.length,
+    );
+    const projectionAudits = await database
+      .select({ requestId: securityAuditEntries.requestId })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, projectionRequestId));
+    expect(projectionAudits).toEqual([{ requestId: projectionRequestId }]);
   });
 });

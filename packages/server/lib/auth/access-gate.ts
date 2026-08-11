@@ -14,7 +14,7 @@ import {
   type SecurityAuditEntry,
   type User,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
@@ -99,7 +99,10 @@ export interface AccessGateSnapshotEvidence {
 export interface AccessGateEvidence {
   readonly user: AccessGateUserRecord | null;
   readonly activeAccessGroupSourceRefs: readonly AccessGroupSourceRef[];
-  /** Latest canonical source update that requires a newer access sync. */
+  /**
+   * Legacy diagnostic retained for adapter compatibility. Authorization never
+   * uses request/audit timestamps as a configuration generation.
+   */
   readonly latestSuccessfulGroupSourceUpdateAt: string | null;
   readonly snapshot: AccessGateSnapshotEvidence | null;
 }
@@ -246,6 +249,31 @@ function isSameGroupSet(
   );
 }
 
+function parseCanonicalAccessGroupSet(
+  values: readonly AccessGroupSourceRef[],
+): readonly AccessGroupSourceRef[] | null {
+  const parsed: AccessGroupSourceRef[] = [];
+  for (const value of values) {
+    const result = AccessGroupSourceRefSchema.safeParse(value);
+    if (
+      !result.success ||
+      result.data.kind !== 'google-group' ||
+      result.data.purpose !== 'access' ||
+      result.data.facilityId !== null
+    ) {
+      return null;
+    }
+    parsed.push(result.data);
+  }
+  if (
+    parsed.length === 0 ||
+    new Set(parsed.map(({ id }) => id)).size !== parsed.length
+  ) {
+    return null;
+  }
+  return Object.freeze(parsed);
+}
+
 function isSameFacilityScope(
   left: FacilityScope,
   right: FacilityScope,
@@ -287,14 +315,14 @@ function validateEvidence(
     return { granted: false, reasonCode: 'USER_DISABLED' };
   }
 
-  const activeGroups = evidence.activeAccessGroupSourceRefs.map((source) =>
-    AccessGroupSourceRefSchema.safeParse(source),
-  );
-  if (activeGroups.some((result) => !result.success)) {
-    return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
-  }
-  if (activeGroups.length === 0) {
+  if (evidence.activeAccessGroupSourceRefs.length === 0) {
     return { granted: false, reasonCode: 'NO_ACTIVE_ACCESS_GROUPS' };
+  }
+  const activeGroups = parseCanonicalAccessGroupSet(
+    evidence.activeAccessGroupSourceRefs,
+  );
+  if (activeGroups === null) {
+    return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
   }
   if (evidence.snapshot === null) {
     return { granted: false, reasonCode: 'ACCESS_SNAPSHOT_UNAVAILABLE' };
@@ -303,10 +331,12 @@ function validateEvidence(
   const snapshot = evidence.snapshot;
   const syncStartedAt = TimestampSchema.safeParse(snapshot.syncStartedAt);
   const capturedAt = TimestampSchema.safeParse(snapshot.capturedAt);
-  const latestSourceUpdateAt =
-    evidence.latestSuccessfulGroupSourceUpdateAt === null
-      ? null
-      : TimestampSchema.safeParse(evidence.latestSuccessfulGroupSourceUpdateAt);
+  const expectedGroups = parseCanonicalAccessGroupSet(
+    snapshot.expectedAccessGroupSourceRefs,
+  );
+  const completedGroups = parseCanonicalAccessGroupSet(
+    snapshot.completedAccessGroupSourceRefs,
+  );
   if (
     !UuidSchema.safeParse(snapshot.id).success ||
     !Number.isSafeInteger(snapshot.version) ||
@@ -316,19 +346,10 @@ function validateEvidence(
     (syncStartedAt.success &&
       capturedAt.success &&
       Date.parse(capturedAt.data) < Date.parse(syncStartedAt.data)) ||
-    (latestSourceUpdateAt !== null && !latestSourceUpdateAt.success) ||
-    (latestSourceUpdateAt !== null &&
-      latestSourceUpdateAt.success &&
-      Date.parse(syncStartedAt.data) <=
-        Date.parse(latestSourceUpdateAt.data)) ||
-    !isSameGroupSet(
-      evidence.activeAccessGroupSourceRefs,
-      snapshot.expectedAccessGroupSourceRefs,
-    ) ||
-    !isSameGroupSet(
-      snapshot.expectedAccessGroupSourceRefs,
-      snapshot.completedAccessGroupSourceRefs,
-    )
+    expectedGroups === null ||
+    completedGroups === null ||
+    !isSameGroupSet(activeGroups, expectedGroups ?? []) ||
+    !isSameGroupSet(expectedGroups ?? [], completedGroups ?? [])
   ) {
     return { granted: false, reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED' };
   }
@@ -346,18 +367,13 @@ function validateEvidence(
     return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
   }
 
-  const activeGroupKeys = new Set(
-    evidence.activeAccessGroupSourceRefs.map(accessGroupKey),
-  );
-  const memberGroups = member.accessGroupSourceRefs.map((source) =>
-    AccessGroupSourceRefSchema.safeParse(source),
+  const activeGroupKeys = new Set(activeGroups.map(accessGroupKey));
+  const memberGroups = parseCanonicalAccessGroupSet(
+    member.accessGroupSourceRefs,
   );
   if (
-    memberGroups.length === 0 ||
-    memberGroups.some((result) => !result.success) ||
-    !member.accessGroupSourceRefs.every((source) =>
-      activeGroupKeys.has(accessGroupKey(source)),
-    )
+    memberGroups === null ||
+    !memberGroups.every((source) => activeGroupKeys.has(accessGroupKey(source)))
   ) {
     return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
   }
@@ -366,7 +382,10 @@ function validateEvidence(
     granted: true,
     user: userResult.data,
     snapshot,
-    member,
+    member: Object.freeze({
+      ...member,
+      accessGroupSourceRefs: memberGroups,
+    }),
   };
 }
 
@@ -484,59 +503,17 @@ export function createDrizzleAccessGateStore(
               eq(groupSources.kind, 'google-group'),
               eq(groupSources.purpose, 'access'),
             ),
-          );
+          )
+          .orderBy(asc(groupSources.id));
         const activeAccessGroupSourceRefs = accessGroupRows
           .filter(({ active }) => active)
           .map(parseAccessGroupRef);
-        const accessGroupUpdateTargetIds = accessGroupRows.flatMap(({ id }) => [
-          id,
-          `group-source:access:${id}`,
-        ]);
-
-        const [latestSuccessfulGroupSourceUpdate] = await transaction
-          .select({ occurredAt: securityAuditEntries.occurredAt })
-          .from(securityAuditEntries)
-          .where(
-            and(
-              eq(securityAuditEntries.action, 'update-group-source'),
-              eq(securityAuditEntries.outcome, 'success'),
-              or(
-                and(
-                  eq(securityAuditEntries.targetKind, 'configuration'),
-                  accessGroupUpdateTargetIds.length === 0
-                    ? sql`false`
-                    : inArray(
-                        securityAuditEntries.targetId,
-                        accessGroupUpdateTargetIds,
-                      ),
-                ),
-                // Earlier issue #26 revisions emitted this exact prefixed
-                // target. Match only known access-group UUIDs so upgrades
-                // preserve fail-closed snapshot invalidation without treating
-                // building or notification-group corrections as access edits.
-                // Before opaque configuration UUID targets shipped, every
-                // successful update used this generic target. Retain the
-                // conservative fail-closed interpretation until a later sync.
-                and(
-                  eq(securityAuditEntries.targetKind, 'capability'),
-                  eq(securityAuditEntries.targetId, 'update-group-source'),
-                ),
-              ),
-            ),
-          )
-          .orderBy(
-            desc(securityAuditEntries.occurredAt),
-            desc(securityAuditEntries.sequence),
-          )
-          .limit(1);
-        const latestSuccessfulGroupSourceUpdateAt =
-          latestSuccessfulGroupSourceUpdate?.occurredAt.toISOString() ?? null;
 
         if (userRow === undefined) {
           return {
             user: null,
             activeAccessGroupSourceRefs,
-            latestSuccessfulGroupSourceUpdateAt,
+            latestSuccessfulGroupSourceUpdateAt: null,
             snapshot: null,
           };
         }
@@ -546,7 +523,8 @@ export function createDrizzleAccessGateStore(
         const userScopeRows = await transaction
           .select({ facilityId: userFacilityScopes.facilityId })
           .from(userFacilityScopes)
-          .where(eq(userFacilityScopes.userId, userRow.id));
+          .where(eq(userFacilityScopes.userId, userRow.id))
+          .orderBy(asc(userFacilityScopes.facilityId));
         const userFacilityScope = parseFacilityScope(
           userRow.facilityScopeKind,
           userScopeRows.map((row) => row.facilityId),
@@ -566,14 +544,18 @@ export function createDrizzleAccessGateStore(
           .select()
           .from(accessMembershipSnapshots)
           .where(eq(accessMembershipSnapshots.complete, true))
-          .orderBy(desc(accessMembershipSnapshots.version))
+          .orderBy(
+            desc(accessMembershipSnapshots.version),
+            desc(accessMembershipSnapshots.capturedAt),
+            desc(accessMembershipSnapshots.id),
+          )
           .limit(1);
         const snapshotRow = snapshotRows[0];
         if (snapshotRow === undefined) {
           return {
             user,
             activeAccessGroupSourceRefs,
-            latestSuccessfulGroupSourceUpdateAt,
+            latestSuccessfulGroupSourceUpdateAt: null,
             snapshot: null,
           };
         }
@@ -586,7 +568,11 @@ export function createDrizzleAccessGateStore(
             completionKind: accessMembershipSnapshotGroups.completionKind,
           })
           .from(accessMembershipSnapshotGroups)
-          .where(eq(accessMembershipSnapshotGroups.snapshotId, snapshotRow.id));
+          .where(eq(accessMembershipSnapshotGroups.snapshotId, snapshotRow.id))
+          .orderBy(
+            asc(accessMembershipSnapshotGroups.completionKind),
+            asc(accessMembershipSnapshotGroups.groupSourceId),
+          );
         const expectedAccessGroupSourceRefs = snapshotGroupRows
           .filter((row) => row.completionKind === 'expected')
           .map(parseAccessGroupRef);
@@ -620,7 +606,8 @@ export function createDrizzleAccessGateStore(
                 eq(accessMembershipMemberGroups.snapshotId, snapshotRow.id),
                 eq(accessMembershipMemberGroups.userId, userRow.id),
               ),
-            );
+            )
+            .orderBy(asc(accessMembershipMemberGroups.groupSourceId));
           const memberFacilityRows = await transaction
             .select({
               facilityId: accessMembershipMemberFacilities.facilityId,
@@ -631,7 +618,8 @@ export function createDrizzleAccessGateStore(
                 eq(accessMembershipMemberFacilities.snapshotId, snapshotRow.id),
                 eq(accessMembershipMemberFacilities.userId, userRow.id),
               ),
-            );
+            )
+            .orderBy(asc(accessMembershipMemberFacilities.facilityId));
           member = {
             userId: memberRow.userId,
             googleSubject: memberRow.googleSubject,
@@ -646,7 +634,7 @@ export function createDrizzleAccessGateStore(
         return {
           user,
           activeAccessGroupSourceRefs,
-          latestSuccessfulGroupSourceUpdateAt,
+          latestSuccessfulGroupSourceUpdateAt: null,
           snapshot: {
             id: snapshotRow.id,
             version: snapshotRow.version,

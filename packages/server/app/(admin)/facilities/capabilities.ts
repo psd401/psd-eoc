@@ -10,12 +10,15 @@ import {
   FacilitySchema,
   GroupSourcePageSchema,
   GroupSourceSchema,
+  ListGroupSourcesInputSchema,
+  ListNeighborhoodsInputSchema,
   NeighborhoodPageSchema,
   NeighborhoodSchema,
   RosterSourceConfigurationSchema,
   UpdateFacilityInputSchema,
   UpdateGroupSourceInputSchema,
   UuidSchema,
+  type Actor,
   type AudienceConfig,
   type CapabilityInput,
   type Facility,
@@ -30,7 +33,9 @@ import {
   asc,
   desc,
   eq,
+  gt,
   inArray,
+  lt,
   ne,
   notInArray,
   or,
@@ -48,7 +53,15 @@ import {
   rosterSourceConfigurationFacilities,
   rosterSourceConfigurationGroups,
   rosterSourceConfigurations,
+  users,
 } from '../../../db/schema';
+import {
+  ADMIN_AVAILABILITY_LOCK_SQL,
+  loadAccessConfigurationSnapshotState,
+  loadEffectiveAdministratorUserIds,
+  loadEffectiveRoles,
+  type AccessConfigurationSnapshotState,
+} from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type {
   CapabilityHandlerContext,
@@ -87,28 +100,102 @@ function dateIso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
 
-function decodeOffset(cursor: string | null): number {
-  if (cursor === null) return 0;
-  const value = Buffer.from(cursor, 'base64url').toString('utf8');
-  if (!/^\d+$/u.test(value)) {
-    throw invalid('The pagination cursor is invalid.');
-  }
-  const offset = Number(value);
-  if (!Number.isSafeInteger(offset) || offset < 0) {
-    throw invalid('The pagination cursor is invalid.');
-  }
-  return offset;
+type PaginationCollection =
+  | 'facilities'
+  | 'group-sources'
+  | 'neighborhood-versions'
+  | 'neighborhoods';
+
+interface KeysetCursor {
+  readonly version: 1;
+  readonly collection: PaginationCollection;
+  readonly filterDigest: string;
+  readonly after: number | string;
 }
 
-function encodeOffset(offset: number): string {
-  return Buffer.from(String(offset), 'utf8').toString('base64url');
+function encodeKeysetCursor(cursor: KeysetCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
 }
 
-function pageInfo(offset: number, limit: number, count: number) {
+function paginationFilterDigest(
+  collection: PaginationCollection,
+  filters: unknown,
+): string {
+  return digestCapabilityValue({ collection, filters });
+}
+
+function decodeKeysetCursor(
+  cursor: string | null,
+  collection: PaginationCollection,
+  filterDigest: string,
+  afterKind: 'number' | 'uuid',
+): number | string | null {
+  if (cursor === null) return null;
+  try {
+    const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+    const parsed: unknown = JSON.parse(decoded);
+    if (typeof parsed !== 'object' || parsed === null) throw new TypeError();
+    const keys = Object.keys(parsed).sort();
+    if (
+      keys.length !== 4 ||
+      keys[0] !== 'after' ||
+      keys[1] !== 'collection' ||
+      keys[2] !== 'filterDigest' ||
+      keys[3] !== 'version'
+    ) {
+      throw new TypeError();
+    }
+    const candidate = parsed as Readonly<Record<string, unknown>>;
+    const after = candidate.after;
+    if (
+      candidate.version !== 1 ||
+      candidate.collection !== collection ||
+      candidate.filterDigest !== filterDigest ||
+      typeof candidate.filterDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(candidate.filterDigest) ||
+      (afterKind === 'number'
+        ? !Number.isSafeInteger(after) || Number(after) <= 0
+        : typeof after !== 'string')
+    ) {
+      throw new TypeError();
+    }
+    const canonicalAfter =
+      afterKind === 'number' ? Number(after) : UuidSchema.parse(after);
+    const canonical: KeysetCursor = {
+      version: 1,
+      collection,
+      filterDigest,
+      after: canonicalAfter,
+    };
+    if (encodeKeysetCursor(canonical) !== cursor) throw new TypeError();
+    return canonicalAfter;
+  } catch {
+    throw invalid('The pagination cursor is invalid for this result set.');
+  }
+}
+
+function keysetPageInfo(
+  collection: PaginationCollection,
+  filterDigest: string,
+  limit: number,
+  count: number,
+  lastKey: number | string | undefined,
+) {
   const hasMore = count > limit;
+  if (hasMore && lastKey === undefined) {
+    throw conflict('The pagination continuation key is unavailable.');
+  }
   return {
     hasMore,
-    nextCursor: hasMore ? encodeOffset(offset + limit) : null,
+    nextCursor:
+      hasMore && lastKey !== undefined
+        ? encodeKeysetCursor({
+            version: 1,
+            collection,
+            filterDigest,
+            after: lastKey,
+          })
+        : null,
   } as const;
 }
 
@@ -175,21 +262,137 @@ async function lockRosterConfigurationPopulations(
   await lockAdminIdentity(database, 'psd-eoc-roster-synthetic');
 }
 
+interface AccessSetMutationState {
+  readonly accessState: AccessConfigurationSnapshotState | null;
+  readonly activeAccessGroupSourceIds: readonly string[];
+}
+
+async function loadAccessSetMutationStateAfterLock(
+  database: AdminQueryDatabase,
+  actor: Actor,
+): Promise<AccessSetMutationState> {
+  if (actor.kind !== 'human') {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'A human administrator is required to change access groups.',
+      403,
+    );
+  }
+  const [actorRow] = await database
+    .select({
+      disabledAt: users.disabledAt,
+      facilityScopeKind: users.facilityScopeKind,
+    })
+    .from(users)
+    .where(eq(users.id, actor.userId))
+    .limit(1);
+  const actorRoles = await loadEffectiveRoles(database, actor.userId);
+  if (
+    actorRow === undefined ||
+    actorRow.disabledAt !== null ||
+    actorRow.facilityScopeKind !== 'district' ||
+    !actorRoles.includes('admin')
+  ) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'The current human must still be an enabled district administrator.',
+      403,
+    );
+  }
+  const activeRows = await database
+    .select({ id: groupSources.id })
+    .from(groupSources)
+    .where(
+      and(
+        eq(groupSources.kind, 'google-group'),
+        eq(groupSources.purpose, 'access'),
+        eq(groupSources.active, true),
+      ),
+    )
+    .orderBy(asc(groupSources.id));
+  const activeAccessGroupSourceIds = Object.freeze(
+    activeRows.map(({ id }) => id),
+  );
+  const accessState = await loadAccessConfigurationSnapshotState(database);
+  if (activeAccessGroupSourceIds.length === 0) {
+    return Object.freeze({ accessState: null, activeAccessGroupSourceIds });
+  }
+  if (accessState === null) {
+    throw conflict(
+      'Access groups cannot change until one complete snapshot exactly matches the active access-group set.',
+    );
+  }
+  const reachableAdministratorIds = await loadEffectiveAdministratorUserIds(
+    database,
+    { accessState },
+  );
+  if (!reachableAdministratorIds.includes(actor.userId)) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'The current administrator is not reachable through the exact access snapshot.',
+      403,
+    );
+  }
+  return Object.freeze({ accessState, activeAccessGroupSourceIds });
+}
+
+async function assertReachableAdministratorRemains(
+  database: AdminQueryDatabase,
+  state: AccessSetMutationState,
+  removedSourceId: string,
+): Promise<void> {
+  if (state.accessState === null) {
+    throw conflict('The final active access group cannot be removed.');
+  }
+  const remainingIds = state.activeAccessGroupSourceIds.filter(
+    (id) => id !== removedSourceId,
+  );
+  const remainingAdministratorIds = await loadEffectiveAdministratorUserIds(
+    database,
+    {
+      accessState: state.accessState,
+      eligibleAccessGroupSourceIds: remainingIds,
+    },
+  );
+  if (remainingAdministratorIds.length === 0) {
+    throw conflict(
+      'Another reachable district administrator must remain through an unchanged active access group.',
+    );
+  }
+}
+
 async function listFacilities(
   database: AdminQueryDatabase,
   input: CapabilityInput<'list-facilities'>,
 ): Promise<FacilityPage> {
-  const offset = decodeOffset(input.cursor);
+  const filterDigest = paginationFilterDigest('facilities', {
+    includeInactive: input.includeInactive,
+  });
+  const after = decodeKeysetCursor(
+    input.cursor,
+    'facilities',
+    filterDigest,
+    'uuid',
+  );
+  const conditions: SQL[] = [];
+  if (!input.includeInactive) conditions.push(eq(facilities.active, true));
+  if (after !== null) conditions.push(gt(facilities.id, String(after)));
   const rows = await database
     .select()
     .from(facilities)
-    .where(input.includeInactive ? undefined : eq(facilities.active, true))
-    .orderBy(asc(facilities.code), asc(facilities.id))
-    .offset(offset)
+    .where(conditions.length === 0 ? undefined : and(...conditions))
+    .orderBy(asc(facilities.id))
     .limit(input.limit + 1);
+  const items = rows.slice(0, input.limit).map(facilityFromRow);
   return FacilityPageSchema.parse({
-    items: rows.slice(0, input.limit).map(facilityFromRow),
-    pageInfo: pageInfo(offset, input.limit, rows.length),
+    items,
+    pageInfo: keysetPageInfo(
+      'facilities',
+      filterDigest,
+      input.limit,
+      rows.length,
+      items.at(-1)?.id,
+    ),
   });
 }
 
@@ -290,44 +493,159 @@ async function neighborhoodByVersion(
   });
 }
 
-async function latestNeighborhoodVersion(
+async function latestNeighborhoodsById(
   database: AdminQueryDatabase,
-  neighborhoodId: string,
-): Promise<Neighborhood | null> {
-  const [header] = await database
-    .select({ version: neighborhoodVersions.version })
+  neighborhoodIds: readonly string[],
+): Promise<readonly Neighborhood[]> {
+  if (neighborhoodIds.length === 0) return Object.freeze([]);
+  const latestHeaders = await database
+    .selectDistinctOn([neighborhoodVersions.id], {
+      createdAt: neighborhoodVersions.createdAt,
+      id: neighborhoodVersions.id,
+      name: neighborhoodVersions.name,
+      version: neighborhoodVersions.version,
+    })
     .from(neighborhoodVersions)
-    .where(eq(neighborhoodVersions.id, neighborhoodId))
-    .orderBy(desc(neighborhoodVersions.version))
-    .limit(1);
-  return header === undefined
-    ? null
-    : neighborhoodByVersion(database, neighborhoodId, header.version);
+    .where(inArray(neighborhoodVersions.id, neighborhoodIds))
+    .orderBy(asc(neighborhoodVersions.id), desc(neighborhoodVersions.version));
+  const headerById = new Map(
+    latestHeaders.map((header) => [header.id, header]),
+  );
+  const membersByKey = new Map<string, string[]>();
+  for (const headerBatch of chunks(
+    latestHeaders,
+    DATA_API_NEIGHBORHOOD_HEADER_BATCH_SIZE,
+  )) {
+    const rows = await database
+      .select({
+        facilityId: neighborhoodFacilities.facilityId,
+        id: neighborhoodFacilities.neighborhoodId,
+        version: neighborhoodFacilities.neighborhoodVersion,
+      })
+      .from(neighborhoodFacilities)
+      .where(
+        or(
+          ...headerBatch.map((header) =>
+            and(
+              eq(neighborhoodFacilities.neighborhoodId, header.id),
+              eq(neighborhoodFacilities.neighborhoodVersion, header.version),
+            ),
+          ),
+        ),
+      )
+      .orderBy(
+        asc(neighborhoodFacilities.neighborhoodId),
+        asc(neighborhoodFacilities.neighborhoodVersion),
+        asc(neighborhoodFacilities.facilityId),
+      );
+    for (const row of rows) {
+      const key = `${row.id}:${row.version}`;
+      const members = membersByKey.get(key) ?? [];
+      members.push(row.facilityId);
+      membersByKey.set(key, members);
+    }
+  }
+  return Object.freeze(
+    neighborhoodIds.map((id) => {
+      const header = headerById.get(id);
+      if (header === undefined) {
+        throw conflict('Neighborhood version history is incomplete.');
+      }
+      return NeighborhoodSchema.parse({
+        id: header.id,
+        name: header.name,
+        version: header.version,
+        facilityIds: membersByKey.get(`${header.id}:${header.version}`) ?? [],
+        createdAt: dateIso(header.createdAt),
+      });
+    }),
+  );
+}
+
+async function neighborhoodVersionsFromHeaders(
+  database: AdminQueryDatabase,
+  headers: readonly Readonly<{
+    createdAt: Date | string;
+    id: string;
+    name: string;
+    version: number;
+  }>[],
+): Promise<readonly Neighborhood[]> {
+  if (headers.length === 0) return Object.freeze([]);
+  const facilitiesByVersion = new Map<number, string[]>();
+  for (const headerBatch of chunks(
+    headers,
+    DATA_API_NEIGHBORHOOD_HEADER_BATCH_SIZE,
+  )) {
+    const facilityRows = await database
+      .select({
+        facilityId: neighborhoodFacilities.facilityId,
+        version: neighborhoodFacilities.neighborhoodVersion,
+      })
+      .from(neighborhoodFacilities)
+      .where(
+        and(
+          eq(neighborhoodFacilities.neighborhoodId, headers[0]!.id),
+          inArray(
+            neighborhoodFacilities.neighborhoodVersion,
+            headerBatch.map(({ version }) => version),
+          ),
+        ),
+      )
+      .orderBy(
+        desc(neighborhoodFacilities.neighborhoodVersion),
+        asc(neighborhoodFacilities.facilityId),
+      );
+    for (const row of facilityRows) {
+      const members = facilitiesByVersion.get(row.version) ?? [];
+      members.push(row.facilityId);
+      facilitiesByVersion.set(row.version, members);
+    }
+  }
+  return Object.freeze(
+    headers.map((header) =>
+      NeighborhoodSchema.parse({
+        ...header,
+        facilityIds: facilitiesByVersion.get(header.version) ?? [],
+        createdAt: dateIso(header.createdAt),
+      }),
+    ),
+  );
 }
 
 async function listNeighborhoods(
   database: AdminQueryDatabase,
   input: CapabilityInput<'list-neighborhoods'>,
 ): Promise<NeighborhoodPage> {
-  const offset = decodeOffset(input.cursor);
+  const filterDigest = paginationFilterDigest('neighborhoods', {});
+  const after = decodeKeysetCursor(
+    input.cursor,
+    'neighborhoods',
+    filterDigest,
+    'uuid',
+  );
   const headers = await database
     .select({ id: neighborhoodVersions.id })
     .from(neighborhoodVersions)
+    .where(
+      after === null ? undefined : gt(neighborhoodVersions.id, String(after)),
+    )
     .groupBy(neighborhoodVersions.id)
     .orderBy(asc(neighborhoodVersions.id))
-    .offset(offset)
     .limit(input.limit + 1);
-  const items: Neighborhood[] = [];
-  for (const { id } of headers.slice(0, input.limit)) {
-    const item = await latestNeighborhoodVersion(database, id);
-    if (item === null) {
-      throw conflict('Neighborhood version history is incomplete.');
-    }
-    items.push(item);
-  }
+  const items = await latestNeighborhoodsById(
+    database,
+    headers.slice(0, input.limit).map(({ id }) => id),
+  );
   return NeighborhoodPageSchema.parse({
     items,
-    pageInfo: pageInfo(offset, input.limit, headers.length),
+    pageInfo: keysetPageInfo(
+      'neighborhoods',
+      filterDigest,
+      input.limit,
+      headers.length,
+      items.at(-1)?.id,
+    ),
   });
 }
 
@@ -335,29 +653,46 @@ async function listNeighborhoodVersions(
   database: AdminQueryDatabase,
   input: CapabilityInput<'list-neighborhood-versions'>,
 ): Promise<NeighborhoodPage> {
-  const offset = decodeOffset(input.cursor);
+  const filterDigest = paginationFilterDigest('neighborhood-versions', {
+    neighborhoodId: input.neighborhoodId,
+  });
+  const after = decodeKeysetCursor(
+    input.cursor,
+    'neighborhood-versions',
+    filterDigest,
+    'number',
+  );
   const rows = await database
-    .select({ version: neighborhoodVersions.version })
+    .select({
+      createdAt: neighborhoodVersions.createdAt,
+      id: neighborhoodVersions.id,
+      name: neighborhoodVersions.name,
+      version: neighborhoodVersions.version,
+    })
     .from(neighborhoodVersions)
-    .where(eq(neighborhoodVersions.id, input.neighborhoodId))
+    .where(
+      and(
+        eq(neighborhoodVersions.id, input.neighborhoodId),
+        after === null
+          ? undefined
+          : lt(neighborhoodVersions.version, Number(after)),
+      ),
+    )
     .orderBy(desc(neighborhoodVersions.version))
-    .offset(offset)
     .limit(input.limit + 1);
-  const items: Neighborhood[] = [];
-  for (const { version } of rows.slice(0, input.limit)) {
-    const item = await neighborhoodByVersion(
-      database,
-      input.neighborhoodId,
-      version,
-    );
-    if (item === null) {
-      throw conflict('Neighborhood version history is incomplete.');
-    }
-    items.push(item);
-  }
+  const items = await neighborhoodVersionsFromHeaders(
+    database,
+    rows.slice(0, input.limit),
+  );
   return NeighborhoodPageSchema.parse({
     items,
-    pageInfo: pageInfo(offset, input.limit, rows.length),
+    pageInfo: keysetPageInfo(
+      'neighborhood-versions',
+      filterDigest,
+      input.limit,
+      rows.length,
+      items.at(-1)?.version,
+    ),
   });
 }
 
@@ -559,9 +894,22 @@ async function effectiveRosterSourceIds(
 async function listGroupSources(
   database: AdminQueryDatabase,
   input: CapabilityInput<'list-group-sources'>,
+  knownEffectiveSourceIds?: ReadonlySet<string>,
 ): Promise<GroupSourcePage> {
-  const offset = decodeOffset(input.cursor);
-  const effectiveSourceIds = await effectiveRosterSourceIds(database);
+  const filterDigest = paginationFilterDigest('group-sources', {
+    active: input.active,
+    facilityId: input.facilityId,
+    kind: input.kind,
+    purpose: input.purpose,
+  });
+  const after = decodeKeysetCursor(
+    input.cursor,
+    'group-sources',
+    filterDigest,
+    'uuid',
+  );
+  const effectiveSourceIds =
+    knownEffectiveSourceIds ?? (await effectiveRosterSourceIds(database));
   const conditions: SQL[] = [];
   if (input.kind !== null) conditions.push(eq(groupSources.kind, input.kind));
   if (input.purpose !== null) {
@@ -589,25 +937,30 @@ async function listGroupSources(
     );
     if (activeCondition !== undefined) conditions.push(activeCondition);
   }
+  if (after !== null) conditions.push(gt(groupSources.id, String(after)));
   const rows = await database
     .select()
     .from(groupSources)
     .where(conditions.length === 0 ? undefined : and(...conditions))
-    .orderBy(asc(groupSources.displayName), asc(groupSources.id))
-    .offset(offset)
+    .orderBy(asc(groupSources.id))
     .limit(input.limit + 1);
-  return GroupSourcePageSchema.parse({
-    items: rows
-      .slice(0, input.limit)
-      .map((row) =>
-        groupSourceFromRow(
-          row,
-          row.purpose === 'access'
-            ? row.active
-            : effectiveSourceIds.has(row.id),
-        ),
+  const items = rows
+    .slice(0, input.limit)
+    .map((row) =>
+      groupSourceFromRow(
+        row,
+        row.purpose === 'access' ? row.active : effectiveSourceIds.has(row.id),
       ),
-    pageInfo: pageInfo(offset, input.limit, rows.length),
+    );
+  return GroupSourcePageSchema.parse({
+    items,
+    pageInfo: keysetPageInfo(
+      'group-sources',
+      filterDigest,
+      input.limit,
+      rows.length,
+      items.at(-1)?.id,
+    ),
   });
 }
 
@@ -780,10 +1133,14 @@ async function refreshRosterSourceConfiguration(
 async function createGroupSource(
   database: AdminQueryDatabase,
   inputValue: CapabilityInput<'create-group-source'>,
+  actor: Actor,
 ): Promise<GroupSource> {
   const input = CreateGroupSourceInputSchema.parse(inputValue);
+  await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
   if (input.purpose !== 'access') {
     await lockRosterConfigurationPopulations(database);
+  } else if (input.active) {
+    await loadAccessSetMutationStateAfterLock(database, actor);
   }
   if (input.facilityId !== null) {
     const facility = await getFacility(database, input.facilityId);
@@ -821,12 +1178,18 @@ async function createGroupSource(
 async function updateGroupSource(
   database: AdminQueryDatabase,
   inputValue: CapabilityInput<'update-group-source'>,
+  actor: Actor,
 ): Promise<GroupSource> {
   const input = UpdateGroupSourceInputSchema.parse(inputValue);
+  let accessMutationState: AccessSetMutationState | null = null;
+  await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
   if (input.purpose !== 'access') {
     await lockRosterConfigurationPopulations(database);
-  } else if (!input.active) {
-    await lockAdminIdentity(database, 'admin-access-group-active-set');
+  } else {
+    accessMutationState = await loadAccessSetMutationStateAfterLock(
+      database,
+      actor,
+    );
   }
   const current = await getGroupSource(database, input.id, true);
   if (current === null) {
@@ -875,23 +1238,60 @@ async function updateGroupSource(
     });
     return replacement;
   }
-  if (current.active && !input.active) {
-    const activeAccessSources = await database
-      .select({ id: groupSources.id })
-      .from(groupSources)
-      .where(
-        and(
-          eq(groupSources.kind, 'google-group'),
-          eq(groupSources.purpose, 'access'),
-          eq(groupSources.active, true),
-        ),
-      )
-      .for('share');
-    if (activeAccessSources.every(({ id }) => id === current.id)) {
-      throw conflict(
-        'Configure another active access group before disabling the final access gate.',
-      );
+  if (accessMutationState === null) {
+    throw conflict('The access-group mutation state is unavailable.');
+  }
+  if (
+    input.purpose !== 'access' ||
+    input.kind !== 'google-group' ||
+    current.kind !== 'google-group'
+  ) {
+    throw conflict('The access-group variant is invalid.');
+  }
+  const locatorChanged =
+    current.googleGroupId !== input.googleGroupId ||
+    current.email !== input.email;
+  if (locatorChanged && current.googleGroupId === input.googleGroupId) {
+    throw conflict(
+      'Correcting an access email requires a new Google Group ID so the replacement has a distinct immutable identity.',
+    );
+  }
+  if (current.active && (locatorChanged || !input.active)) {
+    await assertReachableAdministratorRemains(
+      database,
+      accessMutationState,
+      current.id,
+    );
+  }
+  if (locatorChanged) {
+    await assertGroupIdentityAvailable(database, input, null);
+    const [replacementRow] = await database
+      .insert(groupSources)
+      .values({
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: input.displayName,
+        active: input.active,
+        googleGroupId: input.googleGroupId,
+        email: input.email,
+        fixtureKey: null,
+      })
+      .returning();
+    if (replacementRow === undefined) {
+      throw conflict('The replacement access group could not be created.');
     }
+    if (current.active) {
+      const [deactivated] = await database
+        .update(groupSources)
+        .set({ active: false })
+        .where(eq(groupSources.id, current.id))
+        .returning({ id: groupSources.id });
+      if (deactivated === undefined) {
+        throw conflict('The superseded access group could not be disabled.');
+      }
+    }
+    return groupSourceFromRow(replacementRow);
   }
   await assertGroupIdentityAvailable(database, input, input.id);
   const [row] = await database
@@ -899,9 +1299,9 @@ async function updateGroupSource(
     .set({
       displayName: input.displayName,
       active: input.active,
-      googleGroupId: input.kind === 'google-group' ? input.googleGroupId : null,
-      email: input.kind === 'google-group' ? input.email : null,
-      fixtureKey: input.kind === 'synthetic' ? input.fixtureKey : null,
+      googleGroupId: input.googleGroupId,
+      email: input.email,
+      fixtureKey: null,
     })
     .where(eq(groupSources.id, input.id))
     .returning();
@@ -1016,6 +1416,153 @@ async function latestAudienceConfig(
   return header === undefined
     ? null
     : audienceByVersion(database, header.id, header.version);
+}
+
+async function latestAudienceConfigs(
+  database: AdminQueryDatabase,
+  facilityIds: readonly string[],
+): Promise<readonly AudienceConfig[]> {
+  if (facilityIds.length === 0) return Object.freeze([]);
+  const lineageRows = await database
+    .select({
+      facilityId: audienceConfigurations.facilityId,
+      id: audienceConfigurations.id,
+    })
+    .from(audienceConfigurations)
+    .where(inArray(audienceConfigurations.facilityId, facilityIds))
+    .groupBy(audienceConfigurations.facilityId, audienceConfigurations.id)
+    .orderBy(
+      asc(audienceConfigurations.facilityId),
+      asc(audienceConfigurations.id),
+    );
+  const lineageByFacility = new Map<string, string>();
+  for (const row of lineageRows) {
+    const existing = lineageByFacility.get(row.facilityId);
+    if (existing !== undefined && existing !== row.id) {
+      throw conflict('The facility has conflicting audience lineages.');
+    }
+    lineageByFacility.set(row.facilityId, row.id);
+  }
+  if (lineageRows.length === 0) return Object.freeze([]);
+
+  const headers = await database
+    .selectDistinctOn([audienceConfigurations.facilityId], {
+      createdAt: audienceConfigurations.createdAt,
+      facilityId: audienceConfigurations.facilityId,
+      id: audienceConfigurations.id,
+      version: audienceConfigurations.version,
+    })
+    .from(audienceConfigurations)
+    .where(
+      inArray(audienceConfigurations.id, [
+        ...new Set(lineageRows.map(({ id }) => id)),
+      ]),
+    )
+    .orderBy(
+      asc(audienceConfigurations.facilityId),
+      desc(audienceConfigurations.version),
+    );
+  if (headers.length === 0) return Object.freeze([]);
+
+  const targetsByVersion = new Map<
+    string,
+    Array<AudienceConfig['targets'][number]>
+  >();
+  for (const headerBatch of chunks(
+    headers,
+    DATA_API_AUDIENCE_HEADER_BATCH_SIZE,
+  )) {
+    const targetRows = await database
+      .select({
+        audienceConfigId: audienceTargets.audienceConfigId,
+        audienceConfigVersion: audienceTargets.audienceConfigVersion,
+        neighborhoodId: audienceTargets.neighborhoodId,
+        neighborhoodVersion: audienceTargets.neighborhoodVersion,
+        ordinal: audienceTargets.ordinal,
+        sourceFacilityId: groupSources.facilityId,
+        sourceId: groupSources.id,
+        sourceKind: groupSources.kind,
+        sourcePurpose: groupSources.purpose,
+        targetFacilityId: audienceTargets.targetFacilityId,
+        targetKind: audienceTargets.targetKind,
+      })
+      .from(audienceTargets)
+      .leftJoin(
+        groupSources,
+        eq(audienceTargets.groupSourceId, groupSources.id),
+      )
+      .where(
+        or(
+          ...headerBatch.map((header) =>
+            and(
+              eq(audienceTargets.audienceConfigId, header.id),
+              eq(audienceTargets.audienceConfigVersion, header.version),
+            ),
+          ),
+        ),
+      )
+      .orderBy(
+        asc(audienceTargets.audienceConfigId),
+        asc(audienceTargets.audienceConfigVersion),
+        asc(audienceTargets.ordinal),
+      );
+    for (const row of targetRows) {
+      const key = `${row.audienceConfigId}:${row.audienceConfigVersion}`;
+      const targets = targetsByVersion.get(key) ?? [];
+      switch (row.targetKind) {
+        case 'building':
+          if (row.targetFacilityId === null) {
+            throw conflict('The building audience target is incomplete.');
+          }
+          targets.push({ kind: 'building', facilityId: row.targetFacilityId });
+          break;
+        case 'neighborhood':
+          if (row.neighborhoodId === null || row.neighborhoodVersion === null) {
+            throw conflict('The neighborhood audience target is incomplete.');
+          }
+          targets.push({
+            kind: 'neighborhood',
+            neighborhood: {
+              id: row.neighborhoodId,
+              version: row.neighborhoodVersion,
+            },
+          });
+          break;
+        case 'others':
+          if (
+            row.sourceId === null ||
+            row.sourceKind === null ||
+            row.sourcePurpose !== 'others' ||
+            row.sourceFacilityId !== null
+          ) {
+            throw conflict('The others audience source is unavailable.');
+          }
+          targets.push({
+            kind: 'others',
+            groupSourceRef: {
+              id: row.sourceId,
+              kind: row.sourceKind,
+              purpose: 'others',
+              facilityId: null,
+            },
+          });
+          break;
+      }
+      targetsByVersion.set(key, targets);
+    }
+  }
+
+  return Object.freeze(
+    headers.map((header) =>
+      AudienceConfigSchema.parse({
+        id: header.id,
+        facilityId: header.facilityId,
+        version: header.version,
+        targets: targetsByVersion.get(`${header.id}:${header.version}`) ?? [],
+        createdAt: dateIso(header.createdAt),
+      }),
+    ),
+  );
 }
 
 async function validateAudienceTargets(
@@ -1438,7 +1985,11 @@ export const createGroupSourceRegistration: ServerCapabilityRegistration<
       ? guard(context, null)
       : resolveExistingFacilityId(context, input.facilityId),
   async handler(input, context) {
-    const output = await createGroupSource(context.transaction.database, input);
+    const output = await createGroupSource(
+      context.transaction.database,
+      input,
+      context.invocation.actor,
+    );
     context.transaction.setAuditTarget({
       kind: 'configuration',
       id: output.id,
@@ -1483,7 +2034,11 @@ export const updateGroupSourceRegistration: ServerCapabilityRegistration<
     return source?.facilityId ?? null;
   },
   async handler(input, context) {
-    const output = await updateGroupSource(context.transaction.database, input);
+    const output = await updateGroupSource(
+      context.transaction.database,
+      input,
+      context.invocation.actor,
+    );
     context.transaction.setAuditTarget({
       kind: 'configuration',
       id: output.id,
@@ -1594,6 +2149,142 @@ export const createAudienceConfigVersionRegistration: ServerCapabilityRegistrati
   replayFacilityId: (output) => output.facilityId,
 };
 
+const ADMIN_FACILITY_CATALOG_LIMIT = 200;
+const ADMIN_NEIGHBORHOOD_CATALOG_LIMIT = 200;
+const ADMIN_GROUP_CATALOG_LIMIT = 500;
+// Aurora Data API rejects a response over 1 MiB. Neighborhoods can contain
+// 200 facilities and audiences can contain 500 targets, so fetch only compact
+// membership fields in conservative, sequential batches.
+const DATA_API_NEIGHBORHOOD_HEADER_BATCH_SIZE = 20;
+const DATA_API_AUDIENCE_HEADER_BATCH_SIZE = 2;
+
+function chunks<Item>(
+  items: readonly Item[],
+  size: number,
+): readonly (readonly Item[])[] {
+  const result: Item[][] = [];
+  for (let start = 0; start < items.length; start += size) {
+    result.push(items.slice(start, start + size));
+  }
+  return result;
+}
+
+export interface FacilitiesAdminProjection {
+  readonly facilities: FacilityPage;
+  readonly neighborhoods: NeighborhoodPage;
+  readonly buildingGroups: GroupSourcePage;
+  readonly othersGroups: GroupSourcePage;
+  readonly facilityOptions: readonly Facility[];
+  readonly neighborhoodOptions: readonly Neighborhood[];
+  readonly buildingGroupOptions: readonly GroupSource[];
+  readonly othersGroupOptions: readonly GroupSource[];
+  readonly audienceConfigs: readonly AudienceConfig[];
+}
+
+function requireCompleteCatalog<Item>(
+  page: Readonly<{
+    items: readonly Item[];
+    pageInfo: Readonly<{ hasMore: boolean }>;
+  }>,
+  label: string,
+): readonly Item[] {
+  if (page.pageInfo.hasMore) {
+    throw conflict(
+      `The complete ${label} option catalog exceeds the safe administrative bound.`,
+    );
+  }
+  return page.items;
+}
+
+async function facilitiesAdminProjection(
+  database: AdminQueryDatabase,
+  queries: Readonly<{
+    facilities: CapabilityInput<'list-facilities'>;
+    neighborhoods: CapabilityInput<'list-neighborhoods'>;
+    buildingGroups: CapabilityInput<'list-group-sources'>;
+    othersGroups: CapabilityInput<'list-group-sources'>;
+  }>,
+): Promise<FacilitiesAdminProjection> {
+  if (
+    queries.buildingGroups.purpose !== 'building' ||
+    queries.othersGroups.purpose !== 'others'
+  ) {
+    throw invalid('The facilities administration projection is invalid.');
+  }
+  const effectiveSourceIds = await effectiveRosterSourceIds(database);
+  const pagedFacilities = await listFacilities(database, queries.facilities);
+  const pagedNeighborhoods = await listNeighborhoods(
+    database,
+    queries.neighborhoods,
+  );
+  const pagedBuildingGroups = await listGroupSources(
+    database,
+    queries.buildingGroups,
+    effectiveSourceIds,
+  );
+  const pagedOthersGroups = await listGroupSources(
+    database,
+    queries.othersGroups,
+    effectiveSourceIds,
+  );
+  const completeFacilities = await listFacilities(database, {
+    includeInactive: true,
+    cursor: null,
+    limit: ADMIN_FACILITY_CATALOG_LIMIT,
+  });
+  const completeNeighborhoods = await listNeighborhoods(database, {
+    cursor: null,
+    limit: ADMIN_NEIGHBORHOOD_CATALOG_LIMIT,
+  });
+  const completeBuildingGroups = await listGroupSources(
+    database,
+    {
+      kind: null,
+      purpose: 'building',
+      facilityId: null,
+      active: null,
+      cursor: null,
+      limit: ADMIN_GROUP_CATALOG_LIMIT,
+    },
+    effectiveSourceIds,
+  );
+  const completeOthersGroups = await listGroupSources(
+    database,
+    {
+      kind: null,
+      purpose: 'others',
+      facilityId: null,
+      active: null,
+      cursor: null,
+      limit: ADMIN_GROUP_CATALOG_LIMIT,
+    },
+    effectiveSourceIds,
+  );
+  return Object.freeze({
+    facilities: pagedFacilities,
+    neighborhoods: pagedNeighborhoods,
+    buildingGroups: pagedBuildingGroups,
+    othersGroups: pagedOthersGroups,
+    facilityOptions: requireCompleteCatalog(completeFacilities, 'facility'),
+    neighborhoodOptions: requireCompleteCatalog(
+      completeNeighborhoods,
+      'neighborhood',
+    ),
+    buildingGroupOptions: requireCompleteCatalog(
+      completeBuildingGroups,
+      'building-group',
+    ),
+    othersGroupOptions: requireCompleteCatalog(
+      completeOthersGroups,
+      'others-group',
+    ),
+    audienceConfigs: await latestAudienceConfigs(
+      database,
+      pagedFacilities.items.map(({ id }) => id),
+    ),
+  });
+}
+
 export function createDefaultFacilityAdminStore(
   authenticated: AuthenticatedSession,
 ): AdminCapabilityStore {
@@ -1622,6 +2313,61 @@ function executionStore(
   store: AdminCapabilityStore | undefined,
 ): AdminCapabilityStore {
   return store ?? createDefaultFacilityAdminStore(authenticated);
+}
+
+export async function executeFacilitiesAdminProjection(
+  input: Readonly<{
+    authenticated: AuthenticatedSession;
+    store?: AdminCapabilityStore;
+    queries: Readonly<{
+      facilities: CapabilityInput<'list-facilities'>;
+      neighborhoods: CapabilityInput<'list-neighborhoods'>;
+      buildingGroups: CapabilityInput<'list-group-sources'>;
+      othersGroups: CapabilityInput<'list-group-sources'>;
+    }>;
+    metadata?: AdminQueryMetadata;
+  }>,
+): Promise<FacilitiesAdminProjection> {
+  const neighborhoodsQuery = ListNeighborhoodsInputSchema.parse(
+    input.queries.neighborhoods,
+  );
+  const buildingGroupsQuery = ListGroupSourcesInputSchema.parse(
+    input.queries.buildingGroups,
+  );
+  const othersGroupsQuery = ListGroupSourcesInputSchema.parse(
+    input.queries.othersGroups,
+  );
+  const holder: { projection?: FacilitiesAdminProjection } = {};
+  const registration: ServerCapabilityRegistration<
+    'list-facilities',
+    AdminCapabilityTransaction
+  > = {
+    ...listFacilitiesRegistration,
+    async handler(facilitiesQuery, context) {
+      const projection = await facilitiesAdminProjection(
+        context.transaction.database,
+        {
+          facilities: facilitiesQuery,
+          neighborhoods: neighborhoodsQuery,
+          buildingGroups: buildingGroupsQuery,
+          othersGroups: othersGroupsQuery,
+        },
+      );
+      holder.projection = projection;
+      return projection.facilities;
+    },
+  };
+  await executeAdminQueryCapability(
+    registration,
+    input.queries.facilities,
+    input.authenticated,
+    executionStore(input.authenticated, input.store),
+    input.metadata,
+  );
+  if (holder.projection === undefined) {
+    throw conflict('The facilities administration projection is unavailable.');
+  }
+  return holder.projection;
 }
 
 export const executeListFacilitiesCapability = (
