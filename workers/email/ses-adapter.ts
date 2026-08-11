@@ -473,12 +473,15 @@ export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
         // therefore safe and lets the shared processor schedule its bounded
         // retry as a new immutable attempt. If release itself fails, a stale
         // fence can only suppress this attempt; it cannot create a duplicate.
-        await this.#ledger
-          .release({
+        try {
+          await this.#ledger.release({
             ...claimRequest,
             leaseToken: claim.leaseToken,
-          })
-          .catch(() => undefined);
+          });
+        } catch {
+          // Preserve the provider classification even when a ledger method
+          // throws before returning a promise or rejects asynchronously.
+        }
         throw error;
       }
       if (
