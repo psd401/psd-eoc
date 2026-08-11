@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { PaginationCursorSchema } from './api';
 import { ActorSchema, InvocationSourceSchema } from './capability';
 import { EventIdSchema, EventSchema } from './event';
+import { EventTypeVersionIdSchema, TemplateModeSchema } from './event-type';
+import { FacilityIdSchema } from './facility';
 import {
   JournalEntryKindSchema,
   JournalEntrySchema,
@@ -113,17 +115,54 @@ export const SyncEventRoomInputSchema = z
 export type SyncEventRoomInput = z.infer<typeof SyncEventRoomInputSchema>;
 
 /**
- * Owns one coherent event-room snapshot and ordered journal delta. A null
- * event means the caller's already-rendered event projection remains current
- * for this page; it never means that authorization or event existence was
- * inferred client-side. `snapshotSequence` is the journal head observed in
- * the same database snapshot as the event projection and returned entries.
+ * Owns the trusted labels needed to render an event-room heading without a
+ * second, mutable configuration lookup. The event-type ID is the immutable
+ * version ID pinned by the event, not a latest-version pointer.
+ */
+export const EventRoomHeaderSchema = z
+  .object({
+    facility: z
+      .object({
+        id: FacilityIdSchema,
+        code: z
+          .string()
+          .trim()
+          .min(1)
+          .max(32)
+          .regex(/^[A-Z0-9-]+$/u),
+        name: z.string().trim().min(1).max(160),
+      })
+      .strict()
+      .readonly(),
+    eventType: z
+      .object({
+        id: EventTypeVersionIdSchema,
+        name: z.string().trim().min(1).max(160),
+        templateMode: TemplateModeSchema,
+      })
+      .strict()
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
+/** Trusted event-room heading inferred from its canonical schema. */
+export type EventRoomHeader = z.infer<typeof EventRoomHeaderSchema>;
+
+/**
+ * Owns one coherent event-room snapshot and ordered journal delta. The trusted
+ * header is present on every page and is read from the same database snapshot
+ * as the event and entries. A null event means the caller's already-rendered
+ * event projection remains current for this page; it never means that
+ * authorization or event existence was inferred client-side.
+ * `snapshotSequence` is the journal head observed in that same snapshot.
  * `cursor` is always the durable resume position (including at the live edge),
  * not nullable `pageInfo.nextCursor`; `hasMore` only controls immediate drain.
  */
 export const EventRoomSyncResultSchema = z
   .object({
     eventId: EventIdSchema,
+    header: EventRoomHeaderSchema,
     event: EventSchema.nullable(),
     entries: z.array(JournalEntryReadProjectionSchema).max(200).readonly(),
     cursor: PaginationCursorSchema,
@@ -137,6 +176,38 @@ export const EventRoomSyncResultSchema = z
         code: 'custom',
         message: 'Event-room projection must match the synchronized event.',
         path: ['event', 'id'],
+      });
+    }
+    if (
+      result.event !== null &&
+      result.header.facility.id !== result.event.facilityId
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Event-room facility heading must match the event.',
+        path: ['header', 'facility', 'id'],
+      });
+    }
+    if (
+      result.event !== null &&
+      result.header.eventType.id !== result.event.eventTypeVersion.id
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Event-room type heading must use the pinned event version.',
+        path: ['header', 'eventType', 'id'],
+      });
+    }
+    if (
+      result.event !== null &&
+      (result.header.eventType.templateMode !== result.event.templateMode ||
+        result.header.eventType.templateMode !==
+          result.event.eventTypeVersion.templateMode)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Event-room type heading must preserve event template mode.',
+        path: ['header', 'eventType', 'templateMode'],
       });
     }
 

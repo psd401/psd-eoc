@@ -13,7 +13,7 @@
     "format:check": "prettier --check package.json tsconfig.base.json eslint.config.mjs .prettierrc .github packages workers infra",
     "lint": "eslint .",
     "typecheck": "bun run --filter '*' typecheck",
-    "test": "if find packages workers infra -type f \\( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' \\) -print -quit | grep -q .; then bun test; else echo 'No tests have been added yet.'; fi",
+    "test": "if find packages workers infra -type f \\( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' \\) -print -quit | grep -q .; then bun test; else echo 'No tests have been added yet.'; fi && bun run --cwd packages/mobile test:native",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run test"
   },
   "devDependencies": {
