@@ -1290,6 +1290,7 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
   'set-channel-enabled': 'none',
   'issue-agent-api-key': 'none',
   'revoke-agent-api-key': 'none',
+  'create-lifecycle-consequence-preview': 'none',
 } as const satisfies Readonly<Record<string, CapabilitySafetyEffect>>);
 
 /**
@@ -1299,7 +1300,6 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
  */
 export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
   'create-activation-preview': 'none',
-  'create-lifecycle-consequence-preview': 'none',
   'get-prepared-activation': 'none',
   'get-current-session': 'none',
   'list-device-sessions': 'none',
@@ -1313,6 +1313,7 @@ export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
   'get-stale-roster-report': 'none',
   'list-active-events': 'none',
   'get-event': 'none',
+  'sync-event-room': 'none',
   'list-journal-entries': 'none',
   'search-journal-entries': 'none',
   'get-media-read-grant': 'none',

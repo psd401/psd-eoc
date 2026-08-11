@@ -1,6 +1,7 @@
+import type { FullConfig } from '@playwright/test';
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -15,7 +16,7 @@ import {
   type Event,
   type JournalEntry,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -40,10 +41,8 @@ import {
   digestWebSessionCredential,
 } from '../../../../lib/auth/session-cookie';
 import {
-  EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH,
-  EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH,
-  EVENT_ROOM_PLAYWRIGHT_STORAGE_STATE_PATH,
-  requireSyntheticEventRoomTestDatabaseUrl,
+  requireEventRoomPlaywrightRunContext,
+  type EventRoomPlaywrightRunContext,
 } from './test-database';
 
 const ACCESS_GROUP_ID = '16000000-0000-4000-8000-000000000110';
@@ -70,12 +69,22 @@ interface AccessFixture {
 }
 
 interface EventRoomFixture {
+  readonly continuationEventId: string;
+  readonly dialogFailureEventId: string;
   readonly historyEventId: string;
+  readonly invalidationEventId: string;
+  readonly journalEvidenceEventId: string;
   readonly keyboardEventId: string;
   readonly recoveryEventId: string;
   readonly recoveryOwnerEventId: string;
   readonly lifecycleEventId: string;
+  readonly malformedLifecycleEventId: string;
+  readonly newerPollEventId: string;
   readonly realDraftEventId: string;
+  readonly stalePollEventId: string;
+  readonly staleLifecycleResponseEventId: string;
+  readonly stalledMutationEventId: string;
+  readonly stalledPreviewEventId: string;
 }
 
 interface ChannelConfigurationState {
@@ -131,6 +140,50 @@ async function prepareDatabase(databaseUrl: string): Promise<void> {
     cwd: serverRoot,
     env: environment,
   });
+}
+
+async function createIsolatedDatabase(
+  context: EventRoomPlaywrightRunContext,
+): Promise<void> {
+  const admin = createDatabaseClient({
+    driver: 'postgres',
+    url: context.baseDatabaseUrl,
+    maxConnections: 1,
+  });
+  if (admin.driver !== 'postgres') {
+    throw new Error(
+      'Event-room Playwright database setup requires PostgreSQL.',
+    );
+  }
+  try {
+    await admin.db.execute(
+      sql.raw(`create database "${context.databaseName}"`),
+    );
+  } finally {
+    await admin.close();
+  }
+}
+
+async function dropIsolatedDatabase(
+  context: EventRoomPlaywrightRunContext,
+): Promise<void> {
+  const admin = createDatabaseClient({
+    driver: 'postgres',
+    url: context.baseDatabaseUrl,
+    maxConnections: 1,
+  });
+  if (admin.driver !== 'postgres') {
+    throw new Error(
+      'Event-room Playwright database cleanup requires PostgreSQL.',
+    );
+  }
+  try {
+    await admin.db.execute(
+      sql.raw(`drop database if exists "${context.databaseName}" with (force)`),
+    );
+  } finally {
+    await admin.close();
+  }
 }
 
 async function prepareAccessEvidence(
@@ -262,6 +315,7 @@ async function prepareAccessEvidence(
 async function issueSyntheticOperatorSession(
   connection: PostgresDatabaseConnection,
   fixture: AccessFixture,
+  storageStatePath: string,
 ): Promise<Extract<Actor, { kind: 'human' }>> {
   const now = new Date(
     Math.max(Date.now(), fixture.capturedAt.getTime() + 1_000),
@@ -339,7 +393,7 @@ async function issueSyntheticOperatorSession(
     new Date(result.session.expiresAt).getTime() / 1_000,
   );
   await writeFile(
-    EVENT_ROOM_PLAYWRIGHT_STORAGE_STATE_PATH,
+    storageStatePath,
     JSON.stringify({
       cookies: [
         {
@@ -537,10 +591,20 @@ async function prepareEventFixtures(
     });
   };
   const historyEvent = makeActiveEvent();
+  const invalidationEvent = makeActiveEvent();
+  const journalEvidenceEvent = makeActiveEvent();
   const keyboardEvent = makeActiveEvent();
   const recoveryEvent = makeActiveEvent();
   const recoveryOwnerEvent = makeActiveEvent();
   const lifecycleEvent = makeActiveEvent();
+  const continuationEvent = makeActiveEvent();
+  const stalePollEvent = makeActiveEvent();
+  const malformedLifecycleEvent = makeActiveEvent();
+  const newerPollEvent = makeActiveEvent();
+  const staleLifecycleResponseEvent = makeActiveEvent();
+  const dialogFailureEvent = makeActiveEvent();
+  const stalledMutationEvent = makeActiveEvent();
+  const stalledPreviewEvent = makeActiveEvent();
   const realDraftEvent = EventSchema.parse({
     id: randomUUID(),
     facilityId: FACILITY_ID,
@@ -588,10 +652,20 @@ async function prepareEventFixtures(
     });
   const journal = [
     ...makeHistory(historyEvent, 105),
+    ...makeHistory(invalidationEvent, 3),
+    ...makeHistory(journalEvidenceEvent, 3),
     ...makeHistory(keyboardEvent, 3),
     ...makeHistory(recoveryEvent, 3),
     ...makeHistory(recoveryOwnerEvent, 3),
     ...makeHistory(lifecycleEvent, 3),
+    ...makeHistory(continuationEvent, 3),
+    ...makeHistory(stalePollEvent, 3),
+    ...makeHistory(malformedLifecycleEvent, 3),
+    ...makeHistory(newerPollEvent, 3),
+    ...makeHistory(staleLifecycleResponseEvent, 3),
+    ...makeHistory(dialogFailureEvent, 3),
+    ...makeHistory(stalledMutationEvent, 3),
+    ...makeHistory(stalledPreviewEvent, 3),
   ];
 
   await database.transaction(async (transaction) => {
@@ -625,10 +699,20 @@ async function prepareEventFixtures(
       .values(
         [
           historyEvent,
+          invalidationEvent,
+          journalEvidenceEvent,
           keyboardEvent,
           recoveryEvent,
           recoveryOwnerEvent,
           lifecycleEvent,
+          continuationEvent,
+          stalePollEvent,
+          malformedLifecycleEvent,
+          newerPollEvent,
+          staleLifecycleResponseEvent,
+          dialogFailureEvent,
+          stalledMutationEvent,
+          stalledPreviewEvent,
           realDraftEvent,
         ].map(eventInsert),
       );
@@ -636,80 +720,113 @@ async function prepareEventFixtures(
   });
 
   return {
+    continuationEventId: continuationEvent.id,
+    dialogFailureEventId: dialogFailureEvent.id,
     historyEventId: historyEvent.id,
+    invalidationEventId: invalidationEvent.id,
+    journalEvidenceEventId: journalEvidenceEvent.id,
     keyboardEventId: keyboardEvent.id,
     recoveryEventId: recoveryEvent.id,
     recoveryOwnerEventId: recoveryOwnerEvent.id,
     lifecycleEventId: lifecycleEvent.id,
+    malformedLifecycleEventId: malformedLifecycleEvent.id,
+    newerPollEventId: newerPollEvent.id,
     realDraftEventId: realDraftEvent.id,
+    stalePollEventId: stalePollEvent.id,
+    staleLifecycleResponseEventId: staleLifecycleResponseEvent.id,
+    stalledMutationEventId: stalledMutationEvent.id,
+    stalledPreviewEventId: stalledPreviewEvent.id,
   };
 }
 
-export default async function globalSetup(): Promise<void> {
-  const databaseUrl = requireSyntheticEventRoomTestDatabaseUrl(
-    process.env.TEST_DATABASE_URL,
-  );
-  await rm(EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH, { force: true });
-  await prepareDatabase(databaseUrl);
-  const created = createDatabaseClient({
-    driver: 'postgres',
-    url: databaseUrl,
-    maxConnections: 2,
-  });
-  if (created.driver !== 'postgres') {
-    throw new Error('Event-room Playwright requires PostgreSQL.');
-  }
+export default async function globalSetup(config: FullConfig): Promise<void> {
+  const metadata = config.metadata as Readonly<Record<string, unknown>>;
+  const context = requireEventRoomPlaywrightRunContext(metadata.eventRoomRun);
+  let isolatedDatabaseCreated = false;
   try {
-    const originalChannelConfigurations: readonly ChannelConfigurationState[] =
-      await created.db
-        .select({
-          integrationId: channelConfigurations.integrationId,
-          enabled: channelConfigurations.enabled,
-          changedAt: channelConfigurations.changedAt,
-        })
-        .from(channelConfigurations)
-        .where(
-          inArray(channelConfigurations.integrationId, REQUIRED_INTEGRATIONS),
-        )
-        .then((rows) =>
-          rows.map((row) => ({
-            integrationId: row.integrationId,
-            enabled: row.enabled,
-            changedAt: row.changedAt.toISOString(),
-          })),
-        );
-    if (
-      originalChannelConfigurations.length !== REQUIRED_INTEGRATIONS.length ||
-      originalChannelConfigurations.some((configuration) =>
-        Boolean(configuration.enabled),
-      )
-    ) {
-      throw new Error(
-        'Event-room Playwright requires inert mocked channel configurations.',
-      );
+    await mkdir(context.runDirectory, { mode: 0o700, recursive: true });
+    await createIsolatedDatabase(context);
+    isolatedDatabaseCreated = true;
+    await prepareDatabase(context.databaseUrl);
+    const created = createDatabaseClient({
+      driver: 'postgres',
+      url: context.databaseUrl,
+      maxConnections: 2,
+    });
+    if (created.driver !== 'postgres') {
+      throw new Error('Event-room Playwright requires PostgreSQL.');
     }
-    await writeFile(
-      EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH,
-      JSON.stringify(originalChannelConfigurations),
-      { encoding: 'utf8', mode: 0o600 },
-    );
     try {
-      const access = await prepareAccessEvidence(created);
-      const actor = await issueSyntheticOperatorSession(created, access);
-      const fixture = await prepareEventFixtures(created, actor);
+      const originalChannelConfigurations: readonly ChannelConfigurationState[] =
+        await created.db
+          .select({
+            integrationId: channelConfigurations.integrationId,
+            enabled: channelConfigurations.enabled,
+            changedAt: channelConfigurations.changedAt,
+          })
+          .from(channelConfigurations)
+          .where(
+            inArray(channelConfigurations.integrationId, REQUIRED_INTEGRATIONS),
+          )
+          .then((rows) =>
+            rows.map((row) => ({
+              integrationId: row.integrationId,
+              enabled: row.enabled,
+              changedAt: row.changedAt.toISOString(),
+            })),
+          );
+      if (
+        originalChannelConfigurations.length !== REQUIRED_INTEGRATIONS.length ||
+        originalChannelConfigurations.some((configuration) =>
+          Boolean(configuration.enabled),
+        )
+      ) {
+        throw new Error(
+          'Event-room Playwright requires inert mocked channel configurations.',
+        );
+      }
       await writeFile(
-        EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH,
-        JSON.stringify(fixture),
+        context.channelStatePath,
+        JSON.stringify(originalChannelConfigurations),
         { encoding: 'utf8', mode: 0o600 },
       );
-    } catch (error) {
-      await restoreChannelConfigurations(
-        created,
-        originalChannelConfigurations,
-      );
-      throw error;
+      try {
+        const access = await prepareAccessEvidence(created);
+        const actor = await issueSyntheticOperatorSession(
+          created,
+          access,
+          context.storageStatePath,
+        );
+        const fixture = await prepareEventFixtures(created, actor);
+        await writeFile(context.fixturePath, JSON.stringify(fixture), {
+          encoding: 'utf8',
+          mode: 0o600,
+        });
+      } catch (error) {
+        await restoreChannelConfigurations(
+          created,
+          originalChannelConfigurations,
+        );
+        throw error;
+      }
+    } finally {
+      await created.close();
     }
-  } finally {
-    await created.close();
+  } catch (error) {
+    const cleanupErrors: unknown[] = [];
+    if (isolatedDatabaseCreated) {
+      try {
+        await dropIsolatedDatabase(context);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        'Event-room Playwright setup and disposable database cleanup both failed.',
+      );
+    }
+    throw error;
   }
 }

@@ -40,6 +40,7 @@ import type { AuthenticatedSession } from '../auth/sessions';
 
 /** Stable, non-sensitive engine failures mapped by REST and future MCP adapters. */
 export type CapabilityEngineReasonCode =
+  | 'CAPABILITY_INPUT_INVALID'
   | 'CAPABILITY_INVOCATION_DENIED'
   | 'CAPABILITY_SCOPE_DENIED'
   | 'CONFIRMATION_ALREADY_USED'
@@ -220,6 +221,11 @@ export interface CapabilityHandlerContext<
   resolvedFacilityId: string | null;
   safetyResolution: CapabilitySafetyResolution | null;
 }
+
+type CapabilityFailureAuditContext = Pick<
+  CapabilityHandlerContext<CapabilityEngineTransaction>,
+  'authorization' | 'invocation' | 'resolvedFacilityId' | 'safetyResolution'
+>;
 
 export function requireCapabilityAuthorization<
   Transaction extends CapabilityEngineTransaction,
@@ -465,6 +471,22 @@ function errorForUnknownFailure(error: unknown): CapabilityEngineError {
   );
 }
 
+function parseServerCapabilityInput<Id extends RegisteredCapabilityId>(
+  capabilityId: Id,
+  untrustedInput: unknown,
+): CapabilityInput<Id> {
+  try {
+    return parseCapabilityInput(capabilityId, untrustedInput);
+  } catch {
+    throw new CapabilityEngineError(
+      'VALIDATION_ERROR',
+      'CAPABILITY_INPUT_INVALID',
+      'The capability input is invalid.',
+      400,
+    );
+  }
+}
+
 function validateConfirmation(
   record: HumanConfirmationRecord,
   invocation: TrustedCapabilityInvocation,
@@ -537,7 +559,7 @@ function successAuditEvent(
 
 function failureAuditEvent(
   capabilityId: RegisteredCapabilityId,
-  context: CapabilityHandlerContext<CapabilityEngineTransaction>,
+  context: CapabilityFailureAuditContext,
   error: CapabilityEngineError,
 ): CapabilityAuditEvent {
   const actionIds =
@@ -752,10 +774,15 @@ export async function executeCapability<
 ): Promise<CapabilityOutput<Id>> {
   const invocation = validateTrustedInvocation(untrustedInvocation);
   const definition = defineCapability(registration.id);
-  const input = parseCapabilityInput(registration.id, untrustedInput);
-  let context: CapabilityHandlerContext<Transaction> | null = null;
+  let auditContext: CapabilityFailureAuditContext = {
+    invocation,
+    authorization: null,
+    resolvedFacilityId: null,
+    safetyResolution: null,
+  };
 
   try {
+    const input = parseServerCapabilityInput(registration.id, untrustedInput);
     return await store.transaction(async (transaction) => {
       const transactionContext: CapabilityHandlerContext<Transaction> = {
         invocation,
@@ -765,7 +792,7 @@ export async function executeCapability<
         resolvedFacilityId: null,
         safetyResolution: null,
       };
-      context = transactionContext;
+      auditContext = transactionContext;
       assertInvocationAllowed(registration.id, invocation);
 
       let idempotencyRecordId: string | null = null;
@@ -848,6 +875,24 @@ export async function executeCapability<
               'The original result facility evidence is inconsistent.',
               500,
             );
+          }
+          if (definition.auditPolicy === 'all-outcomes') {
+            await transaction.appendCapabilityAudit({
+              category:
+                invocation.actor.kind === 'agent'
+                  ? 'agent-access'
+                  : 'capability-execution',
+              action: registration.id,
+              actionIds: [],
+              confirmationId: null,
+              outcome: 'success',
+              actor: invocation.actor,
+              source: invocation.source,
+              facilityId,
+              requestId: invocation.requestId,
+              reasonCode: null,
+              occurredAt: invocation.serverTime,
+            });
           }
           return replay;
         }
@@ -947,23 +992,22 @@ export async function executeCapability<
         });
       }
 
-      await transaction.appendCapabilityAudit(
-        successAuditEvent(
-          registration.id,
-          transactionContext as CapabilityHandlerContext<CapabilityEngineTransaction>,
-        ),
-      );
+      if (definition.auditPolicy === 'all-outcomes') {
+        await transaction.appendCapabilityAudit(
+          successAuditEvent(
+            registration.id,
+            transactionContext as CapabilityHandlerContext<CapabilityEngineTransaction>,
+          ),
+        );
+      }
       return output;
     });
   } catch (error) {
     const engineError = errorForUnknownFailure(error);
-    if (context === null) {
-      throw engineError;
-    }
     try {
       const event = failureAuditEvent(
         registration.id,
-        context as CapabilityHandlerContext<CapabilityEngineTransaction>,
+        auditContext,
         engineError,
       );
       await store.appendCapabilityAudit(event);

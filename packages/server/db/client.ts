@@ -144,6 +144,35 @@ export type AwsDataApiDatabase = AwsDataApiPgDatabase<typeof databaseSchema>;
 /** A schema-aware database using either explicitly selected transport. */
 export type Database = PostgresDatabase | AwsDataApiDatabase;
 
+/**
+ * Rows returned by a raw Drizzle PostgreSQL query.
+ *
+ * postgres-js returns its row list directly. The RDS Data API adapter retains
+ * the AWS command response envelope and exposes mapped rows on `rows`.
+ */
+export type DatabaseExecuteResult<Row extends Record<string, unknown>> =
+  | Row[]
+  | Readonly<{ rows: Row[] }>;
+
+/**
+ * Schema-aware query surface shared by both configured transports.
+ *
+ * Drizzle query builders normalize their results across transports. Raw
+ * `execute`, however, has the transport-specific result shape modeled here.
+ */
+export type DatabaseQuery = Omit<PostgresDatabase, 'execute'> & {
+  execute<Row extends Record<string, unknown> = Record<string, unknown>>(
+    query: Parameters<PostgresDatabase['execute']>[0],
+  ): PromiseLike<DatabaseExecuteResult<Row>>;
+};
+
+/** Returns mapped rows from either supported raw Drizzle result shape. */
+export function databaseExecuteRows<Row extends Record<string, unknown>>(
+  result: DatabaseExecuteResult<Row>,
+): readonly Row[] {
+  return Array.isArray(result) ? result : result.rows;
+}
+
 /** A direct PostgreSQL connection and its idempotent lifecycle hook. */
 export interface PostgresDatabaseConnection {
   readonly driver: typeof POSTGRES_DRIVER;
