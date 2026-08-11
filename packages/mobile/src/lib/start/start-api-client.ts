@@ -1,0 +1,533 @@
+import {
+  ActivationPreviewSchema,
+  ApiErrorSchema,
+  CreateActivationPreviewInputSchema,
+  EventIdSchema,
+  EventPageSchema,
+  EventSchema,
+  EventTypePageSchema,
+  EventTypeVersionSchema,
+  FacilityPageSchema,
+  IdempotencyKeySchema,
+  JoinEventResultSchema,
+  StartEventInputSchema,
+  StartEventResultSchema,
+  type ActivationPreview,
+  type ApiErrorCode,
+  type CreateActivationPreviewInput,
+  type Event,
+  type EventTypeListItem,
+  type Facility,
+  type JoinEventResult,
+  type StartEventResult,
+} from '@psd-eoc/contracts';
+
+import type { MobileAuthenticatedRequest } from '../auth/auth-controller';
+import { OfflineMutationDeniedError } from '../auth/auth-errors';
+
+export type StartAuthenticatedRequest = MobileAuthenticatedRequest;
+
+export interface StartHomeActiveEvent {
+  readonly event: Event;
+  readonly facilityName: string;
+  readonly eventTypeName: string;
+}
+
+export interface StartHomeData {
+  readonly facilities: readonly Facility[];
+  readonly eventTypes: readonly EventTypeListItem[];
+  readonly activeEvents: readonly StartHomeActiveEvent[];
+}
+
+/** Public-safe failure metadata; callers must never automatically retry a mutation. */
+export class StartClientError extends Error {
+  public constructor(
+    message: string,
+    public readonly retryable: boolean,
+    public readonly outcomeUnknown: boolean,
+    public readonly code: ApiErrorCode | null = null,
+    public readonly requestId: string | null = null,
+  ) {
+    super(message);
+    this.name = 'StartClientError';
+  }
+}
+
+interface Schema<Output> {
+  parse(value: unknown): Output;
+}
+
+interface ParsedPage<Item> {
+  readonly items: readonly Item[];
+  readonly pageInfo: Readonly<{
+    readonly hasMore: boolean;
+    readonly nextCursor: string | null;
+  }>;
+}
+
+type RequestKind = 'query' | 'preview' | 'mutation';
+
+const MAX_PAGES_PER_COLLECTION = 100;
+const START_QUERY_TIMEOUT_MS = 10_000;
+const START_MUTATION_TIMEOUT_MS = 20_000;
+
+function requestFailure(kind: RequestKind, message?: string): StartClientError {
+  if (kind === 'mutation') {
+    return new StartClientError(
+      message ??
+        'The server outcome is unknown. Nothing will retry automatically. Check active events before making a fresh decision.',
+      false,
+      true,
+    );
+  }
+  if (kind === 'preview') {
+    return new StartClientError(
+      message ??
+        'PSD EOC could not load the consequence preview. No event was started and no notification was queued.',
+      true,
+      false,
+    );
+  }
+  return new StartClientError(
+    message ??
+      'PSD EOC could not load the current start information. No event was started and no notification was queued.',
+    true,
+    false,
+  );
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+async function executeJsonRequest<Output>(
+  request: StartAuthenticatedRequest,
+  input: Parameters<StartAuthenticatedRequest>[0],
+  schema: Schema<Output>,
+  kind: RequestKind,
+): Promise<Output> {
+  let response: Response;
+  try {
+    response = await request(input);
+  } catch (error) {
+    if (error instanceof OfflineMutationDeniedError || isAbortError(error)) {
+      throw error;
+    }
+    throw requestFailure(kind);
+  }
+
+  let payload: unknown;
+  try {
+    payload = (await response.json()) as unknown;
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    const outcomeUnknown =
+      kind === 'mutation' && (response.ok || response.status >= 500);
+    throw new StartClientError(
+      kind === 'mutation'
+        ? outcomeUnknown
+          ? 'PSD EOC received an unreadable server response. Treat the outcome as unresolved; no automatic retry will occur.'
+          : 'The request was not accepted. Check active events before trying again.'
+        : kind === 'preview'
+          ? 'PSD EOC received an unreadable consequence preview. No event was started and no notification was queued.'
+          : 'PSD EOC received unreadable start information. No event was started and no notification was queued.',
+      kind !== 'mutation',
+      outcomeUnknown,
+    );
+  }
+
+  if (!response.ok) {
+    const parsedError = ApiErrorSchema.safeParse(payload);
+    const outcomeUnknown = kind === 'mutation' && response.status >= 500;
+    throw new StartClientError(
+      parsedError.success
+        ? parsedError.data.message
+        : 'The request was not accepted. Review the current event state before trying again.',
+      !outcomeUnknown && parsedError.success && parsedError.data.retryable,
+      outcomeUnknown,
+      parsedError.success ? parsedError.data.code : null,
+      parsedError.success ? parsedError.data.requestId : null,
+    );
+  }
+
+  try {
+    return schema.parse(payload);
+  } catch {
+    throw requestFailure(
+      kind,
+      kind === 'mutation'
+        ? 'PSD EOC returned an invalid success response. Treat the outcome as unresolved; no automatic retry will occur.'
+        : kind === 'preview'
+          ? 'PSD EOC returned an invalid consequence preview. No event was started and no notification was queued.'
+          : 'PSD EOC returned invalid start information. No event was started and no notification was queued.',
+    );
+  }
+}
+
+function timeoutFailure(kind: RequestKind): StartClientError {
+  if (kind === 'mutation') {
+    return requestFailure(
+      kind,
+      'The request timed out, so the server outcome is unknown. Nothing will retry automatically. Check active events before making a fresh decision.',
+    );
+  }
+  return requestFailure(
+    kind,
+    kind === 'preview'
+      ? 'The consequence preview timed out. No event was started and no notification was queued.'
+      : 'Loading the current start information timed out. No event was started and no notification was queued.',
+  );
+}
+
+async function requestJson<Output>(
+  request: StartAuthenticatedRequest,
+  input: Parameters<StartAuthenticatedRequest>[0],
+  schema: Schema<Output>,
+  kind: RequestKind,
+): Promise<Output> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(
+    () => {
+      timedOut = true;
+      controller.abort();
+    },
+    kind === 'mutation' ? START_MUTATION_TIMEOUT_MS : START_QUERY_TIMEOUT_MS,
+  );
+  try {
+    return await executeJsonRequest(
+      request,
+      { ...input, signal: controller.signal },
+      schema,
+      kind,
+    );
+  } catch (error) {
+    if (timedOut) {
+      throw timeoutFailure(kind);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function pagePath(firstPath: string, cursor: string): string {
+  const separator = firstPath.includes('?') ? '&' : '?';
+  return `${firstPath}${separator}cursor=${encodeURIComponent(cursor)}`;
+}
+
+async function loadAllPages<Item>(
+  request: StartAuthenticatedRequest,
+  firstPath: string,
+  schema: Schema<ParsedPage<Item>>,
+): Promise<readonly Item[]> {
+  const items: Item[] = [];
+  const seenCursors = new Set<string>();
+  let path = firstPath;
+
+  for (
+    let pageNumber = 0;
+    pageNumber < MAX_PAGES_PER_COLLECTION;
+    pageNumber += 1
+  ) {
+    const page = await requestJson(
+      request,
+      { operation: 'query', method: 'GET', path },
+      schema,
+      'query',
+    );
+    items.push(...page.items);
+    if (!page.pageInfo.hasMore) {
+      return Object.freeze(items);
+    }
+    const cursor = page.pageInfo.nextCursor;
+    if (cursor === null || seenCursors.has(cursor)) {
+      throw requestFailure(
+        'query',
+        'PSD EOC returned an invalid pagination response. No event was started and no notification was queued.',
+      );
+    }
+    seenCursors.add(cursor);
+    path = pagePath(firstPath, cursor);
+  }
+
+  throw requestFailure(
+    'query',
+    'PSD EOC returned too many start-information pages. No event was started and no notification was queued.',
+  );
+}
+
+function fallbackEventTypeName(event: Event): string {
+  if (event.templateMode === 'real') {
+    return 'Real incident';
+  }
+  return event.kind === 'test' ? 'Synthetic test' : 'Practice drill';
+}
+
+async function historicalEventTypeName(
+  request: StartAuthenticatedRequest,
+  event: Event,
+): Promise<string> {
+  try {
+    const version = await requestJson(
+      request,
+      {
+        operation: 'query',
+        method: 'GET',
+        path: `/event-types/api?operation=version&eventTypeVersionId=${encodeURIComponent(event.eventTypeVersion.id)}`,
+      },
+      EventTypeVersionSchema,
+      'query',
+    );
+    return version.id === event.eventTypeVersion.id &&
+      version.templateMode === event.templateMode
+      ? version.name
+      : fallbackEventTypeName(event);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    return fallbackEventTypeName(event);
+  }
+}
+
+/** Loads only facility-authorized start choices and active events. */
+export async function loadStartHomeData(
+  request: StartAuthenticatedRequest,
+): Promise<StartHomeData> {
+  const [facilities, eventTypes, activeEvents] = await Promise.all([
+    loadAllPages<Facility>(
+      request,
+      '/api/mobile/start/facilities',
+      FacilityPageSchema,
+    ),
+    loadAllPages<EventTypeListItem>(
+      request,
+      '/event-types/api?operation=list&enabled=true',
+      EventTypePageSchema,
+    ),
+    loadAllPages<Event>(request, '/api/events', EventPageSchema),
+  ]);
+
+  const facilityNames = new Map(
+    facilities.map((facility) => [facility.id, facility.name] as const),
+  );
+  const versionNames = new Map(
+    eventTypes.map(
+      (item) => [item.latestVersion.id, item.latestVersion.name] as const,
+    ),
+  );
+  const missingVersions = new Map<string, Event>();
+  for (const event of activeEvents) {
+    if (!versionNames.has(event.eventTypeVersion.id)) {
+      missingVersions.set(event.eventTypeVersion.id, event);
+    }
+  }
+  await Promise.all(
+    [...missingVersions.values()].map(async (event) => {
+      versionNames.set(
+        event.eventTypeVersion.id,
+        await historicalEventTypeName(request, event),
+      );
+    }),
+  );
+
+  return Object.freeze({
+    facilities,
+    eventTypes,
+    activeEvents: Object.freeze(
+      activeEvents.map((event) =>
+        Object.freeze({
+          event,
+          facilityName:
+            facilityNames.get(event.facilityId) ?? 'Authorized facility',
+          eventTypeName:
+            versionNames.get(event.eventTypeVersion.id) ??
+            fallbackEventTypeName(event),
+        }),
+      ),
+    ),
+  });
+}
+
+function sameVersion(
+  left: ActivationPreview['eventTypeVersion'],
+  right: ActivationPreview['eventTypeVersion'],
+): boolean {
+  return left.id === right.id && left.templateMode === right.templateMode;
+}
+
+/** Creates a non-mutating server consequence preview and binds it to the selection. */
+export async function createPreview(
+  request: StartAuthenticatedRequest,
+  input: CreateActivationPreviewInput,
+): Promise<ActivationPreview> {
+  const selection = CreateActivationPreviewInputSchema.parse(input);
+  const preview = await requestJson(
+    request,
+    {
+      operation: 'query',
+      method: 'POST',
+      path: '/api/mobile/start/preview',
+      body: JSON.stringify(selection),
+    },
+    ActivationPreviewSchema,
+    'preview',
+  );
+  if (
+    preview.facilityId !== selection.facilityId ||
+    preview.kind !== selection.kind ||
+    preview.templateMode !== selection.templateMode ||
+    preview.rosterPopulation !== selection.rosterPopulation ||
+    !sameVersion(preview.eventTypeVersion, selection.eventTypeVersion)
+  ) {
+    throw requestFailure(
+      'preview',
+      'PSD EOC returned a consequence preview that does not match your selection. No event was started and no notification was queued.',
+    );
+  }
+  return preview;
+}
+
+function structurallyEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => structurallyEqual(value, right[index]))
+    );
+  }
+  if (
+    typeof left !== 'object' ||
+    left === null ||
+    typeof right !== 'object' ||
+    right === null
+  ) {
+    return false;
+  }
+  const leftRecord = left as Readonly<Record<string, unknown>>;
+  const rightRecord = right as Readonly<Record<string, unknown>>;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] &&
+        structurallyEqual(leftRecord[key], rightRecord[key]),
+    )
+  );
+}
+
+function activationMatchesPreview(
+  result: StartEventResult,
+  preview: ActivationPreview,
+  idempotencyKey: string,
+): boolean {
+  const event = result.event;
+  const authorization = event.activationAuthorization;
+  const intent = result.notificationIntent;
+  return (
+    event.facilityId === preview.facilityId &&
+    event.kind === preview.kind &&
+    event.templateMode === preview.templateMode &&
+    sameVersion(event.eventTypeVersion, preview.eventTypeVersion) &&
+    event.rosterSnapshotId === preview.rosterSnapshotId &&
+    event.rosterPopulation === preview.rosterPopulation &&
+    event.status === 'active' &&
+    result.transition.idempotencyKey === idempotencyKey &&
+    authorization !== null &&
+    authorization.activationPreviewId === preview.id &&
+    authorization.consequenceDigest === preview.consequenceDigest &&
+    (authorization.kind !== 'human-confirmed' ||
+      authorization.preparedActivationId === null) &&
+    result.preparedActivationConsumption === null &&
+    intent !== null &&
+    intent.eventId === event.id &&
+    intent.eventKind === preview.kind &&
+    intent.templateMode === preview.templateMode &&
+    intent.purpose === 'activation' &&
+    sameVersion(intent.eventTypeVersion, preview.eventTypeVersion) &&
+    intent.rosterSnapshotId === preview.rosterSnapshotId &&
+    intent.rosterPopulation === preview.rosterPopulation &&
+    structurallyEqual(intent.audienceConfig, preview.audienceConfig) &&
+    structurallyEqual(intent.channels, preview.channels)
+  );
+}
+
+/** Executes one explicit human activation; failures are never retried here. */
+export async function activate(
+  request: StartAuthenticatedRequest,
+  previewInput: ActivationPreview,
+  idempotencyKeyInput: string,
+): Promise<StartEventResult> {
+  const preview = ActivationPreviewSchema.parse(previewInput);
+  const idempotencyKey = IdempotencyKeySchema.parse(idempotencyKeyInput);
+  const body = StartEventInputSchema.parse({
+    source: 'activation-preview',
+    activationPreviewId: preview.id,
+    activeEventDecision: {
+      decision: 'start-new',
+      activeEventIdsSeen: preview.activeEventIds,
+    },
+  });
+  const result = await requestJson(
+    request,
+    {
+      operation: 'mutation',
+      method: 'POST',
+      path: '/api/mobile/start/activate',
+      body: JSON.stringify(body),
+      idempotencyKey,
+    },
+    StartEventResultSchema,
+    'mutation',
+  );
+  if (!activationMatchesPreview(result, preview, idempotencyKey)) {
+    throw requestFailure(
+      'mutation',
+      'PSD EOC returned an event that does not match the confirmed preview. Treat the outcome as unresolved; no automatic retry will occur.',
+    );
+  }
+  return result;
+}
+
+/** Joins exactly one selected active event and never creates a notification intent. */
+export async function join(
+  request: StartAuthenticatedRequest,
+  expectedEventInput: Event,
+  idempotencyKeyInput: string,
+): Promise<JoinEventResult> {
+  const expectedEvent = EventSchema.parse(expectedEventInput);
+  const eventId = EventIdSchema.parse(expectedEvent.id);
+  const idempotencyKey = IdempotencyKeySchema.parse(idempotencyKeyInput);
+  const result = await requestJson(
+    request,
+    {
+      operation: 'mutation',
+      method: 'POST',
+      path: `/api/events/${encodeURIComponent(eventId)}/join`,
+      body: '{}',
+      idempotencyKey,
+    },
+    JoinEventResultSchema,
+    'mutation',
+  );
+  if (
+    result.event.id !== eventId ||
+    result.event.status !== 'active' ||
+    !structurallyEqual(result.event, expectedEvent)
+  ) {
+    throw requestFailure(
+      'mutation',
+      'PSD EOC returned a joined event whose identity or classification does not match your choice. Treat the outcome as unresolved; no automatic retry will occur.',
+    );
+  }
+  return result;
+}
