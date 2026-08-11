@@ -24,7 +24,9 @@ const PLAYWRIGHT_CHILD_TIMEOUT_MS = 30 * 60_000;
 const PLAYWRIGHT_CHILD_TERMINATION_GRACE_MS = 15_000;
 const PLAYWRIGHT_OUTPUT_DRAIN_TIMEOUT_MS = 15_000;
 const BROWSER_GATE_CLEANUP_BACKSTOP_MS = 2 * 60_000;
+const MAX_BROWSER_SHARD_START_DELAY_MS = 60_000;
 const BROWSER_GATE_TIMEOUT_MS =
+  MAX_BROWSER_SHARD_START_DELAY_MS +
   PLAYWRIGHT_CHILD_TIMEOUT_MS +
   PLAYWRIGHT_CHILD_TERMINATION_GRACE_MS +
   PLAYWRIGHT_OUTPUT_DRAIN_TIMEOUT_MS +
@@ -86,7 +88,7 @@ const BROWSER_SHARDS: readonly BrowserShard[] = Object.freeze([
   Object.freeze({
     label: 'shard 2/2',
     cliArguments: Object.freeze(['--fully-parallel', '--shard=2/2']),
-    startDelayMs: 60_000,
+    startDelayMs: MAX_BROWSER_SHARD_START_DELAY_MS,
   }),
 ]);
 
@@ -334,8 +336,16 @@ describe('event-room Playwright gate', () => {
       ['--fully-parallel', '--shard=2/2'],
     ]);
     expect(BROWSER_SHARDS.map((shard) => shard.startDelayMs)).toEqual([
-      0, 60_000,
+      0,
+      MAX_BROWSER_SHARD_START_DELAY_MS,
     ]);
+    expect(BROWSER_GATE_TIMEOUT_MS).toBe(
+      Math.max(...BROWSER_SHARDS.map((shard) => shard.startDelayMs)) +
+        PLAYWRIGHT_CHILD_TIMEOUT_MS +
+        PLAYWRIGHT_CHILD_TERMINATION_GRACE_MS +
+        PLAYWRIGHT_OUTPUT_DRAIN_TIMEOUT_MS +
+        BROWSER_GATE_CLEANUP_BACKSTOP_MS,
+    );
   });
 
   test('cleanup proves server stop before database removal and fails closed on stop-proof failure', async () => {
