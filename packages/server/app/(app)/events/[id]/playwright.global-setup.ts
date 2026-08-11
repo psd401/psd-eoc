@@ -40,10 +40,7 @@ import {
   createDrizzleInitialWebSessionStore,
   digestWebSessionCredential,
 } from '../../../../lib/auth/session-cookie';
-import {
-  createOwnedEventRoomPlaywrightDatabase,
-  dropOwnedEventRoomPlaywrightDatabase,
-} from './playwright-database';
+import { createOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import { requireEventRoomPlaywrightRunContext } from './test-database';
 
 const ACCESS_GROUP_ID = '16000000-0000-4000-8000-000000000110';
@@ -85,10 +82,12 @@ interface EventRoomFixture {
   readonly mismatchedTransitionEventId: string;
   readonly newerPollEventId: string;
   readonly paginatedDialogEventId: string;
+  readonly paginatedLifecycleEventId: string;
   readonly pendingDialogEventId: string;
   readonly previewRetryEventId: string;
   readonly realDraftEventId: string;
   readonly rejectedDialogRaceEventId: string;
+  readonly rejectedLifecycleDialogEventId: string;
   readonly stalePollEventId: string;
   readonly staleLifecycleResponseEventId: string;
   readonly stalledMutationEventId: string;
@@ -569,9 +568,11 @@ async function prepareEventFixtures(
   const mismatchedTransitionEvent = makeActiveEvent();
   const newerPollEvent = makeActiveEvent();
   const paginatedDialogEvent = makeActiveEvent();
+  const paginatedLifecycleEvent = makeActiveEvent();
   const pendingDialogEvent = makeActiveEvent();
   const previewRetryEvent = makeActiveEvent();
   const rejectedDialogRaceEvent = makeActiveEvent();
+  const rejectedLifecycleDialogEvent = makeActiveEvent();
   const staleLifecycleResponseEvent = makeActiveEvent();
   const dialogFailureEvent = makeActiveEvent();
   const stalledMutationEvent = makeActiveEvent();
@@ -637,9 +638,11 @@ async function prepareEventFixtures(
     ...makeHistory(mismatchedTransitionEvent, 3),
     ...makeHistory(newerPollEvent, 3),
     ...makeHistory(paginatedDialogEvent, 3),
+    ...makeHistory(paginatedLifecycleEvent, 3),
     ...makeHistory(pendingDialogEvent, 3),
     ...makeHistory(previewRetryEvent, 3),
     ...makeHistory(rejectedDialogRaceEvent, 3),
+    ...makeHistory(rejectedLifecycleDialogEvent, 3),
     ...makeHistory(staleLifecycleResponseEvent, 3),
     ...makeHistory(dialogFailureEvent, 3),
     ...makeHistory(stalledMutationEvent, 3),
@@ -691,9 +694,11 @@ async function prepareEventFixtures(
           mismatchedTransitionEvent,
           newerPollEvent,
           paginatedDialogEvent,
+          paginatedLifecycleEvent,
           pendingDialogEvent,
           previewRetryEvent,
           rejectedDialogRaceEvent,
+          rejectedLifecycleDialogEvent,
           staleLifecycleResponseEvent,
           dialogFailureEvent,
           stalledMutationEvent,
@@ -720,10 +725,12 @@ async function prepareEventFixtures(
     mismatchedTransitionEventId: mismatchedTransitionEvent.id,
     newerPollEventId: newerPollEvent.id,
     paginatedDialogEventId: paginatedDialogEvent.id,
+    paginatedLifecycleEventId: paginatedLifecycleEvent.id,
     pendingDialogEventId: pendingDialogEvent.id,
     previewRetryEventId: previewRetryEvent.id,
     realDraftEventId: realDraftEvent.id,
     rejectedDialogRaceEventId: rejectedDialogRaceEvent.id,
+    rejectedLifecycleDialogEventId: rejectedLifecycleDialogEvent.id,
     stalePollEventId: stalePollEvent.id,
     staleLifecycleResponseEventId: staleLifecycleResponseEvent.id,
     stalledMutationEventId: stalledMutationEvent.id,
@@ -734,91 +741,79 @@ async function prepareEventFixtures(
 export default async function globalSetup(config: FullConfig): Promise<void> {
   const metadata = config.metadata as Readonly<Record<string, unknown>>;
   const context = requireEventRoomPlaywrightRunContext(metadata.eventRoomRun);
-  let isolatedDatabaseCreated = false;
+  await mkdir(context.runDirectory, { mode: 0o700, recursive: true });
+  await createOwnedEventRoomPlaywrightDatabase(context);
+  if (
+    process.env.PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SETUP_FAILURE_RUN_ID ===
+    context.runId
+  ) {
+    throw new Error(
+      'Synthetic event-room Playwright setup failure after database creation.',
+    );
+  }
+  await prepareDatabase(context.databaseUrl);
+  const created = createDatabaseClient({
+    driver: 'postgres',
+    url: context.databaseUrl,
+    maxConnections: 2,
+  });
+  if (created.driver !== 'postgres') {
+    throw new Error('Event-room Playwright requires PostgreSQL.');
+  }
   try {
-    await mkdir(context.runDirectory, { mode: 0o700, recursive: true });
-    await createOwnedEventRoomPlaywrightDatabase(context);
-    isolatedDatabaseCreated = true;
-    await prepareDatabase(context.databaseUrl);
-    const created = createDatabaseClient({
-      driver: 'postgres',
-      url: context.databaseUrl,
-      maxConnections: 2,
-    });
-    if (created.driver !== 'postgres') {
-      throw new Error('Event-room Playwright requires PostgreSQL.');
-    }
-    try {
-      const originalChannelConfigurations: readonly ChannelConfigurationState[] =
-        await created.db
-          .select({
-            integrationId: channelConfigurations.integrationId,
-            enabled: channelConfigurations.enabled,
-            changedAt: channelConfigurations.changedAt,
-          })
-          .from(channelConfigurations)
-          .where(
-            inArray(channelConfigurations.integrationId, REQUIRED_INTEGRATIONS),
-          )
-          .then((rows) =>
-            rows.map((row) => ({
-              integrationId: row.integrationId,
-              enabled: row.enabled,
-              changedAt: row.changedAt.toISOString(),
-            })),
-          );
-      if (
-        originalChannelConfigurations.length !== REQUIRED_INTEGRATIONS.length ||
-        originalChannelConfigurations.some((configuration) =>
-          Boolean(configuration.enabled),
+    const originalChannelConfigurations: readonly ChannelConfigurationState[] =
+      await created.db
+        .select({
+          integrationId: channelConfigurations.integrationId,
+          enabled: channelConfigurations.enabled,
+          changedAt: channelConfigurations.changedAt,
+        })
+        .from(channelConfigurations)
+        .where(
+          inArray(channelConfigurations.integrationId, REQUIRED_INTEGRATIONS),
         )
-      ) {
-        throw new Error(
-          'Event-room Playwright requires inert mocked channel configurations.',
+        .then((rows) =>
+          rows.map((row) => ({
+            integrationId: row.integrationId,
+            enabled: row.enabled,
+            changedAt: row.changedAt.toISOString(),
+          })),
         );
-      }
-      await writeFile(
-        context.channelStatePath,
-        JSON.stringify(originalChannelConfigurations),
-        { encoding: 'utf8', mode: 0o600 },
-      );
-      try {
-        const access = await prepareAccessEvidence(created);
-        const actor = await issueSyntheticOperatorSession(
-          created,
-          access,
-          context.storageStatePath,
-        );
-        const fixture = await prepareEventFixtures(created, actor);
-        await writeFile(context.fixturePath, JSON.stringify(fixture), {
-          encoding: 'utf8',
-          mode: 0o600,
-        });
-      } catch (error) {
-        await restoreChannelConfigurations(
-          created,
-          originalChannelConfigurations,
-        );
-        throw error;
-      }
-    } finally {
-      await created.close();
-    }
-  } catch (error) {
-    const cleanupErrors: unknown[] = [];
-    if (isolatedDatabaseCreated) {
-      try {
-        await dropOwnedEventRoomPlaywrightDatabase(context);
-      } catch (cleanupError) {
-        cleanupErrors.push(cleanupError);
-      }
-    }
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError(
-        [error, ...cleanupErrors],
-        'Event-room Playwright setup and disposable database cleanup both failed.',
+    if (
+      originalChannelConfigurations.length !== REQUIRED_INTEGRATIONS.length ||
+      originalChannelConfigurations.some((configuration) =>
+        Boolean(configuration.enabled),
+      )
+    ) {
+      throw new Error(
+        'Event-room Playwright requires inert mocked channel configurations.',
       );
     }
-    throw error;
+    await writeFile(
+      context.channelStatePath,
+      JSON.stringify(originalChannelConfigurations),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    try {
+      const access = await prepareAccessEvidence(created);
+      const actor = await issueSyntheticOperatorSession(
+        created,
+        access,
+        context.storageStatePath,
+      );
+      const fixture = await prepareEventFixtures(created, actor);
+      await writeFile(context.fixturePath, JSON.stringify(fixture), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+    } catch (error) {
+      await restoreChannelConfigurations(
+        created,
+        originalChannelConfigurations,
+      );
+      throw error;
+    }
+  } finally {
+    await created.close();
   }
 }

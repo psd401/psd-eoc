@@ -8,6 +8,7 @@ import { dropOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import {
   cleanupEventRoomPlaywrightRunAfterChildExit,
   inspectEventRoomPlaywrightPortLease,
+  releaseEventRoomPlaywrightPortLeaseIfOwned,
   requireSyntheticEventRoomTestDatabaseUrl,
   resolveEventRoomPlaywrightRunContext,
   type EventRoomPlaywrightRunContext,
@@ -58,6 +59,11 @@ interface ChildOutputResult {
 interface ChildOutputCapture {
   readonly completion: Promise<ChildOutputResult>;
   cancel(reason: string): Promise<void>;
+}
+
+interface ExactGateCleanupOperations {
+  stopServerAndRemoveRun(context: EventRoomPlaywrightRunContext): Promise<void>;
+  dropDatabase(context: EventRoomPlaywrightRunContext): Promise<unknown>;
 }
 
 const DEFAULT_CHILD_WAIT_LIMITS: ChildWaitLimits = Object.freeze({
@@ -199,9 +205,13 @@ async function waitForPlaywrightChild(
 
 async function cleanExactGateRun(
   context: EventRoomPlaywrightRunContext,
+  operations: ExactGateCleanupOperations = {
+    stopServerAndRemoveRun: cleanupEventRoomPlaywrightRunAfterChildExit,
+    dropDatabase: dropOwnedEventRoomPlaywrightDatabase,
+  },
 ): Promise<void> {
   try {
-    await cleanupEventRoomPlaywrightRunAfterChildExit(context);
+    await operations.stopServerAndRemoveRun(context);
   } catch (error) {
     throw new Error(
       'Event-room Playwright gate refused database cleanup before proving its server stopped.',
@@ -209,7 +219,7 @@ async function cleanExactGateRun(
     );
   }
   try {
-    await dropOwnedEventRoomPlaywrightDatabase(context);
+    await operations.dropDatabase(context);
   } catch (error) {
     throw new Error('Event-room Playwright gate database cleanup failed.', {
       cause: error,
@@ -239,6 +249,45 @@ describe('event-room Playwright gate', () => {
   test('CI cannot silently skip event-room browser accessibility and safety coverage', () => {
     if (process.env.CI === 'true') {
       expect(process.env.TEST_DATABASE_URL).toBeTruthy();
+    }
+  });
+
+  test('cleanup proves server stop before database removal and fails closed on stop-proof failure', async () => {
+    const context = resolveEventRoomPlaywrightRunContext(
+      'postgresql://synthetic:synthetic@localhost:5432/psd_eoc_test',
+      { NODE_ENV: 'test' },
+    );
+    try {
+      const order: string[] = [];
+      await cleanExactGateRun(context, {
+        async stopServerAndRemoveRun(received) {
+          expect(received).toBe(context);
+          order.push('server-stopped');
+        },
+        async dropDatabase(received) {
+          expect(received).toBe(context);
+          order.push('database-dropped');
+        },
+      });
+      expect(order).toEqual(['server-stopped', 'database-dropped']);
+
+      order.length = 0;
+      await expect(
+        cleanExactGateRun(context, {
+          async stopServerAndRemoveRun() {
+            order.push('stop-proof-failed');
+            throw new Error('synthetic server still running');
+          },
+          async dropDatabase() {
+            order.push('database-dropped');
+          },
+        }),
+      ).rejects.toThrow(
+        'refused database cleanup before proving its server stopped',
+      );
+      expect(order).toEqual(['stop-proof-failed']);
+    } finally {
+      releaseEventRoomPlaywrightPortLeaseIfOwned(context);
     }
   });
 
@@ -367,6 +416,60 @@ describe('event-room Playwright gate', () => {
     expect(exitedBeforeCancel).toBe(true);
     expect(signals).toEqual(['SIGTERM']);
   });
+
+  const setupFailureGateName =
+    'drops the owned database only after setup-failure server shutdown';
+  const runSetupFailureGate = async (): Promise<void> => {
+    const baseDatabaseUrl = requireSyntheticEventRoomTestDatabaseUrl(
+      process.env.TEST_DATABASE_URL,
+    );
+    const childEnvironment = { ...process.env };
+    const context = resolveEventRoomPlaywrightRunContext(
+      baseDatabaseUrl,
+      childEnvironment,
+    );
+    childEnvironment.PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SETUP_FAILURE_RUN_ID =
+      context.runId;
+    try {
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          'x',
+          'playwright',
+          'test',
+          '--config',
+          playwrightConfig,
+        ],
+        {
+          cwd: workspaceRoot,
+          env: childEnvironment,
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      );
+      const { exitCode, stdout, stderr, outputErrors } =
+        await waitForPlaywrightChild(child);
+      expect(exitCode).not.toBe(0);
+      expect(`${stdout}\n${stderr}`).toContain(
+        'Synthetic event-room Playwright setup failure after database creation.',
+      );
+      expect(outputErrors).toEqual([]);
+      expect(existsSync(context.runDirectory)).toBe(false);
+      expect(inspectEventRoomPlaywrightPortLease(context)).toBe('absent');
+      expect(await dropOwnedEventRoomPlaywrightDatabase(context)).toBe(false);
+    } finally {
+      await cleanExactGateRun(context);
+    }
+  };
+  if (process.env.TEST_DATABASE_URL === undefined) {
+    test.skip(
+      setupFailureGateName,
+      runSetupFailureGate,
+      BROWSER_GATE_TIMEOUT_MS,
+    );
+  } else {
+    test(setupFailureGateName, runSetupFailureGate, BROWSER_GATE_TIMEOUT_MS);
+  }
 
   const browserGateName =
     'runs the owned browser suite when the synthetic database is configured';

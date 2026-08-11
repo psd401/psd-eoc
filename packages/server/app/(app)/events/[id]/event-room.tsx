@@ -589,7 +589,7 @@ async function requestTimelinePage(
     }
     throw new EventRoomRequestError(
       deadline.didExpire()
-        ? 'Timeline refresh timed out. PSD EOC will keep checking.'
+        ? 'Timeline refresh timed out.'
         : 'Timeline updates are temporarily unavailable.',
       false,
     );
@@ -1013,14 +1013,23 @@ function waitForNextPoll(
 ): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
-    const timer = window.setTimeout(() => {
-      signal.removeEventListener('abort', abort);
-      resolve(true);
-    }, milliseconds);
-    function abort() {
+    let observedHidden = document.visibilityState === 'hidden';
+    const finish = (continued: boolean) => {
       window.clearTimeout(timer);
-      resolve(false);
-    }
+      document.removeEventListener('visibilitychange', visibilityChanged);
+      signal.removeEventListener('abort', abort);
+      resolve(continued);
+    };
+    const timer = window.setTimeout(() => finish(true), milliseconds);
+    const visibilityChanged = () => {
+      if (document.visibilityState === 'hidden') {
+        observedHidden = true;
+      } else if (observedHidden) {
+        finish(true);
+      }
+    };
+    const abort = () => finish(false);
+    document.addEventListener('visibilitychange', visibilityChanged);
     signal.addEventListener('abort', abort, { once: true });
   });
 }
@@ -1319,6 +1328,8 @@ export function EventRoom({
     useState<RetainedCommand | null>(null);
   const [recoveryBlocked, setRecoveryBlocked] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [dialogText, setDialogText] = useState('');
+  const [dialogReason, setDialogReason] = useState('');
   const [confirmationPhrase, setConfirmationPhrase] = useState('');
   const [pollRefreshVersion, setPollRefreshVersion] = useState(0);
 
@@ -1570,7 +1581,7 @@ export function EventRoom({
     } catch {
       setRecoveryBlocked(true);
       setMutationError(
-        'PSD EOC could not read the browser recovery record. No request was sent. Verify the current timeline before clearing it.',
+        'PSD EOC could not read the browser recovery record. This page load sent no new request; any prior request outcome remains unresolved. Verify the current timeline before clearing it.',
       );
     }
   }, [apiUrl, event.id, sessionId]);
@@ -1594,7 +1605,9 @@ export function EventRoom({
       dialogWasOpenRef.current = false;
       const opener = dialogOpenerRef.current;
       if (opener?.isConnected) opener.focus();
-      else document.getElementById('main-content')?.focus();
+      if (document.activeElement !== opener) {
+        document.getElementById('main-content')?.focus();
+      }
     }
   }, [dialog]);
 
@@ -1659,6 +1672,8 @@ export function EventRoom({
     previewControllerRef.current = null;
     dialogRequestAttemptedRef.current = false;
     setDialog(null);
+    setDialogText('');
+    setDialogReason('');
     setConfirmationPhrase('');
     if (
       !requestWasAttempted &&
@@ -1689,12 +1704,65 @@ export function EventRoom({
     retainedCommand?.operation === 'all-clear' ||
     retainedCommand?.operation === 'close';
 
+  useEffect(() => {
+    const lifecycleDialog =
+      dialog?.kind === 'all-clear' || dialog?.kind === 'close';
+    if (!lifecycleDialog || pendingRef.current) return;
+    const eventStateChanged =
+      (dialog.kind === 'all-clear' && currentEvent.status !== 'active') ||
+      (dialog.kind === 'close' && currentEvent.status !== 'all-clear');
+    if (
+      !loadingHistory &&
+      retainedCommand === null &&
+      !recoveryBlocked &&
+      !eventStateChanged
+    ) {
+      return;
+    }
+    const requestWasAttempted = dialogRequestAttemptedRef.current;
+    previewControllerRef.current?.abort();
+    previewControllerRef.current = null;
+    dialogRequestAttemptedRef.current = false;
+    setDialog(null);
+    setDialogText('');
+    setDialogReason('');
+    setConfirmationPhrase('');
+    if (!requestWasAttempted && loadingHistory) {
+      setMutationError(null);
+      setMutationStatus(
+        'Timeline synchronization began while the lifecycle review was open. No lifecycle transition request was submitted; reopen the action after the complete timeline is visible.',
+      );
+    } else if (!requestWasAttempted && eventStateChanged) {
+      setMutationError(null);
+      setMutationStatus(
+        'The event state changed while the lifecycle review was open. No lifecycle transition request was submitted from this dialog; review the current state before starting another action.',
+      );
+    }
+  }, [
+    currentEvent.status,
+    dialog,
+    loadingHistory,
+    recoveryBlocked,
+    retainedCommand,
+  ]);
+
   function openDialog(next: DialogState, opener: HTMLElement): void {
     if (commandsBlocked) return;
+    const correctionTarget =
+      next.kind === 'correct'
+        ? entries.find(({ entry }) => entry.id === next.entryId)
+        : undefined;
     dialogOpenerRef.current = opener;
     dialogRequestAttemptedRef.current = false;
     setMutationError(null);
     setMutationStatus('');
+    setDialogText(
+      correctionTarget?.visibility === 'visible' &&
+        correctionTarget.entry.kind === 'text'
+        ? correctionTarget.entry.payload.text
+        : '',
+    );
+    setDialogReason('');
     setConfirmationPhrase('');
     setDialog(next);
   }
@@ -1705,6 +1773,8 @@ export function EventRoom({
     previewControllerRef.current = null;
     dialogRequestAttemptedRef.current = false;
     setDialog(null);
+    setDialogText('');
+    setDialogReason('');
     setConfirmationPhrase('');
   }
 
@@ -1839,11 +1909,7 @@ export function EventRoom({
     command: RetainedCommand,
   ): Promise<boolean> {
     if (pendingRef.current) return false;
-    if (
-      dialog !== null &&
-      (command.operation === 'correct-text' ||
-        command.operation === 'redact-entry')
-    ) {
+    if (dialog !== null && command.operation !== 'post-text') {
       dialogRequestAttemptedRef.current = true;
     }
     pendingRef.current = true;
@@ -1883,10 +1949,12 @@ export function EventRoom({
       setMutationStatus(
         requestError.ambiguous
           ? 'The outcome is unresolved. The exact request is retained and will never replay automatically.'
-          : 'The server rejected the request. No change was recorded by this attempt.',
+          : 'The request was not accepted. No change was recorded by this attempt.',
       );
       if (requestError.ambiguous && dialog !== null) {
         setDialog(null);
+        setDialogText('');
+        setDialogReason('');
         setConfirmationPhrase('');
       }
       return false;
@@ -1910,6 +1978,8 @@ export function EventRoom({
       setMutationStatus('No request was sent.');
       if (dialog !== null) {
         setDialog(null);
+        setDialogText('');
+        setDialogReason('');
         setConfirmationPhrase('');
       }
       return false;
@@ -1932,9 +2002,8 @@ export function EventRoom({
   async function submitCorrection(submission: FormEvent<HTMLFormElement>) {
     submission.preventDefault();
     if (dialog?.kind !== 'correct' || correctionDialogEntry === null) return;
-    const form = new FormData(submission.currentTarget);
-    const text = String(form.get('correctionText') ?? '').trim();
-    const reason = String(form.get('correctionReason') ?? '').trim();
+    const text = dialogText.trim();
+    const reason = dialogReason.trim();
     if (text.length === 0 || reason.length === 0) return;
     const succeeded = await executeNewCommand({
       operation: 'correct-text',
@@ -1950,8 +2019,7 @@ export function EventRoom({
   async function submitRedaction(submission: FormEvent<HTMLFormElement>) {
     submission.preventDefault();
     if (dialog?.kind !== 'redact' || redactionDialogEntry === null) return;
-    const form = new FormData(submission.currentTarget);
-    const reason = String(form.get('redactionReason') ?? '').trim();
+    const reason = dialogReason.trim();
     if (reason.length === 0) return;
     const succeeded = await executeNewCommand({
       operation: 'redact-entry',
@@ -2005,11 +2073,11 @@ export function EventRoom({
       setRecoveryBlocked(false);
       setMutationError(null);
       setMutationStatus(
-        'Browser recovery record cleared after explicit timeline verification. No request was sent.',
+        'Browser recovery record cleared after explicit timeline verification. Clearing this browser record sent no new request; the prior outcome remains determined by the verified timeline and event status.',
       );
     } catch {
       setMutationError(
-        'The browser recovery record could not be cleared. No request was sent.',
+        'The browser recovery record could not be cleared. This cleanup attempt sent no new request; the prior request outcome remains unresolved.',
       );
     }
   }
@@ -2383,6 +2451,9 @@ export function EventRoom({
             !pendingRef.current
           ) {
             setDialog(null);
+            setDialogText('');
+            setDialogReason('');
+            setConfirmationPhrase('');
           }
         }}
         ref={dialogRef}
@@ -2401,17 +2472,17 @@ export function EventRoom({
               The original remains visible and marked as superseded. This form
               appends a replacement with actor, time, and reason provenance.
             </p>
-            <fieldset disabled={pendingOperation !== null || recoveryBlocked}>
+            <fieldset disabled={commandsBlocked}>
               <legend>Correction details</legend>
               <div className="field">
                 <label htmlFor="correction-text">Corrected text</label>
                 <textarea
                   data-autofocus
-                  defaultValue={correctionDialogEntry.payload.text}
                   id="correction-text"
                   maxLength={10_000}
-                  name="correctionText"
+                  onChange={(change) => setDialogText(change.target.value)}
                   required
+                  value={dialogText}
                 />
               </div>
               <div className="field">
@@ -2419,21 +2490,32 @@ export function EventRoom({
                 <textarea
                   id="correction-reason"
                   maxLength={1_000}
-                  name="correctionReason"
+                  onChange={(change) => setDialogReason(change.target.value)}
                   required
+                  value={dialogReason}
                 />
               </div>
-              <div className="form-actions">
-                <button type="submit">Append correction</button>
-                <button
-                  className="secondary"
-                  onClick={closeDialog}
-                  type="button"
-                >
-                  Cancel
-                </button>
-              </div>
             </fieldset>
+            <div className="form-actions">
+              <button
+                disabled={
+                  commandsBlocked ||
+                  dialogText.trim().length === 0 ||
+                  dialogReason.trim().length === 0
+                }
+                type="submit"
+              >
+                Append correction
+              </button>
+              <button
+                className="secondary"
+                disabled={pendingOperation !== null}
+                onClick={closeDialog}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
           </form>
         ) : null}
 
@@ -2452,7 +2534,7 @@ export function EventRoom({
               content in this view. The original journal record, sequence,
               timing, and provenance are never deleted.
             </p>
-            <fieldset disabled={pendingOperation !== null || recoveryBlocked}>
+            <fieldset disabled={commandsBlocked}>
               <legend>Redaction details</legend>
               <div className="field">
                 <label htmlFor="redaction-reason">Reason for redaction</label>
@@ -2460,23 +2542,29 @@ export function EventRoom({
                   data-autofocus
                   id="redaction-reason"
                   maxLength={1_000}
-                  name="redactionReason"
+                  onChange={(change) => setDialogReason(change.target.value)}
                   required
+                  value={dialogReason}
                 />
               </div>
-              <div className="form-actions">
-                <button className="danger" type="submit">
-                  Append redaction
-                </button>
-                <button
-                  className="secondary"
-                  onClick={closeDialog}
-                  type="button"
-                >
-                  Cancel
-                </button>
-              </div>
             </fieldset>
+            <div className="form-actions">
+              <button
+                className="danger"
+                disabled={commandsBlocked || dialogReason.trim().length === 0}
+                type="submit"
+              >
+                Append redaction
+              </button>
+              <button
+                className="secondary"
+                disabled={pendingOperation !== null}
+                onClick={closeDialog}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
           </form>
         ) : null}
 
@@ -2504,6 +2592,7 @@ export function EventRoom({
                 <p>{dialog.error}</p>
                 <button
                   data-autofocus
+                  disabled={commandsBlocked}
                   onClick={() =>
                     void loadAllClearPreview(dialog.idempotencyKey)
                   }
@@ -2518,9 +2607,7 @@ export function EventRoom({
                 <PreviewDetails preview={dialog.preview} />
                 <fieldset
                   disabled={
-                    pendingOperation !== null ||
-                    recoveryBlocked ||
-                    dialog.preview.sendReadiness !== 'ready'
+                    commandsBlocked || dialog.preview.sendReadiness !== 'ready'
                   }
                 >
                   <legend>Human confirmation</legend>
@@ -2550,8 +2637,7 @@ export function EventRoom({
                   <button
                     className="danger"
                     disabled={
-                      pendingOperation !== null ||
-                      recoveryBlocked ||
+                      commandsBlocked ||
                       dialog.preview.sendReadiness !== 'ready' ||
                       confirmationPhrase !== 'ALL CLEAR'
                     }
@@ -2603,7 +2689,7 @@ export function EventRoom({
               <li>No journal history is deleted or rewritten.</li>
               <li>Closing does not send another all-clear notification.</li>
             </ul>
-            <fieldset disabled={pendingOperation !== null || recoveryBlocked}>
+            <fieldset disabled={commandsBlocked}>
               <legend>Human confirmation</legend>
               <div className="field">
                 <label htmlFor="close-event-phrase">
@@ -2626,25 +2712,28 @@ export function EventRoom({
                 This confirmation is case-sensitive. Closing preserves the full
                 append-only event record.
               </p>
-              <div className="form-actions">
-                <button
-                  className="caution"
-                  disabled={confirmationPhrase !== 'CLOSE EVENT'}
-                  type="submit"
-                >
-                  {pendingOperation === 'close'
-                    ? 'Closing event…'
-                    : 'Close event'}
-                </button>
-                <button
-                  className="secondary"
-                  onClick={closeDialog}
-                  type="button"
-                >
-                  Cancel
-                </button>
-              </div>
             </fieldset>
+            <div className="form-actions">
+              <button
+                className="caution"
+                disabled={
+                  commandsBlocked || confirmationPhrase !== 'CLOSE EVENT'
+                }
+                type="submit"
+              >
+                {pendingOperation === 'close'
+                  ? 'Closing event…'
+                  : 'Close event'}
+              </button>
+              <button
+                className="secondary"
+                disabled={pendingOperation !== null}
+                onClick={closeDialog}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
           </form>
         ) : null}
       </dialog>

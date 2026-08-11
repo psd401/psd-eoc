@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import { dropOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import {
   finalizeEventRoomPlaywrightWebServer,
   requireInheritedEventRoomPlaywrightRunContext,
@@ -74,6 +75,7 @@ async function main(): Promise<void> {
         return code;
       },
       waitForEventRoomPlaywrightPortToClose,
+      () => dropOwnedEventRoomPlaywrightDatabase(context),
     );
     process.exitCode = shutdownRequested ? 0 : exitCode;
   } finally {
