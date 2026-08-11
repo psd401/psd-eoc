@@ -42,6 +42,8 @@ interface EventRoomFixture {
   readonly photoUploadMediaId: string;
   readonly photoSanitizedSha256: string;
   readonly photoStressEventId: string;
+  readonly photoStressOldestMediaId: string;
+  readonly photoStressSecondMediaId: string;
   readonly photoStressMiddleMediaId: string;
   readonly redactedPhotoEventId: string;
   readonly redactedPhotoMediaId: string;
@@ -93,6 +95,7 @@ interface SyntheticMediaLog {
 }
 
 interface PrivatePhotoIntersectionProbe {
+  readonly activeTargets: number;
   readonly disconnectCalls: number;
   readonly observeCalls: number;
 }
@@ -266,7 +269,15 @@ async function installDeterministicIntersectionObserver(
     Object.defineProperty(window, '__privatePhotoIntersectionProbe', {
       configurable: true,
       value: {
-        stats: () => ({ disconnectCalls, observeCalls }),
+        stats: () => ({
+          activeTargets: records.reduce(
+            (total, record) =>
+              total + (record.connected ? record.targets.size : 0),
+            0,
+          ),
+          disconnectCalls,
+          observeCalls,
+        }),
         trigger: (target: Element, isIntersecting: boolean) => {
           const bounds = target.getBoundingClientRect();
           for (const record of records) {
@@ -923,7 +934,7 @@ test('a private photo receives a fresh authorized read grant after reload', asyn
   await expectAxeClean(page, 'authorized private photo after a fresh grant');
 });
 
-test('deterministic viewport demand authorizes only the intersecting target with unused automatic capacity', async ({
+test('history mounts ten observed photos and replaces one focused older selection without eager old reads', async ({
   page,
 }) => {
   await installDeterministicIntersectionObserver(page);
@@ -939,9 +950,15 @@ test('deterministic viewport demand authorizes only the intersecting target with
   await expect(page.locator('.timeline-entry')).toHaveCount(12);
   await page.waitForTimeout(250);
   expect(media.readGrantRequests).toHaveLength(0);
+  await expect(
+    page.locator('[data-private-photo-mount="stateful"]'),
+  ).toHaveCount(10);
+  await expect(
+    page.locator('[data-private-photo-mount="deferred"]'),
+  ).toHaveCount(2);
   await expect
-    .poll(async () => (await privatePhotoIntersectionStats(page)).observeCalls)
-    .toBeGreaterThanOrEqual(12);
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(10);
 
   const targetEntry = page.getByRole('article', {
     name: 'Entry 6: Photo update',
@@ -965,26 +982,86 @@ test('deterministic viewport demand authorizes only the intersecting target with
   );
   await expect(targetFigure).toBeFocused();
 
-  const explicitEntry = page.getByRole('article', {
-    name: 'Entry 5: Photo update',
+  const oldestEntry = page.getByRole('article', {
+    name: 'Entry 1: Photo update',
     exact: true,
   });
-  const explicitFigure = explicitEntry.locator('figure.photo-entry');
-  const explicitButton = explicitEntry.getByRole('button', {
-    name: 'Load private photo for entry 5',
+  const oldestFigure = oldestEntry.locator('figure.photo-entry');
+  const oldestButton = oldestEntry.getByRole('button', {
+    name: 'Load older private photo for entry 1',
   });
-  await explicitButton.focus();
+  expect(
+    media.readGrantRequests.some(
+      (request) => request.mediaId === fixture.photoStressOldestMediaId,
+    ),
+  ).toBe(false);
+  await oldestButton.focus();
   await page.keyboard.press('Enter');
-  await expect(explicitFigure).toBeFocused();
+  await expect(oldestFigure).toBeFocused();
   await expect.poll(() => media.readGrantRequests.length).toBe(2);
-  await expect(explicitFigure).toHaveAttribute(
+  expect(media.readGrantRequests.at(-1)?.mediaId).toBe(
+    fixture.photoStressOldestMediaId,
+  );
+  await expect(oldestFigure).toHaveAttribute(
     'data-private-photo-state',
     'displayed',
   );
-  await expect(explicitFigure).toBeFocused();
+  await expect(oldestFigure).toHaveAttribute(
+    'data-private-photo-observer',
+    'disabled',
+  );
+  await expect(oldestFigure).toBeFocused();
+
+  const secondEntry = page.getByRole('article', {
+    name: 'Entry 2: Photo update',
+    exact: true,
+  });
+  const secondFigure = secondEntry.locator('figure.photo-entry');
+  const secondButton = secondEntry.getByRole('button', {
+    name: 'Load older private photo for entry 2',
+  });
+  expect(
+    media.readGrantRequests.some(
+      (request) => request.mediaId === fixture.photoStressSecondMediaId,
+    ),
+  ).toBe(false);
+  await secondButton.focus();
+  await page.keyboard.press('Enter');
+  await expect(secondFigure).toBeFocused();
+  await expect.poll(() => media.readGrantRequests.length).toBe(3);
+  expect(media.readGrantRequests.at(-1)?.mediaId).toBe(
+    fixture.photoStressSecondMediaId,
+  );
+  await expect(oldestFigure).toHaveAttribute(
+    'data-private-photo-mount',
+    'deferred',
+  );
+  await expect(oldestFigure.locator('img')).toHaveCount(0);
+  await expect(secondFigure).toHaveAttribute(
+    'data-private-photo-mount',
+    'stateful',
+  );
+  await expect(secondFigure).toHaveAttribute(
+    'data-private-photo-observer',
+    'disabled',
+  );
+  await expect(secondFigure).toBeFocused();
+  await expect(
+    page.locator('[data-private-photo-mount="stateful"]'),
+  ).toHaveCount(11);
+  await expect(
+    page.locator('[data-private-photo-mount="deferred"]'),
+  ).toHaveCount(1);
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(10);
+  await expectAxeClean(
+    page,
+    'bounded private-photo history and older selection',
+  );
 });
 
-test('offscreen private photos require viewport or explicit demand and automatic work stays capped', async ({
+test('older private photos stay stateless and unread until explicit keyboard activation', async ({
   page,
 }) => {
   const fixture = await readFixture();
@@ -1001,37 +1078,42 @@ test('offscreen private photos require viewport or explicit demand and automatic
     .poll(() => media.readGrantRequests.length)
     .toBeGreaterThanOrEqual(1);
 
-  const middleEntry = page.getByRole('article', {
-    name: 'Entry 6: Photo update',
+  const oldestEntry = page.getByRole('article', {
+    name: 'Entry 1: Photo update',
     exact: true,
   });
-  const middleLoadButton = middleEntry.getByRole('button', {
-    name: 'Load private photo for entry 6',
+  const oldestLoadButton = oldestEntry.getByRole('button', {
+    name: 'Load older private photo for entry 1',
   });
-  await expect(middleLoadButton).toBeAttached();
+  await expect(oldestLoadButton).toBeAttached();
+  await expect(oldestEntry.locator('figure.photo-entry')).toHaveAttribute(
+    'data-private-photo-mount',
+    'deferred',
+  );
   expect(
     media.readGrantRequests.some(
-      (request) => request.mediaId === fixture.photoStressMiddleMediaId,
+      (request) => request.mediaId === fixture.photoStressOldestMediaId,
     ),
   ).toBe(false);
 
-  await middleLoadButton.evaluate((button) =>
+  await oldestLoadButton.evaluate((button) =>
     (button as HTMLButtonElement).focus({ preventScroll: true }),
   );
-  await expect(middleLoadButton).toBeFocused();
+  await expect(oldestLoadButton).toBeFocused();
   await page.keyboard.press('Enter');
   await expect
     .poll(() =>
       media.readGrantRequests.some(
-        (request) => request.mediaId === fixture.photoStressMiddleMediaId,
+        (request) => request.mediaId === fixture.photoStressOldestMediaId,
       ),
     )
     .toBe(true);
   await expect(
-    middleEntry.getByRole('img', {
-      name: 'Synthetic bounded-loader private photo 6.',
+    oldestEntry.getByRole('img', {
+      name: 'Synthetic bounded-loader private photo 1.',
     }),
   ).toBeAttached();
+  await expect(oldestEntry.locator('figure.photo-entry')).toBeFocused();
 
   const timeline = page.getByRole('region', {
     name: 'Chronological event journal',
@@ -1046,13 +1128,13 @@ test('offscreen private photos require viewport or explicit demand and automatic
   }
   expect(
     media.readGrantRequests.filter(
-      (request) => request.mediaId !== fixture.photoStressMiddleMediaId,
+      (request) => request.mediaId !== fixture.photoStressOldestMediaId,
     ).length,
   ).toBeLessThanOrEqual(2);
   expect(await page.locator('.timeline-entry img').count()).toBeLessThanOrEqual(
     2,
   );
-  await expectAxeClean(page, 'bounded viewport-gated private photo history');
+  await expectAxeClean(page, 'keyboard-activated older private photo history');
 });
 
 test('private photos use truthful explicit fallback and keep out-of-order decodes within two slots', async ({
@@ -1088,7 +1170,12 @@ test('private photos use truthful explicit fallback and keep out-of-order decode
   ).toBeVisible();
   await expect(
     page.getByRole('button', { name: /^Load private photo for entry /u }),
-  ).toHaveCount(12);
+  ).toHaveCount(10);
+  await expect(
+    page.getByRole('button', {
+      name: /^Load older private photo for entry /u,
+    }),
+  ).toHaveCount(2);
 
   const loadButton = (sequence: number) =>
     page
@@ -1106,19 +1193,19 @@ test('private photos use truthful explicit fallback and keep out-of-order decode
         exact: true,
       })
       .locator('figure.photo-entry');
-  const firstLoad = loadButton(1);
+  const firstLoad = loadButton(3);
   await firstLoad.evaluate((button) =>
     (button as HTMLButtonElement).focus({ preventScroll: true }),
   );
   await expect(firstLoad).toBeFocused();
   await page.keyboard.press('Enter');
-  await expect(figure(1)).toBeFocused();
-  for (const sequence of [2, 3]) {
+  await expect(figure(3)).toBeFocused();
+  for (const sequence of [4, 5]) {
     await loadButton(sequence).evaluate((button) =>
       (button as HTMLButtonElement).click(),
     );
   }
-  await expect(figure(3)).toBeFocused();
+  await expect(figure(5)).toBeFocused();
 
   await expect.poll(() => media.readGrantRequests.length).toBe(2);
   await expect.poll(() => media.imageRequests.length).toBe(2);
@@ -1130,7 +1217,7 @@ test('private photos use truthful explicit fallback and keep out-of-order decode
   expect(
     await releasePrivatePhotoDecode(
       page,
-      'Synthetic bounded-loader private photo 2.',
+      'Synthetic bounded-loader private photo 4.',
     ),
   ).toBe(true);
   await expect.poll(() => media.readGrantRequests.length).toBe(3);
@@ -1139,31 +1226,31 @@ test('private photos use truthful explicit fallback and keep out-of-order decode
     .poll(async () => (await privatePhotoDecodeStats(page)).active)
     .toBe(2);
   expect((await privatePhotoDecodeStats(page)).maxActive).toBe(2);
-  await expect(figure(1).locator('img')).toBeAttached();
-  await expect(figure(2)).toHaveAttribute(
+  await expect(figure(3).locator('img')).toBeAttached();
+  await expect(figure(4)).toHaveAttribute(
     'data-private-photo-state',
     'evicted',
   );
-  await expect(figure(2).locator('img')).toHaveCount(0);
-  await expect(figure(3).locator('img')).toBeAttached();
+  await expect(figure(4).locator('img')).toHaveCount(0);
+  await expect(figure(5).locator('img')).toBeAttached();
 
-  expect(
-    await releasePrivatePhotoDecode(
-      page,
-      'Synthetic bounded-loader private photo 1.',
-    ),
-  ).toBe(true);
   expect(
     await releasePrivatePhotoDecode(
       page,
       'Synthetic bounded-loader private photo 3.',
     ),
   ).toBe(true);
-  await expect(figure(3)).toHaveAttribute(
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 5.',
+    ),
+  ).toBe(true);
+  await expect(figure(5)).toHaveAttribute(
     'data-private-photo-state',
     'displayed',
   );
-  await expect(figure(3)).toBeFocused();
+  await expect(figure(5)).toBeFocused();
   await expect.poll(() => page.locator('.timeline-entry img').count()).toBe(2);
   await expectAxeClean(page, 'explicit bounded private photo fallback');
 });
@@ -1201,14 +1288,14 @@ test('a fixed private-photo deadline fails visibly and advances queued explicit 
       name: `Load private photo for entry ${sequence}`,
     });
 
-  for (const sequence of [1, 2]) {
+  for (const sequence of [3, 4]) {
     await loadButton(sequence).evaluate((button) =>
       (button as HTMLButtonElement).click(),
     );
   }
-  await loadButton(3).focus();
+  await loadButton(5).focus();
   await page.keyboard.press('Enter');
-  await expect(figure(3)).toBeFocused();
+  await expect(figure(5)).toBeFocused();
   await expect.poll(() => media.readGrantRequests.length).toBe(2);
   await expect
     .poll(async () => (await privatePhotoDecodeStats(page)).active)
@@ -1220,7 +1307,7 @@ test('a fixed private-photo deadline fails visibly and advances queued explicit 
   await expect
     .poll(async () =>
       (await privatePhotoDecodeStats(page)).pendingAltText.includes(
-        'Synthetic bounded-loader private photo 3.',
+        'Synthetic bounded-loader private photo 5.',
       ),
     )
     .toBe(true);
@@ -1228,20 +1315,20 @@ test('a fixed private-photo deadline fails visibly and advances queued explicit 
     active: 1,
     maxActive: 2,
   });
-  for (const sequence of [1, 2]) {
+  for (const sequence of [3, 4]) {
     await expect(figure(sequence)).toContainText(
       'Private photo loading exceeded the 60-second safety limit and was stopped.',
     );
   }
-  await expect(figure(3)).toBeFocused();
+  await expect(figure(5)).toBeFocused();
 
   await page.clock.fastForward(60_001);
-  await expect(figure(3)).toContainText(
+  await expect(figure(5)).toContainText(
     'Private photo loading exceeded the 60-second safety limit and was stopped.',
   );
   await expect(
-    entry(3).getByRole('button', {
-      name: 'Retry private photo for entry 3',
+    entry(5).getByRole('button', {
+      name: 'Retry private photo for entry 5',
     }),
   ).toBeVisible();
   expect(await privatePhotoDecodeStats(page)).toMatchObject({
@@ -1249,7 +1336,7 @@ test('a fixed private-photo deadline fails visibly and advances queued explicit 
     maxActive: 2,
     pendingAltText: [],
   });
-  await expect(figure(3)).toBeFocused();
+  await expect(figure(5)).toBeFocused();
 });
 
 test('photo upload is keyboard-operable and appends only canonical same-event media data', async ({
