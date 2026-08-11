@@ -8,6 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
+import { eq } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -21,13 +22,25 @@ import {
   deviceEnrollments,
   groupSources,
   sessions,
+  securityAuditEntries,
   userRoleChanges,
   userRoles,
   users,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
-import { createDrizzleAccessGateStore } from './access-gate';
+import { createDrizzleAdminCapabilityStore } from '../../app/(admin)/facilities/admin-core';
+import {
+  executeCreateFacilityCapability,
+  executeCreateGroupSourceCapability,
+  executeUpdateGroupSourceCapability,
+} from '../../app/(admin)/facilities/capabilities';
+import type { AuthenticatedSession } from './sessions';
+import {
+  checkAccessGate,
+  createDrizzleAccessGateAuditSink,
+  createDrizzleAccessGateStore,
+} from './access-gate';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -78,7 +91,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const googleSubject = `issue-26-access-gate-${suffix}`;
     const snapshotVersion =
       2_000_000_000 + Number.parseInt(suffix.slice(0, 6), 16);
-    const now = new Date();
+    const now = new Date(Date.now() + 60_000);
 
     await database.insert(groupSources).values({
       id: groupSourceId,
@@ -203,5 +216,152 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         'completionKind',
       ),
     ).toBe(false);
+
+    const authenticated = {
+      actor: { kind: 'human', userId, sessionId },
+      source: 'web',
+      roles: ['admin'],
+      scope: { facilityScope: { kind: 'district' } },
+      membershipState: 'fresh',
+      result: { connectivityEpoch: { id: randomUUID() } },
+    } as unknown as AuthenticatedSession;
+    const adminStore = createDrizzleAdminCapabilityStore(
+      database,
+      authenticated,
+    );
+    const facility = await executeCreateFacilityCapability({
+      authenticated,
+      store: adminStore,
+      command: {
+        code: `GATE-${suffix.slice(0, 8).toUpperCase()}`,
+        name: `Access gate correction site ${suffix.slice(0, 8)}`,
+      },
+      metadata: {
+        idempotencyKey: `issue-26-gate-facility-${suffix}`,
+        requestId: randomUUID(),
+        now,
+      },
+    });
+    const building = await executeCreateGroupSourceCapability({
+      authenticated,
+      store: adminStore,
+      command: {
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: `Access gate building ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-gate-building-${suffix}`,
+        email: `issue-26-gate-building-${suffix}@example.invalid`,
+      },
+      metadata: {
+        idempotencyKey: `issue-26-gate-building-${suffix}`,
+        requestId: randomUUID(),
+        now,
+      },
+    });
+    const buildingUpdateRequestId = randomUUID();
+    const buildingUpdatedAt = new Date(now.getTime() + 1_000);
+    const buildingReplacement = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store: adminStore,
+      command: {
+        id: building.id,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: `Corrected access gate building ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-gate-building-v2-${suffix}`,
+        email: `issue-26-gate-building-v2-${suffix}@example.invalid`,
+      },
+      metadata: {
+        idempotencyKey: `issue-26-gate-building-v2-${suffix}`,
+        requestId: buildingUpdateRequestId,
+        now: buildingUpdatedAt,
+      },
+    });
+    const [buildingUpdateAudit] = await database
+      .select({
+        targetKind: securityAuditEntries.targetKind,
+        targetId: securityAuditEntries.targetId,
+      })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, buildingUpdateRequestId))
+      .limit(1);
+    expect(buildingUpdateAudit).toEqual({
+      targetKind: 'configuration',
+      targetId: `group-source:building:${buildingReplacement.id}`,
+    });
+
+    const gateStore = createDrizzleAccessGateStore(database);
+    const auditSink = createDrizzleAccessGateAuditSink(database);
+    const afterBuildingCorrection = await checkAccessGate(
+      {
+        googleSubject,
+        subjectDigest: 'a'.repeat(64),
+        requestId: randomUUID(),
+        checkedAt: new Date(now.getTime() + 1_500).toISOString(),
+        source: 'web',
+      },
+      {
+        store: gateStore,
+        audit: auditSink,
+        bootstrapAdminSubjects: new Set(),
+      },
+    );
+    expect(afterBuildingCorrection.granted).toBe(true);
+
+    const accessUpdateRequestId = randomUUID();
+    const accessUpdatedAt = new Date(now.getTime() + 2_000);
+    await executeUpdateGroupSourceCapability({
+      authenticated,
+      store: adminStore,
+      command: {
+        id: groupSourceId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Corrected access gate ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-access-gate-v2-${suffix}`,
+        email: `issue-26-access-gate-v2-${suffix}@example.invalid`,
+      },
+      metadata: {
+        idempotencyKey: `issue-26-gate-access-v2-${suffix}`,
+        requestId: accessUpdateRequestId,
+        now: accessUpdatedAt,
+      },
+    });
+    const [accessUpdateAudit] = await database
+      .select({
+        targetKind: securityAuditEntries.targetKind,
+        targetId: securityAuditEntries.targetId,
+      })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, accessUpdateRequestId))
+      .limit(1);
+    expect(accessUpdateAudit).toEqual({
+      targetKind: 'configuration',
+      targetId: `group-source:access:${groupSourceId}`,
+    });
+    const afterAccessCorrection = await checkAccessGate(
+      {
+        googleSubject,
+        subjectDigest: 'b'.repeat(64),
+        requestId: randomUUID(),
+        checkedAt: new Date(now.getTime() + 3_000).toISOString(),
+        source: 'web',
+      },
+      {
+        store: gateStore,
+        audit: auditSink,
+        bootstrapAdminSubjects: new Set(),
+      },
+    );
+    expect(afterAccessCorrection).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
+    });
   });
 });

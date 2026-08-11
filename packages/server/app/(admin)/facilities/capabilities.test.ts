@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { Actor, Facility } from '@psd-eoc/contracts';
+import type { Actor, Facility, SecurityAuditTarget } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type {
@@ -124,6 +124,10 @@ class MemoryAdminTransaction implements AdminCapabilityTransaction {
         403,
       );
     }
+  }
+
+  public setAuditTarget(target: SecurityAuditTarget): void {
+    void target;
   }
 
   public readCurrentTime(): Promise<Date> {

@@ -65,7 +65,10 @@ import {
   executeCreateGroupSourceCapability,
   executeCreateNeighborhoodVersionCapability,
   executeGetAudienceConfigCapability,
+  executeGetAudienceConfigVersionCapability,
+  executeGetNeighborhoodVersionCapability,
   executeListGroupSourcesCapability,
+  executeListNeighborhoodsCapability,
   executeUpdateFacilityCapability,
   executeUpdateGroupSourceCapability,
 } from './capabilities';
@@ -125,15 +128,17 @@ function liveAuthorizationFor(input: {
     statusId: string;
   }> | null;
   readonly issuedAt: Date;
+  readonly desiredEnabled?: boolean;
 }) {
   if (input.authenticated.actor.kind !== 'human') {
     throw new Error('A live authorization requires a synthetic human actor.');
   }
+  const desiredEnabled = input.desiredEnabled ?? true;
   const base = {
     reference: `issue-26-live-race-${randomUUID()}`,
     integrationStatusId: input.integrationStatusId,
     integrationId: input.integrationId,
-    desiredEnabled: true,
+    desiredEnabled,
     requestDigest: '0'.repeat(64),
     consequenceDigest: '0'.repeat(64),
     authorizedByUserId: input.authenticated.actor.userId,
@@ -149,7 +154,7 @@ function liveAuthorizationFor(input: {
     consequenceDigest: liveChannelChangeConsequenceDigest({
       integrationId: input.integrationId,
       previousConfiguration: input.previousConfiguration,
-      desiredEnabled: true,
+      desiredEnabled,
       integrationStatusId: input.integrationStatusId,
     }),
   });
@@ -280,6 +285,63 @@ async function persistAuthenticatedAdministrator(
     membershipGraceUntil: graceUntil,
     createdAt: now,
     expiresAt,
+  });
+}
+
+async function persistLiveAuthorizationActor(
+  database: PostgresDatabaseConnection['db'],
+  authenticated: AuthenticatedSession,
+  label: string,
+): Promise<void> {
+  if (authenticated.actor.kind !== 'human') {
+    throw new Error('A live authorization actor must be human.');
+  }
+  const [membershipSnapshot] = await database
+    .select({ id: accessMembershipSnapshots.id })
+    .from(accessMembershipSnapshots)
+    .orderBy(desc(accessMembershipSnapshots.version))
+    .limit(1);
+  if (membershipSnapshot === undefined) {
+    throw new Error('A membership snapshot is required for a live session.');
+  }
+  const [existingUser] = await database
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.id, authenticated.actor.userId))
+    .limit(1);
+  if (existingUser === undefined) {
+    await database.insert(users).values({
+      id: authenticated.actor.userId,
+      googleSubject: `issue-26-live-${label}-${authenticated.actor.userId}`,
+      email: `issue-26-live-${label}-${authenticated.actor.userId}@psd401.net`,
+      displayName: `Issue 26 live authorization ${label}`,
+      facilityScopeKind: 'district',
+    });
+    await database.insert(userRoles).values({
+      userId: authenticated.actor.userId,
+      role: 'admin',
+    });
+  }
+  const now = new Date();
+  const deviceId = randomUUID();
+  await database.insert(deviceEnrollments).values({
+    id: deviceId,
+    userId: authenticated.actor.userId,
+    platform: 'web',
+    unlockMethod: 'secure-session-cookie',
+    installationId: `issue-26-live-${label}-${randomUUID()}`,
+    enrolledAt: now,
+    lastSeenAt: now,
+  });
+  await database.insert(sessions).values({
+    id: authenticated.actor.sessionId,
+    userId: authenticated.actor.userId,
+    deviceEnrollmentId: deviceId,
+    membershipSnapshotId: membershipSnapshot.id,
+    membershipValidUntil: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
+    membershipGraceUntil: new Date(now.getTime() + 48 * 60 * 60 * 1_000),
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + 72 * 60 * 60 * 1_000),
   });
 }
 
@@ -574,6 +636,88 @@ describeWithDatabase('facilities administrator database flow', () => {
       expect(error).toBeInstanceOf(AdminCapabilityError);
       expect((error as AdminCapabilityError).status).toBe(409);
     }
+
+    const neighborhoodV2 = await executeCreateNeighborhoodVersionCapability({
+      authenticated,
+      store,
+      command: {
+        neighborhoodId: neighborhood.id,
+        name: `${neighborhood.name} corrected`,
+        facilityIds: [facility.id],
+      },
+      metadata: metadata('neighborhood-v2', requestIds),
+    });
+    expect(neighborhoodV2).toMatchObject({
+      id: neighborhood.id,
+      version: neighborhood.version + 1,
+      name: `${neighborhood.name} corrected`,
+      facilityIds: [facility.id],
+    });
+    expect(
+      await executeGetNeighborhoodVersionCapability({
+        authenticated,
+        store,
+        query: {
+          neighborhood: {
+            id: neighborhood.id,
+            version: neighborhood.version,
+          },
+        },
+        metadata: { requestId: randomUUID(), now: new Date() },
+      }),
+    ).toEqual(neighborhood);
+    const currentNeighborhoods = await executeListNeighborhoodsCapability({
+      authenticated,
+      store,
+      query: { cursor: null, limit: 200 },
+      metadata: { requestId: randomUUID(), now: new Date() },
+    });
+    expect(
+      currentNeighborhoods.items.find(({ id }) => id === neighborhood.id),
+    ).toEqual(neighborhoodV2);
+
+    const audienceV2 = await executeCreateAudienceConfigVersionCapability({
+      authenticated,
+      store,
+      command: {
+        audienceConfigId: audience.id,
+        facilityId: facility.id,
+        targets: [
+          { kind: 'building', facilityId: facility.id },
+          {
+            kind: 'neighborhood',
+            neighborhood: {
+              id: neighborhoodV2.id,
+              version: neighborhoodV2.version,
+            },
+          },
+        ],
+      },
+      metadata: metadata('audience-v2', requestIds),
+    });
+    expect(audienceV2).toMatchObject({
+      id: audience.id,
+      facilityId: facility.id,
+      version: audience.version + 1,
+    });
+    expect(
+      await executeGetAudienceConfigVersionCapability({
+        authenticated,
+        store,
+        query: {
+          audienceConfig: { id: audience.id, version: audience.version },
+        },
+        metadata: { requestId: randomUUID(), now: new Date() },
+      }),
+    ).toEqual(audience);
+    expect(
+      await executeGetAudienceConfigCapability({
+        authenticated,
+        store,
+        query: { facilityId: facility.id },
+        metadata: { requestId: randomUUID(), now: new Date() },
+      }),
+    ).toEqual(audienceV2);
 
     const roleTargetId = randomUUID();
     await database.insert(users).values({
@@ -978,9 +1122,10 @@ describeWithDatabase('facilities administrator database flow', () => {
     });
     const oneTimeRaceBlockerPid = await oneTimeRaceLockHeld;
 
+    const oneTimeRaceRequestIds: string[] = [];
     const oneTimeRaceMetadata = [
-      metadata('live-one-time-race-a', requestIds),
-      metadata('live-one-time-race-b', requestIds),
+      metadata('live-one-time-race-a', oneTimeRaceRequestIds),
+      metadata('live-one-time-race-b', oneTimeRaceRequestIds),
     ] as const;
     const oneTimeRaceResultsPromise = Promise.allSettled(
       oneTimeRaceMetadata.map((raceMetadata) =>
@@ -1044,6 +1189,32 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(oneTimeRaceAuthorizationRow.requestId).toBe(
       oneTimeRaceWinnerMetadata.requestId,
     );
+    requestIds.push(oneTimeRaceWinnerMetadata.requestId);
+    const oneTimeRaceLoserIndex = oneTimeRaceResults.findIndex(
+      (result) => result.status === 'rejected',
+    );
+    const oneTimeRaceLoserMetadata = oneTimeRaceMetadata[oneTimeRaceLoserIndex];
+    if (oneTimeRaceLoserMetadata === undefined) {
+      throw new Error('The one-time authorization race has no loser.');
+    }
+    const [oneTimeRaceFailureAudit] = await database
+      .select({
+        action: securityAuditEntries.action,
+        category: securityAuditEntries.category,
+        outcome: securityAuditEntries.outcome,
+        reasonCode: securityAuditEntries.reasonCode,
+      })
+      .from(securityAuditEntries)
+      .where(
+        eq(securityAuditEntries.requestId, oneTimeRaceLoserMetadata.requestId),
+      )
+      .limit(1);
+    expect(oneTimeRaceFailureAudit).toEqual({
+      action: 'set-channel-enabled',
+      category: 'access-denial',
+      outcome: 'denied',
+      reasonCode: 'FORBIDDEN',
+    });
 
     const statusRaceIntegrationId = `synthetic-live-status-race-${suffix}`;
     const statusRaceLiveStatusId = randomUUID();
@@ -1530,6 +1701,268 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(missingFacilityAudit?.requestId).toBe(missingFacilityRequestId);
   });
 
+  test('rejects mismatched live authorization and enforces exact single use', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    await persistLiveAuthorizationActor(database, authenticated, 'primary');
+    if (authenticated.actor.kind !== 'human') {
+      throw new Error('The primary live authorization actor must be human.');
+    }
+    const differentHuman = authenticatedAdministrator();
+    await persistLiveAuthorizationActor(database, differentHuman, 'other');
+    const differentSession = {
+      ...authenticated,
+      actor: {
+        kind: 'human' as const,
+        userId: authenticated.actor.userId,
+        sessionId: randomUUID(),
+      },
+    } as unknown as AuthenticatedSession;
+    await persistLiveAuthorizationActor(
+      database,
+      differentSession,
+      'different-session',
+    );
+
+    const mismatchIntegrationId = `synthetic-live-mismatch-${randomUUID()}`;
+    const mismatchStatusId = randomUUID();
+    const mismatchIssuedAt = new Date(Date.now() - 1_000);
+    const validAuthorization = liveAuthorizationFor({
+      authenticated,
+      integrationId: mismatchIntegrationId,
+      integrationStatusId: mismatchStatusId,
+      previousConfiguration: null,
+      issuedAt: mismatchIssuedAt,
+    });
+    await database.insert(integrationStatuses).values({
+      id: mismatchStatusId,
+      integrationId: mismatchIntegrationId,
+      label: 'live-verified',
+      verifiedAt: mismatchIssuedAt,
+      verifiedByUserId: authenticated.actor.userId,
+      authorizationReference:
+        liveChannelChangeAuthorizationCommitment(validAuthorization),
+      reasonCode: null,
+      observedAt: mismatchIssuedAt,
+    });
+
+    const mismatchCases = [
+      {
+        label: 'different-human',
+        caller: differentHuman,
+        authorization: validAuthorization,
+      },
+      {
+        label: 'different-session',
+        caller: differentSession,
+        authorization: validAuthorization,
+      },
+      {
+        label: 'different-status',
+        caller: authenticated,
+        authorization: {
+          ...validAuthorization,
+          integrationStatusId: randomUUID(),
+        },
+      },
+      {
+        label: 'bad-request-digest',
+        caller: authenticated,
+        authorization: {
+          ...validAuthorization,
+          requestDigest: 'f'.repeat(64),
+        },
+      },
+      {
+        label: 'bad-consequence-digest',
+        caller: authenticated,
+        authorization: {
+          ...validAuthorization,
+          consequenceDigest: 'e'.repeat(64),
+        },
+      },
+      {
+        label: 'different-issued-at',
+        caller: authenticated,
+        authorization: {
+          ...validAuthorization,
+          issuedAt: new Date(mismatchIssuedAt.getTime() + 1).toISOString(),
+        },
+      },
+    ] as const;
+    for (const mismatch of mismatchCases) {
+      const callerStore = createDrizzleAdminCapabilityStore(
+        database,
+        mismatch.caller,
+      );
+      try {
+        await executeSetChannelEnabledCapability({
+          authenticated: mismatch.caller,
+          store: callerStore,
+          command: {
+            integrationId: mismatchIntegrationId,
+            enabled: true,
+            authorization: mismatch.authorization,
+          },
+          metadata: {
+            idempotencyKey: `issue-26-live-mismatch-${mismatch.label}-${randomUUID()}`,
+            requestId: randomUUID(),
+            now: new Date(),
+          },
+        });
+        throw new Error(
+          `Expected ${mismatch.label} live authorization to fail closed.`,
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(AdminCapabilityError);
+        expect((error as AdminCapabilityError).status).toBe(403);
+      }
+    }
+    expect(
+      await database
+        .select({ id: integrationChannelChangeAuthorizations.id })
+        .from(integrationChannelChangeAuthorizations)
+        .where(
+          eq(
+            integrationChannelChangeAuthorizations.integrationStatusId,
+            mismatchStatusId,
+          ),
+        ),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ id: channelConfigurations.integrationId })
+        .from(channelConfigurations)
+        .where(eq(channelConfigurations.integrationId, mismatchIntegrationId)),
+    ).toEqual([]);
+
+    const singleUseIntegrationId = `synthetic-live-single-use-${randomUUID()}`;
+    const singleUseStatusId = randomUUID();
+    const singleUseIssuedAt = new Date(Date.now() - 1_000);
+    const singleUseAuthorization = liveAuthorizationFor({
+      authenticated,
+      integrationId: singleUseIntegrationId,
+      integrationStatusId: singleUseStatusId,
+      previousConfiguration: {
+        enabled: false,
+        statusId: singleUseStatusId,
+      },
+      issuedAt: singleUseIssuedAt,
+      desiredEnabled: false,
+    });
+    await database.insert(integrationStatuses).values({
+      id: singleUseStatusId,
+      integrationId: singleUseIntegrationId,
+      label: 'live-verified',
+      verifiedAt: singleUseIssuedAt,
+      verifiedByUserId: authenticated.actor.userId,
+      authorizationReference: liveChannelChangeAuthorizationCommitment(
+        singleUseAuthorization,
+      ),
+      reasonCode: null,
+      observedAt: singleUseIssuedAt,
+    });
+    await database.insert(channelConfigurations).values({
+      integrationId: singleUseIntegrationId,
+      enabled: false,
+      statusId: singleUseStatusId,
+      statusLabel: 'live-verified',
+      changedAt: singleUseIssuedAt,
+    });
+    const primaryStore = createDrizzleAdminCapabilityStore(
+      database,
+      authenticated,
+    );
+    const firstMetadata = {
+      idempotencyKey: `issue-26-live-single-use-${randomUUID()}`,
+      requestId: randomUUID(),
+      now: new Date(),
+    };
+    const firstResult = await executeSetChannelEnabledCapability({
+      authenticated,
+      store: primaryStore,
+      command: {
+        integrationId: singleUseIntegrationId,
+        enabled: false,
+        authorization: singleUseAuthorization,
+      },
+      metadata: firstMetadata,
+    });
+    expect(firstResult).toMatchObject({
+      integrationId: singleUseIntegrationId,
+      enabled: false,
+      status: { id: singleUseStatusId, label: 'live-verified' },
+    });
+    expect(
+      await executeSetChannelEnabledCapability({
+        authenticated,
+        store: primaryStore,
+        command: {
+          integrationId: singleUseIntegrationId,
+          enabled: false,
+          authorization: singleUseAuthorization,
+        },
+        metadata: firstMetadata,
+      }),
+    ).toEqual(firstResult);
+
+    const reusedRequestId = randomUUID();
+    try {
+      await executeSetChannelEnabledCapability({
+        authenticated,
+        store: primaryStore,
+        command: {
+          integrationId: singleUseIntegrationId,
+          enabled: false,
+          authorization: singleUseAuthorization,
+        },
+        metadata: {
+          idempotencyKey: `issue-26-live-single-use-reuse-${randomUUID()}`,
+          requestId: reusedRequestId,
+          now: new Date(),
+        },
+      });
+      throw new Error('Expected a consumed live authorization to be refused.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AdminCapabilityError);
+      expect((error as AdminCapabilityError).status).toBe(403);
+    }
+    const singleUseRows = await database
+      .select({
+        reference: integrationChannelChangeAuthorizations.reference,
+        requestId: integrationChannelChangeAuthorizations.consumedRequestId,
+      })
+      .from(integrationChannelChangeAuthorizations)
+      .where(
+        eq(
+          integrationChannelChangeAuthorizations.integrationStatusId,
+          singleUseStatusId,
+        ),
+      );
+    expect(singleUseRows).toEqual([
+      {
+        reference: singleUseAuthorization.reference,
+        requestId: firstMetadata.requestId,
+      },
+    ]);
+    const [reuseAudit] = await database
+      .select({
+        action: securityAuditEntries.action,
+        category: securityAuditEntries.category,
+        outcome: securityAuditEntries.outcome,
+        reasonCode: securityAuditEntries.reasonCode,
+      })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, reusedRequestId))
+      .limit(1);
+    expect(reuseAudit).toEqual({
+      action: 'set-channel-enabled',
+      category: 'access-denial',
+      outcome: 'denied',
+      reasonCode: 'FORBIDDEN',
+    });
+  });
+
   test('replaces immutable roster sources with derived versions and rejects stale concurrent replacements', async () => {
     const database = databaseConnection().db;
     const authenticated = authenticatedAdministrator();
@@ -1653,6 +2086,35 @@ describeWithDatabase('facilities administrator database flow', () => {
       .from(groupSources)
       .where(eq(groupSources.id, originalBuilding.id))
       .limit(1);
+
+    try {
+      await executeUpdateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          id: originalBuilding.id,
+          kind: 'google-group',
+          purpose: 'building',
+          facilityId: facility.id,
+          displayName: 'Inactive replacement must fail closed',
+          active: false,
+          googleGroupId: `replacement-inactive-${suffix}`,
+          email: `replacement-inactive-${suffix}@example.invalid`,
+        },
+        metadata: metadata('replacement-inactive', requestIds),
+      });
+      throw new Error('Expected an inactive replacement source to fail.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AdminCapabilityError);
+      expect((error as AdminCapabilityError).status).toBe(409);
+    }
+    expect(await latestStaffConfiguration()).toEqual(before);
+    const [inactiveReplacementRow] = await database
+      .select({ id: groupSources.id })
+      .from(groupSources)
+      .where(eq(groupSources.googleGroupId, `replacement-inactive-${suffix}`))
+      .limit(1);
+    expect(inactiveReplacementRow).toBeUndefined();
 
     const replacement = await executeUpdateGroupSourceCapability({
       authenticated,
@@ -1992,6 +2454,248 @@ describeWithDatabase('facilities administrator database flow', () => {
       throw new Error(
         'Expected a superseded others source to be refused in a new audience version.',
       );
+    } catch (error) {
+      expect(error).toBeInstanceOf(AdminCapabilityError);
+      expect((error as AdminCapabilityError).status).toBe(409);
+    }
+  });
+
+  test('replaces synthetic building and others sources without rewriting history', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const suffix = randomUUID();
+    const requestIds: string[] = [];
+
+    const facility = await executeCreateFacilityCapability({
+      authenticated,
+      store,
+      command: {
+        code: `SYN-${suffix.slice(0, 8).toUpperCase()}`,
+        name: `Synthetic replacement site ${suffix.slice(0, 8)}`,
+      },
+      metadata: metadata('synthetic-replacement-facility', requestIds),
+    });
+    const originalBuilding = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'synthetic',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: `${facility.name} original synthetic building`,
+        active: true,
+        fixtureKey: `synthetic-building-${suffix}`,
+      },
+      metadata: metadata('synthetic-replacement-building', requestIds),
+    });
+    const originalOthers = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'synthetic',
+        purpose: 'others',
+        facilityId: null,
+        displayName: 'Original synthetic others',
+        active: true,
+        fixtureKey: `synthetic-others-${suffix}`,
+      },
+      metadata: metadata('synthetic-replacement-others', requestIds),
+    });
+    const historicalAudience =
+      await executeCreateAudienceConfigVersionCapability({
+        authenticated,
+        store,
+        command: {
+          audienceConfigId: null,
+          facilityId: facility.id,
+          targets: [
+            { kind: 'building', facilityId: facility.id },
+            {
+              kind: 'others',
+              groupSourceRef: {
+                id: originalOthers.id,
+                kind: 'synthetic',
+                purpose: 'others',
+                facilityId: null,
+              },
+            },
+          ],
+        },
+        metadata: metadata('synthetic-replacement-audience', requestIds),
+      });
+
+    async function latestSyntheticConfiguration() {
+      const [header] = await database
+        .select({
+          id: rosterSourceConfigurations.id,
+          version: rosterSourceConfigurations.version,
+        })
+        .from(rosterSourceConfigurations)
+        .where(eq(rosterSourceConfigurations.population, 'synthetic'))
+        .orderBy(desc(rosterSourceConfigurations.version))
+        .limit(1);
+      if (header === undefined) {
+        throw new Error('The synthetic roster configuration is missing.');
+      }
+      const groups = await database
+        .select({ sourceId: rosterSourceConfigurationGroups.groupSourceId })
+        .from(rosterSourceConfigurationGroups)
+        .where(
+          and(
+            eq(rosterSourceConfigurationGroups.configurationId, header.id),
+            eq(
+              rosterSourceConfigurationGroups.configurationVersion,
+              header.version,
+            ),
+          ),
+        )
+        .orderBy(rosterSourceConfigurationGroups.groupSourceId);
+      return { ...header, sourceIds: groups.map(({ sourceId }) => sourceId) };
+    }
+
+    const before = await latestSyntheticConfiguration();
+    expect(before.sourceIds).toContain(originalBuilding.id);
+    expect(before.sourceIds).toContain(originalOthers.id);
+    const originalRowsBefore = await database
+      .select()
+      .from(groupSources)
+      .where(inArray(groupSources.id, [originalBuilding.id, originalOthers.id]))
+      .orderBy(groupSources.id);
+
+    const replacementBuilding = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        id: originalBuilding.id,
+        kind: 'synthetic',
+        purpose: 'building',
+        facilityId: facility.id,
+        displayName: `${facility.name} corrected synthetic building`,
+        active: true,
+        fixtureKey: `synthetic-building-corrected-${suffix}`,
+      },
+      metadata: metadata('synthetic-building-corrected', requestIds),
+    });
+    const replacementOthers = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        id: originalOthers.id,
+        kind: 'synthetic',
+        purpose: 'others',
+        facilityId: null,
+        displayName: 'Corrected synthetic others',
+        active: true,
+        fixtureKey: `synthetic-others-corrected-${suffix}`,
+      },
+      metadata: metadata('synthetic-others-corrected', requestIds),
+    });
+
+    const current = await latestSyntheticConfiguration();
+    expect(current.id).toBe(before.id);
+    expect(current.version).toBe(before.version + 2);
+    expect(current.sourceIds).toContain(replacementBuilding.id);
+    expect(current.sourceIds).toContain(replacementOthers.id);
+    expect(current.sourceIds).not.toContain(originalBuilding.id);
+    expect(current.sourceIds).not.toContain(originalOthers.id);
+    const historicalSourceIds = await database
+      .select({ sourceId: rosterSourceConfigurationGroups.groupSourceId })
+      .from(rosterSourceConfigurationGroups)
+      .where(
+        and(
+          eq(rosterSourceConfigurationGroups.configurationId, before.id),
+          eq(
+            rosterSourceConfigurationGroups.configurationVersion,
+            before.version,
+          ),
+        ),
+      )
+      .orderBy(rosterSourceConfigurationGroups.groupSourceId);
+    expect(historicalSourceIds.map(({ sourceId }) => sourceId)).toEqual(
+      before.sourceIds,
+    );
+    expect(
+      await database
+        .select()
+        .from(groupSources)
+        .where(
+          inArray(groupSources.id, [originalBuilding.id, originalOthers.id]),
+        )
+        .orderBy(groupSources.id),
+    ).toEqual(originalRowsBefore);
+
+    const correctedAudience =
+      await executeCreateAudienceConfigVersionCapability({
+        authenticated,
+        store,
+        command: {
+          audienceConfigId: historicalAudience.id,
+          facilityId: facility.id,
+          targets: [
+            { kind: 'building', facilityId: facility.id },
+            {
+              kind: 'others',
+              groupSourceRef: {
+                id: replacementOthers.id,
+                kind: 'synthetic',
+                purpose: 'others',
+                facilityId: null,
+              },
+            },
+          ],
+        },
+        metadata: metadata('synthetic-audience-corrected', requestIds),
+      });
+    expect(correctedAudience).toMatchObject({
+      id: historicalAudience.id,
+      version: historicalAudience.version + 1,
+    });
+    expect(
+      await executeGetAudienceConfigVersionCapability({
+        authenticated,
+        store,
+        query: {
+          audienceConfig: {
+            id: historicalAudience.id,
+            version: historicalAudience.version,
+          },
+        },
+        metadata: { requestId: randomUUID(), now: new Date() },
+      }),
+    ).toEqual(historicalAudience);
+    expect(
+      await executeGetAudienceConfigCapability({
+        authenticated,
+        store,
+        query: { facilityId: facility.id },
+        metadata: { requestId: randomUUID(), now: new Date() },
+      }),
+    ).toEqual(correctedAudience);
+
+    try {
+      await executeCreateAudienceConfigVersionCapability({
+        authenticated,
+        store,
+        command: {
+          audienceConfigId: historicalAudience.id,
+          facilityId: facility.id,
+          targets: [
+            { kind: 'building', facilityId: facility.id },
+            {
+              kind: 'others',
+              groupSourceRef: {
+                id: originalOthers.id,
+                kind: 'synthetic',
+                purpose: 'others',
+                facilityId: null,
+              },
+            },
+          ],
+        },
+        metadata: metadata('synthetic-stale-audience', requestIds),
+      });
+      throw new Error('Expected a superseded synthetic source to be refused.');
     } catch (error) {
       expect(error).toBeInstanceOf(AdminCapabilityError);
       expect((error as AdminCapabilityError).status).toBe(409);
