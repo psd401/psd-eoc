@@ -13,6 +13,7 @@ export interface ActivationConfirmationProps {
   readonly activeEventCount?: number;
   readonly blockingMessages?: readonly string[];
   readonly busy?: boolean;
+  readonly channels: ActivationPreview['channels'];
   readonly children?: ReactNode;
   readonly disabled?: boolean;
   readonly eventTypeName: string;
@@ -23,6 +24,53 @@ export interface ActivationConfirmationProps {
   readonly rosterPopulation: RosterPopulation;
   readonly sendReadiness: ActivationPreview['sendReadiness'];
   readonly testID?: string;
+}
+
+type PreviewChannel = ActivationPreview['channels'][number];
+
+function channelName(channel: PreviewChannel['channel']): string {
+  switch (channel) {
+    case 'push':
+      return 'Push notifications';
+    case 'email':
+      return 'Email';
+    case 'sms':
+      return 'Text messages';
+  }
+}
+
+function integrationLabel(
+  label: PreviewChannel['integrationStatus']['label'],
+): string {
+  switch (label) {
+    case 'live-verified':
+      return 'Live integration verified';
+    case 'mocked':
+      return 'Mocked — training data only';
+    case 'configured-unverified':
+      return 'Configured, not verified';
+    case 'blocked':
+      return 'Blocked';
+  }
+}
+
+function renderedMessageFields(
+  message: PreviewChannel['renderedMessage'],
+): readonly Readonly<{ label: string; value: string }>[] {
+  switch (message.channel) {
+    case 'push':
+      return [
+        { label: 'Title', value: message.title },
+        { label: 'Message', value: message.body },
+      ];
+    case 'email':
+      return [
+        { label: 'Subject', value: message.subject },
+        { label: 'Message', value: message.textBody },
+      ];
+    case 'sms':
+      return [{ label: 'Message', value: message.body }];
+  }
 }
 
 export function activationAudienceLabel(
@@ -43,6 +91,7 @@ export function ActivationConfirmation({
   activeEventCount = 0,
   blockingMessages = [],
   busy = false,
+  channels,
   children,
   disabled = false,
   eventTypeName,
@@ -118,6 +167,93 @@ export function ActivationConfirmation({
 
       {children}
 
+      <View style={styles.consequences}>
+        <Text accessibilityRole="header" style={styles.consequencesHeading}>
+          Exact notification consequences
+        </Text>
+        <Text style={styles.consequencesIntroduction}>
+          Your confirmation signs these server-rendered messages, endpoint
+          counts, and integration truth labels for this {classification}.
+        </Text>
+
+        {channels.map((channel) => {
+          const messageFields = renderedMessageFields(channel.renderedMessage);
+          const friendlyChannelName = channelName(channel.channel);
+
+          return (
+            <View
+              key={channel.channel}
+              style={[
+                styles.channelCard,
+                {
+                  backgroundColor: theme.colors.surface,
+                  borderColor: theme.colors.border,
+                },
+              ]}
+            >
+              <Text
+                accessibilityLabel={`${classification}, ${friendlyChannelName} consequence`}
+                accessibilityRole="header"
+                style={[
+                  styles.channelHeading,
+                  { color: theme.colors.textPrimary },
+                ]}
+              >
+                {classification} · {friendlyChannelName}
+              </Text>
+              <Text style={styles.fact}>
+                <Text style={styles.factLabel}>Channel: </Text>
+                {friendlyChannelName}
+              </Text>
+              <Text style={styles.fact}>
+                <Text style={styles.factLabel}>Eligible endpoints: </Text>
+                {channel.endpointCount}
+              </Text>
+              <Text style={styles.fact}>
+                <Text style={styles.factLabel}>Integration: </Text>
+                {integrationLabel(channel.integrationStatus.label)}
+              </Text>
+              <Text accessibilityRole="header" style={styles.messageHeading}>
+                Exact message preview
+              </Text>
+              {messageFields.map((field) => (
+                <Text key={field.label} style={styles.messageField}>
+                  <Text style={styles.factLabel}>{field.label}: </Text>
+                  {field.value}
+                </Text>
+              ))}
+            </View>
+          );
+        })}
+
+        {channels.some((channel) => channel.channel === 'sms') ? null : (
+          <View
+            style={[
+              styles.channelCard,
+              styles.channelCardDisabled,
+              { borderColor: theme.colors.border },
+            ]}
+          >
+            <Text accessibilityRole="header" style={styles.channelHeading}>
+              Text messages
+            </Text>
+            <Text style={styles.fact}>
+              <Text style={styles.factLabel}>Not included. </Text>
+              Text messaging is not enabled for this preview.
+            </Text>
+            <Text style={styles.fact}>
+              This confirmation signs no SMS notification intent and claims no
+              eligible SMS endpoints.
+            </Text>
+          </View>
+        )}
+
+        <Text style={styles.endpointTruth}>
+          Endpoint counts describe eligible destinations, not provider
+          acceptance or confirmed human receipt.
+        </Text>
+      </View>
+
       {blocked ? (
         <View
           accessibilityLiveRegion="assertive"
@@ -145,7 +281,7 @@ export function ActivationConfirmation({
           notification intents for {audience}.
         </Text>
         <Pressable
-          accessibilityHint="Final human confirmation. PSD EOC will not queue an automatic retry."
+          accessibilityHint="Final human confirmation of the exact messages, endpoints, and integration truth labels above. PSD EOC will not queue an automatic retry."
           accessibilityLabel={busy ? `${action}. Starting once.` : action}
           accessibilityRole="button"
           accessibilityState={{ busy, disabled: unavailable }}
@@ -229,6 +365,34 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     lineHeight: 29,
   },
+  consequences: {
+    gap: 12,
+  },
+  consequencesHeading: {
+    color: '#102A43',
+    fontSize: 22,
+    fontWeight: '900',
+    lineHeight: 29,
+  },
+  consequencesIntroduction: {
+    color: '#334E68',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  channelCard: {
+    borderRadius: 16,
+    borderWidth: 2,
+    gap: 8,
+    padding: 16,
+  },
+  channelCardDisabled: {
+    backgroundColor: '#EDF2F7',
+  },
+  channelHeading: {
+    fontSize: 18,
+    fontWeight: '900',
+    lineHeight: 24,
+  },
   confirmButton: {
     alignItems: 'center',
     borderRadius: 16,
@@ -246,6 +410,32 @@ const styles = StyleSheet.create({
   container: {
     gap: 18,
     width: '100%',
+  },
+  fact: {
+    color: '#334E68',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  factLabel: {
+    color: '#102A43',
+    fontWeight: '900',
+  },
+  endpointTruth: {
+    color: '#486581',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  messageField: {
+    color: '#334E68',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  messageHeading: {
+    color: '#102A43',
+    fontSize: 16,
+    fontWeight: '900',
+    lineHeight: 22,
+    marginTop: 4,
   },
   neverQueue: {
     color: '#486581',

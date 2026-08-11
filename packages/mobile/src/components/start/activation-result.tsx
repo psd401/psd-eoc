@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import {
   AccessibilityInfo,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -20,6 +21,42 @@ export interface ActivationResultProps {
   readonly testID?: string;
 }
 
+type ResultIdentity = Pick<
+  ActivationResultProps,
+  'eventTypeName' | 'kind' | 'mode'
+>;
+
+function resultCopy({ kind, mode }: ResultIdentity) {
+  const activated = kind === 'activated';
+  return Object.freeze({
+    heading: activated
+      ? mode === 'real'
+        ? 'Incident started'
+        : 'Drill started'
+      : 'Event joined',
+    status: activated
+      ? `PSD EOC durably accepted the ${mode === 'real' ? 'incident' : 'drill'} and recorded its notification intent.`
+      : 'You joined the existing event. Joining did not create another event or notification.',
+  });
+}
+
+export function activationResultAnnouncement(input: ResultIdentity): string {
+  const theme = getEventTheme(input.mode);
+  const { heading, status } = resultCopy(input);
+  return `${heading}. ${theme.classificationWord}. ${input.eventTypeName}. ${status}`;
+}
+
+type Announce = (message: string) => void;
+
+/** Executes the exact announcement used by the mounted result screen. */
+export function announceActivationResult(
+  input: ResultIdentity,
+  announce: Announce = (message) =>
+    AccessibilityInfo.announceForAccessibility(message),
+): void {
+  announce(activationResultAnnouncement(input));
+}
+
 /**
  * Full-screen result content. Haptics intentionally remain a screen concern so
  * feedback occurs only after that screen validates the server result.
@@ -33,27 +70,46 @@ export function ActivationResult({
   testID,
 }: ActivationResultProps) {
   const announced = useRef(false);
-  const theme = getEventTheme(mode);
-  const activated = kind === 'activated';
-  const heading = activated
-    ? mode === 'real'
-      ? 'Incident started'
-      : 'Drill started'
-    : 'Event joined';
-  const status = activated
-    ? `PSD EOC durably accepted the ${mode === 'real' ? 'incident' : 'drill'} and recorded its notification intent.`
-    : 'You joined the existing event. Joining did not create another event or notification.';
+  const announcement = activationResultAnnouncement({
+    eventTypeName,
+    kind,
+    mode,
+  });
 
   useEffect(() => {
     if (announced.current) return;
     announced.current = true;
-    AccessibilityInfo.announceForAccessibility(
-      `${heading}. ${theme.classificationWord}. ${eventTypeName}. ${status}`,
-    );
-  }, [eventTypeName, heading, status, theme.classificationWord]);
+    announceActivationResult({ eventTypeName, kind, mode });
+  }, [announcement, eventTypeName, kind, mode]);
 
   return (
-    <View
+    <ActivationResultContent
+      eventTypeName={eventTypeName}
+      kind={kind}
+      mode={mode}
+      {...(onOpenEvent === undefined ? {} : { onOpenEvent })}
+      {...(onReturnHome === undefined ? {} : { onReturnHome })}
+      {...(testID === undefined ? {} : { testID })}
+    />
+  );
+}
+
+/** Pure native result tree shared with renderer-independent accessibility tests. */
+export function ActivationResultContent({
+  eventTypeName,
+  kind,
+  mode,
+  onOpenEvent,
+  onReturnHome,
+  testID,
+}: ActivationResultProps) {
+  const theme = getEventTheme(mode);
+  const activated = kind === 'activated';
+  const { heading, status } = resultCopy({ eventTypeName, kind, mode });
+
+  return (
+    <ScrollView
+      contentContainerStyle={styles.content}
       style={[styles.page, { backgroundColor: theme.colors.pageBackground }]}
       testID={testID}
     >
@@ -132,13 +188,20 @@ export function ActivationResult({
           )}
         </View>
       )}
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   actions: {
     gap: 12,
+    marginTop: 'auto',
+    width: '100%',
+  },
+  content: {
+    flexGrow: 1,
+    gap: 20,
+    padding: 20,
     width: '100%',
   },
   eventType: {
@@ -153,8 +216,6 @@ const styles = StyleSheet.create({
   },
   page: {
     flex: 1,
-    gap: 20,
-    padding: 20,
     width: '100%',
   },
   pressed: {

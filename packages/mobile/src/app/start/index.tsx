@@ -262,8 +262,12 @@ export default function StartEventScreen() {
         Crypto.randomUUID(),
         (key) => activate(authenticatedRequest, nextPreview, key),
       );
+      const previewClassification =
+        nextPreview.templateMode === 'real'
+          ? 'REAL INCIDENT'
+          : 'DRILL — PRACTICE';
       AccessibilityInfo.announceForAccessibility(
-        `Consequence preview ready. ${activationAudienceLabel(nextPreview.recipientCount, nextPreview.rosterPopulation)}. Review before confirming.`,
+        `Consequence preview ready for ${previewClassification}. ${activationAudienceLabel(nextPreview.recipientCount, nextPreview.rosterPopulation)}. ${nextPreview.channels.length} channels list the exact rendered messages, endpoint counts, and integration truth labels. Review before confirming.`,
       );
     } catch (error) {
       if (previewRequestGeneration.current !== requestGeneration) return;
@@ -565,6 +569,7 @@ export default function StartEventScreen() {
             activeEventCount={preview.activeEventIds.length}
             blockingMessages={preview.blockingReasonCodes.map(blockingMessage)}
             busy={pendingAction === 'activate'}
+            channels={preview.channels}
             disabled={pendingAction !== null || mutationError !== null}
             eventTypeName={selectedType.latestVersion.name}
             facilityName={facility.name}

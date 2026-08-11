@@ -639,6 +639,92 @@ describe('mobile start API client', () => {
     expect(calls).toBe(1);
   });
 
+  test('aborts a timed-out activation once and reports its outcome as unknown', async () => {
+    const preview = previewFixture(selectionFixture());
+    const originalSetTimeout = globalThis.setTimeout;
+    let calls = 0;
+    let observedSignal: AbortSignal | undefined;
+    let fireTimeout: (() => void) | undefined;
+
+    globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+      expect(delay).toBe(20_000);
+      fireTimeout = callback;
+      return 1 as unknown as ReturnType<typeof globalThis.setTimeout>;
+    }) as typeof globalThis.setTimeout;
+
+    try {
+      const request: StartAuthenticatedRequest = (input) => {
+        calls += 1;
+        observedSignal = input.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          input.signal?.addEventListener(
+            'abort',
+            () => {
+              const error = new Error('Synthetic request aborted.');
+              error.name = 'AbortError';
+              reject(error);
+            },
+            { once: true },
+          );
+        });
+      };
+
+      const pendingActivation = activate(request, preview, IDEMPOTENCY_KEY);
+      expect(calls).toBe(1);
+      expect(observedSignal?.aborted).toBe(false);
+      expect(fireTimeout).toBeDefined();
+
+      fireTimeout?.();
+
+      await expect(pendingActivation).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+      });
+      expect(observedSignal?.aborted).toBe(true);
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
+  test('does not retry activate or join after an actual HTTP 5xx response', async () => {
+    const preview = previewFixture(selectionFixture());
+    const selectedEvent = activeEventFixture(selectionFixture());
+    const mutations = [
+      (request: StartAuthenticatedRequest) =>
+        activate(request, preview, IDEMPOTENCY_KEY),
+      (request: StartAuthenticatedRequest) =>
+        join(request, selectedEvent, IDEMPOTENCY_KEY),
+    ];
+
+    for (const mutate of mutations) {
+      let calls = 0;
+      const request: StartAuthenticatedRequest = async () => {
+        calls += 1;
+        return jsonResponse(
+          {
+            code: 'INTERNAL_ERROR',
+            message: 'Synthetic server acknowledgement was interrupted.',
+            requestId: IDS.request,
+            retryable: true,
+            fieldErrors: [],
+          },
+          503,
+        );
+      };
+
+      await expect(mutate(request)).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+      });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    }
+  });
+
   test('joins exactly the selected active event', async () => {
     const selectedEvent = activeEventFixture(selectionFixture());
     const result = JoinEventResultSchema.parse({
