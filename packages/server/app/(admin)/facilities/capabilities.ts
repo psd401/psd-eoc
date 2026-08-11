@@ -231,6 +231,7 @@ async function updateFacility(
   inputValue: CapabilityInput<'update-facility'>,
 ): Promise<Facility> {
   const input = UpdateFacilityInputSchema.parse(inputValue);
+  await lockRosterConfigurationPopulations(database);
   const [currentRow] = await database
     .select()
     .from(facilities)
@@ -781,6 +782,9 @@ async function createGroupSource(
   inputValue: CapabilityInput<'create-group-source'>,
 ): Promise<GroupSource> {
   const input = CreateGroupSourceInputSchema.parse(inputValue);
+  if (input.purpose !== 'access') {
+    await lockRosterConfigurationPopulations(database);
+  }
   if (input.facilityId !== null) {
     const facility = await getFacility(database, input.facilityId);
     if (facility === null || !facility.active) {
@@ -819,6 +823,11 @@ async function updateGroupSource(
   inputValue: CapabilityInput<'update-group-source'>,
 ): Promise<GroupSource> {
   const input = UpdateGroupSourceInputSchema.parse(inputValue);
+  if (input.purpose !== 'access') {
+    await lockRosterConfigurationPopulations(database);
+  } else if (!input.active) {
+    await lockAdminIdentity(database, 'admin-access-group-active-set');
+  }
   const current = await getGroupSource(database, input.id, true);
   if (current === null) {
     throw notFound('The group source was not found.');
@@ -867,7 +876,6 @@ async function updateGroupSource(
     return replacement;
   }
   if (current.active && !input.active) {
-    await lockAdminIdentity(database, 'admin-access-group-active-set');
     const activeAccessSources = await database
       .select({ id: groupSources.id })
       .from(groupSources)
@@ -1118,6 +1126,10 @@ async function createAudienceConfigVersion(
   inputValue: CapabilityInput<'create-audience-config-version'>,
 ): Promise<AudienceConfig> {
   const input = CreateAudienceConfigVersionInputSchema.parse(inputValue);
+  // Serialize every facility/roster-dependent administrator mutation before
+  // taking row locks. This preserves the replacement-before-audience order
+  // without forming a facility-row/advisory-lock cycle.
+  await lockRosterConfigurationPopulations(database);
   const [lockedFacility] = await database
     .select({ id: facilities.id })
     .from(facilities)
@@ -1127,9 +1139,6 @@ async function createAudienceConfigVersion(
   if (lockedFacility === undefined) {
     throw notFound('The audience facility was not found.');
   }
-  // Match updateFacility's facility -> staff roster -> synthetic roster lock
-  // order so concurrent facility and audience changes cannot deadlock.
-  await lockRosterConfigurationPopulations(database);
   await validateAudienceTargets(database, input);
   const id = input.audienceConfigId ?? randomUUID();
   let version = 1;
@@ -1467,7 +1476,7 @@ export const updateGroupSourceRegistration: ServerCapabilityRegistration<
     const output = await updateGroupSource(context.transaction.database, input);
     context.transaction.setAuditTarget({
       kind: 'configuration',
-      id: `group-source:${output.purpose}:${output.id}`,
+      id: output.id,
     });
     return output;
   },

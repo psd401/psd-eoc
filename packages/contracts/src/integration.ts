@@ -140,9 +140,7 @@ export const IntegrationHealthSchema = z
 export type IntegrationHealth = z.infer<typeof IntegrationHealthSchema>;
 
 const Sha256DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const CanonicalAuthorizationUuidSchema = UuidSchema.transform((value) =>
-  value.toLowerCase(),
-);
+const CanonicalAuthorizationUuidSchema = UuidSchema.toLowerCase();
 const ChannelAuthorizationTimestampSchema = TimestampSchema.refine((value) => {
   const fractionalSeconds = /\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/u.exec(value)?.[1];
   return fractionalSeconds === undefined || fractionalSeconds.length <= 3;
