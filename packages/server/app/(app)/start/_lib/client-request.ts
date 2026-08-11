@@ -237,6 +237,13 @@ export async function requestStartFlow<Output>(
     ) {
       throw error;
     }
+    if (path === '/start/api/preview') {
+      throw new StartFlowRequestError(
+        'PSD EOC could not load the consequence preview. No event was started and no notification was queued. Load a fresh preview before continuing.',
+        true,
+        false,
+      );
+    }
     throw new StartFlowRequestError(
       'The server outcome is unknown. Nothing will retry automatically. Return to the dashboard and check active events before making a fresh decision.',
       false,
@@ -257,6 +264,13 @@ export async function requestStartFlow<Output>(
       (error instanceof DOMException && error.name === 'AbortError')
     ) {
       throw error;
+    }
+    if (path === '/start/api/preview') {
+      throw new StartFlowRequestError(
+        'PSD EOC received an unreadable consequence preview. No event was started and no notification was queued. Load a fresh preview before continuing.',
+        true,
+        false,
+      );
     }
     throw new StartFlowRequestError(
       'PSD EOC received an unreadable server response. No automatic retry will occur.',
@@ -281,6 +295,13 @@ export async function requestStartFlow<Output>(
   try {
     return parser.parse(payload);
   } catch {
+    if (path === '/start/api/preview') {
+      throw new StartFlowRequestError(
+        'PSD EOC received an invalid consequence preview. No event was started and no notification was queued. Load a fresh preview before continuing.',
+        true,
+        false,
+      );
+    }
     throw new StartFlowRequestError(
       'PSD EOC received an invalid server response. Treat the outcome as unresolved and contact district technology.',
       false,

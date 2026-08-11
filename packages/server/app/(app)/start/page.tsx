@@ -155,10 +155,17 @@ export default async function SelectEventTypePage({
                 <span className="choice-card__icon" aria-hidden="true">
                   <ClassificationIcon mode={mode} />
                 </span>
-                <span>
-                  <strong>{item.latestVersion.name}</strong>
+                <span className="choice-card__copy">
+                  <strong className="choice-card__label">
+                    {item.latestVersion.name}
+                  </strong>
                   {item.latestVersion.description === null ? null : (
-                    <small>{item.latestVersion.description}</small>
+                    <>
+                      {' '}
+                      <small className="choice-card__detail">
+                        {item.latestVersion.description}
+                      </small>
+                    </>
                   )}
                 </span>
               </Link>

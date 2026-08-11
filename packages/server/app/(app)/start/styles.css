@@ -103,6 +103,7 @@ button,
   padding: 0.65rem 1rem;
   text-align: center;
   text-decoration: none;
+  white-space: normal;
 }
 
 button:hover,
@@ -112,6 +113,13 @@ button:hover,
   border-color: var(--link-hover);
   background: var(--link-hover);
   color: #ffffff;
+}
+
+button > span,
+.button > span,
+.action-link > span,
+.join-link > span {
+  min-width: 0;
 }
 
 button:disabled,
@@ -211,7 +219,9 @@ button:disabled,
 main,
 .page-shell {
   width: min(100% - 2rem, 80rem);
+  min-width: 0;
   margin: 0 auto;
+  overflow-wrap: anywhere;
   padding: clamp(1.5rem, 4vw, 3rem) 0 5rem;
 }
 
@@ -320,6 +330,13 @@ dd {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
   gap: 1rem;
+}
+
+.dashboard-grid > *,
+.choice-grid > *,
+.channel-grid > *,
+.result-grid > * {
+  min-width: 0;
 }
 
 .dashboard-section,
@@ -448,6 +465,8 @@ dd {
 
 .action-grid > *,
 .actions > * {
+  min-width: 0;
+  max-width: 100%;
   flex: 1 1 12rem;
 }
 
@@ -461,6 +480,7 @@ dd {
 .choice-card {
   display: grid;
   width: 100%;
+  min-width: 0;
   min-height: 6rem;
   align-content: center;
   justify-items: start;
@@ -468,6 +488,12 @@ dd {
   color: var(--text);
   text-align: left;
   text-decoration: none;
+}
+
+.choice-card__copy {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .choice-card:hover {
@@ -497,11 +523,14 @@ dd {
 }
 
 .choice-card__label {
+  display: block;
   font-size: 1.05rem;
   font-weight: 850;
 }
 
 .choice-card__detail {
+  display: block;
+  margin-top: 0.25rem;
   color: var(--text-muted);
   font-size: 0.94rem;
   line-height: 1.45;
