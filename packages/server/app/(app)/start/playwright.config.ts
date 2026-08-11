@@ -2,14 +2,12 @@ import { defineConfig } from '@playwright/test';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { requireSyntheticTestDatabaseUrl } from '../../(admin)/event-types/test-database';
 import { START_FLOW_PLAYWRIGHT_STORAGE_STATE_PATH } from './test/playwright.global-setup';
+import { startFlowPlaywrightDatabaseUrl } from './test/playwright-database';
 
 const appPort = Number(process.env.PSD_EOC_START_APP_PORT ?? '3115');
 const idpPort = Number(process.env.PSD_EOC_START_IDP_PORT ?? '4115');
-const databaseUrl = requireSyntheticTestDatabaseUrl(
-  process.env.TEST_DATABASE_URL,
-);
+const databaseUrl = startFlowPlaywrightDatabaseUrl();
 if (
   ![appPort, idpPort].every(
     (port) => Number.isSafeInteger(port) && port >= 1_024 && port <= 65_535,
@@ -37,6 +35,7 @@ export default defineConfig({
   testDir: './test',
   testMatch: /playwright\.flow\.ts$/u,
   globalSetup: resolve(startRoot, 'test/playwright.global-setup.ts'),
+  globalTeardown: resolve(startRoot, 'test/playwright.global-teardown.ts'),
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,

@@ -16,6 +16,8 @@ import {
   StartFlowRequestError,
   requestActiveEvent,
   requestStartFlow,
+  requireMatchingActiveJoinedEvent,
+  requireMatchingActivationResult,
 } from '../_lib/client-request';
 import { ClassificationBanner } from './classification-banner';
 import { ClassificationIcon } from './classification-icon';
@@ -56,6 +58,18 @@ type MutationResult =
     }>;
 
 type ResolvedActiveEventChoice = ActiveEventChoice;
+
+type MutationOperation =
+  | Readonly<{
+      kind: 'activate';
+      templateMode: TemplateMode;
+    }>
+  | Readonly<{
+      eventId: string;
+      eventTypeName: string;
+      kind: 'join';
+      templateMode: TemplateMode;
+    }>;
 
 const TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/Los_Angeles',
@@ -103,6 +117,10 @@ function audienceLabel(preview: ActivationPreview): string {
 
 function classificationLabel(mode: TemplateMode): string {
   return mode === 'real' ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY';
+}
+
+function shortEventId(eventId: string): string {
+  return eventId.slice(-8);
 }
 
 function fallbackEventName(kind: EventKind): string {
@@ -229,47 +247,6 @@ function requireMatchingActiveEvent(
   return event;
 }
 
-function requireMatchingActivation(
-  event: Event,
-  preview: ActivationPreview,
-  selection: ConfirmedSelection,
-): Event {
-  if (
-    event.facilityId !== selection.facilityId ||
-    event.kind !== selection.eventKind ||
-    event.templateMode !== selection.templateMode ||
-    event.eventTypeVersion.id !== selection.eventTypeVersionId ||
-    event.eventTypeVersion.templateMode !== selection.templateMode ||
-    event.rosterSnapshotId !== preview.rosterSnapshotId ||
-    event.rosterPopulation !== preview.rosterPopulation ||
-    event.status !== 'active'
-  ) {
-    throw new StartFlowRequestError(
-      'PSD EOC returned an event that does not match the confirmed preview. Treat the outcome as unresolved and check the dashboard before making another decision.',
-      false,
-      true,
-    );
-  }
-  return event;
-}
-
-function requireMatchingJoinedEvent(event: Event, expected: Event): Event {
-  if (
-    event.id !== expected.id ||
-    event.facilityId !== expected.facilityId ||
-    event.kind !== expected.kind ||
-    event.templateMode !== expected.templateMode ||
-    event.eventTypeVersion.id !== expected.eventTypeVersion.id
-  ) {
-    throw new StartFlowRequestError(
-      'PSD EOC returned a joined event that does not match the event you chose. Treat the outcome as unresolved and check the dashboard before making another decision.',
-      false,
-      true,
-    );
-  }
-  return event;
-}
-
 export function ActivationConfirm({
   activationIdempotencyKey,
   activeEvents,
@@ -283,11 +260,19 @@ export function ActivationConfirm({
   >([]);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(true);
-  const [mutationPending, setMutationPending] = useState(false);
+  const [pendingOperation, setPendingOperation] =
+    useState<MutationOperation | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [failedOperation, setFailedOperation] =
+    useState<MutationOperation | null>(null);
   const [mutationUnknown, setMutationUnknown] = useState(false);
   const [result, setResult] = useState<MutationResult | null>(null);
   const feedbackRef = useRef<HTMLDivElement>(null);
+  const previewStatusRef = useRef<HTMLParagraphElement>(null);
+  const focusPreviewStatusOnRetry = useRef(false);
+  const mutationInFlight = useRef(false);
+  const joinIdempotencyKeys = useRef(new Map<string, string>());
+  const mutationPending = pendingOperation !== null;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -373,18 +358,36 @@ export function ActivationConfirm({
     }
   }, [mutationError, result]);
 
+  useEffect(() => {
+    if (previewLoading && focusPreviewStatusOnRetry.current) {
+      focusPreviewStatusOnRetry.current = false;
+      previewStatusRef.current?.focus();
+    }
+  }, [previewLoading]);
+
+  function retryPreview() {
+    focusPreviewStatusOnRetry.current = true;
+    setPreviewAttempt((attempt) => attempt + 1);
+  }
+
   async function activate() {
     if (
       preview === null ||
       preview.sendReadiness !== 'ready' ||
-      mutationPending ||
+      mutationInFlight.current ||
       mutationUnknown ||
       result !== null
     ) {
       return;
     }
-    setMutationPending(true);
+    const operation: MutationOperation = {
+      kind: 'activate',
+      templateMode: selection.templateMode,
+    };
+    mutationInFlight.current = true;
+    setPendingOperation(operation);
     setMutationError(null);
+    setFailedOperation(null);
     setMutationUnknown(false);
     try {
       const activated = await requestStartFlow(
@@ -401,10 +404,11 @@ export function ActivationConfirm({
         StartEventResultSchema,
         activationIdempotencyKey,
       );
-      const event = requireMatchingActivation(
-        activated.event,
+      const event = requireMatchingActivationResult(
+        activated,
         preview,
         selection,
+        activationIdempotencyKey,
       );
       setResult({
         kind: 'activated',
@@ -413,6 +417,7 @@ export function ActivationConfirm({
         templateMode: event.templateMode,
       });
     } catch (error) {
+      setFailedOperation(operation);
       setMutationUnknown(
         error instanceof StartFlowRequestError && error.outcomeUnknown,
       );
@@ -422,24 +427,41 @@ export function ActivationConfirm({
           : 'The activation was not accepted.',
       );
     } finally {
-      setMutationPending(false);
+      mutationInFlight.current = false;
+      setPendingOperation(null);
     }
   }
 
   async function join(choice: ResolvedActiveEventChoice) {
-    if (mutationPending || result !== null) return;
-    setMutationPending(true);
+    if (mutationInFlight.current || result !== null) return;
+    const operation: MutationOperation = {
+      eventId: choice.event.id,
+      eventTypeName: choice.label,
+      kind: 'join',
+      templateMode: choice.event.templateMode,
+    };
+    mutationInFlight.current = true;
+    setPendingOperation(operation);
     setMutationError(null);
+    setFailedOperation(null);
     setMutationUnknown(false);
     try {
+      let idempotencyKey = joinIdempotencyKeys.current.get(choice.event.id);
+      if (idempotencyKey === undefined) {
+        idempotencyKey = `join:${crypto.randomUUID()}`;
+        joinIdempotencyKeys.current.set(choice.event.id, idempotencyKey);
+      }
       const joined = await requestStartFlow(
         '/start/api/join',
         { eventId: choice.event.id },
         csrfCookieName,
         JoinEventResultSchema,
-        `join:${crypto.randomUUID()}`,
+        idempotencyKey,
       );
-      const event = requireMatchingJoinedEvent(joined.event, choice.event);
+      const event = requireMatchingActiveJoinedEvent(
+        joined.event,
+        choice.event,
+      );
       setResult({
         kind: 'joined',
         eventId: event.id,
@@ -447,6 +469,7 @@ export function ActivationConfirm({
         templateMode: event.templateMode,
       });
     } catch (error) {
+      setFailedOperation(operation);
       setMutationUnknown(
         error instanceof StartFlowRequestError && error.outcomeUnknown,
       );
@@ -454,7 +477,8 @@ export function ActivationConfirm({
         error instanceof Error ? error.message : 'The event was not joined.',
       );
     } finally {
-      setMutationPending(false);
+      mutationInFlight.current = false;
+      setPendingOperation(null);
     }
   }
 
@@ -530,13 +554,23 @@ export function ActivationConfirm({
         templateMode={selection.templateMode}
       />
 
-      <div className="consequence-preview">
-        {previewLoading ? (
-          <p className="status-message" role="status">
-            Loading the current roster snapshot, active events, and channel
-            consequences…
-          </p>
-        ) : null}
+      <div aria-busy={previewLoading} className="consequence-preview">
+        <p
+          aria-atomic="true"
+          aria-live="polite"
+          className="status-message"
+          ref={previewStatusRef}
+          role="status"
+          tabIndex={-1}
+        >
+          {previewLoading
+            ? 'Loading the current roster snapshot, active events, and channel consequences…'
+            : previewError !== null
+              ? 'Consequence preview unavailable.'
+              : preview === null
+                ? 'Consequence preview is not available.'
+                : `Consequence preview ready: ${preview.recipientCount} selected ${audienceLabel(preview)}, ${preview.channels.length} included channel preview${preview.channels.length === 1 ? '' : 's'}, notifications ${preview.sendReadiness}.`}
+        </p>
 
         {previewError !== null ? (
           <section className="error-summary" role="alert">
@@ -546,7 +580,7 @@ export function ActivationConfirm({
             <button
               className="button button--secondary"
               type="button"
-              onClick={() => setPreviewAttempt((attempt) => attempt + 1)}
+              onClick={retryPreview}
             >
               Load a fresh preview
             </button>
@@ -579,6 +613,26 @@ export function ActivationConfirm({
                     <ExactChannelMessage channel={channel} />
                   </article>
                 ))}
+                {preview.channels.some(
+                  (channel) => channel.channel === 'sms',
+                ) ? null : (
+                  <article className="channel-card channel-card--disabled">
+                    <h3>Text messages</h3>
+                    <p>
+                      <strong>Not included</strong>
+                    </p>
+                    <p>
+                      Text messaging is not enabled for this preview.{' '}
+                      <strong>
+                        The notification intent will contain no SMS channel
+                      </strong>{' '}
+                      and no SMS messages will be queued from this confirmation.
+                    </p>
+                    <p>
+                      No eligible SMS endpoint count is claimed by this preview.
+                    </p>
+                  </article>
+                )}
               </div>
               <p>
                 Preview expires{' '}
@@ -603,23 +657,43 @@ export function ActivationConfirm({
                   event with another set of notification intents.
                 </p>
                 <div className="action-grid">
-                  {resolvedActiveEvents.map((choice) => (
-                    <button
-                      className={`button join-choice join-choice--${choice.event.templateMode}`}
-                      disabled={mutationPending || mutationUnknown}
-                      key={choice.event.id}
-                      type="button"
-                      onClick={() => void join(choice)}
-                    >
-                      <ClassificationIcon mode={choice.event.templateMode} />
-                      <span>
-                        Join {choice.label} —{' '}
-                        <strong>
-                          {classificationLabel(choice.event.templateMode)}
-                        </strong>
-                      </span>
-                    </button>
-                  ))}
+                  {resolvedActiveEvents.map((choice) => {
+                    const joiningThisEvent =
+                      pendingOperation?.kind === 'join' &&
+                      pendingOperation.eventId === choice.event.id;
+                    const eventTime =
+                      choice.event.activatedAt ?? choice.event.createdAt;
+                    return (
+                      <button
+                        className={`button join-choice join-choice--${choice.event.templateMode}`}
+                        disabled={mutationPending || mutationUnknown}
+                        key={choice.event.id}
+                        type="button"
+                        onClick={() => void join(choice)}
+                      >
+                        <ClassificationIcon mode={choice.event.templateMode} />
+                        <span>
+                          {joiningThisEvent ? (
+                            `Joining ${classificationLabel(choice.event.templateMode)} once…`
+                          ) : (
+                            <>
+                              Join {choice.label} —{' '}
+                              <strong>
+                                {classificationLabel(choice.event.templateMode)}
+                              </strong>
+                            </>
+                          )}
+                          <span className="join-choice__detail">
+                            Started{' '}
+                            <time dateTime={eventTime}>
+                              {TIME_FORMATTER.format(new Date(eventTime))}
+                            </time>{' '}
+                            — event {shortEventId(choice.event.id)}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </section>
             ) : null}
@@ -659,8 +733,8 @@ export function ActivationConfirm({
                   type="button"
                   onClick={() => void activate()}
                 >
-                  {mutationPending
-                    ? 'Submitting once…'
+                  {pendingOperation?.kind === 'activate'
+                    ? `Starting ${classificationLabel(selection.templateMode)} ${selection.eventTypeName} at ${selection.facilityName} once…`
                     : `${preview.activeEventIds.length > 0 ? 'Start a separate ' : 'Start '}${
                         selection.templateMode === 'real'
                           ? 'REAL incident'
@@ -685,6 +759,15 @@ export function ActivationConfirm({
             <h2>
               {mutationUnknown ? 'Outcome unknown' : 'Request not accepted'}
             </h2>
+            {failedOperation === null ? null : (
+              <p>
+                <strong>Attempted action:</strong>{' '}
+                {failedOperation.kind === 'activate'
+                  ? `Start ${classificationLabel(failedOperation.templateMode)} event ${selection.eventTypeName}`
+                  : `Join ${classificationLabel(failedOperation.templateMode)} event ${failedOperation.eventTypeName} — event ${shortEventId(failedOperation.eventId)}`}
+                .
+              </p>
+            )}
             <p>{mutationError}</p>
             <p>
               <Link href="/">Check the active-events dashboard</Link> before

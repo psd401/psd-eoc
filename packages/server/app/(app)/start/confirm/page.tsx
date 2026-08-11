@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { EventTypeVersionIdSchema, FacilityIdSchema } from '@psd-eoc/contracts';
 import Link from 'next/link';
+import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 
 import { WEB_CSRF_COOKIE_NAME } from '../../../../lib/auth/sessions';
@@ -22,21 +23,37 @@ export const revalidate = 0;
 
 type SearchValue = string | readonly string[] | undefined;
 
-function one(value: SearchValue): string | null {
-  return typeof value === 'string' ? value : null;
-}
-
-export default async function ConfirmStartPage({
-  searchParams,
-}: Readonly<{
-  searchParams: Promise<
+interface ConfirmStartPageProps {
+  readonly searchParams: Promise<
     Readonly<{
       eventTypeVersionId?: SearchValue;
       facilityId?: SearchValue;
       mode?: SearchValue;
     }>
   >;
-}>) {
+}
+
+function one(value: SearchValue): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+export async function generateMetadata({
+  searchParams,
+}: ConfirmStartPageProps): Promise<Metadata> {
+  const mode = one((await searchParams).mode);
+  return {
+    title:
+      mode === 'real'
+        ? 'Review REAL incident confirmation'
+        : mode === 'drill'
+          ? 'Review DRILL confirmation'
+          : 'Review event confirmation',
+  };
+}
+
+export default async function ConfirmStartPage({
+  searchParams,
+}: ConfirmStartPageProps) {
   const parameters = await searchParams;
   const facilityResult = FacilityIdSchema.safeParse(one(parameters.facilityId));
   const eventTypeVersionResult = EventTypeVersionIdSchema.safeParse(
