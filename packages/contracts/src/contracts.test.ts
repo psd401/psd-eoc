@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { z } from 'zod';
 
 import * as Contracts from './index';
 import {
@@ -45,6 +46,8 @@ import {
   IntegrationStatusSchema,
   LifecycleConsequencePreviewSchema,
   MediaReadGrantSchema,
+  McpDraftMessageRevisionInputSchema,
+  McpDraftMessageRevisionResultSchema,
   MutationCapabilityEnvelopeSchema,
   MobileOidcExchangeRequestSchema,
   MobileOidcStartRequestSchema,
@@ -3724,6 +3727,75 @@ describe('agent key credential boundaries', () => {
   });
 });
 
+describe('MCP message-revision facade', () => {
+  test('owns a safe single-channel revision without protected action vocabulary', () => {
+    const input = {
+      source: {
+        kind: 'published-version',
+        baseVersionId: ids.eventTypeVersion,
+      },
+      phase: 'resolution',
+      wording: {
+        channel: 'push',
+        title: 'Resolved at {{site}}',
+        body: 'Follow the next instructions from PSD EOC.',
+      },
+    } as const;
+
+    expect(McpDraftMessageRevisionInputSchema.parse(input)).toEqual(input);
+    expect(
+      McpDraftMessageRevisionInputSchema.safeParse({
+        ...input,
+        phase: 'all-clear',
+      }).success,
+    ).toBe(false);
+    expect(
+      McpDraftMessageRevisionInputSchema.safeParse({
+        ...input,
+        wording: { ...input.wording, title: 'Malformed {{unknown}}' },
+      }).success,
+    ).toBe(false);
+
+    const serializedSchema = JSON.stringify(
+      z.toJSONSchema(McpDraftMessageRevisionInputSchema),
+    );
+    for (const protectedActionId of HUMAN_ONLY_ACTION_IDS) {
+      expect(serializedSchema).not.toContain(protectedActionId);
+    }
+  });
+
+  test('accepts exact draft concurrency and returns only a bounded summary', () => {
+    expect(
+      McpDraftMessageRevisionInputSchema.safeParse({
+        source: {
+          kind: 'existing-draft',
+          draftId: ids.preview,
+          expectedDraftRevision: 'a'.repeat(64),
+        },
+        phase: 'reactivation',
+        wording: {
+          channel: 'email',
+          subject: 'Synthetic operational update',
+          textBody: 'Continue following staff instructions.',
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      McpDraftMessageRevisionResultSchema.safeParse({
+        draftId: ids.preview,
+        draftRevision: 'b'.repeat(64),
+        eventTypeId: ids.eventType,
+        baseVersionId: ids.eventTypeVersion,
+        templateMode: 'drill',
+        changedPhase: 'resolution',
+        changedChannel: 'sms',
+        createdAt: times.created,
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe('barrel exports', () => {
   test('exposes stable downstream schemas from the package entry point', () => {
     expect(typeof Contracts.EventSchema.parse).toBe('function');
@@ -3734,6 +3806,9 @@ describe('barrel exports', () => {
     expect(typeof Contracts.StaleRosterReportSchema.parse).toBe('function');
     expect(typeof Contracts.SecurityAuditEntrySchema.parse).toBe('function');
     expect(typeof Contracts.JournalEntrySchema.parse).toBe('function');
+    expect(typeof Contracts.McpDraftMessageRevisionInputSchema.parse).toBe(
+      'function',
+    );
     expect(typeof Contracts.defineCapability).toBe('function');
     expect(Contracts.HUMAN_ONLY_ACTION_IDS).toHaveLength(4);
   });
