@@ -394,11 +394,26 @@ describe('facilities admin capability boundary', () => {
     expect(duplicateRequestError.status).toBe(409);
     expect(handlerCalls).toBe(1);
     expect(store.idempotencyRecords).toBe(1);
-    expect(store.auditEvents).toHaveLength(1);
-    expect(store.auditEvents[0]).toMatchObject({
-      action: 'create-facility',
-      category: 'capability-execution',
-      outcome: 'success',
-    });
+    expect(
+      store.auditEvents.map(({ action, category, outcome, requestId }) => ({
+        action,
+        category,
+        outcome,
+        requestId,
+      })),
+    ).toEqual([
+      {
+        action: 'create-facility',
+        category: 'capability-execution',
+        outcome: 'success',
+        requestId: uuid(22),
+      },
+      {
+        action: 'create-facility',
+        category: 'capability-execution',
+        outcome: 'success',
+        requestId: uuid(23),
+      },
+    ]);
   });
 });

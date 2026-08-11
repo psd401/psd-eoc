@@ -14,7 +14,7 @@ import {
   type SecurityAuditEntry,
   type User,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, like, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
@@ -471,22 +471,27 @@ export function createDrizzleAccessGateStore(
           .limit(1);
         const userRow = userRows[0];
 
-        const activeGroupRows = await transaction
+        const accessGroupRows = await transaction
           .select({
             id: groupSources.id,
             kind: groupSources.kind,
             purpose: groupSources.purpose,
+            active: groupSources.active,
           })
           .from(groupSources)
           .where(
             and(
               eq(groupSources.kind, 'google-group'),
               eq(groupSources.purpose, 'access'),
-              eq(groupSources.active, true),
             ),
           );
-        const activeAccessGroupSourceRefs =
-          activeGroupRows.map(parseAccessGroupRef);
+        const activeAccessGroupSourceRefs = accessGroupRows
+          .filter(({ active }) => active)
+          .map(parseAccessGroupRef);
+        const accessGroupUpdateTargetIds = accessGroupRows.flatMap(({ id }) => [
+          id,
+          `group-source:access:${id}`,
+        ]);
 
         const [latestSuccessfulGroupSourceUpdate] = await transaction
           .select({ occurredAt: securityAuditEntries.occurredAt })
@@ -498,11 +503,20 @@ export function createDrizzleAccessGateStore(
               or(
                 and(
                   eq(securityAuditEntries.targetKind, 'configuration'),
-                  like(securityAuditEntries.targetId, 'group-source:access:%'),
+                  accessGroupUpdateTargetIds.length === 0
+                    ? sql`false`
+                    : inArray(
+                        securityAuditEntries.targetId,
+                        accessGroupUpdateTargetIds,
+                      ),
                 ),
-                // Before purpose-specific targets shipped, every successful
-                // update used this generic target. Retain the conservative
-                // fail-closed interpretation until a later access sync.
+                // Earlier issue #26 revisions emitted this exact prefixed
+                // target. Match only known access-group UUIDs so upgrades
+                // preserve fail-closed snapshot invalidation without treating
+                // building or notification-group corrections as access edits.
+                // Before opaque configuration UUID targets shipped, every
+                // successful update used this generic target. Retain the
+                // conservative fail-closed interpretation until a later sync.
                 and(
                   eq(securityAuditEntries.targetKind, 'capability'),
                   eq(securityAuditEntries.targetId, 'update-group-source'),

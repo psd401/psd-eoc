@@ -13,6 +13,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   type PostgresDatabaseConnection,
 } from '../../../db/client';
 import {
@@ -43,6 +44,7 @@ import {
   createDrizzleInitialWebSessionStore,
   type PersistInitialWebSessionRequest,
 } from '../../../lib/auth/session-cookie';
+import { executeCapability } from '../../../lib/capabilities/engine';
 import { requireSyntheticTestDatabaseUrl } from '../event-types/test-database';
 import {
   executeListUsersCapability,
@@ -53,6 +55,7 @@ import {
   liveChannelChangeAuthorizationCommitment,
   liveChannelChangeConsequenceDigest,
   liveChannelChangeRequestDigest,
+  setChannelEnabledRegistration,
 } from '../integrations/capabilities';
 import { executeRosterHealthProjection } from '../integrations/roster-health';
 import {
@@ -74,16 +77,174 @@ import {
 } from './capabilities';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
-const testDatabaseUrl =
+const baseTestDatabaseUrl =
   configuredTestDatabaseUrl === undefined
     ? undefined
     : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
-  testDatabaseUrl === undefined ? describe.skip : describe;
+  baseTestDatabaseUrl === undefined ? describe.skip : describe;
 
 setDefaultTimeout(60_000);
 
+interface FacilitiesTestContext {
+  readonly baseDatabaseUrl: string;
+  readonly databaseName: string;
+  readonly databaseUrl: string;
+  readonly marker: string;
+}
+
+interface MarkerRow extends Record<string, unknown> {
+  readonly marker: string | null;
+}
+
+const DATABASE_NAME_PATTERN = /^psd_eoc_i26_fac_[a-f0-9]{32}_test$/u;
+
+let context: FacilitiesTestContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
+let databaseCreated = false;
+
+function buildContext(baseDatabaseUrl: string): FacilitiesTestContext {
+  const runId = randomUUID();
+  const databaseName = `psd_eoc_i26_fac_${runId.replaceAll('-', '')}_test`;
+  if (!DATABASE_NAME_PATTERN.test(databaseName)) {
+    throw new Error('The disposable facilities database name is invalid.');
+  }
+  const databaseUrl = new URL(baseDatabaseUrl);
+  databaseUrl.pathname = `/${databaseName}`;
+  return Object.freeze({
+    baseDatabaseUrl,
+    databaseName,
+    databaseUrl: databaseUrl.toString(),
+    marker: `psd-eoc:issue-26:facilities-capabilities-test:${runId}`,
+  });
+}
+
+function openPostgresConnection(
+  url: string,
+  maxConnections: number,
+): PostgresDatabaseConnection {
+  const opened = createDatabaseClient({
+    driver: 'postgres',
+    url,
+    maxConnections,
+  });
+  if (opened.driver !== 'postgres') {
+    throw new Error('Facilities integration tests require PostgreSQL.');
+  }
+  return opened;
+}
+
+function quotedLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function readDatabaseMarker(
+  admin: PostgresDatabaseConnection,
+  databaseName: string,
+): Promise<string | null | undefined> {
+  const rows = databaseExecuteRows<MarkerRow>(
+    await admin.db.execute<MarkerRow>(sql`
+      select shobj_description(oid, 'pg_database') as marker
+      from pg_database
+      where datname = ${databaseName}
+    `),
+  );
+  if (rows.length > 1) {
+    throw new Error(
+      'The disposable facilities database identity is ambiguous.',
+    );
+  }
+  return rows[0]?.marker;
+}
+
+async function createOwnedDatabase(
+  createdContext: FacilitiesTestContext,
+): Promise<void> {
+  const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  let created = false;
+  try {
+    await admin.db.execute(
+      sql.raw(`create database "${createdContext.databaseName}"`),
+    );
+    created = true;
+    await admin.db.execute(
+      sql.raw(
+        `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+      ),
+    );
+    expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
+      createdContext.marker,
+    );
+  } catch (error) {
+    if (created) {
+      try {
+        await admin.db.execute(
+          sql.raw(
+            `drop database "${createdContext.databaseName}" with (force)`,
+          ),
+        );
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Disposable facilities database creation and rollback both failed.',
+        );
+      }
+    }
+    throw error;
+  } finally {
+    await admin.close();
+  }
+}
+
+async function dropOwnedDatabase(
+  createdContext: FacilitiesTestContext,
+): Promise<void> {
+  const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  try {
+    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
+    if (marker === undefined) return;
+    if (marker !== createdContext.marker) {
+      throw new Error(
+        'Refusing to drop a database without the exact issue #26 facilities ownership marker.',
+      );
+    }
+    await admin.db.execute(
+      sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+    );
+    expect(
+      await readDatabaseMarker(admin, createdContext.databaseName),
+    ).toBeUndefined();
+  } finally {
+    await admin.close();
+  }
+}
+
+async function cleanupResources(): Promise<void> {
+  const errors: unknown[] = [];
+  if (connection !== undefined) {
+    try {
+      await connection.close();
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      connection = undefined;
+    }
+  }
+  if (databaseCreated && context !== undefined) {
+    try {
+      await dropOwnedDatabase(context);
+      databaseCreated = false;
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      'Issue #26 facilities integration test cleanup failed.',
+    );
+  }
+}
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -110,6 +271,19 @@ function metadata(label: string, requestIds: string[]) {
   requestIds.push(requestId);
   return {
     idempotencyKey: `issue-26-${label}-${randomUUID()}`,
+    requestId,
+    now: new Date(),
+  };
+}
+
+function replayMetadata(
+  original: Readonly<ReturnType<typeof metadata>>,
+  requestIds?: string[],
+) {
+  const requestId = randomUUID();
+  requestIds?.push(requestId);
+  return {
+    ...original,
     requestId,
     now: new Date(),
   };
@@ -305,14 +479,15 @@ async function persistLiveAuthorizationActor(
     throw new Error('A membership snapshot is required for a live session.');
   }
   const [existingUser] = await database
-    .select({ id: users.id })
+    .select({ id: users.id, googleSubject: users.googleSubject })
     .from(users)
     .where(eq(users.id, authenticated.actor.userId))
     .limit(1);
   if (existingUser === undefined) {
+    const googleSubject = `issue-26-live-${label}-${authenticated.actor.userId}`;
     await database.insert(users).values({
       id: authenticated.actor.userId,
-      googleSubject: `issue-26-live-${label}-${authenticated.actor.userId}`,
+      googleSubject,
       email: `issue-26-live-${label}-${authenticated.actor.userId}@psd401.net`,
       displayName: `Issue 26 live authorization ${label}`,
       facilityScopeKind: 'district',
@@ -320,6 +495,12 @@ async function persistLiveAuthorizationActor(
     await database.insert(userRoles).values({
       userId: authenticated.actor.userId,
       role: 'admin',
+    });
+    await database.insert(accessMembershipMembers).values({
+      snapshotId: membershipSnapshot.id,
+      userId: authenticated.actor.userId,
+      googleSubject,
+      facilityScopeKind: 'district',
     });
   }
   const now = new Date();
@@ -385,24 +566,134 @@ async function waitForAdvisoryWaiters(
 
 describeWithDatabase('facilities administrator database flow', () => {
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) {
+    if (baseTestDatabaseUrl === undefined) {
       throw new Error('TEST_DATABASE_URL is required for integration tests.');
     }
-    const created = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 6,
-    });
-    if (created.driver !== 'postgres') {
-      throw new Error('Facilities integration tests require PostgreSQL.');
+    context = buildContext(baseTestDatabaseUrl);
+    try {
+      await createOwnedDatabase(context);
+      databaseCreated = true;
+      connection = openPostgresConnection(context.databaseUrl, 6);
+      await migrateDatabase(connection);
+      await seedDatabase(connection.db);
+    } catch (error) {
+      try {
+        await cleanupResources();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Facilities setup and cleanup both failed.',
+        );
+      }
+      throw error;
     }
-    connection = created;
-    await migrateDatabase(created);
-    await seedDatabase(created.db);
   });
 
   afterAll(async () => {
-    await connection?.close();
+    await cleanupResources();
+  });
+
+  test('serializes concurrent access-group deactivation without a row-lock deadlock', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const suffix = randomUUID();
+    const requestIds: string[] = [];
+    const first = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Concurrent access A ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-access-race-a-${suffix}`,
+        email: `issue-26-access-race-a-${suffix}@example.invalid`,
+      },
+      metadata: metadata('access-race-a', requestIds),
+    });
+    const second = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Concurrent access B ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-access-race-b-${suffix}`,
+        email: `issue-26-access-race-b-${suffix}@example.invalid`,
+      },
+      metadata: metadata('access-race-b', requestIds),
+    });
+
+    let releaseActiveSetLock: (() => void) | undefined;
+    const activeSetLockReleased = new Promise<void>((resolve) => {
+      releaseActiveSetLock = resolve;
+    });
+    let confirmActiveSetLock: (() => void) | undefined;
+    const activeSetLockHeld = new Promise<void>((resolve) => {
+      confirmActiveSetLock = resolve;
+    });
+    const activeSetBlocker = database.transaction(async (transaction) => {
+      await transaction.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended('admin-access-group-active-set', 0))`,
+      );
+      confirmActiveSetLock?.();
+      await activeSetLockReleased;
+    });
+    await activeSetLockHeld;
+
+    const deactivations = [first, second].map((source, index) => {
+      if (source.kind !== 'google-group' || source.purpose !== 'access') {
+        throw new Error('The access-group race fixture is invalid.');
+      }
+      return executeUpdateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          id: source.id,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          displayName: source.displayName,
+          active: false,
+          googleGroupId: source.googleGroupId,
+          email: source.email,
+        },
+        metadata: metadata(`access-race-disable-${index}`, requestIds),
+      });
+    });
+    try {
+      await waitForAdvisoryWaiters(database, 2);
+    } finally {
+      releaseActiveSetLock?.();
+      await activeSetBlocker;
+    }
+
+    const results = await Promise.allSettled(deactivations);
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(
+      1,
+    );
+    const rejected = results.filter(({ status }) => status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    if (rejected[0]?.status !== 'rejected') {
+      throw new Error('The concurrent access-group loser is missing.');
+    }
+    expect(rejected[0].reason).toBeInstanceOf(AdminCapabilityError);
+    expect((rejected[0].reason as AdminCapabilityError).status).toBe(409);
+
+    const activeRows = await database
+      .select({ id: groupSources.id })
+      .from(groupSources)
+      .where(
+        and(
+          inArray(groupSources.id, [first.id, second.id]),
+          eq(groupSources.active, true),
+        ),
+      );
+    expect(activeRows).toHaveLength(1);
   });
 
   test('configures a complete new site and records every mutation', async () => {
@@ -426,7 +717,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       authenticated,
       store,
       command: { code: facility.code, name: facility.name },
-      metadata: facilityMetadata,
+      metadata: replayMetadata(facilityMetadata, requestIds),
     });
     expect(facilityReplay).toEqual(facility);
 
@@ -876,7 +1167,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         authenticated,
         store,
         command: { userId: roleTargetId, roles: ['staff', 'admin'] },
-        metadata: roleAssignmentMetadata,
+        metadata: replayMetadata(roleAssignmentMetadata, requestIds),
       }),
     ).toEqual(roleResult);
     const selfDemotion = await executeSetUserRolesCapability({
@@ -1213,7 +1504,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       action: 'set-channel-enabled',
       category: 'access-denial',
       outcome: 'denied',
-      reasonCode: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
     });
 
     const statusRaceIntegrationId = `synthetic-live-status-race-${suffix}`;
@@ -1394,7 +1685,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           enabled: true,
           authorization: liveAuthorization,
         },
-        metadata: liveMetadata,
+        metadata: replayMetadata(liveMetadata, requestIds),
       }),
     ).toEqual(liveChannelResult);
     const authorizationRows = await database
@@ -1475,38 +1766,49 @@ describeWithDatabase('facilities administrator database flow', () => {
       statusLabel: 'blocked',
     });
     await expect(
-      database.insert(integrationStatuses).values({
-        id: randomUUID(),
-        integrationId: liveIntegrationId,
-        label: 'configured-unverified',
-        verifiedAt: null,
-        verifiedByUserId: null,
-        authorizationReference: null,
-        reasonCode: null,
-        observedAt: blockedObservedAt,
-      }),
+      database
+        .insert(integrationStatuses)
+        .values({
+          id: randomUUID(),
+          integrationId: liveIntegrationId,
+          label: 'configured-unverified',
+          verifiedAt: null,
+          verifiedByUserId: null,
+          authorizationReference: null,
+          reasonCode: null,
+          observedAt: blockedObservedAt,
+        })
+        .execute(),
     ).rejects.toThrow();
 
-    const agentAuthenticated = {
-      ...authenticated,
-      actor: { kind: 'agent', agentId: randomUUID() },
-      source: 'agent-rest',
-    } as unknown as AuthenticatedSession;
+    const agentActor = {
+      kind: 'agent' as const,
+      agentId: randomUUID(),
+      apiKeyId: randomUUID(),
+    };
     try {
-      await executeSetChannelEnabledCapability({
-        authenticated: agentAuthenticated,
-        store: createDrizzleAdminCapabilityStore(database, agentAuthenticated),
-        command: {
+      await executeCapability(
+        setChannelEnabledRegistration,
+        {
           integrationId: liveIntegrationId,
           enabled: true,
           authorization: liveAuthorization,
         },
-        metadata: {
-          idempotencyKey: `issue-26-agent-live-${randomUUID()}`,
+        {
+          actor: agentActor,
+          source: 'agent-rest',
+          scope: { facilityScope: { kind: 'district' } },
           requestId: randomUUID(),
-          now: new Date(),
+          serverTime: new Date(),
+          connectivityEpochId: null,
+          mutation: {
+            idempotencyKey: `issue-26-agent-live-${randomUUID()}`,
+            transport: { kind: 'agent-rest-command', method: 'POST' },
+            humanConfirmationId: null,
+          },
         },
-      });
+        store,
+      );
       throw new Error('Expected an agent live change to fail closed.');
     } catch (error) {
       expect(error).toBeInstanceOf(AdminCapabilityError);
@@ -1600,7 +1902,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         authenticated,
         store,
         command: { code: facility.code, name: facility.name },
-        metadata: facilityMetadata,
+        metadata: replayMetadata(facilityMetadata),
       });
       throw new Error('Expected stale mutable replay to fail closed.');
     } catch (error) {
@@ -1891,7 +2193,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(firstResult).toMatchObject({
       integrationId: singleUseIntegrationId,
       enabled: false,
-      status: { id: singleUseStatusId, label: 'live-verified' },
+      status: { label: 'live-verified' },
     });
     expect(
       await executeSetChannelEnabledCapability({
@@ -1902,7 +2204,11 @@ describeWithDatabase('facilities administrator database flow', () => {
           enabled: false,
           authorization: singleUseAuthorization,
         },
-        metadata: firstMetadata,
+        metadata: {
+          ...firstMetadata,
+          requestId: randomUUID(),
+          now: new Date(),
+        },
       }),
     ).toEqual(firstResult);
 
@@ -1959,7 +2265,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       action: 'set-channel-enabled',
       category: 'access-denial',
       outcome: 'denied',
-      reasonCode: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
     });
   });
 
@@ -2144,16 +2450,19 @@ describeWithDatabase('facilities administrator database flow', () => {
     );
     const snapshotAfterReplacementAt = new Date();
     await expect(
-      database.insert(rosterSnapshots).values({
-        id: randomUUID(),
-        version: snapshotVersionBeforeReplacement + 1,
-        population: 'staff',
-        complete: true,
-        sourceConfigurationId: before.id,
-        sourceConfigurationVersion: before.version,
-        syncStartedAt: snapshotAfterReplacementAt,
-        capturedAt: snapshotAfterReplacementAt,
-      }),
+      database
+        .insert(rosterSnapshots)
+        .values({
+          id: randomUUID(),
+          version: snapshotVersionBeforeReplacement + 1,
+          population: 'staff',
+          complete: true,
+          sourceConfigurationId: before.id,
+          sourceConfigurationVersion: before.version,
+          syncStartedAt: snapshotAfterReplacementAt,
+          capturedAt: snapshotAfterReplacementAt,
+        })
+        .execute(),
     ).rejects.toThrow();
     await database.insert(rosterSnapshots).values({
       id: randomUUID(),

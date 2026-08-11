@@ -3,46 +3,41 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH,
-  requireSyntheticTestDatabaseUrl,
-} from '../event-types/test-database';
-
-const appPort = Number(process.env.PSD_EOC_ADMIN_APP_PORT ?? '3126');
-const databaseUrl = requireSyntheticTestDatabaseUrl(
-  process.env.TEST_DATABASE_URL,
-);
-if (!Number.isSafeInteger(appPort) || appPort < 1_024 || appPort > 65_535) {
-  throw new Error('The Playwright app port must be a user port.');
-}
+  prepareAdminPlaywrightServerWorkspace,
+  requireInheritedAdminPlaywrightRunContext,
+} from './playwright-run';
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const serverRoot = resolve(directory, '../../..');
+const adminRun = requireInheritedAdminPlaywrightRunContext();
+prepareAdminPlaywrightServerWorkspace(adminRun, serverRoot);
 
 export default defineConfig({
   testDir: '.',
   testMatch: /admin\.playwright\.ts$/u,
-  globalSetup: resolve(directory, '../event-types/playwright.global-setup.ts'),
+  globalSetup: resolve(directory, 'playwright.global-setup.ts'),
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,
   expect: { timeout: 8_000 },
-  outputDir: '/tmp/psd-eoc-issue26-playwright',
+  outputDir: adminRun.outputDirectory,
   reporter: [['line']],
   use: {
-    baseURL: `http://localhost:${appPort}`,
+    baseURL: `http://localhost:${adminRun.appPort}`,
     channel: process.env.CI === 'true' ? 'chrome' : undefined,
-    storageState: EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH,
+    storageState: adminRun.storageStatePath,
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: `bun run dev --hostname localhost --port ${appPort}`,
-    cwd: serverRoot,
+    command: `bun run dev --hostname localhost --port ${adminRun.appPort}`,
+    cwd: adminRun.serverDirectory,
     env: {
       DATABASE_DRIVER: 'postgres',
-      DATABASE_URL: databaseUrl,
+      DATABASE_URL: adminRun.databaseUrl,
       NODE_ENV: 'development',
     },
-    url: `http://localhost:${appPort}/login`,
+    url: `http://localhost:${adminRun.appPort}/login`,
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
     reuseExistingServer: false,
     timeout: 120_000,
   },

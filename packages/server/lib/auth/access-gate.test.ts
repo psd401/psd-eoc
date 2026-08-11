@@ -8,10 +8,11 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { eq } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
@@ -35,24 +36,184 @@ import {
   executeCreateGroupSourceCapability,
   executeUpdateGroupSourceCapability,
 } from '../../app/(admin)/facilities/capabilities';
+import { calculateSecurityAuditHash } from '../audit/canonical';
 import type { AuthenticatedSession } from './sessions';
 import {
+  ACCESS_GATE_AUDIT_LOCK_SQL,
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
 } from './access-gate';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
-const testDatabaseUrl =
+const baseTestDatabaseUrl =
   configuredTestDatabaseUrl === undefined
     ? undefined
     : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
-  testDatabaseUrl === undefined ? describe.skip : describe;
+  baseTestDatabaseUrl === undefined ? describe.skip : describe;
 
-setDefaultTimeout(30_000);
+setDefaultTimeout(60_000);
 
+interface AccessGateTestContext {
+  readonly baseDatabaseUrl: string;
+  readonly databaseName: string;
+  readonly databaseUrl: string;
+  readonly marker: string;
+}
+
+interface MarkerRow extends Record<string, unknown> {
+  readonly marker: string | null;
+}
+
+const DATABASE_NAME_PATTERN = /^psd_eoc_i26_gate_[a-f0-9]{32}_test$/u;
+
+let context: AccessGateTestContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
+let databaseCreated = false;
+
+function buildContext(baseDatabaseUrl: string): AccessGateTestContext {
+  const runId = randomUUID();
+  const databaseName = `psd_eoc_i26_gate_${runId.replaceAll('-', '')}_test`;
+  if (!DATABASE_NAME_PATTERN.test(databaseName)) {
+    throw new Error('The disposable access-gate database name is invalid.');
+  }
+  const databaseUrl = new URL(baseDatabaseUrl);
+  databaseUrl.pathname = `/${databaseName}`;
+  return Object.freeze({
+    baseDatabaseUrl,
+    databaseName,
+    databaseUrl: databaseUrl.toString(),
+    marker: `psd-eoc:issue-26:access-gate-test:${runId}`,
+  });
+}
+
+function openPostgresConnection(
+  url: string,
+  maxConnections: number,
+): PostgresDatabaseConnection {
+  const opened = createDatabaseClient({
+    driver: 'postgres',
+    url,
+    maxConnections,
+  });
+  if (opened.driver !== 'postgres') {
+    throw new Error('Access-gate integration tests require PostgreSQL.');
+  }
+  return opened;
+}
+
+function quotedLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function readDatabaseMarker(
+  admin: PostgresDatabaseConnection,
+  databaseName: string,
+): Promise<string | null | undefined> {
+  const rows = databaseExecuteRows<MarkerRow>(
+    await admin.db.execute<MarkerRow>(sql`
+      select shobj_description(oid, 'pg_database') as marker
+      from pg_database
+      where datname = ${databaseName}
+    `),
+  );
+  if (rows.length > 1) {
+    throw new Error(
+      'The disposable access-gate database identity is ambiguous.',
+    );
+  }
+  return rows[0]?.marker;
+}
+
+async function createOwnedDatabase(
+  createdContext: AccessGateTestContext,
+): Promise<void> {
+  const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  let created = false;
+  try {
+    await admin.db.execute(
+      sql.raw(`create database "${createdContext.databaseName}"`),
+    );
+    created = true;
+    await admin.db.execute(
+      sql.raw(
+        `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+      ),
+    );
+    expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
+      createdContext.marker,
+    );
+  } catch (error) {
+    if (created) {
+      try {
+        await admin.db.execute(
+          sql.raw(
+            `drop database "${createdContext.databaseName}" with (force)`,
+          ),
+        );
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Disposable access-gate database creation and rollback both failed.',
+        );
+      }
+    }
+    throw error;
+  } finally {
+    await admin.close();
+  }
+}
+
+async function dropOwnedDatabase(
+  createdContext: AccessGateTestContext,
+): Promise<void> {
+  const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  try {
+    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
+    if (marker === undefined) return;
+    if (marker !== createdContext.marker) {
+      throw new Error(
+        'Refusing to drop a database without the exact issue #26 access-gate ownership marker.',
+      );
+    }
+    await admin.db.execute(
+      sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+    );
+    expect(
+      await readDatabaseMarker(admin, createdContext.databaseName),
+    ).toBeUndefined();
+  } finally {
+    await admin.close();
+  }
+}
+
+async function cleanupResources(): Promise<void> {
+  const errors: unknown[] = [];
+  if (connection !== undefined) {
+    try {
+      await connection.close();
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      connection = undefined;
+    }
+  }
+  if (databaseCreated && context !== undefined) {
+    try {
+      await dropOwnedDatabase(context);
+      databaseCreated = false;
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      'Issue #26 access-gate integration test cleanup failed.',
+    );
+  }
+}
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -61,25 +222,91 @@ function databaseConnection(): PostgresDatabaseConnection {
   return connection;
 }
 
+async function appendLegacyAccessGroupUpdateAudit(input: {
+  readonly authenticated: AuthenticatedSession;
+  readonly groupSourceId: string;
+  readonly occurredAt: Date;
+}): Promise<void> {
+  const database = databaseConnection().db;
+  await database.transaction(async (transaction) => {
+    await transaction.execute(ACCESS_GATE_AUDIT_LOCK_SQL);
+    const [previous] = await transaction
+      .select({
+        sequence: securityAuditEntries.sequence,
+        entryHash: securityAuditEntries.entryHash,
+      })
+      .from(securityAuditEntries)
+      .orderBy(desc(securityAuditEntries.sequence))
+      .limit(1);
+    const payload = {
+      id: randomUUID(),
+      sequence: (previous?.sequence ?? 0) + 1,
+      previousHash: previous?.entryHash ?? null,
+      category: 'admin-change' as const,
+      action: 'update-group-source',
+      actionIds: [],
+      confirmationId: null,
+      outcome: 'success' as const,
+      principal: input.authenticated.actor,
+      source: 'web' as const,
+      facilityId: null,
+      target: {
+        kind: 'configuration' as const,
+        id: `group-source:access:${input.groupSourceId}`,
+      },
+      requestId: randomUUID(),
+      reasonCode: null,
+      occurredAt: input.occurredAt.toISOString(),
+    } as const;
+    await transaction.insert(securityAuditEntries).values({
+      id: payload.id,
+      sequence: payload.sequence,
+      previousHash: payload.previousHash,
+      entryHash: calculateSecurityAuditHash(payload),
+      category: payload.category,
+      action: payload.action,
+      actionIds: [...payload.actionIds],
+      confirmationId: payload.confirmationId,
+      outcome: payload.outcome,
+      principalKind: payload.principal.kind,
+      principal: payload.principal,
+      source: payload.source,
+      facilityId: payload.facilityId,
+      targetKind: payload.target.kind,
+      targetId: payload.target.id,
+      requestId: payload.requestId,
+      reasonCode: payload.reasonCode,
+      occurredAt: input.occurredAt,
+    });
+  });
+}
+
 describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) {
+    if (baseTestDatabaseUrl === undefined) {
       throw new Error('TEST_DATABASE_URL is required for integration tests.');
     }
-    const created = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 2,
-    });
-    if (created.driver !== 'postgres') {
-      throw new Error('Access-gate integration tests require PostgreSQL.');
+    context = buildContext(baseTestDatabaseUrl);
+    try {
+      await createOwnedDatabase(context);
+      databaseCreated = true;
+      connection = openPostgresConnection(context.databaseUrl, 2);
+      await migrateDatabase(connection);
+    } catch (error) {
+      try {
+        await cleanupResources();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Access-gate database setup and cleanup both failed.',
+        );
+      }
+      throw error;
     }
-    connection = created;
-    await migrateDatabase(created);
   });
 
   afterAll(async () => {
-    await connection?.close();
+    await cleanupResources();
   });
 
   test('maps expected and completed rows to strict canonical group refs', async () => {
@@ -291,7 +518,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       .limit(1);
     expect(buildingUpdateAudit).toEqual({
       targetKind: 'configuration',
-      targetId: `group-source:building:${buildingReplacement.id}`,
+      targetId: buildingReplacement.id,
     });
 
     const gateStore = createDrizzleAccessGateStore(database);
@@ -343,7 +570,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       .limit(1);
     expect(accessUpdateAudit).toEqual({
       targetKind: 'configuration',
-      targetId: `group-source:access:${groupSourceId}`,
+      targetId: groupSourceId,
     });
     const afterAccessCorrection = await checkAccessGate(
       {
@@ -360,6 +587,84 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       },
     );
     expect(afterAccessCorrection).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
+    });
+
+    const replacementSnapshotId = randomUUID();
+    const replacementCapturedAt = new Date(now.getTime() + 4_000);
+    await database.insert(accessMembershipSnapshots).values({
+      id: replacementSnapshotId,
+      version: snapshotVersion + 1,
+      complete: true,
+      syncStartedAt: replacementCapturedAt,
+      capturedAt: replacementCapturedAt,
+    });
+    await database.insert(accessMembershipSnapshotGroups).values([
+      {
+        snapshotId: replacementSnapshotId,
+        groupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+        completionKind: 'expected',
+      },
+      {
+        snapshotId: replacementSnapshotId,
+        groupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+        completionKind: 'completed',
+      },
+    ]);
+    await database.insert(accessMembershipMembers).values({
+      snapshotId: replacementSnapshotId,
+      userId,
+      googleSubject,
+      facilityScopeKind: 'district',
+    });
+    await database.insert(accessMembershipMemberGroups).values({
+      snapshotId: replacementSnapshotId,
+      userId,
+      groupSourceId,
+      groupSourceKind: 'google-group',
+      groupPurpose: 'access',
+    });
+    const afterReplacementSync = await checkAccessGate(
+      {
+        googleSubject,
+        subjectDigest: 'c'.repeat(64),
+        requestId: randomUUID(),
+        checkedAt: new Date(now.getTime() + 4_500).toISOString(),
+        source: 'web',
+      },
+      {
+        store: gateStore,
+        audit: auditSink,
+        bootstrapAdminSubjects: new Set(),
+      },
+    );
+    expect(afterReplacementSync.granted).toBe(true);
+
+    await appendLegacyAccessGroupUpdateAudit({
+      authenticated,
+      groupSourceId,
+      occurredAt: new Date(now.getTime() + 5_000),
+    });
+    const afterLegacyAccessCorrection = await checkAccessGate(
+      {
+        googleSubject,
+        subjectDigest: 'd'.repeat(64),
+        requestId: randomUUID(),
+        checkedAt: new Date(now.getTime() + 6_000).toISOString(),
+        source: 'web',
+      },
+      {
+        store: gateStore,
+        audit: auditSink,
+        bootstrapAdminSubjects: new Set(),
+      },
+    );
+    expect(afterLegacyAccessCorrection).toEqual({
       granted: false,
       reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
     });

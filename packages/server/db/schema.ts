@@ -2086,7 +2086,7 @@ export const integrationChannelChangeAuthorizations = pgTable(
     consumedByUserId: uuid('consumed_by_user_id').notNull(),
     consumedWithSessionId: uuid('consumed_with_session_id').notNull(),
     consumedRequestId: uuid('consumed_request_id').notNull(),
-    consumedAt: occurredAt('consumed_at').defaultNow().notNull(),
+    consumedAt: occurredAt('consumed_at').notNull(),
   },
   (table) => [
     unique('channel_change_authorizations_reference_uq').on(table.reference),
@@ -2155,6 +2155,12 @@ export const integrationChannelChangeAuthorizations = pgTable(
       sql`${table.authorizationCommitment} ~ '^[a-f0-9]{64}$'
         and ${table.requestDigest} ~ '^[a-f0-9]{64}$'
         and ${table.consequenceDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'channel_change_authorizations_timestamp_precision',
+      sql`${table.issuedAt} = date_trunc('milliseconds', ${table.issuedAt})
+        and ${table.expiresAt} = date_trunc('milliseconds', ${table.expiresAt})
+        and ${table.consumedAt} = date_trunc('milliseconds', ${table.consumedAt})`,
     ),
     check(
       'channel_change_authorizations_expiry_bound',
