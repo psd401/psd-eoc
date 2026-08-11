@@ -26,6 +26,10 @@ import {
   type PreSessionOidcPrincipal,
 } from './capability';
 import {
+  EventRoomSyncResultSchema,
+  SyncEventRoomInputSchema,
+} from './event-room';
+import {
   CreateEventTypeDraftInputSchema,
   EventTypePageSchema,
   EventTypeRenderingPreviewSchema,
@@ -246,6 +250,19 @@ export type CapabilityInvocationPolicy = z.infer<
 >;
 
 /**
+ * Owns whether a successful capability execution is itself a security-audit
+ * fact. Denials and failures are always audited; the narrower policy exists
+ * only for explicitly cataloged high-frequency human polling.
+ */
+export const CapabilityAuditPolicySchema = z.enum([
+  'all-outcomes',
+  'denied-and-failed',
+]);
+
+/** Canonical security-audit policy inferred from its schema. */
+export type CapabilityAuditPolicy = z.infer<typeof CapabilityAuditPolicySchema>;
+
+/**
  * Owns one immutable catalog entry. Callers choose only the ID; operation,
  * safety effect, human-action policy, and both runtime schemas remain fixed by
  * this package and cannot be redeclared by a route, worker, REST adapter, or
@@ -257,11 +274,13 @@ export interface CanonicalCapabilityDefinition<
   Effect extends CapabilitySafetyEffect = CapabilitySafetyEffect,
   InputSchema extends z.ZodType = z.ZodType,
   OutputSchema extends z.ZodType = z.ZodType,
+  AuditPolicy extends CapabilityAuditPolicy = CapabilityAuditPolicy,
 > {
   readonly id: Id;
   readonly operation: Operation;
   readonly safetyEffect: Effect;
   readonly humanActionPolicy: HumanActionPolicy;
+  readonly auditPolicy: AuditPolicy;
   readonly inputSchema: InputSchema;
   readonly outputSchema: OutputSchema;
 }
@@ -275,10 +294,12 @@ function canonicalCapability<
   const Effect extends CapabilitySafetyEffect,
   InputSchema extends z.ZodType,
   OutputSchema extends z.ZodType,
+  const AuditPolicy extends CapabilityAuditPolicy = 'all-outcomes',
 >(definition: {
   readonly id: Id;
   readonly operation: Operation;
   readonly safetyEffect: Effect;
+  readonly auditPolicy?: AuditPolicy;
   readonly inputSchema: InputSchema;
   readonly outputSchema: OutputSchema;
 }): Readonly<
@@ -287,7 +308,8 @@ function canonicalCapability<
     Operation,
     Effect,
     InputSchema,
-    OutputSchema
+    OutputSchema,
+    AuditPolicy
   >
 > {
   CapabilityIdSchema.parse(definition.id);
@@ -295,11 +317,17 @@ function canonicalCapability<
   if (definition.operation === 'query' && definition.safetyEffect !== 'none') {
     throw new Error('Query capabilities cannot have a mutation safety effect.');
   }
+  const auditPolicy = CapabilityAuditPolicySchema.parse(
+    definition.auditPolicy ?? 'all-outcomes',
+  ) as AuditPolicy;
+  if (definition.operation === 'mutation' && auditPolicy !== 'all-outcomes') {
+    throw new Error('Mutation capabilities must audit every outcome.');
+  }
   const humanActionPolicy =
     definition.safetyEffect === 'none'
       ? noHumanActionPolicy
       : centralHumanActionPolicy;
-  return Object.freeze({ ...definition, humanActionPolicy });
+  return Object.freeze({ ...definition, auditPolicy, humanActionPolicy });
 }
 
 /**
@@ -573,6 +601,7 @@ export const EventLifecycleMutationResultSchema = z
       result.notificationIntent &&
       (result.notificationIntent.eventId !== result.event.id ||
         result.notificationIntent.requestId !== result.transition.requestId ||
+        result.notificationIntent.createdAt !== result.transition.occurredAt ||
         result.notificationIntent.eventKind !==
           result.transition.targeting.kind ||
         result.notificationIntent.templateMode !==
@@ -735,7 +764,70 @@ export const AllClearEventResultSchema =
       message: 'All-clear output requires an all-clear transition.',
       path: ['transition', 'transition'],
     },
-  ).readonly();
+  )
+    .superRefine((result, context) => {
+      if (result.transition.transition !== 'all-clear') return;
+      if (result.event.status !== 'all-clear') {
+        context.addIssue({
+          code: 'custom',
+          message: 'All-clear output must expose all-clear event state.',
+          path: ['event', 'status'],
+        });
+      }
+      if (
+        result.journalEntries.some((entry) => entry.eventId !== result.event.id)
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'All-clear journal facts must belong to the result event.',
+          path: ['journalEntries'],
+        });
+      }
+      const allClearFacts = result.journalEntries.filter(
+        (entry) =>
+          entry.kind === 'system' &&
+          entry.payload.code === 'all-clear-issued' &&
+          structurallyEqual(entry.payload.transition, result.transition) &&
+          structurallyEqual(entry.author, result.transition.actor) &&
+          entry.source === result.transition.source &&
+          entry.serverTime === result.transition.occurredAt,
+      );
+      if (allClearFacts.length !== 1) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'All-clear output requires exactly one matching all-clear journal fact.',
+          path: ['journalEntries'],
+        });
+      }
+      const intentId = result.notificationIntent?.id;
+      const intentFacts = result.journalEntries.filter(
+        (entry) =>
+          entry.kind === 'system' &&
+          entry.payload.code === 'notification-intent-recorded' &&
+          entry.payload.relatedRecordId === intentId &&
+          structurallyEqual(entry.author, result.transition.actor) &&
+          entry.source === result.transition.source &&
+          entry.serverTime === result.transition.occurredAt,
+      );
+      if (intentId === undefined || intentFacts.length !== 1) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'All-clear output must link its notification intent from exactly one journal fact.',
+          path: ['journalEntries'],
+        });
+      }
+      if (result.journalEntries.length !== 2) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'All-clear output must contain only its transition and notification-intent facts.',
+          path: ['journalEntries'],
+        });
+      }
+    })
+    .readonly();
 
 /** Exact all-clear result inferred from its schema. */
 export type AllClearEventResult = z.infer<typeof AllClearEventResultSchema>;
@@ -760,7 +852,58 @@ export const CloseEventResultSchema = EventLifecycleMutationResultSchema.refine(
     message: 'Close-event output requires a close transition.',
     path: ['transition', 'transition'],
   },
-).readonly();
+)
+  .superRefine((result, context) => {
+    if (result.transition.transition !== 'close') return;
+    if (result.event.status !== 'closed') {
+      context.addIssue({
+        code: 'custom',
+        message: 'Close-event output must expose closed event state.',
+        path: ['event', 'status'],
+      });
+    }
+    if (
+      result.journalEntries.some((entry) => entry.eventId !== result.event.id)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Close-event journal facts must belong to the result event.',
+        path: ['journalEntries'],
+      });
+    }
+    const closeFacts = result.journalEntries.filter(
+      (entry) =>
+        entry.kind === 'system' &&
+        entry.payload.code === 'event-closed' &&
+        structurallyEqual(entry.payload.transition, result.transition) &&
+        structurallyEqual(entry.author, result.transition.actor) &&
+        entry.source === result.transition.source &&
+        entry.serverTime === result.transition.occurredAt,
+    );
+    if (closeFacts.length !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Close-event output requires exactly one matching close journal fact.',
+        path: ['journalEntries'],
+      });
+    }
+    if (result.notificationIntent !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Closing an event cannot create a notification intent.',
+        path: ['notificationIntent'],
+      });
+    }
+    if (result.journalEntries.length !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Close-event output must contain only its close fact.',
+        path: ['journalEntries'],
+      });
+    }
+  })
+  .readonly();
 
 /** Exact event-close result inferred from its schema. */
 export type CloseEventResult = z.infer<typeof CloseEventResultSchema>;
@@ -1048,7 +1191,7 @@ export const CAPABILITY_CATALOG = Object.freeze({
   }),
   'create-lifecycle-consequence-preview': canonicalCapability({
     id: 'create-lifecycle-consequence-preview',
-    operation: 'query',
+    operation: 'mutation',
     safetyEffect: 'none',
     inputSchema: CreateLifecycleConsequencePreviewInputSchema,
     outputSchema: LifecycleConsequencePreviewSchema,
@@ -1115,6 +1258,14 @@ export const CAPABILITY_CATALOG = Object.freeze({
     safetyEffect: 'none',
     inputSchema: GetEventInputSchema,
     outputSchema: EventSchema,
+  }),
+  'sync-event-room': canonicalCapability({
+    id: 'sync-event-room',
+    operation: 'query',
+    safetyEffect: 'none',
+    auditPolicy: 'denied-and-failed',
+    inputSchema: SyncEventRoomInputSchema,
+    outputSchema: EventRoomSyncResultSchema,
   }),
   'list-journal-entries': canonicalCapability({
     id: 'list-journal-entries',
@@ -1402,6 +1553,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'get-stale-roster-report': humanAgentInvocationPolicy,
   'list-active-events': humanAgentInvocationPolicy,
   'get-event': humanAgentInvocationPolicy,
+  'sync-event-room': humanWebAdministrationInvocationPolicy,
   'list-journal-entries': humanAgentInvocationPolicy,
   'search-journal-entries': humanAgentInvocationPolicy,
   'get-media-read-grant': humanAgentInvocationPolicy,
@@ -1897,7 +2049,44 @@ function assertCatalogInvocationPolicies(): void {
         `Agent grant manifest disagrees with invocation policy for ${capabilityId}.`,
       );
     }
+    const definition = defineCapability(capabilityId);
+    if (
+      definition.auditPolicy === 'denied-and-failed' &&
+      (capabilityId !== 'sync-event-room' ||
+        definition.operation !== 'query' ||
+        policy.agentGrantable ||
+        policy.principalKinds.length !== 1 ||
+        policy.principalKinds[0] !== 'human' ||
+        policy.sources.length !== 1 ||
+        policy.sources[0] !== 'web')
+    ) {
+      throw new Error(
+        `Reduced success auditing is not permitted for ${capabilityId}.`,
+      );
+    }
+    if (
+      (definition.operation === 'mutation' || policy.agentGrantable) &&
+      definition.auditPolicy !== 'all-outcomes'
+    ) {
+      throw new Error(
+        `Mutations and agent capabilities must audit every outcome for ${capabilityId}.`,
+      );
+    }
   });
+
+  const reducedAuditIds = catalogIds.filter(
+    (id) =>
+      defineCapability(RegisteredCapabilityIdSchema.parse(id)).auditPolicy ===
+      'denied-and-failed',
+  );
+  if (
+    reducedAuditIds.length !== 1 ||
+    reducedAuditIds[0] !== 'sync-event-room'
+  ) {
+    throw new Error(
+      'Only sync-event-room may omit successful security-audit entries.',
+    );
+  }
 }
 
 assertCatalogMatchesBaseManifests();

@@ -1,12 +1,14 @@
 'use client';
 
 import {
+  AllClearEventResultSchema,
   ApiErrorSchema,
+  CloseEventResultSchema,
+  EventRoomSyncResultSchema,
   EventSchema,
   IdempotencyKeySchema,
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
-  PaginationCursorSchema,
   UuidSchema,
   type ChannelConsequencePreview,
   type Event,
@@ -23,7 +25,11 @@ import {
   type ReactNode,
 } from 'react';
 
-const POLL_INTERVAL_MILLISECONDS = 4_000;
+const POLL_MINIMUM_MILLISECONDS = 3_000;
+const POLL_JITTER_MILLISECONDS = 2_000;
+const POLL_MAXIMUM_BACKOFF_MILLISECONDS = 30_000;
+const QUERY_DEADLINE_MILLISECONDS = 10_000;
+const MUTATION_DEADLINE_MILLISECONDS = 15_000;
 const ANNOUNCEMENT_BATCH_MILLISECONDS = 5_000;
 const RECOVERY_RECORD_VERSION = 1;
 
@@ -79,10 +85,20 @@ interface RetainedCommand {
 }
 
 interface TimelinePage {
-  readonly event: Event;
+  readonly event: Event | null;
   readonly entries: readonly JournalEntry[];
-  readonly cursor: string | null;
+  readonly cursor: string;
   readonly hasMore: boolean;
+  readonly snapshotSequence: number;
+}
+
+interface TimelineContinuation {
+  /** Last cursor whose event projection and entries are visible together. */
+  readonly baseCursor: string | null;
+  /** Cursor for the next page in this still-hidden catch-up chain. */
+  readonly cursor: string;
+  readonly entries: readonly JournalEntry[];
+  readonly snapshotSequence: number;
 }
 
 interface MutationResult {
@@ -108,6 +124,8 @@ export interface EventRoomProps {
   readonly initialEntries: readonly JournalEntry[];
   /** Opaque continuation token supplied by list-journal-entries. */
   readonly initialCursor: string | null;
+  /** Journal head observed atomically with the server-rendered event. */
+  readonly initialSnapshotSequence: number;
   /** True when the client must drain more history before announcing updates. */
   readonly initialHasMore: boolean;
   /** Authorized display label; never used for authorization or mutation input. */
@@ -195,66 +213,192 @@ function canonicalEntries(
   });
 }
 
-function parseTimelinePage(
-  value: unknown,
-  baselineEvent: Event,
-  previousCursor: string | null,
-): TimelinePage {
-  if (!isRecord(value)) {
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[],
+): boolean {
+  return (
+    Object.keys(value).sort().join(',') === [...expectedKeys].sort().join(',')
+  );
+}
+
+function journalEntryProvesCommand(
+  command: RetainedCommand,
+  entry: JournalEntry,
+): boolean {
+  let body: unknown;
+  try {
+    body = JSON.parse(command.bodyJson);
+  } catch {
+    return false;
+  }
+  if (
+    !isRecord(body) ||
+    entry.kind !== 'text' ||
+    entry.source !== 'web' ||
+    entry.author.kind !== 'human' ||
+    entry.author.sessionId !== command.ownerSessionId ||
+    entry.clientTime !== body.clientTime
+  ) {
+    return false;
+  }
+
+  if (command.operation === 'post-text') {
+    return (
+      hasExactKeys(body, ['operation', 'text', 'clientTime']) &&
+      body.operation === 'post-text' &&
+      typeof body.text === 'string' &&
+      entry.payload.text === body.text &&
+      entry.supersedes === null
+    );
+  }
+
+  if (
+    command.operation !== 'correct-text' &&
+    command.operation !== 'redact-entry'
+  ) {
+    return false;
+  }
+  const expectedKeys =
+    command.operation === 'correct-text'
+      ? [
+          'operation',
+          'entryId',
+          'entrySequence',
+          'text',
+          'reason',
+          'clientTime',
+        ]
+      : ['operation', 'entryId', 'entrySequence', 'reason', 'clientTime'];
+  const supersedes = entry.supersedes;
+  if (
+    !hasExactKeys(body, expectedKeys) ||
+    body.operation !== command.operation ||
+    typeof body.entryId !== 'string' ||
+    typeof body.entrySequence !== 'number' ||
+    typeof body.reason !== 'string' ||
+    supersedes === null ||
+    supersedes.entryId !== body.entryId ||
+    supersedes.entrySequence !== body.entrySequence ||
+    supersedes.kind !==
+      (command.operation === 'correct-text' ? 'correction' : 'redaction') ||
+    supersedes.reason !== body.reason
+  ) {
+    return false;
+  }
+  return command.operation === 'correct-text'
+    ? typeof body.text === 'string' && entry.payload.text === body.text
+    : entry.payload.text ===
+        '[Content redacted — original retained in journal]';
+}
+
+function parseTimelinePage(value: unknown, baselineEvent: Event): TimelinePage {
+  const parsed = EventRoomSyncResultSchema.safeParse(value);
+  if (!parsed.success || parsed.data.eventId !== baselineEvent.id) {
     throw new EventRoomRequestError(
       'PSD EOC returned an invalid timeline response.',
       false,
     );
   }
-  const parsedEvent = EventSchema.safeParse(value.event);
-  if (!parsedEvent.success) {
-    throw new EventRoomRequestError(
-      'PSD EOC returned an event that does not match this room.',
-      false,
-    );
-  }
-  assertImmutableEventIdentity(parsedEvent.data, baselineEvent);
-  const entries = canonicalEntries(
-    value.entries ?? value.items,
-    baselineEvent.id,
-  );
-  const pageInfo = isRecord(value.pageInfo) ? value.pageInfo : null;
-  const cursorCandidate = Object.hasOwn(value, 'cursor')
-    ? value.cursor
-    : pageInfo !== null && Object.hasOwn(pageInfo, 'nextCursor')
-      ? pageInfo.nextCursor
-      : previousCursor;
-  const parsedCursor =
-    cursorCandidate === null
-      ? { success: true as const, data: null }
-      : PaginationCursorSchema.safeParse(cursorCandidate);
-  const hasMoreCandidate =
-    typeof value.hasMore === 'boolean' ? value.hasMore : pageInfo?.hasMore;
-  if (!parsedCursor.success || typeof hasMoreCandidate !== 'boolean') {
-    throw new EventRoomRequestError(
-      'PSD EOC returned invalid timeline continuation data.',
-      false,
-    );
-  }
-  if (hasMoreCandidate && parsedCursor.data === null) {
-    throw new EventRoomRequestError(
-      'PSD EOC omitted the next timeline cursor.',
-      false,
-    );
+  const returnedEvent = parsed.data.event;
+  if (returnedEvent !== null) {
+    assertImmutableEventIdentity(returnedEvent, baselineEvent);
   }
   return {
-    event: parsedEvent.data,
-    entries,
-    cursor: parsedCursor.data,
-    hasMore: hasMoreCandidate,
+    event: returnedEvent,
+    entries: parsed.data.entries,
+    cursor: parsed.data.cursor,
+    hasMore: parsed.data.hasMore,
+    snapshotSequence: parsed.data.snapshotSequence,
   };
 }
 
 function parseMutationResult(
-  operation: CommandOperation,
+  command: RetainedCommand,
   value: unknown,
   baselineEvent: Event,
 ): MutationResult {
+  const operation = command.operation;
+  if (operation === 'all-clear' || operation === 'close') {
+    if (!isRecord(value)) {
+      throw new EventRoomRequestError(
+        'PSD EOC returned an incomplete lifecycle response. The exact request is retained for verification.',
+        true,
+      );
+    }
+    const candidate = {
+      event: value.event,
+      transition: value.transition,
+      journalEntries: value.journalEntries ?? value.entries,
+      notificationIntent: value.notificationIntent,
+      preparedActivationConsumption: value.preparedActivationConsumption,
+    };
+    const parsed =
+      operation === 'all-clear'
+        ? AllClearEventResultSchema.safeParse(candidate)
+        : CloseEventResultSchema.safeParse(candidate);
+    if (!parsed.success) {
+      throw new EventRoomRequestError(
+        'PSD EOC returned lifecycle evidence that does not prove the requested state change. The exact request is retained for verification.',
+        true,
+      );
+    }
+    const body: unknown = JSON.parse(command.bodyJson);
+    const transition = parsed.data.transition;
+    if (
+      !isRecord(body) ||
+      transition.actor.kind !== 'human' ||
+      transition.actor.sessionId !== command.ownerSessionId ||
+      transition.source !== 'web'
+    ) {
+      throw new EventRoomRequestError(
+        'PSD EOC returned lifecycle evidence for a different authenticated request. The exact request is retained for verification.',
+        true,
+      );
+    }
+    if (operation === 'all-clear') {
+      const expectedPreviewId =
+        typeof body.lifecyclePreviewId === 'string'
+          ? body.lifecyclePreviewId
+          : null;
+      const authorization =
+        parsed.data.transition.transition === 'all-clear'
+          ? parsed.data.transition.notificationAuthorization
+          : null;
+      if (
+        !hasExactKeys(body, [
+          'operation',
+          'lifecyclePreviewId',
+          'confirmationPhrase',
+        ]) ||
+        body.operation !== 'all-clear' ||
+        body.confirmationPhrase !== 'ALL CLEAR' ||
+        expectedPreviewId === null ||
+        authorization?.lifecyclePreviewId !== expectedPreviewId
+      ) {
+        throw new EventRoomRequestError(
+          'PSD EOC returned lifecycle evidence for a different consequence preview. The exact request is retained for verification.',
+          true,
+        );
+      }
+    } else if (
+      !hasExactKeys(body, ['operation', 'confirmationPhrase']) ||
+      body.operation !== 'close' ||
+      body.confirmationPhrase !== 'CLOSE EVENT'
+    ) {
+      throw new EventRoomRequestError(
+        'PSD EOC returned close evidence for a different command. The exact request is retained for verification.',
+        true,
+      );
+    }
+    assertImmutableEventIdentity(parsed.data.event, baselineEvent, true);
+    const entries = canonicalEntries(
+      parsed.data.journalEntries,
+      baselineEvent.id,
+    );
+    return { event: parsed.data.event, entries };
+  }
+
   const directEntry = JournalEntrySchema.safeParse(value);
   const record = isRecord(value) ? value : null;
   const entryCandidate = record?.entry;
@@ -281,14 +425,53 @@ function parseMutationResult(
     assertImmutableEventIdentity(returnedEvent, baselineEvent, true);
   }
 
-  const lifecycleOperation = operation === 'all-clear' || operation === 'close';
-  if (entries.length === 0 || (lifecycleOperation && returnedEvent === null)) {
+  if (entries.length === 0) {
     throw new EventRoomRequestError(
       'PSD EOC returned an incomplete success response. The exact request is retained for verification.',
       true,
     );
   }
+  if (
+    entries.length !== 1 ||
+    !journalEntryProvesCommand(command, entries[0]!)
+  ) {
+    throw new EventRoomRequestError(
+      'PSD EOC returned journal evidence for a different request. The exact request is retained for verification.',
+      true,
+    );
+  }
   return { event: returnedEvent, entries };
+}
+
+interface DeadlineSignal {
+  readonly signal: AbortSignal;
+  readonly didExpire: () => boolean;
+  readonly dispose: () => void;
+}
+
+function deadlineSignal(
+  parentSignal: AbortSignal | null,
+  milliseconds: number,
+): DeadlineSignal {
+  const controller = new AbortController();
+  let expired = false;
+  const abortFromParent = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+  const timer = window.setTimeout(() => {
+    expired = true;
+    controller.abort(
+      new DOMException('The request timed out.', 'TimeoutError'),
+    );
+  }, milliseconds);
+  return {
+    signal: controller.signal,
+    didExpire: () => expired,
+    dispose: () => {
+      window.clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abortFromParent);
+    },
+  };
 }
 
 function parseLifecyclePreview(
@@ -350,64 +533,90 @@ async function requestTimelinePage(
   baselineEvent: Event,
   signal: AbortSignal,
 ): Promise<TimelinePage> {
-  let response: Response;
+  const deadline = deadlineSignal(signal, QUERY_DEADLINE_MILLISECONDS);
   try {
-    response = await fetch(timelineUrl(apiUrl, cursor), {
+    const response = await fetch(timelineUrl(apiUrl, cursor), {
       credentials: 'same-origin',
-      signal,
+      signal: deadline.signal,
     });
+    const value = await readJson(response);
+    if (!response.ok) {
+      throw new EventRoomRequestError(
+        publicErrorMessage(
+          value,
+          'Timeline updates are temporarily unavailable.',
+        ),
+        false,
+      );
+    }
+    return parseTimelinePage(value, baselineEvent);
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (signal.aborted && !deadline.didExpire()) throw error;
+    if (error instanceof EventRoomRequestError && !deadline.didExpire()) {
+      throw error;
+    }
     throw new EventRoomRequestError(
-      'Timeline updates are temporarily unavailable.',
+      deadline.didExpire()
+        ? 'Timeline refresh timed out. PSD EOC will keep checking.'
+        : 'Timeline updates are temporarily unavailable.',
       false,
     );
+  } finally {
+    deadline.dispose();
   }
-  const value = await readJson(response);
-  if (!response.ok) {
-    throw new EventRoomRequestError(
-      publicErrorMessage(
-        value,
-        'Timeline updates are temporarily unavailable.',
-      ),
-      false,
-    );
-  }
-  return parseTimelinePage(value, baselineEvent, cursor);
 }
 
 async function requestLifecyclePreview(
   apiUrl: string,
   baselineEvent: Event,
+  csrfCookieName: string,
   signal: AbortSignal,
 ): Promise<LifecycleConsequencePreview> {
-  const url = new URL(apiUrl, window.location.href);
-  url.searchParams.delete('cursor');
-  url.searchParams.set('operation', 'preview-all-clear');
-  let response: Response;
+  const csrf = csrfToken(csrfCookieName);
+  if (csrf === null) {
+    throw new EventRoomRequestError(
+      'Your session is missing its request-protection cookie. No notification was sent.',
+      false,
+    );
+  }
+  const deadline = deadlineSignal(signal, QUERY_DEADLINE_MILLISECONDS);
   try {
-    response = await fetch(url.toString(), {
+    const response = await fetch(apiUrl, {
+      method: 'POST',
       credentials: 'same-origin',
-      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `event-room-preview-${crypto.randomUUID()}`,
+        'X-PSD-EOC-CSRF': csrf,
+      },
+      body: JSON.stringify({ operation: 'preview-all-clear' }),
+      signal: deadline.signal,
     });
+    const value = await readJson(response);
+    if (!response.ok) {
+      throw new EventRoomRequestError(
+        publicErrorMessage(
+          value,
+          'The all-clear preview could not be loaded. No notification was sent.',
+        ),
+        false,
+      );
+    }
+    return parseLifecyclePreview(value, baselineEvent);
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (signal.aborted && !deadline.didExpire()) throw error;
+    if (error instanceof EventRoomRequestError && !deadline.didExpire()) {
+      throw error;
+    }
     throw new EventRoomRequestError(
-      'The all-clear preview could not be loaded. No notification was sent.',
+      deadline.didExpire()
+        ? 'The all-clear preview timed out. No notification was sent.'
+        : 'The all-clear preview could not be loaded. No notification was sent.',
       false,
     );
+  } finally {
+    deadline.dispose();
   }
-  const value = await readJson(response);
-  if (!response.ok) {
-    throw new EventRoomRequestError(
-      publicErrorMessage(
-        value,
-        'The all-clear preview could not be loaded. No notification was sent.',
-      ),
-      false,
-    );
-  }
-  return parseLifecyclePreview(value, baselineEvent);
 }
 
 function csrfToken(cookieName: string): string | null {
@@ -434,9 +643,9 @@ async function postRetainedCommand(
       false,
     );
   }
-  let response: Response;
+  const deadline = deadlineSignal(null, MUTATION_DEADLINE_MILLISECONDS);
   try {
-    response = await fetch(command.apiUrl, {
+    const response = await fetch(command.apiUrl, {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
@@ -445,33 +654,50 @@ async function postRetainedCommand(
         'X-PSD-EOC-CSRF': csrf,
       },
       body: command.bodyJson,
+      signal: deadline.signal,
     });
-  } catch {
+    if (
+      response.ok &&
+      response.headers.get('idempotency-key') !== command.idempotencyKey
+    ) {
+      throw new EventRoomRequestError(
+        'PSD EOC did not acknowledge the exact request key. The exact request is retained for verification.',
+        true,
+      );
+    }
+    let value: unknown;
+    try {
+      value = await readJson(response);
+    } catch (error) {
+      if (error instanceof EventRoomRequestError && response.ok) throw error;
+      value = null;
+    }
+    if (!response.ok) {
+      const parsed = ApiErrorSchema.safeParse(value);
+      const definitelyRejected =
+        response.status >= 400 &&
+        response.status < 500 &&
+        parsed.success &&
+        !parsed.data.retryable;
+      throw new EventRoomRequestError(
+        publicErrorMessage(value, 'PSD EOC could not complete the request.'),
+        !definitelyRejected,
+      );
+    }
+    return value;
+  } catch (error) {
+    if (error instanceof EventRoomRequestError && !deadline.didExpire()) {
+      throw error;
+    }
     throw new EventRoomRequestError(
-      'The connection ended before PSD EOC confirmed the result. The exact request is retained and will not retry automatically.',
+      deadline.didExpire()
+        ? 'PSD EOC did not confirm the request before the safety deadline. The exact request is retained and will not retry automatically.'
+        : 'The connection ended before PSD EOC confirmed the result. The exact request is retained and will not retry automatically.',
       true,
     );
+  } finally {
+    deadline.dispose();
   }
-  let value: unknown;
-  try {
-    value = await readJson(response);
-  } catch (error) {
-    if (error instanceof EventRoomRequestError && response.ok) throw error;
-    value = null;
-  }
-  if (!response.ok) {
-    const parsed = ApiErrorSchema.safeParse(value);
-    const definitelyRejected =
-      response.status >= 400 &&
-      response.status < 500 &&
-      parsed.success &&
-      !parsed.data.retryable;
-    throw new EventRoomRequestError(
-      publicErrorMessage(value, 'PSD EOC could not complete the request.'),
-      !definitelyRejected,
-    );
-  }
-  return value;
 }
 
 function isCommandOperation(value: unknown): value is CommandOperation {
@@ -686,22 +912,55 @@ function formatElapsed(milliseconds: number): string {
   return parts.join(', ');
 }
 
-function useElapsedLabel(event: Event): string {
-  const startedAt = event.activatedAt ?? event.createdAt;
+function useElapsedLabel(event: Event): string | null {
+  const startedAt = event.activatedAt;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (event.closedAt !== null) return;
+    if (startedAt === null || event.closedAt !== null) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, [event.closedAt, startedAt]);
+  if (startedAt === null) return null;
   const end = event.closedAt === null ? now : Date.parse(event.closedAt);
   return formatElapsed(end - Date.parse(startedAt));
 }
 
+export function eventRoomPollDelay(
+  failureCount: number,
+  jitterUnit = Math.random(),
+): number {
+  const jittered =
+    POLL_MINIMUM_MILLISECONDS +
+    Math.min(1, Math.max(0, jitterUnit)) * POLL_JITTER_MILLISECONDS;
+  const multiplier = 2 ** Math.min(failureCount, 3);
+  return Math.min(
+    POLL_MAXIMUM_BACKOFF_MILLISECONDS,
+    Math.round(jittered * multiplier),
+  );
+}
+
+function waitForDocumentVisibility(signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  if (document.visibilityState !== 'hidden') return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (visible: boolean) => {
+      document.removeEventListener('visibilitychange', visibilityChanged);
+      signal.removeEventListener('abort', aborted);
+      resolve(visible);
+    };
+    const visibilityChanged = () => {
+      if (document.visibilityState !== 'hidden') finish(true);
+    };
+    const aborted = () => finish(false);
+    document.addEventListener('visibilitychange', visibilityChanged);
+    signal.addEventListener('abort', aborted, { once: true });
+  });
+}
+
 function waitForNextPoll(
   signal: AbortSignal,
-  milliseconds = POLL_INTERVAL_MILLISECONDS,
+  milliseconds: number,
 ): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
@@ -790,6 +1049,8 @@ function TimelineEntry({
   const redacted = supersededBy.some(
     (candidate) => candidate.supersedes?.kind === 'redaction',
   );
+  const mayCorrect = entry.kind === 'text' && latestSupersession === null;
+  const mayRedact = entry.kind !== 'system' && !redacted;
   const ownSupersession = entry.supersedes;
   const classes = [
     'timeline-entry',
@@ -848,9 +1109,9 @@ function TimelineEntry({
         </span>
       </p>
 
-      {entry.kind === 'system' || latestSupersession !== null ? null : (
+      {!mayCorrect && !mayRedact ? null : (
         <div className="entry-actions">
-          {entry.kind === 'text' ? (
+          {mayCorrect ? (
             <button
               aria-haspopup="dialog"
               className="secondary"
@@ -861,15 +1122,17 @@ function TimelineEntry({
               Correct entry {entry.sequence}
             </button>
           ) : null}
-          <button
-            aria-haspopup="dialog"
-            className="secondary"
-            disabled={commandsBlocked}
-            onClick={(event) => onRedact(entry, event.currentTarget)}
-            type="button"
-          >
-            Redact entry {entry.sequence}
-          </button>
+          {mayRedact ? (
+            <button
+              aria-haspopup="dialog"
+              className="secondary"
+              disabled={commandsBlocked}
+              onClick={(event) => onRedact(entry, event.currentTarget)}
+              type="button"
+            >
+              Redact entry {entry.sequence}
+            </button>
+          ) : null}
         </div>
       )}
     </article>
@@ -948,10 +1211,23 @@ function PreviewDetails({
   );
 }
 
+function DialogClassification({
+  label,
+  real,
+}: Readonly<{ label: string; real: boolean }>) {
+  return (
+    <p className={`dialog-classification ${real ? 'mode-real' : 'mode-drill'}`}>
+      <span aria-hidden="true">{real ? '⚠' : '◆'} </span>
+      {label}
+    </p>
+  );
+}
+
 export function EventRoom({
   event,
   initialEntries,
   initialCursor,
+  initialSnapshotSequence,
   initialHasMore,
   facilityLabel,
   eventTypeLabel,
@@ -984,6 +1260,7 @@ export function EventRoom({
   const [confirmationPhrase, setConfirmationPhrase] = useState('');
 
   const cursorRef = useRef(initialCursor);
+  const appliedSnapshotSequenceRef = useRef(initialSnapshotSequence);
   const knownEntryIdsRef = useRef(
     new Set(initialEntries.map((entry) => entry.id)),
   );
@@ -999,6 +1276,7 @@ export function EventRoom({
   const previewControllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
   const mutationErrorRef = useRef<HTMLDivElement>(null);
+  const dialogMutationErrorRef = useRef<HTMLDivElement>(null);
 
   const elapsed = useElapsedLabel(currentEvent);
   const realEvent = event.templateMode === 'real';
@@ -1076,36 +1354,98 @@ export function EventRoom({
     const controller = new AbortController();
     let active = true;
     let drainInitialHistory = initialHasMore;
-    let loadImmediately = true;
+    let loadImmediately = initialHasMore;
     let consecutiveFailures = 0;
+    let continuation: TimelineContinuation | null = null;
 
     async function poll(): Promise<void> {
       while (active && !controller.signal.aborted) {
+        const wasHidden = document.visibilityState === 'hidden';
+        const visible = await waitForDocumentVisibility(controller.signal);
+        if (!visible) return;
+        if (wasHidden) loadImmediately = true;
         if (!loadImmediately) {
-          const continued = await waitForNextPoll(controller.signal);
+          const continued = await waitForNextPoll(
+            controller.signal,
+            eventRoomPollDelay(consecutiveFailures),
+          );
           if (!continued) return;
+          if (document.visibilityState === 'hidden') continue;
         }
         loadImmediately = false;
         try {
+          const requestedBaseCursor =
+            continuation?.baseCursor ?? cursorRef.current;
+          const requestedCursor = continuation?.cursor ?? cursorRef.current;
           const page = await requestTimelinePage(
             apiUrl,
-            cursorRef.current,
+            requestedCursor,
             event,
             controller.signal,
           );
           if (!active) return;
-          cursorRef.current = page.cursor;
-          setCurrentEvent(page.event);
-          mergeIncomingEntries(page.entries, !drainInitialHistory);
+          const mayApplySnapshot =
+            cursorRef.current === requestedBaseCursor &&
+            page.snapshotSequence >= appliedSnapshotSequenceRef.current;
+          if (!mayApplySnapshot) {
+            const mustDrainBeforeShowingTimeline =
+              drainInitialHistory ||
+              continuation !== null ||
+              page.hasMore ||
+              page.entries.length > 0;
+            continuation = null;
+            setLoadingHistory(mustDrainBeforeShowingTimeline);
+            consecutiveFailures = 0;
+            setConnection('connected');
+            setLastUpdatedAt(new Date().toISOString());
+            setPollMessage(null);
+            loadImmediately = !pendingRef.current;
+            continue;
+          }
+
+          if (
+            continuation !== null &&
+            (page.snapshotSequence < continuation.snapshotSequence ||
+              page.entries.length === 0 ||
+              page.entries[0]?.sequence !==
+                continuation.entries.at(-1)!.sequence + 1)
+          ) {
+            throw new EventRoomRequestError(
+              'PSD EOC returned a broken timeline continuation. Previously displayed state remains unchanged.',
+              false,
+            );
+          }
+
+          const completeEntries =
+            continuation === null
+              ? page.entries
+              : [...continuation.entries, ...page.entries];
           consecutiveFailures = 0;
           setConnection('connected');
           setLastUpdatedAt(new Date().toISOString());
           setPollMessage(null);
-          if (drainInitialHistory && !page.hasMore) {
-            drainInitialHistory = false;
-            setLoadingHistory(false);
+
+          if (page.hasMore) {
+            continuation = {
+              baseCursor: requestedBaseCursor,
+              cursor: page.cursor,
+              entries: completeEntries,
+              snapshotSequence: page.snapshotSequence,
+            };
+            setLoadingHistory(true);
+            loadImmediately = true;
+            continue;
           }
-          loadImmediately = page.hasMore;
+
+          cursorRef.current = page.cursor;
+          appliedSnapshotSequenceRef.current = page.snapshotSequence;
+          if (page.event !== null) setCurrentEvent(page.event);
+          mergeIncomingEntries(completeEntries, !drainInitialHistory);
+          continuation = null;
+          if (drainInitialHistory) {
+            drainInitialHistory = false;
+          }
+          setLoadingHistory(false);
         } catch (error) {
           if (controller.signal.aborted || !active) return;
           consecutiveFailures += 1;
@@ -1144,17 +1484,15 @@ export function EventRoom({
   }, [apiUrl, event.id, sessionId]);
 
   useEffect(() => {
-    if (mutationError !== null) mutationErrorRef.current?.focus();
-  }, [mutationError]);
-
-  useEffect(() => {
     const element = dialogRef.current;
     if (element === null) return;
     if (dialog !== null) {
       if (!element.open) element.showModal();
       dialogWasOpenRef.current = true;
       const frame = window.requestAnimationFrame(() => {
-        const target = element.querySelector<HTMLElement>('[data-autofocus]');
+        const target = element.querySelector<HTMLElement>(
+          '[data-autofocus]:not(:disabled)',
+        );
         target?.focus();
       });
       return () => window.cancelAnimationFrame(frame);
@@ -1167,6 +1505,15 @@ export function EventRoom({
       else document.getElementById('main-content')?.focus();
     }
   }, [dialog]);
+
+  useEffect(() => {
+    if (mutationError === null) return;
+    const target =
+      dialog === null
+        ? mutationErrorRef.current
+        : dialogMutationErrorRef.current;
+    target?.focus();
+  }, [dialog, mutationError]);
 
   const supersessionsByEntry = useMemo(() => {
     const result = new Map<string, JournalEntry[]>();
@@ -1219,6 +1566,7 @@ export function EventRoom({
       const preview = await requestLifecyclePreview(
         apiUrl,
         event,
+        csrfCookieName,
         controller.signal,
       );
       setDialog((current) =>
@@ -1253,7 +1601,23 @@ export function EventRoom({
   }
 
   function applyMutationResult(result: MutationResult): void {
-    if (result.event !== null) setCurrentEvent(result.event);
+    const resultHead = result.entries.reduce(
+      (head, entry) => Math.max(head, entry.sequence),
+      0,
+    );
+    // A poll can observe a later coherent lifecycle commit while this POST's
+    // response is delayed. Journal sequence is monotonic, so never let an
+    // older mutation projection regress that newer room state.
+    if (
+      result.event !== null &&
+      resultHead >= appliedSnapshotSequenceRef.current
+    ) {
+      setCurrentEvent(result.event);
+    }
+    appliedSnapshotSequenceRef.current = Math.max(
+      appliedSnapshotSequenceRef.current,
+      resultHead,
+    );
     autoScrollRef.current = true;
     setUnseenCount(0);
     mergeIncomingEntries(result.entries, false);
@@ -1282,7 +1646,7 @@ export function EventRoom({
     setMutationStatus(`Sending ${commandLabel(command.operation)}…`);
     try {
       const value = await postRetainedCommand(command, csrfCookieName);
-      const result = parseMutationResult(command.operation, value, event);
+      const result = parseMutationResult(command, value, event);
       applyMutationResult(result);
       const cleared = clearCommandAfterResult(command);
       setMutationStatus(
@@ -1313,6 +1677,10 @@ export function EventRoom({
           ? 'The outcome is unresolved. The exact request is retained and will never replay automatically.'
           : 'The server rejected the request. No change was recorded by this attempt.',
       );
+      if (requestError.ambiguous && dialog !== null) {
+        setDialog(null);
+        setConfirmationPhrase('');
+      }
       return false;
     } finally {
       pendingRef.current = false;
@@ -1332,6 +1700,10 @@ export function EventRoom({
         'This browser could not retain an exact recovery request, so PSD EOC did not send anything.',
       );
       setMutationStatus('No request was sent.');
+      if (dialog !== null) {
+        setDialog(null);
+        setConfirmationPhrase('');
+      }
       return false;
     }
     return sendRetainedCommand(command);
@@ -1441,9 +1813,32 @@ export function EventRoom({
     timelineEndRef.current?.focus();
   }
 
-  const startedAt = currentEvent.activatedAt ?? currentEvent.createdAt;
+  const startedAt = currentEvent.activatedAt;
   const canPost =
     currentEvent.status === 'active' || currentEvent.status === 'all-clear';
+  const dialogFeedback = (
+    <>
+      {mutationError === null ? null : (
+        <div
+          className="error-panel dialog-error-panel"
+          ref={dialogMutationErrorRef}
+          role="alert"
+          tabIndex={-1}
+        >
+          <h3>Request needs attention</h3>
+          <p>{mutationError}</p>
+        </div>
+      )}
+      <p
+        aria-atomic="true"
+        aria-live="polite"
+        className="mutation-status"
+        role="status"
+      >
+        {mutationStatus}
+      </p>
+    </>
+  );
 
   return (
     <main className="event-room" id="main-content" tabIndex={-1}>
@@ -1467,12 +1862,27 @@ export function EventRoom({
                   {statusLabel(currentEvent)}
                 </span>
               </dd>
-              <dt>Started</dt>
-              <dd>
-                <time dateTime={startedAt}>{readableDateTime(startedAt)}</time>
-              </dd>
-              <dt>Elapsed</dt>
-              <dd suppressHydrationWarning>{elapsed}</dd>
+              {startedAt === null ? (
+                <>
+                  <dt>Created</dt>
+                  <dd>
+                    <time dateTime={currentEvent.createdAt}>
+                      {readableDateTime(currentEvent.createdAt)}
+                    </time>
+                  </dd>
+                </>
+              ) : (
+                <>
+                  <dt>Started</dt>
+                  <dd>
+                    <time dateTime={startedAt}>
+                      {readableDateTime(startedAt)}
+                    </time>
+                  </dd>
+                  <dt>Elapsed</dt>
+                  <dd suppressHydrationWarning>{elapsed}</dd>
+                </>
+              )}
             </dl>
             {currentEvent.correctionOfEventId === null ? null : (
               <p className="supersession-notice">
@@ -1555,7 +1965,7 @@ export function EventRoom({
         </section>
       ) : null}
 
-      {mutationError === null ? null : (
+      {mutationError === null || dialog !== null ? null : (
         <div
           className="error-panel"
           ref={mutationErrorRef}
@@ -1573,7 +1983,7 @@ export function EventRoom({
         className="mutation-status"
         role="status"
       >
-        {mutationStatus}
+        {dialog === null ? mutationStatus : null}
       </p>
 
       <div className="room-grid">
@@ -1742,8 +2152,14 @@ export function EventRoom({
           if (pendingRef.current) cancel.preventDefault();
           else closeDialog();
         }}
-        onClose={() => {
-          if (dialog !== null && !pendingRef.current) setDialog(null);
+        onClose={(event) => {
+          if (
+            !event.currentTarget.open &&
+            dialog !== null &&
+            !pendingRef.current
+          ) {
+            setDialog(null);
+          }
         }}
         ref={dialogRef}
       >
@@ -1752,11 +2168,16 @@ export function EventRoom({
             <h2 className="dialog-heading" id="event-dialog-heading">
               Correct entry {dialog.entry.sequence}
             </h2>
+            <DialogClassification
+              label={classificationLabel}
+              real={realEvent}
+            />
+            {dialogFeedback}
             <p>
               The original remains visible and marked as superseded. This form
               appends a replacement with actor, time, and reason provenance.
             </p>
-            <fieldset disabled={pendingOperation !== null}>
+            <fieldset disabled={pendingOperation !== null || recoveryBlocked}>
               <legend>Correction details</legend>
               <div className="field">
                 <label htmlFor="correction-text">Corrected text</label>
@@ -1801,12 +2222,17 @@ export function EventRoom({
             <h2 className="dialog-heading" id="event-dialog-heading">
               Redact entry {dialog.entry.sequence}
             </h2>
+            <DialogClassification
+              label={classificationLabel}
+              real={realEvent}
+            />
+            {dialogFeedback}
             <p>
               Redaction appends a superseding entry and hides the original
               content in this view. The original journal record, sequence,
               timing, and provenance are never deleted.
             </p>
-            <fieldset disabled={pendingOperation !== null}>
+            <fieldset disabled={pendingOperation !== null || recoveryBlocked}>
               <legend>Redaction details</legend>
               <div className="field">
                 <label htmlFor="redaction-reason">Reason for redaction</label>
@@ -1839,11 +2265,11 @@ export function EventRoom({
             <h2 className="dialog-heading" id="event-dialog-heading">
               Review and issue all-clear
             </h2>
-            <p
-              className={`dialog-classification ${realEvent ? 'mode-real' : 'mode-drill'}`}
-            >
-              {classificationLabel}
-            </p>
+            <DialogClassification
+              label={classificationLabel}
+              real={realEvent}
+            />
+            {dialogFeedback}
             <p>
               Issuing all-clear changes this event state, appends a distinct
               journal entry, and starts the previewed notification fan-out. It
@@ -1871,6 +2297,7 @@ export function EventRoom({
                 <fieldset
                   disabled={
                     pendingOperation !== null ||
+                    recoveryBlocked ||
                     dialog.preview.sendReadiness !== 'ready'
                   }
                 >
@@ -1896,32 +2323,38 @@ export function EventRoom({
                     This confirmation is case-sensitive and applies only to the
                     fresh preview shown above.
                   </p>
-                  <div className="form-actions">
-                    <button
-                      className="danger"
-                      disabled={confirmationPhrase !== 'ALL CLEAR'}
-                      type="submit"
-                    >
-                      {pendingOperation === 'all-clear'
-                        ? 'Issuing all-clear…'
-                        : 'Issue all-clear and notify'}
-                    </button>
-                    <button
-                      className="secondary"
-                      onClick={closeDialog}
-                      type="button"
-                    >
-                      Cancel
-                    </button>
-                  </div>
                 </fieldset>
+                <div className="form-actions">
+                  <button
+                    className="danger"
+                    disabled={
+                      pendingOperation !== null ||
+                      recoveryBlocked ||
+                      dialog.preview.sendReadiness !== 'ready' ||
+                      confirmationPhrase !== 'ALL CLEAR'
+                    }
+                    type="submit"
+                  >
+                    {pendingOperation === 'all-clear'
+                      ? 'Issuing all-clear…'
+                      : 'Issue all-clear and notify'}
+                  </button>
+                  <button
+                    className="secondary"
+                    data-autofocus
+                    disabled={pendingOperation !== null}
+                    onClick={closeDialog}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </>
             )}
             {dialog.preview !== null ? null : (
               <div className="form-actions">
                 <button
                   className="secondary"
-                  disabled={dialog.loading}
                   onClick={closeDialog}
                   type="button"
                 >
@@ -1937,18 +2370,18 @@ export function EventRoom({
             <h2 className="dialog-heading" id="event-dialog-heading">
               Review and close event
             </h2>
-            <p
-              className={`dialog-classification ${realEvent ? 'mode-real' : 'mode-drill'}`}
-            >
-              {classificationLabel}
-            </p>
+            <DialogClassification
+              label={classificationLabel}
+              real={realEvent}
+            />
+            {dialogFeedback}
             <ul className="consequence-list">
               <li>The event has already reached the all-clear state.</li>
               <li>Closing appends a distinct journal entry.</li>
               <li>No journal history is deleted or rewritten.</li>
               <li>Closing does not send another all-clear notification.</li>
             </ul>
-            <fieldset disabled={pendingOperation !== null}>
+            <fieldset disabled={pendingOperation !== null || recoveryBlocked}>
               <legend>Human confirmation</legend>
               <div className="field">
                 <label htmlFor="close-event-phrase">

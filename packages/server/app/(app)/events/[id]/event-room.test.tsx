@@ -7,7 +7,7 @@ import {
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { EventRoom } from './event-room';
+import { EventRoom, eventRoomPollDelay } from './event-room';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -150,12 +150,21 @@ function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
       initialCursor="eyJ2IjoxfQ"
       initialEntries={entries}
       initialHasMore={false}
+      initialSnapshotSequence={entries.at(-1)?.sequence ?? 0}
       sessionId={IDS.session}
     />,
   );
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('keeps healthy polling in the 3–5 second window with bounded backoff', () => {
+    expect(eventRoomPollDelay(0, 0)).toBe(3_000);
+    expect(eventRoomPollDelay(0, 1)).toBe(5_000);
+    expect(eventRoomPollDelay(1, 0)).toBe(6_000);
+    expect(eventRoomPollDelay(1, 1)).toBe(10_000);
+    expect(eventRoomPollDelay(99, 1)).toBe(30_000);
+  });
+
   test('renders real and drill classification with words and symbols, not color alone', () => {
     const real = render(activeEvent('real'), []);
     const drill = render(activeEvent('drill'), []);
@@ -186,6 +195,25 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).toContain(
       'Server-assigned sequence determines receipt order. Server-recorded and client-reported times are shown as supporting evidence.',
     );
+    expect(html).toContain('Redact entry 1');
+    expect(html).not.toContain('Correct entry 1');
+    expect(html).not.toContain('Redact entry 3');
+  });
+
+  test('labels a draft as created without presenting a running timer', () => {
+    const draft = EventSchema.parse({
+      ...activeEvent('real'),
+      status: 'draft',
+      rosterSnapshotId: null,
+      rosterPopulation: null,
+      activatedAt: null,
+      activationAuthorization: null,
+    });
+    const html = render(draft, []);
+
+    expect(html).toContain('<dt>Created</dt>');
+    expect(html).not.toContain('<dt>Started</dt>');
+    expect(html).not.toContain('<dt>Elapsed</dt>');
   });
 
   test('offers only the lifecycle action valid for the current append-only state', () => {

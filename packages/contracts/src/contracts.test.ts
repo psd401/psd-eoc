@@ -7,6 +7,7 @@ import {
   AgentApiKeySchema,
   AgentCapabilityGrantSchema,
   ActivationPreviewSchema,
+  AllClearEventResultSchema,
   AudienceConfigSchema,
   CAPABILITY_CATALOG,
   CAPABILITY_MUTATION_SAFETY_MANIFEST,
@@ -15,6 +16,7 @@ import {
   ChannelAttemptSchema,
   ConnectivityEpochInvalidationSchema,
   ConnectivityEpochSchema,
+  CloseEventResultSchema,
   CreateActivationPreviewInputSchema,
   DeliveryEvidenceSchema,
   DeliveryReportSchema,
@@ -23,6 +25,7 @@ import {
   DispatchBatchSchema,
   DrillRecordSchema,
   EventClassificationSchema,
+  EventRoomSyncResultSchema,
   EventSchema,
   EventTargetingSchema,
   EventTransitionSchema,
@@ -69,6 +72,7 @@ import {
   StartEventInputSchema,
   UpdateEventTypeDraftInputSchema,
   defineCapability,
+  getCapabilityInvocationPolicy,
   parseCapabilityEnvelopeFor,
   parseCapabilityInput,
   resolveHumanActionRequirement,
@@ -470,6 +474,136 @@ function notificationClassification(
   rosterPopulation: RosterPopulation,
 ) {
   return { eventKind, templateMode, rosterPopulation } as const;
+}
+
+function syntheticAllClearResult() {
+  const target = targeting('test', 'drill', 'synthetic');
+  const authorization = lifecycleAuthorization('all-clear', target);
+  const transition = {
+    id: ids.transition,
+    sequence: 2,
+    actor: agentActor,
+    source: 'mcp',
+    occurredAt: times.later,
+    requestId: ids.request,
+    confirmationId: null,
+    consequenceDigest: null,
+    targeting: target,
+    idempotencyKey: 'synthetic-all-clear-contract-0001',
+    transition: 'all-clear',
+    eventId: ids.event,
+    from: 'active',
+    to: 'all-clear',
+    notificationAuthorization: authorization,
+  } as const;
+  const notificationIntent = {
+    id: ids.intent,
+    eventId: ids.event,
+    ...notificationClassification('test', 'drill', 'synthetic'),
+    purpose: 'all-clear',
+    eventTypeVersion: drillTypeRef,
+    rosterSnapshotId: ids.roster,
+    audienceConfig: audienceRef,
+    createdBy: agentActor,
+    source: 'mcp',
+    requestId: ids.request,
+    authorization,
+    channels: channelPlan(target, 'all-clear'),
+    createdAt: times.later,
+  } as const;
+  return {
+    event: {
+      ...activeEvent('test', 'drill', 'synthetic'),
+      status: 'all-clear',
+      allClearAt: times.later,
+    },
+    transition,
+    journalEntries: [
+      {
+        id: ids.journal,
+        eventId: ids.event,
+        sequence: 2,
+        kind: 'system',
+        author: agentActor,
+        source: 'mcp',
+        serverTime: times.later,
+        clientTime: null,
+        supersedes: null,
+        payload: {
+          code: 'all-clear-issued',
+          summary: 'Synthetic test event is all clear.',
+          transition,
+        },
+      },
+      {
+        id: ids.earlierJournal,
+        eventId: ids.event,
+        sequence: 3,
+        kind: 'system',
+        author: agentActor,
+        source: 'mcp',
+        serverTime: times.later,
+        clientTime: null,
+        supersedes: null,
+        payload: {
+          code: 'notification-intent-recorded',
+          summary: 'Synthetic all-clear notification recorded.',
+          relatedRecordId: ids.intent,
+        },
+      },
+    ],
+    notificationIntent,
+    preparedActivationConsumption: null,
+  } as const;
+}
+
+function syntheticCloseResult() {
+  const target = targeting('test', 'drill', 'synthetic');
+  const transition = {
+    id: ids.transition,
+    sequence: 3,
+    actor: agentActor,
+    source: 'mcp',
+    occurredAt: times.confirmationExpiry,
+    requestId: ids.request,
+    confirmationId: null,
+    consequenceDigest: null,
+    targeting: target,
+    idempotencyKey: 'synthetic-close-contract-0001',
+    transition: 'close',
+    eventId: ids.event,
+    from: 'all-clear',
+    to: 'closed',
+  } as const;
+  return {
+    event: {
+      ...activeEvent('test', 'drill', 'synthetic'),
+      status: 'closed',
+      allClearAt: times.later,
+      closedAt: times.confirmationExpiry,
+    },
+    transition,
+    journalEntries: [
+      {
+        id: ids.journal,
+        eventId: ids.event,
+        sequence: 4,
+        kind: 'system',
+        author: agentActor,
+        source: 'mcp',
+        serverTime: times.confirmationExpiry,
+        clientTime: null,
+        supersedes: null,
+        payload: {
+          code: 'event-closed',
+          summary: 'Synthetic test event closed.',
+          transition,
+        },
+      },
+    ],
+    notificationIntent: null,
+    preparedActivationConsumption: null,
+  } as const;
 }
 
 describe('event type, targeting, and activation contracts', () => {
@@ -1198,6 +1332,204 @@ describe('event type, targeting, and activation contracts', () => {
 });
 
 describe('human-only capability boundary', () => {
+  test('catalogs room sync as the sole web-only reduced-success-audit query', () => {
+    const sync = defineCapability('sync-event-room');
+    expect(sync.operation).toBe('query');
+    expect(sync.auditPolicy).toBe('denied-and-failed');
+    expect(getCapabilityInvocationPolicy('sync-event-room')).toEqual({
+      principalKinds: ['human'],
+      sources: ['web'],
+      agentGrantable: false,
+    });
+    expect(
+      AgentCapabilityGrantSchema.safeParse('sync-event-room').success,
+    ).toBe(false);
+    expect(
+      defineCapability('create-lifecycle-consequence-preview').operation,
+    ).toBe('mutation');
+
+    const reducedAuditIds = Object.values(CAPABILITY_CATALOG)
+      .filter((definition) => definition.auditPolicy === 'denied-and-failed')
+      .map((definition) => definition.id);
+    expect(reducedAuditIds).toEqual(['sync-event-room']);
+    for (const definition of Object.values(CAPABILITY_CATALOG)) {
+      if (
+        definition.operation === 'mutation' ||
+        getCapabilityInvocationPolicy(definition.id).agentGrantable
+      ) {
+        expect(definition.auditPolicy).toBe('all-outcomes');
+      }
+    }
+  });
+
+  test('owns coherent event-room synchronization pages', () => {
+    const cursor = Buffer.from(
+      JSON.stringify({ v: 1, e: ids.event, s: 1 }),
+      'utf8',
+    ).toString('base64url');
+    const entry = {
+      id: ids.journal,
+      eventId: ids.event,
+      sequence: 1,
+      kind: 'text',
+      author: humanActor,
+      source: 'web',
+      serverTime: times.activated,
+      clientTime: null,
+      supersedes: null,
+      payload: { text: 'Synthetic room update.' },
+    } as const;
+    const result = {
+      eventId: ids.event,
+      event: activeEvent('incident', 'real', 'staff'),
+      entries: [entry],
+      cursor,
+      hasMore: false,
+      snapshotSequence: 1,
+    } as const;
+    expect(EventRoomSyncResultSchema.safeParse(result).success).toBe(true);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        entries: [{ ...entry, eventId: ids.otherFacility }],
+      }).success,
+    ).toBe(false);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        entries: [{ ...entry, sequence: 2 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        event: { ...result.event, id: ids.otherFacility },
+      }).success,
+    ).toBe(false);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        event: null,
+        entries: [],
+        hasMore: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('binds all-clear and close outputs to exact lifecycle and journal facts', () => {
+    const allClear = syntheticAllClearResult();
+    expect(AllClearEventResultSchema.safeParse(allClear).success).toBe(true);
+    expect(
+      AllClearEventResultSchema.safeParse({
+        ...allClear,
+        journalEntries: [allClear.journalEntries[0]],
+      }).success,
+    ).toBe(false);
+    expect(
+      AllClearEventResultSchema.safeParse({
+        ...allClear,
+        notificationIntent: {
+          ...allClear.notificationIntent,
+          createdAt: times.confirmationExpiry,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      AllClearEventResultSchema.safeParse({
+        ...allClear,
+        journalEntries: [
+          {
+            ...allClear.journalEntries[0],
+            author: humanActor,
+            source: 'web',
+          },
+          allClear.journalEntries[1],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AllClearEventResultSchema.safeParse({
+        ...allClear,
+        journalEntries: [
+          allClear.journalEntries[0],
+          {
+            ...allClear.journalEntries[1],
+            serverTime: times.confirmationExpiry,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AllClearEventResultSchema.safeParse({
+        ...allClear,
+        journalEntries: [
+          ...allClear.journalEntries,
+          allClear.journalEntries[1],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AllClearEventResultSchema.safeParse({
+        ...allClear,
+        journalEntries: [
+          allClear.journalEntries[0],
+          {
+            ...allClear.journalEntries[1],
+            payload: {
+              ...allClear.journalEntries[1].payload,
+              relatedRecordId: ids.outbox,
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+
+    const closed = syntheticCloseResult();
+    expect(CloseEventResultSchema.safeParse(closed).success).toBe(true);
+    expect(
+      CloseEventResultSchema.safeParse({
+        ...closed,
+        journalEntries: [
+          {
+            id: ids.journal,
+            eventId: ids.event,
+            sequence: 4,
+            kind: 'text',
+            author: agentActor,
+            source: 'mcp',
+            serverTime: times.confirmationExpiry,
+            clientTime: null,
+            supersedes: null,
+            payload: { text: 'Not a close fact.' },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      CloseEventResultSchema.safeParse({
+        ...closed,
+        journalEntries: [
+          {
+            ...closed.journalEntries[0],
+            source: 'agent-rest',
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      CloseEventResultSchema.safeParse({
+        ...closed,
+        journalEntries: [
+          closed.journalEntries[0],
+          {
+            ...allClear.journalEntries[1],
+            eventId: closed.event.id,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   test('allows each protected action only for its confirmed human session', () => {
     for (const capabilityId of HUMAN_ONLY_ACTION_IDS) {
       const operationId = capabilityByProtectedAction[capabilityId];

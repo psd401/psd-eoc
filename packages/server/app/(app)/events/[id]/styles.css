@@ -52,6 +52,12 @@ button.secondary {
   color: #174ea6;
 }
 
+button.secondary:hover:not(:disabled) {
+  border-color: #123b7d;
+  background: #123b7d;
+  color: #fff;
+}
+
 button.caution {
   border-color: #9a3412;
   background: #9a3412;
@@ -597,9 +603,7 @@ dialog::backdrop {
   a,
   input,
   textarea {
-    transition:
-      outline-offset 100ms ease,
-      background-color 100ms ease;
+    transition: outline-offset 100ms ease;
   }
 }
 

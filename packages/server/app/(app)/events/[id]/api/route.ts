@@ -12,11 +12,9 @@ import { NextResponse } from 'next/server';
 import { authenticateSessionRequest } from '../../../../../lib/auth/middleware';
 import { getDefaultSessionService } from '../../../../../lib/auth/sessions';
 import { resolveHumanCapabilityInvocation } from '../../../../../lib/capabilities/engine';
+import { getDefaultEventRoomCapabilityRuntime } from '../../../../../lib/capabilities/event-room';
 import { getDefaultEventCapabilityRuntime } from '../../../../../lib/capabilities/events';
-import {
-  createJournalCursor,
-  getDefaultJournalCapabilityRuntime,
-} from '../../../../../lib/capabilities/journal';
+import { getDefaultJournalCapabilityRuntime } from '../../../../../lib/capabilities/journal';
 import { eventApiErrorResponse } from '../../../../api/events/_lib/http';
 
 const JSON_MEDIA_TYPE = 'application/json';
@@ -33,8 +31,13 @@ interface EventRoomRouteContext {
 
 type JsonObject = Readonly<Record<string, unknown>>;
 
-function success(value: unknown): NextResponse {
-  return NextResponse.json(value, { headers: RESPONSE_HEADERS });
+function success(value: unknown, idempotencyKey?: string): NextResponse {
+  return NextResponse.json(value, {
+    headers:
+      idempotencyKey === undefined
+        ? RESPONSE_HEADERS
+        : { ...RESPONSE_HEADERS, 'Idempotency-Key': idempotencyKey },
+  });
 }
 
 function assertOnlyKeys(
@@ -112,22 +115,6 @@ function mutationKey(request: Request): string {
   );
 }
 
-function timelineCursor(
-  eventId: string,
-  requestedCursor: string | null,
-  items: readonly { readonly sequence: number }[],
-  nextCursor: string | null,
-): string {
-  if (nextCursor !== null) {
-    return nextCursor;
-  }
-  const lastSequence = items.at(-1)?.sequence;
-  if (lastSequence !== undefined) {
-    return createJournalCursor(eventId, lastSequence);
-  }
-  return requestedCursor ?? createJournalCursor(eventId, 0);
-}
-
 async function handleTimelineQuery(
   request: Request,
   eventId: string,
@@ -140,15 +127,11 @@ async function handleTimelineQuery(
     throw new SyntaxError('Timeline queries cannot carry mutation metadata.');
   }
   const url = new URL(request.url);
-  const allowed = new Set(['cursor', 'operation']);
+  const allowed = new Set(['cursor']);
   for (const key of url.searchParams.keys()) {
     if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
       throw new SyntaxError('The event-room query parameters are invalid.');
     }
-  }
-  const operation = url.searchParams.get('operation');
-  if (operation !== null && operation !== 'preview-all-clear') {
-    throw new SyntaxError('The event-room query operation is invalid.');
   }
   const cursor = url.searchParams.get('cursor');
   const authenticated = await authenticateSessionRequest(
@@ -157,45 +140,17 @@ async function handleTimelineQuery(
     { mutation: false },
     serverTime,
   );
-  const queryInvocation = () =>
-    resolveHumanCapabilityInvocation(authenticated, {
-      requestId: randomUUID(),
-      serverTime,
-      mutation: null,
-    });
-  const journalRuntime = getDefaultJournalCapabilityRuntime();
-  if (operation === 'preview-all-clear') {
-    if (cursor !== null) {
-      throw new SyntaxError('All-clear previews do not accept a cursor.');
-    }
-    const preview = await journalRuntime.execute(
-      'create-lifecycle-consequence-preview',
-      { eventId, purpose: 'all-clear' },
-      queryInvocation(),
-    );
-    return success({ preview });
-  }
-
-  const eventRuntime = getDefaultEventCapabilityRuntime();
-  const [event, page] = await Promise.all([
-    eventRuntime.execute('get-event', { eventId }, queryInvocation()),
-    journalRuntime.execute(
-      'list-journal-entries',
-      { eventId, cursor, limit: PAGE_LIMIT },
-      queryInvocation(),
-    ),
-  ]);
-  return success({
-    event,
-    entries: page.items,
-    cursor: timelineCursor(
-      eventId,
-      cursor,
-      page.items,
-      page.pageInfo.nextCursor,
-    ),
-    hasMore: page.pageInfo.hasMore,
+  const invocation = resolveHumanCapabilityInvocation(authenticated, {
+    requestId: randomUUID(),
+    serverTime,
+    mutation: null,
   });
+  return success(
+    await getDefaultEventRoomCapabilityRuntime().execute(
+      { eventId, cursor, limit: PAGE_LIMIT },
+      invocation,
+    ),
+  );
 }
 
 async function handleMutation(
@@ -230,6 +185,25 @@ async function handleMutation(
   const journalRuntime = getDefaultJournalCapabilityRuntime();
   const eventRuntime = getDefaultEventCapabilityRuntime();
 
+  if (operation === 'preview-all-clear') {
+    assertOnlyKeys(body, ['operation']);
+    const invocation = resolveHumanCapabilityInvocation(authenticated, {
+      requestId,
+      serverTime,
+      mutation: { idempotencyKey, humanConfirmationId: null },
+    });
+    return success(
+      {
+        preview: await journalRuntime.execute(
+          'create-lifecycle-consequence-preview',
+          { eventId, purpose: 'all-clear' },
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
+  }
+
   if (operation === 'post-text') {
     assertOnlyKeys(body, ['operation', 'text', 'clientTime']);
     const input = AppendJournalEntryInputSchema.parse({
@@ -250,13 +224,16 @@ async function handleMutation(
       serverTime,
       mutation: { idempotencyKey, humanConfirmationId: null },
     });
-    return success({
-      entry: await journalRuntime.execute(
-        'append-journal-entry',
-        input,
-        invocation,
-      ),
-    });
+    return success(
+      {
+        entry: await journalRuntime.execute(
+          'append-journal-entry',
+          input,
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
   }
 
   if (operation === 'correct-text') {
@@ -299,13 +276,16 @@ async function handleMutation(
       serverTime,
       mutation: { idempotencyKey, humanConfirmationId: null },
     });
-    return success({
-      entry: await journalRuntime.execute(
-        'correct-journal-entry',
-        input,
-        invocation,
-      ),
-    });
+    return success(
+      {
+        entry: await journalRuntime.execute(
+          'correct-journal-entry',
+          input,
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
   }
 
   if (operation === 'redact-entry') {
@@ -345,13 +325,16 @@ async function handleMutation(
       serverTime,
       mutation: { idempotencyKey, humanConfirmationId: null },
     });
-    return success({
-      entry: await journalRuntime.execute(
-        'redact-journal-entry',
-        input,
-        invocation,
-      ),
-    });
+    return success(
+      {
+        entry: await journalRuntime.execute(
+          'redact-journal-entry',
+          input,
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
   }
 
   if (operation === 'all-clear') {
@@ -392,13 +375,13 @@ async function handleMutation(
       { eventId, lifecyclePreviewId },
       invocation,
     );
-    const lastSequence = result.journalEntries.at(-1)?.sequence ?? 0;
-    return success({
-      event: result.event,
-      entries: result.journalEntries,
-      cursor: createJournalCursor(eventId, lastSequence),
-      hasMore: false,
-    });
+    return success(
+      {
+        ...result,
+        entries: result.journalEntries,
+      },
+      idempotencyKey,
+    );
   }
 
   if (operation === 'close') {
@@ -430,13 +413,13 @@ async function handleMutation(
       { eventId },
       invocation,
     );
-    const lastSequence = result.journalEntries.at(-1)?.sequence ?? 0;
-    return success({
-      event: result.event,
-      entries: result.journalEntries,
-      cursor: createJournalCursor(eventId, lastSequence),
-      hasMore: false,
-    });
+    return success(
+      {
+        ...result,
+        entries: result.journalEntries,
+      },
+      idempotencyKey,
+    );
   }
 
   throw new SyntaxError('The event-room operation is invalid.');

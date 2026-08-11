@@ -4,6 +4,7 @@ export * from './audit';
 export * from './capability-catalog';
 export * from './capability';
 export * from './event';
+export * from './event-room';
 export * from './event-type';
 export * from './facility';
 export * from './group';

@@ -1,7 +1,18 @@
 import { describe, expect, test } from 'bun:test';
+import type {
+  ExecuteStatementCommand,
+  ExecuteStatementCommandOutput,
+  RDSDataClient,
+} from '@aws-sdk/client-rds-data';
+import {
+  drizzle as drizzleAwsDataApi,
+  type AwsDataApiPgQueryResult,
+} from 'drizzle-orm/aws-data-api/pg';
+import { sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   DatabaseConfigurationError,
   readDatabaseConfig,
 } from '../db/client';
@@ -67,5 +78,78 @@ describe('database client configuration', () => {
     );
     expect(dataApiClient.driver).toBe('aws-data-api');
     await Promise.all([dataApiClient.close(), dataApiClient.close()]);
+  });
+});
+
+describe('raw execute result compatibility', () => {
+  const row = Object.freeze({ value: '2026-08-10T12:34:56.000Z' });
+
+  test('returns postgres-js array rows without copying them', () => {
+    const result = [row];
+
+    expect(databaseExecuteRows(result)).toBe(result);
+  });
+
+  test('returns mapped rows from the AWS Data API response envelope', () => {
+    const rows = [row];
+    const result = {
+      $metadata: {},
+      rows,
+    } satisfies AwsDataApiPgQueryResult<typeof row>;
+
+    expect(databaseExecuteRows(result)).toBe(rows);
+  });
+
+  test('preserves empty results from both transports', () => {
+    const postgresResult: (typeof row)[] = [];
+    const dataApiResult = {
+      $metadata: {},
+      rows: [] as (typeof row)[],
+    } satisfies AwsDataApiPgQueryResult<typeof row>;
+
+    expect(databaseExecuteRows(postgresResult)).toEqual([]);
+    expect(databaseExecuteRows(dataApiResult)).toEqual([]);
+  });
+
+  test('normalizes the pinned Drizzle Data API runtime response without AWS I/O', async () => {
+    const commands: ExecuteStatementCommand[] = [];
+    const response = {
+      $metadata: { httpStatusCode: 200 },
+      columnMetadata: [{ name: 'value', typeName: 'int8' }],
+      records: [[{ longValue: 1 }]],
+      numberOfRecordsUpdated: 0,
+    } satisfies ExecuteStatementCommandOutput;
+    const fakeClient = {
+      async send(
+        command: ExecuteStatementCommand,
+      ): Promise<ExecuteStatementCommandOutput> {
+        commands.push(command);
+        return response;
+      },
+    } as unknown as RDSDataClient;
+    const database = drizzleAwsDataApi({
+      client: fakeClient,
+      database: 'synthetic',
+      resourceArn:
+        'arn:aws:rds:us-west-2:000000000000:cluster:psd-eoc-synthetic',
+      secretArn:
+        'arn:aws:secretsmanager:us-west-2:000000000000:secret:psd-eoc-synthetic',
+    });
+
+    const result = await database.execute<{ value: number }>(
+      sql`select 1 as value`,
+    );
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.input).toMatchObject({
+      database: 'synthetic',
+      includeResultMetadata: true,
+      parameters: [],
+      sql: 'select 1 as value',
+    });
+    expect(Array.isArray(result)).toBe(false);
+    expect(Symbol.iterator in result).toBe(false);
+    expect(result.rows).toEqual([{ value: 1 }]);
+    expect(databaseExecuteRows(result)).toBe(result.rows);
   });
 });
