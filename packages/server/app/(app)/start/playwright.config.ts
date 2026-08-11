@@ -2,12 +2,31 @@ import { defineConfig } from '@playwright/test';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { START_FLOW_PLAYWRIGHT_STORAGE_STATE_PATH } from './test/playwright.global-setup';
 import { startFlowPlaywrightDatabaseUrl } from './test/playwright-database';
+import {
+  START_FLOW_PLAYWRIGHT_ARTIFACTS_ACQUIRED_ENV,
+  START_FLOW_PLAYWRIGHT_RUN_ID_ENV,
+  acquireStartFlowPlaywrightArtifacts,
+  assertStartFlowPlaywrightArtifactsOwned,
+  createStartFlowPlaywrightRunId,
+  requireStartFlowPlaywrightRunId,
+  startFlowPlaywrightPaths,
+} from './test/playwright-run';
 
-const appPort = Number(process.env.PSD_EOC_START_APP_PORT ?? '3115');
-const idpPort = Number(process.env.PSD_EOC_START_IDP_PORT ?? '4115');
-const databaseUrl = startFlowPlaywrightDatabaseUrl();
+const runId = requireStartFlowPlaywrightRunId(
+  process.env[START_FLOW_PLAYWRIGHT_RUN_ID_ENV] ??
+    createStartFlowPlaywrightRunId(),
+);
+process.env[START_FLOW_PLAYWRIGHT_RUN_ID_ENV] = runId;
+const runPortSeed = Number.parseInt(runId.slice(0, 8), 16);
+const appPort = Number(
+  process.env.PSD_EOC_START_APP_PORT ?? 20_000 + (runPortSeed % 10_000),
+);
+const idpPort = Number(
+  process.env.PSD_EOC_START_IDP_PORT ?? 30_000 + (runPortSeed % 10_000),
+);
+const databaseUrl = startFlowPlaywrightDatabaseUrl(undefined, runId);
+const runPaths = startFlowPlaywrightPaths(runId);
 if (
   ![appPort, idpPort].every(
     (port) => Number.isSafeInteger(port) && port >= 1_024 && port <= 65_535,
@@ -17,6 +36,57 @@ if (
   throw new Error(
     'The start-flow Playwright app and IdP ports must be distinct user ports.',
   );
+}
+
+const workerIndex = process.env.TEST_WORKER_INDEX;
+const parallelIndex = process.env.TEST_PARALLEL_INDEX;
+const isPlaywrightWorker =
+  workerIndex !== undefined &&
+  parallelIndex !== undefined &&
+  /^\d+$/u.test(workerIndex) &&
+  /^\d+$/u.test(parallelIndex);
+if (
+  (workerIndex === undefined) !== (parallelIndex === undefined) ||
+  (workerIndex !== undefined && !isPlaywrightWorker)
+) {
+  throw new Error('The Playwright worker identity is invalid.');
+}
+const disallowedCoordinatorArguments = [
+  '--output',
+  '--reporter',
+  '--ui',
+  '--ui-host',
+  '--ui-port',
+] as const;
+const hasDisallowedCoordinatorArgument = process.argv
+  .slice(2)
+  .some((argument) =>
+    disallowedCoordinatorArguments.some(
+      (option) => argument === option || argument.startsWith(`${option}=`),
+    ),
+  );
+
+// The coordinator claims ownership before Playwright's pre-run output clear.
+// Workers reload this config, so they may only revalidate that exact claim.
+if (isPlaywrightWorker) {
+  if (process.env[START_FLOW_PLAYWRIGHT_ARTIFACTS_ACQUIRED_ENV] !== runId) {
+    throw new Error('The Playwright worker has no matching artifact claim.');
+  }
+  await assertStartFlowPlaywrightArtifactsOwned(runId);
+} else {
+  if (
+    hasDisallowedCoordinatorArgument ||
+    process.env.PWTEST_WATCH !== undefined
+  ) {
+    throw new Error(
+      'The start-flow Playwright suite does not permit reporter, output, UI, or watch overrides.',
+    );
+  }
+  if (process.env[START_FLOW_PLAYWRIGHT_ARTIFACTS_ACQUIRED_ENV] !== undefined) {
+    throw new Error('The Playwright coordinator artifact claim is invalid.');
+  }
+  await acquireStartFlowPlaywrightArtifacts(runId);
+  process.env[START_FLOW_PLAYWRIGHT_ARTIFACTS_ACQUIRED_ENV] = runId;
 }
 
 const startRoot = dirname(fileURLToPath(import.meta.url));
@@ -40,12 +110,15 @@ export default defineConfig({
   workers: 1,
   timeout: 45_000,
   expect: { timeout: 8_000 },
-  outputDir: '/tmp/psd-eoc-issue15-playwright',
-  reporter: [['line']],
+  outputDir: runPaths.output,
+  reporter: [
+    ['line'],
+    [resolve(startRoot, 'test/playwright-cleanup-reporter.ts')],
+  ],
   use: {
     baseURL: `http://localhost:${appPort}`,
     channel: process.env.CI === 'true' ? 'chrome' : undefined,
-    storageState: START_FLOW_PLAYWRIGHT_STORAGE_STATE_PATH,
+    storageState: runPaths.storageState,
     trace: 'retain-on-failure',
   },
   webServer: [
@@ -55,6 +128,7 @@ export default defineConfig({
       env: {
         ...sharedAuthEnvironment,
         MOCK_GOOGLE_OIDC_PORT: String(idpPort),
+        [START_FLOW_PLAYWRIGHT_RUN_ID_ENV]: runId,
       },
       port: idpPort,
       reuseExistingServer: false,
@@ -68,6 +142,7 @@ export default defineConfig({
         DATABASE_DRIVER: 'postgres',
         DATABASE_URL: databaseUrl,
         NODE_ENV: 'development',
+        [START_FLOW_PLAYWRIGHT_RUN_ID_ENV]: runId,
       },
       url: `http://localhost:${appPort}/login`,
       reuseExistingServer: false,
