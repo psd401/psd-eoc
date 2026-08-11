@@ -17,11 +17,13 @@ import {
   claimEventRoomPlaywrightRunContext,
   cleanupEventRoomPlaywrightRunAfterChildExit,
   cleanupReportedEventRoomPlaywrightRun,
+  eventRoomPlaywrightDatabaseMarker,
   finalizeEventRoomPlaywrightWebServer,
   inspectEventRoomPlaywrightPortLease,
   prepareEventRoomPlaywrightServerWorkspace,
   releaseEventRoomPlaywrightPortLease,
   releaseEventRoomPlaywrightPortLeaseIfOwned,
+  requireEventRoomPlaywrightDatabaseOwnership,
   requireEventRoomPlaywrightRunContext,
   requireSyntheticEventRoomTestDatabaseUrl,
   resolveEventRoomPlaywrightRunContext,
@@ -123,6 +125,30 @@ describe('event-room synthetic database guard', () => {
           databaseName: 'main',
         }),
       ).toThrow('altered');
+    } finally {
+      releaseEventRoomPlaywrightPortLease(context);
+    }
+  });
+
+  test('binds disposable database ownership to the exact immutable run', () => {
+    const context = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    try {
+      const marker = eventRoomPlaywrightDatabaseMarker(context);
+      expect(() =>
+        requireEventRoomPlaywrightDatabaseOwnership(context, marker),
+      ).not.toThrow();
+      expect(() =>
+        requireEventRoomPlaywrightDatabaseOwnership(context, null),
+      ).toThrow('ownership marker');
+      expect(() =>
+        requireEventRoomPlaywrightDatabaseOwnership(
+          context,
+          marker.replace(context.runId, randomUUID()),
+        ),
+      ).toThrow('ownership marker');
     } finally {
       releaseEventRoomPlaywrightPortLease(context);
     }
@@ -293,6 +319,19 @@ describe('event-room synthetic database guard', () => {
     expect(config).toContain('gracefulShutdown');
     expect(cleanupReporter).toContain('onExit()');
     expect(cleanupReporter).toContain('cleanupReportedEventRoomPlaywrightRun');
+    expect(setup).toContain('createOwnedEventRoomPlaywrightDatabase');
+    expect(setup).toContain('dropOwnedEventRoomPlaywrightDatabase');
+    expect(teardown).toContain('dropOwnedEventRoomPlaywrightDatabase');
+    const gate = readFileSync(
+      new URL('./event-room.playwright-gate.test.ts', import.meta.url),
+      'utf8',
+    );
+    expect(gate).toContain('dropOwnedEventRoomPlaywrightDatabase');
+    expect(gate).toContain("child.kill('SIGTERM')");
+    expect(gate).toContain("child.kill('SIGKILL')");
+    expect(gate).toContain('await completion');
+    expect(gate).toContain('waitForEventRoomPlaywrightPortToClose');
+    expect(gate).toContain('BROWSER_GATE_TIMEOUT_MS');
     for (const hook of [setup, teardown]) {
       expect(hook).not.toContain('releaseEventRoomPlaywrightPortLease');
       expect(hook).not.toContain('rm(context.runDirectory');

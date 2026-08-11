@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   EventSchema,
   JournalEntrySchema,
+  projectJournalEntryForRead,
   type Event,
   type JournalEntry,
 } from '@psd-eoc/contracts';
@@ -148,7 +149,9 @@ function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
       }
       facilityLabel="Synthetic North Campus"
       initialCursor="eyJ2IjoxfQ"
-      initialEntries={entries}
+      initialEntries={entries.map((entry) =>
+        projectJournalEntryForRead(entry, false),
+      )}
       initialHasMore={false}
       initialSnapshotSequence={entries.at(-1)?.sequence ?? 0}
       sessionId={IDS.session}

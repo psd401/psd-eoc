@@ -43,6 +43,8 @@ import {
   integrationStatuses,
   journalEntries,
   lifecycleConsequencePreviews,
+  mediaRecords,
+  mediaUploadIntents,
   notificationIntentChannels,
   notificationIntents,
   outbox,
@@ -376,7 +378,7 @@ describeWithDatabase('event journal database guarantees', () => {
     }
 
     const firstPage = await listJournal(journalStore, eventId, null, 2);
-    expect(firstPage.items.map((entry) => entry.id)).toEqual(
+    expect(firstPage.items.map(({ entry }) => entry.id)).toEqual(
       initialEntries.slice(0, 2).map((entry) => entry.id),
     );
     expect(firstPage.pageInfo.hasMore).toBe(true);
@@ -403,7 +405,7 @@ describeWithDatabase('event journal database guarantees', () => {
       firstPage.pageInfo.nextCursor,
       2,
     );
-    expect(secondPage.items.map((entry) => entry.id)).toEqual(
+    expect(secondPage.items.map(({ entry }) => entry.id)).toEqual(
       initialEntries.slice(2).map((entry) => entry.id),
     );
     expect(secondPage.pageInfo.hasMore).toBe(true);
@@ -415,27 +417,27 @@ describeWithDatabase('event journal database guarantees', () => {
       secondPage.pageInfo.nextCursor,
       2,
     );
-    expect(thirdPage.items.map((entry) => entry.id).sort()).toEqual(
+    expect(thirdPage.items.map(({ entry }) => entry.id).sort()).toEqual(
       concurrentEntries.map((entry) => entry.id).sort(),
     );
-    expect(thirdPage.items.map((entry) => entry.sequence)).toEqual([5, 6]);
+    expect(thirdPage.items.map(({ entry }) => entry.sequence)).toEqual([5, 6]);
     expect(thirdPage.pageInfo).toEqual({ hasMore: false, nextCursor: null });
 
     const lateJoin = await listJournal(journalStore, eventId, null, 200);
     expect(lateJoin.items).toHaveLength(6);
-    expect(lateJoin.items.map((entry) => entry.sequence)).toEqual([
+    expect(lateJoin.items.map(({ entry }) => entry.sequence)).toEqual([
       1, 2, 3, 4, 5, 6,
     ]);
-    expect(lateJoin.items.slice(0, 4).map((entry) => entry.clientTime)).toEqual(
-      [...deliberatelyReversedClientTimes],
-    );
+    expect(
+      lateJoin.items.slice(0, 4).map(({ entry }) => entry.clientTime),
+    ).toEqual([...deliberatelyReversedClientTimes]);
     for (let index = 1; index < lateJoin.items.length; index += 1) {
       const previous = lateJoin.items[index - 1];
       const current = lateJoin.items[index];
       expect(previous).toBeDefined();
       expect(current).toBeDefined();
-      expect(Date.parse(previous!.serverTime)).toBeLessThanOrEqual(
-        Date.parse(current!.serverTime),
+      expect(Date.parse(previous!.entry.serverTime)).toBeLessThanOrEqual(
+        Date.parse(current!.entry.serverTime),
       );
     }
 
@@ -535,15 +537,28 @@ describeWithDatabase('event journal database guarantees', () => {
     );
 
     const lateJoin = await listJournal(journalStore, eventId, null, 200);
-    expect(lateJoin.items.map((entry) => entry.id)).toEqual([
+    expect(lateJoin.items.map(({ entry }) => entry.id)).toEqual([
       correctedOriginal.id,
       correction.id,
       redaction.id,
     ]);
-    expect(lateJoin.items[0]).toMatchObject({
-      payload: { text: 'Initial accountability count is three.' },
-      supersedes: null,
+    expect(lateJoin.items[0]).toEqual({
+      visibility: 'redacted',
+      entry: {
+        id: correctedOriginal.id,
+        eventId,
+        sequence: correctedOriginal.sequence,
+        kind: correctedOriginal.kind,
+        author: correctedOriginal.author,
+        source: correctedOriginal.source,
+        serverTime: correctedOriginal.serverTime,
+        clientTime: correctedOriginal.clientTime,
+        supersedes: null,
+      },
     });
+    expect(JSON.stringify(lateJoin.items[0])).not.toContain(
+      'Initial accountability count is three.',
+    );
     expect(correction.supersedes).toEqual({
       entryId: correctedOriginal.id,
       entrySequence: correctedOriginal.sequence,
@@ -589,6 +604,122 @@ describeWithDatabase('event journal database guarantees', () => {
       supersessionReason:
         'Synthetic sensitive detail was posted unnecessarily.',
     });
+  });
+
+  test('agent-grantable list reads omit photo and location payloads redacted on a later page', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const mediaId = randomUUID();
+    const uploadIntentId = randomUUID();
+    const mediaCreatedAt = new Date();
+    await databaseConnection()
+      .db.insert(mediaUploadIntents)
+      .values({
+        id: uploadIntentId,
+        eventId,
+        byteLength: 128,
+        contentSha256: 'd'.repeat(64),
+        declaredContentType: 'image/jpeg',
+        storageKey: `synthetic/journal/${uploadIntentId}/upload`,
+        status: 'completed',
+        createdAt: mediaCreatedAt,
+        expiresAt: new Date(mediaCreatedAt.getTime() + 5 * 60_000),
+      });
+    await databaseConnection()
+      .db.insert(mediaRecords)
+      .values({
+        id: mediaId,
+        uploadIntentId,
+        eventId,
+        status: 'ready',
+        detectedContentType: 'image/jpeg',
+        sanitizedByteLength: 120,
+        sanitizedContentSha256: 'e'.repeat(64),
+        storageKey: `synthetic/journal/${uploadIntentId}/sanitized`,
+        malwareScan: 'clean',
+        exifStripped: true,
+        createdAt: mediaCreatedAt,
+      });
+    const photo = await executeJournalCapability(
+      'append-journal-entry',
+      {
+        eventId,
+        kind: 'photo',
+        payload: {
+          mediaId,
+          altText: 'synthetic-list-redacted-photo-alt',
+          caption: 'synthetic-list-redacted-photo-caption',
+        },
+        clientTime: null,
+        supersedes: null,
+      },
+      humanMutationInvocation(`issue77-photo-${randomUUID()}`),
+      journalStore,
+    );
+    const location = await executeJournalCapability(
+      'append-journal-entry',
+      {
+        eventId,
+        kind: 'location',
+        payload: {
+          state: 'known',
+          latitude: 47.391,
+          longitude: -122.591,
+          accuracyMeters: 4,
+          label: 'synthetic-list-redacted-location',
+        },
+        clientTime: null,
+        supersedes: null,
+      },
+      humanMutationInvocation(`issue77-location-${randomUUID()}`),
+      journalStore,
+    );
+    for (const target of [photo, location]) {
+      await executeJournalCapability(
+        'redact-journal-entry',
+        textInput(
+          eventId,
+          '[Content redacted — original retained in journal]',
+          null,
+          {
+            entryId: target.id,
+            entrySequence: target.sequence,
+            kind: 'redaction',
+            reason: 'Synthetic list projection regression.',
+          },
+        ),
+        humanMutationInvocation(`issue77-redact-${randomUUID()}`),
+        journalStore,
+      );
+    }
+
+    const firstPage = await listJournal(journalStore, eventId, null, 2);
+    expect(firstPage.pageInfo.hasMore).toBe(true);
+    expect(firstPage.items.map(({ visibility }) => visibility)).toEqual([
+      'redacted',
+      'redacted',
+    ]);
+    const outwardJson = JSON.stringify(firstPage.items);
+    for (const forbidden of [
+      mediaId,
+      'synthetic-list-redacted-photo-alt',
+      'synthetic-list-redacted-photo-caption',
+      '47.391',
+      '-122.591',
+      'synthetic-list-redacted-location',
+      'payload',
+    ]) {
+      expect(outwardJson).not.toContain(forbidden);
+    }
+
+    const persisted = await databaseConnection()
+      .db.select({ payload: journalEntries.payload })
+      .from(journalEntries)
+      .where(inArray(journalEntries.id, [photo.id, location.id]));
+    expect(JSON.stringify(persisted)).toContain(mediaId);
+    expect(JSON.stringify(persisted)).toContain(
+      'synthetic-list-redacted-location',
+    );
   });
 
   test('records synthetic all-clear fan-out and close as distinct append-only lifecycle facts', async () => {
@@ -997,10 +1128,17 @@ describeWithDatabase('event journal database guarantees', () => {
           humanQueryInvocation(),
           journalStore,
         );
-        expect(retainedJournal.items.map((entry) => entry.sequence)).toEqual([
-          1, 2, 3, 4, 5, 6,
-        ]);
-        expect(retainedJournal.items.map(systemJournalCode)).toEqual([
+        expect(
+          retainedJournal.items.map(({ entry }) => entry.sequence),
+        ).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(
+          retainedJournal.items.map((projection) => {
+            if (projection.visibility !== 'visible') {
+              throw new Error('Lifecycle system facts cannot be redacted.');
+            }
+            return systemJournalCode(projection.entry);
+          }),
+        ).toEqual([
           'event-created',
           'event-activated',
           'notification-intent-recorded',

@@ -1,8 +1,100 @@
 import { z } from 'zod';
 
 import { PaginationCursorSchema } from './api';
+import { ActorSchema, InvocationSourceSchema } from './capability';
 import { EventIdSchema, EventSchema } from './event';
-import { JournalEntrySchema } from './journal';
+import {
+  JournalEntryKindSchema,
+  JournalEntrySchema,
+  JournalSupersessionSchema,
+  type JournalEntry,
+} from './journal';
+import { TimestampSchema, UuidSchema } from './shared';
+
+const journalReadMetadataSchema = z
+  .object({
+    id: UuidSchema,
+    eventId: EventIdSchema,
+    sequence: z.number().int().positive(),
+    kind: JournalEntryKindSchema,
+    author: ActorSchema,
+    source: InvocationSourceSchema,
+    serverTime: TimestampSchema,
+    clientTime: TimestampSchema.nullable(),
+    supersedes: JournalSupersessionSchema.nullable(),
+  })
+  .strict()
+  .readonly();
+
+/**
+ * Owns the outward read projection for immutable journal history. Visible
+ * entries carry the canonical persisted entry. A redacted original retains
+ * sequence, kind, actor, timing, and supersession provenance, but has no
+ * payload field at all: text, media IDs, captions, coordinates, labels, and
+ * payload reasons therefore cannot escape through web or agent read APIs.
+ */
+export const JournalEntryReadProjectionSchema = z
+  .discriminatedUnion('visibility', [
+    z
+      .object({
+        visibility: z.literal('visible'),
+        entry: JournalEntrySchema,
+      })
+      .strict(),
+    z
+      .object({
+        visibility: z.literal('redacted'),
+        entry: journalReadMetadataSchema.refine(
+          (entry) => entry.kind !== 'system',
+          'System journal facts cannot be content-redacted.',
+        ),
+      })
+      .strict(),
+  ])
+  .readonly();
+
+/** Outward journal read projection inferred from its canonical schema. */
+export type JournalEntryReadProjection = z.infer<
+  typeof JournalEntryReadProjectionSchema
+>;
+
+/** Builds the only canonical outward projection of a persisted entry. */
+export function projectJournalEntryForRead(
+  entry: JournalEntry,
+  redacted: boolean,
+): JournalEntryReadProjection {
+  if (!redacted) {
+    return JournalEntryReadProjectionSchema.parse({
+      visibility: 'visible',
+      entry,
+    });
+  }
+  const {
+    id,
+    eventId,
+    sequence,
+    kind,
+    author,
+    source,
+    serverTime,
+    clientTime,
+    supersedes,
+  } = entry;
+  return JournalEntryReadProjectionSchema.parse({
+    visibility: 'redacted',
+    entry: {
+      id,
+      eventId,
+      sequence,
+      kind,
+      author,
+      source,
+      serverTime,
+      clientTime,
+      supersedes,
+    },
+  });
+}
 
 /**
  * Owns one bounded, event-scoped event-room synchronization request. The
@@ -26,12 +118,14 @@ export type SyncEventRoomInput = z.infer<typeof SyncEventRoomInputSchema>;
  * for this page; it never means that authorization or event existence was
  * inferred client-side. `snapshotSequence` is the journal head observed in
  * the same database snapshot as the event projection and returned entries.
+ * `cursor` is always the durable resume position (including at the live edge),
+ * not nullable `pageInfo.nextCursor`; `hasMore` only controls immediate drain.
  */
 export const EventRoomSyncResultSchema = z
   .object({
     eventId: EventIdSchema,
     event: EventSchema.nullable(),
-    entries: z.array(JournalEntrySchema).max(200).readonly(),
+    entries: z.array(JournalEntryReadProjectionSchema).max(200).readonly(),
     cursor: PaginationCursorSchema,
     hasMore: z.boolean(),
     snapshotSequence: z.number().int().nonnegative(),
@@ -47,26 +141,27 @@ export const EventRoomSyncResultSchema = z
     }
 
     let previousSequence = 0;
-    result.entries.forEach((entry, index) => {
+    result.entries.forEach((projection, index) => {
+      const { entry } = projection;
       if (entry.eventId !== result.eventId) {
         context.addIssue({
           code: 'custom',
           message: 'Event-room entries must belong to the synchronized event.',
-          path: ['entries', index, 'eventId'],
+          path: ['entries', index, 'entry', 'eventId'],
         });
       }
       if (entry.sequence <= previousSequence) {
         context.addIssue({
           code: 'custom',
           message: 'Event-room entries must be strictly sequence ordered.',
-          path: ['entries', index, 'sequence'],
+          path: ['entries', index, 'entry', 'sequence'],
         });
       }
       if (entry.sequence > result.snapshotSequence) {
         context.addIssue({
           code: 'custom',
           message: 'Event-room entries cannot exceed their snapshot head.',
-          path: ['entries', index, 'sequence'],
+          path: ['entries', index, 'entry', 'sequence'],
         });
       }
       previousSequence = entry.sequence;

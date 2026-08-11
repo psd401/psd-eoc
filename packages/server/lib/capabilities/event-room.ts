@@ -4,13 +4,14 @@ import {
   EventSchema,
   JournalEntrySchema,
   PaginationCursorSchema,
+  projectJournalEntryForRead,
   type CapabilityInput,
   type CapabilityOutput,
   type Event,
   type EventRoomSyncResult,
   type HumanConfirmationRecord,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, gt, lte } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lte } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -243,13 +244,35 @@ async function syncEventRoom(
     expectedSequence += 1;
   }
   const hasMore = rows.length > input.limit;
-  const entries = rows.slice(0, input.limit).map(journalFromRow);
+  const visibleRows = rows.slice(0, input.limit);
+  const visibleIds = visibleRows.map((row) => row.id);
+  const redactionTargets =
+    visibleIds.length === 0
+      ? []
+      : await database
+          .select({ entryId: journalEntries.supersedesEntryId })
+          .from(journalEntries)
+          .where(
+            and(
+              eq(journalEntries.eventId, input.eventId),
+              eq(journalEntries.supersessionKind, 'redaction'),
+              inArray(journalEntries.supersedesEntryId, visibleIds),
+            ),
+          );
+  const redactedIds = new Set(
+    redactionTargets.flatMap(({ entryId }) =>
+      entryId === null ? [] : [entryId],
+    ),
+  );
+  const entries = visibleRows.map((row) =>
+    projectJournalEntryForRead(journalFromRow(row), redactedIds.has(row.id)),
+  );
   if (afterSequence < snapshotSequence && entries.length === 0) {
     throw persistenceConflict(
       'The event journal cannot make progress from the supplied cursor.',
     );
   }
-  const returnedSequence = entries.at(-1)?.sequence ?? afterSequence;
+  const returnedSequence = entries.at(-1)?.entry.sequence ?? afterSequence;
   const includeEvent =
     input.cursor === null || (!hasMore && entries.length > 0);
   return EventRoomSyncResultSchema.parse({

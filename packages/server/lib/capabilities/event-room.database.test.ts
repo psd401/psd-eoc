@@ -18,11 +18,13 @@ import {
   test,
 } from 'bun:test';
 import { drizzle as drizzleAwsDataApi } from 'drizzle-orm/aws-data-api/pg';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   type AwsDataApiDatabase,
+  type DatabaseExecuteResult,
   type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../../db/client';
@@ -31,6 +33,8 @@ import {
   events,
   facilities,
   journalEntries,
+  mediaRecords,
+  mediaUploadIntents,
   rosterSnapshots,
   securityAuditEntries,
 } from '../../db/schema';
@@ -449,6 +453,18 @@ describeWithDatabase('event-room atomic synchronization', () => {
     });
   });
 
+  test('normalizes the real postgres-js raw execute row-list shape', async () => {
+    const result = await setupDatabase().execute<{ value: number }>(
+      sql`select 77::integer as value`,
+    );
+    expect(Array.isArray(result)).toBe(true);
+    expect(
+      databaseExecuteRows(
+        result as unknown as DatabaseExecuteResult<{ value: number }>,
+      ),
+    ).toEqual([{ value: 77 }]);
+  });
+
   test('returns either the coherent before-commit or after-commit lifecycle snapshot, never a mixed pair', async () => {
     if (testDatabaseUrl === undefined) throw new Error('Missing test URL.');
     const eventId = await createActiveEvent();
@@ -495,9 +511,11 @@ describeWithDatabase('event-room atomic synchronization', () => {
       const before = await duringCommitPromise;
       expect(before.event?.status).toBe('active');
       expect(before.snapshotSequence).toBe(1);
-      expect(before.entries.map((entry) => entry.payload)).toEqual([
-        { text: 'projection:active' },
-      ]);
+      expect(
+        before.entries.map((projection) =>
+          projection.visibility === 'visible' ? projection.entry.payload : null,
+        ),
+      ).toEqual([{ text: 'projection:active' }]);
 
       const after = await hookedRuntime.execute(
         { eventId, cursor: null, limit: 100 },
@@ -505,7 +523,11 @@ describeWithDatabase('event-room atomic synchronization', () => {
       );
       expect(after.event?.status).toBe('all-clear');
       expect(after.snapshotSequence).toBe(2);
-      expect(after.entries.map((entry) => entry.payload)).toEqual([
+      expect(
+        after.entries.map((projection) =>
+          projection.visibility === 'visible' ? projection.entry.payload : null,
+        ),
+      ).toEqual([
         { text: 'projection:active' },
         { text: 'projection:all-clear' },
       ]);
@@ -513,6 +535,190 @@ describeWithDatabase('event-room atomic synchronization', () => {
       continueRead.resolve();
       await hookedRuntime.close();
     }
+  });
+
+  test('omits redacted text, photo, and location payloads even when the redaction is outside the current page', async () => {
+    const eventId = await createActiveEvent();
+    const textId = randomUUID();
+    const photoId = randomUUID();
+    const locationId = randomUUID();
+    const photoMediaId = randomUUID();
+    const uploadIntentId = randomUUID();
+    const baseTime = Date.now();
+    const mediaCreatedAt = new Date(baseTime - 1_000);
+    await setupDatabase()
+      .insert(mediaUploadIntents)
+      .values({
+        id: uploadIntentId,
+        eventId,
+        byteLength: 128,
+        contentSha256: 'b'.repeat(64),
+        declaredContentType: 'image/jpeg',
+        storageKey: `synthetic/event-room/${uploadIntentId}/upload`,
+        status: 'completed',
+        createdAt: mediaCreatedAt,
+        expiresAt: new Date(mediaCreatedAt.getTime() + 5 * 60_000),
+      });
+    await setupDatabase()
+      .insert(mediaRecords)
+      .values({
+        id: photoMediaId,
+        uploadIntentId,
+        eventId,
+        status: 'ready',
+        detectedContentType: 'image/jpeg',
+        sanitizedByteLength: 120,
+        sanitizedContentSha256: 'c'.repeat(64),
+        storageKey: `synthetic/event-room/${uploadIntentId}/sanitized`,
+        malwareScan: 'clean',
+        exifStripped: true,
+        createdAt: mediaCreatedAt,
+      });
+    const common = (sequence: number) => ({
+      eventId,
+      sequence,
+      author: HUMAN_ACTOR,
+      source: 'web' as const,
+      serverTime: new Date(baseTime + sequence),
+      clientTime: null,
+      transitionId: null,
+    });
+    await setupDatabase()
+      .insert(journalEntries)
+      .values([
+        {
+          ...common(1),
+          id: textId,
+          kind: 'text',
+          payload: { text: 'synthetic-redacted-text-secret' },
+          mediaId: null,
+          supersedesEntryId: null,
+          supersedesEntrySequence: null,
+          supersessionKind: null,
+          supersessionReason: null,
+        },
+        {
+          ...common(2),
+          id: photoId,
+          kind: 'photo',
+          payload: {
+            mediaId: photoMediaId,
+            altText: 'synthetic-redacted-photo-alt',
+            caption: 'synthetic-redacted-photo-caption',
+          },
+          mediaId: photoMediaId,
+          supersedesEntryId: null,
+          supersedesEntrySequence: null,
+          supersessionKind: null,
+          supersessionReason: null,
+        },
+        {
+          ...common(3),
+          id: locationId,
+          kind: 'location',
+          payload: {
+            state: 'known',
+            latitude: 47.389,
+            longitude: -122.589,
+            accuracyMeters: 5,
+            label: 'synthetic-redacted-location-label',
+          },
+          mediaId: null,
+          supersedesEntryId: null,
+          supersedesEntrySequence: null,
+          supersessionKind: null,
+          supersessionReason: null,
+        },
+        ...[
+          { sequence: 4, targetId: textId, targetSequence: 1 },
+          { sequence: 5, targetId: photoId, targetSequence: 2 },
+          { sequence: 6, targetId: locationId, targetSequence: 3 },
+        ].map(({ sequence, targetId, targetSequence }) => ({
+          ...common(sequence),
+          id: randomUUID(),
+          kind: 'text' as const,
+          payload: {
+            text: '[Content redacted — original retained in journal]',
+          },
+          mediaId: null,
+          supersedesEntryId: targetId,
+          supersedesEntrySequence: targetSequence,
+          supersessionKind: 'redaction' as const,
+          supersessionReason: 'Synthetic read-projection regression.',
+        })),
+      ]);
+
+    const firstPage = await eventRoomRuntime().execute(
+      { eventId, cursor: null, limit: 1 },
+      invocation(),
+    );
+    expect(firstPage.hasMore).toBe(true);
+    expect(firstPage.entries).toEqual([
+      {
+        visibility: 'redacted',
+        entry: {
+          id: textId,
+          eventId,
+          sequence: 1,
+          kind: 'text',
+          author: HUMAN_ACTOR,
+          source: 'web',
+          serverTime: firstPage.entries[0]!.entry.serverTime,
+          clientTime: null,
+          supersedes: null,
+        },
+      },
+    ]);
+
+    const threeOriginals = await eventRoomRuntime().execute(
+      { eventId, cursor: null, limit: 3 },
+      invocation(),
+    );
+    expect(threeOriginals.entries.map(({ visibility }) => visibility)).toEqual([
+      'redacted',
+      'redacted',
+      'redacted',
+    ]);
+    const outwardJson = JSON.stringify(threeOriginals.entries);
+    for (const forbidden of [
+      'synthetic-redacted-text-secret',
+      photoMediaId,
+      'synthetic-redacted-photo-alt',
+      'synthetic-redacted-photo-caption',
+      '47.389',
+      '-122.589',
+      'synthetic-redacted-location-label',
+      'payload',
+    ]) {
+      expect(outwardJson).not.toContain(forbidden);
+    }
+
+    const persisted = await setupDatabase()
+      .select({ id: journalEntries.id, payload: journalEntries.payload })
+      .from(journalEntries)
+      .where(inArray(journalEntries.id, [textId, photoId, locationId]));
+    expect(JSON.stringify(persisted)).toContain(
+      'synthetic-redacted-text-secret',
+    );
+    expect(JSON.stringify(persisted)).toContain(photoMediaId);
+    expect(JSON.stringify(persisted)).toContain(
+      'synthetic-redacted-location-label',
+    );
+
+    const sequences: number[] = [];
+    let cursor: string | null = null;
+    let hasMore = true;
+    while (hasMore) {
+      const page = await eventRoomRuntime().execute(
+        { eventId, cursor, limit: 2 },
+        invocation(),
+      );
+      sequences.push(...page.entries.map(({ entry }) => entry.sequence));
+      cursor = page.cursor;
+      hasMore = page.hasMore;
+    }
+    expect(sequences).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(new Set(sequences).size).toBe(sequences.length);
   });
 
   test('rejects cross-event, unknown-version, and future cursors', async () => {
@@ -588,7 +794,7 @@ describeWithDatabase('event-room atomic synchronization', () => {
         invocation(),
       );
       pageNumber += 1;
-      seen.push(...page.entries.map((entry) => entry.sequence));
+      seen.push(...page.entries.map(({ entry }) => entry.sequence));
       cursor = page.cursor;
       hasMore = page.hasMore;
       if (pageNumber === 1) {

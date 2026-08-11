@@ -6,6 +6,7 @@ import {
   CloseEventResultSchema,
   EventRoomSyncResultSchema,
   EventSchema,
+  JournalEntryReadProjectionSchema,
   IdempotencyKeySchema,
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
@@ -13,6 +14,7 @@ import {
   type ChannelConsequencePreview,
   type Event,
   type JournalEntry,
+  type JournalEntryReadProjection,
   type LifecycleConsequencePreview,
 } from '@psd-eoc/contracts';
 import {
@@ -86,7 +88,7 @@ interface RetainedCommand {
 
 interface TimelinePage {
   readonly event: Event | null;
-  readonly entries: readonly JournalEntry[];
+  readonly entries: readonly JournalEntryReadProjection[];
   readonly cursor: string;
   readonly hasMore: boolean;
   readonly snapshotSequence: number;
@@ -97,13 +99,18 @@ interface TimelineContinuation {
   readonly baseCursor: string | null;
   /** Cursor for the next page in this still-hidden catch-up chain. */
   readonly cursor: string;
-  readonly entries: readonly JournalEntry[];
+  readonly entries: readonly JournalEntryReadProjection[];
   readonly snapshotSequence: number;
 }
 
 interface MutationResult {
   readonly event: Event | null;
-  readonly entries: readonly JournalEntry[];
+  readonly entries: readonly JournalEntryReadProjection[];
+}
+
+interface RetainedCommandResponse {
+  readonly value: unknown;
+  readonly transitionIdempotencyKey: string | null;
 }
 
 type DialogState =
@@ -121,8 +128,8 @@ export interface EventRoomProps {
   /** Canonical, facility-authorized event returned by the capability layer. */
   readonly event: Event;
   /** First chronological journal page; every item remains immutable. */
-  readonly initialEntries: readonly JournalEntry[];
-  /** Opaque continuation token supplied by list-journal-entries. */
+  readonly initialEntries: readonly JournalEntryReadProjection[];
+  /** Durable opaque resume token supplied by sync-event-room. */
   readonly initialCursor: string | null;
   /** Journal head observed atomically with the server-rendered event. */
   readonly initialSnapshotSequence: number;
@@ -154,11 +161,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function compareEntries(left: JournalEntry, right: JournalEntry): number {
-  const sequenceDifference = left.sequence - right.sequence;
+function compareEntries(
+  left: JournalEntryReadProjection,
+  right: JournalEntryReadProjection,
+): number {
+  const sequenceDifference = left.entry.sequence - right.entry.sequence;
   return sequenceDifference !== 0
     ? sequenceDifference
-    : left.id.localeCompare(right.id);
+    : left.entry.id.localeCompare(right.entry.id);
+}
+
+function visibleJournalEntry(entry: JournalEntry): JournalEntryReadProjection {
+  return JournalEntryReadProjectionSchema.parse({
+    visibility: 'visible',
+    entry,
+  });
 }
 
 function immutableEventIdentity(event: Event): string {
@@ -315,9 +332,10 @@ function parseTimelinePage(value: unknown, baselineEvent: Event): TimelinePage {
 
 function parseMutationResult(
   command: RetainedCommand,
-  value: unknown,
+  response: RetainedCommandResponse,
   baselineEvent: Event,
 ): MutationResult {
+  const { value } = response;
   const operation = command.operation;
   if (operation === 'all-clear' || operation === 'close') {
     if (!isRecord(value)) {
@@ -349,7 +367,9 @@ function parseMutationResult(
       !isRecord(body) ||
       transition.actor.kind !== 'human' ||
       transition.actor.sessionId !== command.ownerSessionId ||
-      transition.source !== 'web'
+      transition.source !== 'web' ||
+      response.transitionIdempotencyKey === null ||
+      transition.idempotencyKey !== response.transitionIdempotencyKey
     ) {
       throw new EventRoomRequestError(
         'PSD EOC returned lifecycle evidence for a different authenticated request. The exact request is retained for verification.',
@@ -395,7 +415,7 @@ function parseMutationResult(
     const entries = canonicalEntries(
       parsed.data.journalEntries,
       baselineEvent.id,
-    );
+    ).map(visibleJournalEntry);
     return { event: parsed.data.event, entries };
   }
 
@@ -440,7 +460,10 @@ function parseMutationResult(
       true,
     );
   }
-  return { event: returnedEvent, entries };
+  return {
+    event: returnedEvent,
+    entries: entries.map(visibleJournalEntry),
+  };
 }
 
 interface DeadlineSignal {
@@ -635,7 +658,7 @@ function csrfToken(cookieName: string): string | null {
 async function postRetainedCommand(
   command: RetainedCommand,
   csrfCookieName: string,
-): Promise<unknown> {
+): Promise<RetainedCommandResponse> {
   const csrf = csrfToken(csrfCookieName);
   if (csrf === null) {
     throw new EventRoomRequestError(
@@ -684,7 +707,12 @@ async function postRetainedCommand(
         !definitelyRejected,
       );
     }
-    return value;
+    return {
+      value,
+      transitionIdempotencyKey: response.headers.get(
+        'x-psd-eoc-transition-idempotency-key',
+      ),
+    };
   } catch (error) {
     if (error instanceof EventRoomRequestError && !deadline.didExpire()) {
       throw error;
@@ -873,7 +901,9 @@ function connectionLabel(state: ConnectionState): string {
   }
 }
 
-function actorLabel(entry: JournalEntry): string {
+type JournalReadMetadata = JournalEntryReadProjection['entry'];
+
+function actorLabel(entry: JournalReadMetadata): string {
   switch (entry.author.kind) {
     case 'human':
       return 'Authenticated staff member';
@@ -884,7 +914,7 @@ function actorLabel(entry: JournalEntry): string {
   }
 }
 
-function entryKindLabel(entry: JournalEntry): string {
+function entryKindLabel(entry: JournalReadMetadata): string {
   switch (entry.kind) {
     case 'text':
       return 'Text update';
@@ -977,10 +1007,13 @@ function waitForNextPoll(
 }
 
 function EntryContent({
-  entry,
+  projection,
   redacted,
-}: Readonly<{ entry: JournalEntry; redacted: boolean }>) {
-  if (redacted && entry.kind !== 'system') {
+}: Readonly<{
+  projection: JournalEntryReadProjection;
+  redacted: boolean;
+}>) {
+  if (redacted || projection.visibility === 'redacted') {
     return (
       <p className="entry-content redacted-content">
         Original content is hidden because a later append-only redaction
@@ -989,6 +1022,7 @@ function EntryContent({
       </p>
     );
   }
+  const { entry } = projection;
   switch (entry.kind) {
     case 'text':
       return <p className="entry-content">{entry.payload.text}</p>;
@@ -1031,26 +1065,33 @@ function EntryContent({
 }
 
 interface TimelineEntryProps {
-  readonly entry: JournalEntry;
-  readonly supersededBy: readonly JournalEntry[];
+  readonly projection: JournalEntryReadProjection;
+  readonly supersededBy: readonly JournalEntryReadProjection[];
   readonly commandsBlocked: boolean;
   readonly onCorrect: (entry: JournalEntry, opener: HTMLElement) => void;
   readonly onRedact: (entry: JournalEntry, opener: HTMLElement) => void;
 }
 
 function TimelineEntry({
-  entry,
+  projection,
   supersededBy,
   commandsBlocked,
   onCorrect,
   onRedact,
 }: TimelineEntryProps) {
+  const { entry } = projection;
   const latestSupersession = supersededBy.at(-1) ?? null;
-  const redacted = supersededBy.some(
-    (candidate) => candidate.supersedes?.kind === 'redaction',
-  );
-  const mayCorrect = entry.kind === 'text' && latestSupersession === null;
-  const mayRedact = entry.kind !== 'system' && !redacted;
+  const redacted =
+    projection.visibility === 'redacted' ||
+    supersededBy.some(
+      (candidate) => candidate.entry.supersedes?.kind === 'redaction',
+    );
+  const visibleEntry =
+    projection.visibility === 'visible' ? projection.entry : null;
+  const mayCorrect =
+    visibleEntry?.kind === 'text' && latestSupersession === null;
+  const mayRedact =
+    visibleEntry !== null && entry.kind !== 'system' && !redacted;
   const ownSupersession = entry.supersedes;
   const classes = [
     'timeline-entry',
@@ -1089,15 +1130,15 @@ function TimelineEntry({
       {latestSupersession === null ? null : (
         <p className="supersession-notice">
           This original entry was superseded, not deleted. Latest:{' '}
-          <a href={`#entry-${latestSupersession.id}`}>
-            {latestSupersession.supersedes?.kind ?? 'update'} entry{' '}
-            {latestSupersession.sequence}
+          <a href={`#entry-${latestSupersession.entry.id}`}>
+            {latestSupersession.entry.supersedes?.kind ?? 'update'} entry{' '}
+            {latestSupersession.entry.sequence}
           </a>
           .
         </p>
       )}
 
-      <EntryContent entry={entry} redacted={redacted} />
+      <EntryContent projection={projection} redacted={redacted} />
       <p className="entry-meta">
         <span>{actorLabel(entry)}</span>
         <span>Source: {entry.source}</span>
@@ -1111,23 +1152,23 @@ function TimelineEntry({
 
       {!mayCorrect && !mayRedact ? null : (
         <div className="entry-actions">
-          {mayCorrect ? (
+          {mayCorrect && visibleEntry !== null ? (
             <button
               aria-haspopup="dialog"
               className="secondary"
               disabled={commandsBlocked}
-              onClick={(event) => onCorrect(entry, event.currentTarget)}
+              onClick={(event) => onCorrect(visibleEntry, event.currentTarget)}
               type="button"
             >
               Correct entry {entry.sequence}
             </button>
           ) : null}
-          {mayRedact ? (
+          {mayRedact && visibleEntry !== null ? (
             <button
               aria-haspopup="dialog"
               className="secondary"
               disabled={commandsBlocked}
-              onClick={(event) => onRedact(entry, event.currentTarget)}
+              onClick={(event) => onRedact(visibleEntry, event.currentTarget)}
               type="button"
             >
               Redact entry {entry.sequence}
@@ -1236,8 +1277,8 @@ export function EventRoom({
   sessionId,
 }: EventRoomProps) {
   const [currentEvent, setCurrentEvent] = useState(event);
-  const [entries, setEntries] = useState<readonly JournalEntry[]>(() =>
-    [...initialEntries].sort(compareEntries),
+  const [entries, setEntries] = useState<readonly JournalEntryReadProjection[]>(
+    () => [...initialEntries].sort(compareEntries),
   );
   const [connection, setConnection] = useState<ConnectionState>('loading');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
@@ -1262,7 +1303,7 @@ export function EventRoom({
   const cursorRef = useRef(initialCursor);
   const appliedSnapshotSequenceRef = useRef(initialSnapshotSequence);
   const knownEntryIdsRef = useRef(
-    new Set(initialEntries.map((entry) => entry.id)),
+    new Set(initialEntries.map(({ entry }) => entry.id)),
   );
   const announcementCountRef = useRef(0);
   const announcementSequenceRef = useRef(0);
@@ -1319,8 +1360,8 @@ export function EventRoom({
   }, []);
 
   const mergeIncomingEntries = useCallback(
-    (incoming: readonly JournalEntry[], announce: boolean) => {
-      const newEntries = incoming.filter((entry) => {
+    (incoming: readonly JournalEntryReadProjection[], announce: boolean) => {
+      const newEntries = incoming.filter(({ entry }) => {
         if (
           entry.eventId !== event.id ||
           knownEntryIdsRef.current.has(entry.id)
@@ -1407,8 +1448,8 @@ export function EventRoom({
             continuation !== null &&
             (page.snapshotSequence < continuation.snapshotSequence ||
               page.entries.length === 0 ||
-              page.entries[0]?.sequence !==
-                continuation.entries.at(-1)!.sequence + 1)
+              page.entries[0]?.entry.sequence !==
+                continuation.entries.at(-1)!.entry.sequence + 1)
           ) {
             throw new EventRoomRequestError(
               'PSD EOC returned a broken timeline continuation. Previously displayed state remains unchanged.',
@@ -1516,12 +1557,12 @@ export function EventRoom({
   }, [dialog, mutationError]);
 
   const supersessionsByEntry = useMemo(() => {
-    const result = new Map<string, JournalEntry[]>();
-    for (const entry of entries) {
-      const targetId = entry.supersedes?.entryId;
+    const result = new Map<string, JournalEntryReadProjection[]>();
+    for (const projection of entries) {
+      const targetId = projection.entry.supersedes?.entryId;
       if (targetId === undefined) continue;
       const existing = result.get(targetId) ?? [];
-      existing.push(entry);
+      existing.push(projection);
       existing.sort(compareEntries);
       result.set(targetId, existing);
     }
@@ -1602,7 +1643,7 @@ export function EventRoom({
 
   function applyMutationResult(result: MutationResult): void {
     const resultHead = result.entries.reduce(
-      (head, entry) => Math.max(head, entry.sequence),
+      (head, projection) => Math.max(head, projection.entry.sequence),
       0,
     );
     // A poll can observe a later coherent lifecycle commit while this POST's
@@ -1645,8 +1686,8 @@ export function EventRoom({
     setMutationError(null);
     setMutationStatus(`Sending ${commandLabel(command.operation)}…`);
     try {
-      const value = await postRetainedCommand(command, csrfCookieName);
-      const result = parseMutationResult(command, value, event);
+      const response = await postRetainedCommand(command, csrfCookieName);
+      const result = parseMutationResult(command, response, event);
       applyMutationResult(result);
       const cleared = clearCommandAfterResult(command);
       setMutationStatus(
@@ -2033,18 +2074,20 @@ export function EventRoom({
               <p className="muted">No journal entries are available yet.</p>
             ) : (
               <ol className="timeline-list">
-                {entries.map((entry) => (
-                  <li key={entry.id}>
+                {entries.map((projection) => (
+                  <li key={projection.entry.id}>
                     <TimelineEntry
                       commandsBlocked={commandsBlocked}
-                      entry={entry}
                       onCorrect={(target, opener) =>
                         openDialog({ kind: 'correct', entry: target }, opener)
                       }
                       onRedact={(target, opener) =>
                         openDialog({ kind: 'redact', entry: target }, opener)
                       }
-                      supersededBy={supersessionsByEntry.get(entry.id) ?? []}
+                      projection={projection}
+                      supersededBy={
+                        supersessionsByEntry.get(projection.entry.id) ?? []
+                      }
                     />
                   </li>
                 ))}

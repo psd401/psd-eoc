@@ -51,6 +51,32 @@ export interface EventRoomPlaywrightRunContext {
   readonly leaseOwnerPid: number;
 }
 
+/** Exact non-secret ownership comment attached to the disposable database. */
+export function eventRoomPlaywrightDatabaseMarker(value: unknown): string {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  return JSON.stringify({
+    kind: 'psd-eoc-event-room-playwright-database',
+    version: 1,
+    runId: context.runId,
+    databaseName: context.databaseName,
+  });
+}
+
+/** Fails closed unless a database comment names this exact validated run. */
+export function requireEventRoomPlaywrightDatabaseOwnership(
+  value: unknown,
+  actualMarker: unknown,
+): void {
+  if (
+    typeof actualMarker !== 'string' ||
+    actualMarker !== eventRoomPlaywrightDatabaseMarker(value)
+  ) {
+    throw new Error(
+      'The event-room Playwright database ownership marker does not match this run.',
+    );
+  }
+}
+
 /**
  * Fails closed before issue #16 tests can migrate, seed, or mutate a database.
  * Remote test services require an explicit opt-in and every database name must
@@ -697,6 +723,9 @@ export function cleanupReportedEventRoomPlaywrightRun(value: unknown): void {
  * Idempotent outer-gate fallback. Without stopped evidence it independently
  * waits for both loopback addresses to reject connections before touching the
  * old run directory or its lease. A valid replacement lease is never removed.
+ * This covers child/server SIGKILL. If the coordinator itself is SIGKILLed,
+ * no cleanup code can execute; its UUID-named resources remain inert and are
+ * never reused, while database cleanup still requires the exact run marker.
  */
 export async function cleanupEventRoomPlaywrightRunAfterChildExit(
   value: unknown,
