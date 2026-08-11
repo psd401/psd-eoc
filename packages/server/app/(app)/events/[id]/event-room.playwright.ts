@@ -1,4 +1,18 @@
-import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from '@playwright/test';
+import {
+  ApiErrorSchema,
+  CreateMediaUploadIntentInputSchema,
+  MediaReadGrantSchema,
+  MediaRecordSchema,
+  MediaUploadIntentSchema,
+  type CreateMediaUploadIntentInput,
+} from '@psd-eoc/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { desc, eq } from 'drizzle-orm';
@@ -18,8 +32,21 @@ const AXE_SHA256 =
   '880970c081707360e64f34cea25ff91892f5bc95675b0776925b9709dd8a68bb';
 const AXE_SOURCE_URL = new URL('./axe-core-4.10.3.min.js.txt', import.meta.url);
 const AXE_LICENSE_URL = new URL('./axe-core-4.10.3.LICENSE', import.meta.url);
+const SYNTHETIC_MEDIA_ORIGIN = 'https://private-media.example.test';
+const SYNTHETIC_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
+const SYNTHETIC_DISGUISED_NON_IMAGE = Buffer.from(
+  'Synthetic text intentionally disguised as image/png.',
+  'utf8',
+);
+const SYNTHETIC_PNG_SHA256 = createHash('sha256')
+  .update(SYNTHETIC_PNG)
+  .digest('hex');
 
 interface EventRoomFixture {
+  readonly sessionId: string;
   readonly concurrentDialogEventId: string;
   readonly continuationEventId: string;
   readonly dialogFailureEventId: string;
@@ -45,6 +72,101 @@ interface EventRoomFixture {
   readonly staleLifecycleResponseEventId: string;
   readonly stalledMutationEventId: string;
   readonly stalledPreviewEventId: string;
+  readonly photoEventId: string;
+  readonly photoMediaId: string;
+  readonly photoUploadMediaId: string;
+  readonly photoSanitizedSha256: string;
+  readonly photoStressEventId: string;
+  readonly photoStressOldestMediaId: string;
+  readonly photoStressSecondMediaId: string;
+  readonly photoStressMiddleMediaId: string;
+  readonly redactedPhotoEventId: string;
+  readonly redactedPhotoMediaId: string;
+}
+
+type CompletionOutcome = 'malformed' | 'ready' | 'scan-pending';
+type ReadGrantOutcome =
+  | 'cross-event'
+  | 'expired'
+  | 'malformed'
+  | 'raw-noncanonical'
+  | 'ready';
+type ImageOutcome = 'error' | 'ready';
+
+interface SyntheticMediaRouteOptions {
+  readonly eventId: string;
+  readonly uploadIntentId: string;
+  readonly mediaId: string;
+  readonly sanitizedSha256: string;
+  readonly completionOutcomes?: readonly CompletionOutcome[];
+  readonly readGrantOutcomes?: readonly ReadGrantOutcome[];
+  readonly imageOutcomes?: readonly ImageOutcome[];
+  readonly holdCreateResponses?: boolean;
+  readonly holdUploadResponses?: boolean;
+  readonly holdCompletionResponses?: boolean;
+  readonly holdImageResponses?: boolean;
+  readonly holdReadGrants?: boolean;
+}
+
+interface SyntheticMediaRequest {
+  readonly headers: Readonly<Record<string, string>>;
+  readonly url: string;
+}
+
+interface SyntheticMediaPreflight extends SyntheticMediaRequest {
+  readonly allowedHeaders: string;
+  readonly allowedOrigin: string;
+}
+
+interface SyntheticMediaLog {
+  readonly stages: string[];
+  readonly createInputs: CreateMediaUploadIntentInput[];
+  readonly createRequests: SyntheticMediaRequest[];
+  readonly preflightRequests: SyntheticMediaPreflight[];
+  readonly uploadRequests: Array<
+    SyntheticMediaRequest & Readonly<{ body: Buffer }>
+  >;
+  readonly completionRequests: Array<
+    SyntheticMediaRequest & Readonly<{ body: string | null }>
+  >;
+  readonly readGrantRequests: Array<
+    SyntheticMediaRequest &
+      Readonly<{
+        eventId: string;
+        mediaId: string;
+        outcome: ReadGrantOutcome;
+        readUrl: string;
+      }>
+  >;
+  readonly imageRequests: Array<
+    SyntheticMediaRequest & Readonly<{ outcome: ImageOutcome }>
+  >;
+  concurrentImageRequests: number;
+  concurrentReadGrantRequests: number;
+  maxConcurrentImageRequests: number;
+  maxConcurrentReadGrantRequests: number;
+  readonly releaseCompletionResponses: () => void;
+  readonly releaseCreateResponses: () => void;
+  readonly releaseImageResponses: () => void;
+  readonly releaseReadGrants: () => void;
+  readonly releaseUploadResponses: () => void;
+}
+
+interface PrivatePhotoIntersectionProbe {
+  readonly activeTargets: number;
+  readonly disconnectCalls: number;
+  readonly observeCalls: number;
+}
+
+interface PrivatePhotoDecodeProbe {
+  readonly active: number;
+  readonly maxActive: number;
+  readonly pendingAltText: readonly string[];
+}
+
+interface PrivatePhotoMountProbe {
+  readonly maxStateful: number;
+  readonly stateful: number;
 }
 
 interface AxeViolation {
@@ -401,6 +523,727 @@ async function expectAxeClean(page: Page, context: string): Promise<void> {
     violations,
     `${context} must have no axe WCAG 2.2 A/AA violations: ${JSON.stringify(violations)}`,
   ).toEqual([]);
+}
+
+async function installDeterministicIntersectionObserver(
+  page: Page,
+): Promise<void> {
+  await page.addInitScript(() => {
+    interface ObserverRecord {
+      readonly callback: IntersectionObserverCallback;
+      readonly observer: IntersectionObserver;
+      readonly targets: Set<Element>;
+      connected: boolean;
+    }
+
+    const records: ObserverRecord[] = [];
+    let disconnectCalls = 0;
+    let observeCalls = 0;
+
+    class DeterministicIntersectionObserver implements IntersectionObserver {
+      readonly root: Element | Document | null;
+      readonly rootMargin: string;
+      readonly thresholds: readonly number[];
+      readonly record: ObserverRecord;
+
+      constructor(
+        callback: IntersectionObserverCallback,
+        options: IntersectionObserverInit = {},
+      ) {
+        this.root = options.root ?? null;
+        this.rootMargin = options.rootMargin ?? '0px';
+        this.thresholds = Array.isArray(options.threshold)
+          ? options.threshold
+          : [options.threshold ?? 0];
+        this.record = {
+          callback,
+          observer: this,
+          targets: new Set<Element>(),
+          connected: true,
+        };
+        records.push(this.record);
+      }
+
+      disconnect(): void {
+        disconnectCalls += 1;
+        this.record.connected = false;
+        this.record.targets.clear();
+      }
+
+      observe(target: Element): void {
+        observeCalls += 1;
+        this.record.connected = true;
+        this.record.targets.add(target);
+      }
+
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+
+      unobserve(target: Element): void {
+        this.record.targets.delete(target);
+      }
+    }
+
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: DeterministicIntersectionObserver,
+      writable: true,
+    });
+    Object.defineProperty(window, '__privatePhotoIntersectionProbe', {
+      configurable: true,
+      value: {
+        stats: () => ({
+          activeTargets: records.reduce(
+            (total, record) =>
+              total + (record.connected ? record.targets.size : 0),
+            0,
+          ),
+          disconnectCalls,
+          observeCalls,
+        }),
+        trigger: (target: Element, isIntersecting: boolean) => {
+          const bounds = target.getBoundingClientRect();
+          for (const record of records) {
+            if (!record.connected || !record.targets.has(target)) continue;
+            record.callback(
+              [
+                {
+                  boundingClientRect: bounds,
+                  intersectionRatio: isIntersecting ? 1 : 0,
+                  intersectionRect: isIntersecting
+                    ? bounds
+                    : new DOMRectReadOnly(),
+                  isIntersecting,
+                  rootBounds: null,
+                  target,
+                  time: performance.now(),
+                },
+              ],
+              record.observer,
+            );
+          }
+        },
+      },
+    });
+  });
+}
+
+async function installPrivatePhotoMountProbe(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let maxStateful = 0;
+    const sample = () => {
+      maxStateful = Math.max(
+        maxStateful,
+        document.querySelectorAll('[data-private-photo-mount="stateful"]')
+          .length,
+      );
+    };
+    const observer = new MutationObserver(sample);
+    observer.observe(document, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      attributeFilter: ['data-private-photo-mount'],
+    });
+
+    const originalAppendChild = Node.prototype.appendChild;
+    Object.defineProperty(Node.prototype, 'appendChild', {
+      configurable: true,
+      value: function appendChild<T extends Node>(this: Node, child: T): T {
+        const result = originalAppendChild.call(this, child) as T;
+        sample();
+        return result;
+      },
+      writable: true,
+    });
+    const originalInsertBefore = Node.prototype.insertBefore;
+    Object.defineProperty(Node.prototype, 'insertBefore', {
+      configurable: true,
+      value: function insertBefore<T extends Node>(
+        this: Node,
+        child: T,
+        before: Node | null,
+      ): T {
+        const result = originalInsertBefore.call(this, child, before) as T;
+        sample();
+        return result;
+      },
+      writable: true,
+    });
+    const originalReplaceChild = Node.prototype.replaceChild;
+    Object.defineProperty(Node.prototype, 'replaceChild', {
+      configurable: true,
+      value: function replaceChild<T extends Node>(
+        this: Node,
+        child: Node,
+        replaced: T,
+      ): T {
+        const result = originalReplaceChild.call(this, child, replaced) as T;
+        sample();
+        return result;
+      },
+      writable: true,
+    });
+
+    Object.defineProperty(window, '__privatePhotoMountProbe', {
+      configurable: true,
+      value: {
+        stats: () => {
+          sample();
+          return {
+            maxStateful,
+            stateful: document.querySelectorAll(
+              '[data-private-photo-mount="stateful"]',
+            ).length,
+          };
+        },
+      },
+    });
+  });
+}
+
+async function privatePhotoMountStats(
+  page: Page,
+): Promise<PrivatePhotoMountProbe> {
+  return page.evaluate(() =>
+    (
+      window as typeof window & {
+        __privatePhotoMountProbe: {
+          stats(): PrivatePhotoMountProbe;
+        };
+      }
+    ).__privatePhotoMountProbe.stats(),
+  );
+}
+
+async function privatePhotoIntersectionStats(
+  page: Page,
+): Promise<PrivatePhotoIntersectionProbe> {
+  return page.evaluate(() =>
+    (
+      window as typeof window & {
+        __privatePhotoIntersectionProbe: {
+          stats(): PrivatePhotoIntersectionProbe;
+        };
+      }
+    ).__privatePhotoIntersectionProbe.stats(),
+  );
+}
+
+async function triggerPrivatePhotoIntersection(target: Locator): Promise<void> {
+  await target.evaluate((element) => {
+    (
+      window as typeof window & {
+        __privatePhotoIntersectionProbe: {
+          trigger(target: Element, isIntersecting: boolean): void;
+        };
+      }
+    ).__privatePhotoIntersectionProbe.trigger(element, true);
+  });
+}
+
+async function installControllableImageDecode(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    interface PendingDecode {
+      readonly altText: string;
+      readonly settleSuccess: () => void;
+    }
+
+    const pending: PendingDecode[] = [];
+    let active = 0;
+    let maxActive = 0;
+    HTMLImageElement.prototype.decode = function decode(): Promise<void> {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const altText = this.alt;
+      return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const originalRemoveAttribute = this.removeAttribute;
+        const settle = (succeeded: boolean) => {
+          if (settled) return;
+          settled = true;
+          const index = pending.findIndex(
+            (candidate) => candidate.settleSuccess === settleSuccess,
+          );
+          if (index >= 0) pending.splice(index, 1);
+          active -= 1;
+          Reflect.deleteProperty(this, 'removeAttribute');
+          if (succeeded) {
+            resolve();
+          } else {
+            reject(
+              new DOMException('Synthetic decode cancelled.', 'AbortError'),
+            );
+          }
+        };
+        const settleSuccess = () => settle(true);
+        Object.defineProperty(this, 'removeAttribute', {
+          configurable: true,
+          value: function removeAttribute(
+            this: HTMLImageElement,
+            name: string,
+          ): void {
+            if (name.toLowerCase() === 'src') settle(false);
+            originalRemoveAttribute.call(this, name);
+          },
+        });
+        pending.push({ altText, settleSuccess });
+      });
+    };
+    Object.defineProperty(window, '__privatePhotoDecodeProbe', {
+      configurable: true,
+      value: {
+        release: (altText: string) => {
+          const index = pending.findIndex(
+            (candidate) => candidate.altText === altText,
+          );
+          const selected = index < 0 ? undefined : pending.splice(index, 1)[0];
+          if (selected === undefined) return false;
+          selected.settleSuccess();
+          return true;
+        },
+        stats: () => ({
+          active,
+          maxActive,
+          pendingAltText: pending.map((candidate) => candidate.altText),
+        }),
+      },
+    });
+  });
+}
+
+async function privatePhotoDecodeStats(
+  page: Page,
+): Promise<PrivatePhotoDecodeProbe> {
+  return page.evaluate(() =>
+    (
+      window as typeof window & {
+        __privatePhotoDecodeProbe: {
+          stats(): PrivatePhotoDecodeProbe;
+        };
+      }
+    ).__privatePhotoDecodeProbe.stats(),
+  );
+}
+
+async function releasePrivatePhotoDecode(
+  page: Page,
+  altText: string,
+): Promise<boolean> {
+  return page.evaluate(
+    (targetAltText) =>
+      (
+        window as typeof window & {
+          __privatePhotoDecodeProbe: {
+            release(value: string): boolean;
+          };
+        }
+      ).__privatePhotoDecodeProbe.release(targetAltText),
+    altText,
+  );
+}
+
+function mediaTimestampWindow(): Readonly<{
+  createdAt: string;
+  expiresAt: string;
+}> {
+  const createdAt = new Date();
+  return {
+    createdAt: createdAt.toISOString(),
+    expiresAt: new Date(createdAt.getTime() + 2 * 60_000).toISOString(),
+  };
+}
+
+function syntheticResponseGate(initiallyHeld: boolean): Readonly<{
+  release: () => void;
+  wait: () => Promise<void>;
+}> {
+  let held = initiallyHeld;
+  const pending: Array<() => void> = [];
+  return {
+    release: () => {
+      held = false;
+      for (const resolve of pending.splice(0)) resolve();
+    },
+    wait: async () => {
+      if (!held) return;
+      await new Promise<void>((resolve) => pending.push(resolve));
+    },
+  };
+}
+
+function syntheticCorsPreflightHeaders(
+  requestOrigin: string,
+  expectedOrigin: string,
+): Readonly<Record<string, string>> {
+  return {
+    'Access-Control-Allow-Headers': 'Content-Type, If-None-Match',
+    'Access-Control-Allow-Methods': 'PUT',
+    'Access-Control-Allow-Origin':
+      requestOrigin === expectedOrigin ? expectedOrigin : '',
+    'Access-Control-Max-Age': '600',
+    Vary: 'Origin',
+  };
+}
+
+function expectSyntheticCorsUpload(
+  media: SyntheticMediaLog,
+  expectedOrigin: string,
+): void {
+  const policy = syntheticCorsPreflightHeaders(expectedOrigin, expectedOrigin);
+  expect(policy).toEqual({
+    'Access-Control-Allow-Headers': 'Content-Type, If-None-Match',
+    'Access-Control-Allow-Methods': 'PUT',
+    'Access-Control-Allow-Origin': expectedOrigin,
+    'Access-Control-Max-Age': '600',
+    Vary: 'Origin',
+  });
+  expect(media.uploadRequests[0]?.headers.origin).toBe(expectedOrigin);
+  expect(media.uploadRequests[0]?.headers['content-type']).toBe('image/png');
+  expect(media.uploadRequests[0]?.headers['if-none-match']).toBe('*');
+
+  // Chromium may satisfy a Playwright-routed cross-origin PUT without
+  // surfacing its internal preflight as an interceptable request. When it is
+  // surfaced, prove the exact request and response contract; in either case,
+  // the routed PUT above proves the browser sent the triggering Origin and
+  // non-safelisted headers.
+  expect(media.preflightRequests.length).toBeLessThanOrEqual(1);
+  for (const preflight of media.preflightRequests) {
+    expect(preflight.headers.origin).toBe(expectedOrigin);
+    expect(preflight.allowedOrigin).toBe(expectedOrigin);
+    expect(preflight.headers['access-control-request-method']).toBe('PUT');
+    expect(
+      preflight.headers['access-control-request-headers']
+        ?.split(',')
+        .map((header) => header.trim().toLowerCase())
+        .sort(),
+    ).toEqual(['content-type', 'if-none-match']);
+    expect(preflight.allowedHeaders).toBe(
+      policy['Access-Control-Allow-Headers'],
+    );
+  }
+}
+
+async function installSyntheticMediaRoutes(
+  page: Page,
+  options: SyntheticMediaRouteOptions,
+): Promise<SyntheticMediaLog> {
+  const createGate = syntheticResponseGate(
+    options.holdCreateResponses ?? false,
+  );
+  const uploadGate = syntheticResponseGate(
+    options.holdUploadResponses ?? false,
+  );
+  const completionGate = syntheticResponseGate(
+    options.holdCompletionResponses ?? false,
+  );
+  const readGrantGate = syntheticResponseGate(options.holdReadGrants ?? false);
+  const imageGate = syntheticResponseGate(options.holdImageResponses ?? false);
+  const log: SyntheticMediaLog = {
+    stages: [],
+    createInputs: [],
+    createRequests: [],
+    preflightRequests: [],
+    uploadRequests: [],
+    completionRequests: [],
+    readGrantRequests: [],
+    imageRequests: [],
+    concurrentImageRequests: 0,
+    concurrentReadGrantRequests: 0,
+    maxConcurrentImageRequests: 0,
+    maxConcurrentReadGrantRequests: 0,
+    releaseCompletionResponses: completionGate.release,
+    releaseCreateResponses: createGate.release,
+    releaseImageResponses: imageGate.release,
+    releaseReadGrants: readGrantGate.release,
+    releaseUploadResponses: uploadGate.release,
+  };
+  const completionOutcomes = options.completionOutcomes ?? ['ready'];
+  const readGrantOutcomes = options.readGrantOutcomes ?? ['ready'];
+  const imageOutcomes = options.imageOutcomes ?? ['ready'];
+  let completionAttempt = 0;
+  let readGrantAttempt = 0;
+  let imageAttempt = 0;
+  let grantSequence = 0;
+
+  await page.route('**/api/media/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const headers = request.headers();
+
+    if (
+      request.method() === 'POST' &&
+      url.pathname === '/api/media/upload-intents'
+    ) {
+      const input = CreateMediaUploadIntentInputSchema.parse(
+        request.postDataJSON() as unknown,
+      );
+      log.stages.push('create-intent');
+      log.createInputs.push(input);
+      log.createRequests.push({ headers, url: request.url() });
+      await createGate.wait();
+      const times = mediaTimestampWindow();
+      await route.fulfill({
+        contentType: 'application/json',
+        json: MediaUploadIntentSchema.parse({
+          id: options.uploadIntentId,
+          eventId: options.eventId,
+          byteLength: input.byteLength,
+          contentSha256: input.contentSha256,
+          declaredContentType: input.declaredContentType,
+          uploadMethod: 'PUT',
+          uploadUrl: `${SYNTHETIC_MEDIA_ORIGIN}/quarantine/${options.eventId}/${options.uploadIntentId}?signature=synthetic`,
+          status: 'pending-upload',
+          ...times,
+        }),
+      });
+      return;
+    }
+
+    const completionMatch =
+      /^\/api\/media\/upload-intents\/([^/]+)\/complete$/u.exec(url.pathname);
+    if (request.method() === 'POST' && completionMatch !== null) {
+      expect(decodeURIComponent(completionMatch[1] ?? '')).toBe(
+        options.uploadIntentId,
+      );
+      log.stages.push('complete-upload');
+      log.completionRequests.push({
+        body: request.postData(),
+        headers,
+        url: request.url(),
+      });
+      const outcome =
+        completionOutcomes[
+          Math.min(completionAttempt, completionOutcomes.length - 1)
+        ] ?? 'ready';
+      completionAttempt += 1;
+      await completionGate.wait();
+      if (outcome === 'malformed') {
+        await route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          json: ApiErrorSchema.parse({
+            code: 'VALIDATION_ERROR',
+            message:
+              'The image could not be safely processed. Choose a different image and try again.',
+            requestId: randomUUID(),
+            retryable: false,
+            fieldErrors: [],
+          }),
+        });
+        return;
+      }
+      if (outcome === 'scan-pending') {
+        await route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          json: ApiErrorSchema.parse({
+            code: 'CONFLICT',
+            message:
+              'The photo safety scan is still pending. Try again shortly.',
+            requestId: randomUUID(),
+            retryable: true,
+            fieldErrors: [],
+          }),
+        });
+        return;
+      }
+      const times = mediaTimestampWindow();
+      await route.fulfill({
+        contentType: 'application/json',
+        json: MediaRecordSchema.parse({
+          id: options.mediaId,
+          uploadIntentId: options.uploadIntentId,
+          eventId: options.eventId,
+          status: 'ready',
+          detectedContentType: 'image/png',
+          sanitizedByteLength: SYNTHETIC_PNG.byteLength,
+          sanitizedContentSha256: options.sanitizedSha256,
+          malwareScan: 'clean',
+          exifStripped: true,
+          createdAt: times.createdAt,
+        }),
+      });
+      return;
+    }
+
+    const readMatch =
+      /^\/api\/media\/events\/([^/]+)\/([^/]+)\/read-grant$/u.exec(
+        url.pathname,
+      );
+    if (request.method() === 'GET' && readMatch !== null) {
+      const eventId = decodeURIComponent(readMatch[1] ?? '');
+      const mediaId = decodeURIComponent(readMatch[2] ?? '');
+      const outcome =
+        readGrantOutcomes[
+          Math.min(readGrantAttempt, readGrantOutcomes.length - 1)
+        ] ?? 'ready';
+      readGrantAttempt += 1;
+      grantSequence += 1;
+      const canonicalReadUrl = `${SYNTHETIC_MEDIA_ORIGIN}/ready/${eventId}/${mediaId}?grant=${grantSequence}`;
+      const readUrl =
+        outcome === 'raw-noncanonical'
+          ? `HTTPS://PRIVATE-MEDIA.EXAMPLE.TEST:443/ready/${eventId}/${mediaId}?grant=${grantSequence}#synthetic-fragment`
+          : canonicalReadUrl;
+      log.concurrentReadGrantRequests += 1;
+      log.maxConcurrentReadGrantRequests = Math.max(
+        log.maxConcurrentReadGrantRequests,
+        log.concurrentReadGrantRequests,
+      );
+      log.stages.push('read-grant');
+      log.readGrantRequests.push({
+        eventId,
+        headers,
+        mediaId,
+        outcome,
+        readUrl,
+        url: request.url(),
+      });
+      try {
+        await readGrantGate.wait();
+        if (outcome === 'malformed') {
+          await route.fulfill({
+            contentType: 'application/json',
+            json: { eventId, mediaId, readUrl: 17 },
+          });
+          return;
+        }
+        if (outcome === 'expired') {
+          const issuedAt = new Date(Date.now() - 2 * 60_000);
+          await route.fulfill({
+            contentType: 'application/json',
+            json: MediaReadGrantSchema.parse({
+              eventId,
+              mediaId,
+              readUrl,
+              issuedAt: issuedAt.toISOString(),
+              expiresAt: new Date(issuedAt.getTime() + 60_000).toISOString(),
+            }),
+          });
+          return;
+        }
+        const times = mediaTimestampWindow();
+        await route.fulfill({
+          contentType: 'application/json',
+          json: MediaReadGrantSchema.parse({
+            eventId: outcome === 'cross-event' ? randomUUID() : eventId,
+            mediaId,
+            readUrl,
+            issuedAt: times.createdAt,
+            expiresAt: times.expiresAt,
+          }),
+        });
+      } finally {
+        log.concurrentReadGrantRequests -= 1;
+      }
+      return;
+    }
+
+    throw new Error(
+      `Unexpected synthetic media request: ${request.method()} ${url.pathname}`,
+    );
+  });
+
+  await page.route(`${SYNTHETIC_MEDIA_ORIGIN}/**`, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const headers = request.headers();
+    const requestOrigin = headers.origin ?? '';
+    const expectedOrigin = new URL(page.url()).origin;
+    const preflightHeaders = syntheticCorsPreflightHeaders(
+      requestOrigin,
+      expectedOrigin,
+    );
+    const allowedOrigin = preflightHeaders['Access-Control-Allow-Origin'] ?? '';
+    const allowedHeaders =
+      preflightHeaders['Access-Control-Allow-Headers'] ?? '';
+    if (request.method() === 'OPTIONS') {
+      log.preflightRequests.push({
+        allowedHeaders,
+        allowedOrigin,
+        headers,
+        url: request.url(),
+      });
+      await route.fulfill({
+        status: 204,
+        headers: preflightHeaders,
+      });
+      return;
+    }
+    if (request.method() === 'PUT' && url.pathname.startsWith('/quarantine/')) {
+      log.stages.push('upload-bytes');
+      log.uploadRequests.push({
+        body: request.postDataBuffer() ?? Buffer.alloc(0),
+        headers,
+        url: request.url(),
+      });
+      await uploadGate.wait();
+      await route.fulfill({
+        status: 200,
+        headers: {
+          'Access-Control-Allow-Origin': allowedOrigin,
+          ETag: '"synthetic-private-upload"',
+        },
+      });
+      return;
+    }
+    if (request.method() === 'GET' && url.pathname.startsWith('/ready/')) {
+      const outcome =
+        imageOutcomes[Math.min(imageAttempt, imageOutcomes.length - 1)] ??
+        'ready';
+      imageAttempt += 1;
+      log.concurrentImageRequests += 1;
+      log.maxConcurrentImageRequests = Math.max(
+        log.maxConcurrentImageRequests,
+        log.concurrentImageRequests,
+      );
+      log.stages.push('read-image');
+      log.imageRequests.push({ headers, outcome, url: request.url() });
+      try {
+        await imageGate.wait();
+        await route.fulfill(
+          outcome === 'error'
+            ? {
+                status: 404,
+                contentType: 'application/json',
+                body: JSON.stringify({
+                  error: 'Synthetic private image miss.',
+                }),
+              }
+            : {
+                status: 200,
+                body: SYNTHETIC_PNG,
+                contentType: 'image/png',
+                headers: { 'Cache-Control': 'private, no-store' },
+              },
+        );
+      } finally {
+        log.concurrentImageRequests -= 1;
+      }
+      return;
+    }
+    throw new Error(
+      `Unexpected synthetic object-store request: ${request.method()} ${url.pathname}`,
+    );
+  });
+  return log;
+}
+
+async function persistedSessionValuesContaining(
+  page: Page,
+  needle: string,
+): Promise<readonly string[]> {
+  return page.evaluate((value) => {
+    const matches: string[] = [];
+    for (let index = 0; index < window.sessionStorage.length; index += 1) {
+      const key = window.sessionStorage.key(index);
+      if (key === null) continue;
+      const stored = window.sessionStorage.getItem(key);
+      if (stored?.includes(value) === true) matches.push(stored);
+    }
+    return matches;
+  }, needle);
 }
 
 async function postExternalUpdate(
@@ -2776,4 +3619,1406 @@ test('synthetic all-clear requires preview and exact typed confirmation, appends
   await expect(page.getByText('Event closed.', { exact: true })).toBeVisible();
   await expect(page.locator('.event-status')).toHaveText('Closed');
   await expectAxeClean(page, 'closed synthetic event room');
+});
+
+test('a private photo receives a fresh authorized read grant after reload', async ({
+  page,
+}, testInfo) => {
+  await installDeterministicIntersectionObserver(page);
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoEventId,
+    uploadIntentId: fixture.photoUploadMediaId,
+    mediaId: fixture.photoUploadMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoEventId));
+  const figure = page
+    .getByRole('article', { name: 'Entry 1: Photo update', exact: true })
+    .locator('figure.photo-entry');
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(1);
+  await triggerPrivatePhotoIntersection(figure);
+  const photo = page.getByRole('img', {
+    name: 'Synthetic emergency operations scene; no people are shown.',
+  });
+  await expect(photo).toBeVisible();
+  await expect(photo).toHaveAttribute('referrerpolicy', 'no-referrer');
+  await expect(photo).toHaveAttribute('src', /[?&]grant=1$/u);
+  const firstReadUrl = await photo.getAttribute('src');
+  expect(firstReadUrl).toBe(media.readGrantRequests[0]?.readUrl);
+  expect(media.readGrantRequests).toHaveLength(1);
+  await expect.poll(() => media.imageRequests.length).toBe(1);
+
+  await page.reload();
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(1);
+  await triggerPrivatePhotoIntersection(figure);
+  await expect(photo).toBeVisible();
+  await expect(photo).toHaveAttribute('src', /[?&]grant=2$/u);
+  const reloadedReadUrl = await photo.getAttribute('src');
+  expect(reloadedReadUrl).toBe(media.readGrantRequests[1]?.readUrl);
+  expect(reloadedReadUrl).not.toBe(firstReadUrl);
+  expect(media.readGrantRequests).toHaveLength(2);
+  await expect.poll(() => media.imageRequests.length).toBe(2);
+  expect(
+    media.readGrantRequests.every(
+      (request) =>
+        request.eventId === fixture.photoEventId &&
+        request.mediaId === fixture.photoMediaId &&
+        request.headers['idempotency-key'] === undefined &&
+        request.headers['x-psd-eoc-csrf'] === undefined,
+    ),
+  ).toBe(true);
+  await expectAxeClean(page, 'authorized private photo after reload');
+});
+
+test('photo upload uses canonical create, exact CORS PUT, completion, journal post, and authorized read', async ({
+  page,
+}, testInfo) => {
+  await installDeterministicIntersectionObserver(page);
+  const fixture = await readFixture(testInfo);
+  const uploadEventId = fixture.photoEventId;
+  const uploadedMediaId = fixture.photoUploadMediaId;
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: uploadEventId,
+    uploadIntentId: uploadedMediaId,
+    mediaId: uploadedMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+  const journalRequests: Array<
+    Readonly<{
+      body: unknown;
+      headers: Readonly<Record<string, string>>;
+    }>
+  > = [];
+  await page.route(`**/events/${uploadEventId}/api`, async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (body?.operation === 'post-photo') {
+      media.stages.push('post-photo');
+      journalRequests.push({ body, headers: request.headers() });
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(uploadEventId));
+  await expect(page.locator('.timeline-entry')).toHaveCount(1);
+  await expect(
+    page.locator('.photo-composer .dialog-classification'),
+  ).toContainText('DRILL — TRAINING ONLY');
+  const pageOrigin = await page.evaluate(() => window.location.origin);
+  const photoFile = page.getByLabel('Photo file');
+  await photoFile.setInputFiles({
+    name: 'synthetic-staff-exercise.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  const altText = page.getByLabel('Photo description (alternative text)');
+  await expect(altText).toHaveValue(
+    /^Photo by Synthetic Event Room Operator at .+\. Visual details were not described\.$/u,
+  );
+  await altText.fill('Synthetic staff exercise photo');
+  await page
+    .getByLabel('Caption (optional)')
+    .fill('Synthetic staff-only exercise evidence');
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+
+  await expect.poll(() => media.createRequests.length).toBe(1);
+  await expect.poll(() => media.completionRequests.length).toBe(1);
+  await expect.poll(() => journalRequests.length).toBe(1);
+  const postedEntry = page.getByRole('article', {
+    name: 'Entry 2: Photo update',
+    exact: true,
+  });
+  await expect(page.locator('.timeline-entry')).toHaveCount(2);
+  await expect(postedEntry).toContainText('Synthetic staff exercise photo');
+  await expect(postedEntry).toContainText(
+    'Synthetic staff-only exercise evidence',
+  );
+  await expect(
+    postedEntry.locator('.photo-entry .dialog-classification'),
+  ).toContainText('DRILL — TRAINING ONLY');
+  expect(media.createInputs).toEqual([
+    {
+      eventId: uploadEventId,
+      byteLength: SYNTHETIC_PNG.byteLength,
+      contentSha256: SYNTHETIC_PNG_SHA256,
+      declaredContentType: 'image/png',
+    },
+  ]);
+  expect(media.createRequests).toHaveLength(1);
+  expect(media.createRequests[0]?.headers['content-type']).toContain(
+    'application/json',
+  );
+  expect(media.createRequests[0]?.headers['idempotency-key']).toBeTruthy();
+  expect(media.createRequests[0]?.headers['x-psd-eoc-csrf']).toBeTruthy();
+
+  expect(media.uploadRequests).toHaveLength(1);
+  expectSyntheticCorsUpload(media, pageOrigin);
+  expect(media.uploadRequests[0]?.body).toEqual(SYNTHETIC_PNG);
+  expect(media.uploadRequests[0]?.headers['content-type']).toBe('image/png');
+  expect(media.uploadRequests[0]?.headers['if-none-match']).toBe('*');
+  expect(media.uploadRequests[0]?.headers.authorization).toBeUndefined();
+  expect(media.uploadRequests[0]?.headers.cookie).toBeUndefined();
+  expect(media.uploadRequests[0]?.headers['idempotency-key']).toBeUndefined();
+  expect(media.uploadRequests[0]?.headers['x-psd-eoc-csrf']).toBeUndefined();
+
+  expect(media.completionRequests).toHaveLength(1);
+  expect(media.completionRequests[0]?.body).toBeNull();
+  expect(media.completionRequests[0]?.headers['content-type']).toBeUndefined();
+  expect(media.completionRequests[0]?.headers['idempotency-key']).toBeTruthy();
+  expect(media.completionRequests[0]?.headers['x-psd-eoc-csrf']).toBeTruthy();
+
+  expect(journalRequests).toHaveLength(1);
+  const journalBody = journalRequests[0]?.body;
+  expect(journalBody).toEqual({
+    operation: 'post-photo',
+    mediaId: uploadedMediaId,
+    altText: 'Synthetic staff exercise photo',
+    caption: 'Synthetic staff-only exercise evidence',
+    clientTime:
+      typeof journalBody === 'object' &&
+      journalBody !== null &&
+      'clientTime' in journalBody
+        ? journalBody.clientTime
+        : null,
+  });
+  expect(
+    typeof journalBody === 'object' &&
+      journalBody !== null &&
+      'clientTime' in journalBody &&
+      typeof journalBody.clientTime === 'string' &&
+      !Number.isNaN(Date.parse(journalBody.clientTime)),
+  ).toBe(true);
+  expect(journalRequests[0]?.headers['idempotency-key']).toBeTruthy();
+  expect(journalRequests[0]?.headers['x-psd-eoc-csrf']).toBeTruthy();
+  expect(
+    media.stages.filter(
+      (stage) => stage !== 'read-grant' && stage !== 'read-image',
+    ),
+  ).toEqual(['create-intent', 'upload-bytes', 'complete-upload', 'post-photo']);
+
+  await postedEntry
+    .getByRole('button', { name: 'Load private photo for entry 2' })
+    .press('Enter');
+  const postedPhoto = postedEntry.getByRole('img', {
+    name: 'Synthetic staff exercise photo',
+  });
+  await expect(postedPhoto).toBeVisible();
+  await expect(postedPhoto).toHaveAttribute('referrerpolicy', 'no-referrer');
+  expect(
+    media.readGrantRequests.some(
+      (request) =>
+        request.eventId === uploadEventId &&
+        request.mediaId === uploadedMediaId,
+    ),
+  ).toBe(true);
+  expect(
+    media.imageRequests.some((request) =>
+      new URL(request.url).pathname.endsWith(`/${uploadedMediaId}`),
+    ),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(
+          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+        ),
+      uploadEventId,
+    ),
+  ).toBeNull();
+  await expectAxeClean(page, 'canonical private photo upload and read');
+});
+
+test('a definite photo timeline rejection reports no post and clears browser recovery', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const uploadIntentId = randomUUID();
+  const mediaId = randomUUID();
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoEventId,
+    uploadIntentId,
+    mediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+  let photoPostAttempts = 0;
+  await page.route(`**/events/${fixture.photoEventId}/api`, async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (body?.operation === 'post-photo') {
+      photoPostAttempts += 1;
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'CONFLICT',
+          message: 'Synthetic definite photo-post conflict.',
+          requestId: randomUUID(),
+          retryable: false,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(fixture.photoEventId));
+  const timelineEntries = page.locator('.timeline-entry');
+  const originalEntryCount = await timelineEntries.count();
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-definite-rejection.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  await page
+    .getByLabel('Photo description (alternative text)')
+    .fill('Synthetic definitely rejected photo post');
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+
+  await expect.poll(() => photoPostAttempts).toBe(1);
+  expect(media.createRequests).toHaveLength(1);
+  expect(media.uploadRequests).toHaveLength(1);
+  expect(media.completionRequests).toHaveLength(1);
+  await expect(page.locator('.photo-status')).toHaveText(
+    'Photo validation was confirmed, but the timeline post request was rejected. No photo timeline entry was posted.',
+  );
+  const rejection = page.locator('.event-room > .error-panel');
+  await expect(rejection).toContainText(
+    'Synthetic definite photo-post conflict.',
+  );
+  await expect(rejection).toBeFocused();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The request was not accepted. No change was recorded by this attempt.',
+  );
+  await expect(page.locator('.recovery-panel')).toHaveCount(0);
+  await expect(page.locator('.photo-pending')).toHaveCount(0);
+  await expect(timelineEntries).toHaveCount(originalEntryCount);
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(`psd-eoc:event-room:pending:v1:${eventId}`),
+      fixture.photoEventId,
+    ),
+  ).toBeNull();
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(
+          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+        ),
+      fixture.photoEventId,
+    ),
+  ).toBeNull();
+  await expectAxeClean(page, 'definite photo timeline rejection');
+});
+
+test('oversized and disguised malformed photos show focused axe-clean errors and never post', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.keyboardEventId,
+    uploadIntentId: randomUUID(),
+    mediaId: randomUUID(),
+    sanitizedSha256: SYNTHETIC_PNG_SHA256,
+    completionOutcomes: ['malformed'],
+  });
+  let photoJournalPosts = 0;
+  await page.route(
+    `**/events/${fixture.keyboardEventId}/api`,
+    async (route) => {
+      if (
+        route.request().method() === 'POST' &&
+        route.request().postData()?.includes('"operation":"post-photo"') ===
+          true
+      ) {
+        photoJournalPosts += 1;
+      }
+      await route.continue();
+    },
+  );
+
+  await page.goto(fixturePath(fixture.keyboardEventId));
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-oversized.png',
+    mimeType: 'image/png',
+    buffer: Buffer.alloc(25 * 1_024 * 1_024 + 1),
+  });
+  await expect(
+    page.getByRole('button', { name: 'Upload and post photo' }),
+  ).toBeDisabled();
+  let alert = page.locator('.photo-workflow-error');
+  await expect(alert).toContainText(/25 MiB|too large/iu);
+  await expect(alert).toBeFocused();
+  expect(media.createRequests).toHaveLength(0);
+  expect(media.uploadRequests).toHaveLength(0);
+  expect(media.completionRequests).toHaveLength(0);
+  expect(photoJournalPosts).toBe(0);
+  await expectAxeClean(page, 'oversized photo validation error');
+
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-disguised-image.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_DISGUISED_NON_IMAGE,
+  });
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+  alert = page.locator('.photo-workflow-error');
+  await expect(alert).toContainText(
+    'The image could not be safely processed. Choose a different image and try again.',
+  );
+  await expect(alert).toBeFocused();
+  expect(media.createRequests).toHaveLength(1);
+  expect(media.uploadRequests).toHaveLength(1);
+  expect(media.completionRequests).toHaveLength(1);
+  expect(photoJournalPosts).toBe(0);
+  await expectAxeClean(page, 'disguised malformed photo processing error');
+});
+
+test('malformed, cross-event, and expired read grants fail focused without image GET or URL persistence until explicit retry', async ({
+  page,
+}, testInfo) => {
+  await installDeterministicIntersectionObserver(page);
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+    readGrantOutcomes: [
+      'malformed',
+      'ready',
+      'cross-event',
+      'ready',
+      'expired',
+      'ready',
+    ],
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  for (const sequence of [3, 4, 5]) {
+    const entry = page.getByRole('article', {
+      name: `Entry ${sequence}: Photo update`,
+      exact: true,
+    });
+    const figure = entry.locator('figure.photo-entry');
+    const grantCount = media.readGrantRequests.length;
+    const imageCount = media.imageRequests.length;
+    await entry
+      .getByRole('button', {
+        name: `Load private photo for entry ${sequence}`,
+      })
+      .press('Enter');
+    const error = figure.locator('.photo-read-error');
+    await expect(error).toBeVisible();
+    await expect(error).toBeFocused();
+    await expect(error).toContainText(
+      'PSD EOC returned a private photo authorization that does not match this event.',
+    );
+    expect(media.readGrantRequests).toHaveLength(grantCount + 1);
+    expect(media.imageRequests).toHaveLength(imageCount);
+    expect(
+      await persistedSessionValuesContaining(page, SYNTHETIC_MEDIA_ORIGIN),
+    ).toEqual([]);
+
+    const rejectedReadUrl = media.readGrantRequests.at(-1)?.readUrl;
+    await error
+      .getByRole('button', {
+        name: `Retry private photo for entry ${sequence}`,
+      })
+      .press('Enter');
+    await expect
+      .poll(() => media.readGrantRequests.length)
+      .toBe(grantCount + 2);
+    expect(media.readGrantRequests.at(-1)?.readUrl).not.toBe(rejectedReadUrl);
+    await expect.poll(() => media.imageRequests.length).toBe(imageCount + 1);
+    await expect(
+      entry.getByRole('img', {
+        name: `Synthetic bounded-loader private photo ${sequence}.`,
+      }),
+    ).toBeVisible();
+    expect(
+      await persistedSessionValuesContaining(page, SYNTHETIC_MEDIA_ORIGIN),
+    ).toEqual([]);
+  }
+  expect(media.readGrantRequests.map(({ outcome }) => outcome)).toEqual([
+    'malformed',
+    'ready',
+    'cross-event',
+    'ready',
+    'expired',
+    'ready',
+  ]);
+  await expectAxeClean(page, 'explicit recovery from invalid read grants');
+});
+
+test('a raw noncanonical read URL still reaches focused onError recovery and requires a fresh grant', async ({
+  page,
+}, testInfo) => {
+  await installDeterministicIntersectionObserver(page);
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+    readGrantOutcomes: ['raw-noncanonical', 'ready'],
+    imageOutcomes: ['error', 'ready'],
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  const entry = page.getByRole('article', {
+    name: 'Entry 6: Photo update',
+    exact: true,
+  });
+  const figure = entry.locator('figure.photo-entry');
+  await entry
+    .getByRole('button', { name: 'Load private photo for entry 6' })
+    .press('Enter');
+  const error = figure.locator('.photo-read-error');
+  await expect(error).toBeVisible();
+  await expect(error).toBeFocused();
+  await expect(error).toContainText(
+    'The authorized private photo could not be displayed. Request a fresh authorization to retry.',
+  );
+  expect(media.readGrantRequests).toHaveLength(1);
+  expect(media.imageRequests).toHaveLength(1);
+  expect(media.readGrantRequests[0]?.outcome).toBe('raw-noncanonical');
+  expect(media.imageRequests[0]?.url).not.toBe(
+    media.readGrantRequests[0]?.readUrl,
+  );
+  expect(
+    await persistedSessionValuesContaining(page, SYNTHETIC_MEDIA_ORIGIN),
+  ).toEqual([]);
+
+  await error
+    .getByRole('button', { name: 'Retry private photo for entry 6' })
+    .press('Enter');
+  await expect.poll(() => media.readGrantRequests.length).toBe(2);
+  await expect.poll(() => media.imageRequests.length).toBe(2);
+  await expect(
+    entry.getByRole('img', {
+      name: 'Synthetic bounded-loader private photo 6.',
+    }),
+  ).toBeVisible();
+  expect(media.readGrantRequests[1]?.outcome).toBe('ready');
+  await expectAxeClean(page, 'raw read URL image failure recovery');
+});
+
+test('a redacted photo mounts no stateful loader and requests no grant or image', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.redactedPhotoEventId,
+    uploadIntentId: fixture.redactedPhotoMediaId,
+    mediaId: fixture.redactedPhotoMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+  await page.goto(fixturePath(fixture.redactedPhotoEventId));
+  await expect(page.locator('.redacted-content')).toContainText(
+    'Original content is hidden because a later append-only redaction supersedes this entry.',
+  );
+  await expect(page.locator('[data-private-photo-mount]')).toHaveCount(0);
+  await expect(page.locator('.timeline-entry img')).toHaveCount(0);
+  await page.waitForTimeout(750);
+  expect(media.readGrantRequests).toHaveLength(0);
+  expect(media.imageRequests).toHaveLength(0);
+  await expectAxeClean(page, 'redacted photo without private media access');
+});
+
+test('private photo history never exceeds ten stateful mounts and keeps only nine recent observers while an older selection is active', async ({
+  page,
+}, testInfo) => {
+  await installDeterministicIntersectionObserver(page);
+  await installPrivatePhotoMountProbe(page);
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  await expect(page.locator('.timeline-entry')).toHaveCount(12);
+  await expect(
+    page.locator('[data-private-photo-mount="stateful"]'),
+  ).toHaveCount(10);
+  await expect(
+    page.locator('[data-private-photo-mount="deferred"]'),
+  ).toHaveCount(2);
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(10);
+
+  const oldestEntry = page.getByRole('article', {
+    name: 'Entry 1: Photo update',
+    exact: true,
+  });
+  await oldestEntry
+    .getByRole('button', { name: 'Load older private photo for entry 1' })
+    .press('Enter');
+  await expect(oldestEntry.locator('figure.photo-entry')).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect(
+    page
+      .getByRole('article', {
+        name: 'Entry 3: Photo update',
+        exact: true,
+      })
+      .locator('figure.photo-entry'),
+  ).toHaveAttribute('data-private-photo-mount', 'deferred');
+  await expect(
+    page.locator('[data-private-photo-mount="stateful"]'),
+  ).toHaveCount(10);
+  await expect(
+    page.locator('[data-private-photo-mount="deferred"]'),
+  ).toHaveCount(2);
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(9);
+
+  const secondEntry = page.getByRole('article', {
+    name: 'Entry 2: Photo update',
+    exact: true,
+  });
+  await secondEntry
+    .getByRole('button', { name: 'Load older private photo for entry 2' })
+    .press('Enter');
+  await expect(secondEntry.locator('figure.photo-entry')).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect(oldestEntry.locator('figure.photo-entry')).toHaveAttribute(
+    'data-private-photo-mount',
+    'deferred',
+  );
+  await expect(oldestEntry.locator('img')).toHaveCount(0);
+  await expect(
+    page.locator('[data-private-photo-mount="stateful"]'),
+  ).toHaveCount(10);
+  await expect(
+    page.locator('[data-private-photo-mount="deferred"]'),
+  ).toHaveCount(2);
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(9);
+  expect(await privatePhotoMountStats(page)).toEqual({
+    maxStateful: 10,
+    stateful: 10,
+  });
+  expect(media.readGrantRequests.map(({ mediaId }) => mediaId)).toEqual([
+    fixture.photoStressOldestMediaId,
+    fixture.photoStressSecondMediaId,
+  ]);
+  expect(media.maxConcurrentReadGrantRequests).toBeLessThanOrEqual(2);
+  expect(media.maxConcurrentImageRequests).toBeLessThanOrEqual(2);
+  await expectAxeClean(page, 'bounded selected older private photo history');
+});
+
+test('a displaced recent private photo can replace the selected older photo without exceeding any loader bound', async ({
+  page,
+}, testInfo) => {
+  await installDeterministicIntersectionObserver(page);
+  await installPrivatePhotoMountProbe(page);
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  await expect(page.locator('.timeline-entry')).toHaveCount(12);
+  await expect(
+    page.locator('[data-private-photo-mount="stateful"]'),
+  ).toHaveCount(10);
+  await expect(
+    page.locator('[data-private-photo-mount="deferred"]'),
+  ).toHaveCount(2);
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(10);
+
+  const oldestEntry = page.getByRole('article', {
+    name: 'Entry 1: Photo update',
+    exact: true,
+  });
+  const oldestFigure = oldestEntry.locator('figure.photo-entry');
+  await oldestEntry
+    .getByRole('button', { name: 'Load older private photo for entry 1' })
+    .press('Enter');
+  await expect(oldestFigure).toBeFocused();
+  await expect(oldestFigure).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect
+    .poll(() =>
+      media.readGrantRequests.some(
+        ({ mediaId }) => mediaId === fixture.photoStressOldestMediaId,
+      ),
+    )
+    .toBe(true);
+  expect(media.readGrantRequests).toHaveLength(1);
+  await expect.poll(() => media.concurrentReadGrantRequests).toBe(0);
+  await expect.poll(() => media.concurrentImageRequests).toBe(0);
+
+  const displacedEntry = page.getByRole('article', {
+    name: 'Entry 3: Photo update',
+    exact: true,
+  });
+  const displacedFigure = displacedEntry.locator('figure.photo-entry');
+  await expect(displacedFigure).toHaveAttribute(
+    'data-private-photo-mount',
+    'deferred',
+  );
+  const loadDisplaced = displacedEntry.getByRole('button', {
+    name: 'Load older private photo for entry 3',
+  });
+  await expect(loadDisplaced).toBeEnabled();
+  await loadDisplaced.focus();
+  await expect(loadDisplaced).toBeFocused();
+  await page.keyboard.press('Enter');
+
+  await expect(oldestFigure).toHaveAttribute(
+    'data-private-photo-mount',
+    'deferred',
+  );
+  await expect(oldestFigure.locator('img')).toHaveCount(0);
+  await expect(displacedFigure).toHaveAttribute(
+    'data-private-photo-mount',
+    'stateful',
+  );
+  await expect(displacedFigure).toHaveAttribute(
+    'data-private-photo-observer',
+    'disabled',
+  );
+  await expect(displacedFigure).toBeFocused();
+  await expect(
+    displacedEntry.getByRole('img', {
+      name: 'Synthetic bounded-loader private photo 3.',
+    }),
+  ).toBeVisible();
+  await expect(displacedFigure).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect(displacedFigure).toBeFocused();
+  await expect.poll(() => media.readGrantRequests.length).toBe(2);
+  await expect.poll(() => media.imageRequests.length).toBe(2);
+  expect(media.maxConcurrentReadGrantRequests).toBeLessThanOrEqual(2);
+  expect(media.maxConcurrentImageRequests).toBeLessThanOrEqual(2);
+  await expect.poll(() => media.concurrentReadGrantRequests).toBe(0);
+  await expect.poll(() => media.concurrentImageRequests).toBe(0);
+
+  await expect(
+    page.locator('[data-private-photo-mount="stateful"]'),
+  ).toHaveCount(10);
+  await expect(
+    page.locator('[data-private-photo-mount="deferred"]'),
+  ).toHaveCount(2);
+  await expect
+    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
+    .toBe(9);
+  expect(await privatePhotoMountStats(page)).toEqual({
+    maxStateful: 10,
+    stateful: 10,
+  });
+  expect(media.readGrantRequests[0]?.mediaId).toBe(
+    fixture.photoStressOldestMediaId,
+  );
+  expect(media.readGrantRequests[1]?.mediaId).not.toBe(
+    fixture.photoStressOldestMediaId,
+  );
+  await expectAxeClean(page, 'displaced recent private photo selection');
+});
+
+test('private photo loading and out-of-order decoding never use more than two jobs', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+  });
+  await installControllableImageDecode(page);
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  await expect(
+    page
+      .getByText(
+        'Automatic viewport loading is unavailable in this browser. Load this private photo explicitly if it is operationally needed.',
+        { exact: true },
+      )
+      .first(),
+  ).toBeVisible();
+  const entry = (sequence: number) =>
+    page.getByRole('article', {
+      name: `Entry ${sequence}: Photo update`,
+      exact: true,
+    });
+  const figure = (sequence: number) => entry(sequence).locator('figure');
+  const load = (sequence: number) =>
+    entry(sequence).getByRole('button', {
+      name: `Load private photo for entry ${sequence}`,
+    });
+
+  await load(3).press('Enter');
+  await load(4).evaluate((button) => (button as HTMLButtonElement).click());
+  await load(5).evaluate((button) => (button as HTMLButtonElement).click());
+  await expect.poll(() => media.readGrantRequests.length).toBe(2);
+  await expect.poll(() => media.imageRequests.length).toBe(2);
+  await expect
+    .poll(async () => (await privatePhotoDecodeStats(page)).active)
+    .toBe(2);
+  expect(await privatePhotoDecodeStats(page)).toMatchObject({
+    active: 2,
+    maxActive: 2,
+  });
+  expect(media.maxConcurrentReadGrantRequests).toBeLessThanOrEqual(2);
+  expect(media.maxConcurrentImageRequests).toBeLessThanOrEqual(2);
+
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 4.',
+    ),
+  ).toBe(true);
+  await expect.poll(() => media.readGrantRequests.length).toBe(3);
+  await expect.poll(() => media.imageRequests.length).toBe(3);
+  await expect
+    .poll(async () => (await privatePhotoDecodeStats(page)).active)
+    .toBe(2);
+  expect((await privatePhotoDecodeStats(page)).maxActive).toBe(2);
+  await expect(figure(4)).toHaveAttribute(
+    'data-private-photo-state',
+    'evicted',
+  );
+  await expect(figure(4).locator('img')).toHaveCount(0);
+
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 3.',
+    ),
+  ).toBe(true);
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 5.',
+    ),
+  ).toBe(true);
+  await expect(figure(5)).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expect.poll(() => page.locator('.timeline-entry img').count()).toBe(2);
+  expect((await privatePhotoDecodeStats(page)).maxActive).toBe(2);
+  await expectAxeClean(page, 'two-slot private photo loader');
+});
+
+test('every private photo load has a fixed sixty-second deadline that frees slots and exposes explicit retry', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+  });
+  await installControllableImageDecode(page);
+  await page.clock.install();
+  const fixture = await readFixture(testInfo);
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoStressEventId,
+    uploadIntentId: fixture.photoStressMiddleMediaId,
+    mediaId: fixture.photoStressMiddleMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+
+  await page.goto(fixturePath(fixture.photoStressEventId));
+  const entry = (sequence: number) =>
+    page.getByRole('article', {
+      name: `Entry ${sequence}: Photo update`,
+      exact: true,
+    });
+  const figure = (sequence: number) => entry(sequence).locator('figure');
+  const load = (sequence: number) =>
+    entry(sequence).getByRole('button', {
+      name: `Load private photo for entry ${sequence}`,
+    });
+
+  await load(3).evaluate((button) => (button as HTMLButtonElement).click());
+  await load(4).evaluate((button) => (button as HTMLButtonElement).click());
+  await load(5).press('Enter');
+  await expect.poll(() => media.readGrantRequests.length).toBe(2);
+  await expect
+    .poll(async () => (await privatePhotoDecodeStats(page)).active)
+    .toBe(2);
+
+  await page.clock.fastForward(60_001);
+  await expect.poll(() => media.readGrantRequests.length).toBe(3);
+  await expect
+    .poll(async () =>
+      (await privatePhotoDecodeStats(page)).pendingAltText.includes(
+        'Synthetic bounded-loader private photo 5.',
+      ),
+    )
+    .toBe(true);
+  expect(await privatePhotoDecodeStats(page)).toMatchObject({
+    active: 1,
+    maxActive: 2,
+  });
+  for (const sequence of [3, 4]) {
+    const error = figure(sequence).locator('.photo-read-error');
+    await expect(error).toContainText(
+      'Private photo loading exceeded the 60-second safety limit and was stopped.',
+    );
+    await expect(
+      error.getByRole('button', {
+        name: `Retry private photo for entry ${sequence}`,
+      }),
+    ).toBeVisible();
+  }
+  await page.clock.fastForward(60_001);
+  const finalError = figure(5).locator('.photo-read-error');
+  await expect(finalError).toContainText(
+    'Private photo loading exceeded the 60-second safety limit and was stopped.',
+  );
+  await expect(finalError).toBeFocused();
+  await expect(
+    finalError.getByRole('button', {
+      name: 'Retry private photo for entry 5',
+    }),
+  ).toBeVisible();
+  expect(await privatePhotoDecodeStats(page)).toMatchObject({
+    active: 0,
+    maxActive: 2,
+    pendingAltText: [],
+  });
+  // The deadlines above intentionally advance the browser two minutes while
+  // synthetic grants are minted from the runner clock. Realign those clocks
+  // before proving that a newly issued grant remains usable on explicit retry.
+  await page.clock.setSystemTime(new Date());
+  const grantsBeforeRetry = media.readGrantRequests.length;
+  const imagesBeforeRetry = media.imageRequests.length;
+  await finalError
+    .getByRole('button', { name: 'Retry private photo for entry 5' })
+    .press('Enter');
+  await expect
+    .poll(() => media.readGrantRequests.length)
+    .toBe(grantsBeforeRetry + 1);
+  await expect
+    .poll(() => media.imageRequests.length)
+    .toBe(imagesBeforeRetry + 1);
+  await expect(figure(5)).toBeFocused();
+  await expect
+    .poll(async () =>
+      (await privatePhotoDecodeStats(page)).pendingAltText.includes(
+        'Synthetic bounded-loader private photo 5.',
+      ),
+    )
+    .toBe(true);
+  expect(media.readGrantRequests.at(-1)?.readUrl).not.toBe(
+    media.readGrantRequests.at(-2)?.readUrl,
+  );
+  expect(
+    await releasePrivatePhotoDecode(
+      page,
+      'Synthetic bounded-loader private photo 5.',
+    ),
+  ).toBe(true);
+  await expect(figure(5)).toHaveAttribute(
+    'data-private-photo-state',
+    'displayed',
+  );
+  await expectAxeClean(page, 'private photo fixed-deadline error');
+});
+
+test('create, PUT, and completion deadlines stop automatically and retain only the exact completion recovery', async ({
+  page,
+}, testInfo) => {
+  await page.clock.install();
+  const fixture = await readFixture(testInfo);
+
+  const createMedia = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.keyboardEventId,
+    uploadIntentId: randomUUID(),
+    mediaId: randomUUID(),
+    sanitizedSha256: SYNTHETIC_PNG_SHA256,
+    holdCreateResponses: true,
+  });
+  await page.goto(fixturePath(fixture.keyboardEventId));
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-create-deadline.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+  await expect.poll(() => createMedia.createRequests.length).toBe(1);
+  await page.clock.fastForward(15_001);
+  let alert = page.locator('.photo-workflow-error');
+  await expect(alert).toContainText(
+    'PSD EOC did not authorize the private upload within 15 seconds. Nothing will retry automatically.',
+  );
+  await expect(alert).toBeFocused();
+  createMedia.releaseCreateResponses();
+  expect(createMedia.uploadRequests).toHaveLength(0);
+  expect(createMedia.completionRequests).toHaveLength(0);
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(
+          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+        ),
+      fixture.keyboardEventId,
+    ),
+  ).toBeNull();
+  await page.unrouteAll({ behavior: 'wait' });
+
+  const uploadMedia = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.recoveryEventId,
+    uploadIntentId: randomUUID(),
+    mediaId: randomUUID(),
+    sanitizedSha256: SYNTHETIC_PNG_SHA256,
+    holdUploadResponses: true,
+  });
+  await page.goto(fixturePath(fixture.recoveryEventId));
+  const uploadPageOrigin = await page.evaluate(() => window.location.origin);
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-put-deadline.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+  await expect.poll(() => uploadMedia.uploadRequests.length).toBe(1);
+  expectSyntheticCorsUpload(uploadMedia, uploadPageOrigin);
+  await page.clock.fastForward(60_001);
+  alert = page.locator('.photo-workflow-error');
+  await expect(alert).toContainText(
+    'The private upload exceeded 60 seconds and was stopped. PSD EOC will not retry it automatically; choose the file again to start a new attempt.',
+  );
+  await expect(alert).toBeFocused();
+  uploadMedia.releaseUploadResponses();
+  expect(uploadMedia.completionRequests).toHaveLength(0);
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(
+          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+        ),
+      fixture.recoveryEventId,
+    ),
+  ).toBeNull();
+  await page.unrouteAll({ behavior: 'wait' });
+
+  const completionMedia = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoEventId,
+    uploadIntentId: fixture.photoUploadMediaId,
+    mediaId: fixture.photoUploadMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+    holdCompletionResponses: true,
+  });
+  await page.goto(fixturePath(fixture.photoEventId));
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-completion-deadline.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  await page
+    .getByLabel('Photo description (alternative text)')
+    .fill('Synthetic completion deadline recovery');
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+  await expect.poll(() => completionMedia.completionRequests.length).toBe(1);
+  const completionKey =
+    completionMedia.completionRequests[0]?.headers['idempotency-key'];
+  expect(completionKey).toBeTruthy();
+  await page.clock.fastForward(15_001);
+  alert = page.locator('.photo-workflow-error');
+  await expect(alert).toContainText(
+    'PSD EOC did not confirm photo validation within 15 seconds. The exact completion request is available for explicit retry and will not retry automatically.',
+  );
+  await expect(alert).toBeFocused();
+  const retainedCompletion = await page.evaluate((eventId) => {
+    const raw = sessionStorage.getItem(
+      `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+    );
+    return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+  }, fixture.photoEventId);
+  expect(retainedCompletion).toMatchObject({
+    eventId: fixture.photoEventId,
+    idempotencyKey: completionKey,
+    mediaId: null,
+    ownerSessionId: fixture.sessionId,
+    uploadIntentId: fixture.photoUploadMediaId,
+  });
+  completionMedia.releaseCompletionResponses();
+
+  await page.reload();
+  const retry = page.getByRole('button', { name: 'Retry photo validation' });
+  await expect(retry).toBeVisible();
+  await page.clock.fastForward(1_000);
+  expect(completionMedia.completionRequests).toHaveLength(1);
+  await retry.press('Enter');
+  await expect.poll(() => completionMedia.completionRequests.length).toBe(2);
+  expect(
+    completionMedia.completionRequests.every(
+      (request) => request.headers['idempotency-key'] === completionKey,
+    ),
+  ).toBe(true);
+  await expect(page.locator('.mutation-status')).toContainText(
+    'photo post confirmed by the server.',
+  );
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(
+          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+        ),
+      fixture.photoEventId,
+    ),
+  ).toBeNull();
+});
+
+test('a retained photo post stops at fifteen seconds, never replays on reload, and retries the exact key explicitly', async ({
+  page,
+}, testInfo) => {
+  await installDeterministicIntersectionObserver(page);
+  await page.clock.install();
+  const fixture = await readFixture(testInfo);
+  await installSyntheticMediaRoutes(page, {
+    eventId: fixture.photoEventId,
+    uploadIntentId: fixture.photoUploadMediaId,
+    mediaId: fixture.photoUploadMediaId,
+    sanitizedSha256: fixture.photoSanitizedSha256,
+  });
+  const postGate = syntheticResponseGate(true);
+  const postAttempts: Array<
+    Readonly<{ body: unknown; idempotencyKey: string | undefined }>
+  > = [];
+  let firstPostCommitted = false;
+  await page.route(`**/events/${fixture.photoEventId}/api`, async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (body?.operation !== 'post-photo') {
+      await route.continue();
+      return;
+    }
+    postAttempts.push({
+      body,
+      idempotencyKey: request.headers()['idempotency-key'],
+    });
+    if (postAttempts.length === 1) {
+      const response = await route.fetch();
+      expect(response.ok()).toBe(true);
+      firstPostCommitted = true;
+      await postGate.wait();
+      await route.fulfill({ response });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(fixture.photoEventId));
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-post-deadline.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  await page
+    .getByLabel('Photo description (alternative text)')
+    .fill('Synthetic retained photo post deadline');
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+  await expect.poll(() => firstPostCommitted).toBe(true);
+  expect(postAttempts).toHaveLength(1);
+  await page.clock.fastForward(15_001);
+  const commandError = page.locator('.event-room > .error-panel');
+  await expect(commandError).toContainText(
+    'PSD EOC did not confirm the request before the safety deadline. The exact request is retained and will not retry automatically.',
+  );
+  await expect(commandError).toBeFocused();
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(
+          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+        ),
+      fixture.photoEventId,
+    ),
+  ).toBeNull();
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(`psd-eoc:event-room:pending:v1:${eventId}`),
+      fixture.photoEventId,
+    ),
+  ).not.toBeNull();
+  postGate.release();
+
+  await page.reload();
+  const retry = page.getByRole('button', {
+    name: 'Retry exact retained request',
+  });
+  await expect(retry).toBeVisible();
+  await page.clock.fastForward(1_000);
+  expect(postAttempts).toHaveLength(1);
+  await retry.press('Enter');
+  await expect.poll(() => postAttempts.length).toBe(2);
+  expect(postAttempts[1]?.body).toEqual(postAttempts[0]?.body);
+  expect(postAttempts[1]?.idempotencyKey).toBe(postAttempts[0]?.idempotencyKey);
+  await expect(page.locator('.mutation-status')).toContainText(
+    'photo post confirmed by the server.',
+  );
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(`psd-eoc:event-room:pending:v1:${eventId}`),
+      fixture.photoEventId,
+    ),
+  ).toBeNull();
+});
+
+test('all-clear and close remain keyboard and axe operable during held photo create and PUT stages without an accidental post or retry', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const lifecycleMediaEventId = fixture.stalledPreviewEventId;
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: lifecycleMediaEventId,
+    uploadIntentId: randomUUID(),
+    mediaId: randomUUID(),
+    sanitizedSha256: fixture.photoSanitizedSha256,
+    holdCreateResponses: true,
+    holdUploadResponses: true,
+  });
+  const eventOperations: string[] = [];
+  await page.route(`**/events/${lifecycleMediaEventId}/api`, async (route) => {
+    const request = route.request();
+    if (request.method() === 'POST') {
+      const body = request.postDataJSON() as { operation?: unknown } | null;
+      if (typeof body?.operation === 'string') {
+        eventOperations.push(body.operation);
+      }
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(lifecycleMediaEventId));
+  const pageOrigin = await page.evaluate(() => window.location.origin);
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-held-lifecycle.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  await page
+    .getByLabel('Photo description (alternative text)')
+    .fill('Synthetic held lifecycle photo');
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+  await expect.poll(() => media.createRequests.length).toBe(1);
+  expect(media.uploadRequests).toHaveLength(0);
+
+  const reviewAllClear = page.getByRole('button', {
+    name: 'Review all-clear',
+  });
+  await expect(reviewAllClear).toBeEnabled();
+  await reviewAllClear.press('Enter');
+  const allClearDialog = page.getByRole('dialog');
+  await expect(
+    allClearDialog.getByRole('heading', {
+      name: 'Notification consequences',
+    }),
+  ).toBeVisible();
+  await expectAxeClean(page, 'all-clear dialog during held photo create');
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  expect(eventOperations).not.toContain('post-photo');
+  expect(media.completionRequests).toHaveLength(0);
+
+  media.releaseCreateResponses();
+  await expect.poll(() => media.uploadRequests.length).toBe(1);
+  expectSyntheticCorsUpload(media, pageOrigin);
+  const reviewClose = page.getByRole('button', {
+    name: 'Review event close',
+  });
+  await expect(reviewClose).toBeEnabled();
+  await reviewClose.press('Enter');
+  const closeDialog = page.getByRole('dialog');
+  await expect(closeDialog).toContainText('DRILL — TRAINING ONLY');
+  await expect(page.getByLabel('Type CLOSE EVENT exactly')).toBeFocused();
+  await expectAxeClean(page, 'close dialog during held photo PUT');
+  await page.getByLabel('Type CLOSE EVENT exactly').fill('CLOSE EVENT');
+  await page.getByRole('button', { name: 'Close event' }).press('Enter');
+  await expect(page.locator('.event-status')).toHaveText('Closed');
+  expect(eventOperations).not.toContain('post-photo');
+
+  media.releaseUploadResponses();
+  await expect(page.locator('.photo-workflow-error')).toContainText(
+    'The event no longer accepts photo posts. The private upload will remain quarantined and no validation or timeline post was started.',
+  );
+  await page.waitForTimeout(750);
+  expect(media.completionRequests).toHaveLength(0);
+  expect(eventOperations).not.toContain('post-photo');
+  expect(
+    eventOperations.filter((operation) => operation === 'all-clear'),
+  ).toHaveLength(1);
+  expect(
+    eventOperations.filter((operation) => operation === 'close'),
+  ).toHaveLength(1);
+  await expect(
+    page.getByRole('button', { name: 'Retry photo validation' }),
+  ).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      (eventId) =>
+        sessionStorage.getItem(
+          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+        ),
+      lifecycleMediaEventId,
+    ),
+  ).toBeNull();
+  await expectAxeClean(page, 'closed event after held photo stages');
+});
+
+test('all-clear and close remain operable while photo completion is held and a stale completion cannot append after close', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const uploadIntentId = randomUUID();
+  const mediaId = randomUUID();
+  const media = await installSyntheticMediaRoutes(page, {
+    eventId: fixture.keyboardEventId,
+    uploadIntentId,
+    mediaId,
+    sanitizedSha256: SYNTHETIC_PNG_SHA256,
+    holdCompletionResponses: true,
+  });
+  const eventOperations: string[] = [];
+  await page.route(
+    `**/events/${fixture.keyboardEventId}/api`,
+    async (route) => {
+      const request = route.request();
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON() as { operation?: unknown } | null;
+        if (typeof body?.operation === 'string') {
+          eventOperations.push(body.operation);
+        }
+      }
+      await route.continue();
+    },
+  );
+
+  await page.goto(fixturePath(fixture.keyboardEventId));
+  await page.getByLabel('Photo file').setInputFiles({
+    name: 'synthetic-held-completion.png',
+    mimeType: 'image/png',
+    buffer: SYNTHETIC_PNG,
+  });
+  await page
+    .getByLabel('Photo description (alternative text)')
+    .fill('Synthetic held completion photo');
+  await page
+    .getByRole('button', { name: 'Upload and post photo' })
+    .press('Enter');
+  await expect.poll(() => media.completionRequests.length).toBe(1);
+  expect(eventOperations).not.toContain('post-photo');
+
+  const reviewAllClear = page.getByRole('button', {
+    name: 'Review all-clear',
+  });
+  await expect(reviewAllClear).toBeEnabled();
+  await reviewAllClear.press('Enter');
+  await expect(page.getByLabel('Type ALL CLEAR exactly')).toBeFocused();
+  await expectAxeClean(page, 'all-clear dialog during held photo completion');
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  expect(media.completionRequests).toHaveLength(1);
+  expect(eventOperations).not.toContain('post-photo');
+
+  const reviewClose = page.getByRole('button', {
+    name: 'Review event close',
+  });
+  await expect(reviewClose).toBeEnabled();
+  await reviewClose.press('Enter');
+  await expect(page.getByLabel('Type CLOSE EVENT exactly')).toBeFocused();
+  await expectAxeClean(page, 'close dialog during held photo completion');
+  await page.getByLabel('Type CLOSE EVENT exactly').fill('CLOSE EVENT');
+  await page.getByRole('button', { name: 'Close event' }).press('Enter');
+  await expect(page.locator('.event-status')).toHaveText('Closed');
+  expect(media.completionRequests).toHaveLength(1);
+  expect(eventOperations).not.toContain('post-photo');
+
+  media.releaseCompletionResponses();
+  const staleError = page.locator('.photo-workflow-error');
+  await expect(staleError).toContainText(
+    'The photo was validated, but the event no longer accepts photo posts. No timeline post was sent; verify the timeline before clearing this completed photo attempt.',
+  );
+  await expect(staleError).toBeFocused();
+  await page.waitForTimeout(750);
+  expect(media.completionRequests).toHaveLength(1);
+  expect(eventOperations).not.toContain('post-photo');
+  expect(
+    await page.evaluate((eventId) => {
+      const raw = sessionStorage.getItem(
+        `psd-eoc:event-room:photo-completion:v1:${eventId}`,
+      );
+      return raw === null
+        ? null
+        : (JSON.parse(raw) as { mediaId?: unknown }).mediaId;
+    }, fixture.keyboardEventId),
+  ).toBe(mediaId);
+  await expect(
+    page.getByRole('button', { name: 'Retry photo validation' }),
+  ).toBeDisabled();
+  await expectAxeClean(page, 'stale completion blocked after event close');
 });

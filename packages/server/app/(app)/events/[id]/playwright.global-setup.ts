@@ -12,6 +12,7 @@ import {
   IdempotencyPrincipalSchema,
   IntegrationStatusSchema,
   JournalEntrySchema,
+  MediaRecordSchema,
   type Actor,
   type Event,
   type JournalEntry,
@@ -33,6 +34,8 @@ import {
   groupSources,
   integrationStatuses,
   journalEntries,
+  mediaRecords,
+  mediaUploadIntents,
   userRoles,
   users,
 } from '../../../../db/schema';
@@ -40,6 +43,10 @@ import {
   createDrizzleInitialWebSessionStore,
   digestWebSessionCredential,
 } from '../../../../lib/auth/session-cookie';
+import {
+  quarantineStorageKey,
+  readyStorageKey,
+} from '../../../../lib/media/model';
 import { createOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import { requireEventRoomPlaywrightRunContext } from './test-database';
 
@@ -67,6 +74,7 @@ interface AccessFixture {
 }
 
 interface EventRoomFixture {
+  readonly sessionId: string;
   readonly concurrentDialogEventId: string;
   readonly continuationEventId: string;
   readonly dialogFailureEventId: string;
@@ -92,6 +100,16 @@ interface EventRoomFixture {
   readonly staleLifecycleResponseEventId: string;
   readonly stalledMutationEventId: string;
   readonly stalledPreviewEventId: string;
+  readonly photoEventId: string;
+  readonly photoMediaId: string;
+  readonly photoUploadMediaId: string;
+  readonly photoSanitizedSha256: string;
+  readonly photoStressEventId: string;
+  readonly photoStressOldestMediaId: string;
+  readonly photoStressSecondMediaId: string;
+  readonly photoStressMiddleMediaId: string;
+  readonly redactedPhotoEventId: string;
+  readonly redactedPhotoMediaId: string;
 }
 
 interface ChannelConfigurationState {
@@ -404,12 +422,12 @@ function journalInsert(
     serverTime: new Date(entry.serverTime),
     clientTime: entry.clientTime === null ? null : new Date(entry.clientTime),
     payload: entry.payload,
-    mediaId: null,
+    mediaId: entry.kind === 'photo' ? entry.payload.mediaId : null,
     transitionId: null,
-    supersedesEntryId: null,
-    supersedesEntrySequence: null,
-    supersessionKind: null,
-    supersessionReason: null,
+    supersedesEntryId: entry.supersedes?.entryId ?? null,
+    supersedesEntrySequence: entry.supersedes?.entrySequence ?? null,
+    supersessionKind: entry.supersedes?.kind ?? null,
+    supersessionReason: entry.supersedes?.reason ?? null,
   };
 }
 
@@ -434,6 +452,69 @@ function eventInsert(event: Event): typeof events.$inferInsert {
     correctionOfEventId: event.correctionOfEventId,
     correctionReason: event.correctionReason,
     activationAuthorization: event.activationAuthorization,
+  };
+}
+
+interface SyntheticReadyMediaSeed {
+  readonly id: string;
+  readonly sanitizedContentSha256: string;
+  readonly uploadIntent: typeof mediaUploadIntents.$inferInsert;
+  readonly record: typeof mediaRecords.$inferInsert;
+}
+
+function readyMediaSeed(
+  eventId: string,
+  createdAt: Date,
+  label: string,
+): SyntheticReadyMediaSeed {
+  const uploadIntentId = randomUUID();
+  const mediaId = randomUUID();
+  const rawContent = `synthetic raw ${label} photo ${uploadIntentId}`;
+  const sanitizedContent = `synthetic sanitized ${label} photo ${mediaId}`;
+  const canonicalRecord = MediaRecordSchema.parse({
+    id: mediaId,
+    uploadIntentId,
+    eventId,
+    status: 'ready',
+    detectedContentType: 'image/jpeg',
+    sanitizedByteLength: Buffer.byteLength(sanitizedContent, 'utf8'),
+    sanitizedContentSha256: digest(sanitizedContent),
+    malwareScan: 'clean',
+    exifStripped: true,
+    createdAt: createdAt.toISOString(),
+  });
+  return {
+    id: canonicalRecord.id,
+    sanitizedContentSha256: canonicalRecord.sanitizedContentSha256,
+    uploadIntent: {
+      id: uploadIntentId,
+      eventId,
+      facilityId: FACILITY_ID,
+      budgetPrincipalDigest: digest(
+        'synthetic event-room browser media fixture principal',
+      ),
+      budgetPrincipalAttributed: true,
+      byteLength: Buffer.byteLength(rawContent, 'utf8'),
+      contentSha256: digest(rawContent),
+      declaredContentType: 'image/jpeg',
+      storageKey: quarantineStorageKey(eventId, uploadIntentId),
+      status: 'completed',
+      createdAt,
+      expiresAt: new Date(createdAt.getTime() + 10 * 60_000),
+    },
+    record: {
+      id: canonicalRecord.id,
+      uploadIntentId: canonicalRecord.uploadIntentId,
+      eventId: canonicalRecord.eventId,
+      status: canonicalRecord.status,
+      detectedContentType: canonicalRecord.detectedContentType,
+      sanitizedByteLength: canonicalRecord.sanitizedByteLength,
+      sanitizedContentSha256: canonicalRecord.sanitizedContentSha256,
+      storageKey: readyStorageKey(eventId, canonicalRecord.id),
+      malwareScan: canonicalRecord.malwareScan,
+      exifStripped: canonicalRecord.exifStripped,
+      createdAt,
+    },
   };
 }
 
@@ -577,6 +658,9 @@ async function prepareEventFixtures(
   const dialogFailureEvent = makeActiveEvent();
   const stalledMutationEvent = makeActiveEvent();
   const stalledPreviewEvent = makeActiveEvent();
+  const photoEvent = makeActiveEvent();
+  const photoStressEvent = makeActiveEvent();
+  const redactedPhotoEvent = makeActiveEvent();
   const realDraftEvent = EventSchema.parse({
     id: randomUUID(),
     facilityId: FACILITY_ID,
@@ -622,6 +706,110 @@ async function prepareEventFixtures(
         supersedes: null,
       });
     });
+  const photoMedia = readyMediaSeed(
+    photoEvent.id,
+    new Date(activatedAt.getTime() + 500),
+    'visible',
+  );
+  const photoUploadMedia = readyMediaSeed(
+    photoEvent.id,
+    new Date(activatedAt.getTime() + 750),
+    'upload completion',
+  );
+  const photoStressMedia = Array.from({ length: 12 }, (_, index) =>
+    readyMediaSeed(
+      photoStressEvent.id,
+      new Date(activatedAt.getTime() + 500 + index),
+      `bounded loader ${index + 1}`,
+    ),
+  );
+  const photoStressMiddleMedia = photoStressMedia[5];
+  const photoStressOldestMedia = photoStressMedia[0];
+  const photoStressSecondMedia = photoStressMedia[1];
+  if (
+    photoStressMiddleMedia === undefined ||
+    photoStressOldestMedia === undefined ||
+    photoStressSecondMedia === undefined
+  ) {
+    throw new Error('The bounded private-photo fixture is incomplete.');
+  }
+  const redactedPhotoMedia = readyMediaSeed(
+    redactedPhotoEvent.id,
+    new Date(activatedAt.getTime() + 500),
+    'redacted',
+  );
+  const photoEntry = JournalEntrySchema.parse({
+    id: randomUUID(),
+    eventId: photoEvent.id,
+    sequence: 1,
+    kind: 'photo',
+    author: actor,
+    source: 'web',
+    serverTime: new Date(activatedAt.getTime() + 1_000).toISOString(),
+    clientTime: null,
+    payload: {
+      mediaId: photoMedia.id,
+      altText: 'Synthetic emergency operations scene; no people are shown.',
+      caption: 'Synthetic authorized-photo rendering fixture.',
+    },
+    supersedes: null,
+  });
+  const photoStressEntries = photoStressMedia.map((media, index) => {
+    const sequence = index + 1;
+    return JournalEntrySchema.parse({
+      id: randomUUID(),
+      eventId: photoStressEvent.id,
+      sequence,
+      kind: 'photo',
+      author: actor,
+      source: 'web',
+      serverTime: new Date(
+        activatedAt.getTime() + sequence * 1_000,
+      ).toISOString(),
+      clientTime: null,
+      payload: {
+        mediaId: media.id,
+        altText: `Synthetic bounded-loader private photo ${sequence}.`,
+        caption: `Synthetic resource-bound fixture ${sequence}.`,
+      },
+      supersedes: null,
+    });
+  });
+  const redactedPhotoEntry = JournalEntrySchema.parse({
+    id: randomUUID(),
+    eventId: redactedPhotoEvent.id,
+    sequence: 1,
+    kind: 'photo',
+    author: actor,
+    source: 'web',
+    serverTime: new Date(activatedAt.getTime() + 1_000).toISOString(),
+    clientTime: null,
+    payload: {
+      mediaId: redactedPhotoMedia.id,
+      altText: 'Synthetic photo hidden by a later append-only redaction.',
+      caption: null,
+    },
+    supersedes: null,
+  });
+  const photoRedactionEntry = JournalEntrySchema.parse({
+    id: randomUUID(),
+    eventId: redactedPhotoEvent.id,
+    sequence: 2,
+    kind: 'text',
+    author: actor,
+    source: 'web',
+    serverTime: new Date(activatedAt.getTime() + 2_000).toISOString(),
+    clientTime: null,
+    payload: {
+      text: '[Content redacted — original retained in journal]',
+    },
+    supersedes: {
+      entryId: redactedPhotoEntry.id,
+      entrySequence: redactedPhotoEntry.sequence,
+      kind: 'redaction',
+      reason: 'Synthetic privacy-safe photo redaction fixture.',
+    },
+  });
   const journal = [
     ...makeHistory(historyEvent, 105),
     ...makeHistory(concurrentDialogEvent, 3),
@@ -647,6 +835,10 @@ async function prepareEventFixtures(
     ...makeHistory(dialogFailureEvent, 3),
     ...makeHistory(stalledMutationEvent, 3),
     ...makeHistory(stalledPreviewEvent, 3),
+    photoEntry,
+    ...photoStressEntries,
+    redactedPhotoEntry,
+    photoRedactionEntry,
   ];
 
   await database.transaction(async (transaction) => {
@@ -703,13 +895,33 @@ async function prepareEventFixtures(
           dialogFailureEvent,
           stalledMutationEvent,
           stalledPreviewEvent,
+          photoEvent,
+          photoStressEvent,
+          redactedPhotoEvent,
           realDraftEvent,
         ].map(eventInsert),
       );
+    await transaction
+      .insert(mediaUploadIntents)
+      .values([
+        photoMedia.uploadIntent,
+        photoUploadMedia.uploadIntent,
+        ...photoStressMedia.map((media) => media.uploadIntent),
+        redactedPhotoMedia.uploadIntent,
+      ]);
+    await transaction
+      .insert(mediaRecords)
+      .values([
+        photoMedia.record,
+        photoUploadMedia.record,
+        ...photoStressMedia.map((media) => media.record),
+        redactedPhotoMedia.record,
+      ]);
     await transaction.insert(journalEntries).values(journal.map(journalInsert));
   });
 
   return {
+    sessionId: actor.sessionId,
     concurrentDialogEventId: concurrentDialogEvent.id,
     continuationEventId: continuationEvent.id,
     dialogFailureEventId: dialogFailureEvent.id,
@@ -735,6 +947,16 @@ async function prepareEventFixtures(
     staleLifecycleResponseEventId: staleLifecycleResponseEvent.id,
     stalledMutationEventId: stalledMutationEvent.id,
     stalledPreviewEventId: stalledPreviewEvent.id,
+    photoEventId: photoEvent.id,
+    photoMediaId: photoMedia.id,
+    photoUploadMediaId: photoUploadMedia.id,
+    photoSanitizedSha256: photoMedia.sanitizedContentSha256,
+    photoStressEventId: photoStressEvent.id,
+    photoStressOldestMediaId: photoStressOldestMedia.id,
+    photoStressSecondMediaId: photoStressSecondMedia.id,
+    photoStressMiddleMediaId: photoStressMiddleMedia.id,
+    redactedPhotoEventId: redactedPhotoEvent.id,
+    redactedPhotoMediaId: redactedPhotoMedia.id,
   };
 }
 

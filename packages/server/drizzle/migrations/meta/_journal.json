@@ -43,6 +43,13 @@
       "when": 1786423901549,
       "tag": "0005_steep_jane_foster",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786462777733,
+      "tag": "0006_media_record_immutability",
+      "breakpoints": true
     }
   ]
 }

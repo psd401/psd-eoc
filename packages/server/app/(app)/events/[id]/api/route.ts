@@ -270,6 +270,58 @@ async function handleMutation(
     );
   }
 
+  if (operation === 'post-photo') {
+    assertOnlyKeys(body, [
+      'operation',
+      'mediaId',
+      'altText',
+      'caption',
+      'clientTime',
+    ]);
+    const input = AppendJournalEntryInputSchema.parse({
+      eventId,
+      clientTime: nullableString(
+        body,
+        'clientTime',
+        'The client time must be a timestamp or null.',
+      ),
+      supersedes: null,
+      kind: 'photo',
+      payload: {
+        mediaId: requiredString(
+          body,
+          'mediaId',
+          'The photo media ID is required.',
+        ),
+        altText: requiredString(
+          body,
+          'altText',
+          'The photo alternative text is required.',
+        ),
+        caption: nullableString(
+          body,
+          'caption',
+          'The photo caption must be text or null.',
+        ),
+      },
+    });
+    const invocation = resolveHumanCapabilityInvocation(authenticated, {
+      requestId,
+      serverTime,
+      mutation: { idempotencyKey, humanConfirmationId: null },
+    });
+    return success(
+      {
+        entry: await journalRuntime.execute(
+          'append-journal-entry',
+          input,
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
+  }
+
   if (operation === 'correct-text') {
     assertOnlyKeys(body, [
       'operation',

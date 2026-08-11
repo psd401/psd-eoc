@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   afterAll,
@@ -13,6 +13,7 @@ import {
   EventTransitionSchema,
   HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
   IntegrationStatusSchema,
+  MediaRecordSchema,
   SessionEstablishmentResultSchema,
   type JournalEntry,
 } from '@psd-eoc/contracts';
@@ -74,6 +75,11 @@ import {
   executeJournalCapability,
   type JournalCapabilityStore,
 } from '../../../../lib/capabilities/journal';
+import {
+  quarantineStorageKey,
+  readyStorageKey,
+} from '../../../../lib/media/model';
+import { buildPhotoChecksumExportQuery } from '../../../../lib/media/repository';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
 import { requireSyntheticEventRoomTestDatabaseUrl } from './test-database';
 
@@ -104,6 +110,12 @@ interface SyntheticFixtureIds {
   readonly rosterSnapshotId: string;
   readonly audienceConfigId: string;
   readonly audienceConfigVersion: number;
+}
+
+interface SyntheticReadyPhoto {
+  readonly id: string;
+  readonly sanitizedContentSha256: string;
+  readonly sanitizedByteLength: number;
 }
 
 let connection: PostgresDatabaseConnection | undefined;
@@ -229,6 +241,70 @@ async function createActiveSyntheticEvent(): Promise<string> {
   return eventId;
 }
 
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+async function createReadySyntheticPhoto(
+  eventId: string,
+): Promise<SyntheticReadyPhoto> {
+  const uploadIntentId = randomUUID();
+  const mediaId = randomUUID();
+  const rawContent = `synthetic raw photo ${uploadIntentId}`;
+  const sanitizedContent = `synthetic sanitized photo ${mediaId}`;
+  const createdAt = new Date();
+  const record = MediaRecordSchema.parse({
+    id: mediaId,
+    uploadIntentId,
+    eventId,
+    status: 'ready',
+    detectedContentType: 'image/jpeg',
+    sanitizedByteLength: Buffer.byteLength(sanitizedContent, 'utf8'),
+    sanitizedContentSha256: sha256(sanitizedContent),
+    malwareScan: 'clean',
+    exifStripped: true,
+    createdAt: createdAt.toISOString(),
+  });
+
+  await databaseConnection().db.transaction(async (transaction) => {
+    await transaction.insert(mediaUploadIntents).values({
+      id: uploadIntentId,
+      eventId,
+      facilityId: syntheticFixtureIds().northFacilityId,
+      budgetPrincipalDigest: sha256(
+        'synthetic journal photo fixture principal',
+      ),
+      budgetPrincipalAttributed: true,
+      byteLength: Buffer.byteLength(rawContent, 'utf8'),
+      contentSha256: sha256(rawContent),
+      declaredContentType: 'image/jpeg',
+      storageKey: quarantineStorageKey(eventId, uploadIntentId),
+      status: 'completed',
+      createdAt,
+      expiresAt: new Date(createdAt.getTime() + 10 * 60_000),
+    });
+    await transaction.insert(mediaRecords).values({
+      id: record.id,
+      uploadIntentId: record.uploadIntentId,
+      eventId: record.eventId,
+      status: record.status,
+      detectedContentType: record.detectedContentType,
+      sanitizedByteLength: record.sanitizedByteLength,
+      sanitizedContentSha256: record.sanitizedContentSha256,
+      storageKey: readyStorageKey(eventId, record.id),
+      malwareScan: record.malwareScan,
+      exifStripped: record.exifStripped,
+      createdAt,
+    });
+  });
+
+  return {
+    id: record.id,
+    sanitizedContentSha256: record.sanitizedContentSha256,
+    sanitizedByteLength: record.sanitizedByteLength,
+  };
+}
+
 function textInput(
   eventId: string,
   text: string,
@@ -241,6 +317,22 @@ function textInput(
     payload: { text },
     clientTime,
     supersedes,
+  };
+}
+
+function photoInput(
+  eventId: string,
+  mediaId: string,
+  altText: string,
+  caption: string | null,
+  clientTime: string | null,
+) {
+  return {
+    eventId,
+    kind: 'photo' as const,
+    payload: { mediaId, altText, caption },
+    clientTime,
+    supersedes: null,
   };
 }
 
@@ -492,6 +584,196 @@ describeWithDatabase('event journal database guarantees', () => {
       .from(journalEntries)
       .where(eq(journalEntries.eventId, eventId));
     expect(rows).toEqual([{ id: first.id }]);
+  });
+
+  test('appends one same-event ready photo, replays idempotently, and exports its sanitized checksum', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const media = await createReadySyntheticPhoto(eventId);
+    const input = photoInput(
+      eventId,
+      media.id,
+      'Synthetic emergency operations scene; no people are shown.',
+      'Synthetic photo used only for persistence evidence.',
+      '2026-08-10T18:15:00.000Z',
+    );
+    const idempotencyKey = `issue17-photo-${randomUUID()}`;
+
+    const first = await executeJournalCapability(
+      'append-journal-entry',
+      input,
+      humanMutationInvocation(idempotencyKey),
+      journalStore,
+    );
+    const replay = await executeJournalCapability(
+      'append-journal-entry',
+      input,
+      humanMutationInvocation(idempotencyKey),
+      journalStore,
+    );
+
+    expect(replay).toEqual(first);
+    expect(first).toMatchObject({
+      eventId,
+      kind: 'photo',
+      payload: {
+        mediaId: media.id,
+        altText: 'Synthetic emergency operations scene; no people are shown.',
+        caption: 'Synthetic photo used only for persistence evidence.',
+      },
+    });
+    const rows = await databaseConnection()
+      .db.select({
+        id: journalEntries.id,
+        mediaId: journalEntries.mediaId,
+        payload: journalEntries.payload,
+      })
+      .from(journalEntries)
+      .where(eq(journalEntries.eventId, eventId));
+    expect(rows).toEqual([
+      {
+        id: first.id,
+        mediaId: media.id,
+        payload: first.payload,
+      },
+    ]);
+
+    const projection = await buildPhotoChecksumExportQuery(
+      databaseConnection().db,
+      eventId,
+    );
+    expect(projection).toEqual([
+      {
+        journalEntryId: first.id,
+        eventId,
+        sequence: first.sequence,
+        mediaId: media.id,
+        sanitizedContentSha256: media.sanitizedContentSha256,
+        sanitizedByteLength: media.sanitizedByteLength,
+        detectedContentType: 'image/jpeg',
+      },
+    ]);
+  });
+
+  test('rejects a ready photo from a different event without appending a journal row', async () => {
+    const journalStore = store();
+    const mediaEventId = await createActiveSyntheticEvent();
+    const targetEventId = await createActiveSyntheticEvent();
+    const media = await createReadySyntheticPhoto(mediaEventId);
+
+    await expect(
+      executeJournalCapability(
+        'append-journal-entry',
+        photoInput(
+          targetEventId,
+          media.id,
+          'This cross-event media reference must be rejected.',
+          null,
+          null,
+        ),
+        humanMutationInvocation(`issue17-wrong-event-${randomUUID()}`),
+        journalStore,
+      ),
+    ).rejects.toMatchObject({
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      message: 'The capability could not be completed.',
+    });
+
+    const targetRows = await databaseConnection()
+      .db.select({ id: journalEntries.id })
+      .from(journalEntries)
+      .where(eq(journalEntries.eventId, targetEventId));
+    expect(targetRows).toEqual([]);
+    const [retainedMedia] = await databaseConnection()
+      .db.select({ eventId: mediaRecords.eventId })
+      .from(mediaRecords)
+      .where(eq(mediaRecords.id, media.id))
+      .limit(1);
+    expect(retainedMedia).toEqual({ eventId: mediaEventId });
+  });
+
+  test('redacts a photo with an appended supersession while retaining the checksum-bound original', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const media = await createReadySyntheticPhoto(eventId);
+    const original = await executeJournalCapability(
+      'append-journal-entry',
+      photoInput(
+        eventId,
+        media.id,
+        'Synthetic scene before append-only redaction.',
+        null,
+        '2026-08-10T18:16:00.000Z',
+      ),
+      humanMutationInvocation(`issue17-redaction-original-${randomUUID()}`),
+      journalStore,
+    );
+    const redaction = await executeJournalCapability(
+      'redact-journal-entry',
+      textInput(
+        eventId,
+        '[Content redacted — original retained in journal]',
+        '2026-08-10T18:17:00.000Z',
+        {
+          entryId: original.id,
+          entrySequence: original.sequence,
+          kind: 'redaction',
+          reason: 'Synthetic privacy-safe photo redaction.',
+        },
+      ),
+      humanMutationInvocation(`issue17-redaction-${randomUUID()}`),
+      journalStore,
+    );
+
+    const persisted = await databaseConnection()
+      .db.select({
+        id: journalEntries.id,
+        kind: journalEntries.kind,
+        mediaId: journalEntries.mediaId,
+        payload: journalEntries.payload,
+        supersedesEntryId: journalEntries.supersedesEntryId,
+        supersedesEntrySequence: journalEntries.supersedesEntrySequence,
+        supersessionKind: journalEntries.supersessionKind,
+      })
+      .from(journalEntries)
+      .where(eq(journalEntries.eventId, eventId))
+      .orderBy(asc(journalEntries.sequence));
+    expect(persisted).toEqual([
+      {
+        id: original.id,
+        kind: 'photo',
+        mediaId: media.id,
+        payload: original.payload,
+        supersedesEntryId: null,
+        supersedesEntrySequence: null,
+        supersessionKind: null,
+      },
+      {
+        id: redaction.id,
+        kind: 'text',
+        mediaId: null,
+        payload: redaction.payload,
+        supersedesEntryId: original.id,
+        supersedesEntrySequence: original.sequence,
+        supersessionKind: 'redaction',
+      },
+    ]);
+    const projection = await buildPhotoChecksumExportQuery(
+      databaseConnection().db,
+      eventId,
+    );
+    expect(projection).toEqual([
+      {
+        journalEntryId: original.id,
+        eventId,
+        sequence: original.sequence,
+        mediaId: media.id,
+        sanitizedContentSha256: media.sanitizedContentSha256,
+        sanitizedByteLength: media.sanitizedByteLength,
+        detectedContentType: 'image/jpeg',
+      },
+    ]);
   });
 
   test('appends corrections and redactions with provenance while retaining every original row', async () => {
@@ -811,6 +1093,11 @@ describeWithDatabase('event journal database guarantees', () => {
       .values({
         id: uploadIntentId,
         eventId,
+        facilityId: syntheticFixtureIds().northFacilityId,
+        budgetPrincipalDigest: sha256(
+          'synthetic journal projection fixture principal',
+        ),
+        budgetPrincipalAttributed: true,
         byteLength: 128,
         contentSha256: 'd'.repeat(64),
         declaredContentType: 'image/jpeg',

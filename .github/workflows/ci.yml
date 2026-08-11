@@ -13,7 +13,7 @@ jobs:
   check:
     name: Format, lint, typecheck, and test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16-alpine
