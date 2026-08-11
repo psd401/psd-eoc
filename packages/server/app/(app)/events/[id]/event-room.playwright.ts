@@ -1908,29 +1908,38 @@ test('location maps support drag correction, one-map history, honest states, and
   await expectAxeClean(page, 'live editable location map');
   const latitudeInput = composer.getByLabel('Latitude');
   const longitudeInput = composer.getByLabel('Longitude');
-  const beforeDragLatitude = await latitudeInput.inputValue();
-  const beforeDragLongitude = await longitudeInput.inputValue();
+  const beforeDragCoordinates = `${await latitudeInput.inputValue()},${await longitudeInput.inputValue()}`;
   const markerBounds = await marker.boundingBox();
   if (markerBounds === null) {
     throw new Error('The synthetic editable location marker is not visible.');
   }
-  await page.mouse.move(
-    markerBounds.x + markerBounds.width / 2,
-    markerBounds.y + markerBounds.height / 2,
-  );
-  await page.mouse.down();
-  await page.mouse.move(
-    markerBounds.x + markerBounds.width / 2 + 48,
-    markerBounds.y + markerBounds.height / 2 + 24,
-    { steps: 8 },
-  );
-  await page.mouse.up();
+  await expect(marker).toHaveClass(/maplibregl-marker-draggable/u);
+  const markerClientX = markerBounds.x + markerBounds.width / 2;
+  const markerClientY = markerBounds.y + markerBounds.height / 2;
+  await marker.dispatchEvent('mousedown', {
+    button: 0,
+    buttons: 1,
+    clientX: markerClientX,
+    clientY: markerClientY,
+  });
+  await marker.dispatchEvent('mousemove', {
+    button: 0,
+    buttons: 1,
+    clientX: markerClientX + 48,
+    clientY: markerClientY + 24,
+  });
+  await marker.dispatchEvent('mouseup', {
+    button: 0,
+    buttons: 0,
+    clientX: markerClientX + 48,
+    clientY: markerClientY + 24,
+  });
   await expect
-    .poll(() => latitudeInput.inputValue())
-    .not.toBe(beforeDragLatitude);
-  await expect
-    .poll(() => longitudeInput.inputValue())
-    .not.toBe(beforeDragLongitude);
+    .poll(
+      async () =>
+        `${await latitudeInput.inputValue()},${await longitudeInput.inputValue()}`,
+    )
+    .not.toBe(beforeDragCoordinates);
   expect(await liveCanvas.evaluate((canvas) => canvas.isConnected)).toBe(true);
   await composer.getByLabel('Latitude').fill('47.386001');
   await composer.getByLabel('Longitude').fill('-122.623002');

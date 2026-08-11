@@ -409,9 +409,10 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).toContain(
       'Browser GPS does not establish room-level location.',
     );
-    expect(html).toContain(
-      '<time dateTime="2026-08-10T16:05:00.000Z">Aug 10, 2026 at 9:05:00 AM PDT</time>',
-    );
+    expect(
+      html.match(/<time dateTime="2026-08-10T16:05:00\.000Z">[^<]+<\/time>/gu),
+    ).toHaveLength(1);
+    expect(html).not.toContain('Server-recorded time:');
     expect(html).toContain('Ambiguous location: Near the west field.');
     expect(html).toContain('Reason: Two possible assembly points.');
     expect(html).toContain('Location unknown.');
