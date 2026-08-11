@@ -43,6 +43,22 @@ export class MediaPipelineError extends CapabilityEngineError {
   }
 }
 
+/**
+ * Internal signal for a structurally invalid image whose upload intent must be
+ * made terminal before its public-safe validation failure is returned. The
+ * exact binding prevents persistence from rejecting a different event upload.
+ */
+export class TerminalMediaImageRejectionError extends MediaPipelineError {
+  public constructor(
+    public readonly eventId: string,
+    public readonly uploadIntentId: string,
+    message: string,
+  ) {
+    super('invalid', message);
+    this.name = 'TerminalMediaImageRejectionError';
+  }
+}
+
 export function invalidMedia(message: string): MediaPipelineError {
   return new MediaPipelineError('invalid', message);
 }

@@ -85,9 +85,10 @@ function emptyClient(
   };
 }
 
-function fixedSigner(
-  url = 'https://synthetic-private-media.s3.us-west-2.amazonaws.com/object',
-): MediaObjectStoreSigner {
+const FIXED_SIGNER_URL =
+  'https://synthetic-private-media.s3.us-west-2.amazonaws.com/object';
+
+function fixedSigner(url = FIXED_SIGNER_URL): MediaObjectStoreSigner {
   return async () => url;
 }
 
@@ -140,6 +141,123 @@ describe('media object-store configuration', () => {
       expect(error).toBeInstanceOf(MediaObjectStoreError);
       expect(String(error)).not.toContain(invalidBucket);
     }
+  });
+
+  test('allows tests and deployments to tighten but never relax provider deadlines', () => {
+    for (const providerTimeoutMilliseconds of [0, 10_001, 1.5]) {
+      expect(() =>
+        createMediaObjectStore({
+          environment: ENVIRONMENT,
+          client: emptyClient(),
+          signer: fixedSigner(),
+          providerTimeoutMilliseconds,
+        }),
+      ).toThrow(RangeError);
+    }
+  });
+
+  test('fails closed and aborts stalled provider calls within the configured bound', async () => {
+    let tagReadAborted = false;
+    const stalledTagRead = createMediaObjectStore({
+      environment: ENVIRONMENT,
+      client: emptyClient({
+        getObjectTagging: async (_command, options) =>
+          new Promise((_resolve, reject) => {
+            options?.abortSignal.addEventListener(
+              'abort',
+              () => {
+                tagReadAborted = true;
+                reject(new Error('synthetic provider abort detail'));
+              },
+              { once: true },
+            );
+          }),
+      }),
+      signer: fixedSigner(),
+      providerTimeoutMilliseconds: 5,
+    });
+    await expectObjectStoreError(
+      stalledTagRead.getMalwareScanStatus(RAW_KEY),
+      'STORAGE_UNAVAILABLE',
+    );
+    expect(tagReadAborted).toBe(true);
+
+    let releaseStalledSigner: ((url: string) => void) | undefined;
+    const stalledSignerOperation = new Promise<string>((resolve) => {
+      releaseStalledSigner = resolve;
+    });
+    const stalledSigner = createMediaObjectStore({
+      environment: ENVIRONMENT,
+      client: emptyClient(),
+      signer: async () => stalledSignerOperation,
+      providerTimeoutMilliseconds: 5,
+    });
+    await expectObjectStoreError(
+      stalledSigner.createPrivateReadGrant({ storageKey: SANITIZED_KEY }),
+      'STORAGE_UNAVAILABLE',
+    );
+    releaseStalledSigner?.(FIXED_SIGNER_URL);
+    await stalledSignerOperation;
+  });
+
+  test('retains signer permits after caller timeouts until underlying work settles', async () => {
+    let resolveFirstSigner: ((url: string) => void) | undefined;
+    const firstSignerOperation = new Promise<string>((resolve) => {
+      resolveFirstSigner = resolve;
+    });
+    let resolveSecondSigner: ((url: string) => void) | undefined;
+    const secondSignerOperation = new Promise<string>((resolve) => {
+      resolveSecondSigner = resolve;
+    });
+    let signerEntries = 0;
+    const signer: MediaObjectStoreSigner = async () => {
+      signerEntries += 1;
+      switch (signerEntries) {
+        case 1:
+          return firstSignerOperation;
+        case 2:
+          return secondSignerOperation;
+        default:
+          return FIXED_SIGNER_URL;
+      }
+    };
+    const store = createMediaObjectStore({
+      environment: ENVIRONMENT,
+      client: emptyClient(),
+      signer,
+      providerTimeoutMilliseconds: 5,
+    });
+    const bytes = new TextEncoder().encode('bounded signer fixture');
+
+    await expectObjectStoreError(
+      store.createPrivateReadGrant({ storageKey: SANITIZED_KEY }),
+      'STORAGE_UNAVAILABLE',
+    );
+    await expectObjectStoreError(
+      store.createRawUploadGrant({
+        storageKey: RAW_KEY,
+        byteLength: bytes.byteLength,
+        contentSha256: hexDigest(bytes),
+        contentType: 'image/jpeg',
+      }),
+      'STORAGE_UNAVAILABLE',
+    );
+    await expectObjectStoreError(
+      store.createPrivateReadGrant({ storageKey: SANITIZED_KEY }),
+      'STORAGE_UNAVAILABLE',
+    );
+    expect(signerEntries).toBe(2);
+
+    resolveFirstSigner?.(FIXED_SIGNER_URL);
+    resolveSecondSigner?.(FIXED_SIGNER_URL);
+    await Promise.all([firstSignerOperation, secondSignerOperation]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await expect(
+      store.createPrivateReadGrant({ storageKey: SANITIZED_KEY }),
+    ).resolves.toMatchObject({ expiresInSeconds: 60 });
+    expect(signerEntries).toBe(3);
   });
 });
 
@@ -289,6 +407,41 @@ describe('raw private media uploads', () => {
 });
 
 describe('bounded raw object reads', () => {
+  test('cancels a stalled streamed body when the provider deadline expires', async () => {
+    const bytes = new TextEncoder().encode('synthetic stalled body');
+    let bodyCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        // Deliberately never enqueue or close.
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    });
+    const store = createMediaObjectStore({
+      environment: ENVIRONMENT,
+      client: emptyClient({
+        getObject: async () =>
+          ({
+            Body: body,
+            ContentLength: bytes.byteLength,
+          }) as unknown as GetObjectCommandOutput,
+      }),
+      signer: fixedSigner(),
+      providerTimeoutMilliseconds: 5,
+    });
+
+    await expectObjectStoreError(
+      store.readVerifiedRawObject({
+        storageKey: RAW_KEY,
+        expectedByteLength: bytes.byteLength,
+        expectedContentSha256: hexDigest(bytes),
+      }),
+      'STORAGE_UNAVAILABLE',
+    );
+    expect(bodyCancelled).toBe(true);
+  });
+
   test('ranges, bounds, and recomputes the recorded SHA-256 before returning bytes', async () => {
     const bytes = new TextEncoder().encode('synthetic validated upload');
     const digest = hexDigest(bytes);
@@ -436,6 +589,85 @@ describe('bounded raw object reads', () => {
 });
 
 describe('sanitized private media writes and reads', () => {
+  test('aborts a stalled sanitized write and fails closed at its provider deadline', async () => {
+    const bytes = new TextEncoder().encode('sanitized stalled write');
+    let putAborted = false;
+    const store = createMediaObjectStore({
+      environment: ENVIRONMENT,
+      client: emptyClient({
+        putObject: async (_command, options) =>
+          new Promise((_resolve, reject) => {
+            options?.abortSignal.addEventListener(
+              'abort',
+              () => {
+                putAborted = true;
+                reject(new Error('synthetic stalled sanitized write'));
+              },
+              { once: true },
+            );
+          }),
+      }),
+      signer: fixedSigner(),
+      providerTimeoutMilliseconds: 5,
+    });
+
+    await expectObjectStoreError(
+      store.putSanitizedObject({
+        storageKey: SANITIZED_KEY,
+        bytes,
+        contentType: 'image/jpeg',
+        metadata: {
+          eventId: EVENT_ID,
+          mediaId: MEDIA_ID,
+          uploadIntentId: UPLOAD_INTENT_ID,
+        },
+      }),
+      'STORAGE_UNAVAILABLE',
+    );
+    expect(putAborted).toBe(true);
+  });
+
+  test('aborts a stalled immutable-retry verification read and fails closed', async () => {
+    const bytes = new TextEncoder().encode('sanitized stalled retry read');
+    let retryReadAborted = false;
+    const store = createMediaObjectStore({
+      environment: ENVIRONMENT,
+      client: emptyClient({
+        putObject: async () => {
+          throw preconditionFailed();
+        },
+        getObject: async (_command, options) =>
+          new Promise((_resolve, reject) => {
+            options?.abortSignal.addEventListener(
+              'abort',
+              () => {
+                retryReadAborted = true;
+                reject(new Error('synthetic stalled immutable retry read'));
+              },
+              { once: true },
+            );
+          }),
+      }),
+      signer: fixedSigner(),
+      providerTimeoutMilliseconds: 5,
+    });
+
+    await expectObjectStoreError(
+      store.putSanitizedObject({
+        storageKey: SANITIZED_KEY,
+        bytes,
+        contentType: 'image/jpeg',
+        metadata: {
+          eventId: EVENT_ID,
+          mediaId: MEDIA_ID,
+          uploadIntentId: UPLOAD_INTENT_ID,
+        },
+      }),
+      'STORAGE_UNAVAILABLE',
+    );
+    expect(retryReadAborted).toBe(true);
+  });
+
   test('normally stores checksum-bound bytes with only server-owned metadata and bucket defaults', async () => {
     const bytes = new TextEncoder().encode('sanitized jpeg bytes');
     const digest = hexDigest(bytes);
@@ -679,7 +911,7 @@ describe('sanitized private media writes and reads', () => {
           uploadIntentId: UPLOAD_INTENT_ID,
         },
       }),
-      'CHECKSUM_MISMATCH',
+      'STORAGE_UNAVAILABLE',
     );
   });
 

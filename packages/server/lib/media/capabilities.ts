@@ -31,6 +31,7 @@ import {
   mediaNotFound,
   mediaScanPending,
   mediaUnavailable,
+  TerminalMediaImageRejectionError,
 } from './errors';
 import {
   MEDIA_READ_GRANT_SECONDS,
@@ -47,8 +48,11 @@ import {
 } from './object-store';
 import {
   createMediaProcessingGate,
+  createMediaProviderGate,
   MediaProcessingCapacityError,
+  MediaProviderCapacityError,
   type MediaProcessingGate,
+  type MediaProviderGate,
 } from './processing-gate';
 import {
   createDefaultMediaRepositoryRuntime,
@@ -69,6 +73,7 @@ export interface MediaCapabilityDependencies {
   readonly createId?: () => string;
   readonly sanitizeImage?: typeof sanitizeUploadedImage;
   readonly processingGate?: MediaProcessingGate;
+  readonly providerGate?: MediaProviderGate;
 }
 
 interface ResolvedMediaCapabilityDependencies {
@@ -76,13 +81,17 @@ interface ResolvedMediaCapabilityDependencies {
   readonly createId: () => string;
   readonly sanitizeImage: typeof sanitizeUploadedImage;
   readonly processingGate: MediaProcessingGate;
+  readonly providerGate: MediaProviderGate;
 }
 
 const EVENT_CACHE_PREFIX = 'media:event:';
 const INTENT_CACHE_PREFIX = 'media:intent:';
 const LOCKED_INTENT_CACHE_PREFIX = 'media:intent:locked:';
 const READY_CACHE_PREFIX = 'media:ready:';
+const REJECTED_IMAGE_MESSAGE =
+  'The image could not be safely processed. Choose a different image and try again.';
 const defaultMediaProcessingGate = createMediaProcessingGate();
+const defaultMediaProviderGate = createMediaProviderGate();
 
 function mediaBudgetPrincipal(actor: Actor): MediaBudgetPrincipal {
   switch (actor.kind) {
@@ -121,6 +130,7 @@ function resolveDependencies(
     createId: dependencies.createId ?? randomUUID,
     sanitizeImage: dependencies.sanitizeImage ?? sanitizeUploadedImage,
     processingGate: dependencies.processingGate ?? defaultMediaProcessingGate,
+    providerGate: dependencies.providerGate ?? defaultMediaProviderGate,
   });
 }
 
@@ -214,12 +224,65 @@ function translateObjectStoreError(error: unknown): never {
   }
 }
 
-async function callObjectStore<Result>(
+async function runMediaProvider<Result>(
+  dependencies: ResolvedMediaCapabilityDependencies,
   operation: () => Promise<Result>,
 ): Promise<Result> {
   try {
-    return await operation();
+    return await dependencies.providerGate.run(operation);
   } catch (error) {
+    if (error instanceof MediaProviderCapacityError) {
+      throw mediaUnavailable();
+    }
+    throw error;
+  }
+}
+
+async function callObjectStore<Result>(
+  dependencies: ResolvedMediaCapabilityDependencies,
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  try {
+    return await runMediaProvider(dependencies, operation);
+  } catch (error) {
+    translateObjectStoreError(error);
+  }
+}
+
+function terminalImageRejection(
+  intent: ResolvedMediaUploadIntent['intent'],
+  message: string,
+): TerminalMediaImageRejectionError {
+  return new TerminalMediaImageRejectionError(
+    intent.eventId,
+    intent.id,
+    message,
+  );
+}
+
+async function readVerifiedRawImage(
+  intent: ResolvedMediaUploadIntent['intent'],
+  dependencies: ResolvedMediaCapabilityDependencies,
+) {
+  try {
+    return await runMediaProvider(dependencies, () =>
+      dependencies.objectStore.readVerifiedRawObject({
+        storageKey: intent.storageKey,
+        expectedByteLength: intent.byteLength,
+        expectedContentSha256: intent.contentSha256,
+      }),
+    );
+  } catch (error) {
+    if (
+      error instanceof MediaObjectStoreError &&
+      (error.code === 'CHECKSUM_MISMATCH' ||
+        error.code === 'OBJECT_SIZE_MISMATCH')
+    ) {
+      throw terminalImageRejection(
+        intent,
+        'The uploaded image did not match the selected file. Please upload it again.',
+      );
+    }
     translateObjectStoreError(error);
   }
 }
@@ -238,7 +301,7 @@ async function sanitizeImage(
     });
   } catch (error) {
     if (error instanceof ImageValidationError) {
-      throw invalidMedia(error.message);
+      throw terminalImageRejection(intent, error.message);
     }
     throw mediaUnavailable();
   }
@@ -301,7 +364,7 @@ async function uploadIntentOutput(
       'The photo upload grant has expired. Start a new upload.',
     );
   }
-  const grant = await callObjectStore(() =>
+  const grant = await callObjectStore(dependencies, () =>
     dependencies.objectStore.createRawUploadGrant({
       storageKey: resolved.intent.storageKey,
       byteLength: resolved.intent.byteLength,
@@ -432,98 +495,100 @@ function createRegistrations(
         .facilityId;
     },
     async handler(input, context): Promise<MediaRecord> {
-      const resolved = await uploadIntent(input.uploadIntentId, context, true);
-      if (resolved.readyRecord !== null) {
-        return mediaRecordOutput(resolved.readyRecord);
-      }
-      if (resolved.intent.status !== 'pending-upload') {
-        throw mediaConflict(
-          'The photo upload cannot be completed in its current state.',
+      // The fail-fast gate is acquired before the upload-intent row lock or
+      // any provider call. Saturated photo work therefore releases its short
+      // capability transaction instead of waiting on media I/O, while the
+      // canonical engine still owns authorization, idempotency, and audit.
+      return runMediaProcessing(dependencies, async () => {
+        const resolved = await uploadIntent(
+          input.uploadIntentId,
+          context,
+          true,
         );
-      }
-      const currentTime = await readCapabilityTime(context);
-      if (currentTime.getTime() > Date.parse(resolved.intent.expiresAt)) {
-        throw mediaConflict(
-          'The photo upload has expired. Start a new upload.',
-        );
-      }
-
-      const scanStatus = await callObjectStore(() =>
-        dependencies.objectStore.getMalwareScanStatus(
-          resolved.intent.storageKey,
-        ),
-      );
-      switch (scanStatus) {
-        case 'pending':
-          throw mediaScanPending();
-        case 'threats':
-          throw invalidMedia(
-            'The photo did not pass its safety scan. Choose a different image.',
+        if (resolved.readyRecord !== null) {
+          return mediaRecordOutput(resolved.readyRecord);
+        }
+        if (resolved.intent.status === 'rejected') {
+          throw invalidMedia(REJECTED_IMAGE_MESSAGE);
+        }
+        if (resolved.intent.status !== 'pending-upload') {
+          throw mediaConflict(
+            'The photo upload cannot be completed in its current state.',
           );
-        case 'unsupported':
-        case 'access-denied':
-        case 'failed':
+        }
+        const currentTime = await readCapabilityTime(context);
+        if (currentTime.getTime() > Date.parse(resolved.intent.expiresAt)) {
+          throw mediaConflict(
+            'The photo upload has expired. Start a new upload.',
+          );
+        }
+
+        const scanStatus = await callObjectStore(dependencies, () =>
+          dependencies.objectStore.getMalwareScanStatus(
+            resolved.intent.storageKey,
+          ),
+        );
+        switch (scanStatus) {
+          case 'pending':
+            throw mediaScanPending();
+          case 'threats':
+            throw terminalImageRejection(
+              resolved.intent,
+              'The photo did not pass its safety scan. Choose a different image.',
+            );
+          case 'unsupported':
+          case 'access-denied':
+          case 'failed':
+            throw mediaUnavailable();
+          case 'clean':
+            break;
+        }
+
+        const mediaId = resolved.intent.id;
+        const storageKey = readyStorageKey(resolved.intent.eventId, mediaId);
+        const raw = await readVerifiedRawImage(resolved.intent, dependencies);
+        const sanitized = await sanitizeImage(
+          resolved.intent,
+          raw.bytes,
+          dependencies,
+        );
+        const stored = await callObjectStore(dependencies, () =>
+          dependencies.objectStore.putSanitizedObject({
+            storageKey,
+            bytes: sanitized.sanitizedBytes,
+            contentType: sanitized.sanitizedContentType,
+            metadata: {
+              eventId: resolved.intent.eventId,
+              mediaId,
+              uploadIntentId: resolved.intent.id,
+            },
+          }),
+        );
+        if (
+          stored.contentSha256 !== sanitized.sanitizedContentSha256 ||
+          stored.byteLength !== sanitized.sanitizedByteLength
+        ) {
           throw mediaUnavailable();
-        case 'clean':
-          break;
-      }
-
-      const mediaId = resolved.intent.id;
-      const storageKey = readyStorageKey(resolved.intent.eventId, mediaId);
-      const { sanitized, stored } = await runMediaProcessing(
-        dependencies,
-        async () => {
-          const raw = await callObjectStore(() =>
-            dependencies.objectStore.readVerifiedRawObject({
-              storageKey: resolved.intent.storageKey,
-              expectedByteLength: resolved.intent.byteLength,
-              expectedContentSha256: resolved.intent.contentSha256,
-            }),
-          );
-          const sanitizedResult = await sanitizeImage(
-            resolved.intent,
-            raw.bytes,
-            dependencies,
-          );
-          const storedResult = await callObjectStore(() =>
-            dependencies.objectStore.putSanitizedObject({
-              storageKey,
-              bytes: sanitizedResult.sanitizedBytes,
-              contentType: sanitizedResult.sanitizedContentType,
-              metadata: {
-                eventId: resolved.intent.eventId,
-                mediaId,
-                uploadIntentId: resolved.intent.id,
-              },
-            }),
-          );
-          return { sanitized: sanitizedResult, stored: storedResult };
-        },
-      );
-      if (
-        stored.contentSha256 !== sanitized.sanitizedContentSha256 ||
-        stored.byteLength !== sanitized.sanitizedByteLength
-      ) {
-        throw mediaUnavailable();
-      }
-      const record: StoredMediaRecord = Object.freeze({
-        id: mediaId,
-        uploadIntentId: resolved.intent.id,
-        eventId: resolved.intent.eventId,
-        status: 'ready',
-        detectedContentType: sanitized.detectedContentType,
-        sanitizedByteLength: stored.byteLength,
-        sanitizedContentSha256: stored.contentSha256,
-        malwareScan: 'clean',
-        exifStripped: true,
-        createdAt: currentTime.toISOString(),
-        storageKey,
+        }
+        const record: StoredMediaRecord = Object.freeze({
+          id: mediaId,
+          uploadIntentId: resolved.intent.id,
+          eventId: resolved.intent.eventId,
+          status: 'ready',
+          detectedContentType: sanitized.detectedContentType,
+          sanitizedByteLength: stored.byteLength,
+          sanitizedContentSha256: stored.contentSha256,
+          malwareScan: 'clean',
+          exifStripped: true,
+          createdAt: currentTime.toISOString(),
+          storageKey,
+        });
+        await context.transaction.completeUpload({
+          record,
+          expectedIntentStatus: 'pending-upload',
+        });
+        return mediaRecordOutput(record);
       });
-      await context.transaction.completeUpload({
-        record,
-        expectedIntentStatus: 'pending-upload',
-      });
-      return mediaRecordOutput(record);
     },
     resultReference: (output) => output.id,
     async loadReplay(resultReference, context) {
@@ -552,7 +617,7 @@ function createRegistrations(
     async handler(input, context): Promise<MediaReadGrant> {
       const resolved = await readyMedia(input.eventId, input.mediaId, context);
       const issuedAt = await readCapabilityTime(context);
-      const grant = await callObjectStore(() =>
+      const grant = await callObjectStore(dependencies, () =>
         dependencies.objectStore.createPrivateReadGrant({
           storageKey: resolved.record.storageKey,
           expiresInSeconds: MEDIA_READ_GRANT_SECONDS,

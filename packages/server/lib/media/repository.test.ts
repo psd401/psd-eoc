@@ -18,12 +18,16 @@ import {
   MEDIA_PRINCIPAL_ROLLING_INTENT_LIMIT,
 } from './model';
 import {
+  buildBoundedMediaUploadUsageQueries,
   buildPhotoChecksumExportQuery,
+  MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS,
   mediaUploadBudgetViolation,
   type MediaUploadResourceUsage,
 } from './repository';
 
 const EVENT_ID = '00000000-0000-4000-8000-000000000701';
+const FACILITY_ID = '00000000-0000-4000-8000-000000000702';
+const USER_ID = '00000000-0000-4000-8000-000000000703';
 
 const EMPTY_USAGE: MediaUploadResourceUsage = Object.freeze({
   principalRollingIntents: 0,
@@ -67,6 +71,52 @@ describe('photo checksum journal/export binding', () => {
     expect(query.sql).toContain('"journal_entries"."kind" = $2');
     expect(query.sql).toContain('order by "journal_entries"."sequence"');
     expect(query.params).toEqual([EVENT_ID, 'photo']);
+  });
+});
+
+describe('bounded media upload usage reads', () => {
+  test('caps every history read at its allocation ceiling plus one', () => {
+    const database = drizzle.mock({ schema: { ...tables, ...relations } });
+    const queries = buildBoundedMediaUploadUsageQueries(
+      database,
+      {
+        eventId: EVENT_ID,
+        facilityId: FACILITY_ID,
+        budgetPrincipal: {
+          kind: 'human',
+          userId: USER_ID,
+          digest: 'a'.repeat(64),
+        },
+      },
+      new Date('2026-08-10T12:00:00.000Z'),
+    );
+    const compiled = {
+      principalRolling: queries.principalRolling.toSQL(),
+      eventActive: queries.eventActive.toSQL(),
+      eventRolling: queries.eventRolling.toSQL(),
+      facilityActive: queries.facilityActive.toSQL(),
+      facilityRolling: queries.facilityRolling.toSQL(),
+    };
+
+    for (const [name, query] of Object.entries(compiled)) {
+      expect(query.sql).not.toMatch(/\b(?:count|sum)\s*\(/iu);
+      expect(query.sql).toContain('order by');
+      expect(query.sql).toContain('limit');
+      expect(query.params.at(-1)).toBe(
+        MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS[
+          name as keyof typeof MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS
+        ],
+      );
+    }
+    expect(compiled.principalRolling.sql).toContain('coalesce(');
+    expect(compiled.principalRolling.sql).toContain(
+      `"idempotency_records"."capability_id" = 'create-media-upload-intent'`,
+    );
+    expect(compiled.eventActive.sql).toContain(
+      `"media_upload_intents"."status" = 'pending-upload'`,
+    );
+    expect(compiled.facilityActive.sql).toContain('inner join "events"');
+    expect(compiled.facilityRolling.sql).toContain('inner join "events"');
   });
 });
 

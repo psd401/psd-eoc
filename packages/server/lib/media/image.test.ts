@@ -4,8 +4,10 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import sharp from 'sharp';
 
 import {
+  ImageProcessingUnavailableError,
   ImageValidationError,
   isHeicDecodeAvailable,
+  mapSharpFailure,
   sanitizeUploadedImage,
   sniffImageContentType,
   type ImageSanitizationInput,
@@ -137,6 +139,16 @@ describe('sniffImageContentType', () => {
 });
 
 describe('sanitizeUploadedImage', () => {
+  test('keeps Sharp operation timeouts retryable instead of declaring malformed bytes', () => {
+    const nativeDetail =
+      'Synthetic Sharp timeout included a native provider detail.';
+    const error = mapSharpFailure(new Error(nativeDetail), 'image/jpeg');
+
+    expect(error).toBeInstanceOf(ImageProcessingUnavailableError);
+    expect(error).not.toBeInstanceOf(ImageValidationError);
+    expect(error.message).not.toContain(nativeDetail);
+  });
+
   const stillImageFixtures = [
     ['JPEG', () => jpeg, 'image/jpeg'],
     ['PNG', () => png, 'image/png'],
