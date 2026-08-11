@@ -326,9 +326,27 @@ export class PsdEocStack extends Stack {
       resourceName: GUARDDUTY_MANAGED_RULE_PREFIX,
       service: 'events',
     });
+    const mediaMalwareProtectionPlanArn = Stack.of(this).formatArn({
+      account: DEPLOYMENT_ACCOUNT,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      region: DEPLOYMENT_REGION,
+      resource: 'malware-protection-plan',
+      resourceName: '*',
+      service: 'guardduty',
+    });
     const mediaMalwareScanRole = new iam.Role(this, 'MediaMalwareScanRole', {
       assumedBy: new iam.ServicePrincipal(
         'malware-protection-plan.guardduty.amazonaws.com',
+        {
+          conditions: {
+            ArnLike: {
+              'aws:SourceArn': mediaMalwareProtectionPlanArn,
+            },
+            StringEquals: {
+              'aws:SourceAccount': DEPLOYMENT_ACCOUNT,
+            },
+          },
+        },
       ),
       description:
         'Allows GuardDuty to scan and tag only PSD EOC quarantine uploads.',

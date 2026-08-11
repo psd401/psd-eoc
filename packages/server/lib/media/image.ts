@@ -10,7 +10,7 @@ export const MAX_IMAGE_INPUT_BYTES = 25 * 1_024 * 1_024;
 export const MAX_IMAGE_OUTPUT_BYTES = 25 * 1_024 * 1_024;
 export const MAX_IMAGE_PIXELS = 40_000_000;
 export const MAX_IMAGE_PAGES = 1;
-export const MAX_SHARP_OPERATION_SECONDS = 10;
+export const MAX_IMAGE_SANITIZATION_SECONDS = 10;
 
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
 const JPEG_METADATA_MARKERS = new Set([0xe1, 0xe2, 0xed, 0xfe]);
@@ -82,6 +82,7 @@ export interface ImageSanitizationLimits {
   readonly maxInputBytes?: number;
   readonly maxOutputBytes?: number;
   readonly maxPixels?: number;
+  readonly maxProcessingSeconds?: number;
 }
 
 /**
@@ -127,6 +128,11 @@ interface ResolvedImageLimits {
   readonly maxInputBytes: number;
   readonly maxOutputBytes: number;
   readonly maxPixels: number;
+  readonly maxProcessingSeconds: number;
+}
+
+interface ImageProcessingBudget {
+  readonly deadlineMilliseconds: number;
 }
 
 interface ImageDimensions {
@@ -230,6 +236,11 @@ function resolveLimits(
       limits?.maxPixels,
       MAX_IMAGE_PIXELS,
       'maxPixels',
+    ),
+    maxProcessingSeconds: resolveTightenedLimit(
+      limits?.maxProcessingSeconds,
+      MAX_IMAGE_SANITIZATION_SECONDS,
+      'maxProcessingSeconds',
     ),
   });
 }
@@ -361,11 +372,10 @@ function sharpFormatFor(contentType: MediaContentType): string {
 
 /** A prebuilt Sharp without an HEVC-enabled libvips must fail closed. */
 export function isHeicDecodeAvailable(): boolean {
+  const heifInput = sharp.format.heif?.input;
   return (
-    sharp.format.heif.input.buffer &&
-    (sharp.format.heif.input.fileSuffix?.some(
-      (suffix) => suffix.toLowerCase() === '.heic',
-    ) ??
+    heifInput?.buffer === true &&
+    (heifInput.fileSuffix?.some((suffix) => suffix.toLowerCase() === '.heic') ??
       false)
   );
 }
@@ -396,14 +406,28 @@ function dimensionsFromMetadata(
   return Object.freeze({ width, height });
 }
 
-function sharpInput(bytes: Buffer, maxPixels: number): Sharp {
+function remainingProcessingSeconds(budget: ImageProcessingBudget): number {
+  const remaining = Math.floor(
+    (budget.deadlineMilliseconds - Date.now()) / 1_000,
+  );
+  if (remaining < 1) {
+    throw new ImageProcessingUnavailableError();
+  }
+  return remaining;
+}
+
+function sharpInput(
+  bytes: Buffer,
+  maxPixels: number,
+  budget: ImageProcessingBudget,
+): Sharp {
   return sharp(bytes, {
     failOn: 'warning',
     limitInputChannels: 4,
     limitInputPixels: maxPixels,
     sequentialRead: true,
     unlimited: false,
-  }).timeout({ seconds: MAX_SHARP_OPERATION_SECONDS });
+  }).timeout({ seconds: remainingProcessingSeconds(budget) });
 }
 
 /** Converts native Sharp details into bounded structural or operational errors. */
@@ -412,6 +436,9 @@ export function mapSharpFailure(
   detectedContentType: MediaContentType,
 ): ImageValidationError | ImageProcessingUnavailableError {
   if (error instanceof ImageValidationError) {
+    return error;
+  }
+  if (error instanceof ImageProcessingUnavailableError) {
     return error;
   }
   if (detectedContentType === 'image/heic' && !isHeicDecodeAvailable()) {
@@ -433,12 +460,17 @@ async function inspectSource(
   bytes: Buffer,
   detectedContentType: MediaContentType,
   maxPixels: number,
+  processingBudget: ImageProcessingBudget,
 ): Promise<ImageDimensions> {
   if (detectedContentType === 'image/heic' && !isHeicDecodeAvailable()) {
     throw safeError('HEIC_CODEC_UNAVAILABLE');
   }
   try {
-    const metadata = await sharpInput(bytes, maxPixels).metadata();
+    const metadata = await sharpInput(
+      bytes,
+      maxPixels,
+      processingBudget,
+    ).metadata();
     if (metadata.format !== sharpFormatFor(detectedContentType)) {
       throw safeError('CONTENT_TYPE_MISMATCH');
     }
@@ -632,6 +664,7 @@ async function verifySanitizedOutput(
   bytes: Buffer,
   contentType: SanitizedMediaContentType,
   limits: ResolvedImageLimits,
+  processingBudget: ImageProcessingBudget,
 ): Promise<ImageDimensions> {
   if (sniffImageContentType(bytes) !== contentType) {
     throw safeError('SANITIZED_IMAGE_INVALID');
@@ -639,16 +672,19 @@ async function verifySanitizedOutput(
   inspectOutputContainer(bytes, contentType);
 
   try {
-    const decoder = sharpInput(bytes, limits.maxPixels);
+    const decoder = sharpInput(bytes, limits.maxPixels, processingBudget);
     const metadata = await decoder.metadata();
     if (metadata.format !== sharpFormatFor(contentType)) {
       throw safeError('SANITIZED_IMAGE_INVALID');
     }
     assertNoDecoderMetadata(metadata);
     const dimensions = dimensionsFromMetadata(metadata, limits.maxPixels);
-    await sharpInput(bytes, limits.maxPixels).stats();
+    await sharpInput(bytes, limits.maxPixels, processingBudget).stats();
     return dimensions;
   } catch (error) {
+    if (error instanceof ImageProcessingUnavailableError) {
+      throw error;
+    }
     if (error instanceof ImageValidationError) {
       if (
         error.code === 'PAGE_LIMIT_EXCEEDED' ||
@@ -707,6 +743,13 @@ export async function sanitizeUploadedImage(
   configuredLimits?: ImageSanitizationLimits,
 ): Promise<SanitizedImage> {
   const limits = resolveLimits(configuredLimits);
+  // One wall-clock budget covers every native metadata, decode, encode, and
+  // verification call. Each Sharp operation receives only the remaining
+  // whole seconds, so a sequence of individually valid operations cannot
+  // multiply the process-level CPU deadline.
+  const processingBudget: ImageProcessingBudget = Object.freeze({
+    deadlineMilliseconds: Date.now() + limits.maxProcessingSeconds * 1_000,
+  });
   // Reject before copying so an oversized object cannot force a second large
   // allocation. The copied buffer then becomes the immutable snapshot hashed,
   // decoded, and rewritten below.
@@ -723,11 +766,16 @@ export async function sanitizeUploadedImage(
     limits,
   );
   // Inspect page and pixel bounds before starting the full decode/rewrite.
-  await inspectSource(sourceBytes, detectedContentType, limits.maxPixels);
+  await inspectSource(
+    sourceBytes,
+    detectedContentType,
+    limits.maxPixels,
+    processingBudget,
+  );
   const sanitizedContentType = sanitizedContentTypeFor(detectedContentType);
 
   try {
-    let pipeline = sharpInput(sourceBytes, limits.maxPixels)
+    let pipeline = sharpInput(sourceBytes, limits.maxPixels, processingBudget)
       .rotate()
       .toColourspace('srgb');
     if (detectedContentType === 'image/heic') {
@@ -750,6 +798,7 @@ export async function sanitizeUploadedImage(
       sanitizedBytes,
       sanitizedContentType,
       limits,
+      processingBudget,
     );
     const sanitizedContentSha256 = contentSha256(sanitizedBytes);
 

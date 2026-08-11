@@ -311,10 +311,11 @@ async function sanitizeImage(
 
 async function runMediaProcessing<Result>(
   dependencies: ResolvedMediaCapabilityDependencies,
+  facilityId: string,
   operation: () => Promise<Result>,
 ): Promise<Result> {
   try {
-    return await dependencies.processingGate.run(operation);
+    return await dependencies.processingGate.run(facilityId, operation);
   } catch (error) {
     if (error instanceof MediaProcessingCapacityError) {
       throw mediaUnavailable();
@@ -522,11 +523,16 @@ function createRegistrations(
         .facilityId;
     },
     async handler(input, context): Promise<MediaRecord> {
+      const facilityId = (
+        await uploadIntent(input.uploadIntentId, context, false)
+      ).facilityId;
       // The fail-fast gate is acquired before the upload-intent row lock or
       // any provider call. Saturated photo work therefore releases its short
       // capability transaction instead of waiting on media I/O, while the
       // canonical engine still owns authorization, idempotency, and audit.
-      return runMediaProcessing(dependencies, async () => {
+      // The trusted facility key prevents one site from occupying every local
+      // image slot; durable repository budgets remain cross-instance.
+      return runMediaProcessing(dependencies, facilityId, async () => {
         const resolved = await uploadIntent(
           input.uploadIntentId,
           context,
@@ -645,6 +651,12 @@ function createRegistrations(
     async handler(input, context): Promise<MediaReadGrant> {
       const resolved = await readyMedia(input.eventId, input.mediaId, context);
       const issuedAt = await readCapabilityTime(context);
+      // Read grants deliberately have no persistent allocation quota: they
+      // accept and retain no untrusted bytes, expire after two minutes, and
+      // every issuance repeats facility plus visible same-event authorization
+      // under the event/redaction lock. The per-instance provider gate bounds
+      // signer bursts; durable principal/event/facility quotas remain reserved
+      // for upload admission and native image work.
       const grant = await callObjectStore(dependencies, () =>
         dependencies.objectStore.createPrivateReadGrant({
           storageKey: resolved.record.storageKey,

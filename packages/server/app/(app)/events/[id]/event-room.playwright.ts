@@ -3710,6 +3710,9 @@ test('photo upload uses canonical create, exact CORS PUT, completion, journal po
 
   await page.goto(fixturePath(uploadEventId));
   await expect(page.locator('.timeline-entry')).toHaveCount(1);
+  await expect(
+    page.locator('.photo-composer .dialog-classification'),
+  ).toContainText('DRILL — TRAINING ONLY');
   const pageOrigin = await page.evaluate(() => window.location.origin);
   const photoFile = page.getByLabel('Photo file');
   await photoFile.setInputFiles({
@@ -3719,7 +3722,7 @@ test('photo upload uses canonical create, exact CORS PUT, completion, journal po
   });
   const altText = page.getByLabel('Photo description (alternative text)');
   await expect(altText).toHaveValue(
-    /^Photo by Synthetic Event Room Operator at .+/u,
+    /^Photo by Synthetic Event Room Operator at .+\. Visual details were not described\.$/u,
   );
   await altText.fill('Synthetic staff exercise photo');
   await page
@@ -3741,6 +3744,9 @@ test('photo upload uses canonical create, exact CORS PUT, completion, journal po
   await expect(postedEntry).toContainText(
     'Synthetic staff-only exercise evidence',
   );
+  await expect(
+    postedEntry.locator('.photo-entry .dialog-classification'),
+  ).toContainText('DRILL — TRAINING ONLY');
   expect(media.createInputs).toEqual([
     {
       eventId: uploadEventId,
