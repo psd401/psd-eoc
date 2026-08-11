@@ -648,6 +648,23 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
+    if (
+      sql.includes('effective_admin_roles') &&
+      sql.includes(
+        'not exists (select "user_id" from "access_membership_member_groups"',
+      ) &&
+      sql.includes('not exists (select "id" from "group_sources"') &&
+      parameterStrings.filter((value) => value === ACCESS_GROUP_SOURCE_ID)
+        .length === 2
+    ) {
+      return {
+        records: [
+          [{ stringValue: USER_ID }],
+          [{ stringValue: SECOND_USER_ID }],
+        ],
+        $metadata: {},
+      };
+    }
     if (sql.includes('from "group_sources"')) {
       if (
         sql.startsWith('select "id", "kind", "purpose"') &&
@@ -937,15 +954,6 @@ class FakeRdsDataClient {
             $metadata: {},
           }
         : { records: [], $metadata: {} };
-    }
-    if (sql.includes('effective_admin_roles')) {
-      return {
-        records: [
-          [{ stringValue: USER_ID }],
-          [{ stringValue: SECOND_USER_ID }],
-        ],
-        $metadata: {},
-      };
     }
     if (sql.includes('from "user_roles"')) {
       if (sql.includes('"user_id"') && sql.includes('order by')) {
@@ -1895,6 +1903,7 @@ describe('admin Aurora Data API transport regression', () => {
       );
     expect(listProjectionStatements).toHaveLength(4);
 
+    const roleStatementStart = client.statements.length;
     const roleResult = await executeSetUserRolesCapability({
       authenticated,
       store,
@@ -1907,6 +1916,22 @@ describe('admin Aurora Data API transport regression', () => {
     });
     executedCapabilities.add('set-user-roles');
     expect(roleResult.roles).toEqual(['staff', 'admin']);
+    const reachableAdministratorStatement = requireRecordedStatement(
+      client.statements
+        .slice(roleStatementStart)
+        .find(({ sql }) => sql.includes('effective_admin_roles')),
+    );
+    expect(reachableAdministratorStatement.sql).toContain(
+      'not exists (select "user_id" from "access_membership_member_groups"',
+    );
+    expect(reachableAdministratorStatement.sql).toContain(
+      'not exists (select "id" from "group_sources"',
+    );
+    expect(
+      reachableAdministratorStatement.parameterStrings.filter(
+        (value) => value === ACCESS_GROUP_SOURCE_ID,
+      ),
+    ).toHaveLength(2);
 
     const usersAfterRoleChange = await executeListUsersCapability({
       authenticated,
