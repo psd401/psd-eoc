@@ -29,6 +29,12 @@ import {
 } from '../../../db/client';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase, migrationsFolder } from '../../../drizzle/migrate';
+import { createDrizzleSecurityAuditRepository } from '../../../lib/audit/drizzle-repository';
+import type { TrustedCapabilityInvocation } from '../../../lib/capabilities/engine';
+import {
+  createDrizzleJournalCapabilityStore,
+  executeJournalCapability,
+} from '../../../lib/capabilities/journal';
 import { requireSyntheticTestDatabaseUrl } from '../event-types/test-database';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -137,6 +143,13 @@ interface ImmutableTargetPresenceRow extends Record<string, unknown> {
   readonly table_name: string;
 }
 
+interface AuditCompatibilityRow extends Record<string, unknown> {
+  readonly action: string;
+  readonly outcome: string;
+  readonly reason_code: string | null;
+  readonly request_id: string;
+}
+
 interface NullableSnapshotRow extends Record<string, unknown> {
   readonly snapshot: string | null;
 }
@@ -240,14 +253,17 @@ async function readDatabaseMarker(
 
 async function createOwnedDatabase(
   createdContext: MigrationTestContext,
+  closeAdmin: (admin: PostgresDatabaseConnection) => Promise<void> = async (
+    admin,
+  ) => admin.close(),
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  let created = false;
+  let markerVerified = false;
+  const errors: unknown[] = [];
   try {
     await admin.db.execute(
       sql.raw(`create database "${createdContext.databaseName}"`),
     );
-    created = true;
     await admin.db.execute(
       sql.raw(
         `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
@@ -256,24 +272,35 @@ async function createOwnedDatabase(
     expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
       createdContext.marker,
     );
+    markerVerified = true;
   } catch (error) {
-    if (created) {
-      try {
-        await admin.db.execute(
-          sql.raw(
-            `drop database "${createdContext.databaseName}" with (force)`,
-          ),
-        );
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'Disposable migration database creation and rollback both failed.',
-        );
-      }
+    errors.push(error);
+  }
+
+  try {
+    await closeAdmin(admin);
+  } catch (closeError) {
+    errors.push(closeError);
+  }
+
+  // Never delete from the create latch alone. A close failure happens after
+  // the caller-visible creation boundary, so the caller cannot set its cleanup
+  // latch; only exact marker readback permits a fresh connection to clean up
+  // before the close failure is surfaced.
+  if (errors.length > 0 && markerVerified) {
+    try {
+      await dropOwnedDatabase(createdContext);
+    } catch (cleanupError) {
+      errors.push(cleanupError);
     }
-    throw error;
-  } finally {
-    await admin.close();
+  }
+
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      'Disposable migration database operation, connection close, or marker-owned cleanup failed.',
+    );
   }
 }
 
@@ -281,22 +308,36 @@ async function dropOwnedDatabase(
   createdContext: MigrationTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  const errors: unknown[] = [];
   try {
     const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    if (marker === undefined) return;
-    if (marker !== createdContext.marker) {
+    if (marker !== undefined && marker !== createdContext.marker) {
       throw new Error(
         'Refusing to drop a database without the exact issue #26 ownership marker.',
       );
     }
-    await admin.db.execute(
-      sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
-    );
-    expect(
-      await readDatabaseMarker(admin, createdContext.databaseName),
-    ).toBeUndefined();
-  } finally {
+    if (marker === createdContext.marker) {
+      await admin.db.execute(
+        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+      );
+      expect(
+        await readDatabaseMarker(admin, createdContext.databaseName),
+      ).toBeUndefined();
+    }
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
     await admin.close();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      'Disposable migration database cleanup and connection close both failed.',
+    );
   }
 }
 
@@ -764,6 +805,68 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
 
   afterAll(async () => {
     await cleanupResources();
+  });
+
+  test('removes a marker-owned child database when the creating connection close fails', async () => {
+    if (baseTestDatabaseUrl === undefined) {
+      throw new Error('TEST_DATABASE_URL is required for migration tests.');
+    }
+    const isolatedContext = buildContext(baseTestDatabaseUrl);
+    const closeFailure = new Error(
+      'Synthetic post-marker database connection close failure.',
+    );
+    let markerAtClose: string | null | undefined;
+    const proofErrors: unknown[] = [];
+    try {
+      await expect(
+        createOwnedDatabase(isolatedContext, async (admin) => {
+          markerAtClose = await readDatabaseMarker(
+            admin,
+            isolatedContext.databaseName,
+          );
+          await admin.close();
+          throw closeFailure;
+        }),
+      ).rejects.toBe(closeFailure);
+      expect(markerAtClose).toBe(isolatedContext.marker);
+
+      const observer = openPostgresConnection(baseTestDatabaseUrl, 1);
+      const observerErrors: unknown[] = [];
+      try {
+        expect(
+          await readDatabaseMarker(observer, isolatedContext.databaseName),
+        ).toBeUndefined();
+      } catch (error) {
+        observerErrors.push(error);
+      }
+      try {
+        await observer.close();
+      } catch (error) {
+        observerErrors.push(error);
+      }
+      if (observerErrors.length === 1) throw observerErrors[0];
+      if (observerErrors.length > 1) {
+        throw new AggregateError(
+          observerErrors,
+          'Migration close-rejection verification and observer close both failed.',
+        );
+      }
+    } catch (error) {
+      proofErrors.push(error);
+    }
+
+    try {
+      await dropOwnedDatabase(isolatedContext);
+    } catch (cleanupError) {
+      proofErrors.push(cleanupError);
+    }
+    if (proofErrors.length === 1) throw proofErrors[0];
+    if (proofErrors.length > 1) {
+      throw new AggregateError(
+        proofErrors,
+        'Post-marker close-failure proof and cleanup both failed.',
+      );
+    }
   });
 
   test('upgrades 0000-0004 without rewriting truth and reconciles stale channels idempotently', async () => {
@@ -2520,6 +2623,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       ['roster_source_configuration_facilities', 'configuration_id'],
       ['roster_source_configuration_groups', 'configuration_id'],
       ['roster_source_configurations', 'id'],
+      ['security_audit_chain_anchors', 'sequence'],
     ] as const;
     const privileges = databaseExecuteRows<LockCompatibilityPrivilegeRow>(
       await db.execute<LockCompatibilityPrivilegeRow>(sql`
@@ -2548,7 +2652,8 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           ('roster_source_configuration_facilities', 'configuration_id'),
           ('roster_source_configuration_groups', 'configuration_id'),
           ('neighborhood_versions', 'id'),
-          ('audience_configurations', 'id')
+          ('audience_configurations', 'id'),
+          ('security_audit_chain_anchors', 'sequence')
         ) as intended(table_name, column_name)
         order by intended.table_name
       `),
@@ -2614,6 +2719,15 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         for share
       `);
 
+      // Both audit writers read the append-only chain head with this lock.
+      await transaction.execute(sql`
+        select anchor.sequence
+        from security_audit_chain_anchors as anchor
+        order by anchor.sequence desc
+        limit 1
+        for share
+      `);
+
       // Facility administration and roster publication use these parent and
       // child lock shapes under the shared population advisory boundary.
       await transaction.execute(sql`
@@ -2650,6 +2764,105 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       `);
     });
 
+    const activeContext = context;
+    if (activeContext === undefined) {
+      throw new Error('The issue #26 migration test context is unavailable.');
+    }
+    const directAuditRequestId = randomUUID();
+    const previewRequestId = randomUUID();
+    const previewInvocation = {
+      actor: {
+        kind: 'human',
+        userId: randomUUID(),
+        sessionId: randomUUID(),
+      },
+      source: 'web',
+      scope: { facilityScope: { kind: 'district' } },
+      requestId: previewRequestId,
+      serverTime: new Date(),
+      connectivityEpochId: randomUUID(),
+      mutation: {
+        idempotencyKey: `issue-26-app-role-preview-${randomUUID()}`,
+        transport: {
+          kind: 'web-interactive',
+          method: 'POST',
+          interaction: 'explicit-user-submit',
+          csrfVerified: true,
+        },
+        humanConfirmationId: null,
+      },
+    } satisfies TrustedCapabilityInvocation;
+    const appRoleConnection = openPostgresConnection(
+      activeContext.databaseUrl,
+      1,
+    );
+    try {
+      await appRoleConnection.db.execute(sql`set role "psd_eoc_app"`);
+      const directAuditEntry = await createDrizzleSecurityAuditRepository(
+        appRoleConnection.db,
+      ).append({
+        category: 'agent-access',
+        action: 'list-facilities',
+        actionIds: [],
+        confirmationId: null,
+        outcome: 'success',
+        principal: {
+          kind: 'system',
+          serviceId: 'issue-26-app-role-audit-proof',
+        },
+        source: 'scheduled-job',
+        facilityId: null,
+        target: { kind: 'capability', id: 'list-facilities' },
+        requestId: directAuditRequestId,
+        reasonCode: null,
+        occurredAt: new Date().toISOString(),
+      });
+      expect(directAuditEntry.requestId).toBe(directAuditRequestId);
+
+      await expect(
+        executeJournalCapability(
+          'create-lifecycle-consequence-preview',
+          { eventId: randomUUID(), purpose: 'all-clear' },
+          previewInvocation,
+          createDrizzleJournalCapabilityStore(appRoleConnection.db),
+        ),
+      ).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 404,
+      });
+    } finally {
+      await appRoleConnection.close();
+    }
+
+    const compatibilityAuditRows = databaseExecuteRows<AuditCompatibilityRow>(
+      await db.execute<AuditCompatibilityRow>(sql`
+          select request_id, action, outcome, reason_code
+          from security_audit_entries
+          where request_id in (
+            ${directAuditRequestId}::uuid,
+            ${previewRequestId}::uuid
+          )
+        `),
+    );
+    expect(compatibilityAuditRows).toHaveLength(2);
+    expect(
+      compatibilityAuditRows.find(
+        (row) => row.request_id === directAuditRequestId,
+      ),
+    ).toMatchObject({
+      action: 'list-facilities',
+      outcome: 'success',
+      reason_code: null,
+    });
+    expect(
+      compatibilityAuditRows.find((row) => row.request_id === previewRequestId),
+    ).toMatchObject({
+      action: 'create-lifecycle-consequence-preview',
+      outcome: 'failure',
+      reason_code: 'PERSISTENCE_CONFLICT',
+    });
+
     // The preceding atomic-publication proof constructs every access child;
     // the seed constructs every other immutable target. Make that prerequisite
     // explicit so a zero-row UPDATE can never masquerade as trigger coverage.
@@ -2668,7 +2881,8 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
             ('roster_source_configuration_facilities', exists(select 1 from roster_source_configuration_facilities)),
             ('roster_source_configuration_groups', exists(select 1 from roster_source_configuration_groups)),
             ('neighborhood_versions', exists(select 1 from neighborhood_versions)),
-            ('audience_configurations', exists(select 1 from audience_configurations))
+            ('audience_configurations', exists(select 1 from audience_configurations)),
+            ('security_audit_chain_anchors', exists(select 1 from security_audit_chain_anchors))
           ) as target(table_name, row_present)
           order by target.table_name
         `),
@@ -2692,6 +2906,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       sql`update roster_source_configuration_groups set configuration_id = configuration_id`,
       sql`update neighborhood_versions set id = id`,
       sql`update audience_configurations set id = id`,
+      sql`update security_audit_chain_anchors set sequence = sequence`,
     ] as const;
     for (const immutableUpdate of immutableColumnUpdates) {
       await expectPostgresCodeRejection(

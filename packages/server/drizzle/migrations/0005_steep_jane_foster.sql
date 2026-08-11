@@ -1414,9 +1414,9 @@ FROM "psd_eoc_app";--> statement-breakpoint
 
 -- PostgreSQL row-locking SELECTs require UPDATE on at least one column of
 -- every locked relation. Preserve the production FOR SHARE/FOR UPDATE reads
--- without restoring mutable-table authority: each granted identity column is
--- protected by an unconditional immutable UPDATE trigger, while table-wide
--- UPDATE remains revoked.
+-- without restoring mutable-table authority: each granted identity/anchor
+-- column is protected by an unconditional immutable UPDATE trigger, while
+-- table-wide UPDATE remains revoked.
 GRANT UPDATE ("id") ON TABLE
 	public."integration_statuses",
 	public."access_membership_snapshots",
@@ -1433,4 +1433,7 @@ TO "psd_eoc_app";--> statement-breakpoint
 GRANT UPDATE ("configuration_id") ON TABLE
 	public."roster_source_configuration_facilities",
 	public."roster_source_configuration_groups"
+TO "psd_eoc_app";--> statement-breakpoint
+GRANT UPDATE ("sequence") ON TABLE
+	public."security_audit_chain_anchors"
 TO "psd_eoc_app";

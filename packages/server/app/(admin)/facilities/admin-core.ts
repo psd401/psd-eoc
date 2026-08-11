@@ -79,7 +79,15 @@ export interface AdminCapabilityTransaction
 export type AdminCapabilityStore =
   CapabilityEngineStore<AdminCapabilityTransaction>;
 
-const adminStoreDatabases = new WeakMap<AdminCapabilityStore, Database>();
+interface AdminCapabilityStoreBinding {
+  readonly database: Database;
+  readonly authenticated: AuthenticatedSession;
+}
+
+const adminStoreBindings = new WeakMap<
+  AdminCapabilityStore,
+  AdminCapabilityStoreBinding
+>();
 
 const ADMIN_REPEATABLE_READ_ONLY_TRANSACTION_CONFIG = Object.freeze({
   isolationLevel: 'repeatable read' as const,
@@ -472,7 +480,7 @@ export function createDrizzleAdminCapabilityStore(
       );
     },
   };
-  adminStoreDatabases.set(store, database);
+  adminStoreBindings.set(store, Object.freeze({ database, authenticated }));
   return store;
 }
 
@@ -546,8 +554,37 @@ export function createRepeatableReadAdminQueryStore(
       );
     },
   };
-  adminStoreDatabases.set(store, database);
+  adminStoreBindings.set(store, Object.freeze({ database, authenticated }));
   return store;
+}
+
+function getAdminCapabilityStoreBinding(
+  store: AdminCapabilityStore,
+): AdminCapabilityStoreBinding {
+  const binding = adminStoreBindings.get(store);
+  if (binding === undefined) {
+    throw new AdminCapabilityError(
+      'INTERNAL_ERROR',
+      'The administrator store does not expose its injected request binding.',
+      500,
+    );
+  }
+  return binding;
+}
+
+/**
+ * Creates a coherent query store while preserving the supplied request-bound
+ * store's authenticated session. The later capability invocation must still
+ * match that binding; callers cannot rebind a database by swapping sessions.
+ */
+export function createRepeatableReadAdminQueryStoreFromStore(
+  store: AdminCapabilityStore,
+): AdminCapabilityStore {
+  const binding = getAdminCapabilityStoreBinding(store);
+  return createRepeatableReadAdminQueryStore(
+    binding.database,
+    binding.authenticated,
+  );
 }
 
 /**
@@ -560,15 +597,7 @@ export function createRepeatableReadAdminQueryStore(
 export function getAdminCapabilityStoreDatabase(
   store: AdminCapabilityStore,
 ): Database {
-  const database = adminStoreDatabases.get(store);
-  if (database === undefined) {
-    throw new AdminCapabilityError(
-      'INTERNAL_ERROR',
-      'The administrator store does not expose its injected database.',
-      500,
-    );
-  }
-  return database;
+  return getAdminCapabilityStoreBinding(store).database;
 }
 
 /**

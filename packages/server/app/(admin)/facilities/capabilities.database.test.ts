@@ -32,6 +32,7 @@ import {
   rosterSourceConfigurationGroups,
   rosterSourceConfigurations,
   rosterSnapshots,
+  rosterSyncResults,
   securityAuditChainAnchors,
   securityAuditEntries,
   sessions,
@@ -173,14 +174,18 @@ async function readDatabaseMarker(
 
 async function createOwnedDatabase(
   createdContext: FacilitiesTestContext,
+  closeAdmin: (connection: PostgresDatabaseConnection) => Promise<void> = (
+    connection,
+  ) => connection.close(),
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  let created = false;
+  let ownershipConfirmed = false;
+  let operationError: unknown;
+  let operationFailed = false;
   try {
     await admin.db.execute(
       sql.raw(`create database "${createdContext.databaseName}"`),
     );
-    created = true;
     await admin.db.execute(
       sql.raw(
         `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
@@ -189,47 +194,86 @@ async function createOwnedDatabase(
     expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
       createdContext.marker,
     );
+    ownershipConfirmed = true;
   } catch (error) {
-    if (created) {
+    operationFailed = true;
+    operationError = error;
+    if (ownershipConfirmed) {
       try {
-        await admin.db.execute(
-          sql.raw(
-            `drop database "${createdContext.databaseName}" with (force)`,
-          ),
-        );
+        await dropOwnedDatabase(createdContext);
       } catch (cleanupError) {
-        throw new AggregateError(
+        operationError = new AggregateError(
           [error, cleanupError],
-          'Disposable facilities database creation and rollback both failed.',
+          'Disposable facilities database setup and marker-guarded rollback both failed.',
         );
       }
     }
-    throw error;
-  } finally {
-    await admin.close();
   }
+
+  let closeError: unknown;
+  let closeFailed = false;
+  try {
+    await closeAdmin(admin);
+  } catch (error) {
+    closeFailed = true;
+    closeError = error;
+  }
+  if (closeFailed && ownershipConfirmed) {
+    try {
+      await dropOwnedDatabase(createdContext);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        operationFailed
+          ? [operationError, closeError, cleanupError]
+          : [closeError, cleanupError],
+        'Disposable facilities database creator close and marker-guarded rollback both failed.',
+      );
+    }
+  }
+  if (operationFailed && closeFailed) {
+    throw new AggregateError(
+      [operationError, closeError],
+      'Disposable facilities database creation and creator close both failed.',
+    );
+  }
+  if (operationFailed) throw operationError;
+  if (closeFailed) throw closeError;
 }
 
 async function dropOwnedDatabase(
   createdContext: FacilitiesTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  const errors: unknown[] = [];
   try {
     const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    if (marker === undefined) return;
-    if (marker !== createdContext.marker) {
+    if (marker !== undefined && marker !== createdContext.marker) {
       throw new Error(
         'Refusing to drop a database without the exact issue #26 facilities ownership marker.',
       );
     }
-    await admin.db.execute(
-      sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
-    );
-    expect(
-      await readDatabaseMarker(admin, createdContext.databaseName),
-    ).toBeUndefined();
-  } finally {
+    if (marker === createdContext.marker) {
+      await admin.db.execute(
+        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+      );
+      expect(
+        await readDatabaseMarker(admin, createdContext.databaseName),
+      ).toBeUndefined();
+    }
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
     await admin.close();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      'Disposable facilities database cleanup and connection close both failed.',
+    );
   }
 }
 
@@ -927,6 +971,25 @@ async function waitForAdvisoryWaiters(
   );
 }
 
+async function waitForBackendBlockedBy(
+  database: PostgresDatabaseConnection['db'],
+  blockerPid: number,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const rows = databaseExecuteRows<{ waiting: number }>(
+      await database.execute<{ waiting: number }>(sql`
+        select count(*)::int as waiting
+        from pg_stat_activity
+        where ${blockerPid} = any(pg_blocking_pids(pid))
+      `),
+    );
+    if ((rows[0]?.waiting ?? 0) > 0) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for the roster projection table lock.');
+}
+
 describeWithDatabase('facilities administrator database flow', () => {
   beforeAll(async () => {
     if (baseTestDatabaseUrl === undefined) {
@@ -954,6 +1017,86 @@ describeWithDatabase('facilities administrator database flow', () => {
 
   afterAll(async () => {
     await cleanupResources();
+  });
+
+  test('removes the marker-owned database when the creator connection close rejects', async () => {
+    if (baseTestDatabaseUrl === undefined) {
+      throw new Error('TEST_DATABASE_URL is required for integration tests.');
+    }
+    const rejectedContext = buildContext(baseTestDatabaseUrl);
+    const closeError = new Error(
+      'Synthetic facilities database creator close rejection.',
+    );
+    let rejectedAdmin: PostgresDatabaseConnection | undefined;
+    let proofError: unknown;
+    let proofFailed = false;
+    try {
+      let observedError: unknown;
+      try {
+        await createOwnedDatabase(rejectedContext, (admin) => {
+          rejectedAdmin = admin;
+          return Promise.reject(closeError);
+        });
+      } catch (error) {
+        observedError = error;
+      }
+      expect(observedError).toBe(closeError);
+
+      const verifier = openPostgresConnection(
+        rejectedContext.baseDatabaseUrl,
+        1,
+      );
+      const verifierErrors: unknown[] = [];
+      try {
+        expect(
+          await readDatabaseMarker(verifier, rejectedContext.databaseName),
+        ).toBeUndefined();
+      } catch (error) {
+        verifierErrors.push(error);
+      }
+      try {
+        await verifier.close();
+      } catch (error) {
+        verifierErrors.push(error);
+      }
+      if (verifierErrors.length === 1) throw verifierErrors[0];
+      if (verifierErrors.length > 1) {
+        throw new AggregateError(
+          verifierErrors,
+          'Facilities close-rejection verification and observer close both failed.',
+        );
+      }
+    } catch (error) {
+      proofFailed = true;
+      proofError = error;
+    }
+
+    const cleanupErrors: unknown[] = [];
+    if (rejectedAdmin !== undefined) {
+      try {
+        await rejectedAdmin.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    try {
+      await dropOwnedDatabase(rejectedContext);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (proofFailed && cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [proofError, ...cleanupErrors],
+        'Synthetic facilities close-rejection proof and cleanup both failed.',
+      );
+    }
+    if (proofFailed) throw proofError;
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        cleanupErrors,
+        'Synthetic facilities close-rejection proof cleanup failed.',
+      );
+    }
   });
 
   test('completes integration health with one app-role PostgreSQL connection and no added status-update privilege', async () => {
@@ -989,6 +1132,207 @@ describeWithDatabase('facilities administrator database flow', () => {
       ).toEqual([{ requestId }]);
     } finally {
       await dedicated.close();
+    }
+  });
+
+  test('completes roster health with one app-role PostgreSQL connection and no nested transaction', async () => {
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    const dedicated = openPostgresConnection(currentContext.databaseUrl, 1);
+    try {
+      await assumeApplicationRole(dedicated);
+      const authenticated = authenticatedAdministrator();
+      const requestId = randomUUID();
+      const projection = await withDeadline(
+        executeRosterHealthProjection({
+          authenticated,
+          store: createDrizzleAdminCapabilityStore(dedicated.db, authenticated),
+          query: {
+            population: 'staff',
+            facilityId: null,
+            cursor: null,
+            limit: 25,
+          },
+          metadata: { requestId, now: new Date() },
+        }),
+      );
+
+      expect(projection.report.generatedAt).toBeString();
+      expect(
+        await dedicated.db
+          .select({
+            requestId: securityAuditEntries.requestId,
+            category: securityAuditEntries.category,
+            outcome: securityAuditEntries.outcome,
+          })
+          .from(securityAuditEntries)
+          .where(eq(securityAuditEntries.requestId, requestId)),
+      ).toEqual([
+        { requestId, category: 'capability-execution', outcome: 'success' },
+      ]);
+    } finally {
+      await dedicated.close();
+    }
+  });
+
+  test('keeps roster evidence and last-sync truth on one repeatable-read snapshot', async () => {
+    const currentContext = context;
+    if (currentContext === undefined) {
+      throw new Error('The facilities test context is not available.');
+    }
+    const writer = openPostgresConnection(currentContext.databaseUrl, 1);
+    const observer = openPostgresConnection(currentContext.databaseUrl, 1);
+    const projectionConnection = openPostgresConnection(
+      currentContext.databaseUrl,
+      2,
+    );
+    const configurationId = randomUUID();
+    const syncResultId = randomUUID();
+    const requestId = randomUUID();
+    let releaseWriter: (() => void) | undefined;
+    const writerRelease = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    let reportWriterReady: (() => void) | undefined;
+    const writerReady = new Promise<void>((resolve) => {
+      reportWriterReady = resolve;
+    });
+    let writerExecution: Promise<void> | undefined;
+    let projectionExecution:
+      | ReturnType<typeof executeRosterHealthProjection>
+      | undefined;
+
+    try {
+      const [baseline] = await observer.db
+        .select({
+          id: rosterSyncResults.id,
+          population: rosterSyncResults.population,
+          outcome: rosterSyncResults.outcome,
+          completedAt: rosterSyncResults.completedAt,
+        })
+        .from(rosterSyncResults)
+        .where(eq(rosterSyncResults.population, 'staff'))
+        .orderBy(
+          desc(rosterSyncResults.completedAt),
+          desc(rosterSyncResults.id),
+        )
+        .limit(1);
+      const baselineProjection =
+        baseline === undefined
+          ? null
+          : {
+              population: baseline.population,
+              outcome: baseline.outcome,
+              completedAt: baseline.completedAt.toISOString(),
+            };
+      const completedAt = new Date(
+        Math.max(
+          Date.now(),
+          (baseline?.completedAt.getTime() ?? Date.now()) + 60_000,
+        ),
+      );
+      const startedAt = new Date(completedAt.getTime() - 1_000);
+      await writer.db.insert(rosterSourceConfigurations).values({
+        id: configurationId,
+        version: 1,
+        population: 'staff',
+        createdAt: startedAt,
+      });
+
+      let blockerPid: number | undefined;
+      writerExecution = Promise.resolve(
+        writer.db.transaction(async (transaction) => {
+          const rows = databaseExecuteRows<{ pid: number }>(
+            await transaction.execute<{ pid: number }>(
+              sql`select pg_backend_pid()::int as pid`,
+            ),
+          );
+          blockerPid = rows[0]?.pid;
+          if (blockerPid === undefined) {
+            throw new Error('The roster-sync writer has no backend PID.');
+          }
+          await transaction.execute(sql`
+            lock table public.roster_sync_results in access exclusive mode
+          `);
+          await transaction.insert(rosterSyncResults).values({
+            id: syncResultId,
+            sourceConfigurationId: configurationId,
+            sourceConfigurationVersion: 1,
+            population: 'staff',
+            outcome: 'failed',
+            startedAt,
+            completedAt,
+            expectedSourceCount: 1,
+            completedSourceCount: 0,
+            groupFailureCount: 0,
+            publishedSnapshotId: null,
+          });
+          reportWriterReady?.();
+          await writerRelease;
+        }),
+      );
+      await withDeadline(writerReady);
+      if (blockerPid === undefined) {
+        throw new Error('The roster-sync writer PID was not captured.');
+      }
+
+      await assumeApplicationRole(projectionConnection);
+      const authenticated = authenticatedAdministrator();
+      projectionExecution = executeRosterHealthProjection({
+        authenticated,
+        store: createDrizzleAdminCapabilityStore(
+          projectionConnection.db,
+          authenticated,
+        ),
+        query: {
+          population: 'staff',
+          facilityId: null,
+          cursor: null,
+          limit: 25,
+        },
+        metadata: { requestId, now: new Date() },
+      });
+      await waitForBackendBlockedBy(observer.db, blockerPid);
+      releaseWriter?.();
+
+      const [, projection] = await withDeadline(
+        Promise.all([writerExecution, projectionExecution]),
+      );
+      expect(projection.lastSync).toEqual(baselineProjection);
+      const [newest] = await observer.db
+        .select({ id: rosterSyncResults.id })
+        .from(rosterSyncResults)
+        .where(eq(rosterSyncResults.population, 'staff'))
+        .orderBy(
+          desc(rosterSyncResults.completedAt),
+          desc(rosterSyncResults.id),
+        )
+        .limit(1);
+      expect(newest?.id).toBe(syncResultId);
+      expect(
+        await observer.db
+          .select({ requestId: securityAuditEntries.requestId })
+          .from(securityAuditEntries)
+          .where(eq(securityAuditEntries.requestId, requestId)),
+      ).toEqual([{ requestId }]);
+    } finally {
+      releaseWriter?.();
+      const pending: Promise<unknown>[] = [];
+      if (writerExecution !== undefined) pending.push(writerExecution);
+      if (projectionExecution !== undefined) pending.push(projectionExecution);
+      try {
+        if (pending.length > 0) {
+          await withDeadline(Promise.allSettled(pending));
+        }
+      } finally {
+        await Promise.all([
+          writer.close(),
+          observer.close(),
+          projectionConnection.close(),
+        ]);
+      }
     }
   });
 

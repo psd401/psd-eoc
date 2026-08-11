@@ -8,16 +8,15 @@ import { desc, eq } from 'drizzle-orm';
 import { facilities, rosterSyncResults } from '../../../db/schema';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type { ServerCapabilityRegistration } from '../../../lib/capabilities/engine';
-import type { Database } from '../../../db/client';
 import {
-  createDrizzleStaleRosterReportStore,
+  createDrizzleStaleRosterReportStoreFromTransaction,
   createGetStaleRosterReportHandler,
 } from '../../../lib/roster/stale-report';
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
+  createRepeatableReadAdminQueryStoreFromStore,
   executeAdminQueryCapability,
-  getAdminCapabilityStoreDatabase,
   getDefaultAdminDatabase,
   requireAdminCapabilityAuthorization,
   type AdminCapabilityStore,
@@ -31,7 +30,6 @@ export type LastRosterSync = Pick<
 >;
 
 function registration(
-  rootDatabase: Database,
   captureLastSync: (value: LastRosterSync | null) => void,
 ): ServerCapabilityRegistration<
   'get-stale-roster-report',
@@ -61,11 +59,15 @@ function registration(
     },
     async handler(input, context) {
       const reportHandler = createGetStaleRosterReportHandler({
-        // The stale-report store owns a repeatable-read/read-only transaction.
-        // Start it from the exact injected root database: nesting it under the
-        // capability transaction is invalid on PostgreSQL/Data API, while a
-        // process-global fallback could mix authorization and report state.
-        store: createDrizzleStaleRosterReportStore(rootDatabase),
+        // The split admin query store owns this repeatable-read/read-only
+        // transaction. Reuse that exact transaction so authorization, report
+        // evidence and last-sync truth share one snapshot without checking out
+        // a nested PostgreSQL connection or overlapping statements on one
+        // Aurora Data API transaction ID. Report generation keeps the trusted
+        // capability invocation time; this store does not change clock policy.
+        store: createDrizzleStaleRosterReportStoreFromTransaction(
+          context.transaction.database,
+        ),
         clock: () => new Date(context.invocation.serverTime.getTime()),
         staleThresholdSeconds: 24 * 60 * 60,
       });
@@ -119,14 +121,14 @@ export async function executeRosterHealthProjection(input: {
       getDefaultAdminDatabase(),
       input.authenticated,
     );
-  const rootDatabase = getAdminCapabilityStoreDatabase(store);
+  const snapshotStore = createRepeatableReadAdminQueryStoreFromStore(store);
   const report = await executeAdminQueryCapability(
-    registration(rootDatabase, (value) => {
+    registration((value) => {
       lastSync = value;
     }),
     input.query,
     input.authenticated,
-    store,
+    snapshotStore,
     input.metadata,
   );
   if (lastSync === undefined) {

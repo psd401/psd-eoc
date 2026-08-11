@@ -27,10 +27,9 @@ import {
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
-  createRepeatableReadAdminQueryStore,
+  createRepeatableReadAdminQueryStoreFromStore,
   executeAdminMutationCapability,
   executeAdminQueryCapability,
-  getAdminCapabilityStoreDatabase,
   getDefaultAdminDatabase,
   requireAdminCapabilityAuthorization,
   type AdminCapabilityStore,
@@ -626,11 +625,8 @@ export async function executeIntegrationHealthProjection(input: {
       getDefaultAdminDatabase(),
       input.authenticated,
     );
-  const rootDatabase = getAdminCapabilityStoreDatabase(injectedStore);
-  const snapshotStore = createRepeatableReadAdminQueryStore(
-    rootDatabase,
-    input.authenticated,
-  );
+  const snapshotStore =
+    createRepeatableReadAdminQueryStoreFromStore(injectedStore);
   const health = await executeAdminQueryCapability(
     getIntegrationHealthRegistration((value) => {
       channels = value;
