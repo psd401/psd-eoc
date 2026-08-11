@@ -24,12 +24,14 @@ const IDS = Object.freeze({
   buildingSynthetic: uuid(2652),
   facilityA: uuid(2653),
   facilityB: uuid(2654),
+  facilityC: uuid(2659),
   neighborhood: uuid(2655),
   othersGoogle: uuid(2656),
+  othersInactiveUnselected: uuid(2660),
   othersSynthetic: uuid(2657),
 });
 
-const AUTHORIZED_VIEW = Object.freeze({
+const AUTHORIZED_VIEW_BASE = Object.freeze({
   kind: 'authorized' as const,
   facilities: FacilityPageSchema.parse({
     items: [
@@ -149,6 +151,20 @@ const AUTHORIZED_VIEW = Object.freeze({
       createdAt: AT,
     }),
   ],
+});
+
+const AUTHORIZED_VIEW = Object.freeze({
+  ...AUTHORIZED_VIEW_BASE,
+  facilityOptions: AUTHORIZED_VIEW_BASE.facilities.items,
+  neighborhoodOptions: AUTHORIZED_VIEW_BASE.neighborhoods.items,
+  buildingGroupOptions: AUTHORIZED_VIEW_BASE.buildingGroups.items,
+  othersGroupOptions: AUTHORIZED_VIEW_BASE.othersGroups.items,
+  currentCursors: Object.freeze({
+    buildingGroupCursor: null,
+    facilityCursor: null,
+    neighborhoodCursor: null,
+    othersGroupCursor: null,
+  }),
 }) satisfies FacilitiesAdminViewModel;
 
 function renderAuthorized(): string {
@@ -218,12 +234,137 @@ describe('facilities administration view', () => {
     );
     expect(markup).not.toContain('name="buildingTarget"');
     expect(markup).toContain('Latest neighborhood version (optional)');
-    expect(markup).toContain(`value="${IDS.neighborhood}:3" selected=""`);
+    expect(markup).toContain(`value="${IDS.neighborhood}:2" selected=""`);
+    expect(markup).toContain(
+      'Harbor campus — version 2 (current pinned version)',
+    );
+    expect(markup).toContain(`value="${IDS.neighborhood}:3"`);
     expect(markup).toContain('name="googleOthersGroupSourceId"');
     expect(markup).toContain('name="syntheticOthersGroupSourceId"');
     expect(markup).toContain('Do not mix both kinds in one audience version');
     expect(markup).toContain('Current immutable audience version:');
     expect(markup).toContain('Neighborhood Harbor campus');
+  });
+
+  test('keeps complete form selections while all four displays paginate independently', () => {
+    const facilityA = AUTHORIZED_VIEW.facilities.items[0]!;
+    const facilityB = AUTHORIZED_VIEW.facilities.items[1]!;
+    const facilityC = FacilityPageSchema.parse({
+      items: [
+        {
+          id: IDS.facilityC,
+          code: 'COVE',
+          name: 'Cove Elementary',
+          active: true,
+          createdAt: AT,
+        },
+      ],
+      pageInfo: { hasMore: false, nextCursor: null },
+    }).items[0]!;
+    const selectedInactiveOthers = Object.freeze({
+      ...AUTHORIZED_VIEW.othersGroups.items[0]!,
+      active: false,
+    });
+    const unselectedInactiveOthers = GroupSourcePageSchema.parse({
+      items: [
+        {
+          id: IDS.othersInactiveUnselected,
+          kind: 'synthetic',
+          purpose: 'others',
+          facilityId: null,
+          displayName: 'Retired test responders',
+          active: false,
+          fixtureKey: 'retired-test-responders',
+          createdAt: AT,
+        },
+      ],
+      pageInfo: { hasMore: false, nextCursor: null },
+    }).items[0]!;
+    const edgeView = Object.freeze({
+      ...AUTHORIZED_VIEW,
+      facilities: FacilityPageSchema.parse({
+        items: [facilityA],
+        pageInfo: { hasMore: true, nextCursor: 'facility-next' },
+      }),
+      neighborhoods: NeighborhoodPageSchema.parse({
+        items: AUTHORIZED_VIEW.neighborhoods.items,
+        pageInfo: { hasMore: true, nextCursor: 'neighborhood-next' },
+      }),
+      buildingGroups: GroupSourcePageSchema.parse({
+        items: [AUTHORIZED_VIEW.buildingGroups.items[0]],
+        pageInfo: { hasMore: true, nextCursor: 'building-next' },
+      }),
+      othersGroups: GroupSourcePageSchema.parse({
+        items: [AUTHORIZED_VIEW.othersGroups.items[1]],
+        pageInfo: { hasMore: true, nextCursor: 'others-next' },
+      }),
+      facilityOptions: [facilityA, facilityB, facilityC],
+      neighborhoodOptions: AUTHORIZED_VIEW.neighborhoodOptions,
+      buildingGroupOptions: AUTHORIZED_VIEW.buildingGroupOptions,
+      othersGroupOptions: [
+        selectedInactiveOthers,
+        AUTHORIZED_VIEW.othersGroups.items[1]!,
+        unselectedInactiveOthers,
+      ],
+      currentCursors: Object.freeze({
+        buildingGroupCursor: 'building-current',
+        facilityCursor: 'facility-current',
+        neighborhoodCursor: 'neighborhood-current',
+        othersGroupCursor: 'others-current',
+      }),
+    }) satisfies FacilitiesAdminViewModel;
+
+    const markup = renderToStaticMarkup(
+      <FacilitiesAdminView
+        csrfToken="csrf-token-for-view-test"
+        view={edgeView}
+      />,
+    );
+
+    const offPageMemberInput = markup.match(
+      new RegExp(
+        `<input[^>]*id="neighborhood-${IDS.neighborhood}-facility-${IDS.facilityB}"[^>]*>`,
+      ),
+    )?.[0];
+    expect(offPageMemberInput).toContain('checked=""');
+    expect(markup).toContain(
+      `<option value="${IDS.facilityC}">COVE — Cove Elementary</option>`,
+    );
+    expect(markup).not.toContain('<summary>Edit Cove Elementary</summary>');
+
+    expect(markup).toContain(`value="${IDS.neighborhood}:2" selected=""`);
+    expect(markup).toContain(
+      'Harbor campus — version 2 (current pinned version)',
+    );
+    const selectedInactiveInput = markup.match(
+      new RegExp(
+        `<input[^>]*id="audience-${IDS.facilityA}-others-${IDS.othersGoogle}"[^>]*>`,
+      ),
+    )?.[0];
+    expect(selectedInactiveInput).toContain('checked=""');
+    expect(selectedInactiveInput).not.toContain('disabled=""');
+    expect(markup).toContain(
+      'District response staff (google-group) — inactive, currently selected',
+    );
+    const unselectedInactiveInput = markup.match(
+      new RegExp(
+        `<input[^>]*id="audience-${IDS.facilityA}-others-${IDS.othersInactiveUnselected}"[^>]*>`,
+      ),
+    )?.[0];
+    expect(unselectedInactiveInput).toContain('disabled=""');
+
+    expect(markup).toContain(
+      'href="/facilities?facilityCursor=facility-next&amp;neighborhoodCursor=neighborhood-current&amp;buildingGroupCursor=building-current&amp;othersGroupCursor=others-current"',
+    );
+    expect(markup).toContain(
+      'href="/facilities?facilityCursor=facility-current&amp;neighborhoodCursor=neighborhood-next&amp;buildingGroupCursor=building-current&amp;othersGroupCursor=others-current"',
+    );
+    expect(markup).toContain(
+      'href="/facilities?facilityCursor=facility-current&amp;neighborhoodCursor=neighborhood-current&amp;buildingGroupCursor=building-next&amp;othersGroupCursor=others-current"',
+    );
+    expect(markup).toContain(
+      'href="/facilities?facilityCursor=facility-current&amp;neighborhoodCursor=neighborhood-current&amp;buildingGroupCursor=building-current&amp;othersGroupCursor=others-next"',
+    );
   });
 
   test('forbidden rendering carries no configuration, forms, navigation, or CSRF data', () => {

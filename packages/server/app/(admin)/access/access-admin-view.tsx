@@ -2,6 +2,7 @@ import type { GroupSourcePage, UserPage } from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from '../facilities/admin-form-fields';
 import { AdminNavigation } from '../facilities/admin-nav';
+import type { AccessAdminCursorState } from './access-page-state';
 
 /** A non-admin view carries no configuration data that could be rendered. */
 export const NON_ADMIN_ACCESS_VIEW = Object.freeze({
@@ -14,15 +15,24 @@ export type AccessAdminViewModel =
       kind: 'authorized';
       accessGroups: GroupSourcePage;
       users: UserPage;
+      cursors: AccessAdminCursorState;
     }>;
 
 function paginationLink(
   label: string,
   parameter: 'accessGroupCursor' | 'userCursor',
   cursor: string | null,
+  current: AccessAdminCursorState,
 ) {
   if (cursor === null) return null;
-  const parameters = new URLSearchParams({ [parameter]: cursor });
+  const parameters = new URLSearchParams();
+  if (current.accessGroupCursor !== null) {
+    parameters.set('accessGroupCursor', current.accessGroupCursor);
+  }
+  if (current.userCursor !== null) {
+    parameters.set('userCursor', current.userCursor);
+  }
+  parameters.set(parameter, cursor);
   return <a href={`/access?${parameters.toString()}`}>{label}</a>;
 }
 
@@ -98,8 +108,11 @@ function AccessGroupEditor({
         <fieldset>
           <legend>Google access group settings</legend>
           <p id={helpId}>
-            Saving replaces this group&apos;s editable configuration. Its stable
-            internal ID and access-only purpose do not change.
+            Changing only the display name or status retains this source&apos;s
+            internal ID. Correcting a provider locator creates a new source ID
+            and leaves this source inactive as immutable history. An email
+            correction also requires a distinct Google Group ID. Its access-only
+            purpose never changes.
           </p>
           <label>
             Display name
@@ -155,7 +168,12 @@ function AccessGroupEditor({
 function AccessGroups({
   page,
   csrfToken,
-}: Readonly<{ page: GroupSourcePage; csrfToken: string }>) {
+  cursors,
+}: Readonly<{
+  page: GroupSourcePage;
+  csrfToken: string;
+  cursors: AccessAdminCursorState;
+}>) {
   const accessGroups = page.items.filter(
     (group) => group.kind === 'google-group' && group.purpose === 'access',
   );
@@ -227,6 +245,7 @@ function AccessGroups({
             'Next page of access groups',
             'accessGroupCursor',
             page.pageInfo.nextCursor,
+            cursors,
           )
         : null}
       <CreateAccessGroupForm csrfToken={csrfToken} />
@@ -300,7 +319,12 @@ function RoleAssignmentForm({
 function UsersAndRoles({
   page,
   csrfToken,
-}: Readonly<{ page: UserPage; csrfToken: string }>) {
+  cursors,
+}: Readonly<{
+  page: UserPage;
+  csrfToken: string;
+  cursors: AccessAdminCursorState;
+}>) {
   return (
     <section aria-labelledby="roles-heading">
       <h2 id="roles-heading">Staff roles</h2>
@@ -350,6 +374,7 @@ function UsersAndRoles({
             'Next page of staff accounts',
             'userCursor',
             page.pageInfo.nextCursor,
+            cursors,
           )
         : null}
     </section>
@@ -398,8 +423,16 @@ export function AccessAdminView({
           {statusMessage}
         </p>
       )}
-      <AccessGroups csrfToken={csrfToken} page={view.accessGroups} />
-      <UsersAndRoles csrfToken={csrfToken} page={view.users} />
+      <AccessGroups
+        csrfToken={csrfToken}
+        cursors={view.cursors}
+        page={view.accessGroups}
+      />
+      <UsersAndRoles
+        csrfToken={csrfToken}
+        cursors={view.cursors}
+        page={view.users}
+      />
     </main>
   );
 }

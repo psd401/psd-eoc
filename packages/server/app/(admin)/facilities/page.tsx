@@ -1,4 +1,3 @@
-import type { AudienceConfig } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
@@ -9,12 +8,7 @@ import {
   type AuthenticatedSession,
 } from '../../../lib/auth/sessions';
 import { AdminCapabilityError } from './admin-core';
-import {
-  executeGetAudienceConfigCapability,
-  executeListFacilitiesCapability,
-  executeListGroupSourcesCapability,
-  executeListNeighborhoodsCapability,
-} from './capabilities';
+import { executeFacilitiesAdminProjection } from './capabilities';
 import {
   FacilitiesAdminView,
   NON_ADMIN_FACILITIES_VIEW,
@@ -36,27 +30,10 @@ const STATUS_MESSAGES = Object.freeze({
     'The others source was replaced with a new immutable source and roster configuration version.',
 } as const);
 
-function statusMessage(value: string | undefined): string | null {
-  return value !== undefined && value in STATUS_MESSAGES
+export function statusMessage(value: string | undefined): string | null {
+  return value !== undefined && Object.hasOwn(STATUS_MESSAGES, value)
     ? STATUS_MESSAGES[value as keyof typeof STATUS_MESSAGES]
     : null;
-}
-
-async function latestAudienceOrNull(
-  authenticated: AuthenticatedSession,
-  facilityId: string,
-): Promise<AudienceConfig | null> {
-  try {
-    return await executeGetAudienceConfigCapability({
-      authenticated,
-      query: { facilityId },
-    });
-  } catch (error) {
-    if (error instanceof AdminCapabilityError && error.status === 404) {
-      return null;
-    }
-    throw error;
-  }
 }
 
 export default async function FacilitiesPage({
@@ -91,65 +68,51 @@ export default async function FacilitiesPage({
     redirect('/login?reason=session-required');
   }
   const parameters = await searchParams;
+  const currentCursors = Object.freeze({
+    buildingGroupCursor: parameters.buildingGroupCursor ?? null,
+    facilityCursor: parameters.facilityCursor ?? null,
+    neighborhoodCursor: parameters.neighborhoodCursor ?? null,
+    othersGroupCursor: parameters.othersGroupCursor ?? null,
+  });
   try {
-    const [facilities, neighborhoods, buildingGroups, othersGroups] =
-      await Promise.all([
-        executeListFacilitiesCapability({
-          authenticated,
-          query: {
-            includeInactive: true,
-            cursor: parameters.facilityCursor ?? null,
-            limit: 200,
-          },
-        }),
-        executeListNeighborhoodsCapability({
-          authenticated,
-          query: {
-            cursor: parameters.neighborhoodCursor ?? null,
-            limit: 200,
-          },
-        }),
-        executeListGroupSourcesCapability({
-          authenticated,
-          query: {
-            kind: null,
-            purpose: 'building',
-            facilityId: null,
-            active: null,
-            cursor: parameters.buildingGroupCursor ?? null,
-            limit: 500,
-          },
-        }),
-        executeListGroupSourcesCapability({
-          authenticated,
-          query: {
-            kind: null,
-            purpose: 'others',
-            facilityId: null,
-            active: null,
-            cursor: parameters.othersGroupCursor ?? null,
-            limit: 500,
-          },
-        }),
-      ]);
-    const audienceConfigs = (
-      await Promise.all(
-        facilities.items.map((facility) =>
-          latestAudienceOrNull(authenticated, facility.id),
-        ),
-      )
-    ).filter((audience): audience is AudienceConfig => audience !== null);
+    const projection = await executeFacilitiesAdminProjection({
+      authenticated,
+      queries: {
+        facilities: {
+          includeInactive: true,
+          cursor: currentCursors.facilityCursor,
+          limit: 200,
+        },
+        neighborhoods: {
+          cursor: currentCursors.neighborhoodCursor,
+          limit: 200,
+        },
+        buildingGroups: {
+          kind: null,
+          purpose: 'building',
+          facilityId: null,
+          active: null,
+          cursor: currentCursors.buildingGroupCursor,
+          limit: 500,
+        },
+        othersGroups: {
+          kind: null,
+          purpose: 'others',
+          facilityId: null,
+          active: null,
+          cursor: currentCursors.othersGroupCursor,
+          limit: 500,
+        },
+      },
+    });
     return (
       <FacilitiesAdminView
         csrfToken={csrfToken}
         statusMessage={statusMessage(parameters.status)}
         view={{
           kind: 'authorized',
-          facilities,
-          neighborhoods,
-          buildingGroups,
-          othersGroups,
-          audienceConfigs,
+          ...projection,
+          currentCursors,
         }}
       />
     );

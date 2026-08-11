@@ -110,6 +110,10 @@ function authorizedView(
     kind: 'authorized' as const,
     accessGroups: groupPage,
     users: users(),
+    cursors: Object.freeze({
+      accessGroupCursor: 'current-access-cursor',
+      userCursor: 'current-user-cursor',
+    }),
   });
 }
 
@@ -157,6 +161,15 @@ describe('AccessAdminView semantics', () => {
     expect(html).toContain('01-access-group');
     expect(html).toContain('eoc-access@psd401.net');
     expect(html).toContain('<summary>Edit PSD EOC Staff Access</summary>');
+    expect(html).toContain(
+      'Changing only the display name or status retains this source&#x27;s internal ID.',
+    );
+    expect(html).toContain(
+      'Correcting a provider locator creates a new source ID and leaves this source inactive as immutable history.',
+    );
+    expect(html).toContain(
+      'An email correction also requires a distinct Google Group ID.',
+    );
     expect(html).toContain('<legend>Add a Google access group</legend>');
     expect(html).toMatch(
       /<input[^>]*name="intent"[^>]*value="create-access-group"/u,
@@ -210,10 +223,12 @@ describe('AccessAdminView semantics', () => {
   test('renders independent opaque pagination links for both tables', () => {
     const html = renderAuthorized();
     expect(html).toContain(
-      'href="/access?accessGroupCursor=access-cursor-safe"',
+      'href="/access?accessGroupCursor=access-cursor-safe&amp;userCursor=current-user-cursor"',
     );
     expect(html).toContain('Next page of access groups');
-    expect(html).toContain('href="/access?userCursor=user-cursor-safe"');
+    expect(html).toContain(
+      'href="/access?accessGroupCursor=current-access-cursor&amp;userCursor=user-cursor-safe"',
+    );
     expect(html).toContain('Next page of staff accounts');
   });
 });

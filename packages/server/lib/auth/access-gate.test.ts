@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   afterAll,
@@ -39,11 +39,20 @@ import {
 import { calculateSecurityAuditHash } from '../audit/canonical';
 import type { AuthenticatedSession } from './sessions';
 import {
+  createDrizzleInitialWebSessionStore,
+  type PersistInitialWebSessionRequest,
+} from './session-cookie';
+import {
   ACCESS_GATE_AUDIT_LOCK_SQL,
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
+  type AccessGateEvidence,
 } from './access-gate';
+import {
+  loadAccessConfigurationSnapshotState,
+  loadEffectiveAdministratorUserIds,
+} from './role-state';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -71,6 +80,10 @@ const DATABASE_NAME_PATTERN = /^psd_eoc_i26_gate_[a-f0-9]{32}_test$/u;
 let context: AccessGateTestContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
 let databaseCreated = false;
+
+function digest(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
 
 function buildContext(baseDatabaseUrl: string): AccessGateTestContext {
   const runId = randomUUID();
@@ -147,11 +160,7 @@ async function createOwnedDatabase(
   } catch (error) {
     if (created) {
       try {
-        await admin.db.execute(
-          sql.raw(
-            `drop database "${createdContext.databaseName}" with (force)`,
-          ),
-        );
+        await dropOwnedDatabase(createdContext);
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
@@ -281,6 +290,115 @@ async function appendLegacyAccessGroupUpdateAudit(input: {
   });
 }
 
+describe('strict access-gate snapshot projection', () => {
+  test('ignores audit chronology but rejects duplicated or noncanonical access refs', async () => {
+    const userId = '10000000-0000-4000-8000-000000000001';
+    const snapshotId = '10000000-0000-4000-8000-000000000002';
+    const groupSourceId = '10000000-0000-4000-8000-000000000003';
+    const googleSubject = 'synthetic-strict-access-subject';
+    const ref = Object.freeze({
+      id: groupSourceId,
+      kind: 'google-group' as const,
+      purpose: 'access' as const,
+      facilityId: null,
+    });
+    const evidence: AccessGateEvidence = Object.freeze({
+      user: Object.freeze({
+        id: userId,
+        googleSubject,
+        email: 'synthetic.strict.access@psd401.net',
+        displayName: 'Synthetic Strict Access',
+        roles: Object.freeze(['staff'] as const),
+        facilityScope: Object.freeze({ kind: 'district' as const }),
+        createdAt: '2026-08-10T18:00:00.000Z',
+        disabledAt: null,
+      }),
+      activeAccessGroupSourceRefs: Object.freeze([ref]),
+      // A completed replay can append a later audit fact, but it does not
+      // create a new access-configuration generation.
+      latestSuccessfulGroupSourceUpdateAt: '2026-08-10T18:30:00.000Z',
+      snapshot: Object.freeze({
+        id: snapshotId,
+        version: 1,
+        syncStartedAt: '2026-08-10T18:05:00.000Z',
+        capturedAt: '2026-08-10T18:06:00.000Z',
+        expectedAccessGroupSourceRefs: Object.freeze([ref]),
+        completedAccessGroupSourceRefs: Object.freeze([ref]),
+        member: Object.freeze({
+          userId,
+          googleSubject,
+          accessGroupSourceRefs: Object.freeze([ref]),
+          facilityScope: Object.freeze({ kind: 'district' as const }),
+        }),
+      }),
+    });
+    const audit = Object.freeze({
+      async append() {
+        return {} as never;
+      },
+    });
+    const input = {
+      googleSubject,
+      subjectDigest: 'a'.repeat(64),
+      requestId: randomUUID(),
+      checkedAt: '2026-08-10T18:31:00.000Z',
+      source: 'web' as const,
+    };
+
+    expect(
+      await checkAccessGate(input, {
+        store: { loadEvidence: async () => evidence },
+        audit,
+        bootstrapAdminSubjects: new Set(),
+      }),
+    ).toMatchObject({ granted: true });
+
+    const duplicated = Object.freeze({
+      ...evidence,
+      snapshot: Object.freeze({
+        ...evidence.snapshot,
+        expectedAccessGroupSourceRefs: Object.freeze([ref, ref]),
+      }),
+    }) as AccessGateEvidence;
+    expect(
+      await checkAccessGate(
+        { ...input, requestId: randomUUID() },
+        {
+          store: { loadEvidence: async () => duplicated },
+          audit,
+          bootstrapAdminSubjects: new Set(),
+        },
+      ),
+    ).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
+    });
+
+    const noncanonical = Object.freeze({
+      ...evidence,
+      snapshot: Object.freeze({
+        ...evidence.snapshot,
+        completedAccessGroupSourceRefs: Object.freeze([
+          { ...ref, completionKind: 'completed' },
+        ]),
+      }),
+    }) as unknown as AccessGateEvidence;
+    expect(
+      await checkAccessGate(
+        { ...input, requestId: randomUUID() },
+        {
+          store: { loadEvidence: async () => noncanonical },
+          audit,
+          bootstrapAdminSubjects: new Set(),
+        },
+      ),
+    ).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
+    });
+  });
+});
+
 describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
   beforeAll(async () => {
     if (baseTestDatabaseUrl === undefined) {
@@ -288,8 +406,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     }
     context = buildContext(baseTestDatabaseUrl);
     try {
-      await createOwnedDatabase(context);
       databaseCreated = true;
+      await createOwnedDatabase(context);
       connection = openPostgresConnection(context.databaseUrl, 2);
       await migrateDatabase(connection);
     } catch (error) {
@@ -313,34 +431,64 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const groupSourceId = randomUUID();
+    const backupGroupSourceId = randomUUID();
     const userId = randomUUID();
+    const backupUserId = randomUUID();
     const snapshotId = randomUUID();
     const googleSubject = `issue-26-access-gate-${suffix}`;
+    const backupGoogleSubject = `issue-26-access-backup-${suffix}`;
     const snapshotVersion =
       2_000_000_000 + Number.parseInt(suffix.slice(0, 6), 16);
     const now = new Date(Date.now() + 60_000);
 
-    await database.insert(groupSources).values({
-      id: groupSourceId,
-      kind: 'google-group',
-      purpose: 'access',
-      facilityId: null,
-      displayName: `Issue 26 access gate ${suffix.slice(0, 8)}`,
-      active: true,
-      googleGroupId: `issue-26-access-gate-${suffix}`,
-      email: `issue-26-access-gate-${suffix}@example.invalid`,
-      fixtureKey: null,
-      createdAt: now,
-    });
-    await database.insert(users).values({
-      id: userId,
-      googleSubject,
-      email: `issue-26-access-gate-${suffix}@psd401.net`,
-      displayName: `Issue 26 access member ${suffix.slice(0, 8)}`,
-      facilityScopeKind: 'district',
-      createdAt: now,
-    });
-    await database.insert(userRoles).values({ userId, role: 'staff' });
+    await database.insert(groupSources).values([
+      {
+        id: groupSourceId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Issue 26 access gate ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-access-gate-${suffix}`,
+        email: `issue-26-access-gate-${suffix}@example.invalid`,
+        fixtureKey: null,
+        createdAt: now,
+      },
+      {
+        id: backupGroupSourceId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Issue 26 backup access ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-access-backup-${suffix}`,
+        email: `issue-26-access-backup-${suffix}@example.invalid`,
+        fixtureKey: null,
+        createdAt: now,
+      },
+    ]);
+    await database.insert(users).values([
+      {
+        id: userId,
+        googleSubject,
+        email: `issue-26-access-gate-${suffix}@psd401.net`,
+        displayName: `Issue 26 access member ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: now,
+      },
+      {
+        id: backupUserId,
+        googleSubject: backupGoogleSubject,
+        email: `issue-26-access-backup-${suffix}@psd401.net`,
+        displayName: `Issue 26 backup admin ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: now,
+      },
+    ]);
+    await database.insert(userRoles).values([
+      { userId, role: 'staff' },
+      { userId: backupUserId, role: 'admin' },
+    ]);
     await database.insert(accessMembershipSnapshots).values({
       id: snapshotId,
       version: snapshotVersion,
@@ -348,35 +496,54 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       syncStartedAt: now,
       capturedAt: now,
     });
-    await database.insert(accessMembershipSnapshotGroups).values([
+    await database.insert(accessMembershipSnapshotGroups).values(
+      [groupSourceId, backupGroupSourceId].flatMap((sourceId) => [
+        {
+          snapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'expected' as const,
+        },
+        {
+          snapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'completed' as const,
+        },
+      ]),
+    );
+    await database.insert(accessMembershipMembers).values([
       {
         snapshotId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'expected',
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
       },
       {
         snapshotId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'completed',
+        userId: backupUserId,
+        googleSubject: backupGoogleSubject,
+        facilityScopeKind: 'district',
       },
     ]);
-    await database.insert(accessMembershipMembers).values({
-      snapshotId,
-      userId,
-      googleSubject,
-      facilityScopeKind: 'district',
-    });
-    await database.insert(accessMembershipMemberGroups).values({
-      snapshotId,
-      userId,
-      groupSourceId,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-    });
+    await database.insert(accessMembershipMemberGroups).values([
+      {
+        snapshotId,
+        userId,
+        groupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+      {
+        snapshotId,
+        userId: backupUserId,
+        groupSourceId: backupGroupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+    ]);
     const deviceEnrollmentId = randomUUID();
     const sessionId = randomUUID();
     await database.insert(deviceEnrollments).values({
@@ -427,13 +594,22 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       purpose: 'access',
       facilityId: null,
     } as const;
+    const backupRef = {
+      id: backupGroupSourceId,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+    } as const;
+    const expectedRefs = [expectedRef, backupRef].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
     expect(evidence.user?.roles).toEqual(['admin']);
-    expect(evidence.snapshot?.expectedAccessGroupSourceRefs).toEqual([
-      expectedRef,
-    ]);
-    expect(evidence.snapshot?.completedAccessGroupSourceRefs).toEqual([
-      expectedRef,
-    ]);
+    expect(evidence.snapshot?.expectedAccessGroupSourceRefs).toEqual(
+      expectedRefs,
+    );
+    expect(evidence.snapshot?.completedAccessGroupSourceRefs).toEqual(
+      expectedRefs,
+    );
     expect(evidence.snapshot?.member?.accessGroupSourceRefs).toEqual([
       expectedRef,
     ]);
@@ -443,6 +619,21 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         'completionKind',
       ),
     ).toBe(false);
+    const initialAccessState =
+      await loadAccessConfigurationSnapshotState(database);
+    expect(initialAccessState).toEqual({
+      snapshotId,
+      snapshotVersion,
+      activeAccessGroupSourceIds: [groupSourceId, backupGroupSourceId].sort(),
+    });
+    if (initialAccessState === null) {
+      throw new Error('The initial access snapshot must be exact.');
+    }
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: initialAccessState,
+      }),
+    ).toEqual([userId, backupUserId].sort());
 
     const authenticated = {
       actor: { kind: 'human', userId, sessionId },
@@ -566,9 +757,95 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     );
     expect(afterBuildingCorrection.granted).toBe(true);
 
+    if (
+      evidence.user === null ||
+      evidence.snapshot === null ||
+      evidence.snapshot.member === null
+    ) {
+      throw new Error('The exact access evidence is required for issuance.');
+    }
+    const issuanceCreatedAt = new Date(now.getTime() + 1_750);
+    const responseDigest = digest(`building-update-response:${suffix}`);
+    const principal = {
+      kind: 'oidc-callback' as const,
+      subjectDigest: digest(googleSubject),
+      responseDigest,
+    };
+    const issuanceRequest: PersistInitialWebSessionRequest = Object.freeze({
+      user: evidence.user,
+      membershipSnapshot: Object.freeze({
+        id: snapshotId,
+        version: snapshotVersion,
+        complete: true as const,
+        syncStartedAt: now.toISOString(),
+        capturedAt: now.toISOString(),
+      }),
+      membershipMember: evidence.snapshot.member,
+      device: Object.freeze({
+        platform: 'web' as const,
+        unlockMethod: 'secure-session-cookie' as const,
+        installationId: `issue-26-building-issuance-${suffix}`,
+      }),
+      credentialDigest: digest(`building-update-credential:${suffix}`),
+      createdAt: issuanceCreatedAt,
+      expiresAt: new Date(issuanceCreatedAt.getTime() + 3 * 60 * 60 * 1_000),
+      membershipValidUntil: new Date(
+        issuanceCreatedAt.getTime() + 60 * 60 * 1_000,
+      ),
+      membershipGraceUntil: new Date(
+        issuanceCreatedAt.getTime() + 2 * 60 * 60 * 1_000,
+      ),
+      grantBootstrapAdmin: false,
+      requestId: randomUUID(),
+      idempotency: Object.freeze({
+        key: `oidc:${responseDigest}`,
+        principal,
+        principalDigest: digest(JSON.stringify(principal)),
+        requestDigest: digest(`building-update-request:${suffix}`),
+      }),
+    });
+    const issuedAfterUnrelatedUpdate =
+      await createDrizzleInitialWebSessionStore(database).persist(
+        issuanceRequest,
+      );
+    expect(issuedAfterUnrelatedUpdate.user.id).toBe(userId);
+
+    const invalidResponseDigest = digest(
+      `noncanonical-membership-response:${suffix}`,
+    );
+    const invalidPrincipal = {
+      kind: 'oidc-callback' as const,
+      subjectDigest: digest(googleSubject),
+      responseDigest: invalidResponseDigest,
+    };
+    await expect(
+      createDrizzleInitialWebSessionStore(database).persist({
+        ...issuanceRequest,
+        credentialDigest: digest(
+          `noncanonical-membership-credential:${suffix}`,
+        ),
+        requestId: randomUUID(),
+        membershipMember: {
+          ...evidence.snapshot.member,
+          accessGroupSourceRefs:
+            evidence.snapshot.member.accessGroupSourceRefs.map((source) => ({
+              ...source,
+              completionKind: 'completed',
+            })),
+        } as unknown as PersistInitialWebSessionRequest['membershipMember'],
+        idempotency: Object.freeze({
+          key: `oidc:${invalidResponseDigest}`,
+          principal: invalidPrincipal,
+          principalDigest: digest(JSON.stringify(invalidPrincipal)),
+          requestDigest: digest(`noncanonical-membership-request:${suffix}`),
+        }),
+      }),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
+
     const accessUpdateRequestId = randomUUID();
     const accessUpdatedAt = new Date(now.getTime() + 2_000);
-    await executeUpdateGroupSourceCapability({
+    const accessUpdateIdempotencyKey = `issue-26-gate-access-v2-${suffix}`;
+    const accessReplacement = await executeUpdateGroupSourceCapability({
       authenticated,
       store: adminStore,
       command: {
@@ -582,7 +859,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         email: `issue-26-access-gate-v2-${suffix}@example.invalid`,
       },
       metadata: {
-        idempotencyKey: `issue-26-gate-access-v2-${suffix}`,
+        idempotencyKey: accessUpdateIdempotencyKey,
         requestId: accessUpdateRequestId,
         now: accessUpdatedAt,
       },
@@ -597,8 +874,11 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       .limit(1);
     expect(accessUpdateAudit).toEqual({
       targetKind: 'configuration',
-      targetId: groupSourceId,
+      targetId: accessReplacement.id,
     });
+    expect(accessReplacement.id).not.toBe(groupSourceId);
+    expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([]);
     const afterAccessCorrection = await checkAccessGate(
       {
         googleSubject,
@@ -627,35 +907,54 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       syncStartedAt: replacementCapturedAt,
       capturedAt: replacementCapturedAt,
     });
-    await database.insert(accessMembershipSnapshotGroups).values([
+    await database.insert(accessMembershipSnapshotGroups).values(
+      [accessReplacement.id, backupGroupSourceId].flatMap((sourceId) => [
+        {
+          snapshotId: replacementSnapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'expected' as const,
+        },
+        {
+          snapshotId: replacementSnapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'completed' as const,
+        },
+      ]),
+    );
+    await database.insert(accessMembershipMembers).values([
       {
         snapshotId: replacementSnapshotId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'expected',
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
       },
       {
         snapshotId: replacementSnapshotId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'completed',
+        userId: backupUserId,
+        googleSubject: backupGoogleSubject,
+        facilityScopeKind: 'district',
       },
     ]);
-    await database.insert(accessMembershipMembers).values({
-      snapshotId: replacementSnapshotId,
-      userId,
-      googleSubject,
-      facilityScopeKind: 'district',
-    });
-    await database.insert(accessMembershipMemberGroups).values({
-      snapshotId: replacementSnapshotId,
-      userId,
-      groupSourceId,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-    });
+    await database.insert(accessMembershipMemberGroups).values([
+      {
+        snapshotId: replacementSnapshotId,
+        userId,
+        groupSourceId: accessReplacement.id,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+      {
+        snapshotId: replacementSnapshotId,
+        userId: backupUserId,
+        groupSourceId: backupGroupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+    ]);
     const afterReplacementSync = await checkAccessGate(
       {
         googleSubject,
@@ -671,6 +970,55 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       },
     );
     expect(afterReplacementSync.granted).toBe(true);
+
+    const completedReplayRequestId = randomUUID();
+    const completedReplay = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store: adminStore,
+      command: {
+        id: groupSourceId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Corrected access gate ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-access-gate-v2-${suffix}`,
+        email: `issue-26-access-gate-v2-${suffix}@example.invalid`,
+      },
+      metadata: {
+        idempotencyKey: accessUpdateIdempotencyKey,
+        requestId: completedReplayRequestId,
+        now: new Date(now.getTime() + 4_750),
+      },
+    });
+    expect(completedReplay).toEqual(accessReplacement);
+    const [completedReplayAudit] = await database
+      .select({
+        targetKind: securityAuditEntries.targetKind,
+        targetId: securityAuditEntries.targetId,
+      })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, completedReplayRequestId))
+      .limit(1);
+    expect(completedReplayAudit).toEqual({
+      targetKind: 'configuration',
+      targetId: accessReplacement.id,
+    });
+    const afterCompletedReplay = await checkAccessGate(
+      {
+        googleSubject,
+        subjectDigest: 'e'.repeat(64),
+        requestId: randomUUID(),
+        checkedAt: new Date(now.getTime() + 4_900).toISOString(),
+        source: 'web',
+      },
+      {
+        store: gateStore,
+        audit: auditSink,
+        bootstrapAdminSubjects: new Set(),
+      },
+    );
+    expect(afterCompletedReplay.granted).toBe(true);
 
     await appendLegacyAccessGroupUpdateAudit({
       authenticated,
@@ -691,9 +1039,126 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         bootstrapAdminSubjects: new Set(),
       },
     );
-    expect(afterLegacyAccessCorrection).toEqual({
-      granted: false,
-      reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
+    expect(afterLegacyAccessCorrection.granted).toBe(true);
+
+    await database
+      .update(users)
+      .set({ disabledAt: new Date(now.getTime() + 6_250) })
+      .where(eq(users.id, backupUserId));
+    const remainingAccessGroupId = randomUUID();
+    await database.insert(groupSources).values({
+      id: remainingAccessGroupId,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+      displayName: `Issue 26 remaining access ${suffix.slice(0, 8)}`,
+      active: true,
+      googleGroupId: `issue-26-remaining-access-${suffix}`,
+      email: `issue-26-remaining-access-${suffix}@example.invalid`,
+      fixtureKey: null,
+      createdAt: new Date(now.getTime() + 6_500),
     });
+    expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([]);
+
+    const exactThreeGroupSnapshotId = randomUUID();
+    const exactThreeGroupSnapshotAt = new Date(now.getTime() + 7_000);
+    await database.insert(accessMembershipSnapshots).values({
+      id: exactThreeGroupSnapshotId,
+      version: snapshotVersion + 2,
+      complete: true,
+      syncStartedAt: exactThreeGroupSnapshotAt,
+      capturedAt: exactThreeGroupSnapshotAt,
+    });
+    await database.insert(accessMembershipSnapshotGroups).values(
+      [
+        accessReplacement.id,
+        backupGroupSourceId,
+        remainingAccessGroupId,
+      ].flatMap((sourceId) => [
+        {
+          snapshotId: exactThreeGroupSnapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'expected' as const,
+        },
+        {
+          snapshotId: exactThreeGroupSnapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+          completionKind: 'completed' as const,
+        },
+      ]),
+    );
+    await database.insert(accessMembershipMembers).values([
+      {
+        snapshotId: exactThreeGroupSnapshotId,
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
+      },
+      {
+        snapshotId: exactThreeGroupSnapshotId,
+        userId: backupUserId,
+        googleSubject: backupGoogleSubject,
+        facilityScopeKind: 'district',
+      },
+    ]);
+    await database.insert(accessMembershipMemberGroups).values([
+      {
+        snapshotId: exactThreeGroupSnapshotId,
+        userId,
+        groupSourceId: accessReplacement.id,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+      {
+        snapshotId: exactThreeGroupSnapshotId,
+        userId: backupUserId,
+        groupSourceId: backupGroupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+    ]);
+
+    const exactThreeGroupState =
+      await loadAccessConfigurationSnapshotState(database);
+    expect(exactThreeGroupState).toEqual({
+      snapshotId: exactThreeGroupSnapshotId,
+      snapshotVersion: snapshotVersion + 2,
+      activeAccessGroupSourceIds: [
+        accessReplacement.id,
+        backupGroupSourceId,
+        remainingAccessGroupId,
+      ].sort(),
+    });
+    if (exactThreeGroupState === null) {
+      throw new Error('The three-group access snapshot must be exact.');
+    }
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: exactThreeGroupState,
+      }),
+    ).toEqual([userId]);
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: exactThreeGroupState,
+        eligibleAccessGroupSourceIds: [remainingAccessGroupId],
+      }),
+    ).toEqual([]);
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: exactThreeGroupState,
+        eligibleAccessGroupSourceIds: [backupGroupSourceId],
+      }),
+    ).toEqual([]);
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: exactThreeGroupState,
+        eligibleAccessGroupSourceIds: [accessReplacement.id],
+      }),
+    ).toEqual([userId]);
   });
 });

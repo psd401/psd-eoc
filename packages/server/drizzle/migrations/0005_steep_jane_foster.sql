@@ -4,6 +4,8 @@
 LOCK TABLE
 	public."users",
 	public."sessions",
+	public."group_sources",
+	public."access_membership_snapshots",
 	public."integration_statuses",
 	public."channel_configurations",
 	public."roster_source_configurations",
@@ -83,6 +85,109 @@ ALTER TABLE "user_role_changes" ADD CONSTRAINT "user_role_changes_changer_sessio
 CREATE INDEX "channel_change_authorizations_integration_idx" ON "integration_channel_change_authorizations" USING btree ("integration_id","consumed_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "user_role_changes_effective_idx" ON "user_role_changes" USING btree ("user_id","role","sequence" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "user_role_changes_changer_idx" ON "user_role_changes" USING btree ("changed_by_user_id","sequence" DESC NULLS LAST);--> statement-breakpoint
+
+-- Access-provider locators are identity-bearing audit targets. Correcting one
+-- must create a replacement row so an idempotent replay and every historical
+-- audit reference continue to resolve the exact provider identity that was
+-- observed when the record was written.
+CREATE OR REPLACE FUNCTION public."psd_eoc_guard_group_source_identity_mutation"()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+	IF TG_RELID <> 'public.group_sources'::pg_catalog.regclass
+		OR TG_TABLE_SCHEMA <> 'public'
+		OR TG_TABLE_NAME <> 'group_sources'
+		OR TG_WHEN <> 'BEFORE'
+		OR TG_LEVEL <> 'ROW'
+		OR TG_OP <> 'UPDATE'
+	THEN
+		RAISE EXCEPTION 'Unexpected group-source identity trigger context'
+			USING ERRCODE = '55000';
+	END IF;
+
+	IF OLD."purpose" IN ('building', 'others')
+		AND pg_catalog.to_jsonb(NEW) IS DISTINCT FROM pg_catalog.to_jsonb(OLD)
+	THEN
+		RAISE EXCEPTION 'Group-source identity, provider locator, status, and presentation are immutable'
+			USING ERRCODE = '55000';
+	END IF;
+	IF NEW."id" IS DISTINCT FROM OLD."id"
+		OR NEW."kind" IS DISTINCT FROM OLD."kind"
+		OR NEW."purpose" IS DISTINCT FROM OLD."purpose"
+		OR NEW."facility_id" IS DISTINCT FROM OLD."facility_id"
+		OR NEW."created_at" IS DISTINCT FROM OLD."created_at"
+	THEN
+		RAISE EXCEPTION 'Group-source identity, purpose, facility binding, and creation time are immutable'
+			USING ERRCODE = '55000';
+	END IF;
+	IF OLD."purpose" = 'access'
+		AND (
+			NEW."google_group_id" IS DISTINCT FROM OLD."google_group_id"
+			OR NEW."email" IS DISTINCT FROM OLD."email"
+		)
+	THEN
+		RAISE EXCEPTION 'Access group provider locators are immutable; create a replacement identity'
+			USING ERRCODE = '55000';
+	END IF;
+
+	RETURN NEW;
+END;
+$$;--> statement-breakpoint
+
+CREATE OR REPLACE FUNCTION public."psd_eoc_lock_admin_availability_on_access_group_write"()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+	IF TG_RELID <> 'public.group_sources'::pg_catalog.regclass
+		OR TG_TABLE_SCHEMA <> 'public'
+		OR TG_TABLE_NAME <> 'group_sources'
+		OR TG_WHEN <> 'BEFORE'
+		OR TG_LEVEL <> 'STATEMENT'
+		OR TG_OP NOT IN ('INSERT', 'UPDATE')
+	THEN
+		RAISE EXCEPTION 'Unexpected access-group availability trigger context'
+			USING ERRCODE = '55000';
+	END IF;
+
+	PERFORM pg_catalog.pg_advisory_xact_lock(
+		pg_catalog.hashtextextended('psd-eoc-admin-availability', 0)
+	);
+
+	RETURN NULL;
+END;
+$$;--> statement-breakpoint
+
+-- Publishing a complete access snapshot and changing either an effective
+-- admin role or the active access-group set share one serialization boundary.
+-- This database-side lock covers every current and future snapshot publisher,
+-- including publishers that do not call the admin capability layer.
+CREATE OR REPLACE FUNCTION public."psd_eoc_lock_admin_availability_on_access_snapshot_insert"()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+	IF TG_RELID <> 'public.access_membership_snapshots'::pg_catalog.regclass
+		OR TG_TABLE_SCHEMA <> 'public'
+		OR TG_TABLE_NAME <> 'access_membership_snapshots'
+		OR TG_WHEN <> 'BEFORE'
+		OR TG_LEVEL <> 'ROW'
+		OR TG_OP <> 'INSERT'
+	THEN
+		RAISE EXCEPTION 'Unexpected access-snapshot availability trigger context'
+			USING ERRCODE = '55000';
+	END IF;
+
+	PERFORM pg_catalog.pg_advisory_xact_lock(
+		pg_catalog.hashtextextended('psd-eoc-admin-availability', 0)
+	);
+	RETURN NEW;
+END;
+$$;--> statement-breakpoint
 
 -- A stricter append guard must not silently legitimize an ambiguous existing
 -- graph. Abort the whole transaction so operators can correct the legacy data
@@ -354,6 +459,10 @@ BEGIN
 		RAISE EXCEPTION 'Unexpected role-change sequence trigger context'
 			USING ERRCODE = '55000';
 	END IF;
+
+	PERFORM pg_catalog.pg_advisory_xact_lock(
+		pg_catalog.hashtextextended('psd-eoc-admin-availability', 0)
+	);
 
 	BEGIN
 		issued_sequence := pg_catalog.currval(
@@ -883,6 +992,16 @@ BEFORE INSERT ON public."user_role_changes"
 FOR EACH ROW
 EXECUTE FUNCTION public."psd_eoc_guard_user_role_change_insert"();--> statement-breakpoint
 
+CREATE TRIGGER "access_membership_snapshots_admin_availability_lock"
+BEFORE INSERT ON public."access_membership_snapshots"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_lock_admin_availability_on_access_snapshot_insert"();--> statement-breakpoint
+
+CREATE TRIGGER "group_sources_admin_availability_lock"
+BEFORE INSERT OR UPDATE ON public."group_sources"
+FOR EACH STATEMENT
+EXECUTE FUNCTION public."psd_eoc_lock_admin_availability_on_access_group_write"();--> statement-breakpoint
+
 CREATE TRIGGER "roster_source_configurations_monotonic_insert_guard"
 BEFORE INSERT ON public."roster_source_configurations"
 FOR EACH ROW
@@ -956,6 +1075,9 @@ EXECUTE FUNCTION public."psd_eoc_reject_immutable_mutation"();--> statement-brea
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_integration_status_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_sync_channel_configuration_after_status"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_user_role_change_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
+REVOKE ALL ON FUNCTION public."psd_eoc_guard_group_source_identity_mutation"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
+REVOKE ALL ON FUNCTION public."psd_eoc_lock_admin_availability_on_access_group_write"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
+REVOKE ALL ON FUNCTION public."psd_eoc_lock_admin_availability_on_access_snapshot_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_roster_source_configuration_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_roster_snapshot_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_roster_configuration_child_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint

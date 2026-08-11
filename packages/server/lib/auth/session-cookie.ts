@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import {
+  AccessGroupSourceRefSchema,
   CompleteOidcSignInInputSchema,
   IdempotencyKeySchema,
   IdempotencyPrincipalSchema,
@@ -46,7 +47,7 @@ import {
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './access-gate';
-import { loadEffectiveRoles } from './role-state';
+import { ADMIN_AVAILABILITY_LOCK_SQL, loadEffectiveRoles } from './role-state';
 
 /**
  * The __Host- prefix makes browsers require Secure, Path=/, and no Domain.
@@ -622,7 +623,38 @@ function accessGroupKey(source: {
   return `${source.id}:${source.kind}:${source.purpose}`;
 }
 
-function sameNonemptyKeySet(left: Set<string>, right: Set<string>): boolean {
+function canonicalAccessGroupKeySet(
+  sources: readonly unknown[],
+): ReadonlySet<string> | null {
+  const keys: string[] = [];
+  const ids: string[] = [];
+  for (const source of sources) {
+    const parsed = AccessGroupSourceRefSchema.safeParse(source);
+    if (
+      !parsed.success ||
+      parsed.data.kind !== 'google-group' ||
+      parsed.data.purpose !== 'access' ||
+      parsed.data.facilityId !== null
+    ) {
+      return null;
+    }
+    ids.push(parsed.data.id);
+    keys.push(accessGroupKey(parsed.data));
+  }
+  if (
+    keys.length === 0 ||
+    new Set(ids).size !== ids.length ||
+    new Set(keys).size !== keys.length
+  ) {
+    return null;
+  }
+  return new Set(keys);
+}
+
+function sameNonemptyKeySet(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
   return (
     left.size > 0 &&
     left.size === right.size &&
@@ -719,6 +751,9 @@ export function createDrizzleInitialWebSessionStore(
             await transaction.execute(
               sql`set transaction isolation level serializable`,
             );
+            if (request.grantBootstrapAdmin) {
+              await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+            }
 
             if (!/^[a-f0-9]{64}$/u.test(request.credentialDigest)) {
               throw new WebSessionIssuanceError(
@@ -765,21 +800,6 @@ export function createDrizzleInitialWebSessionStore(
               .orderBy(desc(accessMembershipSnapshots.version))
               .limit(1)
               .for('share');
-
-            const [latestSuccessfulGroupSourceUpdate] = await transaction
-              .select({ occurredAt: securityAuditEntries.occurredAt })
-              .from(securityAuditEntries)
-              .where(
-                and(
-                  eq(securityAuditEntries.action, 'update-group-source'),
-                  eq(securityAuditEntries.outcome, 'success'),
-                ),
-              )
-              .orderBy(
-                desc(securityAuditEntries.occurredAt),
-                desc(securityAuditEntries.sequence),
-              )
-              .limit(1);
 
             const [membership] = await transaction
               .select({
@@ -828,15 +848,25 @@ export function createDrizzleInitialWebSessionStore(
                 ),
               )
               .for('share');
-            const expectedGroupKeys = new Set(
+            const expectedGroupKeys = canonicalAccessGroupKeySet(
               snapshotGroupEvidence
                 .filter(({ completionKind }) => completionKind === 'expected')
-                .map(accessGroupKey),
+                .map(({ id, kind, purpose }) => ({
+                  id,
+                  kind,
+                  purpose,
+                  facilityId: null,
+                })),
             );
-            const completedGroupKeys = new Set(
+            const completedGroupKeys = canonicalAccessGroupKeySet(
               snapshotGroupEvidence
                 .filter(({ completionKind }) => completionKind === 'completed')
-                .map(accessGroupKey),
+                .map(({ id, kind, purpose }) => ({
+                  id,
+                  kind,
+                  purpose,
+                  facilityId: null,
+                })),
             );
 
             const currentActiveGroups = await transaction
@@ -854,10 +884,20 @@ export function createDrizzleInitialWebSessionStore(
                 ),
               )
               .for('share');
-            const currentActiveGroupKeys = new Set(
-              currentActiveGroups.map(accessGroupKey),
+            const currentActiveGroupKeys = canonicalAccessGroupKeySet(
+              currentActiveGroups.map(({ id, kind, purpose }) => ({
+                id,
+                kind,
+                purpose,
+                facilityId: null,
+              })),
             );
             const snapshotGroupsMatch =
+              expectedGroupKeys !== null &&
+              completedGroupKeys !== null &&
+              currentActiveGroupKeys !== null &&
+              snapshotGroupEvidence.length ===
+                expectedGroupKeys.size + completedGroupKeys.size &&
               sameNonemptyKeySet(expectedGroupKeys, completedGroupKeys) &&
               sameNonemptyKeySet(expectedGroupKeys, currentActiveGroupKeys);
 
@@ -878,8 +918,13 @@ export function createDrizzleInitialWebSessionStore(
                 ),
               )
               .for('share');
-            const membershipGroupKeys = new Set(
-              membershipGroupEvidence.map(accessGroupKey),
+            const membershipGroupKeys = canonicalAccessGroupKeySet(
+              membershipGroupEvidence.map(({ id, kind, purpose }) => ({
+                id,
+                kind,
+                purpose,
+                facilityId: null,
+              })),
             );
             const membershipFacilityEvidence = await transaction
               .select({
@@ -896,19 +941,25 @@ export function createDrizzleInitialWebSessionStore(
                 ),
               )
               .for('share');
-            const contextGroupKeys = new Set(
-              request.membershipMember.accessGroupSourceRefs.map(
-                accessGroupKey,
-              ),
+            const contextGroupKeys = canonicalAccessGroupKeySet(
+              request.membershipMember.accessGroupSourceRefs,
             );
-            const hasDesignatedMembership = [...contextGroupKeys].some(
-              (key) =>
-                expectedGroupKeys.has(key) &&
-                completedGroupKeys.has(key) &&
-                currentActiveGroupKeys.has(key) &&
-                membershipGroupKeys.has(key),
-            );
+            const hasDesignatedMembership =
+              expectedGroupKeys !== null &&
+              completedGroupKeys !== null &&
+              currentActiveGroupKeys !== null &&
+              membershipGroupKeys !== null &&
+              contextGroupKeys !== null &&
+              [...contextGroupKeys].some(
+                (key) =>
+                  expectedGroupKeys.has(key) &&
+                  completedGroupKeys.has(key) &&
+                  currentActiveGroupKeys.has(key) &&
+                  membershipGroupKeys.has(key),
+              );
             const contextMatchesPersistedMembership =
+              contextGroupKeys !== null &&
+              membershipGroupKeys !== null &&
               contextGroupKeys.size === membershipGroupKeys.size &&
               [...contextGroupKeys].every((key) =>
                 membershipGroupKeys.has(key),
@@ -920,9 +971,6 @@ export function createDrizzleInitialWebSessionStore(
               latestSnapshot.version !== request.membershipSnapshot.version ||
               latestSnapshot.syncStartedAt.getTime() !==
                 new Date(request.membershipSnapshot.syncStartedAt).getTime() ||
-              (latestSuccessfulGroupSourceUpdate !== undefined &&
-                latestSnapshot.syncStartedAt.getTime() <=
-                  latestSuccessfulGroupSourceUpdate.occurredAt.getTime()) ||
               membership === undefined ||
               !snapshotGroupsMatch ||
               !contextMatchesPersistedMembership ||
