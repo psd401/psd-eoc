@@ -1,8 +1,16 @@
 import {
+  EndpointStatusRecordSchema,
+  RecordEndpointStatusInputSchema,
   RecordSmsOptOutInputSchema,
   RosterSnapshotIdSchema,
+  SMS_LIFECYCLE_PROVIDER,
+  SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
   SmsEndpointSchema,
   SmsOptOutRecordSchema,
+  TimestampSchema,
+  UuidSchema,
+  type EndpointStatusRecord,
+  type RecordEndpointStatusInput,
   type RecordSmsOptOutInput,
   type SmsOptOutRecord,
 } from '@psd-eoc/contracts';
@@ -13,18 +21,25 @@ import {
 } from '../shared/attempt';
 import { AWS_EUM_SMS_PROVIDER } from './delivery-events';
 
-const OPT_OUT_LIST_NAME_PATTERN = /^[A-Za-z0-9_:/-]{1,256}$/u;
+const OPT_OUT_LIST_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u;
+const OPT_OUT_LIST_ARN_PATTERN =
+  /^arn:[a-z0-9-]+:sms-voice:[a-z0-9-]{1,32}:[0-9]{12}:opt-out-list\/([A-Za-z0-9_-]{1,64})$/u;
 const NEXT_TOKEN_PATTERN = /^.{1,1024}$/u;
 const PROVIDER_REFERENCE_PATTERN = /^[A-Za-z0-9._:/+=-]{1,500}$/u;
 const MAX_RESULTS_PER_PAGE = 100;
 const MAX_RECONCILIATION_PAGES = 100;
 const MAX_RECONCILIATION_RECORDS = 1_200;
 
+export const SMS_PROVIDER_VERIFIED_OPT_IN_REASON =
+  SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE;
+
 export type SmsOptOutErrorCode =
   | 'INVALID_CONFIGURATION'
+  | 'INVOCATION_UNVERIFIED'
+  | 'PROVIDER_READ_FAILED'
   | 'INVALID_PROVIDER_RESPONSE'
+  | 'INVALID_RECORDER_RESPONSE'
   | 'OPT_OUT_PAGINATION_EXCEEDED'
-  | 'OPT_OUT_RESULT_EXCEEDED'
   | 'OPT_OUT_ENDPOINT_MISMATCH';
 
 /** Safe opt-out failure which never repeats a phone number. */
@@ -37,6 +52,13 @@ export class SmsOptOutError extends Error {
 
 export interface SmsOptOutRecorder {
   recordSmsOptOut(input: RecordSmsOptOutInput): Promise<SmsOptOutRecord>;
+}
+
+/** Canonical `record-endpoint-status` execution boundary. */
+export interface SmsEndpointStatusRecorder {
+  recordEndpointStatus(
+    input: RecordEndpointStatusInput,
+  ): Promise<EndpointStatusRecord>;
 }
 
 export interface SmsOptOutDestinationResolver {
@@ -52,8 +74,14 @@ export interface SmsOptOutDestinationResolver {
 
 export interface AwsEumDescribeOptedOutNumbersRequest {
   readonly OptOutListName: string;
-  readonly MaxResults: 100;
+  readonly MaxResults: 1 | 100;
   readonly NextToken?: string;
+  readonly OptedOutNumbers?: readonly [string];
+}
+
+export interface AwsEumOptOutListIdentity {
+  readonly name: string;
+  readonly arn: string;
 }
 
 export interface AwsEumOptOutTransport {
@@ -62,15 +90,39 @@ export interface AwsEumOptOutTransport {
   ): Promise<unknown>;
 }
 
+/** Trusted inbound-keyword facts supplied separately from AWS response data. */
+export interface SmsOptInInvocation {
+  readonly requestId: string;
+  readonly keyword: 'START' | 'UNSTOP';
+  /** Authenticated inbound sender used for the exact filtered provider read. */
+  readonly phoneNumber: string;
+  /** Authenticated provider-webhook occurrence time used for causal ordering. */
+  readonly occurredAt: string;
+  readonly authorization: unknown;
+}
+
+export type SmsOptInInvocationAuthorizer = (
+  invocation: SmsOptInInvocation,
+) => boolean | Promise<boolean>;
+
+export interface RecordAwsManagedOptInOptions {
+  readonly transport: AwsEumOptOutTransport;
+  readonly resolver: SmsOptOutDestinationResolver;
+  readonly recorder: SmsEndpointStatusRecorder;
+  readonly authorizeInvocation: SmsOptInInvocationAuthorizer;
+}
+
 export interface SmsOptOutReconcilerOptions {
   readonly transport: AwsEumOptOutTransport;
   readonly resolver: SmsOptOutDestinationResolver;
   readonly recorder: SmsOptOutRecorder;
   readonly optOutListName: string;
+  readonly optOutListArn: string;
 }
 
 export interface SmsOptOutReconcileInput {
   readonly rosterSnapshotId: string;
+  readonly continuationToken?: string | null;
 }
 
 export interface SmsOptOutReconcileReport {
@@ -78,6 +130,7 @@ export interface SmsOptOutReconcileReport {
   readonly recordedCount: number;
   readonly unresolvedCount: number;
   readonly pageCount: number;
+  readonly continuationToken: string | null;
 }
 
 interface ParsedOptedOutNumber {
@@ -86,7 +139,6 @@ interface ParsedOptedOutNumber {
 }
 
 interface ParsedOptOutPage {
-  readonly optOutListName: string;
   readonly numbers: readonly ParsedOptedOutNumber[];
   readonly nextToken: string | null;
 }
@@ -106,23 +158,81 @@ function parseProviderReference(value: string): string {
   return value;
 }
 
-function parseOptOutListName(value: string): string {
-  if (!OPT_OUT_LIST_NAME_PATTERN.test(value)) {
+function parseOptOutListIdentity(
+  value: AwsEumOptOutListIdentity | unknown,
+): Readonly<AwsEumOptOutListIdentity> {
+  if (
+    !isPlainRecord(value) ||
+    typeof value.name !== 'string' ||
+    typeof value.arn !== 'string'
+  ) {
     throw new SmsOptOutError('INVALID_CONFIGURATION');
   }
-  return value;
+  const arnMatch = OPT_OUT_LIST_ARN_PATTERN.exec(value.arn);
+  if (
+    !OPT_OUT_LIST_NAME_PATTERN.test(value.name) ||
+    arnMatch === null ||
+    arnMatch[1] !== value.name
+  ) {
+    throw new SmsOptOutError('INVALID_CONFIGURATION');
+  }
+  return Object.freeze({ name: value.name, arn: value.arn });
 }
 
-function parseOptOutPage(value: unknown): ParsedOptOutPage {
-  if (!isPlainRecord(value) || !Array.isArray(value.OptedOutNumbers)) {
+/** Validates and copies the exact configured AWS managed opt-out list. */
+export function validateAwsEumOptOutListIdentity(
+  value: AwsEumOptOutListIdentity | unknown,
+): Readonly<AwsEumOptOutListIdentity> {
+  return parseOptOutListIdentity(value);
+}
+
+function parseProviderTimestamp(value: unknown): number {
+  const milliseconds =
+    value instanceof Date
+      ? value.getTime()
+      : typeof value === 'number'
+        ? value
+        : Number.NaN;
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
     throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
   }
+  return milliseconds;
+}
+
+function parseSmsPhoneNumber(value: unknown): string {
+  const endpoint = SmsEndpointSchema.safeParse({
+    id: '00000000-0000-4000-8000-000000000001',
+    status: 'active',
+    capturedAt: '2026-01-01T00:00:00.000Z',
+    channel: 'sms',
+    phoneNumber: value,
+  });
+  if (!endpoint.success) {
+    throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
+  }
+  return endpoint.data.phoneNumber;
+}
+
+function assertProviderListIdentity(
+  value: Record<string, unknown>,
+  expected: AwsEumOptOutListIdentity,
+): void {
   if (
-    typeof value.OptOutListName !== 'string' ||
-    !OPT_OUT_LIST_NAME_PATTERN.test(value.OptOutListName)
+    value.OptOutListName !== expected.name ||
+    value.OptOutListArn !== expected.arn
   ) {
     throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
   }
+}
+
+function parseOptOutPage(
+  value: unknown,
+  expectedList: AwsEumOptOutListIdentity,
+): ParsedOptOutPage {
+  if (!isPlainRecord(value) || !Array.isArray(value.OptedOutNumbers)) {
+    throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
+  }
+  assertProviderListIdentity(value, expectedList);
   if (value.OptedOutNumbers.length > MAX_RESULTS_PER_PAGE) {
     throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
   }
@@ -131,30 +241,18 @@ function parseOptOutPage(value: unknown): ParsedOptOutPage {
     if (!isPlainRecord(candidate)) {
       throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
     }
-    if (candidate.EndUserOptedOut !== true) {
-      if (candidate.EndUserOptedOut !== false) {
-        throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
-      }
-      continue;
-    }
-    const endpoint = SmsEndpointSchema.safeParse({
-      id: '00000000-0000-4000-8000-000000000001',
-      status: 'active',
-      capturedAt: '2026-01-01T00:00:00.000Z',
-      channel: 'sms',
-      phoneNumber: candidate.OptedOutNumber,
-    });
     if (
-      !endpoint.success ||
-      !Number.isSafeInteger(candidate.OptedOutTimestamp) ||
-      (candidate.OptedOutTimestamp as number) < 0
+      candidate.EndUserOptedOut !== true &&
+      candidate.EndUserOptedOut !== false
     ) {
       throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
     }
     numbers.push(
       Object.freeze({
-        phoneNumber: endpoint.data.phoneNumber,
-        optedOutAtMilliseconds: candidate.OptedOutTimestamp as number,
+        phoneNumber: parseSmsPhoneNumber(candidate.OptedOutNumber),
+        optedOutAtMilliseconds: parseProviderTimestamp(
+          candidate.OptedOutTimestamp,
+        ),
       }),
     );
   }
@@ -169,19 +267,81 @@ function parseOptOutPage(value: unknown): ParsedOptOutPage {
     nextToken = value.NextToken;
   }
   return Object.freeze({
-    optOutListName: value.OptOutListName,
     numbers: Object.freeze(numbers),
     nextToken,
   });
 }
 
+async function loadOptOutPage(
+  transport: AwsEumOptOutTransport,
+  request: AwsEumDescribeOptedOutNumbersRequest,
+  expectedList: AwsEumOptOutListIdentity,
+): Promise<ParsedOptOutPage> {
+  let response: unknown;
+  try {
+    response = await transport.describeOptedOutNumbers(request);
+  } catch {
+    // AWS errors are untrusted and can echo request data such as a staff phone
+    // number. Surface only this fixed, PII-free domain error.
+    throw new SmsOptOutError('PROVIDER_READ_FAILED');
+  }
+  return parseOptOutPage(response, expectedList);
+}
+
+function parseExactSmsOptOutRecord(
+  value: unknown,
+  input: RecordSmsOptOutInput,
+): SmsOptOutRecord {
+  const record = SmsOptOutRecordSchema.safeParse(value);
+  if (
+    !record.success ||
+    record.data.rosterSnapshotId !== input.rosterSnapshotId ||
+    record.data.recipientId !== input.recipientId ||
+    record.data.endpointId !== input.endpointId ||
+    record.data.provider !== input.provider ||
+    record.data.providerReference !== input.providerReference ||
+    record.data.providerOccurredAt !== input.providerOccurredAt
+  ) {
+    throw new SmsOptOutError('INVALID_RECORDER_RESPONSE');
+  }
+  return record.data;
+}
+
+function parseExactEndpointStatusRecord(
+  value: unknown,
+  input: RecordEndpointStatusInput,
+): EndpointStatusRecord {
+  const record = EndpointStatusRecordSchema.safeParse(value);
+  if (
+    !record.success ||
+    record.data.rosterSnapshotId !== input.rosterSnapshotId ||
+    record.data.recipientId !== input.recipientId ||
+    record.data.endpointId !== input.endpointId ||
+    record.data.status !== input.status ||
+    record.data.reasonCode !== input.reasonCode ||
+    record.data.provider !== input.provider ||
+    record.data.providerReference !== input.providerReference ||
+    record.data.providerOccurredAt !== input.providerOccurredAt
+  ) {
+    throw new SmsOptOutError('INVALID_RECORDER_RESPONSE');
+  }
+  return record.data;
+}
+
 function optOutProviderReference(
-  optOutListName: string,
+  optOutListArn: string,
   optedOutAtMilliseconds: number,
 ): string {
   return parseProviderReference(
-    `opt-out:${optOutListName}:${optedOutAtMilliseconds}`,
+    `opt-out:${optOutListArn}:${optedOutAtMilliseconds}`,
   );
+}
+
+function optInProviderReference(
+  optOutListArn: string,
+  requestId: string,
+): string {
+  return parseProviderReference(`opt-in:${optOutListArn}:${requestId}`);
 }
 
 /**
@@ -191,6 +351,7 @@ function optOutProviderReference(
 export async function recordAwsManagedOptOutConflict(
   workValue: WorkerAttemptWorkItem | unknown,
   providerRequestId: string,
+  providerOccurredAt: string,
   recorder: SmsOptOutRecorder,
 ): Promise<SmsOptOutRecord> {
   const workItem = parseWorkerAttemptWorkItem(workValue);
@@ -206,8 +367,96 @@ export async function recordAwsManagedOptOutConflict(
     endpointId: workItem.endpoint.id,
     provider: AWS_EUM_SMS_PROVIDER,
     providerReference: parseProviderReference(providerRequestId),
+    providerOccurredAt: TimestampSchema.parse(providerOccurredAt),
   });
-  return SmsOptOutRecordSchema.parse(await recorder.recordSmsOptOut(input));
+  return parseExactSmsOptOutRecord(
+    await recorder.recordSmsOptOut(input),
+    input,
+  );
+}
+
+/**
+ * Appends an active supersession fact only after an authenticated inbound
+ * START/UNSTOP and a filtered provider read prove that AWS's keyword action
+ * removed that exact sender from the exact configured list. Administrative
+ * removal alone cannot manufacture the authenticated keyword invocation.
+ */
+export async function recordAwsManagedOptIn(
+  inputValue: Readonly<{ rosterSnapshotId: string }>,
+  listValue: AwsEumOptOutListIdentity,
+  invocation: SmsOptInInvocation,
+  options: RecordAwsManagedOptInOptions,
+): Promise<EndpointStatusRecord | null> {
+  const rosterSnapshotId = RosterSnapshotIdSchema.safeParse(
+    inputValue.rosterSnapshotId,
+  );
+  const list = parseOptOutListIdentity(listValue);
+  if (
+    !rosterSnapshotId.success ||
+    typeof options.transport?.describeOptedOutNumbers !== 'function' ||
+    typeof options.resolver?.resolveSmsDestination !== 'function' ||
+    typeof options.recorder?.recordEndpointStatus !== 'function' ||
+    typeof options.authorizeInvocation !== 'function'
+  ) {
+    throw new SmsOptOutError('INVALID_CONFIGURATION');
+  }
+  if (
+    !isPlainRecord(invocation) ||
+    !UuidSchema.safeParse(invocation.requestId).success ||
+    (invocation.keyword !== 'START' && invocation.keyword !== 'UNSTOP') ||
+    !TimestampSchema.safeParse(invocation.occurredAt).success
+  ) {
+    throw new SmsOptOutError('INVOCATION_UNVERIFIED');
+  }
+  let invocationPhoneNumber: string;
+  try {
+    invocationPhoneNumber = parseSmsPhoneNumber(invocation.phoneNumber);
+  } catch {
+    throw new SmsOptOutError('INVOCATION_UNVERIFIED');
+  }
+  let authorized = false;
+  try {
+    authorized = (await options.authorizeInvocation(invocation)) === true;
+  } catch {
+    authorized = false;
+  }
+  if (!authorized) {
+    throw new SmsOptOutError('INVOCATION_UNVERIFIED');
+  }
+  const verification = await loadOptOutPage(
+    options.transport,
+    {
+      OptOutListName: list.arn,
+      MaxResults: 1,
+      OptedOutNumbers: [invocationPhoneNumber],
+    },
+    list,
+  );
+  if (verification.numbers.length !== 0 || verification.nextToken !== null) {
+    throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
+  }
+  const resolved = await options.resolver.resolveSmsDestination({
+    rosterSnapshotId: rosterSnapshotId.data,
+    phoneNumber: invocationPhoneNumber,
+  });
+  if (resolved === null) return null;
+  if (resolved.rosterSnapshotId !== rosterSnapshotId.data) {
+    throw new SmsOptOutError('OPT_OUT_ENDPOINT_MISMATCH');
+  }
+  const input = RecordEndpointStatusInputSchema.parse({
+    rosterSnapshotId: resolved.rosterSnapshotId,
+    recipientId: resolved.recipientId,
+    endpointId: resolved.endpointId,
+    status: 'active',
+    reasonCode: SMS_PROVIDER_VERIFIED_OPT_IN_REASON,
+    provider: SMS_LIFECYCLE_PROVIDER,
+    providerReference: optInProviderReference(list.arn, invocation.requestId),
+    providerOccurredAt: invocation.occurredAt,
+  });
+  return parseExactEndpointStatusRecord(
+    await options.recorder.recordEndpointStatus(input),
+    input,
+  );
 }
 
 /**
@@ -218,7 +467,7 @@ export class SmsOptOutReconciler {
   readonly #transport: AwsEumOptOutTransport;
   readonly #resolver: SmsOptOutDestinationResolver;
   readonly #recorder: SmsOptOutRecorder;
-  readonly #optOutListName: string;
+  readonly #optOutList: Readonly<AwsEumOptOutListIdentity>;
 
   public constructor(options: SmsOptOutReconcilerOptions) {
     if (
@@ -231,7 +480,10 @@ export class SmsOptOutReconciler {
     this.#transport = options.transport;
     this.#resolver = options.resolver;
     this.#recorder = options.recorder;
-    this.#optOutListName = parseOptOutListName(options.optOutListName);
+    this.#optOutList = parseOptOutListIdentity({
+      name: options.optOutListName,
+      arn: options.optOutListArn,
+    });
   }
 
   public async reconcile(
@@ -247,28 +499,40 @@ export class SmsOptOutReconciler {
     let recordedCount = 0;
     let unresolvedCount = 0;
     let pageCount = 0;
-    let nextToken: string | null = null;
+    const suppliedToken = input.continuationToken ?? null;
+    if (
+      suppliedToken !== null &&
+      (typeof suppliedToken !== 'string' ||
+        !NEXT_TOKEN_PATTERN.test(suppliedToken))
+    ) {
+      throw new SmsOptOutError('INVALID_CONFIGURATION');
+    }
+    let nextToken: string | null = suppliedToken;
     const seenTokens = new Set<string>();
 
     do {
       pageCount += 1;
-      if (pageCount > MAX_RECONCILIATION_PAGES) {
-        throw new SmsOptOutError('OPT_OUT_PAGINATION_EXCEEDED');
-      }
-      const response = await this.#transport.describeOptedOutNumbers({
-        OptOutListName: this.#optOutListName,
-        MaxResults: MAX_RESULTS_PER_PAGE,
-        ...(nextToken === null ? {} : { NextToken: nextToken }),
-      });
-      const page = parseOptOutPage(response);
-      if (page.optOutListName !== this.#optOutListName) {
-        throw new SmsOptOutError('INVALID_PROVIDER_RESPONSE');
+      const requestedToken = nextToken;
+      const page = await loadOptOutPage(
+        this.#transport,
+        {
+          OptOutListName: this.#optOutList.arn,
+          MaxResults: MAX_RESULTS_PER_PAGE,
+          ...(requestedToken === null ? {} : { NextToken: requestedToken }),
+        },
+        this.#optOutList,
+      );
+      if (examinedCount + page.numbers.length > MAX_RECONCILIATION_RECORDS) {
+        return Object.freeze({
+          examinedCount,
+          recordedCount,
+          unresolvedCount,
+          pageCount: pageCount - 1,
+          continuationToken: requestedToken,
+        });
       }
       for (const number of page.numbers) {
         examinedCount += 1;
-        if (examinedCount > MAX_RECONCILIATION_RECORDS) {
-          throw new SmsOptOutError('OPT_OUT_RESULT_EXCEEDED');
-        }
         const resolved = await this.#resolver.resolveSmsDestination({
           rosterSnapshotId: rosterSnapshotId.data,
           phoneNumber: number.phoneNumber,
@@ -280,27 +544,44 @@ export class SmsOptOutReconciler {
         if (resolved.rosterSnapshotId !== rosterSnapshotId.data) {
           throw new SmsOptOutError('OPT_OUT_ENDPOINT_MISMATCH');
         }
-        const record = await this.#recorder.recordSmsOptOut(
-          RecordSmsOptOutInputSchema.parse({
-            rosterSnapshotId: resolved.rosterSnapshotId,
-            recipientId: resolved.recipientId,
-            endpointId: resolved.endpointId,
-            provider: AWS_EUM_SMS_PROVIDER,
-            providerReference: optOutProviderReference(
-              this.#optOutListName,
-              number.optedOutAtMilliseconds,
-            ),
-          }),
+        const recordInput = RecordSmsOptOutInputSchema.parse({
+          rosterSnapshotId: resolved.rosterSnapshotId,
+          recipientId: resolved.recipientId,
+          endpointId: resolved.endpointId,
+          provider: AWS_EUM_SMS_PROVIDER,
+          providerReference: optOutProviderReference(
+            this.#optOutList.arn,
+            number.optedOutAtMilliseconds,
+          ),
+          providerOccurredAt: new Date(
+            number.optedOutAtMilliseconds,
+          ).toISOString(),
+        });
+        parseExactSmsOptOutRecord(
+          await this.#recorder.recordSmsOptOut(recordInput),
+          recordInput,
         );
-        SmsOptOutRecordSchema.parse(record);
         recordedCount += 1;
       }
       nextToken = page.nextToken;
       if (nextToken !== null) {
-        if (seenTokens.has(nextToken)) {
+        if (nextToken === requestedToken || seenTokens.has(nextToken)) {
           throw new SmsOptOutError('OPT_OUT_PAGINATION_EXCEEDED');
         }
         seenTokens.add(nextToken);
+      }
+      if (
+        nextToken !== null &&
+        (examinedCount >= MAX_RECONCILIATION_RECORDS ||
+          pageCount >= MAX_RECONCILIATION_PAGES)
+      ) {
+        return Object.freeze({
+          examinedCount,
+          recordedCount,
+          unresolvedCount,
+          pageCount,
+          continuationToken: nextToken,
+        });
       }
     } while (nextToken !== null);
 
@@ -309,6 +590,7 @@ export class SmsOptOutReconciler {
       recordedCount,
       unresolvedCount,
       pageCount,
+      continuationToken: null,
     });
   }
 }

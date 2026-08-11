@@ -6,8 +6,11 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { RosterHealthQuerySchema } from '@psd-eoc/contracts';
-import { eq, sql } from 'drizzle-orm';
+import {
+  RosterHealthQuerySchema,
+  type SmsLifecycleCapabilityContext,
+} from '@psd-eoc/contracts';
+import { asc, eq, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -22,11 +25,15 @@ import {
 import { migrateDatabase } from '../../packages/server/drizzle/migrate';
 import {
   createDrizzleSmsPolicyStore,
+  executeRecordEndpointStatusCapability,
+  executeRecordSmsOptOutCapability,
+  SMS_OPT_IN_REASON_CODE,
   SMS_OPT_OUT_REASON_CODE,
 } from '../../packages/server/lib/notify/sms-policy';
 import {
   buildStaleRosterReport,
   createDrizzleStaleRosterReportStore,
+  type ScopedStaleRosterEvidence,
 } from '../../packages/server/lib/roster/stale-report';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -38,13 +45,17 @@ setDefaultTimeout(30_000);
 const SEEDED_ROSTER = '00000000-0000-4000-8000-000000000041';
 const IDS = Object.freeze({
   recipient: '00000000-0000-4000-8000-000000000050',
-  pushEndpoint: '00000000-0000-4000-8000-000000000060',
-  emailEndpoint: '00000000-0000-4000-8000-000000000061',
   endpoint: '00000000-0000-4000-8000-000000000062',
-  pushStatus: '10000000-0000-4000-8000-000000000014',
-  emailStatus: '20000000-0000-4000-8000-000000000014',
   optOutRecord: '30000000-0000-4000-8000-000000000014',
   endpointStatus: '40000000-0000-4000-8000-000000000014',
+  activeEndpointStatus: '50000000-0000-4000-8000-000000000014',
+  delayedOptOutRecord: '60000000-0000-4000-8000-000000000014',
+  delayedOptOutStatus: '70000000-0000-4000-8000-000000000014',
+  newOptOutRecord: '71000000-0000-4000-8000-000000000014',
+  newOptOutStatus: '72000000-0000-4000-8000-000000000014',
+  delayedActiveStatus: '73000000-0000-4000-8000-000000000014',
+  baseInvalidStatus: '74000000-0000-4000-8000-000000000014',
+  newestActiveStatus: '75000000-0000-4000-8000-000000000014',
 });
 const isolatedDatabaseName = `psd_eoc_issue14_${randomUUID().replaceAll('-', '')}_test`;
 
@@ -107,30 +118,6 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
     connection = createdIsolatedConnection;
     await migrateDatabase(createdIsolatedConnection);
     await seedDatabase(createdIsolatedConnection.db);
-    await createdIsolatedConnection.db.insert(endpointStatusRecords).values([
-      {
-        id: IDS.pushStatus,
-        rosterSnapshotId: SEEDED_ROSTER,
-        recipientId: IDS.recipient,
-        endpointId: IDS.pushEndpoint,
-        population: 'synthetic',
-        channel: 'push',
-        status: 'disabled',
-        reasonCode: 'SYNTHETIC_TEST_DISABLED',
-        recordedAt: new Date('2026-08-11T17:58:00.000Z'),
-      },
-      {
-        id: IDS.emailStatus,
-        rosterSnapshotId: SEEDED_ROSTER,
-        recipientId: IDS.recipient,
-        endpointId: IDS.emailEndpoint,
-        population: 'synthetic',
-        channel: 'email',
-        status: 'disabled',
-        reasonCode: 'SYNTHETIC_TEST_DISABLED',
-        recordedAt: new Date('2026-08-11T17:59:00.000Z'),
-      },
-    ]);
   });
 
   afterAll(async () => {
@@ -143,9 +130,20 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
     }
   });
 
-  test('persists and honors an opt-out and lists its recipient as stale', async () => {
+  test('projects the latest authenticated append-only SMS lifecycle fact', async () => {
     const database = databaseConnection().db;
-    const generatedIds = [IDS.optOutRecord, IDS.endpointStatus];
+    const generatedIds = [
+      IDS.optOutRecord,
+      IDS.endpointStatus,
+      IDS.activeEndpointStatus,
+      IDS.delayedOptOutRecord,
+      IDS.delayedOptOutStatus,
+      IDS.newOptOutRecord,
+      IDS.newOptOutStatus,
+      IDS.delayedActiveStatus,
+      IDS.baseInvalidStatus,
+      IDS.newestActiveStatus,
+    ];
     const store = createDrizzleSmsPolicyStore(database, {
       uuid() {
         const id = generatedIds.shift();
@@ -155,16 +153,50 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
         return id;
       },
     });
-    const input = {
+    const workerContext: SmsLifecycleCapabilityContext = {
+      actor: { kind: 'system', serviceId: 'sms-worker' },
+      source: 'worker',
+      transport: 'sqs',
+      requestId: '80000000-0000-4000-8000-000000000014',
+      authenticated: true,
+    };
+    const webhookContext: SmsLifecycleCapabilityContext = {
+      actor: { kind: 'system', serviceId: 'sms-opt-in-webhook' },
+      source: 'webhook',
+      transport: 'provider-webhook',
+      requestId: '90000000-0000-4000-8000-000000000014',
+      authenticated: true,
+    };
+    const firstOptOut = {
       rosterSnapshotId: SEEDED_ROSTER,
       recipientId: IDS.recipient,
       endpointId: IDS.endpoint,
       provider: 'aws-eum-sms',
       providerReference: 'synthetic-stop-conflict-1',
+      providerOccurredAt: '2026-08-10T18:00:00.000Z',
     } as const;
 
-    const first = await store.recordSmsOptOut(input);
-    const replay = await store.recordSmsOptOut(input);
+    await expect(
+      executeRecordSmsOptOutCapability(
+        firstOptOut,
+        {
+          ...workerContext,
+          authenticated: false,
+        } as unknown as SmsLifecycleCapabilityContext,
+        store,
+      ),
+    ).rejects.toMatchObject({ code: 'SMS_LIFECYCLE_INVOCATION_DENIED' });
+
+    const first = await executeRecordSmsOptOutCapability(
+      firstOptOut,
+      workerContext,
+      store,
+    );
+    const replay = await executeRecordSmsOptOutCapability(
+      firstOptOut,
+      workerContext,
+      store,
+    );
     expect(replay).toEqual(first);
 
     const retainedOptOuts = await database
@@ -181,6 +213,7 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
         id: IDS.optOutRecord,
         provider: 'aws-eum-sms',
         providerReference: 'synthetic-stop-conflict-1',
+        providerOccurredAt: new Date(firstOptOut.providerOccurredAt),
       }),
     );
     expect(retainedStatuses).toEqual([
@@ -188,6 +221,9 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
         id: IDS.endpointStatus,
         status: 'disabled',
         reasonCode: SMS_OPT_OUT_REASON_CODE,
+        provider: 'aws-eum-sms',
+        providerReference: 'synthetic-stop-conflict-1',
+        providerOccurredAt: new Date(firstOptOut.providerOccurredAt),
       }),
     ]);
 
@@ -201,7 +237,7 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
       {
         recipientId: IDS.recipient,
         endpointId: IDS.endpoint,
-        status: 'disabled',
+        status: 'active',
         optedOut: true,
       },
     ]);
@@ -220,9 +256,259 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
       staleThresholdSeconds: 1_000_000,
     });
     expect(report.status).toBe('stale');
-    expect(report.staleRecipients).toContainEqual({
+    expect(report.staleRecipients).not.toContainEqual({
       recipientId: IDS.recipient,
       reason: 'no-active-endpoint',
     });
+    expect(report.staleEndpoints).toContainEqual({
+      recipientId: IDS.recipient,
+      endpointId: IDS.endpoint,
+      channel: 'sms',
+      reason: 'sms-opted-out',
+    });
+    expect(JSON.stringify(report)).not.toMatch(/\+1|@|token/iu);
+
+    const afterEndpointCursor = RosterHealthQuerySchema.parse({
+      population: 'synthetic',
+      facilityId: null,
+      cursor: Buffer.from(IDS.recipient).toString('base64url'),
+      limit: 200,
+    });
+    const cursorEvidence = (await createDrizzleStaleRosterReportStore(
+      database,
+    ).loadScopedEvidence(afterEndpointCursor, {
+      facilityScope: { kind: 'district' },
+    })) as ScopedStaleRosterEvidence;
+    expect(
+      cursorEvidence.latestCompleteSnapshot?.hasUnreportedStaleEndpoints,
+    ).toBe(true);
+    expect(
+      cursorEvidence.latestCompleteSnapshot?.staleEndpoints,
+    ).not.toContainEqual(expect.objectContaining({ endpointId: IDS.endpoint }));
+
+    const activeInput = {
+      rosterSnapshotId: SEEDED_ROSTER,
+      recipientId: IDS.recipient,
+      endpointId: IDS.endpoint,
+      status: 'active',
+      reasonCode: SMS_OPT_IN_REASON_CODE,
+      provider: 'aws-eum-sms',
+      providerReference: 'synthetic-start-provider-verified-1',
+      providerOccurredAt: '2026-08-10T18:02:00.000Z',
+    } as const;
+    await expect(
+      executeRecordEndpointStatusCapability(activeInput, workerContext, store),
+    ).rejects.toMatchObject({ code: 'SMS_LIFECYCLE_INVOCATION_DENIED' });
+    const active = await executeRecordEndpointStatusCapability(
+      activeInput,
+      webhookContext,
+      store,
+    );
+    expect(active.id).toBe(IDS.activeEndpointStatus);
+
+    await expect(
+      store.loadEndpointPolicy({
+        rosterSnapshotId: SEEDED_ROSTER,
+        rosterPopulation: 'synthetic',
+        candidates: [{ recipientId: IDS.recipient, endpointId: IDS.endpoint }],
+      }),
+    ).resolves.toEqual([
+      {
+        recipientId: IDS.recipient,
+        endpointId: IDS.endpoint,
+        status: 'active',
+        optedOut: false,
+      },
+    ]);
+
+    const activeEvidence = await createDrizzleStaleRosterReportStore(
+      database,
+    ).loadScopedEvidence(query, { facilityScope: { kind: 'district' } });
+    const activeReport = buildStaleRosterReport(activeEvidence, {
+      generatedAt: new Date('2026-08-11T18:00:00.000Z'),
+      staleThresholdSeconds: 1_000_000,
+    });
+    expect(activeReport.staleEndpoints).not.toContainEqual(
+      expect.objectContaining({ endpointId: IDS.endpoint }),
+    );
+
+    expect(
+      await executeRecordSmsOptOutCapability(firstOptOut, workerContext, store),
+    ).toEqual(first);
+    await expect(
+      store.loadEndpointPolicy({
+        rosterSnapshotId: SEEDED_ROSTER,
+        rosterPopulation: 'synthetic',
+        candidates: [{ recipientId: IDS.recipient, endpointId: IDS.endpoint }],
+      }),
+    ).resolves.toEqual([
+      {
+        recipientId: IDS.recipient,
+        endpointId: IDS.endpoint,
+        status: 'active',
+        optedOut: false,
+      },
+    ]);
+
+    const delayedOptOut = await executeRecordSmsOptOutCapability(
+      {
+        ...firstOptOut,
+        providerReference: 'synthetic-stop-conflict-delayed',
+        providerOccurredAt: '2026-08-10T17:59:00.000Z',
+      },
+      workerContext,
+      store,
+    );
+    expect(delayedOptOut.id).toBe(IDS.delayedOptOutRecord);
+    await expect(
+      store.loadEndpointPolicy({
+        rosterSnapshotId: SEEDED_ROSTER,
+        rosterPopulation: 'synthetic',
+        candidates: [{ recipientId: IDS.recipient, endpointId: IDS.endpoint }],
+      }),
+    ).resolves.toEqual([
+      {
+        recipientId: IDS.recipient,
+        endpointId: IDS.endpoint,
+        status: 'active',
+        optedOut: false,
+      },
+    ]);
+
+    const newestOptOut = await executeRecordSmsOptOutCapability(
+      {
+        ...firstOptOut,
+        providerReference: 'synthetic-stop-conflict-2',
+        providerOccurredAt: '2026-08-10T18:03:00.000Z',
+      },
+      workerContext,
+      store,
+    );
+    expect(newestOptOut.id).toBe(IDS.newOptOutRecord);
+    await expect(
+      store.loadEndpointPolicy({
+        rosterSnapshotId: SEEDED_ROSTER,
+        rosterPopulation: 'synthetic',
+        candidates: [{ recipientId: IDS.recipient, endpointId: IDS.endpoint }],
+      }),
+    ).resolves.toEqual([
+      {
+        recipientId: IDS.recipient,
+        endpointId: IDS.endpoint,
+        status: 'active',
+        optedOut: true,
+      },
+    ]);
+
+    const delayedActive = await executeRecordEndpointStatusCapability(
+      {
+        ...activeInput,
+        providerReference: 'synthetic-start-provider-verified-delayed',
+        providerOccurredAt: '2026-08-10T18:01:00.000Z',
+      },
+      webhookContext,
+      store,
+    );
+    expect(delayedActive.id).toBe(IDS.delayedActiveStatus);
+    await expect(
+      store.loadEndpointPolicy({
+        rosterSnapshotId: SEEDED_ROSTER,
+        rosterPopulation: 'synthetic',
+        candidates: [{ recipientId: IDS.recipient, endpointId: IDS.endpoint }],
+      }),
+    ).resolves.toEqual([
+      {
+        recipientId: IDS.recipient,
+        endpointId: IDS.endpoint,
+        status: 'active',
+        optedOut: true,
+      },
+    ]);
+
+    const invalid = await store.recordEndpointStatus({
+      rosterSnapshotId: SEEDED_ROSTER,
+      recipientId: IDS.recipient,
+      endpointId: IDS.endpoint,
+      status: 'invalid',
+      reasonCode: 'SYNTHETIC_INVALID',
+      provider: null,
+      providerReference: null,
+      providerOccurredAt: null,
+    });
+    expect(invalid.id).toBe(IDS.baseInvalidStatus);
+
+    const newestActive = await executeRecordEndpointStatusCapability(
+      {
+        ...activeInput,
+        providerReference: 'synthetic-start-provider-verified-2',
+        providerOccurredAt: '2026-08-10T18:04:00.000Z',
+      },
+      webhookContext,
+      store,
+    );
+    expect(newestActive.id).toBe(IDS.newestActiveStatus);
+    await expect(
+      store.loadEndpointPolicy({
+        rosterSnapshotId: SEEDED_ROSTER,
+        rosterPopulation: 'synthetic',
+        candidates: [{ recipientId: IDS.recipient, endpointId: IDS.endpoint }],
+      }),
+    ).resolves.toEqual([
+      {
+        recipientId: IDS.recipient,
+        endpointId: IDS.endpoint,
+        status: 'invalid',
+        optedOut: false,
+      },
+    ]);
+
+    const finalEvidence = await createDrizzleStaleRosterReportStore(
+      database,
+    ).loadScopedEvidence(query, { facilityScope: { kind: 'district' } });
+    const finalReport = buildStaleRosterReport(finalEvidence, {
+      generatedAt: new Date('2026-08-11T18:00:00.000Z'),
+      staleThresholdSeconds: 1_000_000,
+    });
+    expect(finalReport.staleEndpoints).toContainEqual({
+      recipientId: IDS.recipient,
+      endpointId: IDS.endpoint,
+      channel: 'sms',
+      reason: 'invalid',
+    });
+
+    const finalStatuses = await database
+      .select()
+      .from(endpointStatusRecords)
+      .where(eq(endpointStatusRecords.endpointId, IDS.endpoint))
+      .orderBy(asc(endpointStatusRecords.sequence));
+    expect(finalStatuses).toHaveLength(7);
+    expect(finalStatuses.map(({ id }) => id)).toEqual([
+      IDS.endpointStatus,
+      IDS.activeEndpointStatus,
+      IDS.delayedOptOutStatus,
+      IDS.newOptOutStatus,
+      IDS.delayedActiveStatus,
+      IDS.baseInvalidStatus,
+      IDS.newestActiveStatus,
+    ]);
+    expect(
+      finalStatuses.map(({ providerOccurredAt }) =>
+        providerOccurredAt?.toISOString(),
+      ),
+    ).toEqual([
+      firstOptOut.providerOccurredAt,
+      activeInput.providerOccurredAt,
+      '2026-08-10T17:59:00.000Z',
+      '2026-08-10T18:03:00.000Z',
+      '2026-08-10T18:01:00.000Z',
+      undefined,
+      '2026-08-10T18:04:00.000Z',
+    ]);
+    expect(finalStatuses.map(({ sequence }) => sequence)).toEqual(
+      [...finalStatuses]
+        .sort((left, right) => left.sequence - right.sequence)
+        .map(({ sequence }) => sequence),
+    );
+    expect(generatedIds).toHaveLength(0);
   });
 });

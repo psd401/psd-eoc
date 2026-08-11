@@ -57,6 +57,27 @@ function smsBatch(mode: 'live' | 'mock' = 'live'): DispatchBatch {
   });
 }
 
+function staffDrillSmsBatch(): DispatchBatch {
+  const base = smsBatch('live');
+  return DispatchBatchSchema.parse({
+    ...base,
+    eventKind: 'drill',
+    templateMode: 'drill',
+    eventTypeVersion: {
+      ...base.eventTypeVersion,
+      templateMode: 'drill',
+    },
+    renderedMessage: {
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: base.purpose,
+      classificationMarker: 'DRILL',
+      channel: 'sms',
+      body: DRILL_BODY,
+    },
+  });
+}
+
 function smsEndpoint(): Endpoint {
   return EndpointSchema.parse({
     id: IDS.endpoint,
@@ -82,6 +103,7 @@ function providerRequest(
 }
 
 class RecordingClient implements AwsEumSmsClient {
+  public readonly deliverySemantics = 'single-wire-attempt' as const;
   public readonly requests: AwsEumSendTextMessageRequest[] = [];
 
   public constructor(
@@ -284,6 +306,63 @@ describe('AWS EUM SMS request and live gates', () => {
     expect(JSON.stringify(app.authorizationContexts[0])).not.toContain(
       INCIDENT_BODY,
     );
+  });
+
+  test('preserves an exact live-verified staff DRILL request at the provider boundary', async () => {
+    const app = adapter();
+    const request = providerRequest(staffDrillSmsBatch());
+
+    await expect(app.adapter.send(request)).resolves.toEqual(
+      expect.objectContaining({ state: 'provider-accepted' }),
+    );
+
+    expect(app.client.requests).toEqual([
+      {
+        DestinationPhoneNumber: '+12025550123',
+        OriginationIdentity:
+          'arn:aws:sms-voice:us-west-2:000000000000:phone-number/synthetic',
+        MessageBody: DRILL_BODY,
+        MessageType: 'TRANSACTIONAL',
+        ConfigurationSetName: 'psd-eoc-sms',
+        MaxPrice: '0.05',
+        TimeToLive: 300,
+        Context: { psdAttemptId: IDS.attempt },
+        DryRun: false,
+        ProtectConfigurationId: 'protect-synthetic',
+      },
+    ]);
+    expect(app.authorizationContexts).toEqual([
+      expect.objectContaining({
+        eventKind: 'drill',
+        templateMode: 'drill',
+        attemptId: IDS.attempt,
+      }),
+    ]);
+  });
+
+  test('fails closed for an arbitrary client that does not prove single-wire semantics', () => {
+    let hiddenWireAttempts = 0;
+    const retryingClient = {
+      async sendTextMessage(): Promise<unknown> {
+        hiddenWireAttempts += 2;
+        return { MessageId: 'unsafe-retried-message' };
+      },
+    } as unknown as AwsEumSmsClient;
+    const ledger = new MemorySendLedger();
+
+    expect(
+      () =>
+        new AwsEumSmsAdapter({
+          client: retryingClient,
+          ledger,
+          ...BASE_OPTIONS,
+          featureEnabled: true,
+          authorizeLiveSend: () => true,
+        }),
+    ).toThrow('must guarantee one wire attempt');
+    expect(hiddenWireAttempts).toBe(0);
+    expect(ledger.lookupCalls).toBe(0);
+    expect(ledger.claimCalls).toBe(0);
   });
 
   test('is dark by default and also requires a successful runtime authorization', async () => {

@@ -62,6 +62,7 @@ function workItem() {
 function processResult(
   reasonCode: string,
   providerReference: string | null = 'synthetic-aws-request-id',
+  replayed = false,
 ): WorkerAttemptProcessResult {
   const item = workItem();
   const attemptedEvidence = DeliveryEvidenceSchema.parse({
@@ -100,7 +101,7 @@ function processResult(
   });
   return Object.freeze({
     kind: 'dlq',
-    replayed: false,
+    replayed,
     outcome,
     attemptedEvidence,
     outcomeEvidence,
@@ -132,6 +133,41 @@ class RecordingOptOutStore implements SmsOptOutRecorder {
   }
 }
 
+class FailOnceOptOutStore extends RecordingOptOutStore {
+  public override recordSmsOptOut(
+    input: RecordSmsOptOutInput,
+  ): Promise<SmsOptOutRecord> {
+    this.inputs.push(input);
+    if (this.inputs.length === 1) {
+      return Promise.reject(new Error('synthetic append interruption'));
+    }
+    return Promise.resolve(
+      SmsOptOutRecordSchema.parse({
+        id: EVIDENCE_IDS.optOut,
+        ...input,
+        recordedAt: TIMES.created,
+      }),
+    );
+  }
+}
+
+class RecoveringProcessor implements SmsAttemptProcessor {
+  public callCount = 0;
+  public providerSendCount = 0;
+
+  public process(): Promise<WorkerAttemptProcessResult> {
+    this.callCount += 1;
+    if (this.callCount === 1) this.providerSendCount += 1;
+    return Promise.resolve(
+      processResult(
+        AWS_EUM_OPT_OUT_REASON,
+        'synthetic-aws-request-id',
+        this.callCount > 1,
+      ),
+    );
+  }
+}
+
 describe('SMS worker opt-out persistence', () => {
   test('automatically persists AWS managed opt-out conflicts', async () => {
     const recorder = new RecordingOptOutStore();
@@ -152,6 +188,7 @@ describe('SMS worker opt-out persistence', () => {
         endpointId: IDS.endpoint,
         provider: 'aws-eum-sms',
         providerReference: 'synthetic-aws-request-id',
+        providerOccurredAt: TIMES.created,
       },
     ]);
     expect(JSON.stringify(recorder.inputs)).not.toContain('+12025550123');
@@ -168,5 +205,27 @@ describe('SMS worker opt-out persistence', () => {
 
     expect(result.optOutRecord).toBeNull();
     expect(recorder.inputs).toEqual([]);
+  });
+
+  test('replays a failed opt-out append without a second provider send', async () => {
+    const processor = new RecoveringProcessor();
+    const recorder = new FailOnceOptOutStore();
+    const options = { attemptProcessor: processor, optOutRecorder: recorder };
+
+    await expect(processSmsWorkItem(workItem(), options)).rejects.toThrow(
+      'synthetic append interruption',
+    );
+    const replay = await processSmsWorkItem(workItem(), options);
+
+    expect(replay.attemptResult).toEqual(
+      expect.objectContaining({ replayed: true }),
+    );
+    expect(replay.optOutRecord).toEqual(
+      expect.objectContaining({ endpointId: IDS.endpoint }),
+    );
+    expect(processor.callCount).toBe(2);
+    expect(processor.providerSendCount).toBe(1);
+    expect(recorder.inputs).toHaveLength(2);
+    expect(JSON.stringify(recorder.inputs)).not.toContain('+12025550123');
   });
 });

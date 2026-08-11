@@ -16,6 +16,8 @@ export const AWS_EUM_TEXT_DELIVERY_DETAIL_TYPE =
 
 const AWS_ACCOUNT_ID_PATTERN = /^\d{12}$/u;
 const AWS_REGION_PATTERN = /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u;
+const EVENTBRIDGE_RULE_ARN_PATTERN =
+  /^arn:(?:aws|aws-us-gov):events:[a-z0-9-]+:\d{12}:rule\/[A-Za-z0-9._/-]{1,256}$/u;
 const PROVIDER_REFERENCE_PATTERN = /^[A-Za-z0-9._:/+=-]{1,500}$/u;
 const EVENT_VERSION_PATTERN = /^1(?:\.\d+)?$/u;
 const MAX_EVENT_AGE_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
@@ -74,6 +76,7 @@ type AwsEumFailureStatus = keyof typeof FAILURE_REASON_BY_STATUS;
 
 export type AwsEumSmsDeliveryEventErrorCode =
   | 'INVALID_CONFIGURATION'
+  | 'INVOCATION_UNVERIFIED'
   | 'INVALID_EVENT'
   | 'EVENT_SCOPE_MISMATCH'
   | 'EVENT_TIME_INVALID'
@@ -91,8 +94,21 @@ export class AwsEumSmsDeliveryEventError extends Error {
 export interface AwsEumSmsDeliveryEventConfiguration {
   readonly accountId: string;
   readonly region: string;
+  readonly eventBridgeRuleArn: string;
   readonly clock?: () => Date;
 }
+
+/** Trusted transport facts supplied separately from the untrusted event. */
+export interface AwsEumSmsEventBridgeInvocation {
+  readonly requestId: string;
+  readonly ruleArn: string;
+  /** Opaque platform evidence interpreted only by the injected authorizer. */
+  readonly authorization: unknown;
+}
+
+export type AwsEumSmsEventBridgeAuthorizer = (
+  invocation: AwsEumSmsEventBridgeInvocation,
+) => boolean | Promise<boolean>;
 
 export interface ParsedAwsEumSmsDeliveryEvent {
   readonly eventId: string;
@@ -115,10 +131,20 @@ export type AwsEumSmsDeliveryMapping =
     }>;
 
 export interface SmsDeliveryAttemptLookup {
-  /** Provider message IDs are the authoritative delivery-event correlation. */
+  /** Provider message IDs are the primary delivery-event correlation. */
   loadAttemptByProviderReference(
     provider: typeof AWS_EUM_SMS_PROVIDER,
     providerReference: string,
+  ): Promise<ChannelAttempt | null>;
+  /**
+   * Recovery-only lookup for an attempt whose latest canonical evidence is
+   * `unknown` for this provider with no provider reference. Implementations
+   * must not return accepted, delivered, failed, or otherwise correlated
+   * attempts through this boundary.
+   */
+  loadUnknownAttemptById(
+    provider: typeof AWS_EUM_SMS_PROVIDER,
+    attemptId: string,
   ): Promise<ChannelAttempt | null>;
 }
 
@@ -126,6 +152,7 @@ export interface SmsDeliveryEventProcessorOptions {
   readonly configuration: AwsEumSmsDeliveryEventConfiguration;
   readonly attempts: SmsDeliveryAttemptLookup;
   readonly evidenceWriter: AttemptEvidenceWriter;
+  readonly authorizeEventBridgeInvocation: AwsEumSmsEventBridgeAuthorizer;
 }
 
 export type SmsDeliveryEventProcessResult =
@@ -179,17 +206,30 @@ function validClock(clock: (() => Date) | undefined): Date {
 
 function parseConfiguration(
   configuration: AwsEumSmsDeliveryEventConfiguration,
-): Readonly<{ accountId: string; region: string; now: Date }> {
+): Readonly<{
+  accountId: string;
+  region: string;
+  eventBridgeRuleArn: string;
+  now: Date;
+}> {
+  const expectedPartition = configuration.region?.startsWith('us-gov-')
+    ? 'aws-us-gov'
+    : 'aws';
   if (
     !isPlainRecord(configuration) ||
     !AWS_ACCOUNT_ID_PATTERN.test(configuration.accountId) ||
-    !AWS_REGION_PATTERN.test(configuration.region)
+    !AWS_REGION_PATTERN.test(configuration.region) ||
+    !EVENTBRIDGE_RULE_ARN_PATTERN.test(configuration.eventBridgeRuleArn) ||
+    !configuration.eventBridgeRuleArn.startsWith(
+      `arn:${expectedPartition}:events:${configuration.region}:${configuration.accountId}:rule/`,
+    )
   ) {
     throw new AwsEumSmsDeliveryEventError('INVALID_CONFIGURATION');
   }
   return Object.freeze({
     accountId: configuration.accountId,
     region: configuration.region,
+    eventBridgeRuleArn: configuration.eventBridgeRuleArn,
     now: validClock(configuration.clock),
   });
 }
@@ -409,7 +449,7 @@ export function mapAwsEumSmsDeliveryEvent(
     throw new AwsEumSmsDeliveryEventError('ATTEMPT_MISMATCH');
   }
   const event = parseAwsEumSmsDeliveryEvent(value, configuration);
-  if (event.attemptId !== null && event.attemptId !== parsedAttemptId.data) {
+  if (event.attemptId !== parsedAttemptId.data) {
     throw new AwsEumSmsDeliveryEventError('ATTEMPT_MISMATCH');
   }
   return evidenceFor(event, parsedAttemptId.data);
@@ -420,33 +460,64 @@ export class SmsDeliveryEventProcessor {
   readonly #configuration: AwsEumSmsDeliveryEventConfiguration;
   readonly #attempts: SmsDeliveryAttemptLookup;
   readonly #writer: AttemptEvidenceWriter;
+  readonly #authorizeInvocation: AwsEumSmsEventBridgeAuthorizer;
 
   public constructor(options: SmsDeliveryEventProcessorOptions) {
     parseConfiguration(options.configuration);
     if (
       typeof options.attempts?.loadAttemptByProviderReference !== 'function' ||
-      typeof options.evidenceWriter?.recordAttemptEvidence !== 'function'
+      typeof options.attempts?.loadUnknownAttemptById !== 'function' ||
+      typeof options.evidenceWriter?.recordAttemptEvidence !== 'function' ||
+      typeof options.authorizeEventBridgeInvocation !== 'function'
     ) {
       throw new AwsEumSmsDeliveryEventError('INVALID_CONFIGURATION');
     }
-    this.#configuration = options.configuration;
+    this.#configuration = Object.freeze({ ...options.configuration });
     this.#attempts = options.attempts;
     this.#writer = options.evidenceWriter;
+    this.#authorizeInvocation = options.authorizeEventBridgeInvocation;
   }
 
-  public async process(value: unknown): Promise<SmsDeliveryEventProcessResult> {
+  public async process(
+    value: unknown,
+    invocation: AwsEumSmsEventBridgeInvocation,
+  ): Promise<SmsDeliveryEventProcessResult> {
+    const configuration = parseConfiguration(this.#configuration);
+    if (
+      !isPlainRecord(invocation) ||
+      !UuidSchema.safeParse(invocation.requestId).success ||
+      invocation.ruleArn !== configuration.eventBridgeRuleArn
+    ) {
+      throw new AwsEumSmsDeliveryEventError('INVOCATION_UNVERIFIED');
+    }
+    let authorized = false;
+    try {
+      authorized = (await this.#authorizeInvocation(invocation)) === true;
+    } catch {
+      authorized = false;
+    }
+    if (!authorized) {
+      throw new AwsEumSmsDeliveryEventError('INVOCATION_UNVERIFIED');
+    }
     const event = parseAwsEumSmsDeliveryEvent(value, this.#configuration);
-    const attempt = await this.#attempts.loadAttemptByProviderReference(
-      AWS_EUM_SMS_PROVIDER,
-      event.messageId,
-    );
+    if (event.attemptId === null) {
+      throw new AwsEumSmsDeliveryEventError('ATTEMPT_MISMATCH');
+    }
+    const correlatedAttempt =
+      await this.#attempts.loadAttemptByProviderReference(
+        AWS_EUM_SMS_PROVIDER,
+        event.messageId,
+      );
+    const attempt =
+      correlatedAttempt ??
+      (await this.#attempts.loadUnknownAttemptById(
+        AWS_EUM_SMS_PROVIDER,
+        event.attemptId,
+      ));
     if (attempt === null) {
       throw new AwsEumSmsDeliveryEventError('ATTEMPT_NOT_FOUND');
     }
-    if (
-      attempt.channel !== 'sms' ||
-      (event.attemptId !== null && event.attemptId !== attempt.id)
-    ) {
+    if (attempt.channel !== 'sms' || event.attemptId !== attempt.id) {
       throw new AwsEumSmsDeliveryEventError('ATTEMPT_MISMATCH');
     }
     const mapping = evidenceFor(event, attempt.id);

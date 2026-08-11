@@ -24,11 +24,39 @@ setDefaultTimeout(30_000);
 let connection: PostgresDatabaseConnection | undefined;
 let firstSeedSummary: SeedSummary | undefined;
 
+const ISSUE_14_PRE_LIFECYCLE_MIGRATIONS = [
+  '0000_youthful_captain_stacy.sql',
+  '0001_brainy_terror.sql',
+  '0002_roster_graph_immutability.sql',
+  '0003_many_ezekiel_stane.sql',
+  '0004_volatile_purple_man.sql',
+  '0005_steep_jane_foster.sql',
+  '0006_media_record_immutability.sql',
+] as const;
+const ISSUE_14_LIFECYCLE_MIGRATION = '0007_pretty_puppet_master.sql';
+
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
     throw new Error('The PostgreSQL integration-test connection is not open.');
   }
   return connection;
+}
+
+async function applySqlMigrationFile(
+  database: PostgresDatabaseConnection['db'],
+  fileName: string,
+): Promise<void> {
+  const migration = await Bun.file(
+    new URL(`./migrations/${fileName}`, import.meta.url),
+  ).text();
+  await database.transaction(async (transaction) => {
+    for (const statement of migration.split('--> statement-breakpoint')) {
+      const normalized = statement.trim();
+      if (normalized.length > 0) {
+        await transaction.execute(sql.raw(normalized));
+      }
+    }
+  });
 }
 
 function findPostgresConstraintName(error: unknown): string | undefined {
@@ -400,6 +428,927 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         )
     `);
     expect(discriminatorCount[0]?.count).toBeGreaterThanOrEqual(12);
+  });
+
+  test('installs strict SMS lifecycle provenance and database-issued ordering', async () => {
+    const db = databaseConnection().db;
+    const columns = await db.execute<{
+      column_name: string;
+      data_type: string;
+      identity_generation: string | null;
+      is_identity: string;
+      is_nullable: string;
+      table_name: string;
+    }>(sql`
+      select
+        table_name,
+        column_name,
+        data_type,
+        is_nullable,
+        is_identity,
+        identity_generation
+      from information_schema.columns
+      where table_schema = 'public'
+        and (
+          (
+            table_name = 'endpoint_status_records'
+            and column_name in (
+              'sequence',
+              'provider',
+              'provider_reference',
+              'provider_occurred_at'
+            )
+          )
+          or (
+            table_name = 'sms_opt_out_records'
+            and column_name = 'provider_occurred_at'
+          )
+        )
+      order by table_name, column_name
+    `);
+    expect([...columns]).toEqual([
+      {
+        table_name: 'endpoint_status_records',
+        column_name: 'provider',
+        data_type: 'character varying',
+        is_nullable: 'YES',
+        is_identity: 'NO',
+        identity_generation: null,
+      },
+      {
+        table_name: 'endpoint_status_records',
+        column_name: 'provider_occurred_at',
+        data_type: 'timestamp with time zone',
+        is_nullable: 'YES',
+        is_identity: 'NO',
+        identity_generation: null,
+      },
+      {
+        table_name: 'endpoint_status_records',
+        column_name: 'provider_reference',
+        data_type: 'character varying',
+        is_nullable: 'YES',
+        is_identity: 'NO',
+        identity_generation: null,
+      },
+      {
+        table_name: 'endpoint_status_records',
+        column_name: 'sequence',
+        data_type: 'integer',
+        is_nullable: 'NO',
+        is_identity: 'YES',
+        identity_generation: 'ALWAYS',
+      },
+      {
+        table_name: 'sms_opt_out_records',
+        column_name: 'provider_occurred_at',
+        data_type: 'timestamp with time zone',
+        is_nullable: 'YES',
+        is_identity: 'NO',
+        identity_generation: null,
+      },
+    ]);
+
+    const [sequencePrivileges] = await db.execute<{
+      can_select: boolean;
+      can_update: boolean;
+      can_usage: boolean;
+      public_has_any_privilege: boolean;
+    }>(sql`
+      select
+        has_sequence_privilege(
+          'psd_eoc_app',
+          'public.endpoint_status_records_sequence_seq',
+          'USAGE'
+        ) as can_usage,
+        has_sequence_privilege(
+          'psd_eoc_app',
+          'public.endpoint_status_records_sequence_seq',
+          'SELECT'
+        ) as can_select,
+        has_sequence_privilege(
+          'psd_eoc_app',
+          'public.endpoint_status_records_sequence_seq',
+          'UPDATE'
+        ) as can_update,
+        exists (
+          select 1
+          from aclexplode(
+            coalesce(
+              sequence_relation.relacl,
+              acldefault('S', sequence_relation.relowner)
+            )
+          ) as public_privilege
+          where public_privilege.grantee = 0
+        ) as public_has_any_privilege
+      from pg_catalog.pg_class as sequence_relation
+      join pg_catalog.pg_namespace as sequence_namespace
+        on sequence_namespace.oid = sequence_relation.relnamespace
+      where sequence_namespace.nspname = 'public'
+        and sequence_relation.relname =
+          'endpoint_status_records_sequence_seq'
+        and sequence_relation.relkind = 'S'
+    `);
+    expect(sequencePrivileges).toEqual({
+      can_usage: true,
+      can_select: true,
+      can_update: false,
+      public_has_any_privilege: false,
+    });
+
+    const constraints = await db.execute<{
+      constraint_name: string;
+      table_name: string;
+      validated: boolean;
+    }>(sql`
+      select
+        relation.relname as table_name,
+        constraint_record.conname as constraint_name,
+        constraint_record.convalidated as validated
+      from pg_catalog.pg_constraint as constraint_record
+      join pg_catalog.pg_class as relation
+        on relation.oid = constraint_record.conrelid
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public'
+        and (
+          (
+            relation.relname = 'endpoint_status_records'
+            and constraint_record.conname in (
+              'endpoint_status_records_provider_identity',
+              'endpoint_status_records_provider_format',
+              'endpoint_status_records_provider_time',
+              'endpoint_status_records_verified_active',
+              'endpoint_status_records_managed_sms_opt_out'
+            )
+          )
+          or (
+            relation.relname = 'sms_opt_out_records'
+            and constraint_record.conname in (
+              'sms_opt_out_records_provider_time_required',
+              'sms_opt_out_records_provider_time'
+            )
+          )
+        )
+      order by relation.relname, constraint_record.conname
+    `);
+    expect([...constraints]).toEqual([
+      {
+        table_name: 'endpoint_status_records',
+        constraint_name: 'endpoint_status_records_managed_sms_opt_out',
+        validated: true,
+      },
+      {
+        table_name: 'endpoint_status_records',
+        constraint_name: 'endpoint_status_records_provider_format',
+        validated: true,
+      },
+      {
+        table_name: 'endpoint_status_records',
+        constraint_name: 'endpoint_status_records_provider_identity',
+        validated: true,
+      },
+      {
+        table_name: 'endpoint_status_records',
+        constraint_name: 'endpoint_status_records_provider_time',
+        validated: true,
+      },
+      {
+        table_name: 'endpoint_status_records',
+        constraint_name: 'endpoint_status_records_verified_active',
+        validated: true,
+      },
+      {
+        table_name: 'sms_opt_out_records',
+        constraint_name: 'sms_opt_out_records_provider_time',
+        validated: true,
+      },
+      {
+        table_name: 'sms_opt_out_records',
+        constraint_name: 'sms_opt_out_records_provider_time_required',
+        validated: true,
+      },
+    ]);
+
+    const lifecycleIndexes = await db.execute<{
+      indexdef: string;
+      indexname: string;
+    }>(sql`
+      select indexname, indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and indexname in (
+          'endpoint_status_records_latest_idx',
+          'endpoint_status_records_sms_lifecycle_idx',
+          'roster_endpoints_sms_phone_idx'
+        )
+      order by indexname
+    `);
+    expect(lifecycleIndexes.map(({ indexname }) => indexname)).toEqual([
+      'endpoint_status_records_latest_idx',
+      'endpoint_status_records_sms_lifecycle_idx',
+      'roster_endpoints_sms_phone_idx',
+    ]);
+    expect(lifecycleIndexes[0]?.indexdef).toContain(
+      '(roster_snapshot_id, recipient_id, endpoint_id, sequence DESC NULLS LAST)',
+    );
+    expect(lifecycleIndexes[1]?.indexdef).toContain(
+      'provider_occurred_at DESC NULLS LAST, sequence DESC NULLS LAST',
+    );
+    expect(lifecycleIndexes[1]?.indexdef).toContain(
+      "WHERE ((channel = 'sms'::notification_channel) AND ((reason_code)::text = ANY",
+    );
+    expect(lifecycleIndexes[2]?.indexdef).toContain('(phone_number)');
+    expect(lifecycleIndexes[2]?.indexdef).toContain(
+      "WHERE ((channel = 'sms'::notification_channel) AND (phone_number IS NOT NULL))",
+    );
+
+    const rollbackProbe = new Error('rollback synthetic SMS lifecycle probe');
+    try {
+      await db.transaction(async (transaction) => {
+        await transaction.execute(sql`set local role "psd_eoc_app"`);
+        await transaction.execute(sql`
+          insert into endpoint_status_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            status,
+            reason_code,
+            provider,
+            provider_reference,
+            provider_occurred_at,
+            recorded_at
+          ) values
+          (
+            '00000000-0000-4000-8000-000000027001'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000050'::uuid,
+            '00000000-0000-4000-8000-000000000062'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'disabled'::endpoint_status,
+            'SMS_OPTED_OUT',
+            'aws-eum-sms',
+            'opt-out:synthetic-fresh-proof:1',
+            '2026-08-11T15:59:00.000Z'::timestamptz,
+            '2026-08-11T16:00:00.000Z'::timestamptz
+          ),
+          (
+            '00000000-0000-4000-8000-000000027002'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000050'::uuid,
+            '00000000-0000-4000-8000-000000000062'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'active'::endpoint_status,
+            'SMS_OPT_IN_PROVIDER_VERIFIED',
+            'aws-eum-sms',
+            'opt-in:synthetic-fresh-proof:2',
+            '2026-08-11T16:00:00.000Z'::timestamptz,
+            '2026-08-11T16:01:00.000Z'::timestamptz
+          )
+        `);
+        const ordered = await transaction.execute<{
+          id: string;
+          sequence: number;
+        }>(sql`
+          select id::text as id, sequence
+          from endpoint_status_records
+          where id in (
+            '00000000-0000-4000-8000-000000027001'::uuid,
+            '00000000-0000-4000-8000-000000027002'::uuid
+          )
+          order by sequence
+        `);
+        expect(ordered.map((row) => row.id)).toEqual([
+          '00000000-0000-4000-8000-000000027001',
+          '00000000-0000-4000-8000-000000027002',
+        ]);
+        expect(ordered[0]?.sequence).toBeGreaterThan(0);
+        expect(ordered[1]?.sequence).toBeGreaterThan(ordered[0]?.sequence ?? 0);
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) throw error;
+    }
+
+    await expectConstraintViolation(
+      () =>
+        db.execute(sql`
+          insert into endpoint_status_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            status,
+            reason_code,
+            provider,
+            provider_reference,
+            recorded_at
+          ) values (
+            '00000000-0000-4000-8000-000000027003'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'invalid'::endpoint_status,
+            'SYNTHETIC_INVALID',
+            'aws-eum-sms',
+            'synthetic-missing-occurrence',
+            '2026-08-11T16:02:00.000Z'::timestamptz
+          )
+        `),
+      'endpoint_status_records_provider_identity',
+    );
+    await expectConstraintViolation(
+      () =>
+        db.execute(sql`
+          insert into endpoint_status_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            status,
+            reason_code,
+            provider,
+            provider_reference,
+            provider_occurred_at,
+            recorded_at
+          ) values (
+            '00000000-0000-4000-8000-000000027009'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'invalid'::endpoint_status,
+            'SYNTHETIC_INVALID',
+            'aws-eum-sms',
+            'synthetic-non-lifecycle-provider',
+            '2026-08-11T16:01:00.000Z'::timestamptz,
+            '2026-08-11T16:02:00.000Z'::timestamptz
+          )
+        `),
+      'endpoint_status_records_provider_identity',
+    );
+    await expectConstraintViolation(
+      () =>
+        db.execute(sql`
+          insert into endpoint_status_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            status,
+            reason_code,
+            recorded_at
+          ) values (
+            '00000000-0000-4000-8000-000000027004'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'disabled'::endpoint_status,
+            'SMS_OPTED_OUT',
+            '2026-08-11T16:03:00.000Z'::timestamptz
+          )
+        `),
+      'endpoint_status_records_managed_sms_opt_out',
+    );
+    await expectConstraintViolation(
+      () =>
+        db.execute(sql`
+          insert into endpoint_status_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            status,
+            reason_code,
+            provider,
+            provider_reference,
+            provider_occurred_at,
+            recorded_at
+          ) values (
+            '00000000-0000-4000-8000-000000027006'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'disabled'::endpoint_status,
+            'SMS_OPTED_OUT',
+            'aws-eum-sms',
+            'opt-out:synthetic-future-proof:3',
+            '2026-08-11T16:09:01.000Z'::timestamptz,
+            '2026-08-11T16:04:00.000Z'::timestamptz
+          )
+        `),
+      'endpoint_status_records_provider_time',
+    );
+    await expectConstraintViolation(
+      () =>
+        db.execute(sql`
+          insert into sms_opt_out_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            provider,
+            provider_reference,
+            recorded_at
+          ) values (
+            '00000000-0000-4000-8000-000000027007'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'aws-eum-sms',
+            'opt-out:synthetic-missing-occurrence:4',
+            '2026-08-11T16:05:00.000Z'::timestamptz
+          )
+        `),
+      'sms_opt_out_records_provider_time_required',
+    );
+    await expectConstraintViolation(
+      () =>
+        db.execute(sql`
+          insert into sms_opt_out_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            provider,
+            provider_reference,
+            provider_occurred_at,
+            recorded_at
+          ) values (
+            '00000000-0000-4000-8000-000000027008'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'aws-eum-sms',
+            'opt-out:synthetic-future-occurrence:5',
+            '2026-08-11T16:11:01.000Z'::timestamptz,
+            '2026-08-11T16:06:00.000Z'::timestamptz
+          )
+        `),
+      'sms_opt_out_records_provider_time',
+    );
+    await expectPostgresRejection(
+      () =>
+        db.execute(sql`
+          insert into endpoint_status_records (
+            id,
+            sequence,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            status,
+            reason_code,
+            recorded_at
+          ) values (
+            '00000000-0000-4000-8000-000000027005'::uuid,
+            2147483647,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000052'::uuid,
+            '00000000-0000-4000-8000-000000000068'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'invalid'::endpoint_status,
+            'SYNTHETIC_INVALID',
+            '2026-08-11T16:04:00.000Z'::timestamptz
+          )
+        `),
+      /cannot insert a non-DEFAULT value into column "sequence"/iu,
+    );
+  });
+
+  test('upgrades legacy SMS opt-outs by appending provenance without rewriting truth', async () => {
+    if (testDatabaseUrl === undefined) {
+      throw new Error(
+        'TEST_DATABASE_URL is required for database integration tests.',
+      );
+    }
+    const adminDatabase = databaseConnection().db;
+    const migrationProofDatabaseName = `psd_eoc_issue14_upgrade_${process.pid}_${Date.now()}`;
+    if (!/^[a-z0-9_]{1,63}$/u.test(migrationProofDatabaseName)) {
+      throw new Error('The synthetic migration-proof database name is unsafe.');
+    }
+    const quotedMigrationProofDatabaseName = `"${migrationProofDatabaseName}"`;
+    let migrationProofConnection: PostgresDatabaseConnection | undefined;
+    let createdMigrationProofDatabase = false;
+
+    try {
+      await adminDatabase.execute(
+        sql.raw(`create database ${quotedMigrationProofDatabaseName}`),
+      );
+      createdMigrationProofDatabase = true;
+      const migrationProofUrl = new URL(testDatabaseUrl);
+      migrationProofUrl.pathname = `/${migrationProofDatabaseName}`;
+      const createdConnection = createDatabaseClient({
+        driver: 'postgres',
+        url: migrationProofUrl.toString(),
+        maxConnections: 1,
+      });
+      if (createdConnection.driver !== 'postgres') {
+        throw new Error(
+          'Migration proof requires the direct PostgreSQL driver.',
+        );
+      }
+      migrationProofConnection = createdConnection;
+
+      for (const migration of ISSUE_14_PRE_LIFECYCLE_MIGRATIONS) {
+        await applySqlMigrationFile(createdConnection.db, migration);
+      }
+      await seedDatabase(createdConnection.db);
+      await createdConnection.db.execute(sql`
+        insert into sms_opt_out_records (
+          id,
+          roster_snapshot_id,
+          recipient_id,
+          endpoint_id,
+          population,
+          channel,
+          provider,
+          provider_reference,
+          recorded_at
+        ) values (
+          '00000000-0000-4000-8000-000000027010'::uuid,
+          '00000000-0000-4000-8000-000000000041'::uuid,
+          '00000000-0000-4000-8000-000000000050'::uuid,
+          '00000000-0000-4000-8000-000000000062'::uuid,
+          'synthetic'::roster_population,
+          'sms'::notification_channel,
+          'aws-eum-sms',
+          'opt-out:synthetic-legacy-proof:1',
+          '2026-08-11T17:00:00.000Z'::timestamptz
+        )
+      `);
+      await createdConnection.db.execute(sql`
+        insert into endpoint_status_records (
+          id,
+          roster_snapshot_id,
+          recipient_id,
+          endpoint_id,
+          population,
+          channel,
+          status,
+          reason_code,
+          recorded_at
+        ) values (
+          '00000000-0000-4000-8000-000000027011'::uuid,
+          '00000000-0000-4000-8000-000000000041'::uuid,
+          '00000000-0000-4000-8000-000000000050'::uuid,
+          '00000000-0000-4000-8000-000000000062'::uuid,
+          'synthetic'::roster_population,
+          'sms'::notification_channel,
+          'disabled'::endpoint_status,
+          'SMS_OPTED_OUT',
+          '2026-08-11T17:00:00.000Z'::timestamptz
+        )
+      `);
+
+      await applySqlMigrationFile(
+        createdConnection.db,
+        ISSUE_14_LIFECYCLE_MIGRATION,
+      );
+
+      const lifecycleRows = await createdConnection.db.execute<{
+        id: string;
+        provider_occurrence_is_null: boolean;
+        provider_occurrence_matches_legacy: boolean | null;
+        provider: string | null;
+        provider_reference: string | null;
+        recorded_at_matches_legacy: boolean;
+        sequence: number;
+      }>(sql`
+        select
+          id::text as id,
+          sequence,
+          provider,
+          provider_reference,
+          provider_occurred_at is null as provider_occurrence_is_null,
+          provider_occurred_at = '2026-08-11T17:00:00.000Z'::timestamptz
+            as provider_occurrence_matches_legacy,
+          recorded_at = '2026-08-11T17:00:00.000Z'::timestamptz
+            as recorded_at_matches_legacy
+        from endpoint_status_records
+        where roster_snapshot_id =
+            '00000000-0000-4000-8000-000000000041'::uuid
+          and recipient_id = '00000000-0000-4000-8000-000000000050'::uuid
+          and endpoint_id = '00000000-0000-4000-8000-000000000062'::uuid
+        order by sequence
+      `);
+      expect(lifecycleRows).toHaveLength(2);
+      expect(lifecycleRows[0]).toMatchObject({
+        id: '00000000-0000-4000-8000-000000027011',
+        provider: null,
+        provider_reference: null,
+        provider_occurrence_is_null: true,
+        provider_occurrence_matches_legacy: null,
+        recorded_at_matches_legacy: true,
+      });
+      expect(lifecycleRows[0]?.sequence).toBeGreaterThan(0);
+      expect(lifecycleRows[1]?.sequence).toBeGreaterThan(
+        lifecycleRows[0]?.sequence ?? 0,
+      );
+      expect(lifecycleRows[1]).toMatchObject({
+        provider: 'aws-eum-sms',
+        provider_reference: 'opt-out:synthetic-legacy-proof:1',
+        provider_occurrence_is_null: false,
+        provider_occurrence_matches_legacy: true,
+      });
+
+      const [retainedLegacyOptOut] = await createdConnection.db.execute<{
+        provider_occurrence_is_null: boolean;
+        recorded_at_matches_legacy: boolean;
+      }>(sql`
+        select
+          provider_occurred_at is null as provider_occurrence_is_null,
+          recorded_at = '2026-08-11T17:00:00.000Z'::timestamptz
+            as recorded_at_matches_legacy
+        from sms_opt_out_records
+        where id = '00000000-0000-4000-8000-000000027010'::uuid
+      `);
+      expect(retainedLegacyOptOut).toEqual({
+        provider_occurrence_is_null: true,
+        recorded_at_matches_legacy: true,
+      });
+
+      const [latestAfterUpgrade] = await createdConnection.db.execute<{
+        provider: string | null;
+        provider_occurrence_matches_legacy: boolean;
+        provider_reference: string | null;
+        reason_code: string;
+        status: string;
+      }>(sql`
+        select
+          status,
+          reason_code,
+          provider,
+          provider_reference,
+          provider_occurred_at = '2026-08-11T17:00:00.000Z'::timestamptz
+            as provider_occurrence_matches_legacy
+        from endpoint_status_records
+        where roster_snapshot_id =
+            '00000000-0000-4000-8000-000000000041'::uuid
+          and recipient_id = '00000000-0000-4000-8000-000000000050'::uuid
+          and endpoint_id = '00000000-0000-4000-8000-000000000062'::uuid
+        order by sequence desc
+        limit 1
+      `);
+      expect(latestAfterUpgrade).toEqual({
+        status: 'disabled',
+        reason_code: 'SMS_OPTED_OUT',
+        provider: 'aws-eum-sms',
+        provider_reference: 'opt-out:synthetic-legacy-proof:1',
+        provider_occurrence_matches_legacy: true,
+      });
+
+      const lifecycleConstraints = await createdConnection.db.execute<{
+        constraint_name: string;
+        table_name: string;
+        validated: boolean;
+      }>(sql`
+        select
+          relation.relname as table_name,
+          constraint_record.conname as constraint_name,
+          constraint_record.convalidated as validated
+        from pg_catalog.pg_constraint as constraint_record
+        join pg_catalog.pg_class as relation
+          on relation.oid = constraint_record.conrelid
+        join pg_catalog.pg_namespace as namespace
+          on namespace.oid = relation.relnamespace
+        where namespace.nspname = 'public'
+          and (
+            (
+              relation.relname = 'endpoint_status_records'
+              and constraint_record.conname in (
+                'endpoint_status_records_provider_identity',
+                'endpoint_status_records_provider_format',
+                'endpoint_status_records_provider_time',
+                'endpoint_status_records_verified_active',
+                'endpoint_status_records_managed_sms_opt_out'
+              )
+            )
+            or (
+              relation.relname = 'sms_opt_out_records'
+              and constraint_record.conname in (
+                'sms_opt_out_records_provider_time_required',
+                'sms_opt_out_records_provider_time'
+              )
+            )
+          )
+        order by relation.relname, constraint_record.conname
+      `);
+      expect([...lifecycleConstraints]).toEqual([
+        {
+          table_name: 'endpoint_status_records',
+          constraint_name: 'endpoint_status_records_managed_sms_opt_out',
+          validated: false,
+        },
+        {
+          table_name: 'endpoint_status_records',
+          constraint_name: 'endpoint_status_records_provider_format',
+          validated: true,
+        },
+        {
+          table_name: 'endpoint_status_records',
+          constraint_name: 'endpoint_status_records_provider_identity',
+          validated: true,
+        },
+        {
+          table_name: 'endpoint_status_records',
+          constraint_name: 'endpoint_status_records_provider_time',
+          validated: true,
+        },
+        {
+          table_name: 'endpoint_status_records',
+          constraint_name: 'endpoint_status_records_verified_active',
+          validated: true,
+        },
+        {
+          table_name: 'sms_opt_out_records',
+          constraint_name: 'sms_opt_out_records_provider_time',
+          validated: true,
+        },
+        {
+          table_name: 'sms_opt_out_records',
+          constraint_name: 'sms_opt_out_records_provider_time_required',
+          validated: false,
+        },
+      ]);
+
+      await expectConstraintViolation(
+        () =>
+          createdConnection.db.execute(sql`
+            insert into endpoint_status_records (
+              id,
+              roster_snapshot_id,
+              recipient_id,
+              endpoint_id,
+              population,
+              channel,
+              status,
+              reason_code,
+              recorded_at
+            ) values (
+              '00000000-0000-4000-8000-000000027012'::uuid,
+              '00000000-0000-4000-8000-000000000041'::uuid,
+              '00000000-0000-4000-8000-000000000051'::uuid,
+              '00000000-0000-4000-8000-000000000065'::uuid,
+              'synthetic'::roster_population,
+              'sms'::notification_channel,
+              'disabled'::endpoint_status,
+              'SMS_OPTED_OUT',
+              '2026-08-11T17:01:00.000Z'::timestamptz
+            )
+          `),
+        'endpoint_status_records_managed_sms_opt_out',
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.execute(sql`
+            update endpoint_status_records
+            set recorded_at = '2026-08-11T17:02:00.000Z'::timestamptz
+            where id = '00000000-0000-4000-8000-000000027011'::uuid
+        `),
+        /immutable truth cannot be changed/u,
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.execute(sql`
+            delete from endpoint_status_records
+            where id = '00000000-0000-4000-8000-000000027011'::uuid
+          `),
+        /records are retained/u,
+      );
+
+      await expectConstraintViolation(
+        () =>
+          createdConnection.db.execute(sql`
+            insert into endpoint_status_records (
+              id,
+              roster_snapshot_id,
+              recipient_id,
+              endpoint_id,
+              population,
+              channel,
+              status,
+              reason_code,
+              provider,
+              provider_reference,
+              recorded_at
+            ) values (
+              '00000000-0000-4000-8000-000000027014'::uuid,
+              '00000000-0000-4000-8000-000000000041'::uuid,
+              '00000000-0000-4000-8000-000000000050'::uuid,
+              '00000000-0000-4000-8000-000000000062'::uuid,
+              'synthetic'::roster_population,
+              'sms'::notification_channel,
+              'active'::endpoint_status,
+              'SMS_OPT_IN_PROVIDER_VERIFIED',
+              'aws-eum-sms',
+              'opt-in:synthetic-missing-occurrence:2',
+              '2026-08-11T17:03:00.000Z'::timestamptz
+            )
+          `),
+        'endpoint_status_records_provider_identity',
+      );
+
+      await createdConnection.db.execute(sql`
+        insert into endpoint_status_records (
+          id,
+          roster_snapshot_id,
+          recipient_id,
+          endpoint_id,
+          population,
+          channel,
+          status,
+          reason_code,
+          provider,
+          provider_reference,
+          provider_occurred_at,
+          recorded_at
+        ) values (
+          '00000000-0000-4000-8000-000000027013'::uuid,
+          '00000000-0000-4000-8000-000000000041'::uuid,
+          '00000000-0000-4000-8000-000000000050'::uuid,
+          '00000000-0000-4000-8000-000000000062'::uuid,
+          'synthetic'::roster_population,
+          'sms'::notification_channel,
+          'active'::endpoint_status,
+          'SMS_OPT_IN_PROVIDER_VERIFIED',
+          'aws-eum-sms',
+          'opt-in:synthetic-upgrade-proof:2',
+          '2026-08-11T17:02:00.000Z'::timestamptz,
+          '2026-08-11T17:03:00.000Z'::timestamptz
+        )
+      `);
+      const [latestAfterOptIn] = await createdConnection.db.execute<{
+        provider_occurrence_matches_expected: boolean;
+        provider_reference: string | null;
+        reason_code: string;
+        sequence: number;
+        status: string;
+      }>(sql`
+        select
+          sequence,
+          status,
+          reason_code,
+          provider_reference,
+          provider_occurred_at = '2026-08-11T17:02:00.000Z'::timestamptz
+            as provider_occurrence_matches_expected
+        from endpoint_status_records
+        where roster_snapshot_id =
+            '00000000-0000-4000-8000-000000000041'::uuid
+          and recipient_id = '00000000-0000-4000-8000-000000000050'::uuid
+          and endpoint_id = '00000000-0000-4000-8000-000000000062'::uuid
+        order by sequence desc
+        limit 1
+      `);
+      expect(latestAfterOptIn).toMatchObject({
+        status: 'active',
+        reason_code: 'SMS_OPT_IN_PROVIDER_VERIFIED',
+        provider_reference: 'opt-in:synthetic-upgrade-proof:2',
+        provider_occurrence_matches_expected: true,
+      });
+      expect(latestAfterOptIn?.sequence).toBeGreaterThan(
+        lifecycleRows[1]?.sequence ?? 0,
+      );
+    } finally {
+      await migrationProofConnection?.close();
+      if (createdMigrationProofDatabase) {
+        await adminDatabase.execute(
+          sql.raw(
+            `drop database ${quotedMigrationProofDatabaseName} with (force)`,
+          ),
+        );
+      }
+    }
   });
 
   test('anchors media allocation identity and installs every bounded-read index', async () => {

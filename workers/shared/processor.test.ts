@@ -15,6 +15,8 @@ import {
   type AttemptExecutionClaim,
   type AttemptExecutionClaimRequest,
   type AttemptExecutionCompletion,
+  type AttemptExecutionLookup,
+  type AttemptExecutionLookupRequest,
   type AttemptExecutionStore,
   type AttemptIdempotentProviderAdapter,
   type CompleteAttemptExecutionRequest,
@@ -48,13 +50,34 @@ interface StoredExecution {
 
 class MemoryExecutionStore implements AttemptExecutionStore {
   public readonly executions = new Map<string, StoredExecution>();
+  public lookupCalls = 0;
+  public claimCalls = 0;
   public completeCalls = 0;
   public releaseCalls = 0;
   public failCompleteOnce = false;
 
+  public lookup(
+    request: AttemptExecutionLookupRequest,
+  ): Promise<AttemptExecutionLookup> {
+    this.lookupCalls += 1;
+    const existing = this.executions.get(request.attemptId);
+    if (existing === undefined) {
+      return Promise.resolve({ kind: 'missing' });
+    }
+    if (existing.fingerprint !== request.fingerprint) {
+      throw new Error('Synthetic attempt fingerprint conflict.');
+    }
+    return Promise.resolve(
+      existing.completion === null
+        ? { kind: 'in-progress' }
+        : { kind: 'completed', completion: existing.completion },
+    );
+  }
+
   public claim(
     request: AttemptExecutionClaimRequest,
   ): Promise<AttemptExecutionClaim> {
+    this.claimCalls += 1;
     const existing = this.executions.get(request.attemptId);
     if (existing !== undefined) {
       if (existing.fingerprint !== request.fingerprint) {
@@ -275,6 +298,56 @@ describe('attempt-ID idempotent processing', () => {
       'attempted',
       'provider-accepted',
     ]);
+  });
+
+  test('completed live truth replays read-only after live authorization is removed', async () => {
+    const adapter = new MockAdapter('live-verified');
+    const store = new MemoryExecutionStore();
+    const writer = new MemoryEvidenceWriter();
+    const live = runtime(adapter, store, writer, { authorizeLive: true });
+    const item = workItem(realBatch());
+
+    await expect(live.processor.process(item)).resolves.toEqual(
+      expect.objectContaining({ kind: 'completed', replayed: false }),
+    );
+
+    const dark = runtime(adapter, store, writer);
+    await expect(dark.processor.process(item)).resolves.toEqual(
+      expect.objectContaining({ kind: 'completed', replayed: true }),
+    );
+    expect(adapter.requests).toHaveLength(1);
+    expect(store.lookupCalls).toBe(2);
+    expect(store.claimCalls).toBe(1);
+  });
+
+  test('in-progress live truth remains visible when current live authorization denies', async () => {
+    const provider = deferred<ProviderSendOutcome>();
+    const started = deferred<void>();
+    const adapter = new MockAdapter('live-verified', () => {
+      started.resolve();
+      return provider.promise;
+    });
+    const store = new MemoryExecutionStore();
+    const writer = new MemoryEvidenceWriter();
+    const live = runtime(adapter, store, writer, { authorizeLive: true });
+    const item = workItem(realBatch());
+
+    const first = live.processor.process(item);
+    await started.promise;
+
+    const dark = runtime(adapter, store, writer, { authorizeLive: false });
+    await expect(dark.processor.process(item)).resolves.toEqual({
+      kind: 'in-progress',
+      retryAfterMilliseconds: 1_000,
+    });
+    expect(adapter.requests).toHaveLength(1);
+    expect(store.lookupCalls).toBe(2);
+    expect(store.claimCalls).toBe(1);
+
+    provider.resolve(ACCEPTED);
+    await expect(first).resolves.toEqual(
+      expect.objectContaining({ kind: 'completed', replayed: false }),
+    );
   });
 
   test('crash after provider side effect relies on attempt-ID provider idempotency', async () => {

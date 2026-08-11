@@ -1502,12 +1502,11 @@ const systemWorkerScheduledInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'scheduled-job'],
 );
+const systemWebhookInvocationPolicy = invocationPolicy(['system'], ['webhook']);
 const systemWorkerWebhookInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'webhook'],
 );
-const systemWebhookInvocationPolicy = invocationPolicy(['system'], ['webhook']);
-
 /**
  * Closed principal/source exposure policy for every callable capability.
  * Internal workers and provider callbacks remain system-only even though
@@ -1537,8 +1536,8 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'dispatch-outbox': systemWorkerScheduledInvocationPolicy,
   'record-delivery-evidence': systemWorkerWebhookInvocationPolicy,
   'reconcile-delivery-attempts': systemWorkerScheduledInvocationPolicy,
-  'record-endpoint-status': systemWorkerWebhookInvocationPolicy,
-  'record-sms-opt-out': systemWebhookInvocationPolicy,
+  'record-endpoint-status': systemWebhookInvocationPolicy,
+  'record-sms-opt-out': systemWorkerScheduledInvocationPolicy,
   'register-push-token': humanInteractiveInvocationPolicy,
   'unregister-push-token': humanInteractiveInvocationPolicy,
   'create-facility': humanAgentInvocationPolicy,
