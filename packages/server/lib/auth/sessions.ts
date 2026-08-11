@@ -59,9 +59,9 @@ import {
   sessionTokenReplays,
   sessionTokenRotations,
   userFacilityScopes,
-  userRoles,
   users,
 } from '../../db/schema';
+import { loadEffectiveRoles, type RoleStateDatabase } from './role-state';
 
 const SECOND_MS = 1_000;
 const DAY_SECONDS = 24 * 60 * 60;
@@ -1178,7 +1178,7 @@ export class DrizzleSessionStore implements SessionStore {
   }
 
   private async loadSessionContextFromSnapshot(
-    database: Pick<Database, 'select'>,
+    database: RoleStateDatabase,
     sessionId: string,
     expectedConnectivityEpochId?: string,
   ): Promise<StoredSessionContext | null> {
@@ -1206,15 +1206,11 @@ export class DrizzleSessionStore implements SessionStore {
         'The session identity graph is incomplete.',
       );
     }
-    const roleRows = await database
-      .select({ role: userRoles.role })
-      .from(userRoles)
-      .where(eq(userRoles.userId, userRow.id));
+    const roles = await loadEffectiveRoles(database, userRow.id);
     const facilityRows = await database
       .select({ facilityId: userFacilityScopes.facilityId })
       .from(userFacilityScopes)
       .where(eq(userFacilityScopes.userId, userRow.id));
-    const roles = roleRows.map((row) => row.role);
     const currentScope = buildFacilityScope(
       userRow.facilityScopeKind,
       facilityRows.map((row) => row.facilityId),

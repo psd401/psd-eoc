@@ -1,5 +1,5 @@
 {
-  "id": "7c173b10-5f57-448a-be55-c70bbba7d5e1",
+  "id": "7f553d99-c908-4e83-8561-37460a1403b8",
   "prevId": "104cd2d8-4c82-4366-872e-a0109587039f",
   "version": "7",
   "dialect": "postgresql",
@@ -3440,11 +3440,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "events_identity_facility_uq": {
-          "name": "events_identity_facility_uq",
-          "nullsNotDistinct": false,
-          "columns": ["id", "facility_id"]
-        },
         "events_identity_classification_uq": {
           "name": "events_identity_classification_uq",
           "nullsNotDistinct": false,
@@ -3984,6 +3979,244 @@
       },
       "isRLSEnabled": false
     },
+    "public.integration_channel_change_authorizations": {
+      "name": "integration_channel_change_authorizations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "reference": {
+          "name": "reference",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authorization_commitment": {
+          "name": "authorization_commitment",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "integration_status_id": {
+          "name": "integration_status_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "integration_id": {
+          "name": "integration_id",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status_label": {
+          "name": "status_label",
+          "type": "integration_truth_label",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "desired_enabled": {
+          "name": "desired_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_digest": {
+          "name": "request_digest",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consequence_digest": {
+          "name": "consequence_digest",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authorized_by_user_id": {
+          "name": "authorized_by_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authorized_with_session_id": {
+          "name": "authorized_with_session_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issued_at": {
+          "name": "issued_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_by_user_id": {
+          "name": "consumed_by_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_with_session_id": {
+          "name": "consumed_with_session_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_request_id": {
+          "name": "consumed_request_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "channel_change_authorizations_integration_idx": {
+          "name": "channel_change_authorizations_integration_idx",
+          "columns": [
+            {
+              "expression": "integration_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "consumed_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "channel_change_authorizations_status_truth_fk": {
+          "name": "channel_change_authorizations_status_truth_fk",
+          "tableFrom": "integration_channel_change_authorizations",
+          "tableTo": "integration_statuses",
+          "columnsFrom": [
+            "integration_status_id",
+            "integration_id",
+            "status_label",
+            "authorized_by_user_id",
+            "authorization_commitment",
+            "issued_at"
+          ],
+          "columnsTo": [
+            "id",
+            "integration_id",
+            "label",
+            "verified_by_user_id",
+            "authorization_reference",
+            "verified_at"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "channel_change_authorizations_authorizer_session_fk": {
+          "name": "channel_change_authorizations_authorizer_session_fk",
+          "tableFrom": "integration_channel_change_authorizations",
+          "tableTo": "sessions",
+          "columnsFrom": [
+            "authorized_with_session_id",
+            "authorized_by_user_id"
+          ],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "channel_change_authorizations_consumer_session_fk": {
+          "name": "channel_change_authorizations_consumer_session_fk",
+          "tableFrom": "integration_channel_change_authorizations",
+          "tableTo": "sessions",
+          "columnsFrom": ["consumed_with_session_id", "consumed_by_user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "channel_change_authorizations_reference_uq": {
+          "name": "channel_change_authorizations_reference_uq",
+          "nullsNotDistinct": false,
+          "columns": ["reference"]
+        },
+        "channel_change_authorizations_status_uq": {
+          "name": "channel_change_authorizations_status_uq",
+          "nullsNotDistinct": false,
+          "columns": ["integration_status_id"]
+        },
+        "channel_change_authorizations_commitment_uq": {
+          "name": "channel_change_authorizations_commitment_uq",
+          "nullsNotDistinct": false,
+          "columns": ["authorization_commitment"]
+        },
+        "channel_change_authorizations_request_uq": {
+          "name": "channel_change_authorizations_request_uq",
+          "nullsNotDistinct": false,
+          "columns": ["consumed_request_id"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "channel_change_authorizations_live_status": {
+          "name": "channel_change_authorizations_live_status",
+          "value": "\"integration_channel_change_authorizations\".\"status_label\" = 'live-verified'"
+        },
+        "channel_change_authorizations_same_human_session": {
+          "name": "channel_change_authorizations_same_human_session",
+          "value": "\"integration_channel_change_authorizations\".\"authorized_by_user_id\" = \"integration_channel_change_authorizations\".\"consumed_by_user_id\"\n        and \"integration_channel_change_authorizations\".\"authorized_with_session_id\" = \"integration_channel_change_authorizations\".\"consumed_with_session_id\""
+        },
+        "channel_change_authorizations_reference_format": {
+          "name": "channel_change_authorizations_reference_format",
+          "value": "\"integration_channel_change_authorizations\".\"reference\" = btrim(\"integration_channel_change_authorizations\".\"reference\")\n        and length(\"integration_channel_change_authorizations\".\"reference\") between 1 and 255"
+        },
+        "channel_change_authorizations_integration_id_format": {
+          "name": "channel_change_authorizations_integration_id_format",
+          "value": "\"integration_channel_change_authorizations\".\"integration_id\" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'"
+        },
+        "channel_change_authorizations_digest_format": {
+          "name": "channel_change_authorizations_digest_format",
+          "value": "\"integration_channel_change_authorizations\".\"authorization_commitment\" ~ '^[a-f0-9]{64}$'\n        and \"integration_channel_change_authorizations\".\"request_digest\" ~ '^[a-f0-9]{64}$'\n        and \"integration_channel_change_authorizations\".\"consequence_digest\" ~ '^[a-f0-9]{64}$'"
+        },
+        "channel_change_authorizations_timestamp_precision": {
+          "name": "channel_change_authorizations_timestamp_precision",
+          "value": "\"integration_channel_change_authorizations\".\"issued_at\" = date_trunc('milliseconds', \"integration_channel_change_authorizations\".\"issued_at\")\n        and \"integration_channel_change_authorizations\".\"expires_at\" = date_trunc('milliseconds', \"integration_channel_change_authorizations\".\"expires_at\")\n        and \"integration_channel_change_authorizations\".\"consumed_at\" = date_trunc('milliseconds', \"integration_channel_change_authorizations\".\"consumed_at\")"
+        },
+        "channel_change_authorizations_expiry_bound": {
+          "name": "channel_change_authorizations_expiry_bound",
+          "value": "\"integration_channel_change_authorizations\".\"expires_at\" > \"integration_channel_change_authorizations\".\"issued_at\"\n        and \"integration_channel_change_authorizations\".\"expires_at\" <= \"integration_channel_change_authorizations\".\"issued_at\" + interval '15 minutes'"
+        },
+        "channel_change_authorizations_consumption_time": {
+          "name": "channel_change_authorizations_consumption_time",
+          "value": "\"integration_channel_change_authorizations\".\"consumed_at\" between \"integration_channel_change_authorizations\".\"issued_at\" and \"integration_channel_change_authorizations\".\"expires_at\""
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.integration_statuses": {
       "name": "integration_statuses",
       "schema": "",
@@ -4080,6 +4313,18 @@
           "name": "integration_statuses_identity_integration_label_uq",
           "nullsNotDistinct": false,
           "columns": ["id", "integration_id", "label"]
+        },
+        "integration_statuses_channel_authorization_anchor_uq": {
+          "name": "integration_statuses_channel_authorization_anchor_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "integration_id",
+            "label",
+            "verified_by_user_id",
+            "authorization_reference",
+            "verified_at"
+          ]
         }
       },
       "policies": {},
@@ -4217,68 +4462,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "journal_entries_event_media_idx": {
-          "name": "journal_entries_event_media_idx",
-          "columns": [
-            {
-              "expression": "event_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "media_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "sequence",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"journal_entries\".\"kind\" = 'photo'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "journal_entries_event_redaction_target_idx": {
-          "name": "journal_entries_event_redaction_target_idx",
-          "columns": [
-            {
-              "expression": "event_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "supersedes_entry_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "supersedes_entry_sequence",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"journal_entries\".\"supersession_kind\" = 'redaction'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -4707,25 +4890,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "facility_id": {
-          "name": "facility_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "budget_principal_digest": {
-          "name": "budget_principal_digest",
-          "type": "varchar(64)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "budget_principal_attributed": {
-          "name": "budget_principal_attributed",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
         "byte_length": {
           "name": "byte_length",
           "type": "integer",
@@ -4786,144 +4950,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "media_upload_intents_budget_principal_created_idx": {
-          "name": "media_upload_intents_budget_principal_created_idx",
-          "columns": [
-            {
-              "expression": "budget_principal_digest",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "media_upload_intents_unattributed_created_idx": {
-          "name": "media_upload_intents_unattributed_created_idx",
-          "columns": [
-            {
-              "expression": "budget_principal_attributed",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "media_upload_intents_event_active_idx": {
-          "name": "media_upload_intents_event_active_idx",
-          "columns": [
-            {
-              "expression": "event_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "media_upload_intents_event_created_idx": {
-          "name": "media_upload_intents_event_created_idx",
-          "columns": [
-            {
-              "expression": "event_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "media_upload_intents_facility_active_idx": {
-          "name": "media_upload_intents_facility_active_idx",
-          "columns": [
-            {
-              "expression": "facility_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "media_upload_intents_facility_created_idx": {
-          "name": "media_upload_intents_facility_created_idx",
-          "columns": [
-            {
-              "expression": "facility_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -4933,15 +4959,6 @@
           "tableTo": "events",
           "columnsFrom": ["event_id"],
           "columnsTo": ["id"],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "media_upload_intents_event_facility_fk": {
-          "name": "media_upload_intents_event_facility_fk",
-          "tableFrom": "media_upload_intents",
-          "tableTo": "events",
-          "columnsFrom": ["event_id", "facility_id"],
-          "columnsTo": ["id", "facility_id"],
           "onDelete": "restrict",
           "onUpdate": "no action"
         }
@@ -4956,14 +4973,6 @@
       },
       "policies": {},
       "checkConstraints": {
-        "media_upload_intents_budget_principal_digest_format": {
-          "name": "media_upload_intents_budget_principal_digest_format",
-          "value": "\"media_upload_intents\".\"budget_principal_digest\" ~ '^[a-f0-9]{64}$'"
-        },
-        "media_upload_intents_budget_principal_attribution": {
-          "name": "media_upload_intents_budget_principal_attribution",
-          "value": "(\n        \"media_upload_intents\".\"budget_principal_attributed\" = false\n        and \"media_upload_intents\".\"budget_principal_digest\" = repeat('0', 64)\n      ) or (\n        \"media_upload_intents\".\"budget_principal_attributed\" = true\n        and \"media_upload_intents\".\"budget_principal_digest\" <> repeat('0', 64)\n      )"
-        },
         "media_upload_intents_size": {
           "name": "media_upload_intents_size",
           "value": "\"media_upload_intents\".\"byte_length\" between 1 and 26214400"
@@ -8274,6 +8283,148 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.user_role_changes": {
+      "name": "user_role_changes",
+      "schema": "",
+      "columns": {
+        "sequence": {
+          "name": "sequence",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "role",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "granted": {
+          "name": "granted",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "changed_by_user_id": {
+          "name": "changed_by_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "changed_with_session_id": {
+          "name": "changed_with_session_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "user_role_changes_effective_idx": {
+          "name": "user_role_changes_effective_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "role",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sequence",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "user_role_changes_changer_idx": {
+          "name": "user_role_changes_changer_idx",
+          "columns": [
+            {
+              "expression": "changed_by_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sequence",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "user_role_changes_user_id_users_id_fk": {
+          "name": "user_role_changes_user_id_users_id_fk",
+          "tableFrom": "user_role_changes",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "user_role_changes_changer_session_fk": {
+          "name": "user_role_changes_changer_session_fk",
+          "tableFrom": "user_role_changes",
+          "tableTo": "sessions",
+          "columnsFrom": ["changed_with_session_id", "changed_by_user_id"],
+          "columnsTo": ["id", "user_id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "user_role_changes_request_user_role_uq": {
+          "name": "user_role_changes_request_user_role_uq",
+          "nullsNotDistinct": false,
+          "columns": ["request_id", "user_id", "role"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "user_role_changes_sequence_positive": {
+          "name": "user_role_changes_sequence_positive",
+          "value": "\"user_role_changes\".\"sequence\" > 0"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.user_roles": {

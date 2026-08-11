@@ -139,19 +139,91 @@ export const IntegrationHealthSchema = z
 /** Truthful integration-health snapshot inferred from its schema. */
 export type IntegrationHealth = z.infer<typeof IntegrationHealthSchema>;
 
+const Sha256DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const CanonicalAuthorizationUuidSchema = UuidSchema.toLowerCase();
+const ChannelAuthorizationTimestampSchema = TimestampSchema.refine((value) => {
+  const fractionalSeconds = /\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/u.exec(value)?.[1];
+  return fractionalSeconds === undefined || fractionalSeconds.length <= 3;
+}, 'Channel-change authorization timestamps support at most millisecond precision.');
+
 /**
- * Owns an administrative channel enablement request. Provider credentials,
- * verification claims, and authorizer identity never enter caller input. A
- * non-secret product-owner approval reference is mandatory for every live
- * provider configuration change and is verified server-side fail-closed.
+ * Owns the complete, pre-issued product-owner authorization for one live
+ * channel configuration change. The canonical digest of this artifact is
+ * stored as the live integration status's non-secret authorization reference;
+ * the artifact itself therefore cannot be altered or copied to a different
+ * integration, desired state, request, consequence, human, or session.
+ */
+export const IntegrationChannelChangeAuthorizationSchema = z
+  .object({
+    reference: z.string().trim().min(1).max(255),
+    integrationStatusId: CanonicalAuthorizationUuidSchema,
+    integrationId: IntegrationIdSchema,
+    desiredEnabled: z.boolean(),
+    requestDigest: Sha256DigestSchema,
+    consequenceDigest: Sha256DigestSchema,
+    authorizedByUserId: CanonicalAuthorizationUuidSchema,
+    authorizedWithSessionId: CanonicalAuthorizationUuidSchema,
+    issuedAt: ChannelAuthorizationTimestampSchema,
+    expiresAt: ChannelAuthorizationTimestampSchema,
+  })
+  .strict()
+  .superRefine((authorization, context) => {
+    const issuedAt = Date.parse(authorization.issuedAt);
+    const expiresAt = Date.parse(authorization.expiresAt);
+    if (expiresAt <= issuedAt || expiresAt > issuedAt + 15 * 60 * 1_000) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Live channel-change authorization must expire within 15 minutes of issuance.',
+        path: ['expiresAt'],
+      });
+    }
+  })
+  .readonly();
+
+/** Immutable live channel-change authorization inferred from its schema. */
+export type IntegrationChannelChangeAuthorization = z.infer<
+  typeof IntegrationChannelChangeAuthorizationSchema
+>;
+
+/**
+ * Owns an administrative channel enablement request. Provider credentials
+ * never enter caller input. A pre-issued, non-secret authorization artifact is
+ * optional at this outer boundary because mocked changes require none; the
+ * capability layer verifies its authorizer and status claims against immutable
+ * database evidence and consumes it fail-closed for every live provider change.
  */
 export const SetChannelEnabledInputSchema = z
   .object({
     integrationId: IntegrationIdSchema,
     enabled: z.boolean(),
-    productOwnerApprovalReference: z.string().trim().min(1).max(255),
+    authorization: IntegrationChannelChangeAuthorizationSchema.nullable(),
   })
   .strict()
+  .superRefine((input, context) => {
+    if (
+      input.authorization !== null &&
+      input.authorization.integrationId !== input.integrationId
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Channel-change authorization must name the requested integration.',
+        path: ['authorization', 'integrationId'],
+      });
+    }
+    if (
+      input.authorization !== null &&
+      input.authorization.desiredEnabled !== input.enabled
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Channel-change authorization must name the requested enabled state.',
+        path: ['authorization', 'desiredEnabled'],
+      });
+    }
+  })
   .readonly();
 
 /** Channel enablement input inferred from its schema. */

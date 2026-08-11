@@ -18,7 +18,7 @@ import {
 import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
-import type { Database } from '../../db/client';
+import type { Database, DatabaseQuery } from '../../db/client';
 import {
   endpointStatusRecords,
   groupSources,
@@ -415,6 +415,325 @@ function cursorRecipientId(cursor: string | null): string | null {
   }
 }
 
+type StaleRosterQueryDatabase = Pick<
+  DatabaseQuery,
+  'select' | 'selectDistinct'
+>;
+
+interface PreparedScopedStaleRosterQuery {
+  readonly query: RosterHealthQuery;
+  readonly facilityId: string | null;
+  readonly afterRecipientId: string | null;
+}
+
+function prepareScopedStaleRosterQuery(
+  queryValue: RosterHealthQuery,
+  context: StaleRosterAuthorizationContext,
+): PreparedScopedStaleRosterQuery {
+  const queryResult = RosterHealthQuerySchema.safeParse(queryValue);
+  if (!queryResult.success) {
+    throw new StaleRosterReportError(
+      'INVALID_REPORT_EVIDENCE',
+      'The roster-health query was invalid.',
+    );
+  }
+  const query = queryResult.data;
+  return Object.freeze({
+    query,
+    facilityId: authorizedFacilityId(query, context),
+    afterRecipientId: cursorRecipientId(query.cursor),
+  });
+}
+
+async function loadPreparedScopedStaleRosterEvidence(
+  database: StaleRosterQueryDatabase,
+  prepared: PreparedScopedStaleRosterQuery,
+): Promise<ScopedStaleRosterEvidence> {
+  const { query, facilityId, afterRecipientId } = prepared;
+
+  const snapshotRows =
+    facilityId === null
+      ? await database
+          .select({
+            id: rosterSnapshots.id,
+            capturedAt: rosterSnapshots.capturedAt,
+          })
+          .from(rosterSnapshots)
+          .where(
+            and(
+              eq(rosterSnapshots.population, query.population),
+              eq(rosterSnapshots.complete, true),
+            ),
+          )
+          .orderBy(desc(rosterSnapshots.version))
+          .limit(1)
+      : await database
+          .select({
+            id: rosterSnapshots.id,
+            capturedAt: rosterSnapshots.capturedAt,
+          })
+          .from(rosterSnapshots)
+          .innerJoin(
+            rosterSnapshotFacilities,
+            eq(rosterSnapshotFacilities.rosterSnapshotId, rosterSnapshots.id),
+          )
+          .where(
+            and(
+              eq(rosterSnapshots.population, query.population),
+              eq(rosterSnapshots.complete, true),
+              eq(rosterSnapshotFacilities.facilityId, facilityId),
+            ),
+          )
+          .orderBy(desc(rosterSnapshots.version))
+          .limit(1);
+  const snapshot = snapshotRows[0];
+
+  let latestCompleteSnapshot: ScopedStaleRosterEvidence['latestCompleteSnapshot'] =
+    null;
+  if (snapshot !== undefined) {
+    // A facility ID authorizes recipient identifiers only through that
+    // building provenance. Facility-unbound `others` members stay
+    // district-scoped unless a future contract supplies an explicit
+    // facility-to-others authorization binding.
+    const recipientRows =
+      facilityId === null
+        ? await database
+            .select({ id: rosterRecipients.id })
+            .from(rosterRecipients)
+            .where(eq(rosterRecipients.rosterSnapshotId, snapshot.id))
+            .orderBy(rosterRecipients.id)
+        : await database
+            .selectDistinct({ id: rosterRecipients.id })
+            .from(rosterRecipients)
+            .innerJoin(
+              rosterRecipientGroupSources,
+              and(
+                eq(
+                  rosterRecipientGroupSources.rosterSnapshotId,
+                  rosterRecipients.rosterSnapshotId,
+                ),
+                eq(
+                  rosterRecipientGroupSources.recipientId,
+                  rosterRecipients.id,
+                ),
+              ),
+            )
+            .innerJoin(
+              groupSources,
+              eq(rosterRecipientGroupSources.groupSourceId, groupSources.id),
+            )
+            .where(
+              and(
+                eq(rosterRecipients.rosterSnapshotId, snapshot.id),
+                eq(groupSources.purpose, 'building'),
+                eq(groupSources.facilityId, facilityId),
+              ),
+            )
+            .orderBy(rosterRecipients.id);
+    const recipientIds = recipientRows.map((row) => row.id);
+    const statusesByRecipient = new Map<
+      string,
+      Map<string, z.infer<typeof EndpointStatusSchema>>
+    >();
+    recipientIds.forEach((recipientId) =>
+      statusesByRecipient.set(recipientId, new Map()),
+    );
+
+    for (let offset = 0; offset < recipientIds.length; offset += 500) {
+      const batch = recipientIds.slice(offset, offset + 500);
+      if (batch.length === 0) {
+        continue;
+      }
+      const endpointRows = await database
+        .select({
+          id: rosterEndpoints.id,
+          recipientId: rosterEndpoints.recipientId,
+          status: rosterEndpoints.status,
+        })
+        .from(rosterEndpoints)
+        .where(
+          and(
+            eq(rosterEndpoints.rosterSnapshotId, snapshot.id),
+            inArray(rosterEndpoints.recipientId, batch),
+          ),
+        );
+      endpointRows.forEach((endpoint) =>
+        statusesByRecipient
+          .get(endpoint.recipientId)
+          ?.set(endpoint.id, endpoint.status),
+      );
+      const statusRows = await database
+        .select({
+          endpointId: endpointStatusRecords.endpointId,
+          recipientId: endpointStatusRecords.recipientId,
+          status: endpointStatusRecords.status,
+          recordedAt: endpointStatusRecords.recordedAt,
+        })
+        .from(endpointStatusRecords)
+        .where(
+          and(
+            eq(endpointStatusRecords.rosterSnapshotId, snapshot.id),
+            inArray(endpointStatusRecords.recipientId, batch),
+          ),
+        )
+        .orderBy(endpointStatusRecords.recordedAt);
+      statusRows.forEach((status) =>
+        statusesByRecipient
+          .get(status.recipientId)
+          ?.set(status.endpointId, status.status),
+      );
+    }
+
+    const staleRows = [...statusesByRecipient.entries()]
+      .map(([recipientId, statuses]) => ({
+        recipientId,
+        endpointStatuses: [...statuses.values()],
+      }))
+      .filter(
+        ({ endpointStatuses }) =>
+          endpointStatuses.length === 0 || !endpointStatuses.includes('active'),
+      )
+      .sort((left, right) => left.recipientId.localeCompare(right.recipientId));
+    const pageRows = staleRows
+      .filter(
+        ({ recipientId }) =>
+          afterRecipientId === null ||
+          recipientId.localeCompare(afterRecipientId) > 0,
+      )
+      .slice(0, query.limit);
+    latestCompleteSnapshot = Object.freeze({
+      id: snapshot.id,
+      capturedAt: snapshot.capturedAt.toISOString(),
+      recipientHealth: Object.freeze(pageRows),
+      hasUnreportedStaleRecipients: staleRows.length > pageRows.length,
+    });
+  }
+
+  // Failure metadata contains no recipient identity. Keep an unresolved
+  // facility-unbound `others` failure visible to every facility so no
+  // facility report can claim current health, without broadening which
+  // recipient identifiers that facility is authorized to read.
+  const scopedFailurePredicate =
+    facilityId === null
+      ? undefined
+      : or(
+          and(
+            eq(groupSources.purpose, 'building'),
+            eq(groupSources.facilityId, facilityId),
+          ),
+          and(
+            eq(groupSources.purpose, 'others'),
+            isNull(groupSources.facilityId),
+          ),
+        );
+  const [latestFailedResult] = await database
+    .select({
+      id: rosterSyncResults.id,
+      outcome: rosterSyncResults.outcome,
+      completedAt: rosterSyncResults.completedAt,
+    })
+    .from(rosterSyncResults)
+    .innerJoin(
+      rosterSyncGroupFailures,
+      eq(rosterSyncGroupFailures.syncResultId, rosterSyncResults.id),
+    )
+    .innerJoin(
+      groupSources,
+      eq(rosterSyncGroupFailures.groupSourceId, groupSources.id),
+    )
+    .where(
+      and(
+        eq(rosterSyncResults.population, query.population),
+        or(
+          eq(rosterSyncResults.outcome, 'failed'),
+          eq(rosterSyncResults.outcome, 'partial-rejected'),
+        ),
+        scopedFailurePredicate,
+      ),
+    )
+    .orderBy(desc(rosterSyncResults.completedAt), desc(rosterSyncResults.id))
+    .limit(1);
+  if (latestFailedResult?.outcome === 'complete') {
+    throw new StaleRosterReportError(
+      'INVALID_REPORT_EVIDENCE',
+      'Complete roster sync evidence cannot be reported as failed.',
+    );
+  }
+  const latestFailureRows =
+    latestFailedResult === undefined
+      ? []
+      : await database
+          .select({
+            sourceId: rosterSyncGroupFailures.groupSourceId,
+            sourceKind: rosterSyncGroupFailures.groupSourceKind,
+            sourcePurpose: rosterSyncGroupFailures.groupPurpose,
+            sourceFacilityId: groupSources.facilityId,
+            errorCode: rosterSyncGroupFailures.errorCode,
+            attemptedAt: rosterSyncGroupFailures.attemptedAt,
+          })
+          .from(rosterSyncGroupFailures)
+          .innerJoin(
+            groupSources,
+            eq(rosterSyncGroupFailures.groupSourceId, groupSources.id),
+          )
+          .where(
+            and(
+              eq(rosterSyncGroupFailures.syncResultId, latestFailedResult.id),
+              scopedFailurePredicate,
+            ),
+          )
+          .orderBy(
+            rosterSyncGroupFailures.groupSourceId,
+            rosterSyncGroupFailures.errorCode,
+            rosterSyncGroupFailures.id,
+          )
+          .limit(501);
+  const latestFailedSync =
+    latestFailedResult === undefined
+      ? null
+      : Object.freeze({
+          outcome: latestFailedResult.outcome,
+          completedAt: latestFailedResult.completedAt.toISOString(),
+          groupFailures: Object.freeze(
+            latestFailureRows.map((failure) => ({
+              groupSourceRef: {
+                id: failure.sourceId,
+                kind: failure.sourceKind,
+                purpose: failure.sourcePurpose,
+                facilityId: failure.sourceFacilityId,
+              },
+              errorCode: failure.errorCode,
+              attemptedAt: failure.attemptedAt.toISOString(),
+            })),
+          ),
+        });
+
+  return parseScopedEvidence({
+    latestCompleteSnapshot,
+    latestFailedSync,
+  });
+}
+
+/**
+ * Creates an endpoint-value-free evidence store inside a caller-owned database
+ * transaction. The caller must provide the coherent snapshot boundary.
+ */
+export function createDrizzleStaleRosterReportStoreFromTransaction(
+  database: StaleRosterQueryDatabase,
+): StaleRosterReportStore<StaleRosterAuthorizationContext> {
+  return Object.freeze({
+    async loadScopedEvidence(
+      query: RosterHealthQuery,
+      context: StaleRosterAuthorizationContext,
+    ): Promise<ScopedStaleRosterEvidence> {
+      return loadPreparedScopedStaleRosterEvidence(
+        database,
+        prepareScopedStaleRosterQuery(query, context),
+      );
+    },
+  });
+}
+
 /**
  * Creates a repeatable-read, endpoint-value-free production evidence store.
  * It replays append-only endpoint status facts over the immutable snapshot and
@@ -425,301 +744,15 @@ export function createDrizzleStaleRosterReportStore(
 ): StaleRosterReportStore<StaleRosterAuthorizationContext> {
   return Object.freeze({
     async loadScopedEvidence(
-      queryValue: RosterHealthQuery,
+      query: RosterHealthQuery,
       context: StaleRosterAuthorizationContext,
-    ): Promise<ScopedStaleRosterEvidence> {
-      const queryResult = RosterHealthQuerySchema.safeParse(queryValue);
-      if (!queryResult.success) {
-        throw new StaleRosterReportError(
-          'INVALID_REPORT_EVIDENCE',
-          'The roster-health query was invalid.',
-        );
-      }
-      const query = queryResult.data;
-      const facilityId = authorizedFacilityId(query, context);
-      const afterRecipientId = cursorRecipientId(query.cursor);
-
+    ): Promise<unknown> {
+      const prepared = prepareScopedStaleRosterQuery(query, context);
       return database.transaction(async (transaction) => {
         await transaction.execute(
           sql`set transaction isolation level repeatable read, read only`,
         );
-
-        const snapshotRows =
-          facilityId === null
-            ? await transaction
-                .select({
-                  id: rosterSnapshots.id,
-                  capturedAt: rosterSnapshots.capturedAt,
-                })
-                .from(rosterSnapshots)
-                .where(
-                  and(
-                    eq(rosterSnapshots.population, query.population),
-                    eq(rosterSnapshots.complete, true),
-                  ),
-                )
-                .orderBy(desc(rosterSnapshots.version))
-                .limit(1)
-            : await transaction
-                .select({
-                  id: rosterSnapshots.id,
-                  capturedAt: rosterSnapshots.capturedAt,
-                })
-                .from(rosterSnapshots)
-                .innerJoin(
-                  rosterSnapshotFacilities,
-                  eq(
-                    rosterSnapshotFacilities.rosterSnapshotId,
-                    rosterSnapshots.id,
-                  ),
-                )
-                .where(
-                  and(
-                    eq(rosterSnapshots.population, query.population),
-                    eq(rosterSnapshots.complete, true),
-                    eq(rosterSnapshotFacilities.facilityId, facilityId),
-                  ),
-                )
-                .orderBy(desc(rosterSnapshots.version))
-                .limit(1);
-        const snapshot = snapshotRows[0];
-
-        let latestCompleteSnapshot: ScopedStaleRosterEvidence['latestCompleteSnapshot'] =
-          null;
-        if (snapshot !== undefined) {
-          // A facility ID authorizes recipient identifiers only through that
-          // building provenance. Facility-unbound `others` members stay
-          // district-scoped unless a future contract supplies an explicit
-          // facility-to-others authorization binding.
-          const recipientRows =
-            facilityId === null
-              ? await transaction
-                  .select({ id: rosterRecipients.id })
-                  .from(rosterRecipients)
-                  .where(eq(rosterRecipients.rosterSnapshotId, snapshot.id))
-                  .orderBy(rosterRecipients.id)
-              : await transaction
-                  .selectDistinct({ id: rosterRecipients.id })
-                  .from(rosterRecipients)
-                  .innerJoin(
-                    rosterRecipientGroupSources,
-                    and(
-                      eq(
-                        rosterRecipientGroupSources.rosterSnapshotId,
-                        rosterRecipients.rosterSnapshotId,
-                      ),
-                      eq(
-                        rosterRecipientGroupSources.recipientId,
-                        rosterRecipients.id,
-                      ),
-                    ),
-                  )
-                  .innerJoin(
-                    groupSources,
-                    eq(
-                      rosterRecipientGroupSources.groupSourceId,
-                      groupSources.id,
-                    ),
-                  )
-                  .where(
-                    and(
-                      eq(rosterRecipients.rosterSnapshotId, snapshot.id),
-                      eq(groupSources.purpose, 'building'),
-                      eq(groupSources.facilityId, facilityId),
-                    ),
-                  )
-                  .orderBy(rosterRecipients.id);
-          const recipientIds = recipientRows.map((row) => row.id);
-          const statusesByRecipient = new Map<
-            string,
-            Map<string, z.infer<typeof EndpointStatusSchema>>
-          >();
-          recipientIds.forEach((recipientId) =>
-            statusesByRecipient.set(recipientId, new Map()),
-          );
-
-          for (let offset = 0; offset < recipientIds.length; offset += 500) {
-            const batch = recipientIds.slice(offset, offset + 500);
-            if (batch.length === 0) {
-              continue;
-            }
-            const endpointRows = await transaction
-              .select({
-                id: rosterEndpoints.id,
-                recipientId: rosterEndpoints.recipientId,
-                status: rosterEndpoints.status,
-              })
-              .from(rosterEndpoints)
-              .where(
-                and(
-                  eq(rosterEndpoints.rosterSnapshotId, snapshot.id),
-                  inArray(rosterEndpoints.recipientId, batch),
-                ),
-              );
-            endpointRows.forEach((endpoint) =>
-              statusesByRecipient
-                .get(endpoint.recipientId)
-                ?.set(endpoint.id, endpoint.status),
-            );
-            const statusRows = await transaction
-              .select({
-                endpointId: endpointStatusRecords.endpointId,
-                recipientId: endpointStatusRecords.recipientId,
-                status: endpointStatusRecords.status,
-                recordedAt: endpointStatusRecords.recordedAt,
-              })
-              .from(endpointStatusRecords)
-              .where(
-                and(
-                  eq(endpointStatusRecords.rosterSnapshotId, snapshot.id),
-                  inArray(endpointStatusRecords.recipientId, batch),
-                ),
-              )
-              .orderBy(endpointStatusRecords.recordedAt);
-            statusRows.forEach((status) =>
-              statusesByRecipient
-                .get(status.recipientId)
-                ?.set(status.endpointId, status.status),
-            );
-          }
-
-          const staleRows = [...statusesByRecipient.entries()]
-            .map(([recipientId, statuses]) => ({
-              recipientId,
-              endpointStatuses: [...statuses.values()],
-            }))
-            .filter(
-              ({ endpointStatuses }) =>
-                endpointStatuses.length === 0 ||
-                !endpointStatuses.includes('active'),
-            )
-            .sort((left, right) =>
-              left.recipientId.localeCompare(right.recipientId),
-            );
-          const pageRows = staleRows
-            .filter(
-              ({ recipientId }) =>
-                afterRecipientId === null ||
-                recipientId.localeCompare(afterRecipientId) > 0,
-            )
-            .slice(0, query.limit);
-          latestCompleteSnapshot = Object.freeze({
-            id: snapshot.id,
-            capturedAt: snapshot.capturedAt.toISOString(),
-            recipientHealth: Object.freeze(pageRows),
-            hasUnreportedStaleRecipients: staleRows.length > pageRows.length,
-          });
-        }
-
-        // Failure metadata contains no recipient identity. Keep an unresolved
-        // facility-unbound `others` failure visible to every facility so no
-        // facility report can claim current health, without broadening which
-        // recipient identifiers that facility is authorized to read.
-        const scopedFailurePredicate =
-          facilityId === null
-            ? undefined
-            : or(
-                and(
-                  eq(groupSources.purpose, 'building'),
-                  eq(groupSources.facilityId, facilityId),
-                ),
-                and(
-                  eq(groupSources.purpose, 'others'),
-                  isNull(groupSources.facilityId),
-                ),
-              );
-        const [latestFailedResult] = await transaction
-          .select({
-            id: rosterSyncResults.id,
-            outcome: rosterSyncResults.outcome,
-            completedAt: rosterSyncResults.completedAt,
-          })
-          .from(rosterSyncResults)
-          .innerJoin(
-            rosterSyncGroupFailures,
-            eq(rosterSyncGroupFailures.syncResultId, rosterSyncResults.id),
-          )
-          .innerJoin(
-            groupSources,
-            eq(rosterSyncGroupFailures.groupSourceId, groupSources.id),
-          )
-          .where(
-            and(
-              eq(rosterSyncResults.population, query.population),
-              or(
-                eq(rosterSyncResults.outcome, 'failed'),
-                eq(rosterSyncResults.outcome, 'partial-rejected'),
-              ),
-              scopedFailurePredicate,
-            ),
-          )
-          .orderBy(
-            desc(rosterSyncResults.completedAt),
-            desc(rosterSyncResults.id),
-          )
-          .limit(1);
-        if (latestFailedResult?.outcome === 'complete') {
-          throw new StaleRosterReportError(
-            'INVALID_REPORT_EVIDENCE',
-            'Complete roster sync evidence cannot be reported as failed.',
-          );
-        }
-        const latestFailureRows =
-          latestFailedResult === undefined
-            ? []
-            : await transaction
-                .select({
-                  sourceId: rosterSyncGroupFailures.groupSourceId,
-                  sourceKind: rosterSyncGroupFailures.groupSourceKind,
-                  sourcePurpose: rosterSyncGroupFailures.groupPurpose,
-                  sourceFacilityId: groupSources.facilityId,
-                  errorCode: rosterSyncGroupFailures.errorCode,
-                  attemptedAt: rosterSyncGroupFailures.attemptedAt,
-                })
-                .from(rosterSyncGroupFailures)
-                .innerJoin(
-                  groupSources,
-                  eq(rosterSyncGroupFailures.groupSourceId, groupSources.id),
-                )
-                .where(
-                  and(
-                    eq(
-                      rosterSyncGroupFailures.syncResultId,
-                      latestFailedResult.id,
-                    ),
-                    scopedFailurePredicate,
-                  ),
-                )
-                .orderBy(
-                  rosterSyncGroupFailures.groupSourceId,
-                  rosterSyncGroupFailures.errorCode,
-                  rosterSyncGroupFailures.id,
-                )
-                .limit(501);
-        const latestFailedSync =
-          latestFailedResult === undefined
-            ? null
-            : Object.freeze({
-                outcome: latestFailedResult.outcome,
-                completedAt: latestFailedResult.completedAt.toISOString(),
-                groupFailures: Object.freeze(
-                  latestFailureRows.map((failure) => ({
-                    groupSourceRef: {
-                      id: failure.sourceId,
-                      kind: failure.sourceKind,
-                      purpose: failure.sourcePurpose,
-                      facilityId: failure.sourceFacilityId,
-                    },
-                    errorCode: failure.errorCode,
-                    attemptedAt: failure.attemptedAt.toISOString(),
-                  })),
-                ),
-              });
-
-        return parseScopedEvidence({
-          latestCompleteSnapshot,
-          latestFailedSync,
-        });
+        return loadPreparedScopedStaleRosterEvidence(transaction, prepared);
       });
     },
   });
