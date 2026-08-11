@@ -288,6 +288,44 @@ function rosterGroupSourceRef(
   return RosterGroupSourceRefSchema.parse(value);
 }
 
+/**
+ * Resolves one facility's current audience without trusting timestamps as a
+ * version order. PostgreSQL transaction-start timestamps are not monotonic by
+ * commit order, and more than one lineage is ambiguous operational truth.
+ */
+export async function loadLatestAudienceConfigurationHeader(
+  databaseValue: unknown,
+  facilityId: string,
+) {
+  const database = startFlowQueryDatabase(databaseValue);
+  const lineages = await database
+    .select({ id: audienceConfigurations.id })
+    .from(audienceConfigurations)
+    .where(eq(audienceConfigurations.facilityId, facilityId))
+    .groupBy(audienceConfigurations.id)
+    .orderBy(asc(audienceConfigurations.id))
+    .limit(2);
+  if (lineages.length > 1) {
+    throw conflict('The facility has conflicting audience lineages.');
+  }
+  const lineage = lineages[0];
+  if (lineage === undefined) {
+    return null;
+  }
+  const [configuration] = await database
+    .select()
+    .from(audienceConfigurations)
+    .where(
+      and(
+        eq(audienceConfigurations.id, lineage.id),
+        eq(audienceConfigurations.facilityId, facilityId),
+      ),
+    )
+    .orderBy(desc(audienceConfigurations.version))
+    .limit(1);
+  return configuration ?? null;
+}
+
 async function loadAudienceConfiguration(
   database: StartFlowQueryDatabase,
   facilityId: string,
@@ -295,17 +333,11 @@ async function loadAudienceConfiguration(
   audienceConfig: AudienceConfig;
   neighborhoodVersions: readonly Neighborhood[];
 }> | null> {
-  const [configuration] = await database
-    .select()
-    .from(audienceConfigurations)
-    .where(eq(audienceConfigurations.facilityId, facilityId))
-    .orderBy(
-      desc(audienceConfigurations.createdAt),
-      desc(audienceConfigurations.version),
-      asc(audienceConfigurations.id),
-    )
-    .limit(1);
-  if (configuration === undefined) {
+  const configuration = await loadLatestAudienceConfigurationHeader(
+    database,
+    facilityId,
+  );
+  if (configuration === null) {
     return null;
   }
   const targets = await database
