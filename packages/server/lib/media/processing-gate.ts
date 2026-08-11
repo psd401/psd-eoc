@@ -1,5 +1,6 @@
-export const MAX_CONCURRENT_MEDIA_PROCESSING = 1;
-export const MAX_CONCURRENT_MEDIA_PROVIDER_OPERATIONS = 2;
+export const MAX_CONCURRENT_MEDIA_PROCESSING_PER_FACILITY = 1;
+export const MAX_CONCURRENT_MEDIA_PROCESSING_PER_INSTANCE = 2;
+export const MAX_CONCURRENT_MEDIA_PROVIDER_OPERATIONS_PER_INSTANCE = 2;
 
 /** Signals local saturation without queueing untrusted media in memory. */
 export class MediaProcessingCapacityError extends Error {
@@ -13,7 +14,12 @@ interface MediaAdmissionGate {
   run<Result>(operation: () => Promise<Result>): Promise<Result>;
 }
 
-export type MediaProcessingGate = MediaAdmissionGate;
+export interface MediaProcessingGate {
+  run<Result>(
+    facilityId: string,
+    operation: () => Promise<Result>,
+  ): Promise<Result>;
+}
 
 /** Signals local S3/signing saturation without queueing inside a DB transaction. */
 export class MediaProviderCapacityError extends Error {
@@ -54,13 +60,59 @@ function createFailFastGate(
  * work is non-critical and must yield capacity to the activation/event path.
  */
 export function createMediaProcessingGate(
-  maximumConcurrent = MAX_CONCURRENT_MEDIA_PROCESSING,
+  maximumConcurrentPerFacility = MAX_CONCURRENT_MEDIA_PROCESSING_PER_FACILITY,
+  maximumConcurrentPerInstance = MAX_CONCURRENT_MEDIA_PROCESSING_PER_INSTANCE,
 ): MediaProcessingGate {
-  return createFailFastGate(
-    maximumConcurrent,
-    'Media processing',
-    () => new MediaProcessingCapacityError(),
-  );
+  if (
+    !Number.isSafeInteger(maximumConcurrentPerFacility) ||
+    maximumConcurrentPerFacility < 1
+  ) {
+    throw new RangeError(
+      'Media processing per-facility concurrency must be positive.',
+    );
+  }
+  if (
+    !Number.isSafeInteger(maximumConcurrentPerInstance) ||
+    maximumConcurrentPerInstance < maximumConcurrentPerFacility
+  ) {
+    throw new RangeError(
+      'Media processing per-instance concurrency must be a positive integer no smaller than the per-facility bound.',
+    );
+  }
+
+  // These counters intentionally protect one App Runner process. Durable
+  // principal/event/facility admission budgets and advisory locks in the
+  // repository remain the cross-instance authority. A keyed local bound keeps
+  // one facility from occupying every native image slot during a multi-site
+  // incident, while the process-wide ceiling still prevents CPU exhaustion.
+  let activeAcrossInstance = 0;
+  const activeByFacility = new Map<string, number>();
+  return Object.freeze({
+    async run<Result>(
+      facilityId: string,
+      operation: () => Promise<Result>,
+    ): Promise<Result> {
+      const activeForFacility = activeByFacility.get(facilityId) ?? 0;
+      if (
+        activeAcrossInstance >= maximumConcurrentPerInstance ||
+        activeForFacility >= maximumConcurrentPerFacility
+      ) {
+        throw new MediaProcessingCapacityError();
+      }
+      activeAcrossInstance += 1;
+      activeByFacility.set(facilityId, activeForFacility + 1);
+      try {
+        return await operation();
+      } finally {
+        activeAcrossInstance -= 1;
+        if (activeForFacility === 0) {
+          activeByFacility.delete(facilityId);
+        } else {
+          activeByFacility.set(facilityId, activeForFacility);
+        }
+      }
+    },
+  });
 }
 
 /**
@@ -69,7 +121,7 @@ export function createMediaProcessingGate(
  * transaction while waiting for a provider slot.
  */
 export function createMediaProviderGate(
-  maximumConcurrent = MAX_CONCURRENT_MEDIA_PROVIDER_OPERATIONS,
+  maximumConcurrent = MAX_CONCURRENT_MEDIA_PROVIDER_OPERATIONS_PER_INSTANCE,
 ): MediaProviderGate {
   return createFailFastGate(
     maximumConcurrent,

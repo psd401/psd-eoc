@@ -1805,6 +1805,8 @@ function AuthorizedPhoto({
   scrollRootRef,
   observeViewport,
   loadExplicitlyOnMount,
+  classificationLabel,
+  realEvent,
 }: Readonly<{
   entryId: string;
   entrySequence: number;
@@ -1816,6 +1818,8 @@ function AuthorizedPhoto({
   scrollRootRef: Readonly<{ current: HTMLDivElement | null }>;
   observeViewport: boolean;
   loadExplicitlyOnMount: boolean;
+  classificationLabel: string;
+  realEvent: boolean;
 }>) {
   const photoKey = `${entryId}:${mediaId}`;
   const statusId = `private-photo-${entryId}-status`;
@@ -2226,6 +2230,7 @@ function AuthorizedPhoto({
       ref={figureRef}
       tabIndex={-1}
     >
+      <DialogClassification label={classificationLabel} real={realEvent} />
       {readUrl === null ? null : (
         <img
           alt={altText}
@@ -2299,12 +2304,16 @@ function DeferredPrivatePhoto({
   altText,
   caption,
   onActivate,
+  classificationLabel,
+  realEvent,
 }: Readonly<{
   entryId: string;
   entrySequence: number;
   altText: string;
   caption: string | null;
   onActivate: () => void;
+  classificationLabel: string;
+  realEvent: boolean;
 }>) {
   const statusId = `private-photo-${entryId}-status`;
   const captionId = `private-photo-${entryId}-caption`;
@@ -2316,6 +2325,7 @@ function DeferredPrivatePhoto({
       data-private-photo-observer="disabled"
       data-private-photo-state="deferred"
     >
+      <DialogClassification label={classificationLabel} real={realEvent} />
       <figcaption id={captionId}>
         <p>
           <strong>Photo description:</strong> {altText}
@@ -2347,6 +2357,8 @@ function EntryContent({
   scrollRootRef,
   photoMountMode,
   onActivateOlderPhoto,
+  classificationLabel,
+  realEvent,
 }: Readonly<{
   projection: JournalEntryReadProjection;
   redacted: boolean;
@@ -2354,6 +2366,8 @@ function EntryContent({
   scrollRootRef: Readonly<{ current: HTMLDivElement | null }>;
   photoMountMode: PrivatePhotoMountMode;
   onActivateOlderPhoto: () => void;
+  classificationLabel: string;
+  realEvent: boolean;
 }>) {
   if (redacted || projection.visibility === 'redacted') {
     return (
@@ -2377,6 +2391,8 @@ function EntryContent({
             entryId={entry.id}
             entrySequence={entry.sequence}
             onActivate={onActivateOlderPhoto}
+            classificationLabel={classificationLabel}
+            realEvent={realEvent}
           />
         );
       }
@@ -2391,6 +2407,8 @@ function EntryContent({
           loadCoordinator={loadCoordinator}
           mediaId={entry.payload.mediaId}
           observeViewport={photoMountMode === 'recent'}
+          classificationLabel={classificationLabel}
+          realEvent={realEvent}
           scrollRootRef={scrollRootRef}
         />
       );
@@ -2429,6 +2447,8 @@ interface TimelineEntryProps {
   readonly onCorrect: (entry: JournalEntry, opener: HTMLElement) => void;
   readonly onRedact: (entry: JournalEntry, opener: HTMLElement) => void;
   readonly onActivateOlderPhoto: (entryId: string) => void;
+  readonly classificationLabel: string;
+  readonly realEvent: boolean;
 }
 
 function TimelineEntry({
@@ -2441,6 +2461,8 @@ function TimelineEntry({
   onCorrect,
   onRedact,
   onActivateOlderPhoto,
+  classificationLabel,
+  realEvent,
 }: TimelineEntryProps) {
   const { entry } = projection;
   const latestSupersession = supersededBy.at(-1) ?? null;
@@ -2506,6 +2528,8 @@ function TimelineEntry({
         onActivateOlderPhoto={() => onActivateOlderPhoto(entry.id)}
         photoMountMode={photoMountMode}
         projection={projection}
+        classificationLabel={classificationLabel}
+        realEvent={realEvent}
         redacted={redacted}
         scrollRootRef={timelineScrollRef}
       />
@@ -3755,7 +3779,7 @@ export function EventRoom({
       return;
     }
     setPhotoAltText(
-      `Photo by ${authorDisplayName} at ${readableDateTime(new Date().toISOString())}`,
+      `Photo by ${authorDisplayName} at ${readableDateTime(new Date().toISOString())}. Visual details were not described.`,
     );
     try {
       validatePhotoFile(file);
@@ -4158,6 +4182,7 @@ export function EventRoom({
                 {entries.map((projection) => (
                   <li key={projection.entry.id}>
                     <TimelineEntry
+                      classificationLabel={classificationLabel}
                       commandsBlocked={commandsBlocked}
                       onCorrect={(target, opener) =>
                         openDialog(
@@ -4200,6 +4225,7 @@ export function EventRoom({
                             : 'deferred-older'
                       }
                       projection={projection}
+                      realEvent={realEvent}
                       supersededBy={
                         supersessionsByEntry.get(projection.entry.id) ?? []
                       }
@@ -4266,6 +4292,10 @@ export function EventRoom({
             className="composer-panel photo-composer"
           >
             <h2 id="photo-post-heading">Post a photo</h2>
+            <DialogClassification
+              label={classificationLabel}
+              real={realEvent}
+            />
             <form onSubmit={(submission) => void submitPhoto(submission)}>
               <fieldset
                 disabled={
@@ -4298,6 +4328,7 @@ export function EventRoom({
                     Photo description (alternative text)
                   </label>
                   <input
+                    aria-describedby="event-photo-alt-help"
                     id="event-photo-alt"
                     maxLength={500}
                     onChange={(change) => setPhotoAltText(change.target.value)}
@@ -4305,6 +4336,11 @@ export function EventRoom({
                     type="text"
                     value={photoAltText}
                   />
+                  <p className="field-help" id="event-photo-alt-help">
+                    Replace the author-and-time fallback with important visual
+                    details when possible. If it is unchanged, the timeline
+                    states that visual details were not described.
+                  </p>
                 </div>
                 <div className="field">
                   <label htmlFor="event-photo-caption">

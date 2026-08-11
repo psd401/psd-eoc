@@ -313,6 +313,23 @@ describe('retained private media storage', () => {
       Statement: [
         {
           Action: 'sts:AssumeRole',
+          Condition: {
+            ArnLike: {
+              'aws:SourceArn': {
+                'Fn::Join': [
+                  '',
+                  [
+                    'arn:',
+                    { Ref: 'AWS::Partition' },
+                    `:guardduty:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:malware-protection-plan/*`,
+                  ],
+                ],
+              },
+            },
+            StringEquals: {
+              'aws:SourceAccount': DEPLOYMENT_ACCOUNT,
+            },
+          },
           Effect: 'Allow',
           Principal: {
             Service: 'malware-protection-plan.guardduty.amazonaws.com',

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import sharp from 'sharp';
 
 import {
@@ -305,6 +305,34 @@ describe('sanitizeUploadedImage', () => {
       }),
       'SANITIZED_IMAGE_TOO_LARGE',
     );
+    await expect(
+      sanitizeUploadedImage(uploadInput(png, 'image/png'), {
+        maxProcessingSeconds: 11,
+      }),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
+
+  test('applies one aggregate deadline across the complete Sharp pipeline', async () => {
+    let nowMilliseconds = 1_000;
+    const clock = spyOn(Date, 'now').mockImplementation(() => nowMilliseconds);
+    try {
+      const sanitization = sanitizeUploadedImage(
+        uploadInput(png, 'image/png'),
+        {
+          maxProcessingSeconds: 1,
+        },
+      );
+      // Source inspection has already received the initial one-second budget.
+      // Advancing the same clock while that native operation is pending proves
+      // later encode/verification work cannot start a fresh deadline.
+      nowMilliseconds += 1_001;
+
+      await expect(sanitization).rejects.toBeInstanceOf(
+        ImageProcessingUnavailableError,
+      );
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test('rejects upload-intent length and checksum mismatches', async () => {
@@ -342,14 +370,13 @@ describe('sanitizeUploadedImage', () => {
     );
   });
 
-  test('fails explicitly when the deployed Sharp build lacks an HEIC codec', async () => {
-    if (isHeicDecodeAvailable()) {
-      return;
-    }
-    expect(isHeicDecodeAvailable()).toBe(false);
+  test('fails explicitly for HEIC according to deployed codec availability', async () => {
+    const expectedCode = isHeicDecodeAvailable()
+      ? 'MALFORMED_IMAGE'
+      : 'HEIC_CODEC_UNAVAILABLE';
     await expectImageError(
       sanitizeUploadedImage(uploadInput(HEIC_HEADER, 'image/heic')),
-      'HEIC_CODEC_UNAVAILABLE',
+      expectedCode,
     );
   });
 });

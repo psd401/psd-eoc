@@ -1,5 +1,17 @@
+-- Drizzle applies this forward migration transactionally. Fail closed instead
+-- of waiting behind an active event transaction, and bound the pre-launch
+-- composite-key build. Production rollout must still occur before launch or in
+-- a district maintenance window with no active incidents.
+SET LOCAL lock_timeout = '5s';--> statement-breakpoint
+
+SET LOCAL statement_timeout = '30s';--> statement-breakpoint
+
 ALTER TABLE public."events"
 ADD CONSTRAINT "events_identity_facility_uq" UNIQUE("id", "facility_id");--> statement-breakpoint
+
+SET LOCAL lock_timeout TO DEFAULT;--> statement-breakpoint
+
+SET LOCAL statement_timeout TO DEFAULT;--> statement-breakpoint
 
 ALTER TABLE public."media_upload_intents"
 ADD COLUMN "facility_id" uuid;--> statement-breakpoint

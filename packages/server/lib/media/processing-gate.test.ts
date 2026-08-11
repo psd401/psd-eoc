@@ -25,32 +25,62 @@ describe('media processing admission', () => {
   test('rejects concurrent work instead of queueing untrusted media', async () => {
     const gate = createMediaProcessingGate();
     const release = deferred();
-    const first = gate.run(async () => {
+    const first = gate.run('facility-a', async () => {
       await release.promise;
       return 'first';
     });
 
-    await expect(gate.run(async () => 'second')).rejects.toBeInstanceOf(
-      MediaProcessingCapacityError,
-    );
+    await expect(
+      gate.run('facility-a', async () => 'second'),
+    ).rejects.toBeInstanceOf(MediaProcessingCapacityError);
     release.resolve();
     expect(await first).toBe('first');
-    expect(await gate.run(async () => 'after-release')).toBe('after-release');
+    expect(await gate.run('facility-a', async () => 'after-release')).toBe(
+      'after-release',
+    );
+  });
+
+  test('reserves independent slots for two facilities within the per-instance ceiling', async () => {
+    const gate = createMediaProcessingGate();
+    const release = deferred();
+    let entered = 0;
+    const run = (facilityId: string) =>
+      gate.run(facilityId, async () => {
+        entered += 1;
+        await release.promise;
+        return facilityId;
+      });
+    const first = run('facility-a');
+    const second = run('facility-b');
+
+    await expect(run('facility-c')).rejects.toBeInstanceOf(
+      MediaProcessingCapacityError,
+    );
+    expect(entered).toBe(2);
+    release.resolve();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'facility-a',
+      'facility-b',
+    ]);
   });
 
   test('always releases capacity after processing rejects', async () => {
     const gate = createMediaProcessingGate();
     await expect(
-      gate.run(async () => {
+      gate.run('facility-a', async () => {
         throw new Error('synthetic processing failure');
       }),
     ).rejects.toThrow('synthetic processing failure');
-    expect(await gate.run(async () => 'recovered')).toBe('recovered');
+    expect(await gate.run('facility-a', async () => 'recovered')).toBe(
+      'recovered',
+    );
   });
 
   test('rejects invalid concurrency configuration', () => {
     expect(() => createMediaProcessingGate(0)).toThrow(RangeError);
     expect(() => createMediaProcessingGate(1.5)).toThrow(RangeError);
+    expect(() => createMediaProcessingGate(2, 1)).toThrow(RangeError);
+    expect(() => createMediaProcessingGate(1, 2.5)).toThrow(RangeError);
   });
 });
 

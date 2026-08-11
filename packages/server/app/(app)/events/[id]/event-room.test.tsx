@@ -373,6 +373,10 @@ describe('event room server-rendered safety and history state', () => {
       'This private photo is not loaded. Load it explicitly if it is operationally needed.',
     );
     expect(html).toContain('Load private photo for entry 5');
+    expect(html.match(/dialog-classification mode-real/gu)).toHaveLength(2);
+    expect(html.match(/REAL INCIDENT/gu)?.length ?? 0).toBeGreaterThanOrEqual(
+      3,
+    );
     expect(html).not.toContain('<img');
     expect(html).not.toContain('https://');
   });
