@@ -489,21 +489,23 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     });
     const buildingUpdateRequestId = randomUUID();
     const buildingUpdatedAt = new Date(now.getTime() + 1_000);
+    const buildingUpdateIdempotencyKey = `issue-26-gate-building-v2-${suffix}`;
+    const buildingUpdateCommand = {
+      id: building.id,
+      kind: 'google-group',
+      purpose: 'building',
+      facilityId: facility.id,
+      displayName: `Corrected access gate building ${suffix.slice(0, 8)}`,
+      active: true,
+      googleGroupId: `issue-26-gate-building-v2-${suffix}`,
+      email: `issue-26-gate-building-v2-${suffix}@example.invalid`,
+    } as const;
     const buildingReplacement = await executeUpdateGroupSourceCapability({
       authenticated,
       store: adminStore,
-      command: {
-        id: building.id,
-        kind: 'google-group',
-        purpose: 'building',
-        facilityId: facility.id,
-        displayName: `Corrected access gate building ${suffix.slice(0, 8)}`,
-        active: true,
-        googleGroupId: `issue-26-gate-building-v2-${suffix}`,
-        email: `issue-26-gate-building-v2-${suffix}@example.invalid`,
-      },
+      command: buildingUpdateCommand,
       metadata: {
-        idempotencyKey: `issue-26-gate-building-v2-${suffix}`,
+        idempotencyKey: buildingUpdateIdempotencyKey,
         requestId: buildingUpdateRequestId,
         now: buildingUpdatedAt,
       },
@@ -517,6 +519,31 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       .where(eq(securityAuditEntries.requestId, buildingUpdateRequestId))
       .limit(1);
     expect(buildingUpdateAudit).toEqual({
+      targetKind: 'configuration',
+      targetId: buildingReplacement.id,
+    });
+
+    const buildingReplayRequestId = randomUUID();
+    const buildingReplay = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store: adminStore,
+      command: buildingUpdateCommand,
+      metadata: {
+        idempotencyKey: buildingUpdateIdempotencyKey,
+        requestId: buildingReplayRequestId,
+        now: new Date(now.getTime() + 1_250),
+      },
+    });
+    expect(buildingReplay).toEqual(buildingReplacement);
+    const [buildingReplayAudit] = await database
+      .select({
+        targetKind: securityAuditEntries.targetKind,
+        targetId: securityAuditEntries.targetId,
+      })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, buildingReplayRequestId))
+      .limit(1);
+    expect(buildingReplayAudit).toEqual({
       targetKind: 'configuration',
       targetId: buildingReplacement.id,
     });

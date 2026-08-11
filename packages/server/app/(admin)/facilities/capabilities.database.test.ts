@@ -39,6 +39,11 @@ import {
 } from '../../../db/schema';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase } from '../../../drizzle/migrate';
+import { createDrizzleAccessGateStore } from '../../../lib/auth/access-gate';
+import {
+  loadEffectiveAdministratorUserIds,
+  loadEffectiveRoles,
+} from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import {
   createDrizzleInitialWebSessionStore,
@@ -1030,6 +1035,18 @@ describeWithDatabase('facilities administrator database flow', () => {
       displayName: `Issue 26 synthetic contact ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
     });
+    const inaccessibleAdministratorId = randomUUID();
+    await database.insert(users).values({
+      id: inaccessibleAdministratorId,
+      googleSubject: `issue-26-inaccessible-admin-${suffix}`,
+      email: `issue-26-inaccessible-admin-${suffix}@psd401.net`,
+      displayName: `Issue 26 inaccessible administrator ${suffix.slice(0, 8)}`,
+      facilityScopeKind: 'district',
+    });
+    await database.insert(userRoles).values({
+      userId: inaccessibleAdministratorId,
+      role: 'staff',
+    });
     const [roleTargetRow] = await database
       .select()
       .from(users)
@@ -1037,6 +1054,14 @@ describeWithDatabase('facilities administrator database flow', () => {
       .limit(1);
     if (roleTargetRow === undefined) {
       throw new Error('The bootstrap-role target could not be reloaded.');
+    }
+    const [primaryAdministratorRow] = await database
+      .select({ googleSubject: users.googleSubject })
+      .from(users)
+      .where(eq(users.id, authenticated.actor.userId))
+      .limit(1);
+    if (primaryAdministratorRow === undefined) {
+      throw new Error('The primary administrator could not be reloaded.');
     }
     const activeAccessGroups = await database
       .select({
@@ -1085,19 +1110,36 @@ describeWithDatabase('facilities administrator database flow', () => {
         },
       ]),
     );
-    await database.insert(accessMembershipMembers).values({
-      snapshotId: bootstrapSnapshotId,
-      userId: roleTargetId,
-      googleSubject: roleTargetRow.googleSubject,
-      facilityScopeKind: 'district',
-    });
-    await database.insert(accessMembershipMemberGroups).values({
-      snapshotId: bootstrapSnapshotId,
-      userId: roleTargetId,
-      groupSourceId: accessGroup.id,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-    });
+    await database.insert(accessMembershipMembers).values([
+      {
+        snapshotId: bootstrapSnapshotId,
+        userId: authenticated.actor.userId,
+        googleSubject: primaryAdministratorRow.googleSubject,
+        facilityScopeKind: 'district',
+      },
+      {
+        snapshotId: bootstrapSnapshotId,
+        userId: roleTargetId,
+        googleSubject: roleTargetRow.googleSubject,
+        facilityScopeKind: 'district',
+      },
+    ]);
+    await database.insert(accessMembershipMemberGroups).values([
+      {
+        snapshotId: bootstrapSnapshotId,
+        userId: authenticated.actor.userId,
+        groupSourceId: accessGroup.id,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+      {
+        snapshotId: bootstrapSnapshotId,
+        userId: roleTargetId,
+        groupSourceId: accessGroup.id,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      },
+    ]);
     const bootstrapUser = {
       id: roleTargetRow.id,
       googleSubject: roleTargetRow.googleSubject,
@@ -1154,6 +1196,9 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(
       accessAccounts.items.some(({ id }) => id === rolelessContactId),
     ).toBe(false);
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
+      [authenticated.actor.userId, roleTargetId].sort(),
+    );
     const roleAssignmentMetadata = metadata('role-assignment', requestIds);
     const roleResult = await executeSetUserRolesCapability({
       authenticated,
@@ -1233,6 +1278,22 @@ describeWithDatabase('facilities administrator database flow', () => {
       .where(eq(userRoles.userId, roleTargetId));
     expect(baseRoleRows).toEqual([{ role: 'staff' }]);
 
+    const inaccessibleAdministrator = await executeSetUserRolesCapability({
+      authenticated,
+      store,
+      command: {
+        userId: inaccessibleAdministratorId,
+        roles: ['staff', 'admin'],
+      },
+      metadata: metadata('inaccessible-admin-role', requestIds),
+    });
+    expect(inaccessibleAdministrator.roles).toEqual(['staff', 'admin']);
+    const inaccessibleEvidence = await createDrizzleAccessGateStore(
+      database,
+    ).loadEvidence(`issue-26-inaccessible-admin-${suffix}`);
+    expect(inaccessibleEvidence.user?.roles).toEqual(['staff', 'admin']);
+    expect(inaccessibleEvidence.snapshot?.member).toBeNull();
+
     const selfRemovalRequestId = randomUUID();
     try {
       await executeSetUserRolesCapability({
@@ -1262,6 +1323,9 @@ describeWithDatabase('facilities administrator database flow', () => {
       action: 'set-user-roles',
       outcome: 'failure',
     });
+    expect(
+      await loadEffectiveRoles(database, authenticated.actor.userId),
+    ).toEqual(['admin']);
 
     const channelResult = await executeSetChannelEnabledCapability({
       authenticated,

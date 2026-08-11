@@ -2,7 +2,15 @@ import { RoleSchema, type Role } from '@psd-eoc/contracts';
 import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
-import { userRoleChanges, userRoles, users } from '../../db/schema';
+import {
+  accessMembershipMemberGroups,
+  accessMembershipMembers,
+  accessMembershipSnapshots,
+  groupSources,
+  userRoleChanges,
+  userRoles,
+  users,
+} from '../../db/schema';
 
 /** Minimal common query surface shared by PostgreSQL and Aurora Data API. */
 export type RoleStateDatabase = Pick<Database, 'select' | 'selectDistinctOn'>;
@@ -81,7 +89,11 @@ export async function loadEffectiveRoles(
   );
 }
 
-/** Loads active district administrators from the same canonical role fold. */
+/**
+ * Loads district administrators who remain eligible through the newest
+ * complete access snapshot. A role-bearing user who can no longer pass the
+ * membership boundary is not a safe backup for the final-admin guard.
+ */
 export async function loadEffectiveAdministratorUserIds(
   database: RoleStateDatabase,
 ): Promise<readonly string[]> {
@@ -103,10 +115,10 @@ export async function loadEffectiveAdministratorUserIds(
     .select({
       userId:
         sql<string>`coalesce(${latestAdminChanges.userId}, ${baseAdmins.userId})`.as(
-          'user_id',
+          'effective_admin_user_id',
         ),
       granted: sql<boolean>`coalesce(${latestAdminChanges.granted}, true)`.as(
-        'granted',
+        'effective_admin_granted',
       ),
     })
     .from(baseAdmins)
@@ -115,16 +127,57 @@ export async function loadEffectiveAdministratorUserIds(
       eq(latestAdminChanges.userId, baseAdmins.userId),
     )
     .as('effective_admin_roles');
+  const latestCompleteSnapshot = database
+    .select({ id: accessMembershipSnapshots.id })
+    .from(accessMembershipSnapshots)
+    .where(eq(accessMembershipSnapshots.complete, true))
+    .orderBy(
+      desc(accessMembershipSnapshots.version),
+      desc(accessMembershipSnapshots.capturedAt),
+      desc(accessMembershipSnapshots.id),
+    )
+    .limit(1)
+    .as('latest_complete_access_snapshot');
 
   const rows = await database
-    .select({ userId: effectiveAdmins.userId })
+    .selectDistinctOn([effectiveAdmins.userId], {
+      userId: effectiveAdmins.userId,
+    })
     .from(effectiveAdmins)
     .innerJoin(users, eq(users.id, effectiveAdmins.userId))
+    .innerJoin(latestCompleteSnapshot, sql`true`)
+    .innerJoin(
+      accessMembershipMembers,
+      and(
+        eq(accessMembershipMembers.snapshotId, latestCompleteSnapshot.id),
+        eq(accessMembershipMembers.userId, effectiveAdmins.userId),
+        eq(accessMembershipMembers.googleSubject, users.googleSubject),
+        eq(accessMembershipMembers.facilityScopeKind, 'district'),
+      ),
+    )
+    .innerJoin(
+      accessMembershipMemberGroups,
+      and(
+        eq(accessMembershipMemberGroups.snapshotId, latestCompleteSnapshot.id),
+        eq(accessMembershipMemberGroups.userId, effectiveAdmins.userId),
+      ),
+    )
+    .innerJoin(
+      groupSources,
+      and(
+        eq(groupSources.id, accessMembershipMemberGroups.groupSourceId),
+        eq(groupSources.kind, accessMembershipMemberGroups.groupSourceKind),
+        eq(groupSources.purpose, accessMembershipMemberGroups.groupPurpose),
+      ),
+    )
     .where(
       and(
         eq(effectiveAdmins.granted, true),
         eq(users.facilityScopeKind, 'district'),
         isNull(users.disabledAt),
+        eq(groupSources.active, true),
+        eq(groupSources.kind, 'google-group'),
+        eq(groupSources.purpose, 'access'),
       ),
     )
     .orderBy(asc(effectiveAdmins.userId));
