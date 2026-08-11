@@ -30,7 +30,7 @@ const runId = randomBytes(16).toString('hex');
 setDefaultTimeout(30_000);
 
 let connection: PostgresDatabaseConnection | undefined;
-let isolatedDatabaseCreated = false;
+let isolatedDatabaseMayExist = false;
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -39,6 +39,56 @@ function databaseConnection(): PostgresDatabaseConnection {
   return connection;
 }
 
+async function closeAndDropAudienceTestDatabase(
+  close: (() => Promise<void>) | undefined,
+  drop: (() => Promise<void>) | undefined,
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const operation of [close, drop]) {
+    if (operation === undefined) continue;
+    try {
+      await operation();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      'The audience selection test database cleanup failed.',
+    );
+  }
+}
+
+describe('start-flow audience test cleanup', () => {
+  test('attempts the exact drop after close failure and retains both errors', async () => {
+    const operations: string[] = [];
+    const closeError = new Error('Synthetic close failure.');
+    const dropError = new Error('Synthetic drop failure.');
+    let thrown: unknown;
+    try {
+      await closeAndDropAudienceTestDatabase(
+        async () => {
+          operations.push('close');
+          throw closeError;
+        },
+        async () => {
+          operations.push('drop');
+          throw dropError;
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(operations).toEqual(['close', 'drop']);
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([closeError, dropError]);
+  });
+});
+
 describeWithDatabase('start-flow audience version selection', () => {
   beforeAll(async () => {
     if (configuredTestDatabaseUrl === undefined) {
@@ -46,11 +96,11 @@ describeWithDatabase('start-flow audience version selection', () => {
         'TEST_DATABASE_URL is required for audience selection tests.',
       );
     }
+    isolatedDatabaseMayExist = true;
     const isolatedUrl = await recreateStartFlowPlaywrightDatabase(
       configuredTestDatabaseUrl,
       runId,
     );
-    isolatedDatabaseCreated = true;
     const createdConnection = createDatabaseClient({
       driver: 'postgres',
       url: isolatedUrl,
@@ -64,12 +114,19 @@ describeWithDatabase('start-flow audience version selection', () => {
   });
 
   afterAll(async () => {
-    await connection?.close();
+    const openConnection = connection;
+    const databaseMayExist = isolatedDatabaseMayExist;
     connection = undefined;
-    if (isolatedDatabaseCreated) {
-      await dropStartFlowPlaywrightDatabase(configuredTestDatabaseUrl, runId);
-      isolatedDatabaseCreated = false;
-    }
+    isolatedDatabaseMayExist = false;
+    await closeAndDropAudienceTestDatabase(
+      openConnection === undefined
+        ? undefined
+        : async () => openConnection.close(),
+      databaseMayExist
+        ? async () =>
+            dropStartFlowPlaywrightDatabase(configuredTestDatabaseUrl, runId)
+        : undefined,
+    );
   });
 
   test('uses the highest version despite inverted timestamps and rejects a second lineage', async () => {
