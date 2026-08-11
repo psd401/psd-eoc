@@ -5,6 +5,7 @@ import {
   CorrectJournalEntryInputSchema,
   EventIdSchema,
   IdempotencyKeySchema,
+  LocationPayloadSchema,
   RedactJournalEntryInputSchema,
 } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
@@ -322,6 +323,36 @@ async function handleMutation(
     );
   }
 
+  if (operation === 'post-location') {
+    assertOnlyKeys(body, ['operation', 'payload', 'clientTime']);
+    const input = AppendJournalEntryInputSchema.parse({
+      eventId,
+      clientTime: nullableString(
+        body,
+        'clientTime',
+        'The client time must be a timestamp or null.',
+      ),
+      supersedes: null,
+      kind: 'location',
+      payload: LocationPayloadSchema.parse(body.payload),
+    });
+    const invocation = resolveHumanCapabilityInvocation(authenticated, {
+      requestId,
+      serverTime,
+      mutation: { idempotencyKey, humanConfirmationId: null },
+    });
+    return success(
+      {
+        entry: await journalRuntime.execute(
+          'append-journal-entry',
+          input,
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
+  }
+
   if (operation === 'correct-text') {
     assertOnlyKeys(body, [
       'operation',
@@ -356,6 +387,56 @@ async function handleMutation(
       payload: {
         text: requiredString(body, 'text', 'The corrected text is required.'),
       },
+    });
+    const invocation = resolveHumanCapabilityInvocation(authenticated, {
+      requestId,
+      serverTime,
+      mutation: { idempotencyKey, humanConfirmationId: null },
+    });
+    return success(
+      {
+        entry: await journalRuntime.execute(
+          'correct-journal-entry',
+          input,
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
+  }
+
+  if (operation === 'correct-location') {
+    assertOnlyKeys(body, [
+      'operation',
+      'entryId',
+      'entrySequence',
+      'payload',
+      'reason',
+      'clientTime',
+    ]);
+    const input = CorrectJournalEntryInputSchema.parse({
+      eventId,
+      clientTime: nullableString(
+        body,
+        'clientTime',
+        'The client time must be a timestamp or null.',
+      ),
+      supersedes: {
+        entryId: requiredString(
+          body,
+          'entryId',
+          'The corrected entry ID is required.',
+        ),
+        entrySequence: body.entrySequence,
+        kind: 'correction',
+        reason: requiredString(
+          body,
+          'reason',
+          'The correction reason is required.',
+        ),
+      },
+      kind: 'location',
+      payload: LocationPayloadSchema.parse(body.payload),
     });
     const invocation = resolveHumanCapabilityInvocation(authenticated, {
       requestId,
