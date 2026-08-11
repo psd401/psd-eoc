@@ -4,6 +4,11 @@ import {
   beginGoogleOidcSignIn,
   readGoogleOidcConfiguration,
 } from '../../../../lib/auth/oidc';
+import {
+  clearReturnToCookieHeader,
+  createReturnToCookieHeader,
+  returnToFromRequestUrl,
+} from '../return-to';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,15 +24,19 @@ export async function GET(request: Request): Promise<NextResponse> {
   try {
     const configuration = readGoogleOidcConfiguration();
     const signIn = await beginGoogleOidcSignIn(configuration);
+    const returnToCookie = createReturnToCookieHeader(
+      returnToFromRequestUrl(request.url),
+    );
     const response = NextResponse.redirect(signIn.authorizationUrl, 302);
     response.headers.append('Set-Cookie', signIn.setCookieHeader);
+    response.headers.append('Set-Cookie', returnToCookie);
     return noStore(response);
   } catch {
-    return noStore(
-      NextResponse.redirect(
-        new URL('/denied?reason=configuration', request.url),
-        303,
-      ),
+    const response = NextResponse.redirect(
+      new URL('/denied?reason=configuration', request.url),
+      303,
     );
+    response.headers.append('Set-Cookie', clearReturnToCookieHeader());
+    return noStore(response);
   }
 }

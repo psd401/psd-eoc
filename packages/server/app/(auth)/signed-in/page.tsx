@@ -6,6 +6,9 @@ export default function SignedInPage() {
         <p>
           PSD EOC verifies your session again before showing protected content.
         </p>
+        <a className="button-link" href="/">
+          Open dashboard
+        </a>
         <p className="supporting-text">
           No incident was started and no notification was sent.
         </p>
