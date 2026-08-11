@@ -1,8 +1,13 @@
 import {
+  ActivationPreviewSchema,
   CreateActivationPreviewInputSchema,
+  EventSchema,
   JoinEventInputSchema,
+  JoinEventResultSchema,
   StartEventInputSchema,
+  type ActivationPreview,
   type CreateActivationPreviewInput,
+  type Event,
 } from '@psd-eoc/contracts';
 import {
   expect,
@@ -11,22 +16,64 @@ import {
   type Page,
   type Route,
 } from '@playwright/test';
+import { count, eq } from 'drizzle-orm';
+
+import {
+  createDatabaseClient,
+  type PostgresDatabase,
+} from '../../../../db/client';
+import {
+  activationPreviews,
+  events,
+  notificationIntents,
+  outbox,
+  rosterSnapshots,
+} from '../../../../db/schema';
 
 import { assertAxeClean, installAxe } from './axe-playwright';
+import { startFlowPlaywrightDatabaseUrl } from './playwright-database';
 import {
   PLAYWRIGHT_IDS,
-  activeEventFixture,
   activationPreviewFixture,
   activationResultFixture,
   interceptedActivationError,
+  interruptedActivationError,
   joinEventResultFixture,
 } from './playwright.fixtures';
+import {
+  START_FLOW_STAFF_AUDIENCE_ID,
+  START_FLOW_STAFF_AUDIENCE_VERSION,
+  START_FLOW_STAFF_ROSTER_VERSION,
+} from './playwright.global-setup';
 
 const SYNTHETIC_FACILITY = 'Synthetic North Campus';
 const SYNTHETIC_FACILITY_ID = '00000000-0000-4000-8000-000000000001';
+const SYNTHETIC_SOUTH_FACILITY = 'Synthetic South Campus';
+const SYNTHETIC_REAL_VERSION_ID = '00000000-0000-4000-8000-000000000200';
 const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
+const FIRST_ACTIVE_EVENT_TIME = '2026-08-10T18:00:00.000Z';
+const SECOND_ACTIVE_EVENT_TIME = '2026-08-10T18:05:00.000Z';
+
+const ACTIVE_EVENT_NAMES = Object.freeze({
+  first: Object.freeze({
+    confirmation:
+      'Join Lockdown Drill — DRILL — TRAINING ONLY Started Aug 10, 2026, 11:00 AM — event 00000001',
+    dashboard:
+      'Join DRILL — TRAINING ONLY — Lockdown Drill at Synthetic North Campus — started Aug 10, 2026, 11:00 AM — event 00000001',
+  }),
+  second: Object.freeze({
+    confirmation:
+      'Join Lockdown Drill — DRILL — TRAINING ONLY Started Aug 10, 2026, 11:05 AM — event 00000016',
+    dashboard:
+      'Join DRILL — TRAINING ONLY — Lockdown Drill at Synthetic North Campus — started Aug 10, 2026, 11:05 AM — event 00000016',
+  }),
+});
+
+const REAL_CONFIRMATION_PATH = `/start/confirm?facilityId=${SYNTHETIC_FACILITY_ID}&mode=real&eventTypeVersionId=${SYNTHETIC_REAL_VERSION_ID}`;
 
 interface PreviewInterception {
+  readonly allowPreviewSuccess: () => void;
+  readonly activationIdempotencyKeys: readonly string[];
   readonly activationRequests: () => number;
   readonly previewRequests: readonly CreateActivationPreviewInput[];
 }
@@ -35,20 +82,44 @@ async function installPreviewInterception(
   page: Page,
   input: Readonly<{
     activeEventIds?: readonly string[];
-    activationOutcome?: 'fail-closed' | 'success';
+    activationDelayMs?: number;
+    activationOutcome?: 'ambiguous' | 'fail-closed' | 'success';
+    holdPreviewFailure?: boolean;
+    includeSms?: boolean;
+    mismatchedActivationIdempotencyKey?: boolean;
     mismatchedFacility?: boolean;
+    previewDelayMs?: number;
     simulatedReadyStaff?: boolean;
   }> = {},
 ): Promise<PreviewInterception> {
   const previewRequests: CreateActivationPreviewInput[] = [];
   let latestPreview: ReturnType<typeof activationPreviewFixture> | undefined;
   let activationRequestCount = 0;
+  const activationIdempotencyKeys: string[] = [];
+  let previewSuccessAllowed = input.holdPreviewFailure !== true;
 
   await page.route('**/start/api/preview', async (route) => {
     const selection = CreateActivationPreviewInputSchema.parse(
       route.request().postDataJSON(),
     );
     previewRequests.push(selection);
+    if (input.previewDelayMs !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, input.previewDelayMs));
+    }
+    if (!previewSuccessAllowed) {
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'LIVE_ACTION_UNAVAILABLE',
+          message: 'Synthetic consequence preview is temporarily unavailable.',
+          requestId: PLAYWRIGHT_IDS.request,
+          retryable: true,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
     const preview = activationPreviewFixture(selection, input);
     latestPreview = preview;
     await route.fulfill({
@@ -66,6 +137,14 @@ async function installPreviewInterception(
     StartEventInputSchema.parse(route.request().postDataJSON());
     const idempotencyKey = route.request().headers()['idempotency-key'];
     expect(idempotencyKey).toMatch(/^activate:/u);
+    if (idempotencyKey !== undefined) {
+      activationIdempotencyKeys.push(idempotencyKey);
+    }
+    if (input.activationDelayMs !== undefined) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, input.activationDelayMs),
+      );
+    }
     if (input.activationOutcome === 'success') {
       if (latestPreview === undefined || idempotencyKey === undefined) {
         throw new Error(
@@ -80,22 +159,95 @@ async function installPreviewInterception(
             'simulated-only-does-not-prove-live-integration',
         },
         body: JSON.stringify(
-          activationResultFixture(latestPreview, idempotencyKey),
+          activationResultFixture(
+            latestPreview,
+            input.mismatchedActivationIdempotencyKey === true
+              ? 'activate:00000000-0000-4000-8000-000000000999'
+              : idempotencyKey,
+          ),
         ),
       });
       return;
     }
+    if (input.activationOutcome === 'ambiguous') {
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify(interruptedActivationError()),
+      });
+      return;
+    }
     await route.fulfill({
-      status: 503,
+      status: 409,
       contentType: 'application/json',
       body: JSON.stringify(interceptedActivationError()),
     });
   });
 
   return {
+    allowPreviewSuccess: () => {
+      previewSuccessAllowed = true;
+    },
+    activationIdempotencyKeys,
     activationRequests: () => activationRequestCount,
     previewRequests,
   };
+}
+
+function facilityStartChoice(page: Page, mode: 'drill' | 'real'): Locator {
+  return page.getByRole('link', {
+    name:
+      mode === 'real'
+        ? `Start REAL incident at ${SYNTHETIC_FACILITY}`
+        : `Run DRILL at ${SYNTHETIC_FACILITY}`,
+    exact: true,
+  });
+}
+
+async function readServerEvent(page: Page, eventId: string): Promise<Event> {
+  const response = await page.request.get(`/api/events/${eventId}`);
+  expect(response.ok()).toBe(true);
+  return EventSchema.parse((await response.json()) as unknown);
+}
+
+async function fulfillMatchingJoin(
+  route: Route,
+  expectedEvent: Event,
+): Promise<void> {
+  const input = JoinEventInputSchema.parse(route.request().postDataJSON());
+  expect(input.eventId).toBe(expectedEvent.id);
+  expect(route.request().headers()['idempotency-key']).toMatch(/^join:/u);
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(
+      JoinEventResultSchema.parse({
+        event: expectedEvent,
+        participantId: PLAYWRIGHT_IDS.joinParticipant,
+        joined: true,
+      }),
+    ),
+  });
+}
+
+async function operationalMutationCounts(database: PostgresDatabase) {
+  const [[eventCount], [intentCount], [outboxCount]] = await Promise.all([
+    database.select({ value: count() }).from(events),
+    database.select({ value: count() }).from(notificationIntents),
+    database.select({ value: count() }).from(outbox),
+  ]);
+  if (
+    eventCount === undefined ||
+    intentCount === undefined ||
+    outboxCount === undefined
+  ) {
+    throw new Error('Synthetic persistence counts were unavailable.');
+  }
+  return Object.freeze({
+    events: eventCount.value,
+    notificationIntents: intentCount.value,
+    outboxMessages: outboxCount.value,
+  });
 }
 
 async function expectEmergencyAffordance(page: Page): Promise<void> {
@@ -171,22 +323,6 @@ async function activateByKeyboard(page: Page, target: Locator): Promise<void> {
   throw new Error('Keyboard focus did not reach the expected control.');
 }
 
-async function fulfillSyntheticJoin(
-  route: Route,
-  selection: CreateActivationPreviewInput,
-): Promise<void> {
-  const input = JoinEventInputSchema.parse(route.request().postDataJSON());
-  expect(input.eventId).toBe(PLAYWRIGHT_IDS.activeEvent);
-  expect(route.request().headers()['idempotency-key']).toMatch(/^join:/u);
-  await route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify(
-      joinEventResultFixture(selection, PLAYWRIGHT_IDS.activeEvent),
-    ),
-  });
-}
-
 test.beforeEach(async ({ context }) => {
   await installAxe(context);
 });
@@ -238,6 +374,7 @@ test('dashboard exposes unmistakable choices, 911, skip navigation, and AA-clean
   page,
 }) => {
   await page.goto('/');
+  await expect(page).toHaveTitle('Active events');
   await expect(
     page.getByRole('heading', { level: 1, name: 'Active events' }),
   ).toBeVisible();
@@ -253,10 +390,22 @@ test('dashboard exposes unmistakable choices, 911, skip navigation, and AA-clean
   await page.keyboard.press('Enter');
   await expect(page.getByRole('main')).toBeFocused();
 
-  const realChoice = page
-    .getByRole('link', { name: /Start REAL incident/u })
-    .first();
-  const drillChoice = page.getByRole('link', { name: /Run DRILL/u }).first();
+  const realChoice = facilityStartChoice(page, 'real');
+  const drillChoice = facilityStartChoice(page, 'drill');
+  await expect(realChoice).toHaveCount(1);
+  await expect(drillChoice).toHaveCount(1);
+  await expect(
+    page.getByRole('link', {
+      name: `Start REAL incident at ${SYNTHETIC_SOUTH_FACILITY}`,
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole('link', {
+      name: `Run DRILL at ${SYNTHETIC_SOUTH_FACILITY}`,
+      exact: true,
+    }),
+  ).toHaveCount(1);
   await expect(realChoice.locator('svg.classification-icon')).toHaveCount(1);
   await expect(drillChoice.locator('svg.classification-icon')).toHaveCount(1);
   const [realBackground, drillBackground] = await Promise.all([
@@ -276,12 +425,10 @@ test('real incident path reaches a current, fail-closed consequence preview in t
   let interactionCount = 0;
   await page.goto('/');
 
-  await page
-    .getByRole('link', { name: /Start REAL incident/u })
-    .first()
-    .click();
+  await facilityStartChoice(page, 'real').click();
   interactionCount += 1;
   await expect(page).toHaveURL(/\/start\?.*mode=real/u);
+  await expect(page).toHaveTitle('Choose REAL incident type | PSD EOC');
   const selectionBanner = page.getByRole('region', {
     name: 'REAL INCIDENT classification',
   });
@@ -310,6 +457,7 @@ test('real incident path reaches a current, fail-closed consequence preview in t
     .click();
   interactionCount += 1;
   await expect(page).toHaveURL(/\/start\/confirm\?/u);
+  await expect(page).toHaveTitle('Review REAL incident confirmation | PSD EOC');
   await expect(page.locator('[aria-current="step"]')).toHaveText(
     '3. Review and confirm',
   );
@@ -351,12 +499,10 @@ test('simulated staff drill submit is keyboard-only, three interactions, and int
   await page.keyboard.press('Home');
   await page.keyboard.press('Tab');
   await page.keyboard.press('Enter');
-  await activateByKeyboard(
-    page,
-    page.getByRole('link', { name: /Run DRILL/u }).first(),
-  );
+  await activateByKeyboard(page, facilityStartChoice(page, 'drill'));
   interactionCount += 1;
   await expect(page).toHaveURL(/\/start\?.*mode=drill/u);
+  await expect(page).toHaveTitle('Choose DRILL type | PSD EOC');
   const selectionBanner = page.getByRole('region', {
     name: 'DRILL — TRAINING ONLY classification',
   });
@@ -372,6 +518,7 @@ test('simulated staff drill submit is keyboard-only, three interactions, and int
   );
   interactionCount += 1;
   await expect(page).toHaveURL(/\/start\/confirm\?/u);
+  await expect(page).toHaveTitle('Review DRILL confirmation | PSD EOC');
   await expectPreviewCounts(page, 'drill');
   // This label is contract-valid simulated response data. The activation
   // request below is intercepted in the browser and proves no integration.
@@ -403,7 +550,6 @@ test('simulated staff drill submit is keyboard-only, three interactions, and int
 for (const scenario of [
   {
     mode: 'real' as const,
-    choice: /Start REAL incident/u,
     eventType: /^Lockdown/u,
     submit:
       'Start REAL incident and create notification intents for 4 selected staff recipients',
@@ -414,7 +560,6 @@ for (const scenario of [
   },
   {
     mode: 'drill' as const,
-    choice: /Run DRILL/u,
     eventType: /^Lockdown Drill/u,
     submit:
       'Start DRILL and create notification intents for 4 selected staff recipients',
@@ -432,7 +577,7 @@ for (const scenario of [
       simulatedReadyStaff: true,
     });
     await page.goto('/');
-    await page.getByRole('link', { name: scenario.choice }).first().click();
+    await facilityStartChoice(page, scenario.mode).click();
     await page.getByRole('link', { name: scenario.eventType }).first().click();
     await page.getByRole('button', { name: scenario.submit }).click();
 
@@ -468,10 +613,7 @@ test('a mismatched preview is rejected before consequences or activation are off
     mismatchedFacility: true,
   });
   await page.goto('/');
-  await page
-    .getByRole('link', { name: /Start REAL incident/u })
-    .first()
-    .click();
+  await facilityStartChoice(page, 'real').click();
   await page
     .getByRole('link', { name: /^Lockdown/u })
     .first()
@@ -504,11 +646,11 @@ test('unknown active-event details fail closed before join or start is offered',
   page,
 }) => {
   const intercepted = await installPreviewInterception(page, {
-    activeEventIds: [PLAYWRIGHT_IDS.activeEvent],
+    activeEventIds: [PLAYWRIGHT_IDS.activatedEvent],
     simulatedReadyStaff: true,
   });
   await page.route(
-    `**/api/events/${PLAYWRIGHT_IDS.activeEvent}`,
+    `**/api/events/${PLAYWRIGHT_IDS.activatedEvent}`,
     async (route) => {
       await route.fulfill({
         status: 404,
@@ -525,10 +667,7 @@ test('unknown active-event details fail closed before join or start is offered',
   );
 
   await page.goto('/');
-  await page
-    .getByRole('link', { name: /Start REAL incident/u })
-    .first()
-    .click();
+  await facilityStartChoice(page, 'real').click();
   await page
     .getByRole('link', { name: /^Lockdown/u })
     .first()
@@ -560,37 +699,14 @@ test('join-existing shows the actual cross-classification event and never invoke
   });
   let interactionCount = 0;
   let joinRequests = 0;
-  let selection: CreateActivationPreviewInput | undefined;
+  await page.goto('/');
+  const expectedEvent = await readServerEvent(page, PLAYWRIGHT_IDS.activeEvent);
   await page.route('**/start/api/join', async (route) => {
     joinRequests += 1;
-    selection = intercepted.previewRequests.at(-1);
-    if (selection === undefined) {
-      throw new Error('Join was requested before a consequence preview.');
-    }
-    await fulfillSyntheticJoin(route, selection);
+    await fulfillMatchingJoin(route, expectedEvent);
   });
-  await page.route(
-    `**/api/events/${PLAYWRIGHT_IDS.activeEvent}`,
-    async (route) => {
-      const currentSelection = intercepted.previewRequests.at(-1);
-      if (currentSelection === undefined) {
-        throw new Error('Active event was read before a consequence preview.');
-      }
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(
-          activeEventFixture(currentSelection, PLAYWRIGHT_IDS.activeEvent),
-        ),
-      });
-    },
-  );
 
-  await page.goto('/');
-  await page
-    .getByRole('link', { name: /Start REAL incident/u })
-    .first()
-    .click();
+  await facilityStartChoice(page, 'real').click();
   interactionCount += 1;
   await page
     .getByRole('link', { name: /^Lockdown/u })
@@ -608,7 +724,8 @@ test('join-existing shows the actual cross-classification event and never invoke
 
   await chooser
     .getByRole('button', {
-      name: 'Join Drill — DRILL — TRAINING ONLY',
+      name: ACTIVE_EVENT_NAMES.first.confirmation,
+      exact: true,
     })
     .click();
   interactionCount += 1;
@@ -634,4 +751,544 @@ test('join-existing shows the actual cross-classification event and never invoke
   expect(joinRequests).toBe(1);
   expect(intercepted.activationRequests()).toBe(0);
   await assertAxeClean(page, 'synthetic join result');
+});
+
+test('database-backed staff preview pins minimized roster evidence without creating an event or provider work', async ({
+  page,
+}) => {
+  const databaseUrl = startFlowPlaywrightDatabaseUrl();
+  const connection = createDatabaseClient({
+    driver: 'postgres',
+    url: databaseUrl,
+    maxConnections: 2,
+  });
+  if (connection.driver !== 'postgres') {
+    throw new Error('Start-flow Playwright requires PostgreSQL.');
+  }
+
+  try {
+    const before = await operationalMutationCounts(connection.db);
+    const responsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === '/start/api/preview' &&
+        response.request().method() === 'POST'
+      );
+    });
+
+    await page.goto(REAL_CONFIRMATION_PATH);
+    const response = await responsePromise;
+    expect(response.status()).toBe(200);
+    const preview = ActivationPreviewSchema.parse(
+      (await response.json()) as unknown,
+    );
+
+    expect(preview).toMatchObject({
+      facilityId: SYNTHETIC_FACILITY_ID,
+      kind: 'incident',
+      templateMode: 'real',
+      eventTypeVersion: {
+        id: SYNTHETIC_REAL_VERSION_ID,
+        templateMode: 'real',
+      },
+      rosterSnapshotId: PLAYWRIGHT_IDS.staffRosterSnapshot,
+      rosterPopulation: 'staff',
+      audienceConfig: {
+        id: START_FLOW_STAFF_AUDIENCE_ID,
+        version: START_FLOW_STAFF_AUDIENCE_VERSION,
+      },
+      recipientCount: 2,
+      sendReadiness: 'blocked',
+      activeEventIds: [
+        PLAYWRIGHT_IDS.activeEvent,
+        PLAYWRIGHT_IDS.activeEventSecond,
+      ],
+    });
+    expect(preview.blockingReasonCodes).toEqual([
+      'EMAIL_DISABLED',
+      'EMAIL_NOT_LIVE_VERIFIED',
+      'PUSH_DISABLED',
+      'PUSH_NOT_LIVE_VERIFIED',
+    ]);
+    expect(preview.channels.map((channel) => channel.channel)).toEqual([
+      'push',
+      'email',
+    ]);
+    const channelByName = new Map<
+      ActivationPreview['channels'][number]['channel'],
+      ActivationPreview['channels'][number]
+    >(preview.channels.map((channel) => [channel.channel, channel]));
+    expect(channelByName.get('push')).toMatchObject({
+      endpointCount: 2,
+      integrationStatus: { integrationId: 'expo-push', label: 'mocked' },
+      renderedMessage: {
+        channel: 'push',
+        eventKind: 'incident',
+        templateMode: 'real',
+        purpose: 'activation',
+        classificationMarker: 'INCIDENT',
+      },
+    });
+    expect(channelByName.get('email')).toMatchObject({
+      endpointCount: 1,
+      integrationStatus: { integrationId: 'ses-email', label: 'mocked' },
+      renderedMessage: {
+        channel: 'email',
+        eventKind: 'incident',
+        templateMode: 'real',
+        purpose: 'activation',
+        classificationMarker: 'INCIDENT',
+      },
+    });
+    for (const channel of preview.channels) {
+      const rendered = JSON.stringify(channel.renderedMessage);
+      expect(rendered).toContain('REAL INCIDENT');
+      expect(rendered).toContain(SYNTHETIC_FACILITY);
+      expect(rendered).toContain('once confirmed');
+    }
+    const minimizedPreview = JSON.stringify(preview);
+    expect(minimizedPreview).not.toContain('Synthetic Browser Staff One');
+    expect(minimizedPreview).not.toContain('example.invalid');
+    expect(minimizedPreview).not.toContain('synthetic-unroutable');
+
+    const [persisted] = await connection.db
+      .select({
+        id: activationPreviews.id,
+        rosterSnapshotId: activationPreviews.rosterSnapshotId,
+        rosterPopulation: activationPreviews.rosterPopulation,
+        audienceConfigId: activationPreviews.audienceConfigId,
+        audienceConfigVersion: activationPreviews.audienceConfigVersion,
+        recipientCount: activationPreviews.recipientCount,
+        channels: activationPreviews.channels,
+        sendReadiness: activationPreviews.sendReadiness,
+        blockingReasonCodes: activationPreviews.blockingReasonCodes,
+        activeEventIds: activationPreviews.activeEventIds,
+        consequenceDigest: activationPreviews.consequenceDigest,
+      })
+      .from(activationPreviews)
+      .where(eq(activationPreviews.id, preview.id))
+      .limit(1);
+    expect(persisted).toEqual({
+      id: preview.id,
+      rosterSnapshotId: preview.rosterSnapshotId,
+      rosterPopulation: preview.rosterPopulation,
+      audienceConfigId: preview.audienceConfig.id,
+      audienceConfigVersion: preview.audienceConfig.version,
+      recipientCount: preview.recipientCount,
+      channels: preview.channels,
+      sendReadiness: preview.sendReadiness,
+      blockingReasonCodes: preview.blockingReasonCodes,
+      activeEventIds: preview.activeEventIds,
+      consequenceDigest: preview.consequenceDigest,
+    });
+    const [staffSnapshot] = await connection.db
+      .select({ version: rosterSnapshots.version })
+      .from(rosterSnapshots)
+      .where(eq(rosterSnapshots.id, preview.rosterSnapshotId))
+      .limit(1);
+    expect(staffSnapshot?.version).toBe(START_FLOW_STAFF_ROSTER_VERSION);
+    expect(await operationalMutationCounts(connection.db)).toEqual(before);
+
+    await expect(page).toHaveTitle(
+      'Review REAL incident confirmation | PSD EOC',
+    );
+    await expect(
+      page.getByRole('status').filter({
+        hasText:
+          'Consequence preview ready: 2 selected staff recipients, 2 included channel previews, notifications blocked.',
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText('2 selected staff recipients', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(PLAYWRIGHT_IDS.staffRosterSnapshot),
+    ).toBeVisible();
+    const pushCard = page.locator('.channel-card').filter({
+      has: page.getByRole('heading', { name: 'Push notifications' }),
+    });
+    const emailCard = page.locator('.channel-card').filter({
+      has: page.getByRole('heading', { name: 'Email' }),
+    });
+    const smsCard = page.locator('.channel-card').filter({
+      has: page.getByRole('heading', { name: 'Text messages' }),
+    });
+    await expect(pushCard).toContainText('2 active endpoints');
+    await expect(emailCard).toContainText('1 active endpoint');
+    await expect(pushCard).toContainText('Mocked — training data only');
+    await expect(emailCard).toContainText('Mocked — training data only');
+    await expect(smsCard).toContainText('Not included');
+    await expect(smsCard).toContainText(
+      'The notification intent will contain no SMS channel',
+    );
+    await expect(
+      page.getByRole('heading', { name: 'Notifications are not ready' }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: /Start REAL incident/u }),
+    ).toHaveCount(0);
+    await assertAxeClean(page, 'database-backed staff consequence preview');
+  } finally {
+    await connection.close();
+  }
+});
+
+test('dashboard gives concurrent same-type events unique names and joins the exact chosen event', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const firstJoin = page.getByRole('button', {
+    name: ACTIVE_EVENT_NAMES.first.dashboard,
+    exact: true,
+  });
+  const secondJoin = page.getByRole('button', {
+    name: ACTIVE_EVENT_NAMES.second.dashboard,
+    exact: true,
+  });
+  await expect(firstJoin).toHaveCount(1);
+  await expect(secondJoin).toHaveCount(1);
+  await expect(firstJoin.locator('svg.classification-icon')).toHaveCount(1);
+  await expect(secondJoin.locator('svg.classification-icon')).toHaveCount(1);
+
+  const expectedEvent = await readServerEvent(page, PLAYWRIGHT_IDS.activeEvent);
+  expect(expectedEvent.activatedAt).toBe(FIRST_ACTIVE_EVENT_TIME);
+  let joinRequests = 0;
+  await page.route('**/start/api/join', async (route) => {
+    joinRequests += 1;
+    await fulfillMatchingJoin(route, expectedEvent);
+  });
+  await firstJoin.click();
+
+  const joined = page.getByRole('status').filter({
+    hasText: 'DRILL — TRAINING ONLY event joined.',
+  });
+  await expect(joined).toBeFocused();
+  await expect(joined).toContainText('DRILL — TRAINING ONLY event joined.');
+  await expect(secondJoin).toBeVisible();
+  expect(joinRequests).toBe(1);
+  await assertAxeClean(page, 'direct dashboard join result');
+});
+
+test('dashboard treats a schema-valid response for different event truth as outcome unknown', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const target = page.getByRole('button', {
+    name: ACTIVE_EVENT_NAMES.second.dashboard,
+    exact: true,
+  });
+  const prospectiveSelection = CreateActivationPreviewInputSchema.parse({
+    facilityId: SYNTHETIC_FACILITY_ID,
+    kind: 'incident',
+    templateMode: 'real',
+    eventTypeVersion: {
+      id: SYNTHETIC_REAL_VERSION_ID,
+      templateMode: 'real',
+    },
+    rosterPopulation: 'staff',
+  });
+  const mismatched = joinEventResultFixture(
+    prospectiveSelection,
+    PLAYWRIGHT_IDS.activeEventSecond,
+    { activatedAt: SECOND_ACTIVE_EVENT_TIME },
+  );
+  let joinRequests = 0;
+  await page.route('**/start/api/join', async (route) => {
+    joinRequests += 1;
+    const submitted = JoinEventInputSchema.parse(
+      route.request().postDataJSON(),
+    );
+    expect(submitted.eventId).toBe(PLAYWRIGHT_IDS.activeEventSecond);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(mismatched),
+    });
+  });
+
+  await target.click();
+  const unresolved = page.getByRole('alert').filter({
+    hasText: 'Outcome unknown.',
+  });
+  await expect(unresolved).toBeFocused();
+  await expect(unresolved).toContainText(
+    'does not match the active event you chose',
+  );
+  await expect(target).toBeDisabled();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'event joined' }),
+  ).toHaveCount(0);
+  expect(joinRequests).toBe(1);
+  await assertAxeClean(page, 'mismatched direct join response');
+});
+
+test('confirmation distinguishes concurrent same-type choices by time and event ID', async ({
+  page,
+}) => {
+  const intercepted = await installPreviewInterception(page, {
+    activeEventIds: [
+      PLAYWRIGHT_IDS.activeEvent,
+      PLAYWRIGHT_IDS.activeEventSecond,
+    ],
+    simulatedReadyStaff: true,
+  });
+  await page.goto(REAL_CONFIRMATION_PATH);
+
+  const chooser = page.getByRole('region', {
+    name: 'An event is already active here',
+  });
+  await expect(
+    chooser.getByRole('button', {
+      name: ACTIVE_EVENT_NAMES.first.confirmation,
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  await expect(
+    chooser.getByRole('button', {
+      name: ACTIVE_EVENT_NAMES.second.confirmation,
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole('button', {
+      name: 'Start a separate REAL incident and create notification intents for 4 selected staff recipients',
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(intercepted.activationRequests()).toBe(0);
+  await assertAxeClean(page, 'concurrent same-type confirmation controls');
+});
+
+test('delayed confirmation join submits once, identifies only that operation, and reuses its key on explicit retry', async ({
+  page,
+}) => {
+  const intercepted = await installPreviewInterception(page, {
+    activeEventIds: [
+      PLAYWRIGHT_IDS.activeEvent,
+      PLAYWRIGHT_IDS.activeEventSecond,
+    ],
+    simulatedReadyStaff: true,
+  });
+  await page.goto('/');
+  const expectedEvent = await readServerEvent(page, PLAYWRIGHT_IDS.activeEvent);
+  let releaseJoin = () => {};
+  const joinGate = new Promise<void>((resolve) => {
+    releaseJoin = resolve;
+  });
+  let joinRequests = 0;
+  const joinKeys: string[] = [];
+  await page.route('**/start/api/join', async (route) => {
+    joinRequests += 1;
+    const input = JoinEventInputSchema.parse(route.request().postDataJSON());
+    expect(input.eventId).toBe(expectedEvent.id);
+    const key = route.request().headers()['idempotency-key'];
+    expect(key).toMatch(/^join:/u);
+    if (key !== undefined) joinKeys.push(key);
+    await joinGate;
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify(interceptedActivationError()),
+    });
+  });
+
+  await page.goto(REAL_CONFIRMATION_PATH);
+  const chosen = page
+    .locator('button.join-choice')
+    .filter({ hasText: 'event 00000001' });
+  const other = page
+    .locator('button.join-choice')
+    .filter({ hasText: 'event 00000016' });
+  const activate = page.locator('button.button--real');
+  await expect(chosen).toHaveAccessibleName(
+    ACTIVE_EVENT_NAMES.first.confirmation,
+  );
+  await expect(other).toHaveAccessibleName(
+    ACTIVE_EVENT_NAMES.second.confirmation,
+  );
+  await expect(activate).toHaveAccessibleName(
+    'Start a separate REAL incident and create notification intents for 4 selected staff recipients',
+  );
+  await chosen.evaluate((button: HTMLButtonElement) => {
+    button.click();
+    button.click();
+  });
+  await expect.poll(() => joinRequests).toBe(1);
+  await expect(chosen).toContainText('Joining DRILL — TRAINING ONLY once…');
+  await expect(other).toHaveAccessibleName(
+    ACTIVE_EVENT_NAMES.second.confirmation,
+  );
+  await expect(other).toBeDisabled();
+  await expect(activate).toHaveAccessibleName(
+    'Start a separate REAL incident and create notification intents for 4 selected staff recipients',
+  );
+  await expect(activate).toBeDisabled();
+  expect(intercepted.activationRequests()).toBe(0);
+
+  releaseJoin();
+  const rejected = page.locator('section.error-summary[role="alert"]').filter({
+    has: page.getByRole('heading', { name: 'Request not accepted' }),
+  });
+  await expect(rejected).toBeFocused();
+  await expect(rejected).toContainText(
+    'Attempted action: Join DRILL — TRAINING ONLY event Lockdown Drill — event 00000001.',
+  );
+  await expect(chosen).toBeEnabled();
+
+  await chosen.click();
+  await expect.poll(() => joinRequests).toBe(2);
+  await expect(rejected).toBeFocused();
+  expect(joinKeys).toHaveLength(2);
+  expect(joinKeys[1]).toBe(joinKeys[0]);
+  expect(intercepted.activationRequests()).toBe(0);
+  await assertAxeClean(page, 'delayed join rejection and retry');
+});
+
+test('delayed activation double-click submits once and preserves the full pending consequence label', async ({
+  page,
+}) => {
+  const intercepted = await installPreviewInterception(page, {
+    activeEventIds: [
+      PLAYWRIGHT_IDS.activeEvent,
+      PLAYWRIGHT_IDS.activeEventSecond,
+    ],
+    activationDelayMs: 750,
+    activationOutcome: 'success',
+    simulatedReadyStaff: true,
+  });
+  await page.goto(REAL_CONFIRMATION_PATH);
+  const submit = page.locator('button.button--real');
+  const firstJoin = page
+    .locator('button.join-choice')
+    .filter({ hasText: 'event 00000001' });
+  await expect(submit).toHaveAccessibleName(
+    'Start a separate REAL incident and create notification intents for 4 selected staff recipients',
+  );
+  await expect(firstJoin).toHaveAccessibleName(
+    ACTIVE_EVENT_NAMES.first.confirmation,
+  );
+  await submit.evaluate((button: HTMLButtonElement) => {
+    button.click();
+    button.click();
+  });
+
+  await expect.poll(intercepted.activationRequests).toBe(1);
+  await expect(submit).toHaveAccessibleName(
+    `Starting REAL INCIDENT Lockdown at ${SYNTHETIC_FACILITY} once…`,
+  );
+  await expect(firstJoin).toHaveAccessibleName(
+    ACTIVE_EVENT_NAMES.first.confirmation,
+  );
+  await expect(firstJoin).toBeDisabled();
+
+  const result = page.locator('section.result-panel').filter({
+    has: page.getByRole('heading', { name: 'Incident started' }),
+  });
+  await expect(result).toBeFocused();
+  expect(intercepted.activationRequests()).toBe(1);
+  expect(intercepted.activationIdempotencyKeys).toHaveLength(1);
+  await assertAxeClean(page, 'single delayed activation result');
+});
+
+test('activation 503 is outcome-unknown, never auto-retries, and disables replay', async ({
+  page,
+}) => {
+  const intercepted = await installPreviewInterception(page, {
+    activationOutcome: 'ambiguous',
+    simulatedReadyStaff: true,
+  });
+  await page.goto(REAL_CONFIRMATION_PATH);
+  const submit = page.getByRole('button', {
+    name: 'Start REAL incident and create notification intents for 4 selected staff recipients',
+    exact: true,
+  });
+  await submit.click();
+
+  const unresolved = page
+    .locator('section.error-summary[role="alert"]')
+    .filter({
+      has: page.getByRole('heading', { name: 'Outcome unknown' }),
+    });
+  await expect(unresolved).toBeFocused();
+  await expect(unresolved).toContainText(
+    'Synthetic response interruption leaves the activation outcome unknown.',
+  );
+  await expect(unresolved).toContainText(
+    'Attempted action: Start REAL INCIDENT event Lockdown.',
+  );
+  await expect(submit).toBeDisabled();
+  await submit.evaluate((button: HTMLButtonElement) => button.click());
+  await page.waitForTimeout(250);
+  expect(intercepted.activationRequests()).toBe(1);
+  expect(intercepted.activationIdempotencyKeys).toHaveLength(1);
+  await assertAxeClean(page, 'ambiguous activation outcome');
+});
+
+test('preview retry focuses the persistent live status before rendering fresh consequences', async ({
+  page,
+}) => {
+  const intercepted = await installPreviewInterception(page, {
+    holdPreviewFailure: true,
+    previewDelayMs: 300,
+  });
+  await page.goto(REAL_CONFIRMATION_PATH);
+  const error = page.locator('section.error-summary[role="alert"]').filter({
+    has: page.getByRole('heading', {
+      name: 'Consequence preview unavailable',
+    }),
+  });
+  await expect(error).toContainText(
+    'Synthetic consequence preview is temporarily unavailable.',
+  );
+
+  intercepted.allowPreviewSuccess();
+  await error.getByRole('button', { name: 'Load a fresh preview' }).click();
+  const status = page.getByRole('status').filter({
+    hasText: 'Loading the current roster snapshot',
+  });
+  await expect(status).toBeFocused();
+  await expect(status).toHaveText(
+    'Loading the current roster snapshot, active events, and channel consequences…',
+  );
+  await expect(
+    page.getByRole('status').filter({
+      hasText: 'Consequence preview ready: 4 selected staff recipients',
+    }),
+  ).toBeFocused();
+  expect(intercepted.previewRequests.length).toBeGreaterThanOrEqual(2);
+  expect(intercepted.activationRequests()).toBe(0);
+  await assertAxeClean(page, 'focused consequence preview retry');
+});
+
+test('schema-valid activation response with a different idempotency decision fails closed as unresolved', async ({
+  page,
+}) => {
+  const intercepted = await installPreviewInterception(page, {
+    activationOutcome: 'success',
+    mismatchedActivationIdempotencyKey: true,
+    simulatedReadyStaff: true,
+  });
+  await page.goto(REAL_CONFIRMATION_PATH);
+  const submit = page.getByRole('button', {
+    name: 'Start REAL incident and create notification intents for 4 selected staff recipients',
+    exact: true,
+  });
+  await submit.click();
+
+  const unresolved = page
+    .locator('section.error-summary[role="alert"]')
+    .filter({
+      has: page.getByRole('heading', { name: 'Outcome unknown' }),
+    });
+  await expect(unresolved).toBeFocused();
+  await expect(unresolved).toContainText(
+    'returned an event that does not match the confirmed preview',
+  );
+  await expect(submit).toBeDisabled();
+  await expect(
+    page.getByRole('heading', { name: 'Incident started' }),
+  ).toHaveCount(0);
+  expect(intercepted.activationRequests()).toBe(1);
+  expect(intercepted.activationIdempotencyKeys).toHaveLength(1);
+  await assertAxeClean(page, 'mismatched activation decision response');
 });

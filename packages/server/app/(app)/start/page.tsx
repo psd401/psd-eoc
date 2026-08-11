@@ -1,5 +1,6 @@
 import { FacilityIdSchema } from '@psd-eoc/contracts';
 import Link from 'next/link';
+import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 
 import { eventTypesForMode, loadOperationalViewData } from './_lib/data';
@@ -17,17 +18,33 @@ export const revalidate = 0;
 
 type SearchValue = string | readonly string[] | undefined;
 
+interface SelectEventTypePageProps {
+  readonly searchParams: Promise<
+    Readonly<{ facilityId?: SearchValue; mode?: SearchValue }>
+  >;
+}
+
 function one(value: SearchValue): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+export async function generateMetadata({
+  searchParams,
+}: SelectEventTypePageProps): Promise<Metadata> {
+  const mode = one((await searchParams).mode);
+  return {
+    title:
+      mode === 'real'
+        ? 'Choose REAL incident type'
+        : mode === 'drill'
+          ? 'Choose DRILL type'
+          : 'Choose event type',
+  };
+}
+
 export default async function SelectEventTypePage({
   searchParams,
-}: Readonly<{
-  searchParams: Promise<
-    Readonly<{ facilityId?: SearchValue; mode?: SearchValue }>
-  >;
-}>) {
+}: SelectEventTypePageProps) {
   const parameters = await searchParams;
   const facilityResult = FacilityIdSchema.safeParse(one(parameters.facilityId));
   const mode = one(parameters.mode);

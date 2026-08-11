@@ -374,6 +374,11 @@ dd {
   margin-bottom: 0.45rem;
 }
 
+.channel-card--disabled {
+  border-style: dashed;
+  background: var(--surface-muted);
+}
+
 .facility-code {
   margin-bottom: 0.35rem;
   color: var(--text-muted);
@@ -444,6 +449,13 @@ dd {
 .action-grid > *,
 .actions > * {
   flex: 1 1 12rem;
+}
+
+.join-choice__detail {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.88rem;
+  font-weight: 650;
 }
 
 .choice-card {

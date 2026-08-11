@@ -17,6 +17,7 @@ const uuid = (suffix: number): string =>
 
 export const PLAYWRIGHT_IDS = Object.freeze({
   activeEvent: uuid(1),
+  activeEventSecond: uuid(16),
   activeEventTypeVersion: uuid(10),
   activatedEvent: uuid(11),
   activationConfirmation: uuid(12),
@@ -27,6 +28,16 @@ export const PLAYWRIGHT_IDS = Object.freeze({
   audience: uuid(3),
   joinParticipant: uuid(4),
   rosterSnapshot: uuid(5),
+  staffRosterConfiguration: '80000000-0000-4000-8000-000000000040',
+  staffRosterSnapshot: uuid(18),
+  staffBuildingGroup: '80000000-0000-4000-8000-000000000030',
+  staffSouthBuildingGroup: '80000000-0000-4000-8000-000000000031',
+  staffOthersGroup: '80000000-0000-4000-8000-000000000032',
+  staffRecipientOne: uuid(20),
+  staffRecipientTwo: uuid(21),
+  staffRecipientOnePush: uuid(22),
+  staffRecipientOneEmail: uuid(23),
+  staffRecipientTwoPush: uuid(24),
   request: uuid(6),
   user: uuid(7),
   session: uuid(8),
@@ -140,6 +151,7 @@ export function activationResultFixture(
 
 function channelConsequences(
   input: Readonly<{
+    includeSms: boolean;
     kind: 'incident' | 'drill';
     mode: TemplateMode;
     observedAt: string;
@@ -172,7 +184,7 @@ function channelConsequences(
           observedAt: input.observedAt,
         };
 
-  return [
+  const consequences: ActivationPreview['channels'] = [
     {
       channel: 'push',
       endpointCount: 4,
@@ -215,6 +227,9 @@ function channelConsequences(
       integrationStatus: integrationStatus('aws-eum-sms'),
     },
   ];
+  return input.includeSms
+    ? consequences
+    : consequences.filter((channel) => channel.channel !== 'sms');
 }
 
 /**
@@ -226,6 +241,7 @@ export function activationPreviewFixture(
   selection: CreateActivationPreviewInput,
   input: Readonly<{
     activeEventIds?: readonly string[];
+    includeSms?: boolean;
     mismatchedFacility?: boolean;
     simulatedReadyStaff?: boolean;
   }> = {},
@@ -254,6 +270,7 @@ export function activationPreviewFixture(
     recipientCount: 4,
     channels: channelConsequences({
       kind: selection.kind,
+      includeSms: input.includeSms !== false,
       mode: selection.templateMode,
       observedAt: createdAt,
       simulatedReadyStaff,
@@ -272,9 +289,10 @@ export function activationPreviewFixture(
 export function joinEventResultFixture(
   selection: CreateActivationPreviewInput,
   eventId: string,
+  input: Readonly<{ activatedAt?: string }> = {},
 ): JoinEventResult {
   return JoinEventResultSchema.parse({
-    event: activeEventFixture(selection, eventId),
+    event: activeEventFixture(selection, eventId, input),
     participantId: PLAYWRIGHT_IDS.joinParticipant,
     joined: true,
   });
@@ -284,8 +302,9 @@ export function joinEventResultFixture(
 export function activeEventFixture(
   selection: CreateActivationPreviewInput,
   eventId: string,
+  input: Readonly<{ activatedAt?: string }> = {},
 ): Event {
-  const at = new Date().toISOString();
+  const at = input.activatedAt ?? new Date().toISOString();
   return EventSchema.parse({
     id: eventId,
     facilityId: selection.facilityId,
@@ -321,11 +340,22 @@ export function activeEventFixture(
 
 export function interceptedActivationError() {
   return ApiErrorSchema.parse({
-    code: 'LIVE_ACTION_UNAVAILABLE',
+    code: 'CONFLICT',
     message:
       'Synthetic browser interception stopped here; no event or notification was created.',
     requestId: PLAYWRIGHT_IDS.request,
     retryable: false,
+    fieldErrors: [],
+  });
+}
+
+export function interruptedActivationError() {
+  return ApiErrorSchema.parse({
+    code: 'INTERNAL_ERROR',
+    message:
+      'Synthetic response interruption leaves the activation outcome unknown.',
+    requestId: PLAYWRIGHT_IDS.request,
+    retryable: true,
     fieldErrors: [],
   });
 }

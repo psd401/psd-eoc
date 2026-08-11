@@ -1,13 +1,16 @@
 import { WEB_CSRF_COOKIE_NAME } from '../../lib/auth/sessions';
+import type { Metadata } from 'next';
 import { loadOperationalViewData } from './start/_lib/data';
 import { startSelectionReturnPath } from './start/_lib/return-path';
 import { requirePageSession } from './start/_lib/session';
 import { Call911Affordance } from './start/components/call-911-affordance';
 import { ClassificationIcon } from './start/components/classification-icon';
 import { JoinEventButton } from './start/components/join-event-button';
+import './start/styles.css';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+export const metadata: Metadata = { title: 'Active events' };
 
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/Los_Angeles',
@@ -47,7 +50,11 @@ export default async function DashboardPage() {
           <ul className="event-list">
             {data.activeEvents.map(({ event, eventTypeName, facilityName }) => {
               const real = event.templateMode === 'real';
-              const joinLabel = `${eventTypeName} at ${facilityName}`;
+              const joinLabel = `${
+                real ? 'REAL INCIDENT' : 'DRILL — TRAINING ONLY'
+              } — ${eventTypeName} at ${facilityName} — started ${DATE_FORMATTER.format(
+                new Date(event.activatedAt ?? event.createdAt),
+              )} — event ${event.id.slice(-8)}`;
               return (
                 <li
                   className={`event-card ${
@@ -78,7 +85,7 @@ export default async function DashboardPage() {
                   </p>
                   <JoinEventButton
                     csrfCookieName={WEB_CSRF_COOKIE_NAME}
-                    eventId={event.id}
+                    event={event}
                     label={joinLabel}
                   />
                 </li>
@@ -104,6 +111,7 @@ export default async function DashboardPage() {
               <h3>{facility.name}</h3>
               <div className="action-grid">
                 <a
+                  aria-label={`Start REAL incident at ${facility.name}`}
                   className="action-link action-link--real"
                   href={startSelectionReturnPath({
                     facilityId: facility.id,
@@ -116,6 +124,7 @@ export default async function DashboardPage() {
                   </span>
                 </a>
                 <a
+                  aria-label={`Run DRILL at ${facility.name}`}
                   className="action-link action-link--drill"
                   href={startSelectionReturnPath({
                     facilityId: facility.id,
