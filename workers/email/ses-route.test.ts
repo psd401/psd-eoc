@@ -28,7 +28,11 @@ import {
   type SesWebhookStore,
 } from '../../packages/server/app/api/webhooks/ses/route';
 import { IDS } from '../shared/test-fixtures';
-import { canonicalSnsEnvelopeDigest, parseSnsEnvelope } from './sns-signature';
+import {
+  SnsSignatureError,
+  canonicalSnsEnvelopeDigest,
+  parseSnsEnvelope,
+} from './sns-signature';
 
 const TOPIC_ARN = 'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events';
 const CERTIFICATE_URL =
@@ -395,12 +399,16 @@ class FailingEvidenceStore extends MemorySesWebhookStore {
   }
 }
 
-function createHarness(store = new MemorySesWebhookStore()) {
+function createHarness(
+  store = new MemorySesWebhookStore(),
+  verifierError?: Error,
+) {
   const calls = { createStore: 0, verifySignature: 0 };
   const handler = createSesWebhookRouteHandler({
     readExpectedTopicArn: () => TOPIC_ARN,
     async verifySignature(envelope): Promise<void> {
       calls.verifySignature += 1;
+      if (verifierError !== undefined) throw verifierError;
       const valid = verify(
         'sha256',
         Buffer.from(canonicalString(envelope), 'utf8'),
@@ -628,6 +636,60 @@ describe('SES signed SNS webhook route', () => {
     expect(await errorCode(wrongTopicResponse)).toBe('INVALID_SNS_ENVELOPE');
     expect(wrongTopicApp.calls.verifySignature).toBe(0);
     expect(wrongTopicApp.calls.createStore).toBe(0);
+  });
+
+  test('returns a safe retryable response when certificate retrieval is transiently unavailable', async () => {
+    const privateDetail = 'Synthetic upstream certificate fetch detail.';
+    const verificationError = new SnsSignatureError('CERTIFICATE_UNAVAILABLE');
+    verificationError.cause = new Error(privateDetail);
+    const app = createHarness(new MemorySesWebhookStore(), verificationError);
+
+    const response = await app.handler(
+      requestForEnvelope(signedEnvelope({ eventType: 'Send' })),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('5');
+    const body = await response.json();
+    expect(body).toEqual({
+      error: {
+        code: 'SNS_VERIFICATION_UNAVAILABLE',
+        message: 'SNS callback authentication is temporarily unavailable.',
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain('CERTIFICATE_UNAVAILABLE');
+    expect(JSON.stringify(body)).not.toContain(privateDetail);
+    expect(app.calls.verifySignature).toBe(1);
+    expect(app.calls.createStore).toBe(0);
+    expect(app.store.closeCalls).toBe(0);
+  });
+
+  test('keeps invalid verifier results unauthorized and non-retryable', async () => {
+    for (const verifierCode of [
+      'INVALID_CERTIFICATE',
+      'INVALID_SIGNATURE',
+    ] as const) {
+      const app = createHarness(
+        new MemorySesWebhookStore(),
+        new SnsSignatureError(verifierCode),
+      );
+
+      const response = await app.handler(
+        requestForEnvelope(signedEnvelope({ eventType: 'Send' })),
+      );
+
+      expect(response.status).toBe(401);
+      expect(response.headers.get('retry-after')).toBeNull();
+      expect(await response.json()).toEqual({
+        error: {
+          code: 'SNS_SIGNATURE_INVALID',
+          message: 'The SNS callback signature could not be verified.',
+        },
+      });
+      expect(app.calls.verifySignature).toBe(1);
+      expect(app.calls.createStore).toBe(0);
+      expect(app.store.closeCalls).toBe(0);
+    }
   });
 
   test('a valid signature with endpoint correlation drift fails closed', async () => {

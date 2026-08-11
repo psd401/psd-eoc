@@ -38,6 +38,7 @@ import {
   type DeliveryEvidenceStore,
 } from '../../internal/delivery-state/route';
 import {
+  SnsSignatureError,
   canonicalSnsEnvelopeDigest,
   parseSnsEnvelope,
   verifySnsSignature,
@@ -550,7 +551,18 @@ export function createSesWebhookRouteHandler(
 
     try {
       await dependencies.verifySignature(envelope);
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof SnsSignatureError &&
+        error.code === 'CERTIFICATE_UNAVAILABLE'
+      ) {
+        return errorResponse(
+          503,
+          'SNS_VERIFICATION_UNAVAILABLE',
+          'SNS callback authentication is temporarily unavailable.',
+          { 'Retry-After': '5' },
+        );
+      }
       return errorResponse(
         401,
         'SNS_SIGNATURE_INVALID',
