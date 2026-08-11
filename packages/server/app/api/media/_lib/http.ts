@@ -17,6 +17,7 @@ import { authenticateSessionRequest } from '../../../../lib/auth/middleware';
 import {
   getDefaultSessionService,
   SessionAccessError,
+  type AuthenticatedSession,
 } from '../../../../lib/auth/sessions';
 import {
   CapabilityEngineError,
@@ -38,19 +39,20 @@ const RESPONSE_HEADERS = Object.freeze({
   Vary: 'Authorization, Cookie',
 });
 
-export interface MediaRouteInvocationRequest {
-  readonly requestId: string;
+type MediaRouteMutationMetadata = Readonly<{ idempotencyKey: string }>;
+
+export interface MediaRouteAuthenticationRequest {
   readonly serverTime: Date;
-  readonly mutation: Readonly<{ idempotencyKey: string }> | null;
+  readonly mutation: boolean;
 }
 
 export interface MediaRouteRuntime {
   createRequestId(): string;
   now(): Date;
-  resolveInvocation(
+  authenticate(
     request: Request,
-    input: MediaRouteInvocationRequest,
-  ): Promise<TrustedCapabilityInvocation>;
+    input: MediaRouteAuthenticationRequest,
+  ): Promise<AuthenticatedSession>;
   execute<Id extends MediaCapabilityId>(
     capabilityId: Id,
     input: unknown,
@@ -61,37 +63,30 @@ export interface MediaRouteRuntime {
 /** Production runtime: session facts are resolved server-side on every call. */
 export function getDefaultMediaRouteRuntime(): MediaRouteRuntime {
   const sessions = getDefaultSessionService();
-  const capabilities = getDefaultMediaCapabilityRuntime();
   const runtime: MediaRouteRuntime = {
     createRequestId: randomUUID,
     now: () => new Date(),
-    async resolveInvocation(
+    async authenticate(
       request: Request,
-      input: MediaRouteInvocationRequest,
+      input: MediaRouteAuthenticationRequest,
     ) {
-      const authenticated = await authenticateSessionRequest(
+      return authenticateSessionRequest(
         request,
         sessions,
-        { mutation: input.mutation !== null },
+        { mutation: input.mutation },
         input.serverTime,
       );
-      return resolveHumanCapabilityInvocation(authenticated, {
-        requestId: input.requestId,
-        serverTime: input.serverTime,
-        mutation:
-          input.mutation === null
-            ? null
-            : {
-                idempotencyKey: input.mutation.idempotencyKey,
-                humanConfirmationId: null,
-              },
-      });
     },
     execute: <Id extends MediaCapabilityId>(
       capabilityId: Id,
       input: unknown,
       invocation: TrustedCapabilityInvocation,
-    ) => capabilities.execute(capabilityId, input, invocation),
+    ) =>
+      getDefaultMediaCapabilityRuntime().execute(
+        capabilityId,
+        input,
+        invocation,
+      ),
   };
   return Object.freeze(runtime);
 }
@@ -159,9 +154,7 @@ function assertNoQueryParameters(request: Request): void {
   }
 }
 
-function mutationMetadata(
-  request: Request,
-): MediaRouteInvocationRequest['mutation'] {
+function mutationMetadata(request: Request): MediaRouteMutationMetadata {
   return Object.freeze({
     idempotencyKey: IdempotencyKeySchema.parse(
       request.headers.get(MEDIA_IDEMPOTENCY_KEY_HEADER) ?? '',
@@ -235,14 +228,24 @@ async function executeMediaRoute<Id extends MediaCapabilityId>(
     const resolvedRuntime = runtime ?? getDefaultMediaRouteRuntime();
     requestId = resolvedRuntime.createRequestId();
     const serverTime = resolvedRuntime.now();
+    const authenticated = await resolvedRuntime.authenticate(request, {
+      serverTime,
+      mutation,
+    });
     const metadata = mutation ? mutationMetadata(request) : null;
     if (!mutation) {
       assertQueryHasNoMutationMetadata(request);
     }
-    const invocation = await resolvedRuntime.resolveInvocation(request, {
+    const invocation = resolveHumanCapabilityInvocation(authenticated, {
       requestId,
       serverTime,
-      mutation: metadata,
+      mutation:
+        metadata === null
+          ? null
+          : {
+              idempotencyKey: metadata.idempotencyKey,
+              humanConfirmationId: null,
+            },
     });
     const input = await loadInput();
     return successResponse(

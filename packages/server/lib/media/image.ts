@@ -10,6 +10,7 @@ export const MAX_IMAGE_INPUT_BYTES = 25 * 1_024 * 1_024;
 export const MAX_IMAGE_OUTPUT_BYTES = 25 * 1_024 * 1_024;
 export const MAX_IMAGE_PIXELS = 40_000_000;
 export const MAX_IMAGE_PAGES = 1;
+export const MAX_SHARP_OPERATION_SECONDS = 10;
 
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
 const JPEG_METADATA_MARKERS = new Set([0xe1, 0xe2, 0xed, 0xfe]);
@@ -51,6 +52,14 @@ export class ImageValidationError extends Error {
   ) {
     super(message);
     this.name = 'ImageValidationError';
+  }
+}
+
+/** A native processing failure that does not prove the input is malformed. */
+export class ImageProcessingUnavailableError extends Error {
+  public constructor() {
+    super('Image processing is temporarily unavailable.');
+    this.name = 'ImageProcessingUnavailableError';
   }
 }
 
@@ -394,13 +403,14 @@ function sharpInput(bytes: Buffer, maxPixels: number): Sharp {
     limitInputPixels: maxPixels,
     sequentialRead: true,
     unlimited: false,
-  });
+  }).timeout({ seconds: MAX_SHARP_OPERATION_SECONDS });
 }
 
-function mapSharpFailure(
+/** Converts native Sharp details into bounded structural or operational errors. */
+export function mapSharpFailure(
   error: unknown,
   detectedContentType: MediaContentType,
-): ImageValidationError {
+): ImageValidationError | ImageProcessingUnavailableError {
   if (error instanceof ImageValidationError) {
     return error;
   }
@@ -408,6 +418,11 @@ function mapSharpFailure(
     return safeError('HEIC_CODEC_UNAVAILABLE');
   }
   const detail = error instanceof Error ? error.message : '';
+  if (/\b(?:timeout|timed\s+out)\b/iu.test(detail)) {
+    // Sharp's configured timeout bounds native work but says nothing about
+    // the structure of the supplied bytes. Keep the intent retryable.
+    return new ImageProcessingUnavailableError();
+  }
   if (/pixel limit|exceeds.*pixels/iu.test(detail)) {
     return safeError('PIXEL_LIMIT_EXCEEDED');
   }
@@ -722,13 +737,15 @@ export async function sanitizeUploadedImage(
       pipeline,
       sanitizedContentType,
     ).toBuffer({ resolveWithObject: true });
-    const sanitizedBytes = Buffer.from(encoded.data);
     if (
-      sanitizedBytes.length === 0 ||
-      sanitizedBytes.length > limits.maxOutputBytes
+      encoded.data.byteLength === 0 ||
+      encoded.data.byteLength > limits.maxOutputBytes
     ) {
       throw safeError('SANITIZED_IMAGE_TOO_LARGE');
     }
+    // Do not create the defensive immutable copy until the native encoder's
+    // output is proven to fit the configured application-memory bound.
+    const sanitizedBytes = Buffer.from(encoded.data);
     const outputDimensions = await verifySanitizedOutput(
       sanitizedBytes,
       sanitizedContentType,

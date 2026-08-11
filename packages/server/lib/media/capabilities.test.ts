@@ -17,7 +17,12 @@ import {
   executeMediaCapability,
   type MediaCapabilityDependencies,
 } from './capabilities';
-import { ImageValidationError, type SanitizedImage } from './image';
+import { TerminalMediaImageRejectionError } from './errors';
+import {
+  ImageValidationError,
+  mapSharpFailure,
+  type SanitizedImage,
+} from './image';
 import type {
   CompleteMediaRecord,
   NewMediaUploadIntent,
@@ -31,7 +36,10 @@ import {
   type MediaObjectStore,
   type PutSanitizedObjectInput,
 } from './object-store';
-import { MediaProcessingCapacityError } from './processing-gate';
+import {
+  createMediaProcessingGate,
+  createMediaProviderGate,
+} from './processing-gate';
 import type {
   MediaCapabilityStore,
   MediaCapabilityTransaction,
@@ -64,7 +72,8 @@ const SANITIZED_SHA256 = createHash('sha256')
 interface MemoryIdempotencyRecord {
   readonly id: string;
   readonly requestDigest: string;
-  status: 'in-progress' | 'completed';
+  status: 'in-progress' | 'completed' | 'failed';
+  completedAt: Date | null;
   resultReference: string | null;
 }
 
@@ -101,6 +110,8 @@ function idempotencyKey(input: ClaimIdempotencyInput): string {
 }
 
 class MemoryMediaTransaction implements MediaCapabilityTransaction {
+  public newlyClaimedIdempotencyRecordId: string | null = null;
+
   public constructor(private readonly state: MemoryState) {}
 
   public async readCurrentTime(): Promise<Date> {
@@ -113,21 +124,35 @@ class MemoryMediaTransaction implements MediaCapabilityTransaction {
     const key = idempotencyKey(input);
     const existing = this.state.idempotency.get(key);
     if (existing !== undefined) {
-      return existing.status === 'completed'
-        ? {
+      switch (existing.status) {
+        case 'completed':
+          return {
             kind: 'completed',
             requestDigest: existing.requestDigest,
             resultReference: existing.resultReference ?? '',
-          }
-        : { kind: 'in-progress', requestDigest: existing.requestDigest };
+          };
+        case 'failed':
+          return {
+            kind: 'failed',
+            requestDigest: existing.requestDigest,
+            resultReference: existing.resultReference ?? '',
+          };
+        case 'in-progress':
+          return {
+            kind: 'in-progress',
+            requestDigest: existing.requestDigest,
+          };
+      }
     }
     const id = uuid(800 + this.state.nextRecord++);
     this.state.idempotency.set(key, {
       id,
       requestDigest: input.requestDigest,
       status: 'in-progress',
+      completedAt: null,
       resultReference: null,
     });
+    this.newlyClaimedIdempotencyRecordId = id;
     return { kind: 'new', recordId: id };
   }
 
@@ -141,6 +166,7 @@ class MemoryMediaTransaction implements MediaCapabilityTransaction {
       throw new Error('Idempotency completion mismatch.');
     }
     record.status = 'completed';
+    record.completedAt = new Date(this.state.currentTime);
     record.resultReference = input.resultReference;
   }
 
@@ -258,9 +284,36 @@ class MemoryMediaStore implements MediaCapabilityStore {
     operation: (transaction: MediaCapabilityTransaction) => Promise<Result>,
   ): Promise<Result> {
     const staged = cloneState(this.state);
-    const result = await operation(new MemoryMediaTransaction(staged));
-    this.state = staged;
-    return result;
+    const transaction = new MemoryMediaTransaction(staged);
+    try {
+      const result = await operation(transaction);
+      this.state = staged;
+      return result;
+    } catch (error) {
+      if (!(error instanceof TerminalMediaImageRejectionError)) {
+        throw error;
+      }
+      const intent = staged.intents.get(error.uploadIntentId);
+      const idempotencyRecord = [...staged.idempotency.values()].find(
+        (candidate) =>
+          candidate.id === transaction.newlyClaimedIdempotencyRecordId,
+      );
+      if (
+        intent === undefined ||
+        intent.eventId !== error.eventId ||
+        intent.status !== 'pending-upload' ||
+        idempotencyRecord === undefined ||
+        idempotencyRecord.status !== 'in-progress'
+      ) {
+        throw new Error('Terminal image rejection persistence mismatch.');
+      }
+      staged.intents.set(intent.id, { ...intent, status: 'rejected' });
+      idempotencyRecord.status = 'failed';
+      idempotencyRecord.completedAt = new Date(staged.currentTime);
+      idempotencyRecord.resultReference = `terminal-image-rejection:${error.eventId}:${error.uploadIntentId}`;
+      this.state = staged;
+      throw error;
+    }
   }
 
   public async appendCapabilityAudit(
@@ -451,6 +504,29 @@ async function expectEngineError(
   throw new Error('Expected the capability to reject.');
 }
 
+async function settleBeforeProviderRelease<Result>(
+  operation: Promise<Result>,
+  description: string,
+): Promise<Result> {
+  return new Promise<Result>((resolve, reject) => {
+    const deadline = setTimeout(() => {
+      reject(
+        new Error(`${description} queued behind saturated provider work.`),
+      );
+    }, 1_000);
+    void operation.then(
+      (result) => {
+        clearTimeout(deadline);
+        resolve(result);
+      },
+      (error: unknown) => {
+        clearTimeout(deadline);
+        reject(error);
+      },
+    );
+  });
+}
+
 describe('media capabilities', () => {
   test('creates one exact quarantine grant and scopes idempotent replay', async () => {
     const store = new MemoryMediaStore();
@@ -548,6 +624,275 @@ describe('media capabilities', () => {
     expect(object.calls.uploadKeys).toHaveLength(2);
   });
 
+  test('shares fail-fast provider admission across creation, replay, completion, and reads', async () => {
+    const object = createObjectStore();
+    const providerGate = createMediaProviderGate(2);
+    let blockUploadGrants = false;
+    let blockedProviderEntries = 0;
+    let announceAtCapacity: (() => void) | undefined;
+    const atCapacity = new Promise<void>((resolve) => {
+      announceAtCapacity = resolve;
+    });
+    let releaseProviders: (() => void) | undefined;
+    const providersReleased = new Promise<void>((resolve) => {
+      releaseProviders = resolve;
+    });
+    const blockingObjectStore: MediaObjectStore = {
+      async createRawUploadGrant(input) {
+        const grant = await object.objectStore.createRawUploadGrant(input);
+        if (blockUploadGrants) {
+          blockedProviderEntries += 1;
+          if (blockedProviderEntries === 2) {
+            announceAtCapacity?.();
+          }
+          await providersReleased;
+        }
+        return grant;
+      },
+      getMalwareScanStatus: (storageKey) =>
+        object.objectStore.getMalwareScanStatus(storageKey),
+      readVerifiedRawObject: (input) =>
+        object.objectStore.readVerifiedRawObject(input),
+      putSanitizedObject: (input) =>
+        object.objectStore.putSanitizedObject(input),
+      createPrivateReadGrant: (input) =>
+        object.objectStore.createPrivateReadGrant(input),
+    };
+    const deps: MediaCapabilityDependencies = {
+      ...dependencies(blockingObjectStore),
+      processingGate: createMediaProcessingGate(1),
+      providerGate,
+    };
+    const createInput = {
+      eventId: IDS.event,
+      byteLength: RAW_BYTES.byteLength,
+      contentSha256: RAW_SHA256,
+      declaredContentType: 'image/jpeg',
+    };
+    const replayStore = new MemoryMediaStore();
+    const replayInvocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'provider-capacity-replay',
+    });
+    await executeMediaCapability(
+      'create-media-upload-intent',
+      createInput,
+      replayInvocation,
+      replayStore,
+      deps,
+    );
+
+    const readStore = new MemoryMediaStore();
+    const completeStore = new MemoryMediaStore();
+    seedPendingIntent(completeStore);
+    const readyRecord: StoredMediaRecord = {
+      id: IDS.intent,
+      uploadIntentId: IDS.intent,
+      eventId: IDS.event,
+      status: 'ready',
+      detectedContentType: 'image/jpeg',
+      sanitizedByteLength: SANITIZED_BYTES.byteLength,
+      sanitizedContentSha256: SANITIZED_SHA256,
+      malwareScan: 'clean',
+      exifStripped: true,
+      createdAt: NOW.toISOString(),
+      storageKey: `ready/${IDS.event}/${IDS.intent}`,
+    };
+    readStore.state.records.set(readyRecord.id, readyRecord);
+
+    blockUploadGrants = true;
+    const firstHolderStore = new MemoryMediaStore();
+    const secondHolderStore = new MemoryMediaStore();
+    const holders = Promise.all([
+      executeMediaCapability(
+        'create-media-upload-intent',
+        createInput,
+        humanInvocation({
+          mutation: true,
+          idempotencyKey: 'provider-capacity-holder-first',
+        }),
+        firstHolderStore,
+        deps,
+      ),
+      executeMediaCapability(
+        'create-media-upload-intent',
+        createInput,
+        humanInvocation({
+          mutation: true,
+          idempotencyKey: 'provider-capacity-holder-second',
+        }),
+        secondHolderStore,
+        deps,
+      ),
+    ]);
+    await atCapacity;
+
+    const saturatedStore = new MemoryMediaStore();
+    const saturatedInvocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'provider-capacity-saturated-create',
+    });
+    const replayWhileSaturated = {
+      ...replayInvocation,
+      requestId: uuid(307),
+    };
+    const readWhileSaturated = humanInvocation({ mutation: false });
+    const completeWhileSaturated = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'provider-capacity-saturated-complete',
+    });
+    let saturatedCreateError: CapabilityEngineError;
+    let saturatedReplayError: CapabilityEngineError;
+    let saturatedReadError: CapabilityEngineError;
+    let saturatedCompleteError: CapabilityEngineError;
+    try {
+      saturatedCreateError = await settleBeforeProviderRelease(
+        expectEngineError(
+          executeMediaCapability(
+            'create-media-upload-intent',
+            createInput,
+            saturatedInvocation,
+            saturatedStore,
+            deps,
+          ),
+        ),
+        'A new upload grant',
+      );
+      saturatedReplayError = await settleBeforeProviderRelease(
+        expectEngineError(
+          executeMediaCapability(
+            'create-media-upload-intent',
+            createInput,
+            replayWhileSaturated,
+            replayStore,
+            deps,
+          ),
+        ),
+        'An upload-grant replay',
+      );
+      saturatedReadError = await settleBeforeProviderRelease(
+        expectEngineError(
+          executeMediaCapability(
+            'get-media-read-grant',
+            { eventId: IDS.event, mediaId: IDS.intent },
+            readWhileSaturated,
+            readStore,
+            deps,
+          ),
+        ),
+        'A private read grant',
+      );
+      saturatedCompleteError = await settleBeforeProviderRelease(
+        expectEngineError(
+          executeMediaCapability(
+            'complete-media-upload',
+            { uploadIntentId: IDS.intent },
+            completeWhileSaturated,
+            completeStore,
+            deps,
+          ),
+        ),
+        'A completed upload safety scan',
+      );
+    } finally {
+      releaseProviders?.();
+    }
+    await holders;
+
+    for (const error of [
+      saturatedCreateError,
+      saturatedReplayError,
+      saturatedReadError,
+      saturatedCompleteError,
+    ]) {
+      expect(error).toMatchObject({
+        code: 'INTERNAL_ERROR',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 503,
+        retryable: true,
+      });
+    }
+    expect(blockedProviderEntries).toBe(2);
+    expect(object.calls.uploadKeys).toHaveLength(3);
+    expect(object.calls.readKeys).toHaveLength(0);
+    expect(object.calls.scanKeys).toHaveLength(0);
+    expect(object.calls.rawKeys).toHaveLength(0);
+    expect(object.calls.sanitized).toHaveLength(0);
+    expect(saturatedStore.state.insertedIntents).toHaveLength(0);
+    expect(saturatedStore.state.idempotency.size).toBe(0);
+    expect(saturatedStore.state.audits).toEqual([
+      expect.objectContaining({
+        requestId: saturatedInvocation.requestId,
+        outcome: 'failure',
+      }),
+    ]);
+    expect([...replayStore.state.idempotency.values()]).toEqual([
+      expect.objectContaining({ status: 'completed' }),
+    ]);
+    expect(replayStore.state.audits).toEqual([
+      expect.objectContaining({ outcome: 'success' }),
+      expect.objectContaining({
+        requestId: replayWhileSaturated.requestId,
+        outcome: 'failure',
+      }),
+    ]);
+    expect(readStore.state.audits).toEqual([
+      expect.objectContaining({
+        requestId: readWhileSaturated.requestId,
+        outcome: 'failure',
+      }),
+    ]);
+    expect(completeStore.state.idempotency.size).toBe(0);
+    expect(completeStore.state.audits).toEqual([
+      expect.objectContaining({
+        requestId: completeWhileSaturated.requestId,
+        outcome: 'failure',
+      }),
+    ]);
+
+    await expect(
+      executeMediaCapability(
+        'create-media-upload-intent',
+        createInput,
+        { ...saturatedInvocation, requestId: uuid(308) },
+        saturatedStore,
+        deps,
+      ),
+    ).resolves.toMatchObject({ status: 'pending-upload' });
+    await expect(
+      executeMediaCapability(
+        'create-media-upload-intent',
+        createInput,
+        { ...replayInvocation, requestId: uuid(309) },
+        replayStore,
+        deps,
+      ),
+    ).resolves.toMatchObject({ id: IDS.intent });
+    await expect(
+      executeMediaCapability(
+        'complete-media-upload',
+        { uploadIntentId: IDS.intent },
+        { ...completeWhileSaturated, requestId: uuid(310) },
+        completeStore,
+        deps,
+      ),
+    ).resolves.toMatchObject({ status: 'ready' });
+    await expect(
+      executeMediaCapability(
+        'get-media-read-grant',
+        { eventId: IDS.event, mediaId: IDS.intent },
+        { ...readWhileSaturated, requestId: uuid(311) },
+        readStore,
+        deps,
+      ),
+    ).resolves.toMatchObject({ mediaId: IDS.intent });
+    expect(object.calls.uploadKeys).toHaveLength(5);
+    expect(object.calls.readKeys).toHaveLength(1);
+    expect(object.calls.scanKeys).toHaveLength(1);
+    expect(object.calls.rawKeys).toHaveLength(1);
+    expect(object.calls.sanitized).toHaveLength(1);
+  });
+
   const rejectedScanStatuses = [
     ['pending', 409, true],
     ['threats', 400, false],
@@ -575,6 +920,86 @@ describe('media capabilities', () => {
       expect(object.calls.rawKeys).toHaveLength(0);
       expect(object.calls.sanitized).toHaveLength(0);
       expect(store.state.completedRecords).toHaveLength(0);
+    });
+  }
+
+  const terminalProviderFailures = [
+    {
+      name: 'malware threats',
+      options: { scanStatus: 'threats' as const },
+      expectedScanCalls: 1,
+      expectedRawCalls: 0,
+    },
+    {
+      name: 'raw checksum mismatch',
+      options: {
+        rawError: new MediaObjectStoreError(
+          'CHECKSUM_MISMATCH',
+          'synthetic provider detail',
+        ),
+      },
+      expectedScanCalls: 1,
+      expectedRawCalls: 1,
+    },
+  ] as const;
+  for (const failure of terminalProviderFailures) {
+    test(`terminalizes ${failure.name} before a fresh key can repeat provider work`, async () => {
+      const store = new MemoryMediaStore();
+      seedPendingIntent(store);
+      const object = createObjectStore(failure.options);
+      let sanitizeCalls = 0;
+      const deps = dependencies(object.objectStore, async () => {
+        sanitizeCalls += 1;
+        return sanitizedImage();
+      });
+
+      const firstError = await expectEngineError(
+        executeMediaCapability(
+          'complete-media-upload',
+          { uploadIntentId: IDS.intent },
+          humanInvocation({
+            mutation: true,
+            idempotencyKey: `terminal-provider-first-${failure.name.replaceAll(' ', '-')}`,
+          }),
+          store,
+          deps,
+        ),
+      );
+      const laterError = await expectEngineError(
+        executeMediaCapability(
+          'complete-media-upload',
+          { uploadIntentId: IDS.intent },
+          humanInvocation({
+            mutation: true,
+            idempotencyKey: `terminal-provider-later-${failure.name.replaceAll(' ', '-')}`,
+          }),
+          store,
+          deps,
+        ),
+      );
+
+      expect(firstError).toMatchObject({
+        code: 'VALIDATION_ERROR',
+        status: 400,
+        retryable: false,
+      });
+      expect(laterError).toMatchObject({
+        code: 'VALIDATION_ERROR',
+        status: 400,
+        retryable: false,
+      });
+      expect(store.state.intents.get(IDS.intent)?.status).toBe('rejected');
+      expect([...store.state.idempotency.values()]).toEqual([
+        expect.objectContaining({
+          status: 'failed',
+          resultReference: `terminal-image-rejection:${IDS.event}:${IDS.intent}`,
+        }),
+      ]);
+      expect(object.calls.scanKeys).toHaveLength(failure.expectedScanCalls);
+      expect(object.calls.rawKeys).toHaveLength(failure.expectedRawCalls);
+      expect(sanitizeCalls).toBe(0);
+      expect(object.calls.sanitized).toHaveLength(0);
+      expect(store.state.audits).toHaveLength(2);
     });
   }
 
@@ -701,26 +1126,36 @@ describe('media capabilities', () => {
     });
     expect(malformedError.message).toContain('safely processed');
     expect(malformedObject.calls.sanitized).toHaveLength(0);
+    expect(malformedStore.state.intents.get(IDS.intent)?.status).toBe(
+      'rejected',
+    );
   });
 
-  test('rejects saturated photo processing before raw bytes enter memory', async () => {
+  test('keeps sanitized provider integrity failures retryable without rejecting the intent', async () => {
     const store = new MemoryMediaStore();
     seedPendingIntent(store);
     const object = createObjectStore();
+    const providerDetail =
+      'Synthetic S3 sanitized checksum acknowledgement mismatch.';
+    const failingObjectStore: MediaObjectStore = {
+      ...object.objectStore,
+      async putSanitizedObject(input) {
+        await object.objectStore.putSanitizedObject(input);
+        throw new MediaObjectStoreError('STORAGE_UNAVAILABLE', providerDetail);
+      },
+    };
+    const invocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'sanitized-provider-integrity-failure',
+    });
+
     const error = await expectEngineError(
       executeMediaCapability(
         'complete-media-upload',
         { uploadIntentId: IDS.intent },
-        humanInvocation({ mutation: true }),
+        invocation,
         store,
-        {
-          ...dependencies(object.objectStore),
-          processingGate: {
-            async run() {
-              throw new MediaProcessingCapacityError();
-            },
-          },
-        },
+        dependencies(failingObjectStore),
       ),
     );
 
@@ -729,9 +1164,268 @@ describe('media capabilities', () => {
       status: 503,
       retryable: true,
     });
+    expect(error.message).not.toContain(providerDetail);
+    expect(object.calls.sanitized).toHaveLength(1);
+    expect(store.state.intents.get(IDS.intent)?.status).toBe('pending-upload');
+    expect(store.state.completedRecords).toHaveLength(0);
+    expect(store.state.idempotency.size).toBe(0);
+    expect(store.state.audits).toEqual([
+      expect.objectContaining({
+        requestId: invocation.requestId,
+        outcome: 'failure',
+      }),
+    ]);
+  });
+
+  test('keeps Sharp timeouts retryable without terminalizing valid bytes', async () => {
+    const store = new MemoryMediaStore();
+    seedPendingIntent(store);
+    const object = createObjectStore();
+    const nativeDetail = 'Synthetic Sharp operation timeout native detail.';
+    const invocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'sharp-operation-timeout',
+    });
+
+    const error = await expectEngineError(
+      executeMediaCapability(
+        'complete-media-upload',
+        { uploadIntentId: IDS.intent },
+        invocation,
+        store,
+        dependencies(object.objectStore, async () => {
+          throw mapSharpFailure(new Error(nativeDetail), 'image/jpeg');
+        }),
+      ),
+    );
+
+    expect(error).toMatchObject({
+      code: 'INTERNAL_ERROR',
+      status: 503,
+      retryable: true,
+    });
+    expect(error.message).not.toContain(nativeDetail);
+    expect(object.calls.sanitized).toHaveLength(0);
+    expect(store.state.intents.get(IDS.intent)?.status).toBe('pending-upload');
+    expect(store.state.completedRecords).toHaveLength(0);
+    expect(store.state.idempotency.size).toBe(0);
+    expect(store.state.audits).toEqual([
+      expect.objectContaining({
+        requestId: invocation.requestId,
+        outcome: 'failure',
+      }),
+    ]);
+  });
+
+  test('durably rejects a malformed intent and terminalizes its exact idempotency claim', async () => {
+    const store = new MemoryMediaStore();
+    seedPendingIntent(store);
+    const object = createObjectStore();
+    let sanitizeCalls = 0;
+    const deps = dependencies(object.objectStore, async () => {
+      sanitizeCalls += 1;
+      throw new ImageValidationError(
+        'MALFORMED_IMAGE',
+        'The image could not be safely processed. Choose a different image and try again.',
+      );
+    });
+    const firstInvocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'reject-malformed-photo-first',
+    });
+
+    const firstError = await expectEngineError(
+      executeMediaCapability(
+        'complete-media-upload',
+        { uploadIntentId: IDS.intent },
+        firstInvocation,
+        store,
+        deps,
+      ),
+    );
+    const sameKeyError = await expectEngineError(
+      executeMediaCapability(
+        'complete-media-upload',
+        { uploadIntentId: IDS.intent },
+        { ...firstInvocation, requestId: uuid(305) },
+        store,
+        deps,
+      ),
+    );
+    const newKeyInvocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'reject-malformed-photo-second',
+    });
+    const newKeyError = await expectEngineError(
+      executeMediaCapability(
+        'complete-media-upload',
+        { uploadIntentId: IDS.intent },
+        newKeyInvocation,
+        store,
+        deps,
+      ),
+    );
+
+    expect(firstError).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+      retryable: false,
+    });
+    expect(sameKeyError).toMatchObject({
+      code: 'CONFLICT',
+      reasonCode: 'IDEMPOTENCY_PREVIOUSLY_FAILED',
+      status: 409,
+      retryable: false,
+    });
+    expect(newKeyError).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+      retryable: false,
+    });
+    expect(object.calls.scanKeys).toHaveLength(1);
+    expect(object.calls.rawKeys).toHaveLength(1);
+    expect(sanitizeCalls).toBe(1);
+    expect(object.calls.sanitized).toHaveLength(0);
+    expect(store.state.completedRecords).toHaveLength(0);
+    expect(store.state.intents.get(IDS.intent)?.status).toBe('rejected');
+    expect([...store.state.idempotency.values()]).toEqual([
+      expect.objectContaining({
+        status: 'failed',
+        completedAt: NOW,
+        resultReference: `terminal-image-rejection:${IDS.event}:${IDS.intent}`,
+      }),
+    ]);
+    expect(store.state.audits).toHaveLength(3);
+    expect(store.state.audits.map((audit) => audit.requestId)).toEqual([
+      firstInvocation.requestId,
+      uuid(305),
+      newKeyInvocation.requestId,
+    ]);
+    expect(
+      store.state.audits.every((audit) => audit.outcome === 'failure'),
+    ).toBe(true);
+  });
+
+  test('fails a saturated concurrent completion before provider work and preserves retryable idempotency', async () => {
+    const firstStore = new MemoryMediaStore();
+    const saturatedStore = new MemoryMediaStore();
+    seedPendingIntent(firstStore);
+    seedPendingIntent(saturatedStore);
+    const object = createObjectStore();
+    const processingGate = createMediaProcessingGate(1);
+    let announceScanEntered: (() => void) | undefined;
+    const scanEntered = new Promise<void>((resolve) => {
+      announceScanEntered = resolve;
+    });
+    let releaseScan: (() => void) | undefined;
+    const scanRelease = new Promise<void>((resolve) => {
+      releaseScan = resolve;
+    });
+    const blockingObjectStore: MediaObjectStore = {
+      createRawUploadGrant: (input) =>
+        object.objectStore.createRawUploadGrant(input),
+      async getMalwareScanStatus(storageKey) {
+        const status =
+          await object.objectStore.getMalwareScanStatus(storageKey);
+        announceScanEntered?.();
+        await scanRelease;
+        return status;
+      },
+      readVerifiedRawObject: (input) =>
+        object.objectStore.readVerifiedRawObject(input),
+      putSanitizedObject: (input) =>
+        object.objectStore.putSanitizedObject(input),
+      createPrivateReadGrant: (input) =>
+        object.objectStore.createPrivateReadGrant(input),
+    };
+    let sanitizeCalls = 0;
+    const deps: MediaCapabilityDependencies = {
+      ...dependencies(blockingObjectStore, async () => {
+        sanitizeCalls += 1;
+        return sanitizedImage();
+      }),
+      processingGate,
+    };
+    const firstInvocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'processing-capacity-first',
+    });
+    const saturatedInvocation = humanInvocation({
+      mutation: true,
+      idempotencyKey: 'processing-capacity-saturated',
+    });
+
+    const first = executeMediaCapability(
+      'complete-media-upload',
+      { uploadIntentId: IDS.intent },
+      firstInvocation,
+      firstStore,
+      deps,
+    );
+    await scanEntered;
+
+    const saturatedError = await expectEngineError(
+      executeMediaCapability(
+        'complete-media-upload',
+        { uploadIntentId: IDS.intent },
+        saturatedInvocation,
+        saturatedStore,
+        deps,
+      ),
+    );
+
+    expect(saturatedError).toMatchObject({
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      status: 503,
+      retryable: true,
+    });
     expect(object.calls.scanKeys).toHaveLength(1);
     expect(object.calls.rawKeys).toHaveLength(0);
+    expect(sanitizeCalls).toBe(0);
     expect(object.calls.sanitized).toHaveLength(0);
+    expect(saturatedStore.state.idempotency.size).toBe(0);
+    expect(saturatedStore.state.audits).toEqual([
+      expect.objectContaining({
+        requestId: saturatedInvocation.requestId,
+        outcome: 'failure',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+      }),
+    ]);
+
+    releaseScan?.();
+    await expect(first).resolves.toMatchObject({ status: 'ready' });
+    const retryInvocation = {
+      ...saturatedInvocation,
+      requestId: uuid(306),
+    };
+    await expect(
+      executeMediaCapability(
+        'complete-media-upload',
+        { uploadIntentId: IDS.intent },
+        retryInvocation,
+        saturatedStore,
+        deps,
+      ),
+    ).resolves.toMatchObject({ status: 'ready' });
+
+    expect([...saturatedStore.state.idempotency.values()]).toEqual([
+      expect.objectContaining({ status: 'completed' }),
+    ]);
+    expect(saturatedStore.state.audits).toEqual([
+      expect.objectContaining({
+        requestId: saturatedInvocation.requestId,
+        outcome: 'failure',
+      }),
+      expect.objectContaining({
+        requestId: retryInvocation.requestId,
+        outcome: 'success',
+      }),
+    ]);
+    expect(object.calls.scanKeys).toHaveLength(2);
+    expect(object.calls.rawKeys).toHaveLength(2);
+    expect(sanitizeCalls).toBe(2);
+    expect(object.calls.sanitized).toHaveLength(2);
   });
 
   test('authorizes every private read against the exact event and facility', async () => {

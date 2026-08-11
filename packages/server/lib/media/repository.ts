@@ -4,7 +4,7 @@ import {
   MediaRecordSchema,
   SecurityAuditEntrySchema,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -31,7 +31,12 @@ import {
   type CompleteIdempotencyInput,
   type IdempotencyClaim,
 } from '../capabilities/engine';
-import { mediaConflict, mediaRateLimited, mediaUnavailable } from './errors';
+import {
+  mediaConflict,
+  mediaRateLimited,
+  mediaUnavailable,
+  TerminalMediaImageRejectionError,
+} from './errors';
 import type {
   CompleteMediaRecord,
   MediaBudgetPrincipal,
@@ -226,17 +231,23 @@ async function readDatabaseTime(database: MediaQueryDatabase): Promise<Date> {
   return new Date(dateIso(row.value));
 }
 
-interface PrincipalRollingUsageRow extends Record<string, unknown> {
-  readonly rollingIntents: number | string;
-  readonly rollingBytes: number | string;
+interface MediaUsageByteRow {
+  readonly byteLength: number | string;
 }
 
-interface ScopedUploadUsageRow extends Record<string, unknown> {
-  readonly activeIntents: number | string;
-  readonly activeBytes: number | string;
-  readonly rollingIntents: number | string;
-  readonly rollingBytes: number | string;
-}
+export const MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS = Object.freeze({
+  principalRolling: MEDIA_PRINCIPAL_ROLLING_INTENT_LIMIT + 1,
+  eventActive: MEDIA_EVENT_ACTIVE_INTENT_LIMIT + 1,
+  eventRolling: MEDIA_EVENT_ROLLING_INTENT_LIMIT + 1,
+  facilityActive: MEDIA_FACILITY_ACTIVE_INTENT_LIMIT + 1,
+  facilityRolling: MEDIA_FACILITY_ROLLING_INTENT_LIMIT + 1,
+});
+
+export const MEDIA_UPLOAD_ALLOCATION_STATEMENT_TIMEOUT_MILLISECONDS = 5_000;
+export const MEDIA_UPLOAD_ALLOCATION_LOCK_TIMEOUT_MILLISECONDS = 1_000;
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 function resourceUsageValue(value: number | string | undefined): number {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -257,18 +268,199 @@ async function acquireMediaUploadBudgetLock(
   );
 }
 
+/**
+ * Bounds both allocation queries and lock waits inside the current database
+ * transaction. A stricter database-level deadline is preserved; an unset or
+ * looser deadline is clamped. PostgreSQL aborts the transaction on expiry, so
+ * no upload grant can escape a timed-out budget check.
+ */
+export async function configureMediaUploadAllocationDeadline(
+  database: Pick<MediaQueryDatabase, 'execute'>,
+): Promise<void> {
+  const statementTimeout = `${MEDIA_UPLOAD_ALLOCATION_STATEMENT_TIMEOUT_MILLISECONDS}ms`;
+  const lockTimeout = `${MEDIA_UPLOAD_ALLOCATION_LOCK_TIMEOUT_MILLISECONDS}ms`;
+  await database.execute(sql`
+    select
+      set_config(
+        'statement_timeout',
+        case
+          when current_setting('statement_timeout')::interval = interval '0'
+            or current_setting('statement_timeout')::interval > ${statementTimeout}::interval
+          then ${statementTimeout}
+          else current_setting('statement_timeout')
+        end,
+        true
+      ),
+      set_config(
+        'lock_timeout',
+        case
+          when current_setting('lock_timeout')::interval = interval '0'
+            or current_setting('lock_timeout')::interval > ${lockTimeout}::interval
+          then ${lockTimeout}
+          else current_setting('lock_timeout')
+        end,
+        true
+      )
+  `);
+}
+
 function mediaBudgetPrincipalPredicate(principal: MediaBudgetPrincipal) {
-  switch (principal.kind) {
-    case 'human':
-      return sql`${idempotencyRecords.principal} ->> 'kind' = 'human'
-        and ${idempotencyRecords.principal} ->> 'userId' = ${principal.userId}`;
-    case 'agent':
-      return sql`${idempotencyRecords.principal} ->> 'kind' = 'agent'
-        and ${idempotencyRecords.principal} ->> 'agentId' = ${principal.agentId}`;
-    case 'system':
-      return sql`${idempotencyRecords.principal} ->> 'kind' = 'system'
-        and ${idempotencyRecords.principal} ->> 'serviceId' = ${principal.serviceId}`;
+  const stableId =
+    principal.kind === 'human'
+      ? principal.userId
+      : principal.kind === 'agent'
+        ? principal.agentId
+        : principal.serviceId;
+  return sql`${idempotencyRecords.principal} ->> 'kind' = ${principal.kind}
+    and coalesce(
+      ${idempotencyRecords.principal} ->> 'userId',
+      ${idempotencyRecords.principal} ->> 'agentId',
+      ${idempotencyRecords.principal} ->> 'serviceId'
+    ) = ${stableId}`;
+}
+
+/**
+ * Builds index-ordered budget reads whose result sets stop as soon as the
+ * corresponding request ceiling is known to be exceeded. The additional row
+ * distinguishes the inclusive limit from an over-limit allocation without
+ * aggregating over retained history while the allocation locks are held.
+ */
+export function buildBoundedMediaUploadUsageQueries(
+  database: PostgresDatabase,
+  input: Pick<
+    NewMediaUploadIntent,
+    'budgetPrincipal' | 'eventId' | 'facilityId'
+  >,
+  currentTime: Date,
+) {
+  const windowStart = new Date(
+    currentTime.getTime() - MEDIA_UPLOAD_BUDGET_WINDOW_SECONDS * 1_000,
+  );
+  const principalPredicate = mediaBudgetPrincipalPredicate(
+    input.budgetPrincipal,
+  );
+
+  return Object.freeze({
+    principalRolling: database
+      .select({ resultReference: idempotencyRecords.resultReference })
+      .from(idempotencyRecords)
+      .where(
+        and(
+          sql`${idempotencyRecords.capabilityId} = 'create-media-upload-intent'`,
+          principalPredicate,
+          sql`${idempotencyRecords.status} = 'completed'`,
+          gte(idempotencyRecords.createdAt, windowStart),
+        ),
+      )
+      .orderBy(desc(idempotencyRecords.createdAt))
+      .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.principalRolling),
+    eventActive: database
+      .select({ byteLength: mediaUploadIntents.byteLength })
+      .from(mediaUploadIntents)
+      .where(
+        and(
+          eq(mediaUploadIntents.eventId, input.eventId),
+          sql`${mediaUploadIntents.status} = 'pending-upload'`,
+          gt(mediaUploadIntents.expiresAt, currentTime),
+        ),
+      )
+      .orderBy(desc(mediaUploadIntents.expiresAt))
+      .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.eventActive),
+    eventRolling: database
+      .select({ byteLength: mediaUploadIntents.byteLength })
+      .from(mediaUploadIntents)
+      .where(
+        and(
+          eq(mediaUploadIntents.eventId, input.eventId),
+          gte(mediaUploadIntents.createdAt, windowStart),
+        ),
+      )
+      .orderBy(desc(mediaUploadIntents.createdAt))
+      .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.eventRolling),
+    facilityActive: database
+      .select({ byteLength: mediaUploadIntents.byteLength })
+      .from(mediaUploadIntents)
+      .innerJoin(events, eq(events.id, mediaUploadIntents.eventId))
+      .where(
+        and(
+          eq(events.facilityId, input.facilityId),
+          sql`${mediaUploadIntents.status} = 'pending-upload'`,
+          gt(mediaUploadIntents.expiresAt, currentTime),
+        ),
+      )
+      .orderBy(desc(mediaUploadIntents.expiresAt))
+      .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.facilityActive),
+    facilityRolling: database
+      .select({ byteLength: mediaUploadIntents.byteLength })
+      .from(mediaUploadIntents)
+      .innerJoin(events, eq(events.id, mediaUploadIntents.eventId))
+      .where(
+        and(
+          eq(events.facilityId, input.facilityId),
+          gte(mediaUploadIntents.createdAt, windowStart),
+        ),
+      )
+      .orderBy(desc(mediaUploadIntents.createdAt))
+      .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.facilityRolling),
+  });
+}
+
+function summarizeBoundedMediaUsage(
+  rows: readonly MediaUsageByteRow[],
+  maximumRows: number,
+): Readonly<{ intents: number; bytes: number }> {
+  if (rows.length > maximumRows) {
+    throw mediaUnavailable();
   }
+  let bytes = 0;
+  for (const row of rows) {
+    const byteLength = resourceUsageValue(row.byteLength);
+    const nextBytes = bytes + byteLength;
+    if (!Number.isSafeInteger(nextBytes)) {
+      throw mediaUnavailable();
+    }
+    bytes = nextBytes;
+  }
+  return Object.freeze({ intents: rows.length, bytes });
+}
+
+async function readPrincipalRollingUsage(
+  database: MediaQueryDatabase,
+  rows: readonly Readonly<{ resultReference: string | null }>[],
+): Promise<Readonly<{ intents: number; bytes: number }>> {
+  const references = rows.map(({ resultReference }) => {
+    if (resultReference === null || !UUID_PATTERN.test(resultReference)) {
+      throw mediaUnavailable();
+    }
+    return resultReference;
+  });
+  if (references.length === 0) {
+    return Object.freeze({ intents: 0, bytes: 0 });
+  }
+
+  const uniqueReferences = [...new Set(references)];
+  const intentRows = await database
+    .select({
+      id: mediaUploadIntents.id,
+      byteLength: mediaUploadIntents.byteLength,
+    })
+    .from(mediaUploadIntents)
+    .where(inArray(mediaUploadIntents.id, uniqueReferences))
+    .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.principalRolling);
+  const bytesByReference = new Map(
+    intentRows.map((row) => [row.id, row.byteLength] as const),
+  );
+  const usageRows = references.map((reference) => {
+    const byteLength = bytesByReference.get(reference);
+    if (byteLength === undefined) {
+      throw mediaUnavailable();
+    }
+    return { byteLength };
+  });
+  return summarizeBoundedMediaUsage(
+    usageRows,
+    MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.principalRolling,
+  );
 }
 
 async function readMediaUploadResourceUsage(
@@ -276,84 +468,40 @@ async function readMediaUploadResourceUsage(
   input: NewMediaUploadIntent,
   currentTime: Date,
 ): Promise<MediaUploadResourceUsage> {
-  const windowStart = new Date(
-    currentTime.getTime() - MEDIA_UPLOAD_BUDGET_WINDOW_SECONDS * 1_000,
+  const queries = buildBoundedMediaUploadUsageQueries(
+    database,
+    input,
+    currentTime,
   );
-  const currentTimeIso = currentTime.toISOString();
-  const windowStartIso = windowStart.toISOString();
-  const principalPredicate = mediaBudgetPrincipalPredicate(
-    input.budgetPrincipal,
+  const principalRows = await queries.principalRolling;
+  const principal = await readPrincipalRollingUsage(database, principalRows);
+  const eventActive = summarizeBoundedMediaUsage(
+    await queries.eventActive,
+    MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.eventActive,
   );
-  const [principal] = await database.execute<PrincipalRollingUsageRow>(sql`
-    select
-      count(*)::integer as "rollingIntents",
-      coalesce(sum(${mediaUploadIntents.byteLength}), 0)::bigint as "rollingBytes"
-    from ${idempotencyRecords}
-    left join ${mediaUploadIntents}
-      on ${idempotencyRecords.resultReference} = ${mediaUploadIntents.id}::text
-    where ${idempotencyRecords.capabilityId} = 'create-media-upload-intent'
-      and ${principalPredicate}
-      and ${idempotencyRecords.status} = 'completed'
-      and ${idempotencyRecords.createdAt} >= ${windowStartIso}::timestamptz
-  `);
-  const [event] = await database.execute<ScopedUploadUsageRow>(sql`
-    select
-      count(*) filter (
-        where ${mediaUploadIntents.status} = 'pending-upload'
-          and ${mediaUploadIntents.expiresAt} > ${currentTimeIso}::timestamptz
-      )::integer as "activeIntents",
-      coalesce(sum(${mediaUploadIntents.byteLength}) filter (
-        where ${mediaUploadIntents.status} = 'pending-upload'
-          and ${mediaUploadIntents.expiresAt} > ${currentTimeIso}::timestamptz
-      ), 0)::bigint as "activeBytes",
-      count(*) filter (
-        where ${mediaUploadIntents.createdAt} >= ${windowStartIso}::timestamptz
-      )::integer as "rollingIntents",
-      coalesce(sum(${mediaUploadIntents.byteLength}) filter (
-        where ${mediaUploadIntents.createdAt} >= ${windowStartIso}::timestamptz
-      ), 0)::bigint as "rollingBytes"
-    from ${mediaUploadIntents}
-    where ${mediaUploadIntents.eventId} = ${input.eventId}
-  `);
-  const [facility] = await database.execute<ScopedUploadUsageRow>(sql`
-    select
-      count(*) filter (
-        where ${mediaUploadIntents.status} = 'pending-upload'
-          and ${mediaUploadIntents.expiresAt} > ${currentTimeIso}::timestamptz
-      )::integer as "activeIntents",
-      coalesce(sum(${mediaUploadIntents.byteLength}) filter (
-        where ${mediaUploadIntents.status} = 'pending-upload'
-          and ${mediaUploadIntents.expiresAt} > ${currentTimeIso}::timestamptz
-      ), 0)::bigint as "activeBytes",
-      count(*) filter (
-        where ${mediaUploadIntents.createdAt} >= ${windowStartIso}::timestamptz
-      )::integer as "rollingIntents",
-      coalesce(sum(${mediaUploadIntents.byteLength}) filter (
-        where ${mediaUploadIntents.createdAt} >= ${windowStartIso}::timestamptz
-      ), 0)::bigint as "rollingBytes"
-    from ${mediaUploadIntents}
-    inner join ${events}
-      on ${events.id} = ${mediaUploadIntents.eventId}
-    where ${events.facilityId} = ${input.facilityId}
-  `);
-  if (
-    principal === undefined ||
-    event === undefined ||
-    facility === undefined
-  ) {
-    throw mediaUnavailable();
-  }
+  const eventRolling = summarizeBoundedMediaUsage(
+    await queries.eventRolling,
+    MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.eventRolling,
+  );
+  const facilityActive = summarizeBoundedMediaUsage(
+    await queries.facilityActive,
+    MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.facilityActive,
+  );
+  const facilityRolling = summarizeBoundedMediaUsage(
+    await queries.facilityRolling,
+    MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.facilityRolling,
+  );
   return Object.freeze({
-    principalRollingIntents: resourceUsageValue(principal.rollingIntents),
-    principalRollingBytes: resourceUsageValue(principal.rollingBytes),
-    eventActiveIntents: resourceUsageValue(event.activeIntents),
-    eventActiveBytes: resourceUsageValue(event.activeBytes),
-    eventRollingIntents: resourceUsageValue(event.rollingIntents),
-    eventRollingBytes: resourceUsageValue(event.rollingBytes),
-    facilityActiveIntents: resourceUsageValue(facility.activeIntents),
-    facilityActiveBytes: resourceUsageValue(facility.activeBytes),
-    facilityRollingIntents: resourceUsageValue(facility.rollingIntents),
-    facilityRollingBytes: resourceUsageValue(facility.rollingBytes),
+    principalRollingIntents: principal.intents,
+    principalRollingBytes: principal.bytes,
+    eventActiveIntents: eventActive.intents,
+    eventActiveBytes: eventActive.bytes,
+    eventRollingIntents: eventRolling.intents,
+    eventRollingBytes: eventRolling.bytes,
+    facilityActiveIntents: facilityActive.intents,
+    facilityActiveBytes: facilityActive.bytes,
+    facilityRollingIntents: facilityRolling.intents,
+    facilityRollingBytes: facilityRolling.bytes,
   });
 }
 
@@ -439,6 +587,79 @@ async function completeIdempotency(
     .returning({ id: idempotencyRecords.id });
   if (updated === undefined) {
     throw mediaConflict('The media request replay could not be completed.');
+  }
+}
+
+interface MediaTransactionExecutionState {
+  newlyClaimedIdempotency: Readonly<{
+    capabilityId: ClaimIdempotencyInput['capabilityId'];
+    recordId: string;
+  }> | null;
+  lockedUploadIntent: Readonly<{
+    eventId: string;
+    uploadIntentId: string;
+  }> | null;
+}
+
+const TERMINAL_IMAGE_REJECTION_COMMITTED = Symbol(
+  'terminal-media-image-rejection-committed',
+);
+
+function terminalImageRejectionReference(
+  error: TerminalMediaImageRejectionError,
+): string {
+  return `terminal-image-rejection:${error.eventId}:${error.uploadIntentId}`;
+}
+
+async function persistTerminalImageRejection(
+  database: MediaQueryDatabase,
+  state: MediaTransactionExecutionState,
+  error: TerminalMediaImageRejectionError,
+): Promise<void> {
+  const claim = state.newlyClaimedIdempotency;
+  const lockedIntent = state.lockedUploadIntent;
+  if (
+    claim === null ||
+    claim.capabilityId !== 'complete-media-upload' ||
+    lockedIntent === null ||
+    lockedIntent.eventId !== error.eventId ||
+    lockedIntent.uploadIntentId !== error.uploadIntentId
+  ) {
+    throw mediaUnavailable();
+  }
+
+  const rejectedIntents = await database
+    .update(mediaUploadIntents)
+    .set({ status: 'rejected' })
+    .where(
+      and(
+        eq(mediaUploadIntents.id, error.uploadIntentId),
+        eq(mediaUploadIntents.eventId, error.eventId),
+        eq(mediaUploadIntents.status, 'pending-upload'),
+      ),
+    )
+    .returning({ id: mediaUploadIntents.id });
+  if (rejectedIntents.length !== 1) {
+    throw mediaUnavailable();
+  }
+
+  const failedClaims = await database
+    .update(idempotencyRecords)
+    .set({
+      status: 'failed',
+      completedAt: sql`greatest(clock_timestamp(), ${idempotencyRecords.createdAt})`,
+      resultReference: terminalImageRejectionReference(error),
+    })
+    .where(
+      and(
+        eq(idempotencyRecords.id, claim.recordId),
+        eq(idempotencyRecords.capabilityId, claim.capabilityId),
+        eq(idempotencyRecords.status, 'in-progress'),
+      ),
+    )
+    .returning({ id: idempotencyRecords.id });
+  if (failedClaims.length !== 1) {
+    throw mediaUnavailable();
   }
 }
 
@@ -602,10 +823,23 @@ export function buildPhotoChecksumExportQuery(
 
 function createTransaction(
   database: MediaQueryDatabase,
+  executionState?: MediaTransactionExecutionState,
 ): MediaCapabilityTransaction {
   return {
     readCurrentTime: () => readDatabaseTime(database),
-    claimIdempotency: (input) => claimIdempotency(database, input),
+    async claimIdempotency(input) {
+      const claim = await claimIdempotency(database, input);
+      if (claim.kind === 'new' && executionState !== undefined) {
+        if (executionState.newlyClaimedIdempotency !== null) {
+          throw mediaUnavailable();
+        }
+        executionState.newlyClaimedIdempotency = Object.freeze({
+          capabilityId: input.capabilityId,
+          recordId: claim.recordId,
+        });
+      }
+      return claim;
+    },
     completeIdempotency: (input) => completeIdempotency(database, input),
     getHumanConfirmation: async () => null,
     consumeHumanConfirmation: async () => false,
@@ -613,11 +847,24 @@ function createTransaction(
       appendCapabilityAuditEntry(database, event),
     resolveEventFacilityId: (eventId) =>
       resolveEventFacilityId(database, eventId),
-    resolveUploadIntent: (uploadIntentId, lock) =>
-      resolveUploadIntent(database, uploadIntentId, lock),
+    async resolveUploadIntent(uploadIntentId, lock) {
+      const resolved = await resolveUploadIntent(
+        database,
+        uploadIntentId,
+        lock,
+      );
+      if (lock && resolved !== null && executionState !== undefined) {
+        executionState.lockedUploadIntent = Object.freeze({
+          eventId: resolved.intent.eventId,
+          uploadIntentId: resolved.intent.id,
+        });
+      }
+      return resolved;
+    },
     resolveReadyMedia: (eventId, mediaId) =>
       resolveReadyMedia(database, eventId, mediaId),
     async insertUploadIntent(intent) {
+      await configureMediaUploadAllocationDeadline(database);
       // A fixed lock order makes fresh idempotency keys contend on both the
       // authenticated principal and facility before any durable allocation.
       await acquireMediaUploadBudgetLock(
@@ -715,12 +962,37 @@ export function createDrizzleMediaCapabilityStore(
   database: Database,
 ): MediaCapabilityStore {
   return {
-    transaction<Result>(
+    async transaction<Result>(
       operation: (transaction: MediaCapabilityTransaction) => Promise<Result>,
     ): Promise<Result> {
-      return database.transaction(async (transaction) =>
-        operation(createTransaction(queryDatabase(transaction))),
-      );
+      let terminalError: TerminalMediaImageRejectionError | null = null;
+      const result = await database.transaction(async (transaction) => {
+        const query = queryDatabase(transaction);
+        const executionState: MediaTransactionExecutionState = {
+          newlyClaimedIdempotency: null,
+          lockedUploadIntent: null,
+        };
+        try {
+          return await operation(createTransaction(query, executionState));
+        } catch (error) {
+          if (!(error instanceof TerminalMediaImageRejectionError)) {
+            throw error;
+          }
+          await persistTerminalImageRejection(query, executionState, error);
+          terminalError = error;
+          return TERMINAL_IMAGE_REJECTION_COMMITTED;
+        }
+      });
+
+      if (result === TERMINAL_IMAGE_REJECTION_COMMITTED) {
+        if (terminalError === null) {
+          throw mediaUnavailable();
+        }
+        // This throw deliberately happens after the database transaction has
+        // committed. If commit fails, that persistence error wins instead.
+        throw terminalError;
+      }
+      return result;
     },
     appendCapabilityAudit(event) {
       return database.transaction((transaction) =>

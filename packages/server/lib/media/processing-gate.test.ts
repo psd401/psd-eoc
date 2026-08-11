@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  MediaProviderCapacityError,
   MediaProcessingCapacityError,
+  createMediaProviderGate,
   createMediaProcessingGate,
 } from './processing-gate';
 
@@ -49,5 +51,76 @@ describe('media processing admission', () => {
   test('rejects invalid concurrency configuration', () => {
     expect(() => createMediaProcessingGate(0)).toThrow(RangeError);
     expect(() => createMediaProcessingGate(1.5)).toThrow(RangeError);
+  });
+});
+
+describe('media provider admission', () => {
+  test('uses two slots and rejects excess provider work without queueing', async () => {
+    const gate = createMediaProviderGate();
+    const release = deferred();
+    let providerEntries = 0;
+    const enterProvider = (result: string) =>
+      gate.run(async () => {
+        providerEntries += 1;
+        await release.promise;
+        return result;
+      });
+    const first = enterProvider('first');
+    const second = enterProvider('second');
+
+    await expect(enterProvider('excess')).rejects.toBeInstanceOf(
+      MediaProviderCapacityError,
+    );
+    expect(providerEntries).toBe(2);
+
+    release.resolve();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'first',
+      'second',
+    ]);
+    await expect(gate.run(async () => 'after-release')).resolves.toBe(
+      'after-release',
+    );
+  });
+
+  test('recovers both slots after provider timeout failures', async () => {
+    const gate = createMediaProviderGate();
+    const rejectAsTimedOut = deferred();
+    const timedOutProviderCall = () =>
+      gate.run(async () => {
+        await rejectAsTimedOut.promise;
+        throw new Error('synthetic provider timeout');
+      });
+    const first = timedOutProviderCall();
+    const second = timedOutProviderCall();
+
+    await expect(gate.run(async () => 'queued')).rejects.toBeInstanceOf(
+      MediaProviderCapacityError,
+    );
+    const captureFailure = (operation: Promise<unknown>) =>
+      operation.then(
+        () => new Error('Expected the provider operation to time out.'),
+        (error: unknown) => error,
+      );
+    const firstFailure = captureFailure(first);
+    const secondFailure = captureFailure(second);
+    rejectAsTimedOut.resolve();
+    expect(await firstFailure).toEqual(
+      expect.objectContaining({ message: 'synthetic provider timeout' }),
+    );
+    expect(await secondFailure).toEqual(
+      expect.objectContaining({ message: 'synthetic provider timeout' }),
+    );
+    await expect(
+      Promise.all([
+        gate.run(async () => 'recovered-first'),
+        gate.run(async () => 'recovered-second'),
+      ]),
+    ).resolves.toEqual(['recovered-first', 'recovered-second']);
+  });
+
+  test('rejects invalid provider concurrency configuration', () => {
+    expect(() => createMediaProviderGate(0)).toThrow(RangeError);
+    expect(() => createMediaProviderGate(2.5)).toThrow(RangeError);
   });
 });

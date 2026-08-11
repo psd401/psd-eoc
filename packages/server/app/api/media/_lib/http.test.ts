@@ -1,17 +1,23 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { CapabilityOutput } from '@psd-eoc/contracts';
+import {
+  SessionEstablishmentResultSchema,
+  type CapabilityOutput,
+} from '@psd-eoc/contracts';
 
 import type { TrustedCapabilityInvocation } from '../../../../lib/capabilities/engine';
 import { CapabilityEngineError } from '../../../../lib/capabilities/engine';
-import { SessionAccessError } from '../../../../lib/auth/sessions';
+import {
+  SessionAccessError,
+  type AuthenticatedSession,
+} from '../../../../lib/auth/sessions';
 import type { MediaCapabilityId } from '../../../../lib/media/capabilities';
 import {
   handleCompleteMediaUpload,
   handleCreateMediaUploadIntent,
   handleGetMediaReadGrant,
   MEDIA_IDEMPOTENCY_KEY_HEADER,
-  type MediaRouteInvocationRequest,
+  type MediaRouteAuthenticationRequest,
   type MediaRouteRuntime,
 } from './http';
 
@@ -23,11 +29,67 @@ const ids = {
   event: '00000000-0000-4000-8000-000000000805',
   media: '00000000-0000-4000-8000-000000000806',
   uploadIntent: '00000000-0000-4000-8000-000000000807',
+  device: '00000000-0000-4000-8000-000000000808',
+  membershipSnapshot: '00000000-0000-4000-8000-000000000809',
 } as const;
 
 const now = new Date('2026-08-10T18:00:00.000Z');
 const idempotencyKey = 'media-route-idempotency-0001';
 const contentSha256 = 'a'.repeat(64);
+
+const authenticatedSession = Object.freeze({
+  actor: {
+    kind: 'human' as const,
+    userId: ids.user,
+    sessionId: ids.session,
+  },
+  source: 'web' as const,
+  roles: ['staff'] as const,
+  scope: { facilityScope: { kind: 'district' as const } },
+  membershipState: 'fresh' as const,
+  result: SessionEstablishmentResultSchema.parse({
+    user: {
+      id: ids.user,
+      googleSubject: 'synthetic-media-route-subject',
+      email: 'synthetic.media-route@psd401.net',
+      displayName: 'Synthetic Media Route Staff',
+      roles: ['staff'],
+      facilityScope: { kind: 'district' },
+      createdAt: '2026-08-01T00:00:00.000Z',
+      disabledAt: null,
+    },
+    session: {
+      id: ids.session,
+      userId: ids.user,
+      deviceEnrollmentId: ids.device,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      expiresAt: '2026-09-01T00:00:00.000Z',
+      authorization: {
+        kind: 'group-membership',
+        source: 'google-group-snapshot',
+        membershipSnapshotId: ids.membershipSnapshot,
+        membershipValidUntil: '2026-08-11T00:00:00.000Z',
+        membershipGraceUntil: '2026-08-12T00:00:00.000Z',
+      },
+      revokedAt: null,
+    },
+    deviceEnrollment: {
+      id: ids.device,
+      userId: ids.user,
+      platform: 'web',
+      unlockMethod: 'secure-session-cookie',
+      installationId: 'synthetic-media-route-installation',
+      enrolledAt: '2026-08-01T00:00:00.000Z',
+      lastSeenAt: '2026-08-10T18:00:00.000Z',
+      revokedAt: null,
+    },
+    connectivityEpoch: {
+      id: ids.epoch,
+      sessionId: ids.session,
+      establishedAt: '2026-08-10T17:00:00.000Z',
+    },
+  }),
+} satisfies AuthenticatedSession);
 
 const createInput = Object.freeze({
   eventId: ids.event,
@@ -76,53 +138,28 @@ interface ExecutionCall {
   readonly invocation: TrustedCapabilityInvocation;
 }
 
-interface InvocationCall {
+interface AuthenticationCall {
   readonly request: Request;
-  readonly input: MediaRouteInvocationRequest;
+  readonly input: MediaRouteAuthenticationRequest;
 }
 
 interface TestRuntimeOptions {
   readonly executeError?: unknown;
-  readonly resolveError?: unknown;
+  readonly authenticateError?: unknown;
 }
 
 function testRuntime(options: TestRuntimeOptions = {}) {
   const executions: ExecutionCall[] = [];
-  const invocationCalls: InvocationCall[] = [];
+  const authenticationCalls: AuthenticationCall[] = [];
   const runtime: MediaRouteRuntime = {
     createRequestId: () => ids.request,
     now: () => now,
-    async resolveInvocation(request, input) {
-      invocationCalls.push({ request, input });
-      if (options.resolveError !== undefined) {
-        throw options.resolveError;
+    async authenticate(request, input) {
+      authenticationCalls.push({ request, input });
+      if (options.authenticateError !== undefined) {
+        throw options.authenticateError;
       }
-      const invocation: TrustedCapabilityInvocation = {
-        actor: {
-          kind: 'human',
-          userId: ids.user,
-          sessionId: ids.session,
-        },
-        source: 'web',
-        scope: { facilityScope: { kind: 'district' } },
-        requestId: input.requestId,
-        serverTime: input.serverTime,
-        connectivityEpochId: ids.epoch,
-        mutation:
-          input.mutation === null
-            ? null
-            : {
-                idempotencyKey: input.mutation.idempotencyKey,
-                humanConfirmationId: null,
-                transport: {
-                  kind: 'web-interactive',
-                  method: 'POST',
-                  interaction: 'explicit-user-submit',
-                  csrfVerified: true,
-                },
-              },
-      };
-      return Object.freeze(invocation);
+      return authenticatedSession;
     },
     async execute<Id extends MediaCapabilityId>(
       capabilityId: Id,
@@ -136,7 +173,7 @@ function testRuntime(options: TestRuntimeOptions = {}) {
       return capabilityOutputs[capabilityId] as CapabilityOutput<Id>;
     },
   };
-  return { executions, invocationCalls, runtime };
+  return { authenticationCalls, executions, runtime };
 }
 
 function mutationRequest(
@@ -202,7 +239,7 @@ async function expectSafeValidationError(response: Response): Promise<void> {
 
 describe('media REST helper boundary', () => {
   test('authenticates and forwards a strict upload-intent mutation with CSRF-ready trusted facts', async () => {
-    const { executions, invocationCalls, runtime } = testRuntime();
+    const { authenticationCalls, executions, runtime } = testRuntime();
     const request = createRequest();
     const response = await handleCreateMediaUploadIntent(request, runtime);
 
@@ -211,13 +248,12 @@ describe('media REST helper boundary', () => {
     expect(await response.json()).toEqual(
       capabilityOutputs['create-media-upload-intent'],
     );
-    expect(invocationCalls).toEqual([
+    expect(authenticationCalls).toEqual([
       {
         request,
         input: {
-          requestId: ids.request,
           serverTime: now,
-          mutation: { idempotencyKey },
+          mutation: true,
         },
       },
     ]);
@@ -262,8 +298,9 @@ describe('media REST helper boundary', () => {
     expect(await response.json()).toEqual(
       capabilityOutputs['complete-media-upload'],
     );
-    expect(accepted.invocationCalls[0]?.input.mutation).toEqual({
-      idempotencyKey,
+    expect(accepted.authenticationCalls[0]?.input).toEqual({
+      serverTime: now,
+      mutation: true,
     });
     expect(accepted.executions[0]).toMatchObject({
       capabilityId: 'complete-media-upload',
@@ -284,12 +321,12 @@ describe('media REST helper boundary', () => {
       rejected.runtime,
     );
     await expectSafeValidationError(rejectedResponse);
-    expect(rejected.invocationCalls).toHaveLength(1);
+    expect(rejected.authenticationCalls).toHaveLength(1);
     expect(rejected.executions).toHaveLength(0);
   });
 
   test('authorizes each private read request and forwards only canonical path IDs', async () => {
-    const { executions, invocationCalls, runtime } = testRuntime();
+    const { authenticationCalls, executions, runtime } = testRuntime();
     const request = new Request(
       `https://eoc.example.test/api/media/events/${ids.event}/${ids.media}/read-grant`,
       { headers: { authorization: 'Bearer synthetic-session-token' } },
@@ -306,13 +343,12 @@ describe('media REST helper boundary', () => {
     expect(await response.json()).toEqual(
       capabilityOutputs['get-media-read-grant'],
     );
-    expect(invocationCalls).toEqual([
+    expect(authenticationCalls).toEqual([
       {
         request,
         input: {
-          requestId: ids.request,
           serverTime: now,
-          mutation: null,
+          mutation: false,
         },
       },
     ]);
@@ -327,9 +363,9 @@ describe('media REST helper boundary', () => {
     });
   });
 
-  test('rejects missing or malformed mutation idempotency before authentication or execution', async () => {
+  test('authenticates before rejecting missing or malformed mutation idempotency', async () => {
     for (const headerValue of [null, 'too-short', 'invalid key spaces']) {
-      const { executions, invocationCalls, runtime } = testRuntime();
+      const { authenticationCalls, executions, runtime } = testRuntime();
       const request = createRequest();
       if (headerValue === null) {
         request.headers.delete(MEDIA_IDEMPOTENCY_KEY_HEADER);
@@ -340,21 +376,98 @@ describe('media REST helper boundary', () => {
       const response = await handleCreateMediaUploadIntent(request, runtime);
 
       await expectSafeValidationError(response);
-      expect(invocationCalls).toHaveLength(0);
+      expect(authenticationCalls).toHaveLength(1);
       expect(executions).toHaveLength(0);
     }
   });
 
-  test('authenticates before parsing upload metadata and never executes malformed input', async () => {
+  test('returns the same auth denial before malformed mutation metadata, diagnostics, or body parsing', async () => {
+    const requests = [
+      createRequest('{ definitely-not-json'),
+      mutationRequest(
+        '/api/media/upload-intents?storageKey=attacker-selected',
+        '{ definitely-not-json',
+      ),
+      completionRequest('?eventId=attacker-selected', '{}'),
+    ];
+    requests[0]?.headers.set(MEDIA_IDEMPOTENCY_KEY_HEADER, 'invalid key');
+    requests[1]?.headers.delete(MEDIA_IDEMPOTENCY_KEY_HEADER);
+
+    for (const request of requests) {
+      const unauthenticated = testRuntime({
+        authenticateError: new SessionAccessError(
+          'INVALID_CREDENTIAL',
+          'A valid session is required.',
+        ),
+      });
+      const response = request.url.includes('/complete')
+        ? await handleCompleteMediaUpload(
+            request,
+            'not-an-upload-intent-id',
+            unauthenticated.runtime,
+          )
+        : await handleCreateMediaUploadIntent(request, unauthenticated.runtime);
+
+      expect(response.status).toBe(401);
+      expectPrivateResponseHeaders(response);
+      expect(await response.json()).toEqual({
+        code: 'UNAUTHENTICATED',
+        message: 'A valid session is required.',
+        requestId: ids.request,
+        retryable: false,
+        fieldErrors: [],
+      });
+      expect(unauthenticated.authenticationCalls).toHaveLength(1);
+      expect(unauthenticated.executions).toHaveLength(0);
+    }
+  });
+
+  test('returns the CSRF denial before malformed mutation metadata or body parsing', async () => {
+    const csrfDenied = testRuntime({
+      authenticateError: new SessionAccessError(
+        'FORBIDDEN',
+        'The browser request failed CSRF verification.',
+      ),
+    });
+    const request = createRequest('{ definitely-not-json');
+    request.headers.set(MEDIA_IDEMPOTENCY_KEY_HEADER, 'invalid key');
+    const response = await handleCreateMediaUploadIntent(
+      request,
+      csrfDenied.runtime,
+    );
+
+    expect(response.status).toBe(403);
+    expectPrivateResponseHeaders(response);
+    expect(await response.json()).toEqual({
+      code: 'FORBIDDEN',
+      message: 'The browser request failed CSRF verification.',
+      requestId: ids.request,
+      retryable: false,
+      fieldErrors: [],
+    });
+    expect(csrfDenied.authenticationCalls).toHaveLength(1);
+    expect(csrfDenied.executions).toHaveLength(0);
+  });
+
+  test('returns the auth denial before private-read metadata, parameters, or path IDs are parsed', async () => {
     const unauthenticated = testRuntime({
-      resolveError: new SessionAccessError(
+      authenticateError: new SessionAccessError(
         'INVALID_CREDENTIAL',
         'A valid session is required.',
       ),
     });
-    const request = createRequest('{ definitely-not-json');
-    const response = await handleCreateMediaUploadIntent(
+    const request = new Request(
+      'https://eoc.example.test/api/media/events/not-an-event/not-media/read-grant?download=public',
+      {
+        headers: {
+          [MEDIA_IDEMPOTENCY_KEY_HEADER]: 'invalid mutation key',
+        },
+      },
+    );
+    const response = await handleGetMediaReadGrant(
       request,
+      'not-an-event-id',
+      'not-a-media-id',
       unauthenticated.runtime,
     );
 
@@ -367,7 +480,7 @@ describe('media REST helper boundary', () => {
       retryable: false,
       fieldErrors: [],
     });
-    expect(unauthenticated.invocationCalls).toHaveLength(1);
+    expect(unauthenticated.authenticationCalls).toHaveLength(1);
     expect(unauthenticated.executions).toHaveLength(0);
   });
 
@@ -416,27 +529,27 @@ describe('media REST helper boundary', () => {
 
   for (const invalidCase of invalidCreateCases) {
     test(`rejects ${invalidCase.name} with a bounded user-visible error`, async () => {
-      const { executions, invocationCalls, runtime } = testRuntime();
+      const { authenticationCalls, executions, runtime } = testRuntime();
       const response = await handleCreateMediaUploadIntent(
         invalidCase.request(),
         runtime,
       );
 
       await expectSafeValidationError(response);
-      expect(invocationCalls).toHaveLength(1);
+      expect(authenticationCalls).toHaveLength(1);
       expect(executions).toHaveLength(0);
     });
   }
 
   test('rejects invalid UTF-8 as malformed client input', async () => {
-    const { executions, invocationCalls, runtime } = testRuntime();
+    const { authenticationCalls, executions, runtime } = testRuntime();
     const response = await handleCreateMediaUploadIntent(
       createRequest(new Uint8Array([0xff, 0xfe, 0xfd])),
       runtime,
     );
 
     await expectSafeValidationError(response);
-    expect(invocationCalls).toHaveLength(1);
+    expect(authenticationCalls).toHaveLength(1);
     expect(executions).toHaveLength(0);
   });
 
@@ -450,7 +563,7 @@ describe('media REST helper boundary', () => {
       create.runtime,
     );
     await expectSafeValidationError(createResponse);
-    expect(create.invocationCalls).toHaveLength(1);
+    expect(create.authenticationCalls).toHaveLength(1);
     expect(create.executions).toHaveLength(0);
 
     const complete = testRuntime();
@@ -460,7 +573,7 @@ describe('media REST helper boundary', () => {
       complete.runtime,
     );
     await expectSafeValidationError(completeResponse);
-    expect(complete.invocationCalls).toHaveLength(1);
+    expect(complete.authenticationCalls).toHaveLength(1);
     expect(complete.executions).toHaveLength(0);
 
     const read = testRuntime();
@@ -473,12 +586,12 @@ describe('media REST helper boundary', () => {
       read.runtime,
     );
     await expectSafeValidationError(readResponse);
-    expect(read.invocationCalls).toHaveLength(1);
+    expect(read.authenticationCalls).toHaveLength(1);
     expect(read.executions).toHaveLength(0);
   });
 
   test('rejects idempotency metadata on private read queries', async () => {
-    const { executions, invocationCalls, runtime } = testRuntime();
+    const { authenticationCalls, executions, runtime } = testRuntime();
     const request = new Request(
       `https://eoc.example.test/api/media/events/${ids.event}/${ids.media}/read-grant`,
       { headers: { [MEDIA_IDEMPOTENCY_KEY_HEADER]: idempotencyKey } },
@@ -491,7 +604,7 @@ describe('media REST helper boundary', () => {
     );
 
     await expectSafeValidationError(response);
-    expect(invocationCalls).toHaveLength(0);
+    expect(authenticationCalls).toHaveLength(1);
     expect(executions).toHaveLength(0);
   });
 
@@ -503,7 +616,7 @@ describe('media REST helper boundary', () => {
       complete.runtime,
     );
     await expectSafeValidationError(completeResponse);
-    expect(complete.invocationCalls).toHaveLength(1);
+    expect(complete.authenticationCalls).toHaveLength(1);
     expect(complete.executions).toHaveLength(0);
 
     for (const [eventId, mediaId] of [
@@ -520,7 +633,7 @@ describe('media REST helper boundary', () => {
         read.runtime,
       );
       await expectSafeValidationError(response);
-      expect(read.invocationCalls).toHaveLength(1);
+      expect(read.authenticationCalls).toHaveLength(1);
       expect(read.executions).toHaveLength(0);
     }
   });

@@ -9,7 +9,7 @@ import {
   test,
 } from 'bun:test';
 import type { Actor } from '@psd-eoc/contracts';
-import { asc, eq, sql } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
 import {
@@ -20,8 +20,10 @@ import {
   eventTypeVersions,
   events,
   facilities,
+  idempotencyRecords,
   mediaUploadIntents,
   rosterSnapshots,
+  securityAuditEntries,
 } from '../../db/schema';
 import { seedDatabase } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
@@ -33,11 +35,14 @@ import {
   executeMediaCapability,
   type MediaCapabilityDependencies,
 } from './capabilities';
+import { ImageValidationError } from './image';
 import {
   MEDIA_EVENT_ACTIVE_BYTE_LIMIT,
   MEDIA_EVENT_ACTIVE_INTENT_LIMIT,
+  MEDIA_EVENT_ROLLING_INTENT_LIMIT,
   MEDIA_FACILITY_ACTIVE_BYTE_LIMIT,
   MEDIA_FACILITY_ACTIVE_INTENT_LIMIT,
+  MEDIA_FACILITY_ROLLING_INTENT_LIMIT,
   MEDIA_MAX_BYTES,
   MEDIA_PRINCIPAL_ROLLING_BYTE_LIMIT,
   MEDIA_PRINCIPAL_ROLLING_INTENT_LIMIT,
@@ -45,7 +50,16 @@ import {
   quarantineStorageKey,
 } from './model';
 import type { MediaObjectStore } from './object-store';
-import { createDrizzleMediaCapabilityStore } from './repository';
+import {
+  createMediaProcessingGate,
+  createMediaProviderGate,
+} from './processing-gate';
+import {
+  configureMediaUploadAllocationDeadline,
+  createDrizzleMediaCapabilityStore,
+  MEDIA_UPLOAD_ALLOCATION_LOCK_TIMEOUT_MILLISECONDS,
+  MEDIA_UPLOAD_ALLOCATION_STATEMENT_TIMEOUT_MILLISECONDS,
+} from './repository';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -76,9 +90,11 @@ const SYNTHETIC_EVENT_CREATOR = Object.freeze({
   userId: randomUUID(),
   sessionId: randomUUID(),
 });
-const CONTENT_SHA256 = createHash('sha256')
-  .update('synthetic media resource budget fixture', 'utf8')
-  .digest('hex');
+const CONTENT_BYTES = Buffer.from(
+  'synthetic media resource budget fixture',
+  'utf8',
+);
+const CONTENT_SHA256 = createHash('sha256').update(CONTENT_BYTES).digest('hex');
 
 let connection: PostgresDatabaseConnection | undefined;
 let fixtureIds: FixtureIds | undefined;
@@ -353,6 +369,43 @@ async function expectRateLimitedWithoutAllocation(input: {
   expect(object.recorder.storageKeys).toHaveLength(0);
 }
 
+async function capabilityError(
+  operation: Promise<unknown>,
+): Promise<CapabilityEngineError> {
+  try {
+    await operation;
+  } catch (error) {
+    expect(error).toBeInstanceOf(CapabilityEngineError);
+    return error as CapabilityEngineError;
+  }
+  throw new Error('Expected the media capability to fail.');
+}
+
+async function settleWithinDatabaseIsolationDeadline<Result>(
+  operation: Promise<Result>,
+  description: string,
+): Promise<Result> {
+  return new Promise<Result>((resolve, reject) => {
+    const deadline = setTimeout(() => {
+      reject(
+        new Error(
+          `${description} did not settle while the first media transaction was blocked.`,
+        ),
+      );
+    }, 2_000);
+    void operation.then(
+      (result) => {
+        clearTimeout(deadline);
+        resolve(result);
+      },
+      (error: unknown) => {
+        clearTimeout(deadline);
+        reject(error);
+      },
+    );
+  });
+}
+
 describeWithDatabase('media upload production resource budgets', () => {
   beforeAll(async () => {
     if (testDatabaseUrl === undefined) {
@@ -361,7 +414,11 @@ describeWithDatabase('media upload production resource budgets', () => {
     const created = createDatabaseClient({
       driver: 'postgres',
       url: testDatabaseUrl,
-      maxConnections: 16,
+      // Two connections model the smallest pool that can keep one unrelated
+      // database operation available while a single media completion is in
+      // provider/image work. The fail-fast gate must never consume the second
+      // connection by waiting on the upload-intent row lock.
+      maxConnections: 2,
     });
     if (created.driver !== 'postgres') {
       throw new Error('Media budget integration tests require PostgreSQL.');
@@ -394,6 +451,52 @@ describeWithDatabase('media upload production resource budgets', () => {
 
   afterAll(async () => {
     await connection?.close();
+  });
+
+  test('clamps allocation statements and lock waits without weakening stricter database deadlines', async () => {
+    const db = databaseConnection().db;
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        select
+          set_config('statement_timeout', '30s', true),
+          set_config('lock_timeout', '30s', true)
+      `);
+      await configureMediaUploadAllocationDeadline(transaction);
+      const [settings] = await transaction.execute<{
+        lockTimeoutMs: number;
+        statementTimeoutMs: number;
+      }>(sql`
+        select
+          (extract(epoch from current_setting('statement_timeout')::interval) * 1000)::integer as "statementTimeoutMs",
+          (extract(epoch from current_setting('lock_timeout')::interval) * 1000)::integer as "lockTimeoutMs"
+      `);
+      expect(settings).toEqual({
+        statementTimeoutMs:
+          MEDIA_UPLOAD_ALLOCATION_STATEMENT_TIMEOUT_MILLISECONDS,
+        lockTimeoutMs: MEDIA_UPLOAD_ALLOCATION_LOCK_TIMEOUT_MILLISECONDS,
+      });
+    });
+
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        select
+          set_config('statement_timeout', '200ms', true),
+          set_config('lock_timeout', '100ms', true)
+      `);
+      await configureMediaUploadAllocationDeadline(transaction);
+      const [settings] = await transaction.execute<{
+        lockTimeoutMs: number;
+        statementTimeoutMs: number;
+      }>(sql`
+        select
+          (extract(epoch from current_setting('statement_timeout')::interval) * 1000)::integer as "statementTimeoutMs",
+          (extract(epoch from current_setting('lock_timeout')::interval) * 1000)::integer as "lockTimeoutMs"
+      `);
+      expect(settings).toEqual({
+        statementTimeoutMs: 200,
+        lockTimeoutMs: 100,
+      });
+    });
   });
 
   test('shares the request boundary across human sessions and replays one key without a second allocation', async () => {
@@ -662,5 +765,456 @@ describeWithDatabase('media upload production resource budgets', () => {
       facilityId: byteFacilityId,
       byteLength: 1,
     });
+  });
+
+  test('preserves event and facility rolling request limits after uploads stop being active', async () => {
+    const eventFacilityId = await createSyntheticFacility();
+    const eventId = await createActiveSyntheticEvent(eventFacilityId);
+    await seedUploadIntents(
+      [eventId],
+      Array.from({ length: MEDIA_EVENT_ROLLING_INTENT_LIMIT }, () => 1),
+      'completed',
+    );
+    await expectRateLimitedWithoutAllocation({
+      eventId,
+      facilityId: eventFacilityId,
+      byteLength: 1,
+    });
+
+    const facilityId = await createSyntheticFacility();
+    const reservoirs = await Promise.all(
+      Array.from({ length: 3 }, () => createActiveSyntheticEvent(facilityId)),
+    );
+    const target = await createActiveSyntheticEvent(facilityId);
+    await seedUploadIntents(
+      reservoirs,
+      Array.from({ length: MEDIA_FACILITY_ROLLING_INTENT_LIMIT }, () => 1),
+      'completed',
+    );
+    await expectRateLimitedWithoutAllocation({
+      eventId: target,
+      facilityId,
+      byteLength: 1,
+    });
+  });
+
+  test('releases a constrained database connection when provider admission is saturated', async () => {
+    if (testDatabaseUrl === undefined) {
+      throw new Error('TEST_DATABASE_URL is required for integration tests.');
+    }
+    const constrained = createDatabaseClient({
+      driver: 'postgres',
+      url: testDatabaseUrl,
+      // Two held provider calls may retain two capability transactions. The
+      // third connection must be returned immediately after admission fails.
+      maxConnections: 3,
+    });
+    if (constrained.driver !== 'postgres') {
+      throw new Error('Provider admission requires direct PostgreSQL.');
+    }
+
+    let releaseProviders: (() => void) | undefined;
+    const providersReleased = new Promise<void>((resolve) => {
+      releaseProviders = resolve;
+    });
+    let announceAtCapacity: (() => void) | undefined;
+    const atCapacity = new Promise<void>((resolve) => {
+      announceAtCapacity = resolve;
+    });
+    let holders: Promise<readonly unknown[]> | undefined;
+    try {
+      const [firstFacilityId, secondFacilityId, saturatedFacilityId] =
+        await Promise.all([
+          createSyntheticFacility(),
+          createSyntheticFacility(),
+          createSyntheticFacility(),
+        ]);
+      const [firstEventId, secondEventId, saturatedEventId] = await Promise.all(
+        [
+          createActiveSyntheticEvent(firstFacilityId),
+          createActiveSyntheticEvent(secondFacilityId),
+          createActiveSyntheticEvent(saturatedFacilityId),
+        ],
+      );
+      const keys = [
+        `provider-holder-first-${randomUUID()}`,
+        `provider-holder-second-${randomUUID()}`,
+        `provider-saturated-${randomUUID()}`,
+      ] as const;
+      const invocations = [
+        mutationInvocation(createHumanActor(), firstFacilityId, keys[0]),
+        mutationInvocation(createHumanActor(), secondFacilityId, keys[1]),
+        mutationInvocation(createHumanActor(), saturatedFacilityId, keys[2]),
+      ] as const;
+      let providerEntries = 0;
+      const unrelated = async (): Promise<never> => {
+        throw new Error('Provider admission used an unrelated object method.');
+      };
+      const objectStore: MediaObjectStore = {
+        async createRawUploadGrant(input) {
+          providerEntries += 1;
+          if (providerEntries === 2) {
+            announceAtCapacity?.();
+          }
+          await providersReleased;
+          return {
+            method: 'PUT',
+            uploadUrl: `https://media.example.test/${input.storageKey}?signature=synthetic`,
+            requiredHeaders: {
+              'content-type': input.contentType,
+              'if-none-match': '*',
+            },
+            byteLength: input.byteLength,
+            contentSha256: input.contentSha256,
+            expiresInSeconds: input.expiresInSeconds ?? 60,
+          };
+        },
+        getMalwareScanStatus: unrelated,
+        readVerifiedRawObject: unrelated,
+        putSanitizedObject: unrelated,
+        createPrivateReadGrant: unrelated,
+      };
+      const dependencies: MediaCapabilityDependencies = {
+        objectStore,
+        createId: randomUUID,
+        providerGate: createMediaProviderGate(2),
+      };
+      const createInput = (eventId: string) => ({
+        eventId,
+        byteLength: CONTENT_BYTES.byteLength,
+        contentSha256: CONTENT_SHA256,
+        declaredContentType: 'image/jpeg',
+      });
+      const inputs = [
+        createInput(firstEventId),
+        createInput(secondEventId),
+        createInput(saturatedEventId),
+      ] as const;
+      const store = createDrizzleMediaCapabilityStore(constrained.db);
+      holders = Promise.all([
+        executeMediaCapability(
+          'create-media-upload-intent',
+          inputs[0],
+          invocations[0],
+          store,
+          dependencies,
+        ),
+        executeMediaCapability(
+          'create-media-upload-intent',
+          inputs[1],
+          invocations[1],
+          store,
+          dependencies,
+        ),
+      ]);
+      await settleWithinDatabaseIsolationDeadline(
+        atCapacity,
+        'Two upload-grant provider calls',
+      );
+
+      const saturatedError = await settleWithinDatabaseIsolationDeadline(
+        capabilityError(
+          executeMediaCapability(
+            'create-media-upload-intent',
+            inputs[2],
+            invocations[2],
+            store,
+            dependencies,
+          ),
+        ),
+        'The saturated upload-grant request',
+      );
+      const [availability] = await settleWithinDatabaseIsolationDeadline(
+        constrained.db.execute<{ available: number }>(
+          sql`select 1::integer as "available"`,
+        ),
+        'An unrelated constrained-pool query',
+      );
+      const providerEntriesWhileBlocked = providerEntries;
+
+      releaseProviders?.();
+      const completedHolders = await holders;
+      expect(completedHolders).toHaveLength(2);
+      expect(saturatedError).toMatchObject({
+        code: 'INTERNAL_ERROR',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 503,
+        retryable: true,
+      });
+      expect(Number(availability?.available)).toBe(1);
+      expect(providerEntriesWhileBlocked).toBe(2);
+      expect(providerEntries).toBe(2);
+
+      const idempotency = await databaseConnection()
+        .db.select({
+          key: idempotencyRecords.key,
+          status: idempotencyRecords.status,
+        })
+        .from(idempotencyRecords)
+        .where(inArray(idempotencyRecords.key, keys));
+      expect(
+        idempotency
+          .map(({ key, status }) => ({ key, status }))
+          .sort((left, right) => left.key.localeCompare(right.key)),
+      ).toEqual(
+        keys
+          .slice(0, 2)
+          .map((key) => ({ key, status: 'completed' as const }))
+          .sort((left, right) => left.key.localeCompare(right.key)),
+      );
+
+      const requestIds = invocations.map(({ requestId }) => requestId);
+      const audits = await databaseConnection()
+        .db.select({
+          outcome: securityAuditEntries.outcome,
+          requestId: securityAuditEntries.requestId,
+        })
+        .from(securityAuditEntries)
+        .where(inArray(securityAuditEntries.requestId, requestIds));
+      expect(audits).toHaveLength(3);
+      expect(
+        audits.find(({ requestId }) => requestId === invocations[2].requestId)
+          ?.outcome,
+      ).toBe('failure');
+      expect(
+        audits
+          .filter(({ requestId }) => requestId !== invocations[2].requestId)
+          .every(({ outcome }) => outcome === 'success'),
+      ).toBe(true);
+    } finally {
+      releaseProviders?.();
+      await holders?.catch(() => undefined);
+      await constrained.close();
+    }
+  });
+
+  test('fails saturated completion before the intent lock while preserving terminal rejection evidence', async () => {
+    const facilityId = await createSyntheticFacility();
+    const eventId = await createActiveSyntheticEvent(facilityId);
+    const uploadIntentId = randomUUID();
+    const now = new Date();
+    await databaseConnection()
+      .db.insert(mediaUploadIntents)
+      .values({
+        id: uploadIntentId,
+        eventId,
+        byteLength: CONTENT_BYTES.byteLength,
+        contentSha256: CONTENT_SHA256,
+        declaredContentType: 'image/jpeg',
+        storageKey: quarantineStorageKey(eventId, uploadIntentId),
+        status: 'pending-upload',
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + MEDIA_UPLOAD_GRANT_SECONDS * 1_000),
+      });
+
+    const actor = createHumanActor();
+    const firstKey = `terminal-image-first-${randomUUID()}`;
+    const concurrentKey = `terminal-image-concurrent-${randomUUID()}`;
+    const laterKey = `terminal-image-later-${randomUUID()}`;
+    const firstInvocation = mutationInvocation(actor, facilityId, firstKey);
+    const concurrentInvocation = mutationInvocation(
+      actor,
+      facilityId,
+      concurrentKey,
+    );
+    const providerCalls = {
+      scan: 0,
+      raw: 0,
+      sanitize: 0,
+      sanitizedWrite: 0,
+    };
+    let releaseSanitizer: (() => void) | undefined;
+    const sanitizerRelease = new Promise<void>((resolve) => {
+      releaseSanitizer = resolve;
+    });
+    let announceSanitizer: (() => void) | undefined;
+    const sanitizerEntered = new Promise<void>((resolve) => {
+      announceSanitizer = resolve;
+    });
+    const unrelated = async (): Promise<never> => {
+      throw new Error('Terminal rejection used an unrelated object method.');
+    };
+    const objectStore: MediaObjectStore = {
+      createRawUploadGrant: unrelated,
+      async getMalwareScanStatus() {
+        providerCalls.scan += 1;
+        return 'clean';
+      },
+      async readVerifiedRawObject() {
+        providerCalls.raw += 1;
+        return {
+          bytes: CONTENT_BYTES,
+          byteLength: CONTENT_BYTES.byteLength,
+          contentSha256: CONTENT_SHA256,
+          storedContentType: 'application/octet-stream',
+        };
+      },
+      async putSanitizedObject() {
+        providerCalls.sanitizedWrite += 1;
+        throw new Error('Malformed bytes must never be persisted as ready.');
+      },
+      createPrivateReadGrant: unrelated,
+    };
+    const dependencies: MediaCapabilityDependencies = {
+      objectStore,
+      processingGate: createMediaProcessingGate(1),
+      async sanitizeImage() {
+        providerCalls.sanitize += 1;
+        announceSanitizer?.();
+        await sanitizerRelease;
+        throw new ImageValidationError(
+          'MALFORMED_IMAGE',
+          'The image could not be safely processed. Choose a different image and try again.',
+        );
+      },
+    };
+    const store = createDrizzleMediaCapabilityStore(databaseConnection().db);
+    const input = { uploadIntentId };
+
+    const first = capabilityError(
+      executeMediaCapability(
+        'complete-media-upload',
+        input,
+        firstInvocation,
+        store,
+        dependencies,
+      ),
+    );
+    await sanitizerEntered;
+    const concurrent = capabilityError(
+      executeMediaCapability(
+        'complete-media-upload',
+        input,
+        concurrentInvocation,
+        store,
+        dependencies,
+      ),
+    );
+    let concurrentError: CapabilityEngineError;
+    let databaseAvailable: number;
+    let providerCallsWhileBlocked: typeof providerCalls;
+    try {
+      concurrentError = await settleWithinDatabaseIsolationDeadline(
+        concurrent,
+        'The saturated completion',
+      );
+      const [availability] = await settleWithinDatabaseIsolationDeadline(
+        databaseConnection().db.execute<{ available: number }>(
+          sql`select 1::integer as "available"`,
+        ),
+        'An unrelated database query',
+      );
+      databaseAvailable = Number(availability?.available);
+      providerCallsWhileBlocked = { ...providerCalls };
+    } finally {
+      releaseSanitizer?.();
+    }
+    const firstError = await first;
+
+    expect(firstError).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+      retryable: false,
+    });
+    expect(concurrentError).toMatchObject({
+      code: 'INTERNAL_ERROR',
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      status: 503,
+      retryable: true,
+    });
+    expect(databaseAvailable).toBe(1);
+    expect(providerCallsWhileBlocked).toEqual({
+      scan: 1,
+      raw: 1,
+      sanitize: 1,
+      sanitizedWrite: 0,
+    });
+
+    const sameKeyInvocation = {
+      ...firstInvocation,
+      requestId: randomUUID(),
+    };
+    const sameKeyError = await capabilityError(
+      executeMediaCapability(
+        'complete-media-upload',
+        input,
+        sameKeyInvocation,
+        store,
+        dependencies,
+      ),
+    );
+    expect(sameKeyError).toMatchObject({
+      code: 'CONFLICT',
+      reasonCode: 'IDEMPOTENCY_PREVIOUSLY_FAILED',
+      status: 409,
+      retryable: false,
+    });
+
+    const laterInvocation = mutationInvocation(actor, facilityId, laterKey);
+    const laterError = await capabilityError(
+      executeMediaCapability(
+        'complete-media-upload',
+        input,
+        laterInvocation,
+        store,
+        dependencies,
+      ),
+    );
+    expect(laterError).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      status: 400,
+      retryable: false,
+    });
+    expect(providerCalls).toEqual({
+      scan: 1,
+      raw: 1,
+      sanitize: 1,
+      sanitizedWrite: 0,
+    });
+
+    const [intent] = await databaseConnection()
+      .db.select({ status: mediaUploadIntents.status })
+      .from(mediaUploadIntents)
+      .where(eq(mediaUploadIntents.id, uploadIntentId));
+    expect(intent?.status).toBe('rejected');
+
+    const idempotency = await databaseConnection()
+      .db.select({
+        key: idempotencyRecords.key,
+        status: idempotencyRecords.status,
+        completedAt: idempotencyRecords.completedAt,
+        resultReference: idempotencyRecords.resultReference,
+      })
+      .from(idempotencyRecords)
+      .where(
+        inArray(idempotencyRecords.key, [firstKey, concurrentKey, laterKey]),
+      );
+    expect(idempotency).toEqual([
+      {
+        key: firstKey,
+        status: 'failed',
+        completedAt: expect.any(Date),
+        resultReference: `terminal-image-rejection:${eventId}:${uploadIntentId}`,
+      },
+    ]);
+
+    const requestIds = [
+      firstInvocation.requestId,
+      concurrentInvocation.requestId,
+      sameKeyInvocation.requestId,
+      laterInvocation.requestId,
+    ];
+    const audits = await databaseConnection()
+      .db.select({
+        requestId: securityAuditEntries.requestId,
+        outcome: securityAuditEntries.outcome,
+      })
+      .from(securityAuditEntries)
+      .where(inArray(securityAuditEntries.requestId, requestIds));
+    expect(audits).toHaveLength(requestIds.length);
+    expect(audits.map(({ requestId }) => requestId).sort()).toEqual(
+      [...requestIds].sort(),
+    );
+    expect(audits.every(({ outcome }) => outcome === 'failure')).toBe(true);
   });
 });
