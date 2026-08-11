@@ -806,11 +806,11 @@ function neighborhoodReference(neighborhood: Neighborhood): string {
 
 function CurrentAudience({
   audience,
-  neighborhoodsById,
+  neighborhoodsByReference,
   othersById,
 }: Readonly<{
   audience: AudienceConfig | undefined;
-  neighborhoodsById: ReadonlyMap<string, Neighborhood>;
+  neighborhoodsByReference: ReadonlyMap<string, Neighborhood>;
   othersById: ReadonlyMap<string, GroupSource>;
 }>) {
   if (audience === undefined) {
@@ -828,10 +828,13 @@ function CurrentAudience({
               return <li key={`building:${target.facilityId}`}>Building</li>;
             case 'neighborhood':
               return (
-                <li key={`neighborhood:${target.neighborhood.id}`}>
+                <li
+                  key={`neighborhood:${target.neighborhood.id}:${target.neighborhood.version}`}
+                >
                   Neighborhood{' '}
-                  {neighborhoodsById.get(target.neighborhood.id)?.name ??
-                    target.neighborhood.id}
+                  {neighborhoodsByReference.get(
+                    `${target.neighborhood.id}:${target.neighborhood.version}`,
+                  )?.name ?? target.neighborhood.id}
                   , version {target.neighborhood.version}
                 </li>
               );
@@ -885,8 +888,14 @@ function AudienceForm({
     (neighborhood) =>
       neighborhoodReference(neighborhood) === currentNeighborhoodReference,
   );
-  const currentNeighborhoodName = neighborhoods.find(
-    (neighborhood) => neighborhood.id === currentNeighborhood?.neighborhood.id,
+  const neighborhoodsByReference = new Map(
+    neighborhoods.map((neighborhood) => [
+      neighborhoodReference(neighborhood),
+      neighborhood,
+    ]),
+  );
+  const currentNeighborhoodName = neighborhoodsByReference.get(
+    currentNeighborhoodReference,
   )?.name;
   const pinnedCurrentNeighborhood =
     currentNeighborhood === undefined || currentNeighborhoodIsAvailable
@@ -1030,8 +1039,11 @@ function AudiencesSection({
     audienceConfigs.map((audience) => [audience.facilityId, audience]),
   );
   const othersById = new Map(othersGroups.map((group) => [group.id, group]));
-  const neighborhoodsById = new Map(
-    neighborhoods.map((neighborhood) => [neighborhood.id, neighborhood]),
+  const neighborhoodsByReference = new Map(
+    neighborhoods.map((neighborhood) => [
+      neighborhoodReference(neighborhood),
+      neighborhood,
+    ]),
   );
   return (
     <section aria-labelledby="audiences-heading">
@@ -1053,7 +1065,7 @@ function AudiencesSection({
               </summary>
               <CurrentAudience
                 audience={audience}
-                neighborhoodsById={neighborhoodsById}
+                neighborhoodsByReference={neighborhoodsByReference}
                 othersById={othersById}
               />
               <AudienceForm

@@ -3,9 +3,14 @@
 -- lock upgrades and mixing migration locks with runtime advisory-lock order.
 LOCK TABLE
 	public."users",
+	public."user_facility_scopes",
 	public."sessions",
 	public."group_sources",
 	public."access_membership_snapshots",
+	public."access_membership_snapshot_groups",
+	public."access_membership_members",
+	public."access_membership_member_groups",
+	public."access_membership_member_facilities",
 	public."integration_statuses",
 	public."channel_configurations",
 	public."roster_source_configurations",
@@ -170,6 +175,8 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $$
+DECLARE
+	existing_row jsonb;
 BEGIN
 	IF TG_RELID <> 'public.access_membership_snapshots'::pg_catalog.regclass
 		OR TG_TABLE_SCHEMA <> 'public'
@@ -185,7 +192,229 @@ BEGIN
 	PERFORM pg_catalog.pg_advisory_xact_lock(
 		pg_catalog.hashtextextended('psd-eoc-admin-availability', 0)
 	);
+
+	SELECT pg_catalog.to_jsonb(existing)
+	INTO existing_row
+	FROM public."access_membership_snapshots" AS existing
+	WHERE existing."id" = NEW."id";
+
+	IF FOUND THEN
+		IF existing_row IS NOT DISTINCT FROM pg_catalog.to_jsonb(NEW) THEN
+			RETURN NEW;
+		END IF;
+		RAISE EXCEPTION 'Access-snapshot retry for id does not match immutable history'
+			USING ERRCODE = '55000';
+	END IF;
+
+	SELECT pg_catalog.to_jsonb(existing)
+	INTO existing_row
+	FROM public."access_membership_snapshots" AS existing
+	WHERE existing."version" = NEW."version";
+
+	IF FOUND THEN
+		IF existing_row IS NOT DISTINCT FROM pg_catalog.to_jsonb(NEW) THEN
+			RETURN NEW;
+		END IF;
+		RAISE EXCEPTION 'Access-snapshot retry for version does not match immutable history'
+			USING ERRCODE = '55000';
+	END IF;
+
 	RETURN NEW;
+END;
+$$;--> statement-breakpoint
+
+-- User disablement, identity changes, and scope changes can all change whether
+-- an administrator is reachable. Take the shared lock at statement start,
+-- before PostgreSQL acquires any per-row UPDATE locks.
+CREATE OR REPLACE FUNCTION public."psd_eoc_lock_admin_availability_on_user_write"()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+	IF TG_RELID <> 'public.users'::pg_catalog.regclass
+		OR TG_TABLE_SCHEMA <> 'public'
+		OR TG_TABLE_NAME <> 'users'
+		OR TG_WHEN <> 'BEFORE'
+		OR TG_LEVEL <> 'STATEMENT'
+		OR TG_OP <> 'UPDATE'
+	THEN
+		RAISE EXCEPTION 'Unexpected user availability trigger context'
+			USING ERRCODE = '55000';
+	END IF;
+
+	PERFORM pg_catalog.pg_advisory_xact_lock(
+		pg_catalog.hashtextextended('psd-eoc-admin-availability', 0)
+	);
+
+	RETURN NULL;
+END;
+$$;--> statement-breakpoint
+
+-- Explicit scope rows participate in the same reachable-admin projection as
+-- the users row. Serialize every construction, correction attempt, and owner
+-- deletion before the statement can make a district administrator ambiguous.
+CREATE OR REPLACE FUNCTION public."psd_eoc_lock_admin_availability_on_user_facility_scope_write"()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+	IF TG_RELID <> 'public.user_facility_scopes'::pg_catalog.regclass
+		OR TG_TABLE_SCHEMA <> 'public'
+		OR TG_TABLE_NAME <> 'user_facility_scopes'
+		OR TG_WHEN <> 'BEFORE'
+		OR TG_LEVEL <> 'STATEMENT'
+		OR TG_OP NOT IN ('INSERT', 'UPDATE', 'DELETE')
+	THEN
+		RAISE EXCEPTION 'Unexpected user facility-scope availability trigger context'
+			USING ERRCODE = '55000';
+	END IF;
+
+	PERFORM pg_catalog.pg_advisory_xact_lock(
+		pg_catalog.hashtextextended('psd-eoc-admin-availability', 0)
+	);
+
+	RETURN NULL;
+END;
+$$;--> statement-breakpoint
+
+-- A complete access snapshot is an immutable authorization fact. Its child
+-- graph may be constructed only in the transaction that inserted the parent;
+-- after publication, an exact retry may be ignored but no new fact may appear.
+CREATE OR REPLACE FUNCTION public."psd_eoc_guard_access_snapshot_child_insert"()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+DECLARE
+	new_row jsonb;
+	existing_row jsonb;
+	parent_created_in_current_transaction boolean := false;
+BEGIN
+	IF TG_TABLE_SCHEMA <> 'public'
+		OR TG_WHEN <> 'BEFORE'
+		OR TG_LEVEL <> 'ROW'
+		OR TG_OP <> 'INSERT'
+	THEN
+		RAISE EXCEPTION 'Unexpected access-snapshot child trigger context'
+			USING ERRCODE = '55000';
+	END IF;
+
+	new_row := pg_catalog.to_jsonb(NEW);
+
+	CASE TG_TABLE_NAME
+		WHEN 'access_membership_snapshot_groups' THEN
+			IF TG_RELID <> 'public.access_membership_snapshot_groups'::pg_catalog.regclass THEN
+				RAISE EXCEPTION 'Unexpected access-snapshot group trigger relation'
+					USING ERRCODE = '55000';
+			END IF;
+			SELECT pg_catalog.to_jsonb(existing)
+			INTO existing_row
+			FROM public."access_membership_snapshot_groups" AS existing
+			WHERE existing."snapshot_id" = NEW."snapshot_id"
+				AND existing."group_source_id" =
+					(new_row ->> 'group_source_id')::pg_catalog.uuid
+				AND existing."completion_kind"::pg_catalog.text =
+					new_row ->> 'completion_kind';
+		WHEN 'access_membership_members' THEN
+			IF TG_RELID <> 'public.access_membership_members'::pg_catalog.regclass THEN
+				RAISE EXCEPTION 'Unexpected access-snapshot member trigger relation'
+					USING ERRCODE = '55000';
+			END IF;
+			SELECT pg_catalog.to_jsonb(existing)
+			INTO existing_row
+			FROM public."access_membership_members" AS existing
+			WHERE existing."snapshot_id" = NEW."snapshot_id"
+				AND existing."user_id" =
+					(new_row ->> 'user_id')::pg_catalog.uuid;
+		WHEN 'access_membership_member_groups' THEN
+			IF TG_RELID <> 'public.access_membership_member_groups'::pg_catalog.regclass THEN
+				RAISE EXCEPTION 'Unexpected access-snapshot member-group trigger relation'
+					USING ERRCODE = '55000';
+			END IF;
+			SELECT pg_catalog.to_jsonb(existing)
+			INTO existing_row
+			FROM public."access_membership_member_groups" AS existing
+			WHERE existing."snapshot_id" = NEW."snapshot_id"
+				AND existing."user_id" =
+					(new_row ->> 'user_id')::pg_catalog.uuid
+				AND existing."group_source_id" =
+					(new_row ->> 'group_source_id')::pg_catalog.uuid;
+		WHEN 'access_membership_member_facilities' THEN
+			IF TG_RELID <> 'public.access_membership_member_facilities'::pg_catalog.regclass THEN
+				RAISE EXCEPTION 'Unexpected access-snapshot member-facility trigger relation'
+					USING ERRCODE = '55000';
+			END IF;
+			SELECT pg_catalog.to_jsonb(existing)
+			INTO existing_row
+			FROM public."access_membership_member_facilities" AS existing
+			WHERE existing."snapshot_id" = NEW."snapshot_id"
+				AND existing."user_id" =
+					(new_row ->> 'user_id')::pg_catalog.uuid
+				AND existing."facility_id" =
+					(new_row ->> 'facility_id')::pg_catalog.uuid;
+		ELSE
+			RAISE EXCEPTION 'Unexpected access-snapshot child trigger table'
+				USING ERRCODE = '55000';
+	END CASE;
+
+	IF FOUND THEN
+		IF existing_row IS NOT DISTINCT FROM new_row THEN
+			RETURN NEW;
+		END IF;
+		RAISE EXCEPTION 'Access-snapshot child retry does not match immutable history'
+			USING ERRCODE = '55000';
+	END IF;
+
+	SELECT parent.xmin =
+		pg_catalog.pg_current_xact_id()::pg_catalog.xid
+	INTO parent_created_in_current_transaction
+	FROM public."access_membership_snapshots" AS parent
+	WHERE parent."id" = NEW."snapshot_id";
+
+	IF parent_created_in_current_transaction IS TRUE THEN
+		RETURN NEW;
+	END IF;
+
+	RAISE EXCEPTION 'Published access snapshot cannot accept new % rows', TG_TABLE_NAME
+		USING ERRCODE = '55000';
+END;
+$$;--> statement-breakpoint
+
+CREATE OR REPLACE FUNCTION public."psd_eoc_reject_access_snapshot_update"()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+	IF TG_TABLE_SCHEMA <> 'public'
+		OR TG_WHEN <> 'BEFORE'
+		OR TG_LEVEL <> 'ROW'
+		OR TG_OP <> 'UPDATE'
+	THEN
+		RAISE EXCEPTION 'Unexpected access-snapshot update trigger context'
+			USING ERRCODE = '55000';
+	END IF;
+
+	IF NOT (
+		(TG_TABLE_NAME = 'access_membership_snapshots'
+			AND TG_RELID = 'public.access_membership_snapshots'::pg_catalog.regclass)
+		OR (TG_TABLE_NAME = 'access_membership_snapshot_groups'
+			AND TG_RELID = 'public.access_membership_snapshot_groups'::pg_catalog.regclass)
+		OR (TG_TABLE_NAME = 'access_membership_members'
+			AND TG_RELID = 'public.access_membership_members'::pg_catalog.regclass)
+		OR (TG_TABLE_NAME = 'access_membership_member_groups'
+			AND TG_RELID = 'public.access_membership_member_groups'::pg_catalog.regclass)
+		OR (TG_TABLE_NAME = 'access_membership_member_facilities'
+			AND TG_RELID = 'public.access_membership_member_facilities'::pg_catalog.regclass)
+	) THEN
+		RAISE EXCEPTION 'Unexpected access-snapshot update trigger relation'
+			USING ERRCODE = '55000';
+	END IF;
+
+	RAISE EXCEPTION 'Published access snapshot evidence is immutable on %', TG_TABLE_NAME
+		USING ERRCODE = '55000';
 END;
 $$;--> statement-breakpoint
 
@@ -997,10 +1226,65 @@ BEFORE INSERT ON public."access_membership_snapshots"
 FOR EACH ROW
 EXECUTE FUNCTION public."psd_eoc_lock_admin_availability_on_access_snapshot_insert"();--> statement-breakpoint
 
+CREATE TRIGGER "users_admin_availability_lock"
+BEFORE UPDATE ON public."users"
+FOR EACH STATEMENT
+EXECUTE FUNCTION public."psd_eoc_lock_admin_availability_on_user_write"();--> statement-breakpoint
+
+CREATE TRIGGER "user_facility_scopes_admin_availability_lock"
+BEFORE INSERT OR UPDATE OR DELETE ON public."user_facility_scopes"
+FOR EACH STATEMENT
+EXECUTE FUNCTION public."psd_eoc_lock_admin_availability_on_user_facility_scope_write"();--> statement-breakpoint
+
 CREATE TRIGGER "group_sources_admin_availability_lock"
 BEFORE INSERT OR UPDATE ON public."group_sources"
 FOR EACH STATEMENT
 EXECUTE FUNCTION public."psd_eoc_lock_admin_availability_on_access_group_write"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_snapshot_groups_construction_guard"
+BEFORE INSERT ON public."access_membership_snapshot_groups"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_guard_access_snapshot_child_insert"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_members_construction_guard"
+BEFORE INSERT ON public."access_membership_members"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_guard_access_snapshot_child_insert"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_member_groups_construction_guard"
+BEFORE INSERT ON public."access_membership_member_groups"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_guard_access_snapshot_child_insert"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_member_facilities_construction_guard"
+BEFORE INSERT ON public."access_membership_member_facilities"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_guard_access_snapshot_child_insert"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_snapshots_immutable_guard"
+BEFORE UPDATE ON public."access_membership_snapshots"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_reject_access_snapshot_update"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_snapshot_groups_immutable_guard"
+BEFORE UPDATE ON public."access_membership_snapshot_groups"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_reject_access_snapshot_update"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_members_immutable_guard"
+BEFORE UPDATE ON public."access_membership_members"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_reject_access_snapshot_update"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_member_groups_immutable_guard"
+BEFORE UPDATE ON public."access_membership_member_groups"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_reject_access_snapshot_update"();--> statement-breakpoint
+
+CREATE TRIGGER "access_membership_member_facilities_immutable_guard"
+BEFORE UPDATE ON public."access_membership_member_facilities"
+FOR EACH ROW
+EXECUTE FUNCTION public."psd_eoc_reject_access_snapshot_update"();--> statement-breakpoint
 
 CREATE TRIGGER "roster_source_configurations_monotonic_insert_guard"
 BEFORE INSERT ON public."roster_source_configurations"
@@ -1078,6 +1362,10 @@ REVOKE ALL ON FUNCTION public."psd_eoc_guard_user_role_change_insert"() FROM PUB
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_group_source_identity_mutation"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_lock_admin_availability_on_access_group_write"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_lock_admin_availability_on_access_snapshot_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
+REVOKE ALL ON FUNCTION public."psd_eoc_lock_admin_availability_on_user_write"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
+REVOKE ALL ON FUNCTION public."psd_eoc_lock_admin_availability_on_user_facility_scope_write"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
+REVOKE ALL ON FUNCTION public."psd_eoc_guard_access_snapshot_child_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
+REVOKE ALL ON FUNCTION public."psd_eoc_reject_access_snapshot_update"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_roster_source_configuration_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_roster_snapshot_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE ALL ON FUNCTION public."psd_eoc_guard_roster_configuration_child_insert"() FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
@@ -1109,6 +1397,13 @@ FROM "psd_eoc_app";--> statement-breakpoint
 REVOKE INSERT, UPDATE, DELETE ON TABLE
 	public."user_roles"
 FROM "psd_eoc_app";--> statement-breakpoint
+REVOKE UPDATE ON TABLE
+	public."access_membership_snapshots",
+	public."access_membership_snapshot_groups",
+	public."access_membership_members",
+	public."access_membership_member_groups",
+	public."access_membership_member_facilities"
+FROM PUBLIC, "psd_eoc_app";--> statement-breakpoint
 REVOKE UPDATE, DELETE ON TABLE
 	public."integration_statuses",
 	public."audience_configurations",

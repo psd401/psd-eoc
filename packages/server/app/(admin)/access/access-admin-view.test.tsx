@@ -165,7 +165,10 @@ describe('AccessAdminView semantics', () => {
       'Changing only the display name or status retains this source&#x27;s internal ID.',
     );
     expect(html).toContain(
-      'Correcting a provider locator creates a new source ID and leaves this source inactive as immutable history.',
+      'Correcting a provider locator creates a new source ID while the proven source and its replacement remain active until a new access snapshot proves the replacement and the old source can be retired.',
+    );
+    expect(html).toContain(
+      'A locator replacement must be submitted as Active.',
     );
     expect(html).toContain(
       'An email correction also requires a distinct Google Group ID.',

@@ -942,6 +942,369 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     ]);
   });
 
+  test('hardens the complete access-snapshot privilege and trigger ledger', async () => {
+    const db = databaseConnection().db;
+    const tablePrivileges = await db.execute<{
+      can_delete: boolean;
+      can_insert: boolean;
+      can_references: boolean;
+      can_select: boolean;
+      can_trigger: boolean;
+      can_truncate: boolean;
+      can_update: boolean;
+      public_has_any_privilege: boolean;
+      table_name: string;
+    }>(sql`
+      select
+        access_tables.table_name,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'SELECT'
+        ) as can_select,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'INSERT'
+        ) as can_insert,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'UPDATE'
+        ) as can_update,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'DELETE'
+        ) as can_delete,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'TRUNCATE'
+        ) as can_truncate,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'REFERENCES'
+        ) as can_references,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'TRIGGER'
+        ) as can_trigger,
+        exists (
+          select 1
+          from pg_catalog.pg_class as public_table
+          join pg_catalog.pg_namespace as public_namespace
+            on public_namespace.oid = public_table.relnamespace
+          cross join lateral aclexplode(
+            coalesce(
+              public_table.relacl,
+              acldefault('r', public_table.relowner)
+            )
+          ) as public_privilege
+          where public_namespace.nspname = 'public'
+            and public_table.relname = access_tables.table_name
+            and public_privilege.grantee = 0
+        ) as public_has_any_privilege
+      from unnest(array[
+        'access_membership_snapshots',
+        'access_membership_snapshot_groups',
+        'access_membership_members',
+        'access_membership_member_groups',
+        'access_membership_member_facilities'
+      ]::text[]) as access_tables(table_name)
+      order by access_tables.table_name
+    `);
+    expect([...tablePrivileges]).toEqual(
+      [
+        'access_membership_member_facilities',
+        'access_membership_member_groups',
+        'access_membership_members',
+        'access_membership_snapshot_groups',
+        'access_membership_snapshots',
+      ].map((tableName) => ({
+        table_name: tableName,
+        can_select: true,
+        can_insert: true,
+        can_update: false,
+        can_delete: false,
+        can_truncate: false,
+        can_references: false,
+        can_trigger: false,
+        public_has_any_privilege: false,
+      })),
+    );
+
+    const triggerLedger = await db.execute<{
+      action_orientation: string;
+      action_statement: string;
+      action_timing: string;
+      event_manipulation: string;
+      event_object_table: string;
+      trigger_name: string;
+    }>(sql`
+      select
+        event_object_table,
+        trigger_name,
+        action_timing,
+        action_orientation,
+        event_manipulation,
+        action_statement
+      from information_schema.triggers
+      where trigger_schema = 'public'
+        and trigger_name in (
+          'access_membership_snapshots_admin_availability_lock',
+          'users_admin_availability_lock',
+          'user_facility_scopes_admin_availability_lock',
+          'group_sources_admin_availability_lock',
+          'group_sources_identity_guard',
+          'access_membership_snapshot_groups_construction_guard',
+          'access_membership_members_construction_guard',
+          'access_membership_member_groups_construction_guard',
+          'access_membership_member_facilities_construction_guard',
+          'access_membership_snapshots_immutable_guard',
+          'access_membership_snapshot_groups_immutable_guard',
+          'access_membership_members_immutable_guard',
+          'access_membership_member_groups_immutable_guard',
+          'access_membership_member_facilities_immutable_guard'
+        )
+      order by event_object_table, trigger_name, event_manipulation
+    `);
+    expect(
+      triggerLedger.map((trigger) => ({
+        table: trigger.event_object_table,
+        name: trigger.trigger_name,
+        timing: trigger.action_timing,
+        orientation: trigger.action_orientation,
+        event: trigger.event_manipulation,
+        function: trigger.action_statement,
+      })),
+    ).toEqual([
+      {
+        table: 'access_membership_member_facilities',
+        name: 'access_membership_member_facilities_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_member_facilities',
+        name: 'access_membership_member_facilities_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_member_groups',
+        name: 'access_membership_member_groups_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_member_groups',
+        name: 'access_membership_member_groups_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_members',
+        name: 'access_membership_members_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_members',
+        name: 'access_membership_members_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_snapshot_groups',
+        name: 'access_membership_snapshot_groups_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_snapshot_groups',
+        name: 'access_membership_snapshot_groups_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_snapshots',
+        name: 'access_membership_snapshots_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_access_snapshot_insert()',
+      },
+      {
+        table: 'access_membership_snapshots',
+        name: 'access_membership_snapshots_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'group_sources',
+        name: 'group_sources_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_access_group_write()',
+      },
+      {
+        table: 'group_sources',
+        name: 'group_sources_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_access_group_write()',
+      },
+      {
+        table: 'group_sources',
+        name: 'group_sources_identity_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_group_source_identity_mutation()',
+      },
+      {
+        table: 'user_facility_scopes',
+        name: 'user_facility_scopes_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'DELETE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_facility_scope_write()',
+      },
+      {
+        table: 'user_facility_scopes',
+        name: 'user_facility_scopes_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_facility_scope_write()',
+      },
+      {
+        table: 'user_facility_scopes',
+        name: 'user_facility_scopes_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_facility_scope_write()',
+      },
+      {
+        table: 'users',
+        name: 'users_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_write()',
+      },
+    ]);
+
+    const triggerFunctions = await db.execute<{
+      app_can_execute: boolean;
+      function_name: string;
+      public_can_execute: boolean;
+      settings: string[];
+    }>(sql`
+      select
+        procedure.proname as function_name,
+        coalesce(procedure.proconfig, array[]::text[]) as settings,
+        has_function_privilege(
+          'psd_eoc_app',
+          procedure.oid,
+          'EXECUTE'
+        ) as app_can_execute,
+        exists (
+          select 1
+          from aclexplode(
+            coalesce(
+              procedure.proacl,
+              acldefault('f', procedure.proowner)
+            )
+          ) as function_privilege
+          where function_privilege.grantee = 0
+            and function_privilege.privilege_type = 'EXECUTE'
+        ) as public_can_execute
+      from pg_catalog.pg_proc as procedure
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'public'
+        and procedure.proname in (
+          'psd_eoc_guard_access_snapshot_child_insert',
+          'psd_eoc_lock_admin_availability_on_access_snapshot_insert',
+          'psd_eoc_lock_admin_availability_on_user_facility_scope_write',
+          'psd_eoc_lock_admin_availability_on_user_write',
+          'psd_eoc_reject_access_snapshot_update'
+        )
+      order by procedure.proname
+    `);
+    expect([...triggerFunctions]).toEqual([
+      {
+        function_name: 'psd_eoc_guard_access_snapshot_child_insert',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name:
+          'psd_eoc_lock_admin_availability_on_access_snapshot_insert',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name:
+          'psd_eoc_lock_admin_availability_on_user_facility_scope_write',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name: 'psd_eoc_lock_admin_availability_on_user_write',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name: 'psd_eoc_reject_access_snapshot_update',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+    ]);
+  });
+
   test('allows app-role inserts without granting sequence mutation authority', async () => {
     const db = databaseConnection().db;
     const rollbackProbe = new Error('rollback synthetic admin evidence probe');

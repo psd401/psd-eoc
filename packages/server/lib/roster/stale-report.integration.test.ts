@@ -67,6 +67,10 @@ interface MarkerRow extends Record<string, unknown> {
   readonly marker: string | null;
 }
 
+interface DatabaseCleanupLatch {
+  created: boolean;
+}
+
 const DATABASE_NAME_PATTERN = /^psd_eoc_i26_stale_[a-f0-9]{32}_test$/u;
 
 const ids = Object.freeze({
@@ -122,7 +126,7 @@ const groupRefs = Object.freeze([
 
 let context: StaleReportTestContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
-let databaseCreated = false;
+const databaseCleanupLatch: DatabaseCleanupLatch = { created: false };
 
 function buildContext(baseDatabaseUrl: string): StaleReportTestContext {
   const runId = randomUUID();
@@ -189,11 +193,25 @@ function requireDatabaseOwnership(
   }
 }
 
+async function closeAfterVerifiedDatabaseCreation(
+  createdContext: StaleReportTestContext,
+  marker: string | null | undefined,
+  close: () => Promise<void>,
+  latch: DatabaseCleanupLatch = databaseCleanupLatch,
+): Promise<void> {
+  requireDatabaseOwnership(createdContext, marker);
+  // Arm cleanup before close: a connection shutdown failure must not make the
+  // already-created, marker-owned child database invisible to setup recovery.
+  latch.created = true;
+  await close();
+}
+
 async function createOwnedDatabase(
   createdContext: StaleReportTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
   let created = false;
+  let verifiedMarker: string | null | undefined;
   try {
     await admin.db.execute(
       sql.raw(`create database "${createdContext.databaseName}"`),
@@ -204,10 +222,9 @@ async function createOwnedDatabase(
         `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
       ),
     );
-    requireDatabaseOwnership(
-      createdContext,
-      await readDatabaseMarker(admin, createdContext.databaseName),
-    );
+    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
+    requireDatabaseOwnership(createdContext, marker);
+    verifiedMarker = marker;
   } catch (error) {
     if (created) {
       try {
@@ -225,7 +242,15 @@ async function createOwnedDatabase(
     }
     throw error;
   } finally {
-    await admin.close();
+    if (verifiedMarker === undefined) {
+      await admin.close();
+    } else {
+      await closeAfterVerifiedDatabaseCreation(
+        createdContext,
+        verifiedMarker,
+        () => admin.close(),
+      );
+    }
   }
 }
 
@@ -259,10 +284,10 @@ async function cleanupResources(): Promise<void> {
       connection = undefined;
     }
   }
-  if (databaseCreated && context !== undefined) {
+  if (databaseCleanupLatch.created && context !== undefined) {
     try {
       await dropOwnedDatabase(context);
-      databaseCreated = false;
+      databaseCleanupLatch.created = false;
     } catch (error) {
       errors.push(error);
     }
@@ -653,6 +678,48 @@ async function executeReport(
   );
 }
 
+describe('stale-report database cleanup latch', () => {
+  test('stays armed when connection close fails after ownership verification', async () => {
+    const syntheticContext = buildContext(
+      'postgres://synthetic:synthetic@127.0.0.1:5432/psd_eoc_cleanup_test',
+    );
+    const latch: DatabaseCleanupLatch = { created: false };
+    let closeCalls = 0;
+    await expect(
+      closeAfterVerifiedDatabaseCreation(
+        syntheticContext,
+        syntheticContext.marker,
+        () => {
+          closeCalls += 1;
+          return Promise.reject(
+            new Error('Synthetic database connection close failure.'),
+          );
+        },
+        latch,
+      ),
+    ).rejects.toThrow('Synthetic database connection close failure.');
+    expect(closeCalls).toBe(1);
+    expect(latch.created).toBe(true);
+
+    const unverifiedLatch: DatabaseCleanupLatch = { created: false };
+    await expect(
+      closeAfterVerifiedDatabaseCreation(
+        syntheticContext,
+        'wrong-marker',
+        () => {
+          closeCalls += 1;
+          return Promise.resolve();
+        },
+        unverifiedLatch,
+      ),
+    ).rejects.toThrow(
+      'Refusing to drop a database without the exact issue #26 stale-report ownership marker.',
+    );
+    expect(closeCalls).toBe(1);
+    expect(unverifiedLatch.created).toBe(false);
+  });
+});
+
 describeWithDatabase('PostgreSQL stale-roster report capability', () => {
   beforeAll(async () => {
     if (baseTestDatabaseUrl === undefined) {
@@ -664,7 +731,6 @@ describeWithDatabase('PostgreSQL stale-roster report capability', () => {
     context = buildContext(baseTestDatabaseUrl);
     try {
       await createOwnedDatabase(context);
-      databaseCreated = true;
       connection = openPostgresConnection(context.databaseUrl, 3);
       await migrateDatabase(connection);
       await seedDatabase(connection.db);

@@ -4,10 +4,20 @@ import {
   RoleSchema,
   type Role,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  notExists,
+  sql,
+} from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
+  accessMembershipMemberFacilities,
   accessMembershipMemberGroups,
   accessMembershipMembers,
   accessMembershipSnapshotGroups,
@@ -15,6 +25,7 @@ import {
   groupSources,
   userRoleChanges,
   userRoles,
+  userFacilityScopes,
   users,
 } from '../../db/schema';
 
@@ -359,6 +370,29 @@ export async function loadEffectiveAdministratorUserIds(
         eq(effectiveAdmins.granted, true),
         eq(users.facilityScopeKind, 'district'),
         isNull(users.disabledAt),
+        notExists(
+          database
+            .select({ userId: userFacilityScopes.userId })
+            .from(userFacilityScopes)
+            .where(eq(userFacilityScopes.userId, effectiveAdmins.userId)),
+        ),
+        notExists(
+          database
+            .select({ userId: accessMembershipMemberFacilities.userId })
+            .from(accessMembershipMemberFacilities)
+            .where(
+              and(
+                eq(
+                  accessMembershipMemberFacilities.snapshotId,
+                  accessState.snapshotId,
+                ),
+                eq(
+                  accessMembershipMemberFacilities.userId,
+                  effectiveAdmins.userId,
+                ),
+              ),
+            ),
+        ),
         eq(groupSources.active, true),
         eq(groupSources.kind, 'google-group'),
         eq(groupSources.purpose, 'access'),

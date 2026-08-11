@@ -1,4 +1,5 @@
 import { AdminCapabilityError } from '../facilities/admin-core';
+import { CapabilityEngineError } from '../../../lib/capabilities/engine';
 
 const STATUS_MESSAGES = Object.freeze({
   'access-group-created': 'The Google access group was added.',
@@ -46,4 +47,15 @@ export function accessAdminStatusMessage(
   return typeof value === 'string' && Object.hasOwn(STATUS_MESSAGES, value)
     ? STATUS_MESSAGES[value as keyof typeof STATUS_MESSAGES]
     : null;
+}
+
+/** Identifies a bounded query-input failure that should return to clean state. */
+export function isInvalidAccessAdminQueryError(
+  error: unknown,
+): error is CapabilityEngineError {
+  return (
+    error instanceof CapabilityEngineError &&
+    error.code === 'VALIDATION_ERROR' &&
+    error.status === 400
+  );
 }

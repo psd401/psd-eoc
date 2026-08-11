@@ -81,6 +81,11 @@ export type AdminCapabilityStore =
 
 const adminStoreDatabases = new WeakMap<AdminCapabilityStore, Database>();
 
+const ADMIN_REPEATABLE_READ_ONLY_TRANSACTION_CONFIG = Object.freeze({
+  isolationLevel: 'repeatable read' as const,
+  accessMode: 'read only' as const,
+});
+
 /** Public-safe error raised by route-owned admin capability handlers. */
 export class AdminCapabilityError extends CapabilityEngineError {
   public constructor(
@@ -247,6 +252,9 @@ async function appendCapabilityAudit(
   target: SecurityAuditTarget | null = null,
 ): Promise<void> {
   await database.execute(SECURITY_AUDIT_APPEND_LOCK_SQL);
+  // The shared audit advisory lock (also enforced by the insert trigger)
+  // serializes every chain writer. Plain reads preserve the application
+  // role's intentionally SELECT-only access to immutable chain anchors.
   const [anchor] = await database
     .select({
       sequence: securityAuditChainAnchors.sequence,
@@ -254,8 +262,7 @@ async function appendCapabilityAudit(
     })
     .from(securityAuditChainAnchors)
     .orderBy(desc(securityAuditChainAnchors.sequence))
-    .limit(1)
-    .for('share');
+    .limit(1);
   const [head] = await database
     .select({
       sequence: securityAuditEntries.sequence,
@@ -263,8 +270,7 @@ async function appendCapabilityAudit(
     })
     .from(securityAuditEntries)
     .orderBy(desc(securityAuditEntries.sequence))
-    .limit(1)
-    .for('share');
+    .limit(1);
   if (
     (anchor === undefined) !== (head === undefined) ||
     anchor?.sequence !== head?.sequence ||
@@ -280,8 +286,7 @@ async function appendCapabilityAudit(
     .select({ id: securityAuditEntries.id })
     .from(securityAuditEntries)
     .where(eq(securityAuditEntries.requestId, event.requestId))
-    .limit(1)
-    .for('share');
+    .limit(1);
   if (existingRequest !== undefined) {
     if (event.outcome === 'success') {
       throw conflict('The request identifier has already been used.');
@@ -352,6 +357,22 @@ async function assertAuditRequestAvailable(
   }
 }
 
+async function assertAuditRequestAvailableInReadOnlySnapshot(
+  database: AdminQueryDatabase,
+  requestId: string,
+): Promise<void> {
+  // Row locks are forbidden in a READ ONLY transaction. The later serialized
+  // append and the request-ID uniqueness constraint remain the race authority.
+  const [existing] = await database
+    .select({ id: securityAuditEntries.id })
+    .from(securityAuditEntries)
+    .where(eq(securityAuditEntries.requestId, requestId))
+    .limit(1);
+  if (existing !== undefined) {
+    throw conflict('The request identifier has already been used.');
+  }
+}
+
 function sameHumanActor(left: Actor, right: Actor): boolean {
   return (
     left.kind === 'human' &&
@@ -364,19 +385,33 @@ function sameHumanActor(left: Actor, right: Actor): boolean {
 function createAdminTransaction(
   database: AdminQueryDatabase,
   authenticated: AuthenticatedSession,
+  auditBehavior: Readonly<{
+    assertRequestAvailable(
+      database: AdminQueryDatabase,
+      requestId: string,
+    ): Promise<void>;
+    append(
+      database: AdminQueryDatabase,
+      event: CapabilityAuditEvent,
+      target: SecurityAuditTarget | null,
+    ): Promise<void>;
+  }> = {
+    assertRequestAvailable: assertAuditRequestAvailable,
+    append: appendCapabilityAudit,
+  },
 ): AdminCapabilityTransaction {
   let auditTarget: SecurityAuditTarget | null = null;
   return {
     database,
     assertAuditRequestAvailable: (requestId) =>
-      assertAuditRequestAvailable(database, requestId),
+      auditBehavior.assertRequestAvailable(database, requestId),
     readCurrentTime: () => readDatabaseTime(database),
     claimIdempotency: (input) => claimIdempotency(database, input),
     completeIdempotency: (input) => completeIdempotency(database, input),
     getHumanConfirmation: () => Promise.resolve(null),
     consumeHumanConfirmation: () => Promise.resolve(false),
     appendCapabilityAudit: (event) =>
-      appendCapabilityAudit(database, event, auditTarget),
+      auditBehavior.append(database, event, auditTarget),
     setAuditTarget(target) {
       auditTarget = target;
     },
@@ -441,12 +476,86 @@ export function createDrizzleAdminCapabilityStore(
   return store;
 }
 
+interface CapturedAdminCapabilityAudit {
+  readonly event: CapabilityAuditEvent;
+  readonly target: SecurityAuditTarget | null;
+}
+
+/**
+ * Creates an all-outcomes query store with one coherent read-only snapshot.
+ * The successful audit is captured without writing inside the snapshot, then
+ * appended through the normal serialized writer before the result is exposed.
+ * A failed snapshot still uses the store's normal fail-closed failure append.
+ */
+export function createRepeatableReadAdminQueryStore(
+  database: Database,
+  authenticated: AuthenticatedSession,
+): AdminCapabilityStore {
+  const store: AdminCapabilityStore = {
+    async transaction<Result>(
+      operation: (transaction: AdminCapabilityTransaction) => Promise<Result>,
+    ): Promise<Result> {
+      const capturedAudit: { value: CapturedAdminCapabilityAudit | null } = {
+        value: null,
+      };
+      const result = await database.transaction(
+        (transaction) =>
+          operation(
+            createAdminTransaction(
+              asAdminDatabase(transaction),
+              authenticated,
+              {
+                assertRequestAvailable:
+                  assertAuditRequestAvailableInReadOnlySnapshot,
+                append(_database, event, target) {
+                  if (capturedAudit.value !== null) {
+                    throw new AdminCapabilityError(
+                      'INTERNAL_ERROR',
+                      'The administrator query produced more than one success audit event.',
+                      500,
+                    );
+                  }
+                  capturedAudit.value = Object.freeze({ event, target });
+                  return Promise.resolve();
+                },
+              },
+            ),
+          ),
+        ADMIN_REPEATABLE_READ_ONLY_TRANSACTION_CONFIG,
+      );
+      const audit = capturedAudit.value;
+      if (audit === null) {
+        throw new AdminCapabilityError(
+          'INTERNAL_ERROR',
+          'The administrator query did not produce its required success audit event.',
+          500,
+        );
+      }
+      await database.transaction((transaction) =>
+        appendCapabilityAudit(
+          asAdminDatabase(transaction),
+          audit.event,
+          audit.target,
+        ),
+      );
+      return result;
+    },
+    appendCapabilityAudit(event) {
+      return database.transaction((transaction) =>
+        appendCapabilityAudit(asAdminDatabase(transaction), event),
+      );
+    },
+  };
+  adminStoreDatabases.set(store, database);
+  return store;
+}
+
 /**
  * Returns the exact root database injected into a Drizzle admin store.
  *
- * Read-only evidence stores that own their own transaction must start it from
- * this root rather than nesting under the capability transaction or falling
- * back to process-global state.
+ * Evidence stores that own a specialized transaction posture must start it
+ * from this root rather than nesting under a capability transaction or
+ * falling back to process-global state.
  */
 export function getAdminCapabilityStoreDatabase(
   store: AdminCapabilityStore,

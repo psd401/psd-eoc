@@ -454,6 +454,11 @@ function parseFacilityScope(
   kind: 'district' | 'facilities',
   facilityIds: readonly string[],
 ): FacilityScope {
+  if (kind === 'district' && facilityIds.length !== 0) {
+    throw new AccessGateConfigurationError(
+      'Persisted district facility scope cannot contain facility rows',
+    );
+  }
   return FacilityScopeSchema.parse(
     kind === 'district' ? { kind } : { kind, facilityIds },
   );
