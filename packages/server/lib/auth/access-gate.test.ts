@@ -16,14 +16,17 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  accessMembershipMemberFacilities,
   accessMembershipMemberGroups,
   accessMembershipMembers,
   accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   deviceEnrollments,
+  facilities,
   groupSources,
   sessions,
   securityAuditEntries,
+  userFacilityScopes,
   userRoleChanges,
   userRoles,
   users,
@@ -44,6 +47,7 @@ import {
 } from './session-cookie';
 import {
   ACCESS_GATE_AUDIT_LOCK_SQL,
+  AccessGateConfigurationError,
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
@@ -489,61 +493,63 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       { userId, role: 'staff' },
       { userId: backupUserId, role: 'admin' },
     ]);
-    await database.insert(accessMembershipSnapshots).values({
-      id: snapshotId,
-      version: snapshotVersion,
-      complete: true,
-      syncStartedAt: now,
-      capturedAt: now,
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: snapshotVersion,
+        complete: true,
+        syncStartedAt: now,
+        capturedAt: now,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        [groupSourceId, backupGroupSourceId].flatMap((sourceId) => [
+          {
+            snapshotId,
+            groupSourceId: sourceId,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'expected' as const,
+          },
+          {
+            snapshotId,
+            groupSourceId: sourceId,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(accessMembershipMembers).values([
+        {
+          snapshotId,
+          userId,
+          googleSubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId,
+          userId: backupUserId,
+          googleSubject: backupGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+      ]);
+      await transaction.insert(accessMembershipMemberGroups).values([
+        {
+          snapshotId,
+          userId,
+          groupSourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId,
+          userId: backupUserId,
+          groupSourceId: backupGroupSourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+      ]);
     });
-    await database.insert(accessMembershipSnapshotGroups).values(
-      [groupSourceId, backupGroupSourceId].flatMap((sourceId) => [
-        {
-          snapshotId,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-          completionKind: 'expected' as const,
-        },
-        {
-          snapshotId,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-          completionKind: 'completed' as const,
-        },
-      ]),
-    );
-    await database.insert(accessMembershipMembers).values([
-      {
-        snapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
-      },
-      {
-        snapshotId,
-        userId: backupUserId,
-        googleSubject: backupGoogleSubject,
-        facilityScopeKind: 'district',
-      },
-    ]);
-    await database.insert(accessMembershipMemberGroups).values([
-      {
-        snapshotId,
-        userId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-      },
-      {
-        snapshotId,
-        userId: backupUserId,
-        groupSourceId: backupGroupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-      },
-    ]);
     const deviceEnrollmentId = randomUUID();
     const sessionId = randomUUID();
     await database.insert(deviceEnrollments).values({
@@ -900,61 +906,65 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
 
     const replacementSnapshotId = randomUUID();
     const replacementCapturedAt = new Date(now.getTime() + 4_000);
-    await database.insert(accessMembershipSnapshots).values({
-      id: replacementSnapshotId,
-      version: snapshotVersion + 1,
-      complete: true,
-      syncStartedAt: replacementCapturedAt,
-      capturedAt: replacementCapturedAt,
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: replacementSnapshotId,
+        version: snapshotVersion + 1,
+        complete: true,
+        syncStartedAt: replacementCapturedAt,
+        capturedAt: replacementCapturedAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        [groupSourceId, accessReplacement.id, backupGroupSourceId].flatMap(
+          (sourceId) => [
+            {
+              snapshotId: replacementSnapshotId,
+              groupSourceId: sourceId,
+              groupSourceKind: 'google-group' as const,
+              groupPurpose: 'access' as const,
+              completionKind: 'expected' as const,
+            },
+            {
+              snapshotId: replacementSnapshotId,
+              groupSourceId: sourceId,
+              groupSourceKind: 'google-group' as const,
+              groupPurpose: 'access' as const,
+              completionKind: 'completed' as const,
+            },
+          ],
+        ),
+      );
+      await transaction.insert(accessMembershipMembers).values([
+        {
+          snapshotId: replacementSnapshotId,
+          userId,
+          googleSubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId: replacementSnapshotId,
+          userId: backupUserId,
+          googleSubject: backupGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+      ]);
+      await transaction.insert(accessMembershipMemberGroups).values([
+        {
+          snapshotId: replacementSnapshotId,
+          userId,
+          groupSourceId: accessReplacement.id,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId: replacementSnapshotId,
+          userId: backupUserId,
+          groupSourceId: backupGroupSourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+      ]);
     });
-    await database.insert(accessMembershipSnapshotGroups).values(
-      [accessReplacement.id, backupGroupSourceId].flatMap((sourceId) => [
-        {
-          snapshotId: replacementSnapshotId,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-          completionKind: 'expected' as const,
-        },
-        {
-          snapshotId: replacementSnapshotId,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-          completionKind: 'completed' as const,
-        },
-      ]),
-    );
-    await database.insert(accessMembershipMembers).values([
-      {
-        snapshotId: replacementSnapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
-      },
-      {
-        snapshotId: replacementSnapshotId,
-        userId: backupUserId,
-        googleSubject: backupGoogleSubject,
-        facilityScopeKind: 'district',
-      },
-    ]);
-    await database.insert(accessMembershipMemberGroups).values([
-      {
-        snapshotId: replacementSnapshotId,
-        userId,
-        groupSourceId: accessReplacement.id,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-      },
-      {
-        snapshotId: replacementSnapshotId,
-        userId: backupUserId,
-        groupSourceId: backupGroupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-      },
-    ]);
     const afterReplacementSync = await checkAccessGate(
       {
         googleSubject,
@@ -1061,104 +1071,272 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
     expect(await loadEffectiveAdministratorUserIds(database)).toEqual([]);
 
-    const exactThreeGroupSnapshotId = randomUUID();
-    const exactThreeGroupSnapshotAt = new Date(now.getTime() + 7_000);
-    await database.insert(accessMembershipSnapshots).values({
-      id: exactThreeGroupSnapshotId,
-      version: snapshotVersion + 2,
-      complete: true,
-      syncStartedAt: exactThreeGroupSnapshotAt,
-      capturedAt: exactThreeGroupSnapshotAt,
+    const exactFourGroupSnapshotId = randomUUID();
+    const exactFourGroupSnapshotAt = new Date(now.getTime() + 7_000);
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: exactFourGroupSnapshotId,
+        version: snapshotVersion + 2,
+        complete: true,
+        syncStartedAt: exactFourGroupSnapshotAt,
+        capturedAt: exactFourGroupSnapshotAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        [
+          groupSourceId,
+          accessReplacement.id,
+          backupGroupSourceId,
+          remainingAccessGroupId,
+        ].flatMap((sourceId) => [
+          {
+            snapshotId: exactFourGroupSnapshotId,
+            groupSourceId: sourceId,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'expected' as const,
+          },
+          {
+            snapshotId: exactFourGroupSnapshotId,
+            groupSourceId: sourceId,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(accessMembershipMembers).values([
+        {
+          snapshotId: exactFourGroupSnapshotId,
+          userId,
+          googleSubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId: exactFourGroupSnapshotId,
+          userId: backupUserId,
+          googleSubject: backupGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+      ]);
+      await transaction.insert(accessMembershipMemberGroups).values([
+        {
+          snapshotId: exactFourGroupSnapshotId,
+          userId,
+          groupSourceId: accessReplacement.id,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId: exactFourGroupSnapshotId,
+          userId: backupUserId,
+          groupSourceId: backupGroupSourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+      ]);
     });
-    await database.insert(accessMembershipSnapshotGroups).values(
-      [
-        accessReplacement.id,
-        backupGroupSourceId,
-        remainingAccessGroupId,
-      ].flatMap((sourceId) => [
-        {
-          snapshotId: exactThreeGroupSnapshotId,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-          completionKind: 'expected' as const,
-        },
-        {
-          snapshotId: exactThreeGroupSnapshotId,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-          completionKind: 'completed' as const,
-        },
-      ]),
-    );
-    await database.insert(accessMembershipMembers).values([
-      {
-        snapshotId: exactThreeGroupSnapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
-      },
-      {
-        snapshotId: exactThreeGroupSnapshotId,
-        userId: backupUserId,
-        googleSubject: backupGoogleSubject,
-        facilityScopeKind: 'district',
-      },
-    ]);
-    await database.insert(accessMembershipMemberGroups).values([
-      {
-        snapshotId: exactThreeGroupSnapshotId,
-        userId,
-        groupSourceId: accessReplacement.id,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-      },
-      {
-        snapshotId: exactThreeGroupSnapshotId,
-        userId: backupUserId,
-        groupSourceId: backupGroupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-      },
-    ]);
 
-    const exactThreeGroupState =
+    const exactFourGroupState =
       await loadAccessConfigurationSnapshotState(database);
-    expect(exactThreeGroupState).toEqual({
-      snapshotId: exactThreeGroupSnapshotId,
+    expect(exactFourGroupState).toEqual({
+      snapshotId: exactFourGroupSnapshotId,
       snapshotVersion: snapshotVersion + 2,
       activeAccessGroupSourceIds: [
+        groupSourceId,
         accessReplacement.id,
         backupGroupSourceId,
         remainingAccessGroupId,
       ].sort(),
     });
-    if (exactThreeGroupState === null) {
-      throw new Error('The three-group access snapshot must be exact.');
+    if (exactFourGroupState === null) {
+      throw new Error('The four-group access snapshot must be exact.');
     }
     expect(
       await loadEffectiveAdministratorUserIds(database, {
-        accessState: exactThreeGroupState,
+        accessState: exactFourGroupState,
       }),
     ).toEqual([userId]);
     expect(
       await loadEffectiveAdministratorUserIds(database, {
-        accessState: exactThreeGroupState,
+        accessState: exactFourGroupState,
         eligibleAccessGroupSourceIds: [remainingAccessGroupId],
       }),
     ).toEqual([]);
     expect(
       await loadEffectiveAdministratorUserIds(database, {
-        accessState: exactThreeGroupState,
+        accessState: exactFourGroupState,
         eligibleAccessGroupSourceIds: [backupGroupSourceId],
       }),
     ).toEqual([]);
     expect(
       await loadEffectiveAdministratorUserIds(database, {
-        accessState: exactThreeGroupState,
+        accessState: exactFourGroupState,
         eligibleAccessGroupSourceIds: [accessReplacement.id],
       }),
     ).toEqual([userId]);
+  });
+
+  test('rejects contradictory district scopes and excludes them from reachable administrators', async () => {
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const facilityId = randomUUID();
+    const validUserId = randomUUID();
+    const persistedScopeUserId = randomUUID();
+    const membershipScopeUserId = randomUUID();
+    const validGoogleSubject = `issue-26-valid-admin-${suffix}`;
+    const persistedScopeGoogleSubject = `issue-26-user-scope-${suffix}`;
+    const membershipScopeGoogleSubject = `issue-26-member-scope-${suffix}`;
+    const snapshotId = randomUUID();
+    const capturedAt = new Date(Date.now() + 120_000);
+
+    await database.insert(facilities).values({
+      id: facilityId,
+      code: `I26-${suffix.slice(0, 8).toUpperCase()}`,
+      name: `Issue 26 contradictory scope ${suffix.slice(0, 8)}`,
+      active: true,
+      createdAt: capturedAt,
+    });
+    await database.insert(users).values([
+      {
+        id: validUserId,
+        googleSubject: validGoogleSubject,
+        email: `issue-26-valid-admin-${suffix}@psd401.net`,
+        displayName: `Issue 26 valid admin ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+      {
+        id: persistedScopeUserId,
+        googleSubject: persistedScopeGoogleSubject,
+        email: `issue-26-user-scope-${suffix}@psd401.net`,
+        displayName: `Issue 26 contradictory user ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+      {
+        id: membershipScopeUserId,
+        googleSubject: membershipScopeGoogleSubject,
+        email: `issue-26-member-scope-${suffix}@psd401.net`,
+        displayName: `Issue 26 contradictory member ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+    ]);
+    await database
+      .insert(userRoles)
+      .values(
+        [validUserId, persistedScopeUserId, membershipScopeUserId].map(
+          (userId) => ({ userId, role: 'admin' as const }),
+        ),
+      );
+    await database.insert(userFacilityScopes).values({
+      userId: persistedScopeUserId,
+      facilityId,
+    });
+
+    const activeAccessGroups = await database
+      .select({
+        id: groupSources.id,
+        kind: groupSources.kind,
+        purpose: groupSources.purpose,
+      })
+      .from(groupSources)
+      .where(eq(groupSources.active, true));
+    const accessGroup = activeAccessGroups.find(
+      (group) => group.kind === 'google-group' && group.purpose === 'access',
+    );
+    if (accessGroup === undefined) {
+      throw new Error('A synthetic active access group must be available.');
+    }
+
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: 2_100_000_000,
+        complete: true,
+        syncStartedAt: capturedAt,
+        capturedAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        activeAccessGroups
+          .filter(
+            (group) =>
+              group.kind === 'google-group' && group.purpose === 'access',
+          )
+          .flatMap((group) => [
+            {
+              snapshotId,
+              groupSourceId: group.id,
+              groupSourceKind: 'google-group' as const,
+              groupPurpose: 'access' as const,
+              completionKind: 'expected' as const,
+            },
+            {
+              snapshotId,
+              groupSourceId: group.id,
+              groupSourceKind: 'google-group' as const,
+              groupPurpose: 'access' as const,
+              completionKind: 'completed' as const,
+            },
+          ]),
+      );
+      await transaction.insert(accessMembershipMembers).values([
+        {
+          snapshotId,
+          userId: validUserId,
+          googleSubject: validGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId,
+          userId: persistedScopeUserId,
+          googleSubject: persistedScopeGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId,
+          userId: membershipScopeUserId,
+          googleSubject: membershipScopeGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+      ]);
+      await transaction.insert(accessMembershipMemberGroups).values(
+        [validUserId, persistedScopeUserId, membershipScopeUserId].map(
+          (userId) => ({
+            snapshotId,
+            userId,
+            groupSourceId: accessGroup.id,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+          }),
+        ),
+      );
+      await transaction.insert(accessMembershipMemberFacilities).values({
+        snapshotId,
+        userId: membershipScopeUserId,
+        facilityId,
+      });
+    });
+
+    const accessState = await loadAccessConfigurationSnapshotState(database);
+    expect(accessState?.snapshotId).toBe(snapshotId);
+    if (accessState === null) {
+      throw new Error('The contradictory-scope snapshot must be exact.');
+    }
+    expect(
+      await loadEffectiveAdministratorUserIds(database, { accessState }),
+    ).toEqual([validUserId]);
+
+    const store = createDrizzleAccessGateStore(database);
+    await expect(
+      store.loadEvidence(persistedScopeGoogleSubject),
+    ).rejects.toBeInstanceOf(AccessGateConfigurationError);
+    await expect(
+      store.loadEvidence(membershipScopeGoogleSubject),
+    ).rejects.toBeInstanceOf(AccessGateConfigurationError);
+    expect(
+      (await store.loadEvidence(validGoogleSubject)).snapshot?.member
+        ?.facilityScope,
+    ).toEqual({ kind: 'district' });
   });
 });

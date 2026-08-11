@@ -292,41 +292,43 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       createdAt: now,
     });
     await database.insert(userRoles).values({ userId, role: 'staff' });
-    await database.insert(accessMembershipSnapshots).values({
-      id: snapshotId,
-      version: 2_100_000_000 + Number.parseInt(suffix.slice(0, 6), 16),
-      complete: true,
-      syncStartedAt: now,
-      capturedAt: now,
-    });
-    await database.insert(accessMembershipSnapshotGroups).values([
-      {
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: 2_100_000_000 + Number.parseInt(suffix.slice(0, 6), 16),
+        complete: true,
+        syncStartedAt: now,
+        capturedAt: now,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values([
+        {
+          snapshotId,
+          groupSourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+          completionKind: 'expected',
+        },
+        {
+          snapshotId,
+          groupSourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+          completionKind: 'completed',
+        },
+      ]);
+      await transaction.insert(accessMembershipMembers).values({
         snapshotId,
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
+      });
+      await transaction.insert(accessMembershipMemberGroups).values({
+        snapshotId,
+        userId,
         groupSourceId,
         groupSourceKind: 'google-group',
         groupPurpose: 'access',
-        completionKind: 'expected',
-      },
-      {
-        snapshotId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'completed',
-      },
-    ]);
-    await database.insert(accessMembershipMembers).values({
-      snapshotId,
-      userId,
-      googleSubject,
-      facilityScopeKind: 'district',
-    });
-    await database.insert(accessMembershipMemberGroups).values({
-      snapshotId,
-      userId,
-      groupSourceId,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
+      });
     });
     await database.insert(deviceEnrollments).values({
       id: deviceEnrollmentId,
@@ -425,43 +427,45 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
           eq(groupSources.purpose, 'access'),
         ),
       );
-    await database.insert(accessMembershipSnapshots).values({
-      id: snapshotId,
-      version: 2_120_000_000 + Number.parseInt(suffix.slice(0, 6), 16),
-      complete: true,
-      syncStartedAt: snapshotAt,
-      capturedAt: snapshotAt,
-    });
-    await database.insert(accessMembershipSnapshotGroups).values(
-      activeAccessGroups.flatMap((source) => [
-        {
-          snapshotId,
-          groupSourceId: source.id,
-          groupSourceKind: source.kind,
-          groupPurpose: source.purpose,
-          completionKind: 'expected' as const,
-        },
-        {
-          snapshotId,
-          groupSourceId: source.id,
-          groupSourceKind: source.kind,
-          groupPurpose: source.purpose,
-          completionKind: 'completed' as const,
-        },
-      ]),
-    );
-    await database.insert(accessMembershipMembers).values({
-      snapshotId,
-      userId,
-      googleSubject,
-      facilityScopeKind: 'district',
-    });
-    await database.insert(accessMembershipMemberGroups).values({
-      snapshotId,
-      userId,
-      groupSourceId,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: 2_120_000_000 + Number.parseInt(suffix.slice(0, 6), 16),
+        complete: true,
+        syncStartedAt: snapshotAt,
+        capturedAt: snapshotAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        activeAccessGroups.flatMap((source) => [
+          {
+            snapshotId,
+            groupSourceId: source.id,
+            groupSourceKind: source.kind,
+            groupPurpose: source.purpose,
+            completionKind: 'expected' as const,
+          },
+          {
+            snapshotId,
+            groupSourceId: source.id,
+            groupSourceKind: source.kind,
+            groupPurpose: source.purpose,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(accessMembershipMembers).values({
+        snapshotId,
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
+      });
+      await transaction.insert(accessMembershipMemberGroups).values({
+        snapshotId,
+        userId,
+        groupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      });
     });
 
     const responseDigest = digest(`issue-26-bootstrap-response:${suffix}`);

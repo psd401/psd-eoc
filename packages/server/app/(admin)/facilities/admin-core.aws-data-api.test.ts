@@ -135,12 +135,26 @@ interface RecordedStatement {
   readonly parameterStrings: readonly string[];
 }
 
+function requireRecordedStatement(
+  statement: RecordedStatement | undefined,
+): RecordedStatement {
+  if (statement === undefined) {
+    throw new Error('The expected synthetic Data API statement was not sent.');
+  }
+  return statement;
+}
+
 interface FakeIdempotencyRecord {
   readonly id: string;
   readonly key: string;
   readonly requestDigest: string;
   status: 'in-progress' | 'completed';
   resultReference: string | null;
+}
+
+interface AuditInsertGate {
+  readonly started: Promise<void>;
+  release(): void;
 }
 
 /**
@@ -150,6 +164,8 @@ interface FakeIdempotencyRecord {
 class FakeRdsDataClient {
   readonly statements: RecordedStatement[] = [];
   readonly maximumInFlight = new Map<string, number>();
+  readonly committedTransactionIds: string[] = [];
+  readonly rolledBackTransactionIds: string[] = [];
 
   private readonly configuredIntegrations = new Set<string>();
   private readonly groupSources = new Map<
@@ -172,6 +188,44 @@ class FakeRdsDataClient {
   private projectionBatchFixtures = false;
   private rosterConfigurationVersion = 0;
   private roleStaffGranted = false;
+  private auditInsertFailuresRemaining = 0;
+  private auditInsertWait:
+    | Readonly<{
+        started(): void;
+        release: Promise<void>;
+      }>
+    | undefined;
+  private failHealthStatusRead = false;
+
+  failNextAuditInserts(count: number): void {
+    this.auditInsertFailuresRemaining = count;
+  }
+
+  failNextIntegrationHealthStatusRead(): void {
+    this.failHealthStatusRead = true;
+  }
+
+  holdNextAuditInsert(): AuditInsertGate {
+    let markStarted: (() => void) | undefined;
+    let release: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    if (markStarted === undefined || release === undefined) {
+      throw new Error('The synthetic audit gate could not be initialized.');
+    }
+    this.auditInsertWait = {
+      started: markStarted,
+      release: released,
+    };
+    return Object.freeze({
+      started,
+      release,
+    });
+  }
 
   enableProjectionBatchFixtures(): void {
     this.projectionBatchFixtures = true;
@@ -189,10 +243,16 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
-    if (
-      command instanceof CommitTransactionCommand ||
-      command instanceof RollbackTransactionCommand
-    ) {
+    if (command instanceof CommitTransactionCommand) {
+      if (command.input.transactionId !== undefined) {
+        this.committedTransactionIds.push(command.input.transactionId);
+      }
+      return { $metadata: {} };
+    }
+    if (command instanceof RollbackTransactionCommand) {
+      if (command.input.transactionId !== undefined) {
+        this.rolledBackTransactionIds.push(command.input.transactionId);
+      }
       return { $metadata: {} };
     }
     if (!(command instanceof ExecuteStatementCommand)) {
@@ -233,6 +293,26 @@ class FakeRdsDataClient {
     // Yield so concurrent sends on one transaction deterministically overlap.
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
     try {
+      if (normalizedSql.startsWith('insert into "security_audit_entries"')) {
+        const wait = this.auditInsertWait;
+        if (wait !== undefined) {
+          this.auditInsertWait = undefined;
+          wait.started();
+          await wait.release;
+        }
+        if (this.auditInsertFailuresRemaining > 0) {
+          this.auditInsertFailuresRemaining -= 1;
+          throw new Error('Synthetic security audit append failure.');
+        }
+      }
+      if (
+        this.failHealthStatusRead &&
+        normalizedSql.startsWith('select distinct on') &&
+        normalizedSql.includes('from "integration_statuses"')
+      ) {
+        this.failHealthStatusRead = false;
+        throw new Error('Synthetic integration health projection failure.');
+      }
       return this.syntheticResponse(normalizedSql, parameterStrings);
     } finally {
       this.inFlight.set(transactionId, current - 1);
@@ -1115,6 +1195,198 @@ function fakeDatabase(client: FakeRdsDataClient): Database {
 }
 
 describe('admin Aurora Data API transport regression', () => {
+  test('holds the health result until the separately serialized success audit commits', async () => {
+    const client = new FakeRdsDataClient();
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(
+      fakeDatabase(client),
+      authenticated,
+    );
+    const auditGate = client.holdNextAuditInsert();
+    let settled = false;
+    const execution = executeIntegrationHealthProjection({
+      authenticated,
+      store,
+      query: { integrationId: LIVE_INTEGRATION_ID },
+      metadata: {
+        requestId: '00000000-0000-4000-8000-000000002690',
+        now: new Date(CLOCK_VALUE),
+      },
+    }).finally(() => {
+      settled = true;
+    });
+
+    await auditGate.started;
+    try {
+      expect(settled).toBe(false);
+      const auditInsert = client.statements.find(({ sql }) =>
+        sql.startsWith('insert into "security_audit_entries"'),
+      );
+      expect(auditInsert).toBeDefined();
+      expect(client.committedTransactionIds).not.toContain(
+        auditInsert?.transactionId,
+      );
+    } finally {
+      auditGate.release();
+    }
+
+    const projection = await execution;
+    const auditInsert = requireRecordedStatement(
+      client.statements.find(({ sql }) =>
+        sql.startsWith('insert into "security_audit_entries"'),
+      ),
+    );
+    expect(projection.health.statuses).toHaveLength(1);
+    expect(settled).toBe(true);
+    expect(client.committedTransactionIds).toContain(auditInsert.transactionId);
+  });
+
+  test('audits authorization and projection failures through the normal writer', async () => {
+    const deniedClient = new FakeRdsDataClient();
+    const deniedAuthenticated = {
+      ...authenticatedAdministrator(),
+      roles: ['staff'],
+    } as unknown as AuthenticatedSession;
+    const deniedStore = createDrizzleAdminCapabilityStore(
+      fakeDatabase(deniedClient),
+      deniedAuthenticated,
+    );
+    await expect(
+      executeIntegrationHealthProjection({
+        authenticated: deniedAuthenticated,
+        store: deniedStore,
+        query: { integrationId: LIVE_INTEGRATION_ID },
+        metadata: {
+          requestId: '00000000-0000-4000-8000-000000002691',
+          now: new Date(CLOCK_VALUE),
+        },
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    const deniedSnapshot = requireRecordedStatement(
+      deniedClient.statements.find(
+        ({ sql }) =>
+          sql === 'set transaction isolation level repeatable read read only',
+      ),
+    );
+    const deniedAudit = requireRecordedStatement(
+      deniedClient.statements.find(({ sql }) =>
+        sql.startsWith('insert into "security_audit_entries"'),
+      ),
+    );
+    expect(deniedAudit.parameterStrings).toContain('denied');
+    expect(deniedAudit.transactionId).not.toBe(deniedSnapshot.transactionId);
+    expect(deniedClient.rolledBackTransactionIds).toContain(
+      deniedSnapshot.transactionId,
+    );
+    expect(deniedClient.committedTransactionIds).toContain(
+      deniedAudit.transactionId,
+    );
+
+    const failedClient = new FakeRdsDataClient();
+    failedClient.failNextIntegrationHealthStatusRead();
+    const authenticated = authenticatedAdministrator();
+    const failedStore = createDrizzleAdminCapabilityStore(
+      fakeDatabase(failedClient),
+      authenticated,
+    );
+    await expect(
+      executeIntegrationHealthProjection({
+        authenticated,
+        store: failedStore,
+        query: { integrationId: LIVE_INTEGRATION_ID },
+        metadata: {
+          requestId: '00000000-0000-4000-8000-000000002692',
+          now: new Date(CLOCK_VALUE),
+        },
+      }),
+    ).rejects.toMatchObject({ status: 500 });
+    const failedSnapshot = requireRecordedStatement(
+      failedClient.statements.find(
+        ({ sql }) =>
+          sql === 'set transaction isolation level repeatable read read only',
+      ),
+    );
+    const failedAudit = requireRecordedStatement(
+      failedClient.statements.find(({ sql }) =>
+        sql.startsWith('insert into "security_audit_entries"'),
+      ),
+    );
+    expect(failedAudit.parameterStrings).toContain('failure');
+    expect(failedAudit.transactionId).not.toBe(failedSnapshot.transactionId);
+    expect(failedClient.rolledBackTransactionIds).toContain(
+      failedSnapshot.transactionId,
+    );
+    expect(failedClient.committedTransactionIds).toContain(
+      failedAudit.transactionId,
+    );
+  });
+
+  test('fails closed when the separate audit append cannot commit', async () => {
+    const successClient = new FakeRdsDataClient();
+    successClient.failNextAuditInserts(1);
+    const authenticated = authenticatedAdministrator();
+    const successStore = createDrizzleAdminCapabilityStore(
+      fakeDatabase(successClient),
+      authenticated,
+    );
+    await expect(
+      executeIntegrationHealthProjection({
+        authenticated,
+        store: successStore,
+        query: { integrationId: LIVE_INTEGRATION_ID },
+        metadata: {
+          requestId: '00000000-0000-4000-8000-000000002693',
+          now: new Date(CLOCK_VALUE),
+        },
+      }),
+    ).rejects.toMatchObject({ status: 500 });
+    const successAuditAttempts = successClient.statements.filter(({ sql }) =>
+      sql.startsWith('insert into "security_audit_entries"'),
+    );
+    expect(successAuditAttempts).toHaveLength(2);
+    const successAuditAttempt = requireRecordedStatement(
+      successAuditAttempts[0],
+    );
+    const failureAuditAttempt = requireRecordedStatement(
+      successAuditAttempts[1],
+    );
+    expect(successAuditAttempt.parameterStrings).toContain('success');
+    expect(failureAuditAttempt.parameterStrings).toContain('failure');
+    expect(successClient.rolledBackTransactionIds).toContain(
+      successAuditAttempt.transactionId,
+    );
+    expect(successClient.committedTransactionIds).toContain(
+      failureAuditAttempt.transactionId,
+    );
+
+    const deniedClient = new FakeRdsDataClient();
+    deniedClient.failNextAuditInserts(1);
+    const deniedAuthenticated = {
+      ...authenticatedAdministrator(),
+      roles: ['staff'],
+    } as unknown as AuthenticatedSession;
+    const deniedStore = createDrizzleAdminCapabilityStore(
+      fakeDatabase(deniedClient),
+      deniedAuthenticated,
+    );
+    await expect(
+      executeIntegrationHealthProjection({
+        authenticated: deniedAuthenticated,
+        store: deniedStore,
+        query: { integrationId: LIVE_INTEGRATION_ID },
+        metadata: {
+          requestId: '00000000-0000-4000-8000-000000002694',
+          now: new Date(CLOCK_VALUE),
+        },
+      }),
+    ).rejects.toMatchObject({ status: 500 });
+    expect(
+      deniedClient.statements.filter(({ sql }) =>
+        sql.startsWith('insert into "security_audit_entries"'),
+      ),
+    ).toHaveLength(1);
+  });
+
   test('maps the database clock row and serializes each transaction ID', async () => {
     const client = new FakeRdsDataClient();
     const authenticated = authenticatedAdministrator();
@@ -1589,10 +1861,11 @@ describe('admin Aurora Data API transport regression', () => {
       { id: SECOND_USER_ID, roles: ['staff', 'admin'] },
     ]);
 
+    const healthStatementStart = client.statements.length;
     const integration = await executeIntegrationHealthProjection({
       authenticated,
       store,
-      query: { integrationId: null },
+      query: { integrationId: LIVE_INTEGRATION_ID },
       metadata: {
         requestId: '00000000-0000-4000-8000-000000002674',
         now: new Date(CLOCK_VALUE),
@@ -1600,8 +1873,90 @@ describe('admin Aurora Data API transport regression', () => {
     });
     executedCapabilities.add('get-integration-health');
     expect(integration.health.observedAt).toBe(CLOCK_VALUE);
-    expect(integration.health.statuses).toEqual([]);
+    expect(integration.health.statuses).toHaveLength(1);
+    const [healthStatus] = integration.health.statuses;
+    expect(healthStatus).toMatchObject({
+      integrationId: LIVE_INTEGRATION_ID,
+      label: 'live-verified',
+      observedAt: CLOCK_VALUE,
+      verifiedAt: CLOCK_VALUE,
+    });
+    if (healthStatus?.verifiedAt === null || healthStatus === undefined) {
+      throw new Error('The synthetic live health status lost verification.');
+    }
+    expect(Date.parse(healthStatus.verifiedAt)).toBeLessThanOrEqual(
+      Date.parse(integration.health.observedAt),
+    );
     expect(integration.channels).toEqual([]);
+    const healthStatements = client.statements.slice(healthStatementStart);
+    const healthAuditPreflightStatement = healthStatements.findIndex(
+      ({ sql }) => sql.includes('from "security_audit_entries"'),
+    );
+    const healthSnapshotStatement = healthStatements.findIndex(
+      ({ sql }) =>
+        sql === 'set transaction isolation level repeatable read read only',
+    );
+    const healthStatusStatement = healthStatements.findIndex(({ sql }) =>
+      sql.includes('from "integration_statuses"'),
+    );
+    const healthChannelStatement = healthStatements.findIndex(
+      ({ sql }) =>
+        sql.includes('from "channel_configurations"') &&
+        sql.includes('inner join "integration_statuses"'),
+    );
+    const healthClockStatement = healthStatements.findIndex(({ sql }) =>
+      sql.includes('clock_timestamp()'),
+    );
+    const healthSuccessAuditStatement = healthStatements.findIndex(({ sql }) =>
+      sql.startsWith('insert into "security_audit_entries"'),
+    );
+    expect(healthSnapshotStatement).toBeGreaterThanOrEqual(0);
+    expect(healthAuditPreflightStatement).toBeGreaterThan(
+      healthSnapshotStatement,
+    );
+    expect(healthStatusStatement).toBeGreaterThan(
+      healthAuditPreflightStatement,
+    );
+    expect(healthChannelStatement).toBeGreaterThan(healthStatusStatement);
+    expect(healthClockStatement).toBeGreaterThan(healthChannelStatement);
+    expect(healthSuccessAuditStatement).toBeGreaterThan(healthClockStatement);
+    const snapshotTransactionId =
+      healthStatements[healthSnapshotStatement]?.transactionId;
+    const successAuditTransactionId =
+      healthStatements[healthSuccessAuditStatement]?.transactionId;
+    expect(snapshotTransactionId).toBeTruthy();
+    expect(successAuditTransactionId).toBeTruthy();
+    expect(successAuditTransactionId).not.toBe(snapshotTransactionId);
+    expect(healthStatements[healthAuditPreflightStatement]?.transactionId).toBe(
+      snapshotTransactionId,
+    );
+    expect(healthStatements[healthStatusStatement]?.transactionId).toBe(
+      snapshotTransactionId,
+    );
+    expect(healthStatements[healthChannelStatement]?.transactionId).toBe(
+      snapshotTransactionId,
+    );
+    expect(healthStatements[healthClockStatement]?.transactionId).toBe(
+      snapshotTransactionId,
+    );
+    expect(
+      healthStatements
+        .slice(healthClockStatement + 1)
+        .every(
+          ({ transactionId }) => transactionId === successAuditTransactionId,
+        ),
+    ).toBe(true);
+    expect(
+      healthStatements
+        .slice(0, healthClockStatement + 1)
+        .every(({ transactionId }) => transactionId === snapshotTransactionId),
+    ).toBe(true);
+    expect(
+      new Set(healthStatements.map(({ transactionId }) => transactionId)).size,
+    ).toBe(2);
+    expect(
+      healthStatements.some(({ sql }) => sql.startsWith('lock table')),
+    ).toBe(false);
 
     const roster = await executeRosterHealthProjection({
       authenticated,

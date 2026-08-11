@@ -56,7 +56,7 @@ const AUTHORIZED_VIEW_BASE = Object.freeze({
     items: [
       {
         id: IDS.neighborhood,
-        name: 'Harbor campus',
+        name: 'Harbor campus corrected',
         facilityIds: [IDS.facilityA, IDS.facilityB],
         version: 3,
         createdAt: AT,
@@ -236,14 +236,16 @@ describe('facilities administration view', () => {
     expect(markup).toContain('Latest neighborhood version (optional)');
     expect(markup).toContain(`value="${IDS.neighborhood}:2" selected=""`);
     expect(markup).toContain(
-      'Harbor campus — version 2 (current pinned version)',
+      `Neighborhood ${IDS.neighborhood} — version 2 (current pinned version)`,
     );
     expect(markup).toContain(`value="${IDS.neighborhood}:3"`);
+    expect(markup).toContain('Harbor campus corrected — version 3');
+    expect(markup).not.toContain('Harbor campus corrected — version 2');
     expect(markup).toContain('name="googleOthersGroupSourceId"');
     expect(markup).toContain('name="syntheticOthersGroupSourceId"');
     expect(markup).toContain('Do not mix both kinds in one audience version');
     expect(markup).toContain('Current immutable audience version:');
-    expect(markup).toContain('Neighborhood Harbor campus');
+    expect(markup).toContain(`Neighborhood ${IDS.neighborhood}, version 2`);
   });
 
   test('keeps complete form selections while all four displays paginate independently', () => {
@@ -334,7 +336,7 @@ describe('facilities administration view', () => {
 
     expect(markup).toContain(`value="${IDS.neighborhood}:2" selected=""`);
     expect(markup).toContain(
-      'Harbor campus — version 2 (current pinned version)',
+      `Neighborhood ${IDS.neighborhood} — version 2 (current pinned version)`,
     );
     const selectedInactiveInput = markup.match(
       new RegExp(

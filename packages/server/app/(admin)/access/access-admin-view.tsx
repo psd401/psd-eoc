@@ -110,7 +110,9 @@ function AccessGroupEditor({
           <p id={helpId}>
             Changing only the display name or status retains this source&apos;s
             internal ID. Correcting a provider locator creates a new source ID
-            and leaves this source inactive as immutable history. An email
+            while the proven source and its replacement remain active until a
+            new access snapshot proves the replacement and the old source can be
+            retired. A locator replacement must be submitted as Active. An email
             correction also requires a distinct Google Group ID. Its access-only
             purpose never changes.
           </p>

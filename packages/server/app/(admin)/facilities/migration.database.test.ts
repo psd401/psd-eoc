@@ -507,6 +507,25 @@ async function expectOperationalRejection(
   throw new Error('Expected PostgreSQL to reject an invalid history insert.');
 }
 
+async function expectPostgresCodeRejection(
+  operation: () => Promise<unknown>,
+  expectedCode: string,
+  expectedMessage?: RegExp,
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    expect(postgresErrorFacts(error, 'code')).toContain(expectedCode);
+    if (expectedMessage !== undefined) {
+      expect(postgresErrorFacts(error, 'message').join('\n')).toMatch(
+        expectedMessage,
+      );
+    }
+    return;
+  }
+  throw new Error(`Expected PostgreSQL to reject with ${expectedCode}.`);
+}
+
 async function insertMockedStatus(
   database: PostgresDatabase,
   input: Readonly<{
@@ -1036,7 +1055,17 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         from information_schema.triggers
         where trigger_schema = 'public'
           and trigger_name in (
+            'access_membership_member_facilities_construction_guard',
+            'access_membership_member_facilities_immutable_guard',
+            'access_membership_member_groups_construction_guard',
+            'access_membership_member_groups_immutable_guard',
+            'access_membership_members_construction_guard',
+            'access_membership_members_immutable_guard',
+            'access_membership_snapshot_groups_construction_guard',
+            'access_membership_snapshot_groups_immutable_guard',
             'access_membership_snapshots_admin_availability_lock',
+            'access_membership_snapshots_immutable_guard',
+            'group_sources_identity_guard',
             'group_sources_admin_availability_lock',
             'integration_statuses_monotonic_insert_guard',
             'integration_statuses_channel_configuration_sync',
@@ -1046,23 +1075,37 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
             'audience_configurations_monotonic_insert_guard',
             'audience_targets_construction_guard',
             'neighborhood_facilities_construction_guard',
-            'user_roles_immutable_guard'
+            'user_roles_immutable_guard',
+            'user_facility_scopes_admin_availability_lock',
+            'users_admin_availability_lock'
           )
         order by trigger_name
       `),
     ).map((row) => row.snapshot);
     expect(triggers).toEqual([
+      'access_membership_member_facilities_construction_guard',
+      'access_membership_member_facilities_immutable_guard',
+      'access_membership_member_groups_construction_guard',
+      'access_membership_member_groups_immutable_guard',
+      'access_membership_members_construction_guard',
+      'access_membership_members_immutable_guard',
+      'access_membership_snapshot_groups_construction_guard',
+      'access_membership_snapshot_groups_immutable_guard',
       'access_membership_snapshots_admin_availability_lock',
+      'access_membership_snapshots_immutable_guard',
       'audience_configurations_monotonic_insert_guard',
       'audience_targets_construction_guard',
       'group_sources_admin_availability_lock',
+      'group_sources_identity_guard',
       'integration_statuses_channel_configuration_sync',
       'integration_statuses_monotonic_insert_guard',
       'neighborhood_facilities_construction_guard',
       'neighborhood_versions_monotonic_insert_guard',
       'roster_snapshots_monotonic_insert_guard',
       'roster_source_configurations_monotonic_insert_guard',
+      'user_facility_scopes_admin_availability_lock',
       'user_roles_immutable_guard',
+      'users_admin_availability_lock',
     ]);
 
     const privileges = databaseExecuteRows<PrivilegeRow>(
@@ -1181,6 +1224,791 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         where id = ${sourceId}::uuid
       `),
     );
+  });
+
+  test('publishes access snapshots atomically and keeps their complete graph immutable', async () => {
+    const db = databaseConnection().db;
+    const snapshotId = randomUUID();
+    const groupSourceId = randomUUID();
+    const lateGroupSourceId = randomUUID();
+    const userId = randomUUID();
+    const lateUserId = randomUUID();
+    const facilityId = randomUUID();
+    const lateFacilityId = randomUUID();
+    const googleSubject = `issue-26-snapshot-${userId}`;
+    const [versionRow] = databaseExecuteRows<CountRow>(
+      await db.execute<CountRow>(sql`
+        select coalesce(max(version), 0)::integer + 1 as count
+        from access_membership_snapshots
+      `),
+    );
+    const version = versionRow?.count;
+    if (version === undefined) {
+      throw new Error('The next access snapshot version is unavailable.');
+    }
+
+    await db.execute(sql`
+      insert into facilities (id, code, name, active)
+      values
+        (
+          ${facilityId}::uuid,
+          ${`I26-${facilityId.slice(0, 8).toUpperCase()}`},
+          'Synthetic access snapshot facility',
+          true
+        ),
+        (
+          ${lateFacilityId}::uuid,
+          ${`I26-${lateFacilityId.slice(0, 8).toUpperCase()}`},
+          'Synthetic late access snapshot facility',
+          true
+        )
+    `);
+    await db.execute(sql`
+      insert into group_sources (
+        id,
+        kind,
+        purpose,
+        facility_id,
+        display_name,
+        active,
+        google_group_id,
+        email,
+        fixture_key
+      )
+      values
+        (
+          ${groupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose,
+          null,
+          'Synthetic atomic access group',
+          true,
+          ${`issue-26-atomic-${groupSourceId}`},
+          ${`${groupSourceId}@example.invalid`},
+          null
+        ),
+        (
+          ${lateGroupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose,
+          null,
+          'Synthetic late access group',
+          true,
+          ${`issue-26-late-${lateGroupSourceId}`},
+          ${`${lateGroupSourceId}@example.invalid`},
+          null
+        )
+    `);
+    await db.execute(sql`
+      insert into users (
+        id,
+        google_subject,
+        email,
+        display_name,
+        facility_scope_kind
+      )
+      values
+        (
+          ${userId}::uuid,
+          ${googleSubject},
+          ${`${userId}@psd401.net`},
+          'Synthetic atomic access member',
+          'facilities'::facility_scope_kind
+        ),
+        (
+          ${lateUserId}::uuid,
+          ${`issue-26-late-${lateUserId}`},
+          ${`${lateUserId}@psd401.net`},
+          'Synthetic late access member',
+          'district'::facility_scope_kind
+        )
+    `);
+
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into access_membership_snapshots (
+          id,
+          version,
+          complete,
+          sync_started_at,
+          captured_at
+        )
+        values (
+          ${snapshotId}::uuid,
+          ${version},
+          true,
+          ${times.adminOne}::timestamptz,
+          ${times.adminOne}::timestamptz
+        )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_snapshot_groups (
+          snapshot_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose,
+          completion_kind
+        )
+        values
+          (
+            ${snapshotId}::uuid,
+            ${groupSourceId}::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            'expected'::group_completion_kind
+          ),
+          (
+            ${snapshotId}::uuid,
+            ${groupSourceId}::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            'completed'::group_completion_kind
+          )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_members (
+          snapshot_id,
+          user_id,
+          google_subject,
+          facility_scope_kind
+        )
+        values (
+          ${snapshotId}::uuid,
+          ${userId}::uuid,
+          ${googleSubject},
+          'facilities'::facility_scope_kind
+        )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_member_groups (
+          snapshot_id,
+          user_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose
+        )
+        values (
+          ${snapshotId}::uuid,
+          ${userId}::uuid,
+          ${groupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose
+        )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_member_facilities (
+          snapshot_id,
+          user_id,
+          facility_id
+        )
+        values (
+          ${snapshotId}::uuid,
+          ${userId}::uuid,
+          ${facilityId}::uuid
+        )
+      `);
+    });
+
+    const graphCounts = databaseExecuteRows<TextSnapshotRow>(
+      await db.execute<TextSnapshotRow>(sql`
+        select concat_ws(
+          ':',
+          (select count(*) from access_membership_snapshot_groups
+            where snapshot_id = ${snapshotId}::uuid),
+          (select count(*) from access_membership_members
+            where snapshot_id = ${snapshotId}::uuid),
+          (select count(*) from access_membership_member_groups
+            where snapshot_id = ${snapshotId}::uuid),
+          (select count(*) from access_membership_member_facilities
+            where snapshot_id = ${snapshotId}::uuid)
+        ) as snapshot
+      `),
+    );
+    expect(graphCounts).toEqual([{ snapshot: '2:1:1:1' }]);
+
+    await db.execute(sql`
+      insert into access_membership_snapshots (
+        id,
+        version,
+        complete,
+        sync_started_at,
+        captured_at
+      ) values (
+        ${snapshotId}::uuid,
+        ${version},
+        true,
+        ${times.adminOne}::timestamptz,
+        ${times.adminOne}::timestamptz
+      ) on conflict do nothing
+    `);
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_snapshots (
+            id,
+            version,
+            complete,
+            sync_started_at,
+            captured_at
+          ) values (
+            ${snapshotId}::uuid,
+            ${version + 1},
+            true,
+            ${times.adminOne}::timestamptz,
+            ${times.adminTwo}::timestamptz
+          ) on conflict do nothing
+        `),
+      /retry for id does not match immutable history/u,
+    );
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_snapshots (
+            id,
+            version,
+            complete,
+            sync_started_at,
+            captured_at
+          ) values (
+            ${randomUUID()}::uuid,
+            ${version},
+            true,
+            ${times.adminOne}::timestamptz,
+            ${times.adminOne}::timestamptz
+          ) on conflict do nothing
+        `),
+      /retry for version does not match immutable history/u,
+    );
+
+    await db.execute(sql`
+      insert into access_membership_snapshot_groups (
+        snapshot_id,
+        group_source_id,
+        group_source_kind,
+        group_purpose,
+        completion_kind
+      ) values (
+        ${snapshotId}::uuid,
+        ${groupSourceId}::uuid,
+        'google-group'::group_source_kind,
+        'access'::group_purpose,
+        'expected'::group_completion_kind
+      ) on conflict do nothing
+    `);
+    await db.execute(sql`
+      insert into access_membership_members (
+        snapshot_id,
+        user_id,
+        google_subject,
+        facility_scope_kind
+      ) values (
+        ${snapshotId}::uuid,
+        ${userId}::uuid,
+        ${googleSubject},
+        'facilities'::facility_scope_kind
+      ) on conflict do nothing
+    `);
+    await db.execute(sql`
+      insert into access_membership_member_groups (
+        snapshot_id,
+        user_id,
+        group_source_id,
+        group_source_kind,
+        group_purpose
+      ) values (
+        ${snapshotId}::uuid,
+        ${userId}::uuid,
+        ${groupSourceId}::uuid,
+        'google-group'::group_source_kind,
+        'access'::group_purpose
+      ) on conflict do nothing
+    `);
+    await db.execute(sql`
+      insert into access_membership_member_facilities (
+        snapshot_id,
+        user_id,
+        facility_id
+      ) values (
+        ${snapshotId}::uuid,
+        ${userId}::uuid,
+        ${facilityId}::uuid
+      ) on conflict do nothing
+    `);
+
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_snapshot_groups (
+            snapshot_id,
+            group_source_id,
+            group_source_kind,
+            group_purpose,
+            completion_kind
+          ) values (
+            ${snapshotId}::uuid,
+            ${lateGroupSourceId}::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            'expected'::group_completion_kind
+          )
+        `),
+      /cannot accept new access_membership_snapshot_groups rows/u,
+    );
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_members (
+            snapshot_id,
+            user_id,
+            google_subject,
+            facility_scope_kind
+          ) values (
+            ${snapshotId}::uuid,
+            ${lateUserId}::uuid,
+            ${`issue-26-late-${lateUserId}`},
+            'district'::facility_scope_kind
+          )
+        `),
+      /cannot accept new access_membership_members rows/u,
+    );
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_member_groups (
+            snapshot_id,
+            user_id,
+            group_source_id,
+            group_source_kind,
+            group_purpose
+          ) values (
+            ${snapshotId}::uuid,
+            ${userId}::uuid,
+            ${lateGroupSourceId}::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose
+          )
+        `),
+      /cannot accept new access_membership_member_groups rows/u,
+    );
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_member_facilities (
+            snapshot_id,
+            user_id,
+            facility_id
+          ) values (
+            ${snapshotId}::uuid,
+            ${userId}::uuid,
+            ${lateFacilityId}::uuid
+          )
+        `),
+      /cannot accept new access_membership_member_facilities rows/u,
+    );
+
+    const immutableUpdates = [
+      sql`update access_membership_snapshots set complete = complete
+        where id = ${snapshotId}::uuid`,
+      sql`update access_membership_snapshot_groups
+        set group_purpose = group_purpose
+        where snapshot_id = ${snapshotId}::uuid`,
+      sql`update access_membership_members
+        set google_subject = google_subject
+        where snapshot_id = ${snapshotId}::uuid`,
+      sql`update access_membership_member_groups
+        set group_purpose = group_purpose
+        where snapshot_id = ${snapshotId}::uuid`,
+      sql`update access_membership_member_facilities
+        set facility_id = facility_id
+        where snapshot_id = ${snapshotId}::uuid`,
+    ];
+    for (const immutableUpdate of immutableUpdates) {
+      await expectOperationalRejection(
+        () => db.execute(immutableUpdate),
+        /immutable/u,
+      );
+    }
+
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_members (
+            snapshot_id,
+            user_id,
+            google_subject,
+            facility_scope_kind
+          ) values (
+            ${snapshotId}::uuid,
+            ${userId}::uuid,
+            ${`mismatched-${googleSubject}`},
+            'facilities'::facility_scope_kind
+          ) on conflict do nothing
+        `),
+      /retry does not match immutable history/u,
+    );
+
+    const appSnapshotId = randomUUID();
+    const [appVersionRow] = databaseExecuteRows<CountRow>(
+      await db.execute<CountRow>(sql`
+        select coalesce(max(version), 0)::integer + 1 as count
+        from access_membership_snapshots
+      `),
+    );
+    const appVersion = appVersionRow?.count;
+    if (appVersion === undefined) {
+      throw new Error('The app-role access snapshot version is unavailable.');
+    }
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local role "psd_eoc_app"`);
+      await transaction.execute(sql`
+        insert into access_membership_snapshots (
+          id,
+          version,
+          complete,
+          sync_started_at,
+          captured_at
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${appVersion},
+          true,
+          ${times.adminTwo}::timestamptz,
+          ${times.adminTwo}::timestamptz
+        )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_snapshot_groups (
+          snapshot_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose,
+          completion_kind
+        ) values
+          (
+            ${appSnapshotId}::uuid,
+            ${groupSourceId}::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            'expected'::group_completion_kind
+          ),
+          (
+            ${appSnapshotId}::uuid,
+            ${groupSourceId}::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            'completed'::group_completion_kind
+          )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_members (
+          snapshot_id,
+          user_id,
+          google_subject,
+          facility_scope_kind
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${googleSubject},
+          'facilities'::facility_scope_kind
+        )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_member_groups (
+          snapshot_id,
+          user_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${groupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose
+        )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_member_facilities (
+          snapshot_id,
+          user_id,
+          facility_id
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${facilityId}::uuid
+        )
+      `);
+    });
+
+    const appGraphCounts = databaseExecuteRows<TextSnapshotRow>(
+      await db.execute<TextSnapshotRow>(sql`
+        select concat_ws(
+          ':',
+          (select count(*) from access_membership_snapshot_groups
+            where snapshot_id = ${appSnapshotId}::uuid),
+          (select count(*) from access_membership_members
+            where snapshot_id = ${appSnapshotId}::uuid),
+          (select count(*) from access_membership_member_groups
+            where snapshot_id = ${appSnapshotId}::uuid),
+          (select count(*) from access_membership_member_facilities
+            where snapshot_id = ${appSnapshotId}::uuid)
+        ) as snapshot
+      `),
+    );
+    expect(appGraphCounts).toEqual([{ snapshot: '2:1:1:1' }]);
+
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local role "psd_eoc_app"`);
+      await transaction.execute(sql`
+        insert into access_membership_snapshots (
+          id,
+          version,
+          complete,
+          sync_started_at,
+          captured_at
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${appVersion},
+          true,
+          ${times.adminTwo}::timestamptz,
+          ${times.adminTwo}::timestamptz
+        ) on conflict do nothing
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_snapshot_groups (
+          snapshot_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose,
+          completion_kind
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${groupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose,
+          'expected'::group_completion_kind
+        ) on conflict do nothing
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_members (
+          snapshot_id,
+          user_id,
+          google_subject,
+          facility_scope_kind
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${googleSubject},
+          'facilities'::facility_scope_kind
+        ) on conflict do nothing
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_member_groups (
+          snapshot_id,
+          user_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${groupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose
+        ) on conflict do nothing
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_member_facilities (
+          snapshot_id,
+          user_id,
+          facility_id
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${facilityId}::uuid
+        ) on conflict do nothing
+      `);
+    });
+
+    const appLateChildStatements = [
+      sql`
+        insert into access_membership_snapshot_groups (
+          snapshot_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose,
+          completion_kind
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${lateGroupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose,
+          'expected'::group_completion_kind
+        )
+      `,
+      sql`
+        insert into access_membership_members (
+          snapshot_id,
+          user_id,
+          google_subject,
+          facility_scope_kind
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${lateUserId}::uuid,
+          ${`issue-26-late-${lateUserId}`},
+          'district'::facility_scope_kind
+        )
+      `,
+      sql`
+        insert into access_membership_member_groups (
+          snapshot_id,
+          user_id,
+          group_source_id,
+          group_source_kind,
+          group_purpose
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${lateGroupSourceId}::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose
+        )
+      `,
+      sql`
+        insert into access_membership_member_facilities (
+          snapshot_id,
+          user_id,
+          facility_id
+        ) values (
+          ${appSnapshotId}::uuid,
+          ${userId}::uuid,
+          ${lateFacilityId}::uuid
+        )
+      `,
+    ];
+    for (const lateChildStatement of appLateChildStatements) {
+      await expectOperationalRejection(
+        () =>
+          db.transaction(async (transaction) => {
+            await transaction.execute(sql`set local role "psd_eoc_app"`);
+            await transaction.execute(lateChildStatement);
+          }),
+        /cannot accept new/u,
+      );
+    }
+
+    await expectOperationalRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            insert into access_membership_snapshots (
+              id,
+              version,
+              complete,
+              sync_started_at,
+              captured_at
+            ) values (
+              ${appSnapshotId}::uuid,
+              ${appVersion + 1},
+              true,
+              ${times.adminOne}::timestamptz,
+              ${times.adminTwo}::timestamptz
+            ) on conflict do nothing
+          `);
+        }),
+      /retry for id does not match immutable history/u,
+    );
+    await expectOperationalRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            insert into access_membership_snapshots (
+              id,
+              version,
+              complete,
+              sync_started_at,
+              captured_at
+            ) values (
+              ${randomUUID()}::uuid,
+              ${appVersion},
+              true,
+              ${times.adminTwo}::timestamptz,
+              ${times.adminTwo}::timestamptz
+            ) on conflict do nothing
+          `);
+        }),
+      /retry for version does not match immutable history/u,
+    );
+    await expectOperationalRejection(
+      () =>
+        db.execute(sql`
+          insert into access_membership_snapshots (
+            id,
+            version,
+            complete,
+            sync_started_at,
+            captured_at
+          ) values (
+            ${snapshotId}::uuid,
+            ${appVersion},
+            true,
+            ${times.adminOne}::timestamptz,
+            ${times.adminOne}::timestamptz
+          ) on conflict do nothing
+        `),
+      /retry for id does not match immutable history/u,
+    );
+    await expectOperationalRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            insert into access_membership_snapshots (
+              id,
+              version,
+              complete,
+              sync_started_at,
+              captured_at
+            ) values (
+              ${snapshotId}::uuid,
+              ${appVersion},
+              true,
+              ${times.adminOne}::timestamptz,
+              ${times.adminOne}::timestamptz
+            ) on conflict do nothing
+          `);
+        }),
+      /retry for id does not match immutable history/u,
+    );
+
+    const appImmutableUpdates = [
+      sql`update access_membership_snapshots set complete = complete
+        where id = ${appSnapshotId}::uuid`,
+      sql`update access_membership_snapshot_groups
+        set group_purpose = group_purpose
+        where snapshot_id = ${appSnapshotId}::uuid`,
+      sql`update access_membership_members
+        set google_subject = google_subject
+        where snapshot_id = ${appSnapshotId}::uuid`,
+      sql`update access_membership_member_groups
+        set group_purpose = group_purpose
+        where snapshot_id = ${appSnapshotId}::uuid`,
+      sql`update access_membership_member_facilities
+        set facility_id = facility_id
+        where snapshot_id = ${appSnapshotId}::uuid`,
+    ];
+    for (const immutableUpdate of appImmutableUpdates) {
+      await expectPostgresCodeRejection(
+        () =>
+          db.transaction(async (transaction) => {
+            await transaction.execute(sql`set local role "psd_eoc_app"`);
+            await transaction.execute(immutableUpdate);
+          }),
+        '42501',
+        /permission denied/u,
+      );
+    }
   });
 
   test('serializes access snapshot publication with admin availability changes', async () => {
@@ -1367,6 +2195,287 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       releaseRowBlocker?.();
       await Promise.allSettled([blockingTransaction, rowBlockingTransaction]);
       await Promise.all([rowBlocker.close(), blocker.close(), writer.close()]);
+    }
+  });
+
+  test('serializes user updates on the shared administrator-availability lock', async () => {
+    if (context === undefined) {
+      throw new Error('The issue #26 migration test context is unavailable.');
+    }
+    const observer = databaseConnection().db;
+    const userId = randomUUID();
+    await observer.execute(sql`
+      insert into users (
+        id,
+        google_subject,
+        email,
+        display_name,
+        facility_scope_kind
+      ) values (
+        ${userId}::uuid,
+        ${`issue-26-user-lock-${userId}`},
+        ${`${userId}@psd401.net`},
+        'Synthetic serialized administrator',
+        'district'::facility_scope_kind
+      )
+    `);
+    const blocker = openPostgresConnection(context.databaseUrl, 1);
+    const writer = openPostgresConnection(context.databaseUrl, 1);
+    let lockHeld: (() => void) | undefined;
+    const lockGate = new Promise<void>((resolve) => {
+      lockHeld = resolve;
+    });
+    let releaseBlocker: (() => void) | undefined;
+    const releaseGate = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    const blockingTransaction = blocker.db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        select pg_advisory_xact_lock(
+          hashtextextended('psd-eoc-admin-availability', 0)
+        )
+      `);
+      lockHeld?.();
+      await releaseGate;
+    });
+
+    try {
+      await lockGate;
+      const processRows = databaseExecuteRows<ProcessRow>(
+        await writer.db.execute<ProcessRow>(sql`
+          select pg_backend_pid()::integer as pid
+        `),
+      );
+      const pid = processRows[0]?.pid;
+      if (pid === undefined) {
+        throw new Error('The competing user writer PID is absent.');
+      }
+      const update = Promise.resolve(
+        writer.db.execute(sql`
+          update users
+          set display_name = 'Synthetic serialized administrator updated'
+          where id = ${userId}::uuid
+        `),
+      );
+      await waitForAdvisoryLock(observer, pid);
+      releaseBlocker?.();
+      await blockingTransaction;
+      await update;
+      const rows = databaseExecuteRows<TextSnapshotRow>(
+        await observer.execute<TextSnapshotRow>(sql`
+          select display_name as snapshot
+          from users
+          where id = ${userId}::uuid
+        `),
+      );
+      expect(rows).toEqual([
+        { snapshot: 'Synthetic serialized administrator updated' },
+      ]);
+    } finally {
+      releaseBlocker?.();
+      await Promise.allSettled([blockingTransaction]);
+      await Promise.all([blocker.close(), writer.close()]);
+    }
+  });
+
+  test('serializes an uncommitted scope contradiction before administrator-role removal', async () => {
+    if (context === undefined) {
+      throw new Error('The issue #26 migration test context is unavailable.');
+    }
+    const observer = databaseConnection().db;
+    const userId = randomUUID();
+    const deviceEnrollmentId = randomUUID();
+    const sessionId = randomUUID();
+    const requestId = randomUUID();
+    const snapshotId = randomUUID();
+    const [snapshotVersionRow] = databaseExecuteRows<CountRow>(
+      await observer.execute<CountRow>(sql`
+        select coalesce(max(version), 0)::integer + 1 as count
+        from access_membership_snapshots
+      `),
+    );
+    const snapshotVersion = snapshotVersionRow?.count;
+    if (snapshotVersion === undefined) {
+      throw new Error(
+        'The role-removal access snapshot version is unavailable.',
+      );
+    }
+    await observer.execute(sql`
+      insert into users (
+        id,
+        google_subject,
+        email,
+        display_name,
+        facility_scope_kind
+      ) values (
+        ${userId}::uuid,
+        ${`issue-26-scope-role-${userId}`},
+        ${`${userId}@psd401.net`},
+        'Synthetic scope-race administrator',
+        'district'::facility_scope_kind
+      )
+    `);
+    await observer.execute(sql`
+      insert into user_roles (user_id, role)
+      values (${userId}::uuid, 'admin'::role)
+    `);
+    await observer.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into access_membership_snapshots (
+          id,
+          version,
+          complete,
+          sync_started_at,
+          captured_at
+        ) values (
+          ${snapshotId}::uuid,
+          ${snapshotVersion},
+          true,
+          ${times.adminOne}::timestamptz,
+          ${times.adminOne}::timestamptz
+        )
+      `);
+      await transaction.execute(sql`
+        insert into access_membership_members (
+          snapshot_id,
+          user_id,
+          google_subject,
+          facility_scope_kind
+        ) values (
+          ${snapshotId}::uuid,
+          ${userId}::uuid,
+          ${`issue-26-scope-role-${userId}`},
+          'district'::facility_scope_kind
+        )
+      `);
+    });
+    await observer.execute(sql`
+      insert into device_enrollments (
+        id,
+        user_id,
+        platform,
+        unlock_method,
+        installation_id,
+        enrolled_at,
+        last_seen_at
+      ) values (
+        ${deviceEnrollmentId}::uuid,
+        ${userId}::uuid,
+        'web'::device_platform,
+        'secure-session-cookie'::device_unlock_method,
+        ${`issue-26-scope-role-${deviceEnrollmentId}`},
+        ${times.adminOne}::timestamptz,
+        ${times.adminOne}::timestamptz
+      )
+    `);
+    await observer.execute(sql`
+      insert into sessions (
+        id,
+        user_id,
+        device_enrollment_id,
+        membership_snapshot_id,
+        membership_valid_until,
+        membership_grace_until,
+        created_at,
+        expires_at
+      ) values (
+        ${sessionId}::uuid,
+        ${userId}::uuid,
+        ${deviceEnrollmentId}::uuid,
+        ${snapshotId}::uuid,
+        (${times.adminOne}::timestamptz + interval '1 hour'),
+        (${times.adminOne}::timestamptz + interval '2 hours'),
+        ${times.adminOne}::timestamptz,
+        (${times.adminOne}::timestamptz + interval '3 hours')
+      )
+    `);
+
+    const scopeWriter = openPostgresConnection(context.databaseUrl, 1);
+    const roleWriter = openPostgresConnection(context.databaseUrl, 1);
+    let scopeInserted: (() => void) | undefined;
+    const scopeInsertedGate = new Promise<void>((resolve) => {
+      scopeInserted = resolve;
+    });
+    let releaseScope: (() => void) | undefined;
+    const releaseScopeGate = new Promise<void>((resolve) => {
+      releaseScope = resolve;
+    });
+    const scopeWrite = scopeWriter.db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        insert into user_facility_scopes (user_id, facility_id)
+        values (${userId}::uuid, ${ids.seedFacilityNorth}::uuid)
+      `);
+      scopeInserted?.();
+      await releaseScopeGate;
+    });
+
+    try {
+      await scopeInsertedGate;
+      const processRows = databaseExecuteRows<ProcessRow>(
+        await roleWriter.db.execute<ProcessRow>(sql`
+          select pg_backend_pid()::integer as pid
+        `),
+      );
+      const pid = processRows[0]?.pid;
+      if (pid === undefined) {
+        throw new Error(
+          'The competing administrator-role writer PID is absent.',
+        );
+      }
+      const roleRemoval = Promise.resolve(
+        roleWriter.db.execute(sql`
+          insert into user_role_changes (
+            user_id,
+            role,
+            granted,
+            changed_by_user_id,
+            changed_with_session_id,
+            request_id,
+            occurred_at
+          ) values (
+            ${userId}::uuid,
+            'admin'::role,
+            false,
+            ${userId}::uuid,
+            ${sessionId}::uuid,
+            ${requestId}::uuid,
+            ${times.adminTwo}::timestamptz
+          )
+        `),
+      ).then(
+        () => ({ error: undefined }),
+        (error: unknown) => ({ error }),
+      );
+      await waitForAdvisoryLock(observer, pid);
+      const hiddenScopeCount = databaseExecuteRows<CountRow>(
+        await observer.execute<CountRow>(sql`
+          select count(*)::integer as count
+          from user_facility_scopes
+          where user_id = ${userId}::uuid
+        `),
+      );
+      expect(hiddenScopeCount).toEqual([{ count: 0 }]);
+
+      releaseScope?.();
+      await scopeWrite;
+      expect((await roleRemoval).error).toBeUndefined();
+      const serializedFacts = databaseExecuteRows<TextSnapshotRow>(
+        await observer.execute<TextSnapshotRow>(sql`
+          select concat_ws(
+            ':',
+            (select count(*) from user_facility_scopes
+              where user_id = ${userId}::uuid),
+            (select granted::text from user_role_changes
+              where user_id = ${userId}::uuid and role = 'admin'::role
+              order by sequence desc limit 1)
+          ) as snapshot
+        `),
+      );
+      expect(serializedFacts).toEqual([{ snapshot: '1:false' }]);
+    } finally {
+      releaseScope?.();
+      await Promise.allSettled([scopeWrite]);
+      await Promise.all([scopeWriter.close(), roleWriter.close()]);
     }
   });
 

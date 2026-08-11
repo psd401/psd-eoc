@@ -9,20 +9,14 @@ import {
 import { AdminCapabilityError } from '../facilities/admin-core';
 import { executeIntegrationHealthProjection } from './capabilities';
 import { IntegrationsAdminView } from './integrations-admin-view';
+import {
+  integrationsAdminStatusMessage,
+  type IntegrationsAdminSearchParameters,
+} from './page-state';
 import { executeRosterHealthProjection } from './roster-health';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-const STATUS_MESSAGES = Object.freeze({
-  'channel-updated': 'The notification channel configuration was updated.',
-} as const);
-
-function statusMessage(value: string | undefined): string | null {
-  return value !== undefined && value in STATUS_MESSAGES
-    ? STATUS_MESSAGES[value as keyof typeof STATUS_MESSAGES]
-    : null;
-}
 
 function ForbiddenIntegrations() {
   return (
@@ -44,7 +38,7 @@ function ForbiddenIntegrations() {
 export default async function IntegrationsPage({
   searchParams,
 }: Readonly<{
-  searchParams: Promise<Readonly<{ status?: string }>>;
+  searchParams: Promise<IntegrationsAdminSearchParameters>;
 }>) {
   const cookieStore = await cookies();
   const sessionToken = cookieStore.get(WEB_SESSION_COOKIE_NAME)?.value;
@@ -86,7 +80,7 @@ export default async function IntegrationsPage({
         integrationHealth={integration.health}
         lastRosterSync={roster.lastSync}
         staleEndpointReport={roster.report}
-        statusMessage={statusMessage(parameters.status)}
+        statusMessage={integrationsAdminStatusMessage(parameters.status)}
       />
     );
   } catch (error) {

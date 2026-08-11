@@ -27,13 +27,16 @@ import {
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
+  createRepeatableReadAdminQueryStore,
   executeAdminMutationCapability,
   executeAdminQueryCapability,
+  getAdminCapabilityStoreDatabase,
   getDefaultAdminDatabase,
   requireAdminCapabilityAuthorization,
   type AdminCapabilityStore,
   type AdminCapabilityTransaction,
   type AdminMutationMetadata,
+  type AdminQueryDatabase,
   type AdminQueryMetadata,
 } from '../facilities/admin-core';
 
@@ -273,10 +276,10 @@ function statusFromRow(
 }
 
 async function latestStatuses(
-  transaction: AdminCapabilityTransaction,
+  database: AdminQueryDatabase,
   integrationId: string | null,
 ) {
-  return transaction.database
+  return database
     .selectDistinctOn([integrationStatuses.integrationId], {
       id: integrationStatuses.id,
       integrationId: integrationStatuses.integrationId,
@@ -352,9 +355,9 @@ async function lockChannelConfigurationState(
 }
 
 async function channelConfigurationProjection(
-  transaction: AdminCapabilityTransaction,
+  database: AdminQueryDatabase,
 ): Promise<readonly ChannelConfiguration[]> {
-  const rows = await transaction.database
+  const rows = await database
     .select({
       integrationId: channelConfigurations.integrationId,
       enabled: channelConfigurations.enabled,
@@ -414,16 +417,18 @@ function getIntegrationHealthRegistration(
       return null;
     },
     async handler(input, context) {
-      const observedAt = await readCapabilityTime(context);
       // One RDS Data API transaction ID may execute only one statement at a
-      // time. Keep this projection serial on both supported transports.
+      // time. Keep both projections and the authoritative clock serial inside
+      // the store's one repeatable-read transaction so the returned status and
+      // channel evidence cannot come from different database snapshots.
       const statuses = await latestStatuses(
-        context.transaction,
+        context.transaction.database,
         input.integrationId,
       );
       const channels = await channelConfigurationProjection(
-        context.transaction,
+        context.transaction.database,
       );
+      const observedAt = await readCapabilityTime(context);
       captureProjection(channels);
       return IntegrationHealthSchema.parse({
         statuses: statuses.map((status) => statusFromRow(status, observedAt)),
@@ -615,19 +620,24 @@ export async function executeIntegrationHealthProjection(input: {
   readonly metadata?: AdminQueryMetadata;
 }): Promise<IntegrationHealthProjection> {
   let channels: readonly ChannelConfiguration[] | null = null;
-  const store =
+  const injectedStore =
     input.store ??
     createDrizzleAdminCapabilityStore(
       getDefaultAdminDatabase(),
       input.authenticated,
     );
+  const rootDatabase = getAdminCapabilityStoreDatabase(injectedStore);
+  const snapshotStore = createRepeatableReadAdminQueryStore(
+    rootDatabase,
+    input.authenticated,
+  );
   const health = await executeAdminQueryCapability(
     getIntegrationHealthRegistration((value) => {
       channels = value;
     }),
     input.query,
     input.authenticated,
-    store,
+    snapshotStore,
     input.metadata,
   );
   if (channels === null) {

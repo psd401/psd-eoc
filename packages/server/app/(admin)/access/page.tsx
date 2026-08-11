@@ -11,6 +11,7 @@ import { AdminCapabilityError } from '../facilities/admin-core';
 import { AccessAdminView, NON_ADMIN_ACCESS_VIEW } from './access-admin-view';
 import {
   accessAdminStatusMessage,
+  isInvalidAccessAdminQueryError,
   normalizeAccessAdminCursorState,
   type AccessAdminSearchParameters,
 } from './access-page-state';
@@ -77,6 +78,9 @@ export default async function AccessPage({
   } catch (error) {
     if (error instanceof AdminCapabilityError && error.status === 403) {
       return <AccessAdminView view={NON_ADMIN_ACCESS_VIEW} />;
+    }
+    if (isInvalidAccessAdminQueryError(error)) {
+      redirect('/access');
     }
     throw error;
   }

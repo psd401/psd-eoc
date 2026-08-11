@@ -44,6 +44,8 @@ import {
 } from 'drizzle-orm';
 
 import {
+  accessMembershipSnapshotGroups,
+  accessMembershipSnapshots,
   audienceConfigurations,
   audienceTargets,
   facilities,
@@ -265,6 +267,84 @@ async function lockRosterConfigurationPopulations(
 interface AccessSetMutationState {
   readonly accessState: AccessConfigurationSnapshotState | null;
   readonly activeAccessGroupSourceIds: readonly string[];
+  readonly latestCompleteSnapshot:
+    | Readonly<{ kind: 'none' }>
+    | Readonly<{ kind: 'invalid' }>
+    | Readonly<{
+        kind: 'strict';
+        state: AccessConfigurationSnapshotState;
+      }>;
+}
+
+function sameSortedIds(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((id, index) => id === right[index])
+  );
+}
+
+async function loadLatestStrictCompleteAccessSnapshot(
+  database: AdminQueryDatabase,
+): Promise<AccessSetMutationState['latestCompleteSnapshot']> {
+  const [snapshot] = await database
+    .select({
+      id: accessMembershipSnapshots.id,
+      version: accessMembershipSnapshots.version,
+    })
+    .from(accessMembershipSnapshots)
+    .where(eq(accessMembershipSnapshots.complete, true))
+    .orderBy(
+      desc(accessMembershipSnapshots.version),
+      desc(accessMembershipSnapshots.capturedAt),
+      desc(accessMembershipSnapshots.id),
+    )
+    .limit(1);
+  if (snapshot === undefined) return Object.freeze({ kind: 'none' as const });
+
+  const rows = await database
+    .select({
+      id: accessMembershipSnapshotGroups.groupSourceId,
+      kind: accessMembershipSnapshotGroups.groupSourceKind,
+      purpose: accessMembershipSnapshotGroups.groupPurpose,
+      completionKind: accessMembershipSnapshotGroups.completionKind,
+    })
+    .from(accessMembershipSnapshotGroups)
+    .where(eq(accessMembershipSnapshotGroups.snapshotId, snapshot.id))
+    .orderBy(
+      asc(accessMembershipSnapshotGroups.completionKind),
+      asc(accessMembershipSnapshotGroups.groupSourceId),
+    );
+  const expectedIds = rows
+    .filter(({ completionKind }) => completionKind === 'expected')
+    .map(({ id }) => id)
+    .sort();
+  const completedIds = rows
+    .filter(({ completionKind }) => completionKind === 'completed')
+    .map(({ id }) => id)
+    .sort();
+  if (
+    expectedIds.length === 0 ||
+    rows.some(
+      ({ kind, purpose }) => kind !== 'google-group' || purpose !== 'access',
+    ) ||
+    rows.length !== expectedIds.length + completedIds.length ||
+    new Set(expectedIds).size !== expectedIds.length ||
+    new Set(completedIds).size !== completedIds.length ||
+    !sameSortedIds(expectedIds, completedIds)
+  ) {
+    return Object.freeze({ kind: 'invalid' as const });
+  }
+  return Object.freeze({
+    kind: 'strict' as const,
+    state: Object.freeze({
+      snapshotId: snapshot.id,
+      snapshotVersion: snapshot.version,
+      activeAccessGroupSourceIds: Object.freeze(expectedIds),
+    }),
+  });
 }
 
 async function loadAccessSetMutationStateAfterLock(
@@ -314,26 +394,79 @@ async function loadAccessSetMutationStateAfterLock(
     activeRows.map(({ id }) => id),
   );
   const accessState = await loadAccessConfigurationSnapshotState(database);
-  if (activeAccessGroupSourceIds.length === 0) {
-    return Object.freeze({ accessState: null, activeAccessGroupSourceIds });
+  const latestCompleteSnapshot =
+    await loadLatestStrictCompleteAccessSnapshot(database);
+  if (accessState !== null) {
+    const reachableAdministratorIds = await loadEffectiveAdministratorUserIds(
+      database,
+      { accessState },
+    );
+    if (!reachableAdministratorIds.includes(actor.userId)) {
+      throw new AdminCapabilityError(
+        'FORBIDDEN',
+        'The current administrator is not reachable through the exact access snapshot.',
+        403,
+      );
+    }
   }
-  if (accessState === null) {
+  return Object.freeze({
+    accessState,
+    activeAccessGroupSourceIds,
+    latestCompleteSnapshot,
+  });
+}
+
+interface AccessRecoveryTransition {
+  readonly kind: 'empty-bootstrap' | 'strict-snapshot';
+  readonly snapshotState?: AccessConfigurationSnapshotState;
+}
+
+function accessRecoveryTransition(
+  state: AccessSetMutationState,
+  current: Extract<GroupSource, { purpose: 'access' }>,
+  input: Extract<CapabilityInput<'update-group-source'>, { purpose: 'access' }>,
+): AccessRecoveryTransition {
+  const locatorChanged =
+    current.googleGroupId !== input.googleGroupId ||
+    current.email !== input.email;
+  if (
+    locatorChanged ||
+    current.displayName !== input.displayName ||
+    current.active === input.active
+  ) {
     throw conflict(
-      'Access groups cannot change until one complete snapshot exactly matches the active access-group set.',
+      'While access-group evidence is incomplete, only a status change that restores a previously proven set is allowed.',
     );
   }
-  const reachableAdministratorIds = await loadEffectiveAdministratorUserIds(
-    database,
-    { accessState },
+  const prospectiveIds = state.activeAccessGroupSourceIds
+    .filter((id) => id !== current.id)
+    .concat(input.active ? [current.id] : [])
+    .sort();
+  if (
+    state.latestCompleteSnapshot.kind === 'strict' &&
+    sameSortedIds(
+      prospectiveIds,
+      state.latestCompleteSnapshot.state.activeAccessGroupSourceIds,
+    )
+  ) {
+    return Object.freeze({
+      kind: 'strict-snapshot' as const,
+      snapshotState: state.latestCompleteSnapshot.state,
+    });
+  }
+  if (
+    state.latestCompleteSnapshot.kind === 'none' &&
+    current.active &&
+    !input.active &&
+    state.activeAccessGroupSourceIds.length === 1 &&
+    state.activeAccessGroupSourceIds[0] === current.id &&
+    prospectiveIds.length === 0
+  ) {
+    return Object.freeze({ kind: 'empty-bootstrap' as const });
+  }
+  throw conflict(
+    'The access-group status change does not restore the newest proven access set.',
   );
-  if (!reachableAdministratorIds.includes(actor.userId)) {
-    throw new AdminCapabilityError(
-      'FORBIDDEN',
-      'The current administrator is not reachable through the exact access snapshot.',
-      403,
-    );
-  }
-  return Object.freeze({ accessState, activeAccessGroupSourceIds });
 }
 
 async function assertReachableAdministratorRemains(
@@ -1139,8 +1272,16 @@ async function createGroupSource(
   await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
   if (input.purpose !== 'access') {
     await lockRosterConfigurationPopulations(database);
-  } else if (input.active) {
-    await loadAccessSetMutationStateAfterLock(database, actor);
+  } else {
+    const state = await loadAccessSetMutationStateAfterLock(database, actor);
+    const emptyBootstrap =
+      state.activeAccessGroupSourceIds.length === 0 &&
+      state.latestCompleteSnapshot.kind === 'none';
+    if (state.accessState === null && !emptyBootstrap) {
+      throw conflict(
+        'New access groups cannot be added until the active set is restored to proven membership evidence.',
+      );
+    }
   }
   if (input.facilityId !== null) {
     const facility = await getFacility(database, input.facilityId);
@@ -1182,6 +1323,7 @@ async function updateGroupSource(
 ): Promise<GroupSource> {
   const input = UpdateGroupSourceInputSchema.parse(inputValue);
   let accessMutationState: AccessSetMutationState | null = null;
+  let accessRecovery: AccessRecoveryTransition | null = null;
   await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
   if (input.purpose !== 'access') {
     await lockRosterConfigurationPopulations(database);
@@ -1251,12 +1393,29 @@ async function updateGroupSource(
   const locatorChanged =
     current.googleGroupId !== input.googleGroupId ||
     current.email !== input.email;
+  if (locatorChanged && !input.active) {
+    throw conflict(
+      'An access locator correction must create an active replacement source until a complete access snapshot proves the rotation.',
+    );
+  }
+  if (accessMutationState.accessState === null) {
+    accessRecovery = accessRecoveryTransition(
+      accessMutationState,
+      current,
+      input,
+    );
+  }
   if (locatorChanged && current.googleGroupId === input.googleGroupId) {
     throw conflict(
       'Correcting an access email requires a new Google Group ID so the replacement has a distinct immutable identity.',
     );
   }
-  if (current.active && (locatorChanged || !input.active)) {
+  if (
+    accessMutationState.accessState !== null &&
+    !locatorChanged &&
+    current.active &&
+    !input.active
+  ) {
     await assertReachableAdministratorRemains(
       database,
       accessMutationState,
@@ -1281,16 +1440,6 @@ async function updateGroupSource(
     if (replacementRow === undefined) {
       throw conflict('The replacement access group could not be created.');
     }
-    if (current.active) {
-      const [deactivated] = await database
-        .update(groupSources)
-        .set({ active: false })
-        .where(eq(groupSources.id, current.id))
-        .returning({ id: groupSources.id });
-      if (deactivated === undefined) {
-        throw conflict('The superseded access group could not be disabled.');
-      }
-    }
     return groupSourceFromRow(replacementRow);
   }
   await assertGroupIdentityAvailable(database, input, input.id);
@@ -1307,6 +1456,25 @@ async function updateGroupSource(
     .returning();
   if (row === undefined) {
     throw conflict('The group source could not be updated.');
+  }
+  if (
+    accessRecovery?.kind === 'strict-snapshot' &&
+    accessRecovery.snapshotState !== undefined
+  ) {
+    const reachableAdministratorIds = await loadEffectiveAdministratorUserIds(
+      database,
+      { accessState: accessRecovery.snapshotState },
+    );
+    if (
+      actor.kind !== 'human' ||
+      !reachableAdministratorIds.includes(actor.userId)
+    ) {
+      throw new AdminCapabilityError(
+        'FORBIDDEN',
+        'The restored access set must keep the current human administrator reachable.',
+        403,
+      );
+    }
   }
   const source = groupSourceFromRow(row);
   return source;
