@@ -5,6 +5,7 @@ import {
   ApiErrorSchema,
   AppendJournalEntryInputSchema,
   CloseEventResultSchema,
+  CorrectJournalEntryInputSchema,
   CreateMediaUploadIntentInputSchema,
   EventRoomSyncResultSchema,
   EventSchema,
@@ -12,6 +13,7 @@ import {
   IdempotencyKeySchema,
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
+  LocationPayloadSchema,
   MediaContentTypeSchema,
   MediaReadGrantSchema,
   MediaRecordSchema,
@@ -22,10 +24,12 @@ import {
   type JournalEntry,
   type JournalEntryReadProjection,
   type LifecycleConsequencePreview,
+  type LocationPayload,
   type MediaRecord,
   type MediaUploadIntent,
 } from '@psd-eoc/contracts';
 import {
+  Component,
   useCallback,
   useEffect,
   useMemo,
@@ -34,6 +38,8 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
+
+import { LocationMap, formatLocationTextEquivalent } from '../../../../lib/map';
 
 const POLL_MINIMUM_MILLISECONDS = 3_000;
 const POLL_JITTER_MILLISECONDS = 2_000;
@@ -58,7 +64,9 @@ type ConnectionState = 'loading' | 'connected' | 'reconnecting' | 'offline';
 type CommandOperation =
   | 'post-text'
   | 'post-photo'
+  | 'post-location'
   | 'correct-text'
+  | 'correct-location'
   | 'redact-entry'
   | 'all-clear'
   | 'close';
@@ -83,10 +91,23 @@ type CommandBody =
       clientTime: string;
     }>
   | Readonly<{
+      operation: 'post-location';
+      payload: LocationPayload;
+      clientTime: string;
+    }>
+  | Readonly<{
       operation: 'correct-text';
       entryId: string;
       entrySequence: number;
       text: string;
+      reason: string;
+      clientTime: string;
+    }>
+  | Readonly<{
+      operation: 'correct-location';
+      entryId: string;
+      entrySequence: number;
+      payload: LocationPayload;
       reason: string;
       clientTime: string;
     }>
@@ -178,6 +199,81 @@ type DialogState =
       error: string | null;
     }>
   | Readonly<{ kind: 'close' }>;
+
+export interface LocationDraft {
+  readonly state: LocationPayload['state'];
+  readonly latitude: string;
+  readonly longitude: string;
+  readonly accuracyMeters: string;
+  readonly label: string;
+  readonly reason: string;
+}
+
+const EMPTY_LOCATION_DRAFT: LocationDraft = Object.freeze({
+  state: 'unknown',
+  latitude: '',
+  longitude: '',
+  accuracyMeters: '',
+  label: '',
+  reason: '',
+});
+
+function locationDraftFromPayload(payload: LocationPayload): LocationDraft {
+  if (payload.state === 'known') {
+    return {
+      state: 'known',
+      latitude: String(payload.latitude),
+      longitude: String(payload.longitude),
+      accuracyMeters: String(payload.accuracyMeters),
+      label: payload.label ?? '',
+      reason: '',
+    };
+  }
+  if (payload.state === 'ambiguous') {
+    return {
+      ...EMPTY_LOCATION_DRAFT,
+      state: 'ambiguous',
+      label: payload.label,
+      reason: payload.reason,
+    };
+  }
+  return {
+    ...EMPTY_LOCATION_DRAFT,
+    reason: payload.reason,
+  };
+}
+
+export function locationPayloadFromDraft(
+  draft: LocationDraft,
+): LocationPayload | null {
+  let candidate: unknown;
+  if (draft.state === 'known') {
+    if (
+      draft.latitude.trim().length === 0 ||
+      draft.longitude.trim().length === 0 ||
+      draft.accuracyMeters.trim().length === 0
+    ) {
+      return null;
+    }
+    candidate = {
+      state: 'known',
+      latitude: Number(draft.latitude),
+      longitude: Number(draft.longitude),
+      accuracyMeters: Number(draft.accuracyMeters),
+      label: draft.label.trim().length === 0 ? null : draft.label.trim(),
+    };
+  } else if (draft.state === 'ambiguous') {
+    candidate = {
+      state: 'ambiguous',
+      label: draft.label.trim(),
+      reason: draft.reason.trim(),
+    };
+  } else {
+    candidate = { state: 'unknown', reason: draft.reason.trim() };
+  }
+  const parsed = LocationPayloadSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
 
 export interface EventRoomProps {
   /** Canonical, facility-authorized event returned by the capability layer. */
@@ -306,6 +402,29 @@ function hasExactKeys(
   );
 }
 
+function locationPayloadsEqual(
+  left: LocationPayload,
+  right: LocationPayload,
+): boolean {
+  if (left.state !== right.state) return false;
+  if (left.state === 'known' && right.state === 'known') {
+    return (
+      left.latitude === right.latitude &&
+      left.longitude === right.longitude &&
+      left.accuracyMeters === right.accuracyMeters &&
+      left.label === right.label
+    );
+  }
+  if (left.state === 'ambiguous' && right.state === 'ambiguous') {
+    return left.label === right.label && left.reason === right.reason;
+  }
+  return (
+    left.state === 'unknown' &&
+    right.state === 'unknown' &&
+    left.reason === right.reason
+  );
+}
+
 function journalEntryProvesCommand(
   command: RetainedCommand,
   entry: JournalEntry,
@@ -370,6 +489,70 @@ function journalEntryProvesCommand(
       entry.payload.altText === input.data.payload.altText &&
       entry.payload.caption === input.data.payload.caption &&
       entry.supersedes === null
+    );
+  }
+
+  if (command.operation === 'post-location') {
+    if (
+      !hasExactKeys(body, ['operation', 'payload', 'clientTime']) ||
+      body.operation !== 'post-location'
+    ) {
+      return false;
+    }
+    const input = AppendJournalEntryInputSchema.safeParse({
+      eventId: command.eventId,
+      clientTime: body.clientTime,
+      supersedes: null,
+      kind: 'location',
+      payload: body.payload,
+    });
+    return (
+      input.success &&
+      input.data.kind === 'location' &&
+      entry.kind === 'location' &&
+      entry.eventId === input.data.eventId &&
+      locationPayloadsEqual(entry.payload, input.data.payload) &&
+      entry.supersedes === null
+    );
+  }
+
+  if (command.operation === 'correct-location') {
+    if (
+      !hasExactKeys(body, [
+        'operation',
+        'entryId',
+        'entrySequence',
+        'payload',
+        'reason',
+        'clientTime',
+      ]) ||
+      body.operation !== 'correct-location'
+    ) {
+      return false;
+    }
+    const input = CorrectJournalEntryInputSchema.safeParse({
+      eventId: command.eventId,
+      clientTime: body.clientTime,
+      supersedes: {
+        entryId: body.entryId,
+        entrySequence: body.entrySequence,
+        kind: 'correction',
+        reason: body.reason,
+      },
+      kind: 'location',
+      payload: body.payload,
+    });
+    return (
+      input.success &&
+      input.data.kind === 'location' &&
+      input.data.supersedes !== null &&
+      entry.kind === 'location' &&
+      entry.eventId === input.data.eventId &&
+      locationPayloadsEqual(entry.payload, input.data.payload) &&
+      entry.supersedes?.entryId === input.data.supersedes.entryId &&
+      entry.supersedes.entrySequence === input.data.supersedes.entrySequence &&
+      entry.supersedes.kind === 'correction' &&
+      entry.supersedes.reason === input.data.supersedes.reason
     );
   }
 
@@ -1075,7 +1258,9 @@ function isCommandOperation(value: unknown): value is CommandOperation {
   return (
     value === 'post-text' ||
     value === 'post-photo' ||
+    value === 'post-location' ||
     value === 'correct-text' ||
+    value === 'correct-location' ||
     value === 'redact-entry' ||
     value === 'all-clear' ||
     value === 'close'
@@ -1475,8 +1660,12 @@ function commandLabel(operation: CommandOperation): string {
       return 'timeline post';
     case 'post-photo':
       return 'photo post';
+    case 'post-location':
+      return 'location post';
     case 'correct-text':
       return 'timeline correction';
+    case 'correct-location':
+      return 'location correction';
     case 'redact-entry':
       return 'timeline redaction';
     case 'all-clear':
@@ -2350,6 +2539,387 @@ function DeferredPrivatePhoto({
   );
 }
 
+class LocationMapBoundary extends Component<
+  Readonly<{ children: ReactNode }>,
+  Readonly<{ failed: boolean }>
+> {
+  public override state = { failed: false };
+
+  public static getDerivedStateFromError(): Readonly<{ failed: boolean }> {
+    return { failed: true };
+  }
+
+  public override render(): ReactNode {
+    if (this.state.failed) {
+      return (
+        <p className="location-map-fallback" role="status">
+          Map unavailable. The complete location text remains available.
+        </p>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function SafeLocationMap({
+  payload,
+  mode,
+  ariaLabel,
+  onCoordinatesChange,
+}: Readonly<{
+  payload: Extract<LocationPayload, { state: 'known' }>;
+  mode: 'display' | 'edit';
+  ariaLabel: string;
+  onCoordinatesChange?: (coordinates: {
+    latitude: number;
+    longitude: number;
+  }) => void;
+}>) {
+  const [failed, setFailed] = useState(false);
+  const mapKey = `${payload.latitude}:${payload.longitude}:${payload.accuracyMeters}:${mode}`;
+  if (failed) {
+    return (
+      <p className="location-map-fallback" role="status">
+        Map unavailable. The complete location text and posting controls remain
+        available.
+      </p>
+    );
+  }
+  return (
+    <LocationMapBoundary key={mapKey}>
+      {mode === 'edit' && onCoordinatesChange !== undefined ? (
+        <LocationMap
+          ariaLabel={ariaLabel}
+          mode="edit"
+          onCoordinatesChange={onCoordinatesChange}
+          onError={() => setFailed(true)}
+          payload={payload}
+        />
+      ) : (
+        <LocationMap
+          ariaLabel={ariaLabel}
+          mode="display"
+          onError={() => setFailed(true)}
+          payload={payload}
+        />
+      )}
+    </LocationMapBoundary>
+  );
+}
+
+function LocationEditor({
+  draft,
+  idPrefix,
+  onChange,
+}: Readonly<{
+  draft: LocationDraft;
+  idPrefix: string;
+  onChange: (draft: LocationDraft) => void;
+}>) {
+  const [geolocationStatus, setGeolocationStatus] = useState('');
+  const [locating, setLocating] = useState(false);
+  const geolocationRequestRef = useRef(0);
+  const currentDraftRef = useRef(draft);
+  currentDraftRef.current = draft;
+  const payload = locationPayloadFromDraft(draft);
+  const knownPayload = payload?.state === 'known' ? payload : null;
+
+  useEffect(
+    () => () => {
+      geolocationRequestRef.current += 1;
+    },
+    [],
+  );
+
+  function update(patch: Partial<LocationDraft>): void {
+    const nextDraft = { ...draft, ...patch };
+    currentDraftRef.current = nextDraft;
+    onChange(nextDraft);
+  }
+
+  function changeState(
+    state: LocationPayload['state'],
+    patch: Partial<LocationDraft> = {},
+  ): void {
+    geolocationRequestRef.current += 1;
+    if (locating) {
+      setLocating(false);
+      setGeolocationStatus(
+        'The pending device-location result was ignored after the location state changed.',
+      );
+    }
+    update({ state, ...patch });
+  }
+
+  function requestCurrentLocation(): void {
+    if (locating) return;
+    if (!('geolocation' in navigator)) {
+      setGeolocationStatus(
+        'This browser cannot provide a device location. Choose ambiguous or unknown instead.',
+      );
+      return;
+    }
+    setLocating(true);
+    setGeolocationStatus('Requesting the current device location…');
+    const requestGeneration = geolocationRequestRef.current + 1;
+    geolocationRequestRef.current = requestGeneration;
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        if (geolocationRequestRef.current !== requestGeneration) return;
+        const currentDraft = currentDraftRef.current;
+        if (currentDraft.state !== 'known') return;
+        const captured = LocationPayloadSchema.safeParse({
+          state: 'known',
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracyMeters: position.coords.accuracy,
+          label:
+            currentDraft.label.trim().length === 0
+              ? null
+              : currentDraft.label.trim(),
+        });
+        setLocating(false);
+        if (!captured.success || captured.data.state !== 'known') {
+          setGeolocationStatus(
+            'The browser returned invalid location evidence. Nothing was posted; choose ambiguous or unknown instead.',
+          );
+          return;
+        }
+        onChange(locationDraftFromPayload(captured.data));
+        setGeolocationStatus(
+          'Device location captured. Review the accuracy radius and correct the pin before posting.',
+        );
+      },
+      () => {
+        if (geolocationRequestRef.current !== requestGeneration) return;
+        setLocating(false);
+        setGeolocationStatus(
+          'The device location was not available. Nothing was posted; choose ambiguous or unknown instead.',
+        );
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10_000 },
+    );
+  }
+
+  return (
+    <div className="location-editor">
+      <fieldset className="location-state-options">
+        <legend>Location certainty</legend>
+        <label>
+          <input
+            checked={draft.state === 'known'}
+            data-autofocus={draft.state === 'known' ? true : undefined}
+            name={`${idPrefix}-state`}
+            onChange={() => changeState('known', { reason: '' })}
+            type="radio"
+            value="known"
+          />{' '}
+          Known coordinates
+        </label>
+        <label>
+          <input
+            checked={draft.state === 'ambiguous'}
+            data-autofocus={draft.state === 'ambiguous' ? true : undefined}
+            name={`${idPrefix}-state`}
+            onChange={() => changeState('ambiguous')}
+            type="radio"
+            value="ambiguous"
+          />{' '}
+          Ambiguous location
+        </label>
+        <label>
+          <input
+            checked={draft.state === 'unknown'}
+            data-autofocus={draft.state === 'unknown' ? true : undefined}
+            name={`${idPrefix}-state`}
+            onChange={() => changeState('unknown', { label: '' })}
+            type="radio"
+            value="unknown"
+          />{' '}
+          Unknown location
+        </label>
+      </fieldset>
+
+      {draft.state === 'known' ? (
+        <>
+          <button
+            className="secondary"
+            disabled={locating}
+            onClick={requestCurrentLocation}
+            type="button"
+          >
+            {locating ? 'Locating device…' : 'Use current device location'}
+          </button>
+          <p className="field-help">
+            GPS accuracy is a radius and never establishes room-level precision.
+            Review the visible radius, then drag the pin or edit the coordinates
+            before posting.
+          </p>
+          <div className="location-coordinate-grid">
+            <div className="field">
+              <label htmlFor={`${idPrefix}-latitude`}>Latitude</label>
+              <input
+                id={`${idPrefix}-latitude`}
+                max={90}
+                min={-90}
+                onChange={(change) =>
+                  update({ latitude: change.currentTarget.value })
+                }
+                required
+                step="any"
+                type="number"
+                value={draft.latitude}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor={`${idPrefix}-longitude`}>Longitude</label>
+              <input
+                id={`${idPrefix}-longitude`}
+                max={180}
+                min={-180}
+                onChange={(change) =>
+                  update({ longitude: change.currentTarget.value })
+                }
+                required
+                step="any"
+                type="number"
+                value={draft.longitude}
+              />
+            </div>
+          </div>
+          <p className="location-accuracy" role="status">
+            Accuracy radius:{' '}
+            <strong>
+              {draft.accuracyMeters.trim().length === 0
+                ? 'not captured'
+                : `±${draft.accuracyMeters} meters`}
+            </strong>
+          </p>
+          <div className="field">
+            <label htmlFor={`${idPrefix}-label`}>
+              Location label (optional)
+            </label>
+            <input
+              id={`${idPrefix}-label`}
+              maxLength={200}
+              onChange={(change) => update({ label: change.target.value })}
+              type="text"
+              value={draft.label}
+            />
+          </div>
+          {knownPayload === null ? (
+            <p className="location-map-fallback">
+              Capture a device location to establish its accuracy radius. A
+              known location cannot be posted without that evidence.
+            </p>
+          ) : (
+            <SafeLocationMap
+              ariaLabel="Adjustable location pin and browser accuracy radius"
+              mode="edit"
+              onCoordinatesChange={(coordinates) =>
+                update({
+                  latitude: String(coordinates.latitude),
+                  longitude: String(coordinates.longitude),
+                })
+              }
+              payload={knownPayload}
+            />
+          )}
+        </>
+      ) : draft.state === 'ambiguous' ? (
+        <>
+          <div className="field">
+            <label htmlFor={`${idPrefix}-label`}>Best available label</label>
+            <input
+              id={`${idPrefix}-label`}
+              maxLength={200}
+              onChange={(change) => update({ label: change.target.value })}
+              required
+              type="text"
+              value={draft.label}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor={`${idPrefix}-reason`}>
+              Why the location is ambiguous
+            </label>
+            <textarea
+              id={`${idPrefix}-reason`}
+              maxLength={500}
+              onChange={(change) => update({ reason: change.target.value })}
+              required
+              value={draft.reason}
+            />
+          </div>
+        </>
+      ) : (
+        <div className="field">
+          <label htmlFor={`${idPrefix}-reason`}>
+            Why the location is unknown
+          </label>
+          <textarea
+            id={`${idPrefix}-reason`}
+            maxLength={500}
+            onChange={(change) => update({ reason: change.target.value })}
+            required
+            value={draft.reason}
+          />
+        </div>
+      )}
+      <p aria-atomic="true" aria-live="polite" className="location-status">
+        {geolocationStatus}
+      </p>
+    </div>
+  );
+}
+
+function LocationEntryContent({
+  entryId,
+  entrySequence,
+  mapVisible,
+  onToggleMap,
+  payload,
+  serverTime,
+}: Readonly<{
+  entryId: string;
+  entrySequence: number;
+  mapVisible: boolean;
+  onToggleMap: () => void;
+  payload: LocationPayload;
+  serverTime: string;
+}>) {
+  const mapId = `location-map-${entryId}`;
+  return (
+    <div className="entry-content location-entry-content">
+      <p className="location-text-equivalent">
+        {formatLocationTextEquivalent(payload, serverTime)}
+      </p>
+      {payload.state === 'known' ? (
+        <>
+          <button
+            aria-controls={mapId}
+            aria-expanded={mapVisible}
+            className="secondary location-map-toggle"
+            onClick={onToggleMap}
+            type="button"
+          >
+            {mapVisible ? 'Hide' : 'Show'} map for entry {entrySequence}
+          </button>
+          <div hidden={!mapVisible} id={mapId}>
+            {mapVisible ? (
+              <SafeLocationMap
+                ariaLabel={`Posted location pin and accuracy radius for entry ${entrySequence}`}
+                mode="display"
+                payload={payload}
+              />
+            ) : null}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function EntryContent({
   projection,
   redacted,
@@ -2359,6 +2929,8 @@ function EntryContent({
   onActivateOlderPhoto,
   classificationLabel,
   realEvent,
+  locationMapVisible,
+  onToggleLocationMap,
 }: Readonly<{
   projection: JournalEntryReadProjection;
   redacted: boolean;
@@ -2368,6 +2940,8 @@ function EntryContent({
   onActivateOlderPhoto: () => void;
   classificationLabel: string;
   realEvent: boolean;
+  locationMapVisible: boolean;
+  onToggleLocationMap: () => void;
 }>) {
   if (redacted || projection.visibility === 'redacted') {
     return (
@@ -2413,22 +2987,15 @@ function EntryContent({
         />
       );
     case 'location':
-      if (entry.payload.state === 'known') {
-        return (
-          <p className="entry-content">
-            {entry.payload.label ?? 'Recorded location'}: latitude{' '}
-            {entry.payload.latitude}, longitude {entry.payload.longitude} (±
-            {entry.payload.accuracyMeters} meters)
-          </p>
-        );
-      }
       return (
-        <p className="entry-content">
-          Location {entry.payload.state}: {entry.payload.reason}
-          {entry.payload.state === 'ambiguous'
-            ? ` (${entry.payload.label})`
-            : ''}
-        </p>
+        <LocationEntryContent
+          entryId={entry.id}
+          entrySequence={entry.sequence}
+          mapVisible={locationMapVisible}
+          onToggleMap={onToggleLocationMap}
+          payload={entry.payload}
+          serverTime={entry.serverTime}
+        />
       );
     case 'system':
       return <p className="entry-content">{entry.payload.summary}</p>;
@@ -2449,6 +3016,8 @@ interface TimelineEntryProps {
   readonly onActivateOlderPhoto: (entryId: string) => void;
   readonly classificationLabel: string;
   readonly realEvent: boolean;
+  readonly locationMapVisible: boolean;
+  readonly onToggleLocationMap: () => void;
 }
 
 function TimelineEntry({
@@ -2463,6 +3032,8 @@ function TimelineEntry({
   onActivateOlderPhoto,
   classificationLabel,
   realEvent,
+  locationMapVisible,
+  onToggleLocationMap,
 }: TimelineEntryProps) {
   const { entry } = projection;
   const latestSupersession = supersededBy.at(-1) ?? null;
@@ -2474,7 +3045,8 @@ function TimelineEntry({
   const visibleEntry =
     projection.visibility === 'visible' ? projection.entry : null;
   const mayCorrect =
-    visibleEntry?.kind === 'text' && latestSupersession === null;
+    (visibleEntry?.kind === 'text' || visibleEntry?.kind === 'location') &&
+    latestSupersession === null;
   const mayRedact =
     visibleEntry !== null && entry.kind !== 'system' && !redacted;
   const ownSupersession = entry.supersedes;
@@ -2530,6 +3102,8 @@ function TimelineEntry({
         projection={projection}
         classificationLabel={classificationLabel}
         realEvent={realEvent}
+        locationMapVisible={locationMapVisible}
+        onToggleLocationMap={onToggleLocationMap}
         redacted={redacted}
         scrollRootRef={timelineScrollRef}
       />
@@ -2679,6 +3253,9 @@ export function EventRoom({
   const [selectedOlderPhotoEntryId, setSelectedOlderPhotoEntryId] = useState<
     string | null
   >(null);
+  const [visibleLocationMapEntryId, setVisibleLocationMapEntryId] = useState<
+    string | null
+  >(null);
   const [pendingOlderPhotoEntryId, setPendingOlderPhotoEntryId] = useState<
     string | null
   >(null);
@@ -2694,6 +3271,8 @@ export function EventRoom({
   }> | null>(null);
   const [unseenCount, setUnseenCount] = useState(0);
   const [postText, setPostText] = useState('');
+  const [locationDraft, setLocationDraft] =
+    useState<LocationDraft>(EMPTY_LOCATION_DRAFT);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoAltText, setPhotoAltText] = useState('');
   const [photoCaption, setPhotoCaption] = useState('');
@@ -2712,6 +3291,8 @@ export function EventRoom({
   const [recoveryBlocked, setRecoveryBlocked] = useState(false);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [dialogText, setDialogText] = useState('');
+  const [dialogLocationDraft, setDialogLocationDraft] =
+    useState<LocationDraft>(EMPTY_LOCATION_DRAFT);
   const [dialogReason, setDialogReason] = useState('');
   const [confirmationPhrase, setConfirmationPhrase] = useState('');
   const [pollRefreshVersion, setPollRefreshVersion] = useState(0);
@@ -3139,7 +3720,8 @@ export function EventRoom({
   const correctionDialogEntry =
     !loadingHistory &&
     correctionDialogProjection?.visibility === 'visible' &&
-    correctionDialogProjection.entry.kind === 'text' &&
+    (correctionDialogProjection.entry.kind === 'text' ||
+      correctionDialogProjection.entry.kind === 'location') &&
     (supersessionsByEntry.get(correctionDialogProjection.entry.id)?.length ??
       0) === 0
       ? correctionDialogProjection.entry
@@ -3172,6 +3754,7 @@ export function EventRoom({
     dialogRequestAttemptedRef.current = false;
     setDialog(null);
     setDialogText('');
+    setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
     setDialogReason('');
     setConfirmationPhrase('');
     if (
@@ -3269,6 +3852,12 @@ export function EventRoom({
         ? correctionTarget.entry.payload.text
         : '',
     );
+    setDialogLocationDraft(
+      correctionTarget?.visibility === 'visible' &&
+        correctionTarget.entry.kind === 'location'
+        ? locationDraftFromPayload(correctionTarget.entry.payload)
+        : EMPTY_LOCATION_DRAFT,
+    );
     setDialogReason('');
     setConfirmationPhrase('');
     setDialog(next);
@@ -3281,6 +3870,7 @@ export function EventRoom({
     dialogRequestAttemptedRef.current = false;
     setDialog(null);
     setDialogText('');
+    setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
     setDialogReason('');
     setConfirmationPhrase('');
   }
@@ -3436,7 +4026,8 @@ export function EventRoom({
     if (
       dialog !== null &&
       command.operation !== 'post-text' &&
-      command.operation !== 'post-photo'
+      command.operation !== 'post-photo' &&
+      command.operation !== 'post-location'
     ) {
       dialogRequestAttemptedRef.current = true;
     }
@@ -3559,6 +4150,18 @@ export function EventRoom({
       clientTime: new Date().toISOString(),
     });
     if (succeeded) setPostText('');
+  }
+
+  async function submitLocation(submission: FormEvent<HTMLFormElement>) {
+    submission.preventDefault();
+    const payload = locationPayloadFromDraft(locationDraft);
+    if (payload === null) return;
+    const succeeded = await executeNewCommand({
+      operation: 'post-location',
+      payload,
+      clientTime: new Date().toISOString(),
+    });
+    if (succeeded) setLocationDraft(EMPTY_LOCATION_DRAFT);
   }
 
   async function completeAndPostPhoto(
@@ -3834,17 +4437,34 @@ export function EventRoom({
   async function submitCorrection(submission: FormEvent<HTMLFormElement>) {
     submission.preventDefault();
     if (dialog?.kind !== 'correct' || correctionDialogEntry === null) return;
-    const text = dialogText.trim();
     const reason = dialogReason.trim();
-    if (text.length === 0 || reason.length === 0) return;
-    const succeeded = await executeNewCommand({
-      operation: 'correct-text',
-      entryId: correctionDialogEntry.id,
-      entrySequence: correctionDialogEntry.sequence,
-      text,
-      reason,
-      clientTime: new Date().toISOString(),
-    });
+    if (reason.length === 0) return;
+    const succeeded =
+      correctionDialogEntry.kind === 'location'
+        ? await (async () => {
+            const payload = locationPayloadFromDraft(dialogLocationDraft);
+            if (payload === null) return false;
+            return executeNewCommand({
+              operation: 'correct-location',
+              entryId: correctionDialogEntry.id,
+              entrySequence: correctionDialogEntry.sequence,
+              payload,
+              reason,
+              clientTime: new Date().toISOString(),
+            });
+          })()
+        : await (async () => {
+            const text = dialogText.trim();
+            if (text.length === 0) return false;
+            return executeNewCommand({
+              operation: 'correct-text',
+              entryId: correctionDialogEntry.id,
+              entrySequence: correctionDialogEntry.sequence,
+              text,
+              reason,
+              clientTime: new Date().toISOString(),
+            });
+          })();
     if (succeeded) closeDialog();
   }
 
@@ -3948,6 +4568,8 @@ export function EventRoom({
 
   const startedAt = currentEvent.activatedAt;
   const canPost = eventAcceptsJournalPosts(currentEvent);
+  const locationPayload = locationPayloadFromDraft(locationDraft);
+  const dialogLocationPayload = locationPayloadFromDraft(dialogLocationDraft);
   const photoFileValid =
     photoFile !== null &&
     photoFile.size >= 1 &&
@@ -4204,6 +4826,16 @@ export function EventRoom({
                           opener,
                         )
                       }
+                      locationMapVisible={
+                        visibleLocationMapEntryId === projection.entry.id
+                      }
+                      onToggleLocationMap={() =>
+                        setVisibleLocationMapEntryId((visibleEntryId) =>
+                          visibleEntryId === projection.entry.id
+                            ? null
+                            : projection.entry.id,
+                        )
+                      }
                       onActivateOlderPhoto={(entryId) => {
                         if (!automaticPrivatePhotoEntryIds.has(entryId)) {
                           // Reserve one recent slot in a committed render
@@ -4282,6 +4914,46 @@ export function EventRoom({
             {!canPost ? (
               <p className="muted">
                 New text posts are unavailable after this event is closed or
+                before it is active.
+              </p>
+            ) : null}
+          </section>
+
+          <section
+            aria-labelledby="location-post-heading"
+            className="composer-panel location-composer"
+          >
+            <h2 id="location-post-heading">Post a location</h2>
+            <DialogClassification
+              label={classificationLabel}
+              real={realEvent}
+            />
+            <form onSubmit={(submission) => void submitLocation(submission)}>
+              <fieldset
+                disabled={commandsBlocked || !canPost}
+                style={{ border: 0, margin: 0, padding: 0 }}
+              >
+                <legend className="sr-only">Location timeline update</legend>
+                <LocationEditor
+                  draft={locationDraft}
+                  idPrefix="event-location"
+                  onChange={setLocationDraft}
+                />
+                <p className="field-help">
+                  Do not include student data. Post only the precision you can
+                  support. The posted entry is immutable; later corrections
+                  append a superseding entry with a reason.
+                </p>
+                <button disabled={locationPayload === null} type="submit">
+                  {pendingOperation === 'post-location'
+                    ? 'Posting location…'
+                    : 'Post location'}
+                </button>
+              </fieldset>
+            </form>
+            {!canPost ? (
+              <p className="muted">
+                New location posts are unavailable after this event is closed or
                 before it is active.
               </p>
             ) : null}
@@ -4486,6 +5158,7 @@ export function EventRoom({
           ) {
             setDialog(null);
             setDialogText('');
+            setDialogLocationDraft(EMPTY_LOCATION_DRAFT);
             setDialogReason('');
             setConfirmationPhrase('');
           }
@@ -4495,7 +5168,9 @@ export function EventRoom({
         {dialog?.kind === 'correct' && correctionDialogEntry !== null ? (
           <form onSubmit={(submission) => void submitCorrection(submission)}>
             <h2 className="dialog-heading" id="event-dialog-heading">
-              Correct entry {correctionDialogEntry.sequence}
+              Correct{' '}
+              {correctionDialogEntry.kind === 'location' ? 'location ' : ''}
+              entry {correctionDialogEntry.sequence}
             </h2>
             <DialogClassification
               label={classificationLabel}
@@ -4508,17 +5183,25 @@ export function EventRoom({
             </p>
             <fieldset disabled={commandsBlocked}>
               <legend>Correction details</legend>
-              <div className="field">
-                <label htmlFor="correction-text">Corrected text</label>
-                <textarea
-                  data-autofocus
-                  id="correction-text"
-                  maxLength={10_000}
-                  onChange={(change) => setDialogText(change.target.value)}
-                  required
-                  value={dialogText}
+              {correctionDialogEntry.kind === 'location' ? (
+                <LocationEditor
+                  draft={dialogLocationDraft}
+                  idPrefix="correction-location"
+                  onChange={setDialogLocationDraft}
                 />
-              </div>
+              ) : (
+                <div className="field">
+                  <label htmlFor="correction-text">Corrected text</label>
+                  <textarea
+                    data-autofocus
+                    id="correction-text"
+                    maxLength={10_000}
+                    onChange={(change) => setDialogText(change.target.value)}
+                    required
+                    value={dialogText}
+                  />
+                </div>
+              )}
               <div className="field">
                 <label htmlFor="correction-reason">Reason for correction</label>
                 <textarea
@@ -4534,7 +5217,9 @@ export function EventRoom({
               <button
                 disabled={
                   commandsBlocked ||
-                  dialogText.trim().length === 0 ||
+                  (correctionDialogEntry.kind === 'location'
+                    ? dialogLocationPayload === null
+                    : dialogText.trim().length === 0) ||
                   dialogReason.trim().length === 0
                 }
                 type="submit"
