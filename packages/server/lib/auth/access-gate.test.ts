@@ -33,7 +33,12 @@ import {
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from '../../app/(admin)/facilities/owned-database-lifecycle';
 import { createDrizzleAdminCapabilityStore } from '../../app/(admin)/facilities/admin-core';
+import { executeSetUserRolesCapability } from '../../app/(admin)/access/capabilities';
 import {
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
@@ -56,6 +61,7 @@ import {
 import {
   loadAccessConfigurationSnapshotState,
   loadEffectiveAdministratorUserIds,
+  loadEffectiveRoles,
 } from './role-state';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -147,58 +153,55 @@ async function createOwnedDatabase(
   createdContext: AccessGateTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  let created = false;
-  try {
-    await admin.db.execute(
-      sql.raw(`create database "${createdContext.databaseName}"`),
-    );
-    created = true;
-    await admin.db.execute(
-      sql.raw(
-        `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
-      ),
-    );
-    expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
-      createdContext.marker,
-    );
-  } catch (error) {
-    if (created) {
-      try {
-        await dropOwnedDatabase(createdContext);
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'Disposable access-gate database creation and rollback both failed.',
-        );
-      }
-    }
-    throw error;
-  } finally {
-    await admin.close();
-  }
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await admin.db.execute(
+        sql.raw(`create database "${createdContext.databaseName}"`),
+      );
+      recordCreated();
+      await admin.db.execute(
+        sql.raw(
+          `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+        ),
+      );
+      expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
+        createdContext.marker,
+      );
+    },
+    closeCreator: () => admin.close(),
+    rollbackWithFreshMarkerProof: () => dropOwnedDatabase(createdContext),
+    failureMessage:
+      'Disposable access-gate database operation, creator close, or marker-owned rollback failed.',
+  });
 }
 
 async function dropOwnedDatabase(
   createdContext: AccessGateTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  try {
-    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    if (marker === undefined) return;
-    if (marker !== createdContext.marker) {
-      throw new Error(
-        'Refusing to drop a database without the exact issue #26 access-gate ownership marker.',
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
       );
-    }
-    await admin.db.execute(
-      sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
-    );
-    expect(
-      await readDatabaseMarker(admin, createdContext.databaseName),
-    ).toBeUndefined();
-  } finally {
-    await admin.close();
-  }
+      if (marker === undefined) return;
+      if (marker !== createdContext.marker) {
+        throw new Error(
+          'Refusing to drop a database without the exact issue #26 access-gate ownership marker.',
+        );
+      }
+      await admin.db.execute(
+        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+      );
+      expect(
+        await readDatabaseMarker(admin, createdContext.databaseName),
+      ).toBeUndefined();
+    },
+    cleanup: () => admin.close(),
+    failureMessage:
+      'Disposable access-gate database cleanup and connection close both failed.',
+  });
 }
 
 async function cleanupResources(): Promise<void> {
@@ -1338,5 +1341,518 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       (await store.loadEvidence(validGoogleSubject)).snapshot?.member
         ?.facilityScope,
     ).toEqual({ kind: 'district' });
+  });
+
+  test('rejects self-demotion when the only backup has inactive group provenance', async () => {
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const eligibleGroupId = randomUUID();
+    const inactiveGroupId = randomUUID();
+    const validUserId = randomUUID();
+    const inactiveMembershipUserId = randomUUID();
+    const validGoogleSubject = `issue-26-valid-membership-${suffix}`;
+    const inactiveMembershipGoogleSubject = `issue-26-inactive-membership-${suffix}`;
+    const snapshotId = randomUUID();
+    const capturedAt = new Date(Date.now() + 180_000);
+
+    await database.insert(groupSources).values([
+      {
+        id: eligibleGroupId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Issue 26 eligible access ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-eligible-${suffix}`,
+        email: `issue-26-eligible-${suffix}@example.invalid`,
+        fixtureKey: null,
+        createdAt: capturedAt,
+      },
+      {
+        id: inactiveGroupId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Issue 26 inactive access ${suffix.slice(0, 8)}`,
+        active: false,
+        googleGroupId: `issue-26-inactive-${suffix}`,
+        email: `issue-26-inactive-${suffix}@example.invalid`,
+        fixtureKey: null,
+        createdAt: capturedAt,
+      },
+    ]);
+    await database.insert(users).values([
+      {
+        id: validUserId,
+        googleSubject: validGoogleSubject,
+        email: `issue-26-valid-membership-${suffix}@psd401.net`,
+        displayName: `Issue 26 valid membership ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+      {
+        id: inactiveMembershipUserId,
+        googleSubject: inactiveMembershipGoogleSubject,
+        email: `issue-26-inactive-membership-${suffix}@psd401.net`,
+        displayName: `Issue 26 inactive membership ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+    ]);
+    await database.insert(userRoles).values([
+      { userId: validUserId, role: 'staff' },
+      { userId: validUserId, role: 'admin' },
+      { userId: inactiveMembershipUserId, role: 'admin' },
+    ]);
+
+    const activeAccessGroups = (
+      await database
+        .select({
+          id: groupSources.id,
+          kind: groupSources.kind,
+          purpose: groupSources.purpose,
+        })
+        .from(groupSources)
+        .where(eq(groupSources.active, true))
+    ).filter(
+      (group) => group.kind === 'google-group' && group.purpose === 'access',
+    );
+
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: 2_120_000_000,
+        complete: true,
+        syncStartedAt: capturedAt,
+        capturedAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        activeAccessGroups.flatMap((group) => [
+          {
+            snapshotId,
+            groupSourceId: group.id,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'expected' as const,
+          },
+          {
+            snapshotId,
+            groupSourceId: group.id,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(accessMembershipMembers).values([
+        {
+          snapshotId,
+          userId: validUserId,
+          googleSubject: validGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId,
+          userId: inactiveMembershipUserId,
+          googleSubject: inactiveMembershipGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+      ]);
+      await transaction.insert(accessMembershipMemberGroups).values([
+        {
+          snapshotId,
+          userId: validUserId,
+          groupSourceId: eligibleGroupId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId,
+          userId: inactiveMembershipUserId,
+          groupSourceId: eligibleGroupId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId,
+          userId: inactiveMembershipUserId,
+          groupSourceId: inactiveGroupId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+      ]);
+    });
+
+    const accessState = await loadAccessConfigurationSnapshotState(database);
+    expect(accessState?.snapshotId).toBe(snapshotId);
+    if (accessState === null) {
+      throw new Error(
+        'The every-membership regression snapshot must be exact.',
+      );
+    }
+
+    expect(
+      await loadEffectiveAdministratorUserIds(database, { accessState }),
+    ).toEqual([validUserId]);
+
+    const gateStore = createDrizzleAccessGateStore(database);
+    const gateAudit = Object.freeze({
+      async append() {
+        return {} as never;
+      },
+    });
+    expect(
+      await checkAccessGate(
+        {
+          googleSubject: inactiveMembershipGoogleSubject,
+          subjectDigest: digest(inactiveMembershipGoogleSubject),
+          requestId: randomUUID(),
+          checkedAt: new Date(capturedAt.getTime() + 1_000).toISOString(),
+          source: 'web',
+        },
+        {
+          store: gateStore,
+          audit: gateAudit,
+          bootstrapAdminSubjects: new Set(),
+        },
+      ),
+    ).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
+    });
+
+    const sessionId = randomUUID();
+    const deviceEnrollmentId = randomUUID();
+    await database.insert(deviceEnrollments).values({
+      id: deviceEnrollmentId,
+      userId: validUserId,
+      platform: 'web',
+      unlockMethod: 'secure-session-cookie',
+      installationId: `issue-26-inactive-provenance-${suffix}`,
+      enrolledAt: capturedAt,
+      lastSeenAt: capturedAt,
+    });
+    await database.insert(sessions).values({
+      id: sessionId,
+      userId: validUserId,
+      deviceEnrollmentId,
+      membershipSnapshotId: snapshotId,
+      membershipValidUntil: new Date(capturedAt.getTime() + 60 * 60 * 1_000),
+      membershipGraceUntil: new Date(
+        capturedAt.getTime() + 2 * 60 * 60 * 1_000,
+      ),
+      createdAt: capturedAt,
+      expiresAt: new Date(capturedAt.getTime() + 3 * 60 * 60 * 1_000),
+    });
+    const authenticated = {
+      actor: { kind: 'human', userId: validUserId, sessionId },
+      source: 'web',
+      roles: ['staff', 'admin'],
+      scope: { facilityScope: { kind: 'district' } },
+      membershipState: 'fresh',
+      result: { connectivityEpoch: { id: randomUUID() } },
+    } as unknown as AuthenticatedSession;
+    const roleChangeRequestId = randomUUID();
+    await expect(
+      executeSetUserRolesCapability({
+        authenticated,
+        store: createDrizzleAdminCapabilityStore(database, authenticated),
+        command: { userId: validUserId, roles: ['staff'] },
+        metadata: {
+          idempotencyKey: `issue-26-inactive-provenance-${randomUUID()}`,
+          requestId: roleChangeRequestId,
+          now: new Date(capturedAt.getTime() + 2_000),
+        },
+      }),
+    ).rejects.toMatchObject({
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      status: 409,
+      message: 'The final reachable administrator cannot be removed.',
+    });
+    expect(await loadEffectiveRoles(database, validUserId)).toEqual([
+      'staff',
+      'admin',
+    ]);
+    expect(
+      await database
+        .select({ granted: userRoleChanges.granted })
+        .from(userRoleChanges)
+        .where(eq(userRoleChanges.requestId, roleChangeRequestId)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({
+          action: securityAuditEntries.action,
+          outcome: securityAuditEntries.outcome,
+          reasonCode: securityAuditEntries.reasonCode,
+          requestId: securityAuditEntries.requestId,
+        })
+        .from(securityAuditEntries)
+        .where(eq(securityAuditEntries.requestId, roleChangeRequestId)),
+    ).toEqual([
+      {
+        action: 'set-user-roles',
+        outcome: 'failure',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        requestId: roleChangeRequestId,
+      },
+    ]);
+  });
+
+  test('rejects retiring a source when the only backup also references it', async () => {
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const remainingGroupId = randomUUID();
+    const retiringGroupId = randomUUID();
+    const actorUserId = randomUUID();
+    const backupUserId = randomUUID();
+    const actorGoogleSubject = `issue-26-retiring-actor-${suffix}`;
+    const backupGoogleSubject = `issue-26-retiring-backup-${suffix}`;
+    const snapshotId = randomUUID();
+    const capturedAt = new Date(Date.now() + 240_000);
+    const retiringDisplayName = `Issue 26 retiring access ${suffix.slice(0, 8)}`;
+    const retiringGoogleGroupId = `issue-26-retiring-${suffix}`;
+    const retiringEmail = `issue-26-retiring-${suffix}@example.invalid`;
+
+    await database.insert(groupSources).values([
+      {
+        id: remainingGroupId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Issue 26 remaining access ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-remaining-${suffix}`,
+        email: `issue-26-remaining-${suffix}@example.invalid`,
+        fixtureKey: null,
+        createdAt: capturedAt,
+      },
+      {
+        id: retiringGroupId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: retiringDisplayName,
+        active: true,
+        googleGroupId: retiringGoogleGroupId,
+        email: retiringEmail,
+        fixtureKey: null,
+        createdAt: capturedAt,
+      },
+    ]);
+    await database.insert(users).values([
+      {
+        id: actorUserId,
+        googleSubject: actorGoogleSubject,
+        email: `issue-26-retiring-actor-${suffix}@psd401.net`,
+        displayName: `Issue 26 retiring actor ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+      {
+        id: backupUserId,
+        googleSubject: backupGoogleSubject,
+        email: `issue-26-retiring-backup-${suffix}@psd401.net`,
+        displayName: `Issue 26 retiring backup ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+    ]);
+    await database.insert(userRoles).values([
+      { userId: actorUserId, role: 'admin' },
+      { userId: backupUserId, role: 'admin' },
+    ]);
+
+    const activeAccessGroups = (
+      await database
+        .select({
+          id: groupSources.id,
+          kind: groupSources.kind,
+          purpose: groupSources.purpose,
+        })
+        .from(groupSources)
+        .where(eq(groupSources.active, true))
+    ).filter(
+      (group) => group.kind === 'google-group' && group.purpose === 'access',
+    );
+
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: 2_130_000_000,
+        complete: true,
+        syncStartedAt: capturedAt,
+        capturedAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        activeAccessGroups.flatMap((group) => [
+          {
+            snapshotId,
+            groupSourceId: group.id,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'expected' as const,
+          },
+          {
+            snapshotId,
+            groupSourceId: group.id,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(accessMembershipMembers).values([
+        {
+          snapshotId,
+          userId: actorUserId,
+          googleSubject: actorGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId,
+          userId: backupUserId,
+          googleSubject: backupGoogleSubject,
+          facilityScopeKind: 'district',
+        },
+      ]);
+      await transaction.insert(accessMembershipMemberGroups).values([
+        {
+          snapshotId,
+          userId: actorUserId,
+          groupSourceId: retiringGroupId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId,
+          userId: backupUserId,
+          groupSourceId: remainingGroupId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId,
+          userId: backupUserId,
+          groupSourceId: retiringGroupId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+      ]);
+    });
+
+    const accessState = await loadAccessConfigurationSnapshotState(database);
+    expect(accessState?.snapshotId).toBe(snapshotId);
+    if (accessState === null) {
+      throw new Error('The prospective-retirement snapshot must be exact.');
+    }
+    expect(
+      await loadEffectiveAdministratorUserIds(database, { accessState }),
+    ).toEqual([actorUserId, backupUserId].sort());
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState,
+        eligibleAccessGroupSourceIds:
+          accessState.activeAccessGroupSourceIds.filter(
+            (id) => id !== retiringGroupId,
+          ),
+      }),
+    ).toEqual([]);
+
+    const sessionId = randomUUID();
+    const deviceEnrollmentId = randomUUID();
+    await database.insert(deviceEnrollments).values({
+      id: deviceEnrollmentId,
+      userId: actorUserId,
+      platform: 'web',
+      unlockMethod: 'secure-session-cookie',
+      installationId: `issue-26-retirement-${suffix}`,
+      enrolledAt: capturedAt,
+      lastSeenAt: capturedAt,
+    });
+    await database.insert(sessions).values({
+      id: sessionId,
+      userId: actorUserId,
+      deviceEnrollmentId,
+      membershipSnapshotId: snapshotId,
+      membershipValidUntil: new Date(capturedAt.getTime() + 60 * 60 * 1_000),
+      membershipGraceUntil: new Date(
+        capturedAt.getTime() + 2 * 60 * 60 * 1_000,
+      ),
+      createdAt: capturedAt,
+      expiresAt: new Date(capturedAt.getTime() + 3 * 60 * 60 * 1_000),
+    });
+    const authenticated = {
+      actor: { kind: 'human', userId: actorUserId, sessionId },
+      source: 'web',
+      roles: ['admin'],
+      scope: { facilityScope: { kind: 'district' } },
+      membershipState: 'fresh',
+      result: { connectivityEpoch: { id: randomUUID() } },
+    } as unknown as AuthenticatedSession;
+    const retirementRequestId = randomUUID();
+    await expect(
+      executeUpdateGroupSourceCapability({
+        authenticated,
+        store: createDrizzleAdminCapabilityStore(database, authenticated),
+        command: {
+          id: retiringGroupId,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          displayName: retiringDisplayName,
+          active: false,
+          googleGroupId: retiringGoogleGroupId,
+          email: retiringEmail,
+        },
+        metadata: {
+          idempotencyKey: `issue-26-retirement-${randomUUID()}`,
+          requestId: retirementRequestId,
+          now: new Date(capturedAt.getTime() + 2_000),
+        },
+      }),
+    ).rejects.toMatchObject({
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      status: 409,
+      message:
+        'Another reachable district administrator must remain through an unchanged active access group.',
+    });
+    expect(
+      await database
+        .select({
+          active: groupSources.active,
+          displayName: groupSources.displayName,
+          googleGroupId: groupSources.googleGroupId,
+          email: groupSources.email,
+        })
+        .from(groupSources)
+        .where(eq(groupSources.id, retiringGroupId))
+        .limit(1),
+    ).toEqual([
+      {
+        active: true,
+        displayName: retiringDisplayName,
+        googleGroupId: retiringGoogleGroupId,
+        email: retiringEmail,
+      },
+    ]);
+    expect(
+      await database
+        .select({
+          action: securityAuditEntries.action,
+          outcome: securityAuditEntries.outcome,
+          reasonCode: securityAuditEntries.reasonCode,
+          requestId: securityAuditEntries.requestId,
+        })
+        .from(securityAuditEntries)
+        .where(eq(securityAuditEntries.requestId, retirementRequestId)),
+    ).toEqual([
+      {
+        action: 'update-group-source',
+        outcome: 'failure',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        requestId: retirementRequestId,
+      },
+    ]);
   });
 });

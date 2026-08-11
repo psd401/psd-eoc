@@ -25,6 +25,7 @@ import {
   digestWebSessionCredential,
 } from '../../../lib/auth/session-cookie';
 import { createOwnedAdminPlaywrightDatabase } from './playwright-database';
+import { executeOperationWithCleanup } from './owned-database-lifecycle';
 import {
   requireInheritedAdminPlaywrightRunContext,
   type AdminPlaywrightRunContext,
@@ -311,14 +312,17 @@ export default async function globalSetup(): Promise<void> {
   if (connection.driver !== 'postgres') {
     throw new Error('Administration Playwright requires PostgreSQL.');
   }
-  try {
-    const fixture = await prepareAccessEvidence(connection);
-    await issueSyntheticAdministratorSession(
-      connection,
-      fixture,
-      context.storageStatePath,
-    );
-  } finally {
-    await connection.close();
-  }
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const fixture = await prepareAccessEvidence(connection);
+      await issueSyntheticAdministratorSession(
+        connection,
+        fixture,
+        context.storageStatePath,
+      );
+    },
+    cleanup: () => connection.close(),
+    failureMessage:
+      'Administration Playwright fixture setup and connection close both failed.',
+  });
 }

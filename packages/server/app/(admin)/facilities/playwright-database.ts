@@ -9,6 +9,10 @@ import {
   requireAdminPlaywrightRunContext,
   type AdminPlaywrightRunContext,
 } from './playwright-run';
+import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from './owned-database-lifecycle';
 
 interface DatabaseMarkerRow extends Record<string, unknown> {
   readonly marker: string | null;
@@ -80,64 +84,66 @@ async function readDatabaseMarker(
 /** Creates and immediately marks the exact UUID-named disposable database. */
 export async function createOwnedAdminPlaywrightDatabase(
   value: unknown,
+  adminFactory: (
+    context: AdminPlaywrightRunContext,
+  ) => PostgresDatabaseConnection = databaseAdmin,
 ): Promise<void> {
   const context = requireAdminPlaywrightRunContext(value);
-  const admin = databaseAdmin(context);
-  let created = false;
-  try {
-    await admin.db.execute(
-      sql.raw(`create database "${context.databaseName}"`),
-    );
-    created = true;
-    const marker = adminPlaywrightDatabaseMarker(context);
-    await admin.db.execute(
-      sql.raw(
-        `comment on database "${context.databaseName}" is ${quotedLiteral(marker)}`,
-      ),
-    );
-    requireAdminPlaywrightDatabaseOwnership(
-      context,
-      await readDatabaseMarker(admin, context.databaseName),
-    );
-  } catch (error) {
-    if (created) {
-      try {
-        await admin.db.execute(
-          sql.raw(`drop database "${context.databaseName}" with (force)`),
-        );
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'Administration Playwright database creation and rollback both failed.',
-        );
-      }
-    }
-    throw error;
-  } finally {
-    await admin.close();
-  }
+  const admin = adminFactory(context);
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await admin.db.execute(
+        sql.raw(`create database "${context.databaseName}"`),
+      );
+      recordCreated();
+      const marker = adminPlaywrightDatabaseMarker(context);
+      await admin.db.execute(
+        sql.raw(
+          `comment on database "${context.databaseName}" is ${quotedLiteral(marker)}`,
+        ),
+      );
+      requireAdminPlaywrightDatabaseOwnership(
+        context,
+        await readDatabaseMarker(admin, context.databaseName),
+      );
+    },
+    closeCreator: () => admin.close(),
+    rollbackWithFreshMarkerProof: async () => {
+      await dropOwnedAdminPlaywrightDatabase(context, adminFactory);
+    },
+    failureMessage:
+      'Administration Playwright database creation, creator close, or marker-owned rollback failed.',
+  });
 }
 
 /** Drops only a database carrying this exact run's immutable marker. */
 export async function dropOwnedAdminPlaywrightDatabase(
   value: unknown,
+  adminFactory: (
+    context: AdminPlaywrightRunContext,
+  ) => PostgresDatabaseConnection = databaseAdmin,
 ): Promise<boolean> {
   const context = requireAdminPlaywrightRunContext(value);
-  const admin = databaseAdmin(context);
-  try {
-    const marker = await readDatabaseMarker(admin, context.databaseName);
-    if (marker === undefined) return false;
-    requireAdminPlaywrightDatabaseOwnership(context, marker);
-    await admin.db.execute(
-      sql.raw(`drop database "${context.databaseName}" with (force)`),
-    );
-    if ((await readDatabaseMarker(admin, context.databaseName)) !== undefined) {
-      throw new Error(
-        'The owned administration Playwright database remained after cleanup.',
+  const admin = adminFactory(context);
+  return executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(admin, context.databaseName);
+      if (marker === undefined) return false;
+      requireAdminPlaywrightDatabaseOwnership(context, marker);
+      await admin.db.execute(
+        sql.raw(`drop database "${context.databaseName}" with (force)`),
       );
-    }
-    return true;
-  } finally {
-    await admin.close();
-  }
+      if (
+        (await readDatabaseMarker(admin, context.databaseName)) !== undefined
+      ) {
+        throw new Error(
+          'The owned administration Playwright database remained after cleanup.',
+        );
+      }
+      return true;
+    },
+    cleanup: () => admin.close(),
+    failureMessage:
+      'Administration Playwright database cleanup and connection close failed.',
+  });
 }

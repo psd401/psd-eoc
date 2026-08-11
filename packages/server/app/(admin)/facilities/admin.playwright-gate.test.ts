@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
 
 import { dropOwnedAdminPlaywrightDatabase } from './playwright-database';
+import { executeOperationWithCleanup } from './owned-database-lifecycle';
 import {
   cleanupAdminPlaywrightRunArtifacts,
   requireAdminPlaywrightRunContext,
@@ -164,33 +165,22 @@ describe('issue #26 administration Playwright gate', () => {
         baseDatabaseUrl,
         childEnvironment,
       );
-      let runError: unknown;
-      try {
-        await waitForAdminPlaywrightPortToClose(context.appPort);
-        const { exitCode, stdout, stderr } =
-          await runPlaywright(childEnvironment);
-        if (exitCode !== 0) {
-          throw new Error(
-            `Issue #26 Playwright gate failed.\n${stdout}\n${stderr}`,
-          );
-        }
-        expect(exitCode).toBe(0);
-      } catch (error) {
-        runError = error;
-      }
-
-      try {
-        await cleanupExactRun(context);
-      } catch (cleanupError) {
-        if (runError !== undefined) {
-          throw new AggregateError(
-            [runError, cleanupError],
-            'Issue #26 Playwright run and exact cleanup both failed.',
-          );
-        }
-        throw cleanupError;
-      }
-      if (runError !== undefined) throw runError;
+      await executeOperationWithCleanup({
+        operation: async () => {
+          await waitForAdminPlaywrightPortToClose(context.appPort);
+          const { exitCode, stdout, stderr } =
+            await runPlaywright(childEnvironment);
+          if (exitCode !== 0) {
+            throw new Error(
+              `Issue #26 Playwright gate failed.\n${stdout}\n${stderr}`,
+            );
+          }
+          expect(exitCode).toBe(0);
+        },
+        cleanup: () => cleanupExactRun(context),
+        failureMessage:
+          'Issue #26 Playwright run and exact cleanup both failed.',
+      });
     },
     GATE_TIMEOUT_MS,
   );
