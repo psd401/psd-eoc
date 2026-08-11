@@ -61,6 +61,12 @@ interface ChildOutputCapture {
   cancel(reason: string): Promise<void>;
 }
 
+interface BrowserShard {
+  readonly label: string;
+  readonly cliArguments: readonly string[];
+  readonly startDelayMs: number;
+}
+
 interface ExactGateCleanupOperations {
   stopServerAndRemoveRun(context: EventRoomPlaywrightRunContext): Promise<void>;
   dropDatabase(context: EventRoomPlaywrightRunContext): Promise<unknown>;
@@ -71,6 +77,18 @@ const DEFAULT_CHILD_WAIT_LIMITS: ChildWaitLimits = Object.freeze({
   terminationGraceMs: PLAYWRIGHT_CHILD_TERMINATION_GRACE_MS,
   outputDrainTimeoutMs: PLAYWRIGHT_OUTPUT_DRAIN_TIMEOUT_MS,
 });
+const BROWSER_SHARDS: readonly BrowserShard[] = Object.freeze([
+  Object.freeze({
+    label: 'shard 1/2',
+    cliArguments: Object.freeze(['--fully-parallel', '--shard=1/2']),
+    startDelayMs: 0,
+  }),
+  Object.freeze({
+    label: 'shard 2/2',
+    cliArguments: Object.freeze(['--fully-parallel', '--shard=2/2']),
+    startDelayMs: 60_000,
+  }),
+]);
 
 function captureChildOutput(
   stream: ReadableStream<Uint8Array>,
@@ -227,6 +245,67 @@ async function cleanExactGateRun(
   }
 }
 
+async function runBrowserShard(
+  baseDatabaseUrl: string,
+  shard: BrowserShard,
+): Promise<void> {
+  if (shard.startDelayMs > 0) {
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, shard.startDelayMs),
+    );
+  }
+  const childEnvironment = { ...process.env };
+  const context = resolveEventRoomPlaywrightRunContext(
+    baseDatabaseUrl,
+    childEnvironment,
+  );
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        'x',
+        'playwright',
+        'test',
+        '--config',
+        playwrightConfig,
+        ...shard.cliArguments,
+      ],
+      {
+        cwd: workspaceRoot,
+        env: childEnvironment,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+    const { exitCode, stdout, stderr, outputErrors } =
+      await waitForPlaywrightChild(child);
+    const failures: string[] = [];
+    if (existsSync(context.runDirectory)) {
+      failures.push(
+        `validated run directory remained after child exit: ${context.runDirectory}`,
+      );
+    }
+    if (inspectEventRoomPlaywrightPortLease(context) === 'owned') {
+      failures.push(
+        `validated port lease remained after child exit: ${context.portLeasePath}`,
+      );
+    }
+    if (exitCode !== 0) {
+      failures.push(
+        `${shard.label} browser suite exited ${exitCode}.\n${stdout}\n${stderr}`,
+      );
+    }
+    failures.push(...outputErrors);
+    if (failures.length > 0) {
+      throw new Error(
+        `Event-room Playwright ${shard.label} failed.\n${failures.join('\n')}`,
+      );
+    }
+  } finally {
+    await cleanExactGateRun(context);
+  }
+}
+
 describe('event-room Playwright gate', () => {
   test('pins a licensed repository-local axe asset with no network loader', async () => {
     const [storedBytes, license, suite] = await Promise.all([
@@ -250,6 +329,13 @@ describe('event-room Playwright gate', () => {
     if (process.env.CI === 'true') {
       expect(process.env.TEST_DATABASE_URL).toBeTruthy();
     }
+    expect(BROWSER_SHARDS.map((shard) => shard.cliArguments)).toEqual([
+      ['--fully-parallel', '--shard=1/2'],
+      ['--fully-parallel', '--shard=2/2'],
+    ]);
+    expect(BROWSER_SHARDS.map((shard) => shard.startDelayMs)).toEqual([
+      0, 60_000,
+    ]);
   });
 
   test('cleanup proves server stop before database removal and fails closed on stop-proof failure', async () => {
@@ -477,56 +563,26 @@ describe('event-room Playwright gate', () => {
     const baseDatabaseUrl = requireSyntheticEventRoomTestDatabaseUrl(
       process.env.TEST_DATABASE_URL,
     );
-    const childEnvironment = { ...process.env };
-    const context = resolveEventRoomPlaywrightRunContext(
-      baseDatabaseUrl,
-      childEnvironment,
+    const results = await Promise.allSettled(
+      BROWSER_SHARDS.map((shard) => runBrowserShard(baseDatabaseUrl, shard)),
     );
-    try {
-      const child = Bun.spawn(
-        [
-          process.execPath,
-          'x',
-          'playwright',
-          'test',
-          '--config',
-          playwrightConfig,
-        ],
-        {
-          cwd: workspaceRoot,
-          env: childEnvironment,
-          stdout: 'pipe',
-          stderr: 'pipe',
-        },
+    const failures = results.flatMap((result, index) =>
+      result.status === 'rejected'
+        ? [
+            `${BROWSER_SHARDS[index]?.label ?? `shard ${index + 1}`}: ${
+              result.reason instanceof Error
+                ? result.reason.message
+                : String(result.reason)
+            }`,
+          ]
+        : [],
+    );
+    if (failures.length > 0) {
+      throw new Error(
+        `Event-room Playwright gate failed after both isolated shards completed.\n${failures.join('\n')}`,
       );
-      const { exitCode, stdout, stderr, outputErrors } =
-        await waitForPlaywrightChild(child);
-      const failures: string[] = [];
-      if (existsSync(context.runDirectory)) {
-        failures.push(
-          `validated run directory remained after child exit: ${context.runDirectory}`,
-        );
-      }
-      if (inspectEventRoomPlaywrightPortLease(context) === 'owned') {
-        failures.push(
-          `validated port lease remained after child exit: ${context.portLeasePath}`,
-        );
-      }
-      if (exitCode !== 0) {
-        failures.push(
-          `browser suite exited ${exitCode}.\n${stdout}\n${stderr}`,
-        );
-      }
-      failures.push(...outputErrors);
-      if (failures.length > 0) {
-        throw new Error(
-          `Event-room Playwright gate failed.\n${failures.join('\n')}`,
-        );
-      }
-      expect(exitCode).toBe(0);
-    } finally {
-      await cleanExactGateRun(context);
     }
+    expect(results).toHaveLength(2);
   };
   if (process.env.TEST_DATABASE_URL === undefined) {
     test.skip(browserGateName, runBrowserGate, BROWSER_GATE_TIMEOUT_MS);
