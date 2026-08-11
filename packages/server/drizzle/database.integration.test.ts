@@ -70,6 +70,10 @@ function postgresErrorMessages(error: unknown): readonly string[] {
   return messages;
 }
 
+function findPostgresErrorMessage(error: unknown): string | undefined {
+  return postgresErrorMessages(error).at(-1);
+}
+
 async function expectConstraintViolation(
   operation: () => Promise<unknown>,
   expectedConstraintName: string,
@@ -83,6 +87,22 @@ async function expectConstraintViolation(
 
   throw new Error(
     `Expected PostgreSQL constraint ${expectedConstraintName} to reject the operation.`,
+  );
+}
+
+async function expectPostgresRejection(
+  operation: () => Promise<unknown>,
+  expectedMessage: RegExp,
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    expect(findPostgresErrorMessage(error)).toMatch(expectedMessage);
+    return;
+  }
+
+  throw new Error(
+    `Expected PostgreSQL to reject the operation with ${String(expectedMessage)}.`,
   );
 }
 
@@ -126,6 +146,175 @@ const insertSyntheticTestEvent = sql`
   where facility.code = 'SYN-NORTH'
     and snapshot.population = 'synthetic'
     and event_type.key = 'lockdown-drill'
+`;
+
+const syntheticAdminEvidencePrerequisites = [
+  sql`
+    insert into users (
+      id,
+      google_subject,
+      email,
+      display_name,
+      facility_scope_kind,
+      created_at
+    ) values (
+      '00000000-0000-4000-8000-000000026001'::uuid,
+      'synthetic-database-admin-evidence',
+      'synthetic-database-admin-evidence@psd401.net',
+      'Synthetic Database Admin Evidence',
+      'district'::facility_scope_kind,
+      '2026-08-10T16:00:00.000Z'::timestamptz
+    )
+  `,
+  sql`
+    insert into device_enrollments (
+      id,
+      user_id,
+      platform,
+      unlock_method,
+      installation_id,
+      enrolled_at,
+      last_seen_at
+    ) values (
+      '00000000-0000-4000-8000-000000026002'::uuid,
+      '00000000-0000-4000-8000-000000026001'::uuid,
+      'web'::device_platform,
+      'secure-session-cookie'::device_unlock_method,
+      'synthetic-database-admin-evidence-installation',
+      '2026-08-10T16:00:00.000Z'::timestamptz,
+      '2026-08-10T16:00:00.000Z'::timestamptz
+    )
+  `,
+  sql`
+    insert into access_membership_snapshots (
+      id,
+      version,
+      complete,
+      sync_started_at,
+      captured_at
+    ) values (
+      '00000000-0000-4000-8000-000000026003'::uuid,
+      260026,
+      true,
+      '2026-08-10T15:59:00.000Z'::timestamptz,
+      '2026-08-10T16:00:00.000Z'::timestamptz
+    )
+  `,
+  sql`
+    insert into access_membership_members (
+      snapshot_id,
+      user_id,
+      google_subject,
+      facility_scope_kind
+    ) values (
+      '00000000-0000-4000-8000-000000026003'::uuid,
+      '00000000-0000-4000-8000-000000026001'::uuid,
+      'synthetic-database-admin-evidence',
+      'district'::facility_scope_kind
+    )
+  `,
+  sql`
+    insert into sessions (
+      id,
+      user_id,
+      device_enrollment_id,
+      membership_snapshot_id,
+      membership_valid_until,
+      membership_grace_until,
+      created_at,
+      expires_at
+    ) values (
+      '00000000-0000-4000-8000-000000026004'::uuid,
+      '00000000-0000-4000-8000-000000026001'::uuid,
+      '00000000-0000-4000-8000-000000026002'::uuid,
+      '00000000-0000-4000-8000-000000026003'::uuid,
+      '2026-08-10T17:00:00.000Z'::timestamptz,
+      '2026-08-10T18:00:00.000Z'::timestamptz,
+      '2026-08-10T16:00:00.000Z'::timestamptz,
+      '2026-08-10T19:00:00.000Z'::timestamptz
+    )
+  `,
+  sql`
+    insert into integration_statuses (
+      id,
+      integration_id,
+      label,
+      verified_at,
+      verified_by_user_id,
+      authorization_reference,
+      reason_code,
+      observed_at
+    ) values (
+      '00000000-0000-4000-8000-000000026005'::uuid,
+      'synthetic-database-evidence',
+      'live-verified'::integration_truth_label,
+      '2026-08-10T16:01:00.000Z'::timestamptz,
+      '00000000-0000-4000-8000-000000026001'::uuid,
+      repeat('a', 64),
+      null,
+      '2026-08-10T16:01:00.000Z'::timestamptz
+    )
+  `,
+] as const;
+
+const insertSyntheticRoleChange = sql`
+  insert into user_role_changes (
+    user_id,
+    role,
+    granted,
+    changed_by_user_id,
+    changed_with_session_id,
+    request_id,
+    occurred_at
+  ) values (
+    '00000000-0000-4000-8000-000000026001'::uuid,
+    'admin'::role,
+    true,
+    '00000000-0000-4000-8000-000000026001'::uuid,
+    '00000000-0000-4000-8000-000000026004'::uuid,
+    '00000000-0000-4000-8000-000000026007'::uuid,
+    '2026-08-10T16:02:00.000Z'::timestamptz
+  )
+`;
+
+const insertSyntheticChannelChangeAuthorization = sql`
+  insert into integration_channel_change_authorizations (
+    id,
+    reference,
+    authorization_commitment,
+    integration_status_id,
+    integration_id,
+    status_label,
+    desired_enabled,
+    request_digest,
+    consequence_digest,
+    authorized_by_user_id,
+    authorized_with_session_id,
+    issued_at,
+    expires_at,
+    consumed_by_user_id,
+    consumed_with_session_id,
+    consumed_request_id,
+    consumed_at
+  ) values (
+    '00000000-0000-4000-8000-000000026006'::uuid,
+    'synthetic-product-owner-evidence-26',
+    repeat('a', 64),
+    '00000000-0000-4000-8000-000000026005'::uuid,
+    'synthetic-database-evidence',
+    'live-verified'::integration_truth_label,
+    false,
+    repeat('b', 64),
+    repeat('c', 64),
+    '00000000-0000-4000-8000-000000026001'::uuid,
+    '00000000-0000-4000-8000-000000026004'::uuid,
+    '2026-08-10T16:01:00.000Z'::timestamptz,
+    '2026-08-10T16:16:00.000Z'::timestamptz,
+    '00000000-0000-4000-8000-000000026001'::uuid,
+    '00000000-0000-4000-8000-000000026004'::uuid,
+    '00000000-0000-4000-8000-000000026009'::uuid,
+    '2026-08-10T16:02:00.000Z'::timestamptz
+  )
 `;
 
 describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
@@ -562,6 +751,1214 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
 
     await expectMediaMutationRejected('update');
     await expectMediaMutationRejected('delete');
+  });
+
+  test('creates the append-only role-change and live-channel authorization schema', async () => {
+    const db = databaseConnection().db;
+    const [consumedAtColumn] = await db.execute<{
+      column_default: string | null;
+      is_nullable: 'NO' | 'YES';
+    }>(sql`
+      select column_default, is_nullable
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'integration_channel_change_authorizations'
+        and column_name = 'consumed_at'
+    `);
+    expect(consumedAtColumn).toEqual({
+      column_default: null,
+      is_nullable: 'NO',
+    });
+
+    const constraints = await db.execute<{
+      constraint_name: string;
+      constraint_type: string;
+      table_name: string;
+      validated: boolean;
+    }>(sql`
+      select
+        relation.relname as table_name,
+        constraint_record.conname as constraint_name,
+        constraint_record.contype::text as constraint_type,
+        constraint_record.convalidated as validated
+      from pg_catalog.pg_constraint as constraint_record
+      join pg_catalog.pg_class as relation
+        on relation.oid = constraint_record.conrelid
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      where namespace.nspname = 'public'
+        and relation.relname in (
+          'user_role_changes',
+          'integration_channel_change_authorizations'
+        )
+    `);
+    expect(constraints.every((constraint) => constraint.validated)).toBe(true);
+    expect(
+      constraints
+        .map(
+          (constraint) =>
+            `${constraint.table_name}:${constraint.constraint_name}:${constraint.constraint_type}`,
+        )
+        .sort(),
+    ).toEqual(
+      [
+        'integration_channel_change_authorizations:channel_change_authorizations_authorizer_session_fk:f',
+        'integration_channel_change_authorizations:channel_change_authorizations_commitment_uq:u',
+        'integration_channel_change_authorizations:channel_change_authorizations_consumer_session_fk:f',
+        'integration_channel_change_authorizations:channel_change_authorizations_consumption_time:c',
+        'integration_channel_change_authorizations:channel_change_authorizations_digest_format:c',
+        'integration_channel_change_authorizations:channel_change_authorizations_expiry_bound:c',
+        'integration_channel_change_authorizations:channel_change_authorizations_integration_id_format:c',
+        'integration_channel_change_authorizations:channel_change_authorizations_live_status:c',
+        'integration_channel_change_authorizations:channel_change_authorizations_reference_format:c',
+        'integration_channel_change_authorizations:channel_change_authorizations_reference_uq:u',
+        'integration_channel_change_authorizations:channel_change_authorizations_request_uq:u',
+        'integration_channel_change_authorizations:channel_change_authorizations_same_human_session:c',
+        'integration_channel_change_authorizations:channel_change_authorizations_status_truth_fk:f',
+        'integration_channel_change_authorizations:channel_change_authorizations_status_uq:u',
+        'integration_channel_change_authorizations:channel_change_authorizations_timestamp_precision:c',
+        'integration_channel_change_authorizations:integration_channel_change_authorizations_pkey:p',
+        'user_role_changes:user_role_changes_changer_session_fk:f',
+        'user_role_changes:user_role_changes_pkey:p',
+        'user_role_changes:user_role_changes_request_user_role_uq:u',
+        'user_role_changes:user_role_changes_sequence_positive:c',
+        'user_role_changes:user_role_changes_user_id_users_id_fk:f',
+      ].sort(),
+    );
+
+    const keyedConstraints = await db.execute<{
+      columns: string[];
+      constraint_name: string;
+      constraint_type: string;
+      delete_action: string | null;
+      referenced_columns: string[] | null;
+      referenced_table: string | null;
+      table_name: string;
+    }>(sql`
+      select
+        relation.relname as table_name,
+        constraint_record.conname as constraint_name,
+        constraint_record.contype::text as constraint_type,
+        array(
+          select attribute.attname
+          from unnest(constraint_record.conkey::smallint[]) with ordinality
+            as key_column(attribute_number, position)
+          join pg_catalog.pg_attribute as attribute
+            on attribute.attrelid = constraint_record.conrelid
+            and attribute.attnum = key_column.attribute_number
+          order by key_column.position
+        )::text[] as columns,
+        case
+          when constraint_record.contype = 'f'
+            then referenced_relation.relname
+          else null
+        end as referenced_table,
+        case
+          when constraint_record.contype = 'f' then array(
+            select attribute.attname
+            from unnest(constraint_record.confkey::smallint[]) with ordinality
+              as key_column(attribute_number, position)
+            join pg_catalog.pg_attribute as attribute
+              on attribute.attrelid = constraint_record.confrelid
+              and attribute.attnum = key_column.attribute_number
+            order by key_column.position
+          )::text[]
+          else null
+        end as referenced_columns,
+        case
+          when constraint_record.contype = 'f'
+            then constraint_record.confdeltype::text
+          else null
+        end as delete_action
+      from pg_catalog.pg_constraint as constraint_record
+      join pg_catalog.pg_class as relation
+        on relation.oid = constraint_record.conrelid
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      left join pg_catalog.pg_class as referenced_relation
+        on referenced_relation.oid = constraint_record.confrelid
+      where namespace.nspname = 'public'
+        and relation.relname in (
+          'user_role_changes',
+          'integration_channel_change_authorizations'
+        )
+        and constraint_record.contype in ('p', 'u', 'f')
+    `);
+    expect(
+      keyedConstraints
+        .map((constraint) =>
+          [
+            constraint.table_name,
+            constraint.constraint_name,
+            constraint.constraint_type,
+            constraint.columns.join(','),
+            constraint.referenced_table ?? '',
+            constraint.referenced_columns?.join(',') ?? '',
+            constraint.delete_action ?? '',
+          ].join(':'),
+        )
+        .sort(),
+    ).toEqual(
+      [
+        'integration_channel_change_authorizations:channel_change_authorizations_authorizer_session_fk:f:authorized_with_session_id,authorized_by_user_id:sessions:id,user_id:r',
+        'integration_channel_change_authorizations:channel_change_authorizations_commitment_uq:u:authorization_commitment:::',
+        'integration_channel_change_authorizations:channel_change_authorizations_consumer_session_fk:f:consumed_with_session_id,consumed_by_user_id:sessions:id,user_id:r',
+        'integration_channel_change_authorizations:channel_change_authorizations_reference_uq:u:reference:::',
+        'integration_channel_change_authorizations:channel_change_authorizations_request_uq:u:consumed_request_id:::',
+        'integration_channel_change_authorizations:channel_change_authorizations_status_truth_fk:f:integration_status_id,integration_id,status_label,authorized_by_user_id,authorization_commitment,issued_at:integration_statuses:id,integration_id,label,verified_by_user_id,authorization_reference,verified_at:r',
+        'integration_channel_change_authorizations:channel_change_authorizations_status_uq:u:integration_status_id:::',
+        'integration_channel_change_authorizations:integration_channel_change_authorizations_pkey:p:id:::',
+        'user_role_changes:user_role_changes_changer_session_fk:f:changed_with_session_id,changed_by_user_id:sessions:id,user_id:r',
+        'user_role_changes:user_role_changes_pkey:p:sequence:::',
+        'user_role_changes:user_role_changes_request_user_role_uq:u:request_id,user_id,role:::',
+        'user_role_changes:user_role_changes_user_id_users_id_fk:f:user_id:users:id:r',
+      ].sort(),
+    );
+
+    const indexes = await db.execute<{
+      columns: string[];
+      index_name: string;
+      is_ready: boolean;
+      is_unique: boolean;
+      is_valid: boolean;
+      table_name: string;
+    }>(sql`
+      select
+        table_relation.relname as table_name,
+        index_relation.relname as index_name,
+        index_record.indisunique as is_unique,
+        index_record.indisvalid as is_valid,
+        index_record.indisready as is_ready,
+        array_agg(attribute.attname order by key_column.position)::text[]
+          as columns
+      from pg_catalog.pg_index as index_record
+      join pg_catalog.pg_class as table_relation
+        on table_relation.oid = index_record.indrelid
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = table_relation.relnamespace
+      join pg_catalog.pg_class as index_relation
+        on index_relation.oid = index_record.indexrelid
+      cross join lateral unnest(index_record.indkey::smallint[])
+        with ordinality as key_column(attribute_number, position)
+      join pg_catalog.pg_attribute as attribute
+        on attribute.attrelid = table_relation.oid
+        and attribute.attnum = key_column.attribute_number
+      where namespace.nspname = 'public'
+        and table_relation.relname in (
+          'user_role_changes',
+          'integration_channel_change_authorizations'
+        )
+      group by
+        table_relation.relname,
+        index_relation.relname,
+        index_record.indisunique,
+        index_record.indisvalid,
+        index_record.indisready
+    `);
+    expect(indexes.every((index) => index.is_valid && index.is_ready)).toBe(
+      true,
+    );
+    expect(
+      indexes
+        .map(
+          (index) =>
+            `${index.table_name}:${index.index_name}:${index.is_unique}:${index.columns.join(',')}`,
+        )
+        .sort(),
+    ).toEqual(
+      [
+        'integration_channel_change_authorizations:channel_change_authorizations_commitment_uq:true:authorization_commitment',
+        'integration_channel_change_authorizations:channel_change_authorizations_integration_idx:false:integration_id,consumed_at',
+        'integration_channel_change_authorizations:channel_change_authorizations_reference_uq:true:reference',
+        'integration_channel_change_authorizations:channel_change_authorizations_request_uq:true:consumed_request_id',
+        'integration_channel_change_authorizations:channel_change_authorizations_status_uq:true:integration_status_id',
+        'integration_channel_change_authorizations:integration_channel_change_authorizations_pkey:true:id',
+        'user_role_changes:user_role_changes_changer_idx:false:changed_by_user_id,sequence',
+        'user_role_changes:user_role_changes_effective_idx:false:user_id,role,sequence',
+        'user_role_changes:user_role_changes_pkey:true:sequence',
+        'user_role_changes:user_role_changes_request_user_role_uq:true:request_id,user_id,role',
+      ].sort(),
+    );
+  });
+
+  test('limits app-role privileges while retaining append-only trigger enforcement', async () => {
+    const db = databaseConnection().db;
+    const tablePrivileges = await db.execute<{
+      can_delete: boolean;
+      can_insert: boolean;
+      can_references: boolean;
+      can_select: boolean;
+      can_trigger: boolean;
+      can_truncate: boolean;
+      can_update: boolean;
+      public_has_any_privilege: boolean;
+      table_name: string;
+    }>(sql`
+      select
+        new_tables.table_name,
+        has_table_privilege(
+          'psd_eoc_app',
+          new_tables.table_name,
+          'SELECT'
+        ) as can_select,
+        has_table_privilege(
+          'psd_eoc_app',
+          new_tables.table_name,
+          'INSERT'
+        ) as can_insert,
+        has_table_privilege(
+          'psd_eoc_app',
+          new_tables.table_name,
+          'UPDATE'
+        ) as can_update,
+        has_table_privilege(
+          'psd_eoc_app',
+          new_tables.table_name,
+          'DELETE'
+        ) as can_delete,
+        has_table_privilege('psd_eoc_app', new_tables.table_name, 'TRUNCATE')
+          as can_truncate,
+        has_table_privilege('psd_eoc_app', new_tables.table_name, 'REFERENCES')
+          as can_references,
+        has_table_privilege('psd_eoc_app', new_tables.table_name, 'TRIGGER')
+          as can_trigger,
+        exists (
+          select 1
+          from pg_catalog.pg_class as public_table
+          join pg_catalog.pg_namespace as public_namespace
+            on public_namespace.oid = public_table.relnamespace
+          cross join lateral aclexplode(
+            coalesce(
+              public_table.relacl,
+              acldefault('r', public_table.relowner)
+            )
+          ) as public_privilege
+          where public_namespace.nspname = 'public'
+            and public_table.relname = new_tables.table_name
+            and public_privilege.grantee = 0
+        ) as public_has_any_privilege
+      from unnest(array[
+        'integration_channel_change_authorizations',
+        'user_role_changes'
+      ]::text[]) as new_tables(table_name)
+      order by table_name
+    `);
+    expect([...tablePrivileges]).toEqual([
+      {
+        table_name: 'integration_channel_change_authorizations',
+        can_select: true,
+        can_insert: true,
+        can_update: false,
+        can_delete: false,
+        can_truncate: false,
+        can_references: false,
+        can_trigger: false,
+        public_has_any_privilege: false,
+      },
+      {
+        table_name: 'user_role_changes',
+        can_select: true,
+        can_insert: true,
+        can_update: false,
+        can_delete: false,
+        can_truncate: false,
+        can_references: false,
+        can_trigger: false,
+        public_has_any_privilege: false,
+      },
+    ]);
+
+    const [sequencePrivileges] = await db.execute<{
+      can_select: boolean;
+      can_update: boolean;
+      can_usage: boolean;
+      public_has_any_privilege: boolean;
+    }>(sql`
+      select
+        has_sequence_privilege(
+          'psd_eoc_app',
+          'public.user_role_changes_sequence_seq',
+          'USAGE'
+        ) as can_usage,
+        has_sequence_privilege(
+          'psd_eoc_app',
+          'public.user_role_changes_sequence_seq',
+          'SELECT'
+        ) as can_select,
+        has_sequence_privilege(
+          'psd_eoc_app',
+          'public.user_role_changes_sequence_seq',
+          'UPDATE'
+        ) as can_update,
+        exists (
+          select 1
+          from aclexplode(
+            coalesce(
+              sequence_relation.relacl,
+              acldefault('S', sequence_relation.relowner)
+            )
+          ) as public_privilege
+          where public_privilege.grantee = 0
+        ) as public_has_any_privilege
+      from pg_catalog.pg_class as sequence_relation
+      join pg_catalog.pg_namespace as sequence_namespace
+        on sequence_namespace.oid = sequence_relation.relnamespace
+      where sequence_namespace.nspname = 'public'
+        and sequence_relation.relname = 'user_role_changes_sequence_seq'
+        and sequence_relation.relkind = 'S'
+    `);
+    expect(sequencePrivileges).toEqual({
+      can_usage: true,
+      can_select: true,
+      can_update: false,
+      public_has_any_privilege: false,
+    });
+
+    const triggers = await db.execute<{
+      action_statement: string;
+      action_timing: string;
+      event_manipulation: string;
+      event_object_table: string;
+      trigger_name: string;
+    }>(sql`
+      select
+        event_object_table,
+        trigger_name,
+        action_timing,
+        event_manipulation,
+        action_statement
+      from information_schema.triggers
+      where trigger_schema = 'public'
+        and event_object_table in (
+          'user_role_changes',
+          'integration_channel_change_authorizations'
+        )
+      order by event_object_table, trigger_name, event_manipulation
+    `);
+    expect(
+      triggers.map((trigger) => ({
+        table: trigger.event_object_table,
+        name: trigger.trigger_name,
+        timing: trigger.action_timing,
+        event: trigger.event_manipulation,
+      })),
+    ).toEqual([
+      {
+        table: 'integration_channel_change_authorizations',
+        name: 'integration_channel_change_authorizations_immutable_guard',
+        timing: 'BEFORE',
+        event: 'UPDATE',
+      },
+      {
+        table: 'integration_channel_change_authorizations',
+        name: 'integration_channel_change_authorizations_retain_guard',
+        timing: 'BEFORE',
+        event: 'DELETE',
+      },
+      {
+        table: 'user_role_changes',
+        name: 'user_role_changes_immutable_guard',
+        timing: 'BEFORE',
+        event: 'UPDATE',
+      },
+      {
+        table: 'user_role_changes',
+        name: 'user_role_changes_retain_guard',
+        timing: 'BEFORE',
+        event: 'DELETE',
+      },
+      {
+        table: 'user_role_changes',
+        name: 'user_role_changes_sequence_guard',
+        timing: 'BEFORE',
+        event: 'INSERT',
+      },
+    ]);
+    for (const trigger of triggers) {
+      expect(trigger.action_statement).toContain(
+        trigger.event_manipulation === 'INSERT'
+          ? 'psd_eoc_guard_user_role_change_insert'
+          : trigger.event_manipulation === 'UPDATE'
+            ? 'psd_eoc_reject_immutable_mutation'
+            : 'psd_eoc_reject_delete',
+      );
+    }
+
+    const triggerFunctionPrivileges = await db.execute<{
+      app_can_execute: boolean;
+      function_name: string;
+      public_can_execute: boolean;
+    }>(sql`
+      select
+        procedure.proname as function_name,
+        has_function_privilege(
+          'psd_eoc_app',
+          procedure.oid,
+          'EXECUTE'
+        ) as app_can_execute,
+        exists (
+          select 1
+          from aclexplode(
+            coalesce(
+              procedure.proacl,
+              acldefault('f', procedure.proowner)
+            )
+          ) as function_privilege
+          where function_privilege.grantee = 0
+            and function_privilege.privilege_type = 'EXECUTE'
+        ) as public_can_execute
+      from pg_catalog.pg_proc as procedure
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'public'
+        and procedure.proname in (
+          'psd_eoc_guard_user_role_change_insert',
+          'psd_eoc_reject_delete',
+          'psd_eoc_reject_immutable_mutation'
+        )
+      order by procedure.proname
+    `);
+    expect([...triggerFunctionPrivileges]).toEqual([
+      {
+        function_name: 'psd_eoc_guard_user_role_change_insert',
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name: 'psd_eoc_reject_delete',
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name: 'psd_eoc_reject_immutable_mutation',
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+    ]);
+  });
+
+  test('hardens the complete access-snapshot privilege and trigger ledger', async () => {
+    const db = databaseConnection().db;
+    const tablePrivileges = await db.execute<{
+      can_delete: boolean;
+      can_insert: boolean;
+      can_references: boolean;
+      can_select: boolean;
+      can_trigger: boolean;
+      can_truncate: boolean;
+      can_update: boolean;
+      public_has_any_privilege: boolean;
+      table_name: string;
+    }>(sql`
+      select
+        access_tables.table_name,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'SELECT'
+        ) as can_select,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'INSERT'
+        ) as can_insert,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'UPDATE'
+        ) as can_update,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'DELETE'
+        ) as can_delete,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'TRUNCATE'
+        ) as can_truncate,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'REFERENCES'
+        ) as can_references,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || access_tables.table_name,
+          'TRIGGER'
+        ) as can_trigger,
+        exists (
+          select 1
+          from pg_catalog.pg_class as public_table
+          join pg_catalog.pg_namespace as public_namespace
+            on public_namespace.oid = public_table.relnamespace
+          cross join lateral aclexplode(
+            coalesce(
+              public_table.relacl,
+              acldefault('r', public_table.relowner)
+            )
+          ) as public_privilege
+          where public_namespace.nspname = 'public'
+            and public_table.relname = access_tables.table_name
+            and public_privilege.grantee = 0
+        ) as public_has_any_privilege
+      from unnest(array[
+        'access_membership_snapshots',
+        'access_membership_snapshot_groups',
+        'access_membership_members',
+        'access_membership_member_groups',
+        'access_membership_member_facilities'
+      ]::text[]) as access_tables(table_name)
+      order by access_tables.table_name
+    `);
+    expect([...tablePrivileges]).toEqual(
+      [
+        'access_membership_member_facilities',
+        'access_membership_member_groups',
+        'access_membership_members',
+        'access_membership_snapshot_groups',
+        'access_membership_snapshots',
+      ].map((tableName) => ({
+        table_name: tableName,
+        can_select: true,
+        can_insert: true,
+        can_update: false,
+        can_delete: false,
+        can_truncate: false,
+        can_references: false,
+        can_trigger: false,
+        public_has_any_privilege: false,
+      })),
+    );
+
+    const triggerLedger = await db.execute<{
+      action_orientation: string;
+      action_statement: string;
+      action_timing: string;
+      event_manipulation: string;
+      event_object_table: string;
+      trigger_name: string;
+    }>(sql`
+      select
+        event_object_table,
+        trigger_name,
+        action_timing,
+        action_orientation,
+        event_manipulation,
+        action_statement
+      from information_schema.triggers
+      where trigger_schema = 'public'
+        and trigger_name in (
+          'access_membership_snapshots_admin_availability_lock',
+          'users_admin_availability_lock',
+          'user_facility_scopes_admin_availability_lock',
+          'group_sources_admin_availability_lock',
+          'group_sources_identity_guard',
+          'access_membership_snapshot_groups_construction_guard',
+          'access_membership_members_construction_guard',
+          'access_membership_member_groups_construction_guard',
+          'access_membership_member_facilities_construction_guard',
+          'access_membership_snapshots_immutable_guard',
+          'access_membership_snapshot_groups_immutable_guard',
+          'access_membership_members_immutable_guard',
+          'access_membership_member_groups_immutable_guard',
+          'access_membership_member_facilities_immutable_guard'
+        )
+      order by event_object_table, trigger_name, event_manipulation
+    `);
+    expect(
+      triggerLedger.map((trigger) => ({
+        table: trigger.event_object_table,
+        name: trigger.trigger_name,
+        timing: trigger.action_timing,
+        orientation: trigger.action_orientation,
+        event: trigger.event_manipulation,
+        function: trigger.action_statement,
+      })),
+    ).toEqual([
+      {
+        table: 'access_membership_member_facilities',
+        name: 'access_membership_member_facilities_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_member_facilities',
+        name: 'access_membership_member_facilities_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_member_groups',
+        name: 'access_membership_member_groups_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_member_groups',
+        name: 'access_membership_member_groups_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_members',
+        name: 'access_membership_members_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_members',
+        name: 'access_membership_members_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_snapshot_groups',
+        name: 'access_membership_snapshot_groups_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_snapshot_child_insert()',
+      },
+      {
+        table: 'access_membership_snapshot_groups',
+        name: 'access_membership_snapshot_groups_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'access_membership_snapshots',
+        name: 'access_membership_snapshots_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_access_snapshot_insert()',
+      },
+      {
+        table: 'access_membership_snapshots',
+        name: 'access_membership_snapshots_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_access_snapshot_update()',
+      },
+      {
+        table: 'group_sources',
+        name: 'group_sources_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_access_group_write()',
+      },
+      {
+        table: 'group_sources',
+        name: 'group_sources_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_access_group_write()',
+      },
+      {
+        table: 'group_sources',
+        name: 'group_sources_identity_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_group_source_identity_mutation()',
+      },
+      {
+        table: 'user_facility_scopes',
+        name: 'user_facility_scopes_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'DELETE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_facility_scope_write()',
+      },
+      {
+        table: 'user_facility_scopes',
+        name: 'user_facility_scopes_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_facility_scope_write()',
+      },
+      {
+        table: 'user_facility_scopes',
+        name: 'user_facility_scopes_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_facility_scope_write()',
+      },
+      {
+        table: 'users',
+        name: 'users_admin_availability_lock',
+        timing: 'BEFORE',
+        orientation: 'STATEMENT',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_lock_admin_availability_on_user_write()',
+      },
+    ]);
+
+    const triggerFunctions = await db.execute<{
+      app_can_execute: boolean;
+      function_name: string;
+      public_can_execute: boolean;
+      settings: string[];
+    }>(sql`
+      select
+        procedure.proname as function_name,
+        coalesce(procedure.proconfig, array[]::text[]) as settings,
+        has_function_privilege(
+          'psd_eoc_app',
+          procedure.oid,
+          'EXECUTE'
+        ) as app_can_execute,
+        exists (
+          select 1
+          from aclexplode(
+            coalesce(
+              procedure.proacl,
+              acldefault('f', procedure.proowner)
+            )
+          ) as function_privilege
+          where function_privilege.grantee = 0
+            and function_privilege.privilege_type = 'EXECUTE'
+        ) as public_can_execute
+      from pg_catalog.pg_proc as procedure
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'public'
+        and procedure.proname in (
+          'psd_eoc_guard_access_snapshot_child_insert',
+          'psd_eoc_lock_admin_availability_on_access_snapshot_insert',
+          'psd_eoc_lock_admin_availability_on_user_facility_scope_write',
+          'psd_eoc_lock_admin_availability_on_user_write',
+          'psd_eoc_reject_access_snapshot_update'
+        )
+      order by procedure.proname
+    `);
+    expect([...triggerFunctions]).toEqual([
+      {
+        function_name: 'psd_eoc_guard_access_snapshot_child_insert',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name:
+          'psd_eoc_lock_admin_availability_on_access_snapshot_insert',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name:
+          'psd_eoc_lock_admin_availability_on_user_facility_scope_write',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name: 'psd_eoc_lock_admin_availability_on_user_write',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
+        function_name: 'psd_eoc_reject_access_snapshot_update',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+    ]);
+  });
+
+  test('allows app-role inserts without granting sequence mutation authority', async () => {
+    const db = databaseConnection().db;
+    const rollbackProbe = new Error('rollback synthetic admin evidence probe');
+
+    try {
+      await db.transaction(async (transaction) => {
+        for (const statement of syntheticAdminEvidencePrerequisites) {
+          await transaction.execute(statement);
+        }
+        await transaction.execute(sql`set local role "psd_eoc_app"`);
+
+        const roleChanges = await transaction.execute<{
+          granted: boolean;
+          sequence: number;
+        }>(sql`
+          insert into user_role_changes (
+            user_id,
+            role,
+            granted,
+            changed_by_user_id,
+            changed_with_session_id,
+            request_id,
+            occurred_at
+          ) values
+          (
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              'admin'::role,
+              true,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '00000000-0000-4000-8000-000000026007'::uuid,
+              '2026-08-10T16:02:00.000Z'::timestamptz
+          ),
+          (
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              'admin'::role,
+              false,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '00000000-0000-4000-8000-000000026008'::uuid,
+              '2026-08-10T16:03:00.000Z'::timestamptz
+          )
+          returning sequence, granted
+        `);
+        expect(roleChanges).toHaveLength(2);
+        const orderedRoleChanges = [...roleChanges].sort(
+          (left, right) => left.sequence - right.sequence,
+        );
+        expect(orderedRoleChanges[0]?.sequence).toBeGreaterThan(0);
+        expect(orderedRoleChanges[1]?.sequence).toBeGreaterThan(
+          orderedRoleChanges[0]?.sequence ?? 0,
+        );
+        expect(orderedRoleChanges.map((change) => change.granted)).toEqual([
+          true,
+          false,
+        ]);
+
+        const [sequenceState] = await transaction.execute<{
+          last_value: number;
+        }>(sql`
+          select last_value::integer as last_value
+          from user_role_changes_sequence_seq
+        `);
+        expect(sequenceState?.last_value).toBeGreaterThan(0);
+
+        await transaction.execute(insertSyntheticChannelChangeAuthorization);
+        const [authorization] = await transaction.execute<{
+          consumed_at_matches: boolean;
+          integration_id: string;
+          status_label: string;
+        }>(sql`
+          select
+            integration_id,
+            status_label,
+            consumed_at = '2026-08-10T16:02:00.000Z'::timestamptz
+              as consumed_at_matches
+          from integration_channel_change_authorizations
+          where id = '00000000-0000-4000-8000-000000026006'::uuid
+        `);
+        expect(authorization).toEqual({
+          integration_id: 'synthetic-database-evidence',
+          status_label: 'live-verified',
+          consumed_at_matches: true,
+        });
+
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) {
+        throw error;
+      }
+    }
+  });
+
+  test('rejects live-channel evidence without an authoritative consumed-at time', async () => {
+    const db = databaseConnection().db;
+    const unexpectedAcceptance = new Error(
+      'rollback unexpected missing consumed-at acceptance',
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            insert into integration_channel_change_authorizations (
+              id,
+              reference,
+              authorization_commitment,
+              integration_status_id,
+              integration_id,
+              status_label,
+              desired_enabled,
+              request_digest,
+              consequence_digest,
+              authorized_by_user_id,
+              authorized_with_session_id,
+              issued_at,
+              expires_at,
+              consumed_by_user_id,
+              consumed_with_session_id,
+              consumed_request_id
+            ) values (
+              '00000000-0000-4000-8000-000000026006'::uuid,
+              'synthetic-product-owner-evidence-26',
+              repeat('a', 64),
+              '00000000-0000-4000-8000-000000026005'::uuid,
+              'synthetic-database-evidence',
+              'live-verified'::integration_truth_label,
+              false,
+              repeat('b', 64),
+              repeat('c', 64),
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '2026-08-10T16:01:00.000Z'::timestamptz,
+              '2026-08-10T16:16:00.000Z'::timestamptz,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '00000000-0000-4000-8000-000000026009'::uuid
+            )
+          `);
+          throw unexpectedAcceptance;
+        }),
+      /null value in column "consumed_at".*not-null constraint/iu,
+    );
+  });
+
+  test('rejects an app-role role change with a non-issued sequence', async () => {
+    const db = databaseConnection().db;
+    const unexpectedAcceptance = new Error(
+      'rollback unexpected explicit role sequence acceptance',
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            insert into user_role_changes (
+              sequence,
+              user_id,
+              role,
+              granted,
+              changed_by_user_id,
+              changed_with_session_id,
+              request_id,
+              occurred_at
+            ) values (
+              2147483647,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              'admin'::role,
+              true,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '00000000-0000-4000-8000-000000026007'::uuid,
+              '2026-08-10T16:02:00.000Z'::timestamptz
+            )
+          `);
+          throw unexpectedAcceptance;
+        }),
+      /role-change sequence must be (?:the )?database-issued/iu,
+    );
+  });
+
+  test('enforces new-table keys, checks, and append-only triggers', async () => {
+    const db = databaseConnection().db;
+
+    await expectConstraintViolation(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(insertSyntheticRoleChange);
+          await transaction.execute(insertSyntheticRoleChange);
+        }),
+      'user_role_changes_request_user_role_uq',
+    );
+    await expectConstraintViolation(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(sql`
+            insert into integration_channel_change_authorizations (
+              id,
+              reference,
+              authorization_commitment,
+              integration_status_id,
+              integration_id,
+              status_label,
+              desired_enabled,
+              request_digest,
+              consequence_digest,
+              authorized_by_user_id,
+              authorized_with_session_id,
+              issued_at,
+              expires_at,
+              consumed_by_user_id,
+              consumed_with_session_id,
+              consumed_request_id,
+              consumed_at
+            ) values (
+              '00000000-0000-4000-8000-000000026006'::uuid,
+              'synthetic-product-owner-evidence-26',
+              repeat('d', 64),
+              '00000000-0000-4000-8000-000000026005'::uuid,
+              'synthetic-database-evidence',
+              'live-verified'::integration_truth_label,
+              false,
+              repeat('b', 64),
+              repeat('c', 64),
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '2026-08-10T16:01:00.000Z'::timestamptz,
+              '2026-08-10T16:16:00.000Z'::timestamptz,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '00000000-0000-4000-8000-000000026009'::uuid,
+              '2026-08-10T16:02:00.000Z'::timestamptz
+            )
+          `);
+        }),
+      'channel_change_authorizations_status_truth_fk',
+    );
+    await expectConstraintViolation(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(sql`
+            insert into integration_channel_change_authorizations (
+              id,
+              reference,
+              authorization_commitment,
+              integration_status_id,
+              integration_id,
+              status_label,
+              desired_enabled,
+              request_digest,
+              consequence_digest,
+              authorized_by_user_id,
+              authorized_with_session_id,
+              issued_at,
+              expires_at,
+              consumed_by_user_id,
+              consumed_with_session_id,
+              consumed_request_id,
+              consumed_at
+            ) values (
+              '00000000-0000-4000-8000-000000026006'::uuid,
+              'synthetic-product-owner-evidence-26',
+              repeat('a', 64),
+              '00000000-0000-4000-8000-000000026005'::uuid,
+              'synthetic-database-evidence',
+              'live-verified'::integration_truth_label,
+              false,
+              repeat('b', 64),
+              repeat('c', 64),
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '2026-08-10T16:01:00.000Z'::timestamptz,
+              '2026-08-10T16:01:00.000Z'::timestamptz,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '00000000-0000-4000-8000-000000026009'::uuid,
+              '2026-08-10T16:01:00.000Z'::timestamptz
+            )
+          `);
+        }),
+      'channel_change_authorizations_expiry_bound',
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(insertSyntheticRoleChange);
+          await transaction.execute(sql`
+            update user_role_changes
+            set granted = false
+            where request_id = '00000000-0000-4000-8000-000000026007'::uuid
+          `);
+        }),
+      /immutable truth cannot be changed/u,
+    );
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(insertSyntheticRoleChange);
+          await transaction.execute(sql`
+            delete from user_role_changes
+            where request_id = '00000000-0000-4000-8000-000000026007'::uuid
+          `);
+        }),
+      /records are retained/u,
+    );
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(insertSyntheticChannelChangeAuthorization);
+          await transaction.execute(sql`
+            update integration_channel_change_authorizations
+            set desired_enabled = true
+            where id = '00000000-0000-4000-8000-000000026006'::uuid
+          `);
+        }),
+      /immutable truth cannot be changed/u,
+    );
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          for (const statement of syntheticAdminEvidencePrerequisites) {
+            await transaction.execute(statement);
+          }
+          await transaction.execute(insertSyntheticChannelChangeAuthorization);
+          await transaction.execute(sql`
+            delete from integration_channel_change_authorizations
+            where id = '00000000-0000-4000-8000-000000026006'::uuid
+          `);
+        }),
+      /records are retained/u,
+    );
   });
 
   test('database constraints reject real and drill substitution', async () => {

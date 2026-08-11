@@ -76,6 +76,42 @@ describe('media processing admission', () => {
     );
   });
 
+  test('decrements the current facility count when older work finishes first', async () => {
+    const gate = createMediaProcessingGate(2, 3);
+    const releaseFirst = deferred();
+    const releaseSecond = deferred();
+    const first = gate.run('facility-a', async () => {
+      await releaseFirst.promise;
+      return 'first';
+    });
+    const second = gate.run('facility-a', async () => {
+      await releaseSecond.promise;
+      return 'second';
+    });
+
+    await expect(
+      gate.run('facility-a', async () => 'initial-excess'),
+    ).rejects.toBeInstanceOf(MediaProcessingCapacityError);
+    releaseFirst.resolve();
+    expect(await first).toBe('first');
+
+    const releaseThird = deferred();
+    const third = gate.run('facility-a', async () => {
+      await releaseThird.promise;
+      return 'third';
+    });
+    await expect(
+      gate.run('facility-a', async () => 'out-of-order-excess'),
+    ).rejects.toBeInstanceOf(MediaProcessingCapacityError);
+
+    releaseSecond.resolve();
+    releaseThird.resolve();
+    await expect(Promise.all([second, third])).resolves.toEqual([
+      'second',
+      'third',
+    ]);
+  });
+
   test('rejects invalid concurrency configuration', () => {
     expect(() => createMediaProcessingGate(0)).toThrow(RangeError);
     expect(() => createMediaProcessingGate(1.5)).toThrow(RangeError);

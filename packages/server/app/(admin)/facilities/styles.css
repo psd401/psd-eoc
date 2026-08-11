@@ -1,0 +1,301 @@
+:root {
+  color-scheme: light;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  background: #eef3f8;
+  color: #172033;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+}
+
+main {
+  width: min(100% - 2rem, 92rem);
+  margin: 0 auto;
+  padding: 2rem 0 5rem;
+}
+
+main:focus {
+  outline: 0;
+}
+
+h1,
+h2,
+h3,
+legend {
+  line-height: 1.2;
+}
+
+p,
+li,
+dd {
+  line-height: 1.55;
+}
+
+a {
+  color: #174ea6;
+}
+
+.skip-link {
+  position: absolute;
+  top: -6rem;
+  left: 0.75rem;
+  z-index: 20;
+  border: 2px solid #172033;
+  background: #fff;
+  color: #172033;
+  padding: 0.75rem 1rem;
+}
+
+.skip-link:focus {
+  top: 0.75rem;
+}
+
+.admin-nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-nav a {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  border: 2px solid #174ea6;
+  border-radius: 0.35rem;
+  background: #fff;
+  padding: 0.45rem 0.8rem;
+  font-weight: 750;
+}
+
+.lede {
+  max-width: 72ch;
+  color: #475569;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 28rem), 1fr));
+  gap: 1.25rem;
+  align-items: start;
+}
+
+section,
+aside,
+details,
+.notice {
+  margin-top: 1.25rem;
+  border: 1px solid #94a3b8;
+  border-radius: 0.55rem;
+  background: #fff;
+  padding: clamp(1rem, 2.5vw, 1.5rem);
+}
+
+section > :first-child,
+aside > :first-child {
+  margin-top: 0;
+}
+
+fieldset {
+  min-width: 0;
+  margin: 1rem 0 0;
+  border: 2px solid #94a3b8;
+  border-radius: 0.45rem;
+  padding: 1rem;
+}
+
+legend {
+  padding: 0 0.4rem;
+  font-weight: 800;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.8rem;
+  font-weight: 700;
+}
+
+.checkbox-label {
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  align-items: start;
+}
+
+button,
+input,
+select,
+textarea,
+summary {
+  font: inherit;
+}
+
+button,
+input:not([type='hidden']),
+select,
+textarea,
+summary {
+  min-height: 2.75rem;
+}
+
+input:not([type='checkbox']):not([type='hidden']),
+select,
+textarea {
+  width: 100%;
+  border: 2px solid #64748b;
+  border-radius: 0.35rem;
+  background: #fff;
+  color: #172033;
+  padding: 0.55rem 0.65rem;
+}
+
+input[type='checkbox'] {
+  width: 1.5rem;
+  min-height: 1.5rem;
+  margin: 0.15rem 0 0;
+}
+
+button {
+  min-height: 2.75rem;
+  margin-top: 1rem;
+  border: 2px solid #174ea6;
+  border-radius: 0.35rem;
+  background: #174ea6;
+  color: #fff;
+  cursor: pointer;
+  padding: 0.55rem 1rem;
+  font-weight: 800;
+}
+
+button:disabled,
+fieldset:disabled button {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+summary {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.field-help,
+.muted {
+  color: #475569;
+  font-size: 0.94rem;
+  font-weight: 400;
+}
+
+.status-message {
+  border-left: 0.4rem solid #0f766e;
+  background: #ecfdf5;
+}
+
+.test-boundary {
+  border: 4px solid #7c3aed;
+  background: #f5f3ff;
+  color: #4c1d95;
+}
+
+.test-boundary h2 {
+  letter-spacing: 0.025em;
+}
+
+.table-region {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #94a3b8;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+caption {
+  padding: 0.75rem;
+  text-align: left;
+  font-weight: 750;
+}
+
+th,
+td {
+  border-top: 1px solid #cbd5e1;
+  padding: 0.7rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+thead th {
+  background: #e8eef7;
+}
+
+td code {
+  overflow-wrap: anywhere;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: minmax(10rem, max-content) minmax(0, 1fr);
+  gap: 0.45rem 0.8rem;
+}
+
+dt {
+  font-weight: 800;
+}
+
+dd {
+  margin: 0;
+}
+
+a:focus-visible,
+button:focus-visible,
+details:focus-visible,
+input:focus-visible,
+main:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+textarea:focus-visible,
+.table-region:focus-visible {
+  outline: 0.25rem solid #b45309;
+  outline-offset: 0.18rem;
+}
+
+@media (max-width: 44rem) {
+  dl {
+    grid-template-columns: 1fr;
+  }
+
+  dd {
+    margin-bottom: 0.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a,
+  button,
+  input,
+  select,
+  summary,
+  textarea {
+    transition:
+      outline-offset 100ms ease,
+      background-color 100ms ease;
+  }
+}

@@ -105,10 +105,11 @@ export function createMediaProcessingGate(
         return await operation();
       } finally {
         activeAcrossInstance -= 1;
-        if (activeForFacility === 0) {
+        const currentActiveForFacility = activeByFacility.get(facilityId) ?? 0;
+        if (currentActiveForFacility <= 1) {
           activeByFacility.delete(facilityId);
         } else {
-          activeByFacility.set(facilityId, activeForFacility);
+          activeByFacility.set(facilityId, currentActiveForFacility - 1);
         }
       }
     },

@@ -14,6 +14,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  serial,
   text,
   timestamp,
   unique,
@@ -703,6 +704,45 @@ export const sessions = pgTable(
         and ${table.membershipGraceUntil} >= ${table.membershipValidUntil}
         and (${table.revokedAt} is null or ${table.revokedAt} >= ${table.createdAt})`,
     ),
+  ],
+);
+
+/** Append-only role grants and revocations ordered by one monotonic sequence. */
+export const userRoleChanges = pgTable(
+  'user_role_changes',
+  {
+    sequence: serial('sequence').primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    role: roleEnum('role').notNull(),
+    granted: boolean('granted').notNull(),
+    changedByUserId: uuid('changed_by_user_id').notNull(),
+    changedWithSessionId: uuid('changed_with_session_id').notNull(),
+    requestId: uuid('request_id').notNull(),
+    occurredAt: occurredAt('occurred_at').defaultNow().notNull(),
+  },
+  (table) => [
+    unique('user_role_changes_request_user_role_uq').on(
+      table.requestId,
+      table.userId,
+      table.role,
+    ),
+    foreignKey({
+      columns: [table.changedWithSessionId, table.changedByUserId],
+      foreignColumns: [sessions.id, sessions.userId],
+      name: 'user_role_changes_changer_session_fk',
+    }).onDelete('restrict'),
+    index('user_role_changes_effective_idx').on(
+      table.userId,
+      table.role,
+      table.sequence.desc(),
+    ),
+    index('user_role_changes_changer_idx').on(
+      table.changedByUserId,
+      table.sequence.desc(),
+    ),
+    check('user_role_changes_sequence_positive', sql`${table.sequence} > 0`),
   ],
 );
 
@@ -1950,6 +1990,14 @@ export const integrationStatuses = pgTable(
       table.integrationId,
       table.label,
     ),
+    unique('integration_statuses_channel_authorization_anchor_uq').on(
+      table.id,
+      table.integrationId,
+      table.label,
+      table.verifiedByUserId,
+      table.authorizationReference,
+      table.verifiedAt,
+    ),
     index('integration_statuses_latest_idx').on(
       table.integrationId,
       table.observedAt,
@@ -2011,6 +2059,117 @@ export const channelConfigurations = pgTable(
     check(
       'channel_configurations_blocked_disabled',
       sql`${table.statusLabel} <> 'blocked' or ${table.enabled} = false`,
+    ),
+  ],
+);
+
+/**
+ * Immutable, single-use evidence that one fresh product-owner artifact was
+ * consumed by its exact authorized human session for one live channel change.
+ */
+export const integrationChannelChangeAuthorizations = pgTable(
+  'integration_channel_change_authorizations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    reference: varchar('reference', { length: 255 }).notNull(),
+    authorizationCommitment: digest('authorization_commitment').notNull(),
+    integrationStatusId: uuid('integration_status_id').notNull(),
+    integrationId: varchar('integration_id', { length: 100 }).notNull(),
+    statusLabel: integrationTruthLabelEnum('status_label').notNull(),
+    desiredEnabled: boolean('desired_enabled').notNull(),
+    requestDigest: digest('request_digest').notNull(),
+    consequenceDigest: digest('consequence_digest').notNull(),
+    authorizedByUserId: uuid('authorized_by_user_id').notNull(),
+    authorizedWithSessionId: uuid('authorized_with_session_id').notNull(),
+    issuedAt: occurredAt('issued_at').notNull(),
+    expiresAt: occurredAt('expires_at').notNull(),
+    consumedByUserId: uuid('consumed_by_user_id').notNull(),
+    consumedWithSessionId: uuid('consumed_with_session_id').notNull(),
+    consumedRequestId: uuid('consumed_request_id').notNull(),
+    consumedAt: occurredAt('consumed_at').notNull(),
+  },
+  (table) => [
+    unique('channel_change_authorizations_reference_uq').on(table.reference),
+    unique('channel_change_authorizations_status_uq').on(
+      table.integrationStatusId,
+    ),
+    unique('channel_change_authorizations_commitment_uq').on(
+      table.authorizationCommitment,
+    ),
+    unique('channel_change_authorizations_request_uq').on(
+      table.consumedRequestId,
+    ),
+    index('channel_change_authorizations_integration_idx').on(
+      table.integrationId,
+      table.consumedAt.desc(),
+    ),
+    foreignKey({
+      columns: [
+        table.integrationStatusId,
+        table.integrationId,
+        table.statusLabel,
+        table.authorizedByUserId,
+        table.authorizationCommitment,
+        table.issuedAt,
+      ],
+      foreignColumns: [
+        integrationStatuses.id,
+        integrationStatuses.integrationId,
+        integrationStatuses.label,
+        integrationStatuses.verifiedByUserId,
+        integrationStatuses.authorizationReference,
+        integrationStatuses.verifiedAt,
+      ],
+      name: 'channel_change_authorizations_status_truth_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.authorizedWithSessionId, table.authorizedByUserId],
+      foreignColumns: [sessions.id, sessions.userId],
+      name: 'channel_change_authorizations_authorizer_session_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.consumedWithSessionId, table.consumedByUserId],
+      foreignColumns: [sessions.id, sessions.userId],
+      name: 'channel_change_authorizations_consumer_session_fk',
+    }).onDelete('restrict'),
+    check(
+      'channel_change_authorizations_live_status',
+      sql`${table.statusLabel} = 'live-verified'`,
+    ),
+    check(
+      'channel_change_authorizations_same_human_session',
+      sql`${table.authorizedByUserId} = ${table.consumedByUserId}
+        and ${table.authorizedWithSessionId} = ${table.consumedWithSessionId}`,
+    ),
+    check(
+      'channel_change_authorizations_reference_format',
+      sql`${table.reference} = btrim(${table.reference})
+        and length(${table.reference}) between 1 and 255`,
+    ),
+    check(
+      'channel_change_authorizations_integration_id_format',
+      sql`${table.integrationId} ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'`,
+    ),
+    check(
+      'channel_change_authorizations_digest_format',
+      sql`${table.authorizationCommitment} ~ '^[a-f0-9]{64}$'
+        and ${table.requestDigest} ~ '^[a-f0-9]{64}$'
+        and ${table.consequenceDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'channel_change_authorizations_timestamp_precision',
+      sql`${table.issuedAt} = date_trunc('milliseconds', ${table.issuedAt})
+        and ${table.expiresAt} = date_trunc('milliseconds', ${table.expiresAt})
+        and ${table.consumedAt} = date_trunc('milliseconds', ${table.consumedAt})`,
+    ),
+    check(
+      'channel_change_authorizations_expiry_bound',
+      sql`${table.expiresAt} > ${table.issuedAt}
+        and ${table.expiresAt} <= ${table.issuedAt} + interval '15 minutes'`,
+    ),
+    check(
+      'channel_change_authorizations_consumption_time',
+      sql`${table.consumedAt} between ${table.issuedAt} and ${table.expiresAt}`,
     ),
   ],
 );
