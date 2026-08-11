@@ -10,7 +10,9 @@ import './start/styles.css';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const metadata: Metadata = { title: 'Active events' };
+export const metadata: Metadata = {
+  title: { absolute: 'Active events | PSD EOC' },
+};
 
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/Los_Angeles',
