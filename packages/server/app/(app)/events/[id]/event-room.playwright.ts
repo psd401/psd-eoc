@@ -1754,7 +1754,7 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
   await expectAxeClean(page, 'event room after correction and redaction');
 });
 
-test('location posts preserve browser accuracy, explicit truth states, and append-only correction when tiles fail', async ({
+test('location maps support drag correction, one-map history, honest states, and fail-open text when tiles fail', async ({
   page,
 }, testInfo) => {
   const fixture = await readFixture(testInfo);
@@ -1808,12 +1808,27 @@ test('location posts preserve browser accuracy, explicit truth states, and appen
     throw new Error('The synthetic location event has no journal head.');
   }
   let nextSequence = Number(lastSequence) + 1;
+  let failTiles = false;
+  let tileSuccesses = 0;
   let tileFailures = 0;
   const bodies: Array<Record<string, unknown>> = [];
   const syntheticUserId = randomUUID();
   await page.route('https://tile.openstreetmap.org/**', async (route) => {
-    tileFailures += 1;
-    await route.fulfill({ status: 503, body: 'Synthetic tile failure.' });
+    if (failTiles) {
+      tileFailures += 1;
+      await route.fulfill({ status: 503, body: 'Synthetic tile failure.' });
+      return;
+    }
+    tileSuccesses += 1;
+    await route.fulfill({
+      status: 200,
+      body: SYNTHETIC_PNG,
+      contentType: 'image/png',
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      },
+    });
   });
   await page.route(
     `**/events/${fixture.keyboardEventId}/api`,
@@ -1880,13 +1895,48 @@ test('location posts preserve browser accuracy, explicit truth states, and appen
   await expect(composer).toContainText(
     'GPS accuracy is a radius and never establishes room-level precision.',
   );
+  await expect.poll(() => tileSuccesses).toBeGreaterThan(0);
+  const editableMap = composer.locator('.location-map-frame');
+  const marker = editableMap.locator('.location-map-marker');
+  await expect(editableMap).toBeVisible();
+  await expect(marker).toBeVisible();
+  const liveCanvas = await editableMap.locator('canvas').elementHandle();
+  if (liveCanvas === null) {
+    throw new Error('The synthetic editable map canvas is not mounted.');
+  }
+  await expect(editableMap.locator('canvas')).toHaveAttribute('tabindex', '-1');
+  await expectAxeClean(page, 'live editable location map');
+  const latitudeInput = composer.getByLabel('Latitude');
+  const longitudeInput = composer.getByLabel('Longitude');
+  const beforeDragLatitude = await latitudeInput.inputValue();
+  const beforeDragLongitude = await longitudeInput.inputValue();
+  const markerBounds = await marker.boundingBox();
+  if (markerBounds === null) {
+    throw new Error('The synthetic editable location marker is not visible.');
+  }
+  await page.mouse.move(
+    markerBounds.x + markerBounds.width / 2,
+    markerBounds.y + markerBounds.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    markerBounds.x + markerBounds.width / 2 + 48,
+    markerBounds.y + markerBounds.height / 2 + 24,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+  await expect
+    .poll(() => latitudeInput.inputValue())
+    .not.toBe(beforeDragLatitude);
+  await expect
+    .poll(() => longitudeInput.inputValue())
+    .not.toBe(beforeDragLongitude);
+  expect(await liveCanvas.evaluate((canvas) => canvas.isConnected)).toBe(true);
   await composer.getByLabel('Latitude').fill('47.386001');
   await composer.getByLabel('Longitude').fill('-122.623002');
   await composer
     .getByLabel('Location label (optional)')
     .fill('North staff entrance');
-  await expect.poll(() => tileFailures).toBeGreaterThan(0);
-  await expect(composer).toContainText('Map unavailable.');
   await composer.getByRole('button', { name: 'Post location' }).press('Enter');
   await expect.poll(() => bodies.length).toBe(1);
   const knownSequence = Number(lastSequence) + 1;
@@ -1933,13 +1983,77 @@ test('location posts preserve browser accuracy, explicit truth states, and appen
     },
   });
 
+  const correctedSequence = knownSequence + 1;
+  const correctedArticle = page.getByRole('article', {
+    name: `Entry ${correctedSequence}: Location update`,
+  });
+  await expect(correctedArticle).toContainText(
+    'latitude 47.3865, longitude -122.6235; GPS accuracy radius ±18.5 meters.',
+  );
+  const originalMapToggle = knownArticle.locator('.location-map-toggle');
+  const correctedMapToggle = correctedArticle.locator('.location-map-toggle');
+  const timelineMaps = page.locator('.timeline-panel .location-map-frame');
+  await expect(originalMapToggle).toHaveAccessibleName(
+    `Show map for entry ${knownSequence}`,
+  );
+  await expect(correctedMapToggle).toHaveAccessibleName(
+    `Show map for entry ${correctedSequence}`,
+  );
+  await expect(timelineMaps).toHaveCount(0);
+  await originalMapToggle.press('Enter');
+  await expect(timelineMaps).toHaveCount(1);
+  await correctedMapToggle.press('Enter');
+  await expect(timelineMaps).toHaveCount(1);
+  await expect(originalMapToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(correctedMapToggle).toHaveAttribute('aria-expanded', 'true');
+  await correctedMapToggle.press('Enter');
+  await expect(timelineMaps).toHaveCount(0);
+
+  failTiles = true;
+  await page.context().setGeolocation({
+    latitude: 47.6,
+    longitude: -122.9,
+    accuracy: 31,
+  });
+  await composer.getByLabel('Known coordinates').check();
+  await composer
+    .getByRole('button', { name: 'Use current device location' })
+    .press('Enter');
+  await expect(composer.locator('.location-accuracy')).toContainText(
+    '±31 meters',
+  );
+  await expect.poll(() => tileFailures).toBeGreaterThan(0);
+  await expect(composer).toContainText('Map unavailable.');
+  await composer.getByLabel('Latitude').fill('47.6005');
+  await composer.getByLabel('Longitude').fill('-122.9005');
+  await composer
+    .getByLabel('Location label (optional)')
+    .fill('South staging lot');
+  await expect(
+    composer.getByRole('button', { name: 'Post location' }),
+  ).toBeEnabled();
+  await composer.getByRole('button', { name: 'Post location' }).press('Enter');
+  await expect.poll(() => bodies.length).toBe(3);
+  expect(bodies[2]?.payload).toEqual({
+    state: 'known',
+    latitude: 47.6005,
+    longitude: -122.9005,
+    accuracyMeters: 31,
+    label: 'South staging lot',
+  });
+  await expect(
+    page.getByText(
+      'South staging lot: latitude 47.6005, longitude -122.9005; GPS accuracy radius ±31 meters.',
+    ),
+  ).toBeVisible();
+
   await composer.getByLabel('Ambiguous location').check();
   await composer.getByLabel('Best available label').fill('West field area');
   await composer
     .getByLabel('Why the location is ambiguous')
     .fill('Two possible assembly points.');
   await composer.getByRole('button', { name: 'Post location' }).press('Enter');
-  await expect.poll(() => bodies.length).toBe(3);
+  await expect.poll(() => bodies.length).toBe(4);
   await expect(
     page.getByText('Ambiguous location: West field area.'),
   ).toBeVisible();
@@ -1948,14 +2062,14 @@ test('location posts preserve browser accuracy, explicit truth states, and appen
     .getByLabel('Why the location is unknown')
     .fill('Reporter could not verify a location.');
   await composer.getByRole('button', { name: 'Post location' }).press('Enter');
-  await expect.poll(() => bodies.length).toBe(4);
+  await expect.poll(() => bodies.length).toBe(5);
   await expect(page.getByText('Location unknown.')).toBeVisible();
-  expect(bodies[2]?.payload).toEqual({
+  expect(bodies[3]?.payload).toEqual({
     state: 'ambiguous',
     label: 'West field area',
     reason: 'Two possible assembly points.',
   });
-  expect(bodies[3]?.payload).toEqual({
+  expect(bodies[4]?.payload).toEqual({
     state: 'unknown',
     reason: 'Reporter could not verify a location.',
   });

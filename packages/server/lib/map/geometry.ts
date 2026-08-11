@@ -136,22 +136,13 @@ export function createOsmRasterStyle(): Exclude<
   };
 }
 
-function serverTimeText(serverTime: string): string {
-  const parsed = new Date(serverTime);
-  return Number.isNaN(parsed.getTime()) ? serverTime : parsed.toISOString();
-}
-
-export function formatLocationTextEquivalent(
-  payload: LocationPayload,
-  serverTime: string,
-): string {
-  const recorded = `Server-recorded time: ${serverTimeText(serverTime)}.`;
+export function formatLocationTextEquivalent(payload: LocationPayload): string {
   if (payload.state === 'known') {
     const label = payload.label ?? 'Recorded location';
-    return `${label}: latitude ${payload.latitude}, longitude ${payload.longitude}; GPS accuracy radius ±${payload.accuracyMeters} meters. ${GPS_PRECISION_DISCLAIMER} ${recorded}`;
+    return `${label}: latitude ${payload.latitude}, longitude ${payload.longitude}; GPS accuracy radius ±${payload.accuracyMeters} meters. ${GPS_PRECISION_DISCLAIMER}`;
   }
   if (payload.state === 'ambiguous') {
-    return `Ambiguous location: ${payload.label}. Coordinates and accuracy are unavailable. Reason: ${payload.reason}. ${recorded}`;
+    return `Ambiguous location: ${payload.label}. Coordinates and accuracy are unavailable. Reason: ${payload.reason}.`;
   }
-  return `Location unknown. Coordinates and accuracy are unavailable. Reason: ${payload.reason}. ${recorded}`;
+  return `Location unknown. Coordinates and accuracy are unavailable. Reason: ${payload.reason}.`;
 }

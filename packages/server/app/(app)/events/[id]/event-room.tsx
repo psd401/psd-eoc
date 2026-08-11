@@ -2576,7 +2576,6 @@ function SafeLocationMap({
   }) => void;
 }>) {
   const [failed, setFailed] = useState(false);
-  const mapKey = `${payload.latitude}:${payload.longitude}:${payload.accuracyMeters}:${mode}`;
   if (failed) {
     return (
       <p className="location-map-fallback" role="status">
@@ -2586,7 +2585,7 @@ function SafeLocationMap({
     );
   }
   return (
-    <LocationMapBoundary key={mapKey}>
+    <LocationMapBoundary>
       {mode === 'edit' && onCoordinatesChange !== undefined ? (
         <LocationMap
           ariaLabel={ariaLabel}
@@ -2879,20 +2878,18 @@ function LocationEntryContent({
   mapVisible,
   onToggleMap,
   payload,
-  serverTime,
 }: Readonly<{
   entryId: string;
   entrySequence: number;
   mapVisible: boolean;
   onToggleMap: () => void;
   payload: LocationPayload;
-  serverTime: string;
 }>) {
   const mapId = `location-map-${entryId}`;
   return (
     <div className="entry-content location-entry-content">
       <p className="location-text-equivalent">
-        {formatLocationTextEquivalent(payload, serverTime)}
+        {formatLocationTextEquivalent(payload)}
       </p>
       {payload.state === 'known' ? (
         <>
@@ -2994,7 +2991,6 @@ function EntryContent({
           mapVisible={locationMapVisible}
           onToggleMap={onToggleLocationMap}
           payload={entry.payload}
-          serverTime={entry.serverTime}
         />
       );
     case 'system':
