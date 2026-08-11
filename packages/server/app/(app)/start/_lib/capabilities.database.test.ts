@@ -15,7 +15,6 @@ import {
 } from '../../../../db/client';
 import { audienceConfigurations, facilities } from '../../../../db/schema';
 import { migrateDatabase } from '../../../../drizzle/migrate';
-import { CapabilityEngineError } from '../../../../lib/capabilities/engine';
 import {
   dropStartFlowPlaywrightDatabase,
   recreateStartFlowPlaywrightDatabase,
@@ -37,6 +36,26 @@ function databaseConnection(): PostgresDatabaseConnection {
     throw new Error('The start-flow integration database is not open.');
   }
   return connection;
+}
+
+function postgresErrorFacts(
+  error: unknown,
+  field: 'code' | 'message',
+): readonly string[] {
+  const visited = new Set<unknown>();
+  const facts: string[] = [];
+  let current = error;
+  while (
+    typeof current === 'object' &&
+    current !== null &&
+    !visited.has(current)
+  ) {
+    visited.add(current);
+    const value = Reflect.get(current, field);
+    if (typeof value === 'string') facts.push(value);
+    current = Reflect.get(current, 'cause');
+  }
+  return facts;
 }
 
 async function closeAndDropAudienceTestDatabase(
@@ -129,7 +148,7 @@ describeWithDatabase('start-flow audience version selection', () => {
     );
   });
 
-  test('uses the highest version despite inverted timestamps and rejects a second lineage', async () => {
+  test('uses the highest version despite inverted timestamps and the database rejects a second lineage', async () => {
     const database = databaseConnection().db;
     const facilityId = randomUUID();
     const audienceId = randomUUID();
@@ -160,23 +179,26 @@ describeWithDatabase('start-flow audience version selection', () => {
     );
     expect(selected).toMatchObject({ id: audienceId, version: 2 });
 
-    await database.insert(audienceConfigurations).values({
-      id: randomUUID(),
-      facilityId,
-      version: 1,
-      createdAt: new Date('2030-01-03T00:00:00.000Z'),
-    });
-    let thrown: unknown;
+    let lineageError: unknown;
     try {
-      await loadLatestAudienceConfigurationHeader(database, facilityId);
+      await database.insert(audienceConfigurations).values({
+        id: randomUUID(),
+        facilityId,
+        version: 1,
+        createdAt: new Date('2030-01-03T00:00:00.000Z'),
+      });
     } catch (error) {
-      thrown = error;
+      lineageError = error;
     }
-    expect(thrown).toBeInstanceOf(CapabilityEngineError);
-    expect(thrown).toMatchObject({
-      code: 'CONFLICT',
-      reasonCode: 'PERSISTENCE_CONFLICT',
-      status: 409,
-    });
+    expect(postgresErrorFacts(lineageError, 'code')).toContain('55000');
+    expect(postgresErrorFacts(lineageError, 'message').join('\n')).toMatch(
+      /Admin version lineage cannot change/,
+    );
+
+    const stillSelected = await loadLatestAudienceConfigurationHeader(
+      database,
+      facilityId,
+    );
+    expect(stillSelected).toMatchObject({ id: audienceId, version: 2 });
   });
 });
