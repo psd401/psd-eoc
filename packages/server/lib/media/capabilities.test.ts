@@ -77,6 +77,17 @@ interface MemoryIdempotencyRecord {
   resultReference: string | null;
 }
 
+interface MemoryJournalEntry {
+  readonly id: string;
+  readonly eventId: string;
+  readonly sequence: number;
+  readonly kind: 'photo' | 'text';
+  readonly mediaId: string | null;
+  readonly supersedesEntryId: string | null;
+  readonly supersedesEntrySequence: number | null;
+  readonly supersessionKind: 'correction' | 'redaction' | null;
+}
+
 interface MemoryState {
   readonly eventFacilities: Map<string, string>;
   readonly intents: Map<string, StoredMediaUploadIntent>;
@@ -85,8 +96,10 @@ interface MemoryState {
   readonly audits: CapabilityAuditEvent[];
   readonly insertedIntents: NewMediaUploadIntent[];
   readonly completedRecords: CompleteMediaRecord[];
+  readonly journalEntries: MemoryJournalEntry[];
   currentTime: Date;
   nextRecord: number;
+  readyMediaResolutions: number;
 }
 
 function cloneState(state: MemoryState): MemoryState {
@@ -100,8 +113,10 @@ function cloneState(state: MemoryState): MemoryState {
     audits: [...state.audits],
     insertedIntents: [...state.insertedIntents],
     completedRecords: [...state.completedRecords],
+    journalEntries: [...state.journalEntries],
     currentTime: new Date(state.currentTime),
     nextRecord: state.nextRecord,
+    readyMediaResolutions: state.readyMediaResolutions,
   };
 }
 
@@ -215,8 +230,25 @@ class MemoryMediaTransaction implements MediaCapabilityTransaction {
     eventId: string,
     mediaId: string,
   ): Promise<ResolvedReadyMedia | null> {
+    this.state.readyMediaResolutions += 1;
     const record = this.state.records.get(mediaId);
     if (record === undefined || record.eventId !== eventId) {
+      return null;
+    }
+    const hasVisibleBinding = this.state.journalEntries.some(
+      (binding) =>
+        binding.eventId === eventId &&
+        binding.kind === 'photo' &&
+        binding.mediaId === mediaId &&
+        !this.state.journalEntries.some(
+          (redaction) =>
+            redaction.eventId === binding.eventId &&
+            redaction.supersessionKind === 'redaction' &&
+            redaction.supersedesEntryId === binding.id &&
+            redaction.supersedesEntrySequence === binding.sequence,
+        ),
+    );
+    if (!hasVisibleBinding) {
       return null;
     }
     const facilityId = this.state.eventFacilities.get(eventId);
@@ -275,8 +307,10 @@ class MemoryMediaStore implements MediaCapabilityStore {
       audits: [],
       insertedIntents: [],
       completedRecords: [],
+      journalEntries: [],
       currentTime: new Date(NOW),
       nextRecord: 0,
+      readyMediaResolutions: 0,
     };
   }
 
@@ -492,6 +526,70 @@ function seedPendingIntent(store: MemoryMediaStore): void {
   });
 }
 
+function seedReadyRecord(store: MemoryMediaStore): StoredMediaRecord {
+  const record: StoredMediaRecord = {
+    id: IDS.intent,
+    uploadIntentId: IDS.intent,
+    eventId: IDS.event,
+    status: 'ready',
+    detectedContentType: 'image/jpeg',
+    sanitizedByteLength: SANITIZED_BYTES.byteLength,
+    sanitizedContentSha256: SANITIZED_SHA256,
+    malwareScan: 'clean',
+    exifStripped: true,
+    createdAt: NOW.toISOString(),
+    storageKey: `ready/${IDS.event}/${IDS.intent}`,
+  };
+  store.state.records.set(record.id, record);
+  return record;
+}
+
+function seedPhotoBinding(
+  store: MemoryMediaStore,
+  input: Readonly<{
+    id?: string;
+    eventId?: string;
+    mediaId?: string;
+    sequence?: number;
+  }> = {},
+): MemoryJournalEntry {
+  const entry: MemoryJournalEntry = {
+    id: input.id ?? uuid(20),
+    eventId: input.eventId ?? IDS.event,
+    sequence: input.sequence ?? 1,
+    kind: 'photo',
+    mediaId: input.mediaId ?? IDS.intent,
+    supersedesEntryId: null,
+    supersedesEntrySequence: null,
+    supersessionKind: null,
+  };
+  store.state.journalEntries.push(entry);
+  return entry;
+}
+
+function seedSupersession(
+  store: MemoryMediaStore,
+  target: MemoryJournalEntry,
+  input: Readonly<{
+    id?: string;
+    kind: 'correction' | 'redaction';
+    sequence?: number;
+  }>,
+): MemoryJournalEntry {
+  const entry: MemoryJournalEntry = {
+    id: input.id ?? uuid(input.kind === 'redaction' ? 21 : 22),
+    eventId: target.eventId,
+    sequence: input.sequence ?? target.sequence + 1,
+    kind: 'text',
+    mediaId: null,
+    supersedesEntryId: target.id,
+    supersedesEntrySequence: target.sequence,
+    supersessionKind: input.kind,
+  };
+  store.state.journalEntries.push(entry);
+  return entry;
+}
+
 async function expectEngineError(
   operation: Promise<unknown>,
 ): Promise<CapabilityEngineError> {
@@ -571,31 +669,47 @@ describe('media capabilities', () => {
       `quarantine/${IDS.event}/${IDS.intent}`,
     ]);
 
+    const replayInvocation = { ...invocation, requestId: uuid(300) };
     const replay = await executeMediaCapability(
       'create-media-upload-intent',
       input,
-      { ...invocation, requestId: uuid(300) },
+      replayInvocation,
       store,
       dependencies(object.objectStore),
     );
     expect(replay.id).toBe(created.id);
     expect(store.state.insertedIntents).toHaveLength(1);
     expect(object.calls.uploadKeys).toHaveLength(2);
+    expect(store.state.audits).toEqual([
+      expect.objectContaining({
+        action: 'create-media-upload-intent',
+        facilityId: IDS.facility,
+        outcome: 'success',
+        requestId: invocation.requestId,
+      }),
+      expect.objectContaining({
+        action: 'create-media-upload-intent',
+        facilityId: IDS.facility,
+        outcome: 'success',
+        requestId: replayInvocation.requestId,
+      }),
+    ]);
 
+    const deniedReplayInvocation = {
+      ...invocation,
+      requestId: uuid(301),
+      scope: {
+        facilityScope: {
+          kind: 'facilities' as const,
+          facilityIds: [IDS.otherFacility],
+        },
+      },
+    };
     const denied = await expectEngineError(
       executeMediaCapability(
         'create-media-upload-intent',
         input,
-        {
-          ...invocation,
-          requestId: uuid(301),
-          scope: {
-            facilityScope: {
-              kind: 'facilities',
-              facilityIds: [IDS.otherFacility],
-            },
-          },
-        },
+        deniedReplayInvocation,
         store,
         dependencies(object.objectStore),
       ),
@@ -605,6 +719,14 @@ describe('media capabilities', () => {
       reasonCode: 'CAPABILITY_SCOPE_DENIED',
     });
     expect(object.calls.uploadKeys).toHaveLength(2);
+    expect(store.state.audits.at(-1)).toEqual(
+      expect.objectContaining({
+        action: 'create-media-upload-intent',
+        facilityId: IDS.facility,
+        outcome: 'denied',
+        requestId: deniedReplayInvocation.requestId,
+      }),
+    );
 
     const pending = store.state.intents.get(IDS.intent);
     if (pending === undefined) {
@@ -699,6 +821,7 @@ describe('media capabilities', () => {
       storageKey: `ready/${IDS.event}/${IDS.intent}`,
     };
     readStore.state.records.set(readyRecord.id, readyRecord);
+    seedPhotoBinding(readStore);
 
     blockUploadGrants = true;
     const firstHolderStore = new MemoryMediaStore();
@@ -1045,37 +1168,61 @@ describe('media capabilities', () => {
     });
     expect(object.calls.sanitized[0]?.contentType).toBe('image/jpeg');
 
+    const replayInvocation = { ...invocation, requestId: uuid(302) };
     const replay = await executeMediaCapability(
       'complete-media-upload',
       { uploadIntentId: IDS.intent },
-      { ...invocation, requestId: uuid(302) },
+      replayInvocation,
       store,
       deps,
     );
     expect(replay).toEqual(completed);
     expect(sanitizeCalls).toBe(1);
     expect(object.calls.sanitized).toHaveLength(1);
+    expect(store.state.audits).toEqual([
+      expect.objectContaining({
+        action: 'complete-media-upload',
+        facilityId: IDS.facility,
+        outcome: 'success',
+        requestId: invocation.requestId,
+      }),
+      expect.objectContaining({
+        action: 'complete-media-upload',
+        facilityId: IDS.facility,
+        outcome: 'success',
+        requestId: replayInvocation.requestId,
+      }),
+    ]);
 
+    const deniedReplayInvocation = {
+      ...invocation,
+      requestId: uuid(303),
+      scope: {
+        facilityScope: {
+          kind: 'facilities' as const,
+          facilityIds: [IDS.otherFacility],
+        },
+      },
+    };
     const deniedReplay = await expectEngineError(
       executeMediaCapability(
         'complete-media-upload',
         { uploadIntentId: IDS.intent },
-        {
-          ...invocation,
-          requestId: uuid(303),
-          scope: {
-            facilityScope: {
-              kind: 'facilities',
-              facilityIds: [IDS.otherFacility],
-            },
-          },
-        },
+        deniedReplayInvocation,
         store,
         deps,
       ),
     );
     expect(deniedReplay.code).toBe('FORBIDDEN');
     expect(sanitizeCalls).toBe(1);
+    expect(store.state.audits.at(-1)).toEqual(
+      expect.objectContaining({
+        action: 'complete-media-upload',
+        facilityId: IDS.facility,
+        outcome: 'denied',
+        requestId: deniedReplayInvocation.requestId,
+      }),
+    );
   });
 
   test('returns bounded user-safe failures for corrupt objects and malformed images', async () => {
@@ -1428,6 +1575,119 @@ describe('media capabilities', () => {
     expect(object.calls.sanitized).toHaveLength(2);
   });
 
+  test('denies unjournaled, wrong-event, and non-photo media references', async () => {
+    const store = new MemoryMediaStore();
+    seedReadyRecord(store);
+    const object = createObjectStore();
+    const deps = dependencies(object.objectStore);
+    const deny = () =>
+      expectEngineError(
+        executeMediaCapability(
+          'get-media-read-grant',
+          { eventId: IDS.event, mediaId: IDS.intent },
+          humanInvocation({ mutation: false }),
+          store,
+          deps,
+        ),
+      );
+
+    expect((await deny()).code).toBe('NOT_FOUND');
+    store.state.journalEntries.push({
+      id: uuid(30),
+      eventId: IDS.event,
+      sequence: 1,
+      kind: 'text',
+      mediaId: IDS.intent,
+      supersedesEntryId: null,
+      supersedesEntrySequence: null,
+      supersessionKind: null,
+    });
+    expect((await deny()).code).toBe('NOT_FOUND');
+    seedPhotoBinding(store, { id: uuid(31), eventId: IDS.otherEvent });
+    expect((await deny()).code).toBe('NOT_FOUND');
+    expect(object.calls.readKeys).toHaveLength(0);
+  });
+
+  test('keeps a photo visible through corrections and unrelated redactions', async () => {
+    const store = new MemoryMediaStore();
+    seedReadyRecord(store);
+    const visible = seedPhotoBinding(store, { id: uuid(32), sequence: 1 });
+    seedSupersession(store, visible, {
+      id: uuid(33),
+      kind: 'correction',
+      sequence: 2,
+    });
+    const unrelated = seedPhotoBinding(store, {
+      id: uuid(34),
+      mediaId: uuid(35),
+      sequence: 3,
+    });
+    seedSupersession(store, unrelated, {
+      id: uuid(36),
+      kind: 'redaction',
+      sequence: 4,
+    });
+    const object = createObjectStore();
+
+    await expect(
+      executeMediaCapability(
+        'get-media-read-grant',
+        { eventId: IDS.event, mediaId: IDS.intent },
+        humanInvocation({ mutation: false }),
+        store,
+        dependencies(object.objectStore),
+      ),
+    ).resolves.toMatchObject({ mediaId: IDS.intent });
+    expect(object.calls.readKeys).toHaveLength(1);
+  });
+
+  test('allows any visible binding and denies only after all bindings are redacted', async () => {
+    const store = new MemoryMediaStore();
+    seedReadyRecord(store);
+    const firstBinding = seedPhotoBinding(store, {
+      id: uuid(40),
+      sequence: 1,
+    });
+    const secondBinding = seedPhotoBinding(store, {
+      id: uuid(41),
+      sequence: 2,
+    });
+    seedSupersession(store, firstBinding, {
+      id: uuid(42),
+      kind: 'redaction',
+      sequence: 3,
+    });
+    const object = createObjectStore();
+    const deps = dependencies(object.objectStore);
+
+    await expect(
+      executeMediaCapability(
+        'get-media-read-grant',
+        { eventId: IDS.event, mediaId: IDS.intent },
+        humanInvocation({ mutation: false }),
+        store,
+        deps,
+      ),
+    ).resolves.toMatchObject({ mediaId: IDS.intent });
+
+    seedSupersession(store, secondBinding, {
+      id: uuid(43),
+      kind: 'redaction',
+      sequence: 4,
+    });
+    const denied = await expectEngineError(
+      executeMediaCapability(
+        'get-media-read-grant',
+        { eventId: IDS.event, mediaId: IDS.intent },
+        humanInvocation({ mutation: false }),
+        store,
+        deps,
+      ),
+    );
+    expect(denied.code).toBe('NOT_FOUND');
+    expect(object.calls.readKeys).toHaveLength(1);
+  });
+
   test('authorizes every private read against the exact event and facility', async () => {
     const store = new MemoryMediaStore();
     seedPendingIntent(store);
@@ -1445,6 +1705,7 @@ describe('media capabilities', () => {
       storageKey: `ready/${IDS.event}/${IDS.intent}`,
     };
     store.state.records.set(record.id, record);
+    seedPhotoBinding(store);
     const object = createObjectStore();
     const deps = dependencies(object.objectStore);
 
@@ -1470,6 +1731,7 @@ describe('media capabilities', () => {
       record.storageKey,
       record.storageKey,
     ]);
+    expect(store.state.readyMediaResolutions).toBe(2);
 
     const wrongEvent = await expectEngineError(
       executeMediaCapability(

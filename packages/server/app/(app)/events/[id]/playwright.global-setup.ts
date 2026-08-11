@@ -43,6 +43,10 @@ import {
   createDrizzleInitialWebSessionStore,
   digestWebSessionCredential,
 } from '../../../../lib/auth/session-cookie';
+import {
+  quarantineStorageKey,
+  readyStorageKey,
+} from '../../../../lib/media/model';
 import { createOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import { requireEventRoomPlaywrightRunContext } from './test-database';
 
@@ -70,6 +74,7 @@ interface AccessFixture {
 }
 
 interface EventRoomFixture {
+  readonly sessionId: string;
   readonly concurrentDialogEventId: string;
   readonly continuationEventId: string;
   readonly dialogFailureEventId: string;
@@ -95,6 +100,16 @@ interface EventRoomFixture {
   readonly staleLifecycleResponseEventId: string;
   readonly stalledMutationEventId: string;
   readonly stalledPreviewEventId: string;
+  readonly photoEventId: string;
+  readonly photoMediaId: string;
+  readonly photoUploadMediaId: string;
+  readonly photoSanitizedSha256: string;
+  readonly photoStressEventId: string;
+  readonly photoStressOldestMediaId: string;
+  readonly photoStressSecondMediaId: string;
+  readonly photoStressMiddleMediaId: string;
+  readonly redactedPhotoEventId: string;
+  readonly redactedPhotoMediaId: string;
 }
 
 interface ChannelConfigurationState {
@@ -474,6 +489,11 @@ function readyMediaSeed(
     uploadIntent: {
       id: uploadIntentId,
       eventId,
+      facilityId: FACILITY_ID,
+      budgetPrincipalDigest: digest(
+        'synthetic event-room browser media fixture principal',
+      ),
+      budgetPrincipalAttributed: true,
       byteLength: Buffer.byteLength(rawContent, 'utf8'),
       contentSha256: digest(rawContent),
       declaredContentType: 'image/jpeg',
@@ -638,6 +658,9 @@ async function prepareEventFixtures(
   const dialogFailureEvent = makeActiveEvent();
   const stalledMutationEvent = makeActiveEvent();
   const stalledPreviewEvent = makeActiveEvent();
+  const photoEvent = makeActiveEvent();
+  const photoStressEvent = makeActiveEvent();
+  const redactedPhotoEvent = makeActiveEvent();
   const realDraftEvent = EventSchema.parse({
     id: randomUUID(),
     facilityId: FACILITY_ID,
@@ -812,6 +835,10 @@ async function prepareEventFixtures(
     ...makeHistory(dialogFailureEvent, 3),
     ...makeHistory(stalledMutationEvent, 3),
     ...makeHistory(stalledPreviewEvent, 3),
+    photoEntry,
+    ...photoStressEntries,
+    redactedPhotoEntry,
+    photoRedactionEntry,
   ];
 
   await database.transaction(async (transaction) => {
@@ -868,6 +895,9 @@ async function prepareEventFixtures(
           dialogFailureEvent,
           stalledMutationEvent,
           stalledPreviewEvent,
+          photoEvent,
+          photoStressEvent,
+          redactedPhotoEvent,
           realDraftEvent,
         ].map(eventInsert),
       );
@@ -891,6 +921,7 @@ async function prepareEventFixtures(
   });
 
   return {
+    sessionId: actor.sessionId,
     concurrentDialogEventId: concurrentDialogEvent.id,
     continuationEventId: continuationEvent.id,
     dialogFailureEventId: dialogFailureEvent.id,
@@ -916,6 +947,16 @@ async function prepareEventFixtures(
     staleLifecycleResponseEventId: staleLifecycleResponseEvent.id,
     stalledMutationEventId: stalledMutationEvent.id,
     stalledPreviewEventId: stalledPreviewEvent.id,
+    photoEventId: photoEvent.id,
+    photoMediaId: photoMedia.id,
+    photoUploadMediaId: photoUploadMedia.id,
+    photoSanitizedSha256: photoMedia.sanitizedContentSha256,
+    photoStressEventId: photoStressEvent.id,
+    photoStressOldestMediaId: photoStressOldestMedia.id,
+    photoStressSecondMediaId: photoStressSecondMedia.id,
+    photoStressMiddleMediaId: photoStressMiddleMedia.id,
+    redactedPhotoEventId: redactedPhotoEvent.id,
+    redactedPhotoMediaId: redactedPhotoMedia.id,
   };
 }
 

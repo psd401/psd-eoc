@@ -55,6 +55,7 @@ import {
   createMediaProviderGate,
 } from './processing-gate';
 import {
+  buildBoundedMediaUploadUsageQueries,
   configureMediaUploadAllocationDeadline,
   createDrizzleMediaCapabilityStore,
   MEDIA_UPLOAD_ALLOCATION_LOCK_TIMEOUT_MILLISECONDS,
@@ -95,6 +96,9 @@ const CONTENT_BYTES = Buffer.from(
   'utf8',
 );
 const CONTENT_SHA256 = createHash('sha256').update(CONTENT_BYTES).digest('hex');
+const SEEDED_BUDGET_PRINCIPAL_DIGEST = createHash('sha256')
+  .update('synthetic direct media budget fixture principal', 'utf8')
+  .digest('hex');
 
 let connection: PostgresDatabaseConnection | undefined;
 let fixtureIds: FixtureIds | undefined;
@@ -269,6 +273,13 @@ async function seedUploadIntents(
   status: 'completed' | 'pending-upload' = 'pending-upload',
 ): Promise<void> {
   const createdAt = new Date();
+  const eventAnchors = await databaseConnection()
+    .db.select({ id: events.id, facilityId: events.facilityId })
+    .from(events)
+    .where(inArray(events.id, eventIds));
+  const facilityByEvent = new Map(
+    eventAnchors.map(({ id, facilityId }) => [id, facilityId] as const),
+  );
   await databaseConnection()
     .db.insert(mediaUploadIntents)
     .values(
@@ -278,9 +289,16 @@ async function seedUploadIntents(
         if (eventId === undefined) {
           throw new Error('At least one synthetic event is required.');
         }
+        const facilityId = facilityByEvent.get(eventId);
+        if (facilityId === undefined) {
+          throw new Error('Every synthetic event requires a facility anchor.');
+        }
         return {
           id,
           eventId,
+          facilityId,
+          budgetPrincipalDigest: SEEDED_BUDGET_PRINCIPAL_DIGEST,
+          budgetPrincipalAttributed: true,
           byteLength,
           contentSha256: CONTENT_SHA256,
           declaredContentType: 'image/jpeg' as const,
@@ -497,6 +515,170 @@ describeWithDatabase('media upload production resource budgets', () => {
         lockTimeoutMs: 100,
       });
     });
+  });
+
+  test('plans every quota and journal read-auth lookup through its dedicated index', async () => {
+    const facilityId = await createSyntheticFacility();
+    const eventId = await createActiveSyntheticEvent(facilityId);
+    const currentTime = new Date();
+    const queries = buildBoundedMediaUploadUsageQueries(
+      databaseConnection().db,
+      {
+        eventId,
+        facilityId,
+        budgetPrincipal: {
+          kind: 'human',
+          userId: randomUUID(),
+          digest: createHash('sha256')
+            .update('synthetic explain-plan principal', 'utf8')
+            .digest('hex'),
+        },
+      },
+      currentTime,
+    );
+
+    await databaseConnection().db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local enable_seqscan = off`);
+      await transaction.execute(sql`set local enable_bitmapscan = off`);
+      const quotaPlans = [
+        [
+          queries.principalRolling,
+          'media_upload_intents_budget_principal_created_idx',
+        ],
+        [
+          queries.unattributedRecent,
+          'media_upload_intents_unattributed_created_idx',
+        ],
+        [queries.eventActive, 'media_upload_intents_event_active_idx'],
+        [queries.eventRolling, 'media_upload_intents_event_created_idx'],
+        [queries.facilityActive, 'media_upload_intents_facility_active_idx'],
+        [queries.facilityRolling, 'media_upload_intents_facility_created_idx'],
+      ] as const;
+      for (const [query, expectedIndex] of quotaPlans) {
+        const rows = await transaction.execute<Record<string, unknown>>(
+          sql`explain (costs off) ${query}`,
+        );
+        const plan = rows
+          .map((row) => String(Object.values(row)[0] ?? ''))
+          .join('\n');
+        expect(plan).toContain(expectedIndex);
+      }
+
+      const mediaId = randomUUID();
+      const entryId = randomUUID();
+      const entrySequence = 1;
+      const journalPlans = [
+        [
+          sql`
+            select id
+            from journal_entries
+            where event_id = ${eventId}
+              and media_id = ${mediaId}
+              and kind = 'photo'
+            limit 1
+          `,
+          'journal_entries_event_media_idx',
+        ],
+        [
+          sql`
+            select id
+            from journal_entries
+            where event_id = ${eventId}
+              and supersedes_entry_id = ${entryId}
+              and supersedes_entry_sequence = ${entrySequence}
+              and supersession_kind = 'redaction'
+            limit 1
+          `,
+          'journal_entries_event_redaction_target_idx',
+        ],
+      ] as const;
+      for (const [query, expectedIndex] of journalPlans) {
+        const rows = await transaction.execute<Record<string, unknown>>(
+          sql`explain (costs off) ${query}`,
+        );
+        const plan = rows
+          .map((row) => String(Object.values(row)[0] ?? ''))
+          .join('\n');
+        expect(plan).toContain(expectedIndex);
+      }
+    });
+  });
+
+  test('fails closed while an unattributed migrated row remains in the principal window', async () => {
+    const facilityId = await createSyntheticFacility();
+    const eventId = await createActiveSyntheticEvent(facilityId);
+    const legacyIntentId = randomUUID();
+    const createdAt = new Date();
+    const db = databaseConnection().db;
+
+    // Simulate 0005's pre-trigger backfill. The trigger is re-enabled in the
+    // same committed DDL transaction before application admission is invoked.
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`
+        alter table media_upload_intents
+        disable trigger media_upload_intents_integrity_guard
+      `);
+      await transaction.insert(mediaUploadIntents).values({
+        id: legacyIntentId,
+        eventId,
+        facilityId,
+        budgetPrincipalDigest: '0'.repeat(64),
+        budgetPrincipalAttributed: false,
+        byteLength: 1,
+        contentSha256: CONTENT_SHA256,
+        declaredContentType: 'image/jpeg',
+        storageKey: quarantineStorageKey(eventId, legacyIntentId),
+        status: 'pending-upload',
+        createdAt,
+        expiresAt: new Date(
+          createdAt.getTime() + MEDIA_UPLOAD_GRANT_SECONDS * 1_000,
+        ),
+      });
+      await transaction.execute(sql`
+        alter table media_upload_intents
+        enable trigger media_upload_intents_integrity_guard
+      `);
+    });
+
+    const object = createGrantRecorder();
+    try {
+      await expect(
+        reserveUpload(
+          eventId,
+          facilityId,
+          createHumanActor(),
+          `media-budget-unattributed-${randomUUID()}`,
+          1,
+          object.dependencies,
+        ),
+      ).rejects.toMatchObject({
+        code: 'INTERNAL_ERROR',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 503,
+        retryable: true,
+      });
+      expect(object.recorder.storageKeys).toHaveLength(0);
+      expect(await eventUsage(eventId)).toEqual({ intents: 1, bytes: 1 });
+    } finally {
+      await db.transaction(async (transaction) => {
+        await transaction.execute(sql`
+          alter table media_upload_intents
+          disable trigger media_upload_intents_integrity_guard
+        `);
+        await transaction
+          .update(mediaUploadIntents)
+          .set({
+            status: 'expired',
+            createdAt: new Date(createdAt.getTime() - 60 * 60_000),
+            expiresAt: new Date(createdAt.getTime() - 50 * 60_000),
+          })
+          .where(eq(mediaUploadIntents.id, legacyIntentId));
+        await transaction.execute(sql`
+          alter table media_upload_intents
+          enable trigger media_upload_intents_integrity_guard
+        `);
+      });
+    }
   });
 
   test('shares the request boundary across human sessions and replays one key without a second allocation', async () => {
@@ -998,6 +1180,9 @@ describeWithDatabase('media upload production resource budgets', () => {
       .values({
         id: uploadIntentId,
         eventId,
+        facilityId,
+        budgetPrincipalDigest: SEEDED_BUDGET_PRINCIPAL_DIGEST,
+        budgetPrincipalAttributed: true,
         byteLength: CONTENT_BYTES.byteLength,
         contentSha256: CONTENT_SHA256,
         declaredContentType: 'image/jpeg',

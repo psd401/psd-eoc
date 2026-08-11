@@ -13,6 +13,7 @@ import {
   EventTransitionSchema,
   HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
   IntegrationStatusSchema,
+  MediaRecordSchema,
   SessionEstablishmentResultSchema,
   type JournalEntry,
 } from '@psd-eoc/contracts';
@@ -74,6 +75,11 @@ import {
   executeJournalCapability,
   type JournalCapabilityStore,
 } from '../../../../lib/capabilities/journal';
+import {
+  quarantineStorageKey,
+  readyStorageKey,
+} from '../../../../lib/media/model';
+import { buildPhotoChecksumExportQuery } from '../../../../lib/media/repository';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
 import { requireSyntheticEventRoomTestDatabaseUrl } from './test-database';
 
@@ -264,6 +270,11 @@ async function createReadySyntheticPhoto(
     await transaction.insert(mediaUploadIntents).values({
       id: uploadIntentId,
       eventId,
+      facilityId: syntheticFixtureIds().northFacilityId,
+      budgetPrincipalDigest: sha256(
+        'synthetic journal photo fixture principal',
+      ),
+      budgetPrincipalAttributed: true,
       byteLength: Buffer.byteLength(rawContent, 'utf8'),
       contentSha256: sha256(rawContent),
       declaredContentType: 'image/jpeg',
@@ -1082,6 +1093,11 @@ describeWithDatabase('event journal database guarantees', () => {
       .values({
         id: uploadIntentId,
         eventId,
+        facilityId: syntheticFixtureIds().northFacilityId,
+        budgetPrincipalDigest: sha256(
+          'synthetic journal projection fixture principal',
+        ),
+        budgetPrincipalAttributed: true,
         byteLength: 128,
         contentSha256: 'd'.repeat(64),
         declaredContentType: 'image/jpeg',

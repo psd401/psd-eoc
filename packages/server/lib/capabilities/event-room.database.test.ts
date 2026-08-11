@@ -551,6 +551,9 @@ describeWithDatabase('event-room atomic synchronization', () => {
       .values({
         id: uploadIntentId,
         eventId,
+        facilityId: fixtures().facilityId,
+        budgetPrincipalDigest: 'f'.repeat(64),
+        budgetPrincipalAttributed: true,
         byteLength: 128,
         contentSha256: 'b'.repeat(64),
         declaredContentType: 'image/jpeg',

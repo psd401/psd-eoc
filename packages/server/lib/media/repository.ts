@@ -4,7 +4,18 @@ import {
   MediaRecordSchema,
   SecurityAuditEntrySchema,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, gt, gte, inArray, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  gte,
+  notExists,
+  sql,
+} from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 
 import {
   createDatabaseClient,
@@ -39,7 +50,6 @@ import {
 } from './errors';
 import type {
   CompleteMediaRecord,
-  MediaBudgetPrincipal,
   NewMediaUploadIntent,
   PhotoChecksumExportProjection,
   StoredMediaRecord,
@@ -243,11 +253,11 @@ export const MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS = Object.freeze({
   facilityRolling: MEDIA_FACILITY_ROLLING_INTENT_LIMIT + 1,
 });
 
+/** One indexed row is enough to fail closed on unattributed legacy history. */
+export const MEDIA_UNATTRIBUTED_USAGE_QUERY_ROW_LIMIT = 1;
+
 export const MEDIA_UPLOAD_ALLOCATION_STATEMENT_TIMEOUT_MILLISECONDS = 5_000;
 export const MEDIA_UPLOAD_ALLOCATION_LOCK_TIMEOUT_MILLISECONDS = 1_000;
-
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 function resourceUsageValue(value: number | string | undefined): number {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -304,26 +314,12 @@ export async function configureMediaUploadAllocationDeadline(
   `);
 }
 
-function mediaBudgetPrincipalPredicate(principal: MediaBudgetPrincipal) {
-  const stableId =
-    principal.kind === 'human'
-      ? principal.userId
-      : principal.kind === 'agent'
-        ? principal.agentId
-        : principal.serviceId;
-  return sql`${idempotencyRecords.principal} ->> 'kind' = ${principal.kind}
-    and coalesce(
-      ${idempotencyRecords.principal} ->> 'userId',
-      ${idempotencyRecords.principal} ->> 'agentId',
-      ${idempotencyRecords.principal} ->> 'serviceId'
-    ) = ${stableId}`;
-}
-
 /**
- * Builds index-ordered budget reads whose result sets stop as soon as the
- * corresponding request ceiling is known to be exceeded. The additional row
- * distinguishes the inclusive limit from an over-limit allocation without
- * aggregating over retained history while the allocation locks are held.
+ * Builds index-backed budget reads whose result sets stop as soon as the
+ * corresponding request ceiling is known to be exceeded. The event/facility
+ * anchors and stable pseudonymous principal digest live on each intent, so no
+ * retained idempotency JSON scan or events join is needed while locks are held.
+ * The one-row unattributed read fails closed for recent pre-migration history.
  */
 export function buildBoundedMediaUploadUsageQueries(
   database: PostgresDatabase,
@@ -336,24 +332,33 @@ export function buildBoundedMediaUploadUsageQueries(
   const windowStart = new Date(
     currentTime.getTime() - MEDIA_UPLOAD_BUDGET_WINDOW_SECONDS * 1_000,
   );
-  const principalPredicate = mediaBudgetPrincipalPredicate(
-    input.budgetPrincipal,
-  );
 
   return Object.freeze({
     principalRolling: database
-      .select({ resultReference: idempotencyRecords.resultReference })
-      .from(idempotencyRecords)
+      .select({ byteLength: mediaUploadIntents.byteLength })
+      .from(mediaUploadIntents)
       .where(
         and(
-          sql`${idempotencyRecords.capabilityId} = 'create-media-upload-intent'`,
-          principalPredicate,
-          sql`${idempotencyRecords.status} = 'completed'`,
-          gte(idempotencyRecords.createdAt, windowStart),
+          eq(
+            mediaUploadIntents.budgetPrincipalDigest,
+            input.budgetPrincipal.digest,
+          ),
+          gte(mediaUploadIntents.createdAt, windowStart),
         ),
       )
-      .orderBy(desc(idempotencyRecords.createdAt))
+      .orderBy(desc(mediaUploadIntents.createdAt))
       .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.principalRolling),
+    unattributedRecent: database
+      .select({ id: mediaUploadIntents.id })
+      .from(mediaUploadIntents)
+      .where(
+        and(
+          eq(mediaUploadIntents.budgetPrincipalAttributed, false),
+          gte(mediaUploadIntents.createdAt, windowStart),
+        ),
+      )
+      .orderBy(desc(mediaUploadIntents.createdAt))
+      .limit(MEDIA_UNATTRIBUTED_USAGE_QUERY_ROW_LIMIT),
     eventActive: database
       .select({ byteLength: mediaUploadIntents.byteLength })
       .from(mediaUploadIntents)
@@ -380,10 +385,9 @@ export function buildBoundedMediaUploadUsageQueries(
     facilityActive: database
       .select({ byteLength: mediaUploadIntents.byteLength })
       .from(mediaUploadIntents)
-      .innerJoin(events, eq(events.id, mediaUploadIntents.eventId))
       .where(
         and(
-          eq(events.facilityId, input.facilityId),
+          eq(mediaUploadIntents.facilityId, input.facilityId),
           sql`${mediaUploadIntents.status} = 'pending-upload'`,
           gt(mediaUploadIntents.expiresAt, currentTime),
         ),
@@ -393,10 +397,9 @@ export function buildBoundedMediaUploadUsageQueries(
     facilityRolling: database
       .select({ byteLength: mediaUploadIntents.byteLength })
       .from(mediaUploadIntents)
-      .innerJoin(events, eq(events.id, mediaUploadIntents.eventId))
       .where(
         and(
-          eq(events.facilityId, input.facilityId),
+          eq(mediaUploadIntents.facilityId, input.facilityId),
           gte(mediaUploadIntents.createdAt, windowStart),
         ),
       )
@@ -424,45 +427,6 @@ function summarizeBoundedMediaUsage(
   return Object.freeze({ intents: rows.length, bytes });
 }
 
-async function readPrincipalRollingUsage(
-  database: MediaQueryDatabase,
-  rows: readonly Readonly<{ resultReference: string | null }>[],
-): Promise<Readonly<{ intents: number; bytes: number }>> {
-  const references = rows.map(({ resultReference }) => {
-    if (resultReference === null || !UUID_PATTERN.test(resultReference)) {
-      throw mediaUnavailable();
-    }
-    return resultReference;
-  });
-  if (references.length === 0) {
-    return Object.freeze({ intents: 0, bytes: 0 });
-  }
-
-  const uniqueReferences = [...new Set(references)];
-  const intentRows = await database
-    .select({
-      id: mediaUploadIntents.id,
-      byteLength: mediaUploadIntents.byteLength,
-    })
-    .from(mediaUploadIntents)
-    .where(inArray(mediaUploadIntents.id, uniqueReferences))
-    .limit(MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.principalRolling);
-  const bytesByReference = new Map(
-    intentRows.map((row) => [row.id, row.byteLength] as const),
-  );
-  const usageRows = references.map((reference) => {
-    const byteLength = bytesByReference.get(reference);
-    if (byteLength === undefined) {
-      throw mediaUnavailable();
-    }
-    return { byteLength };
-  });
-  return summarizeBoundedMediaUsage(
-    usageRows,
-    MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.principalRolling,
-  );
-}
-
 async function readMediaUploadResourceUsage(
   database: MediaQueryDatabase,
   input: NewMediaUploadIntent,
@@ -473,8 +437,14 @@ async function readMediaUploadResourceUsage(
     input,
     currentTime,
   );
+  if ((await queries.unattributedRecent).length !== 0) {
+    throw mediaUnavailable();
+  }
   const principalRows = await queries.principalRolling;
-  const principal = await readPrincipalRollingUsage(database, principalRows);
+  const principal = summarizeBoundedMediaUsage(
+    principalRows,
+    MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.principalRolling,
+  );
   const eventActive = summarizeBoundedMediaUsage(
     await queries.eventActive,
     MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS.eventActive,
@@ -766,21 +736,90 @@ async function resolveUploadIntent(
   });
 }
 
+/**
+ * Locks the event row shared with journal writers before media visibility is
+ * evaluated. This must remain a separate statement: after waiting for an
+ * in-flight journal writer, PostgreSQL READ COMMITTED gives the following
+ * statement a fresh snapshot containing that writer's redaction.
+ */
+export function buildMediaReadEventLockQuery(
+  database: PostgresDatabase,
+  eventId: string,
+) {
+  return database
+    .select({ facilityId: events.facilityId })
+    .from(events)
+    .where(eq(events.id, eventId))
+    .for('share', { of: events })
+    .limit(1);
+}
+
+/**
+ * Resolves only media with at least one visible same-event photo binding.
+ * Redaction is exact on both immutable entry identity fields; corrections and
+ * redactions of other entries therefore cannot hide the photo accidentally.
+ */
+export function buildAuthorizedReadyMediaQuery(
+  database: PostgresDatabase,
+  eventId: string,
+  mediaId: string,
+) {
+  const redactions = alias(journalEntries, 'media_read_redactions');
+  const visiblePhotoBinding = database
+    .select({ id: journalEntries.id })
+    .from(journalEntries)
+    .where(
+      and(
+        eq(journalEntries.eventId, mediaRecords.eventId),
+        eq(journalEntries.kind, 'photo'),
+        eq(journalEntries.mediaId, mediaRecords.id),
+        notExists(
+          database
+            .select({ id: redactions.id })
+            .from(redactions)
+            .where(
+              and(
+                eq(redactions.eventId, journalEntries.eventId),
+                eq(redactions.supersedesEntryId, journalEntries.id),
+                eq(redactions.supersedesEntrySequence, journalEntries.sequence),
+                eq(redactions.supersessionKind, 'redaction'),
+              ),
+            ),
+        ),
+      ),
+    );
+
+  return database
+    .select({ record: mediaRecords })
+    .from(mediaRecords)
+    .where(
+      and(
+        eq(mediaRecords.id, mediaId),
+        eq(mediaRecords.eventId, eventId),
+        exists(visiblePhotoBinding),
+      ),
+    )
+    .limit(1);
+}
+
 async function resolveReadyMedia(
   database: MediaQueryDatabase,
   eventId: string,
   mediaId: string,
 ): Promise<ResolvedReadyMedia | null> {
-  const [row] = await database
-    .select({ record: mediaRecords, facilityId: events.facilityId })
-    .from(mediaRecords)
-    .innerJoin(events, eq(events.id, mediaRecords.eventId))
-    .where(and(eq(mediaRecords.id, mediaId), eq(mediaRecords.eventId, eventId)))
-    .limit(1);
+  const [lockedEvent] = await buildMediaReadEventLockQuery(database, eventId);
+  if (lockedEvent === undefined) {
+    return null;
+  }
+  const [row] = await buildAuthorizedReadyMediaQuery(
+    database,
+    eventId,
+    mediaId,
+  );
   return row === undefined
     ? null
     : Object.freeze({
-        facilityId: row.facilityId,
+        facilityId: lockedEvent.facilityId,
         record: storedRecordFromRow(row.record),
       });
 }
@@ -910,6 +949,9 @@ function createTransaction(
       await database.insert(mediaUploadIntents).values({
         id: intent.id,
         eventId: intent.eventId,
+        facilityId: intent.facilityId,
+        budgetPrincipalDigest: intent.budgetPrincipal.digest,
+        budgetPrincipalAttributed: true,
         byteLength: intent.byteLength,
         contentSha256: intent.contentSha256,
         declaredContentType: intent.declaredContentType,

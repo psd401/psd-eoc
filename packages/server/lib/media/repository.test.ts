@@ -4,7 +4,12 @@ import { getTableConfig } from 'drizzle-orm/pg-core';
 
 import * as relations from '../../db/relations';
 import * as tables from '../../db/schema';
-import { journalEntries, mediaRecords } from '../../db/schema';
+import {
+  events,
+  journalEntries,
+  mediaRecords,
+  mediaUploadIntents,
+} from '../../db/schema';
 import {
   MEDIA_EVENT_ACTIVE_BYTE_LIMIT,
   MEDIA_EVENT_ACTIVE_INTENT_LIMIT,
@@ -18,8 +23,11 @@ import {
   MEDIA_PRINCIPAL_ROLLING_INTENT_LIMIT,
 } from './model';
 import {
+  buildAuthorizedReadyMediaQuery,
   buildBoundedMediaUploadUsageQueries,
+  buildMediaReadEventLockQuery,
   buildPhotoChecksumExportQuery,
+  MEDIA_UNATTRIBUTED_USAGE_QUERY_ROW_LIMIT,
   MEDIA_UPLOAD_USAGE_QUERY_ROW_LIMITS,
   mediaUploadBudgetViolation,
   type MediaUploadResourceUsage,
@@ -28,6 +36,7 @@ import {
 const EVENT_ID = '00000000-0000-4000-8000-000000000701';
 const FACILITY_ID = '00000000-0000-4000-8000-000000000702';
 const USER_ID = '00000000-0000-4000-8000-000000000703';
+const MEDIA_ID = '00000000-0000-4000-8000-000000000704';
 
 const EMPTY_USAGE: MediaUploadResourceUsage = Object.freeze({
   principalRollingIntents: 0,
@@ -44,8 +53,9 @@ const EMPTY_USAGE: MediaUploadResourceUsage = Object.freeze({
 
 describe('photo checksum journal/export binding', () => {
   test('binds every photo media reference to the same event at the schema boundary', () => {
-    const foreignKey = getTableConfig(journalEntries)
-      .foreignKeys.map((candidate) => candidate.reference())
+    const config = getTableConfig(journalEntries);
+    const foreignKey = config.foreignKeys
+      .map((candidate) => candidate.reference())
       .find((candidate) => candidate.name === 'journal_entries_media_event_fk');
 
     expect(foreignKey).toBeDefined();
@@ -58,6 +68,12 @@ describe('photo checksum journal/export binding', () => {
       'event_id',
     ]);
     expect(foreignKey?.foreignTable).toBe(mediaRecords);
+    expect(config.indexes.map((index) => index.config.name)).toEqual(
+      expect.arrayContaining([
+        'journal_entries_event_media_idx',
+        'journal_entries_event_redaction_target_idx',
+      ]),
+    );
   });
 
   test('exports the sanitized checksum through that exact same-event join', () => {
@@ -74,8 +90,97 @@ describe('photo checksum journal/export binding', () => {
   });
 });
 
+describe('redaction-aware private media reads', () => {
+  test('locks the exact event in a separate statement before visibility is read', () => {
+    const database = drizzle.mock({ schema: { ...tables, ...relations } });
+    const lock = buildMediaReadEventLockQuery(database, EVENT_ID).toSQL();
+    const visibility = buildAuthorizedReadyMediaQuery(
+      database,
+      EVENT_ID,
+      MEDIA_ID,
+    ).toSQL();
+
+    expect(lock.sql).toContain('from "events"');
+    expect(lock.sql).toContain('where "events"."id" = $1');
+    expect(lock.sql).toContain('for share of "events"');
+    expect(lock.sql).not.toContain('journal_entries');
+    expect(lock.params).toContain(EVENT_ID);
+
+    expect(visibility.sql).not.toContain('for share');
+    expect(visibility.sql).toContain('from "media_records"');
+    expect(visibility.sql).toContain('"media_records"."id" = $1');
+    expect(visibility.sql).toContain('"media_records"."event_id" = $2');
+    expect(visibility.params).toEqual(
+      expect.arrayContaining([MEDIA_ID, EVENT_ID, 'photo', 'redaction']),
+    );
+  });
+
+  test('requires one same-event photo binding without an exact redaction', () => {
+    const database = drizzle.mock({ schema: { ...tables, ...relations } });
+    const query = buildAuthorizedReadyMediaQuery(
+      database,
+      EVENT_ID,
+      MEDIA_ID,
+    ).toSQL();
+
+    expect(query.sql).toContain('exists (select');
+    expect(query.sql).toContain(
+      '"journal_entries"."event_id" = "media_records"."event_id"',
+    );
+    expect(query.sql).toContain(
+      '"journal_entries"."media_id" = "media_records"."id"',
+    );
+    expect(query.sql).toContain('"journal_entries"."kind" = $3');
+    expect(query.sql).toContain('not exists (select');
+    expect(query.sql).toContain(
+      '"media_read_redactions"."event_id" = "journal_entries"."event_id"',
+    );
+    expect(query.sql).toContain(
+      '"media_read_redactions"."supersedes_entry_id" = "journal_entries"."id"',
+    );
+    expect(query.sql).toContain(
+      '"media_read_redactions"."supersedes_entry_sequence" = "journal_entries"."sequence"',
+    );
+    expect(query.sql).toContain(
+      '"media_read_redactions"."supersession_kind" = $4',
+    );
+  });
+});
+
 describe('bounded media upload usage reads', () => {
-  test('caps every history read at its allocation ceiling plus one', () => {
+  test('persists the trusted event/facility anchor and all admission indexes', () => {
+    const config = getTableConfig(mediaUploadIntents);
+    const foreignKey = config.foreignKeys
+      .map((candidate) => candidate.reference())
+      .find(
+        (candidate) =>
+          candidate.name === 'media_upload_intents_event_facility_fk',
+      );
+
+    expect(foreignKey).toBeDefined();
+    expect(foreignKey?.columns.map((column) => column.name)).toEqual([
+      'event_id',
+      'facility_id',
+    ]);
+    expect(foreignKey?.foreignColumns.map((column) => column.name)).toEqual([
+      'id',
+      'facility_id',
+    ]);
+    expect(foreignKey?.foreignTable).toBe(events);
+    expect(config.indexes.map((index) => index.config.name).sort()).toEqual(
+      [
+        'media_upload_intents_budget_principal_created_idx',
+        'media_upload_intents_event_active_idx',
+        'media_upload_intents_event_created_idx',
+        'media_upload_intents_facility_active_idx',
+        'media_upload_intents_facility_created_idx',
+        'media_upload_intents_storage_key_uq',
+        'media_upload_intents_unattributed_created_idx',
+      ].sort(),
+    );
+  });
+
+  test('caps every indexed history read at its allocation ceiling plus one', () => {
     const database = drizzle.mock({ schema: { ...tables, ...relations } });
     const queries = buildBoundedMediaUploadUsageQueries(
       database,
@@ -92,13 +197,21 @@ describe('bounded media upload usage reads', () => {
     );
     const compiled = {
       principalRolling: queries.principalRolling.toSQL(),
+      unattributedRecent: queries.unattributedRecent.toSQL(),
       eventActive: queries.eventActive.toSQL(),
       eventRolling: queries.eventRolling.toSQL(),
       facilityActive: queries.facilityActive.toSQL(),
       facilityRolling: queries.facilityRolling.toSQL(),
     };
 
-    for (const [name, query] of Object.entries(compiled)) {
+    for (const name of [
+      'principalRolling',
+      'eventActive',
+      'eventRolling',
+      'facilityActive',
+      'facilityRolling',
+    ] as const) {
+      const query = compiled[name];
       expect(query.sql).not.toMatch(/\b(?:count|sum)\s*\(/iu);
       expect(query.sql).toContain('order by');
       expect(query.sql).toContain('limit');
@@ -108,15 +221,27 @@ describe('bounded media upload usage reads', () => {
         ],
       );
     }
-    expect(compiled.principalRolling.sql).toContain('coalesce(');
     expect(compiled.principalRolling.sql).toContain(
-      `"idempotency_records"."capability_id" = 'create-media-upload-intent'`,
+      '"media_upload_intents"."budget_principal_digest" = $1',
+    );
+    expect(compiled.principalRolling.sql).not.toContain('idempotency_records');
+    expect(compiled.unattributedRecent.sql).toContain(
+      '"media_upload_intents"."budget_principal_attributed" = $1',
+    );
+    expect(compiled.unattributedRecent.params.at(-1)).toBe(
+      MEDIA_UNATTRIBUTED_USAGE_QUERY_ROW_LIMIT,
     );
     expect(compiled.eventActive.sql).toContain(
       `"media_upload_intents"."status" = 'pending-upload'`,
     );
-    expect(compiled.facilityActive.sql).toContain('inner join "events"');
-    expect(compiled.facilityRolling.sql).toContain('inner join "events"');
+    expect(compiled.facilityActive.sql).toContain(
+      '"media_upload_intents"."facility_id" = $1',
+    );
+    expect(compiled.facilityRolling.sql).toContain(
+      '"media_upload_intents"."facility_id" = $1',
+    );
+    expect(compiled.facilityActive.sql).not.toContain('join "events"');
+    expect(compiled.facilityRolling.sql).not.toContain('join "events"');
   });
 });
 

@@ -12,7 +12,6 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
-  CapabilityEngineError,
   digestCapabilityValue,
   executeCapability,
   readCapabilityTime,
@@ -88,10 +87,24 @@ const EVENT_CACHE_PREFIX = 'media:event:';
 const INTENT_CACHE_PREFIX = 'media:intent:';
 const LOCKED_INTENT_CACHE_PREFIX = 'media:intent:locked:';
 const READY_CACHE_PREFIX = 'media:ready:';
+// The capability engine's final replay comparison is synchronous while media
+// facility resolution is repository-backed. This bound is above the product's
+// 1,200-user ceiling, and evidence is normally consumed by the matching replay.
+const MEDIA_REPLAY_FACILITY_EVIDENCE_LIMIT = 2_048;
 const REJECTED_IMAGE_MESSAGE =
   'The image could not be safely processed. Choose a different image and try again.';
 const defaultMediaProcessingGate = createMediaProcessingGate();
 const defaultMediaProviderGate = createMediaProviderGate();
+
+interface MediaReplayFacilityEvidence {
+  readonly facilityId: string;
+  readonly pendingConsumers: number;
+}
+
+const mediaReplayFacilityEvidence = new Map<
+  string,
+  MediaReplayFacilityEvidence
+>();
 
 function mediaBudgetPrincipal(actor: Actor): MediaBudgetPrincipal {
   switch (actor.kind) {
@@ -132,17 +145,6 @@ function resolveDependencies(
     processingGate: dependencies.processingGate ?? defaultMediaProcessingGate,
     providerGate: dependencies.providerGate ?? defaultMediaProviderGate,
   });
-}
-
-function scopeAllowsFacility(
-  context: CapabilityHandlerContext<MediaCapabilityTransaction>,
-  facilityId: string,
-): boolean {
-  const facilityScope = context.invocation.scope.facilityScope;
-  return (
-    facilityScope.kind === 'district' ||
-    facilityScope.facilityIds.includes(facilityId)
-  );
 }
 
 async function eventFacilityId(
@@ -387,25 +389,49 @@ async function uploadIntentOutput(
   });
 }
 
-/**
- * Media outputs intentionally omit facility IDs. Replays therefore validate
- * the persisted facility against the current scope here, then use a null/null
- * engine comparison rather than trusting caller-owned output as evidence.
- */
-function authorizeReplayFacility(
-  context: CapabilityHandlerContext<MediaCapabilityTransaction>,
+function rememberMediaReplayFacility(
+  outputId: string,
   facilityId: string,
-): null {
-  context.resolvedFacilityId = facilityId;
-  if (!scopeAllowsFacility(context, facilityId)) {
-    throw new CapabilityEngineError(
-      'FORBIDDEN',
-      'CAPABILITY_SCOPE_DENIED',
-      'The requested facility is outside the authenticated scope.',
-      403,
-    );
+): void {
+  const existing = mediaReplayFacilityEvidence.get(outputId);
+  if (existing !== undefined && existing.facilityId !== facilityId) {
+    throw mediaConflict('The media replay facility evidence is inconsistent.');
   }
-  return null;
+  mediaReplayFacilityEvidence.delete(outputId);
+  mediaReplayFacilityEvidence.set(outputId, {
+    facilityId,
+    pendingConsumers: (existing?.pendingConsumers ?? 0) + 1,
+  });
+  while (
+    mediaReplayFacilityEvidence.size > MEDIA_REPLAY_FACILITY_EVIDENCE_LIMIT
+  ) {
+    const oldest = mediaReplayFacilityEvidence.keys().next().value as
+      | string
+      | undefined;
+    if (oldest === undefined) break;
+    mediaReplayFacilityEvidence.delete(oldest);
+  }
+}
+
+/**
+ * Media outputs intentionally omit facility IDs. This bounded bridge carries
+ * only repository-resolved evidence into the engine's exact output comparison;
+ * no caller-owned output field is trusted for scope or audit attribution.
+ */
+function consumeMediaReplayFacility(
+  output: MediaUploadIntent | MediaRecord,
+): string | null {
+  const evidence = mediaReplayFacilityEvidence.get(output.id);
+  if (evidence === undefined) return null;
+  if (evidence.pendingConsumers <= 1) {
+    mediaReplayFacilityEvidence.delete(output.id);
+  } else {
+    mediaReplayFacilityEvidence.set(output.id, {
+      facilityId: evidence.facilityId,
+      pendingConsumers: evidence.pendingConsumers - 1,
+    });
+  }
+  return evidence.facilityId;
 }
 
 function createRegistrations(
@@ -480,9 +506,10 @@ function createRegistrations(
     },
     async resolveReplayFacilityId(resultReference, context) {
       const resolved = await uploadIntent(resultReference, context, false);
-      return authorizeReplayFacility(context, resolved.facilityId);
+      rememberMediaReplayFacility(resultReference, resolved.facilityId);
+      return resolved.facilityId;
     },
-    replayFacilityId: () => null,
+    replayFacilityId: consumeMediaReplayFacility,
   };
 
   const completeUpload: ServerCapabilityRegistration<
@@ -600,9 +627,10 @@ function createRegistrations(
     },
     async resolveReplayFacilityId(resultReference, context) {
       const resolved = await uploadIntent(resultReference, context, false);
-      return authorizeReplayFacility(context, resolved.facilityId);
+      rememberMediaReplayFacility(resultReference, resolved.facilityId);
+      return resolved.facilityId;
     },
-    replayFacilityId: () => null,
+    replayFacilityId: consumeMediaReplayFacility,
   };
 
   const getReadGrant: ServerCapabilityRegistration<

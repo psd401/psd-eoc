@@ -3,13 +3,19 @@
 import {
   AllClearEventResultSchema,
   ApiErrorSchema,
+  AppendJournalEntryInputSchema,
   CloseEventResultSchema,
+  CreateMediaUploadIntentInputSchema,
   EventRoomSyncResultSchema,
   EventSchema,
   JournalEntryReadProjectionSchema,
   IdempotencyKeySchema,
   JournalEntrySchema,
   LifecycleConsequencePreviewSchema,
+  MediaContentTypeSchema,
+  MediaReadGrantSchema,
+  MediaRecordSchema,
+  MediaUploadIntentSchema,
   UuidSchema,
   type ChannelConsequencePreview,
   type Event,
@@ -43,6 +49,8 @@ const MAX_CONCURRENT_PRIVATE_PHOTO_LOADS = 2;
 const MAX_RESIDENT_PRIVATE_PHOTOS = 2;
 const MAX_AUTOMATIC_PRIVATE_PHOTO_LOADS = 2;
 const RECENT_PRIVATE_PHOTO_WORKING_SET_SIZE = 10;
+const SELECTED_PRIVATE_PHOTO_RECENT_WORKING_SET_SIZE =
+  RECENT_PRIVATE_PHOTO_WORKING_SET_SIZE - 1;
 const PRIVATE_PHOTO_LOAD_DEADLINE_MILLISECONDS = 60_000;
 
 type ConnectionState = 'loading' | 'connected' | 'reconnecting' | 'offline';
@@ -54,6 +62,12 @@ type CommandOperation =
   | 'redact-entry'
   | 'all-clear'
   | 'close';
+
+type RetainedCommandDispatchOutcome =
+  | 'confirmed'
+  | 'ambiguous'
+  | 'rejected'
+  | 'not-sent';
 
 type CommandBody =
   | Readonly<{
@@ -304,7 +318,6 @@ function journalEntryProvesCommand(
   }
   if (
     !isRecord(body) ||
-    entry.kind !== 'text' ||
     entry.source !== 'web' ||
     entry.author.kind !== 'human' ||
     entry.author.sessionId !== command.ownerSessionId ||
@@ -318,7 +331,44 @@ function journalEntryProvesCommand(
       hasExactKeys(body, ['operation', 'text', 'clientTime']) &&
       body.operation === 'post-text' &&
       typeof body.text === 'string' &&
+      entry.kind === 'text' &&
       entry.payload.text === body.text &&
+      entry.supersedes === null
+    );
+  }
+
+  if (command.operation === 'post-photo') {
+    if (
+      !hasExactKeys(body, [
+        'operation',
+        'mediaId',
+        'altText',
+        'caption',
+        'clientTime',
+      ]) ||
+      body.operation !== 'post-photo'
+    ) {
+      return false;
+    }
+    const input = AppendJournalEntryInputSchema.safeParse({
+      eventId: command.eventId,
+      clientTime: body.clientTime,
+      supersedes: null,
+      kind: 'photo',
+      payload: {
+        mediaId: body.mediaId,
+        altText: body.altText,
+        caption: body.caption,
+      },
+    });
+    return (
+      input.success &&
+      input.data.kind === 'photo' &&
+      entry.kind === 'photo' &&
+      entry.eventId === input.data.eventId &&
+      entry.payload.mediaId === input.data.payload.mediaId &&
+      entry.payload.altText === input.data.payload.altText &&
+      entry.payload.caption === input.data.payload.caption &&
       entry.supersedes === null
     );
   }
@@ -347,6 +397,7 @@ function journalEntryProvesCommand(
     typeof body.entryId !== 'string' ||
     typeof body.entrySequence !== 'number' ||
     typeof body.reason !== 'string' ||
+    entry.kind !== 'text' ||
     supersedes === null ||
     supersedes.entryId !== body.entryId ||
     supersedes.entrySequence !== body.entrySequence ||
@@ -657,9 +708,9 @@ async function createPhotoUploadIntent(
     contentSha256: await fileSha256(file),
     declaredContentType: file.type,
   });
-  let response: Response;
+  const deadline = deadlineSignal(null, MUTATION_DEADLINE_MILLISECONDS);
   try {
-    response = await fetch('/api/media/upload-intents', {
+    const response = await fetch('/api/media/upload-intents', {
       method: 'POST',
       credentials: 'same-origin',
       headers: mediaMutationHeaders(
@@ -668,47 +719,58 @@ async function createPhotoUploadIntent(
         true,
       ),
       body: JSON.stringify(input),
+      signal: deadline.signal,
     });
-  } catch {
+    const value = await readJson(response);
+    if (!response.ok) {
+      throw new MediaWorkflowError(
+        publicErrorMessage(
+          value,
+          'PSD EOC could not authorize the private photo upload.',
+        ),
+        false,
+      );
+    }
+    const parsed = MediaUploadIntentSchema.safeParse(value);
+    if (
+      !parsed.success ||
+      parsed.data.eventId !== input.eventId ||
+      parsed.data.byteLength !== input.byteLength ||
+      parsed.data.contentSha256 !== input.contentSha256 ||
+      parsed.data.declaredContentType !== input.declaredContentType ||
+      Date.parse(parsed.data.expiresAt) <= Date.now()
+    ) {
+      throw new MediaWorkflowError(
+        'PSD EOC returned an invalid or expired private upload authorization. No upload was started.',
+        false,
+      );
+    }
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof MediaWorkflowError && !deadline.didExpire()) {
+      throw error;
+    }
     throw new MediaWorkflowError(
-      'The connection ended before PSD EOC confirmed the upload authorization. Nothing will retry automatically.',
+      deadline.didExpire()
+        ? 'PSD EOC did not authorize the private upload within 15 seconds. Nothing will retry automatically.'
+        : 'The connection ended before PSD EOC confirmed the upload authorization. Nothing will retry automatically.',
       false,
     );
+  } finally {
+    deadline.dispose();
   }
-  const value = await readJson(response);
-  if (!response.ok) {
-    throw new MediaWorkflowError(
-      publicErrorMessage(
-        value,
-        'PSD EOC could not authorize the private photo upload.',
-      ),
-      false,
-    );
-  }
-  const parsed = MediaUploadIntentSchema.safeParse(value);
-  if (
-    !parsed.success ||
-    parsed.data.eventId !== input.eventId ||
-    parsed.data.byteLength !== input.byteLength ||
-    parsed.data.contentSha256 !== input.contentSha256 ||
-    parsed.data.declaredContentType !== input.declaredContentType ||
-    Date.parse(parsed.data.expiresAt) <= Date.now()
-  ) {
-    throw new MediaWorkflowError(
-      'PSD EOC returned an invalid or expired private upload authorization. No upload was started.',
-      false,
-    );
-  }
-  return parsed.data;
 }
 
 async function putPhotoBytes(
   file: File,
   intent: MediaUploadIntent,
 ): Promise<void> {
-  let response: Response;
+  const deadline = deadlineSignal(
+    null,
+    PRIVATE_PHOTO_LOAD_DEADLINE_MILLISECONDS,
+  );
   try {
-    response = await fetch(intent.uploadUrl, {
+    const response = await fetch(intent.uploadUrl, {
       method: 'PUT',
       credentials: 'omit',
       headers: {
@@ -718,18 +780,26 @@ async function putPhotoBytes(
       body: file,
       mode: 'cors',
       referrerPolicy: 'no-referrer',
+      signal: deadline.signal,
     });
-  } catch {
+    if (!response.ok) {
+      throw new MediaWorkflowError(
+        'The private photo upload was rejected. No timeline entry was posted.',
+        false,
+      );
+    }
+  } catch (error) {
+    if (error instanceof MediaWorkflowError && !deadline.didExpire()) {
+      throw error;
+    }
     throw new MediaWorkflowError(
-      'The private upload connection ended without a confirmed result. PSD EOC will not retry it automatically; choose the file again to start a new attempt.',
+      deadline.didExpire()
+        ? 'The private upload exceeded 60 seconds and was stopped. PSD EOC will not retry it automatically; choose the file again to start a new attempt.'
+        : 'The private upload connection ended without a confirmed result. PSD EOC will not retry it automatically; choose the file again to start a new attempt.',
       false,
     );
-  }
-  if (!response.ok) {
-    throw new MediaWorkflowError(
-      'The private photo upload was rejected. No timeline entry was posted.',
-      false,
-    );
+  } finally {
+    deadline.dispose();
   }
 }
 
@@ -737,64 +807,72 @@ async function completePhotoUpload(
   pending: PendingPhotoCompletion,
   csrfCookieName: string,
 ): Promise<MediaRecord> {
-  let response: Response;
+  const deadline = deadlineSignal(null, MUTATION_DEADLINE_MILLISECONDS);
   try {
-    response = await fetch(
+    const response = await fetch(
       `/api/media/upload-intents/${encodeURIComponent(pending.uploadIntentId)}/complete`,
       {
         method: 'POST',
         credentials: 'same-origin',
         headers: mediaMutationHeaders(csrfCookieName, pending.idempotencyKey),
+        signal: deadline.signal,
       },
     );
-  } catch {
-    throw new MediaWorkflowError(
-      'The connection ended before PSD EOC confirmed photo validation. The exact completion request is available for explicit retry and will not retry automatically.',
-      true,
-    );
-  }
-  let value: unknown;
-  try {
-    value = await readJson(response);
-  } catch (error) {
-    if (error instanceof EventRoomRequestError && response.ok) {
+    let value: unknown;
+    try {
+      value = await readJson(response);
+    } catch (error) {
+      if (error instanceof EventRoomRequestError && response.ok) {
+        throw new MediaWorkflowError(
+          'PSD EOC returned an incomplete photo-validation result. The exact completion request is available for explicit retry.',
+          true,
+        );
+      }
+      value = null;
+    }
+    if (!response.ok) {
+      const parsedError = ApiErrorSchema.safeParse(value);
+      const definitelyRejected =
+        response.status >= 400 &&
+        response.status < 500 &&
+        parsedError.success &&
+        !parsedError.data.retryable;
+      const keepCompletion = !definitelyRejected;
       throw new MediaWorkflowError(
-        'PSD EOC returned an incomplete photo-validation result. The exact completion request is available for explicit retry.',
+        publicErrorMessage(
+          value,
+          keepCompletion
+            ? 'Photo validation is not complete. Use the explicit retry after waiting for the malware scan.'
+            : 'PSD EOC rejected the photo safely. No timeline entry was posted.',
+        ),
+        keepCompletion,
+      );
+    }
+    const parsed = MediaRecordSchema.safeParse(value);
+    if (
+      !parsed.success ||
+      parsed.data.uploadIntentId !== pending.uploadIntentId ||
+      parsed.data.eventId !== pending.eventId
+    ) {
+      throw new MediaWorkflowError(
+        'PSD EOC returned photo evidence that does not match this upload. The exact completion request is available for explicit retry.',
         true,
       );
     }
-    value = null;
-  }
-  if (!response.ok) {
-    const parsedError = ApiErrorSchema.safeParse(value);
-    const definitelyRejected =
-      response.status >= 400 &&
-      response.status < 500 &&
-      parsedError.success &&
-      !parsedError.data.retryable;
-    const keepCompletion = !definitelyRejected;
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof MediaWorkflowError && !deadline.didExpire()) {
+      throw error;
+    }
     throw new MediaWorkflowError(
-      publicErrorMessage(
-        value,
-        keepCompletion
-          ? 'Photo validation is not complete. Use the explicit retry after waiting for the malware scan.'
-          : 'PSD EOC rejected the photo safely. No timeline entry was posted.',
-      ),
-      keepCompletion,
-    );
-  }
-  const parsed = MediaRecordSchema.safeParse(value);
-  if (
-    !parsed.success ||
-    parsed.data.uploadIntentId !== pending.uploadIntentId ||
-    parsed.data.eventId !== pending.eventId
-  ) {
-    throw new MediaWorkflowError(
-      'PSD EOC returned photo evidence that does not match this upload. The exact completion request is available for explicit retry.',
+      deadline.didExpire()
+        ? 'PSD EOC did not confirm photo validation within 15 seconds. The exact completion request is available for explicit retry and will not retry automatically.'
+        : 'The connection ended before PSD EOC confirmed photo validation. The exact completion request is available for explicit retry and will not retry automatically.',
       true,
     );
+  } finally {
+    deadline.dispose();
   }
-  return parsed.data;
 }
 
 function timelineUrl(apiUrl: string, cursor: string | null): string {
@@ -1434,6 +1512,10 @@ function statusLabel(event: Event): string {
   }
 }
 
+function eventAcceptsJournalPosts(event: Event): boolean {
+  return event.status === 'active' || event.status === 'all-clear';
+}
+
 function connectionLabel(state: ConnectionState): string {
   switch (state) {
     case 'loading':
@@ -1747,6 +1829,8 @@ function AuthorizedPhoto({
       observeViewport ? 'checking' : 'disabled',
     );
   const figureRef = useRef<HTMLElement>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+  const focusErrorOnRenderRef = useRef(false);
   const mountedRef = useRef(true);
   const attemptRef = useRef(0);
   const automaticStartedRef = useRef(false);
@@ -1809,6 +1893,7 @@ function AuthorizedPhoto({
       attemptRef.current = attempt;
       loadingRef.current = true;
       requestModeRef.current = mode;
+      focusErrorOnRenderRef.current = false;
       setError(null);
       setExplicitDemand(mode === 'explicit');
       setPhase('queued');
@@ -1829,6 +1914,7 @@ function AuthorizedPhoto({
           loadingRef.current = false;
           requestCancelRef.current = null;
           requestModeRef.current = null;
+          focusErrorOnRenderRef.current = mode === 'explicit';
           setError(
             'The bounded private photo loader could not start. No public image URL was used.',
           );
@@ -1869,6 +1955,8 @@ function AuthorizedPhoto({
             loadCoordinator.releaseResident(photoKey);
             setReadUrl(null);
             setExplicitDemand(false);
+            focusErrorOnRenderRef.current =
+              requestModeRef.current === 'explicit';
             setError(message);
             setPhase('error');
             finish();
@@ -1889,6 +1977,8 @@ function AuthorizedPhoto({
             loadCoordinator.releaseResident(photoKey);
             setReadUrl(null);
             setExplicitDemand(false);
+            focusErrorOnRenderRef.current =
+              requestModeRef.current === 'explicit';
             setError(
               'Private photo loading exceeded the 60-second safety limit and was stopped. Retry explicitly if the photo is still needed.',
             );
@@ -2009,8 +2099,18 @@ function AuthorizedPhoto({
 
   useEffect(() => {
     if (!loadExplicitlyOnMount) return;
-    requestLoad('explicit');
+    figureRef.current?.focus({ preventScroll: true });
+    const requestTimer = window.setTimeout(() => {
+      requestLoad('explicit');
+    }, 0);
+    return () => window.clearTimeout(requestTimer);
   }, [loadExplicitlyOnMount, requestLoad]);
+
+  useEffect(() => {
+    if (error === null || !focusErrorOnRenderRef.current) return;
+    focusErrorOnRenderRef.current = false;
+    errorRef.current?.focus({ preventScroll: true });
+  }, [error]);
 
   useEffect(() => {
     if (!observeViewport) {
@@ -2066,6 +2166,7 @@ function AuthorizedPhoto({
     loadCoordinator.releaseResident(photoKey);
     setReadUrl(null);
     setExplicitDemand(false);
+    focusErrorOnRenderRef.current = requestModeRef.current === 'explicit';
     setError(
       'The authorized private photo could not be displayed. Request a fresh authorization to retry.',
     );
@@ -2131,7 +2232,7 @@ function AuthorizedPhoto({
           className="timeline-photo"
           decoding="async"
           loading={explicitDemand ? 'eager' : 'lazy'}
-          onError={(event) => failDisplayedImage(event.currentTarget.src)}
+          onError={() => failDisplayedImage(readUrl)}
           onLoad={(event) => finishDecodedImage(event.currentTarget)}
           ref={(image) => {
             imageElementRef.current = image;
@@ -2169,7 +2270,12 @@ function AuthorizedPhoto({
         </div>
       ) : null}
       {error === null ? null : (
-        <div className="photo-read-error" role="alert">
+        <div
+          className="photo-read-error"
+          ref={errorRef}
+          role="alert"
+          tabIndex={-1}
+        >
           <p id={statusId}>{error}</p>
           <button
             aria-describedby={statusId}
@@ -2237,9 +2343,17 @@ function DeferredPrivatePhoto({
 function EntryContent({
   projection,
   redacted,
+  loadCoordinator,
+  scrollRootRef,
+  photoMountMode,
+  onActivateOlderPhoto,
 }: Readonly<{
   projection: JournalEntryReadProjection;
   redacted: boolean;
+  loadCoordinator: PrivatePhotoLoadCoordinator;
+  scrollRootRef: Readonly<{ current: HTMLDivElement | null }>;
+  photoMountMode: PrivatePhotoMountMode;
+  onActivateOlderPhoto: () => void;
 }>) {
   if (redacted || projection.visibility === 'redacted') {
     return (
@@ -2387,7 +2501,14 @@ function TimelineEntry({
         </p>
       )}
 
-      <EntryContent projection={projection} redacted={redacted} />
+      <EntryContent
+        loadCoordinator={photoLoadCoordinator}
+        onActivateOlderPhoto={() => onActivateOlderPhoto(entry.id)}
+        photoMountMode={photoMountMode}
+        projection={projection}
+        redacted={redacted}
+        scrollRootRef={timelineScrollRef}
+      />
       <p className="entry-meta">
         <span>{actorLabel(entry)}</span>
         <span>Source: {entry.source}</span>
@@ -2527,9 +2648,16 @@ export function EventRoom({
   authorDisplayName,
 }: EventRoomProps) {
   const [currentEvent, setCurrentEvent] = useState(event);
+  const currentEventRef = useRef(event);
   const [entries, setEntries] = useState<readonly JournalEntryReadProjection[]>(
     () => [...initialEntries].sort(compareEntries),
   );
+  const [selectedOlderPhotoEntryId, setSelectedOlderPhotoEntryId] = useState<
+    string | null
+  >(null);
+  const [pendingOlderPhotoEntryId, setPendingOlderPhotoEntryId] = useState<
+    string | null
+  >(null);
   const [connection, setConnection] = useState<ConnectionState>(() =>
     initialHasMore ? 'loading' : 'connected',
   );
@@ -2584,6 +2712,16 @@ export function EventRoom({
   const dialogRequestAttemptedRef = useRef(false);
   const mutationErrorRef = useRef<HTMLDivElement>(null);
   const dialogMutationErrorRef = useRef<HTMLDivElement>(null);
+  const photoErrorRef = useRef<HTMLDivElement>(null);
+  const photoFileRef = useRef<HTMLInputElement>(null);
+  const photoWorkflowRef = useRef(false);
+  const photoLoadCoordinatorRef = useRef<PrivatePhotoLoadCoordinator | null>(
+    null,
+  );
+  if (photoLoadCoordinatorRef.current === null) {
+    photoLoadCoordinatorRef.current = new PrivatePhotoLoadCoordinator();
+  }
+  const photoLoadCoordinator = photoLoadCoordinatorRef.current;
 
   const elapsed = useElapsedLabel(currentEvent);
   const realEvent = event.templateMode === 'real';
@@ -2767,7 +2905,10 @@ export function EventRoom({
           ) {
             requiredSyncSequenceRef.current = null;
           }
-          if (page.event !== null) setCurrentEvent(page.event);
+          if (page.event !== null) {
+            currentEventRef.current = page.event;
+            setCurrentEvent(page.event);
+          }
           mergeIncomingEntries(completeEntries, !drainInitialHistory);
           continuation = null;
           if (drainInitialHistory) {
@@ -2818,6 +2959,41 @@ export function EventRoom({
   }, [apiUrl, event.id, sessionId]);
 
   useEffect(() => {
+    try {
+      const pending = readPendingPhotoCompletion(event.id, sessionId);
+      if (pending === null) return;
+      const retained = readRetainedCommand(event.id, apiUrl, sessionId);
+      if (retained !== null) {
+        if (!retainedPhotoCommandMatches(retained, pending)) {
+          throw new Error(
+            'Conflicting browser recovery records require explicit review.',
+          );
+        }
+        clearPendingPhotoCompletion(pending);
+        setPhotoStatus(
+          'A completed photo-validation handoff was reconciled to the exact retained timeline post. Nothing was retried automatically.',
+        );
+        return;
+      }
+      setPendingPhotoCompletion(pending);
+      setPhotoAltText(pending.altText);
+      setPhotoCaption(pending.caption ?? '');
+      setPhotoError(
+        'A previous private photo validation has an unresolved result. It was not retried automatically.',
+      );
+      setPhotoStatus(
+        'Verify the timeline, then explicitly retry the exact validation request or clear it.',
+      );
+    } catch {
+      setPhotoRecoveryBlocked(true);
+      setPhotoError(
+        'PSD EOC could not read the private photo recovery record. This page load sent no request. Verify the current timeline before clearing it.',
+      );
+      setPhotoStatus('No photo request was retried automatically.');
+    }
+  }, [apiUrl, event.id, sessionId]);
+
+  useEffect(() => {
     const element = dialogRef.current;
     if (element === null) return;
     if (dialog !== null) {
@@ -2851,6 +3027,11 @@ export function EventRoom({
     target?.focus();
   }, [dialog, mutationError]);
 
+  useEffect(() => {
+    if (photoError === null || dialog !== null) return;
+    photoErrorRef.current?.focus();
+  }, [dialog, photoError]);
+
   const supersessionsByEntry = useMemo(() => {
     const result = new Map<string, JournalEntryReadProjection[]>();
     for (const projection of entries) {
@@ -2863,6 +3044,69 @@ export function EventRoom({
     }
     return result;
   }, [entries]);
+
+  const visiblePrivatePhotoEntryIds = useMemo(
+    () =>
+      entries
+        .filter(
+          (projection) =>
+            projection.visibility === 'visible' &&
+            projection.entry.kind === 'photo' &&
+            !(supersessionsByEntry.get(projection.entry.id) ?? []).some(
+              (candidate) => candidate.entry.supersedes?.kind === 'redaction',
+            ),
+        )
+        .map(({ entry }) => entry.id),
+    [entries, supersessionsByEntry],
+  );
+
+  const automaticPrivatePhotoEntryIds = useMemo(() => {
+    const recentCapacity =
+      selectedOlderPhotoEntryId === null && pendingOlderPhotoEntryId === null
+        ? RECENT_PRIVATE_PHOTO_WORKING_SET_SIZE
+        : SELECTED_PRIVATE_PHOTO_RECENT_WORKING_SET_SIZE;
+    return new Set(
+      visiblePrivatePhotoEntryIds
+        .filter((entryId) => entryId !== selectedOlderPhotoEntryId)
+        .slice(-recentCapacity),
+    );
+  }, [
+    pendingOlderPhotoEntryId,
+    selectedOlderPhotoEntryId,
+    visiblePrivatePhotoEntryIds,
+  ]);
+
+  useEffect(() => {
+    if (pendingOlderPhotoEntryId === null) return;
+    if (
+      visiblePrivatePhotoEntryIds.includes(pendingOlderPhotoEntryId) &&
+      !automaticPrivatePhotoEntryIds.has(pendingOlderPhotoEntryId)
+    ) {
+      setSelectedOlderPhotoEntryId(pendingOlderPhotoEntryId);
+    }
+    setPendingOlderPhotoEntryId(null);
+  }, [
+    automaticPrivatePhotoEntryIds,
+    pendingOlderPhotoEntryId,
+    visiblePrivatePhotoEntryIds,
+  ]);
+
+  useEffect(() => {
+    if (selectedOlderPhotoEntryId === null) return;
+    const selected = entries.find(
+      ({ entry }) => entry.id === selectedOlderPhotoEntryId,
+    );
+    const redacted = (
+      supersessionsByEntry.get(selectedOlderPhotoEntryId) ?? []
+    ).some(({ entry }) => entry.supersedes?.kind === 'redaction');
+    if (
+      selected?.visibility !== 'visible' ||
+      selected.entry.kind !== 'photo' ||
+      redacted
+    ) {
+      setSelectedOlderPhotoEntryId(null);
+    }
+  }, [entries, selectedOlderPhotoEntryId, supersessionsByEntry]);
 
   const correctionDialogProjection =
     dialog?.kind === 'correct'
@@ -2926,12 +3170,13 @@ export function EventRoom({
     retainedCommand,
   ]);
 
-  const commandsBlocked =
+  const baseCommandsBlocked =
     loadingHistory ||
     pendingOperation !== null ||
     retainedCommand !== null ||
     recoveryBlocked;
   const commandsBlocked = baseCommandsBlocked || photoWorkflowBusy;
+  const lifecycleCommandsBlocked = baseCommandsBlocked;
   const retainedLifecycleCommand =
     retainedCommand?.operation === 'all-clear' ||
     retainedCommand?.operation === 'close';
@@ -2981,7 +3226,11 @@ export function EventRoom({
   ]);
 
   function openDialog(next: DialogState, opener: HTMLElement): void {
-    if (commandsBlocked) return;
+    const openingLifecycleDialog =
+      next.kind === 'all-clear' || next.kind === 'close';
+    if (openingLifecycleDialog ? lifecycleCommandsBlocked : commandsBlocked) {
+      return;
+    }
     const correctionTarget =
       next.kind === 'correct'
         ? entries.find(({ entry }) => entry.id === next.entryId)
@@ -3104,6 +3353,10 @@ export function EventRoom({
       // Another operator committed one or more facts before this mutation.
       // Keep the last coherent room visible only after a complete sync from
       // the durable cursor; never show a lifecycle state with a sequence gap.
+      // The canonical mutation response can still tighten the photo-post
+      // safety gate immediately (notably after a confirmed close) without
+      // exposing that incomplete projection in the UI.
+      if (result.event !== null) currentEventRef.current = result.event;
       setLoadingHistory(true);
       setConnection('reconnecting');
       setPollMessage(
@@ -3117,6 +3370,7 @@ export function EventRoom({
       return 'refreshing';
     }
     if (result.event !== null) {
+      currentEventRef.current = result.event;
       setCurrentEvent(result.event);
     }
     appliedSnapshotSequenceRef.current = resultHead;
@@ -3153,9 +3407,13 @@ export function EventRoom({
 
   async function sendRetainedCommand(
     command: RetainedCommand,
-  ): Promise<boolean> {
-    if (pendingRef.current) return false;
-    if (dialog !== null && command.operation !== 'post-text') {
+  ): Promise<RetainedCommandDispatchOutcome> {
+    if (pendingRef.current) return 'not-sent';
+    if (
+      dialog !== null &&
+      command.operation !== 'post-text' &&
+      command.operation !== 'post-photo'
+    ) {
       dialogRequestAttemptedRef.current = true;
     }
     pendingRef.current = true;
@@ -3174,7 +3432,7 @@ export function EventRoom({
             : `${commandLabel(command.operation)} confirmed by the server.`
           : `${commandLabel(command.operation)} confirmed; browser recovery cleanup needs attention.`,
       );
-      return true;
+      return 'confirmed';
     } catch (error) {
       const requestError =
         error instanceof EventRoomRequestError
@@ -3203,7 +3461,7 @@ export function EventRoom({
         setDialogReason('');
         setConfirmationPhrase('');
       }
-      return false;
+      return requestError.ambiguous ? 'ambiguous' : 'rejected';
     } finally {
       pendingRef.current = false;
       setPendingOperation(null);
@@ -3217,9 +3475,13 @@ export function EventRoom({
       idempotencyKey?: string;
     }> = {},
   ): RetainedCommand | null {
+    const lifecycleOperation =
+      body.operation === 'all-clear' || body.operation === 'close';
     if (
       baseCommandsBlocked ||
-      (photoWorkflowBusy && !options.fromPhotoWorkflow) ||
+      ((photoWorkflowBusy || photoWorkflowRef.current) &&
+        !options.fromPhotoWorkflow &&
+        !lifecycleOperation) ||
       pendingRef.current
     ) {
       return null;
@@ -3246,7 +3508,7 @@ export function EventRoom({
         setDialogReason('');
         setConfirmationPhrase('');
       }
-      return false;
+      return null;
     }
     return command;
   }
@@ -3259,7 +3521,8 @@ export function EventRoom({
     }> = {},
   ): Promise<boolean> {
     const command = prepareNewCommand(body, options);
-    return command === null ? false : sendRetainedCommand(command);
+    if (command === null) return false;
+    return (await sendRetainedCommand(command)) === 'confirmed';
   }
 
   async function submitPost(submission: FormEvent<HTMLFormElement>) {
@@ -3307,6 +3570,12 @@ export function EventRoom({
           true,
         );
       }
+      if (!eventAcceptsJournalPosts(currentEventRef.current)) {
+        throw new MediaWorkflowError(
+          'The photo was validated, but the event no longer accepts photo posts. No timeline post was sent; verify the timeline before clearing this completed photo attempt.',
+          true,
+        );
+      }
       setPhotoStatus('Photo validated. Appending the timeline entry…');
       const command = prepareNewCommand(
         {
@@ -3344,16 +3613,24 @@ export function EventRoom({
       }
       setPendingPhotoCompletion(null);
       setPhotoRecoveryBlocked(false);
-      const succeeded = await sendRetainedCommand(command);
-      if (succeeded) {
+      const dispatchOutcome = await sendRetainedCommand(command);
+      if (dispatchOutcome === 'confirmed') {
         setPhotoFile(null);
         setPhotoAltText('');
         setPhotoCaption('');
         if (photoFileRef.current !== null) photoFileRef.current.value = '';
         setPhotoStatus('Photo post confirmed by the server.');
+      } else if (dispatchOutcome === 'ambiguous') {
+        setPhotoStatus(
+          'Photo validation was confirmed. The exact timeline post result is unresolved and retained in browser request recovery; it will not retry automatically.',
+        );
+      } else if (dispatchOutcome === 'rejected') {
+        setPhotoStatus(
+          'Photo validation was confirmed, but the timeline post request was rejected. No photo timeline entry was posted.',
+        );
       } else {
         setPhotoStatus(
-          'Photo validation was confirmed. The exact timeline post result needs attention in browser request recovery.',
+          'Photo validation was confirmed, but the timeline post was not sent. The exact request remains in browser recovery.',
         );
       }
     } catch (error) {
@@ -3383,7 +3660,9 @@ export function EventRoom({
       setPhotoError(workflowError.message);
       setPhotoStatus(
         keepCompletion
-          ? 'Photo validation is unresolved. It will not retry automatically.'
+          ? recoveryPending.mediaId === null
+            ? 'Photo validation is unresolved. It will not retry automatically.'
+            : 'Photo validation was confirmed, but no timeline post was confirmed. It will not retry automatically.'
           : 'No photo timeline entry was posted.',
       );
     } finally {
@@ -3420,8 +3699,20 @@ export function EventRoom({
         event.id,
         csrfCookieName,
       );
+      if (!eventAcceptsJournalPosts(currentEventRef.current)) {
+        throw new MediaWorkflowError(
+          'The event no longer accepts photo posts. No private upload or timeline post was started.',
+          false,
+        );
+      }
       setPhotoStatus('Uploading directly to private quarantine storage…');
       await putPhotoBytes(photoFile, intent);
+      if (!eventAcceptsJournalPosts(currentEventRef.current)) {
+        throw new MediaWorkflowError(
+          'The event no longer accepts photo posts. The private upload will remain quarantined and no validation or timeline post was started.',
+          false,
+        );
+      }
       const pending = makePendingPhotoCompletion(
         event.id,
         sessionId,
@@ -3632,8 +3923,12 @@ export function EventRoom({
   }
 
   const startedAt = currentEvent.activatedAt;
-  const canPost =
-    currentEvent.status === 'active' || currentEvent.status === 'all-clear';
+  const canPost = eventAcceptsJournalPosts(currentEvent);
+  const photoFileValid =
+    photoFile !== null &&
+    photoFile.size >= 1 &&
+    photoFile.size <= MAX_MEDIA_BYTES &&
+    MediaContentTypeSchema.safeParse(photoFile.type).success;
   const dialogFeedback = (
     <>
       {mutationError === null ? null : (
@@ -3884,10 +4179,31 @@ export function EventRoom({
                           opener,
                         )
                       }
+                      onActivateOlderPhoto={(entryId) => {
+                        if (!automaticPrivatePhotoEntryIds.has(entryId)) {
+                          // Reserve one recent slot in a committed render
+                          // before mounting the selected older loader. React
+                          // therefore never transiently owns eleven stateful
+                          // photo components while replacing a selection.
+                          setPendingOlderPhotoEntryId(entryId);
+                          setSelectedOlderPhotoEntryId(null);
+                        }
+                      }}
+                      photoLoadCoordinator={photoLoadCoordinator}
+                      photoMountMode={
+                        projection.visibility !== 'visible' ||
+                        projection.entry.kind !== 'photo' ||
+                        automaticPrivatePhotoEntryIds.has(projection.entry.id)
+                          ? 'recent'
+                          : selectedOlderPhotoEntryId === projection.entry.id
+                            ? 'selected-older'
+                            : 'deferred-older'
+                      }
                       projection={projection}
                       supersededBy={
                         supersessionsByEntry.get(projection.entry.id) ?? []
                       }
+                      timelineScrollRef={timelineScrollRef}
                     />
                   </li>
                 ))}
@@ -4090,7 +4406,7 @@ export function EventRoom({
                 <button
                   aria-haspopup="dialog"
                   className="danger"
-                  disabled={commandsBlocked}
+                  disabled={lifecycleCommandsBlocked}
                   onClick={(click) => beginAllClear(click.currentTarget)}
                   type="button"
                 >
@@ -4101,7 +4417,7 @@ export function EventRoom({
                 <button
                   aria-haspopup="dialog"
                   className="caution"
-                  disabled={commandsBlocked}
+                  disabled={lifecycleCommandsBlocked}
                   onClick={(click) =>
                     openDialog({ kind: 'close' }, click.currentTarget)
                   }
@@ -4274,7 +4590,7 @@ export function EventRoom({
                 <p>{dialog.error}</p>
                 <button
                   data-autofocus
-                  disabled={commandsBlocked}
+                  disabled={lifecycleCommandsBlocked}
                   onClick={() =>
                     void loadAllClearPreview(dialog.idempotencyKey)
                   }
@@ -4289,7 +4605,8 @@ export function EventRoom({
                 <PreviewDetails preview={dialog.preview} />
                 <fieldset
                   disabled={
-                    commandsBlocked || dialog.preview.sendReadiness !== 'ready'
+                    lifecycleCommandsBlocked ||
+                    dialog.preview.sendReadiness !== 'ready'
                   }
                 >
                   <legend>Human confirmation</legend>
@@ -4319,7 +4636,7 @@ export function EventRoom({
                   <button
                     className="danger"
                     disabled={
-                      commandsBlocked ||
+                      lifecycleCommandsBlocked ||
                       dialog.preview.sendReadiness !== 'ready' ||
                       confirmationPhrase !== 'ALL CLEAR'
                     }
@@ -4371,7 +4688,7 @@ export function EventRoom({
               <li>No journal history is deleted or rewritten.</li>
               <li>Closing does not send another all-clear notification.</li>
             </ul>
-            <fieldset disabled={commandsBlocked}>
+            <fieldset disabled={lifecycleCommandsBlocked}>
               <legend>Human confirmation</legend>
               <div className="field">
                 <label htmlFor="close-event-phrase">
@@ -4399,7 +4716,8 @@ export function EventRoom({
               <button
                 className="caution"
                 disabled={
-                  commandsBlocked || confirmationPhrase !== 'CLOSE EVENT'
+                  lifecycleCommandsBlocked ||
+                  confirmationPhrase !== 'CLOSE EVENT'
                 }
                 type="submit"
               >
