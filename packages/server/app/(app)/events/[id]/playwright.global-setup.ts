@@ -89,6 +89,8 @@ interface EventRoomFixture {
   readonly photoUploadMediaId: string;
   readonly photoSanitizedSha256: string;
   readonly photoStressEventId: string;
+  readonly photoStressOldestMediaId: string;
+  readonly photoStressSecondMediaId: string;
   readonly photoStressMiddleMediaId: string;
   readonly redactedPhotoEventId: string;
   readonly redactedPhotoMediaId: string;
@@ -681,7 +683,13 @@ async function prepareEventFixtures(
     ),
   );
   const photoStressMiddleMedia = photoStressMedia[5];
-  if (photoStressMiddleMedia === undefined) {
+  const photoStressOldestMedia = photoStressMedia[0];
+  const photoStressSecondMedia = photoStressMedia[1];
+  if (
+    photoStressMiddleMedia === undefined ||
+    photoStressOldestMedia === undefined ||
+    photoStressSecondMedia === undefined
+  ) {
     throw new Error('The bounded private-photo fixture is incomplete.');
   }
   const redactedPhotoMedia = readyMediaSeed(
@@ -846,6 +854,8 @@ async function prepareEventFixtures(
     photoUploadMediaId: photoUploadMedia.id,
     photoSanitizedSha256: photoMedia.sanitizedContentSha256,
     photoStressEventId: photoStressEvent.id,
+    photoStressOldestMediaId: photoStressOldestMedia.id,
+    photoStressSecondMediaId: photoStressSecondMedia.id,
     photoStressMiddleMediaId: photoStressMiddleMedia.id,
     redactedPhotoEventId: redactedPhotoEvent.id,
     redactedPhotoMediaId: redactedPhotoMedia.id,

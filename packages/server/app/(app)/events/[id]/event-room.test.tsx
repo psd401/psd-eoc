@@ -114,6 +114,28 @@ function photoEntry(): JournalEntry {
   });
 }
 
+function historicalPhotoEntry(sequence: number): JournalEntry {
+  const suffix = String(sequence).padStart(12, '0');
+  return JournalEntrySchema.parse({
+    id: `20000000-0000-4000-8000-${suffix}`,
+    eventId: IDS.event,
+    sequence,
+    author: ACTOR,
+    source: 'web',
+    serverTime: new Date(
+      Date.parse('2026-08-10T16:00:00.000Z') + sequence * 1_000,
+    ).toISOString(),
+    clientTime: null,
+    supersedes: null,
+    kind: 'photo',
+    payload: {
+      mediaId: `30000000-0000-4000-8000-${suffix}`,
+      altText: `Synthetic historical photo ${sequence}`,
+      caption: `Retained synthetic caption ${sequence}`,
+    },
+  });
+}
+
 const ENTRIES = [
   textEntry({
     id: IDS.original,
@@ -296,6 +318,30 @@ describe('event room server-rendered safety and history state', () => {
       'This private photo is not loaded. Load it explicitly if it is operationally needed.',
     );
     expect(html).toContain('Load private photo for entry 5');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('https://');
+  });
+
+  test('mounts stateful controls only for ten recent photos while retaining every older description and caption', () => {
+    const photos = Array.from({ length: 12 }, (_, index) =>
+      historicalPhotoEntry(index + 1),
+    );
+    const html = render(activeEvent('real'), photos);
+
+    expect(html.match(/data-private-photo-mount="stateful"/gu)).toHaveLength(
+      10,
+    );
+    expect(html.match(/data-private-photo-observer="enabled"/gu)).toHaveLength(
+      10,
+    );
+    expect(html.match(/data-private-photo-mount="deferred"/gu)).toHaveLength(2);
+    expect(html).toContain('Load older private photo for entry 1');
+    expect(html).toContain('Load older private photo for entry 2');
+    expect(html).not.toContain('Load older private photo for entry 3');
+    for (let sequence = 1; sequence <= 12; sequence += 1) {
+      expect(html).toContain(`Synthetic historical photo ${sequence}`);
+      expect(html).toContain(`Retained synthetic caption ${sequence}`);
+    }
     expect(html).not.toContain('<img');
     expect(html).not.toContain('https://');
   });

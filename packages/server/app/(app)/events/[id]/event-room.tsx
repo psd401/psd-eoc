@@ -40,6 +40,7 @@ const ACCEPTED_MEDIA_TYPES = 'image/jpeg,image/png,image/webp,image/heic';
 const MAX_CONCURRENT_PRIVATE_PHOTO_LOADS = 2;
 const MAX_RESIDENT_PRIVATE_PHOTOS = 2;
 const MAX_AUTOMATIC_PRIVATE_PHOTO_LOADS = 2;
+const RECENT_PRIVATE_PHOTO_WORKING_SET_SIZE = 10;
 const PRIVATE_PHOTO_LOAD_DEADLINE_MILLISECONDS = 60_000;
 
 type ConnectionState = 'loading' | 'connected' | 'reconnecting' | 'offline';
@@ -1394,7 +1395,11 @@ type PrivatePhotoPhase =
   | 'evicted'
   | 'error';
 
-type PrivatePhotoObserverSupport = 'checking' | 'available' | 'unavailable';
+type PrivatePhotoObserverSupport =
+  | 'checking'
+  | 'available'
+  | 'unavailable'
+  | 'disabled';
 
 function AuthorizedPhoto({
   entryId,
@@ -1405,6 +1410,8 @@ function AuthorizedPhoto({
   caption,
   loadCoordinator,
   scrollRootRef,
+  observeViewport,
+  loadExplicitlyOnMount,
 }: Readonly<{
   entryId: string;
   entrySequence: number;
@@ -1414,6 +1421,8 @@ function AuthorizedPhoto({
   caption: string | null;
   loadCoordinator: PrivatePhotoLoadCoordinator;
   scrollRootRef: Readonly<{ current: HTMLDivElement | null }>;
+  observeViewport: boolean;
+  loadExplicitlyOnMount: boolean;
 }>) {
   const photoKey = `${entryId}:${mediaId}`;
   const statusId = `private-photo-${entryId}-status`;
@@ -1423,7 +1432,9 @@ function AuthorizedPhoto({
   const [phase, setPhase] = useState<PrivatePhotoPhase>('idle');
   const [explicitDemand, setExplicitDemand] = useState(false);
   const [observerSupport, setObserverSupport] =
-    useState<PrivatePhotoObserverSupport>('checking');
+    useState<PrivatePhotoObserverSupport>(
+      observeViewport ? 'checking' : 'disabled',
+    );
   const figureRef = useRef<HTMLElement>(null);
   const mountedRef = useRef(true);
   const attemptRef = useRef(0);
@@ -1673,14 +1684,28 @@ function AuthorizedPhoto({
       mountedRef.current = false;
       attemptRef.current += 1;
       controllerRef.current?.abort();
+      controllerRef.current = null;
       readUrlRef.current = null;
       cancelCurrentImage();
       requestCancelRef.current?.();
+      requestCancelRef.current = null;
+      finishActiveRef.current = null;
+      requestModeRef.current = null;
+      loadingRef.current = false;
       loadCoordinator.remove(photoKey);
     };
   }, [cancelCurrentImage, loadCoordinator, photoKey]);
 
   useEffect(() => {
+    if (!loadExplicitlyOnMount) return;
+    requestLoad('explicit');
+  }, [loadExplicitlyOnMount, requestLoad]);
+
+  useEffect(() => {
+    if (!observeViewport) {
+      setObserverSupport('disabled');
+      return;
+    }
     const figure = figureRef.current;
     if (figure === null || typeof window.IntersectionObserver === 'undefined') {
       setObserverSupport('unavailable');
@@ -1720,7 +1745,7 @@ function AuthorizedPhoto({
     );
     observer.observe(figure);
     return () => observer.disconnect();
-  }, [cancelCurrentImage, requestLoad, scrollRootRef]);
+  }, [cancelCurrentImage, observeViewport, requestLoad, scrollRootRef]);
 
   function failDisplayedImage(expectedUrl = readUrlRef.current): void {
     if (expectedUrl === null || expectedUrl !== readUrlRef.current) return;
@@ -1783,6 +1808,8 @@ function AuthorizedPhoto({
       aria-busy={loading}
       aria-labelledby={captionId}
       className="entry-content photo-entry"
+      data-private-photo-mount="stateful"
+      data-private-photo-observer={observeViewport ? 'enabled' : 'disabled'}
       data-private-photo-state={phase}
       ref={figureRef}
       tabIndex={-1}
@@ -1847,16 +1874,69 @@ function AuthorizedPhoto({
   );
 }
 
+type PrivatePhotoMountMode = 'recent' | 'selected-older' | 'deferred-older';
+
+function DeferredPrivatePhoto({
+  entryId,
+  entrySequence,
+  altText,
+  caption,
+  onActivate,
+}: Readonly<{
+  entryId: string;
+  entrySequence: number;
+  altText: string;
+  caption: string | null;
+  onActivate: () => void;
+}>) {
+  const statusId = `private-photo-${entryId}-status`;
+  const captionId = `private-photo-${entryId}-caption`;
+  return (
+    <figure
+      aria-labelledby={captionId}
+      className="entry-content photo-entry photo-entry-deferred"
+      data-private-photo-mount="deferred"
+      data-private-photo-observer="disabled"
+      data-private-photo-state="deferred"
+    >
+      <figcaption id={captionId}>
+        <p>
+          <strong>Photo description:</strong> {altText}
+        </p>
+        {caption === null ? null : <p>{caption}</p>}
+      </figcaption>
+      <div className="photo-read-control">
+        <p id={statusId}>
+          This older private photo is not loaded. Activating it authorizes this
+          photo and unloads any previously selected older photo.
+        </p>
+        <button
+          aria-describedby={statusId}
+          className="secondary"
+          onClick={onActivate}
+          type="button"
+        >
+          Load older private photo for entry {entrySequence}
+        </button>
+      </div>
+    </figure>
+  );
+}
+
 function EntryContent({
   entry,
   redacted,
   loadCoordinator,
   scrollRootRef,
+  photoMountMode,
+  onActivateOlderPhoto,
 }: Readonly<{
   entry: JournalEntry;
   redacted: boolean;
   loadCoordinator: PrivatePhotoLoadCoordinator;
   scrollRootRef: Readonly<{ current: HTMLDivElement | null }>;
+  photoMountMode: PrivatePhotoMountMode;
+  onActivateOlderPhoto: () => void;
 }>) {
   if (redacted && entry.kind !== 'system') {
     return (
@@ -1871,6 +1951,17 @@ function EntryContent({
     case 'text':
       return <p className="entry-content">{entry.payload.text}</p>;
     case 'photo':
+      if (photoMountMode === 'deferred-older') {
+        return (
+          <DeferredPrivatePhoto
+            altText={entry.payload.altText}
+            caption={entry.payload.caption}
+            entryId={entry.id}
+            entrySequence={entry.sequence}
+            onActivate={onActivateOlderPhoto}
+          />
+        );
+      }
       return (
         <AuthorizedPhoto
           altText={entry.payload.altText}
@@ -1878,8 +1969,10 @@ function EntryContent({
           entryId={entry.id}
           entrySequence={entry.sequence}
           eventId={entry.eventId}
+          loadExplicitlyOnMount={photoMountMode === 'selected-older'}
           loadCoordinator={loadCoordinator}
           mediaId={entry.payload.mediaId}
+          observeViewport={photoMountMode === 'recent'}
           scrollRootRef={scrollRootRef}
         />
       );
@@ -1910,22 +2003,26 @@ interface TimelineEntryProps {
   readonly entry: JournalEntry;
   readonly supersededBy: readonly JournalEntry[];
   readonly commandsBlocked: boolean;
+  readonly photoMountMode: PrivatePhotoMountMode;
   readonly photoLoadCoordinator: PrivatePhotoLoadCoordinator;
   readonly timelineScrollRef: Readonly<{
     current: HTMLDivElement | null;
   }>;
   readonly onCorrect: (entry: JournalEntry, opener: HTMLElement) => void;
   readonly onRedact: (entry: JournalEntry, opener: HTMLElement) => void;
+  readonly onActivateOlderPhoto: (entryId: string) => void;
 }
 
 function TimelineEntry({
   entry,
   supersededBy,
   commandsBlocked,
+  photoMountMode,
   photoLoadCoordinator,
   timelineScrollRef,
   onCorrect,
   onRedact,
+  onActivateOlderPhoto,
 }: TimelineEntryProps) {
   const latestSupersession = supersededBy.at(-1) ?? null;
   const redacted = supersededBy.some(
@@ -1980,6 +2077,8 @@ function TimelineEntry({
       <EntryContent
         entry={entry}
         loadCoordinator={photoLoadCoordinator}
+        onActivateOlderPhoto={() => onActivateOlderPhoto(entry.id)}
+        photoMountMode={photoMountMode}
         redacted={redacted}
         scrollRootRef={timelineScrollRef}
       />
@@ -2110,6 +2209,9 @@ export function EventRoom({
   const [entries, setEntries] = useState<readonly JournalEntry[]>(() =>
     [...initialEntries].sort(compareEntries),
   );
+  const [selectedOlderPhotoEntryId, setSelectedOlderPhotoEntryId] = useState<
+    string | null
+  >(null);
   const [connection, setConnection] = useState<ConnectionState>('loading');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(initialHasMore);
@@ -2386,6 +2488,43 @@ export function EventRoom({
     }
     return result;
   }, [entries]);
+
+  const recentPrivatePhotoEntryIds = useMemo(() => {
+    const visiblePhotoIds = entries
+      .filter(
+        (entry) =>
+          entry.kind === 'photo' &&
+          !(supersessionsByEntry.get(entry.id) ?? []).some(
+            (candidate) => candidate.supersedes?.kind === 'redaction',
+          ),
+      )
+      .map((entry) => entry.id);
+    return new Set(
+      visiblePhotoIds.slice(-RECENT_PRIVATE_PHOTO_WORKING_SET_SIZE),
+    );
+  }, [entries, supersessionsByEntry]);
+
+  useEffect(() => {
+    if (selectedOlderPhotoEntryId === null) return;
+    const selected = entries.find(
+      (entry) => entry.id === selectedOlderPhotoEntryId,
+    );
+    const redacted = (
+      supersessionsByEntry.get(selectedOlderPhotoEntryId) ?? []
+    ).some((entry) => entry.supersedes?.kind === 'redaction');
+    if (
+      selected?.kind !== 'photo' ||
+      redacted ||
+      recentPrivatePhotoEntryIds.has(selectedOlderPhotoEntryId)
+    ) {
+      setSelectedOlderPhotoEntryId(null);
+    }
+  }, [
+    entries,
+    recentPrivatePhotoEntryIds,
+    selectedOlderPhotoEntryId,
+    supersessionsByEntry,
+  ]);
 
   const baseCommandsBlocked =
     loadingHistory ||
@@ -3164,6 +3303,19 @@ export function EventRoom({
                       }
                       onRedact={(target, opener) =>
                         openDialog({ kind: 'redact', entry: target }, opener)
+                      }
+                      onActivateOlderPhoto={(entryId) => {
+                        if (!recentPrivatePhotoEntryIds.has(entryId)) {
+                          setSelectedOlderPhotoEntryId(entryId);
+                        }
+                      }}
+                      photoMountMode={
+                        entry.kind !== 'photo' ||
+                        recentPrivatePhotoEntryIds.has(entry.id)
+                          ? 'recent'
+                          : selectedOlderPhotoEntryId === entry.id
+                            ? 'selected-older'
+                            : 'deferred-older'
                       }
                       photoLoadCoordinator={photoLoadCoordinator}
                       supersededBy={supersessionsByEntry.get(entry.id) ?? []}
