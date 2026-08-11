@@ -1393,6 +1393,11 @@ async function updateGroupSource(
   const locatorChanged =
     current.googleGroupId !== input.googleGroupId ||
     current.email !== input.email;
+  if (locatorChanged && !current.active) {
+    throw conflict(
+      'An inactive access group cannot be used as the origin of a locator correction.',
+    );
+  }
   if (locatorChanged && !input.active) {
     throw conflict(
       'An access locator correction must create an active replacement source until a complete access snapshot proves the rotation.',
@@ -2496,15 +2501,6 @@ export async function executeFacilitiesAdminProjection(
     metadata?: AdminQueryMetadata;
   }>,
 ): Promise<FacilitiesAdminProjection> {
-  const neighborhoodsQuery = ListNeighborhoodsInputSchema.parse(
-    input.queries.neighborhoods,
-  );
-  const buildingGroupsQuery = ListGroupSourcesInputSchema.parse(
-    input.queries.buildingGroups,
-  );
-  const othersGroupsQuery = ListGroupSourcesInputSchema.parse(
-    input.queries.othersGroups,
-  );
   const holder: { projection?: FacilitiesAdminProjection } = {};
   const registration: ServerCapabilityRegistration<
     'list-facilities',
@@ -2512,13 +2508,29 @@ export async function executeFacilitiesAdminProjection(
   > = {
     ...listFacilitiesRegistration,
     async handler(facilitiesQuery, context) {
+      const parsedNeighborhoods = ListNeighborhoodsInputSchema.safeParse(
+        input.queries.neighborhoods,
+      );
+      const parsedBuildingGroups = ListGroupSourcesInputSchema.safeParse(
+        input.queries.buildingGroups,
+      );
+      const parsedOthersGroups = ListGroupSourcesInputSchema.safeParse(
+        input.queries.othersGroups,
+      );
+      if (
+        !parsedNeighborhoods.success ||
+        !parsedBuildingGroups.success ||
+        !parsedOthersGroups.success
+      ) {
+        throw invalid('The facilities administration query is invalid.');
+      }
       const projection = await facilitiesAdminProjection(
         context.transaction.database,
         {
           facilities: facilitiesQuery,
-          neighborhoods: neighborhoodsQuery,
-          buildingGroups: buildingGroupsQuery,
-          othersGroups: othersGroupsQuery,
+          neighborhoods: parsedNeighborhoods.data,
+          buildingGroups: parsedBuildingGroups.data,
+          othersGroups: parsedOthersGroups.data,
         },
       );
       holder.projection = projection;

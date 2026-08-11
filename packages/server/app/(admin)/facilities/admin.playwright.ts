@@ -69,6 +69,24 @@ for (const adminPage of ADMIN_PAGES) {
   });
 }
 
+test('invalid facilities cursors recover to the clean administration URL', async ({
+  page,
+}) => {
+  for (const path of [
+    '/facilities?facilityCursor=first&facilityCursor=second',
+    '/facilities?facilityCursor=not-a-canonical-cursor',
+  ]) {
+    await page.goto(path);
+    await expect(page).toHaveURL(/\/facilities$/u);
+    await expect(
+      page.getByRole('heading', {
+        level: 1,
+        name: 'Facilities, neighborhoods, and audiences',
+      }),
+    ).toBeVisible();
+  }
+});
+
 test('test mode is unmistakable and SMS cannot be enabled in the browser', async ({
   page,
 }) => {

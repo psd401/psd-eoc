@@ -105,7 +105,7 @@ export class AdminCapabilityError extends CapabilityEngineError {
         : code === 'CONFLICT'
           ? 'PERSISTENCE_CONFLICT'
           : code === 'VALIDATION_ERROR'
-            ? 'MUTATION_METADATA_INVALID'
+            ? 'CAPABILITY_INPUT_INVALID'
             : 'PERSISTENCE_CONFLICT',
       message,
       status,

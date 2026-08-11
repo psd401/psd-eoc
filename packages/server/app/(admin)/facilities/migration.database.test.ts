@@ -125,6 +125,18 @@ interface PrivilegeRow extends Record<string, unknown> {
   readonly can_update: boolean;
 }
 
+interface LockCompatibilityPrivilegeRow extends Record<string, unknown> {
+  readonly can_update_column: boolean;
+  readonly can_update_table: boolean;
+  readonly column_name: string;
+  readonly table_name: string;
+}
+
+interface ImmutableTargetPresenceRow extends Record<string, unknown> {
+  readonly row_present: boolean;
+  readonly table_name: string;
+}
+
 interface NullableSnapshotRow extends Record<string, unknown> {
   readonly snapshot: string | null;
 }
@@ -1194,11 +1206,14 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       )
     `);
 
-    await db.execute(sql`
-      update group_sources
-      set display_name = 'Synthetic access source renamed', active = false
-      where id = ${sourceId}::uuid
-    `);
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local role "psd_eoc_app"`);
+      await transaction.execute(sql`
+        update group_sources
+        set display_name = 'Synthetic access source renamed', active = false
+        where id = ${sourceId}::uuid
+      `);
+    });
     const rows = databaseExecuteRows<TextSnapshotRow>(
       await db.execute<TextSnapshotRow>(sql`
         select display_name || ':' || active::text as snapshot
@@ -1210,19 +1225,31 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       { snapshot: 'Synthetic access source renamed:false' },
     ]);
 
-    await expectOperationalRejection(() =>
-      db.execute(sql`
-        update group_sources
-        set google_group_id = ${`${originalGoogleGroupId}-changed`}
-        where id = ${sourceId}::uuid
-      `),
+    await expectPostgresCodeRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            update group_sources
+            set google_group_id = ${`${originalGoogleGroupId}-changed`}
+            where id = ${sourceId}::uuid
+          `);
+        }),
+      '55000',
+      /Access group provider locators are immutable/u,
     );
-    await expectOperationalRejection(() =>
-      db.execute(sql`
-        update group_sources
-        set email = ${`changed-${originalEmail}`}
-        where id = ${sourceId}::uuid
-      `),
+    await expectPostgresCodeRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            update group_sources
+            set email = ${`changed-${originalEmail}`}
+            where id = ${sourceId}::uuid
+          `);
+        }),
+      '55000',
+      /Access group provider locators are immutable/u,
     );
   });
 
@@ -2476,6 +2503,206 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       releaseScope?.();
       await Promise.allSettled([scopeWrite]);
       await Promise.all([scopeWriter.close(), roleWriter.close()]);
+    }
+  });
+
+  test('preserves app-role row locks with narrow immutable-column privileges', async () => {
+    const db = databaseConnection().db;
+    const expectedPrivileges = [
+      ['access_membership_member_facilities', 'snapshot_id'],
+      ['access_membership_member_groups', 'snapshot_id'],
+      ['access_membership_members', 'snapshot_id'],
+      ['access_membership_snapshot_groups', 'snapshot_id'],
+      ['access_membership_snapshots', 'id'],
+      ['audience_configurations', 'id'],
+      ['integration_statuses', 'id'],
+      ['neighborhood_versions', 'id'],
+      ['roster_source_configuration_facilities', 'configuration_id'],
+      ['roster_source_configuration_groups', 'configuration_id'],
+      ['roster_source_configurations', 'id'],
+    ] as const;
+    const privileges = databaseExecuteRows<LockCompatibilityPrivilegeRow>(
+      await db.execute<LockCompatibilityPrivilegeRow>(sql`
+        select
+          intended.table_name,
+          intended.column_name,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || intended.table_name,
+            'UPDATE'
+          ) as can_update_table,
+          has_column_privilege(
+            'psd_eoc_app',
+            'public.' || intended.table_name,
+            intended.column_name,
+            'UPDATE'
+          ) as can_update_column
+        from (values
+          ('integration_statuses', 'id'),
+          ('access_membership_snapshots', 'id'),
+          ('access_membership_snapshot_groups', 'snapshot_id'),
+          ('access_membership_members', 'snapshot_id'),
+          ('access_membership_member_groups', 'snapshot_id'),
+          ('access_membership_member_facilities', 'snapshot_id'),
+          ('roster_source_configurations', 'id'),
+          ('roster_source_configuration_facilities', 'configuration_id'),
+          ('roster_source_configuration_groups', 'configuration_id'),
+          ('neighborhood_versions', 'id'),
+          ('audience_configurations', 'id')
+        ) as intended(table_name, column_name)
+        order by intended.table_name
+      `),
+    );
+    expect(privileges).toEqual(
+      expectedPrivileges.map(([tableName, columnName]) => ({
+        table_name: tableName,
+        column_name: columnName,
+        can_update_table: false,
+        can_update_column: true,
+      })),
+    );
+
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local role "psd_eoc_app"`);
+
+      // Initial-session access evidence uses these exact unqualified row-lock
+      // shapes, including the member-to-snapshot join.
+      await transaction.execute(sql`
+        select snapshot.id
+        from access_membership_snapshots as snapshot
+        order by snapshot.version desc
+        limit 1
+        for share
+      `);
+      await transaction.execute(sql`
+        select member.user_id
+        from access_membership_members as member
+        inner join access_membership_snapshots as snapshot
+          on snapshot.id = member.snapshot_id
+        limit 1
+        for share
+      `);
+      await transaction.execute(sql`
+        select snapshot_group.group_source_id
+        from access_membership_snapshot_groups as snapshot_group
+        limit 1
+        for share
+      `);
+      await transaction.execute(sql`
+        select member_group.group_source_id
+        from access_membership_member_groups as member_group
+        limit 1
+        for share
+      `);
+      await transaction.execute(sql`
+        select member_facility.facility_id
+        from access_membership_member_facilities as member_facility
+        limit 1
+        for share
+      `);
+
+      // Activation and lifecycle checks lock both the mutable channel row and
+      // its exact immutable truth observation with one unqualified FOR SHARE.
+      await transaction.execute(sql`
+        select configuration.integration_id
+        from channel_configurations as configuration
+        inner join integration_statuses as status
+          on status.id = configuration.status_id
+          and status.integration_id = configuration.integration_id
+          and status.label = configuration.status_label
+        limit 1
+        for share
+      `);
+
+      // Facility administration and roster publication use these parent and
+      // child lock shapes under the shared population advisory boundary.
+      await transaction.execute(sql`
+        select configuration.id
+        from roster_source_configurations as configuration
+        limit 1
+        for update
+      `);
+      await transaction.execute(sql`
+        select configured_facility.facility_id
+        from roster_source_configuration_facilities as configured_facility
+        limit 1
+        for share
+      `);
+      await transaction.execute(sql`
+        select configured_group.group_source_id
+        from roster_source_configuration_groups as configured_group
+        inner join group_sources as source
+          on source.id = configured_group.group_source_id
+        limit 1
+        for share
+      `);
+      await transaction.execute(sql`
+        select neighborhood.id
+        from neighborhood_versions as neighborhood
+        limit 1
+        for update
+      `);
+      await transaction.execute(sql`
+        select audience.id
+        from audience_configurations as audience
+        limit 1
+        for update
+      `);
+    });
+
+    // The preceding atomic-publication proof constructs every access child;
+    // the seed constructs every other immutable target. Make that prerequisite
+    // explicit so a zero-row UPDATE can never masquerade as trigger coverage.
+    const immutableTargetPresence =
+      databaseExecuteRows<ImmutableTargetPresenceRow>(
+        await db.execute<ImmutableTargetPresenceRow>(sql`
+          select target.table_name, target.row_present
+          from (values
+            ('integration_statuses', exists(select 1 from integration_statuses)),
+            ('access_membership_snapshots', exists(select 1 from access_membership_snapshots)),
+            ('access_membership_snapshot_groups', exists(select 1 from access_membership_snapshot_groups)),
+            ('access_membership_members', exists(select 1 from access_membership_members)),
+            ('access_membership_member_groups', exists(select 1 from access_membership_member_groups)),
+            ('access_membership_member_facilities', exists(select 1 from access_membership_member_facilities)),
+            ('roster_source_configurations', exists(select 1 from roster_source_configurations)),
+            ('roster_source_configuration_facilities', exists(select 1 from roster_source_configuration_facilities)),
+            ('roster_source_configuration_groups', exists(select 1 from roster_source_configuration_groups)),
+            ('neighborhood_versions', exists(select 1 from neighborhood_versions)),
+            ('audience_configurations', exists(select 1 from audience_configurations))
+          ) as target(table_name, row_present)
+          order by target.table_name
+        `),
+      );
+    expect(immutableTargetPresence).toEqual(
+      expectedPrivileges.map(([tableName]) => ({
+        table_name: tableName,
+        row_present: true,
+      })),
+    );
+
+    const immutableColumnUpdates = [
+      sql`update integration_statuses set id = id`,
+      sql`update access_membership_snapshots set id = id`,
+      sql`update access_membership_snapshot_groups set snapshot_id = snapshot_id`,
+      sql`update access_membership_members set snapshot_id = snapshot_id`,
+      sql`update access_membership_member_groups set snapshot_id = snapshot_id`,
+      sql`update access_membership_member_facilities set snapshot_id = snapshot_id`,
+      sql`update roster_source_configurations set id = id`,
+      sql`update roster_source_configuration_facilities set configuration_id = configuration_id`,
+      sql`update roster_source_configuration_groups set configuration_id = configuration_id`,
+      sql`update neighborhood_versions set id = id`,
+      sql`update audience_configurations set id = id`,
+    ] as const;
+    for (const immutableUpdate of immutableColumnUpdates) {
+      await expectPostgresCodeRejection(
+        () =>
+          db.transaction(async (transaction) => {
+            await transaction.execute(sql`set local role "psd_eoc_app"`);
+            await transaction.execute(immutableUpdate);
+          }),
+        '55000',
+        /immutable/u,
+      );
     }
   });
 

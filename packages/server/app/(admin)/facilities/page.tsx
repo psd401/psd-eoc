@@ -13,41 +13,28 @@ import {
   FacilitiesAdminView,
   NON_ADMIN_FACILITIES_VIEW,
 } from './facilities-admin-view';
+import {
+  facilitiesAdminQueryRecoveryPath,
+  facilitiesAdminStatusMessage,
+  normalizeFacilitiesAdminCursorState,
+  type FacilitiesAdminSearchParameters,
+} from './facilities-page-state';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const STATUS_MESSAGES = Object.freeze({
-  'audience-version-created': 'The facility audience version was saved.',
-  'building-group-created': 'The immutable building source was added.',
-  'building-group-replaced':
-    'The building source was replaced with a new immutable source and roster configuration version.',
-  'facility-created': 'The facility was added.',
-  'facility-updated': 'The facility settings were updated.',
-  'neighborhood-version-created': 'The neighborhood version was saved.',
-  'others-group-created': 'The immutable others source was added.',
-  'others-group-replaced':
-    'The others source was replaced with a new immutable source and roster configuration version.',
-} as const);
-
-export function statusMessage(value: string | undefined): string | null {
-  return value !== undefined && Object.hasOwn(STATUS_MESSAGES, value)
-    ? STATUS_MESSAGES[value as keyof typeof STATUS_MESSAGES]
-    : null;
+/** Performs the bounded server-page redirect for invalid pagination input. */
+export function redirectInvalidFacilitiesAdminQuery(error: unknown): void {
+  const recoveryPath = facilitiesAdminQueryRecoveryPath(error);
+  if (recoveryPath !== null) {
+    redirect(recoveryPath);
+  }
 }
 
 export default async function FacilitiesPage({
   searchParams,
 }: Readonly<{
-  searchParams: Promise<
-    Readonly<{
-      buildingGroupCursor?: string;
-      facilityCursor?: string;
-      neighborhoodCursor?: string;
-      othersGroupCursor?: string;
-      status?: string;
-    }>
-  >;
+  searchParams: Promise<FacilitiesAdminSearchParameters>;
 }>) {
   const cookieStore = await cookies();
   const sessionToken = cookieStore.get(WEB_SESSION_COOKIE_NAME)?.value;
@@ -68,13 +55,8 @@ export default async function FacilitiesPage({
     redirect('/login?reason=session-required');
   }
   const parameters = await searchParams;
-  const currentCursors = Object.freeze({
-    buildingGroupCursor: parameters.buildingGroupCursor ?? null,
-    facilityCursor: parameters.facilityCursor ?? null,
-    neighborhoodCursor: parameters.neighborhoodCursor ?? null,
-    othersGroupCursor: parameters.othersGroupCursor ?? null,
-  });
   try {
+    const currentCursors = normalizeFacilitiesAdminCursorState(parameters);
     const projection = await executeFacilitiesAdminProjection({
       authenticated,
       queries: {
@@ -108,7 +90,7 @@ export default async function FacilitiesPage({
     return (
       <FacilitiesAdminView
         csrfToken={csrfToken}
-        statusMessage={statusMessage(parameters.status)}
+        statusMessage={facilitiesAdminStatusMessage(parameters.status)}
         view={{
           kind: 'authorized',
           ...projection,
@@ -120,6 +102,7 @@ export default async function FacilitiesPage({
     if (error instanceof AdminCapabilityError && error.status === 403) {
       return <FacilitiesAdminView view={NON_ADMIN_FACILITIES_VIEW} />;
     }
+    redirectInvalidFacilitiesAdminQuery(error);
     throw error;
   }
 }
