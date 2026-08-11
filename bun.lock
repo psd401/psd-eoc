@@ -38,6 +38,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@psd-eoc/contracts": "workspace:*",
+        "zod": "4.1.5",
       },
     },
     "packages/mobile": {

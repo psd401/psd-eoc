@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "bun run src/stdio.ts",
+    "start:http": "bun run src/http.ts",
     "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "dependencies": {
-    "@psd-eoc/contracts": "workspace:*"
+    "@psd-eoc/contracts": "workspace:*",
+    "zod": "4.1.5"
   }
 }

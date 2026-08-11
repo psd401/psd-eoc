@@ -13,6 +13,7 @@ export * from './identity';
 export * from './integration';
 export * from './journal';
 export * from './media';
+export * from './mcp';
 export * from './notification';
 export * from './report';
 export * from './roster';
