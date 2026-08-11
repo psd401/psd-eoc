@@ -20,6 +20,7 @@ import {
   type RecordEndpointStatusInput,
 } from '@psd-eoc/contracts';
 
+import { DeliveryStateError } from '../../packages/server/app/api/internal/delivery-state/route';
 import {
   SES_WEBHOOK_MAX_BODY_BYTES,
   createSesWebhookRouteHandler,
@@ -384,8 +385,17 @@ class MemorySesWebhookStore implements SesWebhookStore {
   }
 }
 
-function createHarness() {
-  const store = new MemorySesWebhookStore();
+class FailingEvidenceStore extends MemorySesWebhookStore {
+  public constructor(private readonly error: Error) {
+    super();
+  }
+
+  public override recordAttemptEvidence(): Promise<DeliveryEvidence> {
+    return Promise.reject(this.error);
+  }
+}
+
+function createHarness(store = new MemorySesWebhookStore()) {
   const calls = { createStore: 0, verifySignature: 0 };
   const handler = createSesWebhookRouteHandler({
     readExpectedTopicArn: () => TOPIC_ARN,
@@ -638,6 +648,53 @@ describe('SES signed SNS webhook route', () => {
     ]);
     expect(app.store.completeCalls).toBe(0);
     expect(app.store.closeCalls).toBe(1);
+  });
+
+  test('preserves public delivery-transition failures and their callback reason', async () => {
+    const message =
+      'Delivery evidence may not transition from delivered to provider-accepted.';
+    const store = new FailingEvidenceStore(
+      new DeliveryStateError('INVALID_DELIVERY_TRANSITION', 409, message),
+    );
+    const app = createHarness(store);
+
+    const response = await app.handler(
+      requestForEnvelope(signedEnvelope({ eventType: 'Send' })),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: { code: 'INVALID_DELIVERY_TRANSITION', message },
+    });
+    expect(store.failedCallbacks).toEqual([
+      expect.objectContaining({ reasonCode: 'INVALID_DELIVERY_TRANSITION' }),
+    ]);
+    expect(store.completeCalls).toBe(0);
+    expect(store.closeCalls).toBe(1);
+  });
+
+  test('keeps unknown evidence persistence failures generic and retryable', async () => {
+    const store = new FailingEvidenceStore(
+      new Error('Synthetic private persistence detail.'),
+    );
+    const app = createHarness(store);
+
+    const response = await app.handler(
+      requestForEnvelope(signedEnvelope({ eventType: 'Send' })),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'SES_WEBHOOK_UNAVAILABLE',
+        message: 'SES callback persistence failed safely.',
+      },
+    });
+    expect(store.failedCallbacks).toEqual([
+      expect.objectContaining({ reasonCode: 'SES_CALLBACK_PROCESSING_FAILED' }),
+    ]);
+    expect(store.completeCalls).toBe(0);
+    expect(store.closeCalls).toBe(1);
   });
 
   test('valid Send signatures with immutable correlation drift fail closed', async () => {

@@ -126,6 +126,14 @@ function signedEnvelope(
 }
 
 const loadTestCertificate = async (): Promise<string> => TEST_CERTIFICATE;
+const testCertificateNow = (): Date => new Date('2026-08-11T20:30:00.000Z');
+
+function testCertificateOptions() {
+  return {
+    loadSigningCertificate: loadTestCertificate,
+    now: testCertificateNow,
+  };
+}
 
 describe('SNS Notification signature verification', () => {
   test.each(['1', '2'] as const)(
@@ -134,9 +142,7 @@ describe('SNS Notification signature verification', () => {
       const envelope = signedEnvelope(version);
 
       await expect(
-        verifySnsSignature(envelope, {
-          loadSigningCertificate: loadTestCertificate,
-        }),
+        verifySnsSignature(envelope, testCertificateOptions()),
       ).resolves.toBeUndefined();
     },
   );
@@ -146,9 +152,7 @@ describe('SNS Notification signature verification', () => {
 
     expect(envelope.Subject).toBeUndefined();
     await expect(
-      verifySnsSignature(envelope, {
-        loadSigningCertificate: loadTestCertificate,
-      }),
+      verifySnsSignature(envelope, testCertificateOptions()),
     ).resolves.toBeUndefined();
   });
 
@@ -165,14 +169,12 @@ describe('SNS Notification signature verification', () => {
     ).toString('base64');
 
     await expect(
-      verifySnsSignature(mutated, {
-        loadSigningCertificate: loadTestCertificate,
-      }),
+      verifySnsSignature(mutated, testCertificateOptions()),
     ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_SIGNATURE' }));
     await expect(
       verifySnsSignature(
         { ...mutated, Signature: attackerSignature },
-        { loadSigningCertificate: loadTestCertificate },
+        testCertificateOptions(),
       ),
     ).rejects.toEqual(expect.objectContaining({ code: 'INVALID_SIGNATURE' }));
   });
