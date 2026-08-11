@@ -14,12 +14,12 @@ or schedules. The generated Google and Expo secrets are deliberately unusable
 placeholders.
 
 [`docs/INTEGRATIONS.md`](../docs/INTEGRATIONS.md) is the single source of truth
-for integration labels. This infrastructure-only issue does not advance any
-label: no resource was deployed and no provider connectivity was exercised.
-The register's existing `mocked` and `blocked` states therefore remain
-authoritative. Synthesized resources, generated placeholders, identity
-definitions, and passing tests are not evidence of configured or live
-integration status.
+for integration labels. GuardDuty Malware Protection for S3 is
+`configured-unverified`: the exact plan, prefix, tagging action, and service
+role are configured in CloudFormation, but no resource was deployed and no
+scan result or plan status was verified. Synthesized resources, generated
+placeholders, identity definitions, and passing tests are never evidence of a
+live integration.
 
 Provider activation remains subject to the synthetic-target, consequence
 preview, authorization, and human-confirmation rules in `AGENTS.md`. Any
@@ -33,7 +33,24 @@ evidence and approval.
   storage, retained backups, and deletion protection. No auto-pause setting is
   present.
 - A versioned, KMS-encrypted media bucket with every public-access block,
-  TLS-only access, retained data, and no lifecycle deletion.
+  TLS-only access, immutable retained `ready/` data, and a `quarantine/`-only
+  one-day lifecycle for current, noncurrent, and incomplete abandoned uploads.
+  Browser uploads require the no-default `MediaUploadAllowedOrigin` HTTPS
+  parameter. CORS permits only `PUT` from that exact origin with the
+  `content-type` and `if-none-match` request headers, exposes only `ETag` and
+  `x-amz-checksum-sha256`, and caches preflight results for five minutes.
+- A GuardDuty Malware Protection for S3 plan restricted to `quarantine/`, with
+  scan-result tagging enabled. Its dedicated service role follows the AWS
+  prerequisite policy: only the GuardDuty-managed EventBridge rule, bucket
+  notification and ownership checks, the exact validation object,
+  quarantine-scoped reads and tags, and KMS use through regional S3. App
+  Runner can read the resulting quarantine scan tag but has no object-tag
+  write authority. Bucket policy additionally denies every non-GuardDuty
+  principal from mutating quarantine tags or reading quarantine bytes unless
+  the current object carries the exact clean tag, so another broad role in the
+  shared account cannot forge or bypass the scan result. App Runner's media
+  data access is limited to `quarantine/` and `ready/` object reads/writes plus
+  the exact KMS operations S3 requires.
 - A central fan-out queue plus push, email, and SMS work queues. Every queue has
   an attached retained dead-letter queue and bounded receive attempts; each
   dead-letter queue accepts redrive only from its paired source queue.
@@ -96,6 +113,51 @@ the process can serve traffic. The route must never start or change an event,
 send a notification, issue an all-clear, or close an event. App Runner checks
 this exact path every five seconds.
 
+## Media upload and scan contract
+
+`MediaUploadAllowedOrigin` is required at deployment and accepts one HTTPS
+origin only, without a path, query, fragment, embedded credentials, or
+wildcard. It must be the reviewed browser origin that receives PSD EOC's
+presigned private upload URLs. Adding another origin or request header is a
+reviewed infrastructure change, not a runtime fallback.
+
+Every quarantine PUT is signed with and must send `If-None-Match: *`. Bucket
+policy denies a quarantine write that omits that create-only precondition, so
+reusing either the original URL or an idempotent replay grant after the first
+successful PUT fails S3's precondition instead of creating another object
+version and another malware scan.
+
+Only objects whose keys begin with `quarantine/` enter the GuardDuty plan.
+Tagging is enabled so GuardDuty can set `GuardDutyMalwareScanStatus` on the
+scanned object. The application must continue to fail closed unless the exact
+object has `NO_THREATS_FOUND`; a synthesized plan, an active plan, a missing
+tag, or any other result does not make media readable or journal-visible.
+Bucket policy enforces that gate on quarantine object reads for every
+principal except sessions issued from the dedicated GuardDuty role. It matches
+the stable IAM role ARN through `aws:PrincipalArn` rather than guessing an
+AWS-controlled session name, and reserves all quarantine tag mutations to that
+role.
+
+The bucket lifecycle is also restricted to `quarantine/`: current and
+noncurrent raw versions expire after one day, and incomplete multipart uploads
+are aborted after one day. Upload grants themselves expire after ten minutes,
+so this is bounded reclamation for abandoned untrusted bytes, not an extension
+of upload authority. No lifecycle rule targets immutable `ready/` media.
+
+The plan depends explicitly on its IAM role because AWS validates the role
+while creating the plan and recommends an IaC dependency for propagation. The
+role also retains AWS's exact access to the root
+`malware-protection-resource-validation-object`; that single validation key
+does not expand the plan's `quarantine/` scan scope.
+
+Sanitized objects under `ready/` are create-only. The application sends
+`If-None-Match: *`, and the bucket policy denies any ready-object creation that
+omits that condition. The policy also denies deleting ready objects or
+versions, preventing a delete-marker-and-recreate path from breaking the
+database checksum binding. A retry may read and accept an existing object only
+when its bytes, checksum, content type, cache control, and server metadata all
+match the intended immutable object exactly.
+
 ## Local verification
 
 From the repository root:
@@ -121,6 +183,7 @@ its reviewed consequence preview. A deploy must also have all of the following:
 - a current CDK bootstrap in that account and the shared GitHub OIDC provider;
 - an approved PSD EOC server image in same-account ECR, pinned by immutable
   SHA-256 digest and verified to satisfy the health-check contract;
+- the exact approved HTTPS browser origin for private media uploads;
 - an approved one-time database bootstrap procedure to run after CloudFormation
   creates Aurora and `/psd-eoc/database/application`, but before any
   database-backed use; it must grant the new LOGIN only `psd_eoc_app`
@@ -136,8 +199,12 @@ repository root:
 ```sh
 bun run --cwd infra deploy -- \
   --require-approval broadening \
-  --parameters 'AppImageIdentifier=338414773271.dkr.ecr.us-west-2.amazonaws.com/psd-eoc-server@sha256:REPLACE_WITH_64_HEX_CHARACTERS'
+  --parameters 'AppImageIdentifier=338414773271.dkr.ecr.us-west-2.amazonaws.com/psd-eoc-server@sha256:REPLACE_WITH_64_HEX_CHARACTERS' \
+  --parameters 'MediaUploadAllowedOrigin=https://eoc.example.invalid'
 ```
+
+Replace `https://eoc.example.invalid` with the reviewed PSD EOC HTTPS origin;
+the example is deliberately non-routable.
 
 After the stack completes, confirm the `AlertsHostedZoneId`,
 `AlertsHostedZoneNameServers`, retained delegation, DKIM status, custom MAIL
@@ -147,5 +214,6 @@ reviewed change set. The `SesDkimRecordName1..3` and
 records; they are not instructions for a manual DNS change. Complete the
 separately approved database bootstrap before enabling database-backed use;
 until then, those requests fail closed. Do not infer SES production access,
-event consumption, or delivery verification from stack completion. No
-deployment was performed for this issue.
+event consumption, GuardDuty plan health, a successful malware scan, or
+delivery verification from stack completion. No deployment was performed for
+this issue.

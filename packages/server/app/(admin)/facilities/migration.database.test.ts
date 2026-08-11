@@ -29,6 +29,7 @@ import {
 } from '../../../db/client';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase, migrationsFolder } from '../../../drizzle/migrate';
+import migrationJournal from '../../../drizzle/migrations/meta/_journal.json';
 import { createDrizzleSecurityAuditRepository } from '../../../lib/audit/drizzle-repository';
 import type { TrustedCapabilityInvocation } from '../../../lib/capabilities/engine';
 import {
@@ -1161,7 +1162,9 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           from drizzle.__drizzle_migrations
         `),
       );
-      expect(migrationCountAfterRetry).toEqual([{ count: 6 }]);
+      expect(migrationCountAfterRetry).toEqual([
+        { count: migrationJournal.entries.length },
+      ]);
     } finally {
       releaseLock?.();
       if (lockHolderTransaction !== undefined) {

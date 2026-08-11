@@ -1,4 +1,5 @@
 import {
+  ArnFormat,
   CfnOutput,
   CfnParameter,
   Duration,
@@ -10,6 +11,7 @@ import {
   Validations,
   aws_apprunner as apprunner,
   aws_ec2 as ec2,
+  aws_guardduty as guardduty,
   aws_iam as iam,
   aws_kms as kms,
   aws_logs as logs,
@@ -48,6 +50,11 @@ import {
 
 const CDK_BOOTSTRAP_QUALIFIER = 'hnb659fds';
 const MAX_QUEUE_RECEIVES = 5;
+const MEDIA_QUARANTINE_PREFIX = 'quarantine/';
+const MEDIA_QUARANTINE_RETENTION_DAYS = 1;
+const MEDIA_UPLOAD_CORS_MAX_AGE_SECONDS = 300;
+const GUARDDUTY_MANAGED_RULE_PREFIX =
+  'DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*';
 
 interface QueueWithDeadLetterQueue {
   readonly deadLetterQueue: sqs.Queue;
@@ -219,18 +226,269 @@ export class PsdEocStack extends Stack {
       },
     );
 
+    const mediaUploadAllowedOrigin = new CfnParameter(
+      this,
+      'MediaUploadAllowedOrigin',
+      {
+        allowedPattern:
+          '^https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::[0-9]{1,5})?$',
+        constraintDescription:
+          'Use exactly one HTTPS origin with no path, query, fragment, credentials, or wildcard.',
+        description:
+          'Approved PSD EOC web origin allowed to PUT directly to private media upload URLs.',
+        type: 'String',
+      },
+    );
+
     const mediaBucket = new s3.Bucket(this, 'MediaBucket', {
       autoDeleteObjects: false,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       bucketKeyEnabled: true,
+      cors: [
+        {
+          allowedHeaders: ['content-type', 'if-none-match'],
+          allowedMethods: [s3.HttpMethods.PUT],
+          allowedOrigins: [mediaUploadAllowedOrigin.valueAsString],
+          exposedHeaders: ['ETag', 'x-amz-checksum-sha256'],
+          maxAge: MEDIA_UPLOAD_CORS_MAX_AGE_SECONDS,
+        },
+      ],
       encryption: s3.BucketEncryption.KMS,
       encryptionKey: dataKey,
       enforceSSL: true,
+      lifecycleRules: [
+        {
+          abortIncompleteMultipartUploadAfter: Duration.days(
+            MEDIA_QUARANTINE_RETENTION_DAYS,
+          ),
+          expiration: Duration.days(MEDIA_QUARANTINE_RETENTION_DAYS),
+          id: 'ExpireAbandonedQuarantineMedia',
+          noncurrentVersionExpiration: Duration.days(
+            MEDIA_QUARANTINE_RETENTION_DAYS,
+          ),
+          prefix: MEDIA_QUARANTINE_PREFIX,
+        },
+      ],
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
       removalPolicy: RemovalPolicy.RETAIN,
       versioned: true,
     });
     this.retainGeneratedPolicy(mediaBucket);
+    mediaBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObject'],
+        conditions: {
+          Bool: {
+            's3:ObjectCreationOperation': 'true',
+          },
+          Null: {
+            's3:if-none-match': 'true',
+          },
+        },
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        resources: [mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`)],
+        sid: 'DenyUnconditionalQuarantineMediaWrite',
+      }),
+    );
+    mediaBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:PutObject'],
+        conditions: {
+          Bool: {
+            's3:ObjectCreationOperation': 'true',
+          },
+          Null: {
+            's3:if-none-match': 'true',
+          },
+        },
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        resources: [mediaBucket.arnForObjects('ready/*')],
+        sid: 'DenyUnconditionalReadyMediaWrite',
+      }),
+    );
+    mediaBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        resources: [mediaBucket.arnForObjects('ready/*')],
+        sid: 'DenyReadyMediaDeletion',
+      }),
+    );
+
+    const guardDutyManagedRuleArn = Stack.of(this).formatArn({
+      account: DEPLOYMENT_ACCOUNT,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      region: DEPLOYMENT_REGION,
+      resource: 'rule',
+      resourceName: GUARDDUTY_MANAGED_RULE_PREFIX,
+      service: 'events',
+    });
+    const mediaMalwareProtectionPlanArn = Stack.of(this).formatArn({
+      account: DEPLOYMENT_ACCOUNT,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      region: DEPLOYMENT_REGION,
+      resource: 'malware-protection-plan',
+      resourceName: '*',
+      service: 'guardduty',
+    });
+    const mediaMalwareScanRole = new iam.Role(this, 'MediaMalwareScanRole', {
+      assumedBy: new iam.ServicePrincipal(
+        'malware-protection-plan.guardduty.amazonaws.com',
+        {
+          conditions: {
+            ArnLike: {
+              'aws:SourceArn': mediaMalwareProtectionPlanArn,
+            },
+            StringEquals: {
+              'aws:SourceAccount': DEPLOYMENT_ACCOUNT,
+            },
+          },
+        },
+      ),
+      description:
+        'Allows GuardDuty to scan and tag only PSD EOC quarantine uploads.',
+      inlinePolicies: {
+        MediaMalwareProtection: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              actions: [
+                'events:PutRule',
+                'events:DeleteRule',
+                'events:PutTargets',
+                'events:RemoveTargets',
+              ],
+              conditions: {
+                StringLike: {
+                  'events:ManagedBy':
+                    'malware-protection-plan.guardduty.amazonaws.com',
+                },
+              },
+              resources: [guardDutyManagedRuleArn],
+              sid: 'AllowManagedRuleToSendS3EventsToGuardDuty',
+            }),
+            new iam.PolicyStatement({
+              actions: ['events:DescribeRule', 'events:ListTargetsByRule'],
+              resources: [guardDutyManagedRuleArn],
+              sid: 'AllowGuardDutyToMonitorEventBridgeManagedRule',
+            }),
+            new iam.PolicyStatement({
+              actions: [
+                's3:PutObjectTagging',
+                's3:GetObjectTagging',
+                's3:PutObjectVersionTagging',
+                's3:GetObjectVersionTagging',
+              ],
+              resources: [
+                mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`),
+              ],
+              sid: 'AllowPostScanTag',
+            }),
+            new iam.PolicyStatement({
+              actions: ['s3:PutBucketNotification', 's3:GetBucketNotification'],
+              resources: [mediaBucket.bucketArn],
+              sid: 'AllowEnableS3EventBridgeEvents',
+            }),
+            new iam.PolicyStatement({
+              actions: ['s3:PutObject'],
+              resources: [
+                mediaBucket.arnForObjects(
+                  'malware-protection-resource-validation-object',
+                ),
+              ],
+              sid: 'AllowPutValidationObject',
+            }),
+            new iam.PolicyStatement({
+              actions: ['s3:ListBucket'],
+              conditions: {
+                StringLike: {
+                  's3:prefix': `${MEDIA_QUARANTINE_PREFIX}*`,
+                },
+              },
+              resources: [mediaBucket.bucketArn],
+              sid: 'AllowCheckBucketOwnership',
+            }),
+            new iam.PolicyStatement({
+              actions: ['s3:GetObject', 's3:GetObjectVersion'],
+              resources: [
+                mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`),
+              ],
+              sid: 'AllowMalwareScan',
+            }),
+            new iam.PolicyStatement({
+              actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
+              conditions: {
+                StringLike: {
+                  'kms:ViaService': `s3.${DEPLOYMENT_REGION}.amazonaws.com`,
+                },
+              },
+              resources: [dataKey.keyArn],
+              sid: 'AllowDecryptForMalwareScan',
+            }),
+          ],
+        }),
+      },
+    });
+    mediaBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          's3:PutObjectTagging',
+          's3:PutObjectVersionTagging',
+          's3:DeleteObjectTagging',
+          's3:DeleteObjectVersionTagging',
+        ],
+        conditions: {
+          ArnNotEquals: {
+            'aws:PrincipalArn': mediaMalwareScanRole.roleArn,
+          },
+        },
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        resources: [mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`)],
+        sid: 'DenyQuarantineScanTagMutationOutsideGuardDuty',
+      }),
+    );
+    mediaBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject', 's3:GetObjectVersion'],
+        conditions: {
+          ArnNotEquals: {
+            'aws:PrincipalArn': mediaMalwareScanRole.roleArn,
+          },
+          StringNotEquals: {
+            's3:ExistingObjectTag/GuardDutyMalwareScanStatus':
+              'NO_THREATS_FOUND',
+          },
+        },
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        resources: [mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`)],
+        sid: 'DenyQuarantineReadUnlessGuardDutyMarkedClean',
+      }),
+    );
+    const mediaMalwareProtectionPlan = new guardduty.CfnMalwareProtectionPlan(
+      this,
+      'MediaMalwareProtectionPlan',
+      {
+        actions: {
+          tagging: {
+            status: 'ENABLED',
+          },
+        },
+        protectedResource: {
+          s3Bucket: {
+            bucketName: mediaBucket.bucketName,
+            objectPrefixes: [MEDIA_QUARANTINE_PREFIX],
+          },
+        },
+        role: mediaMalwareScanRole.roleArn,
+      },
+    );
+    // AWS recommends an explicit IaC dependency so the role and its inline
+    // permissions can propagate before GuardDuty validates the plan.
+    mediaMalwareProtectionPlan.node.addDependency(mediaMalwareScanRole);
 
     const fanout = this.createQueueWithDeadLetterQueue(
       'Fanout',
@@ -365,8 +623,31 @@ export class PsdEocStack extends Stack {
       databaseApplicationSecret.grantRead(appRunnerInstanceRole),
       googleOauthSecret.grantRead(appRunnerInstanceRole),
       apiSaltSecret.grantRead(appRunnerInstanceRole),
-      mediaBucket.grantRead(appRunnerInstanceRole),
-      mediaBucket.grantPut(appRunnerInstanceRole),
+      iam.Grant.addToPrincipal({
+        actions: ['s3:GetObject', 's3:PutObject'],
+        grantee: appRunnerInstanceRole,
+        resourceArns: [
+          mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`),
+          mediaBucket.arnForObjects('ready/*'),
+        ],
+      }),
+      iam.Grant.addToPrincipal({
+        actions: ['s3:GetObjectTagging'],
+        grantee: appRunnerInstanceRole,
+        resourceArns: [
+          mediaBucket.arnForObjects(`${MEDIA_QUARANTINE_PREFIX}*`),
+        ],
+      }),
+      iam.Grant.addToPrincipal({
+        actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
+        conditions: {
+          StringEquals: {
+            'kms:ViaService': `s3.${DEPLOYMENT_REGION}.amazonaws.com`,
+          },
+        },
+        grantee: appRunnerInstanceRole,
+        resourceArns: [dataKey.keyArn],
+      }),
       fanout.queue.grantSendMessages(appRunnerInstanceRole),
     ];
 

@@ -8,7 +8,11 @@ import {
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { EventRoom, eventRoomPollDelay } from './event-room';
+import {
+  EventRoom,
+  PrivatePhotoLoadCoordinator,
+  eventRoomPollDelay,
+} from './event-room';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -24,6 +28,9 @@ const IDS = {
   correction: '10000000-0000-4000-8000-000000000011',
   redactedOriginal: '10000000-0000-4000-8000-000000000012',
   redaction: '10000000-0000-4000-8000-000000000013',
+  photo: '10000000-0000-4000-8000-000000000014',
+  media: '10000000-0000-4000-8000-000000000015',
+  photoRedaction: '10000000-0000-4000-8000-000000000016',
 } as const;
 
 const ACTOR = {
@@ -93,6 +100,47 @@ function textEntry(
   });
 }
 
+function photoEntry(): JournalEntry {
+  return JournalEntrySchema.parse({
+    id: IDS.photo,
+    eventId: IDS.event,
+    sequence: 5,
+    author: ACTOR,
+    source: 'web',
+    serverTime: '2026-08-10T16:06:00.000Z',
+    clientTime: '2026-08-10T16:05:30.000Z',
+    supersedes: null,
+    kind: 'photo',
+    payload: {
+      mediaId: IDS.media,
+      altText: 'Exterior assembly area with staff accountability teams',
+      caption: 'Synthetic exercise photo',
+    },
+  });
+}
+
+function historicalPhotoEntry(sequence: number): JournalEntry {
+  const suffix = String(sequence).padStart(12, '0');
+  return JournalEntrySchema.parse({
+    id: `20000000-0000-4000-8000-${suffix}`,
+    eventId: IDS.event,
+    sequence,
+    author: ACTOR,
+    source: 'web',
+    serverTime: new Date(
+      Date.parse('2026-08-10T16:00:00.000Z') + sequence * 1_000,
+    ).toISOString(),
+    clientTime: null,
+    supersedes: null,
+    kind: 'photo',
+    payload: {
+      mediaId: `30000000-0000-4000-8000-${suffix}`,
+      altText: `Synthetic historical photo ${sequence}`,
+      caption: `Retained synthetic caption ${sequence}`,
+    },
+  });
+}
+
 const ENTRIES = [
   textEntry({
     id: IDS.original,
@@ -146,6 +194,7 @@ function render(
   return renderToStaticMarkup(
     <EventRoom
       apiUrl={`/events/${event.id}/api`}
+      authorDisplayName="Synthetic Event Room Operator"
       csrfCookieName="__Host-psd-eoc-csrf"
       event={event}
       eventTypeLabel={
@@ -164,6 +213,55 @@ function render(
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('keeps private-photo coordination reusable across StrictMode-style cleanup and setup', () => {
+    const coordinator = new PrivatePhotoLoadCoordinator();
+    let cleanupCancelled = false;
+    let automaticStarted = false;
+    let explicitStarted = false;
+    let finishAutomatic: (() => void) | null = null;
+
+    const cleanup = coordinator.enqueue({
+      key: 'strict-mode-initial-effect',
+      mode: 'explicit',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: () => () => {
+        cleanupCancelled = true;
+      },
+    });
+    cleanup();
+    expect(cleanupCancelled).toBe(true);
+
+    coordinator.enqueue({
+      key: 'strict-mode-viewport-demand',
+      mode: 'automatic',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: (complete) => {
+        automaticStarted = true;
+        finishAutomatic = complete;
+        return () => undefined;
+      },
+    });
+    expect(automaticStarted).toBe(true);
+    if (finishAutomatic === null) {
+      throw new Error('The remounted automatic load did not start.');
+    }
+    (finishAutomatic as () => void)();
+
+    coordinator.enqueue({
+      key: 'strict-mode-explicit-demand',
+      mode: 'explicit',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: () => {
+        explicitStarted = true;
+        return () => undefined;
+      },
+    });
+    expect(explicitStarted).toBe(true);
+  });
+
   test('keeps healthy polling in the 3–5 second window with bounded backoff', () => {
     expect(eventRoomPollDelay(0, 0)).toBe(3_000);
     expect(eventRoomPollDelay(0, 1)).toBe(5_000);
@@ -262,5 +360,110 @@ describe('event room server-rendered safety and history state', () => {
     expect(closedHtml).toContain(
       'The event is closed. Its complete journal remains retained.',
     );
+  });
+
+  test('renders private photo description without embedding a public URL', () => {
+    const html = render(activeEvent('real'), [photoEntry()]);
+
+    expect(html).toContain(
+      'Exterior assembly area with staff accountability teams',
+    );
+    expect(html).toContain('Synthetic exercise photo');
+    expect(html).toContain(
+      'This private photo is not loaded. Load it explicitly if it is operationally needed.',
+    );
+    expect(html).toContain('Load private photo for entry 5');
+    expect(html.match(/dialog-classification mode-real/gu)).toHaveLength(2);
+    expect(html.match(/REAL INCIDENT/gu)?.length ?? 0).toBeGreaterThanOrEqual(
+      3,
+    );
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('https://');
+  });
+
+  test('mounts stateful controls only for ten recent photos while retaining every older description and caption', () => {
+    const photos = Array.from({ length: 12 }, (_, index) =>
+      historicalPhotoEntry(index + 1),
+    );
+    const html = render(activeEvent('real'), photos);
+
+    expect(html.match(/data-private-photo-mount="stateful"/gu)).toHaveLength(
+      10,
+    );
+    expect(html.match(/data-private-photo-observer="enabled"/gu)).toHaveLength(
+      10,
+    );
+    expect(html.match(/data-private-photo-mount="deferred"/gu)).toHaveLength(2);
+    expect(html).toContain('Load older private photo for entry 1');
+    expect(html).toContain('Load older private photo for entry 2');
+    expect(html).not.toContain('Load older private photo for entry 3');
+    for (let sequence = 1; sequence <= 12; sequence += 1) {
+      expect(html).toContain(`Synthetic historical photo ${sequence}`);
+      expect(html).toContain(`Retained synthetic caption ${sequence}`);
+    }
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('https://');
+  });
+
+  test('never mounts private photo rendering for an append-only redacted photo', () => {
+    const redaction = textEntry({
+      id: IDS.photoRedaction,
+      sequence: 6,
+      text: '[Content redacted — original retained in journal]',
+      serverTime: '2026-08-10T16:07:00.000Z',
+      clientTime: null,
+      supersedes: {
+        entryId: IDS.photo,
+        entrySequence: 5,
+        kind: 'redaction',
+        reason: 'Synthetic photo no longer needed for operations.',
+      },
+    });
+    const html = render(activeEvent('real'), [photoEntry(), redaction]);
+
+    expect(html).toContain(
+      'Original content is hidden because a later append-only redaction',
+    );
+    expect(html).not.toContain(
+      'Exterior assembly area with staff accountability teams',
+    );
+    expect(html).not.toContain('Load private photo for entry 5');
+    expect(html).not.toContain('<img');
+  });
+
+  test('renders a redacted photo projection without ever receiving its media payload', () => {
+    const original = photoEntry();
+    const redactedProjection = projectJournalEntryForRead(original, true);
+    const serializedProjection = JSON.stringify(redactedProjection);
+
+    expect(redactedProjection.visibility).toBe('redacted');
+    expect(serializedProjection).not.toContain(IDS.media);
+    expect(serializedProjection).not.toContain(
+      'Exterior assembly area with staff accountability teams',
+    );
+    expect(serializedProjection).not.toContain('Synthetic exercise photo');
+
+    const html = renderToStaticMarkup(
+      <EventRoom
+        apiUrl={`/events/${IDS.event}/api`}
+        authorDisplayName="Synthetic Event Room Operator"
+        csrfCookieName="__Host-psd-eoc-csrf"
+        event={activeEvent('real')}
+        eventTypeLabel="Lockdown"
+        facilityLabel="Synthetic North Campus"
+        initialCursor="eyJ2IjoxfQ"
+        initialEntries={[redactedProjection]}
+        initialHasMore={false}
+        initialSnapshotSequence={original.sequence}
+        sessionId={IDS.session}
+      />,
+    );
+
+    expect(html).toContain(
+      'Original content is hidden because a later append-only redaction',
+    );
+    expect(html).not.toContain(IDS.media);
+    expect(html).not.toContain('Load private photo');
+    expect(html).not.toContain('<img');
   });
 });
