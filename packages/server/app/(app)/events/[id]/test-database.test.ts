@@ -283,7 +283,9 @@ describe('event-room synthetic database guard', () => {
       expect(replacement.appPort).toBe(context.appPort);
       expect(inspectEventRoomPlaywrightPortLease(context)).toBe('replacement');
       expect(releaseEventRoomPlaywrightPortLeaseIfOwned(context)).toBe(false);
-      cleanupReportedEventRoomPlaywrightRun(context);
+      await cleanupEventRoomPlaywrightRunAfterChildExit(context, async () => {
+        throw new Error('replacement port must not be awaited');
+      });
       expect(existsSync(context.runDirectory)).toBe(false);
       expect(existsSync(replacement.portLeasePath)).toBe(true);
       expect(inspectEventRoomPlaywrightPortLease(replacement)).toBe('owned');
@@ -330,7 +332,21 @@ describe('event-room synthetic database guard', () => {
     expect(gate).toContain("child.kill('SIGTERM')");
     expect(gate).toContain("child.kill('SIGKILL')");
     expect(gate).toContain('await completion');
-    expect(gate).toContain('waitForEventRoomPlaywrightPortToClose');
+    expect(gate).toContain('cleanupEventRoomPlaywrightRunAfterChildExit');
+    expect(gate).not.toContain('waitForEventRoomPlaywrightPortToClose');
+    const cleanupBody = gate.slice(
+      gate.indexOf('async function cleanExactGateRun'),
+      gate.indexOf("describe('event-room Playwright gate'"),
+    );
+    expect(
+      cleanupBody.indexOf(
+        'await cleanupEventRoomPlaywrightRunAfterChildExit(context)',
+      ),
+    ).toBeLessThan(
+      cleanupBody.indexOf(
+        'await dropOwnedEventRoomPlaywrightDatabase(context)',
+      ),
+    );
     expect(gate).toContain('BROWSER_GATE_TIMEOUT_MS');
     for (const hook of [setup, teardown]) {
       expect(hook).not.toContain('releaseEventRoomPlaywrightPortLease');

@@ -138,7 +138,11 @@ const ENTRIES = [
   }),
 ] as const;
 
-function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
+function render(
+  event: Event,
+  entries: readonly JournalEntry[] = ENTRIES,
+  initialHasMore = false,
+) {
   return renderToStaticMarkup(
     <EventRoom
       apiUrl={`/events/${event.id}/api`}
@@ -152,7 +156,7 @@ function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
       initialEntries={entries.map((entry) =>
         projectJournalEntryForRead(entry, false),
       )}
-      initialHasMore={false}
+      initialHasMore={initialHasMore}
       initialSnapshotSequence={entries.at(-1)?.sequence ?? 0}
       sessionId={IDS.session}
     />,
@@ -180,6 +184,22 @@ describe('event room server-rendered safety and history state', () => {
     expect(drill).not.toContain('REAL INCIDENT');
     expect(real).toContain('aria-hidden="true"');
     expect(drill).toContain('aria-hidden="true"');
+  });
+
+  test('announces complete SSR history as connected and paginated history as loading', () => {
+    const complete = render(activeEvent('drill'), []);
+    const paginated = render(activeEvent('drill'), ENTRIES, true);
+
+    expect(complete).toContain('connection-line connection-connected');
+    expect(complete).toContain('<span>Connected</span>');
+    expect(complete).toContain('aria-busy="false"');
+    expect(complete).not.toContain('Loading event history');
+    expect(paginated).toContain('connection-line connection-loading');
+    expect(paginated).toContain('<span>Loading event history</span>');
+    expect(paginated).toContain('aria-busy="true"');
+    expect(paginated).toContain(
+      'Timeline content remains hidden until all authorized history',
+    );
   });
 
   test('renders immutable correction and redaction provenance without deleting originals', () => {

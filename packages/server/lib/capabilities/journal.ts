@@ -97,6 +97,11 @@ export interface JournalCapabilityTransaction
     entryId: string,
     sequence: number | null,
   ): Promise<JournalEntry | null>;
+  hasJournalSupersession(
+    eventId: string,
+    entryId: string,
+    kind: 'correction' | 'redaction' | null,
+  ): Promise<boolean>;
   appendJournalEntry(entry: JournalEntry): Promise<void>;
   listJournalEntries(
     input: CapabilityInput<'list-journal-entries'>,
@@ -694,6 +699,22 @@ async function buildJournalEntry(
     if (target.kind === 'system') {
       throw conflict('System lifecycle journal facts cannot be superseded.');
     }
+    const supersessionKind =
+      capabilityId === 'correct-journal-entry' ? null : 'redaction';
+    if (
+      capabilityId !== 'append-journal-entry' &&
+      (await context.transaction.hasJournalSupersession(
+        input.eventId,
+        target.id,
+        supersessionKind,
+      ))
+    ) {
+      throw conflict(
+        capabilityId === 'correct-journal-entry'
+          ? 'A journal correction cannot target an entry that is already superseded.'
+          : 'The journal entry already has an append-only redaction.',
+      );
+    }
   }
 
   // Read after acquiring the event lock. Sequence is the total order; this
@@ -1237,6 +1258,27 @@ async function getJournalEntryFromDatabase(
   return row === undefined ? null : journalFromRow(row);
 }
 
+async function hasJournalSupersessionFromDatabase(
+  database: JournalQueryDatabase,
+  eventId: string,
+  entryId: string,
+  kind: 'correction' | 'redaction' | null,
+): Promise<boolean> {
+  const conditions = [
+    eq(journalEntries.eventId, eventId),
+    eq(journalEntries.supersedesEntryId, entryId),
+  ];
+  if (kind !== null) {
+    conditions.push(eq(journalEntries.supersessionKind, kind));
+  }
+  const [row] = await database
+    .select({ id: journalEntries.id })
+    .from(journalEntries)
+    .where(and(...conditions))
+    .limit(1);
+  return row !== undefined;
+}
+
 async function listJournalEntriesFromDatabase(
   database: JournalQueryDatabase,
   input: CapabilityInput<'list-journal-entries'>,
@@ -1668,6 +1710,8 @@ function createDrizzleJournalTransaction(
       lockEventForJournalFromDatabase(database, eventId),
     getJournalEntry: (eventId, entryId, sequence) =>
       getJournalEntryFromDatabase(database, eventId, entryId, sequence),
+    hasJournalSupersession: (eventId, entryId, kind) =>
+      hasJournalSupersessionFromDatabase(database, eventId, entryId, kind),
     async appendJournalEntry(entry) {
       await database.insert(journalEntries).values(journalInsertValues(entry));
     },

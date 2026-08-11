@@ -70,6 +70,7 @@ interface AccessFixture {
 }
 
 interface EventRoomFixture {
+  readonly concurrentDialogEventId: string;
   readonly continuationEventId: string;
   readonly dialogFailureEventId: string;
   readonly historyEventId: string;
@@ -83,7 +84,11 @@ interface EventRoomFixture {
   readonly mismatchedAllClearTransitionEventId: string;
   readonly mismatchedTransitionEventId: string;
   readonly newerPollEventId: string;
+  readonly paginatedDialogEventId: string;
+  readonly pendingDialogEventId: string;
+  readonly previewRetryEventId: string;
   readonly realDraftEventId: string;
+  readonly rejectedDialogRaceEventId: string;
   readonly stalePollEventId: string;
   readonly staleLifecycleResponseEventId: string;
   readonly stalledMutationEventId: string;
@@ -550,6 +555,7 @@ async function prepareEventFixtures(
     });
   };
   const historyEvent = makeActiveEvent();
+  const concurrentDialogEvent = makeActiveEvent();
   const invalidationEvent = makeActiveEvent();
   const journalEvidenceEvent = makeActiveEvent();
   const keyboardEvent = makeActiveEvent();
@@ -562,6 +568,10 @@ async function prepareEventFixtures(
   const mismatchedAllClearTransitionEvent = makeActiveEvent();
   const mismatchedTransitionEvent = makeActiveEvent();
   const newerPollEvent = makeActiveEvent();
+  const paginatedDialogEvent = makeActiveEvent();
+  const pendingDialogEvent = makeActiveEvent();
+  const previewRetryEvent = makeActiveEvent();
+  const rejectedDialogRaceEvent = makeActiveEvent();
   const staleLifecycleResponseEvent = makeActiveEvent();
   const dialogFailureEvent = makeActiveEvent();
   const stalledMutationEvent = makeActiveEvent();
@@ -613,6 +623,7 @@ async function prepareEventFixtures(
     });
   const journal = [
     ...makeHistory(historyEvent, 105),
+    ...makeHistory(concurrentDialogEvent, 3),
     ...makeHistory(invalidationEvent, 3),
     ...makeHistory(journalEvidenceEvent, 3),
     ...makeHistory(keyboardEvent, 3),
@@ -625,6 +636,10 @@ async function prepareEventFixtures(
     ...makeHistory(mismatchedAllClearTransitionEvent, 3),
     ...makeHistory(mismatchedTransitionEvent, 3),
     ...makeHistory(newerPollEvent, 3),
+    ...makeHistory(paginatedDialogEvent, 3),
+    ...makeHistory(pendingDialogEvent, 3),
+    ...makeHistory(previewRetryEvent, 3),
+    ...makeHistory(rejectedDialogRaceEvent, 3),
     ...makeHistory(staleLifecycleResponseEvent, 3),
     ...makeHistory(dialogFailureEvent, 3),
     ...makeHistory(stalledMutationEvent, 3),
@@ -662,6 +677,7 @@ async function prepareEventFixtures(
       .values(
         [
           historyEvent,
+          concurrentDialogEvent,
           invalidationEvent,
           journalEvidenceEvent,
           keyboardEvent,
@@ -674,6 +690,10 @@ async function prepareEventFixtures(
           mismatchedAllClearTransitionEvent,
           mismatchedTransitionEvent,
           newerPollEvent,
+          paginatedDialogEvent,
+          pendingDialogEvent,
+          previewRetryEvent,
+          rejectedDialogRaceEvent,
           staleLifecycleResponseEvent,
           dialogFailureEvent,
           stalledMutationEvent,
@@ -685,6 +705,7 @@ async function prepareEventFixtures(
   });
 
   return {
+    concurrentDialogEventId: concurrentDialogEvent.id,
     continuationEventId: continuationEvent.id,
     dialogFailureEventId: dialogFailureEvent.id,
     historyEventId: historyEvent.id,
@@ -698,7 +719,11 @@ async function prepareEventFixtures(
     mismatchedAllClearTransitionEventId: mismatchedAllClearTransitionEvent.id,
     mismatchedTransitionEventId: mismatchedTransitionEvent.id,
     newerPollEventId: newerPollEvent.id,
+    paginatedDialogEventId: paginatedDialogEvent.id,
+    pendingDialogEventId: pendingDialogEvent.id,
+    previewRetryEventId: previewRetryEvent.id,
     realDraftEventId: realDraftEvent.id,
+    rejectedDialogRaceEventId: rejectedDialogRaceEvent.id,
     stalePollEventId: stalePollEvent.id,
     staleLifecycleResponseEventId: staleLifecycleResponseEvent.id,
     stalledMutationEventId: stalledMutationEvent.id,
