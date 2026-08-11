@@ -14,6 +14,7 @@ import { drizzle as drizzleAwsDataApi } from 'drizzle-orm/aws-data-api/pg';
 
 import type { Database } from '../../../db/client';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
+import { createDrizzleStaleRosterReportStore } from '../../../lib/roster/stale-report';
 import {
   executeListUsersCapability,
   executeSetUserRolesCapability,
@@ -1195,6 +1196,73 @@ function fakeDatabase(client: FakeRdsDataClient): Database {
 }
 
 describe('admin Aurora Data API transport regression', () => {
+  test('keeps stale-report preflight failures asynchronous and transaction-free', async () => {
+    const client = new FakeRdsDataClient();
+    const store = createDrizzleStaleRosterReportStore(fakeDatabase(client));
+    let operation: Promise<unknown> | undefined;
+
+    expect(() => {
+      operation = store.loadScopedEvidence(
+        {
+          population: 'staff',
+          facilityId: FACILITY_ID,
+          cursor: null,
+          limit: 25,
+        },
+        {
+          facilityScope: {
+            kind: 'facilities',
+            facilityIds: [PROJECTION_FACILITY_IDS[1] ?? FACILITY_ID],
+          },
+        },
+      );
+    }).not.toThrow();
+    expect(operation).toBeInstanceOf(Promise);
+    await expect(operation).rejects.toMatchObject({
+      code: 'INVALID_REPORT_EVIDENCE',
+      name: 'StaleRosterReportError',
+    });
+    expect(client.statements).toEqual([]);
+  });
+
+  test('preserves the supplied store session binding in a repeatable-read projection', async () => {
+    const client = new FakeRdsDataClient();
+    const boundAuthenticated = authenticatedAdministrator();
+    const invokedAuthenticated = {
+      ...boundAuthenticated,
+      actor: {
+        ...boundAuthenticated.actor,
+        sessionId: '00000000-0000-4000-8000-000000002699',
+      },
+    } as AuthenticatedSession;
+    const requestId = '00000000-0000-4000-8000-000000002698';
+
+    await expect(
+      executeRosterHealthProjection({
+        authenticated: invokedAuthenticated,
+        store: createDrizzleAdminCapabilityStore(
+          fakeDatabase(client),
+          boundAuthenticated,
+        ),
+        query: {
+          population: 'staff',
+          facilityId: null,
+          cursor: null,
+          limit: 25,
+        },
+        metadata: { requestId, now: new Date(CLOCK_VALUE) },
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    const auditInsert = requireRecordedStatement(
+      client.statements.find(({ sql }) =>
+        sql.startsWith('insert into "security_audit_entries"'),
+      ),
+    );
+    expect(auditInsert.parameterStrings).toContain(requestId);
+    expect(auditInsert.parameterStrings).toContain('denied');
+    expect(client.committedTransactionIds).toContain(auditInsert.transactionId);
+  });
+
   test('holds the health result until the separately serialized success audit commits', async () => {
     const client = new FakeRdsDataClient();
     const authenticated = authenticatedAdministrator();
@@ -1958,6 +2026,7 @@ describe('admin Aurora Data API transport regression', () => {
       healthStatements.some(({ sql }) => sql.startsWith('lock table')),
     ).toBe(false);
 
+    const rosterStatementStart = client.statements.length;
     const roster = await executeRosterHealthProjection({
       authenticated,
       store,
@@ -1979,6 +2048,56 @@ describe('admin Aurora Data API transport regression', () => {
       latestCompleteSnapshotId: null,
       staleRecipients: [],
     });
+    const rosterStatements = client.statements.slice(rosterStatementStart);
+    const rosterSnapshotStatement = rosterStatements.findIndex(
+      ({ sql }) =>
+        sql === 'set transaction isolation level repeatable read read only',
+    );
+    const rosterSuccessAuditStatement = rosterStatements.findIndex(({ sql }) =>
+      sql.startsWith('insert into "security_audit_entries"'),
+    );
+    expect(rosterSnapshotStatement).toBe(0);
+    expect(rosterSuccessAuditStatement).toBeGreaterThan(
+      rosterSnapshotStatement,
+    );
+    const rosterSnapshotTransactionId =
+      rosterStatements[rosterSnapshotStatement]?.transactionId;
+    const rosterAuditTransactionId =
+      rosterStatements[rosterSuccessAuditStatement]?.transactionId;
+    expect(rosterSnapshotTransactionId).toBeTruthy();
+    expect(rosterAuditTransactionId).toBeTruthy();
+    expect(rosterAuditTransactionId).not.toBe(rosterSnapshotTransactionId);
+    const rosterAuditStatementStart = rosterStatements.findIndex(
+      ({ transactionId }) => transactionId === rosterAuditTransactionId,
+    );
+    expect(rosterAuditStatementStart).toBeGreaterThan(rosterSnapshotStatement);
+    expect(
+      rosterStatements
+        .slice(0, rosterAuditStatementStart)
+        .every(
+          ({ transactionId }) => transactionId === rosterSnapshotTransactionId,
+        ),
+    ).toBe(true);
+    expect(
+      rosterStatements
+        .slice(rosterAuditStatementStart)
+        .every(
+          ({ transactionId }) => transactionId === rosterAuditTransactionId,
+        ),
+    ).toBe(true);
+    expect(
+      rosterStatements.some(({ sql }) =>
+        sql.includes('from "roster_snapshots"'),
+      ),
+    ).toBe(true);
+    expect(
+      rosterStatements.some(({ sql }) =>
+        sql.includes('from "roster_sync_results"'),
+      ),
+    ).toBe(true);
+    expect(
+      new Set(rosterStatements.map(({ transactionId }) => transactionId)).size,
+    ).toBe(2);
     executedCapabilities.add('set-channel-enabled');
 
     const mockedChannel = await executeSetChannelEnabledCapability({
@@ -2064,10 +2183,9 @@ describe('admin Aurora Data API transport regression', () => {
       [...client.maximumInFlight.values()].every((maximum) => maximum === 1),
     ).toBe(true);
     expect(
-      client.statements.some(({ sql }) =>
-        sql.includes(
-          'set transaction isolation level repeatable read, read only',
-        ),
+      client.statements.some(
+        ({ sql }) =>
+          sql === 'set transaction isolation level repeatable read read only',
       ),
     ).toBe(true);
     expect(
