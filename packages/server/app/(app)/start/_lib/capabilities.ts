@@ -30,10 +30,11 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   readDatabaseConfig,
   type Database,
   type DatabaseConnection,
-  type PostgresDatabase,
+  type DatabaseQuery,
 } from '../../../../db/client';
 import {
   activationPreviews,
@@ -89,7 +90,7 @@ type StartFlowCapabilityId = Extract<
   'create-activation-preview' | 'list-facilities'
 >;
 
-type StartFlowQueryDatabase = PostgresDatabase;
+type StartFlowQueryDatabase = DatabaseQuery;
 
 // Defensive query ceilings mirror the canonical roster contract. The Zod
 // schemas remain the source of truth and validate every assembled row.
@@ -171,16 +172,24 @@ function encodeOffsetCursor(offset: number): string {
 }
 
 function startFlowQueryDatabase(database: unknown): StartFlowQueryDatabase {
-  // Both configured Drizzle transports expose this schema-aware query API.
-  // The direct-driver type avoids a union of overloaded method signatures.
+  // Both configured Drizzle transports expose this schema-aware query API;
+  // raw execute results are normalized at the consumers that read rows.
   return database as StartFlowQueryDatabase;
+}
+
+function eventTypeStoreDatabase(database: StartFlowQueryDatabase): Database {
+  // DrizzleEventTypeStore consumes only transport-normalized query builders.
+  // Keep it on this transaction while adapting its existing Database input.
+  return database as unknown as Database;
 }
 
 async function readDatabaseTime(
   database: StartFlowQueryDatabase,
 ): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+  const [row] = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   if (row === undefined) {
     throw unavailable('The authoritative database clock is unavailable.');
@@ -814,7 +823,7 @@ async function createActivationPreviewFromDatabase(
       throw unavailable('A complete roster snapshot is unavailable.');
     }
     const eventTypeVersion = await new DrizzleEventTypeStore(
-      database,
+      eventTypeStoreDatabase(database),
     ).getVersion({
       eventTypeVersionId: input.eventTypeVersion.id,
     });
