@@ -5,9 +5,12 @@ import {
   type CapabilityOutput,
   type CapabilityScope,
   type HumanConfirmationRecord,
+  type SecurityAuditEntry,
 } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../auth/sessions';
+import { buildSecurityAuditEntry } from '../audit/entry';
+import { verifySecurityAuditEntries } from '../audit/verification';
 import {
   CapabilityEngineError,
   executeCapability,
@@ -259,6 +262,34 @@ class MemoryCapabilityStore
   public get auditEvents(): readonly CapabilityAuditEvent[] {
     return this.state.audits;
   }
+
+  public get auditChain(): readonly SecurityAuditEntry[] {
+    const entries: SecurityAuditEntry[] = [];
+    for (const [index, event] of this.state.audits.entries()) {
+      const previous = entries.at(-1) ?? null;
+      entries.push(
+        buildSecurityAuditEntry(
+          {
+            category: event.category,
+            action: event.action,
+            actionIds: event.actionIds,
+            confirmationId: event.confirmationId,
+            outcome: event.outcome,
+            principal: event.actor,
+            source: event.source,
+            facilityId: event.facilityId,
+            target: { kind: 'capability', id: event.action },
+            requestId: event.requestId,
+            reasonCode: event.reasonCode,
+            occurredAt: event.occurredAt.toISOString(),
+          },
+          previous,
+          { createId: () => uuid(30_000 + index) },
+        ),
+      );
+    }
+    return entries;
+  }
 }
 
 function humanMutationInvocation(
@@ -301,6 +332,18 @@ function humanQueryInvocation(
     requestId,
     serverTime: new Date(TIMES.execution),
     connectivityEpochId: IDS.connectivityEpoch,
+    mutation: null,
+  };
+}
+
+function agentQueryInvocation(requestId: string): TrustedCapabilityInvocation {
+  return {
+    actor: AGENT_ACTOR,
+    source: 'mcp',
+    scope: DISTRICT_SCOPE,
+    requestId,
+    serverTime: new Date(TIMES.execution),
+    connectivityEpochId: null,
     mutation: null,
   };
 }
@@ -393,6 +436,38 @@ function createListRegistration(): Readonly<{
         };
       },
       resolveFacilityId: (input) => input.facilityId,
+    },
+    handlerCalls: () => handlerCalls,
+  };
+}
+
+function createEventRoomSyncRegistration(fail = false): Readonly<{
+  registration: ServerCapabilityRegistration<
+    'sync-event-room',
+    MemoryCapabilityTransaction
+  >;
+  handlerCalls: () => number;
+}> {
+  let handlerCalls = 0;
+  return {
+    registration: {
+      id: 'sync-event-room',
+      handler: () => {
+        handlerCalls += 1;
+        if (fail) throw new Error('synthetic sync persistence failure');
+        return {
+          eventId: IDS.event,
+          event: SYNTHETIC_ACTIVE_EVENT,
+          entries: [],
+          cursor: Buffer.from(
+            JSON.stringify({ v: 1, e: IDS.event, s: 1 }),
+            'utf8',
+          ).toString('base64url'),
+          hasMore: false,
+          snapshotSequence: 1,
+        };
+      },
+      resolveFacilityId: () => IDS.facility,
     },
     handlerCalls: () => handlerCalls,
   };
@@ -619,7 +694,7 @@ describe('capability engine', () => {
     expect(Object.isFrozen(invocation.mutation)).toBe(true);
   });
 
-  test('returns the original mutation result on same-key replay without a second handler call', async () => {
+  test('audits an exact mutation replay under its fresh request ID without a second handler call', async () => {
     const store = new MemoryCapabilityStore();
     const join = createJoinRegistration();
     const idempotencyKey = 'join-replay-key-0001';
@@ -647,6 +722,22 @@ describe('capability engine', () => {
     expect(replay).toEqual(first);
     expect(join.handlerCalls()).toBe(1);
     expect(join.replayLoads()).toBe(1);
+    expect(store.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'join-event',
+        outcome: 'success',
+        requestId: uuid(101),
+        facilityId: IDS.facility,
+      }),
+      expect.objectContaining({
+        action: 'join-event',
+        outcome: 'success',
+        requestId: uuid(102),
+        facilityId: IDS.facility,
+        actionIds: [],
+        confirmationId: null,
+      }),
+    ]);
   });
 
   test('validates static transport and connectivity truth before idempotent replay', async () => {
@@ -754,6 +845,201 @@ describe('capability engine', () => {
         facilityId: IDS.facility,
       }),
     ]);
+  });
+
+  test('executes 1,200 successful room syncs without serializing security-audit writes', async () => {
+    const store = new MemoryCapabilityStore();
+    const sync = createEventRoomSyncRegistration();
+
+    for (let index = 0; index < 1_200; index += 1) {
+      await executeCapability(
+        sync.registration,
+        { eventId: IDS.event, cursor: null, limit: 100 },
+        humanQueryInvocation(uuid(10_000 + index), DISTRICT_SCOPE),
+        store,
+      );
+    }
+
+    expect(sync.handlerCalls()).toBe(1_200);
+    expect(store.auditEvents).toHaveLength(0);
+  });
+
+  test('still audits denied and failed room syncs while agent queries remain all-outcomes', async () => {
+    const deniedStore = new MemoryCapabilityStore();
+    const deniedSync = createEventRoomSyncRegistration();
+    const deniedRequestId = uuid(11_300);
+    const denied = await captureEngineError(() =>
+      executeCapability(
+        deniedSync.registration,
+        { eventId: IDS.event, cursor: null, limit: 100 },
+        humanQueryInvocation(deniedRequestId, facilityScope(IDS.otherFacility)),
+        deniedStore,
+      ),
+    );
+    expect(denied.reasonCode).toBe('CAPABILITY_SCOPE_DENIED');
+    expect(deniedStore.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'sync-event-room',
+        outcome: 'denied',
+        requestId: deniedRequestId,
+      }),
+    ]);
+
+    const failedStore = new MemoryCapabilityStore();
+    const failedSync = createEventRoomSyncRegistration(true);
+    const failedRequestId = uuid(11_301);
+    const failed = await captureEngineError(() =>
+      executeCapability(
+        failedSync.registration,
+        { eventId: IDS.event, cursor: null, limit: 100 },
+        humanQueryInvocation(failedRequestId, DISTRICT_SCOPE),
+        failedStore,
+      ),
+    );
+    expect(failed.reasonCode).toBe('PERSISTENCE_CONFLICT');
+    expect(failedStore.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'sync-event-room',
+        outcome: 'failure',
+        requestId: failedRequestId,
+      }),
+    ]);
+
+    const agentStore = new MemoryCapabilityStore();
+    const list = createListRegistration();
+    await executeCapability(
+      list.registration,
+      { facilityId: IDS.facility, cursor: null, limit: 20 },
+      agentQueryInvocation(uuid(11_302)),
+      agentStore,
+    );
+    expect(agentStore.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'list-active-events',
+        category: 'agent-access',
+        outcome: 'success',
+      }),
+    ]);
+  });
+
+  test('audits malformed sync, mutation, and agent-query input exactly once', async () => {
+    const syncStore = new MemoryCapabilityStore();
+    const sync = createEventRoomSyncRegistration();
+    const syncRequestId = uuid(11_303);
+    const syncError = await captureEngineError(() =>
+      executeCapability(
+        sync.registration,
+        { eventId: IDS.event, cursor: null, limit: 0 },
+        humanQueryInvocation(syncRequestId, DISTRICT_SCOPE),
+        syncStore,
+      ),
+    );
+    expect(syncError).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      reasonCode: 'CAPABILITY_INPUT_INVALID',
+      status: 400,
+    });
+    expect(sync.handlerCalls()).toBe(0);
+    expect(syncStore.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'sync-event-room',
+        facilityId: null,
+        outcome: 'failure',
+        reasonCode: 'CAPABILITY_INPUT_INVALID',
+        requestId: syncRequestId,
+      }),
+    ]);
+
+    const mutationStore = new MemoryCapabilityStore();
+    const join = createJoinRegistration();
+    const mutationRequestId = uuid(11_304);
+    const mutationError = await captureEngineError(() =>
+      executeCapability(
+        join.registration,
+        { eventId: 'not-a-valid-event-id' },
+        humanMutationInvocation({
+          requestId: mutationRequestId,
+          idempotencyKey: 'malformed-join-input-0001',
+        }),
+        mutationStore,
+      ),
+    );
+    expect(mutationError.reasonCode).toBe('CAPABILITY_INPUT_INVALID');
+    expect(join.handlerCalls()).toBe(0);
+    expect(mutationStore.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'join-event',
+        facilityId: null,
+        outcome: 'failure',
+        reasonCode: 'CAPABILITY_INPUT_INVALID',
+        requestId: mutationRequestId,
+      }),
+    ]);
+
+    const agentStore = new MemoryCapabilityStore();
+    const list = createListRegistration();
+    const agentRequestId = uuid(11_305);
+    const agentError = await captureEngineError(() =>
+      executeCapability(
+        list.registration,
+        { facilityId: 'not-a-valid-facility-id', cursor: null, limit: 20 },
+        agentQueryInvocation(agentRequestId),
+        agentStore,
+      ),
+    );
+    expect(agentError.reasonCode).toBe('CAPABILITY_INPUT_INVALID');
+    expect(list.handlerCalls()).toBe(0);
+    expect(agentStore.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'list-active-events',
+        facilityId: null,
+        outcome: 'failure',
+        reasonCode: 'CAPABILITY_INPUT_INVALID',
+        requestId: agentRequestId,
+      }),
+    ]);
+  });
+
+  test('forms a valid exactly-once hash chain for a mutation replay and an agent query', async () => {
+    const store = new MemoryCapabilityStore();
+    const join = createJoinRegistration();
+    const list = createListRegistration();
+    const idempotencyKey = 'join-chain-replay-key-0001';
+    const firstRequestId = uuid(11_400);
+    const replayRequestId = uuid(11_401);
+    const agentRequestId = uuid(11_402);
+
+    await executeCapability(
+      join.registration,
+      { eventId: IDS.event },
+      humanMutationInvocation({ requestId: firstRequestId, idempotencyKey }),
+      store,
+    );
+    await executeCapability(
+      join.registration,
+      { eventId: IDS.event },
+      humanMutationInvocation({ requestId: replayRequestId, idempotencyKey }),
+      store,
+    );
+    await executeCapability(
+      list.registration,
+      { facilityId: IDS.facility, cursor: null, limit: 20 },
+      agentQueryInvocation(agentRequestId),
+      store,
+    );
+
+    expect(store.auditEvents.map((event) => event.requestId)).toEqual([
+      firstRequestId,
+      replayRequestId,
+      agentRequestId,
+    ]);
+    expect(join.handlerCalls()).toBe(1);
+    expect(list.handlerCalls()).toBe(1);
+    expect(store.auditChain).toHaveLength(3);
+    expect(verifySecurityAuditEntries(store.auditChain)).toEqual({
+      valid: true,
+      verifiedThroughSequence: 3,
+    });
   });
 
   test('denies an explicitly filtered query outside the trusted facility scope', async () => {

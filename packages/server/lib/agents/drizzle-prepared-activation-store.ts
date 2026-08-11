@@ -9,7 +9,11 @@ import {
 } from '@psd-eoc/contracts';
 import { and, desc, eq, sql } from 'drizzle-orm';
 
-import type { Database, PostgresDatabase } from '../../db/client';
+import {
+  databaseExecuteRows,
+  type Database,
+  type DatabaseQuery,
+} from '../../db/client';
 import {
   activationPreviews,
   audienceConfigurations,
@@ -34,7 +38,11 @@ import type {
 
 // Both configured Drizzle transports expose this schema-aware query surface.
 // The direct-driver type avoids a union of incompatible overloaded signatures.
-type AgentQueryDatabase = PostgresDatabase;
+type AgentQueryDatabase = DatabaseQuery;
+
+function agentQueryDatabase(database: unknown): AgentQueryDatabase {
+  return database as AgentQueryDatabase;
+}
 
 function dateIso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
@@ -49,9 +57,14 @@ function conflict(message: string): CapabilityEngineError {
   );
 }
 
-async function databaseTime(database: AgentQueryDatabase): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+/** Reads the authoritative clock through either configured Drizzle transport. */
+export async function readPreparedActivationDatabaseTime(
+  database: Pick<DatabaseQuery, 'execute'>,
+): Promise<Date> {
+  const [row] = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   if (row === undefined) {
     throw conflict('The authoritative database clock is unavailable.');
@@ -322,7 +335,7 @@ function createTransaction(
   database: AgentQueryDatabase,
 ): PreparedActivationCapabilityTransaction {
   return {
-    readCurrentTime: () => databaseTime(database),
+    readCurrentTime: () => readPreparedActivationDatabaseTime(database),
     claimIdempotency: (input) => claimIdempotency(database, input),
     completeIdempotency: (input) => completeIdempotency(database, input),
     getHumanConfirmation: async () => null,
@@ -355,12 +368,12 @@ export function createDrizzlePreparedActivationCapabilityStore(
       ) => Promise<Result>,
     ): Promise<Result> {
       return queryDatabase.transaction((transaction) =>
-        operation(createTransaction(transaction)),
+        operation(createTransaction(agentQueryDatabase(transaction))),
       );
     },
     appendCapabilityAudit(event) {
       return queryDatabase.transaction((transaction) =>
-        appendCapabilityAudit(transaction, event),
+        appendCapabilityAudit(agentQueryDatabase(transaction), event),
       );
     },
   };

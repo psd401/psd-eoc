@@ -15,6 +15,7 @@ import {
   PaginationCursorSchema,
   SecurityAuditEntrySchema,
   UuidSchema,
+  projectJournalEntryForRead,
   type ActivationPreview,
   type CapabilityInput,
   type CapabilityOutput,
@@ -30,10 +31,11 @@ import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   readDatabaseConfig,
   type Database,
   type DatabaseConnection,
-  type PostgresDatabase,
+  type DatabaseQuery,
 } from '../../db/client';
 import {
   activationPreviews,
@@ -95,6 +97,11 @@ export interface JournalCapabilityTransaction
     entryId: string,
     sequence: number | null,
   ): Promise<JournalEntry | null>;
+  hasJournalSupersession(
+    eventId: string,
+    entryId: string,
+    kind: 'correction' | 'redaction' | null,
+  ): Promise<boolean>;
   appendJournalEntry(entry: JournalEntry): Promise<void>;
   listJournalEntries(
     input: CapabilityInput<'list-journal-entries'>,
@@ -107,6 +114,12 @@ export interface JournalCapabilityTransaction
     resultReference: string,
   ): Promise<string | null>;
   loadJournalReplay(resultReference: string): Promise<JournalEntry | null>;
+  resolveLifecyclePreviewReplayFacilityId(
+    resultReference: string,
+  ): Promise<string | null>;
+  loadLifecyclePreviewReplay(
+    resultReference: string,
+  ): Promise<LifecycleConsequencePreview | null>;
 }
 
 /** Atomic store used by web, REST, MCP, and tests for journal capabilities. */
@@ -392,6 +405,15 @@ interface JournalResultReference {
   readonly j: string;
 }
 
+interface LifecyclePreviewResultReference {
+  readonly v: 1;
+  readonly k: 'lifecycle-preview';
+  readonly e: string;
+  readonly f: string;
+  readonly i: string;
+  readonly p: LifecycleConsequencePreview['purpose'];
+}
+
 // This bridge exists because the shared engine's final replay check is
 // synchronous while facility resolution is database-backed. The bound is
 // above the product's 1,200-user ceiling and entries are normally removed as
@@ -403,6 +425,11 @@ interface JournalReplayFacilityEvidence {
 }
 
 const journalReplayFacilityEvidence = new Map<
+  string,
+  JournalReplayFacilityEvidence
+>();
+
+const lifecyclePreviewReplayFacilityEvidence = new Map<
   string,
   JournalReplayFacilityEvidence
 >();
@@ -485,6 +512,116 @@ function parseJournalResultReference(
   }
 }
 
+function lifecyclePreviewResultReference(
+  preview: LifecycleConsequencePreview,
+  context: CapabilityHandlerContext<JournalCapabilityTransaction>,
+): string {
+  const facilityId = context.resolvedFacilityId;
+  if (facilityId === null) {
+    throw new CapabilityEngineError(
+      'INTERNAL_ERROR',
+      'IDEMPOTENCY_RESULT_UNAVAILABLE',
+      'The lifecycle preview facility was not resolved.',
+      500,
+    );
+  }
+  return Buffer.from(
+    JSON.stringify({
+      v: 1,
+      k: 'lifecycle-preview',
+      e: preview.eventId,
+      f: UuidSchema.parse(facilityId),
+      i: preview.id,
+      p: preview.purpose,
+    } satisfies LifecyclePreviewResultReference),
+    'utf8',
+  ).toString('base64url');
+}
+
+function parseLifecyclePreviewResultReference(
+  value: string,
+): LifecyclePreviewResultReference | null {
+  try {
+    const parsed: unknown = JSON.parse(
+      Buffer.from(value, 'base64url').toString('utf8'),
+    );
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return null;
+    }
+    const purpose = Reflect.get(parsed, 'p');
+    if (
+      Reflect.get(parsed, 'v') !== 1 ||
+      Reflect.get(parsed, 'k') !== 'lifecycle-preview' ||
+      !UuidSchema.safeParse(Reflect.get(parsed, 'e')).success ||
+      !UuidSchema.safeParse(Reflect.get(parsed, 'f')).success ||
+      !UuidSchema.safeParse(Reflect.get(parsed, 'i')).success ||
+      (purpose !== 'all-clear' && purpose !== 'reactivation') ||
+      Object.keys(parsed).sort().join(',') !== 'e,f,i,k,p,v'
+    ) {
+      return null;
+    }
+    return {
+      v: 1,
+      k: 'lifecycle-preview',
+      e: String(Reflect.get(parsed, 'e')),
+      f: String(Reflect.get(parsed, 'f')),
+      i: String(Reflect.get(parsed, 'i')),
+      p: purpose,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function rememberLifecyclePreviewReplayFacility(
+  previewId: string,
+  facilityId: string,
+): void {
+  const existing = lifecyclePreviewReplayFacilityEvidence.get(previewId);
+  if (existing !== undefined && existing.facilityId !== facilityId) {
+    throw conflict(
+      'The lifecycle preview replay facility evidence is inconsistent.',
+    );
+  }
+  lifecyclePreviewReplayFacilityEvidence.delete(previewId);
+  lifecyclePreviewReplayFacilityEvidence.set(previewId, {
+    facilityId,
+    pendingConsumers: (existing?.pendingConsumers ?? 0) + 1,
+  });
+  while (
+    lifecyclePreviewReplayFacilityEvidence.size > JOURNAL_REPLAY_EVIDENCE_LIMIT
+  ) {
+    const oldest = lifecyclePreviewReplayFacilityEvidence.keys().next()
+      .value as string | undefined;
+    if (oldest === undefined) {
+      break;
+    }
+    lifecyclePreviewReplayFacilityEvidence.delete(oldest);
+  }
+}
+
+function consumeLifecyclePreviewReplayFacility(
+  preview: LifecycleConsequencePreview,
+): string | null {
+  const evidence = lifecyclePreviewReplayFacilityEvidence.get(preview.id);
+  if (evidence === undefined) {
+    return null;
+  }
+  if (evidence.pendingConsumers <= 1) {
+    lifecyclePreviewReplayFacilityEvidence.delete(preview.id);
+  } else {
+    lifecyclePreviewReplayFacilityEvidence.set(preview.id, {
+      facilityId: evidence.facilityId,
+      pendingConsumers: evidence.pendingConsumers - 1,
+    });
+  }
+  return evidence.facilityId;
+}
+
 async function eventFacilityId(
   eventId: string,
   context: CapabilityHandlerContext<JournalCapabilityTransaction>,
@@ -562,6 +699,22 @@ async function buildJournalEntry(
     if (target.kind === 'system') {
       throw conflict('System lifecycle journal facts cannot be superseded.');
     }
+    const supersessionKind =
+      capabilityId === 'correct-journal-entry' ? null : 'redaction';
+    if (
+      capabilityId !== 'append-journal-entry' &&
+      (await context.transaction.hasJournalSupersession(
+        input.eventId,
+        target.id,
+        supersessionKind,
+      ))
+    ) {
+      throw conflict(
+        capabilityId === 'correct-journal-entry'
+          ? 'A journal correction cannot target an entry that is already superseded.'
+          : 'The journal entry already has an append-only redaction.',
+      );
+    }
   }
 
   // Read after acquiring the event lock. Sequence is the total order; this
@@ -638,6 +791,57 @@ async function loadJournalReplay(
   return JournalEntrySchema.parse(entry);
 }
 
+function canonicalLifecyclePreviewInput(
+  input: CapabilityInput<'create-lifecycle-consequence-preview'>,
+): unknown {
+  return {
+    eventId: input.eventId,
+    purpose: input.purpose,
+  };
+}
+
+async function lifecyclePreviewReplayFacilityId(
+  reference: string,
+  context: CapabilityHandlerContext<JournalCapabilityTransaction>,
+): Promise<string> {
+  const referenceValue = parseLifecyclePreviewResultReference(reference);
+  const facilityId =
+    await context.transaction.resolveLifecyclePreviewReplayFacilityId(
+      reference,
+    );
+  if (
+    referenceValue === null ||
+    facilityId === null ||
+    referenceValue.f !== facilityId
+  ) {
+    throw new CapabilityEngineError(
+      'INTERNAL_ERROR',
+      'IDEMPOTENCY_RESULT_UNAVAILABLE',
+      'The original lifecycle preview facility is unavailable.',
+      500,
+    );
+  }
+  rememberLifecyclePreviewReplayFacility(referenceValue.i, facilityId);
+  return facilityId;
+}
+
+async function loadLifecyclePreviewReplay(
+  reference: string,
+  context: CapabilityHandlerContext<JournalCapabilityTransaction>,
+): Promise<LifecycleConsequencePreview> {
+  const preview =
+    await context.transaction.loadLifecyclePreviewReplay(reference);
+  if (preview === null) {
+    throw new CapabilityEngineError(
+      'INTERNAL_ERROR',
+      'IDEMPOTENCY_RESULT_UNAVAILABLE',
+      'The original lifecycle preview is unavailable.',
+      500,
+    );
+  }
+  return LifecycleConsequencePreviewSchema.parse(preview);
+}
+
 export const appendJournalEntryRegistration: ServerCapabilityRegistration<
   'append-journal-entry',
   JournalCapabilityTransaction
@@ -702,6 +906,7 @@ export const createLifecycleConsequencePreviewRegistration: ServerCapabilityRegi
   JournalCapabilityTransaction
 > = {
   id: 'create-lifecycle-consequence-preview',
+  canonicalizeIdempotencyInput: canonicalLifecyclePreviewInput,
   resolveFacilityId: (input, context) =>
     eventFacilityId(input.eventId, context),
   async handler(input, context): Promise<LifecycleConsequencePreview> {
@@ -709,6 +914,10 @@ export const createLifecycleConsequencePreviewRegistration: ServerCapabilityRegi
       await context.transaction.createLifecycleConsequencePreview(input),
     );
   },
+  resultReference: lifecyclePreviewResultReference,
+  loadReplay: loadLifecyclePreviewReplay,
+  resolveReplayFacilityId: lifecyclePreviewReplayFacilityId,
+  replayFacilityId: consumeLifecyclePreviewReplayFacility,
 };
 
 export const getFacilityRegistration: ServerCapabilityRegistration<
@@ -749,7 +958,7 @@ export async function executeJournalCapability<Id extends JournalCapabilityId>(
   return executeCapability(registration, input, invocation, store);
 }
 
-type JournalQueryDatabase = PostgresDatabase;
+type JournalQueryDatabase = DatabaseQuery;
 
 function journalQueryDatabase(database: unknown): JournalQueryDatabase {
   // Both configured Drizzle transports expose this common query surface.
@@ -757,8 +966,10 @@ function journalQueryDatabase(database: unknown): JournalQueryDatabase {
 }
 
 async function readDatabaseTime(database: JournalQueryDatabase): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+  const [row] = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   if (row === undefined) {
     throw conflict('The authoritative database clock is unavailable.');
@@ -1047,6 +1258,27 @@ async function getJournalEntryFromDatabase(
   return row === undefined ? null : journalFromRow(row);
 }
 
+async function hasJournalSupersessionFromDatabase(
+  database: JournalQueryDatabase,
+  eventId: string,
+  entryId: string,
+  kind: 'correction' | 'redaction' | null,
+): Promise<boolean> {
+  const conditions = [
+    eq(journalEntries.eventId, eventId),
+    eq(journalEntries.supersedesEntryId, entryId),
+  ];
+  if (kind !== null) {
+    conditions.push(eq(journalEntries.supersessionKind, kind));
+  }
+  const [row] = await database
+    .select({ id: journalEntries.id })
+    .from(journalEntries)
+    .where(and(...conditions))
+    .limit(1);
+  return row !== undefined;
+}
+
 async function listJournalEntriesFromDatabase(
   database: JournalQueryDatabase,
   input: CapabilityInput<'list-journal-entries'>,
@@ -1064,7 +1296,29 @@ async function listJournalEntriesFromDatabase(
     .orderBy(asc(journalEntries.sequence))
     .limit(input.limit + 1);
   const hasMore = rows.length > input.limit;
-  const visible = rows.slice(0, input.limit).map(journalFromRow);
+  const visibleRows = rows.slice(0, input.limit);
+  const visibleIds = visibleRows.map((row) => row.id);
+  const redactionTargets =
+    visibleIds.length === 0
+      ? []
+      : await database
+          .select({ entryId: journalEntries.supersedesEntryId })
+          .from(journalEntries)
+          .where(
+            and(
+              eq(journalEntries.eventId, input.eventId),
+              eq(journalEntries.supersessionKind, 'redaction'),
+              inArray(journalEntries.supersedesEntryId, visibleIds),
+            ),
+          );
+  const redactedIds = new Set(
+    redactionTargets.flatMap(({ entryId }) =>
+      entryId === null ? [] : [entryId],
+    ),
+  );
+  const visible = visibleRows.map((row) =>
+    projectJournalEntryForRead(journalFromRow(row), redactedIds.has(row.id)),
+  );
   const last = visible.at(-1);
   return JournalEntryPageSchema.parse({
     items: visible,
@@ -1072,7 +1326,7 @@ async function listJournalEntriesFromDatabase(
       hasMore,
       nextCursor:
         hasMore && last !== undefined
-          ? createJournalCursor(input.eventId, last.sequence)
+          ? createJournalCursor(input.eventId, last.entry.sequence)
           : null,
     },
   });
@@ -1153,29 +1407,28 @@ async function createLifecycleConsequencePreviewFromDatabase(
     );
   }
 
-  const [facilityRow, versionRow, templateRows] = await Promise.all([
-    database
-      .select()
-      .from(facilities)
-      .where(eq(facilities.id, event.facilityId))
-      .limit(1)
-      .then((rows) => rows[0]),
-    database
-      .select()
-      .from(eventTypeVersions)
-      .where(eq(eventTypeVersions.id, event.eventTypeVersion.id))
-      .limit(1)
-      .then((rows) => rows[0]),
-    database
-      .select()
-      .from(eventTypeTemplates)
-      .where(
-        and(
-          eq(eventTypeTemplates.eventTypeVersionId, event.eventTypeVersion.id),
-          eq(eventTypeTemplates.purpose, input.purpose),
-        ),
+  // The AWS Data API rejects concurrent statements carrying one transaction
+  // ID. Keep these independent reads sequential so the same capability works
+  // through both configured Drizzle transports.
+  const [facilityRow] = await database
+    .select()
+    .from(facilities)
+    .where(eq(facilities.id, event.facilityId))
+    .limit(1);
+  const [versionRow] = await database
+    .select()
+    .from(eventTypeVersions)
+    .where(eq(eventTypeVersions.id, event.eventTypeVersion.id))
+    .limit(1);
+  const templateRows = await database
+    .select()
+    .from(eventTypeTemplates)
+    .where(
+      and(
+        eq(eventTypeTemplates.eventTypeVersionId, event.eventTypeVersion.id),
+        eq(eventTypeTemplates.purpose, input.purpose),
       ),
-  ]);
+    );
   if (
     facilityRow === undefined ||
     versionRow === undefined ||
@@ -1394,6 +1647,51 @@ async function loadJournalReplayFromDatabase(
   return getJournalEntryFromDatabase(database, reference.e, reference.j, null);
 }
 
+async function resolveLifecyclePreviewReplayFacilityIdFromDatabase(
+  database: JournalQueryDatabase,
+  resultReference: string,
+): Promise<string | null> {
+  const reference = parseLifecyclePreviewResultReference(resultReference);
+  if (reference === null) {
+    return null;
+  }
+  const [row] = await database
+    .select({ facilityId: events.facilityId })
+    .from(lifecycleConsequencePreviews)
+    .innerJoin(events, eq(events.id, lifecycleConsequencePreviews.eventId))
+    .where(
+      and(
+        eq(lifecycleConsequencePreviews.id, reference.i),
+        eq(lifecycleConsequencePreviews.eventId, reference.e),
+        eq(lifecycleConsequencePreviews.purpose, reference.p),
+      ),
+    )
+    .limit(1);
+  return row?.facilityId ?? null;
+}
+
+async function loadLifecyclePreviewReplayFromDatabase(
+  database: JournalQueryDatabase,
+  resultReference: string,
+): Promise<LifecycleConsequencePreview | null> {
+  const reference = parseLifecyclePreviewResultReference(resultReference);
+  if (reference === null) {
+    return null;
+  }
+  const [row] = await database
+    .select()
+    .from(lifecycleConsequencePreviews)
+    .where(
+      and(
+        eq(lifecycleConsequencePreviews.id, reference.i),
+        eq(lifecycleConsequencePreviews.eventId, reference.e),
+        eq(lifecycleConsequencePreviews.purpose, reference.p),
+      ),
+    )
+    .limit(1);
+  return row === undefined ? null : lifecyclePreviewFromRow(row);
+}
+
 function createDrizzleJournalTransaction(
   database: JournalQueryDatabase,
 ): JournalCapabilityTransaction {
@@ -1412,6 +1710,8 @@ function createDrizzleJournalTransaction(
       lockEventForJournalFromDatabase(database, eventId),
     getJournalEntry: (eventId, entryId, sequence) =>
       getJournalEntryFromDatabase(database, eventId, entryId, sequence),
+    hasJournalSupersession: (eventId, entryId, kind) =>
+      hasJournalSupersessionFromDatabase(database, eventId, entryId, kind),
     async appendJournalEntry(entry) {
       await database.insert(journalEntries).values(journalInsertValues(entry));
     },
@@ -1424,6 +1724,10 @@ function createDrizzleJournalTransaction(
       resolveJournalReplayFacilityIdFromDatabase(database, reference),
     loadJournalReplay: (reference) =>
       loadJournalReplayFromDatabase(database, reference),
+    resolveLifecyclePreviewReplayFacilityId: (reference) =>
+      resolveLifecyclePreviewReplayFacilityIdFromDatabase(database, reference),
+    loadLifecyclePreviewReplay: (reference) =>
+      loadLifecyclePreviewReplayFromDatabase(database, reference),
   };
 }
 

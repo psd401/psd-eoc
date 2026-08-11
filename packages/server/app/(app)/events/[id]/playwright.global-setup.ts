@@ -1,6 +1,7 @@
+import type { FullConfig } from '@playwright/test';
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -39,12 +40,8 @@ import {
   createDrizzleInitialWebSessionStore,
   digestWebSessionCredential,
 } from '../../../../lib/auth/session-cookie';
-import {
-  EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH,
-  EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH,
-  EVENT_ROOM_PLAYWRIGHT_STORAGE_STATE_PATH,
-  requireSyntheticEventRoomTestDatabaseUrl,
-} from './test-database';
+import { createOwnedEventRoomPlaywrightDatabase } from './playwright-database';
+import { requireEventRoomPlaywrightRunContext } from './test-database';
 
 const ACCESS_GROUP_ID = '16000000-0000-4000-8000-000000000110';
 const MEMBER_USER_ID = '16000000-0000-4000-8000-000000000120';
@@ -70,12 +67,31 @@ interface AccessFixture {
 }
 
 interface EventRoomFixture {
+  readonly concurrentDialogEventId: string;
+  readonly continuationEventId: string;
+  readonly dialogFailureEventId: string;
   readonly historyEventId: string;
+  readonly invalidationEventId: string;
+  readonly journalEvidenceEventId: string;
   readonly keyboardEventId: string;
   readonly recoveryEventId: string;
   readonly recoveryOwnerEventId: string;
   readonly lifecycleEventId: string;
+  readonly malformedLifecycleEventId: string;
+  readonly mismatchedAllClearTransitionEventId: string;
+  readonly mismatchedTransitionEventId: string;
+  readonly newerPollEventId: string;
+  readonly paginatedDialogEventId: string;
+  readonly paginatedLifecycleEventId: string;
+  readonly pendingDialogEventId: string;
+  readonly previewRetryEventId: string;
   readonly realDraftEventId: string;
+  readonly rejectedDialogRaceEventId: string;
+  readonly rejectedLifecycleDialogEventId: string;
+  readonly stalePollEventId: string;
+  readonly staleLifecycleResponseEventId: string;
+  readonly stalledMutationEventId: string;
+  readonly stalledPreviewEventId: string;
 }
 
 interface ChannelConfigurationState {
@@ -262,6 +278,7 @@ async function prepareAccessEvidence(
 async function issueSyntheticOperatorSession(
   connection: PostgresDatabaseConnection,
   fixture: AccessFixture,
+  storageStatePath: string,
 ): Promise<Extract<Actor, { kind: 'human' }>> {
   const now = new Date(
     Math.max(Date.now(), fixture.capturedAt.getTime() + 1_000),
@@ -339,7 +356,7 @@ async function issueSyntheticOperatorSession(
     new Date(result.session.expiresAt).getTime() / 1_000,
   );
   await writeFile(
-    EVENT_ROOM_PLAYWRIGHT_STORAGE_STATE_PATH,
+    storageStatePath,
     JSON.stringify({
       cookies: [
         {
@@ -537,10 +554,29 @@ async function prepareEventFixtures(
     });
   };
   const historyEvent = makeActiveEvent();
+  const concurrentDialogEvent = makeActiveEvent();
+  const invalidationEvent = makeActiveEvent();
+  const journalEvidenceEvent = makeActiveEvent();
   const keyboardEvent = makeActiveEvent();
   const recoveryEvent = makeActiveEvent();
   const recoveryOwnerEvent = makeActiveEvent();
   const lifecycleEvent = makeActiveEvent();
+  const continuationEvent = makeActiveEvent();
+  const stalePollEvent = makeActiveEvent();
+  const malformedLifecycleEvent = makeActiveEvent();
+  const mismatchedAllClearTransitionEvent = makeActiveEvent();
+  const mismatchedTransitionEvent = makeActiveEvent();
+  const newerPollEvent = makeActiveEvent();
+  const paginatedDialogEvent = makeActiveEvent();
+  const paginatedLifecycleEvent = makeActiveEvent();
+  const pendingDialogEvent = makeActiveEvent();
+  const previewRetryEvent = makeActiveEvent();
+  const rejectedDialogRaceEvent = makeActiveEvent();
+  const rejectedLifecycleDialogEvent = makeActiveEvent();
+  const staleLifecycleResponseEvent = makeActiveEvent();
+  const dialogFailureEvent = makeActiveEvent();
+  const stalledMutationEvent = makeActiveEvent();
+  const stalledPreviewEvent = makeActiveEvent();
   const realDraftEvent = EventSchema.parse({
     id: randomUUID(),
     facilityId: FACILITY_ID,
@@ -588,10 +624,29 @@ async function prepareEventFixtures(
     });
   const journal = [
     ...makeHistory(historyEvent, 105),
+    ...makeHistory(concurrentDialogEvent, 3),
+    ...makeHistory(invalidationEvent, 3),
+    ...makeHistory(journalEvidenceEvent, 3),
     ...makeHistory(keyboardEvent, 3),
     ...makeHistory(recoveryEvent, 3),
     ...makeHistory(recoveryOwnerEvent, 3),
     ...makeHistory(lifecycleEvent, 3),
+    ...makeHistory(continuationEvent, 3),
+    ...makeHistory(stalePollEvent, 3),
+    ...makeHistory(malformedLifecycleEvent, 3),
+    ...makeHistory(mismatchedAllClearTransitionEvent, 3),
+    ...makeHistory(mismatchedTransitionEvent, 3),
+    ...makeHistory(newerPollEvent, 3),
+    ...makeHistory(paginatedDialogEvent, 3),
+    ...makeHistory(paginatedLifecycleEvent, 3),
+    ...makeHistory(pendingDialogEvent, 3),
+    ...makeHistory(previewRetryEvent, 3),
+    ...makeHistory(rejectedDialogRaceEvent, 3),
+    ...makeHistory(rejectedLifecycleDialogEvent, 3),
+    ...makeHistory(staleLifecycleResponseEvent, 3),
+    ...makeHistory(dialogFailureEvent, 3),
+    ...makeHistory(stalledMutationEvent, 3),
+    ...makeHistory(stalledPreviewEvent, 3),
   ];
 
   await database.transaction(async (transaction) => {
@@ -625,10 +680,29 @@ async function prepareEventFixtures(
       .values(
         [
           historyEvent,
+          concurrentDialogEvent,
+          invalidationEvent,
+          journalEvidenceEvent,
           keyboardEvent,
           recoveryEvent,
           recoveryOwnerEvent,
           lifecycleEvent,
+          continuationEvent,
+          stalePollEvent,
+          malformedLifecycleEvent,
+          mismatchedAllClearTransitionEvent,
+          mismatchedTransitionEvent,
+          newerPollEvent,
+          paginatedDialogEvent,
+          paginatedLifecycleEvent,
+          pendingDialogEvent,
+          previewRetryEvent,
+          rejectedDialogRaceEvent,
+          rejectedLifecycleDialogEvent,
+          staleLifecycleResponseEvent,
+          dialogFailureEvent,
+          stalledMutationEvent,
+          stalledPreviewEvent,
           realDraftEvent,
         ].map(eventInsert),
       );
@@ -636,24 +710,51 @@ async function prepareEventFixtures(
   });
 
   return {
+    concurrentDialogEventId: concurrentDialogEvent.id,
+    continuationEventId: continuationEvent.id,
+    dialogFailureEventId: dialogFailureEvent.id,
     historyEventId: historyEvent.id,
+    invalidationEventId: invalidationEvent.id,
+    journalEvidenceEventId: journalEvidenceEvent.id,
     keyboardEventId: keyboardEvent.id,
     recoveryEventId: recoveryEvent.id,
     recoveryOwnerEventId: recoveryOwnerEvent.id,
     lifecycleEventId: lifecycleEvent.id,
+    malformedLifecycleEventId: malformedLifecycleEvent.id,
+    mismatchedAllClearTransitionEventId: mismatchedAllClearTransitionEvent.id,
+    mismatchedTransitionEventId: mismatchedTransitionEvent.id,
+    newerPollEventId: newerPollEvent.id,
+    paginatedDialogEventId: paginatedDialogEvent.id,
+    paginatedLifecycleEventId: paginatedLifecycleEvent.id,
+    pendingDialogEventId: pendingDialogEvent.id,
+    previewRetryEventId: previewRetryEvent.id,
     realDraftEventId: realDraftEvent.id,
+    rejectedDialogRaceEventId: rejectedDialogRaceEvent.id,
+    rejectedLifecycleDialogEventId: rejectedLifecycleDialogEvent.id,
+    stalePollEventId: stalePollEvent.id,
+    staleLifecycleResponseEventId: staleLifecycleResponseEvent.id,
+    stalledMutationEventId: stalledMutationEvent.id,
+    stalledPreviewEventId: stalledPreviewEvent.id,
   };
 }
 
-export default async function globalSetup(): Promise<void> {
-  const databaseUrl = requireSyntheticEventRoomTestDatabaseUrl(
-    process.env.TEST_DATABASE_URL,
-  );
-  await rm(EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH, { force: true });
-  await prepareDatabase(databaseUrl);
+export default async function globalSetup(config: FullConfig): Promise<void> {
+  const metadata = config.metadata as Readonly<Record<string, unknown>>;
+  const context = requireEventRoomPlaywrightRunContext(metadata.eventRoomRun);
+  await mkdir(context.runDirectory, { mode: 0o700, recursive: true });
+  await createOwnedEventRoomPlaywrightDatabase(context);
+  if (
+    process.env.PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SETUP_FAILURE_RUN_ID ===
+    context.runId
+  ) {
+    throw new Error(
+      'Synthetic event-room Playwright setup failure after database creation.',
+    );
+  }
+  await prepareDatabase(context.databaseUrl);
   const created = createDatabaseClient({
     driver: 'postgres',
-    url: databaseUrl,
+    url: context.databaseUrl,
     maxConnections: 2,
   });
   if (created.driver !== 'postgres') {
@@ -689,19 +790,22 @@ export default async function globalSetup(): Promise<void> {
       );
     }
     await writeFile(
-      EVENT_ROOM_PLAYWRIGHT_CHANNEL_STATE_PATH,
+      context.channelStatePath,
       JSON.stringify(originalChannelConfigurations),
       { encoding: 'utf8', mode: 0o600 },
     );
     try {
       const access = await prepareAccessEvidence(created);
-      const actor = await issueSyntheticOperatorSession(created, access);
-      const fixture = await prepareEventFixtures(created, actor);
-      await writeFile(
-        EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH,
-        JSON.stringify(fixture),
-        { encoding: 'utf8', mode: 0o600 },
+      const actor = await issueSyntheticOperatorSession(
+        created,
+        access,
+        context.storageStatePath,
       );
+      const fixture = await prepareEventFixtures(created, actor);
+      await writeFile(context.fixturePath, JSON.stringify(fixture), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
     } catch (error) {
       await restoreChannelConfigurations(
         created,
