@@ -33,6 +33,7 @@ import {
   idempotencyRecords,
 } from '../../../../db/schema';
 import {
+  DeliveryStateError,
   createDrizzleDeliveryEvidenceStore,
   type DeliveryEvidenceStore,
 } from '../../internal/delivery-state/route';
@@ -631,7 +632,8 @@ export function createSesWebhookRouteHandler(
         acquiredLeaseToken !== undefined
       ) {
         const reasonCode =
-          error instanceof SesWebhookRequestError
+          error instanceof SesWebhookRequestError ||
+          error instanceof DeliveryStateError
             ? error.code
             : 'SES_CALLBACK_PROCESSING_FAILED';
         await store
@@ -639,6 +641,9 @@ export function createSesWebhookRouteHandler(
           .catch(() => undefined);
       }
       if (error instanceof SesWebhookRequestError) {
+        return errorResponse(error.status, error.code, error.message);
+      }
+      if (error instanceof DeliveryStateError) {
         return errorResponse(error.status, error.code, error.message);
       }
       return errorResponse(

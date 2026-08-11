@@ -62,7 +62,11 @@ export interface SesV2SendEmailInput {
   }>[];
 }
 
-/** Minimal injected SES v2 boundary; the worker package owns no AWS SDK. */
+/**
+ * Minimal injected SES v2 boundary; the worker package owns no AWS SDK.
+ * Implementations may throw ProviderDispatchError only when they can classify
+ * provider acceptance from a confirmed response or pre-dispatch failure.
+ */
 export interface SesV2Client {
   sendEmail(input: SesV2SendEmailInput): Promise<unknown>;
 }
@@ -78,6 +82,10 @@ export interface SesSendLedgerCompleteRequest
   readonly outcome: ProviderSendOutcome;
 }
 
+export interface SesSendLedgerReleaseRequest extends SesSendLedgerClaimRequest {
+  readonly leaseToken: string;
+}
+
 export type SesSendLedgerClaim =
   | Readonly<{ kind: 'acquired'; leaseToken: string }>
   | Readonly<{ kind: 'in-progress' }>
@@ -88,12 +96,14 @@ export type SesSendLedgerClaim =
  * A live adapter requires a durable ledger in front of SES because SendEmail
  * has no attempt-ID idempotency facility. An implementation must retain an
  * acquired claim after ambiguous provider I/O; it must never release it for a
- * blind resend.
+ * blind resend. It may release a claim only when the injected client proves
+ * that no provider acceptance was possible.
  */
 export interface DurableSesSendLedger {
   readonly durability: 'durable';
   claim(request: SesSendLedgerClaimRequest): Promise<SesSendLedgerClaim>;
   complete(request: SesSendLedgerCompleteRequest): Promise<void>;
+  release(request: SesSendLedgerReleaseRequest): Promise<void>;
 }
 
 export interface SesV2EmailAdapterOptions {
@@ -157,6 +167,7 @@ function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
     options.sendLedger.durability !== 'durable' ||
     typeof options.sendLedger.claim !== 'function' ||
     typeof options.sendLedger.complete !== 'function' ||
+    typeof options.sendLedger.release !== 'function' ||
     !validFromEmailAddress(options.fromEmailAddress)
   ) {
     throw new SesV2EmailAdapterError('INVALID_CONFIGURATION');
@@ -285,14 +296,31 @@ function acceptedOutcome(messageId: string): ProviderSendOutcome {
   });
 }
 
-function unknownOutcome(reasonCode: string): ProviderSendOutcome {
+function unknownOutcome(
+  reasonCode: string,
+  diagnosticDigest: string | null = null,
+): ProviderSendOutcome {
   return Object.freeze({
     state: 'unknown',
     provider: SES_V2_PROVIDER,
     providerReference: null,
     proof: null,
     reasonCode,
-    diagnosticDigest: null,
+    diagnosticDigest,
+  });
+}
+
+function failedOutcome(
+  reasonCode: string,
+  diagnosticDigest: string | null,
+): ProviderSendOutcome {
+  return Object.freeze({
+    state: 'failed',
+    provider: SES_V2_PROVIDER,
+    providerReference: null,
+    proof: null,
+    reasonCode,
+    diagnosticDigest,
   });
 }
 
@@ -322,7 +350,7 @@ function parseStoredOutcome(
   });
   if (
     !parsed.success ||
-    !['provider-accepted', 'unknown'].includes(parsed.data.state) ||
+    !['provider-accepted', 'failed', 'unknown'].includes(parsed.data.state) ||
     parsed.data.provider !== SES_V2_PROVIDER
   ) {
     throw new SesV2EmailAdapterError('INVALID_LEDGER_CLAIM');
@@ -435,10 +463,42 @@ export class SesV2EmailAdapter implements AttemptIdempotentProviderAdapter {
         messageId === null
           ? unknownOutcome('SES_RESPONSE_INVALID')
           : acceptedOutcome(messageId);
-    } catch {
-      // SES documents that an error can rarely follow provider acceptance.
-      // Without a provider idempotency token, a retry would risk a duplicate.
-      outcome = unknownOutcome('SES_SEND_OUTCOME_UNKNOWN');
+    } catch (error) {
+      if (
+        error instanceof ProviderDispatchError &&
+        error.disposition === 'safe-to-retry'
+      ) {
+        // The injected client may use this disposition only when it has proof
+        // that SES could not have accepted the request. Releasing the fence is
+        // therefore safe and lets the shared processor schedule its bounded
+        // retry as a new immutable attempt. If release itself fails, a stale
+        // fence can only suppress this attempt; it cannot create a duplicate.
+        await this.#ledger
+          .release({
+            ...claimRequest,
+            leaseToken: claim.leaseToken,
+          })
+          .catch(() => undefined);
+        throw error;
+      }
+      if (
+        error instanceof ProviderDispatchError &&
+        error.disposition === 'terminal-failure'
+      ) {
+        outcome = failedOutcome(error.code, error.diagnosticDigest);
+      } else {
+        // Raw transport failures and explicitly ambiguous provider failures
+        // may have followed acceptance. Without a provider idempotency token,
+        // a retry would risk a duplicate logical send.
+        outcome = unknownOutcome(
+          error instanceof ProviderDispatchError
+            ? error.code
+            : 'SES_SEND_OUTCOME_UNKNOWN',
+          error instanceof ProviderDispatchError
+            ? error.diagnosticDigest
+            : null,
+        );
+      }
     }
 
     try {

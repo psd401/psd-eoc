@@ -8,6 +8,7 @@ import {
 
 import type { WorkerAttemptWorkItem } from '../shared/attempt';
 import type { ProviderSendOutcome } from '../shared/processor';
+import { ProviderDispatchError } from '../shared/retry';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_CORRELATION_TAG_NAMES,
@@ -18,6 +19,7 @@ import {
   type SesSendLedgerClaim,
   type SesSendLedgerClaimRequest,
   type SesSendLedgerCompleteRequest,
+  type SesSendLedgerReleaseRequest,
   type SesV2Client,
   type SesV2SendEmailInput,
 } from './ses-adapter';
@@ -164,6 +166,7 @@ class MemoryDurableLedger implements DurableSesSendLedger {
   public readonly entries = new Map<string, LedgerEntry>();
   public claimCalls = 0;
   public completeCalls = 0;
+  public releaseCalls = 0;
   public failClaim = false;
   public failComplete = false;
 
@@ -207,6 +210,21 @@ class MemoryDurableLedger implements DurableSesSendLedger {
       throw new Error('Synthetic completion conflict.');
     }
     entry.outcome = request.outcome;
+    return Promise.resolve();
+  }
+
+  public release(request: SesSendLedgerReleaseRequest): Promise<void> {
+    this.releaseCalls += 1;
+    const entry = this.entries.get(request.attemptId);
+    if (
+      entry === undefined ||
+      entry.fingerprint !== request.requestFingerprint ||
+      entry.leaseToken !== request.leaseToken ||
+      entry.outcome !== null
+    ) {
+      throw new Error('Synthetic release conflict.');
+    }
+    this.entries.delete(request.attemptId);
     return Promise.resolve();
   }
 }
@@ -333,6 +351,72 @@ describe('SES v2 live adapter', () => {
     expect(client.inputs).toHaveLength(1);
   });
 
+  test('a proven safe SES rejection releases its fence for bounded retry', async () => {
+    let calls = 0;
+    const client = new CapturingSesClient(() => {
+      calls += 1;
+      return calls === 1
+        ? Promise.reject(
+            new ProviderDispatchError(
+              'SES_PROVIDER_THROTTLED',
+              'safe-to-retry',
+            ),
+          )
+        : Promise.resolve({ MessageId: '01000191f0a1-retry-000000' });
+    });
+    const app = adapter(client);
+    const request = { workItem: workItem(), idempotencyKey: IDS.attempt };
+
+    await expect(app.adapter.send(request)).rejects.toEqual(
+      expect.objectContaining({
+        code: 'SES_PROVIDER_THROTTLED',
+        disposition: 'safe-to-retry',
+      }),
+    );
+    expect(app.ledger.releaseCalls).toBe(1);
+    expect(app.ledger.entries.size).toBe(0);
+
+    await expect(app.adapter.send(request)).resolves.toEqual(
+      expect.objectContaining({
+        state: 'provider-accepted',
+        providerReference: '01000191f0a1-retry-000000',
+      }),
+    );
+    expect(client.inputs).toHaveLength(2);
+  });
+
+  test('a proven terminal SES rejection is retained as failed truth', async () => {
+    const diagnosticDigest = 'a'.repeat(64);
+    const client = new CapturingSesClient(() =>
+      Promise.reject(
+        new ProviderDispatchError(
+          'SES_RECIPIENT_REJECTED',
+          'terminal-failure',
+          diagnosticDigest,
+        ),
+      ),
+    );
+    const app = adapter(client);
+    const request = { workItem: workItem(), idempotencyKey: IDS.attempt };
+
+    await expect(app.adapter.send(request)).resolves.toEqual({
+      state: 'failed',
+      provider: SES_V2_PROVIDER,
+      providerReference: null,
+      proof: null,
+      reasonCode: 'SES_RECIPIENT_REJECTED',
+      diagnosticDigest,
+    });
+    await expect(app.adapter.send(request)).resolves.toEqual(
+      expect.objectContaining({
+        state: 'failed',
+        reasonCode: 'SES_RECIPIENT_REJECTED',
+      }),
+    );
+    expect(client.inputs).toHaveLength(1);
+    expect(app.ledger.completeCalls).toBe(1);
+  });
+
   test('a malformed success response becomes unknown rather than provider-accepted', async () => {
     const client = new CapturingSesClient(() => Promise.resolve({}));
     const app = adapter(client);
@@ -393,6 +477,7 @@ describe('SES v2 live adapter', () => {
       durability: 'durable',
       claim: () => Promise.resolve({ kind: 'conflict' }),
       complete: () => Promise.resolve(),
+      release: () => Promise.resolve(),
     };
     const emailAdapter = new SesV2EmailAdapter({
       client,
