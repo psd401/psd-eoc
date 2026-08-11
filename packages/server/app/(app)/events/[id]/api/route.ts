@@ -310,13 +310,16 @@ async function handleMutation(
       serverTime,
       mutation: { idempotencyKey, humanConfirmationId: null },
     });
-    return success({
-      entry: await journalRuntime.execute(
-        'append-journal-entry',
-        input,
-        invocation,
-      ),
-    });
+    return success(
+      {
+        entry: await journalRuntime.execute(
+          'append-journal-entry',
+          input,
+          invocation,
+        ),
+      },
+      idempotencyKey,
+    );
   }
 
   if (operation === 'correct-text') {

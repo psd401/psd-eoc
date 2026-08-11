@@ -213,6 +213,205 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     expect(discriminatorCount[0]?.count).toBeGreaterThanOrEqual(12);
   });
 
+  test('anchors media allocation identity and installs every bounded-read index', async () => {
+    const db = databaseConnection().db;
+    const mediaColumns = await db.execute<{
+      column_name: string;
+      column_default: string | null;
+      is_nullable: string;
+    }>(sql`
+      select column_name, column_default, is_nullable
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'media_upload_intents'
+        and column_name in (
+          'facility_id',
+          'budget_principal_digest',
+          'budget_principal_attributed'
+        )
+      order by column_name
+    `);
+    expect([...mediaColumns]).toEqual([
+      {
+        column_name: 'budget_principal_attributed',
+        column_default: 'true',
+        is_nullable: 'NO',
+      },
+      {
+        column_name: 'budget_principal_digest',
+        column_default: null,
+        is_nullable: 'NO',
+      },
+      {
+        column_name: 'facility_id',
+        column_default: null,
+        is_nullable: 'NO',
+      },
+    ]);
+
+    const constraints = await db.execute<{
+      constraint_name: string;
+      constraint_type: string;
+    }>(sql`
+      select constraint_name, constraint_type
+      from information_schema.table_constraints
+      where constraint_schema = 'public'
+        and constraint_name in (
+          'events_identity_facility_uq',
+          'media_upload_intents_event_facility_fk',
+          'media_upload_intents_budget_principal_digest_format',
+          'media_upload_intents_budget_principal_attribution'
+        )
+      order by constraint_name
+    `);
+    expect([...constraints]).toEqual([
+      {
+        constraint_name: 'events_identity_facility_uq',
+        constraint_type: 'UNIQUE',
+      },
+      {
+        constraint_name: 'media_upload_intents_budget_principal_attribution',
+        constraint_type: 'CHECK',
+      },
+      {
+        constraint_name: 'media_upload_intents_budget_principal_digest_format',
+        constraint_type: 'CHECK',
+      },
+      {
+        constraint_name: 'media_upload_intents_event_facility_fk',
+        constraint_type: 'FOREIGN KEY',
+      },
+    ]);
+
+    const indexes = await db.execute<{
+      indexdef: string;
+      indexname: string;
+    }>(sql`
+      select indexname, indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and indexname in (
+          'media_upload_intents_budget_principal_created_idx',
+          'media_upload_intents_unattributed_created_idx',
+          'media_upload_intents_event_active_idx',
+          'media_upload_intents_event_created_idx',
+          'media_upload_intents_facility_active_idx',
+          'media_upload_intents_facility_created_idx',
+          'journal_entries_event_media_idx',
+          'journal_entries_event_redaction_target_idx'
+        )
+      order by indexname
+    `);
+    expect(indexes.map(({ indexname }) => indexname)).toEqual(
+      [
+        'journal_entries_event_media_idx',
+        'journal_entries_event_redaction_target_idx',
+        'media_upload_intents_budget_principal_created_idx',
+        'media_upload_intents_event_active_idx',
+        'media_upload_intents_event_created_idx',
+        'media_upload_intents_facility_active_idx',
+        'media_upload_intents_facility_created_idx',
+        'media_upload_intents_unattributed_created_idx',
+      ].sort(),
+    );
+    const photoBindingIndex = indexes.find(
+      ({ indexname }) => indexname === 'journal_entries_event_media_idx',
+    )?.indexdef;
+    expect(photoBindingIndex).toContain('(event_id, media_id, id, sequence)');
+    expect(photoBindingIndex).toContain(
+      "WHERE (kind = 'photo'::journal_entry_kind)",
+    );
+    expect(
+      indexes.find(
+        ({ indexname }) =>
+          indexname === 'journal_entries_event_redaction_target_idx',
+      )?.indexdef,
+    ).toContain(
+      "WHERE (supersession_kind = 'redaction'::journal_supersession_kind)",
+    );
+
+    await expectConstraintViolation(
+      () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(insertSyntheticTestEvent);
+          await transaction.execute(sql`
+            insert into media_upload_intents (
+              id,
+              event_id,
+              facility_id,
+              budget_principal_digest,
+              budget_principal_attributed,
+              byte_length,
+              content_sha256,
+              declared_content_type,
+              storage_key,
+              status,
+              created_at,
+              expires_at
+            )
+            select
+              '00000000-0000-4000-8000-000000009969'::uuid,
+              '00000000-0000-4000-8000-000000009980'::uuid,
+              facility.id,
+              repeat('f', 64),
+              true,
+              20,
+              repeat('a', 64),
+              'image/jpeg'::media_content_type,
+              'quarantine/database-test/9969',
+              'pending-upload',
+              now(),
+              now() + interval '10 minutes'
+            from facilities as facility
+            where facility.code = 'SYN-SOUTH'
+          `);
+        }),
+      'media_upload_intents_event_facility_fk',
+    );
+
+    try {
+      await db.transaction(async (transaction) => {
+        await transaction.execute(insertSyntheticTestEvent);
+        await transaction.execute(sql`
+          insert into media_upload_intents (
+            id,
+            event_id,
+            facility_id,
+            budget_principal_digest,
+            budget_principal_attributed,
+            byte_length,
+            content_sha256,
+            declared_content_type,
+            storage_key,
+            status,
+            created_at,
+            expires_at
+          )
+          select
+            '00000000-0000-4000-8000-000000009968'::uuid,
+            event.id,
+            event.facility_id,
+            repeat('0', 64),
+            false,
+            20,
+            repeat('a', 64),
+            'image/jpeg'::media_content_type,
+            'quarantine/database-test/9968',
+            'pending-upload',
+            now(),
+            now() + interval '10 minutes'
+          from events as event
+          where event.id = '00000000-0000-4000-8000-000000009980'::uuid
+        `);
+      });
+      throw new Error('Expected an unattributed media insert to be rejected.');
+    } catch (error) {
+      expect(postgresErrorMessages(error).join('\n')).toContain(
+        'new media upload intents require an attributed budget principal',
+      );
+    }
+  });
+
   test('revokes and rejects mutation of append-only truth tables', async () => {
     const db = databaseConnection().db;
     const privileges = await db.execute<{
@@ -283,6 +482,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             insert into media_upload_intents (
               id,
               event_id,
+              facility_id,
+              budget_principal_digest,
+              budget_principal_attributed,
               byte_length,
               content_sha256,
               declared_content_type,
@@ -293,6 +495,13 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             ) values (
               '00000000-0000-4000-8000-000000009970'::uuid,
               '00000000-0000-4000-8000-000000009980'::uuid,
+              (
+                select facility_id
+                from events
+                where id = '00000000-0000-4000-8000-000000009980'::uuid
+              ),
+              repeat('e', 64),
+              true,
               20,
               repeat('a', 64),
               'image/jpeg'::media_content_type,

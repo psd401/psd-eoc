@@ -2197,6 +2197,7 @@ export const events = pgTable(
     activationAuthorization: jsonb('activation_authorization'),
   },
   (table) => [
+    unique('events_identity_facility_uq').on(table.id, table.facilityId),
     unique('events_identity_classification_uq').on(
       table.id,
       table.kind,
@@ -2702,6 +2703,14 @@ export const mediaUploadIntents = pgTable(
     eventId: uuid('event_id')
       .notNull()
       .references(() => events.id, { onDelete: 'restrict' }),
+    /** Trusted event-derived anchor; clients never supply this value. */
+    facilityId: uuid('facility_id').notNull(),
+    /** Stable one-way identity shared across sessions and API-key rotations. */
+    budgetPrincipalDigest: digest('budget_principal_digest').notNull(),
+    /** False exists only for safely quarantined rows predating attribution. */
+    budgetPrincipalAttributed: boolean('budget_principal_attributed')
+      .default(true)
+      .notNull(),
     byteLength: integer('byte_length').notNull(),
     contentSha256: digest('content_sha256').notNull(),
     declaredContentType: mediaContentTypeEnum(
@@ -2717,7 +2726,52 @@ export const mediaUploadIntents = pgTable(
       table.id,
       table.eventId,
     ),
+    foreignKey({
+      columns: [table.eventId, table.facilityId],
+      foreignColumns: [events.id, events.facilityId],
+      name: 'media_upload_intents_event_facility_fk',
+    }).onDelete('restrict'),
     uniqueIndex('media_upload_intents_storage_key_uq').on(table.storageKey),
+    index('media_upload_intents_budget_principal_created_idx').on(
+      table.budgetPrincipalDigest,
+      table.createdAt,
+    ),
+    index('media_upload_intents_unattributed_created_idx').on(
+      table.budgetPrincipalAttributed,
+      table.createdAt,
+    ),
+    index('media_upload_intents_event_active_idx').on(
+      table.eventId,
+      table.status,
+      table.expiresAt,
+    ),
+    index('media_upload_intents_event_created_idx').on(
+      table.eventId,
+      table.createdAt,
+    ),
+    index('media_upload_intents_facility_active_idx').on(
+      table.facilityId,
+      table.status,
+      table.expiresAt,
+    ),
+    index('media_upload_intents_facility_created_idx').on(
+      table.facilityId,
+      table.createdAt,
+    ),
+    check(
+      'media_upload_intents_budget_principal_digest_format',
+      sql`${table.budgetPrincipalDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'media_upload_intents_budget_principal_attribution',
+      sql`(
+        ${table.budgetPrincipalAttributed} = false
+        and ${table.budgetPrincipalDigest} = repeat('0', 64)
+      ) or (
+        ${table.budgetPrincipalAttributed} = true
+        and ${table.budgetPrincipalDigest} <> repeat('0', 64)
+      )`,
+    ),
     check(
       'media_upload_intents_size',
       sql`${table.byteLength} between 1 and 26214400`,
@@ -2825,6 +2879,12 @@ export const journalEntries = pgTable(
       name: 'journal_entries_transition_event_fk',
     }).onDelete('restrict'),
     index('journal_entries_event_time_idx').on(table.eventId, table.serverTime),
+    index('journal_entries_event_media_idx')
+      .on(table.eventId, table.mediaId, table.id, table.sequence)
+      .where(sql`${table.kind} = 'photo'`),
+    index('journal_entries_event_redaction_target_idx')
+      .on(table.eventId, table.supersedesEntryId, table.supersedesEntrySequence)
+      .where(sql`${table.supersessionKind} = 'redaction'`),
     check('journal_entries_sequence_positive', sql`${table.sequence} > 0`),
     check(
       'journal_entries_payload_reference',

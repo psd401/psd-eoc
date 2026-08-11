@@ -8,7 +8,11 @@ import {
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { EventRoom, eventRoomPollDelay } from './event-room';
+import {
+  EventRoom,
+  PrivatePhotoLoadCoordinator,
+  eventRoomPollDelay,
+} from './event-room';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -209,6 +213,55 @@ function render(
 }
 
 describe('event room server-rendered safety and history state', () => {
+  test('keeps private-photo coordination reusable across StrictMode-style cleanup and setup', () => {
+    const coordinator = new PrivatePhotoLoadCoordinator();
+    let cleanupCancelled = false;
+    let automaticStarted = false;
+    let explicitStarted = false;
+    let finishAutomatic: (() => void) | null = null;
+
+    const cleanup = coordinator.enqueue({
+      key: 'strict-mode-initial-effect',
+      mode: 'explicit',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: () => () => {
+        cleanupCancelled = true;
+      },
+    });
+    cleanup();
+    expect(cleanupCancelled).toBe(true);
+
+    coordinator.enqueue({
+      key: 'strict-mode-viewport-demand',
+      mode: 'automatic',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: (complete) => {
+        automaticStarted = true;
+        finishAutomatic = complete;
+        return () => undefined;
+      },
+    });
+    expect(automaticStarted).toBe(true);
+    if (finishAutomatic === null) {
+      throw new Error('The remounted automatic load did not start.');
+    }
+    (finishAutomatic as () => void)();
+
+    coordinator.enqueue({
+      key: 'strict-mode-explicit-demand',
+      mode: 'explicit',
+      onAutomaticLimit: () => undefined,
+      onStartError: () => undefined,
+      start: () => {
+        explicitStarted = true;
+        return () => undefined;
+      },
+    });
+    expect(explicitStarted).toBe(true);
+  });
+
   test('keeps healthy polling in the 3–5 second window with bounded backoff', () => {
     expect(eventRoomPollDelay(0, 0)).toBe(3_000);
     expect(eventRoomPollDelay(0, 1)).toBe(5_000);
@@ -371,6 +424,42 @@ describe('event room server-rendered safety and history state', () => {
       'Exterior assembly area with staff accountability teams',
     );
     expect(html).not.toContain('Load private photo for entry 5');
+    expect(html).not.toContain('<img');
+  });
+
+  test('renders a redacted photo projection without ever receiving its media payload', () => {
+    const original = photoEntry();
+    const redactedProjection = projectJournalEntryForRead(original, true);
+    const serializedProjection = JSON.stringify(redactedProjection);
+
+    expect(redactedProjection.visibility).toBe('redacted');
+    expect(serializedProjection).not.toContain(IDS.media);
+    expect(serializedProjection).not.toContain(
+      'Exterior assembly area with staff accountability teams',
+    );
+    expect(serializedProjection).not.toContain('Synthetic exercise photo');
+
+    const html = renderToStaticMarkup(
+      <EventRoom
+        apiUrl={`/events/${IDS.event}/api`}
+        authorDisplayName="Synthetic Event Room Operator"
+        csrfCookieName="__Host-psd-eoc-csrf"
+        event={activeEvent('real')}
+        eventTypeLabel="Lockdown"
+        facilityLabel="Synthetic North Campus"
+        initialCursor="eyJ2IjoxfQ"
+        initialEntries={[redactedProjection]}
+        initialHasMore={false}
+        initialSnapshotSequence={original.sequence}
+        sessionId={IDS.session}
+      />,
+    );
+
+    expect(html).toContain(
+      'Original content is hidden because a later append-only redaction',
+    );
+    expect(html).not.toContain(IDS.media);
+    expect(html).not.toContain('Load private photo');
     expect(html).not.toContain('<img');
   });
 });
