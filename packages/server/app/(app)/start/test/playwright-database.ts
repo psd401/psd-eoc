@@ -4,9 +4,17 @@ import {
   START_FLOW_PLAYWRIGHT_RUN_ID_ENV,
   requireStartFlowPlaywrightRunId,
 } from './playwright-run';
+import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from '../../../(admin)/facilities/owned-database-lifecycle';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 const SYNTHETIC_DATABASE_PATTERN = /^[A-Za-z0-9_-]+[-_]test$/u;
+
+interface DatabaseMarkerRow {
+  readonly marker: string | null;
+}
 
 function databaseName(databaseUrl: string): string {
   return decodeURIComponent(new URL(databaseUrl).pathname.slice(1));
@@ -58,6 +66,36 @@ export function startFlowPlaywrightDatabaseName(
   return `psd_eoc_i15_pw_${runId}_test`;
 }
 
+/** Exact non-secret catalog comment owned by one validated browser run. */
+export function startFlowPlaywrightDatabaseMarker(
+  runIdValue: string | undefined = process.env[
+    START_FLOW_PLAYWRIGHT_RUN_ID_ENV
+  ],
+): string {
+  const runId = requireStartFlowPlaywrightRunId(runIdValue);
+  return JSON.stringify({
+    kind: 'psd-eoc-start-flow-playwright-database',
+    version: 1,
+    runId,
+    databaseName: startFlowPlaywrightDatabaseName(runId),
+  });
+}
+
+/** Fails closed unless a catalog comment names this exact validated run. */
+export function requireStartFlowPlaywrightDatabaseOwnership(
+  runIdValue: string | undefined,
+  actualMarker: unknown,
+): void {
+  if (
+    typeof actualMarker !== 'string' ||
+    actualMarker !== startFlowPlaywrightDatabaseMarker(runIdValue)
+  ) {
+    throw new Error(
+      'The start-flow Playwright database ownership marker does not match this run.',
+    );
+  }
+}
+
 /**
  * Keeps browser mutations out of the shared Bun integration-test database.
  * Every run receives a distinct synthetic, loopback-only child database.
@@ -73,21 +111,34 @@ export function startFlowPlaywrightDatabaseUrl(
   return databaseUrl.toString();
 }
 
-async function withMaintenanceConnection(
+function maintenanceConnection(
   baseDatabaseUrl: string | undefined,
-  operation: (sql: postgres.Sql) => Promise<void>,
-): Promise<void> {
+): postgres.Sql {
   const maintenanceUrl = requireLoopbackBaseDatabase(baseDatabaseUrl);
   maintenanceUrl.pathname = '/postgres';
-  const sql = postgres(maintenanceUrl.toString(), {
+  return postgres(maintenanceUrl.toString(), {
     max: 1,
     onnotice: () => undefined,
   });
-  try {
-    await operation(sql);
-  } finally {
-    await sql.end();
+}
+
+function quotedLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function readDatabaseMarker(
+  sql: postgres.Sql,
+  isolatedName: string,
+): Promise<string | null | undefined> {
+  const rows = await sql<DatabaseMarkerRow[]>`
+    select shobj_description(oid, 'pg_database') as marker
+    from pg_database
+    where datname = ${isolatedName}
+  `;
+  if (rows.length > 1) {
+    throw new Error('The start-flow database catalog identity is ambiguous.');
   }
+  return rows[0]?.marker;
 }
 
 export async function recreateStartFlowPlaywrightDatabase(
@@ -104,9 +155,26 @@ export async function recreateStartFlowPlaywrightDatabase(
   if (databaseName(isolatedUrl) !== isolatedName) {
     throw new Error('Refusing to recreate an unexpected database.');
   }
-  await withMaintenanceConnection(baseDatabaseUrl, async (sql) => {
-    await sql.unsafe(`drop database if exists "${isolatedName}" with (force)`);
-    await sql.unsafe(`create database "${isolatedName}"`);
+  const creator = maintenanceConnection(baseDatabaseUrl);
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await creator.unsafe(`create database "${isolatedName}"`);
+      recordCreated();
+      const marker = startFlowPlaywrightDatabaseMarker(runIdValue);
+      await creator.unsafe(
+        `comment on database "${isolatedName}" is ${quotedLiteral(marker)}`,
+      );
+      requireStartFlowPlaywrightDatabaseOwnership(
+        runIdValue,
+        await readDatabaseMarker(creator, isolatedName),
+      );
+    },
+    closeCreator: () => creator.end(),
+    rollbackWithFreshMarkerProof: async () => {
+      await dropStartFlowPlaywrightDatabase(baseDatabaseUrl, runIdValue);
+    },
+    failureMessage:
+      'Start-flow Playwright database creation, creator close, or marker-owned rollback failed.',
   });
   return isolatedUrl;
 }
@@ -116,7 +184,7 @@ export async function dropStartFlowPlaywrightDatabase(
   runIdValue: string | undefined = process.env[
     START_FLOW_PLAYWRIGHT_RUN_ID_ENV
   ],
-): Promise<void> {
+): Promise<boolean> {
   const isolatedName = startFlowPlaywrightDatabaseName(runIdValue);
   const isolatedUrl = startFlowPlaywrightDatabaseUrl(
     baseDatabaseUrl,
@@ -125,7 +193,22 @@ export async function dropStartFlowPlaywrightDatabase(
   if (databaseName(isolatedUrl) !== isolatedName) {
     throw new Error('Refusing to drop an unexpected database.');
   }
-  await withMaintenanceConnection(baseDatabaseUrl, async (sql) => {
-    await sql.unsafe(`drop database if exists "${isolatedName}" with (force)`);
+  const admin = maintenanceConnection(baseDatabaseUrl);
+  return executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(admin, isolatedName);
+      if (marker === undefined) return false;
+      requireStartFlowPlaywrightDatabaseOwnership(runIdValue, marker);
+      await admin.unsafe(`drop database "${isolatedName}" with (force)`);
+      if ((await readDatabaseMarker(admin, isolatedName)) !== undefined) {
+        throw new Error(
+          'The owned start-flow Playwright database remained after cleanup.',
+        );
+      }
+      return true;
+    },
+    cleanup: () => admin.end(),
+    failureMessage:
+      'Start-flow Playwright database cleanup and connection close failed.',
   });
 }
