@@ -158,9 +158,10 @@ function persistedResult(
 function context(
   signInEnvelope: RegisteredCapabilityEnvelope<'complete-oidc-sign-in'>,
   bearers: string[],
+  authorization: CompleteOidcSignInContext['authorization'] = AUTHORIZATION,
 ): CompleteOidcSignInContext {
   return Object.freeze({
-    authorization: AUTHORIZATION,
+    authorization,
     bearerSink: Object.freeze({
       set(bearer: string): void {
         bearers.push(bearer);
@@ -249,6 +250,36 @@ describe('native initial session issuance', () => {
 
     expect(sessionsCreated).toBe(1);
     expect(consumedFlowKeys.size).toBe(1);
+    expect(bearers).toHaveLength(1);
+  });
+
+  test('honors a persisted bootstrap-admin revocation on later eligible sign-in', async () => {
+    const bootstrapEligibleAfterRevocation = Object.freeze({
+      ...AUTHORIZATION,
+      grantBootstrapAdmin: true,
+    });
+    let persisted: PersistInitialWebSessionRequest | undefined;
+    const store: InitialWebSessionStore = Object.freeze({
+      async persist(request: PersistInitialWebSessionRequest) {
+        persisted = request;
+        // The production store returns the canonical role projection. A prior
+        // admin revocation keeps this bootstrap-eligible subject at staff.
+        return persistedResult(request);
+      },
+    });
+    const bearers: string[] = [];
+
+    const result = await execute(
+      store,
+      context(
+        envelope('10000000-0000-4000-8000-000000000110'),
+        bearers,
+        bootstrapEligibleAfterRevocation,
+      ),
+    );
+
+    expect(persisted?.grantBootstrapAdmin).toBe(true);
+    expect(result.user.roles).toEqual(['staff']);
     expect(bearers).toHaveLength(1);
   });
 });
