@@ -671,7 +671,7 @@ describe('configured Groups access and initial session', () => {
     });
   });
 
-  test('requires a snapshot begun after the latest successful group-source update', async () => {
+  test('ignores legacy group-source audit chronology when exact source sets match', async () => {
     const runtime = createPlaywrightAuthRuntime();
     const evidence = await runtime.accessStore.loadEvidence(
       PLAYWRIGHT_MEMBER_SUBJECT,
@@ -700,16 +700,8 @@ describe('configured Groups access and initial session', () => {
         audit: runtime.auditSink,
       },
     );
-    expect(decision).toEqual({
-      granted: false,
-      reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
-    });
-    expect(runtime.auditEntries).toContainEqual(
-      expect.objectContaining({
-        outcome: 'denied',
-        reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
-      }),
-    );
+    expect(decision.granted).toBe(true);
+    expect(runtime.auditEntries).toEqual([]);
   });
 
   test('denies and truthfully audits a mobile non-member without session issuance', async () => {

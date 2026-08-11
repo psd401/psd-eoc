@@ -4,24 +4,22 @@ import {
   createDatabaseClient,
   databaseExecuteRows,
   type PostgresDatabaseConnection,
-} from '../../../../db/client';
+} from '../../../db/client';
+import {
+  requireAdminPlaywrightRunContext,
+  type AdminPlaywrightRunContext,
+} from './playwright-run';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
-} from '../../../(admin)/facilities/owned-database-lifecycle';
-import {
-  eventRoomPlaywrightDatabaseMarker,
-  requireEventRoomPlaywrightDatabaseOwnership,
-  requireEventRoomPlaywrightRunContext,
-  type EventRoomPlaywrightRunContext,
-} from './test-database';
+} from './owned-database-lifecycle';
 
 interface DatabaseMarkerRow extends Record<string, unknown> {
   readonly marker: string | null;
 }
 
 function databaseAdmin(
-  context: EventRoomPlaywrightRunContext,
+  context: AdminPlaywrightRunContext,
 ): PostgresDatabaseConnection {
   const admin = createDatabaseClient({
     driver: 'postgres',
@@ -30,7 +28,7 @@ function databaseAdmin(
   });
   if (admin.driver !== 'postgres') {
     throw new Error(
-      'Event-room Playwright database ownership requires PostgreSQL.',
+      'Administration Playwright database ownership requires PostgreSQL.',
     );
   }
   return admin;
@@ -38,6 +36,30 @@ function databaseAdmin(
 
 function quotedLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+export function adminPlaywrightDatabaseMarker(value: unknown): string {
+  const context = requireAdminPlaywrightRunContext(value);
+  return JSON.stringify({
+    kind: 'psd-eoc-issue26-admin-playwright-database',
+    version: 1,
+    runId: context.runId,
+    databaseName: context.databaseName,
+  });
+}
+
+export function requireAdminPlaywrightDatabaseOwnership(
+  value: unknown,
+  actualMarker: unknown,
+): void {
+  if (
+    typeof actualMarker !== 'string' ||
+    actualMarker !== adminPlaywrightDatabaseMarker(value)
+  ) {
+    throw new Error(
+      'The administration Playwright database ownership marker does not match this run.',
+    );
+  }
 }
 
 async function readDatabaseMarker(
@@ -52,19 +74,21 @@ async function readDatabaseMarker(
     `),
   );
   if (rows.length > 1) {
-    throw new Error('The disposable database catalog identity is ambiguous.');
+    throw new Error(
+      'The administration Playwright database identity is ambiguous.',
+    );
   }
   return rows[0]?.marker;
 }
 
 /** Creates and immediately marks the exact UUID-named disposable database. */
-export async function createOwnedEventRoomPlaywrightDatabase(
+export async function createOwnedAdminPlaywrightDatabase(
   value: unknown,
   adminFactory: (
-    context: EventRoomPlaywrightRunContext,
+    context: AdminPlaywrightRunContext,
   ) => PostgresDatabaseConnection = databaseAdmin,
 ): Promise<void> {
-  const context = requireEventRoomPlaywrightRunContext(value);
+  const context = requireAdminPlaywrightRunContext(value);
   const admin = adminFactory(context);
   await executeOwnedDatabaseCreation({
     createAndVerify: async (recordCreated) => {
@@ -72,43 +96,40 @@ export async function createOwnedEventRoomPlaywrightDatabase(
         sql.raw(`create database "${context.databaseName}"`),
       );
       recordCreated();
-      const marker = eventRoomPlaywrightDatabaseMarker(context);
+      const marker = adminPlaywrightDatabaseMarker(context);
       await admin.db.execute(
         sql.raw(
           `comment on database "${context.databaseName}" is ${quotedLiteral(marker)}`,
         ),
       );
-      requireEventRoomPlaywrightDatabaseOwnership(
+      requireAdminPlaywrightDatabaseOwnership(
         context,
         await readDatabaseMarker(admin, context.databaseName),
       );
     },
     closeCreator: () => admin.close(),
     rollbackWithFreshMarkerProof: async () => {
-      await dropOwnedEventRoomPlaywrightDatabase(context, adminFactory);
+      await dropOwnedAdminPlaywrightDatabase(context, adminFactory);
     },
     failureMessage:
-      'Event-room Playwright database creation, creator close, or marker-owned rollback failed.',
+      'Administration Playwright database creation, creator close, or marker-owned rollback failed.',
   });
 }
 
-/**
- * Drops only an exact database whose catalog comment proves run ownership.
- * The operation is idempotent after a successful drop and verifies absence.
- */
-export async function dropOwnedEventRoomPlaywrightDatabase(
+/** Drops only a database carrying this exact run's immutable marker. */
+export async function dropOwnedAdminPlaywrightDatabase(
   value: unknown,
   adminFactory: (
-    context: EventRoomPlaywrightRunContext,
+    context: AdminPlaywrightRunContext,
   ) => PostgresDatabaseConnection = databaseAdmin,
 ): Promise<boolean> {
-  const context = requireEventRoomPlaywrightRunContext(value);
+  const context = requireAdminPlaywrightRunContext(value);
   const admin = adminFactory(context);
   return executeOperationWithCleanup({
     operation: async () => {
       const marker = await readDatabaseMarker(admin, context.databaseName);
       if (marker === undefined) return false;
-      requireEventRoomPlaywrightDatabaseOwnership(context, marker);
+      requireAdminPlaywrightDatabaseOwnership(context, marker);
       await admin.db.execute(
         sql.raw(`drop database "${context.databaseName}" with (force)`),
       );
@@ -116,13 +137,13 @@ export async function dropOwnedEventRoomPlaywrightDatabase(
         (await readDatabaseMarker(admin, context.databaseName)) !== undefined
       ) {
         throw new Error(
-          'The owned event-room Playwright database remained after cleanup.',
+          'The owned administration Playwright database remained after cleanup.',
         );
       }
       return true;
     },
     cleanup: () => admin.close(),
     failureMessage:
-      'Event-room Playwright database cleanup and connection close failed.',
+      'Administration Playwright database cleanup and connection close failed.',
   });
 }

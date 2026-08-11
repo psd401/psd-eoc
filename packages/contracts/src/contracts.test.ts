@@ -41,6 +41,7 @@ import {
   JournalEntryInputSchema,
   HumanConfirmationRecordSchema,
   IdempotencyRecordSchema,
+  IntegrationChannelChangeAuthorizationSchema,
   IntegrationStatusSchema,
   LifecycleConsequencePreviewSchema,
   MediaReadGrantSchema,
@@ -1119,19 +1120,6 @@ describe('event type, targeting, and activation contracts', () => {
       }).success,
     ).toBe(false);
     expect(
-      SetChannelEnabledInputSchema.safeParse({
-        integrationId: 'expo-push',
-        enabled: true,
-      }).success,
-    ).toBe(false);
-    expect(
-      SetChannelEnabledInputSchema.safeParse({
-        integrationId: 'expo-push',
-        enabled: true,
-        productOwnerApprovalReference: 'approved-production-change-001',
-      }).success,
-    ).toBe(true);
-    expect(
       LifecycleConsequencePreviewSchema.safeParse(lifecyclePreview('all-clear'))
         .success,
     ).toBe(true);
@@ -1329,6 +1317,105 @@ describe('event type, targeting, and activation contracts', () => {
         ...staffDrillClose,
         actor: agentActor,
         source: 'mcp',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('strictly binds live channel changes to a fresh authorization artifact', () => {
+    const authorization = {
+      reference: 'approved-production-change-001',
+      integrationStatusId: ids.audit,
+      integrationId: 'expo-push',
+      desiredEnabled: true,
+      requestDigest:
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      consequenceDigest:
+        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      authorizedByUserId: ids.actor,
+      authorizedWithSessionId: ids.session,
+      issuedAt: '2026-08-07T04:00:00.000Z',
+      expiresAt: '2026-08-07T04:15:00.000Z',
+    } as const;
+
+    expect(
+      IntegrationChannelChangeAuthorizationSchema.safeParse(authorization)
+        .success,
+    ).toBe(true);
+    expect(
+      IntegrationChannelChangeAuthorizationSchema.parse({
+        ...authorization,
+        integrationStatusId: 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA',
+        authorizedByUserId: 'BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB',
+        authorizedWithSessionId: 'CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC',
+      }),
+    ).toMatchObject({
+      integrationStatusId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      authorizedByUserId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      authorizedWithSessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    });
+    expect(
+      IntegrationChannelChangeAuthorizationSchema.safeParse({
+        ...authorization,
+        unexpected: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      IntegrationChannelChangeAuthorizationSchema.safeParse({
+        ...authorization,
+        expiresAt: authorization.issuedAt,
+      }).success,
+    ).toBe(false);
+    expect(
+      IntegrationChannelChangeAuthorizationSchema.safeParse({
+        ...authorization,
+        expiresAt: '2026-08-07T04:15:00.001Z',
+      }).success,
+    ).toBe(false);
+    expect(
+      IntegrationChannelChangeAuthorizationSchema.safeParse({
+        ...authorization,
+        issuedAt: '2026-08-07T04:00:00.0001Z',
+      }).success,
+    ).toBe(false);
+    expect(
+      IntegrationChannelChangeAuthorizationSchema.safeParse({
+        ...authorization,
+        expiresAt: '2026-08-07T04:15:00.0001Z',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      SetChannelEnabledInputSchema.safeParse({
+        integrationId: 'expo-push',
+        enabled: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetChannelEnabledInputSchema.safeParse({
+        integrationId: 'expo-push',
+        enabled: true,
+        authorization: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      SetChannelEnabledInputSchema.safeParse({
+        integrationId: 'expo-push',
+        enabled: true,
+        authorization,
+      }).success,
+    ).toBe(true);
+    expect(
+      SetChannelEnabledInputSchema.safeParse({
+        integrationId: 'google-groups',
+        enabled: true,
+        authorization,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetChannelEnabledInputSchema.safeParse({
+        integrationId: 'expo-push',
+        enabled: false,
+        authorization,
       }).success,
     ).toBe(false);
   });
