@@ -166,11 +166,23 @@ export type DatabaseQuery = Omit<PostgresDatabase, 'execute'> & {
   ): PromiseLike<DatabaseExecuteResult<Row>>;
 };
 
+/** Invalid or absent raw database result that cannot safely be normalized. */
+export class DatabaseExecuteResultError extends Error {
+  public constructor() {
+    super('The database execute result did not contain a rows collection.');
+    this.name = 'DatabaseExecuteResultError';
+  }
+}
+
 /** Returns mapped rows from either supported raw Drizzle result shape. */
 export function databaseExecuteRows<Row extends Record<string, unknown>>(
-  result: DatabaseExecuteResult<Row>,
+  result: DatabaseExecuteResult<Row> | null | undefined,
 ): readonly Row[] {
-  return Array.isArray(result) ? result : result.rows;
+  if (Array.isArray(result)) return result;
+  if (result === null || result === undefined || !Array.isArray(result.rows)) {
+    throw new DatabaseExecuteResultError();
+  }
+  return result.rows;
 }
 
 /** A direct PostgreSQL connection and its idempotent lifecycle hook. */

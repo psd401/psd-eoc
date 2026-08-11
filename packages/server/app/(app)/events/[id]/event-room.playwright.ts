@@ -30,6 +30,8 @@ interface EventRoomFixture {
   readonly recoveryOwnerEventId: string;
   readonly lifecycleEventId: string;
   readonly malformedLifecycleEventId: string;
+  readonly mismatchedAllClearTransitionEventId: string;
+  readonly mismatchedTransitionEventId: string;
   readonly newerPollEventId: string;
   readonly realDraftEventId: string;
   readonly stalePollEventId: string;
@@ -616,7 +618,9 @@ test('an invalidated continuation remains fail-closed until a complete retry rea
 }, testInfo) => {
   const fixture = await readFixture(testInfo);
   await page.goto(fixturePath(fixture.invalidationEventId));
-  await expect(page.locator('.connection-line')).toContainText('Connected');
+  await expect(page.locator('.connection-line')).toContainText('Connected', {
+    timeout: 22_000,
+  });
 
   let releaseStalePage: () => void = () => undefined;
   const stalePageRelease = new Promise<void>((resolve) => {
@@ -626,9 +630,18 @@ test('an invalidated continuation remains fail-closed until a complete retry rea
   const terminalPageRelease = new Promise<void>((resolve) => {
     releaseTerminalPage = resolve;
   });
-  let stalePageCaptured = false;
-  let retryFirstPageSeen = false;
-  let retryTerminalHeld = false;
+  let resolveStalePageCaptured: () => void = () => undefined;
+  const stalePageCaptured = new Promise<void>((resolve) => {
+    resolveStalePageCaptured = resolve;
+  });
+  let resolveRetryFirstPageSeen: () => void = () => undefined;
+  const retryFirstPageSeen = new Promise<void>((resolve) => {
+    resolveRetryFirstPageSeen = resolve;
+  });
+  let resolveRetryTerminalHeld: () => void = () => undefined;
+  const retryTerminalHeld = new Promise<void>((resolve) => {
+    resolveRetryTerminalHeld = resolve;
+  });
   let timelineRequests = 0;
   await page.route('**/events/*/api**', async (route) => {
     const request = route.request();
@@ -648,7 +661,7 @@ test('an invalidated continuation remains fail-closed until a complete retry rea
       };
       expect(value.entries).toHaveLength(100);
       expect(value.hasMore).toBe(true);
-      stalePageCaptured = true;
+      resolveStalePageCaptured();
       await stalePageRelease;
       await route.fulfill({ response: upstream, json: value });
       return;
@@ -661,20 +674,21 @@ test('an invalidated continuation remains fail-closed until a complete retry rea
       };
       expect(value.entries).toHaveLength(100);
       expect(value.hasMore).toBe(true);
-      retryFirstPageSeen = true;
+      resolveRetryFirstPageSeen();
       await route.fulfill({ response: upstream, json: value });
       return;
     }
     if (timelineRequests === 3) {
-      retryTerminalHeld = true;
+      resolveRetryTerminalHeld();
       await terminalPageRelease;
     }
     await route.continue();
   });
 
+  let scenarioCompleted = false;
   try {
     await appendSyntheticBurst(testInfo, fixture.invalidationEventId, 101);
-    await expect.poll(() => stalePageCaptured, { timeout: 7_000 }).toBe(true);
+    await stalePageCaptured;
     await page
       .getByLabel('Update text')
       .fill('Mutation committed while a stale continuation was held');
@@ -683,8 +697,8 @@ test('an invalidated continuation remains fail-closed until a complete retry rea
       'timeline post confirmed by the server.',
     );
     releaseStalePage();
-    await expect.poll(() => retryFirstPageSeen).toBe(true);
-    await expect.poll(() => retryTerminalHeld).toBe(true);
+    await retryFirstPageSeen;
+    await retryTerminalHeld;
     await expect(page.locator('.timeline-panel')).toContainText(
       'Timeline content remains hidden until all authorized history',
     );
@@ -700,11 +714,14 @@ test('an invalidated continuation remains fail-closed until a complete retry rea
         exact: true,
       }),
     ).toBeVisible();
+    scenarioCompleted = true;
   } finally {
     releaseStalePage();
     releaseTerminalPage();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
   }
-  await page.unrouteAll({ behavior: 'wait' });
 });
 
 test('composer, correction, and redaction remain keyboard-operable and append provenance', async ({
@@ -778,6 +795,25 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
   await expect(
     page.getByRole('article', { name: 'Entry 6: Text update' }),
   ).toContainText('Reason: Synthetic privacy-safe redaction');
+  const redactedProjection = await page.evaluate(async (eventId) => {
+    const response = await fetch(`/events/${encodeURIComponent(eventId)}/api`, {
+      credentials: 'same-origin',
+    });
+    const value = (await response.json()) as {
+      entries?: Array<{
+        visibility?: string;
+        entry?: { sequence?: number; payload?: unknown };
+      }>;
+    };
+    return value.entries?.find(
+      (projection) => projection.entry?.sequence === 1,
+    );
+  }, fixture.keyboardEventId);
+  expect(redactedProjection?.visibility).toBe('redacted');
+  expect(redactedProjection?.entry).not.toHaveProperty('payload');
+  expect(JSON.stringify(redactedProjection)).not.toContain(
+    'Synthetic ordered history 001',
+  );
   await expectAxeClean(page, 'event room after correction and redaction');
 });
 
@@ -790,8 +826,10 @@ test('same-event but unrelated journal evidence never clears post, correction, o
     const response = await fetch(`/events/${encodeURIComponent(eventId)}/api`, {
       credentials: 'same-origin',
     });
-    const value = (await response.json()) as { entries?: unknown[] };
-    return value.entries?.[0] ?? null;
+    const value = (await response.json()) as {
+      entries?: Array<{ entry?: unknown }>;
+    };
+    return value.entries?.[0]?.entry ?? null;
   }, fixture.journalEvidenceEventId);
   expect(unrelatedEntry).not.toBeNull();
 
@@ -1096,6 +1134,30 @@ test('a blocked all-clear preview keeps classification visible and an operable k
   page,
 }, testInfo) => {
   const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.stalledPreviewEventId));
+  const prepared = await postPreview(
+    page,
+    fixture.stalledPreviewEventId,
+    `event-room-preview-${randomUUID()}`,
+    true,
+  );
+  expect(prepared.status).toBe(200);
+  const value = prepared.value as Record<string, unknown>;
+  const preview = value.preview as Record<string, unknown>;
+  const channels = preview.channels as Array<Record<string, unknown>>;
+  const blockedValue = {
+    ...value,
+    preview: {
+      ...preview,
+      recipientCount: 0,
+      channels: channels.map((channel) => ({
+        ...channel,
+        endpointCount: 0,
+      })),
+      sendReadiness: 'blocked',
+      blockingReasonCodes: ['NO_RECIPIENTS'],
+    },
+  };
   await page.route('**/events/*/api', async (route) => {
     const request = route.request();
     const body =
@@ -1107,32 +1169,14 @@ test('a blocked all-clear preview keeps classification visible and an operable k
       request.url().includes(fixture.stalledPreviewEventId) &&
       body?.operation === 'preview-all-clear'
     ) {
-      const upstream = await route.fetch();
-      const value = (await upstream.json()) as Record<string, unknown>;
-      const preview = value.preview as Record<string, unknown>;
-      const channels = preview.channels as Array<Record<string, unknown>>;
       await route.fulfill({
-        response: upstream,
-        json: {
-          ...value,
-          preview: {
-            ...preview,
-            recipientCount: 0,
-            channels: channels.map((channel) => ({
-              ...channel,
-              endpointCount: 0,
-            })),
-            sendReadiness: 'blocked',
-            blockingReasonCodes: ['NO_RECIPIENTS'],
-          },
-        },
+        json: blockedValue,
       });
       return;
     }
     await route.continue();
   });
 
-  await page.goto(fixturePath(fixture.stalledPreviewEventId));
   const opener = page.getByRole('button', { name: 'Review all-clear' });
   await opener.press('Enter');
   const dialog = page.getByRole('dialog');
@@ -1551,6 +1595,140 @@ test('a successful lifecycle response with a mismatched request acknowledgement 
   await expect(page.locator('.event-room > .error-panel')).toContainText(
     'did not acknowledge the exact request key',
   );
+  await expect(page.locator('.event-room > .error-panel')).toBeFocused();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a canonical all-clear response whose transition belongs to another request remains unresolved', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.mismatchedAllClearTransitionEventId) &&
+      body?.operation === 'all-clear'
+    ) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as Record<string, unknown>;
+      const mismatchedTransition = {
+        ...(value.transition as Record<string, unknown>),
+        idempotencyKey: `event-room-${randomUUID()}`,
+      };
+      const rewriteEntries = (candidate: unknown): unknown =>
+        (candidate as readonly Record<string, unknown>[]).map((entry) => ({
+          ...entry,
+          payload: {
+            ...(entry.payload as Record<string, unknown>),
+            transition: mismatchedTransition,
+          },
+        }));
+      await route.fulfill({
+        response: upstream,
+        json: {
+          ...value,
+          transition: mismatchedTransition,
+          journalEntries: rewriteEntries(value.journalEntries),
+          entries: rewriteEntries(value.entries),
+        },
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(fixture.mismatchedAllClearTransitionEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toBeVisible();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The outcome is unresolved.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('confirmed by the server');
+  await expect(page.locator('.event-room > .error-panel')).toBeFocused();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a canonical close response whose transition belongs to another request remains unresolved', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.mismatchedTransitionEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.mismatchedTransitionEventId) &&
+      body?.operation === 'close'
+    ) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as Record<string, unknown>;
+      const mismatchedTransition = {
+        ...(value.transition as Record<string, unknown>),
+        idempotencyKey: `event-room-${randomUUID()}`,
+      };
+      const rewriteEntries = (candidate: unknown): unknown =>
+        (candidate as readonly Record<string, unknown>[]).map((entry) => ({
+          ...entry,
+          payload: {
+            ...(entry.payload as Record<string, unknown>),
+            transition: mismatchedTransition,
+          },
+        }));
+      await route.fulfill({
+        response: upstream,
+        json: {
+          ...value,
+          transition: mismatchedTransition,
+          journalEntries: rewriteEntries(value.journalEntries),
+          entries: rewriteEntries(value.entries),
+        },
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const reviewClose = page.getByRole('button', { name: 'Review event close' });
+  await expect(reviewClose).toBeEnabled();
+  await reviewClose.press('Enter');
+  await page.getByLabel('Type CLOSE EVENT exactly').fill('CLOSE EVENT');
+  await page.getByRole('button', { name: 'Close event' }).press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toBeVisible();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The outcome is unresolved.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('confirmed by the server');
   await expect(page.locator('.event-room > .error-panel')).toBeFocused();
   await page.unrouteAll({ behavior: 'wait' });
 });

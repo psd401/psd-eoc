@@ -36,6 +36,8 @@ import {
   HUMAN_ONLY_ACTION_IDS,
   HttpsUrlSchema,
   JournalEntrySchema,
+  JournalEntryPageSchema,
+  JournalEntryReadProjectionSchema,
   JournalEntryInputSchema,
   HumanConfirmationRecordSchema,
   IdempotencyRecordSchema,
@@ -122,6 +124,7 @@ const ids = {
   rosterConfiguration: '00000000-0000-4000-8000-000000000038',
   tokenIssuance: '00000000-0000-4000-8000-000000000039',
   transition: '00000000-0000-4000-8000-000000000040',
+  media: '00000000-0000-4000-8000-000000000041',
 } as const;
 
 const times = {
@@ -1382,7 +1385,7 @@ describe('human-only capability boundary', () => {
     const result = {
       eventId: ids.event,
       event: activeEvent('incident', 'real', 'staff'),
-      entries: [entry],
+      entries: [{ visibility: 'visible', entry }],
       cursor,
       hasMore: false,
       snapshotSequence: 1,
@@ -1391,13 +1394,18 @@ describe('human-only capability boundary', () => {
     expect(
       EventRoomSyncResultSchema.safeParse({
         ...result,
-        entries: [{ ...entry, eventId: ids.otherFacility }],
+        entries: [
+          {
+            visibility: 'visible',
+            entry: { ...entry, eventId: ids.otherFacility },
+          },
+        ],
       }).success,
     ).toBe(false);
     expect(
       EventRoomSyncResultSchema.safeParse({
         ...result,
-        entries: [{ ...entry, sequence: 2 }],
+        entries: [{ visibility: 'visible', entry: { ...entry, sequence: 2 } }],
       }).success,
     ).toBe(false);
     expect(
@@ -1412,6 +1420,58 @@ describe('human-only capability boundary', () => {
         event: null,
         entries: [],
         hasMore: true,
+      }).success,
+    ).toBe(false);
+
+    const terminal = EventRoomSyncResultSchema.parse(result);
+    expect(terminal.hasMore).toBe(false);
+    expect(terminal.cursor).toBe(cursor);
+  });
+
+  test('projects redacted journal reads without any original payload fields', () => {
+    const metadata = {
+      id: ids.journal,
+      eventId: ids.event,
+      sequence: 1,
+      kind: 'photo',
+      author: humanActor,
+      source: 'web',
+      serverTime: times.activated,
+      clientTime: null,
+      supersedes: null,
+    } as const;
+    const projection = JournalEntryReadProjectionSchema.parse({
+      visibility: 'redacted',
+      entry: metadata,
+    });
+
+    expect('payload' in projection.entry).toBe(false);
+    expect(JSON.stringify(projection)).not.toContain('mediaId');
+    expect(
+      JournalEntryReadProjectionSchema.safeParse({
+        ...projection,
+        entry: { ...projection.entry, payload: { mediaId: ids.media } },
+      }).success,
+    ).toBe(false);
+    expect(
+      JournalEntryPageSchema.safeParse({
+        items: [projection],
+        pageInfo: { hasMore: false, nextCursor: null },
+      }).success,
+    ).toBe(true);
+    expect(
+      JournalEntryPageSchema.safeParse({
+        items: [
+          {
+            ...metadata,
+            payload: {
+              mediaId: ids.media,
+              altText: 'Synthetic original alt text',
+              caption: null,
+            },
+          },
+        ],
+        pageInfo: { hasMore: false, nextCursor: null },
       }).success,
     ).toBe(false);
   });

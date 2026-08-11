@@ -14,6 +14,7 @@ import {
   createDatabaseClient,
   databaseExecuteRows,
   DatabaseConfigurationError,
+  DatabaseExecuteResultError,
   readDatabaseConfig,
 } from '../db/client';
 
@@ -109,6 +110,16 @@ describe('raw execute result compatibility', () => {
 
     expect(databaseExecuteRows(postgresResult)).toEqual([]);
     expect(databaseExecuteRows(dataApiResult)).toEqual([]);
+  });
+
+  test('rejects absent or malformed raw results with an explicit domain error', () => {
+    for (const result of [null, undefined, {}, { rows: null }]) {
+      expect(() =>
+        databaseExecuteRows(
+          result as { rows: Record<string, unknown>[] } | null | undefined,
+        ),
+      ).toThrow(DatabaseExecuteResultError);
+    }
   });
 
   test('normalizes the pinned Drizzle Data API runtime response without AWS I/O', async () => {

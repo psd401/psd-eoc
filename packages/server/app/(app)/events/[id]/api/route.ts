@@ -11,7 +11,11 @@ import { NextResponse } from 'next/server';
 
 import { authenticateSessionRequest } from '../../../../../lib/auth/middleware';
 import { getDefaultSessionService } from '../../../../../lib/auth/sessions';
-import { resolveHumanCapabilityInvocation } from '../../../../../lib/capabilities/engine';
+import {
+  digestCapabilityValue,
+  resolveHumanCapabilityInvocation,
+  scopeTransitionIdempotencyKey,
+} from '../../../../../lib/capabilities/engine';
 import { getDefaultEventRoomCapabilityRuntime } from '../../../../../lib/capabilities/event-room';
 import { getDefaultEventCapabilityRuntime } from '../../../../../lib/capabilities/events';
 import { getDefaultJournalCapabilityRuntime } from '../../../../../lib/capabilities/journal';
@@ -20,6 +24,7 @@ import { eventApiErrorResponse } from '../../../../api/events/_lib/http';
 const JSON_MEDIA_TYPE = 'application/json';
 const MAX_BODY_BYTES = 64 * 1_024;
 const PAGE_LIMIT = 100;
+const TRANSITION_IDEMPOTENCY_HEADER = 'X-PSD-EOC-Transition-Idempotency-Key';
 const RESPONSE_HEADERS = Object.freeze({
   'Cache-Control': 'no-store',
   Vary: 'Authorization, Cookie',
@@ -31,13 +36,42 @@ interface EventRoomRouteContext {
 
 type JsonObject = Readonly<Record<string, unknown>>;
 
-function success(value: unknown, idempotencyKey?: string): NextResponse {
+function success(
+  value: unknown,
+  idempotencyKey?: string,
+  transitionIdempotencyKey?: string,
+): NextResponse {
+  const mutationHeaders =
+    idempotencyKey === undefined
+      ? RESPONSE_HEADERS
+      : { ...RESPONSE_HEADERS, 'Idempotency-Key': idempotencyKey };
   return NextResponse.json(value, {
     headers:
-      idempotencyKey === undefined
-        ? RESPONSE_HEADERS
-        : { ...RESPONSE_HEADERS, 'Idempotency-Key': idempotencyKey },
+      transitionIdempotencyKey === undefined
+        ? mutationHeaders
+        : {
+            ...mutationHeaders,
+            [TRANSITION_IDEMPOTENCY_HEADER]: transitionIdempotencyKey,
+          },
   });
+}
+
+function assertLifecycleTransitionKey(
+  capabilityId: 'all-clear-event' | 'close-event',
+  actor: Parameters<typeof digestCapabilityValue>[0],
+  rawIdempotencyKey: string,
+  transitionIdempotencyKey: string,
+): void {
+  const expected = scopeTransitionIdempotencyKey(
+    capabilityId,
+    digestCapabilityValue(actor),
+    rawIdempotencyKey,
+  );
+  if (transitionIdempotencyKey !== expected) {
+    throw new Error(
+      'Lifecycle evidence did not match the authenticated request scope.',
+    );
+  }
 }
 
 function assertOnlyKeys(
@@ -159,6 +193,12 @@ async function handleMutation(
   requestId: string,
   serverTime: Date,
 ): Promise<NextResponse> {
+  const authenticated = await authenticateSessionRequest(
+    request,
+    getDefaultSessionService(),
+    { mutation: true },
+    serverTime,
+  );
   if (new URL(request.url).search.length > 0) {
     throw new SyntaxError(
       'Event-room mutations do not accept query parameters.',
@@ -170,12 +210,6 @@ async function handleMutation(
     );
   }
   const idempotencyKey = mutationKey(request);
-  const authenticated = await authenticateSessionRequest(
-    request,
-    getDefaultSessionService(),
-    { mutation: true },
-    serverTime,
-  );
   const body = await readJsonObject(request);
   const operation = requiredString(
     body,
@@ -375,12 +409,19 @@ async function handleMutation(
       { eventId, lifecyclePreviewId },
       invocation,
     );
+    assertLifecycleTransitionKey(
+      'all-clear-event',
+      invocation.actor,
+      idempotencyKey,
+      result.transition.idempotencyKey,
+    );
     return success(
       {
         ...result,
         entries: result.journalEntries,
       },
       idempotencyKey,
+      result.transition.idempotencyKey,
     );
   }
 
@@ -413,12 +454,19 @@ async function handleMutation(
       { eventId },
       invocation,
     );
+    assertLifecycleTransitionKey(
+      'close-event',
+      invocation.actor,
+      idempotencyKey,
+      result.transition.idempotencyKey,
+    );
     return success(
       {
         ...result,
         entries: result.journalEntries,
       },
       idempotencyKey,
+      result.transition.idempotencyKey,
     );
   }
 

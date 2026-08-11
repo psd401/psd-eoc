@@ -16,7 +16,7 @@ import {
   type Event,
   type JournalEntry,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -41,9 +41,10 @@ import {
   digestWebSessionCredential,
 } from '../../../../lib/auth/session-cookie';
 import {
-  requireEventRoomPlaywrightRunContext,
-  type EventRoomPlaywrightRunContext,
-} from './test-database';
+  createOwnedEventRoomPlaywrightDatabase,
+  dropOwnedEventRoomPlaywrightDatabase,
+} from './playwright-database';
+import { requireEventRoomPlaywrightRunContext } from './test-database';
 
 const ACCESS_GROUP_ID = '16000000-0000-4000-8000-000000000110';
 const MEMBER_USER_ID = '16000000-0000-4000-8000-000000000120';
@@ -79,6 +80,8 @@ interface EventRoomFixture {
   readonly recoveryOwnerEventId: string;
   readonly lifecycleEventId: string;
   readonly malformedLifecycleEventId: string;
+  readonly mismatchedAllClearTransitionEventId: string;
+  readonly mismatchedTransitionEventId: string;
   readonly newerPollEventId: string;
   readonly realDraftEventId: string;
   readonly stalePollEventId: string;
@@ -140,50 +143,6 @@ async function prepareDatabase(databaseUrl: string): Promise<void> {
     cwd: serverRoot,
     env: environment,
   });
-}
-
-async function createIsolatedDatabase(
-  context: EventRoomPlaywrightRunContext,
-): Promise<void> {
-  const admin = createDatabaseClient({
-    driver: 'postgres',
-    url: context.baseDatabaseUrl,
-    maxConnections: 1,
-  });
-  if (admin.driver !== 'postgres') {
-    throw new Error(
-      'Event-room Playwright database setup requires PostgreSQL.',
-    );
-  }
-  try {
-    await admin.db.execute(
-      sql.raw(`create database "${context.databaseName}"`),
-    );
-  } finally {
-    await admin.close();
-  }
-}
-
-async function dropIsolatedDatabase(
-  context: EventRoomPlaywrightRunContext,
-): Promise<void> {
-  const admin = createDatabaseClient({
-    driver: 'postgres',
-    url: context.baseDatabaseUrl,
-    maxConnections: 1,
-  });
-  if (admin.driver !== 'postgres') {
-    throw new Error(
-      'Event-room Playwright database cleanup requires PostgreSQL.',
-    );
-  }
-  try {
-    await admin.db.execute(
-      sql.raw(`drop database if exists "${context.databaseName}" with (force)`),
-    );
-  } finally {
-    await admin.close();
-  }
 }
 
 async function prepareAccessEvidence(
@@ -600,6 +559,8 @@ async function prepareEventFixtures(
   const continuationEvent = makeActiveEvent();
   const stalePollEvent = makeActiveEvent();
   const malformedLifecycleEvent = makeActiveEvent();
+  const mismatchedAllClearTransitionEvent = makeActiveEvent();
+  const mismatchedTransitionEvent = makeActiveEvent();
   const newerPollEvent = makeActiveEvent();
   const staleLifecycleResponseEvent = makeActiveEvent();
   const dialogFailureEvent = makeActiveEvent();
@@ -661,6 +622,8 @@ async function prepareEventFixtures(
     ...makeHistory(continuationEvent, 3),
     ...makeHistory(stalePollEvent, 3),
     ...makeHistory(malformedLifecycleEvent, 3),
+    ...makeHistory(mismatchedAllClearTransitionEvent, 3),
+    ...makeHistory(mismatchedTransitionEvent, 3),
     ...makeHistory(newerPollEvent, 3),
     ...makeHistory(staleLifecycleResponseEvent, 3),
     ...makeHistory(dialogFailureEvent, 3),
@@ -708,6 +671,8 @@ async function prepareEventFixtures(
           continuationEvent,
           stalePollEvent,
           malformedLifecycleEvent,
+          mismatchedAllClearTransitionEvent,
+          mismatchedTransitionEvent,
           newerPollEvent,
           staleLifecycleResponseEvent,
           dialogFailureEvent,
@@ -730,6 +695,8 @@ async function prepareEventFixtures(
     recoveryOwnerEventId: recoveryOwnerEvent.id,
     lifecycleEventId: lifecycleEvent.id,
     malformedLifecycleEventId: malformedLifecycleEvent.id,
+    mismatchedAllClearTransitionEventId: mismatchedAllClearTransitionEvent.id,
+    mismatchedTransitionEventId: mismatchedTransitionEvent.id,
     newerPollEventId: newerPollEvent.id,
     realDraftEventId: realDraftEvent.id,
     stalePollEventId: stalePollEvent.id,
@@ -745,7 +712,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   let isolatedDatabaseCreated = false;
   try {
     await mkdir(context.runDirectory, { mode: 0o700, recursive: true });
-    await createIsolatedDatabase(context);
+    await createOwnedEventRoomPlaywrightDatabase(context);
     isolatedDatabaseCreated = true;
     await prepareDatabase(context.databaseUrl);
     const created = createDatabaseClient({
@@ -816,7 +783,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const cleanupErrors: unknown[] = [];
     if (isolatedDatabaseCreated) {
       try {
-        await dropIsolatedDatabase(context);
+        await dropOwnedEventRoomPlaywrightDatabase(context);
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);
       }

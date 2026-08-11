@@ -15,6 +15,7 @@ import {
   PaginationCursorSchema,
   SecurityAuditEntrySchema,
   UuidSchema,
+  projectJournalEntryForRead,
   type ActivationPreview,
   type CapabilityInput,
   type CapabilityOutput,
@@ -1253,7 +1254,29 @@ async function listJournalEntriesFromDatabase(
     .orderBy(asc(journalEntries.sequence))
     .limit(input.limit + 1);
   const hasMore = rows.length > input.limit;
-  const visible = rows.slice(0, input.limit).map(journalFromRow);
+  const visibleRows = rows.slice(0, input.limit);
+  const visibleIds = visibleRows.map((row) => row.id);
+  const redactionTargets =
+    visibleIds.length === 0
+      ? []
+      : await database
+          .select({ entryId: journalEntries.supersedesEntryId })
+          .from(journalEntries)
+          .where(
+            and(
+              eq(journalEntries.eventId, input.eventId),
+              eq(journalEntries.supersessionKind, 'redaction'),
+              inArray(journalEntries.supersedesEntryId, visibleIds),
+            ),
+          );
+  const redactedIds = new Set(
+    redactionTargets.flatMap(({ entryId }) =>
+      entryId === null ? [] : [entryId],
+    ),
+  );
+  const visible = visibleRows.map((row) =>
+    projectJournalEntryForRead(journalFromRow(row), redactedIds.has(row.id)),
+  );
   const last = visible.at(-1);
   return JournalEntryPageSchema.parse({
     items: visible,
@@ -1261,7 +1284,7 @@ async function listJournalEntriesFromDatabase(
       hasMore,
       nextCursor:
         hasMore && last !== undefined
-          ? createJournalCursor(input.eventId, last.sequence)
+          ? createJournalCursor(input.eventId, last.entry.sequence)
           : null,
     },
   });

@@ -27,6 +27,7 @@ import {
 } from './capability';
 import {
   EventRoomSyncResultSchema,
+  JournalEntryReadProjectionSchema,
   SyncEventRoomInputSchema,
 } from './event-room';
 import {
@@ -400,6 +401,8 @@ export type ListJournalEntriesInput = z.infer<
 /**
  * Owns bounded facility-authorized journal search filters. Message search text
  * is accepted only as input and must never be copied into security audit data.
+ * Implementations must exclude redacted originals before content matching so
+ * search cannot become an oracle for content removed from outward reads.
  */
 export const SearchJournalEntriesInputSchema = z
   .object({
@@ -433,7 +436,9 @@ export type SearchJournalEntriesInput = z.infer<
 >;
 
 /** Owns a stable cursor page of append-only operational journal entries. */
-export const JournalEntryPageSchema = paginatedSchema(JournalEntrySchema);
+export const JournalEntryPageSchema = paginatedSchema(
+  JournalEntryReadProjectionSchema,
+);
 
 /** Cursor page of operational journal entries inferred from its schema. */
 export type JournalEntryPage = z.infer<typeof JournalEntryPageSchema>;
@@ -1263,6 +1268,10 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'sync-event-room',
     operation: 'query',
     safetyEffect: 'none',
+    // Binding issue #77 operational sign-off: this web-human-only, read-only
+    // high-frequency sync omits successful chain writes so 1,200 pollers do
+    // not serialize incident mutations. Denials/failures remain audited, and
+    // the catalog invariants below prohibit this policy for agents/mutations.
     auditPolicy: 'denied-and-failed',
     inputSchema: SyncEventRoomInputSchema,
     outputSchema: EventRoomSyncResultSchema,
