@@ -608,7 +608,10 @@ test('real incident path reaches a current, fail-closed consequence preview in t
     .first()
     .click();
   interactionCount += 1;
-  await expect(page).toHaveURL(/\/start\/confirm\?/u);
+  // The first confirmation navigation compiles that dynamic route in the
+  // Playwright development server. A cold CI runner can legitimately take
+  // longer than the normal assertion budget before committing the URL.
+  await expect(page).toHaveURL(/\/start\/confirm\?/u, { timeout: 20_000 });
   await expect(page).toHaveTitle('Review REAL incident confirmation | PSD EOC');
   await expect(page.locator('[aria-current="step"]')).toHaveText(
     '3. Review and confirm',
