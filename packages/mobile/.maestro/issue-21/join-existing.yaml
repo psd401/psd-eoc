@@ -9,14 +9,14 @@ tags:
 # flow from operating outside explicit synthetic test mode.
 - launchApp:
     clearState: false
-    stopApp: true
+    stopApp: false
 - assertVisible:
     id: 'issue-21-synthetic-mode'
 - assertVisible: 'DRILL — PRACTICE'
 - assertVisible:
     id: 'issue-21-join-existing'
-- tapOn:
-    id: 'issue-21-join-existing'
+- assertVisible: 'Join existing DRILL — PRACTICE: Synthetic earthquake drill at Synthetic Test School.*'
+- tapOn: 'Join existing DRILL — PRACTICE: Synthetic earthquake drill at Synthetic Test School.*'
 - extendedWaitUntil:
     visible:
       id: 'issue-21-joined-result'

@@ -3,36 +3,28 @@ import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 const DIALER_URL = 'tel:911';
 
+type OpenUrl = (url: string) => Promise<void> | void;
+
 export interface Call911AffordanceProps {
   readonly onOpenDialer?: () => Promise<void> | void;
   readonly testID?: string;
 }
 
-/**
- * Explicit human-controlled dialer affordance. It never runs on mount and does
- * not claim that PSD EOC contacts or dispatches 911.
- */
-export function Call911Affordance({
-  onOpenDialer,
-  testID = 'call-911-first',
-}: Call911AffordanceProps) {
-  const [error, setError] = useState<string | null>(null);
+interface Call911ActionProps {
+  readonly error: string | null;
+  readonly onPress: () => void;
+  readonly testID: string;
+}
 
-  async function openDialer() {
-    setError(null);
-    try {
-      if (onOpenDialer === undefined) {
-        await Linking.openURL(DIALER_URL);
-      } else {
-        await onOpenDialer();
-      }
-    } catch {
-      setError(
-        'The phone dialer could not be opened. Call 911 from your phone.',
-      );
-    }
-  }
+/** Executes only the human-selected system dialer handoff. */
+export async function open911Dialer(
+  openUrl: OpenUrl = (url) => Linking.openURL(url),
+): Promise<void> {
+  await openUrl(DIALER_URL);
+}
 
+/** Pure native presentation used by the stateful dialer wrapper. */
+export function Call911Action({ error, onPress, testID }: Call911ActionProps) {
   return (
     <View style={styles.container}>
       <Pressable
@@ -40,9 +32,7 @@ export function Call911Affordance({
         accessibilityLabel="Call 911 first"
         accessibilityRole="link"
         hitSlop={4}
-        onPress={() => {
-          void openDialer();
-        }}
+        onPress={onPress}
         style={({ pressed }) => [styles.row, pressed && styles.pressed]}
         testID={testID}
       >
@@ -70,6 +60,42 @@ export function Call911Affordance({
         </Text>
       )}
     </View>
+  );
+}
+
+/**
+ * Explicit human-controlled dialer affordance. It never runs on mount and does
+ * not claim that PSD EOC contacts or dispatches 911.
+ */
+export function Call911Affordance({
+  onOpenDialer,
+  testID = 'call-911-first',
+}: Call911AffordanceProps) {
+  const [error, setError] = useState<string | null>(null);
+
+  async function openDialer() {
+    setError(null);
+    try {
+      if (onOpenDialer === undefined) {
+        await open911Dialer();
+      } else {
+        await onOpenDialer();
+      }
+    } catch {
+      setError(
+        'The phone dialer could not be opened. Call 911 from your phone.',
+      );
+    }
+  }
+
+  return (
+    <Call911Action
+      error={error}
+      onPress={() => {
+        void openDialer();
+      }}
+      testID={testID}
+    />
   );
 }
 
