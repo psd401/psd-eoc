@@ -3,12 +3,14 @@ import {
   readDatabaseConfig,
   type DatabaseConnection,
 } from '../../db/client';
+import { createStartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
 import {
   createDrizzleSecurityAuditRepository,
   SecurityAuditService,
 } from '../audit';
 import { createEventCapabilityRuntime } from '../capabilities/events';
 import { createJournalCapabilityRuntime } from '../capabilities/journal';
+import { createRecordsCapabilityRuntime } from '../capabilities/records';
 import { createDrizzleStaleRosterReportStore } from '../roster/stale-report';
 import { AgentApiKeyAdministration } from './admin-capabilities';
 import {
@@ -58,9 +60,13 @@ export function createAgentRestRuntime(
   });
   const events = createEventCapabilityRuntime(connection);
   const journal = createJournalCapabilityRuntime(connection);
+  const activationPreviews = createStartFlowCapabilityRuntime(connection);
+  const records = createRecordsCapabilityRuntime(journal.store);
   const dispatcher = createDefaultAgentCapabilityDispatcher({
     events,
     journal,
+    activationPreviews,
+    records,
     administration,
     administrationFacilities,
     eventTypes: createAtomicAgentEventTypeStore(connection.db),
