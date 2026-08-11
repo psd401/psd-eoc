@@ -45,6 +45,7 @@ import {
   type WebSessionIssuanceErrorCode,
   type WebSessionPolicy,
 } from '../../../../lib/auth/session-cookie';
+import { clearReturnToCookieHeader, readReturnToCookie } from '../return-to';
 
 export const dynamic = 'force-dynamic';
 
@@ -353,6 +354,7 @@ function deniedResponse(
   if (clearCookieHeader !== undefined) {
     response.headers.append('Set-Cookie', clearCookieHeader);
   }
+  response.headers.append('Set-Cookie', clearReturnToCookieHeader());
   return noStore(response);
 }
 
@@ -402,12 +404,12 @@ export async function GET(request: Request): Promise<NextResponse> {
       : deniedResponse(request, 'configuration');
   }
   if (mobileRelayUrl !== null) {
-    return noStore(
-      new NextResponse(null, {
-        status: 303,
-        headers: { Location: mobileRelayUrl },
-      }),
-    );
+    const response = new NextResponse(null, {
+      status: 303,
+      headers: { Location: mobileRelayUrl },
+    });
+    response.headers.append('Set-Cookie', clearReturnToCookieHeader());
+    return noStore(response);
   }
   let clearCookieHeader: string | undefined;
   let runtime: AuthRuntime | undefined;
@@ -503,17 +505,21 @@ export async function GET(request: Request): Promise<NextResponse> {
       throw new Error('The canonical sign-in capability issued no cookie.');
     }
 
+    const returnTo = readReturnToCookie(request.headers.get('cookie'));
     const response = NextResponse.redirect(
-      new URL('/signed-in', request.url),
+      new URL(returnTo.destination, request.url),
       303,
     );
-    response.headers.append('Set-Cookie', clearCookieHeader);
     response.cookies.set(sessionCookie);
     writeBrowserCsrfCookie(
       response.cookies,
       createCsrfToken(),
       sessionCookie.maxAge,
     );
+    // NextResponse.cookies rewrites Set-Cookie, so append transient-cookie
+    // clearing only after all cookie-writer calls have completed.
+    response.headers.append('Set-Cookie', clearCookieHeader);
+    response.headers.append('Set-Cookie', clearReturnToCookieHeader());
     return noStore(response);
   } catch (error) {
     if (error instanceof GoogleOidcCallbackError) {
