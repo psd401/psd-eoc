@@ -51,21 +51,14 @@ describe('location map helpers', () => {
   });
 
   test('formats a permanent text equivalent for known, ambiguous, and unknown states', () => {
-    const recordedAt = '2026-08-11T15:00:00.000Z';
-    expect(formatLocationTextEquivalent(KNOWN, recordedAt)).toContain(
+    expect(formatLocationTextEquivalent(KNOWN)).toContain(
       'GPS accuracy radius ±42.5 meters',
     );
-    expect(formatLocationTextEquivalent(KNOWN, recordedAt)).toContain(
+    expect(formatLocationTextEquivalent(KNOWN)).toContain(
       GPS_PRECISION_DISCLAIMER,
     );
-    expect(formatLocationTextEquivalent(KNOWN, recordedAt)).toContain(
-      recordedAt,
-    );
     expect(
-      formatLocationTextEquivalent(
-        { ...KNOWN, accuracyMeters: 0.04 },
-        recordedAt,
-      ),
+      formatLocationTextEquivalent({ ...KNOWN, accuracyMeters: 0.04 }),
     ).toContain('GPS accuracy radius ±0.04 meters');
     expect(
       formatLocationTextEquivalent(
@@ -74,7 +67,6 @@ describe('location map helpers', () => {
           label: 'Near the synthetic gym',
           reason: 'Signal drift crosses two buildings.',
         }),
-        recordedAt,
       ),
     ).toContain('Coordinates and accuracy are unavailable');
     expect(
@@ -83,7 +75,6 @@ describe('location map helpers', () => {
           state: 'unknown',
           reason: 'The operator cannot safely determine the location.',
         }),
-        recordedAt,
       ),
     ).toContain('Location unknown');
   });

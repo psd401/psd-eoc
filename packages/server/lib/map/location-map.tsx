@@ -1,5 +1,10 @@
 'use client';
 
+import type {
+  GeoJSONSource,
+  Map as MapLibreMap,
+  Marker as MapLibreMarker,
+} from 'maplibre-gl';
 import { useEffect, useRef } from 'react';
 
 import {
@@ -35,9 +40,13 @@ export function LocationMap({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const coordinateCallbackRef = useRef(onCoordinatesChange);
   const errorCallbackRef = useRef(onError);
+  const mapRef = useRef<MapLibreMap | null>(null);
+  const markerRef = useRef<MapLibreMarker | null>(null);
   const latitude = payload.latitude;
   const longitude = payload.longitude;
   const accuracyMeters = payload.accuracyMeters;
+  const locationRef = useRef({ latitude, longitude, accuracyMeters });
+  locationRef.current = { latitude, longitude, accuracyMeters };
 
   useEffect(() => {
     coordinateCallbackRef.current = onCoordinatesChange;
@@ -62,21 +71,18 @@ export function LocationMap({
     void import('maplibre-gl')
       .then(({ Map, Marker }) => {
         if (cancelled) return;
-        const geometry = createLocationMapGeometry({
-          state: 'known',
-          latitude,
-          longitude,
-          accuracyMeters,
-          label: null,
-        });
+        const currentLocation = locationRef.current;
         const map = new Map({
           container,
           style: createOsmRasterStyle(),
-          center: [longitude, latitude],
+          center: [currentLocation.longitude, currentLocation.latitude],
           zoom: 17,
           attributionControl: false,
           interactive: mode === 'edit',
+          keyboard: false,
         });
+        map.getCanvas().tabIndex = -1;
+        map.getCanvas().setAttribute('aria-hidden', 'true');
 
         const markerElement = document.createElement('span');
         markerElement.className = 'location-map-marker';
@@ -85,8 +91,10 @@ export function LocationMap({
           draggable: mode === 'edit',
           element: markerElement,
         })
-          .setLngLat([longitude, latitude])
+          .setLngLat([currentLocation.longitude, currentLocation.latitude])
           .addTo(map);
+        mapRef.current = map;
+        markerRef.current = marker;
 
         if (mode === 'edit') {
           marker.on('dragend', () => {
@@ -100,9 +108,14 @@ export function LocationMap({
 
         map.on('load', () => {
           if (cancelled) return;
+          const currentGeometry = createLocationMapGeometry({
+            state: 'known',
+            ...locationRef.current,
+            label: null,
+          });
           map.addSource('location-accuracy', {
             type: 'geojson',
-            data: geometry.accuracyArea,
+            data: currentGeometry.accuracyArea,
           });
           map.addLayer({
             id: 'location-accuracy-fill',
@@ -118,6 +131,8 @@ export function LocationMap({
         map.on('error', (event) => reportError(event.error));
 
         cleanup = () => {
+          mapRef.current = null;
+          markerRef.current = null;
           marker.remove();
           map.remove();
         };
@@ -128,7 +143,29 @@ export function LocationMap({
       cancelled = true;
       cleanup();
     };
-  }, [accuracyMeters, latitude, longitude, mode]);
+  }, [mode]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const marker = markerRef.current;
+    if (map === null || marker === null) return;
+    const coordinates: [number, number] = [longitude, latitude];
+    marker.setLngLat(coordinates);
+    const geometry = createLocationMapGeometry({
+      state: 'known',
+      latitude,
+      longitude,
+      accuracyMeters,
+      label: null,
+    });
+    const accuracySource = map.getSource('location-accuracy');
+    if (accuracySource !== undefined && 'setData' in accuracySource) {
+      void (accuracySource as GeoJSONSource).setData(geometry.accuracyArea);
+    }
+    if (!map.getBounds().contains(coordinates)) {
+      map.jumpTo({ center: coordinates });
+    }
+  }, [accuracyMeters, latitude, longitude]);
 
   return (
     <div className="location-map-frame">
