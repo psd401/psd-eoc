@@ -102,6 +102,14 @@ const ROSTER_QUERY_LIMITS = Object.freeze({
   sources: 500 * 2,
 });
 
+// These read ceilings mirror the canonical administrator mutation inputs:
+// at most 500 audience targets and 200 facilities in one neighborhood.
+const AUDIENCE_QUERY_LIMITS = Object.freeze({
+  neighborhoodFacilities: 200,
+  otherSources: 500,
+  targets: 500,
+});
+
 /** Persistence boundary for the two query capabilities owned by start flow. */
 export interface StartFlowCapabilityTransaction
   extends CapabilityEngineTransaction {
@@ -335,7 +343,7 @@ export async function loadLatestAudienceConfigurationHeader(
   return configuration ?? null;
 }
 
-async function loadAudienceConfiguration(
+export async function loadAudienceConfiguration(
   database: StartFlowQueryDatabase,
   facilityId: string,
 ): Promise<Readonly<{
@@ -349,29 +357,43 @@ async function loadAudienceConfiguration(
   if (configuration === null) {
     return null;
   }
-  const targets = await database
-    .select()
-    .from(audienceTargets)
-    .where(
-      and(
-        eq(audienceTargets.audienceConfigId, configuration.id),
-        eq(audienceTargets.audienceConfigVersion, configuration.version),
-      ),
-    )
-    .orderBy(asc(audienceTargets.ordinal));
+  const targets = await collectBoundedDatabaseRows(
+    (offset, limit) =>
+      database
+        .select()
+        .from(audienceTargets)
+        .where(
+          and(
+            eq(audienceTargets.audienceConfigId, configuration.id),
+            eq(audienceTargets.audienceConfigVersion, configuration.version),
+          ),
+        )
+        .orderBy(asc(audienceTargets.ordinal))
+        .offset(offset)
+        .limit(limit),
+    { maxRows: AUDIENCE_QUERY_LIMITS.targets },
+  );
 
   const othersIds = targets.flatMap((target) =>
     target.targetKind === 'others' && target.groupSourceId !== null
       ? [target.groupSourceId]
       : [],
   );
+  const uniqueOthersIds = [...new Set(othersIds)].sort();
   const otherSources =
-    othersIds.length === 0
+    uniqueOthersIds.length === 0
       ? []
-      : await database
-          .select()
-          .from(groupSources)
-          .where(inArray(groupSources.id, othersIds));
+      : await collectBoundedDatabaseRows(
+          (offset, limit) =>
+            database
+              .select()
+              .from(groupSources)
+              .where(inArray(groupSources.id, uniqueOthersIds))
+              .orderBy(asc(groupSources.id))
+              .offset(offset)
+              .limit(limit),
+          { maxRows: AUDIENCE_QUERY_LIMITS.otherSources },
+        );
   const otherById = new Map(otherSources.map((source) => [source.id, source]));
 
   const neighborhoodRefs = targets.flatMap((target) =>
@@ -401,16 +423,22 @@ async function loadAudienceConfiguration(
     if (version === undefined) {
       return null;
     }
-    const members = await database
-      .select({ facilityId: neighborhoodFacilities.facilityId })
-      .from(neighborhoodFacilities)
-      .where(
-        and(
-          eq(neighborhoodFacilities.neighborhoodId, reference.id),
-          eq(neighborhoodFacilities.neighborhoodVersion, reference.version),
-        ),
-      )
-      .orderBy(asc(neighborhoodFacilities.facilityId));
+    const members = await collectBoundedDatabaseRows(
+      (offset, limit) =>
+        database
+          .select({ facilityId: neighborhoodFacilities.facilityId })
+          .from(neighborhoodFacilities)
+          .where(
+            and(
+              eq(neighborhoodFacilities.neighborhoodId, reference.id),
+              eq(neighborhoodFacilities.neighborhoodVersion, reference.version),
+            ),
+          )
+          .orderBy(asc(neighborhoodFacilities.facilityId))
+          .offset(offset)
+          .limit(limit),
+      { maxRows: AUDIENCE_QUERY_LIMITS.neighborhoodFacilities },
+    );
     resolvedNeighborhoods.push(
       NeighborhoodSchema.parse({
         id: version.id,
@@ -767,7 +795,9 @@ function mapPreviewConstructionError(error: unknown): never {
     throw conflict('The selected event type is inconsistent.');
   }
   if (error instanceof BoundedDatabaseQueryError) {
-    throw conflict('The roster snapshot exceeds its supported query bounds.');
+    throw conflict(
+      'The activation consequence data exceeds its supported query bounds.',
+    );
   }
   if (error instanceof ActivationPreviewBuildError) {
     switch (error.code) {
