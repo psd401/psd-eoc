@@ -77,6 +77,11 @@ import {
   EventTypeCapabilityError,
 } from '../../../../lib/capabilities/event-types';
 import { AudienceResolutionError } from '../../../../lib/roster/resolve';
+import {
+  BoundedDatabaseQueryError,
+  collectBoundedDatabaseRows,
+  START_FLOW_ENDPOINT_PAGE_SIZE,
+} from './bounded-query';
 import { ActivationPreviewBuildError, buildActivationPreview } from './preview';
 
 type StartFlowCapabilityId = Extract<
@@ -85,6 +90,16 @@ type StartFlowCapabilityId = Extract<
 >;
 
 type StartFlowQueryDatabase = PostgresDatabase;
+
+// Defensive query ceilings mirror the canonical roster contract. The Zod
+// schemas remain the source of truth and validate every assembled row.
+const ROSTER_QUERY_LIMITS = Object.freeze({
+  endpoints: 1_200 * 10,
+  facilities: 200,
+  provenance: 1_200 * 50,
+  recipients: 1_200,
+  sources: 500 * 2,
+});
 
 /** Persistence boundary for the two query capabilities owned by start flow. */
 export interface StartFlowCapabilityTransaction
@@ -456,65 +471,90 @@ async function loadRosterSnapshot(
     return null;
   }
   const snapshotId = snapshot.snapshot.id;
-  const [
-    facilityRows,
-    sourceRows,
-    recipientRows,
-    provenanceRows,
-    endpointRows,
-  ] = await Promise.all([
-    database
-      .select({ facilityId: rosterSnapshotFacilities.facilityId })
-      .from(rosterSnapshotFacilities)
-      .where(eq(rosterSnapshotFacilities.rosterSnapshotId, snapshotId))
-      .orderBy(asc(rosterSnapshotFacilities.facilityId)),
-    database
-      .select({
-        completionKind: rosterSnapshotSources.completionKind,
-        id: groupSources.id,
-        kind: groupSources.kind,
-        purpose: groupSources.purpose,
-        facilityId: groupSources.facilityId,
-      })
-      .from(rosterSnapshotSources)
-      .innerJoin(
-        groupSources,
-        eq(groupSources.id, rosterSnapshotSources.groupSourceId),
-      )
-      .where(eq(rosterSnapshotSources.rosterSnapshotId, snapshotId))
-      .orderBy(
-        asc(rosterSnapshotSources.completionKind),
-        asc(rosterSnapshotSources.groupSourceId),
-      ),
-    database
-      .select()
-      .from(rosterRecipients)
-      .where(eq(rosterRecipients.rosterSnapshotId, snapshotId))
-      .orderBy(asc(rosterRecipients.id)),
-    database
-      .select({
-        recipientId: rosterRecipientGroupSources.recipientId,
-        id: groupSources.id,
-        kind: groupSources.kind,
-        purpose: groupSources.purpose,
-        facilityId: groupSources.facilityId,
-      })
-      .from(rosterRecipientGroupSources)
-      .innerJoin(
-        groupSources,
-        eq(groupSources.id, rosterRecipientGroupSources.groupSourceId),
-      )
-      .where(eq(rosterRecipientGroupSources.rosterSnapshotId, snapshotId))
-      .orderBy(
-        asc(rosterRecipientGroupSources.recipientId),
-        asc(rosterRecipientGroupSources.groupSourceId),
-      ),
-    database
-      .select()
-      .from(rosterEndpoints)
-      .where(eq(rosterEndpoints.rosterSnapshotId, snapshotId))
-      .orderBy(asc(rosterEndpoints.recipientId), asc(rosterEndpoints.id)),
-  ]);
+  const facilityRows = await collectBoundedDatabaseRows(
+    (offset, limit) =>
+      database
+        .select({ facilityId: rosterSnapshotFacilities.facilityId })
+        .from(rosterSnapshotFacilities)
+        .where(eq(rosterSnapshotFacilities.rosterSnapshotId, snapshotId))
+        .orderBy(asc(rosterSnapshotFacilities.facilityId))
+        .offset(offset)
+        .limit(limit),
+    { maxRows: ROSTER_QUERY_LIMITS.facilities },
+  );
+  const sourceRows = await collectBoundedDatabaseRows(
+    (offset, limit) =>
+      database
+        .select({
+          completionKind: rosterSnapshotSources.completionKind,
+          id: groupSources.id,
+          kind: groupSources.kind,
+          purpose: groupSources.purpose,
+          facilityId: groupSources.facilityId,
+        })
+        .from(rosterSnapshotSources)
+        .innerJoin(
+          groupSources,
+          eq(groupSources.id, rosterSnapshotSources.groupSourceId),
+        )
+        .where(eq(rosterSnapshotSources.rosterSnapshotId, snapshotId))
+        .orderBy(
+          asc(rosterSnapshotSources.completionKind),
+          asc(rosterSnapshotSources.groupSourceId),
+        )
+        .offset(offset)
+        .limit(limit),
+    { maxRows: ROSTER_QUERY_LIMITS.sources },
+  );
+  const recipientRows = await collectBoundedDatabaseRows(
+    (offset, limit) =>
+      database
+        .select()
+        .from(rosterRecipients)
+        .where(eq(rosterRecipients.rosterSnapshotId, snapshotId))
+        .orderBy(asc(rosterRecipients.id))
+        .offset(offset)
+        .limit(limit),
+    { maxRows: ROSTER_QUERY_LIMITS.recipients },
+  );
+  const provenanceRows = await collectBoundedDatabaseRows(
+    (offset, limit) =>
+      database
+        .select({
+          recipientId: rosterRecipientGroupSources.recipientId,
+          id: groupSources.id,
+          kind: groupSources.kind,
+          purpose: groupSources.purpose,
+          facilityId: groupSources.facilityId,
+        })
+        .from(rosterRecipientGroupSources)
+        .innerJoin(
+          groupSources,
+          eq(groupSources.id, rosterRecipientGroupSources.groupSourceId),
+        )
+        .where(eq(rosterRecipientGroupSources.rosterSnapshotId, snapshotId))
+        .orderBy(
+          asc(rosterRecipientGroupSources.recipientId),
+          asc(rosterRecipientGroupSources.groupSourceId),
+        )
+        .offset(offset)
+        .limit(limit),
+    { maxRows: ROSTER_QUERY_LIMITS.provenance },
+  );
+  const endpointRows = await collectBoundedDatabaseRows(
+    (offset, limit) =>
+      database
+        .select()
+        .from(rosterEndpoints)
+        .where(eq(rosterEndpoints.rosterSnapshotId, snapshotId))
+        .orderBy(asc(rosterEndpoints.recipientId), asc(rosterEndpoints.id))
+        .offset(offset)
+        .limit(limit),
+    {
+      maxRows: ROSTER_QUERY_LIMITS.endpoints,
+      pageSize: START_FLOW_ENDPOINT_PAGE_SIZE,
+    },
+  );
 
   const groupRefsForRecipient = new Map<string, RosterGroupSourceRef[]>();
   for (const row of provenanceRows) {
@@ -685,6 +725,9 @@ function mapPreviewConstructionError(error: unknown): never {
     }
     throw conflict('The selected event type is inconsistent.');
   }
+  if (error instanceof BoundedDatabaseQueryError) {
+    throw conflict('The roster snapshot exceeds its supported query bounds.');
+  }
   if (error instanceof ActivationPreviewBuildError) {
     switch (error.code) {
       case 'FACILITY_UNAVAILABLE':
@@ -710,18 +753,25 @@ async function createActivationPreviewFromDatabase(
   now: Date,
 ): Promise<ActivationPreview> {
   try {
-    const [facilityRow, audience, rosterSnapshot, channelConfigurationsValue] =
-      await Promise.all([
-        database
-          .select()
-          .from(facilities)
-          .where(eq(facilities.id, input.facilityId))
-          .limit(1)
-          .then((rows) => rows[0] ?? null),
-        loadAudienceConfiguration(database, input.facilityId),
-        loadRosterSnapshot(database, input.rosterPopulation, input.facilityId),
-        loadChannelConfigurations(database),
-      ]);
+    // The Data API permits only one in-flight statement for a transaction ID.
+    // Keep every independent consequence read explicitly sequential.
+    const facilityRows = await database
+      .select()
+      .from(facilities)
+      .where(eq(facilities.id, input.facilityId))
+      .limit(1);
+    const facilityRow = facilityRows[0] ?? null;
+    const audience = await loadAudienceConfiguration(
+      database,
+      input.facilityId,
+    );
+    const rosterSnapshot = await loadRosterSnapshot(
+      database,
+      input.rosterPopulation,
+      input.facilityId,
+    );
+    const channelConfigurationsValue =
+      await loadChannelConfigurations(database);
     if (facilityRow === null || !facilityRow.active) {
       throw unavailable('The selected facility is unavailable.');
     }
@@ -731,23 +781,26 @@ async function createActivationPreviewFromDatabase(
     if (rosterSnapshot === null) {
       throw unavailable('A complete roster snapshot is unavailable.');
     }
-    const [eventTypeVersion, initiatorDisplayName, activeEventRows] =
-      await Promise.all([
-        new DrizzleEventTypeStore(database).getVersion({
-          eventTypeVersionId: input.eventTypeVersion.id,
-        }),
-        loadInitiatorDisplayName(database, actor),
-        database
-          .select({ id: events.id })
-          .from(events)
-          .where(
-            and(
-              eq(events.facilityId, input.facilityId),
-              eq(events.status, 'active'),
-            ),
-          )
-          .orderBy(asc(events.id)),
-      ]);
+    const eventTypeVersion = await new DrizzleEventTypeStore(
+      database,
+    ).getVersion({
+      eventTypeVersionId: input.eventTypeVersion.id,
+    });
+    const initiatorDisplayName = await loadInitiatorDisplayName(
+      database,
+      actor,
+    );
+    const activeEventRows = await database
+      .select({ id: events.id })
+      .from(events)
+      .where(
+        and(
+          eq(events.facilityId, input.facilityId),
+          eq(events.status, 'active'),
+        ),
+      )
+      .orderBy(asc(events.id))
+      .limit(101);
     if (initiatorDisplayName === null) {
       throw unavailable('The initiating identity is unavailable.');
     }

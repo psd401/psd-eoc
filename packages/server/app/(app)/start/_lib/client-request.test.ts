@@ -311,6 +311,16 @@ async function withBrowserResponse(
   response: Response,
   operation: () => Promise<void>,
 ): Promise<void> {
+  await withBrowserFetch(
+    (async () => response) as unknown as typeof fetch,
+    operation,
+  );
+}
+
+async function withBrowserFetch(
+  browserFetch: typeof fetch,
+  operation: () => Promise<void>,
+): Promise<void> {
   const documentDescriptor = Object.getOwnPropertyDescriptor(
     globalThis,
     'document',
@@ -320,7 +330,7 @@ async function withBrowserResponse(
     configurable: true,
     value: { cookie: 'synthetic-csrf=synthetic-token' },
   });
-  globalThis.fetch = (async () => response) as unknown as typeof fetch;
+  globalThis.fetch = browserFetch;
   try {
     await operation();
   } finally {
@@ -333,7 +343,19 @@ async function withBrowserResponse(
   }
 }
 
-describe('start-flow request deadlines', () => {
+async function captureStartFlowRequestError(
+  operation: () => Promise<unknown>,
+): Promise<StartFlowRequestError> {
+  try {
+    await operation();
+    throw new Error('Expected the start-flow request to fail.');
+  } catch (error) {
+    expect(error).toBeInstanceOf(StartFlowRequestError);
+    return error as StartFlowRequestError;
+  }
+}
+
+describe('start-flow request failure classification', () => {
   test('classifies a stalled join as outcome-unknown without replay', async () => {
     await withStalledBrowserRequest(async (requests) => {
       let caught: unknown;
@@ -380,6 +402,117 @@ describe('start-flow request deadlines', () => {
       expect((caught as StartFlowRequestError).retryable).toBe(true);
       expect(requests()).toBe(1);
     });
+  });
+
+  test('classifies a rejected preview fetch as definite and safely retryable', async () => {
+    await withBrowserFetch(
+      (async () => {
+        throw new TypeError('Synthetic network rejection.');
+      }) as unknown as typeof fetch,
+      async () => {
+        const caught = await captureStartFlowRequestError(() =>
+          requestStartFlow(
+            '/start/api/preview',
+            { facilityId: uuid(2) },
+            'synthetic-csrf',
+            { parse: (value: unknown) => value },
+          ),
+        );
+
+        expect(caught.outcomeUnknown).toBe(false);
+        expect(caught.retryable).toBe(true);
+        expect(caught.message).toContain('No event was started');
+      },
+    );
+  });
+
+  test('classifies an unreadable successful preview as definite and safely retryable', async () => {
+    await withBrowserResponse(
+      new Response('{not-json', {
+        headers: { 'content-type': 'application/json' },
+        status: 200,
+      }),
+      async () => {
+        const caught = await captureStartFlowRequestError(() =>
+          requestStartFlow(
+            '/start/api/preview',
+            { facilityId: uuid(2) },
+            'synthetic-csrf',
+            { parse: (value: unknown) => value },
+          ),
+        );
+
+        expect(caught.outcomeUnknown).toBe(false);
+        expect(caught.retryable).toBe(true);
+        expect(caught.message).toContain('No event was started');
+      },
+    );
+  });
+
+  test('classifies an invalid successful preview as definite and safely retryable', async () => {
+    await withBrowserResponse(Response.json({ invalid: true }), async () => {
+      const caught = await captureStartFlowRequestError(() =>
+        requestStartFlow(
+          '/start/api/preview',
+          { facilityId: uuid(2) },
+          'synthetic-csrf',
+          {
+            parse: () => {
+              throw new Error('Synthetic schema rejection.');
+            },
+          },
+        ),
+      );
+
+      expect(caught.outcomeUnknown).toBe(false);
+      expect(caught.retryable).toBe(true);
+      expect(caught.message).toContain('No event was started');
+    });
+  });
+
+  test('keeps rejected, unreadable, and invalid mutation responses outcome-unknown', async () => {
+    const assertMutationUnknown = async (
+      browserFetch: typeof fetch,
+      parser: Readonly<{ parse(value: unknown): unknown }>,
+    ) => {
+      await withBrowserFetch(browserFetch, async () => {
+        const caught = await captureStartFlowRequestError(() =>
+          requestStartFlow(
+            '/start/api/activate',
+            { activationPreviewId: uuid(25) },
+            'synthetic-csrf',
+            parser,
+            'activate:synthetic-ambiguous-response',
+          ),
+        );
+
+        expect(caught.outcomeUnknown).toBe(true);
+        expect(caught.retryable).toBe(false);
+      });
+    };
+
+    await assertMutationUnknown(
+      (async () => {
+        throw new TypeError('Synthetic network rejection.');
+      }) as unknown as typeof fetch,
+      { parse: (value: unknown) => value },
+    );
+    await assertMutationUnknown(
+      (async () =>
+        new Response('{not-json', {
+          headers: { 'content-type': 'application/json' },
+          status: 200,
+        })) as unknown as typeof fetch,
+      { parse: (value: unknown) => value },
+    );
+    await assertMutationUnknown(
+      (async () => Response.json({ invalid: true })) as unknown as typeof fetch,
+      {
+        parse: () => {
+          throw new Error('Synthetic schema rejection.');
+        },
+      },
+    );
   });
 
   test('classifies a parseable mutation 5xx as outcome-unknown', async () => {
