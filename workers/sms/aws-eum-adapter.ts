@@ -124,6 +124,12 @@ export interface AwsEumSendTextMessageRequest {
 
 /** Minimal SDK-independent provider boundary. Provider responses are untrusted. */
 export interface AwsEumSmsClient {
+  /**
+   * The provider transport performs exactly one wire attempt per invocation.
+   * AWS SDK clients with their default retry middleware do not satisfy this
+   * boundary because retries would occur below the durable send ledger.
+   */
+  readonly deliverySemantics: 'single-wire-attempt';
   sendTextMessage(request: AwsEumSendTextMessageRequest): Promise<unknown>;
 }
 
@@ -715,6 +721,14 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
   >;
 
   public constructor(options: AwsEumSmsAdapterOptions) {
+    if (
+      options.client.deliverySemantics !== 'single-wire-attempt' ||
+      typeof options.client.sendTextMessage !== 'function'
+    ) {
+      throw new TypeError(
+        'AWS EUM SMS client must guarantee one wire attempt per send.',
+      );
+    }
     this.#client = options.client;
     this.#ledger = options.ledger;
     this.#featureEnabled = options.featureEnabled === true;

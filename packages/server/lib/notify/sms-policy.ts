@@ -3,26 +3,38 @@ import { randomUUID } from 'node:crypto';
 import {
   DispatchBatchSchema,
   EndpointIdSchema,
+  EndpointStatusRecordSchema,
   EndpointStatusSchema,
   RecipientIdSchema,
+  RecordEndpointStatusInputSchema,
   RecordSmsOptOutInputSchema,
   RenderedMessageSchema,
   RosterPopulationSchema,
   RosterSnapshotIdSchema,
+  SMS_OPT_OUT_REASON_CODE as CONTRACT_SMS_OPT_OUT_REASON_CODE,
+  SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
   SmsEndpointSchema,
+  SmsLifecycleCapabilityContextSchema,
   SmsOptOutRecordSchema,
   UuidSchema,
+  executeCapability as executeCanonicalCapability,
   registerCapabilityHandler,
+  type CapabilityAuthorizationRequest,
+  type CapabilityExecutionAuthorizer,
   type DispatchBatch,
   type Endpoint,
   type EventKind,
+  type EndpointStatusRecord,
+  type RecordEndpointStatusInput,
   type RecordSmsOptOutInput,
+  type RegisteredCapabilityId,
   type RegisteredCapabilityHandler,
   type RenderedMessage,
   type SmsMessageTemplate,
+  type SmsLifecycleCapabilityContext,
   type SmsOptOutRecord,
 } from '@psd-eoc/contracts';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 
@@ -44,7 +56,8 @@ import {
 } from './render';
 
 export const SMS_INTEGRATION_ID = 'aws-eum-sms' as const;
-export const SMS_OPT_OUT_REASON_CODE = 'SMS_OPTED_OUT' as const;
+export const SMS_OPT_OUT_REASON_CODE = CONTRACT_SMS_OPT_OUT_REASON_CODE;
+export const SMS_OPT_IN_REASON_CODE = SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE;
 
 const SMS_POLICY_LOCK_NAMESPACE = 4_014;
 const MAX_SMS_ENDPOINTS = 12_000;
@@ -60,6 +73,9 @@ export type SmsPolicyErrorCode =
   | 'INVALID_SMS_ENDPOINT_POLICY'
   | 'SMS_AUDIENCE_MISMATCH'
   | 'SMS_ENDPOINT_COUNT_MISMATCH'
+  | 'SMS_ENDPOINT_STATUS_INPUT_INVALID'
+  | 'SMS_ENDPOINT_STATUS_PERSISTENCE_INVALID'
+  | 'SMS_LIFECYCLE_INVOCATION_DENIED'
   | 'SMS_LENGTH_UNSAFE'
   | 'SMS_OPT_OUT_CONFLICT'
   | 'SMS_OPT_OUT_INPUT_INVALID'
@@ -211,6 +227,13 @@ export interface SmsOptOutStore {
   recordSmsOptOut(input: RecordSmsOptOutInput): Promise<SmsOptOutRecord>;
 }
 
+/** Append-only endpoint lifecycle boundary for the canonical capability. */
+export interface SmsEndpointStatusStore {
+  recordEndpointStatus(
+    input: RecordEndpointStatusInput,
+  ): Promise<EndpointStatusRecord>;
+}
+
 export interface ResolveSmsDestinationInput {
   readonly rosterSnapshotId: string;
   readonly phoneNumber: string;
@@ -235,6 +258,7 @@ export interface SmsOptOutDestinationResolver {
 export interface SmsPolicyStore
   extends SmsEndpointPolicyStore,
     SmsOptOutStore,
+    SmsEndpointStatusStore,
     SmsOptOutDestinationResolver {}
 
 export interface ResolveSmsEndpointsInput {
@@ -411,7 +435,8 @@ export async function recordSmsOptOut(
     recordResult.data.recipientId !== input.recipientId ||
     recordResult.data.endpointId !== input.endpointId ||
     recordResult.data.provider !== input.provider ||
-    recordResult.data.providerReference !== input.providerReference
+    recordResult.data.providerReference !== input.providerReference ||
+    recordResult.data.providerOccurredAt !== input.providerOccurredAt
   ) {
     throw new SmsPolicyError(
       'SMS_OPT_OUT_PERSISTENCE_INVALID',
@@ -421,12 +446,132 @@ export async function recordSmsOptOut(
   return recordResult.data;
 }
 
-/** Registers the canonical webhook-only opt-out mutation. */
+/** Registers canonical worker/scheduled-job opt-out persistence. */
 export function createRecordSmsOptOutHandler<Context>(
   store: SmsOptOutStore,
 ): Readonly<RegisteredCapabilityHandler<'record-sms-opt-out', Context>> {
   return registerCapabilityHandler('record-sms-opt-out', (input) =>
     recordSmsOptOut(input, store),
+  );
+}
+
+/** Parses a lifecycle append and requires exact returned canonical evidence. */
+export async function recordEndpointStatus(
+  inputValue: unknown,
+  store: SmsEndpointStatusStore,
+): Promise<EndpointStatusRecord> {
+  const inputResult = RecordEndpointStatusInputSchema.safeParse(inputValue);
+  if (!inputResult.success) {
+    throw new SmsPolicyError(
+      'SMS_ENDPOINT_STATUS_INPUT_INVALID',
+      'The SMS endpoint-status request was invalid.',
+    );
+  }
+  const input = inputResult.data;
+  const recordResult = EndpointStatusRecordSchema.safeParse(
+    await store.recordEndpointStatus(input),
+  );
+  if (
+    !recordResult.success ||
+    recordResult.data.rosterSnapshotId !== input.rosterSnapshotId ||
+    recordResult.data.recipientId !== input.recipientId ||
+    recordResult.data.endpointId !== input.endpointId ||
+    recordResult.data.status !== input.status ||
+    recordResult.data.reasonCode !== input.reasonCode ||
+    recordResult.data.provider !== input.provider ||
+    recordResult.data.providerReference !== input.providerReference ||
+    recordResult.data.providerOccurredAt !== input.providerOccurredAt
+  ) {
+    throw new SmsPolicyError(
+      'SMS_ENDPOINT_STATUS_PERSISTENCE_INVALID',
+      'The endpoint-status store returned inconsistent evidence.',
+    );
+  }
+  return recordResult.data;
+}
+
+/** Registers the canonical append-only endpoint lifecycle mutation. */
+export function createRecordEndpointStatusHandler<Context>(
+  store: SmsEndpointStatusStore,
+): Readonly<RegisteredCapabilityHandler<'record-endpoint-status', Context>> {
+  return registerCapabilityHandler('record-endpoint-status', (input) =>
+    recordEndpointStatus(input, store),
+  );
+}
+
+/** Deny-by-default authorization for the two SMS lifecycle mutations. */
+export function createSmsLifecycleCapabilityAuthorizer(): Readonly<
+  CapabilityExecutionAuthorizer<SmsLifecycleCapabilityContext>
+> {
+  return Object.freeze({
+    authorize(
+      request: CapabilityAuthorizationRequest<
+        RegisteredCapabilityId,
+        SmsLifecycleCapabilityContext
+      >,
+    ): void {
+      const context = SmsLifecycleCapabilityContextSchema.safeParse(
+        request.context,
+      );
+      const sourceMayInvokeCapability =
+        (request.definition.id === 'record-sms-opt-out' &&
+          context.success &&
+          ['worker', 'scheduled-job'].includes(context.data.source)) ||
+        (request.definition.id === 'record-endpoint-status' &&
+          context.success &&
+          context.data.source === 'webhook');
+      if (
+        !context.success ||
+        !['record-sms-opt-out', 'record-endpoint-status'].includes(
+          request.definition.id,
+        ) ||
+        !sourceMayInvokeCapability ||
+        request.definition.operation !== 'mutation' ||
+        !request.invocationPolicy.principalKinds.includes('system') ||
+        !request.invocationPolicy.sources.includes(context.data.source) ||
+        request.humanActionRequirement.actionIds.length !== 0 ||
+        request.humanActionRequirement.consequenceDigest !== null
+      ) {
+        throw new SmsPolicyError(
+          'SMS_LIFECYCLE_INVOCATION_DENIED',
+          'The SMS lifecycle capability invocation was not authorized.',
+        );
+      }
+    },
+  });
+}
+
+export function executeRecordSmsOptOutCapability(
+  input: unknown,
+  context: SmsLifecycleCapabilityContext,
+  store: SmsOptOutStore,
+): Promise<SmsOptOutRecord> {
+  return executeCanonicalCapability(
+    createRecordSmsOptOutHandler<SmsLifecycleCapabilityContext>(store),
+    input,
+    {
+      context,
+      humanActionResolutionContext: null,
+      safetyResolver: null,
+      authorizer: createSmsLifecycleCapabilityAuthorizer(),
+    },
+  );
+}
+
+export function executeRecordEndpointStatusCapability(
+  input: unknown,
+  context: SmsLifecycleCapabilityContext,
+  store: SmsEndpointStatusStore,
+): Promise<EndpointStatusRecord> {
+  return executeCanonicalCapability(
+    createRecordEndpointStatusHandler<SmsLifecycleCapabilityContext>(store),
+    input,
+    {
+      context,
+      humanActionResolutionContext: null,
+      safetyResolver: null,
+      authorizer: createSmsLifecycleCapabilityAuthorizer(),
+    },
   );
 }
 
@@ -436,6 +581,7 @@ export interface DrizzleSmsPolicyStoreOptions {
 
 type SmsPolicyQueryDatabase = DatabaseQuery;
 type SmsOptOutRow = typeof smsOptOutRecords.$inferSelect;
+type EndpointStatusRow = typeof endpointStatusRecords.$inferSelect;
 
 function smsPolicyQueryDatabase(database: unknown): SmsPolicyQueryDatabase {
   return database as SmsPolicyQueryDatabase;
@@ -460,6 +606,23 @@ function smsOptOutFromRow(row: SmsOptOutRow): SmsOptOutRecord {
     endpointId: row.endpointId,
     provider: row.provider,
     providerReference: row.providerReference,
+    providerOccurredAt: dateIso(row.providerOccurredAt ?? row.recordedAt),
+    recordedAt: dateIso(row.recordedAt),
+  });
+}
+
+function endpointStatusFromRow(row: EndpointStatusRow): EndpointStatusRecord {
+  return EndpointStatusRecordSchema.parse({
+    id: row.id,
+    rosterSnapshotId: row.rosterSnapshotId,
+    recipientId: row.recipientId,
+    endpointId: row.endpointId,
+    status: row.status,
+    reasonCode: row.reasonCode,
+    provider: row.provider,
+    providerReference: row.providerReference,
+    providerOccurredAt:
+      row.providerOccurredAt === null ? null : dateIso(row.providerOccurredAt),
     recordedAt: dateIso(row.recordedAt),
   });
 }
@@ -481,28 +644,69 @@ async function readDatabaseTime(
   return new Date(dateIso(row.value));
 }
 
-async function lockSmsOptOut(
+async function lockSmsEndpointPolicy(
   database: SmsPolicyQueryDatabase,
-  input: RecordSmsOptOutInput,
+  input: Readonly<{
+    rosterSnapshotId: string;
+    recipientId: string;
+    endpointId: string;
+  }>,
 ): Promise<void> {
   const endpointIdentity = `${input.rosterSnapshotId}:${input.recipientId}:${input.endpointId}`;
   await database.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`sms-opt-out-endpoint:${endpointIdentity}`}, ${SMS_POLICY_LOCK_NAMESPACE}))`,
+    sql`select pg_advisory_xact_lock(hashtextextended(${`sms-endpoint-policy:${endpointIdentity}`}, ${SMS_POLICY_LOCK_NAMESPACE}))`,
   );
 }
 
-async function ensureSmsOptOutEndpointStatus(
+async function appendSmsEndpointStatus(
   database: SmsPolicyQueryDatabase,
-  input: RecordSmsOptOutInput,
+  input: RecordEndpointStatusInput,
   endpoint: Readonly<{
     population: 'staff' | 'synthetic';
     channel: 'sms';
   }>,
   recordedAt: Date,
   uuid: () => string,
-): Promise<void> {
+): Promise<EndpointStatusRecord> {
+  if (input.provider !== null && input.providerReference !== null) {
+    const exactRows = await database
+      .select()
+      .from(endpointStatusRecords)
+      .where(
+        and(
+          eq(endpointStatusRecords.rosterSnapshotId, input.rosterSnapshotId),
+          eq(endpointStatusRecords.recipientId, input.recipientId),
+          eq(endpointStatusRecords.endpointId, input.endpointId),
+          eq(endpointStatusRecords.channel, 'sms'),
+          eq(endpointStatusRecords.provider, input.provider),
+          eq(endpointStatusRecords.providerReference, input.providerReference),
+        ),
+      )
+      .limit(2);
+    if (exactRows.length > 1) {
+      throw new SmsPolicyError(
+        'SMS_ENDPOINT_STATUS_PERSISTENCE_INVALID',
+        'The endpoint lifecycle provider reference was not unique.',
+      );
+    }
+    const exact = exactRows[0];
+    if (exact !== undefined) {
+      const record = endpointStatusFromRow(exact);
+      if (
+        record.status !== input.status ||
+        record.reasonCode !== input.reasonCode ||
+        record.providerOccurredAt !== input.providerOccurredAt
+      ) {
+        throw new SmsPolicyError(
+          'SMS_ENDPOINT_STATUS_PERSISTENCE_INVALID',
+          'The endpoint lifecycle replay did not match retained evidence.',
+        );
+      }
+      return record;
+    }
+  }
   const [existing] = await database
-    .select({ id: endpointStatusRecords.id })
+    .select()
     .from(endpointStatusRecords)
     .where(
       and(
@@ -510,27 +714,50 @@ async function ensureSmsOptOutEndpointStatus(
         eq(endpointStatusRecords.recipientId, input.recipientId),
         eq(endpointStatusRecords.endpointId, input.endpointId),
         eq(endpointStatusRecords.channel, 'sms'),
-        eq(endpointStatusRecords.status, 'disabled'),
-        eq(endpointStatusRecords.reasonCode, SMS_OPT_OUT_REASON_CODE),
       ),
     )
     .orderBy(
-      asc(endpointStatusRecords.recordedAt),
-      asc(endpointStatusRecords.id),
+      desc(
+        sql`coalesce(${endpointStatusRecords.providerOccurredAt}, ${endpointStatusRecords.recordedAt})`,
+      ),
+      desc(endpointStatusRecords.sequence),
     )
     .limit(1);
-  if (existing !== undefined) return;
-  await database.insert(endpointStatusRecords).values({
+  if (
+    existing !== undefined &&
+    existing.status === input.status &&
+    existing.reasonCode === input.reasonCode &&
+    existing.provider === input.provider &&
+    existing.providerReference === input.providerReference &&
+    (existing.providerOccurredAt === null
+      ? null
+      : dateIso(existing.providerOccurredAt)) === input.providerOccurredAt
+  ) {
+    return endpointStatusFromRow(existing);
+  }
+  const record = EndpointStatusRecordSchema.parse({
     id: UuidSchema.parse(uuid()),
     rosterSnapshotId: input.rosterSnapshotId,
     recipientId: input.recipientId,
     endpointId: input.endpointId,
+    status: input.status,
+    reasonCode: input.reasonCode,
+    provider: input.provider,
+    providerReference: input.providerReference,
+    providerOccurredAt: input.providerOccurredAt,
+    recordedAt: recordedAt.toISOString(),
+  });
+  await database.insert(endpointStatusRecords).values({
+    ...record,
     population: endpoint.population,
     channel: endpoint.channel,
-    status: 'disabled',
-    reasonCode: SMS_OPT_OUT_REASON_CODE,
+    providerOccurredAt:
+      record.providerOccurredAt === null
+        ? null
+        : new Date(record.providerOccurredAt),
     recordedAt,
   });
+  return record;
 }
 
 async function loadDrizzleEndpointPolicy(
@@ -557,12 +784,15 @@ async function loadDrizzleEndpointPolicy(
     );
 
   const statusRows = await database
-    .select({
+    .selectDistinctOn([endpointStatusRecords.endpointId], {
       endpointId: endpointStatusRecords.endpointId,
       recipientId: endpointStatusRecords.recipientId,
       status: endpointStatusRecords.status,
-      recordedAt: endpointStatusRecords.recordedAt,
-      id: endpointStatusRecords.id,
+      reasonCode: endpointStatusRecords.reasonCode,
+      provider: endpointStatusRecords.provider,
+      providerReference: endpointStatusRecords.providerReference,
+      providerOccurredAt: endpointStatusRecords.providerOccurredAt,
+      sequence: endpointStatusRecords.sequence,
     })
     .from(endpointStatusRecords)
     .where(
@@ -571,11 +801,18 @@ async function loadDrizzleEndpointPolicy(
         eq(endpointStatusRecords.population, query.rosterPopulation),
         eq(endpointStatusRecords.channel, 'sms'),
         inArray(endpointStatusRecords.endpointId, endpointIds),
+        notInArray(endpointStatusRecords.reasonCode, [
+          SMS_OPT_OUT_REASON_CODE,
+          SMS_OPT_IN_REASON_CODE,
+        ]),
       ),
     )
     .orderBy(
-      asc(endpointStatusRecords.recordedAt),
-      asc(endpointStatusRecords.id),
+      endpointStatusRecords.endpointId,
+      desc(
+        sql`coalesce(${endpointStatusRecords.providerOccurredAt}, ${endpointStatusRecords.recordedAt})`,
+      ),
+      desc(endpointStatusRecords.sequence),
     );
 
   const effectiveStatuses = new Map<
@@ -588,57 +825,115 @@ async function loadDrizzleEndpointPolicy(
       EndpointStatusSchema.parse(endpoint.status),
     ),
   );
-  statusRows.forEach((status) =>
+  statusRows.forEach((status) => {
+    if (
+      status.status === 'active' ||
+      status.provider !== null ||
+      status.providerReference !== null ||
+      status.providerOccurredAt !== null
+    ) {
+      throw new SmsPolicyError(
+        'INVALID_SMS_ENDPOINT_POLICY',
+        'Persisted non-provider SMS endpoint evidence was inconsistent.',
+      );
+    }
     effectiveStatuses.set(
       candidateKey(status),
       EndpointStatusSchema.parse(status.status),
-    ),
-  );
+    );
+  });
 
   const phoneNumbers = endpointRows.flatMap(({ phoneNumber }) =>
     phoneNumber === null ? [] : [phoneNumber],
   );
-  const retainedOptOutEndpoint = alias(
+  const retainedLifecycleEndpoint = alias(
     rosterEndpoints,
-    'retained_sms_opt_out_endpoint',
+    'retained_sms_lifecycle_endpoint',
   );
-  const optedOutPhoneRows =
+  const phoneLifecycleRows =
     phoneNumbers.length === 0
       ? []
       : await database
-          .selectDistinct({ phoneNumber: retainedOptOutEndpoint.phoneNumber })
-          .from(smsOptOutRecords)
+          .selectDistinctOn([retainedLifecycleEndpoint.phoneNumber], {
+            phoneNumber: retainedLifecycleEndpoint.phoneNumber,
+            status: endpointStatusRecords.status,
+            reasonCode: endpointStatusRecords.reasonCode,
+            provider: endpointStatusRecords.provider,
+            providerReference: endpointStatusRecords.providerReference,
+            providerOccurredAt: endpointStatusRecords.providerOccurredAt,
+            sequence: endpointStatusRecords.sequence,
+          })
+          .from(endpointStatusRecords)
           .innerJoin(
-            retainedOptOutEndpoint,
+            retainedLifecycleEndpoint,
             and(
               eq(
-                retainedOptOutEndpoint.rosterSnapshotId,
-                smsOptOutRecords.rosterSnapshotId,
+                retainedLifecycleEndpoint.rosterSnapshotId,
+                endpointStatusRecords.rosterSnapshotId,
               ),
               eq(
-                retainedOptOutEndpoint.recipientId,
-                smsOptOutRecords.recipientId,
+                retainedLifecycleEndpoint.recipientId,
+                endpointStatusRecords.recipientId,
               ),
-              eq(retainedOptOutEndpoint.id, smsOptOutRecords.endpointId),
               eq(
-                retainedOptOutEndpoint.population,
-                smsOptOutRecords.population,
+                retainedLifecycleEndpoint.id,
+                endpointStatusRecords.endpointId,
               ),
-              eq(retainedOptOutEndpoint.channel, smsOptOutRecords.channel),
+              eq(
+                retainedLifecycleEndpoint.population,
+                endpointStatusRecords.population,
+              ),
+              eq(
+                retainedLifecycleEndpoint.channel,
+                endpointStatusRecords.channel,
+              ),
             ),
           )
           .where(
             and(
-              eq(smsOptOutRecords.channel, 'sms'),
-              inArray(retainedOptOutEndpoint.phoneNumber, phoneNumbers),
+              eq(endpointStatusRecords.channel, 'sms'),
+              inArray(retainedLifecycleEndpoint.phoneNumber, phoneNumbers),
+              inArray(endpointStatusRecords.reasonCode, [
+                SMS_OPT_OUT_REASON_CODE,
+                SMS_OPT_IN_REASON_CODE,
+              ]),
             ),
           )
-          .limit(MAX_SMS_ENDPOINTS);
-  const optedOutPhoneNumbers = new Set(
-    optedOutPhoneRows.flatMap(({ phoneNumber }) =>
-      phoneNumber === null ? [] : [phoneNumber],
-    ),
-  );
+          .orderBy(
+            retainedLifecycleEndpoint.phoneNumber,
+            desc(
+              sql`coalesce(${endpointStatusRecords.providerOccurredAt}, ${endpointStatusRecords.recordedAt})`,
+            ),
+            desc(endpointStatusRecords.sequence),
+          );
+  const effectivePhoneOptOut = new Map<string, boolean>();
+  phoneLifecycleRows.forEach((row) => {
+    if (row.phoneNumber === null) return;
+    if (
+      row.reasonCode === SMS_OPT_OUT_REASON_CODE &&
+      row.status === 'disabled' &&
+      row.provider === SMS_INTEGRATION_ID &&
+      row.providerReference !== null &&
+      row.providerOccurredAt !== null
+    ) {
+      effectivePhoneOptOut.set(row.phoneNumber, true);
+      return;
+    }
+    if (
+      row.reasonCode === SMS_OPT_IN_REASON_CODE &&
+      row.status === 'active' &&
+      row.provider === SMS_INTEGRATION_ID &&
+      row.providerReference !== null &&
+      row.providerOccurredAt !== null
+    ) {
+      effectivePhoneOptOut.set(row.phoneNumber, false);
+      return;
+    }
+    throw new SmsPolicyError(
+      'INVALID_SMS_ENDPOINT_POLICY',
+      'Persisted SMS opt-out lifecycle evidence was inconsistent.',
+    );
+  });
 
   return Object.freeze(
     endpointRows
@@ -649,7 +944,7 @@ async function loadDrizzleEndpointPolicy(
           effectiveStatuses.get(candidateKey(endpoint)) ?? endpoint.status,
         optedOut:
           endpoint.phoneNumber !== null &&
-          optedOutPhoneNumbers.has(endpoint.phoneNumber),
+          (effectivePhoneOptOut.get(endpoint.phoneNumber) ?? false),
       }))
       .sort(
         (left, right) =>
@@ -660,9 +955,9 @@ async function loadDrizzleEndpointPolicy(
 }
 
 /**
- * Transactional PostgreSQL policy store. Opt-out replay is serialized by both
- * endpoint and provider-reference identity; the retained opt-out and disabled
- * status facts commit together and are never updated or deleted.
+ * Transactional PostgreSQL policy store. Lifecycle appends are serialized per
+ * endpoint. Retained opt-out and disabled facts commit together; a later
+ * provider-verified active fact supersedes them without rewriting history.
  */
 export function createDrizzleSmsPolicyStore(
   database: Database,
@@ -727,6 +1022,50 @@ export function createDrizzleSmsPolicyStore(
       });
     },
 
+    recordEndpointStatus(
+      inputValue: RecordEndpointStatusInput,
+    ): Promise<EndpointStatusRecord> {
+      const inputResult = RecordEndpointStatusInputSchema.safeParse(inputValue);
+      if (!inputResult.success) {
+        throw new SmsPolicyError(
+          'SMS_ENDPOINT_STATUS_INPUT_INVALID',
+          'The SMS endpoint-status request was invalid.',
+        );
+      }
+      const input = inputResult.data;
+      return database.transaction(async (transaction) => {
+        const queryDatabase = smsPolicyQueryDatabase(transaction);
+        await lockSmsEndpointPolicy(queryDatabase, input);
+        const [endpoint] = await queryDatabase
+          .select({
+            population: rosterEndpoints.population,
+            channel: rosterEndpoints.channel,
+          })
+          .from(rosterEndpoints)
+          .where(
+            and(
+              eq(rosterEndpoints.rosterSnapshotId, input.rosterSnapshotId),
+              eq(rosterEndpoints.recipientId, input.recipientId),
+              eq(rosterEndpoints.id, input.endpointId),
+            ),
+          )
+          .limit(1);
+        if (endpoint === undefined || endpoint.channel !== 'sms') {
+          throw new SmsPolicyError(
+            'SMS_OPT_OUT_CONFLICT',
+            'The endpoint-status append did not identify a retained SMS endpoint.',
+          );
+        }
+        return appendSmsEndpointStatus(
+          queryDatabase,
+          input,
+          { population: endpoint.population, channel: 'sms' },
+          await readDatabaseTime(queryDatabase),
+          uuid,
+        );
+      });
+    },
+
     recordSmsOptOut(
       inputValue: RecordSmsOptOutInput,
     ): Promise<SmsOptOutRecord> {
@@ -740,7 +1079,7 @@ export function createDrizzleSmsPolicyStore(
       const input = inputResult.data;
       return database.transaction(async (transaction) => {
         const queryDatabase = smsPolicyQueryDatabase(transaction);
-        await lockSmsOptOut(queryDatabase, input);
+        await lockSmsEndpointPolicy(queryDatabase, input);
         const [endpoint] = await queryDatabase
           .select({
             population: rosterEndpoints.population,
@@ -806,12 +1145,22 @@ export function createDrizzleSmsPolicyStore(
             channel: 'sms',
             provider: record.provider,
             providerReference: record.providerReference,
+            providerOccurredAt: new Date(record.providerOccurredAt),
             recordedAt,
           });
         }
-        await ensureSmsOptOutEndpointStatus(
+        await appendSmsEndpointStatus(
           queryDatabase,
-          input,
+          RecordEndpointStatusInputSchema.parse({
+            rosterSnapshotId: input.rosterSnapshotId,
+            recipientId: input.recipientId,
+            endpointId: input.endpointId,
+            status: 'disabled',
+            reasonCode: SMS_OPT_OUT_REASON_CODE,
+            provider: input.provider,
+            providerReference: input.providerReference,
+            providerOccurredAt: input.providerOccurredAt,
+          }),
           { population: endpoint.population, channel: 'sms' },
           recordedAt,
           uuid,

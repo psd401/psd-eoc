@@ -63,9 +63,14 @@ import {
   RosterSourceConfigurationSchema,
   RosterSyncResultSchema,
   RefreshCredentialRejectionEvidenceSchema,
+  RecordEndpointStatusInputSchema,
   RenderedMessageSchema,
   SecurityAuditEntrySchema,
   SecurityAuditQuerySchema,
+  SMS_LIFECYCLE_PROVIDER,
+  SMS_OPT_OUT_REASON_CODE,
+  SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+  SmsLifecycleCapabilityContextSchema,
   SetChannelEnabledInputSchema,
   SessionSchema,
   SessionTokenIssuanceSchema,
@@ -2572,6 +2577,89 @@ describe('human-only capability boundary', () => {
       }),
     ).not.toThrow();
   });
+
+  test('limits SMS lifecycle persistence to authenticated system producers and exact provider provenance', () => {
+    expect(getCapabilityInvocationPolicy('record-endpoint-status')).toEqual({
+      principalKinds: ['system'],
+      sources: ['webhook'],
+      agentGrantable: false,
+    });
+    expect(getCapabilityInvocationPolicy('record-sms-opt-out')).toEqual({
+      principalKinds: ['system'],
+      sources: ['worker', 'scheduled-job'],
+      agentGrantable: false,
+    });
+
+    const active = {
+      rosterSnapshotId: ids.roster,
+      recipientId: ids.recipient,
+      endpointId: ids.smsEndpoint,
+      status: 'active',
+      reasonCode: SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+      provider: SMS_LIFECYCLE_PROVIDER,
+      providerReference: 'synthetic-opt-in-proof',
+      providerOccurredAt: '2026-08-11T18:00:00.000Z',
+    } as const;
+    expect(RecordEndpointStatusInputSchema.safeParse(active).success).toBe(
+      true,
+    );
+    expect(
+      RecordEndpointStatusInputSchema.safeParse({
+        ...active,
+        providerReference: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      RecordEndpointStatusInputSchema.safeParse({
+        ...active,
+        reasonCode: 'ARBITRARY_REENABLE',
+      }).success,
+    ).toBe(false);
+    expect(
+      RecordEndpointStatusInputSchema.safeParse({
+        ...active,
+        status: 'invalid',
+        reasonCode: 'SYNTHETIC_INVALID',
+      }).success,
+    ).toBe(false);
+
+    const optedOut = {
+      ...active,
+      status: 'disabled',
+      reasonCode: SMS_OPT_OUT_REASON_CODE,
+      providerReference: 'synthetic-opt-out-proof',
+    } as const;
+    expect(RecordEndpointStatusInputSchema.safeParse(optedOut).success).toBe(
+      true,
+    );
+    expect(
+      RecordEndpointStatusInputSchema.safeParse({
+        ...optedOut,
+        provider: null,
+        providerReference: null,
+        providerOccurredAt: null,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      SmsLifecycleCapabilityContextSchema.safeParse({
+        actor: { kind: 'system', serviceId: 'sms-worker' },
+        source: 'worker',
+        transport: 'sqs',
+        requestId: ids.request,
+        authenticated: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      SmsLifecycleCapabilityContextSchema.safeParse({
+        actor: { kind: 'system', serviceId: 'sms-opt-in-webhook' },
+        source: 'worker',
+        transport: 'sqs',
+        requestId: ids.request,
+        authenticated: true,
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe('append-only journal contract', () => {
@@ -3362,8 +3450,54 @@ describe('roster, facility, and identity boundaries', () => {
         staleRecipients: [
           { recipientId: ids.recipient, reason: 'no-active-endpoint' },
         ],
+        staleEndpoints: [
+          {
+            recipientId: ids.recipient,
+            endpointId: ids.endpoint,
+            channel: 'sms',
+            reason: 'sms-opted-out',
+          },
+        ],
       }).success,
     ).toBe(true);
+    expect(
+      StaleRosterReportSchema.safeParse({
+        generatedAt: times.later,
+        status: 'current',
+        latestCompleteSnapshotId: ids.roster,
+        latestCompleteCapturedAt: times.created,
+        latestCompleteAgeSeconds: 120,
+        failedGroups: [],
+        staleRecipients: [],
+        staleEndpoints: [
+          {
+            recipientId: ids.recipient,
+            endpointId: ids.endpoint,
+            channel: 'sms',
+            reason: 'sms-opted-out',
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      StaleRosterReportSchema.safeParse({
+        generatedAt: times.later,
+        status: 'stale',
+        latestCompleteSnapshotId: ids.roster,
+        latestCompleteCapturedAt: times.created,
+        latestCompleteAgeSeconds: 120,
+        failedGroups: [],
+        staleRecipients: [],
+        staleEndpoints: [
+          {
+            recipientId: ids.recipient,
+            endpointId: ids.endpoint,
+            channel: 'push',
+            reason: 'sms-opted-out',
+          },
+        ],
+      }).success,
+    ).toBe(false);
     expect(
       StaleRosterReportSchema.safeParse({
         generatedAt: times.later,

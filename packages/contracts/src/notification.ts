@@ -27,6 +27,7 @@ import {
 } from './event-type';
 import {
   EndpointIdSchema,
+  EndpointStatusSchema,
   RecipientIdSchema,
   RosterPopulationSchema,
   RosterSnapshotIdSchema,
@@ -1052,24 +1053,183 @@ export type ReconcileDeliveryAttemptsResult = z.infer<
   typeof ReconcileDeliveryAttemptsResultSchema
 >;
 
+/** Canonical SMS endpoint lifecycle reasons carried by append-only facts. */
+export const SMS_LIFECYCLE_PROVIDER = 'aws-eum-sms' as const;
+export const SMS_OPT_OUT_REASON_CODE = 'SMS_OPTED_OUT' as const;
+export const SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE =
+  'SMS_OPT_IN_PROVIDER_VERIFIED' as const;
+
+/**
+ * Trusted, transport-derived context for the system-only SMS lifecycle
+ * capabilities. The discriminated variants prevent a worker, schedule, or
+ * provider webhook from claiming another producer's service identity.
+ */
+export const SmsLifecycleCapabilityContextSchema = z
+  .discriminatedUnion('source', [
+    z
+      .object({
+        actor: z
+          .object({
+            kind: z.literal('system'),
+            serviceId: z.literal('sms-worker'),
+          })
+          .strict()
+          .readonly(),
+        source: z.literal('worker'),
+        transport: z.literal('sqs'),
+        requestId: UuidSchema,
+        authenticated: z.literal(true),
+      })
+      .strict()
+      .readonly(),
+    z
+      .object({
+        actor: z
+          .object({
+            kind: z.literal('system'),
+            serviceId: z.literal('sms-opt-out-reconciler'),
+          })
+          .strict()
+          .readonly(),
+        source: z.literal('scheduled-job'),
+        transport: z.literal('scheduled-execution'),
+        requestId: UuidSchema,
+        authenticated: z.literal(true),
+      })
+      .strict()
+      .readonly(),
+    z
+      .object({
+        actor: z
+          .object({
+            kind: z.literal('system'),
+            serviceId: z.literal('sms-opt-in-webhook'),
+          })
+          .strict()
+          .readonly(),
+        source: z.literal('webhook'),
+        transport: z.literal('provider-webhook'),
+        requestId: UuidSchema,
+        authenticated: z.literal(true),
+      })
+      .strict()
+      .readonly(),
+  ])
+  .readonly();
+
+/** Trusted SMS lifecycle capability context inferred from its schema. */
+export type SmsLifecycleCapabilityContext = z.infer<
+  typeof SmsLifecycleCapabilityContextSchema
+>;
+
+const SmsLifecycleProviderSchema = z.string().trim().min(1).max(100);
+const SmsLifecycleProviderReferenceSchema = z.string().trim().min(1).max(500);
+
+function addEndpointLifecycleIssues(
+  record: Readonly<{
+    status: z.infer<typeof EndpointStatusSchema>;
+    reasonCode: string;
+    provider: string | null;
+    providerReference: string | null;
+    providerOccurredAt: string | null;
+  }>,
+  context: z.RefinementCtx,
+): void {
+  if (
+    (record.provider === null) !== (record.providerReference === null) ||
+    (record.provider === null) !== (record.providerOccurredAt === null)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message:
+        'Endpoint lifecycle provider identity and occurrence time must be complete.',
+      path: ['providerOccurredAt'],
+    });
+  }
+  const isProviderVerifiedOptIn =
+    record.reasonCode === SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE &&
+    record.provider === SMS_LIFECYCLE_PROVIDER &&
+    record.providerReference !== null &&
+    record.providerOccurredAt !== null;
+  if ((record.status === 'active') !== isProviderVerifiedOptIn) {
+    context.addIssue({
+      code: 'custom',
+      message:
+        'Active endpoint status is reserved for provider-verified SMS opt-in supersession.',
+      path: ['status'],
+    });
+  }
+  const isManagedSmsOptOut =
+    record.status === 'disabled' &&
+    record.provider === SMS_LIFECYCLE_PROVIDER &&
+    record.providerReference !== null &&
+    record.providerOccurredAt !== null;
+  if (
+    record.provider !== null &&
+    !isProviderVerifiedOptIn &&
+    !isManagedSmsOptOut
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message:
+        'Provider evidence is reserved for managed SMS STOP/START lifecycle facts.',
+      path: ['provider'],
+    });
+  }
+  if ((record.reasonCode === SMS_OPT_OUT_REASON_CODE) !== isManagedSmsOptOut) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Managed SMS opt-out evidence must disable the SMS endpoint.',
+      path: ['reasonCode'],
+    });
+  }
+}
+
+function addProviderOccurrenceIssues(
+  record: Readonly<{
+    providerOccurredAt: string | null;
+    recordedAt: string;
+  }>,
+  context: z.RefinementCtx,
+): void {
+  if (
+    record.providerOccurredAt !== null &&
+    Date.parse(record.providerOccurredAt) >
+      Date.parse(record.recordedAt) + 300_000
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Provider occurrence time cannot be materially in the future.',
+      path: ['providerOccurredAt'],
+    });
+  }
+}
+
 /**
  * Owns a request to append endpoint lifecycle evidence. It references the
  * pinned endpoint rather than accepting a contact destination from a provider.
+ * `active` is an append-only supersession fact; it never mutates or erases a
+ * prior invalid/disabled fact.
  */
 export const RecordEndpointStatusInputSchema = z
   .object({
     rosterSnapshotId: RosterSnapshotIdSchema,
     recipientId: RecipientIdSchema,
     endpointId: EndpointIdSchema,
-    status: z.enum(['invalid', 'disabled']),
+    status: EndpointStatusSchema,
     reasonCode: z
       .string()
       .trim()
       .min(1)
       .max(100)
       .regex(/^[A-Z0-9_]+$/u),
+    provider: SmsLifecycleProviderSchema.nullable().default(null),
+    providerReference:
+      SmsLifecycleProviderReferenceSchema.nullable().default(null),
+    providerOccurredAt: TimestampSchema.nullable().default(null),
   })
   .strict()
+  .superRefine(addEndpointLifecycleIssues)
   .readonly();
 
 /** Endpoint-status evidence input inferred from its schema. */
@@ -1084,16 +1244,24 @@ export const EndpointStatusRecordSchema = z
     rosterSnapshotId: RosterSnapshotIdSchema,
     recipientId: RecipientIdSchema,
     endpointId: EndpointIdSchema,
-    status: z.enum(['invalid', 'disabled']),
+    status: EndpointStatusSchema,
     reasonCode: z
       .string()
       .trim()
       .min(1)
       .max(100)
       .regex(/^[A-Z0-9_]+$/u),
+    provider: SmsLifecycleProviderSchema.nullable().default(null),
+    providerReference:
+      SmsLifecycleProviderReferenceSchema.nullable().default(null),
+    providerOccurredAt: TimestampSchema.nullable().default(null),
     recordedAt: TimestampSchema,
   })
   .strict()
+  .superRefine((record, context) => {
+    addEndpointLifecycleIssues(record, context);
+    addProviderOccurrenceIssues(record, context);
+  })
   .readonly();
 
 /** Append-only endpoint lifecycle fact inferred from its schema. */
@@ -1111,6 +1279,7 @@ export const RecordSmsOptOutInputSchema = z
     endpointId: EndpointIdSchema,
     provider: z.string().trim().min(1).max(100),
     providerReference: z.string().trim().min(1).max(500),
+    providerOccurredAt: TimestampSchema,
   })
   .strict()
   .readonly();
@@ -1127,9 +1296,11 @@ export const SmsOptOutRecordSchema = z
     endpointId: EndpointIdSchema,
     provider: z.string().trim().min(1).max(100),
     providerReference: z.string().trim().min(1).max(500),
+    providerOccurredAt: TimestampSchema,
     recordedAt: TimestampSchema,
   })
   .strict()
+  .superRefine(addProviderOccurrenceIssues)
   .readonly();
 
 /** Retained SMS opt-out fact inferred from its schema. */

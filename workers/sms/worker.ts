@@ -78,6 +78,7 @@ export async function processSmsWorkItem(
   const optOutRecord = await recordAwsManagedOptOutConflict(
     workItem,
     optOutReference(workItem, attemptResult.outcome.providerReference),
+    attemptResult.outcomeEvidence.recordedAt,
     options.optOutRecorder,
   );
   return Object.freeze({ attemptResult, optOutRecord });

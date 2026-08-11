@@ -75,6 +75,11 @@ export interface AttemptExecutionClaimRequest {
   readonly leaseMilliseconds: number;
 }
 
+export interface AttemptExecutionLookupRequest {
+  readonly attemptId: string;
+  readonly fingerprint: string;
+}
+
 export type AttemptExecutionCompletion =
   | Readonly<{
       kind: 'final';
@@ -96,6 +101,14 @@ export type AttemptExecutionClaim =
     }>
   | Readonly<{ kind: 'in-progress' }>;
 
+export type AttemptExecutionLookup =
+  | Readonly<{ kind: 'missing' }>
+  | Readonly<{
+      kind: 'completed';
+      completion: AttemptExecutionCompletion;
+    }>
+  | Readonly<{ kind: 'in-progress' }>;
+
 export interface CompleteAttemptExecutionRequest {
   readonly attemptId: string;
   readonly fingerprint: string;
@@ -111,6 +124,10 @@ export interface ReleaseAttemptExecutionRequest {
 
 /** Production implementations persist claims and reject fingerprint conflicts. */
 export interface AttemptExecutionStore {
+  /** Read-only recovery never acquires permission to call a provider. */
+  lookup(
+    request: AttemptExecutionLookupRequest,
+  ): Promise<AttemptExecutionLookup>;
   claim(request: AttemptExecutionClaimRequest): Promise<AttemptExecutionClaim>;
   complete(request: CompleteAttemptExecutionRequest): Promise<void>;
   release(request: ReleaseAttemptExecutionRequest): Promise<void>;
@@ -304,6 +321,29 @@ function parseClaim(
   }
 }
 
+function parseLookup(
+  value: AttemptExecutionLookup,
+  attemptId: string,
+  provider: string,
+): AttemptExecutionLookup {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new WorkerProcessingError('INVALID_IDEMPOTENCY_CLAIM');
+  }
+  switch (value.kind) {
+    case 'missing':
+      return Object.freeze({ kind: 'missing' });
+    case 'completed':
+      return Object.freeze({
+        kind: 'completed',
+        completion: parseCompletion(value.completion, attemptId, provider),
+      });
+    case 'in-progress':
+      return Object.freeze({ kind: 'in-progress' });
+    default:
+      throw new WorkerProcessingError('INVALID_IDEMPOTENCY_CLAIM');
+  }
+}
+
 function parseCompletion(
   value: AttemptExecutionCompletion,
   attemptId: string,
@@ -372,7 +412,37 @@ export class WorkerAttemptProcessor {
     ) {
       throw new WorkerProcessingError('ADAPTER_MISMATCH');
     }
-    if (workItem.attempt.attemptNumber > this.#retryPolicy.maxAttempts) {
+    const attempt = workItem.attempt;
+    const fingerprint = workerAttemptFingerprint(workItem);
+    let recovered: AttemptExecutionLookup;
+    try {
+      recovered = parseLookup(
+        await this.#store.lookup({
+          attemptId: attempt.id,
+          fingerprint,
+        }),
+        attempt.id,
+        this.#adapter.provider,
+      );
+    } catch (error) {
+      if (error instanceof WorkerProcessingError) throw error;
+      throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
+    }
+    if (recovered.kind === 'in-progress') {
+      return Object.freeze({
+        kind: 'in-progress',
+        retryAfterMilliseconds: calculateRetryDelayMilliseconds(
+          attempt.attemptNumber,
+          this.#retryPolicy,
+          this.#random,
+        ),
+      });
+    }
+    if (recovered.kind === 'completed') {
+      return this.#writeCompletion(attempt, recovered.completion, true);
+    }
+
+    if (attempt.attemptNumber > this.#retryPolicy.maxAttempts) {
       throw new WorkerProcessingError('RETRY_BUDGET_EXCEEDED');
     }
     if (this.#adapter.truthLabel === 'live-verified') {
@@ -390,8 +460,6 @@ export class WorkerAttemptProcessor {
       }
     }
 
-    const attempt = workItem.attempt;
-    const fingerprint = workerAttemptFingerprint(workItem);
     let claim: AttemptExecutionClaim;
     try {
       claim = parseClaim(

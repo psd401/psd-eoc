@@ -37,8 +37,20 @@ const OCCURRED_AT = new Date('2026-08-11T17:59:00.000Z').getTime();
 const CONFIGURATION = Object.freeze({
   accountId: '<aws-account-id>',
   region: 'us-west-2',
+  eventBridgeRuleArn:
+    'arn:aws:events:us-west-2:<aws-account-id>:rule/psd-eoc-sms-delivery',
   clock: () => new Date(NOW),
 });
+const TRUSTED_INVOCATION = Symbol('trusted-eventbridge-invocation');
+const INVOCATION = Object.freeze({
+  requestId: '00000000-0000-4000-8000-000000000112',
+  ruleArn: CONFIGURATION.eventBridgeRuleArn,
+  authorization: TRUSTED_INVOCATION,
+});
+
+function authorizeInvocation(invocation: { readonly authorization: unknown }) {
+  return invocation.authorization === TRUSTED_INVOCATION;
+}
 
 function attempt(): ChannelAttempt {
   return ChannelAttemptSchema.parse({
@@ -223,6 +235,14 @@ describe('AWS EUM SMS delivery event truth mapping', () => {
         IDS.attempt,
       ),
     ).toThrow(AwsEumSmsDeliveryEventError);
+
+    expect(() =>
+      mapAwsEumSmsDeliveryEvent(
+        deliveryEvent('DELIVERED', { attemptId: null }),
+        CONFIGURATION,
+        IDS.attempt,
+      ),
+    ).toThrow(AwsEumSmsDeliveryEventError);
   });
 
   test('treats mismatched eventType and status as unknown instead of dropping it', () => {
@@ -268,15 +288,32 @@ describe('AWS EUM SMS delivery event truth mapping', () => {
 });
 
 class MemoryLookup implements SmsDeliveryAttemptLookup {
-  public constructor(private readonly value: ChannelAttempt | null) {}
+  public providerReferenceCalls = 0;
+  public unknownAttemptCalls = 0;
+
+  public constructor(
+    private readonly providerReferenceValue: ChannelAttempt | null,
+    private readonly unknownAttemptValue: ChannelAttempt | null = providerReferenceValue,
+  ) {}
 
   public loadAttemptByProviderReference(
     provider: typeof AWS_EUM_SMS_PROVIDER,
     providerReference: string,
   ): Promise<ChannelAttempt | null> {
+    this.providerReferenceCalls += 1;
     expect(provider).toBe(AWS_EUM_SMS_PROVIDER);
     expect(providerReference).toBe('synthetic-provider-message-1');
-    return Promise.resolve(this.value);
+    return Promise.resolve(this.providerReferenceValue);
+  }
+
+  public loadUnknownAttemptById(
+    provider: typeof AWS_EUM_SMS_PROVIDER,
+    attemptId: string,
+  ): Promise<ChannelAttempt | null> {
+    this.unknownAttemptCalls += 1;
+    expect(provider).toBe(AWS_EUM_SMS_PROVIDER);
+    expect(attemptId).toBe(IDS.attempt);
+    return Promise.resolve(this.unknownAttemptValue);
   }
 }
 
@@ -309,20 +346,49 @@ class MemoryWriter implements AttemptEvidenceWriter {
 describe('SMS delivery event processor', () => {
   test('correlates by MessageId and appends canonical evidence', async () => {
     const writer = new MemoryWriter();
+    const lookup = new MemoryLookup(attempt());
     const processor = new SmsDeliveryEventProcessor({
       configuration: CONFIGURATION,
-      attempts: new MemoryLookup(attempt()),
+      attempts: lookup,
       evidenceWriter: writer,
+      authorizeEventBridgeInvocation: authorizeInvocation,
     });
 
     await expect(
-      processor.process(deliveryEvent('DELIVERED')),
+      processor.process(deliveryEvent('DELIVERED'), INVOCATION),
     ).resolves.toEqual(expect.objectContaining({ kind: 'recorded' }));
     expect(writer.requests).toHaveLength(1);
     expect(writer.requests[0]).toEqual(
       expect.objectContaining({
         attempt: expect.objectContaining({ id: IDS.attempt, channel: 'sms' }),
         evidence: expect.objectContaining({ state: 'delivered' }),
+      }),
+    );
+    expect(lookup.providerReferenceCalls).toBe(1);
+    expect(lookup.unknownAttemptCalls).toBe(0);
+  });
+
+  test('recovers late proof by authenticated attempt context only after an unknown no-reference send', async () => {
+    const writer = new MemoryWriter();
+    const lookup = new MemoryLookup(null, attempt());
+    const processor = new SmsDeliveryEventProcessor({
+      configuration: CONFIGURATION,
+      attempts: lookup,
+      evidenceWriter: writer,
+      authorizeEventBridgeInvocation: authorizeInvocation,
+    });
+
+    await expect(
+      processor.process(deliveryEvent('DELIVERED'), INVOCATION),
+    ).resolves.toEqual(expect.objectContaining({ kind: 'recorded' }));
+    expect(lookup.providerReferenceCalls).toBe(1);
+    expect(lookup.unknownAttemptCalls).toBe(1);
+    expect(writer.requests[0]?.evidence).toEqual(
+      expect.objectContaining({
+        subject: { kind: 'attempt', attemptId: IDS.attempt },
+        state: 'delivered',
+        provider: AWS_EUM_SMS_PROVIDER,
+        providerReference: 'synthetic-provider-message-1',
       }),
     );
   });
@@ -332,11 +398,12 @@ describe('SMS delivery event processor', () => {
       configuration: CONFIGURATION,
       attempts: new MemoryLookup(null),
       evidenceWriter: new MemoryWriter(),
+      authorizeEventBridgeInvocation: authorizeInvocation,
     });
 
-    await expect(processor.process(deliveryEvent('DELIVERED'))).rejects.toEqual(
-      expect.objectContaining({ code: 'ATTEMPT_NOT_FOUND' }),
-    );
+    await expect(
+      processor.process(deliveryEvent('DELIVERED'), INVOCATION),
+    ).rejects.toEqual(expect.objectContaining({ code: 'ATTEMPT_NOT_FOUND' }));
   });
 
   test('appends non-final carrier filtering instead of dropping it', async () => {
@@ -345,10 +412,14 @@ describe('SMS delivery event processor', () => {
       configuration: CONFIGURATION,
       attempts: new MemoryLookup(attempt()),
       evidenceWriter: writer,
+      authorizeEventBridgeInvocation: authorizeInvocation,
     });
 
     await expect(
-      processor.process(deliveryEvent('CARRIER_BLOCKED', { final: false })),
+      processor.process(
+        deliveryEvent('CARRIER_BLOCKED', { final: false }),
+        INVOCATION,
+      ),
     ).resolves.toEqual(expect.objectContaining({ kind: 'recorded' }));
     expect(writer.requests[0]?.evidence).toEqual(
       expect.objectContaining({
@@ -356,5 +427,65 @@ describe('SMS delivery event processor', () => {
         reasonCode: 'AWS_CARRIER_FILTERING_NOT_FINAL',
       }),
     );
+  });
+
+  test('rejects an unverified invocation before lookup or evidence writes', async () => {
+    const writer = new MemoryWriter();
+    const lookup = new MemoryLookup(attempt());
+    const processor = new SmsDeliveryEventProcessor({
+      configuration: CONFIGURATION,
+      attempts: lookup,
+      evidenceWriter: writer,
+      authorizeEventBridgeInvocation: authorizeInvocation,
+    });
+
+    await expect(
+      processor.process(deliveryEvent('DELIVERED'), {
+        ...INVOCATION,
+        authorization: Symbol('forged'),
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'INVOCATION_UNVERIFIED' }),
+    );
+    expect(lookup.providerReferenceCalls).toBe(0);
+    expect(lookup.unknownAttemptCalls).toBe(0);
+    expect(writer.requests).toHaveLength(0);
+  });
+
+  test('fails closed before lookup when rule identity drifts or authorization throws', async () => {
+    for (const options of [
+      {
+        invocation: {
+          ...INVOCATION,
+          ruleArn:
+            'arn:aws:events:us-west-2:<aws-account-id>:rule/forged-sms-delivery',
+        },
+        authorize: authorizeInvocation,
+      },
+      {
+        invocation: INVOCATION,
+        authorize: () => {
+          throw new Error('synthetic authorizer failure');
+        },
+      },
+    ]) {
+      const lookup = new MemoryLookup(attempt());
+      const writer = new MemoryWriter();
+      const processor = new SmsDeliveryEventProcessor({
+        configuration: CONFIGURATION,
+        attempts: lookup,
+        evidenceWriter: writer,
+        authorizeEventBridgeInvocation: options.authorize,
+      });
+
+      await expect(
+        processor.process(deliveryEvent('DELIVERED'), options.invocation),
+      ).rejects.toEqual(
+        expect.objectContaining({ code: 'INVOCATION_UNVERIFIED' }),
+      );
+      expect(lookup.providerReferenceCalls).toBe(0);
+      expect(lookup.unknownAttemptCalls).toBe(0);
+      expect(writer.requests).toHaveLength(0);
+    }
   });
 });

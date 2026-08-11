@@ -1712,6 +1712,11 @@ export const rosterEndpoints = pgTable(
       table.rosterSnapshotId,
       table.recipientId,
     ),
+    index('roster_endpoints_sms_phone_idx')
+      .on(table.phoneNumber)
+      .where(
+        sql`${table.channel} = 'sms' and ${table.phoneNumber} is not null`,
+      ),
     check(
       'roster_endpoints_valid_variant',
       sql`(
@@ -4010,11 +4015,12 @@ export const deliveryEvidence = pgTable(
   ],
 );
 
-/** Append-only lifecycle facts that disable a snapshotted endpoint. */
+/** Append-only lifecycle facts that supersede a snapshotted endpoint state. */
 export const endpointStatusRecords = pgTable(
   'endpoint_status_records',
   {
     id: uuid('id').defaultRandom().primaryKey(),
+    sequence: integer('sequence').generatedAlwaysAsIdentity(),
     rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
     recipientId: uuid('recipient_id').notNull(),
     endpointId: uuid('endpoint_id').notNull(),
@@ -4022,6 +4028,9 @@ export const endpointStatusRecords = pgTable(
     channel: notificationChannelEnum('channel').notNull(),
     status: endpointStatusEnum('status').notNull(),
     reasonCode: auditCode('reason_code').notNull(),
+    provider: varchar('provider', { length: 100 }),
+    providerReference: varchar('provider_reference', { length: 500 }),
+    providerOccurredAt: occurredAt('provider_occurred_at'),
     recordedAt: occurredAt('recorded_at').defaultNow().notNull(),
   },
   (table) => [
@@ -4043,13 +4052,85 @@ export const endpointStatusRecords = pgTable(
       name: 'endpoint_status_records_endpoint_fk',
     }).onDelete('restrict'),
     check(
-      'endpoint_status_records_terminal_status',
-      sql`${table.status} in ('invalid', 'disabled')`,
+      'endpoint_status_records_lifecycle_status',
+      sql`${table.status} in ('active', 'invalid', 'disabled')`,
+    ),
+    check(
+      'endpoint_status_records_provider_identity',
+      sql`(${table.provider} is null) = (${table.providerReference} is null)
+        and (${table.provider} is null) = (${table.providerOccurredAt} is null)
+        and (${table.provider} is null or (
+          ${table.channel} = 'sms'
+          and ${table.provider} = 'aws-eum-sms'
+          and (
+            (${table.status} = 'active' and ${table.reasonCode} = 'SMS_OPT_IN_PROVIDER_VERIFIED')
+            or (${table.status} = 'disabled' and ${table.reasonCode} = 'SMS_OPTED_OUT')
+          )
+        ))`,
+    ),
+    check(
+      'endpoint_status_records_provider_format',
+      sql`${table.provider} is null or (
+        ${table.provider} = btrim(${table.provider})
+        and ${table.providerReference} = btrim(${table.providerReference})
+        and length(${table.provider}) between 1 and 100
+        and length(${table.providerReference}) between 1 and 500
+      )`,
+    ),
+    check(
+      'endpoint_status_records_verified_active',
+      sql`(${table.status} = 'active') = (
+        ${table.channel} = 'sms'
+        and ${table.reasonCode} = 'SMS_OPT_IN_PROVIDER_VERIFIED'
+        and ${table.provider} = 'aws-eum-sms'
+        and ${table.providerReference} is not null
+        and ${table.providerOccurredAt} is not null
+      )`,
+    ),
+    check(
+      'endpoint_status_records_managed_sms_opt_out',
+      sql`(${table.reasonCode} = 'SMS_OPTED_OUT') = (
+        ${table.channel} = 'sms'
+        and ${table.status} = 'disabled'
+        and ${table.provider} = 'aws-eum-sms'
+        and ${table.providerReference} is not null
+        and ${table.providerOccurredAt} is not null
+      )`,
+    ),
+    check(
+      'endpoint_status_records_provider_time',
+      sql`${table.providerOccurredAt} is null
+        or ${table.providerOccurredAt} <= ${table.recordedAt} + interval '5 minutes'`,
     ),
     check(
       'endpoint_status_records_reason_format',
       sql`${table.reasonCode} ~ '^[A-Z0-9_]+$'`,
     ),
+    uniqueIndex('endpoint_status_records_sequence_uq').on(table.sequence),
+    uniqueIndex('endpoint_status_records_provider_reference_uq').on(
+      table.rosterSnapshotId,
+      table.recipientId,
+      table.endpointId,
+      table.provider,
+      table.providerReference,
+    ),
+    index('endpoint_status_records_latest_idx').on(
+      table.rosterSnapshotId,
+      table.recipientId,
+      table.endpointId,
+      table.sequence.desc(),
+    ),
+    index('endpoint_status_records_sms_lifecycle_idx')
+      .on(
+        table.rosterSnapshotId,
+        table.recipientId,
+        table.endpointId,
+        table.providerOccurredAt.desc(),
+        table.sequence.desc(),
+      )
+      .where(
+        sql`${table.channel} = 'sms' and ${table.reasonCode} in ('SMS_OPTED_OUT', 'SMS_OPT_IN_PROVIDER_VERIFIED')`,
+      ),
   ],
 );
 
@@ -4065,6 +4146,7 @@ export const smsOptOutRecords = pgTable(
     channel: notificationChannelEnum('channel').notNull(),
     provider: varchar('provider', { length: 100 }).notNull(),
     providerReference: varchar('provider_reference', { length: 500 }).notNull(),
+    providerOccurredAt: occurredAt('provider_occurred_at'),
     recordedAt: occurredAt('recorded_at').defaultNow().notNull(),
   },
   (table) => [
@@ -4086,6 +4168,14 @@ export const smsOptOutRecords = pgTable(
       name: 'sms_opt_out_records_endpoint_fk',
     }).onDelete('restrict'),
     check('sms_opt_out_records_sms_only', sql`${table.channel} = 'sms'`),
+    check(
+      'sms_opt_out_records_provider_time_required',
+      sql`${table.providerOccurredAt} is not null`,
+    ),
+    check(
+      'sms_opt_out_records_provider_time',
+      sql`${table.providerOccurredAt} <= ${table.recordedAt} + interval '5 minutes'`,
+    ),
   ],
 );
 
