@@ -8,6 +8,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import type { EventTypeStore } from '../capabilities/event-types';
+import type { StartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
 import {
   executeEventCapability,
   type EventCapabilityRuntime,
@@ -16,6 +17,7 @@ import {
 } from '../capabilities/events';
 import type { CapabilityAuditEvent } from '../capabilities/engine';
 import type { JournalCapabilityRuntime } from '../capabilities/journal';
+import type { RecordsCapabilityRuntime } from '../capabilities/records';
 import { AGENT_DEPLOYED_CAPABILITY_IDS } from './availability';
 import {
   createDefaultAgentCapabilityDispatcher,
@@ -96,6 +98,8 @@ function dispatcher(eventTypes: EventTypeStore) {
   const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
     events: unavailableDependency,
     journal: unavailableDependency,
+    activationPreviews: unavailableDependency,
+    records: unavailableDependency,
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes,
@@ -111,6 +115,8 @@ function dispatcherWithEvents(events: EventCapabilityRuntime) {
   const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
     events,
     journal: unavailableDependency,
+    activationPreviews: unavailableDependency,
+    records: unavailableDependency,
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
@@ -126,6 +132,44 @@ function dispatcherWithJournal(journal: JournalCapabilityRuntime) {
   const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
     events: unavailableDependency,
     journal,
+    activationPreviews: unavailableDependency,
+    records: unavailableDependency,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
+    eventTypes: new StubEventTypeStore(),
+    preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
+    securityAudit: unavailableDependency,
+  };
+  return createDefaultAgentCapabilityDispatcher(dependencies);
+}
+
+function dispatcherWithActivationPreviews(
+  activationPreviews: StartFlowCapabilityRuntime,
+) {
+  const unavailableDependency = undefined as never;
+  const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
+    events: unavailableDependency,
+    journal: unavailableDependency,
+    activationPreviews,
+    records: unavailableDependency,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
+    eventTypes: new StubEventTypeStore(),
+    preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
+    securityAudit: unavailableDependency,
+  };
+  return createDefaultAgentCapabilityDispatcher(dependencies);
+}
+
+function dispatcherWithRecords(records: RecordsCapabilityRuntime) {
+  const unavailableDependency = undefined as never;
+  const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
+    events: unavailableDependency,
+    journal: unavailableDependency,
+    activationPreviews: unavailableDependency,
+    records,
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
@@ -426,6 +470,155 @@ describe('default agent dispatcher routing', () => {
     ]);
   });
 
+  test('routes journal search through the canonical scoped journal runtime', async () => {
+    const calls: Array<{
+      capabilityId: string;
+      input: unknown;
+      invocation: ReturnType<typeof invocation>;
+    }> = [];
+    const expected = {
+      items: [],
+      pageInfo: { hasMore: false, nextCursor: null },
+    };
+    const journal = {
+      async execute(
+        capabilityId: string,
+        input: unknown,
+        callInvocation: never,
+      ) {
+        calls.push({
+          capabilityId,
+          input,
+          invocation: callInvocation as ReturnType<typeof invocation>,
+        });
+        return expected;
+      },
+    } as unknown as JournalCapabilityRuntime;
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['search-journal-entries'],
+    );
+    const callInvocation = invocation(authenticated);
+    const input = {
+      eventId: null,
+      kind: null,
+      query: 'synthetic drill',
+      occurredFrom: null,
+      occurredThrough: null,
+      cursor: null,
+      limit: 25,
+    };
+
+    await expect(
+      dispatcherWithJournal(journal).execute(
+        'search-journal-entries',
+        input,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expected);
+    expect(calls).toEqual([
+      {
+        capabilityId: 'search-journal-entries',
+        input,
+        invocation: callInvocation,
+      },
+    ]);
+  });
+
+  test('routes drill records through the canonical records runtime', async () => {
+    const calls: Array<{
+      input: unknown;
+      invocation: ReturnType<typeof invocation>;
+    }> = [];
+    const expected = {
+      items: [],
+      pageInfo: { hasMore: false, nextCursor: null },
+    };
+    const records = {
+      async execute(input: unknown, callInvocation: never) {
+        calls.push({
+          input,
+          invocation: callInvocation as ReturnType<typeof invocation>,
+        });
+        return expected;
+      },
+    } as unknown as RecordsCapabilityRuntime;
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['list-drill-records'],
+    );
+    const callInvocation = invocation(authenticated);
+    const input = {
+      facilityId: IDS.facility,
+      startedFrom: null,
+      startedThrough: null,
+      cursor: null,
+      limit: 25,
+    };
+
+    await expect(
+      dispatcherWithRecords(records).execute(
+        'list-drill-records',
+        input,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expected);
+    expect(calls).toEqual([{ input, invocation: callInvocation }]);
+  });
+
+  test('routes activation preview creation before the existing prepare handoff', async () => {
+    const calls: Array<{
+      capabilityId: string;
+      input: unknown;
+      invocation: ReturnType<typeof invocation>;
+    }> = [];
+    const expected = { synthetic: 'activation-preview' };
+    const activationPreviews = {
+      async execute(
+        capabilityId: string,
+        input: unknown,
+        callInvocation: never,
+      ) {
+        calls.push({
+          capabilityId,
+          input,
+          invocation: callInvocation as ReturnType<typeof invocation>,
+        });
+        return expected;
+      },
+    } as unknown as StartFlowCapabilityRuntime;
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['create-activation-preview', 'prepare-activation'],
+    );
+    const callInvocation = invocation(authenticated);
+    const input = {
+      facilityId: IDS.facility,
+      kind: 'drill',
+      templateMode: 'drill',
+      eventTypeVersion: { id: IDS.issuer, templateMode: 'drill' },
+      rosterPopulation: 'staff',
+    };
+
+    await expect(
+      dispatcherWithActivationPreviews(activationPreviews).execute(
+        'create-activation-preview',
+        input,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expected);
+    expect(calls).toEqual([
+      {
+        capabilityId: 'create-activation-preview',
+        input,
+        invocation: callInvocation,
+      },
+    ]);
+  });
+
   test('preserves the authenticated scope for canonical authorization', async () => {
     const eventTypes = new StubEventTypeStore();
     const authenticated = authenticatedAgent(
@@ -466,18 +659,18 @@ describe('default agent dispatcher routing', () => {
   test('fails closed with 503 when a catalog capability is not deployed', async () => {
     const authenticated = authenticatedAgent(
       { kind: 'facilities', facilityIds: [IDS.facility] },
-      ['search-journal-entries'],
+      ['get-roster-snapshot'],
     );
 
     await expect(
       dispatcher(new StubEventTypeStore()).execute(
-        'search-journal-entries',
+        'get-roster-snapshot',
         {},
         invocation(authenticated),
         authenticated,
       ),
     ).rejects.toMatchObject({
-      capabilityId: 'search-journal-entries',
+      capabilityId: 'get-roster-snapshot',
       code: 'INTERNAL_ERROR',
       status: 503,
       retryable: false,
