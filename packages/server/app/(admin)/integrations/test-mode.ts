@@ -43,6 +43,15 @@ export class TestModeAudienceResolutionError extends Error {
   }
 }
 
+function testModeRosterPopulation(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TestModeAudienceResolutionError(
+      'TEST_MODE_REQUIRES_SYNTHETIC_ROSTER',
+    );
+  }
+  return Reflect.get(value, 'population');
+}
+
 function isProvablyUnroutable(endpoint: Endpoint): boolean {
   switch (endpoint.channel) {
     case 'email':
@@ -57,18 +66,20 @@ function isProvablyUnroutable(endpoint: Endpoint): boolean {
 /**
  * Resolves the admin test-mode audience through the shared immutable resolver.
  *
- * The population check happens before the resolver can inspect or return an
+ * The runtime snapshot container is checked before its population is read, and
+ * the population check happens before the resolver can inspect or return an
  * endpoint. The shared resolver then reparses the complete snapshot, which
- * rejects a forged synthetic snapshot containing any routable destination.
- * The postcondition keeps this route fail-closed if the shared implementation
- * changes later. This function has no provider or network dependency.
+ * rejects a well-shaped forged synthetic snapshot containing any routable
+ * destination. The postcondition keeps this route fail-closed if the shared
+ * implementation changes later. This function has no provider or network
+ * dependency.
  */
 export function resolveTestModeAudience(
   input: ResolveAudienceInput,
 ): ResolvedAudience {
   const targeting = EventTargetingSchema.safeParse({
     ...TEST_MODE_TARGETING,
-    rosterPopulation: input.rosterSnapshot.population,
+    rosterPopulation: testModeRosterPopulation(input.rosterSnapshot),
   });
   if (!targeting.success) {
     throw new TestModeAudienceResolutionError(

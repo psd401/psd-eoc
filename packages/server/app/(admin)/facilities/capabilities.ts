@@ -1437,8 +1437,14 @@ export const createGroupSourceRegistration: ServerCapabilityRegistration<
     input.facilityId === null
       ? guard(context, null)
       : resolveExistingFacilityId(context, input.facilityId),
-  handler: (input, context) =>
-    createGroupSource(context.transaction.database, input),
+  async handler(input, context) {
+    const output = await createGroupSource(context.transaction.database, input);
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: output.id,
+    });
+    return output;
+  },
   resultReference: (output) => resultReference(output.id, null, output),
   async loadReplay(reference, context) {
     const parsed = parseResultReference(reference);
@@ -1448,6 +1454,10 @@ export const createGroupSourceRegistration: ServerCapabilityRegistration<
     );
     if (output === null) throw conflict('The group source is unavailable.');
     assertReplayOutput(parsed, output);
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: output.id,
+    });
     return output;
   },
   async resolveReplayFacilityId(reference, context) {

@@ -726,20 +726,51 @@ describeWithDatabase('facilities administrator database flow', () => {
     });
     expect(facilityReplay).toEqual(facility);
 
+    const staffBuildingCommand = {
+      kind: 'google-group' as const,
+      purpose: 'building' as const,
+      facilityId: facility.id,
+      displayName: `${facility.name} staff`,
+      active: true,
+      googleGroupId: `issue-26-staff-${suffix}`,
+      email: `issue-26-staff-${suffix}@example.invalid`,
+    };
+    const staffBuildingMetadata = metadata('staff-building', requestIds);
     const staffBuilding = await executeCreateGroupSourceCapability({
       authenticated,
       store,
-      command: {
-        kind: 'google-group',
-        purpose: 'building',
-        facilityId: facility.id,
-        displayName: `${facility.name} staff`,
-        active: true,
-        googleGroupId: `issue-26-staff-${suffix}`,
-        email: `issue-26-staff-${suffix}@example.invalid`,
-      },
-      metadata: metadata('staff-building', requestIds),
+      command: staffBuildingCommand,
+      metadata: staffBuildingMetadata,
     });
+    const staffBuildingReplayMetadata = replayMetadata(
+      staffBuildingMetadata,
+      requestIds,
+    );
+    expect(
+      await executeCreateGroupSourceCapability({
+        authenticated,
+        store,
+        command: staffBuildingCommand,
+        metadata: staffBuildingReplayMetadata,
+      }),
+    ).toEqual(staffBuilding);
+    for (const requestId of [
+      staffBuildingMetadata.requestId,
+      staffBuildingReplayMetadata.requestId,
+    ]) {
+      const [audit] = await database
+        .select({
+          targetKind: securityAuditEntries.targetKind,
+          targetId: securityAuditEntries.targetId,
+        })
+        .from(securityAuditEntries)
+        .where(eq(securityAuditEntries.requestId, requestId))
+        .limit(1);
+      expect(audit).toEqual({
+        targetKind: 'configuration',
+        targetId: staffBuilding.id,
+      });
+    }
     const syntheticBuilding = await executeCreateGroupSourceCapability({
       authenticated,
       store,
@@ -1036,9 +1067,10 @@ describeWithDatabase('facilities administrator database flow', () => {
       facilityScopeKind: 'district',
     });
     const inaccessibleAdministratorId = randomUUID();
+    const inaccessibleAdministratorSubject = `issue-26-inaccessible-admin-${suffix}`;
     await database.insert(users).values({
       id: inaccessibleAdministratorId,
-      googleSubject: `issue-26-inaccessible-admin-${suffix}`,
+      googleSubject: inaccessibleAdministratorSubject,
       email: `issue-26-inaccessible-admin-${suffix}@psd401.net`,
       displayName: `Issue 26 inaccessible administrator ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
@@ -1077,14 +1109,34 @@ describeWithDatabase('facilities administrator database flow', () => {
           eq(groupSources.active, true),
         ),
       );
-    const [latestAccessSnapshot] = await database
-      .select({ version: accessMembershipSnapshots.version })
+    const [previousCompleteAccessSnapshot] = await database
+      .select({
+        id: accessMembershipSnapshots.id,
+        version: accessMembershipSnapshots.version,
+      })
       .from(accessMembershipSnapshots)
+      .where(eq(accessMembershipSnapshots.complete, true))
       .orderBy(desc(accessMembershipSnapshots.version))
       .limit(1);
+    if (previousCompleteAccessSnapshot === undefined) {
+      throw new Error('The prior complete access snapshot is missing.');
+    }
+    await database.insert(accessMembershipMembers).values({
+      snapshotId: previousCompleteAccessSnapshot.id,
+      userId: inaccessibleAdministratorId,
+      googleSubject: inaccessibleAdministratorSubject,
+      facilityScopeKind: 'district',
+    });
+    await database.insert(accessMembershipMemberGroups).values({
+      snapshotId: previousCompleteAccessSnapshot.id,
+      userId: inaccessibleAdministratorId,
+      groupSourceId: accessGroup.id,
+      groupSourceKind: 'google-group',
+      groupPurpose: 'access',
+    });
     const bootstrapSnapshotId = randomUUID();
     const bootstrapSnapshotAt = new Date(Date.now() + 60_000);
-    const bootstrapSnapshotVersion = (latestAccessSnapshot?.version ?? 0) + 1;
+    const bootstrapSnapshotVersion = previousCompleteAccessSnapshot.version + 1;
     await database.insert(accessMembershipSnapshots).values({
       id: bootstrapSnapshotId,
       version: bootstrapSnapshotVersion,
@@ -1288,6 +1340,15 @@ describeWithDatabase('facilities administrator database flow', () => {
       metadata: metadata('inaccessible-admin-role', requestIds),
     });
     expect(inaccessibleAdministrator.roles).toEqual(['staff', 'admin']);
+    expect(
+      await database
+        .select({ snapshotId: accessMembershipMembers.snapshotId })
+        .from(accessMembershipMembers)
+        .where(eq(accessMembershipMembers.userId, inaccessibleAdministratorId)),
+    ).toEqual([{ snapshotId: previousCompleteAccessSnapshot.id }]);
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([
+      authenticated.actor.userId,
+    ]);
     const inaccessibleEvidence = await createDrizzleAccessGateStore(
       database,
     ).loadEvidence(`issue-26-inaccessible-admin-${suffix}`);

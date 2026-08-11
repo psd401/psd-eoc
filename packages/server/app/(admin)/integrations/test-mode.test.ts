@@ -153,12 +153,30 @@ function expectInvalidSyntheticSnapshot(endpoint: Endpoint): void {
     resolveTestModeAudience(input(withForgedEndpoint(endpoint)));
   } catch (error) {
     expect(error).toBeInstanceOf(AudienceResolutionError);
+    expect(error).not.toBeInstanceOf(TestModeAudienceResolutionError);
     expect((error as AudienceResolutionError).code).toBe(
       'INVALID_ROSTER_SNAPSHOT',
     );
     return;
   }
   throw new Error('Expected a routable synthetic endpoint to fail closed.');
+}
+
+function expectInvalidTestModeRosterSnapshot(rosterSnapshot: unknown): void {
+  const malformedInput = {
+    ...input(SYNTHETIC_SNAPSHOT),
+    rosterSnapshot,
+  } as unknown as ResolveAudienceInput;
+  try {
+    resolveTestModeAudience(malformedInput);
+  } catch (error) {
+    expect(error).toBeInstanceOf(TestModeAudienceResolutionError);
+    expect((error as TestModeAudienceResolutionError).code).toBe(
+      'TEST_MODE_REQUIRES_SYNTHETIC_ROSTER',
+    );
+    return;
+  }
+  throw new Error('Expected a malformed test-mode roster to fail closed.');
 }
 
 describe('admin test-mode audience resolution', () => {
@@ -178,6 +196,20 @@ describe('admin test-mode audience resolution', () => {
       expect((error as TestModeAudienceResolutionError).code).toBe(
         'TEST_MODE_REQUIRES_SYNTHETIC_ROSTER',
       );
+    }
+  });
+
+  test('rejects malformed roster snapshots with a typed test-mode error', () => {
+    for (const rosterSnapshot of [
+      null,
+      undefined,
+      false,
+      0,
+      'synthetic',
+      [],
+      {},
+    ]) {
+      expectInvalidTestModeRosterSnapshot(rosterSnapshot);
     }
   });
 

@@ -565,8 +565,24 @@ class FakeRdsDataClient {
     if (sql.includes('from "users"') && sql.includes('order by')) {
       return {
         records: [
-          [{ stringValue: USER_ID }],
-          [{ stringValue: SECOND_USER_ID }],
+          [
+            { stringValue: USER_ID },
+            { stringValue: 'synthetic-google-subject-2670' },
+            { stringValue: 'synthetic-admin@psd401.net' },
+            { stringValue: 'Synthetic Administrator' },
+            { stringValue: 'district' },
+            { stringValue: CLOCK_VALUE },
+            { isNull: true },
+          ],
+          [
+            { stringValue: SECOND_USER_ID },
+            { stringValue: 'synthetic-google-subject-2675' },
+            { stringValue: 'synthetic-operator@psd401.net' },
+            { stringValue: 'Synthetic Operator' },
+            { stringValue: 'district' },
+            { stringValue: CLOCK_VALUE },
+            { isNull: true },
+          ],
         ],
         $metadata: {},
       };
@@ -618,6 +634,25 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
+    if (
+      sql.startsWith('select distinct on (') &&
+      sql.includes('from "user_role_changes"') &&
+      !sql.includes('effective_admin_roles')
+    ) {
+      return this.roleStaffGranted
+        ? {
+            records: [
+              [
+                { stringValue: SECOND_USER_ID },
+                { longValue: 1 },
+                { stringValue: 'staff' },
+                { booleanValue: true },
+              ],
+            ],
+            $metadata: {},
+          }
+        : { records: [], $metadata: {} };
+    }
     if (sql.includes('effective_admin_roles')) {
       return {
         records: [
@@ -628,6 +663,15 @@ class FakeRdsDataClient {
       };
     }
     if (sql.includes('from "user_roles"')) {
+      if (sql.includes('"user_id"') && sql.includes('order by')) {
+        return {
+          records: [
+            [{ stringValue: USER_ID }, { stringValue: 'admin' }],
+            [{ stringValue: SECOND_USER_ID }, { stringValue: 'admin' }],
+          ],
+          $metadata: {},
+        };
+      }
       return {
         records: [[{ stringValue: 'admin' }]],
         $metadata: {},
@@ -1117,6 +1161,7 @@ describe('admin Aurora Data API transport regression', () => {
       { kind: 'building', facilityId: FACILITY_ID },
     ]);
 
+    const listStatementStart = client.statements.length;
     const users = await executeListUsersCapability({
       authenticated,
       store,
@@ -1133,6 +1178,23 @@ describe('admin Aurora Data API transport regression', () => {
     });
     executedCapabilities.add('list-users');
     expect(users.items.map(({ id }) => id)).toEqual([USER_ID, SECOND_USER_ID]);
+    expect(users.items.map(({ roles }) => roles)).toEqual([
+      ['admin'],
+      ['admin'],
+    ]);
+    const listProjectionStatements = client.statements
+      .slice(listStatementStart)
+      .filter(
+        ({ sql }) =>
+          sql.includes('from "users"') ||
+          sql.startsWith('select "user_id", "role" from "user_roles"') ||
+          (sql.startsWith('select distinct on (') &&
+            sql.includes('from "user_role_changes"')) ||
+          sql.startsWith(
+            'select "user_id", "facility_id" from "user_facility_scopes"',
+          ),
+      );
+    expect(listProjectionStatements).toHaveLength(4);
 
     const roleResult = await executeSetUserRolesCapability({
       authenticated,
@@ -1146,6 +1208,27 @@ describe('admin Aurora Data API transport regression', () => {
     });
     executedCapabilities.add('set-user-roles');
     expect(roleResult.roles).toEqual(['staff', 'admin']);
+
+    const usersAfterRoleChange = await executeListUsersCapability({
+      authenticated,
+      store,
+      query: {
+        facilityId: null,
+        includeDisabled: true,
+        cursor: null,
+        limit: 10,
+      },
+      metadata: {
+        requestId: '00000000-0000-4000-8000-000000002685',
+        now: new Date(CLOCK_VALUE),
+      },
+    });
+    expect(
+      usersAfterRoleChange.items.map(({ id, roles }) => ({ id, roles })),
+    ).toEqual([
+      { id: USER_ID, roles: ['admin'] },
+      { id: SECOND_USER_ID, roles: ['staff', 'admin'] },
+    ]);
 
     const integration = await executeIntegrationHealthProjection({
       authenticated,
