@@ -13,10 +13,11 @@ import { and, asc, desc, eq, exists, gte, lte, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   readDatabaseConfig,
   type Database,
   type DatabaseConnection,
-  type PostgresDatabase,
+  type DatabaseQuery,
 } from '../../../../db/client';
 import {
   activationPreviews,
@@ -336,7 +337,7 @@ export async function issueStartEventConfirmation(
   return result.receipt;
 }
 
-type ConfirmationQueryDatabase = PostgresDatabase;
+type ConfirmationQueryDatabase = DatabaseQuery;
 
 function confirmationDatabase(database: unknown): ConfirmationQueryDatabase {
   return database as ConfirmationQueryDatabase;
@@ -345,8 +346,10 @@ function confirmationDatabase(database: unknown): ConfirmationQueryDatabase {
 async function readDatabaseTime(
   database: ConfirmationQueryDatabase,
 ): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+  const [row] = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   if (row === undefined) {
     throw unavailable('The authoritative database clock is unavailable.');
