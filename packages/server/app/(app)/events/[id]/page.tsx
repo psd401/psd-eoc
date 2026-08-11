@@ -19,27 +19,27 @@ import {
   getDefaultEventTypeStore,
   executeGetEventTypeVersionCapability,
 } from '../../../../lib/capabilities/event-types';
-import { getDefaultEventCapabilityRuntime } from '../../../../lib/capabilities/events';
-import {
-  createJournalCursor,
-  getDefaultJournalCapabilityRuntime,
-} from '../../../../lib/capabilities/journal';
+import { getDefaultEventRoomCapabilityRuntime } from '../../../../lib/capabilities/event-room';
+import { getDefaultJournalCapabilityRuntime } from '../../../../lib/capabilities/journal';
 import { EventRoom } from './event-room';
+import { eventRoomSignInUrl } from './return-to';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-async function authenticateEventRoom(): Promise<AuthenticatedSession> {
+async function authenticateEventRoom(
+  eventId: string,
+): Promise<AuthenticatedSession> {
   const cookieStore = await cookies();
   const token = cookieStore.get(WEB_SESSION_COOKIE_NAME)?.value;
   if (token === undefined) {
-    redirect('/login?reason=session-required');
+    redirect(eventRoomSignInUrl(eventId, 'session-required'));
   }
   try {
     return await getDefaultSessionService().authenticate(token, 'web');
   } catch (error) {
     if (error instanceof SessionAccessError) {
-      redirect('/login?reason=session-expired');
+      redirect(eventRoomSignInUrl(eventId, 'session-expired'));
     }
     throw error;
   }
@@ -56,7 +56,7 @@ export default async function EventRoomPage({
     notFound();
   }
   const eventId = parsedEventId.data;
-  const authenticated = await authenticateEventRoom();
+  const authenticated = await authenticateEventRoom(eventId);
   const serverTime = new Date();
   const queryInvocation = () =>
     resolveHumanCapabilityInvocation(authenticated, {
@@ -64,21 +64,24 @@ export default async function EventRoomPage({
       serverTime,
       mutation: null,
     });
-  const eventRuntime = getDefaultEventCapabilityRuntime();
+  const eventRoomRuntime = getDefaultEventRoomCapabilityRuntime();
   const journalRuntime = getDefaultJournalCapabilityRuntime();
 
   try {
-    const event = await eventRuntime.execute(
-      'get-event',
-      { eventId },
+    const initialSync = await eventRoomRuntime.execute(
+      { eventId, cursor: null, limit: 100 },
       queryInvocation(),
     );
-    const [initialPage, facility, eventTypeVersion] = await Promise.all([
-      journalRuntime.execute(
-        'list-journal-entries',
-        { eventId, cursor: null, limit: 100 },
-        queryInvocation(),
-      ),
+    const event = initialSync.event;
+    if (event === null) {
+      throw new CapabilityEngineError(
+        'INTERNAL_ERROR',
+        'PERSISTENCE_CONFLICT',
+        'The initial event-room synchronization omitted its event projection.',
+        500,
+      );
+    }
+    const [facility, eventTypeVersion] = await Promise.all([
       journalRuntime.execute(
         'get-facility',
         { facilityId: event.facilityId },
@@ -92,10 +95,6 @@ export default async function EventRoomPage({
         now: serverTime,
       }),
     ]);
-    const lastSequence = initialPage.items.at(-1)?.sequence ?? 0;
-    const initialCursor =
-      initialPage.pageInfo.nextCursor ??
-      createJournalCursor(event.id, lastSequence);
 
     return (
       <EventRoom
@@ -105,9 +104,10 @@ export default async function EventRoomPage({
         event={event}
         eventTypeLabel={eventTypeVersion.name}
         facilityLabel={facility.name}
-        initialCursor={initialCursor}
-        initialEntries={initialPage.items}
-        initialHasMore={initialPage.pageInfo.hasMore}
+        initialCursor={initialSync.cursor}
+        initialEntries={initialSync.entries}
+        initialHasMore={initialSync.hasMore}
+        initialSnapshotSequence={initialSync.snapshotSequence}
         sessionId={authenticated.result.session.id}
       />
     );

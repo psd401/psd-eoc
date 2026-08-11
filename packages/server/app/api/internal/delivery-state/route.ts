@@ -23,9 +23,10 @@ import { z } from 'zod';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   readDatabaseConfig,
   type Database,
-  type PostgresDatabase,
+  type DatabaseQuery,
 } from '../../../../db/client';
 import { channelAttempts, deliveryEvidence } from '../../../../db/schema';
 
@@ -145,7 +146,7 @@ class DeliveryStateRouteRequestError extends Error {
   }
 }
 
-type DeliveryStateQueryDatabase = PostgresDatabase;
+type DeliveryStateQueryDatabase = DatabaseQuery;
 type ChannelAttemptRow = typeof channelAttempts.$inferSelect;
 type DeliveryEvidenceRow = typeof deliveryEvidence.$inferSelect;
 
@@ -252,8 +253,10 @@ function evidenceMatchesInput(
 async function readDatabaseTime(
   database: DeliveryStateQueryDatabase,
 ): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+  const [row] = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   const value = row?.value;
   if (value === undefined) {

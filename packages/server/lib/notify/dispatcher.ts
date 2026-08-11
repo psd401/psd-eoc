@@ -22,7 +22,11 @@ import {
 } from '@psd-eoc/contracts';
 import { and, asc, eq, lte, or, sql } from 'drizzle-orm';
 
-import type { Database, PostgresDatabase } from '../../db/client';
+import {
+  databaseExecuteRows,
+  type Database,
+  type DatabaseQuery,
+} from '../../db/client';
 import {
   dispatchBatches,
   notificationIntentChannels,
@@ -1352,7 +1356,7 @@ function normalizeDispatcherError(error: unknown): OutboxDispatcherError {
   );
 }
 
-type DispatcherQueryDatabase = PostgresDatabase;
+type DispatcherQueryDatabase = DatabaseQuery;
 type OutboxRow = typeof outbox.$inferSelect;
 type DispatchBatchRow = typeof dispatchBatches.$inferSelect;
 
@@ -1377,8 +1381,10 @@ function parsedDate(value: unknown, field: string): Date {
 async function readDatabaseTime(
   database: DispatcherQueryDatabase,
 ): Promise<Date> {
-  const rows = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+  const rows = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   const value = rows[0]?.value;
   if (value === undefined) {
