@@ -31,6 +31,8 @@ export const AGENT_DEPLOYED_CAPABILITY_IDS = Object.freeze([
   'get-event-type-draft',
   'preview-event-type-rendering',
   'list-drill-records',
+  'export-drill-records',
+  'export-event-summary',
   'query-security-audit',
   'verify-security-audit-chain',
 ] as const satisfies readonly AgentGrantableCapabilityId[]);

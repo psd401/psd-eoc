@@ -8,15 +8,22 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  type DatabaseQuery,
   type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import { seedDatabase } from '../../db/seed';
-import { events, journalEntries, securityAuditEntries } from '../../db/schema';
+import {
+  events,
+  journalEntries,
+  notificationIntentChannels,
+  notificationIntents,
+  securityAuditEntries,
+} from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
 import type { TrustedCapabilityInvocation } from './engine';
@@ -25,7 +32,16 @@ import {
   executeJournalCapability,
   type JournalCapabilityStore,
 } from './journal';
-import { executeRecordsCapability } from './records';
+import {
+  createRecordsCapabilityRuntime,
+  executeRecordsCapability,
+  type RecordsCapabilityRuntime,
+} from './records';
+import type {
+  RecordsArtifactStore,
+  StoreRecordsArtifactInput,
+} from './records/artifact-store';
+import { loadEventSummarySnapshot } from './records/snapshot';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -81,8 +97,13 @@ const JOURNAL_TEXT = Object.freeze({
 const SEEDED = Object.freeze({
   facilityNorth: '00000000-0000-4000-8000-000000000001',
   facilitySouth: '00000000-0000-4000-8000-000000000002',
+  audienceNorth: '00000000-0000-4000-8000-000000000020',
   rosterSnapshot: '00000000-0000-4000-8000-000000000041',
+  drillEventType: '00000000-0000-4000-8000-000000000101',
+  otherDrillEventType: '00000000-0000-4000-8000-000000000103',
   drillEventTypeVersion: '00000000-0000-4000-8000-000000000201',
+  integrationExpoPush: '00000000-0000-4000-8000-000000000301',
+  integrationSesEmail: '00000000-0000-4000-8000-000000000302',
 });
 
 const ACTOR = Object.freeze({
@@ -101,10 +122,13 @@ const FIXTURE = Object.freeze({
   northRedactedEntry: randomUUID(),
   northRedaction: randomUUID(),
   southEntry: randomUUID(),
+  northNotificationIntent: randomUUID(),
 });
 
 let connection: PostgresDatabaseConnection | undefined;
 let store: JournalCapabilityStore | undefined;
+let recordsRuntime: RecordsCapabilityRuntime | undefined;
+const storedArtifacts: StoreRecordsArtifactInput[] = [];
 
 function database(): PostgresDatabase {
   if (connection === undefined) {
@@ -118,6 +142,13 @@ function capabilityStore(): JournalCapabilityStore {
     throw new Error('The records integration store is not available.');
   }
   return store;
+}
+
+function exportRuntime(): RecordsCapabilityRuntime {
+  if (recordsRuntime === undefined) {
+    throw new Error('The records export runtime is not available.');
+  }
+  return recordsRuntime;
 }
 
 function invocation(
@@ -200,6 +231,29 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     await migrateDatabase(opened);
     await seedDatabase(opened.db);
     store = createDrizzleJournalCapabilityStore(opened.db);
+    const artifactStore: RecordsArtifactStore = {
+      async store(input) {
+        storedArtifacts.push(input);
+        return {
+          id: randomUUID(),
+          format: input.format,
+          contentType:
+            input.format === 'csv'
+              ? 'text/csv; charset=utf-8'
+              : 'application/pdf',
+          fileName: input.fileName,
+          byteLength: input.bytes.byteLength,
+          contentSha256: 'c'.repeat(64),
+          rowCount: input.rowCount,
+          downloadUrl: 'https://private.example.test/synthetic-records-export',
+          generatedAt: input.generatedAt.toISOString(),
+          expiresAt: new Date(
+            input.generatedAt.getTime() + 5 * 60 * 1_000,
+          ).toISOString(),
+        };
+      },
+    };
+    recordsRuntime = createRecordsCapabilityRuntime(opened, artifactStore);
 
     await opened.db.insert(events).values([
       activatedEvent({
@@ -312,10 +366,85 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         supersessionReason: null,
       },
     ]);
+
+    const notificationRequestId = randomUUID();
+    const notificationAuthorization = {
+      kind: 'synthetic-training' as const,
+      activationPreviewId: randomUUID(),
+      consequenceDigest: 'b'.repeat(64),
+      requestId: notificationRequestId,
+    };
+    await opened.db.insert(notificationIntents).values({
+      id: FIXTURE.northNotificationIntent,
+      eventId: FIXTURE.northDrill,
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersionId: SEEDED.drillEventTypeVersion,
+      rosterSnapshotId: SEEDED.rosterSnapshot,
+      rosterPopulation: 'synthetic',
+      audienceConfigId: SEEDED.audienceNorth,
+      audienceConfigVersion: 1,
+      createdBy: ACTOR,
+      source: 'agent-rest',
+      requestId: notificationRequestId,
+      authorization: notificationAuthorization,
+      createdAt: RUN.northVisibleEntryAt,
+    });
+    await opened.db.insert(notificationIntentChannels).values([
+      {
+        intentId: FIXTURE.northNotificationIntent,
+        sequence: 1,
+        channel: 'push',
+        eventKind: 'drill',
+        templateMode: 'drill',
+        purpose: 'activation',
+        rosterPopulation: 'synthetic',
+        classificationMarker: 'DRILL',
+        endpointCount: 2,
+        renderedMessage: {
+          channel: 'push',
+          eventKind: 'drill',
+          templateMode: 'drill',
+          purpose: 'activation',
+          classificationMarker: 'DRILL',
+          title: '[DRILL] Synthetic lockdown drill',
+          body: '[DRILL] Synthetic records integration notification.',
+        },
+        integrationStatusId: SEEDED.integrationExpoPush,
+        integrationId: 'expo-push',
+        integrationLabel: 'mocked',
+      },
+      {
+        intentId: FIXTURE.northNotificationIntent,
+        sequence: 2,
+        channel: 'email',
+        eventKind: 'drill',
+        templateMode: 'drill',
+        purpose: 'activation',
+        rosterPopulation: 'synthetic',
+        classificationMarker: 'DRILL',
+        endpointCount: 2,
+        renderedMessage: {
+          channel: 'email',
+          eventKind: 'drill',
+          templateMode: 'drill',
+          purpose: 'activation',
+          classificationMarker: 'DRILL',
+          subject: '[DRILL] Synthetic lockdown drill',
+          textBody: '[DRILL] Synthetic records integration notification.',
+        },
+        integrationStatusId: SEEDED.integrationSesEmail,
+        integrationId: 'ses-email',
+        integrationLabel: 'mocked',
+      },
+    ]);
   });
 
   afterAll(async () => {
     store = undefined;
+    recordsRuntime = undefined;
+    storedArtifacts.length = 0;
     await connection?.close();
     connection = undefined;
   });
@@ -325,6 +454,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     const all = await executeRecordsCapability(
       {
         facilityId: null,
+        eventTypeId: null,
         startedFrom: RUN.windowFrom,
         startedThrough: RUN.windowThrough,
         cursor: null,
@@ -360,9 +490,40 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
       }),
     ]);
 
+    const filtered = await executeRecordsCapability(
+      {
+        facilityId: SEEDED.facilityNorth,
+        eventTypeId: SEEDED.drillEventType,
+        startedFrom: RUN.windowFrom,
+        startedThrough: RUN.windowThrough,
+        cursor: null,
+        limit: 25,
+      },
+      invocation(),
+      capabilityStore(),
+    );
+    expect(filtered.items.map((record) => record.eventId)).toEqual([
+      FIXTURE.northTest,
+      FIXTURE.northDrill,
+    ]);
+    const wrongType = await executeRecordsCapability(
+      {
+        facilityId: SEEDED.facilityNorth,
+        eventTypeId: SEEDED.otherDrillEventType,
+        startedFrom: RUN.windowFrom,
+        startedThrough: RUN.windowThrough,
+        cursor: null,
+        limit: 25,
+      },
+      invocation(),
+      capabilityStore(),
+    );
+    expect(wrongType.items).toEqual([]);
+
     const first = await executeRecordsCapability(
       {
         facilityId: null,
+        eventTypeId: null,
         startedFrom: RUN.windowFrom,
         startedThrough: RUN.windowThrough,
         cursor: null,
@@ -389,6 +550,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     const second = await executeRecordsCapability(
       {
         facilityId: null,
+        eventTypeId: null,
         startedFrom: RUN.windowFrom,
         startedThrough: RUN.windowThrough,
         cursor: first.pageInfo.nextCursor,
@@ -413,6 +575,130 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         requestId: allRequestId,
       }),
     ]);
+  });
+
+  test('exports authorized CSV/PDF artifacts from complete redaction-safe snapshots and audits both', async () => {
+    storedArtifacts.length = 0;
+    const csvRequestId = randomUUID();
+    const csv = await exportRuntime().execute(
+      'export-drill-records',
+      {
+        facilityId: SEEDED.facilityNorth,
+        eventTypeId: SEEDED.drillEventType,
+        startedFrom: RUN.windowFrom,
+        startedThrough: RUN.windowThrough,
+        format: 'csv',
+      },
+      invocation(csvRequestId),
+    );
+    expect(csv).toMatchObject({
+      format: 'csv',
+      contentType: 'text/csv; charset=utf-8',
+    });
+    const csvArtifact = storedArtifacts.find(
+      (artifact) => artifact.format === 'csv',
+    );
+    expect(csvArtifact).toBeDefined();
+    if (csvArtifact === undefined) {
+      throw new Error('Expected the CSV artifact to be stored.');
+    }
+    const csvText = new TextDecoder().decode(csvArtifact.bytes);
+    expect(csvText).toStartWith(
+      'site,date,time,type,duration,participants_count\r\n',
+    );
+    expect(csvText).toContain('[DRILL] Lockdown Drill');
+    expect(csvText).toContain('[TEST] Lockdown Drill');
+
+    const snapshot = await loadEventSummarySnapshot(
+      database() as DatabaseQuery,
+      FIXTURE.northDrill,
+      RUN.invocationAt.toISOString(),
+    );
+    expect(snapshot.journal).toHaveLength(3);
+    expect(snapshot.journal[1]).toMatchObject({
+      visibility: 'redacted',
+      entry: {
+        id: FIXTURE.northRedactedEntry,
+        sequence: 2,
+      },
+    });
+    expect(JSON.stringify(snapshot)).not.toContain(JOURNAL_TEXT.redactedNorth);
+    expect(snapshot.recordedParticipantCount).toBe(0);
+    expect(snapshot.delivery).toEqual([
+      {
+        purpose: 'activation',
+        createdAt: RUN.northVisibleEntryAt.toISOString(),
+        explicitIntentState: null,
+        channels: [
+          {
+            channel: 'push',
+            plannedEndpointCount: 2,
+            noAttemptRecordCount: 2,
+            noEvidenceCount: 0,
+            stateCounts: [
+              { state: 'attempted', count: 0 },
+              { state: 'provider-accepted', count: 0 },
+              { state: 'delivered', count: 0 },
+              { state: 'failed', count: 0 },
+              { state: 'expired', count: 0 },
+              { state: 'unknown', count: 0 },
+            ],
+          },
+          {
+            channel: 'email',
+            plannedEndpointCount: 2,
+            noAttemptRecordCount: 2,
+            noEvidenceCount: 0,
+            stateCounts: [
+              { state: 'attempted', count: 0 },
+              { state: 'provider-accepted', count: 0 },
+              { state: 'delivered', count: 0 },
+              { state: 'failed', count: 0 },
+              { state: 'expired', count: 0 },
+              { state: 'unknown', count: 0 },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const pdfRequestId = randomUUID();
+    const pdf = await exportRuntime().execute(
+      'export-event-summary',
+      { eventId: FIXTURE.northDrill, format: 'pdf' },
+      invocation(pdfRequestId),
+    );
+    expect(pdf).toMatchObject({
+      eventId: FIXTURE.northDrill,
+      artifact: {
+        format: 'pdf',
+        contentType: 'application/pdf',
+        rowCount: 3,
+      },
+    });
+    const pdfArtifact = storedArtifacts.find(
+      (artifact) => artifact.format === 'pdf',
+    );
+    expect(pdfArtifact).toBeDefined();
+    if (pdfArtifact === undefined) {
+      throw new Error('Expected the PDF artifact to be stored.');
+    }
+    expect(new TextDecoder().decode(pdfArtifact.bytes.slice(0, 8))).toBe(
+      '%PDF-1.7',
+    );
+
+    const auditRows = await database()
+      .select()
+      .from(securityAuditEntries)
+      .where(
+        sql`${securityAuditEntries.requestId} in (${csvRequestId}::uuid, ${pdfRequestId}::uuid)`,
+      );
+    expect(auditRows).toHaveLength(2);
+    expect(auditRows.map((row) => row.action).sort()).toEqual([
+      'export-drill-records',
+      'export-event-summary',
+    ]);
+    expect(auditRows.every((row) => row.outcome === 'success')).toBe(true);
   });
 
   test('searches only scoped visible content and never uses a redacted original as an oracle', async () => {
