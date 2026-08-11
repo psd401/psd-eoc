@@ -54,10 +54,11 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   readDatabaseConfig,
   type Database,
   type DatabaseConnection,
-  type PostgresDatabase,
+  type DatabaseQuery,
 } from '../../db/client';
 import {
   activationPreviews,
@@ -1323,15 +1324,17 @@ export interface EventCapabilityRuntime {
   close(): Promise<void>;
 }
 
-type EventQueryDatabase = PostgresDatabase;
+type EventQueryDatabase = DatabaseQuery;
 
 function dateIso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
 
 async function readDatabaseTime(database: EventQueryDatabase): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+  const [row] = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   if (row === undefined) {
     throw conflict('The authoritative database clock is unavailable.');

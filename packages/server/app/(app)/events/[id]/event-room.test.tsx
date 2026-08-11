@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import {
   EventSchema,
   JournalEntrySchema,
+  projectJournalEntryForRead,
   type Event,
   type JournalEntry,
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { EventRoom, PrivatePhotoLoadCoordinator } from './event-room';
+import { EventRoom, eventRoomPollDelay } from './event-room';
 
 const IDS = {
   event: '10000000-0000-4000-8000-000000000001',
@@ -181,7 +182,11 @@ const ENTRIES = [
   }),
 ] as const;
 
-function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
+function render(
+  event: Event,
+  entries: readonly JournalEntry[] = ENTRIES,
+  initialHasMore = false,
+) {
   return renderToStaticMarkup(
     <EventRoom
       apiUrl={`/events/${event.id}/api`}
@@ -193,61 +198,23 @@ function render(event: Event, entries: readonly JournalEntry[] = ENTRIES) {
       }
       facilityLabel="Synthetic North Campus"
       initialCursor="eyJ2IjoxfQ"
-      initialEntries={entries}
-      initialHasMore={false}
+      initialEntries={entries.map((entry) =>
+        projectJournalEntryForRead(entry, false),
+      )}
+      initialHasMore={initialHasMore}
+      initialSnapshotSequence={entries.at(-1)?.sequence ?? 0}
       sessionId={IDS.session}
     />,
   );
 }
 
 describe('event room server-rendered safety and history state', () => {
-  test('private-photo coordination remains reusable across StrictMode-style effect cleanup and setup', () => {
-    const coordinator = new PrivatePhotoLoadCoordinator();
-    let cleanupCancelled = false;
-    let automaticStarted = false;
-    let explicitStarted = false;
-    let finishAutomatic: (() => void) | null = null;
-
-    const cleanup = coordinator.enqueue({
-      key: 'strict-mode-initial-effect',
-      mode: 'explicit',
-      onAutomaticLimit: () => undefined,
-      onStartError: () => undefined,
-      start: () => () => {
-        cleanupCancelled = true;
-      },
-    });
-    cleanup();
-    expect(cleanupCancelled).toBe(true);
-
-    coordinator.enqueue({
-      key: 'strict-mode-viewport-demand',
-      mode: 'automatic',
-      onAutomaticLimit: () => undefined,
-      onStartError: () => undefined,
-      start: (complete) => {
-        automaticStarted = true;
-        finishAutomatic = complete;
-        return () => undefined;
-      },
-    });
-    expect(automaticStarted).toBe(true);
-    if (finishAutomatic === null) {
-      throw new Error('The remounted automatic load did not start.');
-    }
-    (finishAutomatic as () => void)();
-
-    coordinator.enqueue({
-      key: 'strict-mode-explicit-demand',
-      mode: 'explicit',
-      onAutomaticLimit: () => undefined,
-      onStartError: () => undefined,
-      start: () => {
-        explicitStarted = true;
-        return () => undefined;
-      },
-    });
-    expect(explicitStarted).toBe(true);
+  test('keeps healthy polling in the 3–5 second window with bounded backoff', () => {
+    expect(eventRoomPollDelay(0, 0)).toBe(3_000);
+    expect(eventRoomPollDelay(0, 1)).toBe(5_000);
+    expect(eventRoomPollDelay(1, 0)).toBe(6_000);
+    expect(eventRoomPollDelay(1, 1)).toBe(10_000);
+    expect(eventRoomPollDelay(99, 1)).toBe(30_000);
   });
 
   test('renders real and drill classification with words and symbols, not color alone', () => {
@@ -262,6 +229,22 @@ describe('event room server-rendered safety and history state', () => {
     expect(drill).not.toContain('REAL INCIDENT');
     expect(real).toContain('aria-hidden="true"');
     expect(drill).toContain('aria-hidden="true"');
+  });
+
+  test('announces complete SSR history as connected and paginated history as loading', () => {
+    const complete = render(activeEvent('drill'), []);
+    const paginated = render(activeEvent('drill'), ENTRIES, true);
+
+    expect(complete).toContain('connection-line connection-connected');
+    expect(complete).toContain('<span>Connected</span>');
+    expect(complete).toContain('aria-busy="false"');
+    expect(complete).not.toContain('Loading event history');
+    expect(paginated).toContain('connection-line connection-loading');
+    expect(paginated).toContain('<span>Loading event history</span>');
+    expect(paginated).toContain('aria-busy="true"');
+    expect(paginated).toContain(
+      'Timeline content remains hidden until all authorized history',
+    );
   });
 
   test('renders immutable correction and redaction provenance without deleting originals', () => {
@@ -280,6 +263,25 @@ describe('event room server-rendered safety and history state', () => {
     expect(html).toContain(
       'Server-assigned sequence determines receipt order. Server-recorded and client-reported times are shown as supporting evidence.',
     );
+    expect(html).toContain('Redact entry 1');
+    expect(html).not.toContain('Correct entry 1');
+    expect(html).not.toContain('Redact entry 3');
+  });
+
+  test('labels a draft as created without presenting a running timer', () => {
+    const draft = EventSchema.parse({
+      ...activeEvent('real'),
+      status: 'draft',
+      rosterSnapshotId: null,
+      rosterPopulation: null,
+      activatedAt: null,
+      activationAuthorization: null,
+    });
+    const html = render(draft, []);
+
+    expect(html).toContain('<dt>Created</dt>');
+    expect(html).not.toContain('<dt>Started</dt>');
+    expect(html).not.toContain('<dt>Elapsed</dt>');
   });
 
   test('offers only the lifecycle action valid for the current append-only state', () => {

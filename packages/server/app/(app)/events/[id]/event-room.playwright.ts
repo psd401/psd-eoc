@@ -1,109 +1,50 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
-import {
-  ApiErrorSchema,
-  CreateMediaUploadIntentInputSchema,
-  MediaReadGrantSchema,
-  MediaRecordSchema,
-  MediaUploadIntentSchema,
-  type CreateMediaUploadIntentInput,
-} from '@psd-eoc/contracts';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { desc, eq } from 'drizzle-orm';
 
-import { EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH } from './test-database';
+import { createDatabaseClient } from '../../../../db/client';
+import {
+  journalEntries,
+  lifecycleConsequencePreviews,
+} from '../../../../db/schema';
+import {
+  requireEventRoomPlaywrightRunContext,
+  type EventRoomPlaywrightRunContext,
+} from './test-database';
 
 const AXE_VERSION = '4.10.3';
-const AXE_URL = `https://cdn.jsdelivr.net/npm/axe-core@${AXE_VERSION}/axe.min.js`;
 const AXE_SHA256 =
   '880970c081707360e64f34cea25ff91892f5bc95675b0776925b9709dd8a68bb';
-const SYNTHETIC_MEDIA_ORIGIN = 'https://private-media.example.test';
-const SYNTHETIC_PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-  'base64',
-);
-const SYNTHETIC_DISGUISED_NON_IMAGE = Buffer.from(
-  'Synthetic text intentionally disguised as image/png.',
-  'utf8',
-);
-const SYNTHETIC_PNG_SHA256 = createHash('sha256')
-  .update(SYNTHETIC_PNG)
-  .digest('hex');
+const AXE_SOURCE_URL = new URL('./axe-core-4.10.3.min.js.txt', import.meta.url);
+const AXE_LICENSE_URL = new URL('./axe-core-4.10.3.LICENSE', import.meta.url);
 
 interface EventRoomFixture {
-  readonly sessionId: string;
+  readonly concurrentDialogEventId: string;
+  readonly continuationEventId: string;
+  readonly dialogFailureEventId: string;
   readonly historyEventId: string;
+  readonly invalidationEventId: string;
+  readonly journalEvidenceEventId: string;
   readonly keyboardEventId: string;
   readonly recoveryEventId: string;
   readonly recoveryOwnerEventId: string;
   readonly lifecycleEventId: string;
+  readonly malformedLifecycleEventId: string;
+  readonly mismatchedAllClearTransitionEventId: string;
+  readonly mismatchedTransitionEventId: string;
+  readonly newerPollEventId: string;
+  readonly paginatedDialogEventId: string;
+  readonly paginatedLifecycleEventId: string;
+  readonly pendingDialogEventId: string;
+  readonly previewRetryEventId: string;
   readonly realDraftEventId: string;
-  readonly photoEventId: string;
-  readonly photoMediaId: string;
-  readonly photoUploadMediaId: string;
-  readonly photoSanitizedSha256: string;
-  readonly photoStressEventId: string;
-  readonly photoStressOldestMediaId: string;
-  readonly photoStressSecondMediaId: string;
-  readonly photoStressMiddleMediaId: string;
-  readonly redactedPhotoEventId: string;
-  readonly redactedPhotoMediaId: string;
-}
-
-type CompletionOutcome =
-  | 'malformed'
-  | 'ready'
-  | 'scan-pending'
-  | 'unreadable-rate-limit'
-  | 'server-nonretryable';
-
-interface SyntheticMediaRouteOptions {
-  readonly eventId: string;
-  readonly uploadIntentId: string;
-  readonly mediaId: string;
-  readonly sanitizedSha256: string;
-  readonly completionOutcomes?: readonly CompletionOutcome[];
-  readonly holdImageResponses?: boolean;
-  readonly holdReadGrants?: boolean;
-}
-
-interface SyntheticMediaRequest {
-  readonly headers: Readonly<Record<string, string>>;
-  readonly url: string;
-}
-
-interface SyntheticMediaLog {
-  readonly stages: string[];
-  readonly createInputs: CreateMediaUploadIntentInput[];
-  readonly createRequests: SyntheticMediaRequest[];
-  readonly uploadRequests: Array<
-    SyntheticMediaRequest & Readonly<{ body: Buffer }>
-  >;
-  readonly completionRequests: Array<
-    SyntheticMediaRequest & Readonly<{ body: string | null }>
-  >;
-  readonly readGrantRequests: Array<
-    SyntheticMediaRequest &
-      Readonly<{ eventId: string; mediaId: string; readUrl: string }>
-  >;
-  readonly imageRequests: SyntheticMediaRequest[];
-  concurrentImageRequests: number;
-  concurrentReadGrantRequests: number;
-  maxConcurrentImageRequests: number;
-  maxConcurrentReadGrantRequests: number;
-  readonly releaseImageResponses: () => void;
-  readonly releaseReadGrants: () => void;
-}
-
-interface PrivatePhotoIntersectionProbe {
-  readonly activeTargets: number;
-  readonly disconnectCalls: number;
-  readonly observeCalls: number;
-}
-
-interface PrivatePhotoDecodeProbe {
-  readonly active: number;
-  readonly maxActive: number;
-  readonly pendingAltText: readonly string[];
+  readonly rejectedDialogRaceEventId: string;
+  readonly rejectedLifecycleDialogEventId: string;
+  readonly stalePollEventId: string;
+  readonly staleLifecycleResponseEventId: string;
+  readonly stalledMutationEventId: string;
+  readonly stalledPreviewEventId: string;
 }
 
 interface AxeViolation {
@@ -122,9 +63,10 @@ function fixturePath(eventId: string): string {
   return `/events/${encodeURIComponent(eventId)}`;
 }
 
-async function readFixture(): Promise<EventRoomFixture> {
+async function readFixture(testInfo: TestInfo): Promise<EventRoomFixture> {
+  const context = runContext(testInfo);
   const parsed: unknown = JSON.parse(
-    await readFile(EVENT_ROOM_PLAYWRIGHT_FIXTURE_PATH, 'utf8'),
+    await readFile(context.fixturePath, 'utf8'),
   );
   if (
     typeof parsed !== 'object' ||
@@ -136,22 +78,282 @@ async function readFixture(): Promise<EventRoomFixture> {
   return parsed as EventRoomFixture;
 }
 
+function runContext(testInfo: TestInfo): EventRoomPlaywrightRunContext {
+  const metadata = testInfo.config.metadata as Readonly<
+    Record<string, unknown>
+  >;
+  return requireEventRoomPlaywrightRunContext(metadata.eventRoomRun);
+}
+
+async function lifecyclePreviewIds(
+  testInfo: TestInfo,
+  eventId: string,
+): Promise<readonly string[]> {
+  const connection = createDatabaseClient({
+    driver: 'postgres',
+    url: runContext(testInfo).databaseUrl,
+    maxConnections: 1,
+  });
+  if (connection.driver !== 'postgres') {
+    throw new Error(
+      'Event-room Playwright database inspection needs PostgreSQL.',
+    );
+  }
+  try {
+    const rows = await connection.db
+      .select({ id: lifecycleConsequencePreviews.id })
+      .from(lifecycleConsequencePreviews)
+      .where(eq(lifecycleConsequencePreviews.eventId, eventId));
+    return rows.map(({ id }) => id).sort();
+  } finally {
+    await connection.close();
+  }
+}
+
+async function appendSyntheticBurst(
+  testInfo: TestInfo,
+  eventId: string,
+  count: number,
+): Promise<void> {
+  const connection = createDatabaseClient({
+    driver: 'postgres',
+    url: runContext(testInfo).databaseUrl,
+    maxConnections: 1,
+  });
+  if (connection.driver !== 'postgres') {
+    throw new Error('Event-room Playwright burst setup needs PostgreSQL.');
+  }
+  try {
+    const [head] = await connection.db
+      .select({
+        sequence: journalEntries.sequence,
+        author: journalEntries.author,
+        serverTime: journalEntries.serverTime,
+      })
+      .from(journalEntries)
+      .where(eq(journalEntries.eventId, eventId))
+      .orderBy(desc(journalEntries.sequence))
+      .limit(1);
+    if (head === undefined) {
+      throw new Error('Synthetic continuation event has no journal head.');
+    }
+    await connection.db.insert(journalEntries).values(
+      Array.from({ length: count }, (_, index) => {
+        const sequence = head.sequence + index + 1;
+        const at = new Date(head.serverTime.getTime() + (index + 1) * 10);
+        return {
+          eventId,
+          sequence,
+          kind: 'text' as const,
+          author: head.author,
+          source: 'web' as const,
+          serverTime: at,
+          clientTime: at,
+          payload: {
+            text: `Synthetic post-connect burst ${String(sequence).padStart(3, '0')}`,
+          },
+        };
+      }),
+    );
+  } finally {
+    await connection.close();
+  }
+}
+
+async function postPreview(
+  page: Page,
+  eventId: string,
+  idempotencyKey: string,
+  includeCsrf: boolean,
+): Promise<
+  Readonly<{
+    status: number;
+    value: unknown;
+    acknowledgedIdempotencyKey: string | null;
+  }>
+> {
+  return page.evaluate(
+    async (input) => {
+      const csrf = document.cookie
+        .split(';')
+        .map((part) => part.trim())
+        .find((part) => part.startsWith('__Host-psd-eoc-csrf='))
+        ?.split('=', 2)[1];
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': input.idempotencyKey,
+      };
+      if (input.includeCsrf && csrf !== undefined) {
+        headers['X-PSD-EOC-CSRF'] = decodeURIComponent(csrf);
+      }
+      const response = await fetch(
+        `/events/${encodeURIComponent(input.eventId)}/api`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers,
+          body: JSON.stringify({ operation: 'preview-all-clear' }),
+        },
+      );
+      return {
+        status: response.status,
+        value: await response.json(),
+        acknowledgedIdempotencyKey: response.headers.get('idempotency-key'),
+      };
+    },
+    { eventId, idempotencyKey, includeCsrf },
+  );
+}
+
+async function issueExternalAllClear(
+  page: Page,
+  eventId: string,
+): Promise<void> {
+  const previewKey = `event-room-preview-${randomUUID()}`;
+  const previewResponse = await postPreview(page, eventId, previewKey, true);
+  const previewEnvelope = previewResponse.value;
+  const preview =
+    typeof previewEnvelope === 'object' &&
+    previewEnvelope !== null &&
+    'preview' in previewEnvelope &&
+    typeof previewEnvelope.preview === 'object' &&
+    previewEnvelope.preview !== null
+      ? previewEnvelope.preview
+      : null;
+  const lifecyclePreviewId =
+    preview !== null && 'id' in preview && typeof preview.id === 'string'
+      ? preview.id
+      : null;
+  expect(previewResponse.status).toBe(200);
+  expect(previewResponse.acknowledgedIdempotencyKey).toBe(previewKey);
+  if (lifecyclePreviewId === null) {
+    throw new Error('Synthetic all-clear preview response is invalid.');
+  }
+
+  const idempotencyKey = `event-room-all-clear-${randomUUID()}`;
+  const result = await page.evaluate(
+    async (input) => {
+      const csrf = document.cookie
+        .split(';')
+        .map((part) => part.trim())
+        .find((part) => part.startsWith('__Host-psd-eoc-csrf='))
+        ?.split('=', 2)[1];
+      if (csrf === undefined) {
+        return { status: 0, acknowledgedIdempotencyKey: null };
+      }
+      const response = await fetch(
+        `/events/${encodeURIComponent(input.eventId)}/api`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': input.idempotencyKey,
+            'X-PSD-EOC-CSRF': decodeURIComponent(csrf),
+          },
+          body: JSON.stringify({
+            operation: 'all-clear',
+            lifecyclePreviewId: input.lifecyclePreviewId,
+            confirmationPhrase: 'ALL CLEAR',
+          }),
+        },
+      );
+      return {
+        status: response.status,
+        acknowledgedIdempotencyKey: response.headers.get('idempotency-key'),
+      };
+    },
+    { eventId, idempotencyKey, lifecyclePreviewId },
+  );
+  expect(result.status).toBe(200);
+  expect(result.acknowledgedIdempotencyKey).toBe(idempotencyKey);
+}
+
+async function issueExternalClose(page: Page, eventId: string): Promise<void> {
+  const idempotencyKey = `event-room-close-${randomUUID()}`;
+  const result = await page.evaluate(
+    async (input) => {
+      const csrf = document.cookie
+        .split(';')
+        .map((part) => part.trim())
+        .find((part) => part.startsWith('__Host-psd-eoc-csrf='))
+        ?.split('=', 2)[1];
+      if (csrf === undefined) {
+        return { status: 0, acknowledgedIdempotencyKey: null };
+      }
+      const response = await fetch(
+        `/events/${encodeURIComponent(input.eventId)}/api`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': input.idempotencyKey,
+            'X-PSD-EOC-CSRF': decodeURIComponent(csrf),
+          },
+          body: JSON.stringify({
+            operation: 'close',
+            confirmationPhrase: 'CLOSE EVENT',
+          }),
+        },
+      );
+      return {
+        status: response.status,
+        acknowledgedIdempotencyKey: response.headers.get('idempotency-key'),
+      };
+    },
+    { eventId, idempotencyKey },
+  );
+  expect(result.status).toBe(200);
+  expect(result.acknowledgedIdempotencyKey).toBe(idempotencyKey);
+}
+
+function relativeLuminance(cssColor: string): number {
+  const components = cssColor
+    .match(/[\d.]+/gu)
+    ?.slice(0, 3)
+    .map(Number);
+  if (components === undefined || components.length !== 3) {
+    throw new Error(`Cannot parse computed color ${cssColor}.`);
+  }
+  const linear = components.map((component) => {
+    const channel = component / 255;
+    return channel <= 0.04045
+      ? channel / 12.92
+      : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const brighter = Math.max(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  const darker = Math.min(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  return (brighter + 0.05) / (darker + 0.05);
+}
+
 async function loadVerifiedAxeSource(): Promise<string> {
   axeSourcePromise ??= (async () => {
-    const response = await fetch(AXE_URL, {
-      headers: { Accept: 'application/javascript' },
-      redirect: 'error',
-    });
-    if (!response.ok) {
-      throw new Error(
-        `Pinned axe-core ${AXE_VERSION} download failed with HTTP ${response.status}.`,
-      );
+    const [storedBytes, license] = await Promise.all([
+      readFile(AXE_SOURCE_URL),
+      readFile(AXE_LICENSE_URL, 'utf8'),
+    ]);
+    if (!license.includes('Mozilla Public License, version 2.0')) {
+      throw new Error(`Pinned axe-core ${AXE_VERSION} license is missing.`);
     }
-    const bytes = Buffer.from(await response.arrayBuffer());
+    const bytes =
+      storedBytes.at(-1) === 0x0a
+        ? storedBytes.subarray(0, storedBytes.length - 1)
+        : storedBytes;
     const actualDigest = createHash('sha256').update(bytes).digest('hex');
     if (actualDigest !== AXE_SHA256) {
       throw new Error(
-        `Pinned axe-core ${AXE_VERSION} failed SHA-256 verification.`,
+        `Repository-local axe-core ${AXE_VERSION} failed SHA-256 verification.`,
       );
     }
     return bytes.toString('utf8');
@@ -485,292 +687,65 @@ async function postExternalUpdate(
   }
 }
 
-function mediaTimestampWindow(): Readonly<{
-  createdAt: string;
-  expiresAt: string;
-}> {
-  const createdAt = new Date();
-  return {
-    createdAt: createdAt.toISOString(),
-    expiresAt: new Date(createdAt.getTime() + 2 * 60_000).toISOString(),
-  };
-}
-
-async function installSyntheticMediaRoutes(
+async function redactExternalEntry(
   page: Page,
-  options: SyntheticMediaRouteOptions,
-): Promise<SyntheticMediaLog> {
-  let holdImageResponses = options.holdImageResponses ?? false;
-  let holdReadGrants = options.holdReadGrants ?? false;
-  const pendingImageResponses: Array<() => void> = [];
-  const pendingReadGrants: Array<() => void> = [];
-  const releaseImageResponses = () => {
-    holdImageResponses = false;
-    for (const release of pendingImageResponses.splice(0)) release();
-  };
-  const releaseReadGrants = () => {
-    holdReadGrants = false;
-    for (const release of pendingReadGrants.splice(0)) release();
-  };
-  const log: SyntheticMediaLog = {
-    stages: [],
-    createInputs: [],
-    createRequests: [],
-    uploadRequests: [],
-    completionRequests: [],
-    readGrantRequests: [],
-    imageRequests: [],
-    concurrentImageRequests: 0,
-    concurrentReadGrantRequests: 0,
-    maxConcurrentImageRequests: 0,
-    maxConcurrentReadGrantRequests: 0,
-    releaseImageResponses,
-    releaseReadGrants,
-  };
-  const completionOutcomes = options.completionOutcomes ?? ['ready'];
-  let completionAttempt = 0;
-  let grantSequence = 0;
-
-  await page.route('**/api/media/**', async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    const headers = request.headers();
-
-    if (
-      request.method() === 'POST' &&
-      url.pathname === '/api/media/upload-intents'
-    ) {
-      const input = CreateMediaUploadIntentInputSchema.parse(
-        request.postDataJSON() as unknown,
-      );
-      log.stages.push('create-intent');
-      log.createInputs.push(input);
-      log.createRequests.push({ headers, url: request.url() });
-      const times = mediaTimestampWindow();
-      await route.fulfill({
-        contentType: 'application/json',
-        json: MediaUploadIntentSchema.parse({
-          id: options.uploadIntentId,
-          eventId: options.eventId,
-          byteLength: input.byteLength,
-          contentSha256: input.contentSha256,
-          declaredContentType: input.declaredContentType,
-          uploadMethod: 'PUT',
-          uploadUrl: `${SYNTHETIC_MEDIA_ORIGIN}/quarantine/${options.eventId}/${options.uploadIntentId}?signature=synthetic`,
-          status: 'pending-upload',
-          ...times,
-        }),
-      });
-      return;
-    }
-
-    const completionMatch =
-      /^\/api\/media\/upload-intents\/([^/]+)\/complete$/u.exec(url.pathname);
-    if (request.method() === 'POST' && completionMatch !== null) {
-      expect(decodeURIComponent(completionMatch[1] ?? '')).toBe(
-        options.uploadIntentId,
-      );
-      log.stages.push('complete-upload');
-      log.completionRequests.push({
-        body: request.postData(),
-        headers,
-        url: request.url(),
-      });
-      const outcome =
-        completionOutcomes[
-          Math.min(completionAttempt, completionOutcomes.length - 1)
-        ] ?? 'ready';
-      completionAttempt += 1;
-      if (outcome === 'malformed') {
-        await route.fulfill({
-          status: 400,
-          contentType: 'application/json',
-          json: ApiErrorSchema.parse({
-            code: 'VALIDATION_ERROR',
-            message:
-              'The image could not be safely processed. Choose a different image and try again.',
-            requestId: randomUUID(),
-            retryable: false,
-            fieldErrors: [],
-          }),
-        });
-        return;
+  eventId: string,
+  entryId: string,
+  entrySequence: number,
+): Promise<void> {
+  const result = await page.evaluate(
+    async (input) => {
+      const csrf = document.cookie
+        .split(';')
+        .map((part) => part.trim())
+        .find((part) => part.startsWith('__Host-psd-eoc-csrf='))
+        ?.split('=', 2)[1];
+      if (csrf === undefined) {
+        return { ok: false, status: 0, body: 'CSRF cookie missing.' };
       }
-      if (outcome === 'unreadable-rate-limit') {
-        await route.fulfill({
-          status: 429,
-          contentType: 'text/html',
-          body: '<p>Synthetic unreadable rate-limit response</p>',
-        });
-        return;
-      }
-      if (outcome === 'server-nonretryable') {
-        await route.fulfill({
-          status: 500,
-          contentType: 'application/json',
-          json: ApiErrorSchema.parse({
-            code: 'INTERNAL_ERROR',
-            message: 'Synthetic upstream failure with an unsafe retry hint.',
-            requestId: randomUUID(),
-            retryable: false,
-            fieldErrors: [],
-          }),
-        });
-        return;
-      }
-      if (outcome === 'scan-pending') {
-        await route.fulfill({
-          status: 409,
-          contentType: 'application/json',
-          json: ApiErrorSchema.parse({
-            code: 'CONFLICT',
-            message:
-              'The photo safety scan is still pending. Try again shortly.',
-            requestId: randomUUID(),
-            retryable: true,
-            fieldErrors: [],
-          }),
-        });
-        return;
-      }
-      const times = mediaTimestampWindow();
-      await route.fulfill({
-        contentType: 'application/json',
-        json: MediaRecordSchema.parse({
-          id: options.mediaId,
-          uploadIntentId: options.uploadIntentId,
-          eventId: options.eventId,
-          status: 'ready',
-          detectedContentType: 'image/png',
-          sanitizedByteLength: SYNTHETIC_PNG.byteLength,
-          sanitizedContentSha256: options.sanitizedSha256,
-          malwareScan: 'clean',
-          exifStripped: true,
-          createdAt: times.createdAt,
-        }),
-      });
-      return;
-    }
-
-    const readMatch =
-      /^\/api\/media\/events\/([^/]+)\/([^/]+)\/read-grant$/u.exec(
-        url.pathname,
-      );
-    if (request.method() === 'GET' && readMatch !== null) {
-      const eventId = decodeURIComponent(readMatch[1] ?? '');
-      const mediaId = decodeURIComponent(readMatch[2] ?? '');
-      log.concurrentReadGrantRequests += 1;
-      log.maxConcurrentReadGrantRequests = Math.max(
-        log.maxConcurrentReadGrantRequests,
-        log.concurrentReadGrantRequests,
-      );
-      grantSequence += 1;
-      const readUrl = `${SYNTHETIC_MEDIA_ORIGIN}/ready/${eventId}/${mediaId}?grant=${grantSequence}`;
-      log.stages.push('read-grant');
-      log.readGrantRequests.push({
-        eventId,
-        headers,
-        mediaId,
-        readUrl,
-        url: request.url(),
-      });
-      try {
-        if (holdReadGrants) {
-          await new Promise<void>((resolve) => pendingReadGrants.push(resolve));
-        }
-        const times = mediaTimestampWindow();
-        await route.fulfill({
-          contentType: 'application/json',
-          json: MediaReadGrantSchema.parse({
-            eventId,
-            mediaId,
-            readUrl,
-            issuedAt: times.createdAt,
-            expiresAt: times.expiresAt,
-          }),
-        });
-      } finally {
-        log.concurrentReadGrantRequests -= 1;
-      }
-      return;
-    }
-
-    throw new Error(
-      `Unexpected synthetic media request: ${request.method()} ${url.pathname}`,
-    );
-  });
-
-  await page.route(`${SYNTHETIC_MEDIA_ORIGIN}/**`, async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    const headers = request.headers();
-    const requestOrigin = headers['origin'] ?? 'http://localhost';
-    if (request.method() === 'OPTIONS') {
-      await route.fulfill({
-        status: 204,
-        headers: {
-          'Access-Control-Allow-Headers': 'Content-Type',
-          'Access-Control-Allow-Methods': 'PUT',
-          'Access-Control-Allow-Origin': requestOrigin,
-          'Access-Control-Max-Age': '600',
-        },
-      });
-      return;
-    }
-    if (request.method() === 'PUT' && url.pathname.startsWith('/quarantine/')) {
-      log.stages.push('upload-bytes');
-      log.uploadRequests.push({
-        body: request.postDataBuffer() ?? Buffer.alloc(0),
-        headers,
-        url: request.url(),
-      });
-      await route.fulfill({
-        status: 200,
-        headers: {
-          'Access-Control-Allow-Origin': requestOrigin,
-          ETag: '"synthetic-private-upload"',
-        },
-      });
-      return;
-    }
-    if (request.method() === 'GET' && url.pathname.startsWith('/ready/')) {
-      log.concurrentImageRequests += 1;
-      log.maxConcurrentImageRequests = Math.max(
-        log.maxConcurrentImageRequests,
-        log.concurrentImageRequests,
-      );
-      log.stages.push('read-image');
-      log.imageRequests.push({ headers, url: request.url() });
-      try {
-        if (holdImageResponses) {
-          await new Promise<void>((resolve) =>
-            pendingImageResponses.push(resolve),
-          );
-        }
-        await route.fulfill({
-          status: 200,
-          body: SYNTHETIC_PNG,
-          contentType: 'image/png',
+      const response = await fetch(
+        `/events/${encodeURIComponent(input.eventId)}/api`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
           headers: {
-            'Cache-Control': 'private, no-store',
+            'Content-Type': 'application/json',
+            'Idempotency-Key': input.idempotencyKey,
+            'X-PSD-EOC-CSRF': decodeURIComponent(csrf),
           },
-        });
-      } finally {
-        log.concurrentImageRequests -= 1;
-      }
-      return;
-    }
+          body: JSON.stringify({
+            operation: 'redact-entry',
+            entryId: input.entryId,
+            entrySequence: input.entrySequence,
+            reason: 'Synthetic concurrent redaction regression.',
+            clientTime: new Date().toISOString(),
+          }),
+        },
+      );
+      return {
+        ok: response.ok,
+        status: response.status,
+        body: await response.text(),
+      };
+    },
+    {
+      eventId,
+      entryId,
+      entrySequence,
+      idempotencyKey: `event-room-redaction-${randomUUID()}`,
+    },
+  );
+  if (!result.ok) {
     throw new Error(
-      `Unexpected synthetic object-store request: ${request.method()} ${url.pathname}`,
+      `Synthetic external redaction failed (${result.status}): ${result.body}`,
     );
-  });
-  return log;
+  }
 }
 
 test('late join drains complete ordered history, polls a stable cursor, batches announcements, and is axe-clean', async ({
   page,
-}) => {
-  const fixture = await readFixture();
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
   await page.goto(fixturePath(fixture.historyEventId));
   await expect(page).toHaveURL(
     new RegExp(`/events/${fixture.historyEventId}$`, 'u'),
@@ -829,12 +804,236 @@ test('late join drains complete ordered history, polls a stable cursor, batches 
   await expectAxeClean(page, 'drill event room after late-join polling');
 });
 
+test('a post-connect continuation stays hidden and blocked across offline recovery until lifecycle state and all facts are coherent', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.continuationEventId));
+  await expect(page.locator('.connection-line')).toContainText('Connected');
+  await expect(page.locator('.event-status')).toHaveText('Active');
+
+  let releaseBurst: () => void = () => undefined;
+  const burstReady = new Promise<void>((resolve) => {
+    releaseBurst = resolve;
+  });
+  let firstPageSeen = false;
+  let continuationFailures = 0;
+  let timelineRequests = 0;
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    if (
+      request.method() !== 'GET' ||
+      !request.url().includes(fixture.continuationEventId)
+    ) {
+      await route.continue();
+      return;
+    }
+    timelineRequests += 1;
+    await burstReady;
+    if (!firstPageSeen) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as {
+        event?: unknown;
+        entries?: unknown[];
+        hasMore?: boolean;
+      };
+      expect(value.event).toBeNull();
+      expect(value.entries).toHaveLength(100);
+      expect(value.hasMore).toBe(true);
+      firstPageSeen = true;
+      await route.fulfill({ response: upstream, json: value });
+      return;
+    }
+    if (continuationFailures < 2) {
+      continuationFailures += 1;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Synthetic continuation outage.',
+          requestId: randomUUID(),
+          retryable: true,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  try {
+    await issueExternalAllClear(page, fixture.continuationEventId);
+    await appendSyntheticBurst(testInfo, fixture.continuationEventId, 100);
+  } finally {
+    releaseBurst();
+  }
+
+  await expect.poll(() => firstPageSeen).toBe(true);
+  await expect(page.locator('.timeline-panel')).toContainText(
+    'Timeline content remains hidden until all authorized history',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Review all-clear' }),
+  ).toBeDisabled();
+  await expect(page.locator('.connection-line')).toContainText('Reconnecting');
+  await expect(page.locator('.connection-line')).toContainText(
+    'Offline — updates may be delayed',
+    { timeout: 12_000 },
+  );
+  await expect(page.locator('.timeline-panel')).toContainText(
+    'Timeline content remains hidden until all authorized history',
+  );
+  await expect(page.locator('.connection-line')).toContainText('Connected', {
+    timeout: 22_000,
+  });
+  expect(continuationFailures).toBe(2);
+  expect(timelineRequests).toBeGreaterThanOrEqual(4);
+  await expect(page.locator('.timeline-entry')).toHaveCount(105);
+  await expect(
+    page.getByText('All-clear issued.', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Notification fan-out intent recorded.', { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  await expect(
+    page.getByRole('button', { name: 'Review all-clear' }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: 'Review event close' }),
+  ).toBeEnabled();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('an invalidated continuation remains fail-closed until a complete retry reaches its terminal projection', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.invalidationEventId));
+  await expect(page.locator('.connection-line')).toContainText('Connected', {
+    timeout: 22_000,
+  });
+
+  let releaseStalePage: () => void = () => undefined;
+  const stalePageRelease = new Promise<void>((resolve) => {
+    releaseStalePage = resolve;
+  });
+  let releaseTerminalPage: () => void = () => undefined;
+  const terminalPageRelease = new Promise<void>((resolve) => {
+    releaseTerminalPage = resolve;
+  });
+  let resolveStalePageCaptured: () => void = () => undefined;
+  const stalePageCaptured = new Promise<void>((resolve) => {
+    resolveStalePageCaptured = resolve;
+  });
+  let resolveRetryFirstPageSeen: () => void = () => undefined;
+  const retryFirstPageSeen = new Promise<void>((resolve) => {
+    resolveRetryFirstPageSeen = resolve;
+  });
+  let resolveRetryTerminalHeld: () => void = () => undefined;
+  const retryTerminalHeld = new Promise<void>((resolve) => {
+    resolveRetryTerminalHeld = resolve;
+  });
+  let timelineRequests = 0;
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    if (
+      request.method() !== 'GET' ||
+      !request.url().includes(fixture.invalidationEventId)
+    ) {
+      await route.continue();
+      return;
+    }
+    timelineRequests += 1;
+    if (timelineRequests === 1) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as {
+        entries?: unknown[];
+        hasMore?: boolean;
+      };
+      expect(value.entries).toHaveLength(100);
+      expect(value.hasMore).toBe(true);
+      resolveStalePageCaptured();
+      await stalePageRelease;
+      await route.fulfill({ response: upstream, json: value });
+      return;
+    }
+    if (timelineRequests === 2) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as {
+        entries?: unknown[];
+        hasMore?: boolean;
+      };
+      expect(value.entries).toHaveLength(100);
+      expect(value.hasMore).toBe(true);
+      resolveRetryFirstPageSeen();
+      await route.fulfill({ response: upstream, json: value });
+      return;
+    }
+    if (timelineRequests === 3) {
+      resolveRetryTerminalHeld();
+      await terminalPageRelease;
+    }
+    await route.continue();
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await appendSyntheticBurst(testInfo, fixture.invalidationEventId, 101);
+    await stalePageCaptured;
+    await page
+      .getByLabel('Update text')
+      .fill('Mutation committed while a stale continuation was held');
+    await page.getByRole('button', { name: 'Post update' }).press('Enter');
+    await expect(page.locator('.mutation-status')).toContainText(
+      'timeline post confirmed by the server.',
+    );
+    releaseStalePage();
+    await retryFirstPageSeen;
+    await retryTerminalHeld;
+    await expect(page.locator('.timeline-panel')).toContainText(
+      'Timeline content remains hidden until all authorized history',
+    );
+    await expect(
+      page.getByText('Mutation committed while a stale continuation was held', {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    releaseTerminalPage();
+    await expect(page.locator('.timeline-entry')).toHaveCount(105);
+    await expect(
+      page.getByText('Mutation committed while a stale continuation was held', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    scenarioCompleted = true;
+  } finally {
+    releaseStalePage();
+    releaseTerminalPage();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
 test('composer, correction, and redaction remain keyboard-operable and append provenance', async ({
   page,
-}) => {
-  const fixture = await readFixture();
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
   await page.goto(fixturePath(fixture.keyboardEventId));
   await expect(page.locator('.timeline-entry')).toHaveCount(3);
+
+  const hoverTarget = page.getByRole('button', { name: 'Correct entry 1' });
+  await hoverTarget.hover();
+  const hoveredColors = await hoverTarget.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, background: style.backgroundColor };
+  });
+  expect(
+    contrastRatio(hoveredColors.color, hoveredColors.background),
+    'secondary-button hover text must meet WCAG 2.2 AA contrast',
+  ).toBeGreaterThanOrEqual(4.5);
 
   const composer = page.getByLabel('Update text');
   await composer.focus();
@@ -851,14 +1050,24 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
 
   const correct = page.getByRole('button', { name: 'Correct entry 1' });
   await correct.press('Enter');
-  await expect(page.getByRole('dialog')).toBeVisible();
+  const correctionDialog = page.getByRole('dialog');
+  await expect(correctionDialog).toBeVisible();
+  await expect(correctionDialog).toContainText('DRILL — TRAINING ONLY');
   await expect(page.getByLabel('Corrected text')).toBeFocused();
   await expectAxeClean(page, 'keyboard correction dialog');
-  await page.getByLabel('Corrected text').fill('Append-only corrected text');
+  const appendCorrection = page.getByRole('button', {
+    name: 'Append correction',
+  });
+  await page.getByLabel('Reason for correction').fill('   ');
+  await expect(appendCorrection).toBeDisabled();
+  await page.getByLabel('Corrected text').fill('   ');
   await page
     .getByLabel('Reason for correction')
     .fill('Synthetic accuracy correction');
-  await page.getByRole('button', { name: 'Append correction' }).press('Enter');
+  await expect(appendCorrection).toBeDisabled();
+  await page.getByLabel('Corrected text').fill('Append-only corrected text');
+  await expect(appendCorrection).toBeEnabled();
+  await appendCorrection.press('Enter');
   await expect(
     page.getByText('Append-only corrected text', { exact: true }),
   ).toBeVisible();
@@ -868,1243 +1077,753 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
   await expect(
     page.getByRole('article', { name: 'Entry 5: Text update' }),
   ).toContainText('Reason: Synthetic accuracy correction');
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'timeline correction confirmed by the server.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('No request was sent');
 
-  await page.getByRole('button', { name: 'Redact entry 2' }).press('Enter');
+  await page.getByRole('button', { name: 'Redact entry 1' }).press('Enter');
+  const redactionDialog = page.getByRole('dialog');
+  await expect(redactionDialog).toContainText('DRILL — TRAINING ONLY');
+  await expect(redactionDialog.locator('.mutation-status')).toHaveText('');
+  await expect(redactionDialog).not.toContainText(
+    'timeline correction confirmed by the server.',
+  );
   await expect(page.getByLabel('Reason for redaction')).toBeFocused();
+  const appendRedaction = page.getByRole('button', {
+    name: 'Append redaction',
+  });
+  await page.getByLabel('Reason for redaction').fill('   ');
+  await expect(appendRedaction).toBeDisabled();
   await page
     .getByLabel('Reason for redaction')
     .fill('Synthetic privacy-safe redaction');
-  await page.getByRole('button', { name: 'Append redaction' }).press('Enter');
+  await expect(appendRedaction).toBeEnabled();
+  await appendRedaction.press('Enter');
   const original = page.getByRole('article', {
-    name: 'Entry 2: Text update',
+    name: 'Entry 1: Text update',
   });
   await expect(original).toContainText(
     'Original content is hidden because a later append-only redaction supersedes this entry.',
   );
-  await expect(original).not.toContainText('Synthetic ordered history 002');
+  await expect(original).not.toContainText('Synthetic ordered history 001');
   await expect(
     page.getByRole('article', { name: 'Entry 6: Text update' }),
   ).toContainText('Reason: Synthetic privacy-safe redaction');
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'timeline redaction confirmed by the server.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('No request was sent');
+  const redactedProjection = await page.evaluate(async (eventId) => {
+    const response = await fetch(`/events/${encodeURIComponent(eventId)}/api`, {
+      credentials: 'same-origin',
+    });
+    const value = (await response.json()) as {
+      entries?: Array<{
+        visibility?: string;
+        entry?: { sequence?: number; payload?: unknown };
+      }>;
+    };
+    return value.entries?.find(
+      (projection) => projection.entry?.sequence === 1,
+    );
+  }, fixture.keyboardEventId);
+  expect(redactedProjection?.visibility).toBe('redacted');
+  expect(redactedProjection?.entry).not.toHaveProperty('payload');
+  expect(JSON.stringify(redactedProjection)).not.toContain(
+    'Synthetic ordered history 001',
+  );
   await expectAxeClean(page, 'event room after correction and redaction');
 });
 
-test('a private photo receives a fresh authorized read grant after reload', async ({
+test('a concurrent redaction immediately removes and invalidates an open correction dialog', async ({
   page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoEventId,
-    uploadIntentId: fixture.photoUploadMediaId,
-    mediaId: fixture.photoUploadMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.concurrentDialogEventId));
+  await expect(page.locator('.connection-line')).toContainText('Connected');
 
-  await page.goto(fixturePath(fixture.photoEventId));
-  const photo = page.locator('.timeline-entry img').first();
-  await expect(photo).toBeVisible();
-  await expect(photo).toHaveAttribute('referrerpolicy', 'no-referrer');
-  await expect(photo).toHaveAttribute('src', /[?&]grant=\d+$/u);
-  const firstReadUrl = await photo.getAttribute('src');
-  expect(firstReadUrl).not.toBeNull();
-  await expect.poll(() => media.imageRequests.length).toBeGreaterThanOrEqual(1);
-  expect(media.readGrantRequests.length).toBeGreaterThanOrEqual(1);
-  expect(
-    media.readGrantRequests.every(
-      (request) =>
-        request.eventId === fixture.photoEventId &&
-        request.mediaId === fixture.photoMediaId &&
-        request.headers['idempotency-key'] === undefined &&
-        request.headers['x-psd-eoc-csrf'] === undefined,
-    ),
-  ).toBe(true);
-
-  const grantCountBeforeReload = media.readGrantRequests.length;
-  await page.reload();
-  await expect
-    .poll(() => media.readGrantRequests.length)
-    .toBeGreaterThan(grantCountBeforeReload);
-  await expect(photo).toHaveAttribute('src', /[?&]grant=\d+$/u);
-  const reloadedReadUrl = await photo.getAttribute('src');
-  expect(reloadedReadUrl).not.toBe(firstReadUrl);
-  expect(
-    media.readGrantRequests
-      .slice(grantCountBeforeReload)
-      .map((request) => request.readUrl),
-  ).toContain(reloadedReadUrl);
-  await expectAxeClean(page, 'authorized private photo after a fresh grant');
-});
-
-test('history mounts ten observed photos and replaces one focused older selection without eager old reads', async ({
-  page,
-}) => {
-  await installDeterministicIntersectionObserver(page);
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoStressEventId,
-    uploadIntentId: fixture.photoStressMiddleMediaId,
-    mediaId: fixture.photoStressMiddleMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
+  const original = page.getByRole('article', {
+    name: 'Entry 1: Text update',
   });
-
-  await page.goto(fixturePath(fixture.photoStressEventId));
-  await expect(page.locator('.timeline-entry')).toHaveCount(12);
-  await page.waitForTimeout(250);
-  expect(media.readGrantRequests).toHaveLength(0);
-  await expect(
-    page.locator('[data-private-photo-mount="stateful"]'),
-  ).toHaveCount(10);
-  await expect(
-    page.locator('[data-private-photo-mount="deferred"]'),
-  ).toHaveCount(2);
-  await expect
-    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
-    .toBe(10);
-
-  const targetEntry = page.getByRole('article', {
-    name: 'Entry 6: Photo update',
-    exact: true,
-  });
-  const targetFigure = targetEntry.locator('figure.photo-entry');
-  const targetButton = targetEntry.getByRole('button', {
-    name: 'Load private photo for entry 6',
-  });
-  await targetButton.focus();
-  await expect(targetButton).toBeFocused();
-  await triggerPrivatePhotoIntersection(targetFigure);
-  await expect(targetFigure).toBeFocused();
-  await expect.poll(() => media.readGrantRequests.length).toBe(1);
-  expect(media.readGrantRequests[0]?.mediaId).toBe(
-    fixture.photoStressMiddleMediaId,
-  );
-  await expect(targetFigure).toHaveAttribute(
-    'data-private-photo-state',
-    'displayed',
-  );
-  await expect(targetFigure).toBeFocused();
-
-  const oldestEntry = page.getByRole('article', {
-    name: 'Entry 1: Photo update',
-    exact: true,
-  });
-  const oldestFigure = oldestEntry.locator('figure.photo-entry');
-  const oldestButton = oldestEntry.getByRole('button', {
-    name: 'Load older private photo for entry 1',
-  });
-  expect(
-    media.readGrantRequests.some(
-      (request) => request.mediaId === fixture.photoStressOldestMediaId,
-    ),
-  ).toBe(false);
-  await oldestButton.focus();
-  await page.keyboard.press('Enter');
-  await expect(oldestFigure).toBeFocused();
-  await expect.poll(() => media.readGrantRequests.length).toBe(2);
-  expect(media.readGrantRequests.at(-1)?.mediaId).toBe(
-    fixture.photoStressOldestMediaId,
-  );
-  await expect(oldestFigure).toHaveAttribute(
-    'data-private-photo-state',
-    'displayed',
-  );
-  await expect(oldestFigure).toHaveAttribute(
-    'data-private-photo-observer',
-    'disabled',
-  );
-  await expect(oldestFigure).toBeFocused();
-
-  const secondEntry = page.getByRole('article', {
-    name: 'Entry 2: Photo update',
-    exact: true,
-  });
-  const secondFigure = secondEntry.locator('figure.photo-entry');
-  const secondButton = secondEntry.getByRole('button', {
-    name: 'Load older private photo for entry 2',
-  });
-  expect(
-    media.readGrantRequests.some(
-      (request) => request.mediaId === fixture.photoStressSecondMediaId,
-    ),
-  ).toBe(false);
-  await secondButton.focus();
-  await page.keyboard.press('Enter');
-  await expect(secondFigure).toBeFocused();
-  await expect.poll(() => media.readGrantRequests.length).toBe(3);
-  expect(media.readGrantRequests.at(-1)?.mediaId).toBe(
-    fixture.photoStressSecondMediaId,
-  );
-  await expect(oldestFigure).toHaveAttribute(
-    'data-private-photo-mount',
-    'deferred',
-  );
-  await expect(oldestFigure.locator('img')).toHaveCount(0);
-  await expect(secondFigure).toHaveAttribute(
-    'data-private-photo-mount',
-    'stateful',
-  );
-  await expect(secondFigure).toHaveAttribute(
-    'data-private-photo-observer',
-    'disabled',
-  );
-  await expect(secondFigure).toBeFocused();
-  await expect(
-    page.locator('[data-private-photo-mount="stateful"]'),
-  ).toHaveCount(11);
-  await expect(
-    page.locator('[data-private-photo-mount="deferred"]'),
-  ).toHaveCount(1);
-  await expect
-    .poll(async () => (await privatePhotoIntersectionStats(page)).activeTargets)
-    .toBe(10);
-  await expectAxeClean(
-    page,
-    'bounded private-photo history and older selection',
-  );
-});
-
-test('older private photos stay stateless and unread until explicit keyboard activation', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoStressEventId,
-    uploadIntentId: fixture.photoStressMiddleMediaId,
-    mediaId: fixture.photoStressMiddleMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
-
-  await page.goto(fixturePath(fixture.photoStressEventId));
-  await expect(page.locator('.timeline-entry')).toHaveCount(12);
-  await expect
-    .poll(() => media.readGrantRequests.length)
-    .toBeGreaterThanOrEqual(1);
-
-  const oldestEntry = page.getByRole('article', {
-    name: 'Entry 1: Photo update',
-    exact: true,
-  });
-  const oldestLoadButton = oldestEntry.getByRole('button', {
-    name: 'Load older private photo for entry 1',
-  });
-  await expect(oldestLoadButton).toBeAttached();
-  await expect(oldestEntry.locator('figure.photo-entry')).toHaveAttribute(
-    'data-private-photo-mount',
-    'deferred',
-  );
-  expect(
-    media.readGrantRequests.some(
-      (request) => request.mediaId === fixture.photoStressOldestMediaId,
-    ),
-  ).toBe(false);
-
-  await oldestLoadButton.evaluate((button) =>
-    (button as HTMLButtonElement).focus({ preventScroll: true }),
-  );
-  await expect(oldestLoadButton).toBeFocused();
-  await page.keyboard.press('Enter');
-  await expect
-    .poll(() =>
-      media.readGrantRequests.some(
-        (request) => request.mediaId === fixture.photoStressOldestMediaId,
-      ),
-    )
-    .toBe(true);
-  await expect(
-    oldestEntry.getByRole('img', {
-      name: 'Synthetic bounded-loader private photo 1.',
-    }),
-  ).toBeAttached();
-  await expect(oldestEntry.locator('figure.photo-entry')).toBeFocused();
-
-  const timeline = page.getByRole('region', {
-    name: 'Chronological event journal',
-  });
-  for (const fraction of [0, 0.5, 1]) {
-    await timeline.evaluate((region, position) => {
-      region.scrollTop =
-        (region.scrollHeight - region.clientHeight) * Number(position);
-      region.dispatchEvent(new Event('scroll'));
-    }, fraction);
-    await page.waitForTimeout(250);
+  const articleId = await original.getAttribute('id');
+  if (articleId === null || !articleId.startsWith('entry-')) {
+    throw new Error('Synthetic correction target is missing its entry ID.');
   }
-  expect(
-    media.readGrantRequests.filter(
-      (request) => request.mediaId !== fixture.photoStressOldestMediaId,
-    ).length,
-  ).toBeLessThanOrEqual(2);
-  expect(await page.locator('.timeline-entry img').count()).toBeLessThanOrEqual(
-    2,
+  const entryId = articleId.slice('entry-'.length);
+  await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(page.getByLabel('Corrected text')).toHaveValue(
+    'Synthetic ordered history 001',
   );
-  await expectAxeClean(page, 'keyboard-activated older private photo history');
-});
 
-test('private photos use truthful explicit fallback and keep out-of-order decodes within two slots', async ({
-  page,
-}) => {
-  await page.addInitScript(() => {
-    Object.defineProperty(window, 'IntersectionObserver', {
-      configurable: true,
-      value: undefined,
-      writable: true,
-    });
-  });
-  await installControllableImageDecode(page);
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoStressEventId,
-    uploadIntentId: fixture.photoStressMiddleMediaId,
-    mediaId: fixture.photoStressMiddleMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
+  await redactExternalEntry(page, fixture.concurrentDialogEventId, entryId, 1);
 
-  await page.goto(fixturePath(fixture.photoStressEventId));
-  await expect(page.locator('.timeline-entry')).toHaveCount(12);
-  await page.waitForTimeout(250);
-  expect(media.readGrantRequests).toHaveLength(0);
+  await expect(dialog).not.toBeVisible({ timeout: 8_000 });
   await expect(
-    page
-      .getByText(
-        'Automatic viewport loading is unavailable in this browser. Load this private photo explicitly if it is operationally needed.',
-        { exact: true },
-      )
-      .first(),
-  ).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: /^Load private photo for entry /u }),
-  ).toHaveCount(10);
-  await expect(
-    page.getByRole('button', {
-      name: /^Load older private photo for entry /u,
-    }),
-  ).toHaveCount(2);
-
-  const loadButton = (sequence: number) =>
-    page
-      .getByRole('article', {
-        name: `Entry ${sequence}: Photo update`,
-        exact: true,
-      })
-      .getByRole('button', {
-        name: `Load private photo for entry ${sequence}`,
-      });
-  const figure = (sequence: number) =>
-    page
-      .getByRole('article', {
-        name: `Entry ${sequence}: Photo update`,
-        exact: true,
-      })
-      .locator('figure.photo-entry');
-  const firstLoad = loadButton(3);
-  await firstLoad.evaluate((button) =>
-    (button as HTMLButtonElement).focus({ preventScroll: true }),
-  );
-  await expect(firstLoad).toBeFocused();
-  await page.keyboard.press('Enter');
-  await expect(figure(3)).toBeFocused();
-  for (const sequence of [4, 5]) {
-    await loadButton(sequence).evaluate((button) =>
-      (button as HTMLButtonElement).click(),
-    );
-  }
-  await expect(figure(5)).toBeFocused();
-
-  await expect.poll(() => media.readGrantRequests.length).toBe(2);
-  await expect.poll(() => media.imageRequests.length).toBe(2);
-  await expect
-    .poll(async () => (await privatePhotoDecodeStats(page)).active)
-    .toBe(2);
-  expect((await privatePhotoDecodeStats(page)).maxActive).toBe(2);
-
-  expect(
-    await releasePrivatePhotoDecode(
-      page,
-      'Synthetic bounded-loader private photo 4.',
-    ),
-  ).toBe(true);
-  await expect.poll(() => media.readGrantRequests.length).toBe(3);
-  await expect.poll(() => media.imageRequests.length).toBe(3);
-  await expect
-    .poll(async () => (await privatePhotoDecodeStats(page)).active)
-    .toBe(2);
-  expect((await privatePhotoDecodeStats(page)).maxActive).toBe(2);
-  await expect(figure(3).locator('img')).toBeAttached();
-  await expect(figure(4)).toHaveAttribute(
-    'data-private-photo-state',
-    'evicted',
-  );
-  await expect(figure(4).locator('img')).toHaveCount(0);
-  await expect(figure(5).locator('img')).toBeAttached();
-
-  expect(
-    await releasePrivatePhotoDecode(
-      page,
-      'Synthetic bounded-loader private photo 3.',
-    ),
-  ).toBe(true);
-  expect(
-    await releasePrivatePhotoDecode(
-      page,
-      'Synthetic bounded-loader private photo 5.',
-    ),
-  ).toBe(true);
-  await expect(figure(5)).toHaveAttribute(
-    'data-private-photo-state',
-    'displayed',
-  );
-  await expect(figure(5)).toBeFocused();
-  await expect.poll(() => page.locator('.timeline-entry img').count()).toBe(2);
-  await expectAxeClean(page, 'explicit bounded private photo fallback');
-});
-
-test('a fixed private-photo deadline fails visibly and advances queued explicit work', async ({
-  page,
-}) => {
-  await page.addInitScript(() => {
-    Object.defineProperty(window, 'IntersectionObserver', {
-      configurable: true,
-      value: undefined,
-      writable: true,
-    });
-  });
-  await installControllableImageDecode(page);
-  await page.clock.install();
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoStressEventId,
-    uploadIntentId: fixture.photoStressMiddleMediaId,
-    mediaId: fixture.photoStressMiddleMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
-
-  await page.goto(fixturePath(fixture.photoStressEventId));
-  const entry = (sequence: number) =>
-    page.getByRole('article', {
-      name: `Entry ${sequence}: Photo update`,
-      exact: true,
-    });
-  const figure = (sequence: number) =>
-    entry(sequence).locator('figure.photo-entry');
-  const loadButton = (sequence: number) =>
-    entry(sequence).getByRole('button', {
-      name: `Load private photo for entry ${sequence}`,
-    });
-
-  for (const sequence of [3, 4]) {
-    await loadButton(sequence).evaluate((button) =>
-      (button as HTMLButtonElement).click(),
-    );
-  }
-  await loadButton(5).focus();
-  await page.keyboard.press('Enter');
-  await expect(figure(5)).toBeFocused();
-  await expect.poll(() => media.readGrantRequests.length).toBe(2);
-  await expect
-    .poll(async () => (await privatePhotoDecodeStats(page)).active)
-    .toBe(2);
-
-  await page.clock.fastForward(60_001);
-  await expect.poll(() => media.readGrantRequests.length).toBe(3);
-  await expect.poll(() => media.imageRequests.length).toBe(3);
-  await expect
-    .poll(async () =>
-      (await privatePhotoDecodeStats(page)).pendingAltText.includes(
-        'Synthetic bounded-loader private photo 5.',
-      ),
-    )
-    .toBe(true);
-  expect(await privatePhotoDecodeStats(page)).toMatchObject({
-    active: 1,
-    maxActive: 2,
-  });
-  for (const sequence of [3, 4]) {
-    await expect(figure(sequence)).toContainText(
-      'Private photo loading exceeded the 60-second safety limit and was stopped.',
-    );
-  }
-  await expect(figure(5)).toBeFocused();
-
-  await page.clock.fastForward(60_001);
-  await expect(figure(5)).toContainText(
-    'Private photo loading exceeded the 60-second safety limit and was stopped.',
-  );
-  await expect(
-    entry(5).getByRole('button', {
-      name: 'Retry private photo for entry 5',
-    }),
-  ).toBeVisible();
-  expect(await privatePhotoDecodeStats(page)).toMatchObject({
-    active: 0,
-    maxActive: 2,
-    pendingAltText: [],
-  });
-  await expect(figure(5)).toBeFocused();
-});
-
-test('photo upload is keyboard-operable and appends only canonical same-event media data', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoEventId,
-    uploadIntentId: fixture.photoUploadMediaId,
-    mediaId: fixture.photoUploadMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
-  const journalRequests: Array<
-    Readonly<{
-      body: unknown;
-      headers: Readonly<Record<string, string>>;
-    }>
-  > = [];
-  await page.route(`**/events/${fixture.photoEventId}/api`, async (route) => {
-    const request = route.request();
-    if (request.method() === 'POST') {
-      const body = request.postDataJSON() as unknown;
-      if (
-        typeof body === 'object' &&
-        body !== null &&
-        'operation' in body &&
-        body.operation === 'post-photo'
-      ) {
-        media.stages.push('post-photo');
-        journalRequests.push({ body, headers: request.headers() });
-      }
-    }
-    await route.continue();
-  });
-
-  await page.goto(fixturePath(fixture.photoEventId));
-  const seededPhoto = page.locator('.timeline-entry img').first();
-  await expect(seededPhoto).toHaveAttribute('src', /[?&]grant=\d+$/u);
-  await expect.poll(() => media.imageRequests.length).toBeGreaterThanOrEqual(1);
-  const stageOffset = media.stages.length;
-
-  const photoFile = page.getByLabel('Photo file');
-  await photoFile.focus();
-  await expect(photoFile).toBeFocused();
-  await photoFile.setInputFiles({
-    name: 'synthetic-staff-exercise.png',
-    mimeType: 'image/png',
-    buffer: SYNTHETIC_PNG,
-  });
-  const altText = page.getByLabel('Photo description (alternative text)');
-  await expect(altText).toHaveValue(
-    /^Photo by Synthetic Event Room Operator at .+/u,
-  );
-
-  await photoFile.focus();
-  await page.keyboard.press('Tab');
-  await expect(altText).toBeFocused();
-  await page.keyboard.press('ControlOrMeta+A');
-  await page.keyboard.type('Synthetic staff exercise photo');
-  await page.keyboard.press('Tab');
-  const caption = page.getByLabel('Caption (optional)');
-  await expect(caption).toBeFocused();
-  await page.keyboard.type('Synthetic staff-only exercise evidence');
-  await page.keyboard.press('Tab');
-  const submit = page.getByRole('button', { name: 'Upload and post photo' });
-  await expect(submit).toBeFocused();
-  await page.keyboard.press('Enter');
-
-  const postedPhoto = page.getByRole('img', {
-    name: 'Synthetic staff exercise photo',
-  });
-  await expect(postedPhoto).toBeVisible();
-  await expect(postedPhoto).toHaveAttribute('referrerpolicy', 'no-referrer');
-  await expect(
-    page.getByText('Synthetic staff-only exercise evidence', { exact: true }),
-  ).toBeVisible();
-  await expect.poll(() => media.imageRequests.length).toBeGreaterThanOrEqual(2);
-
-  expect(media.createInputs).toEqual([
-    {
-      eventId: fixture.photoEventId,
-      byteLength: SYNTHETIC_PNG.byteLength,
-      contentSha256: SYNTHETIC_PNG_SHA256,
-      declaredContentType: 'image/png',
-    },
-  ]);
-  expect(media.createRequests).toHaveLength(1);
-  expect(media.createRequests[0]?.headers['content-type']).toContain(
-    'application/json',
-  );
-  expect(media.createRequests[0]?.headers['idempotency-key']).toBeTruthy();
-  expect(media.createRequests[0]?.headers['x-psd-eoc-csrf']).toBeTruthy();
-
-  expect(media.uploadRequests).toHaveLength(1);
-  expect(media.uploadRequests[0]?.body).toEqual(SYNTHETIC_PNG);
-  expect(media.uploadRequests[0]?.headers['content-type']).toBe('image/png');
-  expect(media.uploadRequests[0]?.headers['if-none-match']).toBe('*');
-  expect(media.uploadRequests[0]?.headers['authorization']).toBeUndefined();
-  expect(media.uploadRequests[0]?.headers['cookie']).toBeUndefined();
-  expect(media.uploadRequests[0]?.headers['idempotency-key']).toBeUndefined();
-  expect(media.uploadRequests[0]?.headers['x-psd-eoc-csrf']).toBeUndefined();
-
-  expect(media.completionRequests).toHaveLength(1);
-  expect(media.completionRequests[0]?.body).toBeNull();
-  expect(media.completionRequests[0]?.headers['content-type']).toBeUndefined();
-  expect(media.completionRequests[0]?.headers['idempotency-key']).toBeTruthy();
-  expect(media.completionRequests[0]?.headers['x-psd-eoc-csrf']).toBeTruthy();
-
-  expect(journalRequests).toHaveLength(1);
-  const journalBody = journalRequests[0]?.body;
-  expect(journalBody).toEqual({
-    operation: 'post-photo',
-    mediaId: fixture.photoUploadMediaId,
-    altText: 'Synthetic staff exercise photo',
-    caption: 'Synthetic staff-only exercise evidence',
-    clientTime:
-      typeof journalBody === 'object' &&
-      journalBody !== null &&
-      'clientTime' in journalBody
-        ? journalBody.clientTime
-        : null,
-  });
-  expect(
-    typeof journalBody === 'object' &&
-      journalBody !== null &&
-      'clientTime' in journalBody &&
-      typeof journalBody.clientTime === 'string' &&
-      !Number.isNaN(Date.parse(journalBody.clientTime)),
-  ).toBe(true);
-  expect(journalRequests[0]?.headers['idempotency-key']).toBeTruthy();
-  expect(journalRequests[0]?.headers['x-psd-eoc-csrf']).toBeTruthy();
-  expect(
-    media.readGrantRequests.some(
-      (request) =>
-        request.eventId === fixture.photoEventId &&
-        request.mediaId === fixture.photoUploadMediaId,
-    ),
-  ).toBe(true);
-  expect(
-    media.stages
-      .slice(stageOffset)
-      .filter((stage) => stage !== 'read-grant' && stage !== 'read-image'),
-  ).toEqual(['create-intent', 'upload-bytes', 'complete-upload', 'post-photo']);
-  expect(
-    media.imageRequests.some((request) =>
-      new URL(request.url).pathname.endsWith(`/${fixture.photoUploadMediaId}`),
-    ),
-  ).toBe(true);
-  expect(
-    await page.evaluate(
-      (eventId) =>
-        sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-      fixture.photoEventId,
-    ),
-  ).toBeNull();
-  await expectAxeClean(page, 'keyboard-authored private photo update');
-});
-
-test('oversized photo is rejected visibly before any media network request', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.keyboardEventId,
-    uploadIntentId: randomUUID(),
-    mediaId: randomUUID(),
-    sanitizedSha256: SYNTHETIC_PNG_SHA256,
-  });
-  await page.goto(fixturePath(fixture.keyboardEventId));
-  await page.getByLabel('Photo file').setInputFiles({
-    name: 'synthetic-oversized.png',
-    mimeType: 'image/png',
-    buffer: Buffer.alloc(25 * 1_024 * 1_024 + 1),
-  });
-  await expect(
-    page.getByRole('button', { name: 'Upload and post photo' }),
-  ).toBeDisabled();
-  const alert = page.locator('.photo-workflow-error');
-  await expect(alert).toContainText(/25 MiB|too large/iu);
-  await expect(alert).toBeFocused();
-  expect(media.createRequests).toHaveLength(0);
-  expect(media.uploadRequests).toHaveLength(0);
-  expect(media.completionRequests).toHaveLength(0);
-  await expectAxeClean(page, 'oversized photo validation error');
-});
-
-test('malformed photo failure is focused and never appends a journal entry', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.keyboardEventId,
-    uploadIntentId: randomUUID(),
-    mediaId: randomUUID(),
-    sanitizedSha256: SYNTHETIC_PNG_SHA256,
-    completionOutcomes: ['malformed'],
-  });
-  let photoJournalPosts = 0;
-  await page.route(
-    `**/events/${fixture.keyboardEventId}/api`,
-    async (route) => {
-      const request = route.request();
-      const body = request.method() === 'POST' ? request.postData() : null;
-      if (body?.includes('"operation":"post-photo"') === true) {
-        photoJournalPosts += 1;
-      }
-      await route.continue();
-    },
-  );
-
-  await page.goto(fixturePath(fixture.keyboardEventId));
-  await page.getByLabel('Photo file').setInputFiles({
-    name: 'synthetic-disguised-image.png',
-    mimeType: 'image/png',
-    buffer: SYNTHETIC_DISGUISED_NON_IMAGE,
-  });
-  await page
-    .getByRole('button', { name: 'Upload and post photo' })
-    .press('Enter');
-  const alert = page.locator('.photo-workflow-error');
-  await expect(alert).toContainText(
-    'The image could not be safely processed. Choose a different image and try again.',
-  );
-  await expect(alert).toBeFocused();
-  expect(media.createRequests).toHaveLength(1);
-  expect(media.uploadRequests).toHaveLength(1);
-  expect(media.completionRequests).toHaveLength(1);
-  expect(photoJournalPosts).toBe(0);
-  await expectAxeClean(page, 'malformed photo processing error');
-});
-
-test('ambiguous photo completion survives reload and only retries explicitly with one key', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.keyboardEventId,
-    uploadIntentId: randomUUID(),
-    mediaId: randomUUID(),
-    sanitizedSha256: SYNTHETIC_PNG_SHA256,
-    completionOutcomes: [
-      'unreadable-rate-limit',
-      'server-nonretryable',
-      'scan-pending',
-    ],
-  });
-  let photoJournalPosts = 0;
-  await page.route(
-    `**/events/${fixture.keyboardEventId}/api`,
-    async (route) => {
-      const request = route.request();
-      const body = request.method() === 'POST' ? request.postData() : null;
-      if (body?.includes('"operation":"post-photo"') === true) {
-        photoJournalPosts += 1;
-      }
-      await route.continue();
-    },
-  );
-
-  await page.goto(fixturePath(fixture.keyboardEventId));
-  await page.getByLabel('Photo file').setInputFiles({
-    name: 'synthetic-scan-pending.png',
-    mimeType: 'image/png',
-    buffer: SYNTHETIC_PNG,
-  });
-  await page
-    .getByRole('button', { name: 'Upload and post photo' })
-    .press('Enter');
-  const alert = page.locator('.photo-workflow-error');
-  await expect(alert).toContainText(
-    'Photo validation is not complete. Use the explicit retry after waiting for the malware scan.',
-  );
-  await expect(alert).toBeFocused();
-  expect(media.completionRequests).toHaveLength(1);
-  const firstRecovery = await page.evaluate((eventId) => {
-    const raw = sessionStorage.getItem(
-      `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-    );
-    if (raw === null) return null;
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return { raw, parsed, keys: Object.keys(parsed).sort() };
-  }, fixture.keyboardEventId);
-  expect(firstRecovery).not.toBeNull();
-  if (firstRecovery === null) {
-    throw new Error('Missing retained photo completion after ambiguity.');
-  }
-  expect(firstRecovery.keys).toEqual(
-    [
-      'version',
-      'eventId',
-      'ownerSessionId',
-      'uploadIntentId',
-      'mediaId',
-      'idempotencyKey',
-      'postIdempotencyKey',
-      'altText',
-      'caption',
-      'clientTime',
-      'createdAt',
-    ].sort(),
-  );
-  expect(firstRecovery.parsed).toMatchObject({
-    version: 1,
-    eventId: fixture.keyboardEventId,
-    ownerSessionId: fixture.sessionId,
-    mediaId: null,
-    idempotencyKey: media.completionRequests[0]?.headers['idempotency-key'],
-  });
-  expect(firstRecovery.raw).not.toContain('uploadUrl');
-  expect(firstRecovery.raw).not.toContain(SYNTHETIC_MEDIA_ORIGIN);
-
-  await page.reload();
-  await expect(alert).toContainText(
-    'A previous private photo validation has an unresolved result. It was not retried automatically.',
-  );
-  await expect(alert).toBeFocused();
-  await page.waitForTimeout(750);
-  expect(media.completionRequests).toHaveLength(1);
-
-  let retry = page.getByRole('button', { name: 'Retry photo validation' });
-  await retry.focus();
-  await expect(retry).toBeFocused();
-  await retry.press('Enter');
-  await expect.poll(() => media.completionRequests.length).toBe(2);
-  await expect(alert).toContainText(
-    'Synthetic upstream failure with an unsafe retry hint.',
-  );
-
-  await page.reload();
-  await expect(alert).toContainText(
-    'A previous private photo validation has an unresolved result. It was not retried automatically.',
-  );
-  await page.waitForTimeout(750);
-  expect(media.completionRequests).toHaveLength(2);
-  retry = page.getByRole('button', { name: 'Retry photo validation' });
-  await retry.press('Enter');
-  await expect.poll(() => media.completionRequests.length).toBe(3);
-  await expect(alert).toContainText(
-    'The photo safety scan is still pending. Try again shortly.',
-  );
-  expect(media.createRequests).toHaveLength(1);
-  expect(media.uploadRequests).toHaveLength(1);
-  expect(
-    media.completionRequests.every((request) => request.body === null),
-  ).toBe(true);
-  expect(media.completionRequests[0]?.headers['idempotency-key']).toBeTruthy();
-  expect(
-    media.completionRequests.every(
-      (request) =>
-        request.headers['idempotency-key'] ===
-        media.completionRequests[0]?.headers['idempotency-key'],
-    ),
-  ).toBe(true);
-  expect(
-    await page.evaluate(
-      (eventId) =>
-        sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-      fixture.keyboardEventId,
-    ),
-  ).toBe(firstRecovery.raw);
-  expect(photoJournalPosts).toBe(0);
-  await page
-    .getByRole('button', {
-      name: 'Clear pending photo attempt after timeline verification',
-    })
-    .press('Enter');
-  expect(
-    await page.evaluate(
-      (eventId) =>
-        sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-      fixture.keyboardEventId,
-    ),
-  ).toBeNull();
-  await expect(page.getByLabel('Photo file')).toBeEnabled();
-  await expectAxeClean(page, 'ambiguous photo validation recovery');
-});
-
-test('another-session photo recovery blocks upload and sends nothing until explicit clear', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  let completionPosts = 0;
-  let journalPosts = 0;
-  await page.route('**/api/media/upload-intents/**/complete', async (route) => {
-    if (route.request().method() === 'POST') completionPosts += 1;
-    await route.abort('blockedbyclient');
-  });
-  await page.route(
-    `**/events/${fixture.recoveryOwnerEventId}/api`,
-    async (route) => {
-      if (route.request().method() === 'POST') journalPosts += 1;
-      await route.continue();
-    },
-  );
-
-  await page.goto(fixturePath(fixture.recoveryOwnerEventId));
-  await page.evaluate((eventId) => {
-    const now = new Date().toISOString();
-    sessionStorage.setItem(
-      `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-      JSON.stringify({
-        version: 1,
-        eventId,
-        ownerSessionId: '00000000-0000-4000-8000-000000000999',
-        uploadIntentId: crypto.randomUUID(),
-        mediaId: null,
-        idempotencyKey: `event-photo-complete-${crypto.randomUUID()}`,
-        postIdempotencyKey: `event-room-${crypto.randomUUID()}`,
-        altText: 'Another session synthetic photo',
-        caption: null,
-        clientTime: now,
-        createdAt: now,
-      }),
-    );
-  }, fixture.recoveryOwnerEventId);
-  await page.reload();
-
-  const alert = page.locator('.photo-workflow-error');
-  await expect(alert).toContainText(
-    'PSD EOC could not read the private photo recovery record. No request was sent.',
-  );
-  await expect(alert).toBeFocused();
-  await expect(page.getByLabel('Photo file')).toBeDisabled();
-  await expect(
-    page.getByRole('button', { name: 'Retry photo validation' }),
+    page.getByText('Synthetic ordered history 001', { exact: true }),
   ).toHaveCount(0);
-  await page.waitForTimeout(750);
-  expect(completionPosts).toBe(0);
-  expect(journalPosts).toBe(0);
-
-  await page
-    .getByRole('button', {
-      name: 'Clear pending photo attempt after timeline verification',
-    })
-    .press('Enter');
-  await expect(page.getByLabel('Photo file')).toBeEnabled();
-  expect(
-    await page.evaluate(
-      (eventId) =>
-        sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-      fixture.recoveryOwnerEventId,
-    ),
-  ).toBeNull();
-  expect(completionPosts).toBe(0);
-  expect(journalPosts).toBe(0);
-  await expectAxeClean(page, 'another-session photo recovery block');
-});
-
-test('a handoff crash with both recovery records converges on one exact photo post', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoEventId,
-    uploadIntentId: randomUUID(),
-    mediaId: fixture.photoUploadMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
-  const postRequests: Array<
-    Readonly<{ body: unknown; idempotencyKey: string | undefined }>
-  > = [];
-  await page.route(`**/events/${fixture.photoEventId}/api`, async (route) => {
-    const request = route.request();
-    if (
-      request.method() === 'POST' &&
-      request.postData()?.includes('Synthetic handoff crash photo') === true
-    ) {
-      postRequests.push({
-        body: request.postDataJSON() as unknown,
-        idempotencyKey: request.headers()['idempotency-key'],
-      });
-    }
-    await route.continue();
-  });
-
-  await page.goto(fixturePath(fixture.photoEventId));
-  const postIdempotencyKey = `event-room-${randomUUID()}`;
-  const completionIdempotencyKey = `event-photo-complete-${randomUUID()}`;
-  const uploadIntentId = randomUUID();
-  const clientTime = new Date().toISOString();
-  const body = {
-    operation: 'post-photo' as const,
-    mediaId: fixture.photoUploadMediaId,
-    altText: 'Synthetic handoff crash photo',
-    caption: 'Synthetic dual-record recovery evidence',
-    clientTime,
-  };
-  await page.evaluate(
-    ({
-      bodyJson,
-      clientTime: storedClientTime,
-      completionKey,
-      eventId,
-      mediaId,
-      ownerSessionId,
-      postKey,
-      uploadId,
-    }) => {
-      sessionStorage.setItem(
-        `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        JSON.stringify({
-          version: 1,
-          eventId,
-          ownerSessionId,
-          uploadIntentId: uploadId,
-          mediaId,
-          idempotencyKey: completionKey,
-          postIdempotencyKey: postKey,
-          altText: 'Synthetic handoff crash photo',
-          caption: 'Synthetic dual-record recovery evidence',
-          clientTime: storedClientTime,
-          createdAt: storedClientTime,
-        }),
-      );
-      sessionStorage.setItem(
-        `psd-eoc:event-room:pending:v1:${eventId}`,
-        JSON.stringify({
-          version: 1,
-          eventId,
-          ownerSessionId,
-          apiUrl: `/events/${eventId}/api`,
-          operation: 'post-photo',
-          idempotencyKey: postKey,
-          bodyJson,
-          createdAt: storedClientTime,
-        }),
-      );
-    },
-    {
-      bodyJson: JSON.stringify(body),
-      clientTime,
-      completionKey: completionIdempotencyKey,
-      eventId: fixture.photoEventId,
-      mediaId: fixture.photoUploadMediaId,
-      ownerSessionId: fixture.sessionId,
-      postKey: postIdempotencyKey,
-      uploadId: uploadIntentId,
-    },
-  );
-  await page.reload();
-
-  await expect(
-    page.getByRole('button', { name: 'Retry exact retained request' }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: 'Retry photo validation' }),
-  ).toHaveCount(0);
-  expect(
-    await page.evaluate(
-      (eventId) =>
-        sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-      fixture.photoEventId,
-    ),
-  ).toBeNull();
-  await page.waitForTimeout(750);
-  expect(postRequests).toHaveLength(0);
-  expect(media.completionRequests).toHaveLength(0);
-
-  await page
-    .getByRole('button', { name: 'Retry exact retained request' })
-    .press('Enter');
-  await expect(page.locator('.mutation-status')).toContainText(
-    'photo post confirmed by the server.',
-  );
-  expect(postRequests).toEqual([{ body, idempotencyKey: postIdempotencyKey }]);
-  await expect(
-    page.getByRole('img', { name: 'Synthetic handoff crash photo' }),
-  ).toHaveCount(1);
-  expect(media.completionRequests).toHaveLength(0);
-  expect(
-    await page.evaluate(
-      (eventId) => ({
-        completion: sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-        post: sessionStorage.getItem(
-          `psd-eoc:event-room:pending:v1:${eventId}`,
-        ),
-      }),
-      fixture.photoEventId,
-    ),
-  ).toEqual({ completion: null, post: null });
-  await page.reload();
-  await page.waitForTimeout(750);
-  expect(postRequests).toHaveLength(1);
-  expect(media.completionRequests).toHaveLength(0);
-  await expect(
-    page.getByRole('img', { name: 'Synthetic handoff crash photo' }),
-  ).toHaveCount(1);
-  await expectAxeClean(page, 'dual-record photo handoff recovery');
-});
-
-test('a same-key but altered handoff record is never reconciled or sent', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.photoEventId,
-    uploadIntentId: randomUUID(),
-    mediaId: fixture.photoUploadMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
-  let journalPosts = 0;
-  await page.route(`**/events/${fixture.photoEventId}/api`, async (route) => {
-    if (route.request().method() === 'POST') journalPosts += 1;
-    await route.continue();
-  });
-  await page.goto(fixturePath(fixture.photoEventId));
-  const postKey = `event-room-${randomUUID()}`;
-  const clientTime = new Date().toISOString();
-  const completionRaw = JSON.stringify({
-    version: 1,
-    eventId: fixture.photoEventId,
-    ownerSessionId: fixture.sessionId,
-    uploadIntentId: randomUUID(),
-    mediaId: fixture.photoUploadMediaId,
-    idempotencyKey: `event-photo-complete-${randomUUID()}`,
-    postIdempotencyKey: postKey,
-    altText: 'Valid pending photo evidence',
-    caption: 'Must not be erased by an altered post body',
-    clientTime,
-    createdAt: clientTime,
-  });
-  await page.evaluate(
-    ({
-      alteredMediaId,
-      eventId,
-      ownerSessionId,
-      pendingRaw,
-      retainedPostKey,
-      storedTime,
-    }) => {
-      sessionStorage.setItem(
-        `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        pendingRaw,
-      );
-      sessionStorage.setItem(
-        `psd-eoc:event-room:pending:v1:${eventId}`,
-        JSON.stringify({
-          version: 1,
-          eventId,
-          ownerSessionId,
-          apiUrl: `/events/${eventId}/api`,
-          operation: 'post-photo',
-          idempotencyKey: retainedPostKey,
-          bodyJson: JSON.stringify({
-            operation: 'post-photo',
-            mediaId: alteredMediaId,
-            altText: 'Altered retained photo evidence',
-            caption: null,
-            clientTime: storedTime,
-          }),
-          createdAt: storedTime,
-        }),
-      );
-    },
-    {
-      alteredMediaId: fixture.photoMediaId,
-      eventId: fixture.photoEventId,
-      ownerSessionId: fixture.sessionId,
-      pendingRaw: completionRaw,
-      retainedPostKey: postKey,
-      storedTime: clientTime,
-    },
-  );
-  await page.reload();
-
-  await expect(page.locator('.photo-workflow-error')).toContainText(
-    'PSD EOC could not read the private photo recovery record. No request was sent.',
-  );
-  await expect(page.getByLabel('Photo file')).toBeDisabled();
-  await expect(
-    page.getByRole('button', { name: 'Retry photo validation' }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole('button', { name: 'Retry exact retained request' }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByText(
-      'The retained photo post conflicts with private photo recovery evidence and cannot be retried.',
-      { exact: false },
-    ),
-  ).toBeVisible();
-  expect(
-    await page.evaluate(
-      (eventId) =>
-        sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-      fixture.photoEventId,
-    ),
-  ).toBe(completionRaw);
-  await page.waitForTimeout(750);
-  expect(journalPosts).toBe(0);
-  expect(media.completionRequests).toHaveLength(0);
-
-  await page
-    .getByRole('button', {
-      name: 'I verified the timeline — clear browser recovery record',
-    })
-    .press('Enter');
-  expect(
-    await page.evaluate(
-      (eventId) =>
-        sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-      fixture.photoEventId,
-    ),
-  ).toBe(completionRaw);
-  await page
-    .getByRole('button', {
-      name: 'Clear pending photo attempt after timeline verification',
-    })
-    .press('Enter');
-  await expect(page.getByLabel('Photo file')).toBeEnabled();
-  expect(
-    await page.evaluate(
-      (eventId) => ({
-        completion: sessionStorage.getItem(
-          `psd-eoc:event-room:photo-completion:v1:${eventId}`,
-        ),
-        post: sessionStorage.getItem(
-          `psd-eoc:event-room:pending:v1:${eventId}`,
-        ),
-      }),
-      fixture.photoEventId,
-    ),
-  ).toEqual({ completion: null, post: null });
-  expect(journalPosts).toBe(0);
-  expect(media.completionRequests).toHaveLength(0);
-});
-
-test('a redacted photo never mounts an image or requests private media', async ({
-  page,
-}) => {
-  const fixture = await readFixture();
-  const media = await installSyntheticMediaRoutes(page, {
-    eventId: fixture.redactedPhotoEventId,
-    uploadIntentId: fixture.redactedPhotoMediaId,
-    mediaId: fixture.redactedPhotoMediaId,
-    sanitizedSha256: fixture.photoSanitizedSha256,
-  });
-  await page.goto(fixturePath(fixture.redactedPhotoEventId));
-  await expect(page.locator('.redacted-content')).toContainText(
+  await expect(original).toContainText(
     'Original content is hidden because a later append-only redaction supersedes this entry.',
   );
-  await expect(page.locator('.timeline-entry img')).toHaveCount(0);
-  await page.waitForTimeout(750);
-  expect(media.readGrantRequests).toHaveLength(0);
-  expect(media.imageRequests).toHaveLength(0);
-  await expectAxeClean(page, 'redacted photo without a private read');
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'Entry 1 changed while the dialog was open. No request was sent',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Append correction' }),
+  ).toHaveCount(0);
+  await expectAxeClean(page, 'event room after concurrent dialog redaction');
+});
+
+test('a committed correction with a delayed response never reports that no request was sent', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let resolveCommitted: () => void = () => undefined;
+  const committed = new Promise<void>((resolve) => {
+    resolveCommitted = resolve;
+  });
+  let releaseResponse: () => void = () => undefined;
+  const responseRelease = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.pendingDialogEventId) &&
+      body?.operation === 'correct-text'
+    ) {
+      const upstream = await route.fetch();
+      resolveCommitted();
+      await responseRelease;
+      await route.fulfill({ response: upstream });
+      return;
+    }
+    await route.continue();
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await page.goto(fixturePath(fixture.pendingDialogEventId));
+    await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+    await page
+      .getByLabel('Corrected text')
+      .fill('Correction committed before acknowledgement');
+    await page
+      .getByLabel('Reason for correction')
+      .fill('Synthetic delayed-response regression');
+    await page
+      .getByRole('button', { name: 'Append correction' })
+      .press('Enter');
+    await committed;
+
+    await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 8_000 });
+    await expect(page.getByLabel('Corrected text')).toHaveCount(0);
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'Sending timeline correction',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No request was sent');
+
+    releaseResponse();
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'timeline correction confirmed by the server.',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No request was sent');
+    await expect(
+      page.getByText('Correction committed before acknowledgement', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    scenarioCompleted = true;
+  } finally {
+    releaseResponse();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
+test('a definite correction rejection remains truthful when a later poll closes the invalidated dialog', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let releasePoll: () => void = () => undefined;
+  const pollRelease = new Promise<void>((resolve) => {
+    releasePoll = resolve;
+  });
+  let announceHeldPoll: () => void = () => undefined;
+  const heldPoll = new Promise<void>((resolve) => {
+    announceHeldPoll = resolve;
+  });
+  let pollIsHeld = false;
+  await page.goto(fixturePath(fixture.rejectedDialogRaceEventId));
+  await expect(page.locator('.connection-line')).toContainText('Connected');
+
+  const original = page.getByRole('article', {
+    name: 'Entry 1: Text update',
+  });
+  const articleId = await original.getAttribute('id');
+  if (articleId === null || !articleId.startsWith('entry-')) {
+    throw new Error('Synthetic correction target is missing its entry ID.');
+  }
+  const entryId = articleId.slice('entry-'.length);
+  await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+  await page
+    .getByLabel('Corrected text')
+    .fill('Correction rejected after concurrent redaction');
+  await page
+    .getByLabel('Reason for correction')
+    .fill('Synthetic rejected-response ordering');
+
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const appliesToFixture = request
+      .url()
+      .includes(fixture.rejectedDialogRaceEventId);
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      appliesToFixture &&
+      request.method() === 'POST' &&
+      body?.operation === 'correct-text'
+    ) {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'CONFLICT',
+          message: 'Synthetic correction lost the redaction race.',
+          requestId: randomUUID(),
+          retryable: false,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
+    if (appliesToFixture && request.method() === 'GET' && !pollIsHeld) {
+      pollIsHeld = true;
+      announceHeldPoll();
+      await pollRelease;
+    }
+    await route.continue();
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await redactExternalEntry(
+      page,
+      fixture.rejectedDialogRaceEventId,
+      entryId,
+      1,
+    );
+    await heldPoll;
+    await page
+      .getByRole('button', { name: 'Append correction' })
+      .press('Enter');
+
+    const dialogAlert = page.getByRole('dialog').getByRole('alert');
+    await expect(dialogAlert).toBeVisible();
+    await expect(dialogAlert).toBeFocused();
+    const rejection = await dialogAlert.textContent();
+    expect(rejection).toContain(
+      'Synthetic correction lost the redaction race.',
+    );
+    await expect(
+      page.getByRole('dialog').locator('.mutation-status'),
+    ).toContainText('The request was not accepted.');
+
+    releasePoll();
+    await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 8_000 });
+    await expect(page.getByLabel('Corrected text')).toHaveCount(0);
+    const outerError = page.locator('.event-room > .error-panel');
+    await expect(outerError).toBeVisible();
+    await expect(outerError).toBeFocused();
+    await expect(outerError).toHaveText(rejection ?? '');
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'The request was not accepted.',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No request was sent');
+    await expect(
+      page.getByText('Synthetic ordered history 001', { exact: true }),
+    ).toHaveCount(0);
+    await expect(original).toContainText(
+      'Original content is hidden because a later append-only redaction supersedes this entry.',
+    );
+    scenarioCompleted = true;
+  } finally {
+    releasePoll();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
+test('paginated catch-up hides raw correction content before its terminal page arrives', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const rawText = 'Synthetic ordered history 001';
+  let mutationsReady = false;
+  let timelineRequests = 0;
+  let resolveFirstPageSeen: () => void = () => undefined;
+  const firstPageSeen = new Promise<void>((resolve) => {
+    resolveFirstPageSeen = resolve;
+  });
+  let resolveTerminalHeld: () => void = () => undefined;
+  const terminalHeld = new Promise<void>((resolve) => {
+    resolveTerminalHeld = resolve;
+  });
+  let releaseTerminal: () => void = () => undefined;
+  const terminalRelease = new Promise<void>((resolve) => {
+    releaseTerminal = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    if (
+      !mutationsReady ||
+      request.method() !== 'GET' ||
+      !request.url().includes(fixture.paginatedDialogEventId)
+    ) {
+      await route.continue();
+      return;
+    }
+    timelineRequests += 1;
+    const upstream = await route.fetch();
+    const value = (await upstream.json()) as {
+      entries?: unknown[];
+      hasMore?: boolean;
+    };
+    if (timelineRequests === 1) {
+      expect(value.hasMore).toBe(true);
+      expect(value.entries).toHaveLength(100);
+      expect(JSON.stringify(value.entries)).not.toContain(rawText);
+      expect(JSON.stringify(value.entries)).toContain('redaction');
+      resolveFirstPageSeen();
+      await route.fulfill({ response: upstream, json: value });
+      return;
+    }
+    if (timelineRequests === 2) {
+      expect(value.hasMore).toBe(false);
+      resolveTerminalHeld();
+      await terminalRelease;
+    }
+    await route.fulfill({ response: upstream, json: value });
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await page.goto(fixturePath(fixture.paginatedDialogEventId));
+    const original = page.getByRole('article', {
+      name: 'Entry 1: Text update',
+    });
+    const articleId = await original.getAttribute('id');
+    if (articleId === null || !articleId.startsWith('entry-')) {
+      throw new Error('Synthetic correction target is missing its entry ID.');
+    }
+    const entryId = articleId.slice('entry-'.length);
+    await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(page.getByLabel('Corrected text')).toHaveValue(rawText);
+
+    await redactExternalEntry(page, fixture.paginatedDialogEventId, entryId, 1);
+    await appendSyntheticBurst(testInfo, fixture.paginatedDialogEventId, 101);
+    mutationsReady = true;
+    await firstPageSeen;
+    await terminalHeld;
+
+    await expect(page.locator('.timeline-panel')).toContainText(
+      'Timeline content remains hidden until all authorized history',
+    );
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByLabel('Corrected text')).toHaveCount(0);
+    await expect(page.getByText(rawText, { exact: true })).toHaveCount(0);
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'Timeline synchronization began while the dialog was open. No request was sent',
+    );
+    await expect(
+      page.getByRole('button', { name: 'Append correction' }),
+    ).toHaveCount(0);
+
+    releaseTerminal();
+    await expect(original).toContainText(
+      'Original content is hidden because a later append-only redaction supersedes this entry.',
+    );
+    scenarioCompleted = true;
+  } finally {
+    releaseTerminal();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
+test('paginated catch-up invalidates all-clear and close confirmations before they can silently no-op', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const eventId = fixture.paginatedLifecycleEventId;
+
+  const expectInvalidatedDuringCatchUp = async (input: {
+    readonly openButton: 'Review all-clear' | 'Review event close';
+    readonly confirmationLabel:
+      | 'Type ALL CLEAR exactly'
+      | 'Type CLOSE EVENT exactly';
+    readonly confirmationValue: 'ALL CLEAR' | 'CLOSE EVENT';
+    readonly submitButton: 'Issue all-clear and notify' | 'Close event';
+  }): Promise<void> => {
+    await page.getByRole('button', { name: input.openButton }).press('Enter');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    if (input.openButton === 'Review all-clear') {
+      await expect(
+        page.getByRole('heading', { name: 'Notification consequences' }),
+      ).toBeVisible();
+    }
+    await page
+      .getByLabel(input.confirmationLabel)
+      .fill(input.confirmationValue);
+    await expect(
+      page.getByRole('button', { name: input.submitButton }),
+    ).toBeEnabled();
+
+    let releaseMutations: () => void = () => undefined;
+    const mutationsCommitted = new Promise<void>((resolve) => {
+      releaseMutations = resolve;
+    });
+    let resolveFirstPageSeen: () => void = () => undefined;
+    const firstPageSeen = new Promise<void>((resolve) => {
+      resolveFirstPageSeen = resolve;
+    });
+    let resolveTerminalHeld: () => void = () => undefined;
+    const terminalHeld = new Promise<void>((resolve) => {
+      resolveTerminalHeld = resolve;
+    });
+    let releaseTerminal: () => void = () => undefined;
+    const terminalRelease = new Promise<void>((resolve) => {
+      releaseTerminal = resolve;
+    });
+    let timelineRequests = 0;
+    await page.route('**/events/*/api**', async (route) => {
+      const request = route.request();
+      if (request.method() !== 'GET' || !request.url().includes(eventId)) {
+        await route.continue();
+        return;
+      }
+      await mutationsCommitted;
+      timelineRequests += 1;
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as {
+        entries?: unknown[];
+        hasMore?: boolean;
+      };
+      if (timelineRequests === 1) {
+        expect(value.hasMore).toBe(true);
+        expect(value.entries).toHaveLength(100);
+        resolveFirstPageSeen();
+      } else if (timelineRequests === 2) {
+        expect(value.hasMore).toBe(false);
+        resolveTerminalHeld();
+        await terminalRelease;
+      }
+      await route.fulfill({ response: upstream, json: value });
+    });
+
+    let scenarioCompleted = false;
+    try {
+      await appendSyntheticBurst(testInfo, eventId, 101);
+      releaseMutations();
+      await firstPageSeen;
+      await terminalHeld;
+      await expect(page.locator('.timeline-panel')).toContainText(
+        'Timeline content remains hidden until all authorized history',
+      );
+      await expect(dialog).not.toBeVisible();
+      await expect(page.locator('#main-content')).toBeFocused();
+      await expect(page.getByLabel(input.confirmationLabel)).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: input.submitButton }),
+      ).toHaveCount(0);
+      await expect(
+        page.locator('.event-room > .mutation-status'),
+      ).toContainText(
+        'No lifecycle transition request was submitted; reopen the action after the complete timeline is visible.',
+      );
+      releaseTerminal();
+      await expect(page.locator('.timeline-loading-placeholder')).toHaveCount(
+        0,
+      );
+      scenarioCompleted = true;
+    } finally {
+      releaseMutations();
+      releaseTerminal();
+      await page.unrouteAll({
+        behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+      });
+    }
+  };
+
+  await page.goto(fixturePath(eventId));
+  await expectInvalidatedDuringCatchUp({
+    openButton: 'Review all-clear',
+    confirmationLabel: 'Type ALL CLEAR exactly',
+    confirmationValue: 'ALL CLEAR',
+    submitButton: 'Issue all-clear and notify',
+  });
+
+  await issueExternalAllClear(page, eventId);
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued', {
+    timeout: 10_000,
+  });
+  await expectInvalidatedDuringCatchUp({
+    openButton: 'Review event close',
+    confirmationLabel: 'Type CLOSE EVENT exactly',
+    confirmationValue: 'CLOSE EVENT',
+    submitButton: 'Close event',
+  });
+});
+
+test('a definite lifecycle rejection survives a later paginated dialog invalidation', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const eventId = fixture.rejectedLifecycleDialogEventId;
+  await page.goto(fixturePath(eventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await expect(
+    page.getByRole('heading', { name: 'Notification consequences' }),
+  ).toBeVisible();
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+
+  let releaseFirstPoll: () => void = () => undefined;
+  const firstPollRelease = new Promise<void>((resolve) => {
+    releaseFirstPoll = resolve;
+  });
+  let announceFirstPollHeld: () => void = () => undefined;
+  const firstPollHeld = new Promise<void>((resolve) => {
+    announceFirstPollHeld = resolve;
+  });
+  let resolveFirstPageSeen: () => void = () => undefined;
+  const firstPageSeen = new Promise<void>((resolve) => {
+    resolveFirstPageSeen = resolve;
+  });
+  let resolveTerminalHeld: () => void = () => undefined;
+  const terminalHeld = new Promise<void>((resolve) => {
+    resolveTerminalHeld = resolve;
+  });
+  let releaseTerminal: () => void = () => undefined;
+  const terminalRelease = new Promise<void>((resolve) => {
+    releaseTerminal = resolve;
+  });
+  let timelineRequests = 0;
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(eventId) &&
+      body?.operation === 'all-clear'
+    ) {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'CONFLICT',
+          message: 'Synthetic definite all-clear conflict.',
+          requestId: randomUUID(),
+          retryable: false,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
+    if (request.method() !== 'GET' || !request.url().includes(eventId)) {
+      await route.continue();
+      return;
+    }
+    timelineRequests += 1;
+    if (timelineRequests === 1) {
+      announceFirstPollHeld();
+      await firstPollRelease;
+    }
+    const upstream = await route.fetch();
+    const value = (await upstream.json()) as {
+      entries?: unknown[];
+      hasMore?: boolean;
+    };
+    if (timelineRequests === 1) {
+      expect(value.hasMore).toBe(true);
+      expect(value.entries).toHaveLength(100);
+      resolveFirstPageSeen();
+    } else if (timelineRequests === 2) {
+      expect(value.hasMore).toBe(false);
+      resolveTerminalHeld();
+      await terminalRelease;
+    }
+    await route.fulfill({ response: upstream, json: value });
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await firstPollHeld;
+    await page
+      .getByRole('button', { name: 'Issue all-clear and notify' })
+      .press('Enter');
+    const dialogAlert = page.getByRole('dialog').getByRole('alert');
+    await expect(dialogAlert).toBeVisible();
+    await expect(dialogAlert).toBeFocused();
+    await expect(dialogAlert).toContainText(
+      'Synthetic definite all-clear conflict.',
+    );
+    await expect(
+      page.getByRole('dialog').locator('.mutation-status'),
+    ).toContainText('The request was not accepted.');
+
+    await appendSyntheticBurst(testInfo, eventId, 101);
+    releaseFirstPoll();
+    await firstPageSeen;
+    await terminalHeld;
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    const outerError = page.locator('.event-room > .error-panel');
+    await expect(outerError).toContainText(
+      'Synthetic definite all-clear conflict.',
+    );
+    await expect(outerError).toBeFocused();
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'The request was not accepted. No change was recorded by this attempt.',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No lifecycle transition request was submitted');
+    releaseTerminal();
+    await expect(page.locator('.timeline-loading-placeholder')).toHaveCount(0);
+    scenarioCompleted = true;
+  } finally {
+    releaseFirstPoll();
+    releaseTerminal();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
+test('same-event but unrelated journal evidence never clears post, correction, or redaction recovery', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.journalEvidenceEventId));
+  const unrelatedEntry = await page.evaluate(async (eventId) => {
+    const response = await fetch(`/events/${encodeURIComponent(eventId)}/api`, {
+      credentials: 'same-origin',
+    });
+    const value = (await response.json()) as {
+      entries?: Array<{ entry?: unknown }>;
+    };
+    return value.entries?.[0]?.entry ?? null;
+  }, fixture.journalEvidenceEventId);
+  expect(unrelatedEntry).not.toBeNull();
+
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.journalEvidenceEventId) &&
+      (body?.operation === 'post-text' ||
+        body?.operation === 'correct-text' ||
+        body?.operation === 'redact-entry')
+    ) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as Record<string, unknown>;
+      await route.fulfill({
+        response: upstream,
+        json: { ...value, entry: unrelatedEntry },
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const expectUnresolvedAndClear = async (): Promise<void> => {
+    await expect(
+      page.getByRole('heading', {
+        name: 'Previous request needs verification',
+      }),
+    ).toBeVisible();
+    const error = page.locator('.event-room > .error-panel');
+    await expect(error).toContainText(
+      'returned journal evidence for a different request',
+    );
+    await expect(error).toBeFocused();
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'The outcome is unresolved.',
+    );
+    await page
+      .getByRole('button', {
+        name: 'I verified the timeline — clear browser recovery record',
+      })
+      .press('Enter');
+    await expect(
+      page.getByRole('heading', {
+        name: 'Previous request needs verification',
+      }),
+    ).toHaveCount(0);
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'Clearing this browser record sent no new request; the prior outcome remains determined by the verified timeline and event status.',
+    );
+  };
+
+  await page.getByLabel('Update text').fill('Exact post evidence required');
+  await page.getByRole('button', { name: 'Post update' }).press('Enter');
+  await expectUnresolvedAndClear();
+
+  await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+  await page.getByLabel('Corrected text').fill('Exact correction required');
+  await page
+    .getByLabel('Reason for correction')
+    .fill('Synthetic evidence mismatch');
+  await page.getByRole('button', { name: 'Append correction' }).press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expectUnresolvedAndClear();
+
+  await page.getByRole('button', { name: 'Redact entry 1' }).press('Enter');
+  await page
+    .getByLabel('Reason for redaction')
+    .fill('Synthetic evidence mismatch');
+  await page.getByRole('button', { name: 'Append redaction' }).press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expectUnresolvedAndClear();
+  await page.unrouteAll({ behavior: 'wait' });
 });
 
 test('a lost committed response never replays automatically and retries the exact idempotent command only on explicit keyboard action', async ({
   page,
-}) => {
-  const fixture = await readFixture();
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
   const attempts: Array<Readonly<{ body: string; idempotencyKey: string }>> =
     [];
   await page.route('**/events/*/api', async (route) => {
@@ -2162,8 +1881,8 @@ test('a lost committed response never replays automatically and retries the exac
 
 test('a retained command owned by another session is blocked without sending or exposing retry', async ({
   page,
-}) => {
-  const fixture = await readFixture();
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
   let postCount = 0;
   await page.route('**/events/*/api', async (route) => {
     if (route.request().method() === 'POST') postCount += 1;
@@ -2197,6 +1916,9 @@ test('a retained command owned by another session is blocked without sending or 
   await expect(
     page.getByText('The browser recovery record is unreadable.'),
   ).toBeVisible();
+  await expect(page.locator('.event-room > .error-panel')).toContainText(
+    'This page load sent no new request; any prior request outcome remains unresolved.',
+  );
   await expect(
     page.getByRole('button', { name: 'Retry exact retained request' }),
   ).toHaveCount(0);
@@ -2206,10 +1928,44 @@ test('a retained command owned by another session is blocked without sending or 
   await page.unrouteAll({ behavior: 'wait' });
 });
 
+test('a missing local CSRF preflight never claims that the server rejected a request', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.recoveryOwnerEventId));
+  await page.context().clearCookies({ name: '__Host-psd-eoc-csrf' });
+  let postCount = 0;
+  await page.route('**/events/*/api', async (route) => {
+    if (route.request().method() === 'POST') postCount += 1;
+    await route.continue();
+  });
+
+  await page
+    .getByLabel('Update text')
+    .fill('Local CSRF preflight must fail before fetch');
+  await page.getByRole('button', { name: 'Post update' }).press('Enter');
+  const error = page.locator('.event-room > .error-panel');
+  await expect(error).toContainText(
+    'Your session is missing its request-protection cookie.',
+  );
+  await expect(error).toBeFocused();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The request was not accepted. No change was recorded by this attempt.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('The server rejected the request');
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toHaveCount(0);
+  expect(postCount).toBe(0);
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
 test('same-ID real-to-drill poll data fails closed without changing the room classification', async ({
   page,
-}) => {
-  const fixture = await readFixture();
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
   let classificationSwapReturned = false;
   await page.route('**/events/*/api**', async (route) => {
     const request = route.request();
@@ -2219,7 +1975,8 @@ test('same-ID real-to-drill poll data fails closed without changing the room cla
       url.pathname.endsWith(`/${fixture.realDraftEventId}/api`) &&
       url.searchParams.get('operation') === null
     ) {
-      const upstream = await route.fetch();
+      url.searchParams.delete('cursor');
+      const upstream = await route.fetch({ url: url.toString() });
       const value = (await upstream.json()) as Record<string, unknown>;
       const event = value.event as Record<string, unknown>;
       classificationSwapReturned = true;
@@ -2258,8 +2015,8 @@ test('same-ID real-to-drill poll data fails closed without changing the room cla
 
 test('real and drill event rooms use unmistakably different words and symbols', async ({
   page,
-}) => {
-  const fixture = await readFixture();
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
   await page.goto(fixturePath(fixture.realDraftEventId));
   const realBanner = page.locator('.classification-banner');
   await expect(realBanner).toContainText('⚠');
@@ -2274,15 +2031,920 @@ test('real and drill event rooms use unmistakably different words and symbols', 
   await expect(drillBanner).not.toContainText('REAL INCIDENT');
 });
 
+test('all-clear preview is POST-only, CSRF-protected, and exactly idempotent without GET writes', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.lifecycleEventId));
+  const before = await lifecyclePreviewIds(testInfo, fixture.lifecycleEventId);
+
+  const getResult = await page.evaluate(async (eventId) => {
+    const response = await fetch(
+      `/events/${encodeURIComponent(eventId)}/api?operation=preview-all-clear`,
+      { credentials: 'same-origin' },
+    );
+    return { status: response.status, body: await response.text() };
+  }, fixture.lifecycleEventId);
+  expect(getResult.status).toBe(400);
+  expect(await lifecyclePreviewIds(testInfo, fixture.lifecycleEventId)).toEqual(
+    before,
+  );
+
+  const idempotencyKey = `event-room-preview-${randomUUID()}`;
+  const missingCsrf = await postPreview(
+    page,
+    fixture.lifecycleEventId,
+    idempotencyKey,
+    false,
+  );
+  expect(missingCsrf.status).toBe(403);
+  expect(await lifecyclePreviewIds(testInfo, fixture.lifecycleEventId)).toEqual(
+    before,
+  );
+
+  const first = await postPreview(
+    page,
+    fixture.lifecycleEventId,
+    idempotencyKey,
+    true,
+  );
+  const replay = await postPreview(
+    page,
+    fixture.lifecycleEventId,
+    idempotencyKey,
+    true,
+  );
+  expect(first.status).toBe(200);
+  expect(first.acknowledgedIdempotencyKey).toBe(idempotencyKey);
+  expect(replay).toEqual(first);
+  const after = await lifecyclePreviewIds(testInfo, fixture.lifecycleEventId);
+  expect(after).toHaveLength(before.length + 1);
+});
+
+test('the preview UI retries the exact committed request and rejects a mismatched acknowledgement', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const before = await lifecyclePreviewIds(
+    testInfo,
+    fixture.previewRetryEventId,
+  );
+  const requestKeys: string[] = [];
+  const requestBodies: string[] = [];
+  let firstCommitted = false;
+  let firstFinished = false;
+  let releaseFirst: () => void = () => undefined;
+  const firstRelease = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() !== 'POST' ||
+      !request.url().includes(fixture.previewRetryEventId) ||
+      body?.operation !== 'preview-all-clear'
+    ) {
+      await route.continue();
+      return;
+    }
+    requestKeys.push(request.headers()['idempotency-key'] ?? 'missing');
+    requestBodies.push(request.postData() ?? 'missing');
+    if (requestKeys.length === 1) {
+      const committed = await route.fetch();
+      expect(committed.ok()).toBe(true);
+      firstCommitted = true;
+      await firstRelease;
+      await route.abort('timedout').catch(() => undefined);
+      firstFinished = true;
+      return;
+    }
+    if (requestKeys.length === 2) {
+      const replay = await route.fetch();
+      expect(replay.ok()).toBe(true);
+      await route.fulfill({
+        response: replay,
+        headers: {
+          ...replay.headers(),
+          'idempotency-key': `event-room-preview-${randomUUID()}`,
+        },
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await page.goto(fixturePath(fixture.previewRetryEventId));
+    await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+    await expect.poll(() => firstCommitted).toBe(true);
+    await expect(page.getByRole('dialog')).toContainText(
+      'The all-clear preview timed out.',
+      { timeout: 12_000 },
+    );
+    releaseFirst();
+    await expect.poll(() => firstFinished).toBe(true);
+
+    await page.getByRole('button', { name: 'Retry preview' }).press('Enter');
+    await expect(page.getByRole('dialog')).toContainText(
+      'PSD EOC did not acknowledge the exact preview request key.',
+    );
+    await page.getByRole('button', { name: 'Retry preview' }).press('Enter');
+    await expect(
+      page.getByRole('heading', { name: 'Notification consequences' }),
+    ).toBeVisible();
+
+    expect(requestKeys).toHaveLength(3);
+    expect(new Set(requestKeys).size).toBe(1);
+    expect(new Set(requestBodies).size).toBe(1);
+    const after = await lifecyclePreviewIds(
+      testInfo,
+      fixture.previewRetryEventId,
+    );
+    expect(after).toHaveLength(before.length + 1);
+    scenarioCompleted = true;
+  } finally {
+    releaseFirst();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
+test('a blocked all-clear preview keeps classification visible and an operable keyboard dismissal', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.stalledPreviewEventId));
+  const prepared = await postPreview(
+    page,
+    fixture.stalledPreviewEventId,
+    `event-room-preview-${randomUUID()}`,
+    true,
+  );
+  expect(prepared.status).toBe(200);
+  const value = prepared.value as Record<string, unknown>;
+  const preview = value.preview as Record<string, unknown>;
+  const channels = preview.channels as Array<Record<string, unknown>>;
+  const blockedValue = {
+    ...value,
+    preview: {
+      ...preview,
+      recipientCount: 0,
+      channels: channels.map((channel) => ({
+        ...channel,
+        endpointCount: 0,
+      })),
+      sendReadiness: 'blocked',
+      blockingReasonCodes: ['NO_RECIPIENTS'],
+    },
+  };
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.stalledPreviewEventId) &&
+      body?.operation === 'preview-all-clear'
+    ) {
+      const idempotencyKey = request.headers()['idempotency-key'];
+      expect(idempotencyKey).toBeTruthy();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        headers: {
+          'Idempotency-Key': idempotencyKey ?? '',
+        },
+        body: JSON.stringify(blockedValue),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const opener = page.getByRole('button', { name: 'Review all-clear' });
+  await opener.press('Enter');
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('DRILL — TRAINING ONLY');
+  await expect(dialog).toContainText('Sending is blocked.');
+  await expect(page.getByLabel('Type ALL CLEAR exactly')).toBeDisabled();
+  const cancel = dialog.getByRole('button', { name: 'Cancel' });
+  await expect(cancel).toBeEnabled();
+  await expect(cancel).toBeFocused();
+  await expectAxeClean(page, 'blocked all-clear consequence dialog');
+  await cancel.press('Enter');
+  await expect(dialog).not.toBeVisible();
+  await expect(opener).toBeFocused();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a delayed pre-mutation snapshot cannot regress a confirmed all-clear or its cursor', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let releasePoll: () => void = () => undefined;
+  let pollCaptured = false;
+  const pollRelease = new Promise<void>((resolve) => {
+    releasePoll = resolve;
+  });
+  let releaseRetry: () => void = () => undefined;
+  let retryHeld = false;
+  const retryRelease = new Promise<void>((resolve) => {
+    releaseRetry = resolve;
+  });
+  let stalePollJson: unknown = null;
+  let eventPolls = 0;
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const isEventPoll =
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname.endsWith(
+        `/${fixture.stalePollEventId}/api`,
+      );
+    if (isEventPoll) eventPolls += 1;
+    if (isEventPoll && eventPolls === 1) {
+      const upstream = await route.fetch();
+      const json = await upstream.json();
+      stalePollJson = json;
+      pollCaptured = true;
+      await pollRelease;
+      await route.fulfill({ response: upstream, json }).catch(() => undefined);
+      return;
+    }
+    if (isEventPoll && eventPolls === 2) {
+      retryHeld = true;
+      await retryRelease;
+      expect(stalePollJson).not.toBeNull();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        json: stalePollJson,
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(fixture.stalePollEventId));
+  await postExternalUpdate(
+    page,
+    fixture.stalePollEventId,
+    'Snapshot entry captured before all-clear',
+    new Date().toISOString(),
+  );
+  await expect.poll(() => pollCaptured, { timeout: 7_000 }).toBe(true);
+
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await expect(
+    page.getByRole('heading', { name: 'Notification consequences' }),
+  ).toBeVisible();
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'all-clear confirmed by the server.',
+  );
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'Synchronizing the complete timeline',
+  );
+  await expect(page.locator('.timeline-panel')).toContainText(
+    'Timeline content remains hidden until all authorized history',
+  );
+  await expect(page.locator('.event-status')).toHaveText('Active');
+  await expect(
+    page.getByRole('button', { name: 'Review all-clear' }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Review event close' }),
+  ).toHaveCount(0);
+
+  releasePoll();
+  await expect.poll(() => retryHeld).toBe(true);
+  await expect(page.locator('.timeline-panel')).toContainText(
+    'Timeline content remains hidden until all authorized history',
+  );
+  await expect(page.locator('.event-status')).toHaveText('Active');
+  releaseRetry();
+  await page.waitForTimeout(1_000);
+  expect(eventPolls).toBe(2);
+  await expect.poll(() => eventPolls, { timeout: 12_000 }).toBeGreaterThan(2);
+  await expect(
+    page.getByText('Snapshot entry captured before all-clear', { exact: true }),
+  ).toBeVisible();
+  await page.waitForTimeout(750);
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  await expect(
+    page.getByRole('button', { name: 'Review event close' }),
+  ).toBeVisible();
+  releaseRetry();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a newer closed poll observed during a delayed all-clear response never regresses to the older mutation projection', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let allClearCommitted = false;
+  let releaseAllClear: () => void = () => undefined;
+  const allClearRelease = new Promise<void>((resolve) => {
+    releaseAllClear = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.newerPollEventId) &&
+      body?.operation === 'all-clear'
+    ) {
+      const upstream = await route.fetch();
+      allClearCommitted = true;
+      await allClearRelease;
+      await route.fulfill({ response: upstream });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(fixture.newerPollEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  const allClearDialog = page.getByRole('dialog');
+  await expect(allClearDialog).toContainText('DRILL — TRAINING ONLY');
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect.poll(() => allClearCommitted).toBe(true);
+
+  try {
+    await issueExternalClose(page, fixture.newerPollEventId);
+    await expect(page.locator('.event-status')).toHaveText('Closed', {
+      timeout: 8_000,
+    });
+    await expect(
+      page.getByText('Event closed.', { exact: true }),
+    ).toBeVisible();
+  } finally {
+    releaseAllClear();
+  }
+
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'all-clear confirmed by the server.',
+  );
+  await page.waitForTimeout(750);
+  await expect(page.locator('.event-status')).toHaveText('Closed');
+  await expect(
+    page.getByRole('button', { name: 'Review event close' }),
+  ).toHaveCount(0);
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('polling pauses while hidden, resumes immediately when visible, and keeps one request in flight', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.addInitScript(() => {
+    let hidden = true;
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible'),
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    Reflect.set(window, '__eventRoomSetHidden', (next: boolean) => {
+      hidden = next;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  });
+  let timelineRequests = 0;
+  let releaseRequest: () => void = () => undefined;
+  const requestRelease = new Promise<void>((resolve) => {
+    releaseRequest = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    if (
+      request.method() === 'GET' &&
+      request.url().includes(fixture.realDraftEventId)
+    ) {
+      timelineRequests += 1;
+      await requestRelease;
+      await route.continue();
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(fixturePath(fixture.realDraftEventId));
+  await page.waitForTimeout(5_250);
+  expect(timelineRequests).toBe(0);
+  await page.evaluate(() => {
+    const setHidden = Reflect.get(window, '__eventRoomSetHidden') as (
+      hidden: boolean,
+    ) => void;
+    setHidden(false);
+  });
+  await expect.poll(() => timelineRequests, { timeout: 2_000 }).toBe(1);
+  await page.waitForTimeout(5_250);
+  expect(timelineRequests).toBe(1);
+  releaseRequest();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a quick hide and show interrupts an active poll delay without overlapping the refresh', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.addInitScript(() => {
+    let hidden = false;
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible'),
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    Reflect.set(window, '__eventRoomSetHidden', (next: boolean) => {
+      hidden = next;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  });
+  let timelineRequests = 0;
+  let releaseRequest: () => void = () => undefined;
+  const requestRelease = new Promise<void>((resolve) => {
+    releaseRequest = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    if (
+      route.request().method() === 'GET' &&
+      route.request().url().includes(fixture.keyboardEventId)
+    ) {
+      timelineRequests += 1;
+      await requestRelease;
+    }
+    await route.continue();
+  });
+
+  try {
+    await page.goto(fixturePath(fixture.keyboardEventId));
+    await page.waitForTimeout(250);
+    expect(timelineRequests).toBe(0);
+    await page.evaluate(() => {
+      const setHidden = Reflect.get(window, '__eventRoomSetHidden') as (
+        hidden: boolean,
+      ) => void;
+      setHidden(true);
+      setHidden(false);
+    });
+    await expect.poll(() => timelineRequests, { timeout: 2_000 }).toBe(1);
+    await page.evaluate(() => {
+      const setHidden = Reflect.get(window, '__eventRoomSetHidden') as (
+        hidden: boolean,
+      ) => void;
+      setHidden(true);
+      setHidden(false);
+    });
+    await page.waitForTimeout(1_000);
+    expect(timelineRequests).toBe(1);
+  } finally {
+    releaseRequest();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
+});
+
+test('timeline polling aborts at its deadline without overlapping or replaying', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let timelineRequests = 0;
+  let releaseRequest: () => void = () => undefined;
+  const requestRelease = new Promise<void>((resolve) => {
+    releaseRequest = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    if (
+      route.request().method() === 'GET' &&
+      route.request().url().includes(fixture.realDraftEventId)
+    ) {
+      timelineRequests += 1;
+      await requestRelease;
+      await route.abort('timedout').catch(() => undefined);
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(fixturePath(fixture.realDraftEventId));
+  await expect(page.locator('.timeline-panel')).toContainText(
+    'Timeline refresh timed out.',
+    { timeout: 16_000 },
+  );
+  await expect(
+    page.getByText('Timeline refresh timed out. PSD EOC will keep checking.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(timelineRequests).toBe(1);
+  releaseRequest();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a stalled preview is bounded and its loading dialog always has an immediate cancel', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let releasePreview: () => void = () => undefined;
+  const previewRelease = new Promise<void>((resolve) => {
+    releasePreview = resolve;
+  });
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.stalledPreviewEventId) &&
+      body?.operation === 'preview-all-clear'
+    ) {
+      await previewRelease;
+      await route.abort('timedout').catch(() => undefined);
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(fixturePath(fixture.stalledPreviewEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  const cancel = page
+    .getByRole('dialog')
+    .getByRole('button', { name: 'Cancel' });
+  await expect(cancel).toBeEnabled();
+  await cancel.press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await expect(page.getByRole('dialog')).toContainText(
+    'The all-clear preview timed out.',
+    { timeout: 12_000 },
+  );
+  releasePreview();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a stalled POST becomes ambiguous at its deadline and is never automatically replayed', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let mutationRequests = 0;
+  let releaseMutation: () => void = () => undefined;
+  const mutationRelease = new Promise<void>((resolve) => {
+    releaseMutation = resolve;
+  });
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.stalledMutationEventId) &&
+      body?.operation === 'post-text'
+    ) {
+      mutationRequests += 1;
+      await mutationRelease;
+      await route.abort('timedout').catch(() => undefined);
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(fixturePath(fixture.stalledMutationEventId));
+  await page.getByLabel('Update text').fill('Stalled retained mutation');
+  await page.getByRole('button', { name: 'Post update' }).press('Enter');
+  await expect(page.locator('.mutation-status')).toContainText(
+    'The outcome is unresolved.',
+    { timeout: 18_000 },
+  );
+  expect(mutationRequests).toBe(1);
+  await page.waitForTimeout(1_000);
+  expect(mutationRequests).toBe(1);
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toBeVisible();
+  releaseMutation();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('malformed lifecycle success retains recovery evidence and never announces confirmation', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.malformedLifecycleEventId) &&
+      body?.operation === 'all-clear'
+    ) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as Record<string, unknown>;
+      await route.fulfill({
+        response: upstream,
+        json: { ...value, notificationIntent: null },
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(fixturePath(fixture.malformedLifecycleEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await expect(page.getByLabel('Type ALL CLEAR exactly')).toBeVisible();
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toBeVisible();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The outcome is unresolved.',
+  );
+  await expect(page.locator('.event-room > .error-panel')).toBeFocused();
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('confirmed by the server');
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a successful lifecycle response with a mismatched request acknowledgement remains unresolved', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.staleLifecycleResponseEventId) &&
+      body?.operation === 'all-clear'
+    ) {
+      const upstream = await route.fetch();
+      await route.fulfill({
+        response: upstream,
+        headers: {
+          ...upstream.headers(),
+          'idempotency-key': `event-room-${randomUUID()}`,
+        },
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(fixturePath(fixture.staleLifecycleResponseEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await expect(page.getByLabel('Type ALL CLEAR exactly')).toBeVisible();
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toBeVisible();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The outcome is unresolved.',
+  );
+  await expect(page.locator('.event-room > .error-panel')).toContainText(
+    'did not acknowledge the exact request key',
+  );
+  await expect(page.locator('.event-room > .error-panel')).toBeFocused();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a canonical all-clear response whose transition belongs to another request remains unresolved', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.mismatchedAllClearTransitionEventId) &&
+      body?.operation === 'all-clear'
+    ) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as Record<string, unknown>;
+      const mismatchedTransition = {
+        ...(value.transition as Record<string, unknown>),
+        idempotencyKey: `event-room-${randomUUID()}`,
+      };
+      const rewriteEntries = (candidate: unknown): unknown =>
+        (candidate as readonly Record<string, unknown>[]).map((entry) => ({
+          ...entry,
+          payload: {
+            ...(entry.payload as Record<string, unknown>),
+            transition: mismatchedTransition,
+          },
+        }));
+      await route.fulfill({
+        response: upstream,
+        json: {
+          ...value,
+          transition: mismatchedTransition,
+          journalEntries: rewriteEntries(value.journalEntries),
+          entries: rewriteEntries(value.entries),
+        },
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(fixturePath(fixture.mismatchedAllClearTransitionEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toBeVisible();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The outcome is unresolved.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('confirmed by the server');
+  await expect(page.locator('.event-room > .error-panel')).toBeFocused();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a canonical close response whose transition belongs to another request remains unresolved', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.mismatchedTransitionEventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+  await page
+    .getByRole('button', { name: 'Issue all-clear and notify' })
+    .press('Enter');
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.mismatchedTransitionEventId) &&
+      body?.operation === 'close'
+    ) {
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as Record<string, unknown>;
+      const mismatchedTransition = {
+        ...(value.transition as Record<string, unknown>),
+        idempotencyKey: `event-room-${randomUUID()}`,
+      };
+      const rewriteEntries = (candidate: unknown): unknown =>
+        (candidate as readonly Record<string, unknown>[]).map((entry) => ({
+          ...entry,
+          payload: {
+            ...(entry.payload as Record<string, unknown>),
+            transition: mismatchedTransition,
+          },
+        }));
+      await route.fulfill({
+        response: upstream,
+        json: {
+          ...value,
+          transition: mismatchedTransition,
+          journalEntries: rewriteEntries(value.journalEntries),
+          entries: rewriteEntries(value.entries),
+        },
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const reviewClose = page.getByRole('button', { name: 'Review event close' });
+  await expect(reviewClose).toBeEnabled();
+  await reviewClose.press('Enter');
+  await page.getByLabel('Type CLOSE EVENT exactly').fill('CLOSE EVENT');
+  await page.getByRole('button', { name: 'Close event' }).press('Enter');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toBeVisible();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The outcome is unresolved.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('confirmed by the server');
+  await expect(page.locator('.event-room > .error-panel')).toBeFocused();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('definite modal failures receive focus and leave an operable explicit retry path', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let rejectOnce = true;
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      rejectOnce &&
+      request.method() === 'POST' &&
+      request.url().includes(fixture.dialogFailureEventId) &&
+      body?.operation === 'correct-text'
+    ) {
+      rejectOnce = false;
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'CONFLICT',
+          message: 'Synthetic definite correction conflict.',
+          requestId: randomUUID(),
+          retryable: false,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(fixturePath(fixture.dialogFailureEventId));
+  await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+  await page
+    .getByLabel('Corrected text')
+    .fill('Corrected after explicit retry');
+  await page
+    .getByLabel('Reason for correction')
+    .fill('Synthetic conflict recovery');
+  await page.getByRole('button', { name: 'Append correction' }).press('Enter');
+  const dialogAlert = page.getByRole('dialog').getByRole('alert');
+  await expect(dialogAlert).toBeVisible();
+  await expect(dialogAlert).toBeFocused();
+  await expect(dialogAlert).toContainText(
+    'Synthetic definite correction conflict.',
+  );
+  const retry = page.getByRole('button', { name: 'Append correction' });
+  await expect(retry).toBeEnabled();
+  await retry.press('Enter');
+  await expect(
+    page.getByText('Corrected after explicit retry', { exact: true }),
+  ).toBeVisible();
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
 test('synthetic all-clear requires preview and exact typed confirmation, appends fan-out truth, then requires typed close', async ({
   page,
-}) => {
-  const fixture = await readFixture();
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
   await page.goto(fixturePath(fixture.lifecycleEventId));
   await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
   await expect(
     page.getByRole('heading', { name: 'Notification consequences' }),
   ).toBeVisible();
+  const allClearDialog = page.getByRole('dialog');
+  await expect(allClearDialog).toContainText('DRILL — TRAINING ONLY');
   await expect(
     page.getByText('4 authorized roster recipients', { exact: true }),
   ).toBeVisible();
@@ -2307,6 +2969,7 @@ test('synthetic all-clear requires preview and exact typed confirmation, appends
   const issueAllClear = page.getByRole('button', {
     name: 'Issue all-clear and notify',
   });
+  await expect(phrase).toBeFocused();
   await phrase.fill('ALL-CLEAR');
   await expect(issueAllClear).toBeDisabled();
   await phrase.fill('ALL CLEAR');
@@ -2318,9 +2981,24 @@ test('synthetic all-clear requires preview and exact typed confirmation, appends
     page.getByText('Notification fan-out intent recorded.', { exact: true }),
   ).toBeVisible();
   await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
 
-  await page.getByRole('button', { name: 'Review event close' }).press('Enter');
+  const reviewClose = page.getByRole('button', {
+    name: 'Review event close',
+  });
+  await expect(reviewClose).toBeEnabled();
+  await reviewClose.press('Enter');
+  const closeDialog = page.getByRole('dialog');
+  await expect(closeDialog).toBeVisible();
+  await expect(closeDialog).toContainText('DRILL — TRAINING ONLY');
   const closePhrase = page.getByLabel('Type CLOSE EVENT exactly');
+  await expect(closePhrase).toBeFocused();
+  await expectAxeClean(page, 'close consequence dialog');
+  await closeDialog.getByRole('button', { name: 'Cancel' }).press('Enter');
+  await expect(closeDialog).not.toBeVisible();
+  await expect(reviewClose).toBeFocused();
+  await reviewClose.press('Enter');
+  await expect(closePhrase).toBeFocused();
   const closeEvent = page.getByRole('button', { name: 'Close event' });
   await closePhrase.fill('CLOSE');
   await expect(closeEvent).toBeDisabled();

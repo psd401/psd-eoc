@@ -23,7 +23,11 @@ import {
 import { and, asc, desc, eq, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
-import type { Database, PostgresDatabase } from '../../db/client';
+import {
+  databaseExecuteRows,
+  type Database,
+  type DatabaseQuery,
+} from '../../db/client';
 import { channelAttempts, deliveryEvidence } from '../../db/schema';
 
 export const DEFAULT_RECONCILIATION_STALE_AFTER_MILLISECONDS = 15 * 60_000;
@@ -79,7 +83,7 @@ export interface DrizzleReconciliationStoreOptions {
   readonly uuid?: () => string;
 }
 
-type ReconciliationQueryDatabase = PostgresDatabase;
+type ReconciliationQueryDatabase = DatabaseQuery;
 type DeliveryEvidenceRow = typeof deliveryEvidence.$inferSelect;
 
 function reconciliationQueryDatabase(
@@ -142,8 +146,10 @@ function evidenceFromRow(row: DeliveryEvidenceRow): DeliveryEvidence {
 async function readDatabaseTime(
   database: ReconciliationQueryDatabase,
 ): Promise<Date> {
-  const [row] = await database.execute<{ value: Date | string }>(
-    sql`select clock_timestamp() as value`,
+  const [row] = databaseExecuteRows(
+    await database.execute<{ value: Date | string }>(
+      sql`select clock_timestamp() as value`,
+    ),
   );
   if (row === undefined) {
     throw new ReconciliationError(
