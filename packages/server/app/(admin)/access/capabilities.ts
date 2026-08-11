@@ -5,10 +5,11 @@ import {
   UuidSchema,
   type Actor,
   type CapabilityInput,
+  type Role,
   type User,
   type UserPage,
 } from '@psd-eoc/contracts';
-import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import {
   userFacilityScopes,
@@ -19,6 +20,8 @@ import {
 import {
   loadEffectiveAdministratorUserIds,
   loadEffectiveRoles,
+  projectEffectiveRoles,
+  type RoleChangeFact,
 } from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import {
@@ -155,6 +158,90 @@ async function loadUser(
   });
 }
 
+async function projectUserPage(
+  database: AdminQueryDatabase,
+  rows: readonly (typeof users.$inferSelect)[],
+): Promise<readonly User[]> {
+  if (rows.length === 0) return Object.freeze([]);
+  const userIds = rows.map(({ id }) => id);
+
+  // Keep these fixed-count batch reads sequential: the Aurora Data API rejects
+  // overlapping statements that share one transaction ID.
+  const baseRoleRows = await database
+    .select({ userId: userRoles.userId, role: userRoles.role })
+    .from(userRoles)
+    .where(inArray(userRoles.userId, userIds))
+    .orderBy(asc(userRoles.userId), asc(userRoles.role));
+  const latestRoleChangeRows = await database
+    .selectDistinctOn([userRoleChanges.userId, userRoleChanges.role], {
+      userId: userRoleChanges.userId,
+      sequence: userRoleChanges.sequence,
+      role: userRoleChanges.role,
+      granted: userRoleChanges.granted,
+    })
+    .from(userRoleChanges)
+    .where(inArray(userRoleChanges.userId, userIds))
+    .orderBy(
+      asc(userRoleChanges.userId),
+      asc(userRoleChanges.role),
+      desc(userRoleChanges.sequence),
+    );
+  const facilityRows = await database
+    .select({
+      userId: userFacilityScopes.userId,
+      facilityId: userFacilityScopes.facilityId,
+    })
+    .from(userFacilityScopes)
+    .where(inArray(userFacilityScopes.userId, userIds))
+    .orderBy(
+      asc(userFacilityScopes.userId),
+      asc(userFacilityScopes.facilityId),
+    );
+
+  const baseRolesByUserId = new Map<string, Role[]>();
+  for (const { userId, role } of baseRoleRows) {
+    const roles = baseRolesByUserId.get(userId) ?? [];
+    roles.push(role);
+    baseRolesByUserId.set(userId, roles);
+  }
+  const roleChangesByUserId = new Map<string, RoleChangeFact[]>();
+  for (const { userId, ...change } of latestRoleChangeRows) {
+    const changes = roleChangesByUserId.get(userId) ?? [];
+    changes.push(change);
+    roleChangesByUserId.set(userId, changes);
+  }
+  const facilityIdsByUserId = new Map<string, string[]>();
+  for (const { userId, facilityId } of facilityRows) {
+    const facilityIds = facilityIdsByUserId.get(userId) ?? [];
+    facilityIds.push(facilityId);
+    facilityIdsByUserId.set(userId, facilityIds);
+  }
+
+  return Object.freeze(
+    rows.map((row) =>
+      UserSchema.parse({
+        id: row.id,
+        googleSubject: row.googleSubject,
+        email: row.email,
+        displayName: row.displayName,
+        roles: projectEffectiveRoles(
+          baseRolesByUserId.get(row.id) ?? [],
+          roleChangesByUserId.get(row.id) ?? [],
+        ),
+        facilityScope:
+          row.facilityScopeKind === 'district'
+            ? { kind: 'district' }
+            : {
+                kind: 'facilities',
+                facilityIds: facilityIdsByUserId.get(row.id) ?? [],
+              },
+        createdAt: row.createdAt.toISOString(),
+        disabledAt: row.disabledAt?.toISOString() ?? null,
+      }),
+    ),
+  );
+}
+
 async function listUsers(
   database: AdminQueryDatabase,
   input: CapabilityInput<'list-users'>,
@@ -174,7 +261,7 @@ async function listUsers(
     .select({ userId: userRoles.userId })
     .from(userRoles);
   const rows = await database
-    .select({ id: users.id })
+    .select()
     .from(users)
     .where(
       and(
@@ -192,14 +279,7 @@ async function listUsers(
     .offset(offset)
     .limit(input.limit + 1);
   const selected = rows.slice(0, input.limit);
-  const items: User[] = [];
-  for (const { id } of selected) {
-    const user = await loadUser(database, id);
-    if (user === null) {
-      throw conflict('A listed user could not be reloaded.');
-    }
-    items.push(user);
-  }
+  const items = await projectUserPage(database, selected);
   const hasMore = rows.length > input.limit;
   return UserPageSchema.parse({
     items,
