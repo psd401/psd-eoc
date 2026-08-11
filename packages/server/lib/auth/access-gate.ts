@@ -14,7 +14,7 @@ import {
   type SecurityAuditEntry,
   type User,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, like, or, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
@@ -495,6 +495,19 @@ export function createDrizzleAccessGateStore(
             and(
               eq(securityAuditEntries.action, 'update-group-source'),
               eq(securityAuditEntries.outcome, 'success'),
+              or(
+                and(
+                  eq(securityAuditEntries.targetKind, 'configuration'),
+                  like(securityAuditEntries.targetId, 'group-source:access:%'),
+                ),
+                // Before purpose-specific targets shipped, every successful
+                // update used this generic target. Retain the conservative
+                // fail-closed interpretation until a later access sync.
+                and(
+                  eq(securityAuditEntries.targetKind, 'capability'),
+                  eq(securityAuditEntries.targetId, 'update-group-source'),
+                ),
+              ),
             ),
           )
           .orderBy(

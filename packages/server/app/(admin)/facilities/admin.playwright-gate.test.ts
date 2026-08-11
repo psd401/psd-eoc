@@ -18,7 +18,7 @@ describe('issue #26 administration Playwright gate', () => {
   });
 
   testWithDatabase(
-    'runs keyboard, semantic, safety, and optional axe checks with a synthetic database',
+    'runs keyboard, semantic, safety, and axe checks with a synthetic database',
     async () => {
       const child = Bun.spawn(
         [

@@ -1,4 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
+
+const BUNDLED_AXE_PATH = fileURLToPath(
+  new URL(
+    '../../(app)/events/[id]/axe-core-4.10.3.min.js.txt',
+    import.meta.url,
+  ),
+);
 
 const ADMIN_PAGES = Object.freeze([
   {
@@ -89,14 +97,7 @@ test('test mode is unmistakable and SMS cannot be enabled in the browser', async
 });
 
 test('all issue #26 admin pages are axe clean', async ({ page }) => {
-  const axePath = process.env.PSD_EOC_AXE_PATH;
-  test.skip(
-    axePath === undefined,
-    'Set PSD_EOC_AXE_PATH to an ephemeral axe.min.js for the explicit axe gate.',
-  );
-  if (axePath === undefined) {
-    throw new Error('PSD_EOC_AXE_PATH was not provided.');
-  }
+  const axePath = process.env.PSD_EOC_AXE_PATH ?? BUNDLED_AXE_PATH;
 
   for (const adminPage of ADMIN_PAGES) {
     await openAdminPage(page, adminPage.path, adminPage.heading);

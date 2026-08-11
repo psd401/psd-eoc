@@ -7,6 +7,7 @@ import {
   type CapabilityOutput,
   type RegisteredCapabilityId,
   type SecurityAuditCategory,
+  type SecurityAuditTarget,
 } from '@psd-eoc/contracts';
 import { and, desc, eq, sql } from 'drizzle-orm';
 
@@ -71,6 +72,7 @@ export interface AdminCapabilityTransaction
   readonly database: AdminQueryDatabase;
   assertAuditRequestAvailable(requestId: string): Promise<void>;
   requireAdministrator(actor: Actor): void;
+  setAuditTarget(target: SecurityAuditTarget): void;
 }
 
 /** Shared idempotency and atomic-audit store used by every admin route tree. */
@@ -242,6 +244,7 @@ function auditCategory(event: CapabilityAuditEvent): SecurityAuditCategory {
 async function appendCapabilityAudit(
   database: AdminQueryDatabase,
   event: CapabilityAuditEvent,
+  target: SecurityAuditTarget | null = null,
 ): Promise<void> {
   await database.execute(SECURITY_AUDIT_APPEND_LOCK_SQL);
   const [anchor] = await database
@@ -296,7 +299,7 @@ async function appendCapabilityAudit(
       outcome: event.outcome,
       principal: event.actor,
       source: event.source,
-      target: { kind: 'capability', id: event.action },
+      target: target ?? { kind: 'capability', id: event.action },
       requestId: event.requestId,
       occurredAt: event.occurredAt.toISOString(),
       ...(event.actionIds === undefined ? {} : { actionIds: event.actionIds }),
@@ -362,6 +365,7 @@ function createAdminTransaction(
   database: AdminQueryDatabase,
   authenticated: AuthenticatedSession,
 ): AdminCapabilityTransaction {
+  let auditTarget: SecurityAuditTarget | null = null;
   return {
     database,
     assertAuditRequestAvailable: (requestId) =>
@@ -371,7 +375,11 @@ function createAdminTransaction(
     completeIdempotency: (input) => completeIdempotency(database, input),
     getHumanConfirmation: () => Promise.resolve(null),
     consumeHumanConfirmation: () => Promise.resolve(false),
-    appendCapabilityAudit: (event) => appendCapabilityAudit(database, event),
+    appendCapabilityAudit: (event) =>
+      appendCapabilityAudit(database, event, auditTarget),
+    setAuditTarget(target) {
+      auditTarget = target;
+    },
     requireAdministrator(actor) {
       if (
         !sameHumanActor(actor, authenticated.actor) ||

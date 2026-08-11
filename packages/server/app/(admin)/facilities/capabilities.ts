@@ -831,6 +831,11 @@ async function updateGroupSource(
     throw conflict('Group kind, purpose, and facility cannot be changed.');
   }
   if (current.purpose !== 'access') {
+    if (!input.active) {
+      throw conflict(
+        'A building or others correction must create an active replacement source.',
+      );
+    }
     await assertGroupIdentityAvailable(database, input, null);
     const [row] = await database
       .insert(groupSources)
@@ -1458,8 +1463,14 @@ export const updateGroupSourceRegistration: ServerCapabilityRegistration<
     const source = await getGroupSource(context.transaction.database, input.id);
     return source?.facilityId ?? null;
   },
-  handler: (input, context) =>
-    updateGroupSource(context.transaction.database, input),
+  async handler(input, context) {
+    const output = await updateGroupSource(context.transaction.database, input);
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: `group-source:${output.purpose}:${output.id}`,
+    });
+    return output;
+  },
   resultReference: (output) => resultReference(output.id, null, output),
   async loadReplay(reference, context) {
     const parsed = parseResultReference(reference);
