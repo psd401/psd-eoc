@@ -453,6 +453,131 @@ dd {
   text-align: right;
 }
 
+.location-editor {
+  display: grid;
+  gap: 0.8rem;
+  margin-block: 0.8rem;
+}
+
+.location-state-options {
+  display: grid;
+  gap: 0.4rem;
+  border: 1px solid #94a3b8;
+  border-radius: 0.45rem;
+  padding: 0.7rem;
+}
+
+.location-state-options label {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  min-height: 2.75rem;
+  font-weight: 700;
+}
+
+.location-state-options input {
+  flex: 0 0 auto;
+  min-height: 1.35rem;
+  width: 1.35rem;
+  height: 1.35rem;
+}
+
+.location-coordinate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.location-accuracy,
+.location-map-fallback,
+.location-text-equivalent {
+  border-left: 0.3rem solid #174ea6;
+  background: #eff6ff;
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+}
+
+.location-status {
+  min-height: 1.5rem;
+  margin: 0;
+  font-weight: 700;
+}
+
+.location-entry-content {
+  display: grid;
+  gap: 0.65rem;
+  white-space: normal;
+}
+
+.location-map-frame {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #64748b;
+  border-radius: 0.45rem;
+  background: #e2e8f0;
+}
+
+.location-map-canvas,
+.location-map-canvas.maplibregl-map {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  min-height: 15rem;
+}
+
+.location-map-canvas .maplibregl-canvas-container,
+.location-map-canvas .maplibregl-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.location-map-canvas .maplibregl-canvas-container {
+  touch-action: none;
+  user-select: none;
+}
+
+.location-map-canvas .maplibregl-canvas {
+  cursor: grab;
+}
+
+.location-map-canvas .maplibregl-canvas:active {
+  cursor: grabbing;
+}
+
+.location-map-canvas .maplibregl-marker {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  will-change: transform;
+}
+
+.location-map-marker {
+  display: block;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 0.3rem solid #fff;
+  border-radius: 50%;
+  background: #b91c1c;
+  box-shadow: 0 0 0 0.15rem #7f1d1d;
+  cursor: grab;
+}
+
+.location-map-marker:active {
+  cursor: grabbing;
+}
+
+.location-map-attribution {
+  margin: 0;
+  border-top: 1px solid #94a3b8;
+  background: #fff;
+  color: #334155;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.5rem;
+}
+
 .photo-entry {
   display: grid;
   gap: 0.65rem;
