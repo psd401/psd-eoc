@@ -2925,11 +2925,21 @@ test('same-ID real-to-drill poll data fails closed without changing the room cla
       const upstream = await route.fetch({ url: url.toString() });
       const value = (await upstream.json()) as Record<string, unknown>;
       const event = value.event as Record<string, unknown>;
+      const header = value.header as Record<string, unknown>;
+      const eventType = header.eventType as Record<string, unknown>;
       classificationSwapReturned = true;
       await route.fulfill({
         response: upstream,
         json: {
           ...value,
+          header: {
+            ...header,
+            eventType: {
+              ...eventType,
+              id: '00000000-0000-4000-8000-000000000201',
+              templateMode: 'drill',
+            },
+          },
           event: {
             ...event,
             kind: 'drill',

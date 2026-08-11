@@ -1268,10 +1268,11 @@ export const CAPABILITY_CATALOG = Object.freeze({
     id: 'sync-event-room',
     operation: 'query',
     safetyEffect: 'none',
-    // Binding issue #77 operational sign-off: this web-human-only, read-only
-    // high-frequency sync omits successful chain writes so 1,200 pollers do
-    // not serialize incident mutations. Denials/failures remain audited, and
-    // the catalog invariants below prohibit this policy for agents/mutations.
+    // Binding issue #77 operational sign-off: this human-interactive,
+    // read-only high-frequency sync omits successful chain writes so 1,200
+    // pollers do not serialize incident mutations. Denials/failures remain
+    // audited, and the catalog invariants below prohibit this policy for
+    // agents, non-interactive sources, and mutations.
     auditPolicy: 'denied-and-failed',
     inputSchema: SyncEventRoomInputSchema,
     outputSchema: EventRoomSyncResultSchema,
@@ -1562,7 +1563,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'get-stale-roster-report': humanAgentInvocationPolicy,
   'list-active-events': humanAgentInvocationPolicy,
   'get-event': humanAgentInvocationPolicy,
-  'sync-event-room': humanWebAdministrationInvocationPolicy,
+  'sync-event-room': humanInteractiveInvocationPolicy,
   'list-journal-entries': humanAgentInvocationPolicy,
   'search-journal-entries': humanAgentInvocationPolicy,
   'get-media-read-grant': humanAgentInvocationPolicy,
@@ -2066,8 +2067,9 @@ function assertCatalogInvocationPolicies(): void {
         policy.agentGrantable ||
         policy.principalKinds.length !== 1 ||
         policy.principalKinds[0] !== 'human' ||
-        policy.sources.length !== 1 ||
-        policy.sources[0] !== 'web')
+        policy.sources.length !== 2 ||
+        !policy.sources.includes('web') ||
+        !policy.sources.includes('mobile'))
     ) {
       throw new Error(
         `Reduced success auditing is not permitted for ${capabilityId}.`,
