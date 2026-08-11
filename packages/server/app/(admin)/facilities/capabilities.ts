@@ -1489,6 +1489,10 @@ export const updateGroupSourceRegistration: ServerCapabilityRegistration<
     );
     if (output === null) throw conflict('The group source is unavailable.');
     assertReplayOutput(parsed, output);
+    context.transaction.setAuditTarget({
+      kind: 'configuration',
+      id: output.id,
+    });
     return output;
   },
   async resolveReplayFacilityId(reference, context) {
