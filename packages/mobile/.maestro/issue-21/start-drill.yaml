@@ -1,0 +1,41 @@
+appId: net.psd401.eoc
+name: Issue 21 - start a synthetic drill in exactly three taps
+tags:
+  - issue-21
+  - synthetic-only
+---
+# Preconditions are intentionally fail-visible: the app is already unlocked,
+# exactly one synthetic site is assigned, and every provider is a fail-closed
+# mock. Never bypass the synthetic-mode assertion or run this against live data.
+- launchApp:
+    clearState: false
+    stopApp: true
+- assertVisible:
+    id: 'issue-21-synthetic-mode'
+- assertVisible:
+    id: 'issue-21-start-drill'
+
+# Tap 1: the one-site action chooses both site and DRILL mode.
+- tapOn:
+    id: 'issue-21-start-drill'
+- assertVisible: 'DRILL — PRACTICE'
+- assertVisible:
+    id: 'issue-21-drill-event-type'
+
+# Tap 2: choose the seeded synthetic drill event type.
+- tapOn:
+    id: 'issue-21-drill-event-type'
+- assertVisible: 'DRILL — PRACTICE'
+- assertVisible: '.*synthetic recipient.*'
+- assertVisible:
+    id: 'issue-21-confirm-drill'
+
+# Tap 3: the final authenticated-human confirmation performs the activation.
+- tapOn:
+    id: 'issue-21-confirm-drill'
+- extendedWaitUntil:
+    visible:
+      id: 'issue-21-activation-result'
+    timeout: 15000
+- assertVisible: 'Drill started'
+- assertVisible: '.*durably accepted.*recorded its notification intent.*'

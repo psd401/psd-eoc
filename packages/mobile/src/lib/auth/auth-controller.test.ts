@@ -3,7 +3,9 @@ import { describe, expect, test } from 'bun:test';
 import type { MobileSessionResponse } from '@psd-eoc/contracts';
 
 import {
+  createAuthenticatedRequestTransport,
   MobileAuthController,
+  type AuthenticatedRequestTransport,
   type AuthStorage,
   type AuthTimer,
   type LocalAuthenticator,
@@ -147,6 +149,7 @@ function controller(
     success: true as const,
   }),
   overrides: Readonly<{
+    authenticatedRequest?: AuthenticatedRequestTransport;
     now?: () => Date;
     timer?: AuthTimer;
   }> = {},
@@ -154,6 +157,9 @@ function controller(
   return new MobileAuthController({
     storage,
     api,
+    authenticatedRequest:
+      overrides.authenticatedRequest ??
+      (async () => new Response(null, { status: 204 })),
     localAuthenticator: { authenticate },
     createIdempotencyKey: () => 'mobile-refresh-idempotency-0001',
     now: overrides.now ?? (() => TEST_NOW),
@@ -610,5 +616,163 @@ describe('mobile auth controller', () => {
     expect(storage.clearCount).toBe(1);
     expect(revokeCount).toBe(1);
     expect(auth.getSnapshot().phase).toBe('signed-out');
+  });
+
+  test('keeps the bearer inside the authenticated request seam', async () => {
+    const storage = new FakeStorage(null);
+    const calls: Array<Readonly<{ bearer: string; input: unknown }>> = [];
+    const response = new Response('{"ok":true}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => successfulPayload(),
+        revoke: async () => {},
+      },
+      undefined,
+      {
+        authenticatedRequest: async (bearer, input) => {
+          calls.push({ bearer, input });
+          return response;
+        },
+      },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+
+    await expect(
+      auth.authenticatedRequest({
+        operation: 'query',
+        method: 'GET',
+        path: '/api/events',
+      }),
+    ).resolves.toBe(response);
+    expect(calls).toEqual([
+      {
+        bearer: TEST_TOKEN,
+        input: {
+          operation: 'query',
+          method: 'GET',
+          path: '/api/events',
+        },
+      },
+    ]);
+    expect(JSON.stringify(auth.getSnapshot())).not.toContain(TEST_TOKEN);
+  });
+
+  test('denies offline mutation requests before the bearer-aware transport', async () => {
+    const storage = new FakeStorage(storedVault());
+    let transportCalls = 0;
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => {
+          throw new MobileAuthError('offline', 'unreachable');
+        },
+        revoke: async () => {},
+      },
+      undefined,
+      {
+        authenticatedRequest: async () => {
+          transportCalls += 1;
+          return new Response(null, { status: 204 });
+        },
+      },
+    );
+    await auth.bootstrap();
+    await auth.foreground();
+    expect(auth.getSnapshot().phase).toBe('offline-cached');
+
+    expect(() =>
+      auth.authenticatedRequest({
+        operation: 'mutation',
+        method: 'POST',
+        path: '/api/mobile/start/activate',
+        body: '{}',
+        idempotencyKey: 'mobile-start-idempotency-0001',
+      }),
+    ).toThrow(OfflineMutationDeniedError);
+    expect(transportCalls).toBe(0);
+  });
+});
+
+describe('authenticated request transport', () => {
+  test('resolves only app-relative paths and injects the bearer privately', async () => {
+    const calls: Array<Readonly<{ input: string; init: RequestInit }>> = [];
+    const response = new Response(null, { status: 204 });
+    const transport = createAuthenticatedRequestTransport(
+      () => 'https://eoc.psd401.net',
+      async (input, init) => {
+        calls.push({ input, init });
+        return response;
+      },
+    );
+
+    await expect(
+      transport(TEST_TOKEN, {
+        operation: 'mutation',
+        method: 'POST',
+        path: '/api/mobile/start/activate',
+        body: '{"source":"activation-preview"}',
+        idempotencyKey: 'mobile-start-idempotency-0001',
+      }),
+    ).resolves.toBe(response);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.input).toBe(
+      'https://eoc.psd401.net/api/mobile/start/activate',
+    );
+    expect(calls[0]?.init).toEqual({
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${TEST_TOKEN}`,
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'mobile-start-idempotency-0001',
+      },
+      body: '{"source":"activation-preview"}',
+    });
+  });
+
+  test('rejects origins, credentials, and mutation metadata disguised as paths', async () => {
+    let fetchCalls = 0;
+    const transport = createAuthenticatedRequestTransport(
+      () => 'https://eoc.psd401.net',
+      async () => {
+        fetchCalls += 1;
+        return new Response(null, { status: 204 });
+      },
+    );
+    const invalidPaths = [
+      'https://attacker.invalid/api/events',
+      '//attacker.invalid/api/events',
+      '//user:password@eoc.psd401.net/api/events',
+      '/api/events#fragment',
+    ];
+
+    for (const path of invalidPaths) {
+      await expect(
+        transport(TEST_TOKEN, {
+          operation: 'query',
+          method: 'GET',
+          path,
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+    await expect(
+      transport(TEST_TOKEN, {
+        operation: 'query',
+        method: 'GET',
+        path: '/api/events',
+        idempotencyKey: 'mobile-start-idempotency-0001',
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(fetchCalls).toBe(0);
   });
 });

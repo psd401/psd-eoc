@@ -28,6 +28,10 @@ function AuthenticatedStack() {
         <Stack.Protected guard={hasCachedShell}>
           <Stack.Screen name="index" options={{ title: 'PSD EOC' }} />
           <Stack.Screen
+            name="start/index"
+            options={{ headerShown: false, title: 'Start event' }}
+          />
+          <Stack.Screen
             name="preview/real"
             options={{ title: 'Real incident preview' }}
           />

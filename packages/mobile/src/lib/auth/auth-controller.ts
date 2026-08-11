@@ -1,6 +1,7 @@
-import type {
-  MobileSessionResponse,
-  SessionEstablishmentResult,
+import {
+  IdempotencyKeySchema,
+  type MobileSessionResponse,
+  type SessionEstablishmentResult,
 } from '@psd-eoc/contracts';
 
 import { MobileAuthError, OfflineMutationDeniedError } from './auth-errors';
@@ -61,6 +62,29 @@ export interface SessionApi {
   ): Promise<void>;
 }
 
+export interface AuthenticatedRequestInput {
+  readonly operation: 'query' | 'mutation';
+  readonly method: 'GET' | 'POST';
+  readonly path: string;
+  readonly body?: string;
+  readonly idempotencyKey?: string;
+  readonly signal?: AbortSignal;
+}
+
+export type MobileAuthenticatedRequest = (
+  input: AuthenticatedRequestInput,
+) => Promise<Response>;
+
+export type AuthenticatedFetch = (
+  input: string,
+  init: RequestInit,
+) => Promise<Response>;
+
+export type AuthenticatedRequestTransport = (
+  bearer: string,
+  input: AuthenticatedRequestInput,
+) => Promise<Response>;
+
 export interface AuthTimer {
   schedule(callback: () => void, delayMilliseconds: number): unknown;
   cancel(handle: unknown): void;
@@ -68,11 +92,114 @@ export interface AuthTimer {
 
 export interface MobileAuthControllerDependencies {
   readonly api: SessionApi;
+  readonly authenticatedRequest: AuthenticatedRequestTransport;
   readonly createIdempotencyKey: () => string;
   readonly localAuthenticator: LocalAuthenticator;
   readonly now?: () => Date;
   readonly storage: AuthStorage;
   readonly timer?: AuthTimer;
+}
+
+function hasAsciiControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 0x1f || codePoint === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validatedAuthenticatedRequest(
+  input: AuthenticatedRequestInput,
+): AuthenticatedRequestInput {
+  if (
+    !input.path.startsWith('/') ||
+    input.path.startsWith('//') ||
+    hasAsciiControlCharacter(input.path) ||
+    input.path.includes('#')
+  ) {
+    throw new TypeError('Authenticated requests require an app-relative path.');
+  }
+  const parsedPath = new URL(input.path, 'https://psd-eoc.invalid');
+  if (
+    parsedPath.origin !== 'https://psd-eoc.invalid' ||
+    parsedPath.username.length > 0 ||
+    parsedPath.password.length > 0
+  ) {
+    throw new TypeError('Authenticated requests require an app-relative path.');
+  }
+  if (input.method === 'GET' && input.body !== undefined) {
+    throw new TypeError('Authenticated GET requests cannot carry a body.');
+  }
+  if (input.method === 'GET' && input.idempotencyKey !== undefined) {
+    throw new TypeError(
+      'Authenticated GET requests cannot carry mutation metadata.',
+    );
+  }
+  if (input.method === 'POST' && input.body === undefined) {
+    throw new TypeError('Authenticated POST requests require a JSON body.');
+  }
+  if (input.operation === 'mutation') {
+    if (input.method !== 'POST') {
+      throw new TypeError('Authenticated mutations require POST.');
+    }
+    IdempotencyKeySchema.parse(input.idempotencyKey ?? '');
+  } else if (input.idempotencyKey !== undefined) {
+    throw new TypeError(
+      'Authenticated queries cannot carry mutation metadata.',
+    );
+  }
+  return Object.freeze({ ...input });
+}
+
+/**
+ * Builds the only bearer-aware network adapter used by mobile UI code. The
+ * caller supplies app-relative paths, while this closure resolves them against
+ * the already-validated PSD EOC origin and injects the credential privately.
+ */
+export function createAuthenticatedRequestTransport(
+  getApiOrigin: () => string,
+  fetchImplementation: AuthenticatedFetch = fetch,
+): AuthenticatedRequestTransport {
+  return async (bearer, rawInput) => {
+    const input = validatedAuthenticatedRequest(rawInput);
+    const configuredValue = getApiOrigin();
+    const configured = new URL(configuredValue);
+    if (
+      configured.origin !== configuredValue ||
+      configured.pathname !== '/' ||
+      configured.search.length > 0 ||
+      configured.hash.length > 0 ||
+      configured.username.length > 0 ||
+      configured.password.length > 0
+    ) {
+      throw new TypeError('The PSD EOC API origin is invalid.');
+    }
+    const target = new URL(input.path, `${configured.origin}/`);
+    if (target.origin !== configured.origin) {
+      throw new TypeError(
+        'Authenticated requests require an app-relative path.',
+      );
+    }
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      Authorization: `Bearer ${bearer}`,
+      'Cache-Control': 'no-store',
+    };
+    if (input.method === 'POST') {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (input.idempotencyKey !== undefined) {
+      headers['Idempotency-Key'] = input.idempotencyKey;
+    }
+    return fetchImplementation(target.toString(), {
+      method: input.method,
+      headers,
+      ...(input.body === undefined ? {} : { body: input.body }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    });
+  };
 }
 
 type AuthListener = () => void;
@@ -736,6 +863,21 @@ export class MobileAuthController {
       connectivityEpochId: this.state.connectivityEpochId,
     });
   }
+
+  /**
+   * Performs one online request without returning the bearer to React state or
+   * the caller. Mutations fail before transport whenever connectivity has not
+   * been freshly established, so no offline action can be queued for replay.
+   */
+  public authenticatedRequest: MobileAuthenticatedRequest = (rawInput) => {
+    const input = validatedAuthenticatedRequest(rawInput);
+    this.assertMutationAllowed();
+    const vault = this.vault;
+    if (vault === null) {
+      throw new OfflineMutationDeniedError();
+    }
+    return this.dependencies.authenticatedRequest(vault.refreshToken, input);
+  };
 
   public async signOut(): Promise<void> {
     const current = this.vault;
