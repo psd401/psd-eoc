@@ -519,6 +519,28 @@ describeWithDatabase('event journal database guarantees', () => {
       humanMutationInvocation(`issue16-correct-${randomUUID()}`),
       journalStore,
     );
+    await expect(
+      executeJournalCapability(
+        'correct-journal-entry',
+        textInput(
+          eventId,
+          'A second correction must not fork the supersession history.',
+          '2026-08-10T18:21:30.000Z',
+          {
+            entryId: correctedOriginal.id,
+            entrySequence: correctedOriginal.sequence,
+            kind: 'correction',
+            reason: 'Synthetic duplicate correction attempt.',
+          },
+        ),
+        humanMutationInvocation(`issue77-duplicate-correct-${randomUUID()}`),
+        journalStore,
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message:
+        'A journal correction cannot target an entry that is already superseded.',
+    });
     const redaction = await executeJournalCapability(
       'redact-journal-entry',
       textInput(
@@ -535,6 +557,27 @@ describeWithDatabase('event journal database guarantees', () => {
       humanMutationInvocation(`issue16-redact-${randomUUID()}`),
       journalStore,
     );
+    await expect(
+      executeJournalCapability(
+        'redact-journal-entry',
+        textInput(
+          eventId,
+          '[Content redacted; original retained in append-only history.]',
+          '2026-08-10T18:22:30.000Z',
+          {
+            entryId: correctedOriginal.id,
+            entrySequence: correctedOriginal.sequence,
+            kind: 'redaction',
+            reason: 'Synthetic duplicate redaction attempt.',
+          },
+        ),
+        humanMutationInvocation(`issue77-duplicate-redact-${randomUUID()}`),
+        journalStore,
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message: 'The journal entry already has an append-only redaction.',
+    });
 
     const lateJoin = await listJournal(journalStore, eventId, null, 200);
     expect(lateJoin.items.map(({ entry }) => entry.id)).toEqual([
@@ -604,6 +647,157 @@ describeWithDatabase('event journal database guarantees', () => {
       supersessionReason:
         'Synthetic sensitive detail was posted unnecessarily.',
     });
+  });
+
+  test('serializes a winning redaction before concurrent correction and duplicate redaction attempts', async () => {
+    const journalStore = store();
+    const eventId = await createActiveSyntheticEvent();
+    const original = await appendText(
+      journalStore,
+      eventId,
+      'Synthetic detail that must remain hidden after redaction.',
+      '2026-08-10T18:24:00.000Z',
+    );
+
+    let releaseWinningRedaction: () => void = () => undefined;
+    const winningRedactionRelease = new Promise<void>((resolve) => {
+      releaseWinningRedaction = resolve;
+    });
+    let markWinningRedactionLocked: () => void = () => undefined;
+    const winningRedactionLocked = new Promise<void>((resolve) => {
+      markWinningRedactionLocked = resolve;
+    });
+    const winningRedactionStore: JournalCapabilityStore = {
+      ...journalStore,
+      transaction(operation) {
+        return journalStore.transaction((transaction) =>
+          operation({
+            ...transaction,
+            async lockEventForJournal(candidateEventId) {
+              const locked =
+                await transaction.lockEventForJournal(candidateEventId);
+              if (candidateEventId === eventId) {
+                markWinningRedactionLocked();
+                await winningRedactionRelease;
+              }
+              return locked;
+            },
+          }),
+        );
+      },
+    };
+
+    const winningRedactionPromise = executeJournalCapability(
+      'redact-journal-entry',
+      textInput(
+        eventId,
+        '[Content redacted; original retained in append-only history.]',
+        '2026-08-10T18:25:00.000Z',
+        {
+          entryId: original.id,
+          entrySequence: original.sequence,
+          kind: 'redaction',
+          reason: 'Synthetic concurrent redaction winner.',
+        },
+      ),
+      humanMutationInvocation(`issue77-winning-redact-${randomUUID()}`),
+      winningRedactionStore,
+    );
+    await winningRedactionLocked;
+
+    const lockAttemptStore = (
+      markAttempted: () => void,
+    ): JournalCapabilityStore => ({
+      ...journalStore,
+      transaction(operation) {
+        return journalStore.transaction((transaction) =>
+          operation({
+            ...transaction,
+            lockEventForJournal(candidateEventId) {
+              const locked = transaction.lockEventForJournal(candidateEventId);
+              if (candidateEventId === eventId) markAttempted();
+              return locked;
+            },
+          }),
+        );
+      },
+    });
+    let markCorrectionWaiting: () => void = () => undefined;
+    const correctionWaiting = new Promise<void>((resolve) => {
+      markCorrectionWaiting = resolve;
+    });
+    let markDuplicateRedactionWaiting: () => void = () => undefined;
+    const duplicateRedactionWaiting = new Promise<void>((resolve) => {
+      markDuplicateRedactionWaiting = resolve;
+    });
+
+    const correctionResultPromise = executeJournalCapability(
+      'correct-journal-entry',
+      textInput(
+        eventId,
+        'This stale correction must never become visible.',
+        '2026-08-10T18:25:01.000Z',
+        {
+          entryId: original.id,
+          entrySequence: original.sequence,
+          kind: 'correction',
+          reason: 'Synthetic correction racing a redaction.',
+        },
+      ),
+      humanMutationInvocation(`issue77-racing-correct-${randomUUID()}`),
+      lockAttemptStore(markCorrectionWaiting),
+    ).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+    const duplicateRedactionResultPromise = executeJournalCapability(
+      'redact-journal-entry',
+      textInput(
+        eventId,
+        '[Content redacted; original retained in append-only history.]',
+        '2026-08-10T18:25:02.000Z',
+        {
+          entryId: original.id,
+          entrySequence: original.sequence,
+          kind: 'redaction',
+          reason: 'Synthetic redaction racing the winning redaction.',
+        },
+      ),
+      humanMutationInvocation(`issue77-racing-redact-${randomUUID()}`),
+      lockAttemptStore(markDuplicateRedactionWaiting),
+    ).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+
+    await Promise.all([correctionWaiting, duplicateRedactionWaiting]);
+    releaseWinningRedaction();
+
+    const [winningRedaction, correctionResult, duplicateRedactionResult] =
+      await Promise.all([
+        winningRedactionPromise,
+        correctionResultPromise,
+        duplicateRedactionResultPromise,
+      ]);
+    expect(correctionResult).toMatchObject({
+      code: 'CONFLICT',
+      message:
+        'A journal correction cannot target an entry that is already superseded.',
+    });
+    expect(duplicateRedactionResult).toMatchObject({
+      code: 'CONFLICT',
+      message: 'The journal entry already has an append-only redaction.',
+    });
+
+    const persisted = await databaseConnection()
+      .db.select({ id: journalEntries.id, sequence: journalEntries.sequence })
+      .from(journalEntries)
+      .where(eq(journalEntries.eventId, eventId))
+      .orderBy(asc(journalEntries.sequence));
+    expect(persisted).toEqual([
+      { id: original.id, sequence: 1 },
+      { id: winningRedaction.id, sequence: 2 },
+    ]);
   });
 
   test('agent-grantable list reads omit photo and location payloads redacted on a later page', async () => {

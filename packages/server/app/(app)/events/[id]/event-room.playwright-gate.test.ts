@@ -11,7 +11,6 @@ import {
   requireSyntheticEventRoomTestDatabaseUrl,
   resolveEventRoomPlaywrightRunContext,
   type EventRoomPlaywrightRunContext,
-  waitForEventRoomPlaywrightPortToClose,
 } from './test-database';
 
 const playwrightConfig = fileURLToPath(
@@ -201,30 +200,20 @@ async function waitForPlaywrightChild(
 async function cleanExactGateRun(
   context: EventRoomPlaywrightRunContext,
 ): Promise<void> {
-  const errors: unknown[] = [];
   try {
-    await waitForEventRoomPlaywrightPortToClose(context.appPort);
+    await cleanupEventRoomPlaywrightRunAfterChildExit(context);
   } catch (error) {
     throw new Error(
-      'Event-room Playwright gate refused cleanup while its server port remained open.',
+      'Event-room Playwright gate refused database cleanup before proving its server stopped.',
       { cause: error },
     );
   }
   try {
     await dropOwnedEventRoomPlaywrightDatabase(context);
   } catch (error) {
-    errors.push(error);
-  }
-  try {
-    await cleanupEventRoomPlaywrightRunAfterChildExit(context);
-  } catch (error) {
-    errors.push(error);
-  }
-  if (errors.length > 0) {
-    throw new AggregateError(
-      errors,
-      'Event-room Playwright gate cleanup failed.',
-    );
+    throw new Error('Event-room Playwright gate database cleanup failed.', {
+      cause: error,
+    });
   }
 }
 

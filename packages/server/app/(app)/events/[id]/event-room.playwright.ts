@@ -20,6 +20,7 @@ const AXE_SOURCE_URL = new URL('./axe-core-4.10.3.min.js.txt', import.meta.url);
 const AXE_LICENSE_URL = new URL('./axe-core-4.10.3.LICENSE', import.meta.url);
 
 interface EventRoomFixture {
+  readonly concurrentDialogEventId: string;
   readonly continuationEventId: string;
   readonly dialogFailureEventId: string;
   readonly historyEventId: string;
@@ -33,7 +34,11 @@ interface EventRoomFixture {
   readonly mismatchedAllClearTransitionEventId: string;
   readonly mismatchedTransitionEventId: string;
   readonly newerPollEventId: string;
+  readonly paginatedDialogEventId: string;
+  readonly pendingDialogEventId: string;
+  readonly previewRetryEventId: string;
   readonly realDraftEventId: string;
+  readonly rejectedDialogRaceEventId: string;
   readonly stalePollEventId: string;
   readonly staleLifecycleResponseEventId: string;
   readonly stalledMutationEventId: string;
@@ -449,6 +454,61 @@ async function postExternalUpdate(
   }
 }
 
+async function redactExternalEntry(
+  page: Page,
+  eventId: string,
+  entryId: string,
+  entrySequence: number,
+): Promise<void> {
+  const result = await page.evaluate(
+    async (input) => {
+      const csrf = document.cookie
+        .split(';')
+        .map((part) => part.trim())
+        .find((part) => part.startsWith('__Host-psd-eoc-csrf='))
+        ?.split('=', 2)[1];
+      if (csrf === undefined) {
+        return { ok: false, status: 0, body: 'CSRF cookie missing.' };
+      }
+      const response = await fetch(
+        `/events/${encodeURIComponent(input.eventId)}/api`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': input.idempotencyKey,
+            'X-PSD-EOC-CSRF': decodeURIComponent(csrf),
+          },
+          body: JSON.stringify({
+            operation: 'redact-entry',
+            entryId: input.entryId,
+            entrySequence: input.entrySequence,
+            reason: 'Synthetic concurrent redaction regression.',
+            clientTime: new Date().toISOString(),
+          }),
+        },
+      );
+      return {
+        ok: response.ok,
+        status: response.status,
+        body: await response.text(),
+      };
+    },
+    {
+      eventId,
+      entryId,
+      entrySequence,
+      idempotencyKey: `event-room-redaction-${randomUUID()}`,
+    },
+  );
+  if (!result.ok) {
+    throw new Error(
+      `Synthetic external redaction failed (${result.status}): ${result.body}`,
+    );
+  }
+}
+
 test('late join drains complete ordered history, polls a stable cursor, batches announcements, and is axe-clean', async ({
   page,
 }, testInfo) => {
@@ -776,10 +836,20 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
   await expect(
     page.getByRole('article', { name: 'Entry 5: Text update' }),
   ).toContainText('Reason: Synthetic accuracy correction');
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'timeline correction confirmed by the server.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('No request was sent');
 
   await page.getByRole('button', { name: 'Redact entry 1' }).press('Enter');
   const redactionDialog = page.getByRole('dialog');
   await expect(redactionDialog).toContainText('DRILL — TRAINING ONLY');
+  await expect(redactionDialog.locator('.mutation-status')).toHaveText('');
+  await expect(redactionDialog).not.toContainText(
+    'timeline correction confirmed by the server.',
+  );
   await expect(page.getByLabel('Reason for redaction')).toBeFocused();
   await page
     .getByLabel('Reason for redaction')
@@ -795,6 +865,12 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
   await expect(
     page.getByRole('article', { name: 'Entry 6: Text update' }),
   ).toContainText('Reason: Synthetic privacy-safe redaction');
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'timeline redaction confirmed by the server.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('No request was sent');
   const redactedProjection = await page.evaluate(async (eventId) => {
     const response = await fetch(`/events/${encodeURIComponent(eventId)}/api`, {
       credentials: 'same-origin',
@@ -815,6 +891,342 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
     'Synthetic ordered history 001',
   );
   await expectAxeClean(page, 'event room after correction and redaction');
+});
+
+test('a concurrent redaction immediately removes and invalidates an open correction dialog', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.concurrentDialogEventId));
+  await expect(page.locator('.connection-line')).toContainText('Connected');
+
+  const original = page.getByRole('article', {
+    name: 'Entry 1: Text update',
+  });
+  const articleId = await original.getAttribute('id');
+  if (articleId === null || !articleId.startsWith('entry-')) {
+    throw new Error('Synthetic correction target is missing its entry ID.');
+  }
+  const entryId = articleId.slice('entry-'.length);
+  await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(page.getByLabel('Corrected text')).toHaveValue(
+    'Synthetic ordered history 001',
+  );
+
+  await redactExternalEntry(page, fixture.concurrentDialogEventId, entryId, 1);
+
+  await expect(dialog).not.toBeVisible({ timeout: 8_000 });
+  await expect(
+    page.getByText('Synthetic ordered history 001', { exact: true }),
+  ).toHaveCount(0);
+  await expect(original).toContainText(
+    'Original content is hidden because a later append-only redaction supersedes this entry.',
+  );
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'Entry 1 changed while the dialog was open. No request was sent',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Append correction' }),
+  ).toHaveCount(0);
+  await expectAxeClean(page, 'event room after concurrent dialog redaction');
+});
+
+test('a committed correction with a delayed response never reports that no request was sent', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let resolveCommitted: () => void = () => undefined;
+  const committed = new Promise<void>((resolve) => {
+    resolveCommitted = resolve;
+  });
+  let releaseResponse: () => void = () => undefined;
+  const responseRelease = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(fixture.pendingDialogEventId) &&
+      body?.operation === 'correct-text'
+    ) {
+      const upstream = await route.fetch();
+      resolveCommitted();
+      await responseRelease;
+      await route.fulfill({ response: upstream });
+      return;
+    }
+    await route.continue();
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await page.goto(fixturePath(fixture.pendingDialogEventId));
+    await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+    await page
+      .getByLabel('Corrected text')
+      .fill('Correction committed before acknowledgement');
+    await page
+      .getByLabel('Reason for correction')
+      .fill('Synthetic delayed-response regression');
+    await page
+      .getByRole('button', { name: 'Append correction' })
+      .press('Enter');
+    await committed;
+
+    await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 8_000 });
+    await expect(page.getByLabel('Corrected text')).toHaveCount(0);
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'Sending timeline correction',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No request was sent');
+
+    releaseResponse();
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'timeline correction confirmed by the server.',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No request was sent');
+    await expect(
+      page.getByText('Correction committed before acknowledgement', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    scenarioCompleted = true;
+  } finally {
+    releaseResponse();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
+test('a definite correction rejection remains truthful when a later poll closes the invalidated dialog', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  let releasePoll: () => void = () => undefined;
+  const pollRelease = new Promise<void>((resolve) => {
+    releasePoll = resolve;
+  });
+  let announceHeldPoll: () => void = () => undefined;
+  const heldPoll = new Promise<void>((resolve) => {
+    announceHeldPoll = resolve;
+  });
+  let pollIsHeld = false;
+  await page.goto(fixturePath(fixture.rejectedDialogRaceEventId));
+  await expect(page.locator('.connection-line')).toContainText('Connected');
+
+  const original = page.getByRole('article', {
+    name: 'Entry 1: Text update',
+  });
+  const articleId = await original.getAttribute('id');
+  if (articleId === null || !articleId.startsWith('entry-')) {
+    throw new Error('Synthetic correction target is missing its entry ID.');
+  }
+  const entryId = articleId.slice('entry-'.length);
+  await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+  await page
+    .getByLabel('Corrected text')
+    .fill('Correction rejected after concurrent redaction');
+  await page
+    .getByLabel('Reason for correction')
+    .fill('Synthetic rejected-response ordering');
+
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const appliesToFixture = request
+      .url()
+      .includes(fixture.rejectedDialogRaceEventId);
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      appliesToFixture &&
+      request.method() === 'POST' &&
+      body?.operation === 'correct-text'
+    ) {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'CONFLICT',
+          message: 'Synthetic correction lost the redaction race.',
+          requestId: randomUUID(),
+          retryable: false,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
+    if (appliesToFixture && request.method() === 'GET' && !pollIsHeld) {
+      pollIsHeld = true;
+      announceHeldPoll();
+      await pollRelease;
+    }
+    await route.continue();
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await redactExternalEntry(
+      page,
+      fixture.rejectedDialogRaceEventId,
+      entryId,
+      1,
+    );
+    await heldPoll;
+    await page
+      .getByRole('button', { name: 'Append correction' })
+      .press('Enter');
+
+    const dialogAlert = page.getByRole('dialog').getByRole('alert');
+    await expect(dialogAlert).toBeVisible();
+    await expect(dialogAlert).toBeFocused();
+    const rejection = await dialogAlert.textContent();
+    expect(rejection).toContain(
+      'Synthetic correction lost the redaction race.',
+    );
+    await expect(
+      page.getByRole('dialog').locator('.mutation-status'),
+    ).toContainText('The server rejected the request.');
+
+    releasePoll();
+    await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 8_000 });
+    await expect(page.getByLabel('Corrected text')).toHaveCount(0);
+    const outerError = page.locator('.event-room > .error-panel');
+    await expect(outerError).toBeVisible();
+    await expect(outerError).toBeFocused();
+    await expect(outerError).toHaveText(rejection ?? '');
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'The server rejected the request.',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No request was sent');
+    await expect(
+      page.getByText('Synthetic ordered history 001', { exact: true }),
+    ).toHaveCount(0);
+    await expect(original).toContainText(
+      'Original content is hidden because a later append-only redaction supersedes this entry.',
+    );
+    scenarioCompleted = true;
+  } finally {
+    releasePoll();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
+test('paginated catch-up hides raw correction content before its terminal page arrives', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const rawText = 'Synthetic ordered history 001';
+  let mutationsReady = false;
+  let timelineRequests = 0;
+  let resolveFirstPageSeen: () => void = () => undefined;
+  const firstPageSeen = new Promise<void>((resolve) => {
+    resolveFirstPageSeen = resolve;
+  });
+  let resolveTerminalHeld: () => void = () => undefined;
+  const terminalHeld = new Promise<void>((resolve) => {
+    resolveTerminalHeld = resolve;
+  });
+  let releaseTerminal: () => void = () => undefined;
+  const terminalRelease = new Promise<void>((resolve) => {
+    releaseTerminal = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    if (
+      !mutationsReady ||
+      request.method() !== 'GET' ||
+      !request.url().includes(fixture.paginatedDialogEventId)
+    ) {
+      await route.continue();
+      return;
+    }
+    timelineRequests += 1;
+    const upstream = await route.fetch();
+    const value = (await upstream.json()) as {
+      entries?: unknown[];
+      hasMore?: boolean;
+    };
+    if (timelineRequests === 1) {
+      expect(value.hasMore).toBe(true);
+      expect(value.entries).toHaveLength(100);
+      expect(JSON.stringify(value.entries)).not.toContain(rawText);
+      expect(JSON.stringify(value.entries)).toContain('redaction');
+      resolveFirstPageSeen();
+      await route.fulfill({ response: upstream, json: value });
+      return;
+    }
+    if (timelineRequests === 2) {
+      expect(value.hasMore).toBe(false);
+      resolveTerminalHeld();
+      await terminalRelease;
+    }
+    await route.fulfill({ response: upstream, json: value });
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await page.goto(fixturePath(fixture.paginatedDialogEventId));
+    const original = page.getByRole('article', {
+      name: 'Entry 1: Text update',
+    });
+    const articleId = await original.getAttribute('id');
+    if (articleId === null || !articleId.startsWith('entry-')) {
+      throw new Error('Synthetic correction target is missing its entry ID.');
+    }
+    const entryId = articleId.slice('entry-'.length);
+    await page.getByRole('button', { name: 'Correct entry 1' }).press('Enter');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(page.getByLabel('Corrected text')).toHaveValue(rawText);
+
+    await redactExternalEntry(page, fixture.paginatedDialogEventId, entryId, 1);
+    await appendSyntheticBurst(testInfo, fixture.paginatedDialogEventId, 101);
+    mutationsReady = true;
+    await firstPageSeen;
+    await terminalHeld;
+
+    await expect(page.locator('.timeline-panel')).toContainText(
+      'Timeline content remains hidden until all authorized history',
+    );
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByLabel('Corrected text')).toHaveCount(0);
+    await expect(page.getByText(rawText, { exact: true })).toHaveCount(0);
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'Timeline synchronization began while the dialog was open. No request was sent',
+    );
+    await expect(
+      page.getByRole('button', { name: 'Append correction' }),
+    ).toHaveCount(0);
+
+    releaseTerminal();
+    await expect(original).toContainText(
+      'Original content is hidden because a later append-only redaction supersedes this entry.',
+    );
+    scenarioCompleted = true;
+  } finally {
+    releaseTerminal();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
 });
 
 test('same-event but unrelated journal evidence never clears post, correction, or redaction recovery', async ({
@@ -1130,6 +1542,100 @@ test('all-clear preview is POST-only, CSRF-protected, and exactly idempotent wit
   expect(after).toHaveLength(before.length + 1);
 });
 
+test('the preview UI retries the exact committed request and rejects a mismatched acknowledgement', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const before = await lifecyclePreviewIds(
+    testInfo,
+    fixture.previewRetryEventId,
+  );
+  const requestKeys: string[] = [];
+  const requestBodies: string[] = [];
+  let firstCommitted = false;
+  let firstFinished = false;
+  let releaseFirst: () => void = () => undefined;
+  const firstRelease = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route('**/events/*/api', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() !== 'POST' ||
+      !request.url().includes(fixture.previewRetryEventId) ||
+      body?.operation !== 'preview-all-clear'
+    ) {
+      await route.continue();
+      return;
+    }
+    requestKeys.push(request.headers()['idempotency-key'] ?? 'missing');
+    requestBodies.push(request.postData() ?? 'missing');
+    if (requestKeys.length === 1) {
+      const committed = await route.fetch();
+      expect(committed.ok()).toBe(true);
+      firstCommitted = true;
+      await firstRelease;
+      await route.abort('timedout').catch(() => undefined);
+      firstFinished = true;
+      return;
+    }
+    if (requestKeys.length === 2) {
+      const replay = await route.fetch();
+      expect(replay.ok()).toBe(true);
+      await route.fulfill({
+        response: replay,
+        headers: {
+          ...replay.headers(),
+          'idempotency-key': `event-room-preview-${randomUUID()}`,
+        },
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await page.goto(fixturePath(fixture.previewRetryEventId));
+    await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+    await expect.poll(() => firstCommitted).toBe(true);
+    await expect(page.getByRole('dialog')).toContainText(
+      'The all-clear preview timed out.',
+      { timeout: 12_000 },
+    );
+    releaseFirst();
+    await expect.poll(() => firstFinished).toBe(true);
+
+    await page.getByRole('button', { name: 'Retry preview' }).press('Enter');
+    await expect(page.getByRole('dialog')).toContainText(
+      'PSD EOC did not acknowledge the exact preview request key.',
+    );
+    await page.getByRole('button', { name: 'Retry preview' }).press('Enter');
+    await expect(
+      page.getByRole('heading', { name: 'Notification consequences' }),
+    ).toBeVisible();
+
+    expect(requestKeys).toHaveLength(3);
+    expect(new Set(requestKeys).size).toBe(1);
+    expect(new Set(requestBodies).size).toBe(1);
+    const after = await lifecyclePreviewIds(
+      testInfo,
+      fixture.previewRetryEventId,
+    );
+    expect(after).toHaveLength(before.length + 1);
+    scenarioCompleted = true;
+  } finally {
+    releaseFirst();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
 test('a blocked all-clear preview keeps classification visible and an operable keyboard dismissal', async ({
   page,
 }, testInfo) => {
@@ -1169,8 +1675,15 @@ test('a blocked all-clear preview keeps classification visible and an operable k
       request.url().includes(fixture.stalledPreviewEventId) &&
       body?.operation === 'preview-all-clear'
     ) {
+      const idempotencyKey = request.headers()['idempotency-key'];
+      expect(idempotencyKey).toBeTruthy();
       await route.fulfill({
-        json: blockedValue,
+        status: 200,
+        contentType: 'application/json',
+        headers: {
+          'Idempotency-Key': idempotencyKey ?? '',
+        },
+        body: JSON.stringify(blockedValue),
       });
       return;
     }
@@ -1207,6 +1720,7 @@ test('a delayed pre-mutation snapshot cannot regress a confirmed all-clear or it
   const retryRelease = new Promise<void>((resolve) => {
     releaseRetry = resolve;
   });
+  let stalePollJson: unknown = null;
   let eventPolls = 0;
   await page.route('**/events/*/api**', async (route) => {
     const request = route.request();
@@ -1219,14 +1733,22 @@ test('a delayed pre-mutation snapshot cannot regress a confirmed all-clear or it
     if (isEventPoll && eventPolls === 1) {
       const upstream = await route.fetch();
       const json = await upstream.json();
+      stalePollJson = json;
       pollCaptured = true;
       await pollRelease;
-      await route.fulfill({ response: upstream, json });
+      await route.fulfill({ response: upstream, json }).catch(() => undefined);
       return;
     }
     if (isEventPoll && eventPolls === 2) {
       retryHeld = true;
       await retryRelease;
+      expect(stalePollJson).not.toBeNull();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        json: stalePollJson,
+      });
+      return;
     }
     await route.continue();
   });
@@ -1251,14 +1773,30 @@ test('a delayed pre-mutation snapshot cannot regress a confirmed all-clear or it
   await expect(page.locator('.event-room > .mutation-status')).toContainText(
     'all-clear confirmed by the server.',
   );
-  await expect(page.locator('.event-status')).toHaveText('All-clear issued');
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'Synchronizing the complete timeline',
+  );
+  await expect(page.locator('.timeline-panel')).toContainText(
+    'Timeline content remains hidden until all authorized history',
+  );
+  await expect(page.locator('.event-status')).toHaveText('Active');
+  await expect(
+    page.getByRole('button', { name: 'Review all-clear' }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Review event close' }),
+  ).toHaveCount(0);
 
   releasePoll();
   await expect.poll(() => retryHeld).toBe(true);
   await expect(page.locator('.timeline-panel')).toContainText(
     'Timeline content remains hidden until all authorized history',
   );
+  await expect(page.locator('.event-status')).toHaveText('Active');
   releaseRetry();
+  await page.waitForTimeout(1_000);
+  expect(eventPolls).toBe(2);
+  await expect.poll(() => eventPolls, { timeout: 12_000 }).toBeGreaterThan(2);
   await expect(
     page.getByText('Snapshot entry captured before all-clear', { exact: true }),
   ).toBeVisible();
