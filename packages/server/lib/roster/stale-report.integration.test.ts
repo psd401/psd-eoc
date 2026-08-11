@@ -41,6 +41,10 @@ import {
 import { migrateDatabase } from '../../drizzle/migrate';
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
 import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from '../../app/(admin)/facilities/owned-database-lifecycle';
+import {
   createDrizzleStaleRosterReportStore,
   createGetStaleRosterReportHandler,
   type StaleRosterAuthorizationContext,
@@ -193,84 +197,68 @@ function requireDatabaseOwnership(
   }
 }
 
-async function closeAfterVerifiedDatabaseCreation(
+function armCleanupAfterVerifiedDatabaseCreation(
   createdContext: StaleReportTestContext,
   marker: string | null | undefined,
-  close: () => Promise<void>,
   latch: DatabaseCleanupLatch = databaseCleanupLatch,
-): Promise<void> {
+): void {
   requireDatabaseOwnership(createdContext, marker);
   // Arm cleanup before close: a connection shutdown failure must not make the
   // already-created, marker-owned child database invisible to setup recovery.
   latch.created = true;
-  await close();
 }
 
 async function createOwnedDatabase(
   createdContext: StaleReportTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  let created = false;
-  let verifiedMarker: string | null | undefined;
-  try {
-    await admin.db.execute(
-      sql.raw(`create database "${createdContext.databaseName}"`),
-    );
-    created = true;
-    await admin.db.execute(
-      sql.raw(
-        `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
-      ),
-    );
-    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    requireDatabaseOwnership(createdContext, marker);
-    verifiedMarker = marker;
-  } catch (error) {
-    if (created) {
-      try {
-        await admin.db.execute(
-          sql.raw(
-            `drop database "${createdContext.databaseName}" with (force)`,
-          ),
-        );
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'Disposable stale-report database creation and rollback both failed.',
-        );
-      }
-    }
-    throw error;
-  } finally {
-    if (verifiedMarker === undefined) {
-      await admin.close();
-    } else {
-      await closeAfterVerifiedDatabaseCreation(
-        createdContext,
-        verifiedMarker,
-        () => admin.close(),
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await admin.db.execute(
+        sql.raw(`create database "${createdContext.databaseName}"`),
       );
-    }
-  }
+      recordCreated();
+      await admin.db.execute(
+        sql.raw(
+          `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+        ),
+      );
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
+      );
+      armCleanupAfterVerifiedDatabaseCreation(createdContext, marker);
+    },
+    closeCreator: () => admin.close(),
+    rollbackWithFreshMarkerProof: () => dropOwnedDatabase(createdContext),
+    failureMessage:
+      'Disposable stale-report database operation, creator close, or marker-owned rollback failed.',
+  });
 }
 
 async function dropOwnedDatabase(
   createdContext: StaleReportTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  try {
-    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    if (marker === undefined) return;
-    requireDatabaseOwnership(createdContext, marker);
-    await admin.db.execute(
-      sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
-    );
-    expect(
-      await readDatabaseMarker(admin, createdContext.databaseName),
-    ).toBeUndefined();
-  } finally {
-    await admin.close();
-  }
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
+      );
+      if (marker === undefined) return;
+      requireDatabaseOwnership(createdContext, marker);
+      await admin.db.execute(
+        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+      );
+      expect(
+        await readDatabaseMarker(admin, createdContext.databaseName),
+      ).toBeUndefined();
+    },
+    cleanup: () => admin.close(),
+    failureMessage:
+      'Disposable stale-report database cleanup and connection close both failed.',
+  });
 }
 
 async function cleanupResources(): Promise<void> {
@@ -679,43 +667,28 @@ async function executeReport(
 }
 
 describe('stale-report database cleanup latch', () => {
-  test('stays armed when connection close fails after ownership verification', async () => {
+  test('arms only after exact ownership verification', () => {
     const syntheticContext = buildContext(
       'postgres://synthetic:synthetic@127.0.0.1:5432/psd_eoc_cleanup_test',
     );
     const latch: DatabaseCleanupLatch = { created: false };
-    let closeCalls = 0;
-    await expect(
-      closeAfterVerifiedDatabaseCreation(
-        syntheticContext,
-        syntheticContext.marker,
-        () => {
-          closeCalls += 1;
-          return Promise.reject(
-            new Error('Synthetic database connection close failure.'),
-          );
-        },
-        latch,
-      ),
-    ).rejects.toThrow('Synthetic database connection close failure.');
-    expect(closeCalls).toBe(1);
+    armCleanupAfterVerifiedDatabaseCreation(
+      syntheticContext,
+      syntheticContext.marker,
+      latch,
+    );
     expect(latch.created).toBe(true);
 
     const unverifiedLatch: DatabaseCleanupLatch = { created: false };
-    await expect(
-      closeAfterVerifiedDatabaseCreation(
+    expect(() =>
+      armCleanupAfterVerifiedDatabaseCreation(
         syntheticContext,
         'wrong-marker',
-        () => {
-          closeCalls += 1;
-          return Promise.resolve();
-        },
         unverifiedLatch,
       ),
-    ).rejects.toThrow(
+    ).toThrow(
       'Refusing to drop a database without the exact issue #26 stale-report ownership marker.',
     );
-    expect(closeCalls).toBe(1);
     expect(unverifiedLatch.created).toBe(false);
   });
 });

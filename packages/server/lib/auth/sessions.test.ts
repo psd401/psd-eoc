@@ -12,6 +12,10 @@ import { and, eq, sql } from 'drizzle-orm';
 
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
 import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from '../../app/(admin)/facilities/owned-database-lifecycle';
+import {
   createDatabaseClient,
   databaseExecuteRows,
   type PostgresDatabaseConnection,
@@ -162,58 +166,55 @@ async function createOwnedDatabase(
   createdContext: SessionTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  let created = false;
-  try {
-    await admin.db.execute(
-      sql.raw(`create database "${createdContext.databaseName}"`),
-    );
-    created = true;
-    await admin.db.execute(
-      sql.raw(
-        `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
-      ),
-    );
-    expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
-      createdContext.marker,
-    );
-  } catch (error) {
-    if (created) {
-      try {
-        await dropOwnedDatabase(createdContext);
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          'Disposable session database creation and rollback both failed.',
-        );
-      }
-    }
-    throw error;
-  } finally {
-    await admin.close();
-  }
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await admin.db.execute(
+        sql.raw(`create database "${createdContext.databaseName}"`),
+      );
+      recordCreated();
+      await admin.db.execute(
+        sql.raw(
+          `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+        ),
+      );
+      expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
+        createdContext.marker,
+      );
+    },
+    closeCreator: () => admin.close(),
+    rollbackWithFreshMarkerProof: () => dropOwnedDatabase(createdContext),
+    failureMessage:
+      'Disposable session database operation, creator close, or marker-owned rollback failed.',
+  });
 }
 
 async function dropOwnedDatabase(
   createdContext: SessionTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  try {
-    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    if (marker === undefined) return;
-    if (marker !== createdContext.marker) {
-      throw new Error(
-        'Refusing to drop a database without the exact issue #26 session-test ownership marker.',
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
       );
-    }
-    await admin.db.execute(
-      sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
-    );
-    expect(
-      await readDatabaseMarker(admin, createdContext.databaseName),
-    ).toBeUndefined();
-  } finally {
-    await admin.close();
-  }
+      if (marker === undefined) return;
+      if (marker !== createdContext.marker) {
+        throw new Error(
+          'Refusing to drop a database without the exact issue #26 session-test ownership marker.',
+        );
+      }
+      await admin.db.execute(
+        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+      );
+      expect(
+        await readDatabaseMarker(admin, createdContext.databaseName),
+      ).toBeUndefined();
+    },
+    cleanup: () => admin.close(),
+    failureMessage:
+      'Disposable session database cleanup and connection close both failed.',
+  });
 }
 
 async function cleanupResources(): Promise<void> {

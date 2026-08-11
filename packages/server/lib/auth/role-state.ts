@@ -393,6 +393,45 @@ export async function loadEffectiveAdministratorUserIds(
               ),
             ),
         ),
+        notExists(
+          database
+            .select({ userId: accessMembershipMemberGroups.userId })
+            .from(accessMembershipMemberGroups)
+            .where(
+              and(
+                eq(
+                  accessMembershipMemberGroups.snapshotId,
+                  accessState.snapshotId,
+                ),
+                eq(accessMembershipMemberGroups.userId, effectiveAdmins.userId),
+                notExists(
+                  database
+                    .select({ id: groupSources.id })
+                    .from(groupSources)
+                    .where(
+                      and(
+                        eq(
+                          groupSources.id,
+                          accessMembershipMemberGroups.groupSourceId,
+                        ),
+                        eq(
+                          groupSources.kind,
+                          accessMembershipMemberGroups.groupSourceKind,
+                        ),
+                        eq(
+                          groupSources.purpose,
+                          accessMembershipMemberGroups.groupPurpose,
+                        ),
+                        eq(groupSources.active, true),
+                        eq(groupSources.kind, 'google-group'),
+                        eq(groupSources.purpose, 'access'),
+                        inArray(groupSources.id, [...eligibleIds]),
+                      ),
+                    ),
+                ),
+              ),
+            ),
+        ),
         eq(groupSources.active, true),
         eq(groupSources.kind, 'google-group'),
         eq(groupSources.purpose, 'access'),

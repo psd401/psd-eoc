@@ -75,6 +75,10 @@ import {
   createDrizzleAdminCapabilityStore,
 } from './admin-core';
 import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from './owned-database-lifecycle';
+import {
   executeCreateAudienceConfigVersionCapability,
   executeCreateFacilityCapability,
   executeCreateGroupSourceCapability,
@@ -177,104 +181,61 @@ async function createOwnedDatabase(
   closeAdmin: (connection: PostgresDatabaseConnection) => Promise<void> = (
     connection,
   ) => connection.close(),
+  readMarker: typeof readDatabaseMarker = readDatabaseMarker,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  let ownershipConfirmed = false;
-  let operationError: unknown;
-  let operationFailed = false;
-  try {
-    await admin.db.execute(
-      sql.raw(`create database "${createdContext.databaseName}"`),
-    );
-    await admin.db.execute(
-      sql.raw(
-        `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
-      ),
-    );
-    expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
-      createdContext.marker,
-    );
-    ownershipConfirmed = true;
-  } catch (error) {
-    operationFailed = true;
-    operationError = error;
-    if (ownershipConfirmed) {
-      try {
-        await dropOwnedDatabase(createdContext);
-      } catch (cleanupError) {
-        operationError = new AggregateError(
-          [error, cleanupError],
-          'Disposable facilities database setup and marker-guarded rollback both failed.',
-        );
-      }
-    }
-  }
-
-  let closeError: unknown;
-  let closeFailed = false;
-  try {
-    await closeAdmin(admin);
-  } catch (error) {
-    closeFailed = true;
-    closeError = error;
-  }
-  if (closeFailed && ownershipConfirmed) {
-    try {
-      await dropOwnedDatabase(createdContext);
-    } catch (cleanupError) {
-      throw new AggregateError(
-        operationFailed
-          ? [operationError, closeError, cleanupError]
-          : [closeError, cleanupError],
-        'Disposable facilities database creator close and marker-guarded rollback both failed.',
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await admin.db.execute(
+        sql.raw(`create database "${createdContext.databaseName}"`),
       );
-    }
-  }
-  if (operationFailed && closeFailed) {
-    throw new AggregateError(
-      [operationError, closeError],
-      'Disposable facilities database creation and creator close both failed.',
-    );
-  }
-  if (operationFailed) throw operationError;
-  if (closeFailed) throw closeError;
+      recordCreated();
+      await admin.db.execute(
+        sql.raw(
+          `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+        ),
+      );
+      expect(await readMarker(admin, createdContext.databaseName)).toBe(
+        createdContext.marker,
+      );
+    },
+    closeCreator: () => closeAdmin(admin),
+    rollbackWithFreshMarkerProof: () => dropOwnedDatabase(createdContext),
+    failureMessage:
+      'Disposable facilities database operation, creator close, or marker-owned rollback failed.',
+  });
 }
 
 async function dropOwnedDatabase(
   createdContext: FacilitiesTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  const errors: unknown[] = [];
-  try {
-    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    if (marker !== undefined && marker !== createdContext.marker) {
-      throw new Error(
-        'Refusing to drop a database without the exact issue #26 facilities ownership marker.',
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
       );
-    }
-    if (marker === createdContext.marker) {
-      await admin.db.execute(
-        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
-      );
-      expect(
-        await readDatabaseMarker(admin, createdContext.databaseName),
-      ).toBeUndefined();
-    }
-  } catch (error) {
-    errors.push(error);
-  }
-  try {
-    await admin.close();
-  } catch (error) {
-    errors.push(error);
-  }
-  if (errors.length === 1) throw errors[0];
-  if (errors.length > 1) {
-    throw new AggregateError(
-      errors,
+      if (marker !== undefined && marker !== createdContext.marker) {
+        throw new Error(
+          'Refusing to drop a database without the exact issue #26 facilities ownership marker.',
+        );
+      }
+      if (marker === createdContext.marker) {
+        await admin.db.execute(
+          sql.raw(
+            `drop database "${createdContext.databaseName}" with (force)`,
+          ),
+        );
+        expect(
+          await readDatabaseMarker(admin, createdContext.databaseName),
+        ).toBeUndefined();
+      }
+    },
+    cleanup: () => admin.close(),
+    failureMessage:
       'Disposable facilities database cleanup and connection close both failed.',
-    );
-  }
+  });
 }
 
 async function cleanupResources(): Promise<void> {
@@ -1099,6 +1060,53 @@ describeWithDatabase('facilities administrator database flow', () => {
     }
   });
 
+  test('retries exact marker proof before rolling back after the initial marker read fails', async () => {
+    if (baseTestDatabaseUrl === undefined) {
+      throw new Error('TEST_DATABASE_URL is required for integration tests.');
+    }
+    const rejectedContext = buildContext(baseTestDatabaseUrl);
+    const markerReadError = new Error(
+      'Synthetic facilities initial marker read failure.',
+    );
+    const errors: unknown[] = [];
+    try {
+      await expect(
+        createOwnedDatabase(rejectedContext, undefined, () =>
+          Promise.reject(markerReadError),
+        ),
+      ).rejects.toBe(markerReadError);
+
+      const verifier = openPostgresConnection(
+        rejectedContext.baseDatabaseUrl,
+        1,
+      );
+      await executeOperationWithCleanup({
+        operation: async () => {
+          expect(
+            await readDatabaseMarker(verifier, rejectedContext.databaseName),
+          ).toBeUndefined();
+        },
+        cleanup: () => verifier.close(),
+        failureMessage:
+          'Facilities transient-marker verification and observer close both failed.',
+      });
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await dropOwnedDatabase(rejectedContext);
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        'Facilities transient-marker proof and cleanup both failed.',
+      );
+    }
+  });
+
   test('completes integration health with one app-role PostgreSQL connection and no added status-update privilege', async () => {
     const currentContext = context;
     if (currentContext === undefined) {
@@ -1886,7 +1894,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     await persistAuthenticatedAdministrator(
       database,
       authenticated,
-      accessFixtures.map(({ id }) => id),
+      accessFixtures[0].id,
       suffix,
     );
 

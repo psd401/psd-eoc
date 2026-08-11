@@ -36,6 +36,10 @@ import {
   executeJournalCapability,
 } from '../../../lib/capabilities/journal';
 import { requireSyntheticTestDatabaseUrl } from '../event-types/test-database';
+import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from './owned-database-lifecycle';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -256,89 +260,61 @@ async function createOwnedDatabase(
   closeAdmin: (admin: PostgresDatabaseConnection) => Promise<void> = async (
     admin,
   ) => admin.close(),
+  readMarker: typeof readDatabaseMarker = readDatabaseMarker,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  let markerVerified = false;
-  const errors: unknown[] = [];
-  try {
-    await admin.db.execute(
-      sql.raw(`create database "${createdContext.databaseName}"`),
-    );
-    await admin.db.execute(
-      sql.raw(
-        `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
-      ),
-    );
-    expect(await readDatabaseMarker(admin, createdContext.databaseName)).toBe(
-      createdContext.marker,
-    );
-    markerVerified = true;
-  } catch (error) {
-    errors.push(error);
-  }
-
-  try {
-    await closeAdmin(admin);
-  } catch (closeError) {
-    errors.push(closeError);
-  }
-
-  // Never delete from the create latch alone. A close failure happens after
-  // the caller-visible creation boundary, so the caller cannot set its cleanup
-  // latch; only exact marker readback permits a fresh connection to clean up
-  // before the close failure is surfaced.
-  if (errors.length > 0 && markerVerified) {
-    try {
-      await dropOwnedDatabase(createdContext);
-    } catch (cleanupError) {
-      errors.push(cleanupError);
-    }
-  }
-
-  if (errors.length === 1) throw errors[0];
-  if (errors.length > 1) {
-    throw new AggregateError(
-      errors,
-      'Disposable migration database operation, connection close, or marker-owned cleanup failed.',
-    );
-  }
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await admin.db.execute(
+        sql.raw(`create database "${createdContext.databaseName}"`),
+      );
+      recordCreated();
+      await admin.db.execute(
+        sql.raw(
+          `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+        ),
+      );
+      expect(await readMarker(admin, createdContext.databaseName)).toBe(
+        createdContext.marker,
+      );
+    },
+    closeCreator: () => closeAdmin(admin),
+    rollbackWithFreshMarkerProof: () => dropOwnedDatabase(createdContext),
+    failureMessage:
+      'Disposable migration database operation, creator close, or marker-owned rollback failed.',
+  });
 }
 
 async function dropOwnedDatabase(
   createdContext: MigrationTestContext,
 ): Promise<void> {
   const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
-  const errors: unknown[] = [];
-  try {
-    const marker = await readDatabaseMarker(admin, createdContext.databaseName);
-    if (marker !== undefined && marker !== createdContext.marker) {
-      throw new Error(
-        'Refusing to drop a database without the exact issue #26 ownership marker.',
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
       );
-    }
-    if (marker === createdContext.marker) {
-      await admin.db.execute(
-        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
-      );
-      expect(
-        await readDatabaseMarker(admin, createdContext.databaseName),
-      ).toBeUndefined();
-    }
-  } catch (error) {
-    errors.push(error);
-  }
-  try {
-    await admin.close();
-  } catch (error) {
-    errors.push(error);
-  }
-  if (errors.length === 1) throw errors[0];
-  if (errors.length > 1) {
-    throw new AggregateError(
-      errors,
+      if (marker !== undefined && marker !== createdContext.marker) {
+        throw new Error(
+          'Refusing to drop a database without the exact issue #26 ownership marker.',
+        );
+      }
+      if (marker === createdContext.marker) {
+        await admin.db.execute(
+          sql.raw(
+            `drop database "${createdContext.databaseName}" with (force)`,
+          ),
+        );
+        expect(
+          await readDatabaseMarker(admin, createdContext.databaseName),
+        ).toBeUndefined();
+      }
+    },
+    cleanup: () => admin.close(),
+    failureMessage:
       'Disposable migration database cleanup and connection close both failed.',
-    );
-  }
+  });
 }
 
 function parseMigrationJournal(value: string): MigrationJournal {
@@ -865,6 +841,50 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       throw new AggregateError(
         proofErrors,
         'Post-marker close-failure proof and cleanup both failed.',
+      );
+    }
+  });
+
+  test('retries exact marker proof before rolling back after the initial marker read fails', async () => {
+    if (baseTestDatabaseUrl === undefined) {
+      throw new Error('TEST_DATABASE_URL is required for migration tests.');
+    }
+    const isolatedContext = buildContext(baseTestDatabaseUrl);
+    const markerReadError = new Error(
+      'Synthetic migration initial marker read failure.',
+    );
+    const errors: unknown[] = [];
+    try {
+      await expect(
+        createOwnedDatabase(isolatedContext, undefined, () =>
+          Promise.reject(markerReadError),
+        ),
+      ).rejects.toBe(markerReadError);
+
+      const observer = openPostgresConnection(baseTestDatabaseUrl, 1);
+      await executeOperationWithCleanup({
+        operation: async () => {
+          expect(
+            await readDatabaseMarker(observer, isolatedContext.databaseName),
+          ).toBeUndefined();
+        },
+        cleanup: () => observer.close(),
+        failureMessage:
+          'Migration transient-marker verification and observer close both failed.',
+      });
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await dropOwnedDatabase(isolatedContext);
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        'Migration transient-marker proof and cleanup both failed.',
       );
     }
   });
