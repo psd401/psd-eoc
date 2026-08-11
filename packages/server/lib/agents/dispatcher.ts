@@ -87,6 +87,8 @@ const canonicallyAuditedCapabilityIds = new Set<AgentGrantableCapabilityId>([
   'list-agent-api-keys',
   'list-facilities',
   'list-drill-records',
+  'export-drill-records',
+  'export-event-summary',
 ]);
 
 function eventTypeAgent(
@@ -192,7 +194,9 @@ export function createDefaultAgentCapabilityDispatcher(
           );
 
         case 'list-drill-records':
-          return dependencies.records.execute(input, invocation);
+        case 'export-drill-records':
+        case 'export-event-summary':
+          return dependencies.records.execute(capabilityId, input, invocation);
 
         case 'list-agent-api-keys':
           return dependencies.administration.list({

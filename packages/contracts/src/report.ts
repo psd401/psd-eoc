@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { PaginationCursorSchema, paginatedSchema } from './api';
 import { EventIdSchema, EventStatusSchema } from './event';
 import {
+  EventTypeIdSchema,
   EventTypeVersionRefSchema,
   NotificationChannelSchema,
 } from './event-type';
@@ -254,6 +255,7 @@ export type DrillRecord = z.infer<typeof DrillRecordSchema>;
 export const ListDrillRecordsInputSchema = z
   .object({
     facilityId: FacilityIdSchema.nullable(),
+    eventTypeId: EventTypeIdSchema.nullable(),
     startedFrom: TimestampSchema.nullable(),
     startedThrough: TimestampSchema.nullable(),
     cursor: PaginationCursorSchema.nullable(),
@@ -290,24 +292,36 @@ export const RecordsExportFormatSchema = z.enum(['csv', 'pdf']);
 /** Records-export artifact format inferred from its schema. */
 export type RecordsExportFormat = z.infer<typeof RecordsExportFormatSchema>;
 
+// An inclusive 366-day Pacific calendar range can span one extra absolute
+// hour when it crosses the fall daylight-saving transition.
+const MAX_DRILL_EXPORT_RANGE_MILLISECONDS = (366 * 24 + 1) * 60 * 60 * 1_000;
+
 /** Owns a bounded export request for authorized drill records. */
 export const ExportDrillRecordsInputSchema = z
   .object({
-    facilityId: FacilityIdSchema.nullable(),
-    startedFrom: TimestampSchema.nullable(),
-    startedThrough: TimestampSchema.nullable(),
-    format: RecordsExportFormatSchema,
+    facilityId: FacilityIdSchema,
+    eventTypeId: EventTypeIdSchema.nullable(),
+    startedFrom: TimestampSchema,
+    startedThrough: TimestampSchema,
+    format: z.literal('csv'),
   })
   .strict()
   .superRefine((input, context) => {
-    if (
-      input.startedFrom &&
-      input.startedThrough &&
-      !isAtOrAfter(input.startedThrough, input.startedFrom)
-    ) {
+    if (!isAtOrAfter(input.startedThrough, input.startedFrom)) {
       context.addIssue({
         code: 'custom',
         message: 'Drill export end filter cannot precede its start.',
+        path: ['startedThrough'],
+      });
+      return;
+    }
+    if (
+      Date.parse(input.startedThrough) - Date.parse(input.startedFrom) >
+      MAX_DRILL_EXPORT_RANGE_MILLISECONDS
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Drill exports cannot span more than 366 days.',
         path: ['startedThrough'],
       });
     }
@@ -323,7 +337,7 @@ export type ExportDrillRecordsInput = z.infer<
 export const ExportEventSummaryInputSchema = z
   .object({
     eventId: EventIdSchema,
-    format: RecordsExportFormatSchema,
+    format: z.literal('pdf'),
   })
   .strict()
   .readonly();
@@ -333,15 +347,36 @@ export type ExportEventSummaryInput = z.infer<
   typeof ExportEventSummaryInputSchema
 >;
 
+/** Owns the exact media types available for records-export artifacts. */
+export const RecordsExportContentTypeSchema = z.enum([
+  'text/csv; charset=utf-8',
+  'application/pdf',
+]);
+
+/** Records-export artifact media type inferred from its schema. */
+export type RecordsExportContentType = z.infer<
+  typeof RecordsExportContentTypeSchema
+>;
+
+const RecordsExportFileNameSchema = z
+  .string()
+  .min(5)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,195}\.(?:csv|pdf)$/u);
+
 /**
  * Owns a short-lived private records-export grant. The content digest and row
- * count support verification; the capability authorizes every read and never
- * turns export URLs into permanent public links.
+ * count support verification; exact content metadata prevents format
+ * confusion. The capability authorizes every read and never turns export URLs
+ * into permanent public links.
  */
 export const RecordsExportSchema = z
   .object({
     id: UuidSchema,
     format: RecordsExportFormatSchema,
+    contentType: RecordsExportContentTypeSchema,
+    fileName: RecordsExportFileNameSchema,
+    byteLength: z.number().int().positive(),
     contentSha256: z.string().regex(/^[a-f0-9]{64}$/u),
     rowCount: z.number().int().nonnegative().max(100_000),
     downloadUrl: HttpsUrlSchema,
@@ -350,6 +385,24 @@ export const RecordsExportSchema = z
   })
   .strict()
   .superRefine((artifact, context) => {
+    const expected =
+      artifact.format === 'csv'
+        ? { contentType: 'text/csv; charset=utf-8', extension: '.csv' }
+        : { contentType: 'application/pdf', extension: '.pdf' };
+    if (artifact.contentType !== expected.contentType) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Records export content type must match its format.',
+        path: ['contentType'],
+      });
+    }
+    if (!artifact.fileName.endsWith(expected.extension)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Records export filename extension must match its format.',
+        path: ['fileName'],
+      });
+    }
     if (
       !isAtOrAfter(artifact.expiresAt, artifact.generatedAt) ||
       Date.parse(artifact.expiresAt) - Date.parse(artifact.generatedAt) >
@@ -377,6 +430,15 @@ export const EventSummaryExportSchema = z
     artifact: RecordsExportSchema,
   })
   .strict()
+  .superRefine((summary, context) => {
+    if (summary.artifact.format !== 'pdf') {
+      context.addIssue({
+        code: 'custom',
+        message: 'Event summaries must reference PDF artifacts.',
+        path: ['artifact', 'format'],
+      });
+    }
+  })
   .readonly();
 
 /** Event-summary export result inferred from its schema. */

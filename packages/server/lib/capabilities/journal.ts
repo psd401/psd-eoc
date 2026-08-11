@@ -102,6 +102,12 @@ import {
 import type { AuthenticatedSession } from '../auth/sessions';
 import { renderTemplateSet } from '../notify/render';
 import { deriveCloseConsequenceDigest } from './events';
+import type { DrillRecordCsvRow } from './records/csv';
+import type { EventSummarySnapshot } from './records/pdf';
+import {
+  loadDrillRecordsExportSnapshot,
+  loadEventSummarySnapshot,
+} from './records/snapshot';
 
 /** Event state and the next append position held under the event-row lock. */
 export interface LockedJournalEvent {
@@ -136,6 +142,13 @@ export interface JournalCapabilityTransaction
     input: CapabilityInput<'list-drill-records'>,
     scope: TrustedCapabilityInvocation['scope'],
   ): Promise<DrillRecordPage>;
+  loadDrillRecordsExportSnapshot(
+    input: CapabilityInput<'export-drill-records'>,
+  ): Promise<readonly DrillRecordCsvRow[]>;
+  loadEventSummarySnapshot(
+    eventId: string,
+    generatedAt: string,
+  ): Promise<EventSummarySnapshot>;
   getFacility(facilityId: string): Promise<Facility | null>;
   createLifecycleConsequencePreview(
     input: CapabilityInput<'create-lifecycle-consequence-preview'>,
@@ -1720,6 +1733,9 @@ async function listDrillRecordsFromDatabase(
   if (input.startedThrough !== null) {
     conditions.push(lte(events.activatedAt, new Date(input.startedThrough)));
   }
+  if (input.eventTypeId !== null) {
+    conditions.push(eq(eventTypeVersions.eventTypeId, input.eventTypeId));
+  }
   if (cursor !== null) {
     conditions.push(
       or(
@@ -2153,6 +2169,10 @@ function createDrizzleJournalTransaction(
       searchJournalEntriesFromDatabase(database, input, scope),
     listDrillRecords: (input, scope) =>
       listDrillRecordsFromDatabase(database, input, scope),
+    loadDrillRecordsExportSnapshot: (input) =>
+      loadDrillRecordsExportSnapshot(database, input),
+    loadEventSummarySnapshot: (eventId, generatedAt) =>
+      loadEventSummarySnapshot(database, eventId, generatedAt),
     getFacility: (facilityId) => getFacilityFromDatabase(database, facilityId),
     createLifecycleConsequencePreview: (input) =>
       createLifecycleConsequencePreviewFromDatabase(database, input),
@@ -2179,6 +2199,34 @@ export function createDrizzleJournalCapabilityStore(
         operation(
           createDrizzleJournalTransaction(journalQueryDatabase(transaction)),
         ),
+      );
+    },
+    appendCapabilityAudit(event) {
+      return database.transaction(async (transaction) =>
+        appendCapabilityAuditEntry(journalQueryDatabase(transaction), event),
+      );
+    },
+  };
+}
+
+/**
+ * Creates the records/report store with one repeatable-read snapshot. The
+ * transaction remains read-write solely so the canonical success audit can be
+ * appended atomically; report assembly never updates operational truth.
+ */
+export function createDrizzleRecordsCapabilityStore(
+  database: Database,
+): JournalCapabilityStore {
+  return {
+    transaction<Result>(
+      operation: (transaction: JournalCapabilityTransaction) => Promise<Result>,
+    ): Promise<Result> {
+      return database.transaction(
+        async (transaction) =>
+          operation(
+            createDrizzleJournalTransaction(journalQueryDatabase(transaction)),
+          ),
+        { isolationLevel: 'repeatable read', accessMode: 'read write' },
       );
     },
     appendCapabilityAudit(event) {
