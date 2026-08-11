@@ -244,6 +244,14 @@ describe('event-room synthetic database guard', () => {
     const portClosed = new Promise<void>((resolveClosed) => {
       resolvePortClosed = resolveClosed;
     });
+    let announceDatabaseCleanup: () => void = () => undefined;
+    const databaseCleanupStarted = new Promise<void>((resolveStarted) => {
+      announceDatabaseCleanup = resolveStarted;
+    });
+    let resolveDatabaseCleanup: () => void = () => undefined;
+    const databaseCleanup = new Promise<void>((resolveCleanup) => {
+      resolveDatabaseCleanup = resolveCleanup;
+    });
     let replacement: ReturnType<
       typeof claimEventRoomPlaywrightRunContext
     > | null = null;
@@ -256,6 +264,10 @@ describe('event-room synthetic database guard', () => {
           expect(appPort).toBe(context.appPort);
           announcePortWait();
           await portClosed;
+        },
+        async () => {
+          announceDatabaseCleanup();
+          await databaseCleanup;
         },
       );
       expect(existsSync(context.runDirectory)).toBe(true);
@@ -270,6 +282,11 @@ describe('event-room synthetic database guard', () => {
       expect(existsSync(context.portLeasePath)).toBe(true);
 
       resolvePortClosed();
+      await databaseCleanupStarted;
+      expect(existsSync(context.runDirectory)).toBe(true);
+      expect(existsSync(context.portLeasePath)).toBe(true);
+      expect(existsSync(context.serverStoppedPath)).toBe(false);
+      resolveDatabaseCleanup();
       expect(await finalizing).toBe(0);
       expect(existsSync(context.runDirectory)).toBe(true);
       expect(existsSync(context.portLeasePath)).toBe(false);
@@ -299,7 +316,36 @@ describe('event-room synthetic database guard', () => {
     }
   });
 
-  test('configures graceful wrapper shutdown and leaves server artifacts out of setup hooks', () => {
+  test('database cleanup failure retains the run, lease, and missing stopped evidence', async () => {
+    const context = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    mkdirSync(context.runDirectory, { recursive: true });
+    try {
+      await expect(
+        finalizeEventRoomPlaywrightWebServer(
+          context,
+          async () => 0,
+          async () => undefined,
+          async () => {
+            throw new Error('synthetic database cleanup failure');
+          },
+        ),
+      ).rejects.toThrow('synthetic database cleanup failure');
+      expect(existsSync(context.runDirectory)).toBe(true);
+      expect(existsSync(context.portLeasePath)).toBe(true);
+      expect(existsSync(context.serverStoppedPath)).toBe(false);
+      expect(() => cleanupReportedEventRoomPlaywrightRun(context)).toThrow(
+        'no stopped evidence',
+      );
+    } finally {
+      rmSync(context.runDirectory, { force: true, recursive: true });
+      releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+    }
+  });
+
+  test('orders database removal inside graceful server shutdown and outside setup hooks', () => {
     const config = readFileSync(
       new URL('./playwright.config.ts', import.meta.url),
       'utf8',
@@ -308,8 +354,8 @@ describe('event-room synthetic database guard', () => {
       new URL('./playwright.global-setup.ts', import.meta.url),
       'utf8',
     );
-    const teardown = readFileSync(
-      new URL('./playwright.global-teardown.ts', import.meta.url),
+    const wrapper = readFileSync(
+      new URL('./playwright.web-server.ts', import.meta.url),
       'utf8',
     );
     const cleanupReporter = readFileSync(
@@ -319,11 +365,13 @@ describe('event-room synthetic database guard', () => {
     expect(config).toContain('playwright.web-server.ts');
     expect(config).toContain('playwright.cleanup-reporter.ts');
     expect(config).toContain('gracefulShutdown');
+    expect(config).not.toContain('globalTeardown');
     expect(cleanupReporter).toContain('onExit()');
     expect(cleanupReporter).toContain('cleanupReportedEventRoomPlaywrightRun');
     expect(setup).toContain('createOwnedEventRoomPlaywrightDatabase');
-    expect(setup).toContain('dropOwnedEventRoomPlaywrightDatabase');
-    expect(teardown).toContain('dropOwnedEventRoomPlaywrightDatabase');
+    expect(setup).not.toContain('dropOwnedEventRoomPlaywrightDatabase');
+    expect(wrapper).toContain('dropOwnedEventRoomPlaywrightDatabase');
+    expect(wrapper).toContain('finalizeEventRoomPlaywrightWebServer');
     const gate = readFileSync(
       new URL('./event-room.playwright-gate.test.ts', import.meta.url),
       'utf8',
@@ -339,19 +387,32 @@ describe('event-room synthetic database guard', () => {
       gate.indexOf("describe('event-room Playwright gate'"),
     );
     expect(
-      cleanupBody.indexOf(
-        'await cleanupEventRoomPlaywrightRunAfterChildExit(context)',
-      ),
+      cleanupBody.indexOf('await operations.stopServerAndRemoveRun(context)'),
     ).toBeLessThan(
-      cleanupBody.indexOf(
-        'await dropOwnedEventRoomPlaywrightDatabase(context)',
-      ),
+      cleanupBody.indexOf('await operations.dropDatabase(context)'),
     );
     expect(gate).toContain('BROWSER_GATE_TIMEOUT_MS');
-    for (const hook of [setup, teardown]) {
-      expect(hook).not.toContain('releaseEventRoomPlaywrightPortLease');
-      expect(hook).not.toContain('rm(context.runDirectory');
-    }
+    const lifecycle = readFileSync(
+      new URL('./test-database.ts', import.meta.url),
+      'utf8',
+    );
+    const finalizerBody = lifecycle.slice(
+      lifecycle.indexOf(
+        'export async function finalizeEventRoomPlaywrightWebServer',
+      ),
+    );
+    expect(
+      finalizerBody.indexOf('await waitForPortClose(context.appPort)'),
+    ).toBeLessThan(
+      finalizerBody.indexOf('await cleanupOwnedDatabaseAfterPortClose()'),
+    );
+    expect(
+      finalizerBody.indexOf('await cleanupOwnedDatabaseAfterPortClose()'),
+    ).toBeLessThan(
+      finalizerBody.indexOf('recordStoppedEventRoomPlaywrightServer(context)'),
+    );
+    expect(setup).not.toContain('releaseEventRoomPlaywrightPortLease');
+    expect(setup).not.toContain('rm(context.runDirectory');
   });
 
   test('outer cleanup fails closed until an unmarked run independently proves its port closed', async () => {

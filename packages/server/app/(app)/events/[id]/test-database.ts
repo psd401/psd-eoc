@@ -744,19 +744,22 @@ export async function cleanupEventRoomPlaywrightRunAfterChildExit(
 }
 
 /**
- * Keeps the run directory and port lease until the owned Next process exits
- * and its loopback port is confirmed closed, then records stopped evidence
- * and releases the lease. Reporter output remains until the cleanup reporter's
- * onExit, after every reporter has finished writing.
+ * Keeps the run directory and port lease until the owned Next process exits,
+ * its loopback port is confirmed closed, and its owned database cleanup
+ * succeeds. Only then does it record stopped evidence and release the lease.
+ * Reporter output remains until the cleanup reporter's onExit, after every
+ * reporter has finished writing.
  */
 export async function finalizeEventRoomPlaywrightWebServer(
   value: unknown,
   waitForServerExit: () => Promise<number>,
   waitForPortClose: (appPort: number) => Promise<void>,
+  cleanupOwnedDatabaseAfterPortClose: () => Promise<unknown>,
 ): Promise<number> {
   const context = requireEventRoomPlaywrightRunContext(value);
   const exitCode = await waitForServerExit();
   await waitForPortClose(context.appPort);
+  await cleanupOwnedDatabaseAfterPortClose();
   recordStoppedEventRoomPlaywrightServer(context);
   return exitCode;
 }

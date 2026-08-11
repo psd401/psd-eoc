@@ -22,7 +22,6 @@ export default defineConfig({
   testDir: '.',
   testMatch: /event-room\.playwright\.ts$/u,
   globalSetup: resolve(configDirectory, 'playwright.global-setup.ts'),
-  globalTeardown: resolve(configDirectory, 'playwright.global-teardown.ts'),
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,

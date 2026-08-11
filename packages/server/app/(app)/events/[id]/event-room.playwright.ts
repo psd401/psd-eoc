@@ -35,10 +35,12 @@ interface EventRoomFixture {
   readonly mismatchedTransitionEventId: string;
   readonly newerPollEventId: string;
   readonly paginatedDialogEventId: string;
+  readonly paginatedLifecycleEventId: string;
   readonly pendingDialogEventId: string;
   readonly previewRetryEventId: string;
   readonly realDraftEventId: string;
   readonly rejectedDialogRaceEventId: string;
+  readonly rejectedLifecycleDialogEventId: string;
   readonly stalePollEventId: string;
   readonly staleLifecycleResponseEventId: string;
   readonly stalledMutationEventId: string;
@@ -822,11 +824,19 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
   await expect(correctionDialog).toContainText('DRILL — TRAINING ONLY');
   await expect(page.getByLabel('Corrected text')).toBeFocused();
   await expectAxeClean(page, 'keyboard correction dialog');
-  await page.getByLabel('Corrected text').fill('Append-only corrected text');
+  const appendCorrection = page.getByRole('button', {
+    name: 'Append correction',
+  });
+  await page.getByLabel('Reason for correction').fill('   ');
+  await expect(appendCorrection).toBeDisabled();
+  await page.getByLabel('Corrected text').fill('   ');
   await page
     .getByLabel('Reason for correction')
     .fill('Synthetic accuracy correction');
-  await page.getByRole('button', { name: 'Append correction' }).press('Enter');
+  await expect(appendCorrection).toBeDisabled();
+  await page.getByLabel('Corrected text').fill('Append-only corrected text');
+  await expect(appendCorrection).toBeEnabled();
+  await appendCorrection.press('Enter');
   await expect(
     page.getByText('Append-only corrected text', { exact: true }),
   ).toBeVisible();
@@ -851,10 +861,16 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
     'timeline correction confirmed by the server.',
   );
   await expect(page.getByLabel('Reason for redaction')).toBeFocused();
+  const appendRedaction = page.getByRole('button', {
+    name: 'Append redaction',
+  });
+  await page.getByLabel('Reason for redaction').fill('   ');
+  await expect(appendRedaction).toBeDisabled();
   await page
     .getByLabel('Reason for redaction')
     .fill('Synthetic privacy-safe redaction');
-  await page.getByRole('button', { name: 'Append redaction' }).press('Enter');
+  await expect(appendRedaction).toBeEnabled();
+  await appendRedaction.press('Enter');
   const original = page.getByRole('article', {
     name: 'Entry 1: Text update',
   });
@@ -1099,7 +1115,7 @@ test('a definite correction rejection remains truthful when a later poll closes 
     );
     await expect(
       page.getByRole('dialog').locator('.mutation-status'),
-    ).toContainText('The server rejected the request.');
+    ).toContainText('The request was not accepted.');
 
     releasePoll();
     await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 8_000 });
@@ -1109,7 +1125,7 @@ test('a definite correction rejection remains truthful when a later poll closes 
     await expect(outerError).toBeFocused();
     await expect(outerError).toHaveText(rejection ?? '');
     await expect(page.locator('.event-room > .mutation-status')).toContainText(
-      'The server rejected the request.',
+      'The request was not accepted.',
     );
     await expect(
       page.locator('.event-room > .mutation-status'),
@@ -1229,6 +1245,258 @@ test('paginated catch-up hides raw correction content before its terminal page a
   }
 });
 
+test('paginated catch-up invalidates all-clear and close confirmations before they can silently no-op', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const eventId = fixture.paginatedLifecycleEventId;
+
+  const expectInvalidatedDuringCatchUp = async (input: {
+    readonly openButton: 'Review all-clear' | 'Review event close';
+    readonly confirmationLabel:
+      | 'Type ALL CLEAR exactly'
+      | 'Type CLOSE EVENT exactly';
+    readonly confirmationValue: 'ALL CLEAR' | 'CLOSE EVENT';
+    readonly submitButton: 'Issue all-clear and notify' | 'Close event';
+  }): Promise<void> => {
+    await page.getByRole('button', { name: input.openButton }).press('Enter');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    if (input.openButton === 'Review all-clear') {
+      await expect(
+        page.getByRole('heading', { name: 'Notification consequences' }),
+      ).toBeVisible();
+    }
+    await page
+      .getByLabel(input.confirmationLabel)
+      .fill(input.confirmationValue);
+    await expect(
+      page.getByRole('button', { name: input.submitButton }),
+    ).toBeEnabled();
+
+    let releaseMutations: () => void = () => undefined;
+    const mutationsCommitted = new Promise<void>((resolve) => {
+      releaseMutations = resolve;
+    });
+    let resolveFirstPageSeen: () => void = () => undefined;
+    const firstPageSeen = new Promise<void>((resolve) => {
+      resolveFirstPageSeen = resolve;
+    });
+    let resolveTerminalHeld: () => void = () => undefined;
+    const terminalHeld = new Promise<void>((resolve) => {
+      resolveTerminalHeld = resolve;
+    });
+    let releaseTerminal: () => void = () => undefined;
+    const terminalRelease = new Promise<void>((resolve) => {
+      releaseTerminal = resolve;
+    });
+    let timelineRequests = 0;
+    await page.route('**/events/*/api**', async (route) => {
+      const request = route.request();
+      if (request.method() !== 'GET' || !request.url().includes(eventId)) {
+        await route.continue();
+        return;
+      }
+      await mutationsCommitted;
+      timelineRequests += 1;
+      const upstream = await route.fetch();
+      const value = (await upstream.json()) as {
+        entries?: unknown[];
+        hasMore?: boolean;
+      };
+      if (timelineRequests === 1) {
+        expect(value.hasMore).toBe(true);
+        expect(value.entries).toHaveLength(100);
+        resolveFirstPageSeen();
+      } else if (timelineRequests === 2) {
+        expect(value.hasMore).toBe(false);
+        resolveTerminalHeld();
+        await terminalRelease;
+      }
+      await route.fulfill({ response: upstream, json: value });
+    });
+
+    let scenarioCompleted = false;
+    try {
+      await appendSyntheticBurst(testInfo, eventId, 101);
+      releaseMutations();
+      await firstPageSeen;
+      await terminalHeld;
+      await expect(page.locator('.timeline-panel')).toContainText(
+        'Timeline content remains hidden until all authorized history',
+      );
+      await expect(dialog).not.toBeVisible();
+      await expect(page.locator('#main-content')).toBeFocused();
+      await expect(page.getByLabel(input.confirmationLabel)).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: input.submitButton }),
+      ).toHaveCount(0);
+      await expect(
+        page.locator('.event-room > .mutation-status'),
+      ).toContainText(
+        'No lifecycle transition request was submitted; reopen the action after the complete timeline is visible.',
+      );
+      releaseTerminal();
+      await expect(page.locator('.timeline-loading-placeholder')).toHaveCount(
+        0,
+      );
+      scenarioCompleted = true;
+    } finally {
+      releaseMutations();
+      releaseTerminal();
+      await page.unrouteAll({
+        behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+      });
+    }
+  };
+
+  await page.goto(fixturePath(eventId));
+  await expectInvalidatedDuringCatchUp({
+    openButton: 'Review all-clear',
+    confirmationLabel: 'Type ALL CLEAR exactly',
+    confirmationValue: 'ALL CLEAR',
+    submitButton: 'Issue all-clear and notify',
+  });
+
+  await issueExternalAllClear(page, eventId);
+  await expect(page.locator('.event-status')).toHaveText('All-clear issued', {
+    timeout: 10_000,
+  });
+  await expectInvalidatedDuringCatchUp({
+    openButton: 'Review event close',
+    confirmationLabel: 'Type CLOSE EVENT exactly',
+    confirmationValue: 'CLOSE EVENT',
+    submitButton: 'Close event',
+  });
+});
+
+test('a definite lifecycle rejection survives a later paginated dialog invalidation', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  const eventId = fixture.rejectedLifecycleDialogEventId;
+  await page.goto(fixturePath(eventId));
+  await page.getByRole('button', { name: 'Review all-clear' }).press('Enter');
+  await expect(
+    page.getByRole('heading', { name: 'Notification consequences' }),
+  ).toBeVisible();
+  await page.getByLabel('Type ALL CLEAR exactly').fill('ALL CLEAR');
+
+  let releaseFirstPoll: () => void = () => undefined;
+  const firstPollRelease = new Promise<void>((resolve) => {
+    releaseFirstPoll = resolve;
+  });
+  let announceFirstPollHeld: () => void = () => undefined;
+  const firstPollHeld = new Promise<void>((resolve) => {
+    announceFirstPollHeld = resolve;
+  });
+  let resolveFirstPageSeen: () => void = () => undefined;
+  const firstPageSeen = new Promise<void>((resolve) => {
+    resolveFirstPageSeen = resolve;
+  });
+  let resolveTerminalHeld: () => void = () => undefined;
+  const terminalHeld = new Promise<void>((resolve) => {
+    resolveTerminalHeld = resolve;
+  });
+  let releaseTerminal: () => void = () => undefined;
+  const terminalRelease = new Promise<void>((resolve) => {
+    releaseTerminal = resolve;
+  });
+  let timelineRequests = 0;
+  await page.route('**/events/*/api**', async (route) => {
+    const request = route.request();
+    const body =
+      request.method() === 'POST'
+        ? (request.postDataJSON() as { operation?: string } | null)
+        : null;
+    if (
+      request.method() === 'POST' &&
+      request.url().includes(eventId) &&
+      body?.operation === 'all-clear'
+    ) {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'CONFLICT',
+          message: 'Synthetic definite all-clear conflict.',
+          requestId: randomUUID(),
+          retryable: false,
+          fieldErrors: [],
+        }),
+      });
+      return;
+    }
+    if (request.method() !== 'GET' || !request.url().includes(eventId)) {
+      await route.continue();
+      return;
+    }
+    timelineRequests += 1;
+    if (timelineRequests === 1) {
+      announceFirstPollHeld();
+      await firstPollRelease;
+    }
+    const upstream = await route.fetch();
+    const value = (await upstream.json()) as {
+      entries?: unknown[];
+      hasMore?: boolean;
+    };
+    if (timelineRequests === 1) {
+      expect(value.hasMore).toBe(true);
+      expect(value.entries).toHaveLength(100);
+      resolveFirstPageSeen();
+    } else if (timelineRequests === 2) {
+      expect(value.hasMore).toBe(false);
+      resolveTerminalHeld();
+      await terminalRelease;
+    }
+    await route.fulfill({ response: upstream, json: value });
+  });
+
+  let scenarioCompleted = false;
+  try {
+    await firstPollHeld;
+    await page
+      .getByRole('button', { name: 'Issue all-clear and notify' })
+      .press('Enter');
+    const dialogAlert = page.getByRole('dialog').getByRole('alert');
+    await expect(dialogAlert).toBeVisible();
+    await expect(dialogAlert).toBeFocused();
+    await expect(dialogAlert).toContainText(
+      'Synthetic definite all-clear conflict.',
+    );
+    await expect(
+      page.getByRole('dialog').locator('.mutation-status'),
+    ).toContainText('The request was not accepted.');
+
+    await appendSyntheticBurst(testInfo, eventId, 101);
+    releaseFirstPoll();
+    await firstPageSeen;
+    await terminalHeld;
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    const outerError = page.locator('.event-room > .error-panel');
+    await expect(outerError).toContainText(
+      'Synthetic definite all-clear conflict.',
+    );
+    await expect(outerError).toBeFocused();
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'The request was not accepted. No change was recorded by this attempt.',
+    );
+    await expect(
+      page.locator('.event-room > .mutation-status'),
+    ).not.toContainText('No lifecycle transition request was submitted');
+    releaseTerminal();
+    await expect(page.locator('.timeline-loading-placeholder')).toHaveCount(0);
+    scenarioCompleted = true;
+  } finally {
+    releaseFirstPoll();
+    releaseTerminal();
+    await page.unrouteAll({
+      behavior: scenarioCompleted ? 'wait' : 'ignoreErrors',
+    });
+  }
+});
+
 test('same-event but unrelated journal evidence never clears post, correction, or redaction recovery', async ({
   page,
 }, testInfo) => {
@@ -1293,6 +1561,9 @@ test('same-event but unrelated journal evidence never clears post, correction, o
         name: 'Previous request needs verification',
       }),
     ).toHaveCount(0);
+    await expect(page.locator('.event-room > .mutation-status')).toContainText(
+      'Clearing this browser record sent no new request; the prior outcome remains determined by the verified timeline and event status.',
+    );
   };
 
   await page.getByLabel('Update text').fill('Exact post evidence required');
@@ -1414,11 +1685,48 @@ test('a retained command owned by another session is blocked without sending or 
   await expect(
     page.getByText('The browser recovery record is unreadable.'),
   ).toBeVisible();
+  await expect(page.locator('.event-room > .error-panel')).toContainText(
+    'This page load sent no new request; any prior request outcome remains unresolved.',
+  );
   await expect(
     page.getByRole('button', { name: 'Retry exact retained request' }),
   ).toHaveCount(0);
   await expect(page.getByLabel('Update text')).toBeDisabled();
   await page.waitForTimeout(1_000);
+  expect(postCount).toBe(0);
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
+test('a missing local CSRF preflight never claims that the server rejected a request', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.goto(fixturePath(fixture.recoveryOwnerEventId));
+  await page.context().clearCookies({ name: '__Host-psd-eoc-csrf' });
+  let postCount = 0;
+  await page.route('**/events/*/api', async (route) => {
+    if (route.request().method() === 'POST') postCount += 1;
+    await route.continue();
+  });
+
+  await page
+    .getByLabel('Update text')
+    .fill('Local CSRF preflight must fail before fetch');
+  await page.getByRole('button', { name: 'Post update' }).press('Enter');
+  const error = page.locator('.event-room > .error-panel');
+  await expect(error).toContainText(
+    'Your session is missing its request-protection cookie.',
+  );
+  await expect(error).toBeFocused();
+  await expect(page.locator('.event-room > .mutation-status')).toContainText(
+    'The request was not accepted. No change was recorded by this attempt.',
+  );
+  await expect(
+    page.locator('.event-room > .mutation-status'),
+  ).not.toContainText('The server rejected the request');
+  await expect(
+    page.getByRole('heading', { name: 'Previous request needs verification' }),
+  ).toHaveCount(0);
   expect(postCount).toBe(0);
   await page.unrouteAll({ behavior: 'wait' });
 });
@@ -1925,6 +2233,68 @@ test('polling pauses while hidden, resumes immediately when visible, and keeps o
   await page.unrouteAll({ behavior: 'wait' });
 });
 
+test('a quick hide and show interrupts an active poll delay without overlapping the refresh', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.addInitScript(() => {
+    let hidden = false;
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible'),
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    Reflect.set(window, '__eventRoomSetHidden', (next: boolean) => {
+      hidden = next;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  });
+  let timelineRequests = 0;
+  let releaseRequest: () => void = () => undefined;
+  const requestRelease = new Promise<void>((resolve) => {
+    releaseRequest = resolve;
+  });
+  await page.route('**/events/*/api**', async (route) => {
+    if (
+      route.request().method() === 'GET' &&
+      route.request().url().includes(fixture.keyboardEventId)
+    ) {
+      timelineRequests += 1;
+      await requestRelease;
+    }
+    await route.continue();
+  });
+
+  try {
+    await page.goto(fixturePath(fixture.keyboardEventId));
+    await page.waitForTimeout(250);
+    expect(timelineRequests).toBe(0);
+    await page.evaluate(() => {
+      const setHidden = Reflect.get(window, '__eventRoomSetHidden') as (
+        hidden: boolean,
+      ) => void;
+      setHidden(true);
+      setHidden(false);
+    });
+    await expect.poll(() => timelineRequests, { timeout: 2_000 }).toBe(1);
+    await page.evaluate(() => {
+      const setHidden = Reflect.get(window, '__eventRoomSetHidden') as (
+        hidden: boolean,
+      ) => void;
+      setHidden(true);
+      setHidden(false);
+    });
+    await page.waitForTimeout(1_000);
+    expect(timelineRequests).toBe(1);
+  } finally {
+    releaseRequest();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
+});
+
 test('timeline polling aborts at its deadline without overlapping or replaying', async ({
   page,
 }, testInfo) => {
@@ -1951,6 +2321,11 @@ test('timeline polling aborts at its deadline without overlapping or replaying',
     'Timeline refresh timed out.',
     { timeout: 16_000 },
   );
+  await expect(
+    page.getByText('Timeline refresh timed out. PSD EOC will keep checking.', {
+      exact: true,
+    }),
+  ).toBeVisible();
   expect(timelineRequests).toBe(1);
   releaseRequest();
   await page.unrouteAll({ behavior: 'wait' });

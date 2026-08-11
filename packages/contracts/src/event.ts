@@ -1352,7 +1352,7 @@ export type GetPreparedActivationInput = z.infer<
 >;
 
 /**
- * Owns the non-mutating request for fresh purpose-specific all-clear or
+ * Owns the persisted mutation input for fresh purpose-specific all-clear or
  * reactivation consequences. The server resolves pinned event, roster,
  * integration, and rendered-copy truth before returning the preview.
  */
