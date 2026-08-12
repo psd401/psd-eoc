@@ -1,10 +1,15 @@
 import {
+  EndpointIdSchema,
   EndpointStatusSchema,
   FacilityScopeSchema,
+  NotificationChannelSchema,
   RecipientIdSchema,
   RosterGroupFailureSchema,
   RosterHealthQuerySchema,
   RosterSnapshotIdSchema,
+  SMS_LIFECYCLE_PROVIDER,
+  SMS_OPT_OUT_REASON_CODE,
+  SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
   StaleRosterReportSchema,
   TimestampSchema,
   UuidSchema,
@@ -12,10 +17,21 @@ import {
   type FacilityScope,
   type RegisteredCapabilityHandler,
   type RosterHealthQuery,
+  type StaleRosterEndpoint,
   type StaleRosterRecipient,
   type StaleRosterReport,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 
 import type { Database, DatabaseQuery } from '../../db/client';
@@ -32,11 +48,29 @@ import {
 } from '../../db/schema';
 
 const MAX_SCOPED_RECIPIENTS = 200;
+const MAX_SCOPED_ENDPOINTS = MAX_SCOPED_RECIPIENTS * 10;
 
 const ScopedRecipientHealthSchema = z
   .object({
     recipientId: RecipientIdSchema,
     endpointStatuses: z.array(EndpointStatusSchema).max(10).readonly(),
+  })
+  .strict()
+  .readonly();
+
+const ScopedStaleEndpointSchema = z
+  .object({
+    recipientId: RecipientIdSchema,
+    endpointId: EndpointIdSchema,
+    channel: NotificationChannelSchema,
+    status: EndpointStatusSchema.exclude(['active']),
+    reasonCode: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Z0-9_]+$/u)
+      .nullable(),
   })
   .strict()
   .readonly();
@@ -49,11 +83,17 @@ const LatestCompleteSnapshotEvidenceSchema = z
       .array(ScopedRecipientHealthSchema)
       .max(MAX_SCOPED_RECIPIENTS)
       .readonly(),
+    staleEndpoints: z
+      .array(ScopedStaleEndpointSchema)
+      .max(MAX_SCOPED_ENDPOINTS)
+      .default([])
+      .readonly(),
     /**
      * True when the scoped store omitted one or more stale recipients from
      * this bounded page. It prevents a partial page from claiming `current`.
      */
     hasUnreportedStaleRecipients: z.boolean(),
+    hasUnreportedStaleEndpoints: z.boolean().default(false),
   })
   .strict()
   .superRefine((snapshot, context) => {
@@ -65,6 +105,16 @@ const LatestCompleteSnapshotEvidenceSchema = z
         code: 'custom',
         message: 'Scoped recipient health rows must be unique.',
         path: ['recipientHealth'],
+      });
+    }
+    const endpointIds = snapshot.staleEndpoints.map(
+      ({ endpointId }) => endpointId,
+    );
+    if (new Set(endpointIds).size !== endpointIds.length) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Scoped stale endpoint rows must be unique.',
+        path: ['staleEndpoints'],
       });
     }
   })
@@ -243,6 +293,26 @@ function buildFromParsedEvidence(
       .sort((left, right) =>
         left.recipientId.localeCompare(right.recipientId),
       ) ?? [];
+  const staleEndpoints =
+    snapshot?.staleEndpoints
+      .map(
+        (endpoint): StaleRosterEndpoint =>
+          Object.freeze({
+            recipientId: endpoint.recipientId,
+            endpointId: endpoint.endpointId,
+            channel: endpoint.channel,
+            reason:
+              endpoint.channel === 'sms' &&
+              endpoint.reasonCode === SMS_OPT_OUT_REASON_CODE
+                ? 'sms-opted-out'
+                : endpoint.status,
+          }),
+      )
+      .sort(
+        (left, right) =>
+          left.recipientId.localeCompare(right.recipientId) ||
+          left.endpointId.localeCompare(right.endpointId),
+      ) ?? [];
 
   const latestCompleteCapturedAt = snapshot?.capturedAt ?? null;
   const latestCompleteAgeSeconds =
@@ -278,7 +348,9 @@ function buildFromParsedEvidence(
     if (
       (latestCompleteAgeSeconds ?? 0) > staleThresholdSeconds ||
       staleRecipients.length > 0 ||
-      snapshot.hasUnreportedStaleRecipients
+      staleEndpoints.length > 0 ||
+      snapshot.hasUnreportedStaleRecipients ||
+      snapshot.hasUnreportedStaleEndpoints
     ) {
       return 'stale' as const;
     }
@@ -293,6 +365,7 @@ function buildFromParsedEvidence(
     latestCompleteAgeSeconds,
     failedGroups,
     staleRecipients,
+    staleEndpoints,
   });
   if (!result.success) {
     throw new StaleRosterReportError(
@@ -346,7 +419,14 @@ export function createGetStaleRosterReportHandler<Context>(
       );
       if (
         evidence.latestCompleteSnapshot !== null &&
-        evidence.latestCompleteSnapshot.recipientHealth.length > query.limit
+        new Set([
+          ...evidence.latestCompleteSnapshot.recipientHealth.map(
+            ({ recipientId }) => recipientId,
+          ),
+          ...evidence.latestCompleteSnapshot.staleEndpoints.map(
+            ({ recipientId }) => recipientId,
+          ),
+        ]).size > query.limit
       ) {
         throw new StaleRosterReportError(
           'INVALID_REPORT_EVIDENCE',
@@ -417,13 +497,21 @@ function cursorRecipientId(cursor: string | null): string | null {
 
 type StaleRosterQueryDatabase = Pick<
   DatabaseQuery,
-  'select' | 'selectDistinct'
+  'select' | 'selectDistinct' | 'selectDistinctOn'
 >;
 
 interface PreparedScopedStaleRosterQuery {
   readonly query: RosterHealthQuery;
   readonly facilityId: string | null;
   readonly afterRecipientId: string | null;
+}
+
+interface ScopedEndpointState {
+  readonly endpointId: string;
+  readonly channel: z.infer<typeof NotificationChannelSchema>;
+  readonly status: z.infer<typeof EndpointStatusSchema>;
+  readonly reasonCode: string | null;
+  readonly phoneNumber: string | null;
 }
 
 function prepareScopedStaleRosterQuery(
@@ -533,7 +621,7 @@ async function loadPreparedScopedStaleRosterEvidence(
     const recipientIds = recipientRows.map((row) => row.id);
     const statusesByRecipient = new Map<
       string,
-      Map<string, z.infer<typeof EndpointStatusSchema>>
+      Map<string, ScopedEndpointState>
     >();
     recipientIds.forEach((recipientId) =>
       statusesByRecipient.set(recipientId, new Map()),
@@ -548,7 +636,9 @@ async function loadPreparedScopedStaleRosterEvidence(
         .select({
           id: rosterEndpoints.id,
           recipientId: rosterEndpoints.recipientId,
+          channel: rosterEndpoints.channel,
           status: rosterEndpoints.status,
+          phoneNumber: rosterEndpoints.phoneNumber,
         })
         .from(rosterEndpoints)
         .where(
@@ -558,54 +648,266 @@ async function loadPreparedScopedStaleRosterEvidence(
           ),
         );
       endpointRows.forEach((endpoint) =>
-        statusesByRecipient
-          .get(endpoint.recipientId)
-          ?.set(endpoint.id, endpoint.status),
+        statusesByRecipient.get(endpoint.recipientId)?.set(
+          endpoint.id,
+          Object.freeze({
+            endpointId: endpoint.id,
+            channel: endpoint.channel,
+            status: endpoint.status,
+            reasonCode: null,
+            phoneNumber: endpoint.phoneNumber,
+          }),
+        ),
       );
+      // Provider STOP/START is consent state, not endpoint health. Project
+      // only independent invalid/disabled facts onto the snapshotted base;
+      // the phone lifecycle overlay below must never revive this state.
       const statusRows = await database
-        .select({
+        .selectDistinctOn([endpointStatusRecords.endpointId], {
+          id: endpointStatusRecords.id,
           endpointId: endpointStatusRecords.endpointId,
           recipientId: endpointStatusRecords.recipientId,
           status: endpointStatusRecords.status,
-          recordedAt: endpointStatusRecords.recordedAt,
+          reasonCode: endpointStatusRecords.reasonCode,
+          provider: endpointStatusRecords.provider,
+          providerReference: endpointStatusRecords.providerReference,
+          providerOccurredAt: endpointStatusRecords.providerOccurredAt,
+          sequence: endpointStatusRecords.sequence,
         })
         .from(endpointStatusRecords)
         .where(
           and(
             eq(endpointStatusRecords.rosterSnapshotId, snapshot.id),
             inArray(endpointStatusRecords.recipientId, batch),
+            notInArray(endpointStatusRecords.reasonCode, [
+              SMS_OPT_OUT_REASON_CODE,
+              SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+            ]),
           ),
         )
-        .orderBy(endpointStatusRecords.recordedAt);
-      statusRows.forEach((status) =>
-        statusesByRecipient
-          .get(status.recipientId)
-          ?.set(status.endpointId, status.status),
+        .orderBy(
+          endpointStatusRecords.endpointId,
+          desc(
+            sql`coalesce(${endpointStatusRecords.providerOccurredAt}, ${endpointStatusRecords.recordedAt})`,
+          ),
+          desc(endpointStatusRecords.sequence),
+        );
+      statusRows.forEach((status) => {
+        const recipientStatuses = statusesByRecipient.get(status.recipientId);
+        const endpoint = recipientStatuses?.get(status.endpointId);
+        if (recipientStatuses === undefined || endpoint === undefined) {
+          return;
+        }
+        if (
+          status.status === 'active' ||
+          status.provider !== null ||
+          status.providerReference !== null ||
+          status.providerOccurredAt !== null
+        ) {
+          throw new StaleRosterReportError(
+            'INVALID_REPORT_EVIDENCE',
+            'Persisted non-provider endpoint health evidence was inconsistent.',
+          );
+        }
+        recipientStatuses.set(
+          status.endpointId,
+          Object.freeze({
+            ...endpoint,
+            status: status.status,
+            reasonCode: status.reasonCode,
+          }),
+        );
+      });
+
+      // SMS STOP/START state follows the destination across immutable roster
+      // snapshots. This mirrors send policy: load only lifecycle facts for the
+      // bounded current-batch phone set, order by provider occurrence with a
+      // database-sequence tie-break, and discard every phone number before
+      // evidence leaves the store.
+      const phoneNumbers = [
+        ...new Set(
+          endpointRows.flatMap((endpoint) =>
+            endpoint.channel === 'sms' && endpoint.phoneNumber !== null
+              ? [endpoint.phoneNumber]
+              : [],
+          ),
+        ),
+      ];
+      const retainedSmsLifecycleEndpoint = alias(
+        rosterEndpoints,
+        'stale_report_retained_sms_lifecycle_endpoint',
       );
+      const phoneLifecycleRows =
+        phoneNumbers.length === 0
+          ? []
+          : await database
+              .selectDistinctOn([retainedSmsLifecycleEndpoint.phoneNumber], {
+                phoneNumber: retainedSmsLifecycleEndpoint.phoneNumber,
+                status: endpointStatusRecords.status,
+                reasonCode: endpointStatusRecords.reasonCode,
+                provider: endpointStatusRecords.provider,
+                providerReference: endpointStatusRecords.providerReference,
+                providerOccurredAt: endpointStatusRecords.providerOccurredAt,
+                sequence: endpointStatusRecords.sequence,
+              })
+              .from(endpointStatusRecords)
+              .innerJoin(
+                retainedSmsLifecycleEndpoint,
+                and(
+                  eq(
+                    retainedSmsLifecycleEndpoint.rosterSnapshotId,
+                    endpointStatusRecords.rosterSnapshotId,
+                  ),
+                  eq(
+                    retainedSmsLifecycleEndpoint.recipientId,
+                    endpointStatusRecords.recipientId,
+                  ),
+                  eq(
+                    retainedSmsLifecycleEndpoint.id,
+                    endpointStatusRecords.endpointId,
+                  ),
+                  eq(
+                    retainedSmsLifecycleEndpoint.population,
+                    endpointStatusRecords.population,
+                  ),
+                  eq(
+                    retainedSmsLifecycleEndpoint.channel,
+                    endpointStatusRecords.channel,
+                  ),
+                ),
+              )
+              .where(
+                and(
+                  eq(endpointStatusRecords.channel, 'sms'),
+                  inArray(
+                    retainedSmsLifecycleEndpoint.phoneNumber,
+                    phoneNumbers,
+                  ),
+                  inArray(endpointStatusRecords.reasonCode, [
+                    SMS_OPT_OUT_REASON_CODE,
+                    SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+                  ]),
+                ),
+              )
+              .orderBy(
+                retainedSmsLifecycleEndpoint.phoneNumber,
+                desc(
+                  sql`coalesce(${endpointStatusRecords.providerOccurredAt}, ${endpointStatusRecords.recordedAt})`,
+                ),
+                desc(endpointStatusRecords.sequence),
+              );
+      const effectivePhoneOptOut = new Map<string, boolean>();
+      phoneLifecycleRows.forEach((lifecycle) => {
+        if (lifecycle.phoneNumber === null) return;
+        const hasCanonicalProviderEvidence =
+          lifecycle.provider === SMS_LIFECYCLE_PROVIDER &&
+          lifecycle.providerReference !== null &&
+          lifecycle.providerOccurredAt !== null;
+        if (
+          lifecycle.reasonCode === SMS_OPT_OUT_REASON_CODE &&
+          lifecycle.status === 'disabled' &&
+          hasCanonicalProviderEvidence
+        ) {
+          effectivePhoneOptOut.set(lifecycle.phoneNumber, true);
+          return;
+        }
+        if (
+          lifecycle.reasonCode === SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE &&
+          lifecycle.status === 'active' &&
+          hasCanonicalProviderEvidence
+        ) {
+          effectivePhoneOptOut.set(lifecycle.phoneNumber, false);
+          return;
+        }
+        throw new StaleRosterReportError(
+          'INVALID_REPORT_EVIDENCE',
+          'Persisted SMS endpoint lifecycle evidence was inconsistent.',
+        );
+      });
+      endpointRows.forEach((endpoint) => {
+        if (
+          endpoint.channel !== 'sms' ||
+          endpoint.phoneNumber === null ||
+          effectivePhoneOptOut.get(endpoint.phoneNumber) !== true
+        ) {
+          return;
+        }
+        const recipientStatuses = statusesByRecipient.get(endpoint.recipientId);
+        const current = recipientStatuses?.get(endpoint.id);
+        if (recipientStatuses === undefined || current === undefined) return;
+        recipientStatuses.set(
+          endpoint.id,
+          Object.freeze({
+            ...current,
+            status: 'disabled',
+            reasonCode: SMS_OPT_OUT_REASON_CODE,
+          }),
+        );
+      });
     }
 
-    const staleRows = [...statusesByRecipient.entries()]
+    const staleRecipientRows = [...statusesByRecipient.entries()]
       .map(([recipientId, statuses]) => ({
         recipientId,
-        endpointStatuses: [...statuses.values()],
+        endpointStatuses: [...statuses.values()].map(({ status }) => status),
       }))
       .filter(
         ({ endpointStatuses }) =>
           endpointStatuses.length === 0 || !endpointStatuses.includes('active'),
       )
       .sort((left, right) => left.recipientId.localeCompare(right.recipientId));
-    const pageRows = staleRows
+    const staleEndpointRows = [...statusesByRecipient.entries()]
+      .flatMap(([recipientId, statuses]) =>
+        [...statuses.values()].flatMap((endpoint) =>
+          endpoint.status === 'active'
+            ? []
+            : [
+                Object.freeze({
+                  recipientId,
+                  endpointId: endpoint.endpointId,
+                  channel: endpoint.channel,
+                  status: endpoint.status,
+                  reasonCode: endpoint.reasonCode,
+                }),
+              ],
+        ),
+      )
+      .sort(
+        (left, right) =>
+          left.recipientId.localeCompare(right.recipientId) ||
+          left.endpointId.localeCompare(right.endpointId),
+      );
+    const remainingRecipientIds = [
+      ...new Set([
+        ...staleRecipientRows.map(({ recipientId }) => recipientId),
+        ...staleEndpointRows.map(({ recipientId }) => recipientId),
+      ]),
+    ]
       .filter(
-        ({ recipientId }) =>
+        (recipientId) =>
           afterRecipientId === null ||
           recipientId.localeCompare(afterRecipientId) > 0,
       )
-      .slice(0, query.limit);
+      .sort((left, right) => left.localeCompare(right));
+    const pageRecipientIds = remainingRecipientIds.slice(0, query.limit);
+    const pageRecipientIdSet = new Set(pageRecipientIds);
+    const pageRecipientRows = staleRecipientRows.filter(({ recipientId }) =>
+      pageRecipientIdSet.has(recipientId),
+    );
+    const pageEndpointRows = staleEndpointRows.filter(({ recipientId }) =>
+      pageRecipientIdSet.has(recipientId),
+    );
     latestCompleteSnapshot = Object.freeze({
       id: snapshot.id,
       capturedAt: snapshot.capturedAt.toISOString(),
-      recipientHealth: Object.freeze(pageRows),
-      hasUnreportedStaleRecipients: staleRows.length > pageRows.length,
+      recipientHealth: Object.freeze(pageRecipientRows),
+      staleEndpoints: Object.freeze(pageEndpointRows),
+      hasUnreportedStaleRecipients: staleRecipientRows.some(
+        ({ recipientId }) => !pageRecipientIdSet.has(recipientId),
+      ),
+      hasUnreportedStaleEndpoints: staleEndpointRows.some(
+        ({ recipientId }) => !pageRecipientIdSet.has(recipientId),
+      ),
     });
   }
 
