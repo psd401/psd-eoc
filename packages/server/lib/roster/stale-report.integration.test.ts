@@ -9,6 +9,9 @@ import {
 import { randomUUID } from 'node:crypto';
 import {
   RosterHealthQuerySchema,
+  SMS_LIFECYCLE_PROVIDER,
+  SMS_OPT_OUT_REASON_CODE,
+  SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
   executeCapability,
   type CapabilityExecutionAuthorizer,
   type RosterHealthQuery,
@@ -84,14 +87,23 @@ const ids = Object.freeze({
   groupSouth: '80000000-0000-4000-8000-000000000031',
   groupOthers: '80000000-0000-4000-8000-000000000032',
   configuration: '80000000-0000-4000-8000-000000000040',
+  priorSnapshot: '80000000-0000-4000-8000-000000000042',
   snapshot: '80000000-0000-4000-8000-000000000041',
+  priorRecipientNorthSms: '80000000-0000-4000-8000-000000000049',
   recipientNorthStale: '80000000-0000-4000-8000-000000000050',
   recipientNorthActive: '80000000-0000-4000-8000-000000000051',
   recipientSouthNoEndpoint: '80000000-0000-4000-8000-000000000052',
   recipientOthersNoEndpoint: '80000000-0000-4000-8000-000000000053',
   endpointNorthStale: '80000000-0000-4000-8000-000000000060',
   endpointNorthActive: '80000000-0000-4000-8000-000000000061',
+  endpointPriorNorthSms: '80000000-0000-4000-8000-000000000062',
+  endpointNorthActiveSms: '80000000-0000-4000-8000-000000000063',
+  endpointStatusPriorSmsOptOut: '80000000-0000-4000-8000-000000000069',
   endpointStatusNorthStale: '80000000-0000-4000-8000-000000000070',
+  endpointStatusPriorSmsOptIn: '80000000-0000-4000-8000-000000000071',
+  endpointStatusNorthSmsInvalid: '80000000-0000-4000-8000-000000000072',
+  endpointStatusDelayedSmsOptOut: '80000000-0000-4000-8000-000000000073',
+  endpointStatusTiedSmsOptOut: '80000000-0000-4000-8000-000000000074',
   oldNorthFailureResult: '80000000-0000-4000-8000-000000000080',
   newSouthFailureResult: '80000000-0000-4000-8000-000000000081',
   newOthersFailureResult: '80000000-0000-4000-8000-000000000082',
@@ -109,6 +121,7 @@ const SNAPSHOT_VERSION = 8_008;
 
 const NORTH_STALE_EMAIL = 'stale-report-north-canary@example.invalid';
 const NORTH_ACTIVE_EMAIL = 'active-report-north-canary@example.invalid';
+const NORTH_ACTIVE_SMS = '+12025550199';
 
 const groupRefs = Object.freeze([
   Object.freeze({
@@ -381,16 +394,28 @@ async function installStaffReportFixture(
 
     await transaction
       .insert(rosterSnapshots)
-      .values({
-        id: ids.snapshot,
-        version: SNAPSHOT_VERSION,
-        population: 'staff',
-        complete: true,
-        sourceConfigurationId: ids.configuration,
-        sourceConfigurationVersion: 1,
-        syncStartedAt: SNAPSHOT_STARTED_AT,
-        capturedAt: SNAPSHOT_CAPTURED_AT,
-      })
+      .values([
+        {
+          id: ids.priorSnapshot,
+          version: SNAPSHOT_VERSION - 1,
+          population: 'staff',
+          complete: true,
+          sourceConfigurationId: ids.configuration,
+          sourceConfigurationVersion: 1,
+          syncStartedAt: new Date('2026-08-05T11:00:00.000Z'),
+          capturedAt: new Date('2026-08-05T12:00:00.000Z'),
+        },
+        {
+          id: ids.snapshot,
+          version: SNAPSHOT_VERSION,
+          population: 'staff',
+          complete: true,
+          sourceConfigurationId: ids.configuration,
+          sourceConfigurationVersion: 1,
+          syncStartedAt: SNAPSHOT_STARTED_AT,
+          capturedAt: SNAPSHOT_CAPTURED_AT,
+        },
+      ])
       .onConflictDoNothing();
     await transaction
       .insert(rosterSnapshotFacilities)
@@ -423,6 +448,13 @@ async function installStaffReportFixture(
     await transaction
       .insert(rosterRecipients)
       .values([
+        {
+          id: ids.priorRecipientNorthSms,
+          rosterSnapshotId: ids.priorSnapshot,
+          population: 'staff',
+          googleSubject: 'synthetic-subject-report-prior-north-sms',
+          displayName: 'Synthetic Report Prior North SMS',
+        },
         {
           id: ids.recipientNorthStale,
           rosterSnapshotId: ids.snapshot,
@@ -494,6 +526,19 @@ async function installStaffReportFixture(
       .insert(rosterEndpoints)
       .values([
         {
+          id: ids.endpointPriorNorthSms,
+          rosterSnapshotId: ids.priorSnapshot,
+          recipientId: ids.priorRecipientNorthSms,
+          population: 'staff',
+          channel: 'sms',
+          status: 'active',
+          capturedAt: new Date('2026-08-05T12:00:00.000Z'),
+          platform: null,
+          token: null,
+          email: null,
+          phoneNumber: NORTH_ACTIVE_SMS,
+        },
+        {
           id: ids.endpointNorthStale,
           rosterSnapshotId: ids.snapshot,
           recipientId: ids.recipientNorthStale,
@@ -519,22 +564,51 @@ async function installStaffReportFixture(
           email: NORTH_ACTIVE_EMAIL,
           phoneNumber: null,
         },
+        {
+          id: ids.endpointNorthActiveSms,
+          rosterSnapshotId: ids.snapshot,
+          recipientId: ids.recipientNorthActive,
+          population: 'staff',
+          channel: 'sms',
+          status: 'active',
+          capturedAt: SNAPSHOT_CAPTURED_AT,
+          platform: null,
+          token: null,
+          email: null,
+          phoneNumber: NORTH_ACTIVE_SMS,
+        },
       ])
       .onConflictDoNothing();
 
     await transaction
       .insert(endpointStatusRecords)
-      .values({
-        id: ids.endpointStatusNorthStale,
-        rosterSnapshotId: ids.snapshot,
-        recipientId: ids.recipientNorthStale,
-        endpointId: ids.endpointNorthStale,
-        population: 'staff',
-        channel: 'email',
-        status: 'invalid',
-        reasonCode: 'SYNTHETIC_REPORT_TEST',
-        recordedAt: new Date('2026-08-06T13:00:00.000Z'),
-      })
+      .values([
+        {
+          id: ids.endpointStatusPriorSmsOptOut,
+          rosterSnapshotId: ids.priorSnapshot,
+          recipientId: ids.priorRecipientNorthSms,
+          endpointId: ids.endpointPriorNorthSms,
+          population: 'staff',
+          channel: 'sms',
+          status: 'disabled',
+          reasonCode: SMS_OPT_OUT_REASON_CODE,
+          provider: SMS_LIFECYCLE_PROVIDER,
+          providerReference: 'opt-out:synthetic-stale-report:1',
+          providerOccurredAt: new Date('2026-08-05T12:55:00.000Z'),
+          recordedAt: new Date('2026-08-05T13:00:00.000Z'),
+        },
+        {
+          id: ids.endpointStatusNorthStale,
+          rosterSnapshotId: ids.snapshot,
+          recipientId: ids.recipientNorthStale,
+          endpointId: ids.endpointNorthStale,
+          population: 'staff',
+          channel: 'email',
+          status: 'invalid',
+          reasonCode: 'SYNTHETIC_REPORT_TEST',
+          recordedAt: new Date('2026-08-06T13:00:00.000Z'),
+        },
+      ])
       .onConflictDoNothing();
 
     await transaction
@@ -791,14 +865,14 @@ describeWithDatabase('PostgreSQL stale-roster report capability', () => {
     expect(serialized).not.toContain('displayName');
   });
 
-  test('keeps the report stale when a cursor pages past an earlier stale recipient', async () => {
-    const afterNorthStale = Buffer.from(
-      ids.recipientNorthStale,
+  test('keeps the report stale when a cursor pages past earlier stale evidence', async () => {
+    const afterNorthEvidence = Buffer.from(
+      ids.recipientNorthActive,
       'utf8',
     ).toString('base64url');
     const report = await executeReport(
       databaseConnection().db,
-      query(ids.facilityNorth, afterNorthStale),
+      query(ids.facilityNorth, afterNorthEvidence),
       {
         facilityScope: {
           kind: 'facilities',
@@ -809,7 +883,144 @@ describeWithDatabase('PostgreSQL stale-roster report capability', () => {
 
     expect(report.status).toBe('stale');
     expect(report.staleRecipients).toEqual([]);
+    expect(report.staleEndpoints).toEqual([]);
     expect(report.failedGroups).toEqual([]);
+  });
+
+  test('separates cross-snapshot SMS lifecycle from independent endpoint health', async () => {
+    const database = databaseConnection().db;
+    const authorizationContext = {
+      facilityScope: {
+        kind: 'facilities' as const,
+        facilityIds: [ids.facilityNorth],
+      },
+    };
+    const optedOut = await executeReport(
+      database,
+      query(ids.facilityNorth),
+      authorizationContext,
+    );
+
+    expect(optedOut.latestCompleteSnapshotId).toBe(ids.snapshot);
+    expect(optedOut.staleEndpoints).toContainEqual({
+      recipientId: ids.recipientNorthActive,
+      endpointId: ids.endpointNorthActiveSms,
+      channel: 'sms',
+      reason: 'sms-opted-out',
+    });
+    expect(JSON.stringify(optedOut)).not.toContain(NORTH_ACTIVE_SMS);
+
+    await database.insert(endpointStatusRecords).values({
+      id: ids.endpointStatusNorthSmsInvalid,
+      rosterSnapshotId: ids.snapshot,
+      recipientId: ids.recipientNorthActive,
+      endpointId: ids.endpointNorthActiveSms,
+      population: 'staff',
+      channel: 'sms',
+      status: 'invalid',
+      reasonCode: 'SYNTHETIC_SMS_ENDPOINT_INVALID',
+      provider: null,
+      providerReference: null,
+      providerOccurredAt: null,
+      recordedAt: new Date('2026-08-06T13:30:00.000Z'),
+    });
+    await database.insert(endpointStatusRecords).values({
+      id: ids.endpointStatusPriorSmsOptIn,
+      rosterSnapshotId: ids.priorSnapshot,
+      recipientId: ids.priorRecipientNorthSms,
+      endpointId: ids.endpointPriorNorthSms,
+      population: 'staff',
+      channel: 'sms',
+      status: 'active',
+      reasonCode: SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+      provider: SMS_LIFECYCLE_PROVIDER,
+      providerReference: 'opt-in:synthetic-stale-report:2',
+      providerOccurredAt: new Date('2026-08-06T13:55:00.000Z'),
+      recordedAt: new Date('2026-08-06T14:00:00.000Z'),
+    });
+
+    const optedIn = await executeReport(
+      database,
+      query(ids.facilityNorth),
+      authorizationContext,
+    );
+    expect(optedIn.staleEndpoints).toContainEqual({
+      recipientId: ids.recipientNorthActive,
+      endpointId: ids.endpointNorthActiveSms,
+      channel: 'sms',
+      reason: 'invalid',
+    });
+    expect(optedIn.staleEndpoints).not.toContainEqual({
+      recipientId: ids.recipientNorthActive,
+      endpointId: ids.endpointNorthActiveSms,
+      channel: 'sms',
+      reason: 'sms-opted-out',
+    });
+    expect(JSON.stringify(optedIn)).not.toContain(NORTH_ACTIVE_SMS);
+
+    // A delayed STOP ingested after START must not win merely because its
+    // database sequence is newer; provider occurrence time is causal truth.
+    await database.insert(endpointStatusRecords).values({
+      id: ids.endpointStatusDelayedSmsOptOut,
+      rosterSnapshotId: ids.priorSnapshot,
+      recipientId: ids.priorRecipientNorthSms,
+      endpointId: ids.endpointPriorNorthSms,
+      population: 'staff',
+      channel: 'sms',
+      status: 'disabled',
+      reasonCode: SMS_OPT_OUT_REASON_CODE,
+      provider: SMS_LIFECYCLE_PROVIDER,
+      providerReference: 'opt-out:synthetic-stale-report:delayed',
+      providerOccurredAt: new Date('2026-08-06T13:50:00.000Z'),
+      recordedAt: new Date('2026-08-06T14:01:00.000Z'),
+    });
+
+    const afterDelayedStop = await executeReport(
+      database,
+      query(ids.facilityNorth),
+      authorizationContext,
+    );
+    expect(afterDelayedStop.staleEndpoints).toContainEqual({
+      recipientId: ids.recipientNorthActive,
+      endpointId: ids.endpointNorthActiveSms,
+      channel: 'sms',
+      reason: 'invalid',
+    });
+    expect(afterDelayedStop.staleEndpoints).not.toContainEqual({
+      recipientId: ids.recipientNorthActive,
+      endpointId: ids.endpointNorthActiveSms,
+      channel: 'sms',
+      reason: 'sms-opted-out',
+    });
+    expect(JSON.stringify(afterDelayedStop)).not.toContain(NORTH_ACTIVE_SMS);
+
+    // Equal provider times are deterministic: the later append sequence wins.
+    await database.insert(endpointStatusRecords).values({
+      id: ids.endpointStatusTiedSmsOptOut,
+      rosterSnapshotId: ids.priorSnapshot,
+      recipientId: ids.priorRecipientNorthSms,
+      endpointId: ids.endpointPriorNorthSms,
+      population: 'staff',
+      channel: 'sms',
+      status: 'disabled',
+      reasonCode: SMS_OPT_OUT_REASON_CODE,
+      provider: SMS_LIFECYCLE_PROVIDER,
+      providerReference: 'opt-out:synthetic-stale-report:tied',
+      providerOccurredAt: new Date('2026-08-06T13:55:00.000Z'),
+      recordedAt: new Date('2026-08-06T14:02:00.000Z'),
+    });
+    const afterTiedStop = await executeReport(
+      database,
+      query(ids.facilityNorth),
+      authorizationContext,
+    );
+    expect(afterTiedStop.staleEndpoints).toContainEqual({
+      recipientId: ids.recipientNorthActive,
+      endpointId: ids.endpointNorthActiveSms,
+      channel: 'sms',
+      reason: 'sms-opted-out',
+    });
+    expect(JSON.stringify(afterTiedStop)).not.toContain(NORTH_ACTIVE_SMS);
   });
 
   test('surfaces a newer scoped failure and clears an older failure after recovery', async () => {
