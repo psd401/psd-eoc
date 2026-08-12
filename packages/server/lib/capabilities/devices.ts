@@ -151,8 +151,7 @@ function replayUnavailable(): CapabilityEngineError {
   );
 }
 
-function requirePushInvalidationWorker(
-  input: CapabilityInput<'record-endpoint-status'>,
+function requirePushInvalidationWorkerInvocation(
   context: CapabilityHandlerContext<DeviceCapabilityTransaction>,
 ): void {
   const invocation = context.invocation;
@@ -161,6 +160,23 @@ function requirePushInvalidationWorker(
     invocation.actor.serviceId !== PUSH_ENDPOINT_INVALIDATION_SERVICE_ID ||
     invocation.source !== 'worker' ||
     invocation.mutation?.transport.kind !== 'worker-execution' ||
+    invocation.mutation.humanConfirmationId !== null
+  ) {
+    throw new CapabilityEngineError(
+      'FORBIDDEN',
+      'CAPABILITY_INVOCATION_DENIED',
+      'The endpoint-status invocation was not authorized.',
+      403,
+    );
+  }
+}
+
+function requirePushInvalidationWorker(
+  input: CapabilityInput<'record-endpoint-status'>,
+  context: CapabilityHandlerContext<DeviceCapabilityTransaction>,
+): void {
+  requirePushInvalidationWorkerInvocation(context);
+  if (
     input.status !== 'invalid' ||
     input.reasonCode !== EXPO_DEVICE_NOT_REGISTERED_REASON
   ) {
@@ -266,6 +282,7 @@ const recordEndpointStatusRegistration: ServerCapabilityRegistration<
   resolveReplayFacilityId: () => null,
   replayFacilityId: () => null,
   async loadReplay(reference, context) {
+    requirePushInvalidationWorkerInvocation(context);
     const replay =
       await context.transaction.loadEndpointStatusReplay(reference);
     if (replay === null) throw replayUnavailable();
