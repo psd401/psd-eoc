@@ -52,6 +52,8 @@ export interface ExpoPushWorkerOptions {
 
 const EXPO_FORBIDDEN_DELIVERY_REASON = 'EXPO_DELIVERED_TRUTH_FORBIDDEN';
 const MAX_EXPO_WORK_ITEMS = 12_000;
+const SAFE_EXPO_PROVIDER_REFERENCE_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/u;
 const EXPO_OUTCOME_KEYS = Object.freeze([
   'state',
   'provider',
@@ -61,7 +63,10 @@ const EXPO_OUTCOME_KEYS = Object.freeze([
   'diagnosticDigest',
 ] as const);
 
-function canonicalExpoOutcome(value: unknown): ProviderSendOutcome {
+function canonicalExpoOutcome(
+  value: unknown,
+  expectedProvider: string,
+): ProviderSendOutcome {
   try {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
       throw new TypeError();
@@ -99,7 +104,13 @@ function canonicalExpoOutcome(value: unknown): ProviderSendOutcome {
     }
     if (
       properties.state === 'delivered' ||
+      properties.provider !== expectedProvider ||
       properties.proof !== null ||
+      (properties.providerReference !== null &&
+        (typeof properties.providerReference !== 'string' ||
+          !SAFE_EXPO_PROVIDER_REFERENCE_PATTERN.test(
+            properties.providerReference,
+          ))) ||
       (properties.state === 'provider-accepted' &&
         (properties.providerReference === null ||
           properties.reasonCode !== null ||
@@ -140,19 +151,23 @@ function failClosedExpoAdapter(
     async send(
       request: ProviderSendRequest,
     ): Promise<ProviderSendOutcome | unknown> {
-      return canonicalExpoOutcome(await adapter.send(request));
+      return canonicalExpoOutcome(
+        await adapter.send(request),
+        adapter.provider,
+      );
     },
   });
 }
 
 function failClosedExecutionStore(
   store: AttemptExecutionStore,
+  provider: string,
 ): AttemptExecutionStore {
   return Object.freeze({
     async claim(
       request: AttemptExecutionClaimRequest,
     ): Promise<AttemptExecutionClaim> {
-      return canonicalExecutionClaim(await store.claim(request));
+      return canonicalExecutionClaim(await store.claim(request), provider);
     },
     complete(request: CompleteAttemptExecutionRequest) {
       return store.complete(request);
@@ -204,12 +219,13 @@ function exactDataProperties(
 
 function canonicalExecutionCompletion(
   value: unknown,
+  provider: string,
 ): AttemptExecutionCompletion {
   const final = exactDataProperties(value, ['kind', 'outcome']);
   if (final?.kind === 'final') {
     return Object.freeze({
       kind: 'final',
-      outcome: canonicalExpoOutcome(final.outcome),
+      outcome: canonicalExpoOutcome(final.outcome, provider),
     });
   }
   const retry = exactDataProperties(value, [
@@ -234,7 +250,7 @@ function canonicalExecutionCompletion(
     }
     return Object.freeze({
       kind: 'retry',
-      outcome: canonicalExpoOutcome(retry.outcome),
+      outcome: canonicalExpoOutcome(retry.outcome, provider),
       delayMilliseconds: retry.delayMilliseconds as number,
       nextAttemptNumber: retry.nextAttemptNumber as number,
       reasonCode: retry.reasonCode as string,
@@ -243,7 +259,10 @@ function canonicalExecutionCompletion(
   throw new ProviderDispatchError(EXPO_FORBIDDEN_DELIVERY_REASON, 'ambiguous');
 }
 
-function canonicalExecutionClaim(value: unknown): AttemptExecutionClaim {
+function canonicalExecutionClaim(
+  value: unknown,
+  provider: string,
+): AttemptExecutionClaim {
   const acquired = exactDataProperties(value, ['kind', 'leaseToken']);
   if (acquired?.kind === 'acquired') {
     return Object.freeze({
@@ -255,7 +274,7 @@ function canonicalExecutionClaim(value: unknown): AttemptExecutionClaim {
   if (completed?.kind === 'completed') {
     return Object.freeze({
       kind: 'completed',
-      completion: canonicalExecutionCompletion(completed.completion),
+      completion: canonicalExecutionCompletion(completed.completion, provider),
     });
   }
   const inProgress = exactDataProperties(value, ['kind']);
@@ -349,7 +368,10 @@ export class ExpoPushWorker {
     }
     this.#processor = new WorkerAttemptProcessor({
       adapter: failClosedExpoAdapter(options.adapter),
-      executionStore: failClosedExecutionStore(options.executionStore),
+      executionStore: failClosedExecutionStore(
+        options.executionStore,
+        options.adapter.provider,
+      ),
       evidenceWriter: options.evidenceWriter,
       ...(options.retryPolicy === undefined
         ? {}
