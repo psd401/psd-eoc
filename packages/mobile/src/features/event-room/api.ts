@@ -8,6 +8,7 @@ import {
   MediaReadGrantSchema,
   MediaRecordSchema,
   MediaUploadIntentSchema,
+  SessionIdSchema,
   projectJournalEntryForRead,
   type AllClearEventResult,
   type CloseEventResult,
@@ -71,6 +72,7 @@ function structurallyEqual(left: unknown, right: unknown): boolean {
 
 function journalMutationSchema(
   eventId: string,
+  sessionId: string,
   kind: 'text' | 'photo' | 'location',
   clientTime: string | null,
   matchesRequest: (entry: JournalEntry) => boolean,
@@ -82,6 +84,7 @@ function journalMutationSchema(
       entry.kind !== kind ||
       entry.source !== 'mobile' ||
       entry.author.kind !== 'human' ||
+      entry.author.sessionId !== sessionId ||
       entry.clientTime !== clientTime ||
       entry.supersedes !== null ||
       !matchesRequest(entry)
@@ -190,6 +193,7 @@ export class EventRoomApi {
 
   public postText(
     eventId: string,
+    sessionId: string,
     text: string,
     idempotencyKey: string,
     clientTime: string | null,
@@ -201,6 +205,7 @@ export class EventRoomApi {
       idempotencyKey,
       journalMutationSchema(
         EventIdSchema.parse(eventId),
+        SessionIdSchema.parse(sessionId),
         'text',
         clientTime,
         (entry) => entry.kind === 'text' && entry.payload.text === text,
@@ -211,6 +216,7 @@ export class EventRoomApi {
 
   public postLocation(
     eventId: string,
+    sessionId: string,
     payload: LocationPayload,
     idempotencyKey: string,
     clientTime: string | null,
@@ -222,6 +228,7 @@ export class EventRoomApi {
       idempotencyKey,
       journalMutationSchema(
         EventIdSchema.parse(eventId),
+        SessionIdSchema.parse(sessionId),
         'location',
         clientTime,
         (entry) =>
@@ -234,6 +241,7 @@ export class EventRoomApi {
 
   public postPhoto(
     eventId: string,
+    sessionId: string,
     mediaId: string,
     altText: string,
     caption: string | null,
@@ -253,6 +261,7 @@ export class EventRoomApi {
       idempotencyKey,
       journalMutationSchema(
         EventIdSchema.parse(eventId),
+        SessionIdSchema.parse(sessionId),
         'photo',
         clientTime,
         (entry) =>

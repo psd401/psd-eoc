@@ -83,13 +83,18 @@ describe('authenticated mobile request transport', () => {
     expect(init.credentials).toBe('omit');
     expect(init.redirect).toBe('error');
     expect(init.cache).toBe('no-store');
-    expect(init.signal).toBe(controller.signal);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal).not.toBe(controller.signal);
+    expect(init.signal?.aborted).toBeFalse();
     expect(init.body).toBeUndefined();
     expect(headers.get('accept')).toBe('application/json');
     expect(headers.get('authorization')).toBe(`Bearer ${TEST_BEARER}`);
     expect(headers.get('cache-control')).toBe('no-store');
     expect(headers.get('cookie')).toBeNull();
     expect(headers.get('content-type')).toBeNull();
+
+    controller.abort(new Error('post-request caller abort'));
+    expect(init.signal?.aborted).toBeFalse();
   });
 
   test('serializes mutation JSON and validates the required idempotency key', async () => {
@@ -346,7 +351,7 @@ describe('authenticated mobile request transport', () => {
     });
   });
 
-  test('maps provider failures to a bounded network error while preserving aborts', async () => {
+  test('maps provider failures to a bounded network error', async () => {
     const unavailable = new AuthenticatedApiClient(
       () => 'https://eoc.synthetic.example',
       async () => {
@@ -365,18 +370,113 @@ describe('authenticated mobile request transport', () => {
         'PSD EOC could not reach the server. Reconnect before trying again.',
       ),
     );
+  });
 
+  test('aborts an indefinitely pending fetch at the fixed deadline', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const timeoutHandle = 8_001 as unknown as ReturnType<typeof setTimeout>;
+    let deadlineCallback: (() => void) | undefined;
+    let observedDelay: number | undefined;
+    let clearedHandle: ReturnType<typeof setTimeout> | undefined;
+    let transportSignal: AbortSignal | undefined;
+
+    globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+      deadlineCallback = callback;
+      observedDelay = delay;
+      return timeoutHandle;
+    }) as unknown as typeof globalThis.setTimeout;
+    globalThis.clearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
+      clearedHandle = handle;
+    }) as typeof globalThis.clearTimeout;
+
+    try {
+      const client = new AuthenticatedApiClient(
+        () => 'https://eoc.synthetic.example',
+        (_input, init) => {
+          transportSignal = init.signal ?? undefined;
+          return new Promise<Response>(() => {});
+        },
+      );
+      const request = client.request(
+        TEST_BEARER,
+        getRequest('/api/events'),
+        new AbortController().signal,
+      );
+
+      expect(observedDelay).toBe(8_000);
+      expect(transportSignal?.aborted).toBeFalse();
+      if (deadlineCallback === undefined) {
+        throw new Error('Expected an authenticated request deadline.');
+      }
+      deadlineCallback();
+
+      await expect(request).rejects.toEqual(
+        new AuthenticatedRequestFailure(
+          'network',
+          'PSD EOC could not reach the server. Reconnect before trying again.',
+        ),
+      );
+      expect(transportSignal?.aborted).toBeTrue();
+      expect(clearedHandle).toBe(timeoutHandle);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
+  test('links caller aborts and preserves the caller abort reason', async () => {
     const caller = new AbortController();
-    const abort = new Error('synthetic abort');
-    caller.abort();
+    const abort = new Error('synthetic caller abort');
+    let transportSignal: AbortSignal | undefined;
     const aborted = new AuthenticatedApiClient(
       () => 'https://eoc.synthetic.example',
-      async () => {
-        throw abort;
+      (_input, init) => {
+        const signal = init.signal;
+        if (signal === null || signal === undefined) {
+          throw new Error('Expected a linked authenticated request signal.');
+        }
+        transportSignal = signal;
+        return new Promise<Response>((_resolve, reject) => {
+          const rejectAbort = () => reject(signal.reason);
+          if (signal.aborted) {
+            rejectAbort();
+          } else {
+            signal.addEventListener('abort', rejectAbort, { once: true });
+          }
+        });
       },
     );
+    const request = aborted.request(
+      TEST_BEARER,
+      getRequest('/api/events'),
+      caller.signal,
+    );
+
+    expect(transportSignal).not.toBe(caller.signal);
+    caller.abort(abort);
+
+    await expect(request).rejects.toBe(abort);
+    expect(transportSignal?.aborted).toBeTrue();
+    expect(transportSignal?.reason).toBe(abort);
+  });
+
+  test('does not invoke fetch for a caller that is already aborted', async () => {
+    const caller = new AbortController();
+    const abort = new Error('synthetic pre-aborted caller');
+    caller.abort(abort);
+    let fetchCalls = 0;
+    const client = new AuthenticatedApiClient(
+      () => 'https://eoc.synthetic.example',
+      async () => {
+        fetchCalls += 1;
+        return response({ value: 'must-not-send' });
+      },
+    );
+
     await expect(
-      aborted.request(TEST_BEARER, getRequest('/api/events'), caller.signal),
+      client.request(TEST_BEARER, getRequest('/api/events'), caller.signal),
     ).rejects.toBe(abort);
+    expect(fetchCalls).toBe(0);
   });
 });

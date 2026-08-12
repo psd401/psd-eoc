@@ -547,6 +547,29 @@ function retryStageForActive(stage: PhotoDraftStage): PhotoDraftNetworkStage {
   }
 }
 
+function sameRestoreLineage(
+  left: PhotoDraftManifest,
+  right: PhotoDraftManifest,
+): boolean {
+  return (
+    left.draftId === right.draftId &&
+    left.eventId === right.eventId &&
+    left.sessionId === right.sessionId &&
+    left.localUri === right.localUri &&
+    left.byteLength === right.byteLength &&
+    left.contentSha256 === right.contentSha256 &&
+    left.declaredContentType === right.declaredContentType &&
+    left.altText === right.altText &&
+    left.caption === right.caption &&
+    left.uploadIntentId === right.uploadIntentId &&
+    left.mediaId === right.mediaId &&
+    left.idempotencyKeys.createIntent === right.idempotencyKeys.createIntent &&
+    left.idempotencyKeys.completeUpload ===
+      right.idempotencyKeys.completeUpload &&
+    left.idempotencyKeys.appendEntry === right.idempotencyKeys.appendEntry
+  );
+}
+
 function validateIntent(
   value: unknown,
   manifest: PhotoDraftManifest,
@@ -655,6 +678,7 @@ export class PhotoDraftController {
   private running = false;
   private backgroundObserved = false;
   private activeController: AbortController | null = null;
+  private operationSettled: Promise<void> = Promise.resolve();
 
   private constructor(
     manifest: PhotoDraftManifest,
@@ -728,7 +752,22 @@ export class PhotoDraftController {
         retryStage: retryStageForActive(manifest.stage),
       });
       const previous = parsePhotoDraftManifest(stored);
-      await dependencies.storage.save(manifest, previous);
+      try {
+        await dependencies.storage.save(manifest, previous);
+      } catch (error) {
+        const concurrent = await dependencies.storage.load(eventId);
+        if (concurrent === null) throw error;
+        const adopted = parsePhotoDraftManifest(concurrent);
+        if (
+          adopted.stage !== 'unknown' ||
+          adopted.retryStage !== manifest.retryStage ||
+          adopted.cleanupProof !== null ||
+          !sameRestoreLineage(adopted, manifest)
+        ) {
+          throw error;
+        }
+        manifest = adopted;
+      }
     }
     return new PhotoDraftController(manifest, dependencies);
   }
@@ -776,8 +815,25 @@ export class PhotoDraftController {
 
   /** Stops unlocked work while retaining the exact durable retry checkpoint. */
   public interruptForBackground(): void {
+    // Merely backgrounding an idle, ready composer does not make its outcome
+    // uncertain. start()/retry() claim synchronously before their first await,
+    // so this still covers interruption during every persistence/network gap.
+    if (!this.running) return;
     this.backgroundObserved = true;
     this.activeController?.abort();
+  }
+
+  /** Resolves after this controller's claimed persistence/network work settles. */
+  public async waitForOperationSettlement(): Promise<void> {
+    await this.operationSettled;
+  }
+
+  private trackOperation<Value>(operation: Promise<Value>): Promise<Value> {
+    const previous = this.operationSettled;
+    this.operationSettled = Promise.allSettled([previous, operation]).then(
+      () => undefined,
+    );
+    return operation;
   }
 
   public async start(): Promise<PhotoDraftSnapshot> {
@@ -795,6 +851,13 @@ export class PhotoDraftController {
     altText: string,
     caption: string | null,
   ): Promise<PhotoDraftSnapshot> {
+    return this.trackOperation(this.updateDescriptionTracked(altText, caption));
+  }
+
+  private async updateDescriptionTracked(
+    altText: string,
+    caption: string | null,
+  ): Promise<PhotoDraftSnapshot> {
     const manifest = this.requireManifest();
     if (this.running || manifest.stage !== 'ready') {
       throw new PhotoDraftStateError(
@@ -807,6 +870,10 @@ export class PhotoDraftController {
 
   /** Cancels only a draft that has never attempted a network operation. */
   public async discard(): Promise<PhotoDraftSnapshot> {
+    return this.trackOperation(this.discardTracked());
+  }
+
+  private async discardTracked(): Promise<PhotoDraftSnapshot> {
     const manifest = this.requireManifest();
     if (this.running || manifest.stage !== 'ready') {
       throw new PhotoDraftStateError(
@@ -831,7 +898,46 @@ export class PhotoDraftController {
     return this.snapshot();
   }
 
+  /**
+   * Explicit local-only cleanup after an event is closed. No network adapter
+   * is reachable, including for failed or uncertain retained operations.
+   */
+  public async discardLocallyAfterEventClosed(): Promise<PhotoDraftSnapshot> {
+    return this.trackOperation(this.discardLocallyAfterEventClosedTracked());
+  }
+
+  private async discardLocallyAfterEventClosedTracked(): Promise<PhotoDraftSnapshot> {
+    const manifest = this.requireManifest();
+    if (this.running) {
+      throw new PhotoDraftStateError(
+        'An active photo operation cannot be cleaned up locally.',
+      );
+    }
+    try {
+      await this.dependencies.deletePrivateCopy(
+        manifest.localUri,
+        manifest.draftId,
+      );
+      await this.dependencies.storage.deleteManifest(
+        manifest.eventId,
+        manifest.draftId,
+        manifest,
+      );
+    } catch {
+      return this.snapshot();
+    }
+    this.manifest = null;
+    this.emit();
+    return this.snapshot();
+  }
+
   public async retry(
+    projections: readonly JournalEntryReadProjection[],
+  ): Promise<PhotoDraftSnapshot> {
+    return this.trackOperation(this.retryTracked(projections));
+  }
+
+  private async retryTracked(
     projections: readonly JournalEntryReadProjection[],
   ): Promise<PhotoDraftSnapshot> {
     const manifest = this.requireManifest();
@@ -909,6 +1015,10 @@ export class PhotoDraftController {
   }
 
   public async retryCleanup(): Promise<PhotoDraftSnapshot> {
+    return this.trackOperation(this.retryCleanupTracked());
+  }
+
+  private async retryCleanupTracked(): Promise<PhotoDraftSnapshot> {
     const manifest = this.requireManifest();
     if (this.running || manifest.stage !== 'cleanup-pending') {
       throw new PhotoDraftStateError('Photo cleanup is not currently pending.');
@@ -923,6 +1033,12 @@ export class PhotoDraftController {
   }
 
   public async reconcile(
+    projections: readonly JournalEntryReadProjection[],
+  ): Promise<boolean> {
+    return this.trackOperation(this.reconcileTracked(projections));
+  }
+
+  private async reconcileTracked(
     projections: readonly JournalEntryReadProjection[],
   ): Promise<boolean> {
     this.claimOperation();
@@ -1046,6 +1162,20 @@ export class PhotoDraftController {
     );
   }
 
+  private async haltBeforeNetworkIfInterrupted(
+    retryStage: PhotoDraftNetworkStage,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!this.backgroundObserved && !signal.aborted) return;
+    await this.halt(
+      retryStage,
+      new PhotoDraftOperationError(
+        'unknown',
+        'The photo operation was interrupted before network work began.',
+      ),
+    );
+  }
+
   private claimOperation(): void {
     if (this.running) {
       throw new PhotoDraftStateError(
@@ -1065,17 +1195,28 @@ export class PhotoDraftController {
     initialStage: PhotoDraftNetworkStage,
   ): Promise<PhotoDraftSnapshot> {
     this.claimOperation();
-    return this.runClaimedFrom(initialStage);
+    return this.trackOperation(this.runClaimedFrom(initialStage));
   }
 
   private async runClaimedFrom(
     initialStage: PhotoDraftNetworkStage,
   ): Promise<PhotoDraftSnapshot> {
-    this.backgroundObserved = false;
-    this.activeController = new AbortController();
-    const signal = this.activeController.signal;
-    let stage = initialStage;
     try {
+      if (this.backgroundObserved) {
+        const manifest = this.requireManifest();
+        const retryStage =
+          manifest.stage === 'creating-intent' ? 'create-intent' : initialStage;
+        await this.halt(
+          retryStage,
+          new PhotoDraftOperationError(
+            'unknown',
+            'The photo operation was interrupted before network work began.',
+          ),
+        );
+      }
+      this.activeController = new AbortController();
+      const signal = this.activeController.signal;
+      let stage = initialStage;
       let transientIntent: MediaUploadIntent | null = null;
       if (stage === 'create-intent') {
         const manifest = this.requireManifest();
@@ -1087,6 +1228,7 @@ export class PhotoDraftController {
           uploadIntentId: null,
           mediaId: null,
         });
+        await this.haltBeforeNetworkIfInterrupted('create-intent', signal);
         transientIntent = await this.acquireIntent('create-intent', signal);
         await this.transition({
           ...this.requireManifest(),
@@ -1112,6 +1254,7 @@ export class PhotoDraftController {
             mediaId: null,
           });
         }
+        await this.haltBeforeNetworkIfInterrupted('upload-bytes', signal);
         const uploadIntent =
           transientIntent ?? (await this.acquireIntent('upload-bytes', signal));
         transientIntent = uploadIntent;
@@ -1160,6 +1303,7 @@ export class PhotoDraftController {
             mediaId: null,
           });
         }
+        await this.haltBeforeNetworkIfInterrupted('complete-upload', signal);
         const completing = this.requireManifest();
         const media = await this.perform('complete-upload', async () =>
           validateMedia(
@@ -1194,6 +1338,7 @@ export class PhotoDraftController {
             cleanupProof: null,
           });
         }
+        await this.haltBeforeNetworkIfInterrupted('append-entry', signal);
         const appending = this.requireManifest();
         await this.perform('append-entry', async () =>
           validateAppendedPhoto(
