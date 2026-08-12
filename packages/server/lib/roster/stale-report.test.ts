@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   RosterHealthQuerySchema,
+  SMS_OPT_OUT_REASON_CODE,
   executeCapability,
   type CapabilityExecutionAuthorizer,
   type RosterHealthQuery,
@@ -21,6 +22,7 @@ const SNAPSHOT_ID = '10000000-0000-4000-8000-000000000001';
 const GROUP_SOURCE_ID = '20000000-0000-4000-8000-000000000001';
 const RECIPIENT_ONE = '30000000-0000-4000-8000-000000000001';
 const RECIPIENT_TWO = '30000000-0000-4000-8000-000000000002';
+const ENDPOINT_ID = '40000000-0000-4000-8000-000000000001';
 
 interface TestContext {
   readonly population: 'staff';
@@ -46,12 +48,18 @@ function snapshot(
       : never
     : never,
   hasUnreportedStaleRecipients = false,
+  staleEndpoints: NonNullable<
+    ScopedStaleRosterEvidence['latestCompleteSnapshot']
+  >['staleEndpoints'] = [],
+  hasUnreportedStaleEndpoints = false,
 ): NonNullable<ScopedStaleRosterEvidence['latestCompleteSnapshot']> {
   return {
     id: SNAPSHOT_ID,
     capturedAt: secondsBefore(capturedSecondsAgo),
     recipientHealth,
     hasUnreportedStaleRecipients,
+    staleEndpoints,
+    hasUnreportedStaleEndpoints,
   };
 }
 
@@ -153,6 +161,7 @@ describe('stale roster report', () => {
       latestCompleteAgeSeconds: null,
       failedGroups: [],
       staleRecipients: [],
+      staleEndpoints: [],
     });
   });
 
@@ -211,6 +220,78 @@ describe('stale roster report', () => {
     expect(report.staleRecipients).toEqual([
       { recipientId: RECIPIENT_TWO, reason: 'no-active-endpoint' },
     ]);
+  });
+
+  test('lists an opted-out SMS endpoint even when another channel is active', async () => {
+    const report = await executeReport({
+      latestCompleteSnapshot: snapshot(
+        60,
+        [{ recipientId: RECIPIENT_ONE, endpointStatuses: ['active'] }],
+        false,
+        [
+          {
+            recipientId: RECIPIENT_ONE,
+            endpointId: ENDPOINT_ID,
+            channel: 'sms',
+            status: 'disabled',
+            reasonCode: SMS_OPT_OUT_REASON_CODE,
+          },
+        ],
+      ),
+      latestFailedSync: null,
+    });
+
+    expect(report.status).toBe('stale');
+    expect(report.staleRecipients).toEqual([]);
+    expect(report.staleEndpoints).toEqual([
+      {
+        recipientId: RECIPIENT_ONE,
+        endpointId: ENDPOINT_ID,
+        channel: 'sms',
+        reason: 'sms-opted-out',
+      },
+    ]);
+    expect(JSON.stringify(report)).not.toMatch(/email|phone|token/iu);
+  });
+
+  test('keeps global stale truth when the requested page omits stale endpoints', async () => {
+    const report = await executeReport({
+      latestCompleteSnapshot: snapshot(60, [], false, [], true),
+      latestFailedSync: null,
+    });
+
+    expect(report.status).toBe('stale');
+    expect(report.staleRecipients).toEqual([]);
+    expect(report.staleEndpoints).toEqual([]);
+  });
+
+  test('rejects endpoint evidence that exceeds the authorized recipient limit', async () => {
+    await expect(
+      executeReport(
+        {
+          latestCompleteSnapshot: snapshot(
+            60,
+            [{ recipientId: RECIPIENT_ONE, endpointStatuses: [] }],
+            false,
+            [
+              {
+                recipientId: RECIPIENT_TWO,
+                endpointId: ENDPOINT_ID,
+                channel: 'sms',
+                status: 'disabled',
+                reasonCode: SMS_OPT_OUT_REASON_CODE,
+              },
+            ],
+          ),
+          latestFailedSync: null,
+        },
+        {
+          query: { ...DEFAULT_QUERY, limit: 1 },
+        },
+      ),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'INVALID_REPORT_EVIDENCE' }),
+    );
   });
 
   test('gives a newer partial or failed sync priority over staleness', async () => {
