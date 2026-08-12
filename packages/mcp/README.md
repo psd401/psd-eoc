@@ -6,14 +6,21 @@ HTTP. Both transports call the same REST capabilities used by other agent
 clients; neither transport has a direct database or notification-provider path.
 
 The server exposes event reads, append-only journal search, drill-record
-evidence, roster-staleness reads, unpublished event-type template drafts, and
-activation preparation. It does not expose any tool that can start a real
-incident, send a real notification, issue an all-clear, or close a real event.
-Creating an activation consequence preview and preparing its intent still
-requires an authenticated human to review and confirm in the PSD EOC app.
+evidence, private short-lived records exports, roster-staleness reads,
+unpublished event-type template drafts, and activation preparation. It does not
+expose any tool that can start a real incident, send a real notification, issue
+an all-clear, or close a real event. Creating an activation consequence preview
+and preparing its intent still requires an authenticated human to review and
+confirm in the PSD EOC app.
 
 Drill-record results include site, date/time, and event type. They are retained
 records evidence, not a legal or district-policy compliance determination.
+`export-drill-records` creates the corresponding authorized CSV export;
+`export-event-summary` creates an authorized PDF containing append-only journal
+provenance, photo checksum references, and exact delivery truth states without
+recipient contact data. Both return private download grants that expire within
+15 minutes. Export artifacts remain records evidence, not a legal or
+district-policy compliance determination.
 
 ## Required configuration
 
@@ -27,6 +34,11 @@ Grant the key only the tools the agent needs. The server still shows its fixed,
 safe MCP catalog; P4.1 returns a scoped `403` if the key lacks a grant or the
 requested facility. Do not use a production-capable recipient/provider setup
 for development.
+
+For records access, grant only the needed IDs from `list-drill-records`,
+`export-drill-records`, and `export-event-summary`. Export URLs are temporary
+bearer grants to private artifacts: do not log, persist, or forward them, and do
+not treat provider acceptance in an event summary as delivery or human receipt.
 
 The `draft-message-template-revision` facade requires four underlying scoped
 capability grants: `get-event-type-version`, `get-event-type-draft`,

@@ -20,6 +20,22 @@ const PAGE = Object.freeze({
   pageInfo: Object.freeze({ nextCursor: null, hasMore: false }),
 });
 
+function recordsExport(format: 'csv' | 'pdf', id: string) {
+  return {
+    id,
+    format,
+    contentType:
+      format === 'csv' ? 'text/csv; charset=utf-8' : 'application/pdf',
+    fileName: `records-${id}.${format}`,
+    byteLength: 128,
+    contentSha256: (format === 'csv' ? 'c' : 'd').repeat(64),
+    rowCount: 1,
+    downloadUrl: `https://exports.example.test/${id}.${format}`,
+    generatedAt: '2026-08-11T16:00:00.000Z',
+    expiresAt: '2026-08-11T16:10:00.000Z',
+  };
+}
+
 function templateSet(purpose: 'activation' | 'all-clear' | 'reactivation') {
   return {
     templateMode: 'drill' as const,
@@ -302,8 +318,27 @@ describe('MCP tools', () => {
       MCP_TOOLS.find((tool) => tool.name === 'prepare-activation')?.description,
     ).toContain('authenticated human');
     expect(MCP_TOOLS.map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(['list-event-types', 'get-event-type-version']),
+      expect.arrayContaining([
+        'list-event-types',
+        'get-event-type-version',
+        'export-drill-records',
+        'export-event-summary',
+      ]),
     );
+    for (const capabilityId of [
+      'export-drill-records',
+      'export-event-summary',
+    ] as const) {
+      const tool = MCP_TOOLS.find(({ name }) => name === capabilityId);
+      expect(tool?.description).toContain('private, short-lived');
+      expect(tool?.description).toContain('compliance determination');
+      expect(tool?.annotations).toMatchObject({
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      });
+    }
   });
 
   test('returns drill record evidence with site, date/time, and type', async () => {
@@ -334,6 +369,7 @@ describe('MCP tools', () => {
         name: 'list-drill-records',
         arguments: {
           facilityId: IDS.facility,
+          eventTypeId: null,
           startedFrom: null,
           startedThrough: null,
           cursor: null,
@@ -355,6 +391,97 @@ describe('MCP tools', () => {
         },
       },
     });
+  });
+
+  test('routes both private export tools through their canonical agent API capabilities', async () => {
+    const calls: Array<{
+      readonly url: string;
+      readonly method: string | undefined;
+      readonly headers: Headers;
+      readonly body: unknown;
+    }> = [];
+    const drillArtifact = recordsExport('csv', IDS.request);
+    const eventArtifact = recordsExport('pdf', IDS.apiKey);
+    const protocol = protocolWithFetch(async (input, init = {}) => {
+      const url = String(input);
+      calls.push({
+        url,
+        method: init.method,
+        headers: new Headers(init.headers),
+        body: JSON.parse(String(init.body)) as unknown,
+      });
+      return Response.json(
+        url.endsWith('/export-drill-records')
+          ? drillArtifact
+          : { eventId: IDS.event, artifact: eventArtifact },
+      );
+    });
+    const drillInput = {
+      facilityId: IDS.facility,
+      eventTypeId: null,
+      startedFrom: '2026-08-01T07:00:00.000Z',
+      startedThrough: '2026-08-12T06:59:59.999Z',
+      format: 'csv',
+    };
+    const eventInput = { eventId: IDS.event, format: 'pdf' };
+
+    const drillResult = await protocol.handle(
+      request('tools/call', {
+        name: 'export-drill-records',
+        arguments: drillInput,
+      }),
+    );
+    const eventResult = await protocol.handle(
+      request('tools/call', {
+        name: 'export-event-summary',
+        arguments: eventInput,
+      }),
+    );
+
+    expect(drillResult).toMatchObject({
+      result: {
+        isError: false,
+        structuredContent: drillArtifact,
+      },
+    });
+    expect(eventResult).toMatchObject({
+      result: {
+        isError: false,
+        structuredContent: {
+          eventId: IDS.event,
+          artifact: eventArtifact,
+        },
+      },
+    });
+    expect(
+      calls.map(({ url, method, headers, body }) => ({
+        url,
+        method,
+        hasIdempotencyKey: headers.has('idempotency-key'),
+        body,
+      })),
+    ).toEqual([
+      {
+        url: 'https://eoc.example.test/api/agent/v1/capabilities/export-drill-records',
+        method: 'POST',
+        hasIdempotencyKey: false,
+        body: drillInput,
+      },
+      {
+        url: 'https://eoc.example.test/api/agent/v1/capabilities/export-event-summary',
+        method: 'POST',
+        hasIdempotencyKey: false,
+        body: eventInput,
+      },
+    ]);
+    const serializedTools = JSON.stringify(
+      MCP_TOOLS.filter(({ name }) =>
+        ['export-drill-records', 'export-event-summary'].includes(name),
+      ),
+    );
+    for (const actionId of HUMAN_ONLY_ACTION_IDS) {
+      expect(serializedTools).not.toContain(actionId);
+    }
   });
 
   test('creates and updates a safe unpublished message draft facade', async () => {

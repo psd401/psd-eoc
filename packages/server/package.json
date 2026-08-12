@@ -18,9 +18,11 @@
     "@aws-sdk/s3-request-presigner": "3.1106.0",
     "@psd-eoc/contracts": "workspace:*",
     "drizzle-orm": "0.44.5",
+    "fontkit": "2.0.4",
     "jose": "6.1.0",
     "maplibre-gl": "6.3.0",
     "next": "15.5.2",
+    "pdfkit": "0.19.1",
     "postgres": "3.4.7",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -29,6 +31,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.55.0",
+    "@types/pdfkit": "0.17.6",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "drizzle-kit": "0.31.4"

@@ -61,7 +61,7 @@ export function createAgentRestRuntime(
   const events = createEventCapabilityRuntime(connection);
   const journal = createJournalCapabilityRuntime(connection);
   const activationPreviews = createStartFlowCapabilityRuntime(connection);
-  const records = createRecordsCapabilityRuntime(journal.store);
+  const records = createRecordsCapabilityRuntime(connection);
   const dispatcher = createDefaultAgentCapabilityDispatcher({
     events,
     journal,
