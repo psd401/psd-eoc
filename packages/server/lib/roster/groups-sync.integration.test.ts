@@ -12,11 +12,17 @@ import { randomUUID } from 'node:crypto';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import { seedDatabase } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
+import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import {
+  executeOperationWithCleanup,
+  executeOwnedDatabaseCreation,
+} from '../../app/(admin)/facilities/owned-database-lifecycle';
 import {
   createDrizzleRosterSyncStore,
   createMockGoogleGroupsAdapter,
@@ -32,11 +38,32 @@ import {
   type RosterSyncStore,
 } from './groups-sync';
 
-const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
+const baseTestDatabaseUrl =
+  configuredTestDatabaseUrl === undefined
+    ? undefined
+    : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
-  testDatabaseUrl === undefined ? describe.skip : describe;
+  baseTestDatabaseUrl === undefined ? describe.skip : describe;
 
-setDefaultTimeout(30_000);
+setDefaultTimeout(60_000);
+
+interface RosterSyncTestDatabaseContext {
+  readonly baseDatabaseUrl: string;
+  readonly databaseName: string;
+  readonly databaseUrl: string;
+  readonly marker: string;
+}
+
+interface MarkerRow extends Record<string, unknown> {
+  readonly marker: string | null;
+}
+
+interface DatabaseCleanupLatch {
+  created: boolean;
+}
+
+const DATABASE_NAME_PATTERN = /^psd_eoc_i88_roster_[a-f0-9]{32}_test$/u;
 
 const SYNC_TIME = '2026-08-08T16:00:00.000Z';
 const CONFIGURATION = Object.freeze({
@@ -91,7 +118,170 @@ const COMPLETE_FIXTURES = Object.freeze({
   ]),
 }) satisfies Readonly<Record<string, readonly RosterGroupMember[]>>;
 
+let context: RosterSyncTestDatabaseContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
+const databaseCleanupLatch: DatabaseCleanupLatch = { created: false };
+
+function buildContext(baseDatabaseUrl: string): RosterSyncTestDatabaseContext {
+  const runId = randomUUID();
+  const databaseName = `psd_eoc_i88_roster_${runId.replaceAll('-', '')}_test`;
+  if (!DATABASE_NAME_PATTERN.test(databaseName)) {
+    throw new Error('The disposable roster-sync database name is invalid.');
+  }
+  const databaseUrl = new URL(baseDatabaseUrl);
+  databaseUrl.pathname = `/${databaseName}`;
+  return Object.freeze({
+    baseDatabaseUrl,
+    databaseName,
+    databaseUrl: databaseUrl.toString(),
+    marker: `psd-eoc:issue-88:roster-sync-test:${runId}`,
+  });
+}
+
+function openPostgresConnection(
+  url: string,
+  maxConnections: number,
+): PostgresDatabaseConnection {
+  const opened = createDatabaseClient({
+    driver: 'postgres',
+    url,
+    maxConnections,
+  });
+  if (opened.driver !== 'postgres') {
+    throw new Error('Roster-sync integration tests require PostgreSQL.');
+  }
+  return opened;
+}
+
+function quotedLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function readDatabaseMarker(
+  admin: PostgresDatabaseConnection,
+  databaseName: string,
+): Promise<string | null | undefined> {
+  const rows = databaseExecuteRows<MarkerRow>(
+    await admin.db.execute<MarkerRow>(sql`
+      select shobj_description(oid, 'pg_database') as marker
+      from pg_database
+      where datname = ${databaseName}
+    `),
+  );
+  if (rows.length > 1) {
+    throw new Error(
+      'The disposable roster-sync database identity is ambiguous.',
+    );
+  }
+  return rows[0]?.marker;
+}
+
+function requireDatabaseOwnership(
+  createdContext: RosterSyncTestDatabaseContext,
+  marker: string | null | undefined,
+): void {
+  if (marker !== createdContext.marker) {
+    throw new Error(
+      'Refusing to drop a database without the exact issue #88 roster-sync ownership marker.',
+    );
+  }
+}
+
+function armCleanupAfterVerifiedDatabaseCreation(
+  createdContext: RosterSyncTestDatabaseContext,
+  marker: string | null | undefined,
+  latch: DatabaseCleanupLatch = databaseCleanupLatch,
+): void {
+  requireDatabaseOwnership(createdContext, marker);
+  latch.created = true;
+}
+
+async function createOwnedDatabase(
+  createdContext: RosterSyncTestDatabaseContext,
+): Promise<void> {
+  const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  await executeOwnedDatabaseCreation({
+    createAndVerify: async (recordCreated) => {
+      await admin.db.execute(
+        sql.raw(`create database "${createdContext.databaseName}"`),
+      );
+      recordCreated();
+      await admin.db.execute(
+        sql.raw(
+          `comment on database "${createdContext.databaseName}" is ${quotedLiteral(createdContext.marker)}`,
+        ),
+      );
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
+      );
+      armCleanupAfterVerifiedDatabaseCreation(createdContext, marker);
+    },
+    closeCreator: () => admin.close(),
+    rollbackWithFreshMarkerProof: () => dropOwnedDatabase(createdContext),
+    failureMessage:
+      'Disposable roster-sync database operation, creator close, or marker-owned rollback failed.',
+  });
+}
+
+async function dropOwnedDatabase(
+  createdContext: RosterSyncTestDatabaseContext,
+): Promise<void> {
+  const admin = openPostgresConnection(createdContext.baseDatabaseUrl, 1);
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const marker = await readDatabaseMarker(
+        admin,
+        createdContext.databaseName,
+      );
+      if (marker === undefined) return;
+      requireDatabaseOwnership(createdContext, marker);
+      await admin.db.execute(
+        sql.raw(`drop database "${createdContext.databaseName}" with (force)`),
+      );
+      expect(
+        await readDatabaseMarker(admin, createdContext.databaseName),
+      ).toBeUndefined();
+    },
+    cleanup: () => admin.close(),
+    failureMessage:
+      'Disposable roster-sync database cleanup and connection close both failed.',
+  });
+}
+
+async function cleanupResources(): Promise<void> {
+  const errors: unknown[] = [];
+  if (connection !== undefined) {
+    try {
+      await connection.close();
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      connection = undefined;
+    }
+  }
+  if (databaseCleanupLatch.created && context !== undefined) {
+    try {
+      await dropOwnedDatabase(context);
+      databaseCleanupLatch.created = false;
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      'Issue #88 roster-sync integration test cleanup failed.',
+    );
+  }
+}
+
+function databaseTestContext(): RosterSyncTestDatabaseContext {
+  if (context === undefined) {
+    throw new Error('The roster-sync test database context is not available.');
+  }
+  return context;
+}
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -340,32 +530,80 @@ function requirePublishedSnapshotId(
   return result.publishedSnapshotId;
 }
 
+describe('roster-sync database cleanup latch', () => {
+  test('arms only after exact ownership verification', () => {
+    const syntheticContext = buildContext(
+      'postgres://synthetic:synthetic@127.0.0.1:5432/psd_eoc_cleanup_test',
+    );
+    expect(DATABASE_NAME_PATTERN.test(syntheticContext.databaseName)).toBe(
+      true,
+    );
+    const latch: DatabaseCleanupLatch = { created: false };
+    armCleanupAfterVerifiedDatabaseCreation(
+      syntheticContext,
+      syntheticContext.marker,
+      latch,
+    );
+    expect(latch.created).toBe(true);
+
+    const unverifiedLatch: DatabaseCleanupLatch = { created: false };
+    expect(() =>
+      armCleanupAfterVerifiedDatabaseCreation(
+        syntheticContext,
+        'wrong-marker',
+        unverifiedLatch,
+      ),
+    ).toThrow(
+      'Refusing to drop a database without the exact issue #88 roster-sync ownership marker.',
+    );
+    expect(unverifiedLatch.created).toBe(false);
+  });
+});
+
 describeWithDatabase('PostgreSQL roster synchronization', () => {
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) {
+    if (baseTestDatabaseUrl === undefined) {
       throw new Error(
         'TEST_DATABASE_URL is required for database integration tests.',
       );
     }
 
-    const createdConnection = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 4,
-    });
-    if (createdConnection.driver !== 'postgres') {
-      throw new Error(
-        'Roster-sync integration tests require the direct PostgreSQL driver.',
-      );
+    context = buildContext(baseTestDatabaseUrl);
+    try {
+      await createOwnedDatabase(context);
+      connection = openPostgresConnection(context.databaseUrl, 4);
+      await migrateDatabase(connection);
+      await seedDatabase(connection.db);
+    } catch (error) {
+      try {
+        await cleanupResources();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Roster-sync database setup and cleanup both failed.',
+        );
+      }
+      throw error;
     }
-    connection = createdConnection;
-
-    await migrateDatabase(createdConnection);
-    await seedDatabase(createdConnection.db);
   });
 
   afterAll(async () => {
-    await connection?.close();
+    await cleanupResources();
+  });
+
+  test('requires the exact run marker before disposable database cleanup', () => {
+    const currentContext = databaseTestContext();
+    expect(() => requireDatabaseOwnership(currentContext, null)).toThrow(
+      'Refusing to drop a database without the exact issue #88 roster-sync ownership marker.',
+    );
+    expect(() =>
+      requireDatabaseOwnership(currentContext, 'wrong-marker'),
+    ).toThrow(
+      'Refusing to drop a database without the exact issue #88 roster-sync ownership marker.',
+    );
+    expect(() =>
+      requireDatabaseOwnership(currentContext, currentContext.marker),
+    ).not.toThrow();
   });
 
   test('atomically publishes a complete snapshot and all relational evidence', async () => {
@@ -822,9 +1060,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
   });
 
   test('serializes concurrent unregistration and enrollment revocation after revalidation', async () => {
-    if (testDatabaseUrl === undefined) {
-      throw new Error('TEST_DATABASE_URL is required for the race test.');
-    }
+    const currentContext = databaseTestContext();
     const database = databaseConnection().db;
     const fixture = Object.freeze({
       deviceId: randomUUID(),
@@ -877,93 +1113,79 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
       `);
     });
 
-    const publisher = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 1,
-    });
-    const unregistrationWriter = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 1,
-    });
-    const revocationWriter = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 1,
-    });
-    if (
-      publisher.driver !== 'postgres' ||
-      unregistrationWriter.driver !== 'postgres' ||
-      revocationWriter.driver !== 'postgres'
-    ) {
-      throw new Error('The contact race requires direct PostgreSQL clients.');
-    }
-
-    await database.execute(
-      sql.raw(
-        'drop trigger if exists zz_psd_eoc_test_contact_race_guard on roster_snapshots',
-      ),
+    const publisher = openPostgresConnection(currentContext.databaseUrl, 1);
+    const unregistrationWriter = openPostgresConnection(
+      currentContext.databaseUrl,
+      1,
     );
-    await database.execute(
-      sql.raw('drop function if exists psd_eoc_test_contact_race_guard()'),
+    const revocationWriter = openPostgresConnection(
+      currentContext.databaseUrl,
+      1,
     );
-    await database.execute(
-      sql.raw('drop sequence if exists psd_eoc_test_contact_race_signal'),
-    );
-    await database.execute(
-      sql.raw('create sequence psd_eoc_test_contact_race_signal'),
-    );
-    await database.execute(
-      sql.raw(`
-      create function psd_eoc_test_contact_race_guard()
-      returns trigger
-      language plpgsql
-      as $$
-      declare
-        deadline timestamptz;
-        expected_mutator_pids integer[];
-        blocked_mutator_count integer;
-      begin
-        if current_setting('psd_eoc.test_contact_race', true) is distinct from 'on' then
-          return new;
-        end if;
-        perform nextval('psd_eoc_test_contact_race_signal');
-        expected_mutator_pids := string_to_array(
-          current_setting('psd_eoc.test_contact_race_mutator_pids', true),
-          ','
-        )::integer[];
-        deadline := clock_timestamp() + interval '5 seconds';
-        loop
-          select count(*)::integer
-          into blocked_mutator_count
-          from unnest(expected_mutator_pids) as mutator(pid)
-          where pg_backend_pid() = any(pg_blocking_pids(mutator.pid));
-          if blocked_mutator_count = cardinality(expected_mutator_pids) then
-            return new;
-          end if;
-          if clock_timestamp() >= deadline then
-            raise exception 'Concurrent contact mutations did not block behind roster publication';
-          end if;
-          perform pg_sleep(0.01);
-        end loop;
-      end;
-      $$
-    `),
-    );
-    await database.execute(
-      sql.raw(`
-      create trigger zz_psd_eoc_test_contact_race_guard
-      before insert on roster_snapshots
-      for each row execute function psd_eoc_test_contact_race_guard()
-    `),
-    );
-
     let syncPromise: Promise<Awaited<ReturnType<typeof syncRoster>>> | null =
       null;
     let unregistrationPromise: Promise<unknown> | null = null;
     let revocationPromise: Promise<unknown> | null = null;
     try {
+      await database.execute(
+        sql.raw(
+          'drop trigger if exists zz_psd_eoc_test_contact_race_guard on roster_snapshots',
+        ),
+      );
+      await database.execute(
+        sql.raw('drop function if exists psd_eoc_test_contact_race_guard()'),
+      );
+      await database.execute(
+        sql.raw('drop sequence if exists psd_eoc_test_contact_race_signal'),
+      );
+      await database.execute(
+        sql.raw('create sequence psd_eoc_test_contact_race_signal'),
+      );
+      await database.execute(
+        sql.raw(`
+        create function psd_eoc_test_contact_race_guard()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          deadline timestamptz;
+          expected_mutator_pids integer[];
+          blocked_mutator_count integer;
+        begin
+          if current_setting('psd_eoc.test_contact_race', true) is distinct from 'on' then
+            return new;
+          end if;
+          perform nextval('psd_eoc_test_contact_race_signal');
+          expected_mutator_pids := string_to_array(
+            current_setting('psd_eoc.test_contact_race_mutator_pids', true),
+            ','
+          )::integer[];
+          deadline := clock_timestamp() + interval '5 seconds';
+          loop
+            select count(*)::integer
+            into blocked_mutator_count
+            from unnest(expected_mutator_pids) as mutator(pid)
+            where pg_backend_pid() = any(pg_blocking_pids(mutator.pid));
+            if blocked_mutator_count = cardinality(expected_mutator_pids) then
+              return new;
+            end if;
+            if clock_timestamp() >= deadline then
+              raise exception 'Concurrent contact mutations did not block behind roster publication';
+            end if;
+            perform pg_sleep(0.01);
+          end loop;
+        end;
+        $$
+      `),
+      );
+      await database.execute(
+        sql.raw(`
+        create trigger zz_psd_eoc_test_contact_race_guard
+        before insert on roster_snapshots
+        for each row execute function psd_eoc_test_contact_race_guard()
+      `),
+      );
+
       const [unregistrationBackend, revocationBackend] = await Promise.all([
         unregistrationWriter.db.execute<{ pid: number }>(sql`
           select pg_backend_pid()::integer as pid
