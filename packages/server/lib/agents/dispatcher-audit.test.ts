@@ -526,46 +526,126 @@ describe('default agent dispatcher routing', () => {
     ]);
   });
 
-  test('routes drill records through the canonical records runtime', async () => {
+  test('routes records reads and exports through the canonical records runtime', async () => {
     const calls: Array<{
+      capabilityId: string;
       input: unknown;
       invocation: ReturnType<typeof invocation>;
     }> = [];
-    const expected = {
-      items: [],
-      pageInfo: { hasMore: false, nextCursor: null },
-    };
+    const expectedByCapability = {
+      'list-drill-records': {
+        items: [],
+        pageInfo: { hasMore: false, nextCursor: null },
+      },
+      'export-drill-records': { synthetic: 'drill-export' },
+      'export-event-summary': { synthetic: 'event-summary-export' },
+    } as const;
     const records = {
-      async execute(input: unknown, callInvocation: never) {
+      async execute(
+        capabilityId: keyof typeof expectedByCapability,
+        input: unknown,
+        callInvocation: never,
+      ) {
         calls.push({
+          capabilityId,
           input,
           invocation: callInvocation as ReturnType<typeof invocation>,
         });
-        return expected;
+        return expectedByCapability[capabilityId];
       },
     } as unknown as RecordsCapabilityRuntime;
     const authenticated = authenticatedAgent(
       { kind: 'facilities', facilityIds: [IDS.facility] },
-      ['list-drill-records'],
+      ['list-drill-records', 'export-drill-records', 'export-event-summary'],
     );
     const callInvocation = invocation(authenticated);
-    const input = {
+    const listInput = {
       facilityId: IDS.facility,
+      eventTypeId: null,
       startedFrom: null,
       startedThrough: null,
       cursor: null,
       limit: 25,
     };
+    const drillExportInput = {
+      facilityId: IDS.facility,
+      eventTypeId: null,
+      startedFrom: '2026-08-01T07:00:00.000Z',
+      startedThrough: '2026-08-12T06:59:59.999Z',
+      format: 'csv',
+    };
+    const eventExportInput = { eventId: IDS.request, format: 'pdf' };
 
     await expect(
       dispatcherWithRecords(records).execute(
         'list-drill-records',
-        input,
+        listInput,
         callInvocation,
         authenticated,
       ),
-    ).resolves.toBe(expected);
-    expect(calls).toEqual([{ input, invocation: callInvocation }]);
+    ).resolves.toBe(expectedByCapability['list-drill-records']);
+    await expect(
+      dispatcherWithRecords(records).execute(
+        'export-drill-records',
+        drillExportInput,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expectedByCapability['export-drill-records']);
+    await expect(
+      dispatcherWithRecords(records).execute(
+        'export-event-summary',
+        eventExportInput,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expectedByCapability['export-event-summary']);
+    expect(calls).toEqual([
+      {
+        capabilityId: 'list-drill-records',
+        input: listInput,
+        invocation: callInvocation,
+      },
+      {
+        capabilityId: 'export-drill-records',
+        input: drillExportInput,
+        invocation: callInvocation,
+      },
+      {
+        capabilityId: 'export-event-summary',
+        input: eventExportInput,
+        invocation: callInvocation,
+      },
+    ]);
+  });
+
+  test('assigns canonical audit ownership to every deployed records capability', () => {
+    const subject = dispatcherWithRecords(undefined as never);
+    const capabilityIds = [
+      'list-drill-records',
+      'export-drill-records',
+      'export-event-summary',
+    ] as const satisfies readonly AgentGrantableCapabilityId[];
+
+    expect(
+      capabilityIds.map((capabilityId) => ({
+        capabilityId,
+        auditOwnership: subject.auditOwnership(capabilityId),
+      })),
+    ).toEqual([
+      {
+        capabilityId: 'list-drill-records',
+        auditOwnership: 'canonical',
+      },
+      {
+        capabilityId: 'export-drill-records',
+        auditOwnership: 'canonical',
+      },
+      {
+        capabilityId: 'export-event-summary',
+        auditOwnership: 'canonical',
+      },
+    ]);
   });
 
   test('routes activation preview creation before the existing prepare handoff', async () => {
