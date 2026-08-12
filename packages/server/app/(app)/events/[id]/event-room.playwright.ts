@@ -2975,6 +2975,19 @@ test('real and drill event rooms use unmistakably different words and symbols', 
   await expect(drillBanner).toContainText('◆');
   await expect(drillBanner).toContainText('DRILL — TRAINING ONLY');
   await expect(drillBanner).not.toContainText('REAL INCIDENT');
+  const exportLink = page.getByRole('link', {
+    name: 'Download PDF summary',
+  });
+  await expect(exportLink).toHaveAttribute(
+    'href',
+    `/records/export/events/${fixture.keyboardEventId}`,
+  );
+  const skipLink = page.getByRole('link', { name: 'Skip to main content' });
+  await skipLink.focus();
+  await expect(skipLink).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(exportLink).toBeFocused();
+  await expectAxeClean(page, 'drill event room with PDF export');
 });
 
 test('all-clear preview is POST-only, CSRF-protected, and exactly idempotent without GET writes', async ({

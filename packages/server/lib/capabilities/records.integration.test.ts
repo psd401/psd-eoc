@@ -8,10 +8,11 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
+  type DatabaseQuery,
   type PostgresDatabase,
   type PostgresDatabaseConnection,
 } from '../../db/client';
@@ -19,12 +20,8 @@ import { seedDatabase } from '../../db/seed';
 import {
   events,
   journalEntries,
-  rosterSnapshotFacilities,
-  rosterSnapshotSources,
-  rosterSnapshots,
-  rosterSourceConfigurationFacilities,
-  rosterSourceConfigurationGroups,
-  rosterSourceConfigurations,
+  notificationIntentChannels,
+  notificationIntents,
   securityAuditEntries,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
@@ -35,7 +32,16 @@ import {
   executeJournalCapability,
   type JournalCapabilityStore,
 } from './journal';
-import { executeRecordsCapability } from './records';
+import {
+  createRecordsCapabilityRuntime,
+  executeRecordsCapability,
+  type RecordsCapabilityRuntime,
+} from './records';
+import type {
+  RecordsArtifactStore,
+  StoreRecordsArtifactInput,
+} from './records/artifact-store';
+import { loadEventSummarySnapshot } from './records/snapshot';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -68,9 +74,6 @@ function runTimestamp(minutesAfterStart: number): string {
 
 const RUN = Object.freeze({
   token: `issue-25-${randomUUID()}`,
-  rosterConfigurationAt: runTime(0),
-  rosterSyncStartedAt: runTime(1),
-  rosterCapturedAt: runTime(2),
   windowFrom: runTimestamp(5),
   northDrillAt: runTimestamp(10),
   northVisibleEntryAt: runTime(11),
@@ -79,8 +82,6 @@ const RUN = Object.freeze({
   northTestAt: runTimestamp(60),
   southDrillAt: runTimestamp(90),
   southEntryAt: runTime(91),
-  northIncidentCreatedAt: runTime(104),
-  northIncidentAt: runTime(105),
   northDraftAt: runTime(120),
   northNewerDrillAt: runTimestamp(150),
   windowThrough: runTimestamp(180),
@@ -96,9 +97,13 @@ const JOURNAL_TEXT = Object.freeze({
 const SEEDED = Object.freeze({
   facilityNorth: '00000000-0000-4000-8000-000000000001',
   facilitySouth: '00000000-0000-4000-8000-000000000002',
+  audienceNorth: '00000000-0000-4000-8000-000000000020',
   rosterSnapshot: '00000000-0000-4000-8000-000000000041',
-  realEventTypeVersion: '00000000-0000-4000-8000-000000000200',
+  drillEventType: '00000000-0000-4000-8000-000000000101',
+  otherDrillEventType: '00000000-0000-4000-8000-000000000103',
   drillEventTypeVersion: '00000000-0000-4000-8000-000000000201',
+  integrationExpoPush: '00000000-0000-4000-8000-000000000301',
+  integrationSesEmail: '00000000-0000-4000-8000-000000000302',
 });
 
 const ACTOR = Object.freeze({
@@ -107,33 +112,23 @@ const ACTOR = Object.freeze({
   apiKeyId: randomUUID(),
 });
 
-const HUMAN_ACTOR = Object.freeze({
-  kind: 'human' as const,
-  userId: randomUUID(),
-  sessionId: randomUUID(),
-});
-
-const STAFF_ROSTER = Object.freeze({
-  configurationId: randomUUID(),
-  snapshotId: randomUUID(),
-});
-
 const FIXTURE = Object.freeze({
   northDrill: randomUUID(),
   northTest: randomUUID(),
   northDraft: randomUUID(),
-  northIncident: randomUUID(),
   southDrill: randomUUID(),
   northNewerDrill: randomUUID(),
   northVisibleEntry: randomUUID(),
   northRedactedEntry: randomUUID(),
   northRedaction: randomUUID(),
   southEntry: randomUUID(),
+  northNotificationIntent: randomUUID(),
 });
 
 let connection: PostgresDatabaseConnection | undefined;
 let store: JournalCapabilityStore | undefined;
-let staffRosterSnapshotId: string | undefined;
+let recordsRuntime: RecordsCapabilityRuntime | undefined;
+const storedArtifacts: StoreRecordsArtifactInput[] = [];
 
 function database(): PostgresDatabase {
   if (connection === undefined) {
@@ -147,6 +142,13 @@ function capabilityStore(): JournalCapabilityStore {
     throw new Error('The records integration store is not available.');
   }
   return store;
+}
+
+function exportRuntime(): RecordsCapabilityRuntime {
+  if (recordsRuntime === undefined) {
+    throw new Error('The records export runtime is not available.');
+  }
+  return recordsRuntime;
 }
 
 function invocation(
@@ -215,237 +217,6 @@ function activatedEvent(
   };
 }
 
-function activatedIncident() {
-  if (staffRosterSnapshotId === undefined) {
-    throw new Error('The staff roster fixture has not been prepared.');
-  }
-  return {
-    id: FIXTURE.northIncident,
-    facilityId: SEEDED.facilityNorth,
-    kind: 'incident' as const,
-    templateMode: 'real' as const,
-    eventTypeVersionId: SEEDED.realEventTypeVersion,
-    status: 'active' as const,
-    rosterSnapshotId: staffRosterSnapshotId,
-    rosterPopulation: 'staff' as const,
-    createdBy: HUMAN_ACTOR,
-    createdAt: RUN.northIncidentCreatedAt,
-    activatedAt: RUN.northIncidentAt,
-    allClearAt: null,
-    reactivatedAt: null,
-    closedAt: null,
-    correctionOfEventId: null,
-    correctionReason: null,
-    activationAuthorization: {
-      kind: 'human-confirmed' as const,
-      activationPreviewId: randomUUID(),
-      preparedActivationId: null,
-      confirmationId: randomUUID(),
-      consequenceDigest: 'b'.repeat(64),
-      requestId: randomUUID(),
-    },
-  };
-}
-
-async function ensureNorthStaffRosterSnapshot(
-  database: PostgresDatabase,
-): Promise<string> {
-  return database.transaction(async (transaction) => {
-    await transaction.execute(sql`
-      select pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtextextended('psd-eoc-roster-staff', 0)
-      )
-    `);
-
-    const [latestConfiguration] = await transaction
-      .select({
-        id: rosterSourceConfigurations.id,
-        version: rosterSourceConfigurations.version,
-      })
-      .from(rosterSourceConfigurations)
-      .where(eq(rosterSourceConfigurations.population, 'staff'))
-      .orderBy(desc(rosterSourceConfigurations.version))
-      .limit(1);
-
-    let configuration: Readonly<{ id: string; version: number }>;
-    if (latestConfiguration === undefined) {
-      configuration = {
-        id: STAFF_ROSTER.configurationId,
-        version: 1,
-      };
-      await transaction.insert(rosterSourceConfigurations).values({
-        ...configuration,
-        population: 'staff',
-        createdAt: RUN.rosterConfigurationAt,
-      });
-      await transaction.insert(rosterSourceConfigurationFacilities).values({
-        configurationId: configuration.id,
-        configurationVersion: configuration.version,
-        facilityId: SEEDED.facilityNorth,
-      });
-    } else {
-      configuration = latestConfiguration;
-      const [northFacility] = await transaction
-        .select({ facilityId: rosterSourceConfigurationFacilities.facilityId })
-        .from(rosterSourceConfigurationFacilities)
-        .where(
-          and(
-            eq(
-              rosterSourceConfigurationFacilities.configurationId,
-              configuration.id,
-            ),
-            eq(
-              rosterSourceConfigurationFacilities.configurationVersion,
-              configuration.version,
-            ),
-            eq(
-              rosterSourceConfigurationFacilities.facilityId,
-              SEEDED.facilityNorth,
-            ),
-          ),
-        )
-        .limit(1);
-      if (northFacility === undefined) {
-        const previousFacilities = await transaction
-          .select({
-            facilityId: rosterSourceConfigurationFacilities.facilityId,
-          })
-          .from(rosterSourceConfigurationFacilities)
-          .where(
-            and(
-              eq(
-                rosterSourceConfigurationFacilities.configurationId,
-                configuration.id,
-              ),
-              eq(
-                rosterSourceConfigurationFacilities.configurationVersion,
-                configuration.version,
-              ),
-            ),
-          );
-        const previousGroups = await transaction
-          .select({
-            population: rosterSourceConfigurationGroups.population,
-            groupSourceId: rosterSourceConfigurationGroups.groupSourceId,
-            groupSourceKind: rosterSourceConfigurationGroups.groupSourceKind,
-            groupPurpose: rosterSourceConfigurationGroups.groupPurpose,
-          })
-          .from(rosterSourceConfigurationGroups)
-          .where(
-            and(
-              eq(
-                rosterSourceConfigurationGroups.configurationId,
-                configuration.id,
-              ),
-              eq(
-                rosterSourceConfigurationGroups.configurationVersion,
-                configuration.version,
-              ),
-            ),
-          );
-        configuration = {
-          id: configuration.id,
-          version: configuration.version + 1,
-        };
-        await transaction.insert(rosterSourceConfigurations).values({
-          ...configuration,
-          population: 'staff',
-          createdAt: RUN.rosterConfigurationAt,
-        });
-        await transaction.insert(rosterSourceConfigurationFacilities).values(
-          [...previousFacilities, { facilityId: SEEDED.facilityNorth }].map(
-            ({ facilityId }) => ({
-              configurationId: configuration.id,
-              configurationVersion: configuration.version,
-              facilityId,
-            }),
-          ),
-        );
-        if (previousGroups.length > 0) {
-          await transaction.insert(rosterSourceConfigurationGroups).values(
-            previousGroups.map((group) => ({
-              configurationId: configuration.id,
-              configurationVersion: configuration.version,
-              ...group,
-            })),
-          );
-        }
-      }
-    }
-
-    const configurationFacilities = await transaction
-      .select({
-        facilityId: rosterSourceConfigurationFacilities.facilityId,
-      })
-      .from(rosterSourceConfigurationFacilities)
-      .where(
-        and(
-          eq(
-            rosterSourceConfigurationFacilities.configurationId,
-            configuration.id,
-          ),
-          eq(
-            rosterSourceConfigurationFacilities.configurationVersion,
-            configuration.version,
-          ),
-        ),
-      );
-    const configurationGroups = await transaction
-      .select({
-        population: rosterSourceConfigurationGroups.population,
-        groupSourceId: rosterSourceConfigurationGroups.groupSourceId,
-        groupSourceKind: rosterSourceConfigurationGroups.groupSourceKind,
-        groupPurpose: rosterSourceConfigurationGroups.groupPurpose,
-      })
-      .from(rosterSourceConfigurationGroups)
-      .where(
-        and(
-          eq(rosterSourceConfigurationGroups.configurationId, configuration.id),
-          eq(
-            rosterSourceConfigurationGroups.configurationVersion,
-            configuration.version,
-          ),
-        ),
-      );
-    const [latestSnapshot] = await transaction
-      .select({ version: rosterSnapshots.version })
-      .from(rosterSnapshots)
-      .where(eq(rosterSnapshots.population, 'staff'))
-      .orderBy(desc(rosterSnapshots.version))
-      .limit(1);
-    const snapshotVersion = (latestSnapshot?.version ?? 0) + 1;
-
-    await transaction.insert(rosterSnapshots).values({
-      id: STAFF_ROSTER.snapshotId,
-      version: snapshotVersion,
-      population: 'staff',
-      complete: true,
-      sourceConfigurationId: configuration.id,
-      sourceConfigurationVersion: configuration.version,
-      syncStartedAt: RUN.rosterSyncStartedAt,
-      capturedAt: RUN.rosterCapturedAt,
-    });
-    await transaction.insert(rosterSnapshotFacilities).values(
-      configurationFacilities.map(({ facilityId }) => ({
-        rosterSnapshotId: STAFF_ROSTER.snapshotId,
-        facilityId,
-      })),
-    );
-    if (configurationGroups.length > 0) {
-      await transaction.insert(rosterSnapshotSources).values(
-        configurationGroups.flatMap((group) =>
-          (['expected', 'completed'] as const).map((completionKind) => ({
-            rosterSnapshotId: STAFF_ROSTER.snapshotId,
-            completionKind,
-            ...group,
-          })),
-        ),
-      );
-    }
-    return STAFF_ROSTER.snapshotId;
-  });
-}
-
 describeWithDatabase('canonical records and journal-search persistence', () => {
   beforeAll(async () => {
     const opened = createDatabaseClient({
@@ -460,7 +231,29 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     await migrateDatabase(opened);
     await seedDatabase(opened.db);
     store = createDrizzleJournalCapabilityStore(opened.db);
-    staffRosterSnapshotId = await ensureNorthStaffRosterSnapshot(opened.db);
+    const artifactStore: RecordsArtifactStore = {
+      async store(input) {
+        storedArtifacts.push(input);
+        return {
+          id: randomUUID(),
+          format: input.format,
+          contentType:
+            input.format === 'csv'
+              ? 'text/csv; charset=utf-8'
+              : 'application/pdf',
+          fileName: input.fileName,
+          byteLength: input.bytes.byteLength,
+          contentSha256: 'c'.repeat(64),
+          rowCount: input.rowCount,
+          downloadUrl: 'https://private.example.test/synthetic-records-export',
+          generatedAt: input.generatedAt.toISOString(),
+          expiresAt: new Date(
+            input.generatedAt.getTime() + 5 * 60 * 1_000,
+          ).toISOString(),
+        };
+      },
+    };
+    recordsRuntime = createRecordsCapabilityRuntime(opened, artifactStore);
 
     await opened.db.insert(events).values([
       activatedEvent({
@@ -482,7 +275,6 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         kind: 'drill',
         activatedAt: RUN.southDrillAt,
       }),
-      activatedIncident(),
       {
         id: FIXTURE.northDraft,
         facilityId: SEEDED.facilityNorth,
@@ -574,11 +366,85 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         supersessionReason: null,
       },
     ]);
+
+    const notificationRequestId = randomUUID();
+    const notificationAuthorization = {
+      kind: 'synthetic-training' as const,
+      activationPreviewId: randomUUID(),
+      consequenceDigest: 'b'.repeat(64),
+      requestId: notificationRequestId,
+    };
+    await opened.db.insert(notificationIntents).values({
+      id: FIXTURE.northNotificationIntent,
+      eventId: FIXTURE.northDrill,
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersionId: SEEDED.drillEventTypeVersion,
+      rosterSnapshotId: SEEDED.rosterSnapshot,
+      rosterPopulation: 'synthetic',
+      audienceConfigId: SEEDED.audienceNorth,
+      audienceConfigVersion: 1,
+      createdBy: ACTOR,
+      source: 'agent-rest',
+      requestId: notificationRequestId,
+      authorization: notificationAuthorization,
+      createdAt: RUN.northVisibleEntryAt,
+    });
+    await opened.db.insert(notificationIntentChannels).values([
+      {
+        intentId: FIXTURE.northNotificationIntent,
+        sequence: 1,
+        channel: 'push',
+        eventKind: 'drill',
+        templateMode: 'drill',
+        purpose: 'activation',
+        rosterPopulation: 'synthetic',
+        classificationMarker: 'DRILL',
+        endpointCount: 2,
+        renderedMessage: {
+          channel: 'push',
+          eventKind: 'drill',
+          templateMode: 'drill',
+          purpose: 'activation',
+          classificationMarker: 'DRILL',
+          title: '[DRILL] Synthetic lockdown drill',
+          body: '[DRILL] Synthetic records integration notification.',
+        },
+        integrationStatusId: SEEDED.integrationExpoPush,
+        integrationId: 'expo-push',
+        integrationLabel: 'mocked',
+      },
+      {
+        intentId: FIXTURE.northNotificationIntent,
+        sequence: 2,
+        channel: 'email',
+        eventKind: 'drill',
+        templateMode: 'drill',
+        purpose: 'activation',
+        rosterPopulation: 'synthetic',
+        classificationMarker: 'DRILL',
+        endpointCount: 2,
+        renderedMessage: {
+          channel: 'email',
+          eventKind: 'drill',
+          templateMode: 'drill',
+          purpose: 'activation',
+          classificationMarker: 'DRILL',
+          subject: '[DRILL] Synthetic lockdown drill',
+          textBody: '[DRILL] Synthetic records integration notification.',
+        },
+        integrationStatusId: SEEDED.integrationSesEmail,
+        integrationId: 'ses-email',
+        integrationLabel: 'mocked',
+      },
+    ]);
   });
 
   afterAll(async () => {
     store = undefined;
-    staffRosterSnapshotId = undefined;
+    recordsRuntime = undefined;
+    storedArtifacts.length = 0;
     await connection?.close();
     connection = undefined;
   });
@@ -588,6 +454,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     const all = await executeRecordsCapability(
       {
         facilityId: null,
+        eventTypeId: null,
         startedFrom: RUN.windowFrom,
         startedThrough: RUN.windowThrough,
         cursor: null,
@@ -601,9 +468,6 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
       FIXTURE.northTest,
       FIXTURE.northDrill,
     ]);
-    expect(all.items.map((record) => record.eventId)).not.toContain(
-      FIXTURE.northIncident,
-    );
     expect(all.items.map((record) => record.eventId)).not.toContain(
       FIXTURE.northDraft,
     );
@@ -626,9 +490,40 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
       }),
     ]);
 
+    const filtered = await executeRecordsCapability(
+      {
+        facilityId: SEEDED.facilityNorth,
+        eventTypeId: SEEDED.drillEventType,
+        startedFrom: RUN.windowFrom,
+        startedThrough: RUN.windowThrough,
+        cursor: null,
+        limit: 25,
+      },
+      invocation(),
+      capabilityStore(),
+    );
+    expect(filtered.items.map((record) => record.eventId)).toEqual([
+      FIXTURE.northTest,
+      FIXTURE.northDrill,
+    ]);
+    const wrongType = await executeRecordsCapability(
+      {
+        facilityId: SEEDED.facilityNorth,
+        eventTypeId: SEEDED.otherDrillEventType,
+        startedFrom: RUN.windowFrom,
+        startedThrough: RUN.windowThrough,
+        cursor: null,
+        limit: 25,
+      },
+      invocation(),
+      capabilityStore(),
+    );
+    expect(wrongType.items).toEqual([]);
+
     const first = await executeRecordsCapability(
       {
         facilityId: null,
+        eventTypeId: null,
         startedFrom: RUN.windowFrom,
         startedThrough: RUN.windowThrough,
         cursor: null,
@@ -655,6 +550,7 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
     const second = await executeRecordsCapability(
       {
         facilityId: null,
+        eventTypeId: null,
         startedFrom: RUN.windowFrom,
         startedThrough: RUN.windowThrough,
         cursor: first.pageInfo.nextCursor,
@@ -679,6 +575,130 @@ describeWithDatabase('canonical records and journal-search persistence', () => {
         requestId: allRequestId,
       }),
     ]);
+  });
+
+  test('exports authorized CSV/PDF artifacts from complete redaction-safe snapshots and audits both', async () => {
+    storedArtifacts.length = 0;
+    const csvRequestId = randomUUID();
+    const csv = await exportRuntime().execute(
+      'export-drill-records',
+      {
+        facilityId: SEEDED.facilityNorth,
+        eventTypeId: SEEDED.drillEventType,
+        startedFrom: RUN.windowFrom,
+        startedThrough: RUN.windowThrough,
+        format: 'csv',
+      },
+      invocation(csvRequestId),
+    );
+    expect(csv).toMatchObject({
+      format: 'csv',
+      contentType: 'text/csv; charset=utf-8',
+    });
+    const csvArtifact = storedArtifacts.find(
+      (artifact) => artifact.format === 'csv',
+    );
+    expect(csvArtifact).toBeDefined();
+    if (csvArtifact === undefined) {
+      throw new Error('Expected the CSV artifact to be stored.');
+    }
+    const csvText = new TextDecoder().decode(csvArtifact.bytes);
+    expect(csvText).toStartWith(
+      'site,date,time,type,duration,participants_count\r\n',
+    );
+    expect(csvText).toContain('[DRILL] Lockdown Drill');
+    expect(csvText).toContain('[TEST] Lockdown Drill');
+
+    const snapshot = await loadEventSummarySnapshot(
+      database() as DatabaseQuery,
+      FIXTURE.northDrill,
+      RUN.invocationAt.toISOString(),
+    );
+    expect(snapshot.journal).toHaveLength(3);
+    expect(snapshot.journal[1]).toMatchObject({
+      visibility: 'redacted',
+      entry: {
+        id: FIXTURE.northRedactedEntry,
+        sequence: 2,
+      },
+    });
+    expect(JSON.stringify(snapshot)).not.toContain(JOURNAL_TEXT.redactedNorth);
+    expect(snapshot.recordedParticipantCount).toBe(0);
+    expect(snapshot.delivery).toEqual([
+      {
+        purpose: 'activation',
+        createdAt: RUN.northVisibleEntryAt.toISOString(),
+        explicitIntentState: null,
+        channels: [
+          {
+            channel: 'push',
+            plannedEndpointCount: 2,
+            noAttemptRecordCount: 2,
+            noEvidenceCount: 0,
+            stateCounts: [
+              { state: 'attempted', count: 0 },
+              { state: 'provider-accepted', count: 0 },
+              { state: 'delivered', count: 0 },
+              { state: 'failed', count: 0 },
+              { state: 'expired', count: 0 },
+              { state: 'unknown', count: 0 },
+            ],
+          },
+          {
+            channel: 'email',
+            plannedEndpointCount: 2,
+            noAttemptRecordCount: 2,
+            noEvidenceCount: 0,
+            stateCounts: [
+              { state: 'attempted', count: 0 },
+              { state: 'provider-accepted', count: 0 },
+              { state: 'delivered', count: 0 },
+              { state: 'failed', count: 0 },
+              { state: 'expired', count: 0 },
+              { state: 'unknown', count: 0 },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const pdfRequestId = randomUUID();
+    const pdf = await exportRuntime().execute(
+      'export-event-summary',
+      { eventId: FIXTURE.northDrill, format: 'pdf' },
+      invocation(pdfRequestId),
+    );
+    expect(pdf).toMatchObject({
+      eventId: FIXTURE.northDrill,
+      artifact: {
+        format: 'pdf',
+        contentType: 'application/pdf',
+        rowCount: 3,
+      },
+    });
+    const pdfArtifact = storedArtifacts.find(
+      (artifact) => artifact.format === 'pdf',
+    );
+    expect(pdfArtifact).toBeDefined();
+    if (pdfArtifact === undefined) {
+      throw new Error('Expected the PDF artifact to be stored.');
+    }
+    expect(new TextDecoder().decode(pdfArtifact.bytes.slice(0, 8))).toBe(
+      '%PDF-1.7',
+    );
+
+    const auditRows = await database()
+      .select()
+      .from(securityAuditEntries)
+      .where(
+        sql`${securityAuditEntries.requestId} in (${csvRequestId}::uuid, ${pdfRequestId}::uuid)`,
+      );
+    expect(auditRows).toHaveLength(2);
+    expect(auditRows.map((row) => row.action).sort()).toEqual([
+      'export-drill-records',
+      'export-event-summary',
+    ]);
+    expect(auditRows.every((row) => row.outcome === 'success')).toBe(true);
   });
 
   test('searches only scoped visible content and never uses a redacted original as an oracle', async () => {
