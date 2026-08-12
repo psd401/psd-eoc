@@ -2589,7 +2589,7 @@ describe('human-only capability boundary', () => {
   test('limits SMS lifecycle persistence to authenticated system producers and exact provider provenance', () => {
     expect(getCapabilityInvocationPolicy('record-endpoint-status')).toEqual({
       principalKinds: ['system'],
-      sources: ['webhook'],
+      sources: ['worker', 'webhook'],
       agentGrantable: false,
     });
     expect(getCapabilityInvocationPolicy('record-sms-opt-out')).toEqual({
@@ -2611,6 +2611,43 @@ describe('human-only capability boundary', () => {
     expect(RecordEndpointStatusInputSchema.safeParse(active).success).toBe(
       true,
     );
+    const endpointStatusEnvelope = {
+      capabilityId: 'record-endpoint-status',
+      operation: 'mutation',
+      actor: systemActor,
+      source: 'worker',
+      scope: districtScope,
+      requestId: ids.request,
+      serverTime: times.later,
+      input: {
+        ...active,
+        status: 'invalid',
+        reasonCode: 'PUSH_TOKEN_INVALID',
+        provider: null,
+        providerReference: null,
+        providerOccurredAt: null,
+      },
+      idempotencyKey: 'endpoint-status-worker-idempotent-0001',
+      transport: { kind: 'worker-execution' },
+      connectivityEpochId: null,
+      requiredHumanActionIds: [],
+      requiredConsequenceDigest: null,
+      humanConfirmation: null,
+    } as const;
+    expect(() =>
+      parseCapabilityEnvelopeFor(
+        'record-endpoint-status',
+        endpointStatusEnvelope,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      parseCapabilityEnvelopeFor('record-endpoint-status', {
+        ...endpointStatusEnvelope,
+        actor: agentActor,
+        source: 'mcp',
+        transport: mcpMutationTransport,
+      }),
+    ).toThrow();
     expect(
       RecordEndpointStatusInputSchema.safeParse({
         ...active,

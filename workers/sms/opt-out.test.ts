@@ -188,6 +188,26 @@ describe('AWS-managed SMS opt-out capture', () => {
     expect(JSON.stringify(recorder.inputs)).not.toContain('+12025550123');
   });
 
+  test('canonicalizes an offset provider occurrence before exact persistence comparison', async () => {
+    const recorder = new MemoryRecorder();
+
+    await expect(
+      recordAwsManagedOptOutConflict(
+        workItem(),
+        'synthetic-offset-request-id',
+        '2026-08-11T11:00:30-07:00',
+        recorder,
+      ),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        providerOccurredAt: '2026-08-11T18:00:30.000Z',
+      }),
+    );
+    expect(recorder.inputs[0]?.providerOccurredAt).toBe(
+      '2026-08-11T18:00:30.000Z',
+    );
+  });
+
   test('rejects a schema-valid recorder response for a different identity', async () => {
     const recorder: SmsOptOutRecorder = {
       recordSmsOptOut(input) {
@@ -692,6 +712,49 @@ describe('AWS-managed SMS opt-in supersession', () => {
       },
     ]);
     expect(JSON.stringify(result)).not.toContain('+12025550123');
+  });
+
+  test('canonicalizes a valid no-millisecond webhook occurrence before persistence', async () => {
+    const recorder = new MemoryEndpointStatusRecorder();
+
+    await expect(
+      recordAwsManagedOptIn(
+        { rosterSnapshotId: IDS.roster },
+        OPT_OUT_LIST,
+        {
+          ...OPT_IN_INVOCATION,
+          occurredAt: '2026-08-11T18:02:30Z',
+        },
+        {
+          transport: {
+            describeOptedOutNumbers: () =>
+              Promise.resolve({
+                OptOutListName: OPT_OUT_LIST.name,
+                OptOutListArn: OPT_OUT_LIST.arn,
+                OptedOutNumbers: [],
+              }),
+          },
+          resolver: {
+            resolveSmsDestination: () =>
+              Promise.resolve({
+                rosterSnapshotId: IDS.roster,
+                recipientId: IDS.recipient,
+                endpointId: IDS.endpoint,
+              }),
+          },
+          recorder,
+          authorizeInvocation: (invocation) =>
+            invocation.authorization === TRUSTED_OPT_IN_INVOCATION,
+        },
+      ),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        providerOccurredAt: '2026-08-11T18:02:30.000Z',
+      }),
+    );
+    expect(recorder.inputs[0]?.providerOccurredAt).toBe(
+      '2026-08-11T18:02:30.000Z',
+    );
   });
 
   test('rejects provider-list drift and schema-valid recorder identity drift', async () => {

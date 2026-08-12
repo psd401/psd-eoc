@@ -1502,7 +1502,6 @@ const systemWorkerScheduledInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'scheduled-job'],
 );
-const systemWebhookInvocationPolicy = invocationPolicy(['system'], ['webhook']);
 const systemWorkerWebhookInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'webhook'],
@@ -1536,7 +1535,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'dispatch-outbox': systemWorkerScheduledInvocationPolicy,
   'record-delivery-evidence': systemWorkerWebhookInvocationPolicy,
   'reconcile-delivery-attempts': systemWorkerScheduledInvocationPolicy,
-  'record-endpoint-status': systemWebhookInvocationPolicy,
+  'record-endpoint-status': systemWorkerWebhookInvocationPolicy,
   'record-sms-opt-out': systemWorkerScheduledInvocationPolicy,
   'register-push-token': humanInteractiveInvocationPolicy,
   'unregister-push-token': humanInteractiveInvocationPolicy,

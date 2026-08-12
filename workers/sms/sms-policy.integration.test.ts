@@ -173,7 +173,7 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
       endpointId: IDS.endpoint,
       provider: 'aws-eum-sms',
       providerReference: 'synthetic-stop-conflict-1',
-      providerOccurredAt: '2026-08-10T18:00:00.000Z',
+      providerOccurredAt: '2026-08-10T11:00:00-07:00',
     } as const;
 
     await expect(
@@ -198,6 +198,7 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
       store,
     );
     expect(replay).toEqual(first);
+    expect(first.providerOccurredAt).toBe('2026-08-10T18:00:00.000Z');
 
     const retainedOptOuts = await database
       .select()
@@ -294,7 +295,7 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
       reasonCode: SMS_OPT_IN_REASON_CODE,
       provider: 'aws-eum-sms',
       providerReference: 'synthetic-start-provider-verified-1',
-      providerOccurredAt: '2026-08-10T18:02:00.000Z',
+      providerOccurredAt: '2026-08-10T18:02:00Z',
     } as const;
     await expect(
       executeRecordEndpointStatusCapability(activeInput, workerContext, store),
@@ -305,6 +306,14 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
       store,
     );
     expect(active.id).toBe(IDS.activeEndpointStatus);
+    await expect(
+      executeRecordEndpointStatusCapability(activeInput, webhookContext, store),
+    ).resolves.toEqual(active);
+    expect(active.providerOccurredAt).toBe('2026-08-10T18:02:00.000Z');
+    const activeProviderOccurredAt = active.providerOccurredAt;
+    if (activeProviderOccurredAt === null) {
+      throw new Error('Provider-verified opt-in lost its occurrence time.');
+    }
 
     await expect(
       store.loadEndpointPolicy({
@@ -496,8 +505,8 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
         providerOccurredAt?.toISOString(),
       ),
     ).toEqual([
-      firstOptOut.providerOccurredAt,
-      activeInput.providerOccurredAt,
+      first.providerOccurredAt,
+      activeProviderOccurredAt,
       '2026-08-10T17:59:00.000Z',
       '2026-08-10T18:03:00.000Z',
       '2026-08-10T18:01:00.000Z',

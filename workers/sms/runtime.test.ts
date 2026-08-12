@@ -16,11 +16,14 @@ import {
   type AttemptExecutionLookupRequest,
   type AttemptExecutionStore,
   type DeliveryStateWriteRequest,
+  type ProviderSendOutcome,
   type WorkerAttemptWorkItem,
 } from '../shared';
 import { IDS, TIMES, attemptFor, realBatch } from '../shared/test-fixtures';
+import { measureAwsEumSmsLength } from './aws-eum-adapter';
 import type {
   AwsEumSmsLedgerClaim,
+  AwsEumSmsLedgerCompletion,
   AwsEumSmsLedgerLookup,
   AwsEumSmsSendLedger,
 } from './aws-eum-adapter';
@@ -88,7 +91,9 @@ function deliveredEvent(): unknown {
   };
 }
 
-function smsWorkItem(): WorkerAttemptWorkItem {
+function smsWorkItem(
+  body = '[INCIDENT] REAL INCIDENT - ACTIVATION: Synthetic test. [INCIDENT]',
+): WorkerAttemptWorkItem {
   const base = realBatch();
   const batch = DispatchBatchSchema.parse({
     ...base,
@@ -99,7 +104,7 @@ function smsWorkItem(): WorkerAttemptWorkItem {
       purpose: 'activation',
       classificationMarker: 'INCIDENT',
       channel: 'sms',
-      body: '[INCIDENT] REAL INCIDENT - ACTIVATION: Synthetic test. [INCIDENT]',
+      body,
     },
     integrationStatus: {
       ...base.integrationStatus,
@@ -117,6 +122,18 @@ function smsWorkItem(): WorkerAttemptWorkItem {
       phoneNumber: '+12025550123',
     }),
   });
+}
+
+function classifiedBody(
+  totalUnits: number,
+  encoding: 'gsm-7' | 'ucs-2',
+): string {
+  const prefix = '[INCIDENT] REAL INCIDENT - ACTIVATION: ';
+  const suffix = ' [INCIDENT]';
+  const unicode = encoding === 'ucs-2' ? '漢' : '';
+  const frame = `${prefix}${unicode}${suffix}`;
+  const frameUnits = measureAwsEumSmsLength(frame).units;
+  return `${prefix}${unicode}${'A'.repeat(totalUnits - frameUnits)}${suffix}`;
 }
 
 function noNetworkTransport() {
@@ -235,10 +252,23 @@ class SmsSendLedger implements AwsEumSmsSendLedger {
   public lookupCalls = 0;
   public claimCalls = 0;
   public completeCalls = 0;
+  public recovered: AwsEumSmsLedgerLookup = { kind: 'missing' };
+  public recoveredAttemptId: string | null = null;
+  public recoveredFingerprint: string | null = null;
 
-  public lookup(): Promise<AwsEumSmsLedgerLookup> {
+  public lookup(request: {
+    readonly attemptId: string;
+    readonly fingerprint: string;
+  }): Promise<AwsEumSmsLedgerLookup> {
     this.lookupCalls += 1;
-    return Promise.resolve({ kind: 'missing' });
+    if (
+      this.recoveredAttemptId !== null &&
+      (request.attemptId !== this.recoveredAttemptId ||
+        request.fingerprint !== this.recoveredFingerprint)
+    ) {
+      throw new Error('Synthetic provider ledger fingerprint conflict.');
+    }
+    return Promise.resolve(this.recovered);
   }
 
   public claim(): Promise<AwsEumSmsLedgerClaim> {
@@ -252,6 +282,24 @@ class SmsSendLedger implements AwsEumSmsSendLedger {
   public complete(): Promise<void> {
     this.completeCalls += 1;
     return Promise.resolve();
+  }
+
+  public retain(
+    attemptId: string,
+    fingerprint: string,
+    recovered: AwsEumSmsLedgerLookup,
+  ): void {
+    this.recovered = recovered;
+    this.recoveredAttemptId = attemptId;
+    this.recoveredFingerprint = fingerprint;
+  }
+
+  public retainCompletion(
+    attemptId: string,
+    fingerprint: string,
+    completion: AwsEumSmsLedgerCompletion,
+  ): void {
+    this.retain(attemptId, fingerprint, { kind: 'completed', completion });
   }
 }
 
@@ -436,7 +484,6 @@ function harness(overrides: HarnessOverrides = {}) {
 
 function expectNoProviderIo(value: ReturnType<typeof harness>): void {
   expect(value.transport.requests).toBe(0);
-  expect(value.sendLedger.lookupCalls).toBe(0);
   expect(value.sendLedger.claimCalls).toBe(0);
   expect(value.sendLedger.completeCalls).toBe(0);
 }
@@ -456,6 +503,7 @@ describe('AWS EUM SMS production runtime boundary', () => {
     expect(value.evidenceWriter.requests).toHaveLength(0);
     expect(value.capabilities.requests).toHaveLength(0);
     expectNoProviderIo(value);
+    expect(value.sendLedger.lookupCalls).toBe(1);
   });
 
   test('copies dark configuration so later caller mutation cannot enable AWS reads', async () => {
@@ -511,6 +559,310 @@ describe('AWS EUM SMS production runtime boundary', () => {
     expect(value.executionStore.claimCalls).toBe(0);
     expect(value.evidenceWriter.requests).toHaveLength(0);
     expect(value.capabilities.requests).toHaveLength(0);
+    expectNoProviderIo(value);
+  });
+
+  test('terminally rejects multipart GSM-7 and UCS-2 work items without AWS I/O', async () => {
+    const unsafeBodies = [
+      classifiedBody(161, 'gsm-7'),
+      classifiedBody(71, 'ucs-2'),
+    ] as const;
+    expect(measureAwsEumSmsLength(unsafeBodies[0])).toMatchObject({
+      encoding: 'gsm-7',
+      units: 161,
+    });
+    expect(measureAwsEumSmsLength(unsafeBodies[1])).toMatchObject({
+      encoding: 'ucs-2',
+      units: 71,
+    });
+
+    for (const body of unsafeBodies) {
+      const value = harness({
+        mode: {
+          state: 'enabled',
+          authorizeLiveProvider: () => true,
+          authorizeLiveSend: () => true,
+        },
+      });
+
+      await expect(
+        value.runtime.processQueueAttempt(smsWorkItem(body), QUEUE_INVOCATION),
+      ).resolves.toEqual(
+        expect.objectContaining({
+          attemptResult: expect.objectContaining({
+            kind: 'dlq',
+            outcome: expect.objectContaining({
+              state: 'failed',
+              reasonCode: 'AWS_EUM_WORK_ITEM_INVALID',
+            }),
+          }),
+          optOutRecord: null,
+        }),
+      );
+      expect(value.executionStore.claimCalls).toBe(1);
+      expect(value.evidenceWriter.requests).toHaveLength(2);
+      expect(value.capabilities.requests).toHaveLength(0);
+      expectNoProviderIo(value);
+      expect(value.sendLedger.lookupCalls).toBe(1);
+    }
+  });
+
+  test('recovers inner-ledger AWS acceptance after outer completion loss while dark without a second wire', async () => {
+    const workItem = smsWorkItem();
+    const value = harness();
+    const accepted = Object.freeze({
+      state: 'provider-accepted' as const,
+      provider: 'aws-eum-sms',
+      providerReference: 'synthetic-recovered-message-id',
+      proof: null,
+      reasonCode: null,
+      diagnosticDigest: null,
+    }) satisfies ProviderSendOutcome;
+    // This is the durable state after AWS/inner-ledger success followed by an
+    // outer-store completion crash and lease expiry.
+    value.sendLedger.retainCompletion(
+      IDS.attempt,
+      workerAttemptFingerprint(workItem),
+      { kind: 'outcome', outcome: accepted },
+    );
+
+    const result = await value.runtime.processQueueAttempt(
+      workItem,
+      QUEUE_INVOCATION,
+    );
+
+    expect(result).toEqual({
+      attemptResult: expect.objectContaining({
+        kind: 'completed',
+        replayed: true,
+        outcome: accepted,
+      }),
+      optOutRecord: null,
+    });
+    expect(value.executionStore.claimCalls).toBe(1);
+    expect(value.executionStore.completeCalls).toBe(1);
+    expect(
+      value.evidenceWriter.requests.map(({ evidence }) => evidence),
+    ).toEqual([
+      expect.objectContaining({ state: 'attempted' }),
+      expect.objectContaining({
+        state: 'provider-accepted',
+        providerReference: 'synthetic-recovered-message-id',
+      }),
+    ]);
+    expect(value.capabilities.requests).toHaveLength(0);
+    expect(value.sendLedger.lookupCalls).toBe(1);
+    expectNoProviderIo(value);
+  });
+
+  test('recovers an inner-ledger opt-out outcome while dark through the canonical capability', async () => {
+    const workItem = smsWorkItem();
+    const value = harness();
+    value.sendLedger.retainCompletion(
+      IDS.attempt,
+      workerAttemptFingerprint(workItem),
+      {
+        kind: 'outcome',
+        outcome: {
+          state: 'failed',
+          provider: 'aws-eum-sms',
+          providerReference: 'synthetic-recovered-opt-out-request',
+          proof: null,
+          reasonCode: 'DESTINATION_PHONE_NUMBER_OPTED_OUT',
+          diagnosticDigest: 'a'.repeat(64),
+        },
+      },
+    );
+
+    const result = await value.runtime.processQueueAttempt(
+      workItem,
+      QUEUE_INVOCATION,
+    );
+
+    expect(result.attemptResult).toEqual(
+      expect.objectContaining({ kind: 'dlq', replayed: true }),
+    );
+    expect(result.optOutRecord).toEqual(
+      expect.objectContaining({ endpointId: IDS.endpoint }),
+    );
+    expect(value.executionStore.claimCalls).toBe(1);
+    expect(value.executionStore.completeCalls).toBe(1);
+    expect(value.capabilities.requests).toEqual([
+      {
+        capabilityId: 'record-sms-opt-out',
+        context: {
+          actor: { kind: 'system', serviceId: 'sms-worker' },
+          source: 'worker',
+          transport: 'sqs',
+          requestId: QUEUE_INVOCATION.requestId,
+          authenticated: true,
+        },
+        input: {
+          rosterSnapshotId: IDS.roster,
+          recipientId: IDS.recipient,
+          endpointId: IDS.endpoint,
+          provider: 'aws-eum-sms',
+          providerReference: 'synthetic-recovered-opt-out-request',
+          providerOccurredAt: TIMES.recorded,
+        },
+      },
+    ]);
+    expect(value.sendLedger.lookupCalls).toBe(1);
+    expectNoProviderIo(value);
+  });
+
+  test('recovers a retained safe-to-retry provider error with the ordinary bounded retry decision while dark', async () => {
+    const workItem = smsWorkItem();
+    const value = harness();
+    value.sendLedger.retainCompletion(
+      IDS.attempt,
+      workerAttemptFingerprint(workItem),
+      {
+        kind: 'provider-error',
+        code: 'AWS_EUM_THROTTLED',
+        disposition: 'safe-to-retry',
+        diagnosticDigest: 'b'.repeat(64),
+      },
+    );
+
+    const result = await value.runtime.processQueueAttempt(
+      workItem,
+      QUEUE_INVOCATION,
+    );
+
+    expect(result).toEqual({
+      attemptResult: expect.objectContaining({
+        kind: 'retry',
+        replayed: true,
+        nextAttemptNumber: 2,
+        reasonCode: 'AWS_EUM_THROTTLED',
+        delayMilliseconds: expect.any(Number),
+        outcome: expect.objectContaining({
+          state: 'failed',
+          reasonCode: 'AWS_EUM_THROTTLED',
+          diagnosticDigest: 'b'.repeat(64),
+        }),
+      }),
+      optOutRecord: null,
+    });
+    expect(value.executionStore.claimCalls).toBe(1);
+    expect(value.executionStore.completeCalls).toBe(1);
+    expect(
+      value.evidenceWriter.requests.map(({ evidence }) => evidence.state),
+    ).toEqual(['attempted', 'failed']);
+    expect(value.sendLedger.lookupCalls).toBe(1);
+    expectNoProviderIo(value);
+  });
+
+  test('recovers retained terminal and ambiguous provider errors while dark without sending', async () => {
+    const cases = [
+      {
+        completion: {
+          kind: 'provider-error',
+          code: 'AWS_EUM_REQUEST_INVALID',
+          disposition: 'terminal-failure',
+          diagnosticDigest: 'c'.repeat(64),
+        },
+        expectedState: 'failed',
+        expectedReason: 'AWS_EUM_REQUEST_INVALID',
+      },
+      {
+        completion: {
+          kind: 'provider-error',
+          code: 'AWS_EUM_OUTCOME_AMBIGUOUS',
+          disposition: 'ambiguous',
+          diagnosticDigest: 'd'.repeat(64),
+        },
+        expectedState: 'unknown',
+        expectedReason: 'PROVIDER_OUTCOME_AMBIGUOUS',
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const workItem = smsWorkItem();
+      const value = harness();
+      value.sendLedger.retainCompletion(
+        IDS.attempt,
+        workerAttemptFingerprint(workItem),
+        testCase.completion,
+      );
+
+      const result = await value.runtime.processQueueAttempt(
+        workItem,
+        QUEUE_INVOCATION,
+      );
+
+      expect(result.attemptResult).toEqual(
+        expect.objectContaining({
+          kind: 'dlq',
+          replayed: true,
+          outcome: expect.objectContaining({
+            state: testCase.expectedState,
+            reasonCode: testCase.expectedReason,
+            diagnosticDigest: testCase.completion.diagnosticDigest,
+          }),
+        }),
+      );
+      expect(result.optOutRecord).toBeNull();
+      expect(value.executionStore.claimCalls).toBe(1);
+      expect(value.executionStore.completeCalls).toBe(1);
+      expect(value.sendLedger.lookupCalls).toBe(1);
+      expectNoProviderIo(value);
+    }
+  });
+
+  test('turns an indeterminate inner ledger into final unknown truth while dark and never sends', async () => {
+    const workItem = smsWorkItem();
+    const value = harness();
+    value.sendLedger.retain(IDS.attempt, workerAttemptFingerprint(workItem), {
+      kind: 'indeterminate',
+    });
+
+    const result = await value.runtime.processQueueAttempt(
+      workItem,
+      QUEUE_INVOCATION,
+    );
+
+    expect(result).toEqual({
+      attemptResult: expect.objectContaining({
+        kind: 'dlq',
+        replayed: true,
+        outcome: expect.objectContaining({
+          state: 'unknown',
+          reasonCode: 'PROVIDER_OUTCOME_AMBIGUOUS',
+        }),
+      }),
+      optOutRecord: null,
+    });
+    expect(value.executionStore.claimCalls).toBe(1);
+    expect(value.executionStore.completeCalls).toBe(1);
+    expect(
+      value.evidenceWriter.requests.map(({ evidence }) => evidence.state),
+    ).toEqual(['attempted', 'unknown']);
+    expect(value.sendLedger.lookupCalls).toBe(1);
+    expectNoProviderIo(value);
+  });
+
+  test('keeps an in-progress inner ledger in progress while dark and never sends', async () => {
+    const workItem = smsWorkItem();
+    const value = harness();
+    value.sendLedger.retain(IDS.attempt, workerAttemptFingerprint(workItem), {
+      kind: 'in-progress',
+    });
+
+    await expect(
+      value.runtime.processQueueAttempt(workItem, QUEUE_INVOCATION),
+    ).resolves.toEqual({
+      attemptResult: {
+        kind: 'in-progress',
+        retryAfterMilliseconds: expect.any(Number),
+      },
+      optOutRecord: null,
+    });
+    expect(value.executionStore.claimCalls).toBe(0);
+    expect(value.executionStore.completeCalls).toBe(0);
+    expect(value.evidenceWriter.requests).toHaveLength(0);
+    expect(value.sendLedger.lookupCalls).toBe(1);
     expectNoProviderIo(value);
   });
 

@@ -10,6 +10,7 @@ import {
   workerAttemptFingerprint,
   type AttemptIdempotentProviderAdapter,
   type ProviderFailureDisposition,
+  type ProviderRecoveryResult,
   type ProviderSendOutcome,
   type ProviderSendRequest,
   ProviderDispatchError,
@@ -21,6 +22,9 @@ export const AWS_EUM_SMS_PROVIDER = 'aws-eum-sms' as const;
 
 export const AWS_EUM_SMS_GSM_MAX_SEPTETS = 1_530;
 export const AWS_EUM_SMS_UCS2_MAX_CODE_UNITS = 630;
+
+const SINGLE_PART_GSM_MAX_SEPTETS = 160;
+const SINGLE_PART_UCS2_MAX_CODE_UNITS = 70;
 
 const DEFAULT_LEDGER_LEASE_MILLISECONDS = 2 * 60_000;
 const MAX_LEDGER_LEASE_MILLISECONDS = 15 * 60_000;
@@ -294,8 +298,9 @@ function purposeLabel(
 }
 
 /**
- * Defense-in-depth copy of AWS's provider ceiling calculation. The canonical
- * render and recipient-resolution gate remains server `sms-policy.ts`.
+ * Defense-in-depth copy of the SMS encoding and AWS provider-ceiling
+ * calculation. The final send boundary separately applies the stricter
+ * one-part product policy; canonical rendering remains server `sms-policy.ts`.
  */
 export function measureAwsEumSmsLength(
   value: string,
@@ -321,6 +326,17 @@ export function measureAwsEumSmsLength(
     units: septets,
     exceedsProviderLimit: septets > AWS_EUM_SMS_GSM_MAX_SEPTETS,
   });
+}
+
+function exceedsSmsSendLengthPolicy(
+  measurement: AwsEumSmsLengthMeasurement,
+): boolean {
+  return (
+    measurement.exceedsProviderLimit ||
+    (measurement.encoding === 'gsm-7'
+      ? measurement.units > SINGLE_PART_GSM_MAX_SEPTETS
+      : measurement.units > SINGLE_PART_UCS2_MAX_CODE_UNITS)
+  );
 }
 
 function hasCanonicalRendererFrame(workItem: WorkerAttemptWorkItem): boolean {
@@ -356,6 +372,11 @@ export function parseSmsProviderSendRequest(
       'terminal-failure',
     );
   }
+  const length = measureAwsEumSmsLength(
+    workItem.batch.renderedMessage.channel === 'sms'
+      ? workItem.batch.renderedMessage.body
+      : '',
+  );
   if (
     typeof requestValue.idempotencyKey !== 'string' ||
     requestValue.idempotencyKey !== workItem.attempt.id ||
@@ -370,8 +391,7 @@ export function parseSmsProviderSendRequest(
     (expectedTruthLabel === 'mocked' &&
       workItem.batch.rosterPopulation !== 'synthetic') ||
     !hasCanonicalRendererFrame(workItem) ||
-    measureAwsEumSmsLength(workItem.batch.renderedMessage.body)
-      .exceedsProviderLimit
+    exceedsSmsSendLengthPolicy(length)
   ) {
     throw new ProviderDispatchError(
       'AWS_EUM_WORK_ITEM_INVALID',
@@ -749,6 +769,76 @@ export class AwsEumSmsAdapter implements AttemptIdempotentProviderAdapter {
       ),
       MaxPrice: parseMaxPrice(options.maxPrice),
       TimeToLive: parseTimeToLive(options.timeToLiveSeconds),
+    });
+  }
+
+  /** Read-only recovery used before an outer worker live-send gate. */
+  public async recover(
+    requestValue: ProviderSendRequest,
+  ): Promise<ProviderRecoveryResult> {
+    let workItem: WorkerAttemptWorkItem;
+    try {
+      workItem = parseWorkerAttemptWorkItem(requestValue.workItem);
+    } catch {
+      return Object.freeze({ kind: 'missing' });
+    }
+    if (
+      requestValue.idempotencyKey !== workItem.attempt.id ||
+      workItem.batch.channel !== 'sms' ||
+      workItem.endpoint.channel !== 'sms' ||
+      workItem.batch.integrationStatus.integrationId !==
+        AWS_EUM_SMS_INTEGRATION_ID ||
+      workItem.batch.integrationStatus.label !== this.truthLabel
+    ) {
+      return Object.freeze({ kind: 'missing' });
+    }
+    const fingerprint = workerAttemptFingerprint(workItem);
+    let recovered: AwsEumSmsLedgerLookup;
+    try {
+      recovered = parseLedgerLookup(
+        await this.#ledger.lookup({
+          attemptId: requestValue.idempotencyKey,
+          fingerprint,
+        }),
+        requestValue.idempotencyKey,
+      );
+    } catch (error) {
+      if (error instanceof ProviderDispatchError) throw error;
+      throw new ProviderDispatchError(
+        'AWS_EUM_LEDGER_UNAVAILABLE',
+        'ambiguous',
+      );
+    }
+    if (recovered.kind === 'completed') {
+      if (recovered.completion.kind === 'outcome') {
+        return Object.freeze({
+          kind: 'outcome',
+          outcome: replayCompletion(recovered.completion),
+        });
+      }
+      const error = recovered.completion;
+      return Object.freeze({
+        kind: 'provider-error',
+        error: new ProviderDispatchError(
+          error.code,
+          error.disposition,
+          error.diagnosticDigest,
+        ),
+      });
+    }
+    if (recovered.kind === 'missing') {
+      return Object.freeze({ kind: 'missing' });
+    }
+    if (recovered.kind === 'in-progress') {
+      return Object.freeze({ kind: 'in-progress' });
+    }
+    return Object.freeze({
+      kind: 'provider-error',
+      error: new ProviderDispatchError(
+        'AWS_EUM_LEDGER_INDETERMINATE',
+        'ambiguous',
+        null,
+      ),
     });
   }
 
