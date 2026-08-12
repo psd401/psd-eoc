@@ -1,16 +1,41 @@
 import type {
   ActivationPreview,
+  Event,
   EventTypeListItem,
   FacilityId,
   TemplateMode,
 } from '@psd-eoc/contracts';
 
 export type ActivationPreviewBinding = Readonly<{
+  activeEvents: readonly Event[];
   facilityId: FacilityId | null;
   mode: TemplateMode | null;
   preview: ActivationPreview | null;
   selectedType: EventTypeListItem | null;
 }>;
+
+function activeEventIdsMatchFacility(
+  preview: ActivationPreview,
+  activeEvents: readonly Event[],
+): boolean {
+  const previewIds = new Set(preview.activeEventIds);
+  const facilityEvents = activeEvents.filter(
+    (event) => event.facilityId === preview.facilityId,
+  );
+  const facilityEventIds = new Set(facilityEvents.map((event) => event.id));
+
+  return (
+    previewIds.size === preview.activeEventIds.length &&
+    facilityEventIds.size === facilityEvents.length &&
+    facilityEvents.every((event) => event.status === 'active') &&
+    facilityEvents.length === preview.activeEventIds.length &&
+    preview.activeEventIds.every(
+      (eventId) =>
+        facilityEventIds.has(eventId) &&
+        activeEvents.filter((event) => event.id === eventId).length === 1,
+    )
+  );
+}
 
 /**
  * Returns a preview only while it is bound to the selection visible now.
@@ -22,7 +47,7 @@ export type ActivationPreviewBinding = Readonly<{
 export function getBoundActivationPreview(
   binding: ActivationPreviewBinding,
 ): ActivationPreview | null {
-  const { facilityId, mode, preview, selectedType } = binding;
+  const { activeEvents, facilityId, mode, preview, selectedType } = binding;
   if (
     facilityId === null ||
     mode === null ||
@@ -40,7 +65,8 @@ export function getBoundActivationPreview(
     preview.facilityId !== facilityId ||
     preview.templateMode !== mode ||
     preview.eventTypeVersion.id !== latestVersion.id ||
-    preview.eventTypeVersion.templateMode !== mode
+    preview.eventTypeVersion.templateMode !== mode ||
+    !activeEventIdsMatchFacility(preview, activeEvents)
   ) {
     return null;
   }

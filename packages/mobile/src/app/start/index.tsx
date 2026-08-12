@@ -231,6 +231,7 @@ export default function StartEventScreen() {
         );
   const theme = mode === null ? null : getEventTheme(mode);
   const boundPreview = getBoundActivationPreview({
+    activeEvents: data?.activeEvents.map((choice) => choice.event) ?? [],
     facilityId,
     mode,
     preview,
@@ -274,25 +275,22 @@ export default function StartEventScreen() {
       if (previewRequestGeneration.current !== requestGeneration) return;
 
       let currentData = data;
-      const knownEventIds = new Set(
-        currentData?.activeEvents.map((choice) => choice.event.id) ?? [],
-      );
-      if (
-        nextPreview.activeEventIds.some(
-          (eventId) => !knownEventIds.has(eventId),
-        )
-      ) {
+      const previewMatches = (candidateData: StartHomeData | null): boolean =>
+        getBoundActivationPreview({
+          activeEvents:
+            candidateData?.activeEvents.map((choice) => choice.event) ?? [],
+          facilityId: selectedFacilityId,
+          mode: selectedMode,
+          preview: nextPreview,
+          selectedType: item,
+        }) !== null;
+      if (!previewMatches(currentData)) {
         currentData = await loadStartHomeData(requestAuthenticated);
         if (previewRequestGeneration.current !== requestGeneration) return;
       }
-      const refreshedIds = new Set(
-        currentData?.activeEvents.map((choice) => choice.event.id) ?? [],
-      );
-      if (
-        nextPreview.activeEventIds.some((eventId) => !refreshedIds.has(eventId))
-      ) {
+      if (!previewMatches(currentData)) {
         throw new StartClientError(
-          'Active-event details changed before confirmation. Load a fresh preview.',
+          'Active-event details do not match this site. Load a fresh preview.',
           true,
           false,
         );

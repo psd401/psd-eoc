@@ -8,6 +8,7 @@ import {
   EventTypeVersionSchema,
   FacilityPageSchema,
   IdempotencyKeySchema,
+  isAtOrAfter,
   JoinEventResultSchema,
   StartEventInputSchema,
   StartEventResultSchema,
@@ -280,6 +281,12 @@ export async function loadStartHomeData(
     ),
     loadAllPages<Event>(request, '/api/events', EventPageSchema),
   ]);
+  if (activeEvents.some((event) => event.status !== 'active')) {
+    throw requestFailure(
+      'query',
+      'PSD EOC returned an event that is not active. No event was started and no notification was queued.',
+    );
+  }
 
   const facilityNames = new Map(
     facilities.map((facility) => [facility.id, facility.name] as const),
@@ -433,6 +440,31 @@ function activationMatchesPreview(
   );
 }
 
+function joinResultMatchesSelectedEvent(
+  event: Event,
+  expected: Event,
+): boolean {
+  const lifecycleDidNotRegress =
+    expected.allClearAt === null && expected.reactivatedAt === null
+      ? true
+      : expected.allClearAt !== null &&
+        expected.reactivatedAt !== null &&
+        event.allClearAt !== null &&
+        event.reactivatedAt !== null &&
+        ((event.allClearAt === expected.allClearAt &&
+          event.reactivatedAt === expected.reactivatedAt) ||
+          isAtOrAfter(event.allClearAt, expected.reactivatedAt));
+
+  return (
+    event.status === 'active' &&
+    lifecycleDidNotRegress &&
+    structurallyEqual(
+      { ...event, allClearAt: null, reactivatedAt: null },
+      { ...expected, allClearAt: null, reactivatedAt: null },
+    )
+  );
+}
+
 /** Executes one explicit human activation; failures are never retried here. */
 export async function activate(
   request: StartAuthenticatedRequest,
@@ -489,11 +521,7 @@ export async function join(
     },
     'mutation',
   );
-  if (
-    result.event.id !== eventId ||
-    result.event.status !== 'active' ||
-    !structurallyEqual(result.event, expectedEvent)
-  ) {
+  if (!joinResultMatchesSelectedEvent(result.event, expectedEvent)) {
     throw requestFailure(
       'mutation',
       'PSD EOC returned a joined event whose identity or classification does not match your choice. Treat the outcome as unresolved; no automatic retry will occur.',
