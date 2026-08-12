@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  IdempotencyKeySchema,
   ListFacilitiesInputSchema,
   type CapabilityInput,
 } from '@psd-eoc/contracts';
@@ -179,12 +180,27 @@ export async function handleListMobileStartFacilities(
 /** Creates a consequence preview; no confirmation or mutation is performed. */
 export function handleMobileActivationPreview(
   request: Request,
-  runtime?: MobileStartRouteRuntime,
+  runtimeValue?: MobileStartRouteRuntime,
 ): Promise<NextResponse> {
-  return handleCreateActivationPreview(
-    request,
-    runtime ?? getDefaultMobileStartRouteRuntime(),
+  const runtime = runtimeValue ?? getDefaultMobileStartRouteRuntime();
+  const transportIdempotencyKey = request.headers.get(
+    START_FLOW_IDEMPOTENCY_HEADER,
   );
+  const headers = new Headers(request.headers);
+  headers.delete(START_FLOW_IDEMPOTENCY_HEADER);
+  const previewRequest = new Request(request, { headers });
+
+  return handleCreateActivationPreview(previewRequest, {
+    ...runtime,
+    async authenticate(authRequest, now) {
+      const authenticated = await runtime.authenticate(authRequest, now);
+      // The centralized mobile transport requires a key for every POST. It is
+      // validated after authentication, consumed only by this adapter, and is
+      // deliberately excluded from the non-mutating capability invocation.
+      IdempotencyKeySchema.parse(transportIdempotencyKey ?? '');
+      return authenticated;
+    },
+  });
 }
 
 /** Issues server-owned confirmation and immediately executes one explicit start. */

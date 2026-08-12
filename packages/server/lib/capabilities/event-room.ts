@@ -1,5 +1,6 @@
 import {
   EventIdSchema,
+  EventRoomHeaderSchema,
   EventRoomSyncResultSchema,
   EventSchema,
   JournalEntrySchema,
@@ -8,6 +9,7 @@ import {
   type CapabilityInput,
   type CapabilityOutput,
   type Event,
+  type EventRoomHeader,
   type EventRoomSyncResult,
   type HumanConfirmationRecord,
 } from '@psd-eoc/contracts';
@@ -19,7 +21,12 @@ import {
   type DatabaseConnection,
   type PostgresDatabase,
 } from '../../db/client';
-import { events, journalEntries } from '../../db/schema';
+import {
+  events,
+  eventTypeVersions,
+  facilities,
+  journalEntries,
+} from '../../db/schema';
 import { createDrizzleSecurityAuditRepository } from '../audit/drizzle-repository';
 import {
   CapabilityEngineError,
@@ -204,11 +211,66 @@ async function readEvent(
   return row === undefined ? null : eventFromRow(row);
 }
 
+async function readEventRoomHeader(
+  database: EventRoomQueryDatabase,
+  event: Event,
+): Promise<EventRoomHeader> {
+  // Keep these reads sequential: the AWS Data API rejects concurrent
+  // statements carrying one transaction ID. Both reads remain inside the
+  // repeatable-read transaction that owns the event and journal snapshot.
+  const [facility] = await database
+    .select({
+      id: facilities.id,
+      code: facilities.code,
+      name: facilities.name,
+    })
+    .from(facilities)
+    .where(eq(facilities.id, event.facilityId))
+    .limit(1);
+  const [eventType] = await database
+    .select({
+      id: eventTypeVersions.id,
+      name: eventTypeVersions.name,
+      templateMode: eventTypeVersions.templateMode,
+    })
+    .from(eventTypeVersions)
+    .where(eq(eventTypeVersions.id, event.eventTypeVersion.id))
+    .limit(1);
+  if (
+    facility === undefined ||
+    eventType === undefined ||
+    eventType.templateMode !== event.templateMode
+  ) {
+    throw persistenceConflict(
+      'The event-room heading does not match its pinned event configuration.',
+    );
+  }
+  return EventRoomHeaderSchema.parse({ facility, eventType });
+}
+
+interface EventRoomDescriptor {
+  readonly event: Event;
+  readonly header: EventRoomHeader;
+}
+
+async function readEventRoomDescriptor(
+  database: EventRoomQueryDatabase,
+  eventId: string,
+): Promise<EventRoomDescriptor | null> {
+  const event = await readEvent(database, eventId);
+  if (event === null) return null;
+  return {
+    event,
+    header: await readEventRoomHeader(database, event),
+  };
+}
+
 async function syncEventRoom(
   database: EventRoomQueryDatabase,
   input: CapabilityInput<'sync-event-room'>,
-  event: Event,
+  descriptor: EventRoomDescriptor,
 ): Promise<EventRoomSyncResult> {
+  const { event, header } = descriptor;
   const afterSequence = readEventRoomCursorSequence(
     input.cursor,
     input.eventId,
@@ -277,6 +339,7 @@ async function syncEventRoom(
     input.cursor === null || (!hasMore && entries.length > 0);
   return EventRoomSyncResultSchema.parse({
     eventId: input.eventId,
+    header,
     event: includeEvent ? event : null,
     entries,
     cursor: createEventRoomCursor(input.eventId, returnedSequence),
@@ -289,10 +352,10 @@ async function syncEventRoom(
 export interface EventRoomCapabilityTransaction
   extends CapabilityEngineTransaction {
   beforeSync(): Promise<void>;
-  getEvent(eventId: string): Promise<Event | null>;
+  getEventRoomDescriptor(eventId: string): Promise<EventRoomDescriptor | null>;
   syncEventRoom(
     input: CapabilityInput<'sync-event-room'>,
-    event: Event,
+    descriptor: EventRoomDescriptor,
   ): Promise<EventRoomSyncResult>;
 }
 
@@ -318,12 +381,14 @@ function createEventRoomTransaction(
     consumeHumanConfirmation: async (): Promise<boolean> => readOnlyMutation(),
     appendCapabilityAudit: async (): Promise<void> => readOnlyMutation(),
     beforeSync,
-    getEvent: (eventId) => readEvent(database, eventId),
-    syncEventRoom: (input, event) => syncEventRoom(database, input, event),
+    getEventRoomDescriptor: (eventId) =>
+      readEventRoomDescriptor(database, eventId),
+    syncEventRoom: (input, descriptor) =>
+      syncEventRoom(database, input, descriptor),
   };
 }
 
-async function cachedEvent(
+async function cachedDescriptor(
   input: CapabilityInput<'sync-event-room'>,
   context: Parameters<
     ServerCapabilityRegistration<
@@ -331,13 +396,21 @@ async function cachedEvent(
       EventRoomCapabilityTransaction
     >['handler']
   >[1],
-): Promise<Event> {
+): Promise<EventRoomDescriptor> {
   const cached = context.cache.get(EVENT_CACHE_KEY);
-  if (cached !== undefined) return EventSchema.parse(cached);
-  const event = await context.transaction.getEvent(input.eventId);
-  if (event === null) throw notFound();
-  context.cache.set(EVENT_CACHE_KEY, event);
-  return event;
+  if (cached !== undefined) {
+    const descriptor = cached as EventRoomDescriptor;
+    return {
+      event: EventSchema.parse(descriptor.event),
+      header: EventRoomHeaderSchema.parse(descriptor.header),
+    };
+  }
+  const descriptor = await context.transaction.getEventRoomDescriptor(
+    input.eventId,
+  );
+  if (descriptor === null) throw notFound();
+  context.cache.set(EVENT_CACHE_KEY, descriptor);
+  return descriptor;
 }
 
 export const syncEventRoomRegistration: ServerCapabilityRegistration<
@@ -346,12 +419,12 @@ export const syncEventRoomRegistration: ServerCapabilityRegistration<
 > = {
   id: 'sync-event-room',
   async resolveFacilityId(input, context) {
-    return (await cachedEvent(input, context)).facilityId;
+    return (await cachedDescriptor(input, context)).event.facilityId;
   },
   async handler(input, context) {
-    const event = await cachedEvent(input, context);
+    const descriptor = await cachedDescriptor(input, context);
     await context.transaction.beforeSync();
-    return context.transaction.syncEventRoom(input, event);
+    return context.transaction.syncEventRoom(input, descriptor);
   },
 };
 

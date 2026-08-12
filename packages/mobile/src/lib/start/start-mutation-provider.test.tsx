@@ -41,7 +41,7 @@ const {
 
 type AuthBinding = Pick<
   MobileAuthContextValue,
-  'assertMutationAllowed' | 'authenticatedRequest' | 'state'
+  'assertMutationAllowed' | 'requestAuthenticated' | 'state'
 >;
 
 interface Deferred<Value> {
@@ -189,7 +189,7 @@ function authBinding(
   options: Readonly<{
     differentOwner?: boolean;
     mutationDenied?: boolean;
-    request?: MobileAuthContextValue['authenticatedRequest'];
+    request?: MobileAuthContextValue['requestAuthenticated'];
   }> = {},
 ): AuthBinding {
   const established = sessionFixture();
@@ -229,7 +229,7 @@ function authBinding(
         deviceEnrollmentId: live.deviceEnrollment.id,
       };
     },
-    authenticatedRequest:
+    requestAuthenticated:
       options.request ??
       (() => Promise.reject(new Error('Unexpected test transport call.'))),
   };
@@ -238,7 +238,7 @@ function authBinding(
 describe('StartMutationProviderController retention', () => {
   test('retains activation success through background lock for the same owner', async () => {
     const operation = deferred<StartEventResult>();
-    const request = authBinding().authenticatedRequest;
+    const request = authBinding().requestAuthenticated;
     const keys: string[] = [];
     const transports: unknown[][] = [];
     const controller = new StartMutationProviderController({

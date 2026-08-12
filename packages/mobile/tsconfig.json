@@ -11,6 +11,8 @@
     "src/**/*.ts",
     "src/**/*.tsx",
     "scripts/**/*.ts",
+    "native-tests/**/*.ts",
+    "native-tests/**/*.tsx",
     ".expo/types/**/*.ts",
     "expo-env.d.ts"
   ],

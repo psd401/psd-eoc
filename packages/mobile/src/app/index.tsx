@@ -68,7 +68,7 @@ function startedLabel(event: StartHomeActiveEvent): string {
 export default function HomeScreen() {
   const router = useRouter();
   const isFocused = useIsFocused();
-  const { authenticatedRequest, retryConnection, state } = useMobileAuth();
+  const { requestAuthenticated, retryConnection, state } = useMobileAuth();
   const startMutation = useStartMutation();
   const [data, setData] = useState<StartHomeData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -127,7 +127,7 @@ export default function HomeScreen() {
     return () => {
       outcomeRequestGeneration.current += 1;
     };
-  }, [authenticatedRequest, isFocused, state.session?.session.id]);
+  }, [requestAuthenticated, isFocused, state.session?.session.id]);
 
   const load = useCallback(() => {
     let active = true;
@@ -145,7 +145,7 @@ export default function HomeScreen() {
     }
     setLoading(true);
     setLoadError(null);
-    void loadStartHomeData(authenticatedRequest).then(
+    void loadStartHomeData(requestAuthenticated).then(
       (nextData) => {
         if (!active) return;
         setData(nextData);
@@ -161,7 +161,7 @@ export default function HomeScreen() {
     return () => {
       active = false;
     };
-  }, [authenticatedRequest, state.message, state.phase]);
+  }, [requestAuthenticated, state.message, state.phase]);
 
   useFocusEffect(load);
 
@@ -275,7 +275,7 @@ export default function HomeScreen() {
                   const requestOwnerKey = outcomeOwnerKeyRef.current;
                   setCheckingOutcome(true);
                   setOutcomeCheckError(null);
-                  void loadStartHomeData(authenticatedRequest).then(
+                  void loadStartHomeData(requestAuthenticated).then(
                     (nextData) => {
                       if (
                         outcomeRequestGeneration.current !==
@@ -319,7 +319,7 @@ export default function HomeScreen() {
                     const operation = mutationSnapshot.operation;
                     setCheckingOutcome(true);
                     setOutcomeCheckError(null);
-                    void loadStartHomeData(authenticatedRequest).then(
+                    void loadStartHomeData(requestAuthenticated).then(
                       (nextData) => {
                         if (
                           outcomeRequestGeneration.current !==

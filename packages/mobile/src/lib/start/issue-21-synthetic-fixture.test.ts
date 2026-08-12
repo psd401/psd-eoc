@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import {
+  ActivationPreviewSchema,
   CreateActivationPreviewInputSchema,
+  FacilityPageSchema,
   type CreateActivationPreviewInput,
 } from '@psd-eoc/contracts';
 
+import type { AuthenticatedRequestOptions } from '../api';
 import { MobileAuthController, type AuthTimer } from '../auth/auth-controller';
 import { OfflineMutationDeniedError } from '../auth/auth-errors';
 import {
@@ -21,6 +24,7 @@ import {
 
 const FIXTURE_NOW = new Date('2026-08-11T18:00:00.000Z');
 const IDEMPOTENCY_KEY = 'issue-21-synthetic-idempotency-0001';
+const PREVIEW_IDEMPOTENCY_KEY = 'issue-21-synthetic-preview-idempotency-0001';
 const originalFixture = process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE;
 const developmentGlobal = globalThis as typeof globalThis & {
   __DEV__?: boolean;
@@ -53,7 +57,12 @@ function fixtureRequest(): StartAuthenticatedRequest {
   const transport = createIssue21SyntheticFixtureTransport(
     () => new Date(FIXTURE_NOW),
   );
-  return (input) => transport('synthetic-test-bearer', input);
+  return (input) =>
+    transport.request(
+      'synthetic-test-bearer',
+      input,
+      new AbortController().signal,
+    );
 }
 
 function selection(
@@ -80,11 +89,15 @@ describe('issue-21 synthetic Maestro transport', () => {
     developmentGlobal.__DEV__ = false;
     try {
       await expect(
-        transport('synthetic-test-bearer', {
-          operation: 'query',
-          method: 'GET',
-          path: '/api/mobile/start/facilities',
-        }),
+        transport.request(
+          'synthetic-test-bearer',
+          {
+            method: 'GET',
+            path: '/api/mobile/start/facilities',
+            schema: FacilityPageSchema,
+          },
+          new AbortController().signal,
+        ),
       ).rejects.toBeInstanceOf(TypeError);
     } finally {
       developmentGlobal.__DEV__ = true;
@@ -147,9 +160,15 @@ describe('issue-21 synthetic Maestro transport', () => {
             : { success: true as const };
         },
       },
-      authenticatedRequest: (bearer, input) => {
-        transportCount += 1;
-        return fixtureTransport(bearer, input);
+      authenticatedApi: {
+        async request<Output>(
+          bearer: string,
+          input: AuthenticatedRequestOptions<Output>,
+          signal: AbortSignal,
+        ): Promise<Output> {
+          transportCount += 1;
+          return fixtureTransport.request(bearer, input, signal);
+        },
       },
       createIdempotencyKey: () => 'issue-21-synthetic-refresh-idempotency-0001',
       now: () => new Date(FIXTURE_NOW),
@@ -161,24 +180,24 @@ describe('issue-21 synthetic Maestro transport', () => {
     await auth.foreground();
     expect(auth.getSnapshot().phase).toBe('locked');
     expect(auth.getSnapshot().session).toBeNull();
-    expect(() =>
-      auth.authenticatedRequest({
-        operation: 'query',
+    await expect(
+      auth.requestAuthenticated({
         method: 'GET',
         path: '/api/mobile/start/facilities',
+        schema: FacilityPageSchema,
       }),
-    ).toThrow(OfflineMutationDeniedError);
+    ).rejects.toBeInstanceOf(OfflineMutationDeniedError);
     expect(transportCount).toBe(0);
 
     await auth.foreground();
     expect(authenticationCount).toBe(2);
     expect(auth.getSnapshot().phase).toBe('online');
-    const response = await auth.authenticatedRequest({
-      operation: 'query',
+    const response = await auth.requestAuthenticated({
       method: 'GET',
       path: '/api/mobile/start/facilities',
+      schema: FacilityPageSchema,
     });
-    expect(response.status).toBe(200);
+    expect(response.items).toHaveLength(1);
     expect(transportCount).toBe(1);
 
     await auth.signOut();
@@ -251,6 +270,7 @@ describe('issue-21 synthetic Maestro transport', () => {
     const preview = await createPreview(
       request,
       selection(facility.id, eventType.latestVersion.id),
+      PREVIEW_IDEMPOTENCY_KEY,
     );
     expect(preview.rosterPopulation).toBe('synthetic');
     expect(
@@ -297,28 +317,37 @@ describe('issue-21 synthetic Maestro transport', () => {
     );
 
     await expect(
-      transport('synthetic-test-bearer', {
-        operation: 'query',
-        method: 'POST',
-        path: '/api/mobile/start/preview',
-        body: JSON.stringify({
-          facilityId: '71000000-0000-4000-8000-000000000001',
-          kind: 'incident',
-          templateMode: 'real',
-          eventTypeVersion: {
-            id: '71000000-0000-4000-8000-000000000003',
+      transport.request(
+        'synthetic-test-bearer',
+        {
+          method: 'POST',
+          path: '/api/mobile/start/preview',
+          body: {
+            facilityId: '71000000-0000-4000-8000-000000000001',
+            kind: 'incident',
             templateMode: 'real',
+            eventTypeVersion: {
+              id: '71000000-0000-4000-8000-000000000003',
+              templateMode: 'real',
+            },
+            rosterPopulation: 'staff',
           },
-          rosterPopulation: 'staff',
-        }),
-      }),
+          idempotencyKey: PREVIEW_IDEMPOTENCY_KEY,
+          schema: ActivationPreviewSchema,
+        },
+        new AbortController().signal,
+      ),
     ).rejects.toBeInstanceOf(Error);
     await expect(
-      transport('synthetic-test-bearer', {
-        operation: 'query',
-        method: 'GET',
-        path: '/api/unexpected',
-      }),
+      transport.request(
+        'synthetic-test-bearer',
+        {
+          method: 'GET',
+          path: '/api/unexpected',
+          schema: FacilityPageSchema,
+        },
+        new AbortController().signal,
+      ),
     ).rejects.toBeInstanceOf(TypeError);
   });
 });

@@ -18,13 +18,12 @@ import {
   type PropsWithChildren,
 } from 'react';
 
+import { AuthenticatedApiClient, type RequestAuthenticated } from '../api';
 import { AuthApiClient, parseAuthApiBaseUrl } from './auth-api-client';
 import {
-  createAuthenticatedRequestTransport,
   MobileAuthController,
   type AuthStorage,
   type AuthState,
-  type MobileAuthenticatedRequest,
 } from './auth-controller';
 import { MobileAuthError } from './auth-errors';
 import { expoOidcBrowser, expoPkceSource } from './expo-oidc';
@@ -46,7 +45,7 @@ export interface MobileAuthContextValue {
   readonly unlock: () => Promise<void>;
   readonly retryConnection: () => Promise<void>;
   readonly signOut: () => Promise<void>;
-  readonly authenticatedRequest: MobileAuthenticatedRequest;
+  readonly requestAuthenticated: RequestAuthenticated;
   readonly assertMutationAllowed: () => Readonly<{
     connectivityEpochId: ConnectivityEpochId;
     userId: UserId;
@@ -75,7 +74,7 @@ function createRuntime(): AuthRuntime {
     return Object.freeze({
       controller: new MobileAuthController({
         api: fixture.api,
-        authenticatedRequest: createIssue21SyntheticFixtureTransport(),
+        authenticatedApi: createIssue21SyntheticFixtureTransport(),
         storage: fixture.storage,
         localAuthenticator: createLocalAuthenticator(),
         createIdempotencyKey: () => Crypto.randomUUID(),
@@ -86,12 +85,12 @@ function createRuntime(): AuthRuntime {
   }
 
   const storage = createSecureSessionStore();
-  const apiOrigin = () =>
+  const baseUrl = () =>
     parseAuthApiBaseUrl(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL, __DEV__);
-  const api = new AuthApiClient(apiOrigin);
+  const api = new AuthApiClient(baseUrl);
   const controller = new MobileAuthController({
     api,
-    authenticatedRequest: createAuthenticatedRequestTransport(apiOrigin),
+    authenticatedApi: new AuthenticatedApiClient(baseUrl),
     storage,
     localAuthenticator: createLocalAuthenticator(),
     createIdempotencyKey: () => Crypto.randomUUID(),
@@ -196,11 +195,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
       beginGoogleSignIn,
       unlock: () => runtime.controller.foreground(),
       retryConnection: () => runtime.controller.retryConnection(),
+      requestAuthenticated: runtime.controller.requestAuthenticated,
       signOut: async () => {
         setSignInError(null);
         await runtime.controller.signOut();
       },
-      authenticatedRequest: runtime.controller.authenticatedRequest,
       assertMutationAllowed: () => runtime.controller.assertMutationAllowed(),
     }),
     [beginGoogleSignIn, isSigningIn, runtime, signInError, state],

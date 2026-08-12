@@ -324,10 +324,11 @@ function humanMutationInvocation(
 function humanQueryInvocation(
   requestId: string,
   scope: CapabilityScope,
+  source: 'web' | 'mobile' = 'web',
 ): TrustedCapabilityInvocation {
   return {
     actor: HUMAN_ACTOR,
-    source: 'web',
+    source,
     scope,
     requestId,
     serverTime: new Date(TIMES.execution),
@@ -336,10 +337,13 @@ function humanQueryInvocation(
   };
 }
 
-function agentQueryInvocation(requestId: string): TrustedCapabilityInvocation {
+function agentQueryInvocation(
+  requestId: string,
+  source: 'agent-rest' | 'mcp' = 'mcp',
+): TrustedCapabilityInvocation {
   return {
     actor: AGENT_ACTOR,
-    source: 'mcp',
+    source,
     scope: DISTRICT_SCOPE,
     requestId,
     serverTime: new Date(TIMES.execution),
@@ -457,6 +461,18 @@ function createEventRoomSyncRegistration(fail = false): Readonly<{
         if (fail) throw new Error('synthetic sync persistence failure');
         return {
           eventId: IDS.event,
+          header: {
+            facility: {
+              id: IDS.facility,
+              code: 'SYN-NORTH',
+              name: 'Synthetic North School',
+            },
+            eventType: {
+              id: IDS.eventTypeVersion,
+              name: 'Synthetic Exercise',
+              templateMode: 'drill',
+            },
+          },
           event: SYNTHETIC_ACTIVE_EVENT,
           entries: [],
           cursor: Buffer.from(
@@ -862,6 +878,65 @@ describe('capability engine', () => {
 
     expect(sync.handlerCalls()).toBe(1_200);
     expect(store.auditEvents).toHaveLength(0);
+  });
+
+  test('allows human mobile room sync but denies both agent transports before dispatch', async () => {
+    const store = new MemoryCapabilityStore();
+    const sync = createEventRoomSyncRegistration();
+
+    const mobileResult = await executeCapability(
+      sync.registration,
+      { eventId: IDS.event, cursor: null, limit: 100 },
+      humanQueryInvocation(uuid(11_290), DISTRICT_SCOPE, 'mobile'),
+      store,
+    );
+    expect(mobileResult.header).toEqual({
+      facility: {
+        id: IDS.facility,
+        code: 'SYN-NORTH',
+        name: 'Synthetic North School',
+      },
+      eventType: {
+        id: IDS.eventTypeVersion,
+        name: 'Synthetic Exercise',
+        templateMode: 'drill',
+      },
+    });
+
+    for (const [index, source] of ['agent-rest', 'mcp'].entries()) {
+      const error = await captureEngineError(() =>
+        executeCapability(
+          sync.registration,
+          { eventId: IDS.event, cursor: null, limit: 100 },
+          agentQueryInvocation(
+            uuid(11_291 + index),
+            source as 'agent-rest' | 'mcp',
+          ),
+          store,
+        ),
+      );
+      expect(error).toMatchObject({
+        code: 'FORBIDDEN',
+        reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+        status: 403,
+      });
+    }
+
+    expect(sync.handlerCalls()).toBe(1);
+    expect(store.auditEvents).toEqual([
+      expect.objectContaining({
+        action: 'sync-event-room',
+        actor: AGENT_ACTOR,
+        outcome: 'denied',
+        source: 'agent-rest',
+      }),
+      expect.objectContaining({
+        action: 'sync-event-room',
+        actor: AGENT_ACTOR,
+        outcome: 'denied',
+        source: 'mcp',
+      }),
+    ]);
   });
 
   test('still audits denied and failed room syncs while agent queries remain all-outcomes', async () => {

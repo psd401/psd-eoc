@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   ActivationPreviewSchema,
+  ApiErrorSchema,
   CreateActivationPreviewInputSchema,
   EventSchema,
   EventTypeVersionSchema,
@@ -16,7 +17,11 @@ import {
   type TemplateMode,
 } from '@psd-eoc/contracts';
 
-import type { AuthenticatedRequestInput } from '../auth/auth-controller';
+import {
+  AuthenticatedApiError,
+  AuthenticatedRequestFailure,
+  type AuthenticatedRequestOptions,
+} from '../api';
 import {
   activate,
   createPreview,
@@ -56,11 +61,26 @@ const NOW = '2026-08-11T18:00:00.000Z';
 const EXPIRES = '2026-08-11T18:10:00.000Z';
 const IDEMPOTENCY_KEY = 'mobile-start-idempotency-0001';
 
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
+type RecordedAuthenticatedRequest = AuthenticatedRequestOptions<unknown>;
+
+function parseResponse<Output>(
+  input: AuthenticatedRequestOptions<Output>,
+  payload: unknown,
+): Output {
+  return input.schema.parse(payload);
+}
+
+function syntheticApiError(status: number): AuthenticatedApiError {
+  return new AuthenticatedApiError(
+    ApiErrorSchema.parse({
+      code: 'INTERNAL_ERROR',
+      message: 'Synthetic server acknowledgement was interrupted.',
+      requestId: IDS.request,
+      retryable: true,
+      fieldErrors: [],
+    }),
     status,
-    headers: { 'content-type': 'application/json' },
-  });
+  );
 }
 
 function selectionFixture(
@@ -372,11 +392,13 @@ function activationResultFixture(
 
 function oneResponseRequest(
   payload: unknown,
-  calls: AuthenticatedRequestInput[] = [],
+  calls: RecordedAuthenticatedRequest[] = [],
 ): StartAuthenticatedRequest {
-  return async (input) => {
+  return async <Output>(
+    input: AuthenticatedRequestOptions<Output>,
+  ): Promise<Output> => {
     calls.push(input);
-    return jsonResponse(payload);
+    return parseResponse(input, payload);
   };
 }
 
@@ -397,12 +419,14 @@ describe('mobile start API client', () => {
       IDS.historicalVersion,
     );
     const activeEvent = activeEventFixture(historicalSelection);
-    const calls: AuthenticatedRequestInput[] = [];
-    const request: StartAuthenticatedRequest = async (input) => {
+    const calls: RecordedAuthenticatedRequest[] = [];
+    const request: StartAuthenticatedRequest = async <Output>(
+      input: AuthenticatedRequestOptions<Output>,
+    ): Promise<Output> => {
       calls.push(input);
       switch (input.path) {
         case '/api/mobile/start/facilities':
-          return jsonResponse({
+          return parseResponse(input, {
             items: [
               {
                 id: IDS.facility,
@@ -415,7 +439,7 @@ describe('mobile start API client', () => {
             pageInfo: { hasMore: true, nextCursor: 'facility_cursor' },
           });
         case '/api/mobile/start/facilities?cursor=facility_cursor':
-          return jsonResponse({
+          return parseResponse(input, {
             items: [
               {
                 id: IDS.secondFacility,
@@ -428,7 +452,7 @@ describe('mobile start API client', () => {
             pageInfo: { hasMore: false, nextCursor: null },
           });
         case '/event-types/api?operation=list&enabled=true':
-          return jsonResponse({
+          return parseResponse(input, {
             items: [
               {
                 eventType: {
@@ -444,17 +468,17 @@ describe('mobile start API client', () => {
             pageInfo: { hasMore: false, nextCursor: null },
           });
         case '/api/events':
-          return jsonResponse({
+          return parseResponse(input, {
             items: [activeEvent],
             pageInfo: { hasMore: true, nextCursor: 'event_cursor' },
           });
         case '/api/events?cursor=event_cursor':
-          return jsonResponse({
+          return parseResponse(input, {
             items: [],
             pageInfo: { hasMore: false, nextCursor: null },
           });
         case `/event-types/api?operation=version&eventTypeVersionId=${IDS.historicalVersion}`:
-          return jsonResponse(historicalVersion);
+          return parseResponse(input, historicalVersion);
         default:
           throw new Error(`Unexpected synthetic request: ${input.path}`);
       }
@@ -484,7 +508,6 @@ describe('mobile start API client', () => {
         `/event-types/api?operation=version&eventTypeVersionId=${IDS.historicalVersion}`,
       ]),
     );
-    expect(calls.every((call) => call.operation === 'query')).toBe(true);
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
@@ -492,33 +515,35 @@ describe('mobile start API client', () => {
     const activeEvent = activeEventFixture(
       selectionFixture('drill', IDS.historicalVersion),
     );
-    const request: StartAuthenticatedRequest = async (input) => {
+    const request: StartAuthenticatedRequest = async <Output>(
+      input: AuthenticatedRequestOptions<Output>,
+    ): Promise<Output> => {
       if (input.path === '/api/mobile/start/facilities') {
-        return jsonResponse({
+        return parseResponse(input, {
           items: [],
           pageInfo: { hasMore: false, nextCursor: null },
         });
       }
       if (input.path === '/event-types/api?operation=list&enabled=true') {
-        return jsonResponse({
+        return parseResponse(input, {
           items: [],
           pageInfo: { hasMore: false, nextCursor: null },
         });
       }
       if (input.path === '/api/events') {
-        return jsonResponse({
+        return parseResponse(input, {
           items: [activeEvent],
           pageInfo: { hasMore: false, nextCursor: null },
         });
       }
-      return jsonResponse(
-        {
+      throw new AuthenticatedApiError(
+        ApiErrorSchema.parse({
           code: 'NOT_FOUND',
           message: 'Synthetic historical version is unavailable.',
           requestId: IDS.request,
           retryable: false,
           fieldErrors: [],
-        },
+        }),
         404,
       );
     };
@@ -536,19 +561,22 @@ describe('mobile start API client', () => {
     const preview = previewFixture(selection, {
       activeEventIds: [IDS.activeEvent],
     });
-    const calls: AuthenticatedRequestInput[] = [];
+    const calls: RecordedAuthenticatedRequest[] = [];
 
     await expect(
-      createPreview(oneResponseRequest(preview, calls), selection),
+      createPreview(
+        oneResponseRequest(preview, calls),
+        selection,
+        IDEMPOTENCY_KEY,
+      ),
     ).resolves.toEqual(preview);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      operation: 'query',
       method: 'POST',
       path: '/api/mobile/start/preview',
+      idempotencyKey: IDEMPOTENCY_KEY,
     });
-    expect(JSON.parse(calls[0]?.body ?? '')).toEqual(selection);
-    expect(calls[0]?.idempotencyKey).toBeUndefined();
+    expect(calls[0]?.body).toEqual(selection);
   });
 
   test('rejects a schema-valid preview for a different facility', async () => {
@@ -559,7 +587,7 @@ describe('mobile start API client', () => {
     });
 
     await expect(
-      createPreview(oneResponseRequest(mismatched), selection),
+      createPreview(oneResponseRequest(mismatched), selection, IDEMPOTENCY_KEY),
     ).rejects.toMatchObject({
       name: 'StartClientError',
       outcomeUnknown: false,
@@ -571,19 +599,18 @@ describe('mobile start API client', () => {
       activeEventIds: [IDS.activeEvent, IDS.otherEvent],
     });
     const result = activationResultFixture(preview, 'f'.repeat(64));
-    const calls: AuthenticatedRequestInput[] = [];
+    const calls: RecordedAuthenticatedRequest[] = [];
 
     await expect(
       activate(oneResponseRequest(result, calls), preview, IDEMPOTENCY_KEY),
     ).resolves.toEqual(result);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      operation: 'mutation',
       method: 'POST',
       path: '/api/mobile/start/activate',
       idempotencyKey: IDEMPOTENCY_KEY,
     });
-    expect(JSON.parse(calls[0]?.body ?? '')).toEqual({
+    expect(calls[0]?.body).toEqual({
       source: 'activation-preview',
       activationPreviewId: preview.id,
       activeEventDecision: {
@@ -625,7 +652,10 @@ describe('mobile start API client', () => {
     let calls = 0;
     const request: StartAuthenticatedRequest = async () => {
       calls += 1;
-      throw new Error('synthetic network interruption');
+      throw new AuthenticatedRequestFailure(
+        'network',
+        'Synthetic network interruption.',
+      );
     };
 
     await expect(
@@ -656,7 +686,7 @@ describe('mobile start API client', () => {
       const request: StartAuthenticatedRequest = (input) => {
         calls += 1;
         observedSignal = input.signal;
-        return new Promise<Response>((_resolve, reject) => {
+        return new Promise<never>((_resolve, reject) => {
           input.signal?.addEventListener(
             'abort',
             () => {
@@ -703,16 +733,7 @@ describe('mobile start API client', () => {
       let calls = 0;
       const request: StartAuthenticatedRequest = async () => {
         calls += 1;
-        return jsonResponse(
-          {
-            code: 'INTERNAL_ERROR',
-            message: 'Synthetic server acknowledgement was interrupted.',
-            requestId: IDS.request,
-            retryable: true,
-            fieldErrors: [],
-          },
-          503,
-        );
+        throw syntheticApiError(503);
       };
 
       await expect(mutate(request)).rejects.toMatchObject({
@@ -732,17 +753,16 @@ describe('mobile start API client', () => {
       participantId: IDS.participant,
       joined: true,
     });
-    const calls: AuthenticatedRequestInput[] = [];
+    const calls: RecordedAuthenticatedRequest[] = [];
 
     await expect(
       join(oneResponseRequest(result, calls), selectedEvent, IDEMPOTENCY_KEY),
     ).resolves.toEqual(result);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      operation: 'mutation',
       method: 'POST',
       path: `/api/events/${selectedEvent.id}/join`,
-      body: '{}',
+      body: {},
       idempotencyKey: IDEMPOTENCY_KEY,
     });
   });
