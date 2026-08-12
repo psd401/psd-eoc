@@ -59,6 +59,18 @@ export interface ProviderSendRequest {
   readonly idempotencyKey: string;
 }
 
+export type ProviderRecoveryResult =
+  | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'in-progress' }>
+  | Readonly<{
+      kind: 'outcome';
+      outcome: ProviderSendOutcome | unknown;
+    }>
+  | Readonly<{
+      kind: 'provider-error';
+      error: unknown;
+    }>;
+
 /** Adapter repeats of one attempt ID must produce at most one logical send. */
 export interface AttemptIdempotentProviderAdapter {
   readonly channel: NotificationChannel;
@@ -66,6 +78,14 @@ export interface AttemptIdempotentProviderAdapter {
   readonly truthLabel: IntegrationTruthLabel;
   readonly provider: string;
   readonly deliverySemantics: 'attempt-id-idempotent';
+  /**
+   * Optional read-only recovery from provider-adapter truth already retained
+   * for this exact immutable attempt. It must never claim or send. `missing`
+   * means ordinary processing may continue; `in-progress` prevents a blind
+   * resend; outcomes and provider errors preserve the adapter's retained
+   * result so the outer processor can apply its ordinary completion policy.
+   */
+  recover?(request: ProviderSendRequest): Promise<ProviderRecoveryResult>;
   send(request: ProviderSendRequest): Promise<ProviderSendOutcome | unknown>;
 }
 
@@ -206,7 +226,8 @@ function validateAdapter(adapter: AttemptIdempotentProviderAdapter): void {
     adapter.provider.length > 100 ||
     adapter.provider.trim() !== adapter.provider ||
     !SAFE_PROVIDER_PATTERN.test(adapter.provider) ||
-    adapter.deliverySemantics !== 'attempt-id-idempotent'
+    adapter.deliverySemantics !== 'attempt-id-idempotent' ||
+    (adapter.recover !== undefined && typeof adapter.recover !== 'function')
   ) {
     throw new WorkerProcessingError('INVALID_ADAPTER');
   }
@@ -442,6 +463,54 @@ export class WorkerAttemptProcessor {
       return this.#writeCompletion(attempt, recovered.completion, true);
     }
 
+    if (this.#adapter.recover !== undefined) {
+      let adapterRecovery: ProviderRecoveryResult;
+      try {
+        adapterRecovery = await this.#adapter.recover(
+          Object.freeze({ workItem, idempotencyKey: attempt.id }),
+        );
+      } catch {
+        throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
+      }
+      if (adapterRecovery.kind === 'in-progress') {
+        return Object.freeze({
+          kind: 'in-progress',
+          retryAfterMilliseconds: calculateRetryDelayMilliseconds(
+            attempt.attemptNumber,
+            this.#retryPolicy,
+            this.#random,
+          ),
+        });
+      }
+      if (
+        adapterRecovery.kind === 'outcome' ||
+        adapterRecovery.kind === 'provider-error'
+      ) {
+        const completion = this.#recoveredAdapterCompletion(
+          attempt,
+          adapterRecovery,
+        );
+        const claim = await this.#claimRecoveredAdapterCompletion(
+          workItem,
+          fingerprint,
+          completion,
+        );
+        if (claim.kind === 'in-progress') {
+          return Object.freeze({
+            kind: 'in-progress',
+            retryAfterMilliseconds: calculateRetryDelayMilliseconds(
+              attempt.attemptNumber,
+              this.#retryPolicy,
+              this.#random,
+            ),
+          });
+        }
+        return this.#writeCompletion(attempt, claim.completion, true);
+      } else if (adapterRecovery.kind !== 'missing') {
+        throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
+      }
+    }
+
     if (attempt.attemptNumber > this.#retryPolicy.maxAttempts) {
       throw new WorkerProcessingError('RETRY_BUDGET_EXCEEDED');
     }
@@ -610,6 +679,105 @@ export class WorkerAttemptProcessor {
       attemptedEvidence,
       outcomeEvidence,
     });
+  }
+
+  #recoveredAdapterCompletion(
+    attempt: WorkerAttemptWorkItem['attempt'],
+    recovery: Extract<
+      ProviderRecoveryResult,
+      { kind: 'outcome' | 'provider-error' }
+    >,
+  ): AttemptExecutionCompletion {
+    if (recovery.kind === 'provider-error') {
+      const decision = decideProviderRetry(
+        recovery.error,
+        attempt.attemptNumber,
+        this.#retryPolicy,
+        this.#random,
+      );
+      if (decision.kind === 'retry') {
+        return Object.freeze({
+          kind: 'retry',
+          outcome: failureOutcome(
+            'failed',
+            this.#adapter.provider,
+            decision.failure.code,
+            decision.failure.diagnosticDigest,
+          ),
+          delayMilliseconds: decision.delayMilliseconds,
+          nextAttemptNumber: decision.nextAttemptNumber,
+          reasonCode: decision.failure.code,
+        });
+      }
+      return Object.freeze({
+        kind: 'final',
+        outcome: failureOutcome(
+          decision.truthState,
+          this.#adapter.provider,
+          decision.reasonCode,
+          decision.failure.diagnosticDigest,
+        ),
+      });
+    }
+
+    let outcome: ProviderSendOutcome;
+    try {
+      outcome = parseProviderOutcome(
+        recovery.outcome,
+        attempt.id,
+        this.#adapter.provider,
+      );
+    } catch {
+      outcome = failureOutcome(
+        'unknown',
+        this.#adapter.provider,
+        'PROVIDER_OUTCOME_INVALID',
+        null,
+      );
+    }
+    return Object.freeze({ kind: 'final', outcome });
+  }
+
+  async #claimRecoveredAdapterCompletion(
+    workItem: WorkerAttemptWorkItem,
+    fingerprint: string,
+    completion: AttemptExecutionCompletion,
+  ): Promise<
+    | Readonly<{ kind: 'completed'; completion: AttemptExecutionCompletion }>
+    | Readonly<{ kind: 'in-progress' }>
+  > {
+    const attempt = workItem.attempt;
+    let claim: AttemptExecutionClaim;
+    try {
+      claim = parseClaim(
+        await this.#store.claim({
+          attemptId: attempt.id,
+          fingerprint,
+          leaseMilliseconds: this.#leaseMilliseconds,
+        }),
+        attempt.id,
+        this.#adapter.provider,
+      );
+    } catch (error) {
+      if (error instanceof WorkerProcessingError) throw error;
+      throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
+    }
+    if (claim.kind === 'in-progress') {
+      return Object.freeze({ kind: 'in-progress' });
+    }
+    if (claim.kind === 'completed') return claim;
+
+    try {
+      await this.#store.complete({
+        attemptId: attempt.id,
+        fingerprint,
+        leaseToken: claim.leaseToken,
+        completion,
+      });
+    } catch {
+      throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
+    }
+    return Object.freeze({ kind: 'completed', completion });
   }
 
   async #writeCompletion(

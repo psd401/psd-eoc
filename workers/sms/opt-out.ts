@@ -355,10 +355,11 @@ export async function recordAwsManagedOptOutConflict(
   recorder: SmsOptOutRecorder,
 ): Promise<SmsOptOutRecord> {
   const workItem = parseWorkerAttemptWorkItem(workValue);
+  const occurredAt = TimestampSchema.safeParse(providerOccurredAt);
   if (workItem.batch.channel !== 'sms' || workItem.endpoint.channel !== 'sms') {
     throw new SmsOptOutError('OPT_OUT_ENDPOINT_MISMATCH');
   }
-  if (typeof recorder?.recordSmsOptOut !== 'function') {
+  if (!occurredAt.success || typeof recorder?.recordSmsOptOut !== 'function') {
     throw new SmsOptOutError('INVALID_CONFIGURATION');
   }
   const input = RecordSmsOptOutInputSchema.parse({
@@ -367,7 +368,7 @@ export async function recordAwsManagedOptOutConflict(
     endpointId: workItem.endpoint.id,
     provider: AWS_EUM_SMS_PROVIDER,
     providerReference: parseProviderReference(providerRequestId),
-    providerOccurredAt: TimestampSchema.parse(providerOccurredAt),
+    providerOccurredAt: new Date(occurredAt.data).toISOString(),
   });
   return parseExactSmsOptOutRecord(
     await recorder.recordSmsOptOut(input),
@@ -390,6 +391,7 @@ export async function recordAwsManagedOptIn(
   const rosterSnapshotId = RosterSnapshotIdSchema.safeParse(
     inputValue.rosterSnapshotId,
   );
+  const occurredAt = TimestampSchema.safeParse(invocation?.occurredAt);
   const list = parseOptOutListIdentity(listValue);
   if (
     !rosterSnapshotId.success ||
@@ -404,7 +406,7 @@ export async function recordAwsManagedOptIn(
     !isPlainRecord(invocation) ||
     !UuidSchema.safeParse(invocation.requestId).success ||
     (invocation.keyword !== 'START' && invocation.keyword !== 'UNSTOP') ||
-    !TimestampSchema.safeParse(invocation.occurredAt).success
+    !occurredAt.success
   ) {
     throw new SmsOptOutError('INVOCATION_UNVERIFIED');
   }
@@ -451,7 +453,7 @@ export async function recordAwsManagedOptIn(
     reasonCode: SMS_PROVIDER_VERIFIED_OPT_IN_REASON,
     provider: SMS_LIFECYCLE_PROVIDER,
     providerReference: optInProviderReference(list.arn, invocation.requestId),
-    providerOccurredAt: invocation.occurredAt,
+    providerOccurredAt: new Date(occurredAt.data).toISOString(),
   });
   return parseExactEndpointStatusRecord(
     await options.recorder.recordEndpointStatus(input),

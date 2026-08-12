@@ -2,13 +2,20 @@ import { describe, expect, test } from 'bun:test';
 import {
   AudienceConfigSchema,
   DispatchBatchSchema,
+  EndpointStatusRecordSchema,
   RosterSnapshotSchema,
   SmsMessageTemplateSchema,
+  SmsOptOutRecordSchema,
   type DispatchBatch,
+  type RecordEndpointStatusInput,
+  type RecordSmsOptOutInput,
+  type SmsLifecycleCapabilityContext,
 } from '@psd-eoc/contracts';
 
 import {
   SmsPolicyError,
+  executeRecordEndpointStatusCapability,
+  executeRecordSmsOptOutCapability,
   renderSmsMessage,
   resolveSmsEndpoints,
   validateRenderedSmsMessage,
@@ -235,5 +242,112 @@ describe('SMS endpoint policy', () => {
         new PolicyStore('disabled'),
       ),
     ).resolves.toEqual([]);
+  });
+
+  test('canonicalizes provider timestamps before persistence and replay comparison', async () => {
+    const optOutInputs: unknown[] = [];
+    const endpointStatusInputs: unknown[] = [];
+    const optOutStore = {
+      recordSmsOptOut(input: RecordSmsOptOutInput) {
+        optOutInputs.push(input);
+        return Promise.resolve(
+          SmsOptOutRecordSchema.parse({
+            id: IDS.request,
+            ...input,
+            providerOccurredAt: new Date(
+              input.providerOccurredAt,
+            ).toISOString(),
+            recordedAt: '2026-08-11T18:05:00.000Z',
+          }),
+        );
+      },
+    };
+    const endpointStatusStore = {
+      recordEndpointStatus(input: RecordEndpointStatusInput) {
+        endpointStatusInputs.push(input);
+        const occurredAt = input.providerOccurredAt;
+        return Promise.resolve(
+          EndpointStatusRecordSchema.parse({
+            id: IDS.preview,
+            ...input,
+            providerOccurredAt:
+              occurredAt === null ? null : new Date(occurredAt).toISOString(),
+            recordedAt: '2026-08-11T18:05:00.000Z',
+          }),
+        );
+      },
+    };
+    const workerContext = {
+      actor: { kind: 'system', serviceId: 'sms-worker' },
+      source: 'worker',
+      transport: 'sqs',
+      requestId: IDS.request,
+      authenticated: true,
+    } satisfies SmsLifecycleCapabilityContext;
+    const webhookContext = {
+      actor: { kind: 'system', serviceId: 'sms-opt-in-webhook' },
+      source: 'webhook',
+      transport: 'provider-webhook',
+      requestId: IDS.preview,
+      authenticated: true,
+    } satisfies SmsLifecycleCapabilityContext;
+    const optOutInput = {
+      rosterSnapshotId: IDS.roster,
+      recipientId: IDS.recipient,
+      endpointId: IDS.endpoint,
+      provider: 'aws-eum-sms',
+      providerReference: 'synthetic-offset-opt-out',
+      providerOccurredAt: '2026-08-11T11:00:00-07:00',
+    } as const;
+    const endpointStatusInput = {
+      rosterSnapshotId: IDS.roster,
+      recipientId: IDS.recipient,
+      endpointId: IDS.endpoint,
+      status: 'active',
+      reasonCode: 'SMS_OPT_IN_PROVIDER_VERIFIED',
+      provider: 'aws-eum-sms',
+      providerReference: 'synthetic-no-millisecond-opt-in',
+      providerOccurredAt: '2026-08-11T18:02:00Z',
+    } as const;
+
+    const optOut = await executeRecordSmsOptOutCapability(
+      optOutInput,
+      workerContext,
+      optOutStore,
+    );
+    await expect(
+      executeRecordSmsOptOutCapability(optOutInput, workerContext, optOutStore),
+    ).resolves.toEqual(optOut);
+    const endpointStatus = await executeRecordEndpointStatusCapability(
+      endpointStatusInput,
+      webhookContext,
+      endpointStatusStore,
+    );
+    await expect(
+      executeRecordEndpointStatusCapability(
+        endpointStatusInput,
+        webhookContext,
+        endpointStatusStore,
+      ),
+    ).resolves.toEqual(endpointStatus);
+
+    expect(optOut.providerOccurredAt).toBe('2026-08-11T18:00:00.000Z');
+    expect(endpointStatus.providerOccurredAt).toBe('2026-08-11T18:02:00.000Z');
+    expect(optOutInputs).toEqual([
+      expect.objectContaining({
+        providerOccurredAt: '2026-08-11T18:00:00.000Z',
+      }),
+      expect.objectContaining({
+        providerOccurredAt: '2026-08-11T18:00:00.000Z',
+      }),
+    ]);
+    expect(endpointStatusInputs).toEqual([
+      expect.objectContaining({
+        providerOccurredAt: '2026-08-11T18:02:00.000Z',
+      }),
+      expect.objectContaining({
+        providerOccurredAt: '2026-08-11T18:02:00.000Z',
+      }),
+    ]);
   });
 });

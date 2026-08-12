@@ -425,7 +425,12 @@ export async function recordSmsOptOut(
       'The SMS opt-out request was invalid.',
     );
   }
-  const input = inputResult.data;
+  const input = Object.freeze({
+    ...inputResult.data,
+    providerOccurredAt: new Date(
+      inputResult.data.providerOccurredAt,
+    ).toISOString(),
+  });
   const recordResult = SmsOptOutRecordSchema.safeParse(
     await store.recordSmsOptOut(input),
   );
@@ -467,7 +472,13 @@ export async function recordEndpointStatus(
       'The SMS endpoint-status request was invalid.',
     );
   }
-  const input = inputResult.data;
+  const input = Object.freeze({
+    ...inputResult.data,
+    providerOccurredAt:
+      inputResult.data.providerOccurredAt === null
+        ? null
+        : new Date(inputResult.data.providerOccurredAt).toISOString(),
+  });
   const recordResult = EndpointStatusRecordSchema.safeParse(
     await store.recordEndpointStatus(input),
   );

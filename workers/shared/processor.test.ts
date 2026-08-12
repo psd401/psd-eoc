@@ -20,6 +20,7 @@ import {
   type AttemptExecutionStore,
   type AttemptIdempotentProviderAdapter,
   type CompleteAttemptExecutionRequest,
+  type ProviderRecoveryResult,
   type ProviderSendOutcome,
   type ProviderSendRequest,
   type ReleaseAttemptExecutionRequest,
@@ -216,6 +217,22 @@ class MockAdapter implements AttemptIdempotentProviderAdapter {
   }
 }
 
+class RecoveringLiveAdapter extends MockAdapter {
+  public recovery: ProviderRecoveryResult = { kind: 'missing' };
+  public readonly recoveryRequests: ProviderSendRequest[] = [];
+
+  public constructor() {
+    super('live-verified');
+  }
+
+  public recover(
+    request: ProviderSendRequest,
+  ): Promise<ProviderRecoveryResult> {
+    this.recoveryRequests.push(request);
+    return Promise.resolve(this.recovery);
+  }
+}
+
 function runtime(
   adapter: AttemptIdempotentProviderAdapter,
   store = new MemoryExecutionStore(),
@@ -381,6 +398,35 @@ describe('attempt-ID idempotent processing', () => {
       IDS.attempt,
     ]);
     expect(logicalSends).toBe(1);
+  });
+
+  test('recovers adapter-retained provider truth before a dark live gate', async () => {
+    const adapter = new RecoveringLiveAdapter();
+    const store = new MemoryExecutionStore();
+    const writer = new MemoryEvidenceWriter();
+    const item = workItem(realBatch());
+    adapter.recovery = { kind: 'outcome', outcome: ACCEPTED };
+
+    const dark = runtime(adapter, store, writer);
+    await expect(dark.processor.process(item)).resolves.toEqual(
+      expect.objectContaining({
+        kind: 'completed',
+        replayed: true,
+        outcome: ACCEPTED,
+      }),
+    );
+
+    expect(adapter.recoveryRequests).toEqual([
+      { workItem: item, idempotencyKey: IDS.attempt },
+    ]);
+    expect(adapter.requests).toHaveLength(0);
+    expect(store.lookupCalls).toBe(1);
+    expect(store.claimCalls).toBe(1);
+    expect(store.completeCalls).toBe(1);
+    expect(writer.evidence.map(({ state }) => state)).toEqual([
+      'attempted',
+      'provider-accepted',
+    ]);
   });
 
   test('concurrent duplicate observes in-progress and cannot race a send', async () => {

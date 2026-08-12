@@ -102,6 +102,26 @@ function providerRequest(
   });
 }
 
+function classifiedBody(
+  totalUnits: number,
+  encoding: 'gsm-7' | 'ucs-2',
+): string {
+  const prefix = '[INCIDENT] REAL INCIDENT - ACTIVATION: ';
+  const suffix = ' [INCIDENT]';
+  const unicode = encoding === 'ucs-2' ? '漢' : '';
+  const frame = `${prefix}${unicode}${suffix}`;
+  const frameUnits = measureAwsEumSmsLength(frame).units;
+  return `${prefix}${unicode}${'A'.repeat(totalUnits - frameUnits)}${suffix}`;
+}
+
+function smsBatchWithBody(body: string): DispatchBatch {
+  const base = smsBatch();
+  return DispatchBatchSchema.parse({
+    ...base,
+    renderedMessage: { ...base.renderedMessage, body },
+  });
+}
+
 class RecordingClient implements AwsEumSmsClient {
   public readonly deliverySemantics = 'single-wire-attempt' as const;
   public readonly requests: AwsEumSendTextMessageRequest[] = [];
@@ -411,6 +431,37 @@ describe('AWS EUM SMS request and live gates', () => {
     expect(app.client.requests).toHaveLength(0);
   });
 
+  test('rejects multipart GSM-7 and UCS-2 payloads before ledger or provider I/O', async () => {
+    const unsafeBodies = [
+      classifiedBody(161, 'gsm-7'),
+      classifiedBody(71, 'ucs-2'),
+    ] as const;
+
+    expect(measureAwsEumSmsLength(unsafeBodies[0])).toMatchObject({
+      encoding: 'gsm-7',
+      units: 161,
+      exceedsProviderLimit: false,
+    });
+    expect(measureAwsEumSmsLength(unsafeBodies[1])).toMatchObject({
+      encoding: 'ucs-2',
+      units: 71,
+      exceedsProviderLimit: false,
+    });
+
+    for (const body of unsafeBodies) {
+      const app = adapter();
+      await expect(
+        app.adapter.send(providerRequest(smsBatchWithBody(body))),
+      ).rejects.toMatchObject({
+        code: 'AWS_EUM_WORK_ITEM_INVALID',
+        disposition: 'terminal-failure',
+      });
+      expect(app.ledger.lookupCalls).toBe(0);
+      expect(app.ledger.claimCalls).toBe(0);
+      expect(app.client.requests).toHaveLength(0);
+    }
+  });
+
   test('measures exact AWS GSM-7 and UCS-2 provider ceilings', () => {
     expect(measureAwsEumSmsLength('A'.repeat(1_530))).toEqual({
       encoding: 'gsm-7',
@@ -483,6 +534,41 @@ describe('AWS EUM attempt-ID send ledger', () => {
 
     await expect(dark.send(request)).resolves.toEqual(accepted);
     expect(client.requests).toHaveLength(1);
+  });
+
+  test('read-only recovery returns retained truth and never claims or sends', async () => {
+    const client = new RecordingClient();
+    const ledger = new MemorySendLedger();
+    const enabled = adapter(client, ledger).adapter;
+    const request = providerRequest();
+    const accepted = await enabled.send(request);
+    const claimsAfterSend = ledger.claimCalls;
+    const dark = new AwsEumSmsAdapter({
+      client,
+      ledger,
+      ...BASE_OPTIONS,
+      featureEnabled: false,
+    });
+
+    await expect(dark.recover(request)).resolves.toEqual({
+      kind: 'outcome',
+      outcome: accepted,
+    });
+    expect(client.requests).toHaveLength(1);
+    expect(ledger.claimCalls).toBe(claimsAfterSend);
+    const missingLedger = new MemorySendLedger();
+    const missing = new AwsEumSmsAdapter({
+      client,
+      ledger: missingLedger,
+      ...BASE_OPTIONS,
+      featureEnabled: false,
+    });
+    await expect(missing.recover(request)).resolves.toEqual({
+      kind: 'missing',
+    });
+    expect(client.requests).toHaveLength(1);
+    expect(ledger.claimCalls).toBe(claimsAfterSend);
+    expect(missingLedger.claimCalls).toBe(0);
   });
 });
 
