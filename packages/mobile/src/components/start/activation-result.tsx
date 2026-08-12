@@ -13,6 +13,8 @@ import { ClassificationBanner } from '../classification-banner';
 import { getEventTheme } from '../../theme/event-theme';
 
 export interface ActivationResultProps {
+  /** Defaults true. App-lifetime owners announce from their single claim. */
+  readonly announceOnMount?: boolean;
   readonly eventTypeName: string;
   readonly kind: 'activated' | 'joined';
   readonly mode: TemplateMode;
@@ -57,11 +59,9 @@ export function announceActivationResult(
   announce(activationResultAnnouncement(input));
 }
 
-/**
- * Full-screen result content. Haptics intentionally remain a screen concern so
- * feedback occurs only after that screen validates the server result.
- */
+/** Full-screen result with a standalone one-announcement-per-mount default. */
 export function ActivationResult({
+  announceOnMount = true,
   eventTypeName,
   kind,
   mode,
@@ -77,10 +77,10 @@ export function ActivationResult({
   });
 
   useEffect(() => {
-    if (announced.current) return;
+    if (!announceOnMount || announced.current) return;
     announced.current = true;
     announceActivationResult({ eventTypeName, kind, mode });
-  }, [announcement, eventTypeName, kind, mode]);
+  }, [announceOnMount, announcement, eventTypeName, kind, mode]);
 
   return (
     <ActivationResultContent

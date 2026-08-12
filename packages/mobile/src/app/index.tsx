@@ -1,8 +1,12 @@
-import type { JoinEventResult, TemplateMode } from '@psd-eoc/contracts';
-import * as Crypto from 'expo-crypto';
+import type { TemplateMode } from '@psd-eoc/contracts';
 import * as Haptics from 'expo-haptics';
-import { type Href, useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useRef, useState } from 'react';
+import {
+  type Href,
+  useFocusEffect,
+  useIsFocused,
+  useRouter,
+} from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -16,28 +20,27 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
   ActivationResult,
+  announceActivationResult,
   ActiveEventJoinAction,
   Call911Affordance,
   ISSUE_21_MAESTRO_IDS,
+  OtherSessionStartMutationAttention,
   StartModeAction,
+  StartMutationAttention,
+  StartMutationRecoveryBlockedAttention,
+  StartMutationRecoveryCheckingAttention,
   SyntheticModeBanner,
 } from '../components/start';
+import { OFFLINE_ACTION_MESSAGE, useMobileAuth } from '../lib/auth';
 import {
-  OFFLINE_ACTION_MESSAGE,
-  OfflineMutationDeniedError,
-  useMobileAuth,
-} from '../lib/auth';
-import {
-  createIdempotentSubmission,
-  type IdempotentSubmissionController,
+  deliverClaimedStartMutationSuccessFeedback,
   isIssue21SyntheticFixtureEnabled,
-  isStartMutationPending,
-  join,
   loadStartHomeData,
   requestStartRouteNavigation,
   StartClientError,
   type StartHomeActiveEvent,
   type StartHomeData,
+  useStartMutation,
   useStartMutationHardwareBackGuard,
   useStartMutationNavigationGuard,
 } from '../lib/start';
@@ -50,25 +53,10 @@ const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
 
 const SYNTHETIC_FIXTURE_ENABLED = isIssue21SyntheticFixtureEnabled();
 
-interface CompletedAction {
-  readonly eventTypeName: string;
-  readonly kind: 'joined';
-  readonly mode: TemplateMode;
-}
-
 function publicLoadError(error: unknown): string {
   return error instanceof StartClientError
     ? error.message
     : 'PSD EOC could not load the current authorized sites and events. No action was taken.';
-}
-
-function publicJoinError(error: unknown): string {
-  if (error instanceof OfflineMutationDeniedError) {
-    return `${error.message} No event was joined and nothing was queued.`;
-  }
-  return error instanceof StartClientError
-    ? error.message
-    : 'The join outcome is unknown. Check the active-events list before making another decision. Nothing will retry automatically.';
 }
 
 function startedLabel(event: StartHomeActiveEvent): string {
@@ -79,24 +67,36 @@ function startedLabel(event: StartHomeActiveEvent): string {
 
 export default function HomeScreen() {
   const router = useRouter();
+  const isFocused = useIsFocused();
   const { authenticatedRequest, retryConnection, state } = useMobileAuth();
+  const startMutation = useStartMutation();
   const [data, setData] = useState<StartHomeData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [joinError, setJoinError] = useState<string | null>(null);
-  const [joiningEventId, setJoiningEventId] = useState<string | null>(null);
-  const [completed, setCompleted] = useState<CompletedAction | null>(null);
-  const joinInFlight = useRef(false);
-  const joinSubmissions = useRef(
-    new Map<string, IdempotentSubmissionController<JoinEventResult>>(),
+  const [checkingOutcome, setCheckingOutcome] = useState(false);
+  const [outcomeCheckError, setOutcomeCheckError] = useState<string | null>(
+    null,
   );
-  const mutationPending = isStartMutationPending(joiningEventId);
+  const outcomeRequestGeneration = useRef(0);
+  const outcomeOwnerKey =
+    state.phase === 'online' && state.session !== null
+      ? [
+          state.session.user.id,
+          state.session.session.id,
+          state.session.deviceEnrollment.id,
+        ].join(':')
+      : null;
+  const outcomeOwnerKeyRef = useRef<string | null>(outcomeOwnerKey);
+  outcomeOwnerKeyRef.current = outcomeOwnerKey;
+  const outcomeFocusedRef = useRef(isFocused);
+  outcomeFocusedRef.current = isFocused;
+  const mutationPending = startMutation.snapshot.phase === 'pending';
   const announcePendingMutation = useCallback((message: string): void => {
     AccessibilityInfo.announceForAccessibility(message);
   }, []);
   const isMutationPendingNow = useCallback(
-    () => joinInFlight.current || mutationPending,
-    [mutationPending],
+    () => startMutation.isPendingNow(),
+    [startMutation],
   );
   useStartMutationHardwareBackGuard(
     isMutationPendingNow,
@@ -106,6 +106,28 @@ export default function HomeScreen() {
     mutationPending && state.phase === 'online',
     announcePendingMutation,
   );
+  useEffect(() => {
+    if (!isFocused) return;
+    deliverClaimedStartMutationSuccessFeedback(
+      startMutation.claimSuccessFeedback,
+      {
+        announce: (completion) => {
+          announceActivationResult(completion);
+        },
+        haptic: () =>
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+      },
+    );
+  }, [isFocused, startMutation]);
+
+  useEffect(() => {
+    outcomeRequestGeneration.current += 1;
+    setCheckingOutcome(false);
+    setOutcomeCheckError(null);
+    return () => {
+      outcomeRequestGeneration.current += 1;
+    };
+  }, [authenticatedRequest, isFocused, state.session?.session.id]);
 
   const load = useCallback(() => {
     let active = true;
@@ -126,7 +148,6 @@ export default function HomeScreen() {
     void loadStartHomeData(authenticatedRequest).then(
       (nextData) => {
         if (!active) return;
-        joinSubmissions.current.clear();
         setData(nextData);
         setLoading(false);
       },
@@ -146,60 +167,201 @@ export default function HomeScreen() {
 
   function openStart(facilityId: string, mode: TemplateMode): void {
     requestStartRouteNavigation(
-      joinInFlight.current || mutationPending,
+      startMutation.isPendingNow(),
       () => {
         router.push({
           pathname: '/start',
           params: { facilityId, mode },
-        } as Href);
+        } as unknown as Href);
       },
       announcePendingMutation,
     );
   }
 
-  async function joinExisting(choice: StartHomeActiveEvent): Promise<void> {
-    if (joinInFlight.current) return;
-    joinInFlight.current = true;
-    setJoinError(null);
-    let submission = joinSubmissions.current.get(choice.event.id);
-    if (submission === undefined) {
-      submission = createIdempotentSubmission(Crypto.randomUUID(), (key) =>
-        join(authenticatedRequest, choice.event, key),
-      );
-      joinSubmissions.current.set(choice.event.id, submission);
-    }
-    setJoiningEventId(choice.event.id);
-    try {
-      const result = await submission.submit();
-      void Haptics.notificationAsync(
-        Haptics.NotificationFeedbackType.Success,
-      ).catch(() => undefined);
-      setCompleted({
-        eventTypeName: choice.eventTypeName,
-        kind: 'joined',
-        mode: result.event.templateMode,
-      });
-    } catch (error) {
-      setJoinError(publicJoinError(error));
-    } finally {
-      joinInFlight.current = false;
-      setJoiningEventId(null);
+  function joinExisting(choice: StartHomeActiveEvent): void {
+    const admission = startMutation.submitJoin({ choice });
+    if (admission.accepted) {
+      void admission.completion;
     }
   }
 
-  if (completed !== null) {
+  const mutationSnapshot = startMutation.snapshot;
+  if (isFocused && mutationSnapshot.phase === 'checking-recovery') {
+    return (
+      <SafeAreaView style={styles.page}>
+        <StartMutationRecoveryCheckingAttention />
+      </SafeAreaView>
+    );
+  }
+  if (isFocused && mutationSnapshot.phase === 'recovery-blocked') {
+    return (
+      <SafeAreaView style={styles.page}>
+        <StartMutationRecoveryBlockedAttention
+          message={mutationSnapshot.message}
+        />
+      </SafeAreaView>
+    );
+  }
+  if (isFocused && mutationSnapshot.phase === 'succeeded') {
     return (
       <SafeAreaView style={styles.page}>
         <ActivationResult
-          eventTypeName={completed.eventTypeName}
-          kind={completed.kind}
-          mode={completed.mode}
+          announceOnMount={false}
+          eventTypeName={mutationSnapshot.completion.eventTypeName}
+          kind={mutationSnapshot.completion.kind}
+          mode={mutationSnapshot.completion.mode}
           onReturnHome={() => {
-            setCompleted(null);
+            startMutation.acknowledge();
           }}
           {...(SYNTHETIC_FIXTURE_ENABLED
-            ? { testID: ISSUE_21_MAESTRO_IDS.joinedResult }
+            ? {
+                testID:
+                  mutationSnapshot.completion.kind === 'activated'
+                    ? ISSUE_21_MAESTRO_IDS.activationResult
+                    : ISSUE_21_MAESTRO_IDS.joinedResult,
+              }
             : {})}
+        />
+      </SafeAreaView>
+    );
+  }
+
+  if (
+    isFocused &&
+    mutationSnapshot.phase === 'pending' &&
+    mutationSnapshot.visibility === 'pending-other-session'
+  ) {
+    return (
+      <SafeAreaView style={styles.page}>
+        <OtherSessionStartMutationAttention />
+      </SafeAreaView>
+    );
+  }
+
+  if (isFocused && mutationSnapshot.phase === 'unresolved-other-session') {
+    return (
+      <SafeAreaView style={styles.page}>
+        <OtherSessionStartMutationAttention status="unresolved" />
+      </SafeAreaView>
+    );
+  }
+
+  if (
+    isFocused &&
+    (mutationSnapshot.phase === 'failed' ||
+      mutationSnapshot.phase === 'unresolved' ||
+      (mutationSnapshot.phase === 'pending' &&
+        mutationSnapshot.visibility === 'owner'))
+  ) {
+    const failed = mutationSnapshot.phase === 'failed';
+    const unresolved = mutationSnapshot.phase === 'unresolved';
+    return (
+      <SafeAreaView style={styles.page}>
+        <StartMutationAttention
+          eventTypeName={mutationSnapshot.eventTypeName}
+          mode={mutationSnapshot.mode}
+          operation={mutationSnapshot.operation}
+          {...(failed
+            ? {
+                checkError: outcomeCheckError,
+                checking: checkingOutcome,
+                failureMessage: mutationSnapshot.error.message,
+                online: state.phase === 'online',
+                onRefreshActiveEvents: () => {
+                  if (checkingOutcome || state.phase !== 'online') return;
+                  const requestGeneration =
+                    outcomeRequestGeneration.current + 1;
+                  outcomeRequestGeneration.current = requestGeneration;
+                  const requestOwnerKey = outcomeOwnerKeyRef.current;
+                  setCheckingOutcome(true);
+                  setOutcomeCheckError(null);
+                  void loadStartHomeData(authenticatedRequest).then(
+                    (nextData) => {
+                      if (
+                        outcomeRequestGeneration.current !==
+                          requestGeneration ||
+                        requestOwnerKey === null ||
+                        outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                        !outcomeFocusedRef.current
+                      )
+                        return;
+                      setData(nextData);
+                      setCheckingOutcome(false);
+                      startMutation.acknowledge();
+                    },
+                    (error: unknown) => {
+                      if (
+                        outcomeRequestGeneration.current !==
+                          requestGeneration ||
+                        requestOwnerKey === null ||
+                        outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                        !outcomeFocusedRef.current
+                      )
+                        return;
+                      setOutcomeCheckError(publicLoadError(error));
+                      setCheckingOutcome(false);
+                    },
+                  );
+                },
+                status: 'failed' as const,
+              }
+            : unresolved
+              ? {
+                  checkError: outcomeCheckError,
+                  checking: checkingOutcome,
+                  online: state.phase === 'online',
+                  onCheckActiveEvents: () => {
+                    if (checkingOutcome || state.phase !== 'online') return;
+                    const requestGeneration =
+                      outcomeRequestGeneration.current + 1;
+                    outcomeRequestGeneration.current = requestGeneration;
+                    const requestOwnerKey = outcomeOwnerKeyRef.current;
+                    const operation = mutationSnapshot.operation;
+                    setCheckingOutcome(true);
+                    setOutcomeCheckError(null);
+                    void loadStartHomeData(authenticatedRequest).then(
+                      (nextData) => {
+                        if (
+                          outcomeRequestGeneration.current !==
+                            requestGeneration ||
+                          requestOwnerKey === null ||
+                          outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                          !outcomeFocusedRef.current
+                        )
+                          return;
+                        setData(nextData);
+                        setCheckingOutcome(false);
+                        const resolved =
+                          operation === 'activate' &&
+                          startMutation.resolveActivationFromFreshEvents(
+                            nextData.activeEvents.map((choice) => choice.event),
+                          );
+                        if (!resolved) {
+                          setOutcomeCheckError(
+                            operation === 'activate'
+                              ? 'No exact matching activation evidence was found. Absence from this list is not proof of failure. The outcome remains unresolved; contact district technology support before making another start or join decision.'
+                              : 'The active-event list cannot prove participant join membership. The join outcome remains unresolved; contact district technology support before making another start or join decision.',
+                          );
+                        }
+                      },
+                      (error: unknown) => {
+                        if (
+                          outcomeRequestGeneration.current !==
+                            requestGeneration ||
+                          requestOwnerKey === null ||
+                          outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                          !outcomeFocusedRef.current
+                        )
+                          return;
+                        setOutcomeCheckError(publicLoadError(error));
+                        setCheckingOutcome(false);
+                      },
+                    );
+                  },
+                  outcomeMessage: mutationSnapshot.error.message,
+                  status: 'unresolved' as const,
+                }
+              : { status: 'pending' as const })}
         />
       </SafeAreaView>
     );
@@ -298,14 +460,19 @@ export default function HomeScreen() {
                 <View style={styles.cardList}>
                   {data.activeEvents.map((choice, index) => (
                     <ActiveEventJoinAction
-                      busy={joiningEventId === choice.event.id}
-                      disabled={joiningEventId !== null}
+                      busy={
+                        mutationSnapshot.phase === 'pending' &&
+                        mutationSnapshot.visibility === 'owner' &&
+                        mutationSnapshot.operation === 'join' &&
+                        mutationSnapshot.eventTypeName === choice.eventTypeName
+                      }
+                      disabled={mutationPending}
                       eventTypeName={choice.eventTypeName}
                       facilityName={choice.facilityName}
                       key={choice.event.id}
                       mode={choice.event.templateMode}
                       onPress={() => {
-                        void joinExisting(choice);
+                        joinExisting(choice);
                       }}
                       startedLabel={startedLabel(choice)}
                       {...(SYNTHETIC_FIXTURE_ENABLED && index === 0
@@ -316,19 +483,6 @@ export default function HomeScreen() {
                 </View>
               )}
             </View>
-
-            {joinError === null ? null : (
-              <View
-                accessibilityLiveRegion="assertive"
-                accessibilityRole="alert"
-                style={styles.error}
-              >
-                <Text accessibilityRole="header" style={styles.errorHeading}>
-                  Join needs attention
-                </Text>
-                <Text style={styles.errorText}>{joinError}</Text>
-              </View>
-            )}
 
             <View style={styles.section}>
               <Text accessibilityRole="header" style={styles.sectionHeading}>

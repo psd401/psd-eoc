@@ -3,13 +3,15 @@ import {
   FacilityIdSchema,
   type ActivationPreview,
   type EventTypeListItem,
-  type JoinEventResult,
-  type StartEventResult,
   type TemplateMode,
 } from '@psd-eoc/contracts';
-import * as Crypto from 'expo-crypto';
 import * as Haptics from 'expo-haptics';
-import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
+import {
+  type Href,
+  useIsFocused,
+  useLocalSearchParams,
+  useRouter,
+} from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
@@ -26,11 +28,16 @@ import { ClassificationBanner } from '../../components/classification-banner';
 import {
   ActivationConfirmation,
   ActivationResult,
+  announceActivationResult,
   ActiveEventJoinAction,
   activationAudienceLabel,
   Call911Affordance,
   EventTypeChoice,
   ISSUE_21_MAESTRO_IDS,
+  OtherSessionStartMutationAttention,
+  StartMutationAttention,
+  StartMutationRecoveryBlockedAttention,
+  StartMutationRecoveryCheckingAttention,
   SyntheticModeBanner,
 } from '../../components/start';
 import {
@@ -39,18 +46,16 @@ import {
   useMobileAuth,
 } from '../../lib/auth';
 import {
-  activate,
-  createIdempotentSubmission,
   createPreview,
-  isStartMutationPending,
-  type IdempotentSubmissionController,
+  deliverClaimedStartMutationSuccessFeedback,
+  getBoundActivationPreview,
   isIssue21SyntheticFixtureEnabled,
-  join,
   loadStartHomeData,
   requestStartRouteNavigation,
   StartClientError,
   type StartHomeActiveEvent,
   type StartHomeData,
+  useStartMutation,
   useStartMutationHardwareBackGuard,
   useStartMutationNavigationGuard,
 } from '../../lib/start';
@@ -64,12 +69,6 @@ const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
 
 const SYNTHETIC_FIXTURE_ENABLED = isIssue21SyntheticFixtureEnabled();
 
-interface CompletedAction {
-  readonly eventTypeName: string;
-  readonly kind: 'activated' | 'joined';
-  readonly mode: TemplateMode;
-}
-
 function one(value: string | readonly string[] | undefined): string | null {
   return typeof value === 'string' ? value : null;
 }
@@ -82,16 +81,6 @@ function previewFailureMessage(error: unknown): string {
     return `${error.message} No event was started and nothing was queued.`;
   }
   return 'The consequence preview is unavailable. No event was started and nothing was queued.';
-}
-
-function mutationFailureMessage(error: unknown): string {
-  if (error instanceof OfflineMutationDeniedError) {
-    return `${error.message} No event was started and nothing was queued.`;
-  }
-  if (error instanceof StartClientError) {
-    return error.message;
-  }
-  return 'The outcome is unknown. Check active events before making another decision. Nothing will retry automatically.';
 }
 
 function blockingMessage(code: string): string {
@@ -108,7 +97,9 @@ function startedLabel(choice: StartHomeActiveEvent): string {
 export default function StartEventScreen() {
   const parameters = useLocalSearchParams();
   const router = useRouter();
+  const isFocused = useIsFocused();
   const { authenticatedRequest, state } = useMobileAuth();
+  const startMutation = useStartMutation();
   const facilityResult = FacilityIdSchema.safeParse(one(parameters.facilityId));
   const modeValue = one(parameters.mode);
   const mode: TemplateMode | null =
@@ -123,24 +114,32 @@ export default function StartEventScreen() {
   const [preview, setPreview] = useState<ActivationPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [mutationError, setMutationError] = useState<string | null>(null);
-  const [completed, setCompleted] = useState<CompletedAction | null>(null);
+  const [checkingOutcome, setCheckingOutcome] = useState(false);
+  const [outcomeCheckError, setOutcomeCheckError] = useState<string | null>(
+    null,
+  );
   const previewInFlight = useRef(false);
   const previewRequestGeneration = useRef(0);
-  const mutationInFlight = useRef(false);
-  const activationSubmission =
-    useRef<IdempotentSubmissionController<StartEventResult> | null>(null);
-  const joinSubmissions = useRef(
-    new Map<string, IdempotentSubmissionController<JoinEventResult>>(),
-  );
-  const mutationPending = isStartMutationPending(pendingAction);
+  const outcomeRequestGeneration = useRef(0);
+  const outcomeOwnerKey =
+    state.phase === 'online' && state.session !== null
+      ? [
+          state.session.user.id,
+          state.session.session.id,
+          state.session.deviceEnrollment.id,
+        ].join(':')
+      : null;
+  const outcomeOwnerKeyRef = useRef<string | null>(outcomeOwnerKey);
+  outcomeOwnerKeyRef.current = outcomeOwnerKey;
+  const outcomeFocusedRef = useRef(isFocused);
+  outcomeFocusedRef.current = isFocused;
+  const mutationPending = startMutation.snapshot.phase === 'pending';
   const announcePendingMutation = useCallback((message: string): void => {
     AccessibilityInfo.announceForAccessibility(message);
   }, []);
   const isMutationPendingNow = useCallback(
-    () => mutationInFlight.current || mutationPending,
-    [mutationPending],
+    () => startMutation.isPendingNow(),
+    [startMutation],
   );
   useStartMutationNavigationGuard(
     mutationPending && state.phase === 'online',
@@ -150,6 +149,28 @@ export default function StartEventScreen() {
     isMutationPendingNow,
     announcePendingMutation,
   );
+  useEffect(() => {
+    if (!isFocused) return;
+    deliverClaimedStartMutationSuccessFeedback(
+      startMutation.claimSuccessFeedback,
+      {
+        announce: (completion) => {
+          announceActivationResult(completion);
+        },
+        haptic: () =>
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+      },
+    );
+  }, [isFocused, startMutation]);
+
+  useEffect(() => {
+    outcomeRequestGeneration.current += 1;
+    setCheckingOutcome(false);
+    setOutcomeCheckError(null);
+    return () => {
+      outcomeRequestGeneration.current += 1;
+    };
+  }, [authenticatedRequest, isFocused, state.session?.session.id]);
 
   useEffect(() => {
     previewRequestGeneration.current += 1;
@@ -158,10 +179,6 @@ export default function StartEventScreen() {
     setPreview(null);
     setPreviewLoading(false);
     setPreviewError(null);
-    setPendingAction(null);
-    setMutationError(null);
-    activationSubmission.current = null;
-    joinSubmissions.current.clear();
 
     if (facilityId === null || mode === null) {
       setLoadError('The site or event mode is invalid. No action was taken.');
@@ -212,6 +229,12 @@ export default function StartEventScreen() {
             item.eventType.templateMode === mode && item.latestVersion.enabled,
         );
   const theme = mode === null ? null : getEventTheme(mode);
+  const boundPreview = getBoundActivationPreview({
+    facilityId,
+    mode,
+    preview,
+    selectedType,
+  });
 
   async function chooseEventType(item: EventTypeListItem): Promise<void> {
     if (
@@ -231,10 +254,7 @@ export default function StartEventScreen() {
     setSelectedType(item);
     setPreview(null);
     setPreviewError(null);
-    setMutationError(null);
     setPreviewLoading(true);
-    activationSubmission.current = null;
-    joinSubmissions.current.clear();
     try {
       const nextPreview = await createPreview(
         authenticatedRequest,
@@ -278,10 +298,6 @@ export default function StartEventScreen() {
 
       setData(currentData);
       setPreview(nextPreview);
-      activationSubmission.current = createIdempotentSubmission(
-        Crypto.randomUUID(),
-        (key) => activate(authenticatedRequest, nextPreview, key),
-      );
       const previewClassification =
         nextPreview.templateMode === 'real'
           ? 'REAL INCIDENT'
@@ -303,95 +319,61 @@ export default function StartEventScreen() {
     }
   }
 
-  async function confirmActivation(): Promise<void> {
-    if (
-      activationSubmission.current === null ||
-      selectedType === null ||
-      pendingAction !== null ||
-      mutationError !== null ||
-      mutationInFlight.current
-    ) {
-      return;
-    }
-    mutationInFlight.current = true;
-    setPendingAction('activate');
-    try {
-      const result = await activationSubmission.current.submit();
-      void Haptics.notificationAsync(
-        Haptics.NotificationFeedbackType.Success,
-      ).catch(() => undefined);
-      setCompleted({
-        eventTypeName: selectedType.latestVersion.name,
-        kind: 'activated',
-        mode: result.event.templateMode,
-      });
-    } catch (error) {
-      const message = mutationFailureMessage(error);
-      setMutationError(message);
-      AccessibilityInfo.announceForAccessibility(
-        `Activation needs attention. ${message}`,
-      );
-    } finally {
-      mutationInFlight.current = false;
-      setPendingAction(null);
+  function confirmActivation(): void {
+    if (boundPreview === null || selectedType === null) return;
+    const admission = startMutation.submitActivation({
+      eventTypeName: selectedType.latestVersion.name,
+      preview: boundPreview,
+    });
+    if (admission.accepted) {
+      void admission.completion;
     }
   }
 
-  async function joinExisting(choice: StartHomeActiveEvent): Promise<void> {
-    if (
-      pendingAction !== null ||
-      mutationError !== null ||
-      mutationInFlight.current
-    ) {
-      return;
-    }
-    mutationInFlight.current = true;
-    let submission = joinSubmissions.current.get(choice.event.id);
-    if (submission === undefined) {
-      submission = createIdempotentSubmission(Crypto.randomUUID(), (key) =>
-        join(authenticatedRequest, choice.event, key),
-      );
-      joinSubmissions.current.set(choice.event.id, submission);
-    }
-    setPendingAction(choice.event.id);
-    try {
-      const result = await submission.submit();
-      void Haptics.notificationAsync(
-        Haptics.NotificationFeedbackType.Success,
-      ).catch(() => undefined);
-      setCompleted({
-        eventTypeName: choice.eventTypeName,
-        kind: 'joined',
-        mode: result.event.templateMode,
-      });
-    } catch (error) {
-      const message = mutationFailureMessage(error);
-      setMutationError(message);
-      AccessibilityInfo.announceForAccessibility(
-        `Join needs attention. ${message}`,
-      );
-    } finally {
-      mutationInFlight.current = false;
-      setPendingAction(null);
+  function joinExisting(choice: StartHomeActiveEvent): void {
+    const admission = startMutation.submitJoin({ choice });
+    if (admission.accepted) {
+      void admission.completion;
     }
   }
 
   function returnHome(): void {
-    router.replace('/' as Href);
+    router.dismissTo('/' as Href);
   }
 
-  if (completed !== null) {
+  const mutationSnapshot = startMutation.snapshot;
+  if (isFocused && mutationSnapshot.phase === 'checking-recovery') {
+    return (
+      <SafeAreaView style={styles.page}>
+        <StartMutationRecoveryCheckingAttention />
+      </SafeAreaView>
+    );
+  }
+  if (isFocused && mutationSnapshot.phase === 'recovery-blocked') {
+    return (
+      <SafeAreaView style={styles.page}>
+        <StartMutationRecoveryBlockedAttention
+          message={mutationSnapshot.message}
+        />
+      </SafeAreaView>
+    );
+  }
+  if (isFocused && mutationSnapshot.phase === 'succeeded') {
     return (
       <SafeAreaView style={styles.page}>
         <ActivationResult
-          eventTypeName={completed.eventTypeName}
-          kind={completed.kind}
-          mode={completed.mode}
-          onReturnHome={returnHome}
+          announceOnMount={false}
+          eventTypeName={mutationSnapshot.completion.eventTypeName}
+          kind={mutationSnapshot.completion.kind}
+          mode={mutationSnapshot.completion.mode}
+          onReturnHome={() => {
+            startMutation.acknowledge();
+            returnHome();
+          }}
           {...(SYNTHETIC_FIXTURE_ENABLED
             ? {
                 testID:
-                  completed.kind === 'activated'
+                  mutationSnapshot.completion.kind === 'activated'
                     ? ISSUE_21_MAESTRO_IDS.activationResult
                     : ISSUE_21_MAESTRO_IDS.joinedResult,
               }
@@ -401,10 +383,151 @@ export default function StartEventScreen() {
     );
   }
 
+  if (
+    isFocused &&
+    mutationSnapshot.phase === 'pending' &&
+    mutationSnapshot.visibility === 'pending-other-session'
+  ) {
+    return (
+      <SafeAreaView style={styles.page}>
+        <OtherSessionStartMutationAttention />
+      </SafeAreaView>
+    );
+  }
+
+  if (isFocused && mutationSnapshot.phase === 'unresolved-other-session') {
+    return (
+      <SafeAreaView style={styles.page}>
+        <OtherSessionStartMutationAttention status="unresolved" />
+      </SafeAreaView>
+    );
+  }
+
+  if (
+    isFocused &&
+    (mutationSnapshot.phase === 'failed' ||
+      mutationSnapshot.phase === 'unresolved' ||
+      (mutationSnapshot.phase === 'pending' &&
+        mutationSnapshot.visibility === 'owner'))
+  ) {
+    const failed = mutationSnapshot.phase === 'failed';
+    const unresolved = mutationSnapshot.phase === 'unresolved';
+    return (
+      <SafeAreaView style={styles.page}>
+        <StartMutationAttention
+          eventTypeName={mutationSnapshot.eventTypeName}
+          mode={mutationSnapshot.mode}
+          operation={mutationSnapshot.operation}
+          {...(failed
+            ? {
+                checkError: outcomeCheckError,
+                checking: checkingOutcome,
+                failureMessage: mutationSnapshot.error.message,
+                online: state.phase === 'online',
+                onRefreshActiveEvents: () => {
+                  if (checkingOutcome || state.phase !== 'online') return;
+                  const requestGeneration =
+                    outcomeRequestGeneration.current + 1;
+                  outcomeRequestGeneration.current = requestGeneration;
+                  const requestOwnerKey = outcomeOwnerKeyRef.current;
+                  setCheckingOutcome(true);
+                  setOutcomeCheckError(null);
+                  void loadStartHomeData(authenticatedRequest).then(
+                    (nextData) => {
+                      if (
+                        outcomeRequestGeneration.current !==
+                          requestGeneration ||
+                        requestOwnerKey === null ||
+                        outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                        !outcomeFocusedRef.current
+                      )
+                        return;
+                      setData(nextData);
+                      setCheckingOutcome(false);
+                      if (startMutation.acknowledge()) returnHome();
+                    },
+                    (error: unknown) => {
+                      if (
+                        outcomeRequestGeneration.current !==
+                          requestGeneration ||
+                        requestOwnerKey === null ||
+                        outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                        !outcomeFocusedRef.current
+                      )
+                        return;
+                      setOutcomeCheckError(previewFailureMessage(error));
+                      setCheckingOutcome(false);
+                    },
+                  );
+                },
+                status: 'failed' as const,
+              }
+            : unresolved
+              ? {
+                  checkError: outcomeCheckError,
+                  checking: checkingOutcome,
+                  online: state.phase === 'online',
+                  onCheckActiveEvents: () => {
+                    if (checkingOutcome || state.phase !== 'online') return;
+                    const requestGeneration =
+                      outcomeRequestGeneration.current + 1;
+                    outcomeRequestGeneration.current = requestGeneration;
+                    const requestOwnerKey = outcomeOwnerKeyRef.current;
+                    const operation = mutationSnapshot.operation;
+                    setCheckingOutcome(true);
+                    setOutcomeCheckError(null);
+                    void loadStartHomeData(authenticatedRequest).then(
+                      (nextData) => {
+                        if (
+                          outcomeRequestGeneration.current !==
+                            requestGeneration ||
+                          requestOwnerKey === null ||
+                          outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                          !outcomeFocusedRef.current
+                        )
+                          return;
+                        setData(nextData);
+                        setCheckingOutcome(false);
+                        const resolved =
+                          operation === 'activate' &&
+                          startMutation.resolveActivationFromFreshEvents(
+                            nextData.activeEvents.map((choice) => choice.event),
+                          );
+                        if (!resolved) {
+                          setOutcomeCheckError(
+                            operation === 'activate'
+                              ? 'No exact matching activation evidence was found. Absence from this list is not proof of failure. The outcome remains unresolved; contact district technology support before making another start or join decision.'
+                              : 'The active-event list cannot prove participant join membership. The join outcome remains unresolved; contact district technology support before making another start or join decision.',
+                          );
+                        }
+                      },
+                      (error: unknown) => {
+                        if (
+                          outcomeRequestGeneration.current !==
+                            requestGeneration ||
+                          requestOwnerKey === null ||
+                          outcomeOwnerKeyRef.current !== requestOwnerKey ||
+                          !outcomeFocusedRef.current
+                        )
+                          return;
+                        setOutcomeCheckError(previewFailureMessage(error));
+                        setCheckingOutcome(false);
+                      },
+                    );
+                  },
+                  outcomeMessage: mutationSnapshot.error.message,
+                  status: 'unresolved' as const,
+                }
+              : { status: 'pending' as const })}
+        />
+      </SafeAreaView>
+    );
+  }
+
   const activeChoices =
-    preview === null || data === null
+    boundPreview === null || data === null
       ? []
-      : preview.activeEventIds
+      : boundPreview.activeEventIds
           .map((eventId) =>
             data.activeEvents.find((choice) => choice.event.id === eventId),
           )
@@ -439,7 +562,7 @@ export default function StartEventScreen() {
             disabled={mutationPending}
             onPress={() => {
               requestStartRouteNavigation(
-                mutationInFlight.current || mutationPending,
+                startMutation.isPendingNow(),
                 () => {
                   router.back();
                 },
@@ -454,13 +577,13 @@ export default function StartEventScreen() {
             <Text style={styles.backButtonText}>‹ Back</Text>
           </Pressable>
           <Text style={styles.stepText}>
-            {preview === null ? 'Step 2 of 3' : 'Step 3 of 3'}
+            {boundPreview === null ? 'Step 2 of 3' : 'Step 3 of 3'}
           </Text>
         </View>
 
         {SYNTHETIC_FIXTURE_ENABLED ? <SyntheticModeBanner /> : null}
 
-        {mode === null ? null : preview === null ? (
+        {mode === null ? null : boundPreview === null ? (
           <ClassificationBanner mode={mode} />
         ) : null}
 
@@ -501,7 +624,7 @@ export default function StartEventScreen() {
           </View>
         )}
 
-        {facility !== undefined && mode !== null && preview === null ? (
+        {facility !== undefined && mode !== null && boundPreview === null ? (
           <View style={styles.selection}>
             <View style={styles.heading}>
               <Text style={styles.eyebrow}>{facility.code}</Text>
@@ -597,22 +720,28 @@ export default function StartEventScreen() {
         {facility !== undefined &&
         mode !== null &&
         selectedType !== null &&
-        preview !== null ? (
+        boundPreview !== null ? (
           <ActivationConfirmation
-            activeEventCount={preview.activeEventIds.length}
-            blockingMessages={preview.blockingReasonCodes.map(blockingMessage)}
-            busy={pendingAction === 'activate'}
-            channels={preview.channels}
-            disabled={pendingAction !== null || mutationError !== null}
+            activeEventCount={boundPreview.activeEventIds.length}
+            blockingMessages={boundPreview.blockingReasonCodes.map(
+              blockingMessage,
+            )}
+            busy={
+              mutationSnapshot.phase === 'pending' &&
+              mutationSnapshot.visibility === 'owner' &&
+              mutationSnapshot.operation === 'activate'
+            }
+            channels={boundPreview.channels}
+            disabled={mutationPending}
             eventTypeName={selectedType.latestVersion.name}
             facilityName={facility.name}
             mode={mode}
             onConfirm={() => {
-              void confirmActivation();
+              confirmActivation();
             }}
-            recipientCount={preview.recipientCount}
-            rosterPopulation={preview.rosterPopulation}
-            sendReadiness={preview.sendReadiness}
+            recipientCount={boundPreview.recipientCount}
+            rosterPopulation={boundPreview.rosterPopulation}
+            sendReadiness={boundPreview.sendReadiness}
             {...(SYNTHETIC_FIXTURE_ENABLED && mode === 'drill'
               ? { testID: ISSUE_21_MAESTRO_IDS.confirmDrill }
               : {})}
@@ -628,14 +757,19 @@ export default function StartEventScreen() {
                 </Text>
                 {activeChoices.map((choice, index) => (
                   <ActiveEventJoinAction
-                    busy={pendingAction === choice.event.id}
-                    disabled={pendingAction !== null || mutationError !== null}
+                    busy={
+                      mutationSnapshot.phase === 'pending' &&
+                      mutationSnapshot.visibility === 'owner' &&
+                      mutationSnapshot.operation === 'join' &&
+                      mutationSnapshot.eventTypeName === choice.eventTypeName
+                    }
+                    disabled={mutationPending}
                     eventTypeName={choice.eventTypeName}
                     facilityName={choice.facilityName}
                     key={choice.event.id}
                     mode={choice.event.templateMode}
                     onPress={() => {
-                      void joinExisting(choice);
+                      joinExisting(choice);
                     }}
                     startedLabel={startedLabel(choice)}
                     {...(SYNTHETIC_FIXTURE_ENABLED && index === 0
@@ -647,35 +781,6 @@ export default function StartEventScreen() {
             )}
           </ActivationConfirmation>
         ) : null}
-
-        {mutationError === null ? null : (
-          <View
-            accessibilityLiveRegion="assertive"
-            accessibilityRole="alert"
-            style={styles.error}
-          >
-            <Text accessibilityRole="header" style={styles.errorHeading}>
-              Outcome needs attention
-            </Text>
-            <Text style={styles.errorText}>{mutationError}</Text>
-            <Text style={styles.errorText}>
-              Check active events before making another decision. This app will
-              not retry automatically.
-            </Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={returnHome}
-              style={({ pressed }) => [
-                styles.secondaryButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Text style={styles.secondaryButtonText}>
-                Return home and check active events
-              </Text>
-            </Pressable>
-          </View>
-        )}
       </ScrollView>
     </SafeAreaView>
   );

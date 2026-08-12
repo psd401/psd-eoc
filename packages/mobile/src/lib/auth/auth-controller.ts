@@ -1,7 +1,11 @@
 import {
   IdempotencyKeySchema,
+  type ConnectivityEpochId,
+  type DeviceEnrollmentId,
   type MobileSessionResponse,
+  type SessionId,
   type SessionEstablishmentResult,
+  type UserId,
 } from '@psd-eoc/contracts';
 
 import { MobileAuthError, OfflineMutationDeniedError } from './auth-errors';
@@ -846,7 +850,10 @@ export class MobileAuthController {
   }
 
   public assertMutationAllowed(): Readonly<{
-    connectivityEpochId: string;
+    connectivityEpochId: ConnectivityEpochId;
+    userId: UserId;
+    sessionId: SessionId;
+    deviceEnrollmentId: DeviceEnrollmentId;
   }> {
     if (
       this.state.phase !== 'online' ||
@@ -861,6 +868,9 @@ export class MobileAuthController {
     }
     return Object.freeze({
       connectivityEpochId: this.state.connectivityEpochId,
+      userId: this.state.session.user.id,
+      sessionId: this.state.session.session.id,
+      deviceEnrollmentId: this.state.session.deviceEnrollment.id,
     });
   }
 

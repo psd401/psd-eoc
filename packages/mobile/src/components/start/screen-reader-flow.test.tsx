@@ -7,6 +7,7 @@ const announcements: string[] = [];
 const dialerUrls: string[] = [];
 
 mock.module('react-native', () => ({
+  ActivityIndicator: 'ActivityIndicator',
   AccessibilityInfo: {
     announceForAccessibility: (message: string) => {
       announcements.push(message);
