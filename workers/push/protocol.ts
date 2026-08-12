@@ -57,6 +57,7 @@ export type ExpoSafeReasonCode =
   | 'EXPO_RECEIPT_ERROR_UNKNOWN'
   | 'EXPO_RECEIPT_HORIZON_EXPIRED'
   | 'EXPO_RECEIPT_MISSING'
+  | 'EXPO_RECEIPT_REFERENCE_CONFLICT'
   | 'EXPO_RECEIPT_RESPONSE_INVALID'
   | 'EXPO_TICKET_ERROR_UNKNOWN'
   | 'EXPO_TICKET_MISSING'
@@ -79,6 +80,7 @@ const EXPO_SAFE_REASON_CODES: ReadonlySet<string> = new Set([
   'EXPO_RECEIPT_ERROR_UNKNOWN',
   'EXPO_RECEIPT_HORIZON_EXPIRED',
   'EXPO_RECEIPT_MISSING',
+  'EXPO_RECEIPT_REFERENCE_CONFLICT',
   'EXPO_RECEIPT_RESPONSE_INVALID',
   'EXPO_TICKET_ERROR_UNKNOWN',
   'EXPO_TICKET_MISSING',
@@ -86,6 +88,32 @@ const EXPO_SAFE_REASON_CODES: ReadonlySet<string> = new Set([
   'EXPO_RESPONSE_TOO_LARGE',
   'PROVIDER_RETRY_EXHAUSTED',
 ]);
+
+const EXPO_CANONICAL_TRANSPORT_OUTCOME_KIND_BY_REASON: Readonly<
+  Record<ExpoSafeReasonCode, 'failed' | 'retry' | 'unknown' | null>
+> = Object.freeze({
+  EXPO_DEVICE_NOT_REGISTERED: 'failed',
+  EXPO_HTTP_CLIENT_ERROR: null,
+  EXPO_HTTP_RATE_LIMITED: null,
+  EXPO_HTTP_SERVER_ERROR: null,
+  EXPO_INVALID_CREDENTIALS: 'failed',
+  EXPO_LIVE_TRANSPORT_DISABLED: null,
+  EXPO_MESSAGE_RATE_EXCEEDED: 'retry',
+  EXPO_MESSAGE_TOO_BIG: 'failed',
+  EXPO_MISMATCH_SENDER_ID: 'failed',
+  EXPO_NETWORK_OUTCOME_AMBIGUOUS: 'unknown',
+  EXPO_NOTIFICATION_EXPIRED: 'failed',
+  EXPO_RECEIPT_ERROR_UNKNOWN: 'unknown',
+  EXPO_RECEIPT_HORIZON_EXPIRED: null,
+  EXPO_RECEIPT_MISSING: 'unknown',
+  EXPO_RECEIPT_REFERENCE_CONFLICT: null,
+  EXPO_RECEIPT_RESPONSE_INVALID: 'unknown',
+  EXPO_RESPONSE_TOO_LARGE: null,
+  EXPO_TICKET_ERROR_UNKNOWN: 'unknown',
+  EXPO_TICKET_MISSING: 'unknown',
+  EXPO_TICKET_RESPONSE_INVALID: 'unknown',
+  PROVIDER_RETRY_EXHAUSTED: null,
+});
 
 export function isExpoSafeReasonCode(
   value: unknown,
@@ -185,16 +213,51 @@ function exactDataProperties(
   }
 }
 
+function boundedArrayLength(value: unknown, maximum: number): number | null {
+  try {
+    if (!Array.isArray(value)) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (
+      descriptor === undefined ||
+      !Object.hasOwn(descriptor, 'value') ||
+      !Number.isSafeInteger(descriptor.value) ||
+      Number(descriptor.value) < 0 ||
+      Number(descriptor.value) > maximum
+    ) {
+      return null;
+    }
+    return Number(descriptor.value);
+  } catch {
+    return null;
+  }
+}
+
+type ArrayElement =
+  | Readonly<{ kind: 'value'; value: unknown }>
+  | Readonly<{ kind: 'invalid' }>;
+
+function ownArrayElement(value: unknown, index: number): ArrayElement {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      descriptor === undefined ||
+      descriptor.enumerable !== true ||
+      !Object.hasOwn(descriptor, 'value')
+    ) {
+      return Object.freeze({ kind: 'invalid' });
+    }
+    return Object.freeze({ kind: 'value', value: descriptor.value });
+  } catch {
+    return Object.freeze({ kind: 'invalid' });
+  }
+}
+
 function responseData(value: unknown): unknown | null {
   if (!isPlainRecord(value)) return null;
   const dataOnly = exactDataProperties(value, ['data']);
   if (dataOnly !== null) return dataOnly.data;
   const withErrors = exactDataProperties(value, ['data', 'errors']);
-  if (
-    withErrors === null ||
-    !Array.isArray(withErrors.errors) ||
-    withErrors.errors.length !== 0
-  ) {
+  if (withErrors === null || boundedArrayLength(withErrors.errors, 0) !== 0) {
     return null;
   }
   return withErrors.data;
@@ -304,6 +367,7 @@ export function expired(
  */
 export function parseExpoProviderOutcome(
   value: unknown,
+  phase?: ExpoResponsePhase,
 ): ExpoProviderOutcome | null {
   try {
     if (!isPlainRecord(value)) return null;
@@ -332,24 +396,19 @@ export function parseExpoProviderOutcome(
   }
   if (
     !isExpoSafeReasonCode(reasonCode) ||
-    typeof invalidatesEndpoint !== 'boolean'
+    typeof invalidatesEndpoint !== 'boolean' ||
+    !isOutcomeReasonForPhase(reasonCode, phase)
   ) {
     return null;
   }
-  if (
-    (reasonCode === 'EXPO_DEVICE_NOT_REGISTERED' && kind !== 'failed') ||
-    (reasonCode === 'EXPO_MESSAGE_RATE_EXCEEDED' && kind !== 'retry') ||
-    (reasonCode === 'EXPO_NOTIFICATION_EXPIRED' && kind !== 'failed')
-  ) {
+  if (EXPO_CANONICAL_TRANSPORT_OUTCOME_KIND_BY_REASON[reasonCode] !== kind) {
     return null;
   }
   if (kind === 'failed') {
-    if (
-      reasonCode === 'EXPO_NOTIFICATION_EXPIRED' &&
-      state === 'expired' &&
-      invalidatesEndpoint === false
-    ) {
-      return expired(providerReference);
+    if (reasonCode === 'EXPO_NOTIFICATION_EXPIRED') {
+      return state === 'expired' && invalidatesEndpoint === false
+        ? expired(providerReference)
+        : null;
     }
     return state === 'failed' &&
       invalidatesEndpoint === (reasonCode === 'EXPO_DEVICE_NOT_REGISTERED')
@@ -367,6 +426,38 @@ export function parseExpoProviderOutcome(
       : null;
   }
   return null;
+}
+
+function isOutcomeReasonForPhase(
+  reasonCode: ExpoSafeReasonCode,
+  phase: ExpoResponsePhase | undefined,
+): boolean {
+  if (phase === undefined) return true;
+  if (phase === 'ticket') {
+    return (
+      reasonCode === 'EXPO_DEVICE_NOT_REGISTERED' ||
+      reasonCode === 'EXPO_INVALID_CREDENTIALS' ||
+      reasonCode === 'EXPO_MESSAGE_RATE_EXCEEDED' ||
+      reasonCode === 'EXPO_MESSAGE_TOO_BIG' ||
+      reasonCode === 'EXPO_MISMATCH_SENDER_ID' ||
+      reasonCode === 'EXPO_NETWORK_OUTCOME_AMBIGUOUS' ||
+      reasonCode === 'EXPO_NOTIFICATION_EXPIRED' ||
+      reasonCode === 'EXPO_TICKET_ERROR_UNKNOWN' ||
+      reasonCode === 'EXPO_TICKET_MISSING' ||
+      reasonCode === 'EXPO_TICKET_RESPONSE_INVALID'
+    );
+  }
+  return (
+    reasonCode === 'EXPO_DEVICE_NOT_REGISTERED' ||
+    reasonCode === 'EXPO_INVALID_CREDENTIALS' ||
+    reasonCode === 'EXPO_MESSAGE_RATE_EXCEEDED' ||
+    reasonCode === 'EXPO_MESSAGE_TOO_BIG' ||
+    reasonCode === 'EXPO_MISMATCH_SENDER_ID' ||
+    reasonCode === 'EXPO_NETWORK_OUTCOME_AMBIGUOUS' ||
+    reasonCode === 'EXPO_RECEIPT_ERROR_UNKNOWN' ||
+    reasonCode === 'EXPO_RECEIPT_MISSING' ||
+    reasonCode === 'EXPO_RECEIPT_RESPONSE_INVALID'
+  );
 }
 
 function responseInvalidReason(phase: ExpoResponsePhase): ExpoSafeReasonCode {
@@ -458,15 +549,22 @@ export function parseExpoTicketResponse(
       ),
     );
   const untrustedData = responseData(value);
-  if (!Array.isArray(untrustedData) || untrustedData.length > expectedCount) {
+  const dataLength = boundedArrayLength(untrustedData, expectedCount);
+  if (dataLength === null) {
     return invalid();
   }
-  const data: readonly unknown[] = untrustedData;
-  const outcomes = Array.from({ length: expectedCount }, (_unused, index) =>
-    index < data.length
-      ? mapProviderItem(data[index], 'ticket', null)
-      : unknown('EXPO_TICKET_MISSING'),
-  );
+  const outcomes = Array.from({ length: expectedCount }, (_unused, index) => {
+    if (index >= dataLength) return unknown('EXPO_TICKET_MISSING');
+    const element = ownArrayElement(untrustedData, index);
+    if (element.kind === 'invalid') {
+      return unknown('EXPO_TICKET_RESPONSE_INVALID');
+    }
+    try {
+      return mapProviderItem(element.value, 'ticket', null);
+    } catch {
+      return unknown('EXPO_TICKET_RESPONSE_INVALID');
+    }
+  });
   const acceptedReferenceCounts = new Map<string, number>();
   for (const outcome of outcomes) {
     if (outcome.kind === 'provider-accepted') {

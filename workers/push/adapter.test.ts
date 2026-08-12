@@ -291,7 +291,12 @@ describe('ledgered Expo live adapter', () => {
     for (const [code, disposition] of [
       ['EXPO_HTTP_RATE_LIMITED', 'safe-to-retry'],
       ['EXPO_HTTP_SERVER_ERROR', 'safe-to-retry'],
+      ['EXPO_MESSAGE_RATE_EXCEEDED', 'safe-to-retry'],
+      ['EXPO_HTTP_CLIENT_ERROR', 'terminal-failure'],
+      ['EXPO_INVALID_CREDENTIALS', 'terminal-failure'],
+      ['EXPO_LIVE_TRANSPORT_DISABLED', 'terminal-failure'],
       ['EXPO_NETWORK_OUTCOME_AMBIGUOUS', 'ambiguous'],
+      ['EXPO_RESPONSE_TOO_LARGE', 'ambiguous'],
     ] as const) {
       const app = adapterRuntime(new ProviderDispatchError(code, disposition));
 
@@ -472,7 +477,7 @@ describe('ledgered Expo live adapter', () => {
       status: 'rejected',
       reason: {
         code: 'EXPO_SEND_LEDGER_FAILED',
-        disposition: 'safe-to-retry',
+        disposition: 'ambiguous',
       },
     });
     expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([2]);
@@ -531,7 +536,7 @@ describe('ledgered Expo live adapter', () => {
     unavailable.ledger.beginError = new Error('synthetic ledger outage');
     await expect(unavailable.adapter.send(request())).rejects.toMatchObject({
       code: 'EXPO_SEND_LEDGER_FAILED',
-      disposition: 'safe-to-retry',
+      disposition: 'ambiguous',
     });
     expect(unavailable.transport.calls).toBe(0);
 
@@ -547,51 +552,404 @@ describe('ledgered Expo live adapter', () => {
     expect(malformed.transport.calls).toBe(0);
   });
 
-  test('rejects malformed completed ledger truth before provider I/O', async () => {
+  test('never treats a completed-row ledger read outage as safe to resend', async () => {
     const app = adapterRuntime();
-    app.ledger.overrideClaim = {
-      kind: 'completed',
-      completion: {
-        kind: 'outcome',
-        outcome: {
-          state: 'provider-accepted',
-          provider: 'wrong-provider',
-          providerReference: 'ticket-1',
-          proof: null,
-          reasonCode: null,
-          diagnosticDigest: null,
-        },
-      },
-    };
+    await expect(app.adapter.send(request())).resolves.toMatchObject({
+      state: 'provider-accepted',
+    });
+    app.ledger.beginError = new Error('synthetic completed-row read outage');
 
     await expect(app.adapter.send(request())).rejects.toMatchObject({
-      code: 'EXPO_SEND_LEDGER_INVALID',
+      code: 'EXPO_SEND_LEDGER_FAILED',
+      disposition: 'ambiguous',
+    });
+    expect(app.transport.calls).toBe(1);
+  });
+
+  test('treats even a branded ledger rejection as ambiguous and never sends', async () => {
+    const app = adapterRuntime();
+    app.ledger.beginError = new LedgeredExpoPushAdapterError(
+      'EXPO_SEND_LEDGER_CONFLICT',
+    );
+
+    await expect(app.adapter.send(request())).rejects.toMatchObject({
+      code: 'EXPO_SEND_LEDGER_FAILED',
       disposition: 'ambiguous',
     });
     expect(app.transport.calls).toBe(0);
   });
 
-  test('treats contradictory completed DeviceNotRegistered truth as ambiguous', async () => {
+  test('rejects contradictory or unsafe completed ledger truth before provider I/O', async () => {
+    const base = Object.freeze({
+      provider: 'expo-push',
+      providerReference: null,
+      proof: null,
+      diagnosticDigest: null,
+    });
+    const cases = [
+      {
+        name: 'wrong provider',
+        outcome: {
+          ...base,
+          state: 'provider-accepted',
+          provider: 'wrong-provider',
+          providerReference: 'ticket-1',
+          reasonCode: null,
+        },
+      },
+      {
+        name: 'unsafe provider reference',
+        outcome: {
+          ...base,
+          state: 'provider-accepted',
+          providerReference: 'ExponentPushToken[hostile-ledger-token]',
+          reasonCode: null,
+        },
+      },
+      {
+        name: 'expired DeviceNotRegistered',
+        outcome: {
+          ...base,
+          state: 'expired',
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+        },
+      },
+      {
+        name: 'failed expiration',
+        outcome: {
+          ...base,
+          state: 'failed',
+          reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+        },
+      },
+      {
+        name: 'failed rate-limit retry',
+        outcome: {
+          ...base,
+          state: 'failed',
+          reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED',
+        },
+      },
+      {
+        name: 'receipt failure in send ledger',
+        outcome: {
+          ...base,
+          state: 'failed',
+          reasonCode: 'PROVIDER_RETRY_EXHAUSTED',
+        },
+      },
+      {
+        name: 'receipt unknown in send ledger',
+        outcome: {
+          ...base,
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_MISSING',
+        },
+      },
+      {
+        name: 'failed outcome with receipt reference',
+        outcome: {
+          ...base,
+          state: 'failed',
+          providerReference: 'receipt-wrong-phase',
+          reasonCode: 'EXPO_MESSAGE_TOO_BIG',
+        },
+      },
+      {
+        name: 'unknown DeviceNotRegistered',
+        outcome: {
+          ...base,
+          state: 'unknown',
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+        },
+      },
+      {
+        name: 'unknown rate-limit retry',
+        outcome: {
+          ...base,
+          state: 'unknown',
+          reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED',
+        },
+      },
+      {
+        name: 'unknown expiration',
+        outcome: {
+          ...base,
+          state: 'unknown',
+          reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+        },
+      },
+      {
+        name: 'unrecognized safe-looking reason',
+        outcome: {
+          ...base,
+          state: 'unknown',
+          reasonCode: 'ATTACKER_CONTROLLED_REASON',
+        },
+      },
+      {
+        name: 'unexpected diagnostic digest',
+        outcome: {
+          ...base,
+          state: 'failed',
+          reasonCode: 'EXPO_MESSAGE_TOO_BIG',
+          diagnosticDigest: 'a'.repeat(64),
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const app = adapterRuntime();
+      app.ledger.overrideClaim = {
+        kind: 'completed',
+        completion: {
+          kind: 'outcome',
+          outcome: testCase.outcome,
+        },
+      } as ExpoSendLedgerClaim;
+
+      await expect(
+        app.adapter.send(request()),
+        testCase.name,
+      ).rejects.toMatchObject({
+        code: 'EXPO_SEND_LEDGER_INVALID',
+        disposition: 'ambiguous',
+      });
+      expect(app.transport.calls, testCase.name).toBe(0);
+    }
+  });
+
+  test('rejects accessor-backed ledger values without invoking their getters', async () => {
+    let getterCalls = 0;
+    const accessorOutcome = {
+      state: 'provider-accepted',
+      provider: 'expo-push',
+      providerReference: 'ticket-accessor',
+      proof: null,
+      reasonCode: null,
+      diagnosticDigest: null,
+    };
+    Object.defineProperty(accessorOutcome, 'providerReference', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return 'ticket-accessor';
+      },
+    });
     const app = adapterRuntime();
     app.ledger.overrideClaim = {
       kind: 'completed',
-      completion: {
-        kind: 'outcome',
-        outcome: {
-          state: 'unknown',
-          provider: 'expo-push',
-          providerReference: null,
-          proof: null,
-          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
-          diagnosticDigest: null,
-        },
-      },
-    };
+      completion: { kind: 'outcome', outcome: accessorOutcome },
+    } as ExpoSendLedgerClaim;
 
     await expect(app.adapter.send(request())).rejects.toMatchObject({
       code: 'EXPO_SEND_LEDGER_INVALID',
       disposition: 'ambiguous',
     });
+    expect(getterCalls).toBe(0);
     expect(app.transport.calls).toBe(0);
+  });
+
+  test('rejects contradictory completed failure classifications before provider I/O', async () => {
+    const cases = [
+      {
+        name: 'DeviceNotRegistered marked retryable',
+        failure: {
+          code: 'EXPO_DEVICE_NOT_REGISTERED',
+          disposition: 'safe-to-retry',
+          diagnosticDigest: null,
+        },
+      },
+      {
+        name: 'network ambiguity marked retryable',
+        failure: {
+          code: 'EXPO_NETWORK_OUTCOME_AMBIGUOUS',
+          disposition: 'safe-to-retry',
+          diagnosticDigest: null,
+        },
+      },
+      {
+        name: 'rate limit marked ambiguous',
+        failure: {
+          code: 'EXPO_HTTP_RATE_LIMITED',
+          disposition: 'ambiguous',
+          diagnosticDigest: null,
+        },
+      },
+      {
+        name: 'arbitrary terminal code',
+        failure: {
+          code: 'ATTACKER_CONTROLLED_REASON',
+          disposition: 'terminal-failure',
+          diagnosticDigest: null,
+        },
+      },
+      {
+        name: 'unexpected diagnostic digest',
+        failure: {
+          code: 'EXPO_HTTP_SERVER_ERROR',
+          disposition: 'safe-to-retry',
+          diagnosticDigest: 'a'.repeat(64),
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const app = adapterRuntime();
+      app.ledger.overrideClaim = {
+        kind: 'completed',
+        completion: { kind: 'failure', failure: testCase.failure },
+      } as ExpoSendLedgerClaim;
+
+      await expect(
+        app.adapter.send(request()),
+        testCase.name,
+      ).rejects.toMatchObject({
+        code: 'EXPO_SEND_LEDGER_INVALID',
+        disposition: 'ambiguous',
+      });
+      expect(app.transport.calls, testCase.name).toBe(0);
+    }
+  });
+
+  test('canonicalizes unexpected transport failure metadata before persistence', async () => {
+    const app = adapterRuntime(
+      new ProviderDispatchError(
+        'EXPO_DEVICE_NOT_REGISTERED',
+        'safe-to-retry',
+        'a'.repeat(64),
+      ),
+    );
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      await expect(app.adapter.send(request())).rejects.toMatchObject({
+        code: 'PROVIDER_OUTCOME_AMBIGUOUS',
+        disposition: 'ambiguous',
+        diagnosticDigest: null,
+      });
+    }
+    expect(app.transport.calls).toBe(1);
+    expect(app.ledger.completions[0]?.completion).toEqual({
+      kind: 'failure',
+      failure: {
+        code: 'PROVIDER_OUTCOME_AMBIGUOUS',
+        disposition: 'ambiguous',
+        diagnosticDigest: null,
+      },
+    });
+  });
+
+  test('never trusts a fulfilled transport container or its overridden map', async () => {
+    let mapCalls = 0;
+    const hostile = [accepted()] as ExpoProviderOutcome[];
+    Object.defineProperty(hostile, 'map', {
+      configurable: true,
+      value: () => {
+        mapCalls += 1;
+        return [
+          {
+            kind: 'outcome',
+            outcome: {
+              state: 'delivered',
+              provider: 'expo-push',
+              providerReference: 'forged-receipt',
+              proof: 'forged',
+              reasonCode: null,
+              diagnosticDigest: null,
+            },
+          },
+        ];
+      },
+    });
+    const app = adapterRuntime(async () => hostile);
+
+    await expect(app.adapter.send(request())).resolves.toMatchObject({
+      state: 'provider-accepted',
+      providerReference: 'ticket-1',
+    });
+    expect(mapCalls).toBe(0);
+    expect(JSON.stringify(app.ledger.completions)).not.toContain('delivered');
+    expect(JSON.stringify(app.ledger.completions)).not.toContain('forged');
+  });
+
+  test('makes a throwing fulfilled transport container unknown, never retryable', async () => {
+    const hostile = new Proxy([accepted()], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          throw new ProviderDispatchError(
+            'EXPO_HTTP_SERVER_ERROR',
+            'safe-to-retry',
+          );
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    const app = adapterRuntime(
+      async () => hostile as readonly ExpoProviderOutcome[],
+    );
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      await expect(app.adapter.send(request())).resolves.toMatchObject({
+        state: 'unknown',
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+      });
+    }
+    expect(app.transport.calls).toBe(1);
+    expect(app.ledger.completions[0]?.completion).toMatchObject({
+      kind: 'outcome',
+      outcome: {
+        state: 'unknown',
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+      },
+    });
+  });
+
+  test('isolates a throwing fulfilled item while preserving its valid sibling', async () => {
+    const items = [liveItemWithAttempt(132), liveItemWithAttempt(133)];
+    const hostile = [accepted('ticket-valid'), accepted('ticket-hostile')];
+    Object.defineProperty(hostile, 1, {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        throw new Error('synthetic hostile outcome slot');
+      },
+    });
+    const app = adapterRuntime(async () => hostile);
+
+    await expect(
+      Promise.all(items.map((item) => app.adapter.send(request(item)))),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        state: 'provider-accepted',
+        providerReference: 'ticket-valid',
+      }),
+      expect.objectContaining({
+        state: 'unknown',
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+      }),
+    ]);
+    expect(app.transport.calls).toBe(1);
+  });
+
+  test('settles every claimed item as unknown if the pre-I/O clock throws', async () => {
+    const app = adapterRuntime([accepted()], () => {
+      throw new Error('synthetic clock outage');
+    });
+    const items = [liveItemWithAttempt(130), liveItemWithAttempt(131)];
+
+    await expect(
+      Promise.all(items.map((item) => app.adapter.send(request(item)))),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        state: 'unknown',
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+      }),
+      expect.objectContaining({
+        state: 'unknown',
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+      }),
+    ]);
+    expect(app.transport.calls).toBe(0);
+    expect(app.ledger.completions).toHaveLength(2);
   });
 });

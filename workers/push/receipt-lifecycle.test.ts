@@ -20,6 +20,7 @@ import {
   EXPO_RECEIPT_HORIZON_MILLISECONDS,
   EXPO_RECEIPT_INITIAL_DELAY_MILLISECONDS,
   ExpoReceiptLifecycle,
+  ExpoReceiptLifecycleBatchError,
   createPersistedExpoReceiptTarget,
   parsePersistedExpoReceiptTarget,
   type DurableExpoReceiptStore,
@@ -43,6 +44,7 @@ interface StoredReceipt {
   dueAt: string;
   pollAttemptNumber: number;
   lastReasonCode: ExpoReceiptClaim['lastReasonCode'];
+  receiptReferenceState: ExpoReceiptClaim['receiptReferenceState'];
   pendingAction: ExpoReceiptPendingAction | null;
   leaseToken: string | null;
   leaseExpiresAt: string | null;
@@ -64,6 +66,13 @@ class MemoryReceiptStore implements DurableExpoReceiptStore {
   public claimExtras: (
     claims: readonly ExpoReceiptClaim[],
   ) => readonly unknown[] = () => [];
+  public claimResultDecorator: (
+    claims: ExpoReceiptClaim[],
+  ) => readonly ExpoReceiptClaim[] = (claims) => claims;
+  public beforeDecide: (request: ExpoReceiptDecisionRequest) => Promise<void> =
+    () => Promise.resolve();
+  public afterDecide: (request: ExpoReceiptDecisionRequest) => void = () =>
+    undefined;
 
   public constructor(
     private readonly events: string[] = [],
@@ -85,17 +94,33 @@ class MemoryReceiptStore implements DurableExpoReceiptStore {
       }
       return Promise.resolve();
     }
+    const priorReceiptRows = [...this.rows.values()].filter(
+      (row) => row.schedule.target.receiptId === target.receiptId,
+    );
     this.rows.set(target.attempt.id, {
       schedule: request,
       dueAt: request.firstPollAt,
       pollAttemptNumber: 1,
       lastReasonCode: null,
+      receiptReferenceState:
+        priorReceiptRows.length === 0 ? 'unique' : 'conflict',
       pendingAction: null,
       leaseToken: null,
       leaseExpiresAt: null,
       leaseGeneration: 0,
       decision: null,
     });
+    if (priorReceiptRows.length > 0) {
+      for (const row of priorReceiptRows) {
+        if (row.decision === null && row.pendingAction === null) {
+          row.receiptReferenceState = 'conflict';
+        }
+      }
+      const scheduled = this.rows.get(target.attempt.id);
+      if (scheduled !== undefined) {
+        scheduled.receiptReferenceState = 'conflict';
+      }
+    }
     return Promise.resolve();
   }
 
@@ -132,18 +157,21 @@ class MemoryReceiptStore implements DurableExpoReceiptStore {
         horizonAt: row.schedule.horizonAt,
         pollAttemptNumber: row.pollAttemptNumber,
         lastReasonCode: row.lastReasonCode,
+        receiptReferenceState: row.receiptReferenceState,
         pendingAction: row.pendingAction,
         leaseToken: row.leaseToken,
         leaseExpiresAt: row.leaseExpiresAt,
       });
     }
-    return Promise.resolve([
+    const result = [
       ...claims,
       ...(this.claimExtras(claims) as readonly ExpoReceiptClaim[]),
-    ]);
+    ];
+    return Promise.resolve(this.claimResultDecorator(result));
   }
 
-  public decide(request: ExpoReceiptDecisionRequest): Promise<void> {
+  public async decide(request: ExpoReceiptDecisionRequest): Promise<void> {
+    await this.beforeDecide(request);
     if (this.failDecide) throw new Error('Synthetic decision store failure.');
     const row = this.rows.get(request.attemptId);
     if (
@@ -153,6 +181,20 @@ class MemoryReceiptStore implements DurableExpoReceiptStore {
       row.leaseExpiresAt === null ||
       Date.parse(row.leaseExpiresAt) <= Date.parse(this.clock()) ||
       row.decision !== null
+    ) {
+      throw new Error('Synthetic receipt decision conflict.');
+    }
+    if (
+      row.receiptReferenceState === 'conflict' &&
+      !(
+        (request.decision.kind === 'known-outcome-pending' &&
+          request.decision.action.kind === 'terminal-unknown' &&
+          request.decision.action.reasonCode ===
+            'EXPO_RECEIPT_REFERENCE_CONFLICT') ||
+        (request.decision.kind === 'terminal-dlq' &&
+          request.decision.state === 'unknown' &&
+          request.decision.reasonCode === 'EXPO_RECEIPT_REFERENCE_CONFLICT')
+      )
     ) {
       throw new Error('Synthetic receipt decision conflict.');
     }
@@ -196,6 +238,7 @@ class MemoryReceiptStore implements DurableExpoReceiptStore {
       row.leaseToken = null;
       row.leaseExpiresAt = null;
     }
+    this.afterDecide(request);
     return Promise.resolve();
   }
 
@@ -219,6 +262,13 @@ function decisionCompletesPendingAction(
   action: ExpoReceiptPendingAction,
   decision: ExpoReceiptDurableDecision,
 ): boolean {
+  if (action.kind === 'terminal-unknown') {
+    return (
+      decision.kind === 'terminal-dlq' &&
+      decision.state === action.state &&
+      decision.reasonCode === action.reasonCode
+    );
+  }
   if (action.kind === 'terminal-expiry') {
     return (
       decision.kind === 'terminal-dlq' &&
@@ -372,6 +422,7 @@ class RecordingResendScheduler implements ExpoReceiptResendScheduler {
 function acceptedEvidence(
   attemptId: string,
   provider = MOCK_EXPO_PUSH_PROVIDER,
+  providerReference = `receipt-${attemptId}`,
 ): DeliveryEvidence {
   return DeliveryEvidenceSchema.parse({
     id: ACCEPTED_EVIDENCE_ID,
@@ -381,11 +432,19 @@ function acceptedEvidence(
     state: 'provider-accepted',
     recordedAt: TIMES.recorded,
     provider,
-    providerReference: `receipt-${attemptId}`,
+    providerReference,
     proof: null,
     reasonCode: null,
     diagnosticDigest: null,
   });
+}
+
+function receiptItemError(attemptId: string) {
+  return {
+    kind: 'error',
+    attemptId,
+    errorCode: 'EXPO_RECEIPT_ITEM_FAILED',
+  } as const;
 }
 
 function after(milliseconds: number): string {
@@ -509,8 +568,70 @@ describe('durable Expo receipt scheduling', () => {
       2,
       'EXPO_RECEIPT_MISSING',
     );
-    await expect(app.lifecycle.runDue()).resolves.toEqual([]);
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
     expect(app.transport.queries).toHaveLength(0);
+  });
+
+  test('rejects accessor-backed durable targets and claims without invoking getters', async () => {
+    const app = await scheduledRuntime();
+    const target = createPersistedExpoReceiptTarget(app.item, app.evidence);
+    let targetGetterCalls = 0;
+    const accessorTarget = { ...target };
+    Object.defineProperty(accessorTarget, 'receiptId', {
+      enumerable: true,
+      get: () => {
+        targetGetterCalls += 1;
+        return target.receiptId;
+      },
+    });
+    expect(() => parsePersistedExpoReceiptTarget(accessorTarget)).toThrow(
+      'Persisted Expo receipt target is invalid.',
+    );
+    expect(targetGetterCalls).toBe(0);
+
+    let claimGetterCalls = 0;
+    app.store.claimExtras = (claims) => {
+      const accessorClaim = { ...claims[0]! };
+      Object.defineProperty(accessorClaim, 'dueAt', {
+        enumerable: true,
+        get: () => {
+          claimGetterCalls += 1;
+          return claims[0]!.dueAt;
+        },
+      });
+      return [accessorClaim];
+    };
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [
+        expect.objectContaining({
+          decision: expect.objectContaining({
+            kind: 'reschedule',
+            reasonCode: 'EXPO_RECEIPT_RESPONSE_INVALID',
+          }),
+        }),
+        receiptItemError('00000000-0000-4000-8000-000000000000'),
+      ],
+    });
+    expect(claimGetterCalls).toBe(0);
+    expect(app.transport.queries).toHaveLength(1);
+  });
+
+  test('isolates an impossible persisted last reason instead of terminalizing definite truth', async () => {
+    const app = await scheduledRuntime();
+    const row = app.store.rows.get(app.item.attempt.id)!;
+    row.dueAt = app.clock.now;
+    row.pollAttemptNumber = 2;
+    row.lastReasonCode = 'EXPO_DEVICE_NOT_REGISTERED' as never;
+
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
+    expect(app.transport.queries).toHaveLength(0);
+    expect(app.writer.evidence).toHaveLength(0);
+    expect(row.decision).toBeNull();
   });
 
   test('isolates a corrupted ambiguous pending action instead of replaying it as a definite failure', async () => {
@@ -524,10 +645,99 @@ describe('durable Expo receipt scheduling', () => {
     }) as unknown as ExpoReceiptPendingAction;
     app.clock.now = after(EXPO_RECEIPT_HORIZON_MILLISECONDS);
 
-    await expect(app.lifecycle.runDue()).resolves.toEqual([]);
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
     expect(app.transport.queries).toHaveLength(0);
     expect(app.writer.evidence).toHaveLength(0);
     expect(app.invalidator.inputs).toHaveLength(0);
+    expect(row.decision).toBeNull();
+  });
+
+  test('isolates terminal-unknown pending actions whose durable truth context is impossible', async () => {
+    const uniqueConflict = await scheduledRuntime();
+    const uniqueConflictRow = uniqueConflict.store.rows.get(
+      uniqueConflict.item.attempt.id,
+    )!;
+    uniqueConflictRow.pendingAction = Object.freeze({
+      kind: 'terminal-unknown',
+      state: 'unknown',
+      reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+    });
+
+    await expect(uniqueConflict.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
+    expect(uniqueConflict.writer.evidence).toHaveLength(0);
+    expect(uniqueConflict.store.decisionCalls).toHaveLength(0);
+    expect(uniqueConflictRow.decision).toBeNull();
+
+    const prematureHorizon = await scheduledRuntime();
+    const prematureHorizonRow = prematureHorizon.store.rows.get(
+      prematureHorizon.item.attempt.id,
+    )!;
+    prematureHorizonRow.pendingAction = Object.freeze({
+      kind: 'terminal-unknown',
+      state: 'unknown',
+      reasonCode: 'EXPO_RECEIPT_HORIZON_EXPIRED',
+    });
+
+    await expect(prematureHorizon.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
+    expect(prematureHorizon.writer.evidence).toHaveLength(0);
+    expect(prematureHorizon.store.decisionCalls).toHaveLength(0);
+    expect(prematureHorizonRow.decision).toBeNull();
+
+    const wrongHorizonReason = await scheduledRuntime();
+    const wrongHorizonReasonRow = wrongHorizonReason.store.rows.get(
+      wrongHorizonReason.item.attempt.id,
+    )!;
+    const horizonAt = after(EXPO_RECEIPT_HORIZON_MILLISECONDS);
+    wrongHorizonReason.store.forceDue(
+      wrongHorizonReason.item.attempt.id,
+      horizonAt,
+      2,
+      'EXPO_RECEIPT_MISSING',
+    );
+    wrongHorizonReasonRow.pendingAction = Object.freeze({
+      kind: 'terminal-unknown',
+      state: 'unknown',
+      reasonCode: 'EXPO_HTTP_SERVER_ERROR',
+    });
+    wrongHorizonReason.clock.now = horizonAt;
+
+    await expect(wrongHorizonReason.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
+    expect(wrongHorizonReason.writer.evidence).toHaveLength(0);
+    expect(wrongHorizonReason.store.decisionCalls).toHaveLength(0);
+    expect(wrongHorizonReasonRow.decision).toBeNull();
+  });
+
+  test('isolates a non-conflict terminal unknown staged on a conflict row', async () => {
+    const app = await scheduledRuntime();
+    const row = app.store.rows.get(app.item.attempt.id)!;
+    const horizonAt = after(EXPO_RECEIPT_HORIZON_MILLISECONDS);
+    app.store.forceDue(
+      app.item.attempt.id,
+      horizonAt,
+      2,
+      'EXPO_RECEIPT_MISSING',
+    );
+    row.receiptReferenceState = 'conflict';
+    row.pendingAction = Object.freeze({
+      kind: 'terminal-unknown',
+      state: 'unknown',
+      reasonCode: 'EXPO_RECEIPT_MISSING',
+    });
+    app.clock.now = horizonAt;
+
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
+    expect(app.writer.evidence).toHaveLength(0);
+    expect(app.store.decisionCalls).toHaveLength(0);
     expect(row.decision).toBeNull();
   });
 
@@ -609,7 +819,9 @@ describe('durable Expo receipt scheduling', () => {
 
     const overlong = await scheduledRuntime();
     overlong.store.leaseClockSkewMilliseconds = 30_001;
-    await expect(overlong.lifecycle.runDue()).resolves.toEqual([]);
+    await expect(overlong.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+    });
     expect(overlong.transport.queries).toHaveLength(0);
   });
 
@@ -625,7 +837,7 @@ describe('durable Expo receipt scheduling', () => {
 });
 
 describe('due receipt claims and durable decisions', () => {
-  test('isolates malformed and colliding claims without poisoning unrelated valid work', async () => {
+  test('isolates a malformed claim and preserves an exact duplicate result without duplicate I/O', async () => {
     const malformed = await scheduledRuntime([
       [
         {
@@ -638,43 +850,335 @@ describe('due receipt claims and durable decisions', () => {
       ],
     ]);
     malformed.store.claimExtras = () => [{ malformed: true }];
-    await expect(malformed.lifecycle.runDue()).resolves.toEqual([
-      expect.objectContaining({
-        decision: expect.objectContaining({ kind: 'complete' }),
-      }),
-    ]);
+    await expect(malformed.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [
+        expect.objectContaining({
+          decision: expect.objectContaining({ kind: 'complete' }),
+        }),
+        receiptItemError('00000000-0000-4000-8000-000000000000'),
+      ],
+    });
     expect(malformed.transport.queries).toHaveLength(1);
 
-    const secondItem = workItem(undefined, {
-      attemptId: '00000000-0000-4000-8000-000000000799',
-    });
-    const secondEvidence = acceptedEvidence(secondItem.attempt.id);
     const collision = await scheduledRuntime([
       [
         {
           kind: 'provider-accepted',
           state: 'provider-accepted',
-          providerReference: secondEvidence.providerReference!,
+          providerReference: appReceiptId(),
           reasonCode: null,
           invalidatesEndpoint: false,
         },
       ],
     ]);
-    await collision.lifecycle.scheduleProviderAccepted(
-      secondItem,
-      secondEvidence,
-    );
     collision.store.claimExtras = (claims) => [claims[0]!];
     await expect(collision.lifecycle.runDue()).resolves.toEqual([
       expect.objectContaining({
-        attemptId: secondItem.attempt.id,
+        attemptId: collision.item.attempt.id,
+        decision: expect.objectContaining({ kind: 'complete' }),
+      }),
+      expect.objectContaining({
+        attemptId: collision.item.attempt.id,
         decision: expect.objectContaining({ kind: 'complete' }),
       }),
     ]);
-    expect(collision.transport.queries).toEqual([
-      [secondEvidence.providerReference!],
-    ]);
+    expect(collision.transport.queries).toEqual([[appReceiptId()]]);
     expect(collision.store.decisionCalls).toHaveLength(1);
+  });
+
+  test('uses bounded indexed claim traversal instead of a store array iterator', async () => {
+    const app = await scheduledRuntime([
+      [
+        {
+          kind: 'provider-accepted',
+          state: 'provider-accepted',
+          providerReference: appReceiptId(),
+          reasonCode: null,
+          invalidatesEndpoint: false,
+        },
+      ],
+    ]);
+    let iteratorCalls = 0;
+    let lengthReads = 0;
+    app.store.claimResultDecorator = (claims) => {
+      Object.defineProperty(claims, Symbol.iterator, {
+        configurable: true,
+        value: () => {
+          iteratorCalls += 1;
+          throw new Error('synthetic hostile claim iterator');
+        },
+      });
+      return new Proxy(claims, {
+        get(target, property, receiver) {
+          if (property === 'length') {
+            lengthReads += 1;
+            throw new Error('synthetic hostile claim length read');
+          }
+          return Reflect.get(target, property, receiver) as unknown;
+        },
+      });
+    };
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        decision: expect.objectContaining({ kind: 'complete' }),
+      }),
+    ]);
+    expect(iteratorCalls).toBe(0);
+    expect(lengthReads).toBe(0);
+    expect(app.transport.queries).toHaveLength(1);
+  });
+
+  test('isolates an accessor-backed actual claim slot while preserving its valid sibling', async () => {
+    const app = await scheduledRuntime([
+      [
+        {
+          kind: 'provider-accepted',
+          state: 'provider-accepted',
+          providerReference: appReceiptId(),
+          reasonCode: null,
+          invalidatesEndpoint: false,
+        },
+      ],
+    ]);
+    let slotGetterCalls = 0;
+    app.store.claimResultDecorator = (claims) => {
+      claims.push(claims[0]!);
+      Object.defineProperty(claims, 1, {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          slotGetterCalls += 1;
+          throw new Error('synthetic hostile claim slot');
+        },
+      });
+      return claims;
+    };
+
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [
+        expect.objectContaining({
+          decision: expect.objectContaining({ kind: 'complete' }),
+        }),
+        receiptItemError('00000000-0000-4000-8000-000000000000'),
+      ],
+    });
+    expect(slotGetterCalls).toBe(0);
+    expect(app.transport.queries).toHaveLength(1);
+  });
+
+  test('keeps receipt-reference collisions sticky, never queries Expo, and ends both attempts unknown', async () => {
+    const secondItem = workItem(undefined, {
+      attemptId: '00000000-0000-4000-8000-000000000799',
+    });
+    const app = await scheduledRuntime();
+    const secondEvidence = acceptedEvidence(
+      secondItem.attempt.id,
+      MOCK_EXPO_PUSH_PROVIDER,
+      app.evidence.providerReference!,
+    );
+    await app.lifecycle.scheduleProviderAccepted(secondItem, secondEvidence);
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        attemptId: app.item.attempt.id,
+        decision: expect.objectContaining({
+          kind: 'terminal-dlq',
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+        }),
+      }),
+      expect.objectContaining({
+        attemptId: secondItem.attempt.id,
+        decision: expect.objectContaining({
+          kind: 'terminal-dlq',
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+        }),
+      }),
+    ]);
+    expect(app.transport.queries).toHaveLength(0);
+    expect(
+      [...app.store.rows.values()].map((row) => row.receiptReferenceState),
+    ).toEqual(['conflict', 'conflict']);
+
+    expect(app.transport.queries).toHaveLength(0);
+    expect(app.writer.evidence).toHaveLength(2);
+    expect(
+      app.writer.evidence.every(
+        (entry) =>
+          entry.state === 'unknown' &&
+          entry.reasonCode === 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+      ),
+    ).toBe(true);
+  });
+
+  test('rejects a stale unique-claim decision when a colliding schedule wins first', async () => {
+    const app = await scheduledRuntime();
+    const [staleUniqueClaim] = await app.store.claimDue({
+      now: app.clock.now,
+      limit: 1,
+      leaseMilliseconds: 120_000,
+    });
+    expect(staleUniqueClaim?.receiptReferenceState).toBe('unique');
+
+    const secondItem = workItem(undefined, {
+      attemptId: '00000000-0000-4000-8000-000000000794',
+    });
+    await app.lifecycle.scheduleProviderAccepted(
+      secondItem,
+      acceptedEvidence(
+        secondItem.attempt.id,
+        MOCK_EXPO_PUSH_PROVIDER,
+        app.evidence.providerReference!,
+      ),
+    );
+    expect(app.store.rows.get(app.item.attempt.id)?.receiptReferenceState).toBe(
+      'conflict',
+    );
+
+    await expect(
+      app.store.decide({
+        attemptId: staleUniqueClaim!.target.attempt.id,
+        fingerprint: staleUniqueClaim!.target.fingerprint,
+        leaseToken: staleUniqueClaim!.leaseToken,
+        decision: {
+          kind: 'complete',
+          decidedAt: app.clock.now,
+          state: 'provider-accepted',
+        },
+      }),
+    ).rejects.toThrow('Synthetic receipt decision conflict.');
+    expect(app.store.rows.get(app.item.attempt.id)?.decision).toBeNull();
+    expect(app.store.decisionCalls).toHaveLength(0);
+  });
+
+  test('a staged outcome wins before a later receipt collision is recorded', async () => {
+    const app = await scheduledRuntime([
+      [
+        {
+          kind: 'failed',
+          state: 'failed',
+          providerReference: appReceiptId(),
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+          invalidatesEndpoint: true,
+        },
+      ],
+    ]);
+    app.invalidator.failOnce = true;
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(app.item.attempt.id)],
+    });
+    expect(
+      app.store.rows.get(app.item.attempt.id)?.pendingAction,
+    ).toMatchObject({
+      kind: 'terminal-failure',
+      reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+    });
+
+    const secondItem = workItem(undefined, {
+      attemptId: '00000000-0000-4000-8000-000000000797',
+    });
+    await app.lifecycle.scheduleProviderAccepted(
+      secondItem,
+      acceptedEvidence(
+        secondItem.attempt.id,
+        MOCK_EXPO_PUSH_PROVIDER,
+        app.evidence.providerReference!,
+      ),
+    );
+    app.clock.now = new Date(Date.parse(app.clock.now) + 120_000).toISOString();
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        attemptId: app.item.attempt.id,
+        decision: expect.objectContaining({
+          kind: 'terminal-dlq',
+          state: 'failed',
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+        }),
+      }),
+      expect.objectContaining({
+        attemptId: secondItem.attempt.id,
+        decision: expect.objectContaining({
+          kind: 'terminal-dlq',
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+        }),
+      }),
+    ]);
+    expect(app.transport.queries).toHaveLength(1);
+    expect(app.invalidator.inputs).toHaveLength(1);
+  });
+
+  test('a staged resend wins in the same batch as its later colliding sibling', async () => {
+    const app = await scheduledRuntime([
+      [
+        {
+          kind: 'retry',
+          state: 'failed',
+          providerReference: appReceiptId(),
+          reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED',
+          invalidatesEndpoint: false,
+        },
+      ],
+    ]);
+    app.resendScheduler.failOnce = true;
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(app.item.attempt.id)],
+    });
+    expect(
+      app.store.rows.get(app.item.attempt.id)?.pendingAction,
+    ).toMatchObject({
+      kind: 'resend',
+      reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED',
+    });
+
+    const secondItem = workItem(undefined, {
+      attemptId: '00000000-0000-4000-8000-000000000796',
+    });
+    await app.lifecycle.scheduleProviderAccepted(
+      secondItem,
+      acceptedEvidence(
+        secondItem.attempt.id,
+        MOCK_EXPO_PUSH_PROVIDER,
+        app.evidence.providerReference!,
+      ),
+    );
+    app.clock.now = new Date(Date.parse(app.clock.now) + 120_000).toISOString();
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        attemptId: app.item.attempt.id,
+        decision: expect.objectContaining({
+          kind: 'resend-scheduled',
+          reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED',
+        }),
+      }),
+      expect.objectContaining({
+        attemptId: secondItem.attempt.id,
+        decision: expect.objectContaining({
+          kind: 'terminal-dlq',
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+        }),
+      }),
+    ]);
+    expect(app.resendScheduler.requests).toHaveLength(1);
+    expect(app.writer.evidence).toEqual([
+      expect.objectContaining({
+        state: 'failed',
+        reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED',
+      }),
+      expect.objectContaining({
+        state: 'unknown',
+        reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+      }),
+    ]);
   });
 
   test('isolates one claim decision failure while durably completing its sibling', async () => {
@@ -704,7 +1208,29 @@ describe('due receipt claims and durable decisions', () => {
     app.store.failDecisionKindOnce = 'complete';
     app.store.failDecisionAttemptId = app.item.attempt.id;
 
-    await expect(app.lifecycle.runDue()).rejects.toThrow(
+    const captured = await app.lifecycle
+      .runDue()
+      .catch((error: unknown) => error);
+    expect(captured).toBeInstanceOf(ExpoReceiptLifecycleBatchError);
+    const batchError = captured as ExpoReceiptLifecycleBatchError;
+    expect(batchError).toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [
+        receiptItemError(app.item.attempt.id),
+        expect.objectContaining({
+          attemptId: secondItem.attempt.id,
+          decision: expect.objectContaining({ kind: 'complete' }),
+        }),
+      ],
+    });
+    expect(Object.isFrozen(batchError)).toBe(true);
+    expect(Object.isFrozen(batchError.results)).toBe(true);
+    expect(batchError.results.every((result) => Object.isFrozen(result))).toBe(
+      true,
+    );
+    expect(Object.hasOwn(batchError, 'cause')).toBe(false);
+    expect(Object.hasOwn(batchError, 'errors')).toBe(false);
+    expect(JSON.stringify(batchError)).not.toContain(
       'Synthetic decision store failure.',
     );
 
@@ -715,6 +1241,66 @@ describe('due receipt claims and durable decisions', () => {
     });
     expect(app.transport.queries).toHaveLength(1);
     expect(app.store.decisionCalls).toHaveLength(1);
+  });
+
+  test('starts sibling lifecycle decisions concurrently when one item is hung', async () => {
+    const secondItem = workItem(undefined, {
+      attemptId: '00000000-0000-4000-8000-000000000793',
+    });
+    const secondEvidence = acceptedEvidence(secondItem.attempt.id);
+    const app = await scheduledRuntime([
+      [
+        {
+          kind: 'provider-accepted',
+          state: 'provider-accepted',
+          providerReference: appReceiptId(),
+          reasonCode: null,
+          invalidatesEndpoint: false,
+        },
+        {
+          kind: 'provider-accepted',
+          state: 'provider-accepted',
+          providerReference: secondEvidence.providerReference!,
+          reasonCode: null,
+          invalidatesEndpoint: false,
+        },
+      ],
+    ]);
+    await app.lifecycle.scheduleProviderAccepted(secondItem, secondEvidence);
+
+    let releaseHung!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      releaseHung = resolve;
+    });
+    let reportSiblingDecision!: () => void;
+    const siblingDecided = new Promise<void>((resolve) => {
+      reportSiblingDecision = resolve;
+    });
+    app.store.beforeDecide = (request) =>
+      request.attemptId === app.item.attempt.id ? hung : Promise.resolve();
+    app.store.afterDecide = (request) => {
+      if (request.attemptId === secondItem.attempt.id) reportSiblingDecision();
+    };
+
+    const running = app.lifecycle.runDue();
+    await siblingDecided;
+    expect(app.store.rows.get(secondItem.attempt.id)?.decision).toMatchObject({
+      kind: 'complete',
+      state: 'provider-accepted',
+    });
+    expect(app.store.rows.get(app.item.attempt.id)?.decision).toBeNull();
+
+    releaseHung();
+    await expect(running).resolves.toEqual([
+      expect.objectContaining({
+        attemptId: app.item.attempt.id,
+        decision: expect.objectContaining({ kind: 'complete' }),
+      }),
+      expect.objectContaining({
+        attemptId: secondItem.attempt.id,
+        decision: expect.objectContaining({ kind: 'complete' }),
+      }),
+    ]);
   });
 
   test('claims only due work with a lease and completes receipt ok without delivered evidence', async () => {
@@ -776,6 +1362,156 @@ describe('due receipt claims and durable decisions', () => {
         decision: expect.objectContaining({ kind: 'complete' }),
       }),
     ]);
+  });
+
+  test('reschedules a wrong-phase ticket reason returned by receipt polling', async () => {
+    const app = await scheduledRuntime([
+      [
+        {
+          kind: 'unknown',
+          state: 'unknown',
+          providerReference: appReceiptId(),
+          reasonCode: 'EXPO_TICKET_MISSING',
+          invalidatesEndpoint: false,
+        },
+      ],
+    ]);
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          kind: 'reschedule',
+          reasonCode: 'EXPO_RECEIPT_RESPONSE_INVALID',
+        }),
+      }),
+    ]);
+    expect(app.writer.evidence).toHaveLength(0);
+  });
+
+  test('never trusts a fulfilled receipt container or its overridden map', async () => {
+    let mapCalls = 0;
+    const hostile = [unknown('EXPO_RECEIPT_MISSING', appReceiptId())];
+    Object.defineProperty(hostile, 'map', {
+      configurable: true,
+      value: () => {
+        mapCalls += 1;
+        return [
+          {
+            kind: 'failed',
+            state: 'failed',
+            providerReference: appReceiptId(),
+            reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+            invalidatesEndpoint: true,
+          },
+        ];
+      },
+    });
+    const app = await scheduledRuntime([hostile]);
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          kind: 'reschedule',
+          reasonCode: 'EXPO_RECEIPT_MISSING',
+        }),
+      }),
+    ]);
+    expect(mapCalls).toBe(0);
+    expect(app.writer.evidence).toHaveLength(0);
+    expect(app.invalidator.inputs).toHaveLength(0);
+  });
+
+  test('reschedules a throwing fulfilled receipt container as invalid', async () => {
+    const hostile = new Proxy(
+      [unknown('EXPO_RECEIPT_MISSING', appReceiptId())],
+      {
+        get(target, property, receiver) {
+          if (property === 'length') {
+            throw new ProviderDispatchError(
+              'EXPO_HTTP_SERVER_ERROR',
+              'safe-to-retry',
+            );
+          }
+          return Reflect.get(target, property, receiver) as unknown;
+        },
+      },
+    );
+    const app = await scheduledRuntime([
+      hostile as readonly ExpoProviderOutcome[],
+    ]);
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          kind: 'reschedule',
+          reasonCode: 'EXPO_RECEIPT_RESPONSE_INVALID',
+        }),
+      }),
+    ]);
+    expect(app.writer.evidence).toHaveLength(0);
+  });
+
+  test('isolates a throwing receipt item while completing its valid sibling', async () => {
+    const secondItem = workItem(undefined, {
+      attemptId: '00000000-0000-4000-8000-000000000795',
+    });
+    const secondEvidence = acceptedEvidence(secondItem.attempt.id);
+    const outcomes = [
+      {
+        kind: 'provider-accepted',
+        state: 'provider-accepted',
+        providerReference: appReceiptId(),
+        reasonCode: null,
+        invalidatesEndpoint: false,
+      },
+      unknown('EXPO_RECEIPT_MISSING', secondEvidence.providerReference!),
+    ] as ExpoProviderOutcome[];
+    Object.defineProperty(outcomes, 1, {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        throw new Error('synthetic hostile receipt slot');
+      },
+    });
+    const app = await scheduledRuntime([outcomes]);
+    await app.lifecycle.scheduleProviderAccepted(secondItem, secondEvidence);
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        attemptId: app.item.attempt.id,
+        decision: expect.objectContaining({ kind: 'complete' }),
+      }),
+      expect.objectContaining({
+        attemptId: secondItem.attempt.id,
+        decision: expect.objectContaining({
+          kind: 'reschedule',
+          reasonCode: 'EXPO_RECEIPT_RESPONSE_INVALID',
+        }),
+      }),
+    ]);
+    expect(app.writer.evidence).toHaveLength(0);
+  });
+
+  test('does not accept an internal receipt-conflict code from transport errors', async () => {
+    const app = await scheduledRuntime([
+      new ProviderDispatchError(
+        'EXPO_RECEIPT_REFERENCE_CONFLICT',
+        'safe-to-retry',
+      ),
+    ]);
+
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          kind: 'reschedule',
+          reasonCode: 'EXPO_RECEIPT_ERROR_UNKNOWN',
+        }),
+      }),
+    ]);
+    expect(app.store.rows.get(app.item.attempt.id)?.receiptReferenceState).toBe(
+      'unique',
+    );
+    expect(app.writer.evidence).toHaveLength(0);
   });
 
   test('rejects contradictory provider outcome kinds and non-definite failed reasons before receipt decisions', async () => {
@@ -1004,9 +1740,10 @@ describe('due receipt claims and durable decisions', () => {
     );
     app.resendScheduler.failOnce = true;
 
-    await expect(app.lifecycle.runDue()).rejects.toThrow(
-      'Synthetic resend schedule failure.',
-    );
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(app.item.attempt.id)],
+    });
     expect(app.store.rows.get(app.item.attempt.id)).toMatchObject({
       pendingAction: {
         kind: 'resend',
@@ -1069,9 +1806,10 @@ describe('due receipt claims and durable decisions', () => {
     );
     app.store.failDecisionKindOnce = 'terminal-dlq';
 
-    await expect(app.lifecycle.runDue()).rejects.toThrow(
-      'Synthetic decision store failure.',
-    );
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(app.item.attempt.id)],
+    });
     expect(app.store.rows.get(app.item.attempt.id)).toMatchObject({
       pendingAction: {
         kind: 'terminal-expiry',
@@ -1167,6 +1905,39 @@ describe('due receipt claims and durable decisions', () => {
     });
   });
 
+  test('reclaims and replays a durably staged terminal unknown after final decision failure', async () => {
+    const app = await scheduledRuntime();
+    app.clock.now = after(EXPO_RECEIPT_HORIZON_MILLISECONDS);
+    app.store.failDecisionKindOnce = 'terminal-dlq';
+
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(app.item.attempt.id)],
+    });
+    expect(app.store.rows.get(app.item.attempt.id)).toMatchObject({
+      pendingAction: {
+        kind: 'terminal-unknown',
+        state: 'unknown',
+        reasonCode: 'EXPO_RECEIPT_HORIZON_EXPIRED',
+      },
+      decision: null,
+    });
+    expect(app.writer.evidence).toHaveLength(1);
+
+    app.clock.now = new Date(Date.parse(app.clock.now) + 120_000).toISOString();
+    await expect(app.lifecycle.runDue()).resolves.toEqual([
+      expect.objectContaining({
+        decision: expect.objectContaining({
+          kind: 'terminal-dlq',
+          state: 'unknown',
+          reasonCode: 'EXPO_RECEIPT_HORIZON_EXPIRED',
+        }),
+      }),
+    ]);
+    expect(app.transport.queries).toHaveLength(0);
+    expect(app.writer.evidence).toHaveLength(1);
+  });
+
   test('writes DeviceNotRegistered evidence, then invalidates, then durably records terminal DLQ', async () => {
     const app = await scheduledRuntime([
       [
@@ -1212,9 +1983,10 @@ describe('due receipt claims and durable decisions', () => {
     ]);
     app.invalidator.failOnce = true;
 
-    await expect(app.lifecycle.runDue()).rejects.toThrow(
-      'Synthetic invalidation failure.',
-    );
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(app.item.attempt.id)],
+    });
     expect(app.store.rows.get(app.item.attempt.id)).toMatchObject({
       pendingAction: {
         kind: 'terminal-failure',
@@ -1257,9 +2029,10 @@ describe('due receipt claims and durable decisions', () => {
     ]);
     app.store.failDecisionKindOnce = 'terminal-dlq';
 
-    await expect(app.lifecycle.runDue()).rejects.toThrow(
-      'Synthetic decision store failure.',
-    );
+    await expect(app.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(app.item.attempt.id)],
+    });
     expect(app.invalidator.inputs).toHaveLength(1);
     expect(app.store.rows.get(app.item.attempt.id)).toMatchObject({
       pendingAction: {
@@ -1287,12 +2060,13 @@ describe('due receipt claims and durable decisions', () => {
     );
   });
 
-  test('store claim and decision failures reject the run instead of returning success', async () => {
+  test('store claim failure rejects before identities exist, while decision failure is isolated per item', async () => {
     const claimFailure = await scheduledRuntime();
     claimFailure.store.failClaim = true;
-    await expect(claimFailure.lifecycle.runDue()).rejects.toThrow(
-      'Synthetic claim store failure.',
-    );
+    await expect(claimFailure.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError('00000000-0000-4000-8000-000000000000')],
+    });
 
     const decisionFailure = await scheduledRuntime([
       [
@@ -1306,9 +2080,10 @@ describe('due receipt claims and durable decisions', () => {
       ],
     ]);
     decisionFailure.store.failDecide = true;
-    await expect(decisionFailure.lifecycle.runDue()).rejects.toThrow(
-      'Synthetic decision store failure.',
-    );
+    await expect(decisionFailure.lifecycle.runDue()).rejects.toMatchObject({
+      code: 'EXPO_RECEIPT_BATCH_FAILED',
+      results: [receiptItemError(decisionFailure.item.attempt.id)],
+    });
     expect(decisionFailure.store.decisionCalls).toHaveLength(0);
   });
 });

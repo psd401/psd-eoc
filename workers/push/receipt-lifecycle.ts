@@ -28,7 +28,6 @@ import {
   EXPO_EMERGENCY_TTL_SECONDS,
   chunkExpoValues,
   expired,
-  isExpoSafeReasonCode,
   parseExpoProviderOutcome,
   unknown,
   type ExpoProviderOutcome,
@@ -48,6 +47,7 @@ const SAFE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/u;
 const SAFE_LEASE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/u;
 const SAFE_PROVIDER_PATTERN = /^[a-z0-9]+(?:[a-z0-9._-]*[a-z0-9])?$/u;
 const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/u;
+const INVALID_CLAIM_SLOT = Symbol('invalid-expo-receipt-claim-slot');
 
 export interface PersistedExpoReceiptTarget {
   readonly attempt: ChannelAttempt;
@@ -75,7 +75,8 @@ export interface ExpoReceiptClaim {
   readonly dueAt: string;
   readonly horizonAt: string;
   readonly pollAttemptNumber: number;
-  readonly lastReasonCode: ExpoSafeReasonCode | null;
+  readonly lastReasonCode: ExpoReceiptRescheduleReasonCode | null;
+  readonly receiptReferenceState: 'unique' | 'conflict';
   readonly pendingAction: ExpoReceiptPendingAction | null;
   readonly leaseToken: string;
   readonly leaseExpiresAt: string;
@@ -117,6 +118,11 @@ export type ExpoReceiptDefiniteFailureReasonCode =
   | 'EXPO_INVALID_CREDENTIALS'
   | 'PROVIDER_RETRY_EXHAUSTED';
 
+export type ExpoReceiptTerminalUnknownReasonCode =
+  | ExpoReceiptRescheduleReasonCode
+  | 'EXPO_RECEIPT_HORIZON_EXPIRED'
+  | 'EXPO_RECEIPT_REFERENCE_CONFLICT';
+
 export type ExpoReceiptPendingAction =
   | Readonly<{
       kind: 'terminal-failure';
@@ -128,6 +134,11 @@ export type ExpoReceiptPendingAction =
       kind: 'terminal-expiry';
       state: 'expired';
       reasonCode: 'EXPO_NOTIFICATION_EXPIRED';
+    }>
+  | Readonly<{
+      kind: 'terminal-unknown';
+      state: 'unknown';
+      reasonCode: ExpoReceiptTerminalUnknownReasonCode;
     }>
   | Readonly<{
       kind: 'resend';
@@ -150,7 +161,7 @@ export type ExpoReceiptDurableDecision =
       decidedAt: string;
       nextPollAt: string;
       nextPollAttemptNumber: number;
-      reasonCode: ExpoSafeReasonCode;
+      reasonCode: ExpoReceiptRescheduleReasonCode;
     }>
   | Readonly<{
       kind: 'complete';
@@ -181,9 +192,30 @@ export interface ExpoReceiptDecisionRequest {
   readonly decision: ExpoReceiptDurableDecision;
 }
 
+export type ExpoReceiptRescheduleReasonCode =
+  | 'EXPO_HTTP_CLIENT_ERROR'
+  | 'EXPO_HTTP_RATE_LIMITED'
+  | 'EXPO_HTTP_SERVER_ERROR'
+  | 'EXPO_INVALID_CREDENTIALS'
+  | 'EXPO_LIVE_TRANSPORT_DISABLED'
+  | 'EXPO_NETWORK_OUTCOME_AMBIGUOUS'
+  | 'EXPO_RECEIPT_ERROR_UNKNOWN'
+  | 'EXPO_RECEIPT_MISSING'
+  | 'EXPO_RECEIPT_RESPONSE_INVALID'
+  | 'EXPO_RESPONSE_TOO_LARGE';
+
 /**
  * Production implementations must be durable. schedule is idempotent by
- * attempt ID plus fingerprint. claimDue atomically leases only due work until
+ * attempt ID plus fingerprint. A receipt ID must remain durably bound to its
+ * first attempt/fingerprint. If another retained target presents the same ID,
+ * schedule must atomically mark the new binding and every binding without a
+ * pending or terminal decision as `conflict`; a previously staged outcome is
+ * the first observation and is not retroactively changed. schedule and decide
+ * must linearize on the receipt-ID binding. A decision from a stale `unique`
+ * claim must reject after conflict wins, except the matching staged/final
+ * terminal unknown with EXPO_RECEIPT_REFERENCE_CONFLICT. claimDue must keep
+ * surfacing sticky conflicts without querying Expo.
+ * claimDue atomically leases only due work until
  * leaseExpiresAt. An implementation must reclaim a lease whose expiry is less
  * than or equal to its authoritative current time with a new, unique token.
  * A returned expiry must be later than request.now and no more than the
@@ -211,10 +243,44 @@ export interface ExpoReceiptScheduler {
   ): Promise<void>;
 }
 
-export type ExpoReceiptLifecycleResult = Readonly<{
-  attemptId: string;
-  decision: ExpoReceiptDurableDecision;
-}>;
+export type ExpoReceiptLifecycleResult =
+  | Readonly<{
+      attemptId: string;
+      decision: ExpoReceiptDurableDecision;
+    }>
+  | Readonly<{
+      kind: 'error';
+      attemptId: string;
+      errorCode: 'EXPO_RECEIPT_ITEM_FAILED';
+    }>;
+
+const EXPO_RECEIPT_BATCH_ERROR_ATTEMPT_ID =
+  '00000000-0000-4000-8000-000000000000';
+
+function unidentifiedReceiptItemError(): ExpoReceiptLifecycleResult {
+  return Object.freeze({
+    kind: 'error',
+    attemptId: EXPO_RECEIPT_BATCH_ERROR_ATTEMPT_ID,
+    errorCode: 'EXPO_RECEIPT_ITEM_FAILED',
+  });
+}
+
+/**
+ * Queue-facing failure for a claimed batch with one or more isolated item
+ * failures. It intentionally retains only ordered, bounded lifecycle results;
+ * raw dependency errors are never attached as `cause` or aggregate entries.
+ */
+export class ExpoReceiptLifecycleBatchError extends Error {
+  public readonly code = 'EXPO_RECEIPT_BATCH_FAILED' as const;
+  public readonly results: readonly ExpoReceiptLifecycleResult[];
+
+  public constructor(results: readonly ExpoReceiptLifecycleResult[]) {
+    super('One or more Expo receipt lifecycle items failed safely.');
+    this.name = 'ExpoReceiptLifecycleBatchError';
+    this.results = Object.freeze(Array.from(results));
+    Object.freeze(this);
+  }
+}
 
 export interface ExpoReceiptLifecycleOptions {
   readonly store: DurableExpoReceiptStore;
@@ -231,22 +297,100 @@ export interface ExpoReceiptLifecycleOptions {
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    return prototype === Object.prototype || prototype === null;
+  } catch {
     return false;
   }
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null;
 }
 
-function hasExactKeys(
-  value: Readonly<Record<string, unknown>>,
+function exactDataProperties(
+  value: unknown,
   expected: readonly string[],
-): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return (
-    actual.length === wanted.length &&
-    actual.every((key, index) => key === wanted[index])
+): Readonly<Record<string, unknown>> | null {
+  try {
+    if (!isPlainRecord(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (
+      keys.length !== expected.length ||
+      keys.some((key) => typeof key !== 'string' || !expected.includes(key))
+    ) {
+      return null;
+    }
+    const properties: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    for (const key of expected) {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined ||
+        descriptor.enumerable !== true ||
+        !Object.hasOwn(descriptor, 'value')
+      ) {
+        return null;
+      }
+      properties[key] = descriptor.value;
+    }
+    return properties;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Copies an untrusted store result without invoking its iterator, indexed
+ * accessors, or ordinary property reads. A hostile individual slot becomes an
+ * invalid sentinel so independently valid siblings can still be processed.
+ */
+function boundedClaimValues(
+  value: unknown,
+  maximum: number,
+): readonly unknown[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError('Expo receipt claims are invalid.');
+  }
+  let lengthDescriptor: PropertyDescriptor | undefined;
+  try {
+    lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  } catch {
+    throw new TypeError('Expo receipt claims are invalid.');
+  }
+  if (
+    lengthDescriptor === undefined ||
+    lengthDescriptor.enumerable !== false ||
+    lengthDescriptor.configurable !== false ||
+    !Object.hasOwn(lengthDescriptor, 'value') ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    Number(lengthDescriptor.value) < 0 ||
+    Number(lengthDescriptor.value) > maximum
+  ) {
+    throw new TypeError('Expo receipt claims are invalid.');
+  }
+  return Object.freeze(
+    Array.from(
+      { length: Number(lengthDescriptor.value) },
+      (_unused, index): unknown => {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            value,
+            String(index),
+          );
+          return descriptor !== undefined &&
+            descriptor.enumerable === true &&
+            Object.hasOwn(descriptor, 'value')
+            ? descriptor.value
+            : INVALID_CLAIM_SLOT;
+        } catch {
+          return INVALID_CLAIM_SLOT;
+        }
+      },
+    ),
   );
 }
 
@@ -361,31 +505,31 @@ function targetFingerprintFromPersisted(
 export function parsePersistedExpoReceiptTarget(
   value: PersistedExpoReceiptTarget | unknown,
 ): PersistedExpoReceiptTarget {
+  const properties = exactDataProperties(value, [
+    'attempt',
+    'receiptId',
+    'providerAcceptedEvidence',
+    'batchCreatedAt',
+    'expiresAt',
+    'fingerprint',
+  ]);
   if (
-    !isPlainRecord(value) ||
-    !hasExactKeys(value, [
-      'attempt',
-      'receiptId',
-      'providerAcceptedEvidence',
-      'batchCreatedAt',
-      'expiresAt',
-      'fingerprint',
-    ]) ||
-    typeof value.fingerprint !== 'string' ||
-    !FINGERPRINT_PATTERN.test(value.fingerprint)
+    properties === null ||
+    typeof properties.fingerprint !== 'string' ||
+    !FINGERPRINT_PATTERN.test(properties.fingerprint)
   ) {
     throw new TypeError('Persisted Expo receipt target is invalid.');
   }
-  const attemptResult = ChannelAttemptSchema.safeParse(value.attempt);
+  const attemptResult = ChannelAttemptSchema.safeParse(properties.attempt);
   const evidenceResult = DeliveryEvidenceSchema.safeParse(
-    value.providerAcceptedEvidence,
+    properties.providerAcceptedEvidence,
   );
   const batchCreatedAt = timestamp(
-    value.batchCreatedAt,
+    properties.batchCreatedAt,
     'Persisted Expo receipt target is invalid.',
   );
   const expiresAt = timestamp(
-    value.expiresAt,
+    properties.expiresAt,
     'Persisted Expo receipt target is invalid.',
   );
   if (
@@ -395,15 +539,15 @@ export function parsePersistedExpoReceiptTarget(
     evidenceResult.data.state !== 'provider-accepted' ||
     evidenceResult.data.subject.kind !== 'attempt' ||
     evidenceResult.data.subject.attemptId !== attemptResult.data.id ||
-    evidenceResult.data.providerReference !== value.receiptId ||
-    typeof value.receiptId !== 'string' ||
-    !SAFE_REFERENCE_PATTERN.test(value.receiptId) ||
+    evidenceResult.data.providerReference !== properties.receiptId ||
+    typeof properties.receiptId !== 'string' ||
+    !SAFE_REFERENCE_PATTERN.test(properties.receiptId) ||
     expiresAt !==
       timestampAfter(batchCreatedAt, EXPO_EMERGENCY_TTL_SECONDS * 1_000) ||
-    value.fingerprint !==
+    properties.fingerprint !==
       targetFingerprintFromPersisted(
         attemptResult.data,
-        value.receiptId,
+        properties.receiptId,
         evidenceResult.data,
         batchCreatedAt,
         expiresAt,
@@ -413,11 +557,11 @@ export function parsePersistedExpoReceiptTarget(
   }
   return Object.freeze({
     attempt: attemptResult.data,
-    receiptId: value.receiptId,
+    receiptId: properties.receiptId,
     providerAcceptedEvidence: evidenceResult.data,
     batchCreatedAt,
     expiresAt,
-    fingerprint: value.fingerprint,
+    fingerprint: properties.fingerprint,
   });
 }
 
@@ -451,11 +595,17 @@ function parseMaxSendAttempts(value: number | undefined): number {
 function boundedFailureCode(
   code: string,
   disposition: ProviderFailureDisposition,
-): ExpoSafeReasonCode {
-  if (isExpoSafeReasonCode(code)) return code;
+): ExpoReceiptRescheduleReasonCode {
+  if (isReceiptTransportFailureReasonCode(code)) return code;
   return disposition === 'ambiguous'
     ? 'EXPO_NETWORK_OUTCOME_AMBIGUOUS'
     : 'EXPO_RECEIPT_ERROR_UNKNOWN';
+}
+
+function isReceiptTransportFailureReasonCode(
+  value: unknown,
+): value is ExpoReceiptRescheduleReasonCode {
+  return isReceiptRescheduleReasonCode(value);
 }
 
 function isDefiniteReceiptFailureReason(
@@ -470,6 +620,33 @@ function isDefiniteReceiptFailureReason(
   );
 }
 
+function isReceiptRescheduleReasonCode(
+  value: unknown,
+): value is ExpoReceiptRescheduleReasonCode {
+  return (
+    value === 'EXPO_HTTP_CLIENT_ERROR' ||
+    value === 'EXPO_HTTP_RATE_LIMITED' ||
+    value === 'EXPO_HTTP_SERVER_ERROR' ||
+    value === 'EXPO_INVALID_CREDENTIALS' ||
+    value === 'EXPO_LIVE_TRANSPORT_DISABLED' ||
+    value === 'EXPO_NETWORK_OUTCOME_AMBIGUOUS' ||
+    value === 'EXPO_RECEIPT_ERROR_UNKNOWN' ||
+    value === 'EXPO_RECEIPT_MISSING' ||
+    value === 'EXPO_RECEIPT_RESPONSE_INVALID' ||
+    value === 'EXPO_RESPONSE_TOO_LARGE'
+  );
+}
+
+function isReceiptTerminalUnknownReasonCode(
+  value: unknown,
+): value is ExpoReceiptTerminalUnknownReasonCode {
+  return (
+    isReceiptRescheduleReasonCode(value) ||
+    value === 'EXPO_RECEIPT_HORIZON_EXPIRED' ||
+    value === 'EXPO_RECEIPT_REFERENCE_CONFLICT'
+  );
+}
+
 function parsePendingAction(
   value: unknown,
   sourceAttemptNumber: number,
@@ -477,75 +654,92 @@ function parsePendingAction(
   expectedExpiresAt: string,
 ): ExpoReceiptPendingAction | null {
   if (value === null) return null;
-  if (!isPlainRecord(value)) {
-    throw new TypeError('Expo receipt pending action is invalid.');
-  }
+  const terminalFailure = exactDataProperties(value, [
+    'kind',
+    'state',
+    'reasonCode',
+    'invalidatesEndpoint',
+  ]);
   if (
-    value.kind === 'terminal-failure' &&
-    hasExactKeys(value, [
-      'kind',
-      'state',
-      'reasonCode',
-      'invalidatesEndpoint',
-    ]) &&
-    value.state === 'failed' &&
-    isDefiniteReceiptFailureReason(value.reasonCode) &&
-    typeof value.invalidatesEndpoint === 'boolean' &&
-    value.invalidatesEndpoint ===
-      (value.reasonCode === 'EXPO_DEVICE_NOT_REGISTERED')
+    terminalFailure?.kind === 'terminal-failure' &&
+    terminalFailure.state === 'failed' &&
+    isDefiniteReceiptFailureReason(terminalFailure.reasonCode) &&
+    typeof terminalFailure.invalidatesEndpoint === 'boolean' &&
+    terminalFailure.invalidatesEndpoint ===
+      (terminalFailure.reasonCode === 'EXPO_DEVICE_NOT_REGISTERED')
   ) {
     return Object.freeze({
-      kind: value.kind,
-      state: value.state,
-      reasonCode: value.reasonCode,
-      invalidatesEndpoint: value.invalidatesEndpoint,
+      kind: terminalFailure.kind,
+      state: terminalFailure.state,
+      reasonCode: terminalFailure.reasonCode,
+      invalidatesEndpoint: terminalFailure.invalidatesEndpoint,
     });
   }
+  const terminalExpiry = exactDataProperties(value, [
+    'kind',
+    'state',
+    'reasonCode',
+  ]);
   if (
-    value.kind === 'terminal-expiry' &&
-    hasExactKeys(value, ['kind', 'state', 'reasonCode']) &&
-    value.state === 'expired' &&
-    value.reasonCode === 'EXPO_NOTIFICATION_EXPIRED'
+    terminalExpiry?.kind === 'terminal-expiry' &&
+    terminalExpiry.state === 'expired' &&
+    terminalExpiry.reasonCode === 'EXPO_NOTIFICATION_EXPIRED'
   ) {
     return Object.freeze({
-      kind: value.kind,
-      state: value.state,
-      reasonCode: value.reasonCode,
+      kind: terminalExpiry.kind,
+      state: terminalExpiry.state,
+      reasonCode: terminalExpiry.reasonCode,
+    });
+  }
+  const terminalUnknown = exactDataProperties(value, [
+    'kind',
+    'state',
+    'reasonCode',
+  ]);
+  if (
+    terminalUnknown?.kind === 'terminal-unknown' &&
+    terminalUnknown.state === 'unknown' &&
+    isReceiptTerminalUnknownReasonCode(terminalUnknown.reasonCode)
+  ) {
+    return Object.freeze({
+      kind: terminalUnknown.kind,
+      state: terminalUnknown.state,
+      reasonCode: terminalUnknown.reasonCode,
     });
   }
   const expectedNextAttemptNumber = sourceAttemptNumber + 1;
+  const resend = exactDataProperties(value, [
+    'kind',
+    'state',
+    'reasonCode',
+    'nextAttemptNumber',
+    'delayMilliseconds',
+    'retryAt',
+    'expiresAt',
+  ]);
   if (
-    value.kind === 'resend' &&
-    hasExactKeys(value, [
-      'kind',
-      'state',
-      'reasonCode',
-      'nextAttemptNumber',
-      'delayMilliseconds',
-      'retryAt',
-      'expiresAt',
-    ]) &&
-    value.state === 'failed' &&
-    value.reasonCode === 'EXPO_MESSAGE_RATE_EXCEEDED' &&
-    Number.isSafeInteger(value.nextAttemptNumber) &&
-    value.nextAttemptNumber === expectedNextAttemptNumber &&
+    resend?.kind === 'resend' &&
+    resend.state === 'failed' &&
+    resend.reasonCode === 'EXPO_MESSAGE_RATE_EXCEEDED' &&
+    Number.isSafeInteger(resend.nextAttemptNumber) &&
+    resend.nextAttemptNumber === expectedNextAttemptNumber &&
     expectedNextAttemptNumber <= maxSendAttempts &&
-    Number.isSafeInteger(value.delayMilliseconds) &&
-    Number(value.delayMilliseconds) >= 1 &&
-    Number(value.delayMilliseconds) <=
+    Number.isSafeInteger(resend.delayMilliseconds) &&
+    Number(resend.delayMilliseconds) >= 1 &&
+    Number(resend.delayMilliseconds) <=
       EXPO_RECEIPT_RETRY_MAX_DELAY_MILLISECONDS &&
-    TimestampSchema.safeParse(value.retryAt).success &&
-    value.expiresAt === expectedExpiresAt &&
-    Date.parse(value.retryAt as string) < Date.parse(expectedExpiresAt)
+    TimestampSchema.safeParse(resend.retryAt).success &&
+    resend.expiresAt === expectedExpiresAt &&
+    Date.parse(resend.retryAt as string) < Date.parse(expectedExpiresAt)
   ) {
     return Object.freeze({
-      kind: value.kind,
-      state: value.state,
-      reasonCode: value.reasonCode,
-      nextAttemptNumber: value.nextAttemptNumber as number,
-      delayMilliseconds: value.delayMilliseconds as number,
-      retryAt: value.retryAt as string,
-      expiresAt: value.expiresAt,
+      kind: resend.kind,
+      state: resend.state,
+      reasonCode: resend.reasonCode,
+      nextAttemptNumber: resend.nextAttemptNumber as number,
+      delayMilliseconds: resend.delayMilliseconds as number,
+      retryAt: resend.retryAt as string,
+      expiresAt: resend.expiresAt,
     });
   }
   throw new TypeError('Expo receipt pending action is invalid.');
@@ -558,29 +752,28 @@ function parseClaim(
   leaseMilliseconds: number,
   maxSendAttempts: number,
 ): ExpoReceiptClaim {
-  if (
-    !isPlainRecord(value) ||
-    !hasExactKeys(value, [
-      'target',
-      'dueAt',
-      'horizonAt',
-      'pollAttemptNumber',
-      'lastReasonCode',
-      'pendingAction',
-      'leaseToken',
-      'leaseExpiresAt',
-    ])
-  ) {
+  const properties = exactDataProperties(value, [
+    'target',
+    'dueAt',
+    'horizonAt',
+    'pollAttemptNumber',
+    'lastReasonCode',
+    'pendingAction',
+    'receiptReferenceState',
+    'leaseToken',
+    'leaseExpiresAt',
+  ]);
+  if (properties === null) {
     throw new TypeError('Expo receipt claim is invalid.');
   }
-  const target = parsePersistedExpoReceiptTarget(value.target);
-  const dueAt = timestamp(value.dueAt, 'Expo receipt claim is invalid.');
+  const target = parsePersistedExpoReceiptTarget(properties.target);
+  const dueAt = timestamp(properties.dueAt, 'Expo receipt claim is invalid.');
   const horizonAt = timestamp(
-    value.horizonAt,
+    properties.horizonAt,
     'Expo receipt claim is invalid.',
   );
   const leaseExpiresAt = timestamp(
-    value.leaseExpiresAt,
+    properties.leaseExpiresAt,
     'Expo receipt claim is invalid.',
   );
   const expectedHorizon = timestampAfter(
@@ -594,26 +787,46 @@ function parseClaim(
   const leaseDurationMilliseconds =
     Date.parse(leaseExpiresAt) - Date.parse(now);
   const pendingAction = parsePendingAction(
-    value.pendingAction,
+    properties.pendingAction,
     target.attempt.attemptNumber,
     maxSendAttempts,
     target.expiresAt,
   );
+  const receiptReferenceState = properties.receiptReferenceState;
+  const expectedTerminalUnknownReason =
+    properties.lastReasonCode ?? 'EXPO_RECEIPT_HORIZON_EXPIRED';
+  const terminalUnknownIsConsistent =
+    pendingAction?.kind !== 'terminal-unknown' ||
+    (pendingAction.reasonCode === 'EXPO_RECEIPT_REFERENCE_CONFLICT'
+      ? receiptReferenceState === 'conflict'
+      : receiptReferenceState === 'unique' &&
+        Date.parse(now) >= Date.parse(horizonAt) &&
+        pendingAction.reasonCode === expectedTerminalUnknownReason);
   if (
     target.providerAcceptedEvidence.provider !== provider ||
     horizonAt !== expectedHorizon ||
     Date.parse(dueAt) > Date.parse(now) ||
     Date.parse(dueAt) < Date.parse(expectedFirstPoll) ||
     Date.parse(dueAt) > Date.parse(horizonAt) ||
-    !Number.isSafeInteger(value.pollAttemptNumber) ||
-    Number(value.pollAttemptNumber) < 1 ||
-    Number(value.pollAttemptNumber) > 10_000 ||
-    (value.pollAttemptNumber === 1 && dueAt !== expectedFirstPoll) ||
-    (value.pollAttemptNumber === 1) !== (value.lastReasonCode === null) ||
-    (value.lastReasonCode !== null &&
-      !isExpoSafeReasonCode(value.lastReasonCode)) ||
-    typeof value.leaseToken !== 'string' ||
-    !SAFE_LEASE_PATTERN.test(value.leaseToken) ||
+    !Number.isSafeInteger(properties.pollAttemptNumber) ||
+    Number(properties.pollAttemptNumber) < 1 ||
+    Number(properties.pollAttemptNumber) > 10_000 ||
+    (properties.pollAttemptNumber === 1 && dueAt !== expectedFirstPoll) ||
+    (properties.pollAttemptNumber === 1) !==
+      (properties.lastReasonCode === null) ||
+    (properties.lastReasonCode !== null &&
+      !isReceiptRescheduleReasonCode(properties.lastReasonCode)) ||
+    (receiptReferenceState !== 'unique' &&
+      receiptReferenceState !== 'conflict') ||
+    !terminalUnknownIsConsistent ||
+    (receiptReferenceState === 'conflict' &&
+      pendingAction !== null &&
+      !(
+        pendingAction.kind === 'terminal-unknown' &&
+        pendingAction.reasonCode === 'EXPO_RECEIPT_REFERENCE_CONFLICT'
+      )) ||
+    typeof properties.leaseToken !== 'string' ||
+    !SAFE_LEASE_PATTERN.test(properties.leaseToken) ||
     leaseDurationMilliseconds <= 0 ||
     leaseDurationMilliseconds >
       leaseMilliseconds + MAX_LEASE_CLOCK_SKEW_MILLISECONDS
@@ -624,10 +837,12 @@ function parseClaim(
     target,
     dueAt,
     horizonAt,
-    pollAttemptNumber: value.pollAttemptNumber as number,
-    lastReasonCode: value.lastReasonCode as ExpoSafeReasonCode | null,
+    pollAttemptNumber: properties.pollAttemptNumber as number,
+    lastReasonCode:
+      properties.lastReasonCode as ExpoReceiptRescheduleReasonCode | null,
     pendingAction,
-    leaseToken: value.leaseToken,
+    receiptReferenceState,
+    leaseToken: properties.leaseToken,
     leaseExpiresAt,
   });
 }
@@ -655,12 +870,15 @@ function retryDelayMilliseconds(
   );
 }
 
-function retryableReceiptOutcome(outcome: ExpoProviderOutcome): boolean {
-  return (
+function retryableReceiptOutcome(
+  outcome: ExpoProviderOutcome,
+): outcome is Extract<ExpoProviderOutcome, { kind: 'unknown' }> &
+  Readonly<{ reasonCode: ExpoReceiptRescheduleReasonCode }> {
+  return Boolean(
     outcome.kind === 'unknown' &&
-    (outcome.reasonCode === 'EXPO_RECEIPT_MISSING' ||
-      outcome.reasonCode === 'EXPO_RECEIPT_RESPONSE_INVALID' ||
-      outcome.reasonCode === 'EXPO_RECEIPT_ERROR_UNKNOWN')
+      (outcome.reasonCode === 'EXPO_RECEIPT_MISSING' ||
+        outcome.reasonCode === 'EXPO_RECEIPT_RESPONSE_INVALID' ||
+        outcome.reasonCode === 'EXPO_RECEIPT_ERROR_UNKNOWN'),
   );
 }
 
@@ -735,76 +953,130 @@ export class ExpoReceiptLifecycle implements ExpoReceiptScheduler {
       throw new TypeError('Expo receipt claim limit is invalid.');
     }
     const now = timestamp(this.#clock(), 'Expo receipt clock is invalid.');
-    const rawClaims = await this.#store.claimDue({
-      now,
-      limit,
-      leaseMilliseconds: this.#leaseMilliseconds,
-    });
-    if (!Array.isArray(rawClaims) || rawClaims.length > limit) {
-      throw new TypeError('Expo receipt claims are invalid.');
+    let rawClaimsValue: unknown;
+    try {
+      rawClaimsValue = await this.#store.claimDue({
+        now,
+        limit,
+        leaseMilliseconds: this.#leaseMilliseconds,
+      });
+    } catch {
+      throw new ExpoReceiptLifecycleBatchError([
+        unidentifiedReceiptItemError(),
+      ]);
     }
+    const rawClaims = boundedClaimValues(rawClaimsValue, limit);
     const parsedClaims: ExpoReceiptClaim[] = [];
+    const uniqueClaims: ExpoReceiptClaim[] = [];
+    const parsedClaimKeys = new Set<string>();
+    let invalidClaimCount = 0;
     for (const claim of rawClaims) {
       try {
-        parsedClaims.push(
-          parseClaim(
-            claim,
-            this.provider,
-            now,
-            this.#leaseMilliseconds,
-            this.#maxSendAttempts,
-          ),
+        const parsed = parseClaim(
+          claim,
+          this.provider,
+          now,
+          this.#leaseMilliseconds,
+          this.#maxSendAttempts,
         );
+        const key = stableJson(parsed);
+        parsedClaims.push(parsed);
+        if (!parsedClaimKeys.has(key)) {
+          parsedClaimKeys.add(key);
+          uniqueClaims.push(parsed);
+        }
       } catch {
         // A malformed leased row cannot safely be decided without a validated
         // identity and fencing token. Isolate it until its lease is reclaimed.
+        invalidClaimCount += 1;
       }
     }
     const attemptCounts = new Map<string, number>();
     const receiptCounts = new Map<string, number>();
-    for (const claim of parsedClaims) {
+    for (const claim of uniqueClaims) {
       const attemptId = claim.target.attempt.id;
       const receiptId = claim.target.receiptId;
       attemptCounts.set(attemptId, (attemptCounts.get(attemptId) ?? 0) + 1);
       receiptCounts.set(receiptId, (receiptCounts.get(receiptId) ?? 0) + 1);
     }
-    const claims = parsedClaims.filter(
-      (claim) =>
-        attemptCounts.get(claim.target.attempt.id) === 1 &&
-        receiptCounts.get(claim.target.receiptId) === 1,
-    );
+    // Two distinct leases for one attempt cannot be fenced safely here. Leave
+    // only those store-contract violations for lease reclaim; receipt-ID
+    // ambiguity has validated identities and is terminalized below as unknown.
+    const claims = uniqueClaims;
 
     const results = new Map<string, ExpoReceiptLifecycleResult>();
-    let firstFailure: unknown;
-    let hasFailure = false;
+    for (const claim of claims) {
+      if ((attemptCounts.get(claim.target.attempt.id) ?? 0) > 1) {
+        results.set(
+          claim.target.attempt.id,
+          Object.freeze({
+            kind: 'error',
+            attemptId: claim.target.attempt.id,
+            errorCode: 'EXPO_RECEIPT_ITEM_FAILED',
+          }),
+        );
+      }
+    }
     const settleClaim = async (
       claim: ExpoReceiptClaim,
       operation: () => Promise<ExpoReceiptLifecycleResult>,
     ): Promise<void> => {
       try {
         results.set(claim.target.attempt.id, await operation());
-      } catch (error) {
-        if (!hasFailure) {
-          hasFailure = true;
-          firstFailure = error;
-        }
+      } catch {
+        results.set(
+          claim.target.attempt.id,
+          Object.freeze({
+            kind: 'error',
+            attemptId: claim.target.attempt.id,
+            errorCode: 'EXPO_RECEIPT_ITEM_FAILED',
+          }),
+        );
       }
     };
+    const pendingSettlements: Promise<void>[] = [];
     const pollable: ExpoReceiptClaim[] = [];
     for (const claim of claims) {
+      if ((attemptCounts.get(claim.target.attempt.id) ?? 0) > 1) {
+        continue;
+      }
       if (claim.pendingAction !== null) {
-        await settleClaim(claim, () =>
-          this.#executePendingAction(claim, claim.pendingAction!, now),
+        const pendingAction = claim.pendingAction;
+        pendingSettlements.push(
+          settleClaim(claim, () =>
+            this.#executePendingAction(claim, pendingAction, now),
+          ),
+        );
+      } else if (
+        claim.receiptReferenceState === 'conflict' ||
+        (receiptCounts.get(claim.target.receiptId) ?? 0) > 1
+      ) {
+        pendingSettlements.push(
+          settleClaim(claim, () =>
+            this.#stageKnownOutcome(
+              claim,
+              Object.freeze({
+                kind: 'terminal-unknown',
+                state: 'unknown',
+                reasonCode: 'EXPO_RECEIPT_REFERENCE_CONFLICT',
+              }),
+              now,
+            ),
+          ),
         );
       } else if (Date.parse(now) >= Date.parse(claim.horizonAt)) {
-        await settleClaim(claim, () =>
-          this.#recordTerminal(
-            claim,
-            unknown(
-              claim.lastReasonCode ?? 'EXPO_RECEIPT_HORIZON_EXPIRED',
-              claim.target.receiptId,
+        pendingSettlements.push(
+          settleClaim(claim, () =>
+            this.#stageKnownOutcome(
+              claim,
+              Object.freeze({
+                kind: 'terminal-unknown',
+                state: 'unknown',
+                reasonCode:
+                  claim.lastReasonCode ?? 'EXPO_RECEIPT_HORIZON_EXPIRED',
+              }),
+              now,
             ),
-            now,
           ),
         );
       } else {
@@ -814,23 +1086,11 @@ export class ExpoReceiptLifecycle implements ExpoReceiptScheduler {
 
     for (const chunk of chunkExpoValues(pollable, EXPO_RECEIPT_CHUNK_SIZE)) {
       let outcomes: readonly ExpoProviderOutcome[];
+      let rawOutcomes: unknown;
       try {
-        const values = await this.#transport.queryReceiptChunk(
+        rawOutcomes = await this.#transport.queryReceiptChunk(
           chunk.map((claim) => claim.target.receiptId),
         );
-        outcomes =
-          values.length === chunk.length
-            ? values.map((value, index) => {
-                const parsed = parseExpoProviderOutcome(value);
-                return parsed !== null &&
-                  parsed.providerReference === chunk[index]!.target.receiptId
-                  ? parsed
-                  : unknown(
-                      'EXPO_RECEIPT_RESPONSE_INVALID',
-                      chunk[index]!.target.receiptId,
-                    );
-              })
-            : chunk.map(() => unknown('EXPO_RECEIPT_RESPONSE_INVALID'));
       } catch (error) {
         const failure = normalizeProviderFailure(error);
         const reasonCode = boundedFailureCode(
@@ -838,120 +1098,171 @@ export class ExpoReceiptLifecycle implements ExpoReceiptScheduler {
           failure.disposition,
         );
         for (const claim of chunk) {
-          await settleClaim(claim, () =>
-            this.#reschedule(claim, reasonCode, now),
+          pendingSettlements.push(
+            settleClaim(claim, () => this.#reschedule(claim, reasonCode, now)),
           );
         }
         continue;
+      }
+      try {
+        if (
+          !Array.isArray(rawOutcomes) ||
+          rawOutcomes.length !== chunk.length
+        ) {
+          throw new TypeError('Expo receipt outcomes are invalid.');
+        }
+        outcomes = Array.from({ length: chunk.length }, (_unused, index) => {
+          try {
+            const parsed = parseExpoProviderOutcome(
+              rawOutcomes[index],
+              'receipt',
+            );
+            return parsed !== null &&
+              parsed.providerReference === chunk[index]!.target.receiptId
+              ? parsed
+              : unknown(
+                  'EXPO_RECEIPT_RESPONSE_INVALID',
+                  chunk[index]!.target.receiptId,
+                );
+          } catch {
+            return unknown(
+              'EXPO_RECEIPT_RESPONSE_INVALID',
+              chunk[index]!.target.receiptId,
+            );
+          }
+        });
+      } catch {
+        // Receipt reads are side-effect free, but a malformed fulfilled result
+        // must still pass through bounded retry instead of deciding false truth.
+        outcomes = chunk.map((claim) =>
+          unknown('EXPO_RECEIPT_RESPONSE_INVALID', claim.target.receiptId),
+        );
       }
 
       for (let index = 0; index < chunk.length; index += 1) {
         const claim = chunk[index]!;
         const outcome = outcomes[index]!;
-        await settleClaim(claim, async () => {
-          if (outcome.kind === 'provider-accepted') {
-            return this.#complete(claim, now);
-          }
-          if (
-            outcome.kind === 'retry' &&
-            outcome.reasonCode === 'EXPO_MESSAGE_RATE_EXCEEDED'
-          ) {
-            const delayMilliseconds = retryDelayMilliseconds(
-              claim.target.attempt.attemptNumber,
-              this.#random,
-            );
-            const retryAt = timestampAfter(now, delayMilliseconds);
+        pendingSettlements.push(
+          settleClaim(claim, async () => {
+            if (outcome.kind === 'provider-accepted') {
+              return this.#complete(claim, now);
+            }
             if (
-              claim.target.attempt.attemptNumber < this.#maxSendAttempts &&
-              Date.parse(retryAt) < Date.parse(claim.target.expiresAt)
+              outcome.kind === 'retry' &&
+              outcome.reasonCode === 'EXPO_MESSAGE_RATE_EXCEEDED'
+            ) {
+              const delayMilliseconds = retryDelayMilliseconds(
+                claim.target.attempt.attemptNumber,
+                this.#random,
+              );
+              const retryAt = timestampAfter(now, delayMilliseconds);
+              if (
+                claim.target.attempt.attemptNumber < this.#maxSendAttempts &&
+                Date.parse(retryAt) < Date.parse(claim.target.expiresAt)
+              ) {
+                return this.#stageKnownOutcome(
+                  claim,
+                  Object.freeze({
+                    kind: 'resend' as const,
+                    state: 'failed' as const,
+                    reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED' as const,
+                    nextAttemptNumber: claim.target.attempt.attemptNumber + 1,
+                    delayMilliseconds,
+                    retryAt,
+                    expiresAt: claim.target.expiresAt,
+                  }),
+                  now,
+                );
+              }
+              if (Date.parse(retryAt) >= Date.parse(claim.target.expiresAt)) {
+                return this.#stageKnownOutcome(
+                  claim,
+                  Object.freeze({
+                    kind: 'terminal-expiry' as const,
+                    state: 'expired' as const,
+                    reasonCode: 'EXPO_NOTIFICATION_EXPIRED' as const,
+                  }),
+                  now,
+                );
+              }
+              return this.#stageKnownOutcome(
+                claim,
+                Object.freeze({
+                  kind: 'terminal-failure' as const,
+                  state: 'failed' as const,
+                  reasonCode: 'PROVIDER_RETRY_EXHAUSTED' as const,
+                  invalidatesEndpoint: false as const,
+                }),
+                now,
+              );
+            }
+            if (
+              retryableReceiptOutcome(outcome) ||
+              (outcome.kind === 'unknown' &&
+                outcome.reasonCode === 'EXPO_NETWORK_OUTCOME_AMBIGUOUS')
+            ) {
+              return this.#reschedule(
+                claim,
+                outcome.reasonCode as ExpoReceiptRescheduleReasonCode,
+                now,
+              );
+            }
+            if (outcome.kind === 'retry') {
+              return this.#reschedule(
+                claim,
+                'EXPO_RECEIPT_RESPONSE_INVALID',
+                now,
+              );
+            }
+            if (
+              outcome.kind === 'failed' &&
+              isDefiniteReceiptFailureReason(outcome.reasonCode)
             ) {
               return this.#stageKnownOutcome(
                 claim,
                 Object.freeze({
-                  kind: 'resend' as const,
-                  state: 'failed' as const,
-                  reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED' as const,
-                  nextAttemptNumber: claim.target.attempt.attemptNumber + 1,
-                  delayMilliseconds,
-                  retryAt,
-                  expiresAt: claim.target.expiresAt,
+                  kind: 'terminal-failure',
+                  state: 'failed',
+                  reasonCode: outcome.reasonCode,
+                  invalidatesEndpoint: outcome.invalidatesEndpoint,
                 }),
                 now,
               );
             }
-            if (Date.parse(retryAt) >= Date.parse(claim.target.expiresAt)) {
-              return this.#stageKnownOutcome(
+            if (outcome.kind === 'failed') {
+              return this.#reschedule(
                 claim,
-                Object.freeze({
-                  kind: 'terminal-expiry' as const,
-                  state: 'expired' as const,
-                  reasonCode: 'EXPO_NOTIFICATION_EXPIRED' as const,
-                }),
+                'EXPO_RECEIPT_RESPONSE_INVALID',
                 now,
               );
             }
-            return this.#stageKnownOutcome(
-              claim,
-              Object.freeze({
-                kind: 'terminal-failure' as const,
-                state: 'failed' as const,
-                reasonCode: 'PROVIDER_RETRY_EXHAUSTED' as const,
-                invalidatesEndpoint: false as const,
-              }),
-              now,
-            );
-          }
-          if (
-            retryableReceiptOutcome(outcome) ||
-            (outcome.kind === 'unknown' &&
-              outcome.reasonCode === 'EXPO_NETWORK_OUTCOME_AMBIGUOUS')
-          ) {
-            return this.#reschedule(claim, outcome.reasonCode, now);
-          }
-          if (outcome.kind === 'retry') {
-            return this.#reschedule(
-              claim,
-              'EXPO_RECEIPT_RESPONSE_INVALID',
-              now,
-            );
-          }
-          if (
-            outcome.kind === 'failed' &&
-            isDefiniteReceiptFailureReason(outcome.reasonCode)
-          ) {
-            return this.#stageKnownOutcome(
-              claim,
-              Object.freeze({
-                kind: 'terminal-failure',
-                state: 'failed',
-                reasonCode: outcome.reasonCode,
-                invalidatesEndpoint: outcome.invalidatesEndpoint,
-              }),
-              now,
-            );
-          }
-          if (outcome.kind === 'failed') {
-            return this.#reschedule(
-              claim,
-              'EXPO_RECEIPT_RESPONSE_INVALID',
-              now,
-            );
-          }
-          return this.#recordTerminal(claim, outcome, now);
-        });
+            return this.#recordTerminal(claim, outcome, now);
+          }),
+        );
       }
     }
 
-    if (hasFailure) throw firstFailure;
-    return Object.freeze(
-      claims.map((claim) => {
+    await Promise.all(pendingSettlements);
+    const orderedResults = Object.freeze([
+      ...parsedClaims.map((claim) => {
         const result = results.get(claim.target.attempt.id);
         if (result === undefined) {
           throw new TypeError('Expo receipt lifecycle result is missing.');
         }
         return result;
       }),
-    );
+      ...Array.from({ length: invalidClaimCount }, () =>
+        unidentifiedReceiptItemError(),
+      ),
+    ]);
+    if (
+      orderedResults.some(
+        (result) => 'kind' in result && result.kind === 'error',
+      )
+    ) {
+      throw new ExpoReceiptLifecycleBatchError(orderedResults);
+    }
+    return orderedResults;
   }
 
   async #complete(
@@ -977,7 +1288,7 @@ export class ExpoReceiptLifecycle implements ExpoReceiptScheduler {
 
   async #reschedule(
     claim: ExpoReceiptClaim,
-    reasonCode: ExpoSafeReasonCode,
+    reasonCode: ExpoReceiptRescheduleReasonCode,
     now: string,
   ): Promise<ExpoReceiptLifecycleResult> {
     const nextPollAt = new Date(
@@ -1044,6 +1355,13 @@ export class ExpoReceiptLifecycle implements ExpoReceiptScheduler {
     }
     if (action.kind === 'terminal-expiry') {
       return this.#recordTerminal(claim, expired(claim.target.receiptId), now);
+    }
+    if (action.kind === 'terminal-unknown') {
+      return this.#recordTerminal(
+        claim,
+        unknown(action.reasonCode, claim.target.receiptId),
+        now,
+      );
     }
     return this.#recordTerminal(
       claim,

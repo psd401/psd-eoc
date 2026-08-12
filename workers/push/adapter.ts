@@ -25,10 +25,37 @@ import {
 } from './protocol';
 import type { ExpoPushTransport } from './transport';
 
-const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_TOKEN_PATTERN = /^[A-Za-z0-9._:-]{16,512}$/u;
+const SAFE_PROVIDER_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/u;
 const DEFAULT_BATCH_WINDOW_MILLISECONDS = 5;
 const MAX_BATCH_WINDOW_MILLISECONDS = 100;
+
+const CANONICAL_SEND_OUTCOME_FAILURE_REASONS: ReadonlySet<string> = new Set([
+  'EXPO_DEVICE_NOT_REGISTERED',
+  'EXPO_INVALID_CREDENTIALS',
+  'EXPO_MESSAGE_TOO_BIG',
+  'EXPO_MISMATCH_SENDER_ID',
+]);
+const CANONICAL_SEND_OUTCOME_UNKNOWN_REASONS: ReadonlySet<string> = new Set([
+  'EXPO_SEND_OUTCOME_AMBIGUOUS',
+  'EXPO_TICKET_ERROR_UNKNOWN',
+  'EXPO_TICKET_MISSING',
+  'EXPO_TICKET_RESPONSE_INVALID',
+]);
+
+const CANONICAL_LEDGER_FAILURE_DISPOSITIONS = Object.freeze(
+  new Map<string, ProviderFailure['disposition']>([
+    ['EXPO_HTTP_RATE_LIMITED', 'safe-to-retry'],
+    ['EXPO_HTTP_SERVER_ERROR', 'safe-to-retry'],
+    ['EXPO_MESSAGE_RATE_EXCEEDED', 'safe-to-retry'],
+    ['EXPO_HTTP_CLIENT_ERROR', 'terminal-failure'],
+    ['EXPO_INVALID_CREDENTIALS', 'terminal-failure'],
+    ['EXPO_LIVE_TRANSPORT_DISABLED', 'terminal-failure'],
+    ['EXPO_NETWORK_OUTCOME_AMBIGUOUS', 'ambiguous'],
+    ['EXPO_RESPONSE_TOO_LARGE', 'ambiguous'],
+    ['PROVIDER_OUTCOME_AMBIGUOUS', 'ambiguous'],
+  ]),
+);
 
 export type ExpoSendLedgerCompletion =
   | Readonly<{
@@ -62,6 +89,8 @@ export interface CompleteExpoProviderIoRequest
  * A production implementation must durably and atomically key records by
  * attemptId and workFingerprint. Once `execute` has been returned, that attempt
  * may never receive another provider-I/O permit, even after a crash or timeout.
+ * A thrown claim error is always treated as ambiguous because it cannot prove
+ * whether a completed provider-I/O record already exists.
  */
 export interface DurableExpoSendLedger {
   claimProviderIo(
@@ -83,11 +112,9 @@ export class LedgeredExpoPushAdapterError extends ProviderDispatchError {
   public constructor(code: LedgeredExpoPushAdapterErrorCode) {
     super(
       code,
-      code === 'EXPO_SEND_LEDGER_FAILED'
-        ? 'safe-to-retry'
-        : code === 'EXPO_SEND_LEDGER_INVALID'
-          ? 'ambiguous'
-          : 'terminal-failure',
+      code === 'EXPO_SEND_LEDGER_FAILED' || code === 'EXPO_SEND_LEDGER_INVALID'
+        ? 'ambiguous'
+        : 'terminal-failure',
     );
     this.code = code;
     this.name = 'LedgeredExpoPushAdapterError';
@@ -108,24 +135,43 @@ interface PendingExpoProviderIo {
   readonly resolve: (completion: ExpoSendLedgerCompletion) => void;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null;
-}
-
-function hasExactKeys(
-  value: Readonly<Record<string, unknown>>,
+function exactDataProperties(
+  value: unknown,
   expected: readonly string[],
-): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return (
-    actual.length === wanted.length &&
-    actual.every((key, index) => key === wanted[index])
-  );
+): Readonly<Record<string, unknown>> | null {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (
+      keys.length !== expected.length ||
+      keys.some((key) => typeof key !== 'string' || !expected.includes(key))
+    ) {
+      return null;
+    }
+    const properties: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    for (const key of expected) {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined ||
+        descriptor.enumerable !== true ||
+        !Object.hasOwn(descriptor, 'value')
+      ) {
+        return null;
+      }
+      properties[key] = descriptor.value;
+    }
+    return properties;
+  } catch {
+    return null;
+  }
 }
 
 function unknownSendOutcome(): ProviderSendOutcome {
@@ -139,26 +185,67 @@ function unknownSendOutcome(): ProviderSendOutcome {
   });
 }
 
+function isCanonicalLedgerOutcome(
+  outcome: Readonly<{
+    state: string;
+    providerReference: string | null;
+    proof: unknown;
+    reasonCode: string | null;
+    diagnosticDigest: string | null;
+  }>,
+): boolean {
+  if (
+    outcome.proof !== null ||
+    outcome.diagnosticDigest !== null ||
+    (outcome.providerReference !== null &&
+      !SAFE_PROVIDER_REFERENCE_PATTERN.test(outcome.providerReference))
+  ) {
+    return false;
+  }
+  if (outcome.state === 'provider-accepted') {
+    return outcome.providerReference !== null && outcome.reasonCode === null;
+  }
+  if (outcome.state === 'expired') {
+    return (
+      outcome.providerReference === null &&
+      outcome.reasonCode === 'EXPO_NOTIFICATION_EXPIRED'
+    );
+  }
+  if (outcome.state === 'failed') {
+    return (
+      outcome.providerReference === null &&
+      outcome.reasonCode !== null &&
+      CANONICAL_SEND_OUTCOME_FAILURE_REASONS.has(outcome.reasonCode)
+    );
+  }
+  if (outcome.state === 'unknown') {
+    return (
+      outcome.providerReference === null &&
+      outcome.reasonCode !== null &&
+      CANONICAL_SEND_OUTCOME_UNKNOWN_REASONS.has(outcome.reasonCode)
+    );
+  }
+  return false;
+}
+
 function parseLedgerOutcome(
   value: unknown,
   attemptId: string,
 ): ProviderSendOutcome {
-  if (
-    !isPlainRecord(value) ||
-    !hasExactKeys(value, [
-      'diagnosticDigest',
-      'proof',
-      'provider',
-      'providerReference',
-      'reasonCode',
-      'state',
-    ])
-  ) {
+  const properties = exactDataProperties(value, [
+    'diagnosticDigest',
+    'proof',
+    'provider',
+    'providerReference',
+    'reasonCode',
+    'state',
+  ]);
+  if (properties === null) {
     throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
   }
   const result = RecordDeliveryEvidenceInputSchema.safeParse({
     subject: { kind: 'attempt', attemptId },
-    ...value,
+    ...properties,
   });
   if (
     !result.success ||
@@ -167,13 +254,8 @@ function parseLedgerOutcome(
     ) ||
     result.data.subject.kind !== 'attempt' ||
     result.data.subject.attemptId !== attemptId ||
-    result.data.provider !== EXPO_PUSH_PROVIDER
-  ) {
-    throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
-  }
-  if (
-    result.data.state === 'unknown' &&
-    result.data.reasonCode === 'EXPO_DEVICE_NOT_REGISTERED'
+    result.data.provider !== EXPO_PUSH_PROVIDER ||
+    !isCanonicalLedgerOutcome(result.data)
   ) {
     throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
   }
@@ -188,27 +270,26 @@ function parseLedgerOutcome(
 }
 
 function parseLedgerFailure(value: unknown): ProviderFailure {
+  const properties = exactDataProperties(value, [
+    'code',
+    'diagnosticDigest',
+    'disposition',
+  ]);
   if (
-    !isPlainRecord(value) ||
-    !hasExactKeys(value, ['code', 'diagnosticDigest', 'disposition']) ||
-    typeof value.code !== 'string' ||
-    typeof value.disposition !== 'string' ||
-    !['safe-to-retry', 'terminal-failure', 'ambiguous'].includes(
-      value.disposition,
-    ) ||
-    !(
-      value.diagnosticDigest === null ||
-      (typeof value.diagnosticDigest === 'string' &&
-        DIGEST_PATTERN.test(value.diagnosticDigest))
-    )
+    properties === null ||
+    typeof properties.code !== 'string' ||
+    typeof properties.disposition !== 'string' ||
+    properties.diagnosticDigest !== null ||
+    CANONICAL_LEDGER_FAILURE_DISPOSITIONS.get(properties.code) !==
+      properties.disposition
   ) {
     throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
   }
   try {
     const error = new ProviderDispatchError(
-      value.code,
-      value.disposition as ProviderFailure['disposition'],
-      value.diagnosticDigest,
+      properties.code,
+      properties.disposition as ProviderFailure['disposition'],
+      properties.diagnosticDigest,
     );
     return normalizeProviderFailure(error);
   } catch {
@@ -220,20 +301,22 @@ function parseLedgerCompletion(
   value: unknown,
   attemptId: string,
 ): ExpoSendLedgerCompletion {
-  if (!isPlainRecord(value)) {
-    throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
-  }
-  if (value.kind === 'outcome' && hasExactKeys(value, ['kind', 'outcome'])) {
+  const outcomeCompletion = exactDataProperties(value, ['kind', 'outcome']);
+  if (outcomeCompletion?.kind === 'outcome') {
     return Object.freeze({
       kind: 'outcome',
-      outcome: parseLedgerOutcome(value.outcome, attemptId),
+      outcome: parseLedgerOutcome(outcomeCompletion.outcome, attemptId),
     });
   }
-  if (value.kind === 'failure' && hasExactKeys(value, ['failure', 'kind'])) {
+  const failureCompletion = exactDataProperties(value, ['failure', 'kind']);
+  if (failureCompletion?.kind === 'failure') {
     return Object.freeze({
       kind: 'failure',
-      failure: parseLedgerFailure(value.failure),
+      failure: parseLedgerFailure(failureCompletion.failure),
     });
+  }
+  if (outcomeCompletion === null && failureCompletion === null) {
+    throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
   }
   throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
 }
@@ -242,31 +325,24 @@ function parseLedgerClaim(
   value: unknown,
   attemptId: string,
 ): ExpoSendLedgerClaim {
-  if (!isPlainRecord(value)) {
-    throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
-  }
+  const execute = exactDataProperties(value, ['claimToken', 'kind']);
   if (
-    value.kind === 'execute' &&
-    hasExactKeys(value, ['claimToken', 'kind']) &&
-    typeof value.claimToken === 'string' &&
-    SAFE_TOKEN_PATTERN.test(value.claimToken)
+    execute?.kind === 'execute' &&
+    typeof execute.claimToken === 'string' &&
+    SAFE_TOKEN_PATTERN.test(execute.claimToken)
   ) {
-    return Object.freeze({ kind: 'execute', claimToken: value.claimToken });
+    return Object.freeze({ kind: 'execute', claimToken: execute.claimToken });
   }
-  if (
-    value.kind === 'completed' &&
-    hasExactKeys(value, ['completion', 'kind'])
-  ) {
+  const completed = exactDataProperties(value, ['completion', 'kind']);
+  if (completed?.kind === 'completed') {
     return Object.freeze({
       kind: 'completed',
-      completion: parseLedgerCompletion(value.completion, attemptId),
+      completion: parseLedgerCompletion(completed.completion, attemptId),
     });
   }
-  if (
-    (value.kind === 'uncertain' || value.kind === 'conflict') &&
-    hasExactKeys(value, ['kind'])
-  ) {
-    return Object.freeze({ kind: value.kind });
+  const terminal = exactDataProperties(value, ['kind']);
+  if (terminal?.kind === 'uncertain' || terminal?.kind === 'conflict') {
+    return Object.freeze({ kind: terminal.kind });
   }
   throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
 }
@@ -283,7 +359,19 @@ function outcomeFromExpo(value: ExpoProviderOutcome): ProviderSendOutcome {
 }
 
 function failureFromError(error: unknown): ProviderFailure {
-  return normalizeProviderFailure(error);
+  const failure = normalizeProviderFailure(error);
+  if (
+    failure.diagnosticDigest === null &&
+    CANONICAL_LEDGER_FAILURE_DISPOSITIONS.get(failure.code) ===
+      failure.disposition
+  ) {
+    return failure;
+  }
+  return Object.freeze({
+    code: 'PROVIDER_OUTCOME_AMBIGUOUS',
+    disposition: 'ambiguous',
+    diagnosticDigest: null,
+  });
 }
 
 function batchWindowMilliseconds(value: number | undefined): number {
@@ -318,7 +406,7 @@ function completionFromExpoOutcome(
 function safeCompletionFromExpoOutcome(
   value: unknown,
 ): ExpoSendLedgerCompletion {
-  const outcome = parseExpoProviderOutcome(value);
+  const outcome = parseExpoProviderOutcome(value, 'ticket');
   if (outcome === null) {
     return Object.freeze({
       kind: 'outcome',
@@ -326,7 +414,17 @@ function safeCompletionFromExpoOutcome(
     });
   }
   try {
-    return completionFromExpoOutcome(outcome);
+    const completion = completionFromExpoOutcome(outcome);
+    if (
+      completion.kind === 'outcome' &&
+      !isCanonicalLedgerOutcome(completion.outcome)
+    ) {
+      return Object.freeze({
+        kind: 'outcome',
+        outcome: unknownSendOutcome(),
+      });
+    }
+    return completion;
   } catch {
     return Object.freeze({
       kind: 'outcome',
@@ -385,21 +483,16 @@ export class LedgeredExpoPushAdapter
       throw new LedgeredExpoPushAdapterError('EXPO_SEND_REQUEST_INVALID');
     }
     const workFingerprint = workerAttemptFingerprint(workItem);
-    let claim: ExpoSendLedgerClaim;
+    let rawClaim: unknown;
     try {
-      claim = parseLedgerClaim(
-        await this.#ledger.claimProviderIo({
-          attemptId: workItem.attempt.id,
-          workFingerprint,
-        }),
-        workItem.attempt.id,
-      );
-    } catch (error) {
-      if (error instanceof LedgeredExpoPushAdapterError) {
-        throw error;
-      }
+      rawClaim = await this.#ledger.claimProviderIo({
+        attemptId: workItem.attempt.id,
+        workFingerprint,
+      });
+    } catch {
       throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_FAILED');
     }
+    const claim = parseLedgerClaim(rawClaim, workItem.attempt.id);
 
     if (claim.kind === 'conflict') {
       throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_CONFLICT');
@@ -464,7 +557,16 @@ export class LedgeredExpoPushAdapter
       (includePartial && this.#pendingProviderIo.length > 0)
     ) {
       const pending = this.#pendingProviderIo.splice(0, EXPO_SEND_CHUNK_SIZE);
-      void this.#sendProviderChunk(pending);
+      void this.#sendProviderChunk(pending).catch(() => {
+        for (const entry of pending) {
+          entry.resolve(
+            Object.freeze({
+              kind: 'outcome',
+              outcome: unknownSendOutcome(),
+            }),
+          );
+        }
+      });
     }
     if (this.#pendingProviderIo.length > 0) this.#scheduleFlush();
   }
@@ -492,25 +594,56 @@ export class LedgeredExpoPushAdapter
         return completionFromExpoOutcome(expired());
       });
     if (fresh.length > 0) {
-      let freshCompletions: readonly ExpoSendLedgerCompletion[];
+      let freshCompletions: readonly ExpoSendLedgerCompletion[] = fresh.map(
+        () =>
+          Object.freeze({
+            kind: 'outcome' as const,
+            outcome: unknownSendOutcome(),
+          }),
+      );
+      let rawOutcomes: unknown;
       try {
-        const outcomes = await this.#transport.sendChunk(
+        rawOutcomes = await this.#transport.sendChunk(
           fresh.map((entry) => entry.workItem),
         );
-        freshCompletions =
-          outcomes.length === fresh.length
-            ? outcomes.map(safeCompletionFromExpoOutcome)
-            : fresh.map(() =>
-                Object.freeze({
-                  kind: 'outcome' as const,
-                  outcome: unknownSendOutcome(),
-                }),
-              );
       } catch (error) {
         const failure = failureFromError(error);
         freshCompletions = fresh.map(() =>
           Object.freeze({ kind: 'failure' as const, failure }),
         );
+        rawOutcomes = null;
+      }
+      if (rawOutcomes !== null) {
+        try {
+          if (
+            !Array.isArray(rawOutcomes) ||
+            rawOutcomes.length !== fresh.length
+          ) {
+            throw new TypeError('Expo send outcomes are invalid.');
+          }
+          freshCompletions = Array.from(
+            { length: fresh.length },
+            (_unused, index) => {
+              try {
+                return safeCompletionFromExpoOutcome(rawOutcomes[index]);
+              } catch {
+                return Object.freeze({
+                  kind: 'outcome' as const,
+                  outcome: unknownSendOutcome(),
+                });
+              }
+            },
+          );
+        } catch {
+          // Provider I/O returned successfully, so failures while validating
+          // the untrusted result container are ambiguous and never retryable.
+          freshCompletions = fresh.map(() =>
+            Object.freeze({
+              kind: 'outcome' as const,
+              outcome: unknownSendOutcome(),
+            }),
+          );
+        }
       }
       let freshIndex = 0;
       for (let index = 0; index < pending.length; index += 1) {
