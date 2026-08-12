@@ -35,6 +35,9 @@ export default async function DashboardPage() {
             a separate incident or drill.
           </p>
         </div>
+        <a className="button button--secondary" href="/records">
+          View drill records
+        </a>
       </header>
 
       <Call911Affordance />

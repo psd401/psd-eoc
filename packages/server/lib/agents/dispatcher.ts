@@ -1,5 +1,6 @@
 import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
 
+import type { StartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
 import {
   executeQuerySecurityAuditCapability,
   executeVerifySecurityAuditChainCapability,
@@ -19,6 +20,7 @@ import {
 import type { TrustedCapabilityInvocation } from '../capabilities/engine';
 import type { EventCapabilityRuntime } from '../capabilities/events';
 import type { JournalCapabilityRuntime } from '../capabilities/journal';
+import type { RecordsCapabilityRuntime } from '../capabilities/records';
 import {
   agentApiKeyAdministrationAccessFromAgent,
   type AgentApiKeyAdministration,
@@ -36,6 +38,8 @@ import type { AgentRosterReportRuntime } from './roster-report';
 export interface DefaultAgentCapabilityDispatcherDependencies {
   readonly events: EventCapabilityRuntime;
   readonly journal: JournalCapabilityRuntime;
+  readonly activationPreviews: StartFlowCapabilityRuntime;
+  readonly records: RecordsCapabilityRuntime;
   readonly administration: AgentApiKeyAdministration;
   readonly administrationFacilities: AgentAdministrationFacilityCapabilities;
   readonly eventTypes: EventTypeStore;
@@ -69,8 +73,10 @@ const canonicallyAuditedCapabilityIds = new Set<AgentGrantableCapabilityId>([
   'correct-journal-entry',
   'redact-journal-entry',
   'list-journal-entries',
+  'search-journal-entries',
   'create-lifecycle-consequence-preview',
   'get-facility',
+  'create-activation-preview',
   'prepare-activation',
   'get-prepared-activation',
   'create-event-type-draft',
@@ -80,6 +86,9 @@ const canonicallyAuditedCapabilityIds = new Set<AgentGrantableCapabilityId>([
   'verify-security-audit-chain',
   'list-agent-api-keys',
   'list-facilities',
+  'list-drill-records',
+  'export-drill-records',
+  'export-event-summary',
 ]);
 
 function eventTypeAgent(
@@ -156,9 +165,17 @@ export function createDefaultAgentCapabilityDispatcher(
         case 'correct-journal-entry':
         case 'redact-journal-entry':
         case 'list-journal-entries':
+        case 'search-journal-entries':
         case 'create-lifecycle-consequence-preview':
         case 'get-facility':
           return dependencies.journal.execute(capabilityId, input, invocation);
+
+        case 'create-activation-preview':
+          return dependencies.activationPreviews.execute(
+            capabilityId,
+            input,
+            invocation,
+          );
 
         case 'prepare-activation':
         case 'get-prepared-activation':
@@ -175,6 +192,11 @@ export function createDefaultAgentCapabilityDispatcher(
             invocation,
             authenticated,
           );
+
+        case 'list-drill-records':
+        case 'export-drill-records':
+        case 'export-event-summary':
+          return dependencies.records.execute(capabilityId, input, invocation);
 
         case 'list-agent-api-keys':
           return dependencies.administration.list({
