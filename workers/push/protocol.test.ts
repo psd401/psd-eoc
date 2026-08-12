@@ -182,7 +182,7 @@ describe('Expo untrusted provider response mapping', () => {
         invalidatesEndpoint: false,
       },
     ];
-    expect(malformed.map(parseExpoProviderOutcome)).toEqual(
+    expect(malformed.map((value) => parseExpoProviderOutcome(value))).toEqual(
       malformed.map(() => null),
     );
 
@@ -192,6 +192,113 @@ describe('Expo untrusted provider response mapping', () => {
       get: () => 'ticket-accessor',
     });
     expect(parseExpoProviderOutcome(accessorOutcome)).toBeNull();
+  });
+
+  test('enforces the exact provider-item outcome kind for every safe reason code', () => {
+    const canonicalKinds = [
+      ['EXPO_DEVICE_NOT_REGISTERED', 'failed'],
+      ['EXPO_HTTP_CLIENT_ERROR', null],
+      ['EXPO_HTTP_RATE_LIMITED', null],
+      ['EXPO_HTTP_SERVER_ERROR', null],
+      ['EXPO_INVALID_CREDENTIALS', 'failed'],
+      ['EXPO_LIVE_TRANSPORT_DISABLED', null],
+      ['EXPO_MESSAGE_RATE_EXCEEDED', 'retry'],
+      ['EXPO_MESSAGE_TOO_BIG', 'failed'],
+      ['EXPO_MISMATCH_SENDER_ID', 'failed'],
+      ['EXPO_NETWORK_OUTCOME_AMBIGUOUS', 'unknown'],
+      ['EXPO_NOTIFICATION_EXPIRED', 'failed'],
+      ['EXPO_RECEIPT_ERROR_UNKNOWN', 'unknown'],
+      ['EXPO_RECEIPT_HORIZON_EXPIRED', null],
+      ['EXPO_RECEIPT_MISSING', 'unknown'],
+      ['EXPO_RECEIPT_REFERENCE_CONFLICT', null],
+      ['EXPO_RECEIPT_RESPONSE_INVALID', 'unknown'],
+      ['EXPO_RESPONSE_TOO_LARGE', null],
+      ['EXPO_TICKET_ERROR_UNKNOWN', 'unknown'],
+      ['EXPO_TICKET_MISSING', 'unknown'],
+      ['EXPO_TICKET_RESPONSE_INVALID', 'unknown'],
+      ['PROVIDER_RETRY_EXHAUSTED', null],
+    ] as const;
+    const kinds = ['failed', 'retry', 'unknown'] as const;
+
+    for (const [reasonCode, canonicalKind] of canonicalKinds) {
+      for (const kind of kinds) {
+        const candidate =
+          kind === 'failed'
+            ? ({
+                kind,
+                state:
+                  reasonCode === 'EXPO_NOTIFICATION_EXPIRED'
+                    ? 'expired'
+                    : 'failed',
+                providerReference: 'outcome-matrix-reference',
+                reasonCode,
+                invalidatesEndpoint:
+                  reasonCode === 'EXPO_DEVICE_NOT_REGISTERED',
+              } as const)
+            : kind === 'retry'
+              ? ({
+                  kind,
+                  state: 'failed',
+                  providerReference: 'outcome-matrix-reference',
+                  reasonCode,
+                  invalidatesEndpoint: false,
+                } as const)
+              : ({
+                  kind,
+                  state: 'unknown',
+                  providerReference: 'outcome-matrix-reference',
+                  reasonCode,
+                  invalidatesEndpoint: false,
+                } as const);
+
+        const parsed = parseExpoProviderOutcome(candidate);
+        if (kind === canonicalKind) {
+          expect(parsed).toEqual(candidate);
+          expect(Object.isFrozen(parsed)).toBe(true);
+        } else {
+          expect(parsed).toBeNull();
+        }
+      }
+    }
+
+    expect(
+      parseExpoProviderOutcome({
+        kind: 'failed',
+        state: 'failed',
+        providerReference: null,
+        reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+        invalidatesEndpoint: false,
+      }),
+    ).toBeNull();
+  });
+
+  test('enforces ticket and receipt reason phases independently', () => {
+    const outcome = (reasonCode: string) => ({
+      kind: 'unknown',
+      state: 'unknown',
+      providerReference: 'phase-reference',
+      reasonCode,
+      invalidatesEndpoint: false,
+    });
+
+    expect(
+      parseExpoProviderOutcome(outcome('EXPO_TICKET_MISSING'), 'ticket'),
+    ).toMatchObject({ reasonCode: 'EXPO_TICKET_MISSING' });
+    expect(
+      parseExpoProviderOutcome(outcome('EXPO_TICKET_MISSING'), 'receipt'),
+    ).toBeNull();
+    expect(
+      parseExpoProviderOutcome(outcome('EXPO_RECEIPT_MISSING'), 'receipt'),
+    ).toMatchObject({ reasonCode: 'EXPO_RECEIPT_MISSING' });
+    expect(
+      parseExpoProviderOutcome(outcome('EXPO_RECEIPT_MISSING'), 'ticket'),
+    ).toBeNull();
+    expect(
+      parseExpoProviderOutcome(
+        outcome('EXPO_RECEIPT_REFERENCE_CONFLICT'),
+        'receipt',
+      ),
+    ).toBeNull();
   });
 
   test('maps partial tickets independently', () => {
@@ -233,6 +340,135 @@ describe('Expo untrusted provider response mapping', () => {
         kind: 'unknown',
         reasonCode: 'EXPO_TICKET_MISSING',
       }),
+    ]);
+  });
+
+  test('bounds hostile top-level array lengths without invoking length, iterator, or map traps', () => {
+    let trapCalls = 0;
+    const noPropertyReads = <Value extends readonly unknown[]>(value: Value) =>
+      new Proxy(value, {
+        get: (target, property, receiver) => {
+          if (
+            property === 'length' ||
+            property === Symbol.iterator ||
+            property === 'map'
+          ) {
+            trapCalls += 1;
+            throw new Error('synthetic hostile array property');
+          }
+          return Reflect.get(target, property, receiver) as unknown;
+        },
+      });
+    const data = noPropertyReads([{ status: 'ok', id: 'ticket-safe' }]);
+    const errors = noPropertyReads([]);
+
+    expect(parseExpoTicketResponse({ data, errors }, 1)).toEqual([
+      expect.objectContaining({
+        kind: 'provider-accepted',
+        providerReference: 'ticket-safe',
+      }),
+    ]);
+    expect(trapCalls).toBe(0);
+
+    const hostileDataLength = new Proxy(
+      [{ status: 'ok', id: 'ticket-unreadable-data-length' }],
+      {
+        getOwnPropertyDescriptor: (target, property) => {
+          if (property === 'length') {
+            throw new Error('synthetic hostile data length');
+          }
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+      },
+    );
+    expect(parseExpoTicketResponse({ data: hostileDataLength }, 1)).toEqual([
+      expect.objectContaining({
+        kind: 'unknown',
+        reasonCode: 'EXPO_TICKET_RESPONSE_INVALID',
+      }),
+    ]);
+
+    const hostileErrorsLength = new Proxy([], {
+      getOwnPropertyDescriptor: (target, property) => {
+        if (property === 'length') {
+          throw new Error('synthetic hostile errors length');
+        }
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+    expect(
+      parseExpoTicketResponse(
+        {
+          data: [{ status: 'ok', id: 'ticket-unreadable-errors-length' }],
+          errors: hostileErrorsLength,
+        },
+        1,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: 'unknown',
+        reasonCode: 'EXPO_TICKET_RESPONSE_INVALID',
+      }),
+    ]);
+  });
+
+  test('rejects an accessor-backed ticket slot without invoking it or discarding valid siblings', () => {
+    let getterCalls = 0;
+    const data = [
+      { status: 'ok', id: 'ticket-accessor-sibling-1' },
+      { status: 'ok', id: 'ticket-accessor-hostile' },
+      { status: 'ok', id: 'ticket-accessor-sibling-2' },
+    ];
+    Object.defineProperty(data, 1, {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('synthetic hostile ticket accessor');
+      },
+    });
+
+    expect(
+      parseExpoTicketResponse({ data }, 3).map((outcome) => [
+        outcome.kind,
+        outcome.providerReference,
+        outcome.reasonCode,
+      ]),
+    ).toEqual([
+      ['provider-accepted', 'ticket-accessor-sibling-1', null],
+      ['unknown', null, 'EXPO_TICKET_RESPONSE_INVALID'],
+      ['provider-accepted', 'ticket-accessor-sibling-2', null],
+    ]);
+    expect(getterCalls).toBe(0);
+  });
+
+  test('isolates a throwing proxy index while preserving readable ticket siblings', () => {
+    const data = new Proxy(
+      [
+        { status: 'ok', id: 'ticket-proxy-sibling-1' },
+        { status: 'ok', id: 'ticket-proxy-hostile' },
+        { status: 'ok', id: 'ticket-proxy-sibling-2' },
+      ],
+      {
+        getOwnPropertyDescriptor: (target, property) => {
+          if (property === '1') {
+            throw new Error('synthetic hostile ticket proxy slot');
+          }
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+      },
+    );
+
+    expect(
+      parseExpoTicketResponse({ data }, 3).map((outcome) => [
+        outcome.kind,
+        outcome.providerReference,
+        outcome.reasonCode,
+      ]),
+    ).toEqual([
+      ['provider-accepted', 'ticket-proxy-sibling-1', null],
+      ['unknown', null, 'EXPO_TICKET_RESPONSE_INVALID'],
+      ['provider-accepted', 'ticket-proxy-sibling-2', null],
     ]);
   });
 
