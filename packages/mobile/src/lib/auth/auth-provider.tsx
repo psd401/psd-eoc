@@ -16,6 +16,7 @@ import { AuthApiClient, parseAuthApiBaseUrl } from './auth-api-client';
 import {
   createAuthenticatedRequestTransport,
   MobileAuthController,
+  type AuthStorage,
   type AuthState,
   type MobileAuthenticatedRequest,
 } from './auth-controller';
@@ -25,6 +26,7 @@ import { createLocalAuthenticator } from './local-authenticator';
 import { MobileOidcClient } from './oidc-client';
 import { createSecureSessionStore } from './secure-session-store';
 import {
+  createIssue21SyntheticAuthFixture,
   createIssue21SyntheticFixtureTransport,
   isIssue21SyntheticFixtureEnabled,
 } from '../start/issue-21-synthetic-fixture';
@@ -46,22 +48,41 @@ export interface MobileAuthContextValue {
 
 interface AuthRuntime {
   readonly controller: MobileAuthController;
-  readonly oidc: MobileOidcClient;
-  readonly storage: ReturnType<typeof createSecureSessionStore>;
+  readonly oidc: MobileOidcClient | null;
+  readonly storage: AuthStorage;
 }
 
 const MobileAuthContext = createContext<MobileAuthContextValue | null>(null);
 
 function createRuntime(): AuthRuntime {
+  if (isIssue21SyntheticFixtureEnabled()) {
+    if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
+      throw new MobileAuthError(
+        'configuration',
+        'The issue-21 synthetic fixture requires an iOS or Android development build.',
+      );
+    }
+    const fixture = createIssue21SyntheticAuthFixture(Platform.OS);
+    return Object.freeze({
+      controller: new MobileAuthController({
+        api: fixture.api,
+        authenticatedRequest: createIssue21SyntheticFixtureTransport(),
+        storage: fixture.storage,
+        localAuthenticator: createLocalAuthenticator(),
+        createIdempotencyKey: () => Crypto.randomUUID(),
+      }),
+      storage: fixture.storage,
+      oidc: null,
+    });
+  }
+
   const storage = createSecureSessionStore();
   const apiOrigin = () =>
     parseAuthApiBaseUrl(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL, __DEV__);
   const api = new AuthApiClient(apiOrigin);
   const controller = new MobileAuthController({
     api,
-    authenticatedRequest: isIssue21SyntheticFixtureEnabled()
-      ? createIssue21SyntheticFixtureTransport()
-      : createAuthenticatedRequestTransport(apiOrigin),
+    authenticatedRequest: createAuthenticatedRequestTransport(apiOrigin),
     storage,
     localAuthenticator: createLocalAuthenticator(),
     createIdempotencyKey: () => Crypto.randomUUID(),
@@ -131,6 +152,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
     setIsSigningIn(true);
     setSignInError(null);
     try {
+      if (runtime.oidc === null) {
+        throw new MobileAuthError(
+          'configuration',
+          'Synthetic accessibility testing does not use Google sign-in. Restart the development build to restore its in-memory enrollment.',
+        );
+      }
       if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
         throw new MobileAuthError(
           'configuration',

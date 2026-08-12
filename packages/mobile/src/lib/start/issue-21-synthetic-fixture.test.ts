@@ -5,6 +5,8 @@ import {
   type CreateActivationPreviewInput,
 } from '@psd-eoc/contracts';
 
+import { MobileAuthController, type AuthTimer } from '../auth/auth-controller';
+import { OfflineMutationDeniedError } from '../auth/auth-errors';
 import {
   activate,
   createPreview,
@@ -12,7 +14,10 @@ import {
   loadStartHomeData,
   type StartAuthenticatedRequest,
 } from './start-api-client';
-import { createIssue21SyntheticFixtureTransport } from './issue-21-synthetic-fixture';
+import {
+  createIssue21SyntheticAuthFixture,
+  createIssue21SyntheticFixtureTransport,
+} from './issue-21-synthetic-fixture';
 
 const FIXTURE_NOW = new Date('2026-08-11T18:00:00.000Z');
 const IDEMPOTENCY_KEY = 'issue-21-synthetic-idempotency-0001';
@@ -21,6 +26,10 @@ const developmentGlobal = globalThis as typeof globalThis & {
   __DEV__?: boolean;
 };
 const originalDevelopment = developmentGlobal.__DEV__;
+const inertTimer: AuthTimer = Object.freeze({
+  schedule: () => 1,
+  cancel: () => {},
+});
 
 beforeAll(() => {
   developmentGlobal.__DEV__ = true;
@@ -80,6 +89,146 @@ describe('issue-21 synthetic Maestro transport', () => {
     } finally {
       developmentGlobal.__DEV__ = true;
     }
+
+    const enabledFixture = process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE;
+    process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE = 'unexpected';
+    try {
+      expect(() =>
+        createIssue21SyntheticAuthFixture('ios', () => new Date(FIXTURE_NOW)),
+      ).toThrow(TypeError);
+    } finally {
+      process.env.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE = enabledFixture;
+    }
+  });
+
+  test('seeds only contract-valid, biometric native sessions in memory', async () => {
+    for (const platform of ['ios', 'android'] as const) {
+      const fixture = createIssue21SyntheticAuthFixture(
+        platform,
+        () => new Date(FIXTURE_NOW),
+      );
+      expect(await fixture.storage.hasEnrollment()).toBe(true);
+      const vault = await fixture.storage.readVault();
+      expect(vault?.session.deviceEnrollment.platform).toBe(platform);
+      expect(vault?.session.deviceEnrollment.unlockMethod).toBe('biometric');
+      expect(vault?.session.user.facilityScope).toEqual({
+        kind: 'facilities',
+        facilityIds: ['71000000-0000-4000-8000-000000000001'],
+      });
+      expect(vault?.session.user.email).toBe('synthetic.staff@psd401.net');
+      expect(
+        Date.parse(vault?.session.session.expiresAt ?? '') >
+          FIXTURE_NOW.getTime(),
+      ).toBe(true);
+    }
+  });
+
+  test('requires local device authentication before any synthetic request', async () => {
+    const fixture = createIssue21SyntheticAuthFixture(
+      'ios',
+      () => new Date(FIXTURE_NOW),
+    );
+    const fixtureTransport = createIssue21SyntheticFixtureTransport(
+      () => new Date(FIXTURE_NOW),
+    );
+    let authenticationCount = 0;
+    let transportCount = 0;
+    const auth = new MobileAuthController({
+      api: fixture.api,
+      storage: fixture.storage,
+      localAuthenticator: {
+        async authenticate() {
+          authenticationCount += 1;
+          return authenticationCount === 1
+            ? {
+                success: false as const,
+                message: 'PSD EOC remains locked.',
+              }
+            : { success: true as const };
+        },
+      },
+      authenticatedRequest: (bearer, input) => {
+        transportCount += 1;
+        return fixtureTransport(bearer, input);
+      },
+      createIdempotencyKey: () => 'issue-21-synthetic-refresh-idempotency-0001',
+      now: () => new Date(FIXTURE_NOW),
+      timer: inertTimer,
+    });
+
+    await auth.bootstrap();
+    expect(auth.getSnapshot().phase).toBe('locked');
+    await auth.foreground();
+    expect(auth.getSnapshot().phase).toBe('locked');
+    expect(auth.getSnapshot().session).toBeNull();
+    expect(() =>
+      auth.authenticatedRequest({
+        operation: 'query',
+        method: 'GET',
+        path: '/api/mobile/start/facilities',
+      }),
+    ).toThrow(OfflineMutationDeniedError);
+    expect(transportCount).toBe(0);
+
+    await auth.foreground();
+    expect(authenticationCount).toBe(2);
+    expect(auth.getSnapshot().phase).toBe('online');
+    const response = await auth.authenticatedRequest({
+      operation: 'query',
+      method: 'GET',
+      path: '/api/mobile/start/facilities',
+    });
+    expect(response.status).toBe(200);
+    expect(transportCount).toBe(1);
+
+    await auth.signOut();
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+    expect(await fixture.storage.hasEnrollment()).toBe(false);
+  });
+
+  test('rotates locally, replays an exact refresh, and rejects stale or aborted refreshes', async () => {
+    const fixture = createIssue21SyntheticAuthFixture(
+      'android',
+      () => new Date(FIXTURE_NOW),
+    );
+    const original = await fixture.storage.readVault();
+    if (original === null) {
+      throw new Error('The synthetic enrollment was not seeded.');
+    }
+    const key = 'issue-21-synthetic-refresh-idempotency-0001';
+    const first = await fixture.api.refresh(
+      original.refreshToken,
+      key,
+      new AbortController().signal,
+    );
+    const replay = await fixture.api.refresh(
+      original.refreshToken,
+      key,
+      new AbortController().signal,
+    );
+    expect(replay).toEqual(first);
+    expect(first.refreshToken).not.toBe(original.refreshToken);
+    expect(first.session.connectivityEpoch.id).not.toBe(
+      original.session.connectivityEpoch.id,
+    );
+
+    await expect(
+      fixture.api.refresh(
+        original.refreshToken,
+        'issue-21-synthetic-refresh-idempotency-0002',
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ kind: 'rejected' });
+
+    const abortController = new AbortController();
+    abortController.abort();
+    await expect(
+      fixture.api.refresh(
+        first.refreshToken,
+        'issue-21-synthetic-refresh-idempotency-0003',
+        abortController.signal,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
   });
 
   test('runs the complete three-tap data path without a provider transport', async () => {
