@@ -1,4 +1,10 @@
 import * as Crypto from 'expo-crypto';
+import type {
+  ConnectivityEpochId,
+  DeviceEnrollmentId,
+  SessionId,
+  UserId,
+} from '@psd-eoc/contracts';
 import { AppState, Platform } from 'react-native';
 import {
   createContext,
@@ -42,7 +48,10 @@ export interface MobileAuthContextValue {
   readonly signOut: () => Promise<void>;
   readonly authenticatedRequest: MobileAuthenticatedRequest;
   readonly assertMutationAllowed: () => Readonly<{
-    connectivityEpochId: string;
+    connectivityEpochId: ConnectivityEpochId;
+    userId: UserId;
+    sessionId: SessionId;
+    deviceEnrollmentId: DeviceEnrollmentId;
   }>;
 }
 

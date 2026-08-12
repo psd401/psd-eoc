@@ -566,11 +566,11 @@ describe('mobile start API client', () => {
     });
   });
 
-  test('activates once with the preview active-event evidence and matching idempotency key', async () => {
+  test('activates once with preview evidence and accepts a server-scoped transition key', async () => {
     const preview = previewFixture(selectionFixture(), {
       activeEventIds: [IDS.activeEvent, IDS.otherEvent],
     });
-    const result = activationResultFixture(preview);
+    const result = activationResultFixture(preview, 'f'.repeat(64));
     const calls: AuthenticatedRequestInput[] = [];
 
     await expect(

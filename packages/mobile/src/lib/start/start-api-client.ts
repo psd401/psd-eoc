@@ -428,7 +428,6 @@ function structurallyEqual(left: unknown, right: unknown): boolean {
 function activationMatchesPreview(
   result: StartEventResult,
   preview: ActivationPreview,
-  idempotencyKey: string,
 ): boolean {
   const event = result.event;
   const authorization = event.activationAuthorization;
@@ -441,7 +440,6 @@ function activationMatchesPreview(
     event.rosterSnapshotId === preview.rosterSnapshotId &&
     event.rosterPopulation === preview.rosterPopulation &&
     event.status === 'active' &&
-    result.transition.idempotencyKey === idempotencyKey &&
     authorization !== null &&
     authorization.activationPreviewId === preview.id &&
     authorization.consequenceDigest === preview.consequenceDigest &&
@@ -489,7 +487,7 @@ export async function activate(
     StartEventResultSchema,
     'mutation',
   );
-  if (!activationMatchesPreview(result, preview, idempotencyKey)) {
+  if (!activationMatchesPreview(result, preview)) {
     throw requestFailure(
       'mutation',
       'PSD EOC returned an event that does not match the confirmed preview. Treat the outcome as unresolved; no automatic retry will occur.',

@@ -9,6 +9,10 @@ export {
   type StartHomeData,
 } from './start-api-client';
 export {
+  getBoundActivationPreview,
+  type ActivationPreviewBinding,
+} from './activation-preview-binding';
+export {
   createIdempotentSubmission,
   IdempotentSubmissionController,
   type IdempotentSubmissionState,
@@ -25,3 +29,13 @@ export {
   subscribeToStartMutationHardwareBack,
   useStartMutationNavigationGuard,
 } from './mutation-navigation-guard';
+export {
+  deliverClaimedStartMutationSuccessFeedback,
+  StartMutationProvider,
+  useStartMutation,
+  type StartMutationContextValue,
+  type StartMutationSuccessFeedbackSinks,
+  type StartMutationProviderControllerDependencies,
+  type SubmitStartActivationInput,
+  type SubmitStartJoinInput,
+} from './start-mutation-provider';
