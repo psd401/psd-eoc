@@ -36,6 +36,8 @@ import {
   type AttemptExecutionClaim,
   type AttemptExecutionClaimRequest,
   type AttemptExecutionCompletion,
+  type AttemptExecutionLookup,
+  type AttemptExecutionLookupRequest,
   type AttemptExecutionStore,
   type CompleteAttemptExecutionRequest,
   type ProviderSendOutcome,
@@ -339,6 +341,22 @@ class WorkerExecutionStore implements AttemptExecutionStore {
     string,
     Readonly<{ fingerprint: string; completion: AttemptExecutionCompletion }>
   >();
+
+  public lookup(
+    request: AttemptExecutionLookupRequest,
+  ): Promise<AttemptExecutionLookup> {
+    const existing = this.completions.get(request.attemptId);
+    if (existing === undefined) {
+      return Promise.resolve({ kind: 'missing' });
+    }
+    if (existing.fingerprint !== request.fingerprint) {
+      throw new Error('Synthetic worker fingerprint conflict.');
+    }
+    return Promise.resolve({
+      kind: 'completed',
+      completion: existing.completion,
+    });
+  }
 
   public claim(
     request: AttemptExecutionClaimRequest,
