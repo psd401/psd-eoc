@@ -4,6 +4,7 @@ import {
   type JournalEntryReadProjection,
   type LifecycleConsequencePreview,
   type LocationPayload,
+  type EventStatus,
   type TemplateMode,
 } from '@psd-eoc/contracts';
 import * as Crypto from 'expo-crypto';
@@ -68,10 +69,116 @@ const TEXT_LIMIT = 10_000;
 const LOCATION_LABEL_LIMIT = 200;
 const LOCATION_REASON_LIMIT = 500;
 const PIN_ADJUSTMENT_METRES = 5;
+const LOCATION_CAPTURE_TIMEOUT_MS = 10_000;
+
+export const EVENT_ROOM_MUTED_TEXT_COLOR = '#486581';
 
 type LifecycleAction = 'all-clear' | 'close';
 type LocationMode = 'known' | 'ambiguous' | 'unknown';
 type KnownLocation = Extract<LocationPayload, { state: 'known' }>;
+
+export interface JournalMutationIdentity {
+  readonly idempotencyKey: string;
+  readonly clientTime: string;
+  readonly canonicalDraft: string;
+}
+
+/** Retains the complete canonical request identity after an uncertain result. */
+export function retainJournalMutationIdentity(
+  current: JournalMutationIdentity | null,
+  canonicalDraft: string,
+  createIdempotencyKey: () => string,
+  createClientTime: () => string,
+): JournalMutationIdentity {
+  return (
+    (current?.canonicalDraft === canonicalDraft ? current : null) ??
+    Object.freeze({
+      idempotencyKey: createIdempotencyKey(),
+      clientTime: createClientTime(),
+      canonicalDraft,
+    })
+  );
+}
+
+interface ForegroundPosition {
+  readonly coords: {
+    readonly latitude: number;
+    readonly longitude: number;
+    readonly accuracy: number | null;
+  };
+}
+
+export interface ForegroundLocationCaptureDependencies {
+  readonly requestPermission: () => Promise<{ readonly status: string }>;
+  readonly getPosition: () => Promise<ForegroundPosition>;
+  readonly isCurrentForegroundCapture: () => boolean;
+  readonly timeoutMilliseconds?: number;
+}
+
+export function eventStatusAcceptsTimelinePosts(
+  status: EventStatus | null | undefined,
+): boolean {
+  return status === 'active' || status === 'all-clear';
+}
+
+export function invalidateLocationCaptureForPostingState(
+  eventAcceptsPosts: boolean,
+  activeGeneration: number,
+): number {
+  return eventAcceptsPosts ? activeGeneration : activeGeneration + 1;
+}
+
+async function beforeDeadline<Value>(
+  operation: Promise<Value>,
+  deadlineAt: number,
+): Promise<Value> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(
+      () => {
+        reject(
+          new Error(
+            'GPS capture timed out. Choose ambiguous or unknown instead.',
+          ),
+        );
+      },
+      Math.max(0, deadlineAt - Date.now()),
+    );
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+  }
+}
+
+/** Bounds native GPS work and rejects results from an interrupted foreground generation. */
+export async function captureForegroundPosition({
+  getPosition,
+  isCurrentForegroundCapture,
+  requestPermission,
+  timeoutMilliseconds = LOCATION_CAPTURE_TIMEOUT_MS,
+}: ForegroundLocationCaptureDependencies): Promise<ForegroundPosition> {
+  const deadlineAt = Date.now() + timeoutMilliseconds;
+  const permission = await beforeDeadline(requestPermission(), deadlineAt);
+  if (!isCurrentForegroundCapture()) {
+    throw new Error(
+      'GPS capture stopped when the app left the foreground. Capture again or choose ambiguous or unknown.',
+    );
+  }
+  if (permission.status !== 'granted') {
+    throw new Error(
+      'Foreground location permission was not granted. Choose ambiguous or unknown instead.',
+    );
+  }
+  const captured = await beforeDeadline(getPosition(), deadlineAt);
+  if (!isCurrentForegroundCapture()) {
+    throw new Error(
+      'GPS capture stopped when the app left the foreground. Capture again or choose ambiguous or unknown.',
+    );
+  }
+  return captured;
+}
 
 export interface EventRoomTargetIdentity {
   readonly eventTypeName: string;
@@ -200,6 +307,7 @@ function TimelinePhoto({
 }>) {
   const [uri, setUri] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (api === undefined) return;
@@ -215,7 +323,7 @@ function TimelinePhoto({
         if (!controller.signal.aborted) setUnavailable(true);
       });
     return () => controller.abort();
-  }, [api, eventId, mediaId]);
+  }, [api, attempt, eventId, mediaId]);
 
   if (uri !== null) {
     return (
@@ -233,16 +341,28 @@ function TimelinePhoto({
       />
     );
   }
+  if (unavailable) {
+    return (
+      <View style={styles.photoPlaceholder}>
+        <Text style={styles.photoPlaceholderText}>
+          Photo temporarily unavailable
+        </Text>
+        <ActionButton
+          accessibilityHint={`Requests a fresh authorized read for ${altText}`}
+          label="Retry loading photo"
+          onPress={() => setAttempt((value) => value + 1)}
+        />
+      </View>
+    );
+  }
   return (
     <View
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       style={styles.photoPlaceholder}
     >
-      {unavailable ? null : <ActivityIndicator color="#17324D" />}
-      <Text style={styles.photoPlaceholderText}>
-        {unavailable ? 'Photo temporarily unavailable' : `Loading ${altText}`}
-      </Text>
+      <ActivityIndicator color="#17324D" />
+      <Text style={styles.photoPlaceholderText}>{`Loading ${altText}`}</Text>
     </View>
   );
 }
@@ -261,21 +381,36 @@ export function TimelineEntryCard({ api, projection }: TimelineEntryCardProps) {
       : null;
 
   return (
-    <View
-      accessibilityLabel={timelineEntryAccessibilityLabel(projection)}
-      accessibilityRole="text"
-      accessible
-      style={styles.timelineCard}
-      testID={`timeline-entry-${entry.sequence}`}
-    >
+    <View style={styles.timelineCard}>
       <View
-        accessibilityElementsHidden
-        importantForAccessibility="no-hide-descendants"
-        style={styles.timelineMetaRow}
+        accessibilityLabel={timelineEntryAccessibilityLabel(projection)}
+        accessibilityRole="text"
+        accessible
+        testID={`timeline-entry-${entry.sequence}`}
       >
-        <Text style={styles.timelineActor}>{actorText(projection)}</Text>
-        <Text style={styles.timelineTime}>
-          {new Date(entry.serverTime).toLocaleString()}
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={styles.timelineMetaRow}
+        >
+          <Text style={styles.timelineActor}>{actorText(projection)}</Text>
+          <Text style={styles.timelineTime}>
+            {new Date(entry.serverTime).toLocaleString()}
+          </Text>
+        </View>
+        <Text
+          accessibilityElementsHidden
+          importantForAccessibility="no"
+          style={styles.timelineBody}
+        >
+          {timelineEntryText(projection)}
+        </Text>
+        <Text
+          accessibilityElementsHidden
+          importantForAccessibility="no"
+          style={styles.timelineSequence}
+        >
+          Timeline entry {entry.sequence}
         </Text>
       </View>
       {visiblePhoto === null ? null : (
@@ -286,20 +421,6 @@ export function TimelineEntryCard({ api, projection }: TimelineEntryCardProps) {
           {...(api === undefined ? {} : { api })}
         />
       )}
-      <Text
-        accessibilityElementsHidden
-        importantForAccessibility="no"
-        style={styles.timelineBody}
-      >
-        {timelineEntryText(projection)}
-      </Text>
-      <Text
-        accessibilityElementsHidden
-        importantForAccessibility="no"
-        style={styles.timelineSequence}
-      >
-        Timeline entry {entry.sequence}
-      </Text>
     </View>
   );
 }
@@ -552,6 +673,8 @@ export interface LocationComposerDialogProps {
   readonly visible: boolean;
   readonly online: boolean;
   readonly busy: boolean;
+  readonly captureBusy?: boolean;
+  readonly submitBusy?: boolean;
   readonly templateMode: TemplateMode;
   readonly target: EventRoomTargetIdentity;
   readonly mode: LocationMode;
@@ -573,6 +696,8 @@ export interface LocationComposerDialogProps {
 }
 
 export function LocationComposerDialog(props: LocationComposerDialogProps) {
+  const captureBusy = props.captureBusy ?? props.busy;
+  const submitBusy = props.submitBusy ?? props.busy;
   const valid =
     (props.mode === 'known' && props.known !== null) ||
     (props.mode === 'ambiguous' &&
@@ -621,6 +746,11 @@ export function LocationComposerDialog(props: LocationComposerDialogProps) {
               Choose the truth you know. PSD EOC does not infer location from
               photos and does not turn uncertainty into coordinates.
             </Text>
+            <Text accessibilityRole="summary" style={styles.safetyHelp}>
+              Do not include student data. Post only the precision you can
+              support. Corrections append a new entry; they never rewrite
+              history.
+            </Text>
             <View accessibilityRole="tablist" style={styles.segmentedRow}>
               {(['known', 'ambiguous', 'unknown'] as const).map((mode) => (
                 <Pressable
@@ -657,9 +787,11 @@ export function LocationComposerDialog(props: LocationComposerDialogProps) {
                 <ActionButton
                   disabled={props.busy}
                   label={
-                    props.known === null
-                      ? 'Capture foreground GPS'
-                      : 'Recapture foreground GPS'
+                    captureBusy
+                      ? 'Capturing GPS…'
+                      : props.known === null
+                        ? 'Capture foreground GPS'
+                        : 'Recapture foreground GPS'
                   }
                   onPress={props.onCapture}
                 />
@@ -791,7 +923,7 @@ export function LocationComposerDialog(props: LocationComposerDialogProps) {
             )}
             <ActionButton
               disabled={!props.online || !valid || props.busy}
-              label={props.busy ? 'Posting…' : 'Post location'}
+              label={submitBusy ? 'Posting…' : 'Post location'}
               onPress={props.onSubmit}
             />
             {!props.online ? (
@@ -807,6 +939,7 @@ export function LocationComposerDialog(props: LocationComposerDialogProps) {
 }
 
 export interface PhotoComposerDialogProps {
+  readonly newPostsAllowed: boolean;
   readonly onDismiss: () => void;
   readonly online: boolean;
   readonly photo: EventPhotoDraftWorkflow;
@@ -816,6 +949,7 @@ export interface PhotoComposerDialogProps {
 }
 
 export function PhotoComposerDialog({
+  newPostsAllowed,
   onDismiss,
   online,
   photo,
@@ -830,12 +964,21 @@ export function PhotoComposerDialog({
   );
   const retryable =
     draft !== null &&
-    ['failed', 'unknown', 'cleanup-pending'].includes(draft.stage);
+    ['failed', 'unknown', 'cleanup-pending', 'blocked'].includes(draft.stage);
+  const recoveryOnly = !newPostsAllowed || draft?.localCleanupOnly === true;
+  const descriptionEditable =
+    !recoveryOnly &&
+    !photo.busy &&
+    (draft?.stage === 'describe' || draft?.stage === 'ready');
 
   const confirmDiscard = () => {
     Alert.alert(
       'Discard retained photo draft?',
-      'This explicitly removes the private draft. Closing this composer alone keeps it.',
+      draft?.localCleanupOnly === true
+        ? 'This explicitly removes or releases only the exact owner-bound private local data. It cannot post or replay anything here.'
+        : !newPostsAllowed
+          ? 'This event is closed. This explicitly removes the private local draft and its replay data without posting or uploading anything.'
+          : 'This explicitly removes the private draft. Closing this composer alone keeps it.',
       [
         { text: 'Keep draft', style: 'cancel' },
         {
@@ -867,7 +1010,7 @@ export function PhotoComposerDialog({
           >
             <View style={styles.modalTitleRow}>
               <Text accessibilityRole="header" style={styles.modalTitle}>
-                Post a photo
+                {recoveryOnly ? 'Recover photo draft' : 'Post a photo'}
               </Text>
               <Pressable
                 accessibilityHint="Closes this sheet and keeps the draft"
@@ -891,12 +1034,17 @@ export function PhotoComposerDialog({
                 does not silently discard or automatically post the draft.
               </Text>
             </View>
+            <Text accessibilityRole="summary" style={styles.safetyHelp}>
+              Do not include student data. Photos are untrusted input; PSD EOC
+              validates their bytes and strips EXIF and GPS metadata. Record
+              location only through the explicit location workflow.
+            </Text>
 
             <Text style={styles.inputLabel}>Alternative text (required)</Text>
             <TextInput
               accessibilityHint="Describe the important visual information for screen-reader users"
               accessibilityLabel="Photo alternative text, required"
-              editable={!photo.busy}
+              editable={descriptionEditable}
               maxLength={500}
               multiline
               onChangeText={photo.setAltText}
@@ -907,7 +1055,7 @@ export function PhotoComposerDialog({
             <Text style={styles.inputLabel}>Optional caption</Text>
             <TextInput
               accessibilityLabel="Optional photo caption"
-              editable={!photo.busy}
+              editable={descriptionEditable}
               maxLength={2_000}
               multiline
               onChangeText={photo.setCaption}
@@ -916,17 +1064,27 @@ export function PhotoComposerDialog({
               value={draft?.caption ?? ''}
             />
 
-            <ActionButton
-              disabled={
-                selected ||
-                photo.busy ||
-                (draft?.altText.trim().length ?? 0) === 0
-              }
-              label={selected ? 'Photo retained' : 'Choose photo'}
-              onPress={() => {
-                void photo.selectPhoto();
-              }}
-            />
+            {descriptionEditable ? null : (
+              <Text accessibilityRole="summary" style={styles.safetyHelp}>
+                {draft?.localCleanupOnly === true
+                  ? 'The retained description is read-only and cannot be adopted by this event or signed-in session.'
+                  : 'Photo description is locked after network work starts. The retained canonical alternative text and caption cannot be changed during retry, reconciliation, or private cleanup.'}
+              </Text>
+            )}
+
+            {recoveryOnly ? null : (
+              <ActionButton
+                disabled={
+                  selected ||
+                  photo.busy ||
+                  (draft?.altText.trim().length ?? 0) === 0
+                }
+                label={selected ? 'Photo retained' : 'Choose photo'}
+                onPress={() => {
+                  void photo.selectPhoto();
+                }}
+              />
+            )}
 
             {draft === null ? null : (
               <View style={styles.progressCard}>
@@ -952,31 +1110,45 @@ export function PhotoComposerDialog({
                 {draft.error}
               </Text>
             )}
-            {retryable ? (
+            {retryable && draft?.localCleanupOnly !== true ? (
               <ActionButton
-                disabled={!online || photo.busy}
+                disabled={
+                  photo.busy ||
+                  (draft?.stage !== 'blocked' &&
+                    newPostsAllowed &&
+                    draft?.stage !== 'cleanup-pending' &&
+                    !online)
+                }
                 label={
-                  draft?.stage === 'cleanup-pending'
-                    ? 'Retry private cleanup'
-                    : 'Retry retained draft'
+                  draft?.stage === 'blocked'
+                    ? 'Retry local recovery'
+                    : draft?.stage === 'cleanup-pending'
+                      ? 'Retry private cleanup'
+                      : !newPostsAllowed
+                        ? 'Reconcile with timeline'
+                        : 'Retry retained draft'
                 }
                 onPress={() => {
                   void photo.retry();
                 }}
               />
             ) : null}
-            <ActionButton
-              disabled={
-                !online ||
-                photo.busy ||
-                draft?.stage !== 'ready' ||
-                (draft?.altText.trim().length ?? 0) === 0
-              }
-              label={photo.busy ? 'Posting photo…' : 'Upload and post photo'}
-              onPress={() => {
-                void photo.submit();
-              }}
-            />
+            {recoveryOnly ? null : (
+              <ActionButton
+                disabled={
+                  !online ||
+                  photo.busy ||
+                  draft?.stage !== 'ready' ||
+                  (draft?.altText.trim().length ?? 0) === 0
+                }
+                label={
+                  photo.busy ? 'Working with photo…' : 'Upload and post photo'
+                }
+                onPress={() => {
+                  void photo.submit();
+                }}
+              />
+            )}
             <Pressable
               accessibilityLabel="Discard retained photo draft"
               accessibilityRole="button"
@@ -1034,7 +1206,7 @@ function AuthenticatedEventRoomScreen({
   const [textDraft, setTextDraft] = useState('');
   const [textBusy, setTextBusy] = useState(false);
   const [textError, setTextError] = useState<string | null>(null);
-  const textIdempotencyKeyRef = useRef<string | null>(null);
+  const textMutationIdentityRef = useRef<JournalMutationIdentity | null>(null);
 
   const [composer, setComposer] = useState<'location' | 'photo' | null>(null);
   const [locationMode, setLocationMode] = useState<LocationMode>('known');
@@ -1045,9 +1217,14 @@ function AuthenticatedEventRoomScreen({
   const [ambiguousLabel, setAmbiguousLabel] = useState('');
   const [ambiguousReason, setAmbiguousReason] = useState('');
   const [unknownReason, setUnknownReason] = useState('');
-  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationCaptureBusy, setLocationCaptureBusy] = useState(false);
+  const [locationSubmitBusy, setLocationSubmitBusy] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
-  const locationIdempotencyKeyRef = useRef<string | null>(null);
+  const locationMutationIdentityRef = useRef<JournalMutationIdentity | null>(
+    null,
+  );
+  const locationCaptureGenerationRef = useRef(0);
+  const locationCaptureActiveRef = useRef(false);
 
   const [lifecycleAction, setLifecycleAction] =
     useState<LifecycleAction | null>(null);
@@ -1063,6 +1240,7 @@ function AuthenticatedEventRoomScreen({
 
   useEffect(
     () => () => {
+      locationCaptureGenerationRef.current += 1;
       lifecycleGenerationRef.current += 1;
       lifecycleAbortRef.current?.abort();
       lifecycleAbortRef.current = null;
@@ -1073,6 +1251,7 @@ function AuthenticatedEventRoomScreen({
   const online = state.phase === 'online';
   const event = sync.model.event;
   const eventClosed = event?.status === 'closed';
+  const eventAcceptsPosts = eventStatusAcceptsTimelinePosts(event?.status);
 
   const followConfirmedEntry = useCallback(
     (projection: JournalEntryReadProjection) => {
@@ -1085,6 +1264,7 @@ function AuthenticatedEventRoomScreen({
   const photo = useEventPhotoDraft({
     eventId,
     sessionId,
+    newPostsAllowed: eventAcceptsPosts,
     api,
     entries: sync.model.entries,
     onAppended: followConfirmedEntry,
@@ -1115,7 +1295,17 @@ function AuthenticatedEventRoomScreen({
     updateSync();
     const subscription = AppState.addEventListener('change', (nextState) => {
       appActive = nextState === 'active';
-      if (!appActive) dismissLifecycle();
+      if (!appActive) {
+        if (locationCaptureActiveRef.current) {
+          locationCaptureGenerationRef.current += 1;
+          locationCaptureActiveRef.current = false;
+          setLocationCaptureBusy(false);
+          setLocationError(
+            'GPS capture stopped when the app left the foreground. Capture again or choose ambiguous or unknown.',
+          );
+        }
+        dismissLifecycle();
+      }
       updateSync();
     });
     return () => subscription.remove();
@@ -1136,26 +1326,40 @@ function AuthenticatedEventRoomScreen({
   }, [dismissLifecycle, lifecycleAction, online]);
 
   useEffect(() => {
-    if (eventClosed) setComposer(null);
-  }, [eventClosed]);
+    if (eventAcceptsPosts) return;
+    locationCaptureGenerationRef.current =
+      invalidateLocationCaptureForPostingState(
+        false,
+        locationCaptureGenerationRef.current,
+      );
+    locationCaptureActiveRef.current = false;
+    setLocationCaptureBusy(false);
+    if (composer !== 'photo') setComposer(null);
+  }, [composer, eventAcceptsPosts]);
 
   const submitText = useCallback(async () => {
     const text = textDraft.trim();
-    if (text.length === 0 || textBusy || eventClosed) return;
+    if (text.length === 0 || textBusy || !eventAcceptsPosts) return;
     setTextBusy(true);
     setTextError(null);
     try {
       assertMutationAllowed();
-      const key = textIdempotencyKeyRef.current ?? Crypto.randomUUID();
-      textIdempotencyKeyRef.current = key;
+      const identity = retainJournalMutationIdentity(
+        textMutationIdentityRef.current,
+        text,
+        Crypto.randomUUID,
+        () => new Date().toISOString(),
+      );
+      textMutationIdentityRef.current = identity;
       const projection = await api.postText(
         eventId,
+        sessionId,
         text,
-        key,
-        new Date().toISOString(),
+        identity.idempotencyKey,
+        identity.clientTime,
       );
       followConfirmedEntry(projection);
-      textIdempotencyKeyRef.current = null;
+      textMutationIdentityRef.current = null;
       setTextDraft('');
     } catch (error) {
       setTextError(
@@ -1167,37 +1371,45 @@ function AuthenticatedEventRoomScreen({
   }, [
     api,
     assertMutationAllowed,
-    eventClosed,
+    eventAcceptsPosts,
     eventId,
     followConfirmedEntry,
+    sessionId,
     textBusy,
     textDraft,
   ]);
 
-  const resetLocationFailure = () => {
-    locationIdempotencyKeyRef.current = null;
-    setLocationError(null);
-  };
+  const resetLocationFailure = () => setLocationError(null);
 
   const captureLocation = useCallback(async () => {
-    if (locationBusy || AppState.currentState !== 'active') return;
-    setLocationBusy(true);
+    if (
+      locationCaptureBusy ||
+      locationSubmitBusy ||
+      !eventAcceptsPosts ||
+      AppState.currentState !== 'active'
+    ) {
+      return;
+    }
+    const generation = locationCaptureGenerationRef.current + 1;
+    locationCaptureGenerationRef.current = generation;
+    locationCaptureActiveRef.current = true;
+    setLocationCaptureBusy(true);
     setLocationError(null);
     try {
-      const permission = await Location.requestForegroundPermissionsAsync();
-      if (permission.status !== 'granted') {
-        throw new Error(
-          'Foreground location permission was not granted. Choose ambiguous or unknown instead.',
+      const isCurrentForegroundCapture = () =>
+        locationCaptureGenerationRef.current === generation &&
+        AppState.currentState === 'active' &&
+        eventStatusAcceptsTimelinePosts(
+          controller.getSnapshot().model.event?.status,
         );
-      }
-      const captured = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
+      const captured = await captureForegroundPosition({
+        requestPermission: Location.requestForegroundPermissionsAsync,
+        getPosition: () =>
+          Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High,
+          }),
+        isCurrentForegroundCapture,
       });
-      if (AppState.currentState !== 'active') {
-        throw new Error(
-          'The app left the foreground before GPS capture completed. Capture again.',
-        );
-      }
       const accuracy = captured.coords.accuracy;
       if (accuracy === null || !Number.isFinite(accuracy) || accuracy <= 0) {
         throw new Error(
@@ -1219,13 +1431,32 @@ function AuthenticatedEventRoomScreen({
       setKnownLocation(parsed.data);
       resetLocationFailure();
     } catch (error) {
-      setLocationError(
-        publicError(error, 'PSD EOC could not capture foreground GPS.'),
-      );
+      if (locationCaptureGenerationRef.current === generation) {
+        setLocationError(
+          publicError(error, 'PSD EOC could not capture foreground GPS.'),
+        );
+      }
     } finally {
-      setLocationBusy(false);
+      if (locationCaptureGenerationRef.current === generation) {
+        locationCaptureActiveRef.current = false;
+        setLocationCaptureBusy(false);
+      }
     }
-  }, [knownLabel, locationBusy]);
+  }, [
+    controller,
+    eventAcceptsPosts,
+    knownLabel,
+    locationCaptureBusy,
+    locationSubmitBusy,
+  ]);
+
+  const dismissLocationComposer = useCallback(() => {
+    locationCaptureGenerationRef.current += 1;
+    locationCaptureActiveRef.current = false;
+    setLocationCaptureBusy(false);
+    if (!locationSubmitBusy) setLocationError(null);
+    setComposer(null);
+  }, [locationSubmitBusy]);
 
   const adjustLocation = useCallback(
     (direction: 'north' | 'south' | 'east' | 'west') => {
@@ -1240,7 +1471,7 @@ function AuthenticatedEventRoomScreen({
   );
 
   const submitLocation = useCallback(async () => {
-    if (locationBusy || eventClosed) return;
+    if (locationCaptureBusy || locationSubmitBusy || !eventAcceptsPosts) return;
     let candidate: unknown;
     if (locationMode === 'known') {
       if (knownLocation === null) return;
@@ -1267,20 +1498,26 @@ function AuthenticatedEventRoomScreen({
     }
     const payload = parsedPayload.data;
 
-    setLocationBusy(true);
+    setLocationSubmitBusy(true);
     setLocationError(null);
     try {
       assertMutationAllowed();
-      const key = locationIdempotencyKeyRef.current ?? Crypto.randomUUID();
-      locationIdempotencyKeyRef.current = key;
+      const identity = retainJournalMutationIdentity(
+        locationMutationIdentityRef.current,
+        JSON.stringify(payload),
+        Crypto.randomUUID,
+        () => new Date().toISOString(),
+      );
+      locationMutationIdentityRef.current = identity;
       const projection = await api.postLocation(
         eventId,
+        sessionId,
         payload,
-        key,
-        new Date().toISOString(),
+        identity.idempotencyKey,
+        identity.clientTime,
       );
       followConfirmedEntry(projection);
-      locationIdempotencyKeyRef.current = null;
+      locationMutationIdentityRef.current = null;
       setKnownLocation(null);
       setKnownLabel('');
       setAmbiguousLabel('');
@@ -1295,20 +1532,22 @@ function AuthenticatedEventRoomScreen({
         ),
       );
     } finally {
-      setLocationBusy(false);
+      setLocationSubmitBusy(false);
     }
   }, [
     ambiguousLabel,
     ambiguousReason,
     api,
     assertMutationAllowed,
-    eventClosed,
+    eventAcceptsPosts,
     eventId,
     followConfirmedEntry,
     knownLabel,
     knownLocation,
-    locationBusy,
+    locationCaptureBusy,
     locationMode,
+    locationSubmitBusy,
+    sessionId,
     unknownReason,
   ]);
 
@@ -1559,7 +1798,7 @@ function AuthenticatedEventRoomScreen({
 
   const header = sync.model.header;
   const theme = getEventTheme(event.templateMode);
-  const postingDisabled = !online || eventClosed;
+  const postingDisabled = !online || !eventAcceptsPosts;
   const target: EventRoomTargetIdentity = {
     eventTypeName: header.eventType.name,
     facilityName: header.facility.name,
@@ -1693,10 +1932,20 @@ function AuthenticatedEventRoomScreen({
         keyboardVerticalOffset={88}
       >
         <View style={styles.composerBar}>
-          {eventClosed ? (
-            <Text accessibilityRole="summary" style={styles.closedNotice}>
-              This event is closed. Its append-only timeline remains readable.
-            </Text>
+          {!eventAcceptsPosts ? (
+            <>
+              <Text accessibilityRole="summary" style={styles.closedNotice}>
+                {eventClosed
+                  ? 'This event is closed. Its append-only timeline remains readable.'
+                  : 'This event no longer accepts timeline posts. Its append-only timeline remains readable.'}
+              </Text>
+              {photo.draft?.stage === 'describe' ? null : (
+                <ActionButton
+                  label="Recover retained photo draft…"
+                  onPress={() => setComposer('photo')}
+                />
+              )}
+            </>
           ) : (
             <>
               <View style={styles.textComposerRow}>
@@ -1708,7 +1957,6 @@ function AuthenticatedEventRoomScreen({
                   onChangeText={(value) => {
                     setTextDraft(value);
                     setTextError(null);
-                    textIdempotencyKeyRef.current = null;
                   }}
                   placeholder={
                     postingDisabled ? 'Reconnect to post' : 'Post an update'
@@ -1726,6 +1974,10 @@ function AuthenticatedEventRoomScreen({
                   }}
                 />
               </View>
+              <Text accessibilityRole="summary" style={styles.safetyHelp}>
+                Do not include student data. A submitted update is append-only;
+                corrections create a new entry.
+              </Text>
               {textError === null ? null : (
                 <Text accessibilityRole="alert" style={styles.errorText}>
                   {textError}
@@ -1755,7 +2007,8 @@ function AuthenticatedEventRoomScreen({
       <LocationComposerDialog
         ambiguousLabel={ambiguousLabel}
         ambiguousReason={ambiguousReason}
-        busy={locationBusy}
+        busy={locationCaptureBusy || locationSubmitBusy}
+        captureBusy={locationCaptureBusy}
         error={locationError}
         known={knownLocation}
         knownLabel={knownLabel}
@@ -1772,7 +2025,7 @@ function AuthenticatedEventRoomScreen({
         onCapture={() => {
           void captureLocation();
         }}
-        onDismiss={() => setComposer(null)}
+        onDismiss={dismissLocationComposer}
         onKnownLabelChange={(value) => {
           setKnownLabel(value);
           setKnownLocation((current) =>
@@ -1796,16 +2049,23 @@ function AuthenticatedEventRoomScreen({
         online={online}
         target={target}
         templateMode={event.templateMode}
+        submitBusy={locationSubmitBusy}
         unknownReason={unknownReason}
         visible={isEventComposerVisible(composer, 'location', event.status)}
       />
       <PhotoComposerDialog
+        newPostsAllowed={eventAcceptsPosts}
         onDismiss={() => setComposer(null)}
         online={online}
         photo={photo}
         target={target}
         templateMode={event.templateMode}
-        visible={isEventComposerVisible(composer, 'photo', event.status)}
+        visible={
+          isEventComposerVisible(composer, 'photo', event.status) ||
+          (composer === 'photo' &&
+            eventClosed &&
+            photo.draft?.stage !== 'describe')
+        }
       />
       <LifecycleConfirmationDialog
         action={lifecycleAction ?? 'all-clear'}
@@ -1954,13 +2214,17 @@ const styles = StyleSheet.create({
   },
   timelineActor: { color: '#17324D', fontSize: 14, fontWeight: '900' },
   timelineTime: {
-    color: '#627D98',
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
     flexShrink: 1,
     fontSize: 12,
     textAlign: 'right',
   },
   timelineBody: { color: '#102A43', fontSize: 16, lineHeight: 23 },
-  timelineSequence: { color: '#627D98', fontSize: 12, lineHeight: 16 },
+  timelineSequence: {
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
+    fontSize: 12,
+    lineHeight: 16,
+  },
   timelinePhoto: { borderRadius: 10, height: 200, width: '100%' },
   photoPlaceholder: {
     alignItems: 'center',
@@ -2104,7 +2368,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
   },
-  expiryText: { color: '#627D98', fontSize: 13, lineHeight: 18 },
+  expiryText: {
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
+    fontSize: 13,
+    lineHeight: 18,
+  },
   phraseGroup: { gap: 6 },
   inputLabel: {
     color: '#102A43',
@@ -2124,7 +2392,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   noRetryText: {
-    color: '#627D98',
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
     fontSize: 13,
     lineHeight: 19,
     textAlign: 'center',
@@ -2166,6 +2434,12 @@ const styles = StyleSheet.create({
   locationCoordinate: { color: '#102A43', fontSize: 15, fontWeight: '800' },
   locationAccuracy: { color: '#102A43', fontSize: 15, lineHeight: 21 },
   roomDisclaimer: { color: '#486581', fontSize: 14, lineHeight: 20 },
+  safetyHelp: {
+    color: EVENT_ROOM_MUTED_TEXT_COLOR,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
   textField: {
     backgroundColor: '#FFFFFF',
     borderColor: '#829AB1',
@@ -2211,7 +2485,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   progressFill: { backgroundColor: '#176B4D', height: '100%' },
-  progressText: { color: '#486581', fontSize: 13 },
+  progressText: { color: EVENT_ROOM_MUTED_TEXT_COLOR, fontSize: 13 },
   secondaryButton: {
     alignItems: 'center',
     borderColor: '#8B1526',

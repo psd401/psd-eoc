@@ -15,6 +15,7 @@ import {
 } from './photo-draft';
 
 const MAX_PHOTO_BYTES = 25 * 1_024 * 1_024;
+export const PHOTO_UPLOAD_TIMEOUT_MS = 30_000;
 const DRAFT_DIRECTORY_NAME = 'event-photo-drafts';
 const STORAGE_JOURNAL_VERSION = 1 as const;
 const JOURNAL_SLOTS = ['a', 'b'] as const;
@@ -29,6 +30,10 @@ export interface PendingPhotoSelectionOwner {
   readonly eventId: string;
   readonly sessionId: string;
 }
+
+export type PendingPhotoCleanupResult =
+  | 'discarded-uncommitted'
+  | 'released-committed';
 
 interface JournalRecord<Value> {
   readonly slot: JournalSlot;
@@ -741,6 +746,49 @@ export class NativePhotoDraftStorage implements PhotoDraftStorage {
     });
   }
 
+  /** Atomically removes only the exact retained manifest from an older login. */
+  public async discardPriorSessionManifest(
+    expectedValue: PhotoDraftManifest,
+    currentSessionIdValue: string,
+  ): Promise<void> {
+    const expected = parsePhotoDraftManifest(expectedValue);
+    const currentSessionId = UuidSchema.parse(currentSessionIdValue);
+    if (expected.sessionId === currentSessionId) {
+      throw new Error(
+        'The current session must use its owner-bound photo workflow.',
+      );
+    }
+    await withJournalLock(PENDING_OWNER_LEASE_KEY, async () => {
+      const pending = (await readPendingOwnerJournal())?.value ?? null;
+      if (
+        pending !== null &&
+        pending.eventId === expected.eventId &&
+        pending.draftId === expected.draftId
+      ) {
+        throw new Error(
+          'The retained manifest conflicts with a pending photo selection.',
+        );
+      }
+      const descriptor = manifestJournal(expected.eventId);
+      await withJournalLock(descriptor.key, async () => {
+        const current = await readJournal(descriptor);
+        if (
+          current?.value === null ||
+          current?.value === undefined ||
+          !sameManifestState(current.value, expected)
+        ) {
+          throw new Error(
+            'The retained photo draft changed before local cleanup.',
+          );
+        }
+        deletePrivatePhoto(expected.localUri, expected.draftId);
+        await writeJournal(descriptor, null, current);
+        const tombstone = await readJournal(descriptor);
+        pruneJournalAfterTombstone(descriptor, tombstone);
+      });
+    });
+  }
+
   public async loadComposer(
     eventId: string,
     sessionId: string,
@@ -800,8 +848,9 @@ export class NativePhotoDraftStorage implements PhotoDraftStorage {
   }
 
   /**
-   * Requests permission before retaining an owner, then holds the one process-
-   * global picker lease through the caller's file-to-manifest commit.
+   * Holds the one process-global picker lease through the caller's
+   * file-to-manifest commit. The system photo picker is invoked directly; it
+   * does not require broad media-library permission.
    */
   public async withNewPendingSelection<Value>(
     ownerValue: PendingPhotoSelectionOwner,
@@ -809,13 +858,6 @@ export class NativePhotoDraftStorage implements PhotoDraftStorage {
   ): Promise<Value> {
     const owner = parsePendingOwner(ownerValue);
     return withJournalLock(PENDING_OWNER_LEASE_KEY, async () => {
-      const permission =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permission.granted) {
-        throw new Error(
-          'Photo access is required to select an event-journal image.',
-        );
-      }
       await beginPendingOwner(owner);
       return this.runPendingSelection(owner, operation);
     });
@@ -851,27 +893,35 @@ export class NativePhotoDraftStorage implements PhotoDraftStorage {
   }
 
   /**
-   * Discards only the exact pending owner while manifest absence, file removal,
-   * and the pending-owner tombstone share one critical section.
+   * Resolves only the exact pending owner while manifest inspection, file
+   * removal, and the pending-owner tombstone share one critical section.
+   * Exact committed manifests retain their canonical bytes; uncommitted picker
+   * bytes are discarded. Same-draft ownership ambiguity fails closed.
    */
   public async discardPendingSelection(
     ownerValue: PendingPhotoSelectionOwner,
-  ): Promise<void> {
+  ): Promise<PendingPhotoCleanupResult> {
     const owner = parsePendingOwner(ownerValue);
-    await withJournalLock(PENDING_OWNER_LEASE_KEY, async () => {
+    return withJournalLock(PENDING_OWNER_LEASE_KEY, async () => {
       await requirePendingOwner(owner);
       await drainPendingPickerResult(owner);
       const manifestDescriptor = manifestJournal(owner.eventId);
-      await withJournalLock(manifestDescriptor.key, async () => {
+      return withJournalLock(manifestDescriptor.key, async () => {
         const currentManifest = await readJournal(manifestDescriptor);
-        if (
-          currentManifest?.value !== null &&
-          currentManifest?.value !== undefined
-        ) {
-          throw new Error('A retained manifest owns the private photo.');
+        const manifest = currentManifest?.value ?? null;
+        if (manifest !== null && manifest.draftId === owner.draftId) {
+          if (manifest.sessionId !== owner.sessionId) {
+            throw new Error(
+              'The pending owner conflicts with another session’s retained manifest.',
+            );
+          }
+          deletePendingStagingPhotoFile(owner);
+          await tombstonePendingOwner(owner);
+          return 'released-committed';
         }
         deletePendingPrivatePhotoFiles(owner);
         await tombstonePendingOwner(owner);
+        return 'discarded-uncommitted';
       });
     });
   }
@@ -1357,6 +1407,7 @@ export interface PrivatePhotoUploadInput {
   readonly contentSha256: string;
   readonly signal?: AbortSignal;
   readonly onProgress: (fraction: number) => void;
+  readonly timeoutMilliseconds?: number;
 }
 
 /** Uploads only to a server-issued exact PUT grant, never with app credentials. */
@@ -1398,8 +1449,26 @@ export async function uploadPrivatePhoto(
       );
     },
   });
+  let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
-    const result = await task.uploadAsync();
+    const upload = task.uploadAsync();
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        try {
+          task.cancel();
+        } catch {
+          // Native cancellation failure cannot leave the JS deadline pending.
+        } finally {
+          reject(
+            new PhotoDraftOperationError(
+              'unknown',
+              'The photo upload timed out with an uncertain result.',
+            ),
+          );
+        }
+      }, input.timeoutMilliseconds ?? PHOTO_UPLOAD_TIMEOUT_MS);
+    });
+    const result = await Promise.race([upload, deadline]);
     // 412 means a prior uncertain PUT already created this intent-bound object;
     // completion remains the authoritative reconciliation step.
     if (
@@ -1414,6 +1483,7 @@ export async function uploadPrivatePhoto(
     input.onProgress(1);
     return Object.freeze({ status: result.status });
   } finally {
+    if (timeout !== null) clearTimeout(timeout);
     task.release();
   }
 }
@@ -1430,6 +1500,13 @@ function deletePendingPrivatePhotoFiles(
   const owner = parsePendingOwner(ownerValue);
   const destination = privateDraftDestination(owner.draftId);
   if (destination.exists) destination.delete();
+  deletePendingStagingPhotoFile(owner);
+}
+
+function deletePendingStagingPhotoFile(
+  ownerValue: PendingPhotoSelectionOwner,
+): void {
+  const owner = parsePendingOwner(ownerValue);
   const inProgress = privateDraftInProgressFile(
     owner.draftId,
     owner.selectionId,

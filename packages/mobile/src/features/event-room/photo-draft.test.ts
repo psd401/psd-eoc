@@ -504,6 +504,56 @@ describe('durable photo draft', () => {
     expect(testHarness.network.appendKeys).toEqual([KEYS.appendEntry]);
   });
 
+  test('ignores background interruption while idle and starts a ready draft normally', async () => {
+    const testHarness = harness();
+    const controller = await readyController(testHarness);
+
+    controller.interruptForBackground();
+    expect(controller.snapshot().manifest?.stage).toBe('ready');
+
+    const completed = await controller.start();
+    expect(completed.manifest).toBeNull();
+    expect(testHarness.network.events).toEqual([
+      'network:create-intent',
+      'network:upload-bytes',
+      'network:complete-upload',
+      'network:append-entry',
+    ]);
+  });
+
+  test('waits for every outstanding operation even after a concurrent claim rejects', async () => {
+    const testHarness = harness();
+    let uploadStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      uploadStarted = resolve;
+    });
+    let finishUpload: (() => void) | undefined;
+    const upload = new Promise<void>((resolve) => {
+      finishUpload = resolve;
+    });
+    testHarness.network.uploadImplementation = async () => {
+      uploadStarted?.();
+      await upload;
+      return { status: 200 };
+    };
+    const controller = await readyController(testHarness);
+    const running = controller.start();
+    await started;
+    await expect(controller.reconcile([])).rejects.toBeInstanceOf(
+      PhotoDraftStateError,
+    );
+    let settled = false;
+    const settlement = controller.waitForOperationSettlement().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finishUpload?.();
+    await running;
+    await settlement;
+    expect(settled).toBe(true);
+  });
+
   test('uses an exact retry after background, then rotates an expired failed upload epoch before network', async () => {
     const testHarness = harness();
     let uploadStarted: (() => void) | null = null;
@@ -617,6 +667,58 @@ describe('durable photo draft', () => {
     expect(testHarness.network.appendKeys).toEqual([KEYS.appendEntry]);
   });
 
+  test('halts an interrupted fresh-epoch retry before any network call', async () => {
+    const failed = retainedManifest({
+      stage: 'failed',
+      retryStage: 'create-intent',
+    });
+    const testHarness = harness(failed);
+    let keyGeneration = 0;
+    const dependencies: PhotoDraftDependencies = {
+      ...testHarness.dependencies,
+      createIdempotencyKey(purpose) {
+        keyGeneration += 1;
+        return `photo-${purpose}-fresh-interrupt-${keyGeneration}`;
+      },
+    };
+    const controller = await PhotoDraftController.restore(
+      {
+        draftId: ids.draft,
+        eventId: ids.event,
+        sessionId: ids.session,
+      },
+      dependencies,
+    );
+    const originalSave = testHarness.storage.save.bind(testHarness.storage);
+    let releaseFreshTransition: (() => void) | undefined;
+    const freshTransitionStarted = new Promise<void>((resolve) => {
+      releaseFreshTransition = resolve;
+    });
+    let unblockSave: (() => void) | undefined;
+    const blockedSave = new Promise<void>((resolve) => {
+      unblockSave = resolve;
+    });
+    testHarness.storage.save = async (manifest, expected) => {
+      if (manifest.stage === 'creating-intent') {
+        releaseFreshTransition?.();
+        await blockedSave;
+      }
+      await originalSave(manifest, expected);
+    };
+
+    const retry = controller.retry([]);
+    await freshTransitionStarted;
+    controller.interruptForBackground();
+    unblockSave?.();
+    const result = await retry;
+
+    expect(result.manifest).toMatchObject({
+      stage: 'unknown',
+      retryStage: 'create-intent',
+    });
+    expect(testHarness.network.events).toEqual([]);
+  });
+
   test('persists description edits only before start and denies uncertain edits or discard', async () => {
     const testHarness = harness();
     testHarness.network.createFailure = new PhotoDraftOperationError(
@@ -663,6 +765,35 @@ describe('durable photo draft', () => {
       `delete-private:${CREATE_INPUT.localUri}`,
       `delete-manifest:${ids.event}:${ids.draft}`,
     ]);
+  });
+
+  test('explicitly cleans an uncertain closed-event draft locally without network replay', async () => {
+    const retained = retainedManifest({
+      stage: 'unknown',
+      retryStage: 'append-entry',
+      uploadIntentId: ids.intent,
+      mediaId: ids.media,
+    });
+    const testHarness = harness(retained);
+    const controller = await PhotoDraftController.restore(
+      {
+        draftId: ids.draft,
+        eventId: ids.event,
+        sessionId: ids.session,
+      },
+      testHarness.dependencies,
+    );
+
+    testHarness.setPrivateDeleteFailures(1);
+    expect(
+      (await controller.discardLocallyAfterEventClosed()).manifest,
+    ).toEqual(retained);
+    expect(testHarness.network.events).toEqual([]);
+
+    expect(
+      (await controller.discardLocallyAfterEventClosed()).manifest,
+    ).toBeNull();
+    expect(testHarness.network.events).toEqual([]);
   });
 
   test('reconciles only the exact canonical photo before ordered cleanup', async () => {

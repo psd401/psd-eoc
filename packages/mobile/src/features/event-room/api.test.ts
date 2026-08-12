@@ -486,6 +486,7 @@ describe('mobile event-room API', () => {
 
     const textResult = await api.postText(
       IDS.event,
+      IDS.session,
       'Synthetic room update.',
       'caller-text-key-0001',
       TIMES.activated,
@@ -493,6 +494,7 @@ describe('mobile event-room API', () => {
     );
     const locationResult = await api.postLocation(
       IDS.event,
+      IDS.session,
       locationPayload,
       'caller-location-key-0001',
       TIMES.activated,
@@ -500,6 +502,7 @@ describe('mobile event-room API', () => {
     );
     const photoResult = await api.postPhoto(
       IDS.event,
+      IDS.session,
       IDS.media,
       'Synthetic staging area with no people visible',
       null,
@@ -564,6 +567,7 @@ describe('mobile event-room API', () => {
     await expect(
       wrongText.api.postText(
         IDS.event,
+        IDS.session,
         'Synthetic room update.',
         'caller-text-key-0003',
         TIMES.activated,
@@ -582,10 +586,33 @@ describe('mobile event-room API', () => {
     await expect(
       wrongPhoto.api.postPhoto(
         IDS.event,
+        IDS.session,
         IDS.media,
         'Synthetic staging area with no people visible',
         null,
         'caller-photo-key-0003',
+        TIMES.activated,
+      ),
+    ).rejects.toThrow('another request');
+  });
+
+  test('rejects a mutation echo attributed to another authenticated session', async () => {
+    const wrongSession = requestHarness({
+      entry: {
+        ...journalEntry('text', 1),
+        author: {
+          ...HUMAN_ACTOR,
+          sessionId: IDS.facility,
+        },
+      },
+    });
+
+    await expect(
+      wrongSession.api.postText(
+        IDS.event,
+        IDS.session,
+        'Synthetic room update.',
+        'caller-text-key-session-bound',
         TIMES.activated,
       ),
     ).rejects.toThrow('another request');
@@ -861,6 +888,7 @@ describe('mobile event-room API', () => {
     await expect(
       malformedJournal.api.postText(
         IDS.event,
+        IDS.session,
         'Synthetic room update.',
         'caller-text-key-0002',
         null,

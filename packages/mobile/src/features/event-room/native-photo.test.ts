@@ -19,9 +19,15 @@ let launchResult: unknown = { canceled: true, assets: null };
 let launchError: Error | null = null;
 let launchCalls = 0;
 let permissionGranted = true;
+let permissionCalls = 0;
 let pendingResult: unknown = null;
 let pendingResultCalls = 0;
 let pendingResultImplementation: (() => Promise<unknown>) | null = null;
+let uploadImplementation: (() => Promise<Readonly<{ status: number }>>) | null =
+  null;
+let uploadCancelCalls = 0;
+let uploadReleaseCalls = 0;
+let uploadCancelError: Error | null = null;
 
 function pathUri(value: string | Readonly<{ uri: string }>): string {
   return typeof value === 'string' ? value : value.uri;
@@ -139,8 +145,22 @@ class FakeFile {
     }
   }
 
-  public createUploadTask(): never {
-    throw new Error('upload is outside this storage test');
+  public createUploadTask(): Readonly<{
+    uploadAsync: () => Promise<Readonly<{ status: number }>>;
+    cancel: () => void;
+    release: () => void;
+  }> {
+    return {
+      uploadAsync: () =>
+        uploadImplementation?.() ?? Promise.resolve({ status: 200 }),
+      cancel: () => {
+        uploadCancelCalls += 1;
+        if (uploadCancelError !== null) throw uploadCancelError;
+      },
+      release: () => {
+        uploadReleaseCalls += 1;
+      },
+    };
   }
 }
 
@@ -192,6 +212,7 @@ mock.module('expo-file-system', () => ({
 
 mock.module('expo-image-picker', () => ({
   async requestMediaLibraryPermissionsAsync() {
+    permissionCalls += 1;
     return { granted: permissionGranted };
   },
   async launchImageLibraryAsync() {
@@ -210,7 +231,9 @@ mock.module('expo-image-picker', () => ({
   },
 }));
 
-const { NativePhotoDraftStorage } = await import('./native-photo');
+const { NativePhotoDraftStorage, uploadPrivatePhoto } = await import(
+  './native-photo'
+);
 
 const ids = {
   draft: '00000000-0000-4000-8000-000000000701',
@@ -220,6 +243,7 @@ const ids = {
   event: '00000000-0000-4000-8000-000000000705',
   otherEvent: '00000000-0000-4000-8000-000000000706',
   session: '00000000-0000-4000-8000-000000000707',
+  otherSession: '00000000-0000-4000-8000-000000000708',
 } as const;
 
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0x01, 0x02, 0x03]);
@@ -296,12 +320,60 @@ beforeEach(() => {
   launchError = null;
   launchCalls = 0;
   permissionGranted = true;
+  permissionCalls = 0;
   pendingResult = null;
   pendingResultCalls = 0;
   pendingResultImplementation = null;
+  uploadImplementation = null;
+  uploadCancelCalls = 0;
+  uploadReleaseCalls = 0;
+  uploadCancelError = null;
 });
 
 describe('native photo durable ownership', () => {
+  test('bounds a stalled foreground upload and reports an uncertain result', async () => {
+    const retained = manifest();
+    files.set(retained.localUri, JPEG);
+    uploadImplementation = () => new Promise(() => undefined);
+
+    await expect(
+      uploadPrivatePhoto({
+        draftId: retained.draftId,
+        localUri: retained.localUri,
+        uploadUrl: 'https://uploads.invalid/synthetic-stalled-put',
+        contentType: retained.declaredContentType,
+        byteLength: retained.byteLength,
+        contentSha256: retained.contentSha256,
+        onProgress: () => undefined,
+        timeoutMilliseconds: 5,
+      }),
+    ).rejects.toMatchObject({
+      name: 'PhotoDraftOperationError',
+      outcome: 'unknown',
+    });
+    expect(uploadCancelCalls).toBe(1);
+    expect(uploadReleaseCalls).toBe(1);
+
+    uploadCancelError = new Error('synthetic native cancel failure');
+    await expect(
+      uploadPrivatePhoto({
+        draftId: retained.draftId,
+        localUri: retained.localUri,
+        uploadUrl: 'https://uploads.invalid/synthetic-stalled-put',
+        contentType: retained.declaredContentType,
+        byteLength: retained.byteLength,
+        contentSha256: retained.contentSha256,
+        onProgress: () => undefined,
+        timeoutMilliseconds: 5,
+      }),
+    ).rejects.toMatchObject({
+      name: 'PhotoDraftOperationError',
+      outcome: 'unknown',
+    });
+    expect(uploadCancelCalls).toBe(2);
+    expect(uploadReleaseCalls).toBe(2);
+  });
+
   test('retains the last valid slot and adopts only an exact committed move rejection', async () => {
     const storage = new NativePhotoDraftStorage();
     const first = manifest();
@@ -437,6 +509,96 @@ describe('native photo durable ownership', () => {
     await storage.clearPendingSelection(first);
     expect(await storage.loadPendingSelection()).toBeNull();
     expect(pendingResultCalls).toBe(1);
+  });
+
+  test('resolves a cross-event owner without deleting retained manifests or canonical bytes', async () => {
+    const storage = new NativePhotoDraftStorage();
+    const currentManifest = manifest();
+    const currentUri = currentManifest.localUri;
+    files.set(currentUri, JPEG);
+    await storage.save(currentManifest, null);
+
+    const foreign = owner({
+      draftId: ids.otherDraft,
+      selectionId: ids.otherSelection,
+      eventId: ids.otherEvent,
+      sessionId: ids.otherSession,
+    });
+    const foreignUri = `${DRAFT_DIRECTORY_URI}${foreign.draftId}.private-photo`;
+    files.set(foreignUri, OTHER_JPEG);
+    await beginOwner(storage, foreign);
+
+    await expect(storage.discardPendingSelection(foreign)).resolves.toBe(
+      'discarded-uncommitted',
+    );
+    expect(await storage.load(ids.event)).toEqual(currentManifest);
+    expect(files.get(currentUri)).toEqual(JPEG);
+    expect(files.has(foreignUri)).toBe(false);
+    expect(await storage.loadPendingSelection()).toBeNull();
+  });
+
+  test('releases an exact committed owner but fails closed on same-draft session ambiguity', async () => {
+    const storage = new NativePhotoDraftStorage();
+    const committedOwner = owner();
+    const committedManifest = manifest();
+    const canonicalUri = committedManifest.localUri;
+    files.set(canonicalUri, JPEG);
+    await beginOwner(storage, committedOwner);
+    await storage.save(committedManifest, null);
+
+    await expect(storage.discardPendingSelection(committedOwner)).resolves.toBe(
+      'released-committed',
+    );
+    expect(await storage.load(ids.event)).toEqual(committedManifest);
+    expect(files.get(canonicalUri)).toEqual(JPEG);
+
+    const ambiguousOwner = owner({
+      selectionId: ids.otherSelection,
+      sessionId: ids.otherSession,
+    });
+    await beginOwner(storage, ambiguousOwner);
+    await expect(
+      storage.discardPendingSelection(ambiguousOwner),
+    ).rejects.toThrow('another session');
+    expect(await storage.loadPendingSelection()).toEqual(ambiguousOwner);
+    expect(await storage.load(ids.event)).toEqual(committedManifest);
+    expect(files.get(canonicalUri)).toEqual(JPEG);
+  });
+
+  test('atomically discards only the exact prior-session manifest', async () => {
+    const storage = new NativePhotoDraftStorage();
+    const prior = manifest();
+    files.set(prior.localUri, JPEG);
+    await storage.save(prior, null);
+
+    await expect(
+      storage.discardPriorSessionManifest(prior, ids.session),
+    ).rejects.toThrow('current session');
+    expect(await storage.load(ids.event)).toEqual(prior);
+    expect(files.get(prior.localUri)).toEqual(JPEG);
+
+    const stale = manifest({ altText: 'Changed retained description' });
+    await expect(
+      storage.discardPriorSessionManifest(stale, ids.otherSession),
+    ).rejects.toThrow('changed before local cleanup');
+    expect(await storage.load(ids.event)).toEqual(prior);
+    expect(files.get(prior.localUri)).toEqual(JPEG);
+
+    const conflictingPending = owner({
+      selectionId: ids.otherSelection,
+      sessionId: ids.otherSession,
+    });
+    await beginOwner(storage, conflictingPending);
+    await expect(
+      storage.discardPriorSessionManifest(prior, ids.otherSession),
+    ).rejects.toThrow('conflicts with a pending photo selection');
+    expect(await storage.load(ids.event)).toEqual(prior);
+    expect(files.get(prior.localUri)).toEqual(JPEG);
+    await storage.clearPendingSelection(conflictingPending);
+
+    await storage.discardPriorSessionManifest(prior, ids.otherSession);
+    expect(await storage.load(ids.event)).toBeNull();
+    expect(files.has(prior.localUri)).toBe(false);
   });
 
   test('drains Android exactly once before recovering existing canonical or staging bytes', async () => {
@@ -594,16 +756,19 @@ describe('native photo durable ownership', () => {
     await storage.discardPendingSelection(retainedOwner);
   });
 
-  test('permission denial, cancellation, invalid selection, and thrown launch clear only proved-empty owners', async () => {
+  test('uses the system picker without broad permission and clears only proved-empty failed selections', async () => {
     const storage = new NativePhotoDraftStorage();
 
     permissionGranted = false;
-    await expect(
-      storage.withNewPendingSelection(owner(), async (lease) => lease.select()),
-    ).rejects.toThrow('Photo access is required');
+    expect(
+      await storage.withNewPendingSelection(owner(), async (lease) =>
+        lease.select(),
+      ),
+    ).toBeNull();
     expect(await storage.loadPendingSelection()).toBeNull();
-    expect(launchCalls).toBe(0);
-    expect(pendingResultCalls).toBe(0);
+    expect(permissionCalls).toBe(0);
+    expect(launchCalls).toBe(1);
+    expect(pendingResultCalls).toBe(1);
 
     permissionGranted = true;
     expect(
@@ -612,7 +777,8 @@ describe('native photo durable ownership', () => {
       ),
     ).toBeNull();
     expect(await storage.loadPendingSelection()).toBeNull();
-    expect(pendingResultCalls).toBe(1);
+    expect(permissionCalls).toBe(0);
+    expect(pendingResultCalls).toBe(2);
 
     const invalidOwner = owner({ selectionId: ids.otherSelection });
     launchResult = { canceled: false, assets: [] };
@@ -622,7 +788,7 @@ describe('native photo durable ownership', () => {
       ),
     ).rejects.toThrow('exactly one photo');
     expect(await storage.loadPendingSelection()).toBeNull();
-    expect(pendingResultCalls).toBe(2);
+    expect(pendingResultCalls).toBe(3);
 
     const thrownOwner = owner({ draftId: ids.otherDraft });
     launchError = new Error('synthetic picker launch rejection');
@@ -632,7 +798,8 @@ describe('native photo durable ownership', () => {
       ),
     ).rejects.toThrow('synthetic picker launch rejection');
     expect(await storage.loadPendingSelection()).toBeNull();
-    expect(pendingResultCalls).toBe(3);
+    expect(pendingResultCalls).toBe(4);
+    expect(permissionCalls).toBe(0);
     expect(
       files.has(
         `${DRAFT_DIRECTORY_URI}${thrownOwner.draftId}.${thrownOwner.selectionId}.pending-photo`,

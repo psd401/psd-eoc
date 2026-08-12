@@ -88,6 +88,59 @@ const INVALID_RESPONSE_MESSAGE =
   'PSD EOC received an invalid authenticated response.';
 const NETWORK_MESSAGE =
   'PSD EOC could not reach the server. Reconnect before trying again.';
+const REQUEST_TIMEOUT_MS = 8_000;
+
+type RequestInterruption = 'caller' | 'timeout' | null;
+
+interface RequestDeadline {
+  readonly signal: AbortSignal;
+  readonly interruption: Promise<never>;
+  readonly interruptedBy: () => RequestInterruption;
+  readonly dispose: () => void;
+}
+
+function requestDeadline(callerSignal: AbortSignal): RequestDeadline {
+  const controller = new AbortController();
+  let interruptedBy: RequestInterruption = null;
+  let interrupt: (reason: unknown) => void = () => {};
+  const interruption = new Promise<never>((_resolve, reject) => {
+    interrupt = reject;
+  });
+  const abortFromCaller = () => {
+    if (interruptedBy !== null) {
+      return;
+    }
+    interruptedBy = 'caller';
+    controller.abort(callerSignal.reason);
+    interrupt(callerSignal.reason);
+  };
+
+  if (callerSignal.aborted) {
+    abortFromCaller();
+  } else {
+    callerSignal.addEventListener('abort', abortFromCaller, { once: true });
+  }
+
+  const timeout = setTimeout(() => {
+    if (interruptedBy !== null) {
+      return;
+    }
+    interruptedBy = 'timeout';
+    const failure = new AuthenticatedRequestFailure('network', NETWORK_MESSAGE);
+    controller.abort(failure);
+    interrupt(failure);
+  }, REQUEST_TIMEOUT_MS);
+
+  return {
+    signal: controller.signal,
+    interruption,
+    interruptedBy: () => interruptedBy,
+    dispose: () => {
+      clearTimeout(timeout);
+      callerSignal.removeEventListener('abort', abortFromCaller);
+    },
+  };
+}
 
 function invalidRequest(): AuthenticatedRequestFailure {
   return new AuthenticatedRequestFailure(
@@ -202,13 +255,19 @@ function serializeBody(body: unknown): string {
   }
 }
 
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(
+  response: Response,
+  signal: AbortSignal,
+): Promise<unknown> {
   if (response.status === 204) {
     return null;
   }
   try {
     return (await response.json()) as unknown;
-  } catch {
+  } catch (error) {
+    if (signal.aborted) {
+      throw error;
+    }
     throw new AuthenticatedRequestFailure(
       'invalid-response',
       INVALID_RESPONSE_MESSAGE,
@@ -232,6 +291,7 @@ export class AuthenticatedApiClient implements AuthenticatedRequestTransport {
     request: AuthenticatedRequestOptions<Output>,
     signal: AbortSignal,
   ): Promise<Output> {
+    if (signal.aborted) throw signal.reason;
     assertCallerCannotOverrideTransport(request);
     assertMethodShape(request);
     const url = requestUrl(this.baseUrl(), request.path);
@@ -265,56 +325,73 @@ export class AuthenticatedApiClient implements AuthenticatedRequestTransport {
       }
     }
 
-    let response: Response;
-    try {
-      response = await this.fetchImplementation(url, {
-        method: request.method,
-        headers,
-        ...(body === undefined ? {} : { body }),
-        credentials: 'omit',
-        redirect: 'error',
-        cache: 'no-store',
-        signal,
-      });
-    } catch (error) {
-      if (signal.aborted) {
-        throw error;
+    const deadline = requestDeadline(signal);
+    const fetchAndParse = async (): Promise<Output> => {
+      let response: Response;
+      try {
+        response = await this.fetchImplementation(url, {
+          method: request.method,
+          headers,
+          ...(body === undefined ? {} : { body }),
+          credentials: 'omit',
+          redirect: 'error',
+          cache: 'no-store',
+          signal: deadline.signal,
+        });
+      } catch (error) {
+        if (deadline.interruptedBy() === 'caller') {
+          throw error;
+        }
+        throw new AuthenticatedRequestFailure('network', NETWORK_MESSAGE);
       }
-      throw new AuthenticatedRequestFailure('network', NETWORK_MESSAGE);
-    }
 
-    if (
-      response.redirected ||
-      (response.status >= 300 && response.status < 400)
-    ) {
-      throw new AuthenticatedRequestFailure(
-        'invalid-response',
-        INVALID_RESPONSE_MESSAGE,
-        response.status,
-      );
-    }
-
-    const value = await readJson(response);
-    if (!response.ok) {
-      const parsed = ApiErrorSchema.safeParse(value);
-      if (!parsed.success) {
+      if (
+        response.redirected ||
+        (response.status >= 300 && response.status < 400)
+      ) {
         throw new AuthenticatedRequestFailure(
           'invalid-response',
           INVALID_RESPONSE_MESSAGE,
           response.status,
         );
       }
-      throw new AuthenticatedApiError(parsed.data, response.status);
-    }
+
+      const value = await readJson(response, deadline.signal);
+      if (!response.ok) {
+        const parsed = ApiErrorSchema.safeParse(value);
+        if (!parsed.success) {
+          throw new AuthenticatedRequestFailure(
+            'invalid-response',
+            INVALID_RESPONSE_MESSAGE,
+            response.status,
+          );
+        }
+        throw new AuthenticatedApiError(parsed.data, response.status);
+      }
+
+      try {
+        return request.schema.parse(value);
+      } catch {
+        throw new AuthenticatedRequestFailure(
+          'invalid-response',
+          INVALID_RESPONSE_MESSAGE,
+          response.status,
+        );
+      }
+    };
 
     try {
-      return request.schema.parse(value);
-    } catch {
-      throw new AuthenticatedRequestFailure(
-        'invalid-response',
-        INVALID_RESPONSE_MESSAGE,
-        response.status,
-      );
+      return await Promise.race([fetchAndParse(), deadline.interruption]);
+    } catch (error) {
+      if (deadline.interruptedBy() === 'caller') {
+        throw error;
+      }
+      if (deadline.interruptedBy() === 'timeout') {
+        throw new AuthenticatedRequestFailure('network', NETWORK_MESSAGE);
+      }
+      throw error;
+    } finally {
+      deadline.dispose();
     }
   }
 }
