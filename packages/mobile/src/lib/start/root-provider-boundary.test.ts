@@ -39,7 +39,54 @@ function elementChildren(element: ts.JsxElement): readonly ts.JsxElement[] {
   return element.children.filter(ts.isJsxElement);
 }
 
+function stackScreenNames(
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+): readonly string[] {
+  const names: string[] = [];
+  const visit = (current: ts.Node): void => {
+    if (
+      ts.isJsxSelfClosingElement(current) &&
+      current.tagName.getText(sourceFile) === 'Stack.Screen'
+    ) {
+      const nameAttribute = current.attributes.properties.find(
+        (property): property is ts.JsxAttribute =>
+          ts.isJsxAttribute(property) &&
+          property.name.getText(sourceFile) === 'name',
+      );
+      if (
+        nameAttribute?.initializer !== undefined &&
+        ts.isStringLiteral(nameAttribute.initializer)
+      ) {
+        names.push(nameAttribute.initializer.text);
+      }
+    }
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return names;
+}
+
 describe('root layout provider placement', () => {
+  test('selects the start home when authentication unlocks the protected routes', async () => {
+    const source = await Bun.file(LAYOUT_PATH).text();
+    const sourceFile = ts.createSourceFile(
+      '_layout.tsx',
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const stack = jsxElement(
+      returnedExpression(sourceFile, 'AuthenticatedStack'),
+      'AuthenticatedStack',
+    );
+    const routeNames = stackScreenNames(stack, sourceFile);
+
+    expect(routeNames).toContain('(app)');
+    expect(routeNames[0]).toBe('index');
+  });
+
   test('keeps the app-lifetime mutation owner above all authenticated routes', async () => {
     const source = await Bun.file(LAYOUT_PATH).text();
     const sourceFile = ts.createSourceFile(
