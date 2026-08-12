@@ -4176,6 +4176,15 @@ export const smsOptOutRecords = pgTable(
       'sms_opt_out_records_provider_time',
       sql`${table.providerOccurredAt} <= ${table.recordedAt} + interval '5 minutes'`,
     ),
+    uniqueIndex('sms_opt_out_records_provider_reference_uq')
+      .on(
+        table.rosterSnapshotId,
+        table.recipientId,
+        table.endpointId,
+        table.provider,
+        table.providerReference,
+      )
+      .where(sql`${table.providerOccurredAt} is not null`),
   ],
 );
 

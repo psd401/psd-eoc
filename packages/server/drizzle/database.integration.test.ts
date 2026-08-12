@@ -640,7 +640,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         and indexname in (
           'endpoint_status_records_latest_idx',
           'endpoint_status_records_sms_lifecycle_idx',
-          'roster_endpoints_sms_phone_idx'
+          'roster_endpoints_sms_phone_idx',
+          'sms_opt_out_records_provider_reference_uq'
         )
       order by indexname
     `);
@@ -648,6 +649,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       'endpoint_status_records_latest_idx',
       'endpoint_status_records_sms_lifecycle_idx',
       'roster_endpoints_sms_phone_idx',
+      'sms_opt_out_records_provider_reference_uq',
     ]);
     expect(lifecycleIndexes[0]?.indexdef).toContain(
       '(roster_snapshot_id, recipient_id, endpoint_id, sequence DESC NULLS LAST)',
@@ -657,6 +659,15 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     );
     expect(lifecycleIndexes[1]?.indexdef).toContain(
       "WHERE ((channel = 'sms'::notification_channel) AND ((reason_code)::text = ANY",
+    );
+    expect(lifecycleIndexes[3]?.indexdef).toContain(
+      'UNIQUE INDEX sms_opt_out_records_provider_reference_uq',
+    );
+    expect(lifecycleIndexes[3]?.indexdef).toContain(
+      '(roster_snapshot_id, recipient_id, endpoint_id, provider, provider_reference)',
+    );
+    expect(lifecycleIndexes[3]?.indexdef).toContain(
+      'WHERE (provider_occurred_at IS NOT NULL)',
     );
     expect(lifecycleIndexes[2]?.indexdef).toContain('(phone_number)');
     expect(lifecycleIndexes[2]?.indexdef).toContain(
@@ -915,6 +926,48 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         `),
       'sms_opt_out_records_provider_time',
     );
+    await expectConstraintViolation(
+      () =>
+        db.execute(sql`
+          insert into sms_opt_out_records (
+            id,
+            roster_snapshot_id,
+            recipient_id,
+            endpoint_id,
+            population,
+            channel,
+            provider,
+            provider_reference,
+            provider_occurred_at,
+            recorded_at
+          ) values
+          (
+            '00000000-0000-4000-8000-000000027010'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'aws-eum-sms',
+            'opt-out:synthetic-provider-reference:6',
+            '2026-08-11T16:06:00.000Z'::timestamptz,
+            '2026-08-11T16:07:00.000Z'::timestamptz
+          ),
+          (
+            '00000000-0000-4000-8000-000000027011'::uuid,
+            '00000000-0000-4000-8000-000000000041'::uuid,
+            '00000000-0000-4000-8000-000000000051'::uuid,
+            '00000000-0000-4000-8000-000000000065'::uuid,
+            'synthetic'::roster_population,
+            'sms'::notification_channel,
+            'aws-eum-sms',
+            'opt-out:synthetic-provider-reference:6',
+            '2026-08-11T16:06:30.000Z'::timestamptz,
+            '2026-08-11T16:07:30.000Z'::timestamptz
+          )
+        `),
+      'sms_opt_out_records_provider_reference_uq',
+    );
     await expectPostgresRejection(
       () =>
         db.execute(sql`
@@ -995,8 +1048,20 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           provider,
           provider_reference,
           recorded_at
-        ) values (
+        ) values
+        (
           '00000000-0000-4000-8000-000000027010'::uuid,
+          '00000000-0000-4000-8000-000000000041'::uuid,
+          '00000000-0000-4000-8000-000000000050'::uuid,
+          '00000000-0000-4000-8000-000000000062'::uuid,
+          'synthetic'::roster_population,
+          'sms'::notification_channel,
+          'aws-eum-sms',
+          'opt-out:synthetic-legacy-proof:1',
+          '2026-08-11T17:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000027015'::uuid,
           '00000000-0000-4000-8000-000000000041'::uuid,
           '00000000-0000-4000-8000-000000000050'::uuid,
           '00000000-0000-4000-8000-000000000062'::uuid,
@@ -1082,21 +1147,35 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         provider_occurrence_matches_legacy: true,
       });
 
-      const [retainedLegacyOptOut] = await createdConnection.db.execute<{
+      const retainedLegacyOptOuts = await createdConnection.db.execute<{
+        id: string;
         provider_occurrence_is_null: boolean;
         recorded_at_matches_legacy: boolean;
       }>(sql`
         select
+          id::text as id,
           provider_occurred_at is null as provider_occurrence_is_null,
           recorded_at = '2026-08-11T17:00:00.000Z'::timestamptz
             as recorded_at_matches_legacy
         from sms_opt_out_records
-        where id = '00000000-0000-4000-8000-000000027010'::uuid
+        where id in (
+          '00000000-0000-4000-8000-000000027010'::uuid,
+          '00000000-0000-4000-8000-000000027015'::uuid
+        )
+        order by id
       `);
-      expect(retainedLegacyOptOut).toEqual({
-        provider_occurrence_is_null: true,
-        recorded_at_matches_legacy: true,
-      });
+      expect([...retainedLegacyOptOuts]).toEqual([
+        {
+          id: '00000000-0000-4000-8000-000000027010',
+          provider_occurrence_is_null: true,
+          recorded_at_matches_legacy: true,
+        },
+        {
+          id: '00000000-0000-4000-8000-000000027015',
+          provider_occurrence_is_null: true,
+          recorded_at_matches_legacy: true,
+        },
+      ]);
 
       const [latestAfterUpgrade] = await createdConnection.db.execute<{
         provider: string | null;

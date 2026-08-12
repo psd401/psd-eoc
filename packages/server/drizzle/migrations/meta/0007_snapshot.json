@@ -8631,7 +8631,48 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "sms_opt_out_records_provider_reference_uq": {
+          "name": "sms_opt_out_records_provider_reference_uq",
+          "columns": [
+            {
+              "expression": "roster_snapshot_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "recipient_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "endpoint_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_reference",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"sms_opt_out_records\".\"provider_occurred_at\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "sms_opt_out_records_endpoint_fk": {
           "name": "sms_opt_out_records_endpoint_fk",
