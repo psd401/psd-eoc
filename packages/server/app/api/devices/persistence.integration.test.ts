@@ -8,6 +8,10 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
+import {
+  ChannelAttemptSchema,
+  NotificationOutboxMessageSchema,
+} from '@psd-eoc/contracts';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 
 import {
@@ -25,11 +29,16 @@ import { seedDatabase } from '../../../db/seed';
 import {
   accessMembershipMembers,
   accessMembershipSnapshots,
+  dispatchBatches,
   deviceEnrollments,
   devicePushTokenRegistrations,
   devicePushTokenUnregistrations,
   endpointStatusRecords,
+  events,
   groupSources,
+  notificationIntentChannels,
+  notificationIntents,
+  outbox,
   rosterEndpoints,
   rosterRecipientGroupSources,
   rosterRecipients,
@@ -44,6 +53,10 @@ import {
   users,
 } from '../../../db/schema';
 import { migrateDatabase } from '../../../drizzle/migrate';
+import {
+  createDrizzleDeliveryEvidenceStore,
+  type AttemptEvidenceInput,
+} from '../internal/delivery-state/route';
 import type { TrustedCapabilityInvocation } from '../../../lib/capabilities/engine';
 import {
   createDrizzleDeviceCapabilityStore,
@@ -77,17 +90,32 @@ const fixture = Object.freeze({
   groupSourceId: randomUUID(),
   rosterConfigurationId: randomUUID(),
   rosterSnapshotId: randomUUID(),
+  syntheticRosterSnapshotId: randomUUID(),
   recipientId: randomUUID(),
+  syntheticRecipientId: randomUUID(),
   rosterVersion: randomInt(100_000_000, 900_000_000),
+  syntheticRosterVersion: 2,
   membershipVersion: randomInt(100_000_000, 900_000_000),
 });
 const fixtureSuffix = fixture.userId.replaceAll('-', '');
 const googleSubject = `synthetic-device-${fixtureSuffix}`;
 const firstToken = `ExponentPushToken[synthetic-${fixtureSuffix}-first]`;
-const replacementToken = `ExponentPushToken[synthetic-${fixtureSuffix}-replacement]`;
+const replacementToken = `synthetic-unroutable:device-${fixtureSuffix}-replacement`;
 const contendedToken = `ExponentPushToken[synthetic-${fixtureSuffix}-contended]`;
 const revokedSessionToken = `ExponentPushToken[synthetic-${fixtureSuffix}-revoked]`;
 const facilityId = '00000000-0000-4000-8000-000000000001';
+const SEEDED = Object.freeze({
+  audienceId: '00000000-0000-4000-8000-000000000020',
+  facilitySouthId: '00000000-0000-4000-8000-000000000002',
+  groupNorthId: '00000000-0000-4000-8000-000000000030',
+  groupSouthId: '00000000-0000-4000-8000-000000000031',
+  groupOthersId: '00000000-0000-4000-8000-000000000032',
+  rosterConfigurationId: '00000000-0000-4000-8000-000000000040',
+  eventTypeVersionId: '00000000-0000-4000-8000-000000000201',
+  pushIntegrationStatusId: '00000000-0000-4000-8000-000000000301',
+  emailIntegrationStatusId: '00000000-0000-4000-8000-000000000302',
+  integrationObservedAt: '2026-08-06T12:00:00.000Z',
+});
 
 let connection: PostgresDatabaseConnection | undefined;
 let disposableContext: DisposableDatabaseContext | undefined;
@@ -483,6 +511,343 @@ async function publishRosterEndpointFixture(
   });
 }
 
+async function publishSyntheticRosterEndpointFixture(
+  database: PostgresDatabase,
+  registration: Readonly<{ id: string; token: string }>,
+): Promise<void> {
+  const capturedAt = new Date();
+  const syncStartedAt = new Date(capturedAt.getTime() - 60_000);
+  await database.transaction(async (transaction) => {
+    await transaction.insert(rosterSnapshots).values({
+      id: fixture.syntheticRosterSnapshotId,
+      version: fixture.syntheticRosterVersion,
+      population: 'synthetic',
+      complete: true,
+      sourceConfigurationId: SEEDED.rosterConfigurationId,
+      sourceConfigurationVersion: 1,
+      syncStartedAt,
+      capturedAt,
+    });
+    await transaction.insert(rosterSnapshotFacilities).values([
+      { rosterSnapshotId: fixture.syntheticRosterSnapshotId, facilityId },
+      {
+        rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+        facilityId: SEEDED.facilitySouthId,
+      },
+    ]);
+    await transaction.insert(rosterSnapshotSources).values(
+      [
+        { id: SEEDED.groupNorthId, purpose: 'building' as const },
+        { id: SEEDED.groupSouthId, purpose: 'building' as const },
+        { id: SEEDED.groupOthersId, purpose: 'others' as const },
+      ].flatMap((source) => [
+        {
+          rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+          population: 'synthetic' as const,
+          groupSourceId: source.id,
+          groupSourceKind: 'synthetic' as const,
+          groupPurpose: source.purpose,
+          completionKind: 'expected' as const,
+        },
+        {
+          rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+          population: 'synthetic' as const,
+          groupSourceId: source.id,
+          groupSourceKind: 'synthetic' as const,
+          groupPurpose: source.purpose,
+          completionKind: 'completed' as const,
+        },
+      ]),
+    );
+    await transaction.insert(rosterRecipients).values({
+      id: fixture.syntheticRecipientId,
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      population: 'synthetic',
+      googleSubject: null,
+      displayName: 'Synthetic Device Invalidation Recipient',
+    });
+    await transaction.insert(rosterRecipientGroupSources).values({
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      recipientId: fixture.syntheticRecipientId,
+      population: 'synthetic',
+      groupSourceId: SEEDED.groupNorthId,
+      groupSourceKind: 'synthetic',
+      groupPurpose: 'building',
+    });
+    await transaction.insert(rosterEndpoints).values({
+      id: registration.id,
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      recipientId: fixture.syntheticRecipientId,
+      population: 'synthetic',
+      channel: 'push',
+      status: 'active',
+      capturedAt,
+      platform: 'ios',
+      token: registration.token,
+      email: null,
+      phoneNumber: null,
+    });
+  });
+}
+
+function mockedIntegrationStatus(integrationId: 'expo-push' | 'ses-email') {
+  return Object.freeze({
+    integrationId,
+    label: 'mocked' as const,
+    verifiedAt: null,
+    verifiedByUserId: null,
+    authorizationReference: null,
+    reasonCode: null,
+    observedAt: SEEDED.integrationObservedAt,
+  });
+}
+
+async function installDeviceNotRegisteredAttemptFixture(
+  database: PostgresDatabase,
+  endpointId: string,
+  provider: 'expo-push' | 'mock-expo-push',
+): Promise<Date> {
+  const ids = Object.freeze({
+    event: randomUUID(),
+    intent: randomUUID(),
+    outbox: randomUUID(),
+    batch: randomUUID(),
+    attempt: randomUUID(),
+    request: randomUUID(),
+    preview: randomUUID(),
+  });
+  const createdAt = new Date();
+  const attemptedAt = new Date();
+  const authorization = Object.freeze({
+    kind: 'synthetic-training' as const,
+    activationPreviewId: ids.preview,
+    consequenceDigest: 'd'.repeat(64),
+    requestId: ids.request,
+  });
+  const pushMessage = Object.freeze({
+    eventKind: 'test' as const,
+    templateMode: 'drill' as const,
+    purpose: 'activation' as const,
+    classificationMarker: 'DRILL' as const,
+    channel: 'push' as const,
+    title: '[DRILL] Device invalidation test',
+    body: '[DRILL] Synthetic and unroutable test only.',
+  });
+  const emailMessage = Object.freeze({
+    eventKind: 'test' as const,
+    templateMode: 'drill' as const,
+    purpose: 'activation' as const,
+    classificationMarker: 'DRILL' as const,
+    channel: 'email' as const,
+    subject: '[DRILL] Device invalidation test',
+    textBody: '[DRILL] Synthetic and unroutable test only.',
+  });
+  const channels = Object.freeze([
+    Object.freeze({
+      channel: 'push' as const,
+      endpointCount: 1,
+      renderedMessage: pushMessage,
+      integrationStatus: mockedIntegrationStatus('expo-push'),
+    }),
+    Object.freeze({
+      channel: 'email' as const,
+      endpointCount: 1,
+      renderedMessage: emailMessage,
+      integrationStatus: mockedIntegrationStatus('ses-email'),
+    }),
+  ]);
+  const message = NotificationOutboxMessageSchema.parse({
+    version: 1,
+    outboxId: ids.outbox,
+    intentId: ids.intent,
+    eventId: ids.event,
+    eventKind: 'test',
+    templateMode: 'drill',
+    purpose: 'activation',
+    eventTypeVersion: {
+      id: SEEDED.eventTypeVersionId,
+      templateMode: 'drill',
+    },
+    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterPopulation: 'synthetic',
+    audienceConfig: { id: SEEDED.audienceId, version: 1 },
+    requestId: ids.request,
+    authorization,
+    channels,
+    createdAt: createdAt.toISOString(),
+  });
+
+  await database.transaction(async (transaction) => {
+    await transaction.insert(events).values({
+      id: ids.event,
+      facilityId,
+      kind: 'test',
+      templateMode: 'drill',
+      eventTypeVersionId: SEEDED.eventTypeVersionId,
+      status: 'active',
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterPopulation: 'synthetic',
+      createdBy: {
+        kind: 'system',
+        serviceId: 'device-invalidation-database-test',
+      },
+      createdAt,
+      activatedAt: createdAt,
+      allClearAt: null,
+      reactivatedAt: null,
+      closedAt: null,
+      correctionOfEventId: null,
+      correctionReason: null,
+      activationAuthorization: authorization,
+    });
+    await transaction.insert(notificationIntents).values({
+      id: ids.intent,
+      eventId: ids.event,
+      eventKind: 'test',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersionId: SEEDED.eventTypeVersionId,
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterPopulation: 'synthetic',
+      audienceConfigId: SEEDED.audienceId,
+      audienceConfigVersion: 1,
+      createdBy: {
+        kind: 'system',
+        serviceId: 'device-invalidation-database-test',
+      },
+      source: 'scheduled-job',
+      requestId: ids.request,
+      authorization,
+      createdAt,
+    });
+    await transaction.insert(notificationIntentChannels).values([
+      {
+        intentId: ids.intent,
+        sequence: 1,
+        channel: 'push',
+        eventKind: 'test',
+        templateMode: 'drill',
+        purpose: 'activation',
+        rosterPopulation: 'synthetic',
+        classificationMarker: 'DRILL',
+        endpointCount: 1,
+        renderedMessage: pushMessage,
+        integrationStatusId: SEEDED.pushIntegrationStatusId,
+        integrationId: 'expo-push',
+        integrationLabel: 'mocked',
+      },
+      {
+        intentId: ids.intent,
+        sequence: 2,
+        channel: 'email',
+        eventKind: 'test',
+        templateMode: 'drill',
+        purpose: 'activation',
+        rosterPopulation: 'synthetic',
+        classificationMarker: 'DRILL',
+        endpointCount: 1,
+        renderedMessage: emailMessage,
+        integrationStatusId: SEEDED.emailIntegrationStatusId,
+        integrationId: 'ses-email',
+        integrationLabel: 'mocked',
+      },
+    ]);
+    await transaction.insert(outbox).values({
+      id: ids.outbox,
+      messageVersion: 1,
+      intentId: ids.intent,
+      eventId: ids.event,
+      eventKind: 'test',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersionId: SEEDED.eventTypeVersionId,
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterPopulation: 'synthetic',
+      audienceConfigId: SEEDED.audienceId,
+      audienceConfigVersion: 1,
+      requestId: ids.request,
+      authorization,
+      channels,
+      message,
+      status: 'pending',
+      attempts: 0,
+      availableAt: createdAt,
+      lockedUntil: null,
+      publishedAt: null,
+      failedAt: null,
+      lastErrorCode: null,
+      createdAt,
+    });
+    await transaction.insert(dispatchBatches).values({
+      id: ids.batch,
+      outboxId: ids.outbox,
+      intentId: ids.intent,
+      eventId: ids.event,
+      eventKind: 'test',
+      templateMode: 'drill',
+      purpose: 'activation',
+      eventTypeVersionId: SEEDED.eventTypeVersionId,
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      rosterPopulation: 'synthetic',
+      audienceConfigId: SEEDED.audienceId,
+      audienceConfigVersion: 1,
+      requestId: ids.request,
+      authorization,
+      channel: 'push',
+      renderedMessage: pushMessage,
+      integrationStatusId: SEEDED.pushIntegrationStatusId,
+      integrationId: 'expo-push',
+      integrationLabel: 'mocked',
+      sequence: 1,
+      endpointCount: 1,
+      createdAt,
+    });
+  });
+
+  const attempt = ChannelAttemptSchema.parse({
+    id: ids.attempt,
+    batchId: ids.batch,
+    intentId: ids.intent,
+    eventId: ids.event,
+    eventKind: 'test',
+    templateMode: 'drill',
+    purpose: 'activation',
+    eventTypeVersion: {
+      id: SEEDED.eventTypeVersionId,
+      templateMode: 'drill',
+    },
+    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterPopulation: 'synthetic',
+    recipientId: fixture.syntheticRecipientId,
+    endpointId,
+    channel: 'push',
+    attemptNumber: 1,
+    attemptedAt: attemptedAt.toISOString(),
+  });
+  const attempted: AttemptEvidenceInput = {
+    subject: { kind: 'attempt', attemptId: attempt.id },
+    state: 'attempted',
+    provider: null,
+    providerReference: null,
+    proof: null,
+    reasonCode: null,
+    diagnosticDigest: null,
+  };
+  const failed: AttemptEvidenceInput = {
+    subject: { kind: 'attempt', attemptId: attempt.id },
+    state: 'failed',
+    provider,
+    providerReference: null,
+    proof: null,
+    reasonCode: EXPO_DEVICE_NOT_REGISTERED_REASON,
+    diagnosticDigest: null,
+  };
+  const evidenceStore = createDrizzleDeliveryEvidenceStore(database);
+  await evidenceStore.recordAttemptEvidence({ attempt, evidence: attempted });
+  await evidenceStore.recordAttemptEvidence({ attempt, evidence: failed });
+  return attemptedAt;
+}
+
 async function activeRegistrations(database: PostgresDatabase) {
   return database
     .select({
@@ -637,7 +1002,7 @@ describeWithDatabase('device push-token persistence', () => {
     );
   });
 
-  test('serializes registration and terminal invalidation without resurrecting a token', async () => {
+  test('reconciles DNR evidence while allowing only a fresh same-device generation', async () => {
     const database = databaseConnection().db;
     const store = createDrizzleDeviceCapabilityStore(database);
     const registrationInput = {
@@ -729,6 +1094,7 @@ describeWithDatabase('device push-token persistence', () => {
       throw new Error('The replacement registration was not retained.');
     }
     await publishRosterEndpointFixture(database, active);
+    await publishSyntheticRosterEndpointFixture(database, active);
 
     const rosterStore = createDrizzleRosterSyncStore(database);
     const beforeInvalidation = await rosterStore.loadLocalContacts([
@@ -738,55 +1104,186 @@ describeWithDatabase('device push-token persistence', () => {
       { id: active.id, platform: 'ios', token: replacementToken },
     ]);
 
-    await executeDeviceCapability(
-      'unregister-push-token',
-      { deviceEnrollmentId: fixture.deviceId },
-      humanInvocation('pre-invalidation-unregister'),
-      store,
-    );
-    expect(
-      await activeRegistrationsForToken(database, replacementToken),
-    ).toEqual([]);
-
     const invalidationInput = {
-      rosterSnapshotId: fixture.rosterSnapshotId,
-      recipientId: fixture.recipientId,
+      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      recipientId: fixture.syntheticRecipientId,
       endpointId: active.id,
       status: 'invalid' as const,
       reasonCode: EXPO_DEVICE_NOT_REGISTERED_REASON,
     };
-    const [registrationRace, invalidationRace] = await Promise.allSettled([
+
+    await installDeviceNotRegisteredAttemptFixture(
+      database,
+      active.id,
+      'expo-push',
+    );
+    await expect(
+      executeDeviceCapability(
+        'record-endpoint-status',
+        invalidationInput,
+        workerInvocation('cross-truth-provider-evidence'),
+        store,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      reasonCode: 'PERSISTENCE_CONFLICT',
+      message:
+        'Endpoint invalidation requires retained provider failure evidence.',
+    });
+    expect(
+      await database
+        .select()
+        .from(endpointStatusRecords)
+        .where(
+          and(
+            eq(
+              endpointStatusRecords.rosterSnapshotId,
+              fixture.syntheticRosterSnapshotId,
+            ),
+            eq(endpointStatusRecords.endpointId, active.id),
+          ),
+        ),
+    ).toEqual([]);
+    expect(
+      await activeRegistrationsForToken(database, replacementToken),
+    ).toEqual([{ id: active.id, deviceEnrollmentId: fixture.deviceId }]);
+
+    const attemptedAt = await installDeviceNotRegisteredAttemptFixture(
+      database,
+      active.id,
+      'mock-expo-push',
+    );
+    const sameDeviceRace = await Promise.allSettled([
       executeDeviceCapability(
         'register-push-token',
-        {
-          deviceEnrollmentId: fixture.deviceId,
-          platform: 'ios',
-          token: replacementToken,
-        },
-        humanInvocation('concurrent-terminal-token-reregistration'),
+        { ...registrationInput, token: replacementToken },
+        humanInvocation('same-device-dnr-race'),
         store,
       ),
       executeDeviceCapability(
         'record-endpoint-status',
         invalidationInput,
-        workerInvocation('first'),
+        workerInvocation('same-device-dnr-race'),
         store,
       ),
     ]);
-    expect(invalidationRace.status).toBe('fulfilled');
-    if (invalidationRace.status !== 'fulfilled') {
-      throw new Error('The terminal token invalidation did not complete.');
-    }
-    const firstInvalidation = invalidationRace.value;
-    expect(['fulfilled', 'rejected']).toContain(registrationRace.status);
-    if (registrationRace.status === 'rejected') {
-      expect(registrationRace.reason).toMatchObject({
+    expect(sameDeviceRace.map((result) => result.status)).toEqual([
+      'fulfilled',
+      'fulfilled',
+    ]);
+    const afterSameDeviceRace = await activeRegistrationsForToken(
+      database,
+      replacementToken,
+    );
+    expect(afterSameDeviceRace).toHaveLength(1);
+    expect(afterSameDeviceRace[0]).toMatchObject({
+      deviceEnrollmentId: fixture.deviceId,
+    });
+    expect(afterSameDeviceRace[0]?.id).not.toBe(active.id);
+    expect(
+      await database
+        .select()
+        .from(devicePushTokenUnregistrations)
+        .where(eq(devicePushTokenUnregistrations.registrationId, active.id)),
+    ).toHaveLength(1);
+    await executeDeviceCapability(
+      'unregister-push-token',
+      { deviceEnrollmentId: fixture.deviceId },
+      humanInvocation('provider-evidence-gap-unregister'),
+      store,
+    );
+    const crossDeviceRace = await Promise.allSettled([
+      executeDeviceCapability(
+        'register-push-token',
+        {
+          deviceEnrollmentId: fixture.otherDeviceId,
+          platform: 'ios',
+          token: replacementToken,
+        },
+        humanInvocation(
+          'provider-evidence-gap-cross-device-denied',
+          fixture.otherSessionId,
+          fixture.otherConnectivityEpochId,
+        ),
+        store,
+      ),
+      executeDeviceCapability(
+        'record-endpoint-status',
+        invalidationInput,
+        workerInvocation('cross-device-dnr-race'),
+        store,
+      ),
+    ]);
+    expect(crossDeviceRace[0]).toMatchObject({
+      status: 'rejected',
+      reason: {
         status: 409,
         reasonCode: 'PERSISTENCE_CONFLICT',
         message: 'The push token cannot be registered.',
-      });
+      },
+    });
+    expect(crossDeviceRace[1]).toMatchObject({ status: 'fulfilled' });
+    expect(
+      await activeRegistrationsForToken(database, replacementToken),
+    ).toEqual([]);
+    await Bun.sleep(5);
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios',
+        token: replacementToken,
+      },
+      humanInvocation('post-attempt-new-registration'),
+      store,
+    );
+    const [newerRegistration] = await database
+      .select({
+        id: devicePushTokenRegistrations.id,
+        registeredAt: devicePushTokenRegistrations.registeredAt,
+      })
+      .from(devicePushTokenRegistrations)
+      .leftJoin(
+        devicePushTokenUnregistrations,
+        eq(
+          devicePushTokenUnregistrations.registrationId,
+          devicePushTokenRegistrations.id,
+        ),
+      )
+      .where(
+        and(
+          eq(devicePushTokenRegistrations.token, replacementToken),
+          isNull(devicePushTokenUnregistrations.id),
+        ),
+      );
+    if (newerRegistration === undefined) {
+      throw new Error('The post-attempt registration was not retained.');
     }
-    expect(JSON.stringify(registrationRace)).not.toContain(replacementToken);
+    expect(newerRegistration.id).not.toBe(active.id);
+    expect(newerRegistration.registeredAt.getTime()).toBeGreaterThan(
+      attemptedAt.getTime(),
+    );
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios',
+        token: replacementToken,
+      },
+      humanInvocation('post-attempt-registration-replay'),
+      store,
+    );
+    expect(
+      await activeRegistrationsForToken(database, replacementToken),
+    ).toEqual([
+      { id: newerRegistration.id, deviceEnrollmentId: fixture.deviceId },
+    ]);
+    const firstInvalidation = await executeDeviceCapability(
+      'record-endpoint-status',
+      invalidationInput,
+      workerInvocation('first-evidenced-invalidation'),
+      store,
+    );
 
     const repeatedInvalidation = await executeDeviceCapability(
       'record-endpoint-status',
@@ -794,7 +1291,7 @@ describeWithDatabase('device push-token persistence', () => {
       workerInvocation('semantic-repeat'),
       store,
     );
-    expect(repeatedInvalidation.id).toBe(firstInvalidation.id);
+    expect(repeatedInvalidation).toEqual(firstInvalidation);
 
     const [
       statusRows,
@@ -809,7 +1306,7 @@ describeWithDatabase('device push-token persistence', () => {
           and(
             eq(
               endpointStatusRecords.rosterSnapshotId,
-              fixture.rosterSnapshotId,
+              fixture.syntheticRosterSnapshotId,
             ),
             eq(endpointStatusRecords.endpointId, active.id),
           ),
@@ -842,29 +1339,44 @@ describeWithDatabase('device push-token persistence', () => {
     expect(unregistrationRows).toHaveLength(1);
     expect(tokenRegistrationRows.length).toBeGreaterThanOrEqual(1);
     expect(
-      tokenRegistrationRows.every(
-        (registration) => registration.unregistrationId !== null,
-      ),
-    ).toBe(true);
-    expect(afterInvalidation[0]?.pushEndpoints).toEqual([]);
-    expect(await activeRegistrations(database)).toEqual([]);
-    expect(
-      await activeRegistrationsForToken(database, replacementToken),
-    ).toEqual([]);
+      tokenRegistrationRows.find(
+        (registration) => registration.registrationId === newerRegistration.id,
+      )?.unregistrationId,
+    ).toBeNull();
+    expect(afterInvalidation[0]?.pushEndpoints).toEqual([
+      {
+        id: newerRegistration.id,
+        platform: 'ios',
+        token: replacementToken,
+      },
+    ]);
+    expect(await activeRegistrations(database)).toEqual([
+      { id: newerRegistration.id, token: replacementToken },
+    ]);
 
-    const [terminalReregistration] = await Promise.allSettled([
+    await executeDeviceCapability(
+      'unregister-push-token',
+      { deviceEnrollmentId: fixture.deviceId },
+      humanInvocation('prepare-same-device-recovery'),
+      store,
+    );
+    const crossDeviceRecovery = await Promise.allSettled([
       executeDeviceCapability(
         'register-push-token',
         {
-          deviceEnrollmentId: fixture.deviceId,
+          deviceEnrollmentId: fixture.otherDeviceId,
           platform: 'ios',
           token: replacementToken,
         },
-        humanInvocation('terminal-token-reregistration-denied'),
+        humanInvocation(
+          'cross-device-terminal-token-recovery-denied',
+          fixture.otherSessionId,
+          fixture.otherConnectivityEpochId,
+        ),
         store,
       ),
     ]);
-    expect(terminalReregistration).toMatchObject({
+    expect(crossDeviceRecovery[0]).toMatchObject({
       status: 'rejected',
       reason: {
         status: 409,
@@ -872,12 +1384,37 @@ describeWithDatabase('device push-token persistence', () => {
         message: 'The push token cannot be registered.',
       },
     });
-    expect(JSON.stringify(terminalReregistration)).not.toContain(
-      replacementToken,
+    expect(JSON.stringify(crossDeviceRecovery)).not.toContain(replacementToken);
+    await Bun.sleep(5);
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.deviceId,
+        platform: 'ios',
+        token: replacementToken,
+      },
+      humanInvocation('same-device-terminal-token-recovery'),
+      store,
     );
+    const recovered = await activeRegistrations(database);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ token: replacementToken });
+    expect(recovered[0]?.id).not.toBe(active.id);
+    expect(recovered[0]?.id).not.toBe(newerRegistration.id);
     expect(
-      await activeRegistrationsForToken(database, replacementToken),
-    ).toEqual([]);
+      await database
+        .select()
+        .from(endpointStatusRecords)
+        .where(
+          and(
+            eq(
+              endpointStatusRecords.rosterSnapshotId,
+              fixture.syntheticRosterSnapshotId,
+            ),
+            eq(endpointStatusRecords.endpointId, active.id),
+          ),
+        ),
+    ).toHaveLength(1);
   });
 
   test('denies push-token mutation from an append-only revoked session', async () => {

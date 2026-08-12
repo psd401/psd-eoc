@@ -7,6 +7,7 @@ import {
   EXPO_SEND_URL,
   chunkExpoValues,
   createExpoPushMessage,
+  expired,
   parseExpoReceiptResponse,
   parseExpoTicketResponse,
   type ExpoProviderOutcome,
@@ -39,6 +40,7 @@ export interface ExpoPushHttpTransportOptions {
   /** Omission keeps all provider network I/O disabled. */
   readonly authorizeLiveTransport?: ExpoLiveTransportAuthorizer;
   readonly timeoutMilliseconds?: number;
+  readonly clock?: () => Date | string | number;
 }
 
 function parseAccessToken(value: string): string {
@@ -147,12 +149,14 @@ export class ExpoPushHttpTransport implements ExpoPushTransport {
   readonly #fetch: ExpoPushFetch;
   readonly #authorize: ExpoLiveTransportAuthorizer | undefined;
   readonly #timeoutMilliseconds: number;
+  readonly #clock: () => Date | string | number;
 
   public constructor(options: ExpoPushHttpTransportOptions) {
     this.#accessToken = parseAccessToken(options.accessToken);
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#authorize = options.authorizeLiveTransport;
     this.#timeoutMilliseconds = parseTimeout(options.timeoutMilliseconds);
+    this.#clock = options.clock ?? Date.now;
   }
 
   public async sendChunk(
@@ -160,9 +164,28 @@ export class ExpoPushHttpTransport implements ExpoPushTransport {
   ): Promise<readonly ExpoProviderOutcome[]> {
     assertCanonicalLiveWork(workItems);
     await this.#assertAuthorized();
-    const messages = workItems.map((item) => createExpoPushMessage(item));
-    const response = await this.#post(EXPO_SEND_URL, messages);
-    return parseExpoTicketResponse(response, messages.length);
+    const now = this.#clock();
+    const messages = workItems.map((item) => createExpoPushMessage(item, now));
+    const liveIndexes = messages.flatMap((message, index) =>
+      message.ttl < 1 ? [] : [index],
+    );
+    if (liveIndexes.length === 0) {
+      return Object.freeze(messages.map(() => expired()));
+    }
+    const response = await this.#post(
+      EXPO_SEND_URL,
+      liveIndexes.map((index) => messages[index]!),
+    );
+    const providerOutcomes = parseExpoTicketResponse(
+      response,
+      liveIndexes.length,
+    );
+    let providerIndex = 0;
+    return Object.freeze(
+      messages.map((message) =>
+        message.ttl < 1 ? expired() : providerOutcomes[providerIndex++]!,
+      ),
+    );
   }
 
   public async queryReceiptChunk(
@@ -249,6 +272,13 @@ export class ExpoPushHttpTransport implements ExpoPushTransport {
         throw new ProviderDispatchError(
           'EXPO_HTTP_SERVER_ERROR',
           'safe-to-retry',
+        );
+      }
+      if (response.status === 401 || response.status === 403) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new ProviderDispatchError(
+          'EXPO_INVALID_CREDENTIALS',
+          'terminal-failure',
         );
       }
       if (!response.ok) {

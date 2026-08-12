@@ -16,7 +16,18 @@ import {
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, isNull, ne, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -27,6 +38,8 @@ import {
   type DatabaseQuery,
 } from '../../db/client';
 import {
+  channelAttempts,
+  deliveryEvidence,
   deviceEnrollments,
   devicePushTokenRegistrations,
   devicePushTokenUnregistrations,
@@ -457,49 +470,179 @@ async function assertPushTokenAvailableForDevice(
   }
 }
 
-async function assertPushTokenHasNoTerminalInvalidation(
+async function assertPushTokenRegistrationAllowed(
+  database: DeviceQueryDatabase,
+  deviceEnrollmentId: string,
+  token: string,
+  registeredAt: Date,
+): Promise<PushTokenFailureCutoff | null> {
+  const failure = await latestPushTokenFailureCutoff(
+    database,
+    token,
+    registeredAt,
+  );
+  if (
+    failure !== null &&
+    (failure.deviceEnrollmentId === null ||
+      failure.deviceEnrollmentId !== deviceEnrollmentId ||
+      registeredAt.getTime() <= failure.attemptedAt.getTime())
+  ) {
+    throw deviceConflict('The push token cannot be registered.');
+  }
+  return failure;
+}
+
+interface PushTokenUnregistrationFact {
+  readonly registrationId: string;
+  readonly deviceEnrollmentId: string;
+}
+
+interface PushTokenFailureCutoff {
+  readonly attemptedAt: Date;
+  readonly deviceEnrollmentId: string | null;
+}
+
+async function latestPushTokenFailureCutoff(
   database: DeviceQueryDatabase,
   token: string,
-): Promise<void> {
-  const [terminal] = await database
-    .select({ id: endpointStatusRecords.id })
-    .from(endpointStatusRecords)
+  observedThrough: Date,
+): Promise<PushTokenFailureCutoff | null> {
+  const [failure] = await database
+    .select({
+      attemptedAt: channelAttempts.attemptedAt,
+      deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+      evidenceRecordedAt: deliveryEvidence.recordedAt,
+    })
+    .from(channelAttempts)
+    .innerJoin(
+      deliveryEvidence,
+      and(
+        eq(deliveryEvidence.subjectKind, 'attempt'),
+        eq(deliveryEvidence.subjectId, channelAttempts.id),
+        eq(deliveryEvidence.attemptId, channelAttempts.id),
+      ),
+    )
     .innerJoin(
       rosterEndpoints,
       and(
-        eq(
-          rosterEndpoints.rosterSnapshotId,
-          endpointStatusRecords.rosterSnapshotId,
-        ),
-        eq(rosterEndpoints.recipientId, endpointStatusRecords.recipientId),
-        eq(rosterEndpoints.id, endpointStatusRecords.endpointId),
-        eq(rosterEndpoints.population, endpointStatusRecords.population),
-        eq(rosterEndpoints.channel, endpointStatusRecords.channel),
+        eq(rosterEndpoints.rosterSnapshotId, channelAttempts.rosterSnapshotId),
+        eq(rosterEndpoints.recipientId, channelAttempts.recipientId),
+        eq(rosterEndpoints.id, channelAttempts.endpointId),
+        eq(rosterEndpoints.population, channelAttempts.rosterPopulation),
+        eq(rosterEndpoints.channel, channelAttempts.channel),
+      ),
+    )
+    .leftJoin(
+      devicePushTokenRegistrations,
+      and(
+        eq(devicePushTokenRegistrations.id, rosterEndpoints.id),
+        eq(devicePushTokenRegistrations.token, rosterEndpoints.token),
       ),
     )
     .where(
       and(
-        eq(rosterEndpoints.channel, 'push'),
+        eq(channelAttempts.channel, 'push'),
         eq(rosterEndpoints.token, token),
-        eq(endpointStatusRecords.status, 'invalid'),
-        eq(endpointStatusRecords.reasonCode, EXPO_DEVICE_NOT_REGISTERED_REASON),
+        eq(deliveryEvidence.state, 'failed'),
+        eq(deliveryEvidence.reasonCode, EXPO_DEVICE_NOT_REGISTERED_REASON),
+        lte(deliveryEvidence.recordedAt, observedThrough),
+        or(
+          and(
+            eq(channelAttempts.rosterPopulation, 'staff'),
+            eq(deliveryEvidence.provider, 'expo-push'),
+          ),
+          and(
+            eq(channelAttempts.rosterPopulation, 'synthetic'),
+            eq(deliveryEvidence.provider, 'mock-expo-push'),
+          ),
+        ),
       ),
     )
+    .orderBy(
+      desc(channelAttempts.attemptedAt),
+      desc(deliveryEvidence.recordedAt),
+      desc(deliveryEvidence.id),
+    )
     .limit(1);
-  if (terminal !== undefined) {
-    throw deviceConflict('The push token cannot be registered.');
+  if (failure === undefined) return null;
+  const attemptedAt = new Date(failure.attemptedAt);
+  const evidenceRecordedAt = new Date(failure.evidenceRecordedAt);
+  if (
+    !Number.isFinite(attemptedAt.getTime()) ||
+    !Number.isFinite(evidenceRecordedAt.getTime()) ||
+    attemptedAt.getTime() > evidenceRecordedAt.getTime() ||
+    evidenceRecordedAt.getTime() > observedThrough.getTime()
+  ) {
+    throw deviceConflict('Push-token provider evidence has inconsistent time.');
+  }
+  return Object.freeze({
+    attemptedAt,
+    deviceEnrollmentId: failure.deviceEnrollmentId,
+  });
+}
+
+async function appendPushTokenUnregistrationFacts(
+  database: DeviceQueryDatabase,
+  facts: readonly PushTokenUnregistrationFact[],
+  unregisteredAt: Date,
+): Promise<void> {
+  if (facts.length === 0) return;
+  if (new Set(facts.map((fact) => fact.registrationId)).size !== facts.length) {
+    throw deviceConflict('Push-token unregistration facts were duplicated.');
+  }
+  await database
+    .insert(devicePushTokenUnregistrations)
+    .values(
+      facts.map((fact) => ({
+        registrationId: fact.registrationId,
+        deviceEnrollmentId: fact.deviceEnrollmentId,
+        unregisteredAt,
+      })),
+    )
+    .onConflictDoNothing({
+      target: devicePushTokenUnregistrations.registrationId,
+    });
+  const retained = await database
+    .select({
+      registrationId: devicePushTokenUnregistrations.registrationId,
+      deviceEnrollmentId: devicePushTokenUnregistrations.deviceEnrollmentId,
+    })
+    .from(devicePushTokenUnregistrations)
+    .where(
+      inArray(
+        devicePushTokenUnregistrations.registrationId,
+        facts.map((fact) => fact.registrationId),
+      ),
+    );
+  const retainedByRegistration = new Map(
+    retained.map((fact) => [fact.registrationId, fact.deviceEnrollmentId]),
+  );
+  if (
+    retained.length !== facts.length ||
+    facts.some(
+      (fact) =>
+        retainedByRegistration.get(fact.registrationId) !==
+        fact.deviceEnrollmentId,
+    )
+  ) {
+    throw deviceConflict(
+      'Push-token unregistration evidence could not be retained exactly.',
+    );
   }
 }
 
 async function appendActivePushTokenUnregistrations(
   database: DeviceQueryDatabase,
   token: string,
+  invalidThrough: Date,
+  originDeviceEnrollmentId: string | null,
   unregisteredAt: Date,
 ): Promise<void> {
   const registrations = await database
     .select({
       id: devicePushTokenRegistrations.id,
       deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+      registeredAt: devicePushTokenRegistrations.registeredAt,
     })
     .from(devicePushTokenRegistrations)
     .leftJoin(
@@ -521,19 +664,27 @@ async function appendActivePushTokenUnregistrations(
       'The push token has too many active registrations to reconcile safely.',
     );
   }
-  if (registrations.length === 0) return;
-  await database
-    .insert(devicePushTokenUnregistrations)
-    .values(
-      registrations.map((registration) => ({
+  const registrationIds = new Set(
+    registrations
+      .filter(
+        (registration) =>
+          originDeviceEnrollmentId === null ||
+          registration.deviceEnrollmentId !== originDeviceEnrollmentId ||
+          new Date(registration.registeredAt).getTime() <=
+            invalidThrough.getTime(),
+      )
+      .map((registration) => registration.id),
+  );
+  await appendPushTokenUnregistrationFacts(
+    database,
+    registrations
+      .filter((registration) => registrationIds.has(registration.id))
+      .map((registration) => ({
         registrationId: registration.id,
         deviceEnrollmentId: registration.deviceEnrollmentId,
-        unregisteredAt,
       })),
-    )
-    .onConflictDoNothing({
-      target: devicePushTokenUnregistrations.registrationId,
-    });
+    unregisteredAt,
+  );
 }
 
 /**
@@ -603,19 +754,14 @@ async function appendPushUnregistrations(
   registrationIds: readonly string[],
   unregisteredAt: Date,
 ): Promise<void> {
-  if (registrationIds.length === 0) return;
-  await database
-    .insert(devicePushTokenUnregistrations)
-    .values(
-      registrationIds.map((registrationId) => ({
-        registrationId,
-        deviceEnrollmentId,
-        unregisteredAt,
-      })),
-    )
-    .onConflictDoNothing({
-      target: devicePushTokenUnregistrations.registrationId,
-    });
+  await appendPushTokenUnregistrationFacts(
+    database,
+    registrationIds.map((registrationId) => ({
+      registrationId,
+      deviceEnrollmentId,
+    })),
+    unregisteredAt,
+  );
 }
 
 async function registerPushTokenWithDatabase(
@@ -631,23 +777,58 @@ async function registerPushTokenWithDatabase(
     input.platform,
   );
   await lockPushToken(database, input.token);
-  await assertPushTokenHasNoTerminalInvalidation(database, input.token);
+  const priorFailure = await assertPushTokenRegistrationAllowed(
+    database,
+    device.id,
+    input.token,
+    registeredAt,
+  );
   await assertPushTokenAvailableForDevice(database, device.id, input.token);
   const active = await activePushRegistrations(database, device.id);
   const plan = planPushTokenRegistration(active, input.token);
+  const keptRegistration = active.find(
+    (registration) => registration.id === plan.keepRegistrationId,
+  );
+  const rotateStaleGeneration =
+    priorFailure !== null &&
+    keptRegistration !== undefined &&
+    new Date(keptRegistration.registeredAt).getTime() <=
+      priorFailure.attemptedAt.getTime();
   await appendPushUnregistrations(
     database,
     device.id,
-    plan.unregisterRegistrationIds,
+    [
+      ...plan.unregisterRegistrationIds,
+      ...(rotateStaleGeneration && plan.keepRegistrationId !== null
+        ? [plan.keepRegistrationId]
+        : []),
+    ],
     registeredAt,
   );
-  if (plan.registrationRequired) {
-    await database.insert(devicePushTokenRegistrations).values({
-      deviceEnrollmentId: device.id,
-      platform: device.platform,
-      token: input.token,
-      registeredAt,
-    });
+  if (plan.registrationRequired || rotateStaleGeneration) {
+    const [inserted] = await database
+      .insert(devicePushTokenRegistrations)
+      .values({
+        deviceEnrollmentId: device.id,
+        platform: device.platform,
+        token: input.token,
+        registeredAt,
+      })
+      .returning({
+        deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+        platform: devicePushTokenRegistrations.platform,
+        token: devicePushTokenRegistrations.token,
+      });
+    if (
+      inserted === undefined ||
+      inserted.deviceEnrollmentId !== device.id ||
+      inserted.platform !== device.platform ||
+      inserted.token !== input.token
+    ) {
+      throw deviceConflict(
+        'Push-token registration evidence could not be retained exactly.',
+      );
+    }
   }
   return PushTokenRegistrationReceiptSchema.parse({
     deviceEnrollmentId: device.id,
@@ -738,6 +919,80 @@ function endpointStatusFromRow(
   });
 }
 
+async function requireDeviceNotRegisteredAttempt(
+  database: DeviceQueryDatabase,
+  input: CapabilityInput<'record-endpoint-status'>,
+  recordedAt: Date,
+): Promise<PushTokenFailureCutoff> {
+  const [evidence] = await database
+    .select({
+      attemptedAt: channelAttempts.attemptedAt,
+      evidenceRecordedAt: deliveryEvidence.recordedAt,
+      deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+    })
+    .from(channelAttempts)
+    .innerJoin(
+      deliveryEvidence,
+      and(
+        eq(deliveryEvidence.subjectKind, 'attempt'),
+        eq(deliveryEvidence.subjectId, channelAttempts.id),
+        eq(deliveryEvidence.attemptId, channelAttempts.id),
+      ),
+    )
+    .leftJoin(
+      devicePushTokenRegistrations,
+      eq(devicePushTokenRegistrations.id, channelAttempts.endpointId),
+    )
+    .where(
+      and(
+        eq(channelAttempts.rosterSnapshotId, input.rosterSnapshotId),
+        eq(channelAttempts.recipientId, input.recipientId),
+        eq(channelAttempts.endpointId, input.endpointId),
+        eq(channelAttempts.channel, 'push'),
+        eq(deliveryEvidence.state, 'failed'),
+        or(
+          and(
+            eq(channelAttempts.rosterPopulation, 'staff'),
+            eq(deliveryEvidence.provider, 'expo-push'),
+          ),
+          and(
+            eq(channelAttempts.rosterPopulation, 'synthetic'),
+            eq(deliveryEvidence.provider, 'mock-expo-push'),
+          ),
+        ),
+        eq(deliveryEvidence.reasonCode, EXPO_DEVICE_NOT_REGISTERED_REASON),
+        lte(deliveryEvidence.recordedAt, recordedAt),
+      ),
+    )
+    .orderBy(
+      desc(channelAttempts.attemptedAt),
+      desc(deliveryEvidence.recordedAt),
+      desc(deliveryEvidence.id),
+    )
+    .limit(1);
+  if (evidence === undefined) {
+    throw deviceConflict(
+      'Endpoint invalidation requires retained provider failure evidence.',
+    );
+  }
+  const attemptedAt = new Date(evidence.attemptedAt);
+  const evidenceRecordedAt = new Date(evidence.evidenceRecordedAt);
+  if (
+    !Number.isFinite(attemptedAt.getTime()) ||
+    !Number.isFinite(evidenceRecordedAt.getTime()) ||
+    attemptedAt.getTime() > evidenceRecordedAt.getTime() ||
+    evidenceRecordedAt.getTime() > recordedAt.getTime()
+  ) {
+    throw deviceConflict(
+      'Endpoint invalidation provider evidence has inconsistent time.',
+    );
+  }
+  return Object.freeze({
+    attemptedAt,
+    deviceEnrollmentId: evidence.deviceEnrollmentId,
+  });
+}
+
 async function recordEndpointStatusWithDatabase(
   database: DeviceQueryDatabase,
   input: CapabilityInput<'record-endpoint-status'>,
@@ -771,7 +1026,7 @@ async function recordEndpointStatusWithDatabase(
     .from(devicePushTokenRegistrations)
     .where(eq(devicePushTokenRegistrations.id, endpoint.id))
     .limit(1);
-  if (registration !== undefined && endpoint.population === 'staff') {
+  if (registration !== undefined) {
     if (
       registration.platform !== endpoint.platform ||
       registration.token !== endpoint.token
@@ -780,21 +1035,19 @@ async function recordEndpointStatusWithDatabase(
         'The snapshotted endpoint no longer matches its registration.',
       );
     }
-    const [lockedDevice] = await database
-      .select({ id: deviceEnrollments.id })
-      .from(deviceEnrollments)
-      .where(eq(deviceEnrollments.id, registration.deviceEnrollmentId))
-      .for('update')
-      .limit(1);
-    if (lockedDevice === undefined) {
-      throw deviceConflict('The push registration device could not be locked.');
-    }
   }
 
   await lockPushToken(database, endpoint.token);
+  const failure = await requireDeviceNotRegisteredAttempt(
+    database,
+    input,
+    recordedAt,
+  );
   await appendActivePushTokenUnregistrations(
     database,
     endpoint.token,
+    failure.attemptedAt,
+    failure.deviceEnrollmentId,
     recordedAt,
   );
 

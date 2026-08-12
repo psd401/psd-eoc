@@ -1,4 +1,7 @@
-import type { RecordEndpointStatusInput } from '@psd-eoc/contracts';
+import {
+  DeliveryEvidenceSchema,
+  type RecordEndpointStatusInput,
+} from '@psd-eoc/contracts';
 
 import {
   parseWorkerAttemptWorkItem,
@@ -89,13 +92,24 @@ export class ExpoPushWorker {
     const result = await this.#processor.process(workItem);
     if ('outcome' in result && result.outcome.state === 'provider-accepted') {
       await this.#receiptScheduler.scheduleProviderAccepted(
-        workItem.attempt,
+        workItem,
         result.outcomeEvidence,
       );
     }
+    const durableOutcomeEvidence =
+      'outcome' in result
+        ? DeliveryEvidenceSchema.safeParse(result.outcomeEvidence)
+        : null;
     if (
       'outcome' in result &&
-      result.outcome.reasonCode === 'EXPO_DEVICE_NOT_REGISTERED'
+      result.outcome.state === 'failed' &&
+      result.outcome.reasonCode === 'EXPO_DEVICE_NOT_REGISTERED' &&
+      durableOutcomeEvidence?.success === true &&
+      durableOutcomeEvidence.data.subject.kind === 'attempt' &&
+      durableOutcomeEvidence.data.subject.attemptId === workItem.attempt.id &&
+      durableOutcomeEvidence.data.state === 'failed' &&
+      durableOutcomeEvidence.data.provider === result.outcome.provider &&
+      durableOutcomeEvidence.data.reasonCode === 'EXPO_DEVICE_NOT_REGISTERED'
     ) {
       // Evidence is durable before token-free endpoint invalidation is called.
       await this.#invalidator.invalidate(invalidationInput(workItem));
@@ -106,10 +120,25 @@ export class ExpoPushWorker {
   public async processAll(
     workValues: readonly (WorkerAttemptWorkItem | unknown)[],
   ): Promise<readonly WorkerAttemptProcessResult[]> {
-    const results: WorkerAttemptProcessResult[] = [];
-    for (const workValue of workValues) {
-      results.push(await this.process(workValue));
-    }
-    return Object.freeze(results);
+    // Validate the entire caller-supplied batch before any item can cross the
+    // provider boundary, then start all durable processors concurrently. The
+    // live adapter coalesces only the attempts that independently acquire both
+    // execution and provider-I/O ledger claims.
+    const workItems = workValues.map((value) =>
+      parseWorkerAttemptWorkItem(value),
+    );
+    const settled = await Promise.allSettled(
+      workItems.map((workItem) => this.process(workItem)),
+    );
+    const firstFailure = settled.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (firstFailure !== undefined) throw firstFailure.reason;
+    return Object.freeze(
+      settled.map(
+        (result) =>
+          (result as PromiseFulfilledResult<WorkerAttemptProcessResult>).value,
+      ),
+    );
   }
 }
