@@ -8,6 +8,8 @@ import {
 import {
   ApiErrorSchema,
   CreateMediaUploadIntentInputSchema,
+  JournalEntrySchema,
+  LocationPayloadSchema,
   MediaReadGrantSchema,
   MediaRecordSchema,
   MediaUploadIntentSchema,
@@ -1752,6 +1754,338 @@ test('composer, correction, and redaction remain keyboard-operable and append pr
   await expectAxeClean(page, 'event room after correction and redaction');
 });
 
+test('location maps support drag correction, one-map history, honest states, and fail-open text when tiles fail', async ({
+  page,
+}, testInfo) => {
+  const fixture = await readFixture(testInfo);
+  await page.context().grantPermissions(['geolocation']);
+  await page.context().setGeolocation({
+    latitude: 47.385612,
+    longitude: -122.622407,
+    accuracy: 18.5,
+  });
+  await page.goto(fixturePath(fixture.keyboardEventId));
+  await expect(page.locator('.timeline-loading-placeholder')).toHaveCount(0);
+
+  const malformed = await page.evaluate(async (eventId) => {
+    const csrf = document.cookie
+      .split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith('__Host-psd-eoc-csrf='))
+      ?.split('=', 2)[1];
+    const response = await fetch(`/events/${encodeURIComponent(eventId)}/api`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `event-room-location-malformed-${crypto.randomUUID()}`,
+        ...(csrf === undefined
+          ? {}
+          : { 'X-PSD-EOC-CSRF': decodeURIComponent(csrf) }),
+      },
+      body: JSON.stringify({
+        operation: 'post-location',
+        payload: {
+          state: 'known',
+          latitude: 47.385612,
+          longitude: -122.622407,
+          label: null,
+        },
+        clientTime: new Date().toISOString(),
+      }),
+    });
+    return { status: response.status, value: await response.json() };
+  }, fixture.keyboardEventId);
+  expect(malformed.status).toBe(400);
+  expect(ApiErrorSchema.safeParse(malformed.value).success).toBe(true);
+
+  const lastHeading = await page
+    .locator('.timeline-entry .entry-heading h3')
+    .last()
+    .textContent();
+  const lastSequence = /Entry (\d+):/u.exec(lastHeading ?? '')?.[1];
+  if (lastSequence === undefined) {
+    throw new Error('The synthetic location event has no journal head.');
+  }
+  let nextSequence = Number(lastSequence) + 1;
+  let failTiles = false;
+  let tileSuccesses = 0;
+  let tileFailures = 0;
+  const bodies: Array<Record<string, unknown>> = [];
+  const syntheticUserId = randomUUID();
+  await page.route('https://tile.openstreetmap.org/**', async (route) => {
+    if (failTiles) {
+      tileFailures += 1;
+      await route.fulfill({ status: 503, body: 'Synthetic tile failure.' });
+      return;
+    }
+    tileSuccesses += 1;
+    await route.fulfill({
+      status: 200,
+      body: SYNTHETIC_PNG,
+      contentType: 'image/png',
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      },
+    });
+  });
+  await page.route(
+    `**/events/${fixture.keyboardEventId}/api`,
+    async (route) => {
+      const request = route.request();
+      if (request.method() !== 'POST') {
+        await route.continue();
+        return;
+      }
+      const body = request.postDataJSON() as Record<string, unknown>;
+      if (
+        body.operation !== 'post-location' &&
+        body.operation !== 'correct-location'
+      ) {
+        await route.continue();
+        return;
+      }
+      bodies.push(body);
+      const payload = LocationPayloadSchema.parse(body.payload);
+      const sequence = nextSequence;
+      nextSequence += 1;
+      const entry = JournalEntrySchema.parse({
+        id: randomUUID(),
+        eventId: fixture.keyboardEventId,
+        sequence,
+        author: {
+          kind: 'human',
+          userId: syntheticUserId,
+          sessionId: fixture.sessionId,
+        },
+        source: 'web',
+        serverTime: new Date().toISOString(),
+        clientTime: body.clientTime,
+        supersedes:
+          body.operation === 'correct-location'
+            ? {
+                entryId: body.entryId,
+                entrySequence: body.entrySequence,
+                kind: 'correction',
+                reason: body.reason,
+              }
+            : null,
+        kind: 'location',
+        payload,
+      });
+      await route.fulfill({
+        contentType: 'application/json',
+        headers: {
+          'Idempotency-Key': request.headers()['idempotency-key'] ?? '',
+        },
+        json: { entry },
+      });
+    },
+  );
+
+  const composer = page.locator('.location-composer');
+  await composer.getByLabel('Known coordinates').check();
+  await composer
+    .getByRole('button', { name: 'Use current device location' })
+    .press('Enter');
+  await expect(composer.locator('.location-accuracy')).toContainText(
+    '±18.5 meters',
+  );
+  await expect(composer).toContainText(
+    'GPS accuracy is a radius and never establishes room-level precision.',
+  );
+  await expect.poll(() => tileSuccesses).toBeGreaterThan(0);
+  const editableMap = composer.locator('.location-map-frame');
+  const marker = editableMap.locator('.location-map-marker');
+  await expect(editableMap).toBeVisible();
+  await expect(marker).toBeVisible();
+  const liveCanvas = await editableMap.locator('canvas').elementHandle();
+  if (liveCanvas === null) {
+    throw new Error('The synthetic editable map canvas is not mounted.');
+  }
+  await expect(editableMap.locator('canvas')).toHaveAttribute('tabindex', '-1');
+  await expectAxeClean(page, 'live editable location map');
+  const latitudeInput = composer.getByLabel('Latitude');
+  const longitudeInput = composer.getByLabel('Longitude');
+  const beforeDragCoordinates = `${await latitudeInput.inputValue()},${await longitudeInput.inputValue()}`;
+  const markerBounds = await marker.boundingBox();
+  if (markerBounds === null) {
+    throw new Error('The synthetic editable location marker is not visible.');
+  }
+  await expect(marker).toHaveClass(/maplibregl-marker-draggable/u);
+  const markerClientX = markerBounds.x + markerBounds.width / 2;
+  const markerClientY = markerBounds.y + markerBounds.height / 2;
+  await marker.dispatchEvent('mousedown', {
+    button: 0,
+    buttons: 1,
+    clientX: markerClientX,
+    clientY: markerClientY,
+  });
+  await marker.dispatchEvent('mousemove', {
+    button: 0,
+    buttons: 1,
+    clientX: markerClientX + 48,
+    clientY: markerClientY + 24,
+  });
+  await marker.dispatchEvent('mouseup', {
+    button: 0,
+    buttons: 0,
+    clientX: markerClientX + 48,
+    clientY: markerClientY + 24,
+  });
+  await expect
+    .poll(
+      async () =>
+        `${await latitudeInput.inputValue()},${await longitudeInput.inputValue()}`,
+    )
+    .not.toBe(beforeDragCoordinates);
+  expect(await liveCanvas.evaluate((canvas) => canvas.isConnected)).toBe(true);
+  await composer.getByLabel('Latitude').fill('47.386001');
+  await composer.getByLabel('Longitude').fill('-122.623002');
+  await composer
+    .getByLabel('Location label (optional)')
+    .fill('North staff entrance');
+  await composer.getByRole('button', { name: 'Post location' }).press('Enter');
+  await expect.poll(() => bodies.length).toBe(1);
+  const knownSequence = Number(lastSequence) + 1;
+  const knownArticle = page.getByRole('article', {
+    name: `Entry ${knownSequence}: Location update`,
+  });
+  await expect(knownArticle).toContainText(
+    'latitude 47.386001, longitude -122.623002; GPS accuracy radius ±18.5 meters.',
+  );
+  expect(bodies[0]?.payload).toEqual({
+    state: 'known',
+    latitude: 47.386001,
+    longitude: -122.623002,
+    accuracyMeters: 18.5,
+    label: 'North staff entrance',
+  });
+
+  await knownArticle
+    .getByRole('button', { name: `Correct entry ${knownSequence}` })
+    .press('Enter');
+  const correctionDialog = page.getByRole('dialog');
+  await correctionDialog.getByLabel('Latitude').fill('47.3865');
+  await correctionDialog.getByLabel('Longitude').fill('-122.6235');
+  await correctionDialog
+    .getByLabel('Reason for correction')
+    .fill('Corrected the pin before relying on it.');
+  await correctionDialog
+    .getByRole('button', { name: 'Append correction' })
+    .press('Enter');
+  await expect.poll(() => bodies.length).toBe(2);
+  await expect(knownArticle).toContainText(
+    'This original entry was superseded, not deleted.',
+  );
+  expect(bodies[1]).toMatchObject({
+    operation: 'correct-location',
+    entrySequence: knownSequence,
+    reason: 'Corrected the pin before relying on it.',
+    payload: {
+      state: 'known',
+      latitude: 47.3865,
+      longitude: -122.6235,
+      accuracyMeters: 18.5,
+      label: 'North staff entrance',
+    },
+  });
+
+  const correctedSequence = knownSequence + 1;
+  const correctedArticle = page.getByRole('article', {
+    name: `Entry ${correctedSequence}: Location update`,
+  });
+  await expect(correctedArticle).toContainText(
+    'latitude 47.3865, longitude -122.6235; GPS accuracy radius ±18.5 meters.',
+  );
+  const originalMapToggle = knownArticle.locator('.location-map-toggle');
+  const correctedMapToggle = correctedArticle.locator('.location-map-toggle');
+  const timelineMaps = page.locator('.timeline-panel .location-map-frame');
+  await expect(originalMapToggle).toHaveAccessibleName(
+    `Show map for entry ${knownSequence}`,
+  );
+  await expect(correctedMapToggle).toHaveAccessibleName(
+    `Show map for entry ${correctedSequence}`,
+  );
+  await expect(timelineMaps).toHaveCount(0);
+  await originalMapToggle.press('Enter');
+  await expect(timelineMaps).toHaveCount(1);
+  await correctedMapToggle.press('Enter');
+  await expect(timelineMaps).toHaveCount(1);
+  await expect(originalMapToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(correctedMapToggle).toHaveAttribute('aria-expanded', 'true');
+  await correctedMapToggle.press('Enter');
+  await expect(timelineMaps).toHaveCount(0);
+
+  failTiles = true;
+  await page.context().setGeolocation({
+    latitude: 47.6,
+    longitude: -122.9,
+    accuracy: 31,
+  });
+  await composer.getByLabel('Known coordinates').check();
+  await composer
+    .getByRole('button', { name: 'Use current device location' })
+    .press('Enter');
+  await expect(composer.locator('.location-accuracy')).toContainText(
+    '±31 meters',
+  );
+  await expect.poll(() => tileFailures).toBeGreaterThan(0);
+  await expect(composer).toContainText('Map unavailable.');
+  await composer.getByLabel('Latitude').fill('47.6005');
+  await composer.getByLabel('Longitude').fill('-122.9005');
+  await composer
+    .getByLabel('Location label (optional)')
+    .fill('South staging lot');
+  await expect(
+    composer.getByRole('button', { name: 'Post location' }),
+  ).toBeEnabled();
+  await composer.getByRole('button', { name: 'Post location' }).press('Enter');
+  await expect.poll(() => bodies.length).toBe(3);
+  expect(bodies[2]?.payload).toEqual({
+    state: 'known',
+    latitude: 47.6005,
+    longitude: -122.9005,
+    accuracyMeters: 31,
+    label: 'South staging lot',
+  });
+  await expect(
+    page.getByText(
+      'South staging lot: latitude 47.6005, longitude -122.9005; GPS accuracy radius ±31 meters.',
+    ),
+  ).toBeVisible();
+
+  await composer.getByLabel('Ambiguous location').check();
+  await composer.getByLabel('Best available label').fill('West field area');
+  await composer
+    .getByLabel('Why the location is ambiguous')
+    .fill('Two possible assembly points.');
+  await composer.getByRole('button', { name: 'Post location' }).press('Enter');
+  await expect.poll(() => bodies.length).toBe(4);
+  await expect(
+    page.getByText('Ambiguous location: West field area.'),
+  ).toBeVisible();
+
+  await composer
+    .getByLabel('Why the location is unknown')
+    .fill('Reporter could not verify a location.');
+  await composer.getByRole('button', { name: 'Post location' }).press('Enter');
+  await expect.poll(() => bodies.length).toBe(5);
+  await expect(page.getByText('Location unknown.')).toBeVisible();
+  expect(bodies[3]?.payload).toEqual({
+    state: 'ambiguous',
+    label: 'West field area',
+    reason: 'Two possible assembly points.',
+  });
+  expect(bodies[4]?.payload).toEqual({
+    state: 'unknown',
+    reason: 'Reporter could not verify a location.',
+  });
+  await expectAxeClean(page, 'location truth states after failed map tiles');
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
 test('a concurrent redaction immediately removes and invalidates an open correction dialog', async ({
   page,
 }, testInfo) => {
@@ -2641,6 +2975,19 @@ test('real and drill event rooms use unmistakably different words and symbols', 
   await expect(drillBanner).toContainText('◆');
   await expect(drillBanner).toContainText('DRILL — TRAINING ONLY');
   await expect(drillBanner).not.toContainText('REAL INCIDENT');
+  const exportLink = page.getByRole('link', {
+    name: 'Download PDF summary',
+  });
+  await expect(exportLink).toHaveAttribute(
+    'href',
+    `/records/export/events/${fixture.keyboardEventId}`,
+  );
+  const skipLink = page.getByRole('link', { name: 'Skip to main content' });
+  await skipLink.focus();
+  await expect(skipLink).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(exportLink).toBeFocused();
+  await expectAxeClean(page, 'drill event room with PDF export');
 });
 
 test('all-clear preview is POST-only, CSRF-protected, and exactly idempotent without GET writes', async ({
