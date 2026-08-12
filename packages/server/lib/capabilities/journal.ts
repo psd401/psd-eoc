@@ -2256,22 +2256,29 @@ export interface IssueEventHumanConfirmationResult {
   readonly confirmationId: string | null;
 }
 
-function assertWebConfirmationIdentity(
+function assertInteractiveConfirmationIdentity(
   authenticated: AuthenticatedSession,
 ): void {
   const { actor, result } = authenticated;
+  const enrollment = result.deviceEnrollment;
+  const enrollmentMatchesSource =
+    (authenticated.source === 'web' &&
+      enrollment.platform === 'web' &&
+      enrollment.unlockMethod === 'secure-session-cookie') ||
+    (authenticated.source === 'mobile' &&
+      (enrollment.platform === 'ios' || enrollment.platform === 'android') &&
+      enrollment.unlockMethod === 'biometric');
   if (
-    authenticated.source !== 'web' ||
     actor.kind !== 'human' ||
     actor.userId !== result.user.id ||
     actor.sessionId !== result.session.id ||
     result.connectivityEpoch.sessionId !== result.session.id ||
-    result.deviceEnrollment.platform !== 'web'
+    !enrollmentMatchesSource
   ) {
     throw new CapabilityEngineError(
       'FORBIDDEN',
       'HUMAN_ONLY_REQUIRED',
-      'This confirmation can only be issued to the current web session.',
+      'This confirmation can only be issued to the current authenticated interactive session.',
       403,
     );
   }
@@ -2333,7 +2340,7 @@ async function issueEventHumanConfirmationWithDatabase(
   database: JournalQueryDatabase,
   input: IssueEventHumanConfirmationInput,
 ): Promise<IssueEventHumanConfirmationResult> {
-  assertWebConfirmationIdentity(input.authenticated);
+  assertInteractiveConfirmationIdentity(input.authenticated);
   const eventId = UuidSchema.parse(input.eventId);
   UuidSchema.parse(input.requestId);
   if (!(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) {
