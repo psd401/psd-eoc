@@ -459,11 +459,15 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     expect(dialerUrls).toEqual(['tel:911']);
 
     announcements.length = 0;
+    let openedEvent = false;
     let returnedHome = false;
     const resultInput = {
       eventTypeName: 'Synthetic earthquake drill',
       kind: 'activated' as const,
       mode: 'drill' as const,
+      onOpenEvent: () => {
+        openedEvent = true;
+      },
       onReturnHome: () => {
         returnedHome = true;
       },
@@ -472,6 +476,11 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     const result = ActivationResultContent(resultInput) as Element;
     const resultNodes = renderedElements(result);
     const resultText = renderedText(result).join(' ').replaceAll(/\s+/gu, ' ');
+    const openEvent = resultNodes.find(
+      (node) =>
+        node.props.accessibilityRole === 'button' &&
+        renderedText(node).join(' ').includes('Open event'),
+    );
     const returnHome = resultNodes.find(
       (node) =>
         node.props.accessibilityRole === 'button' &&
@@ -494,9 +503,11 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
         'Drill started. DRILL — PRACTICE. Synthetic earthquake drill.',
       ),
     ]);
-    if (returnHome === undefined) {
-      throw new Error('The scrollable result action is missing.');
+    if (openEvent === undefined || returnHome === undefined) {
+      throw new Error('The scrollable result actions are missing.');
     }
+    press(openEvent);
+    expect(openedEvent).toBe(true);
     press(returnHome);
     expect(returnedHome).toBe(true);
   });

@@ -278,6 +278,7 @@ export class StartMutationProviderController {
     return this.coordinator.submit({
       operation: 'join',
       owner,
+      eventId: input.choice.event.id,
       eventTypeName: input.choice.eventTypeName,
       mode: input.choice.event.templateMode,
       idempotencyKey,

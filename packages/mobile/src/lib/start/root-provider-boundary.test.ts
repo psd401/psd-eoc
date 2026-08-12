@@ -233,4 +233,37 @@ describe('root layout provider placement', () => {
       expect(dependencies).toContain('state.session?.session.id');
     }
   });
+
+  test('keeps pending joins and result navigation bound to the exact event ID', async () => {
+    const screens = [
+      { path: OUTCOME_CHECK_SCREEN_PATHS[0], navigation: 'router.push' },
+      { path: OUTCOME_CHECK_SCREEN_PATHS[1], navigation: 'router.replace' },
+    ] as const;
+
+    for (const { path, navigation } of screens) {
+      const source = await Bun.file(path).text();
+      expect(source).toContain('mutationSnapshot.eventId === choice.event.id');
+      expect(source).not.toContain(
+        'mutationSnapshot.eventTypeName === choice.eventTypeName',
+      );
+
+      const openEvent = source.indexOf('onOpenEvent={() => {');
+      const acknowledge = source.indexOf(
+        'if (!startMutation.acknowledge()) return;',
+        openEvent,
+      );
+      const navigate = source.indexOf(`${navigation}({`, acknowledge);
+      const target = source.indexOf("pathname: '/events/[id]'", navigate);
+      const eventId = source.indexOf(
+        'id: mutationSnapshot.completion.eventId',
+        target,
+      );
+
+      expect(openEvent).toBeGreaterThanOrEqual(0);
+      expect(acknowledge).toBeGreaterThan(openEvent);
+      expect(navigate).toBeGreaterThan(acknowledge);
+      expect(target).toBeGreaterThan(navigate);
+      expect(eventId).toBeGreaterThan(target);
+    }
+  });
 });

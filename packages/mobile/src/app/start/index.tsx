@@ -368,6 +368,13 @@ export default function StartEventScreen() {
           eventTypeName={mutationSnapshot.completion.eventTypeName}
           kind={mutationSnapshot.completion.kind}
           mode={mutationSnapshot.completion.mode}
+          onOpenEvent={() => {
+            if (!startMutation.acknowledge()) return;
+            router.replace({
+              pathname: '/events/[id]',
+              params: { id: mutationSnapshot.completion.eventId },
+            } as Href);
+          }}
           onReturnHome={() => {
             startMutation.acknowledge();
             returnHome();
@@ -763,7 +770,7 @@ export default function StartEventScreen() {
                       mutationSnapshot.phase === 'pending' &&
                       mutationSnapshot.visibility === 'owner' &&
                       mutationSnapshot.operation === 'join' &&
-                      mutationSnapshot.eventTypeName === choice.eventTypeName
+                      mutationSnapshot.eventId === choice.event.id
                     }
                     disabled={mutationPending}
                     eventId={choice.event.id}
