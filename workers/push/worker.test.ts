@@ -14,11 +14,14 @@ import {
   type AttemptExecutionClaim,
   type AttemptExecutionClaimRequest,
   type AttemptExecutionCompletion,
+  type AttemptExecutionLookup,
+  type AttemptExecutionLookupRequest,
   type AttemptExecutionStore,
   type CompleteAttemptExecutionRequest,
   type ReleaseAttemptExecutionRequest,
   type AttemptIdempotentProviderAdapter,
 } from '../shared/processor';
+import { ProviderDispatchError, type RetryPolicy } from '../shared/retry';
 import {
   IDS,
   TIMES,
@@ -33,6 +36,7 @@ import {
   type CompleteExpoProviderIoRequest,
   type DurableExpoSendLedger,
   type ExpoSendLedgerClaim,
+  type ExpoSendLedgerLookup,
 } from './adapter';
 import {
   MOCK_EXPO_PUSH_PROVIDER,
@@ -65,6 +69,25 @@ interface StoredExecution {
 
 class MemoryExecutionStore implements AttemptExecutionStore {
   public readonly executions = new Map<string, StoredExecution>();
+  public lookupOverride: AttemptExecutionLookup | null = null;
+
+  public lookup(
+    request: AttemptExecutionLookupRequest,
+  ): Promise<AttemptExecutionLookup> {
+    if (this.lookupOverride !== null) {
+      return Promise.resolve(this.lookupOverride);
+    }
+    const existing = this.executions.get(request.attemptId);
+    if (existing === undefined) return Promise.resolve({ kind: 'missing' });
+    if (existing.fingerprint !== request.fingerprint) {
+      throw new Error('Synthetic fingerprint conflict.');
+    }
+    return Promise.resolve(
+      existing.completion === null
+        ? { kind: 'in-progress' }
+        : { kind: 'completed', completion: existing.completion },
+    );
+  }
 
   public claim(
     request: AttemptExecutionClaimRequest,
@@ -116,6 +139,102 @@ class MemoryExecutionStore implements AttemptExecutionStore {
     }
     this.executions.delete(request.attemptId);
     return Promise.resolve();
+  }
+}
+
+class ConcurrentMutationExecutionStore implements AttemptExecutionStore {
+  public readonly mutationResults: boolean[] = [];
+  public requestWasFrozen = false;
+  readonly #barrier: Promise<void>;
+  readonly #firstRequestObserved: Promise<void>;
+  #releaseBarrier: (() => void) | undefined;
+  #markFirstRequestObserved: (() => void) | undefined;
+  #firstRequest:
+    | AttemptExecutionLookupRequest
+    | AttemptExecutionClaimRequest
+    | undefined;
+  #secondRequest:
+    | AttemptExecutionLookupRequest
+    | AttemptExecutionClaimRequest
+    | undefined;
+
+  public constructor(private readonly phase: 'lookup' | 'claim') {
+    this.#barrier = new Promise((resolve) => {
+      this.#releaseBarrier = resolve;
+    });
+    this.#firstRequestObserved = new Promise((resolve) => {
+      this.#markFirstRequestObserved = resolve;
+    });
+  }
+
+  public async lookup(
+    request: AttemptExecutionLookupRequest,
+  ): Promise<AttemptExecutionLookup> {
+    if (this.phase !== 'lookup') return { kind: 'missing' };
+    return this.#interleave(request);
+  }
+
+  public async claim(
+    request: AttemptExecutionClaimRequest,
+  ): Promise<AttemptExecutionClaim> {
+    if (this.phase !== 'claim') {
+      throw new Error('Synthetic claim must not run.');
+    }
+    return this.#interleave(request);
+  }
+
+  public complete(): Promise<void> {
+    throw new Error('Synthetic completion must not run.');
+  }
+
+  public release(): Promise<void> {
+    throw new Error('Synthetic release must not run.');
+  }
+
+  public waitForFirstRequest(): Promise<void> {
+    return this.#firstRequestObserved;
+  }
+
+  async #interleave(
+    request: AttemptExecutionLookupRequest | AttemptExecutionClaimRequest,
+  ): Promise<
+    | Readonly<{
+        kind: 'completed';
+        completion: AttemptExecutionCompletion;
+      }>
+    | Readonly<{ kind: 'in-progress' }>
+  > {
+    if (this.#firstRequest === undefined) {
+      this.#firstRequest = request;
+      this.#markFirstRequestObserved?.();
+      await this.#barrier;
+      const target = this.#secondRequest;
+      if (target === undefined) {
+        throw new Error('Synthetic mutation target is missing.');
+      }
+      this.requestWasFrozen = Object.isFrozen(request);
+      this.mutationResults.push(
+        Reflect.set(request, 'attemptId', target.attemptId),
+        Reflect.set(request, 'fingerprint', target.fingerprint),
+      );
+      return {
+        kind: 'completed',
+        completion: {
+          kind: 'final',
+          outcome: {
+            state: 'failed',
+            provider: MOCK_EXPO_PUSH_PROVIDER,
+            providerReference: null,
+            proof: null,
+            reasonCode: 'PROVIDER_RETRY_EXHAUSTED',
+            diagnosticDigest: null,
+          },
+        },
+      };
+    }
+    this.#secondRequest = request;
+    this.#releaseBarrier?.();
+    return { kind: 'in-progress' };
   }
 }
 
@@ -244,6 +363,86 @@ class CorruptProviderExpoAdapter implements AttemptIdempotentProviderAdapter {
   }
 }
 
+class CorruptNonSuccessReferenceAdapter
+  implements AttemptIdempotentProviderAdapter
+{
+  public readonly channel = 'push' as const;
+  public readonly integrationId = 'expo-push' as const;
+  public readonly truthLabel = 'mocked' as const;
+  public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
+  public readonly deliverySemantics = 'attempt-id-idempotent' as const;
+
+  public send() {
+    return Promise.resolve({
+      state: 'failed' as const,
+      provider: this.provider,
+      providerReference: 'a'.repeat(64),
+      proof: null,
+      reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+      diagnosticDigest: null,
+    });
+  }
+}
+
+class StatefulRecoveryErrorAdapter implements AttemptIdempotentProviderAdapter {
+  public readonly channel = 'push' as const;
+  public readonly integrationId = 'expo-push' as const;
+  public readonly truthLabel = 'mocked' as const;
+  public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
+  public readonly deliverySemantics = 'attempt-id-idempotent' as const;
+
+  public recover() {
+    const target = new ProviderDispatchError(
+      'EXPO_HTTP_CLIENT_ERROR',
+      'terminal-failure',
+    );
+    let codeReads = 0;
+    const error = new Proxy(target, {
+      get(value, property, receiver) {
+        if (property === 'code') {
+          codeReads += 1;
+          return codeReads === 1
+            ? 'EXPO_HTTP_CLIENT_ERROR'
+            : 'EXPO_HTTP_SERVER_ERROR';
+        }
+        if (property === 'disposition') {
+          return codeReads === 1 ? 'terminal-failure' : 'safe-to-retry';
+        }
+        return Reflect.get(value, property, receiver) as unknown;
+      },
+    });
+    return Promise.resolve({ kind: 'provider-error' as const, error });
+  }
+
+  public send(): Promise<never> {
+    throw new Error('Recovery adapter must not send.');
+  }
+}
+
+class OverBudgetRecoveryAdapter implements AttemptIdempotentProviderAdapter {
+  public readonly channel = 'push' as const;
+  public readonly integrationId = 'expo-push' as const;
+  public readonly truthLabel = 'mocked' as const;
+  public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
+  public readonly deliverySemantics = 'attempt-id-idempotent' as const;
+  public recoveries = 0;
+
+  public recover() {
+    this.recoveries += 1;
+    return Promise.resolve({
+      kind: 'provider-error' as const,
+      error: new ProviderDispatchError(
+        'EXPO_HTTP_SERVER_ERROR',
+        'safe-to-retry',
+      ),
+    });
+  }
+
+  public send(): Promise<never> {
+    throw new Error('Over-budget recovery must never send.');
+  }
+}
+
 class RecordingInvalidator implements PushEndpointInvalidator {
   public readonly inputs: RecordEndpointStatusInput[] = [];
   public failOnce = false;
@@ -349,6 +548,26 @@ function customAdapterRuntime(adapter: AttemptIdempotentProviderAdapter) {
   return { writer, invalidator, scheduler, store, worker };
 }
 
+function executionStoreRuntime(
+  store: AttemptExecutionStore,
+  retryPolicy: RetryPolicy = RETRY_POLICY,
+) {
+  const adapter = new MockExpoPushAdapter();
+  const writer = new MemoryEvidenceWriter();
+  const invalidator = new RecordingInvalidator();
+  const scheduler = new RecordingReceiptScheduler();
+  const worker = new ExpoPushWorker({
+    adapter,
+    executionStore: store,
+    evidenceWriter: writer,
+    endpointInvalidator: invalidator,
+    receiptScheduler: scheduler,
+    retryPolicy,
+    random: () => 0.5,
+  });
+  return { adapter, writer, invalidator, scheduler, store, worker };
+}
+
 function itemWithAttempt(suffix: number, attemptNumber = 1) {
   return workItem(syntheticBatch(), {
     attemptId: `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`,
@@ -359,16 +578,48 @@ function itemWithAttempt(suffix: number, attemptNumber = 1) {
 class WorkerMemoryExpoLedger implements DurableExpoSendLedger {
   public readonly claims: ClaimExpoProviderIoRequest[] = [];
   public readonly completions: CompleteExpoProviderIoRequest[] = [];
-  readonly #claimed = new Set<string>();
+  readonly #states = new Map<
+    string,
+    Readonly<{
+      fingerprint: string;
+      completion: CompleteExpoProviderIoRequest['completion'] | null;
+    }>
+  >();
+
+  public lookupProviderIo(
+    request: ClaimExpoProviderIoRequest,
+  ): Promise<ExpoSendLedgerLookup> {
+    const existing = this.#states.get(request.attemptId);
+    if (existing === undefined) return Promise.resolve({ kind: 'missing' });
+    if (existing.fingerprint !== request.workFingerprint) {
+      return Promise.resolve({ kind: 'conflict' });
+    }
+    return Promise.resolve(
+      existing.completion === null
+        ? { kind: 'uncertain' }
+        : { kind: 'completed', completion: existing.completion },
+    );
+  }
 
   public claimProviderIo(
     request: ClaimExpoProviderIoRequest,
   ): Promise<ExpoSendLedgerClaim> {
     this.claims.push(request);
-    if (this.#claimed.has(request.attemptId)) {
-      return Promise.resolve({ kind: 'uncertain' });
+    const existing = this.#states.get(request.attemptId);
+    if (existing !== undefined) {
+      if (existing.fingerprint !== request.workFingerprint) {
+        return Promise.resolve({ kind: 'conflict' });
+      }
+      return Promise.resolve(
+        existing.completion === null
+          ? { kind: 'uncertain' }
+          : { kind: 'completed', completion: existing.completion },
+      );
     }
-    this.#claimed.add(request.attemptId);
+    this.#states.set(request.attemptId, {
+      fingerprint: request.workFingerprint,
+      completion: null,
+    });
     return Promise.resolve({
       kind: 'execute',
       claimToken: 'synthetic-worker-claim-token-0001',
@@ -379,6 +630,18 @@ class WorkerMemoryExpoLedger implements DurableExpoSendLedger {
     request: CompleteExpoProviderIoRequest,
   ): Promise<void> {
     this.completions.push(request);
+    const existing = this.#states.get(request.attemptId);
+    if (
+      existing === undefined ||
+      existing.fingerprint !== request.workFingerprint ||
+      existing.completion !== null
+    ) {
+      throw new Error('Synthetic provider-ledger completion conflict.');
+    }
+    this.#states.set(request.attemptId, {
+      fingerprint: request.workFingerprint,
+      completion: request.completion,
+    });
     return Promise.resolve();
   }
 }
@@ -465,6 +728,7 @@ describe('Expo durable attempt worker', () => {
       new DeliveredExpoAdapter(),
       new AccessorDeliveredExpoAdapter(),
       new CorruptProviderExpoAdapter(),
+      new CorruptNonSuccessReferenceAdapter(),
     ]) {
       const app = customAdapterRuntime(adapter);
       await expect(app.worker.process(workItem())).resolves.toMatchObject({
@@ -528,6 +792,214 @@ describe('Expo durable attempt worker', () => {
     await expect(corruptReplay.worker.process(item)).rejects.toThrow();
     expect(corruptReplay.writer.evidence).toHaveLength(0);
     expect(corruptReplay.invalidator.inputs).toHaveLength(0);
+
+    for (const completion of [
+      Object.freeze({
+        kind: 'final' as const,
+        outcome: Object.freeze({
+          state: 'failed' as const,
+          provider: MOCK_EXPO_PUSH_PROVIDER,
+          providerReference: 'b'.repeat(64),
+          proof: null,
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+          diagnosticDigest: null,
+        }),
+      }),
+      Object.freeze({
+        kind: 'retry' as const,
+        outcome: Object.freeze({
+          state: 'failed' as const,
+          provider: MOCK_EXPO_PUSH_PROVIDER,
+          providerReference: null,
+          proof: null,
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+          diagnosticDigest: null,
+        }),
+        delayMilliseconds: 1_000,
+        nextAttemptNumber: 2,
+        reasonCode: 'EXPO_HTTP_SERVER_ERROR',
+      }),
+    ]) {
+      const invalidReplay = workerRuntime();
+      invalidReplay.store.executions.set(item.attempt.id, {
+        fingerprint: workerAttemptFingerprint(item),
+        leaseToken: `lease-${item.attempt.id}`,
+        completion,
+      });
+      await expect(invalidReplay.worker.process(item)).rejects.toThrow();
+      expect(invalidReplay.writer.evidence).toHaveLength(0);
+      expect(invalidReplay.invalidator.inputs).toHaveLength(0);
+      expect(invalidReplay.scheduler.schedules).toHaveLength(0);
+    }
+
+    const malformedLookup = workerRuntime();
+    malformedLookup.store.lookupOverride = {
+      kind: 'completed',
+      completion: {
+        kind: 'final',
+        outcome: {
+          state: 'unknown',
+          provider: MOCK_EXPO_PUSH_PROVIDER,
+          providerReference: 'd'.repeat(64),
+          proof: null,
+          reasonCode: 'EXPO_TICKET_RESPONSE_INVALID',
+          diagnosticDigest: null,
+        },
+      },
+    };
+    await expect(malformedLookup.worker.process(item)).rejects.toThrow();
+    expect(malformedLookup.writer.evidence).toHaveLength(0);
+    expect(malformedLookup.invalidator.inputs).toHaveLength(0);
+    expect(malformedLookup.scheduler.schedules).toHaveLength(0);
+
+    for (const completion of [
+      {
+        kind: 'retry' as const,
+        outcome: {
+          state: 'failed' as const,
+          provider: MOCK_EXPO_PUSH_PROVIDER,
+          providerReference: null,
+          proof: null,
+          reasonCode: 'EXPO_HTTP_SERVER_ERROR',
+          diagnosticDigest: null,
+        },
+        delayMilliseconds: 1_000,
+        nextAttemptNumber: 3,
+        reasonCode: 'EXPO_HTTP_SERVER_ERROR',
+      },
+      {
+        kind: 'final' as const,
+        outcome: {
+          state: 'failed' as const,
+          provider: MOCK_EXPO_PUSH_PROVIDER,
+          providerReference: null,
+          proof: null,
+          reasonCode: 'PROVIDER_RETRY_EXHAUSTED',
+          diagnosticDigest: null,
+        },
+      },
+    ]) {
+      const wrongPhase = workerRuntime();
+      const phaseItem = itemWithAttempt(71, 1);
+      wrongPhase.store.lookupOverride = { kind: 'completed', completion };
+      await expect(wrongPhase.worker.process(phaseItem)).rejects.toThrow();
+      expect(wrongPhase.writer.evidence).toHaveLength(0);
+      expect(wrongPhase.invalidator.inputs).toHaveLength(0);
+      expect(wrongPhase.scheduler.schedules).toHaveLength(0);
+    }
+  });
+
+  test('binds retained retries and exhausted outcomes to the exact attempt policy phase', async () => {
+    const retryCompletion = (
+      delayMilliseconds: number,
+      nextAttemptNumber: number,
+    ): AttemptExecutionCompletion => ({
+      kind: 'retry',
+      outcome: {
+        state: 'failed',
+        provider: MOCK_EXPO_PUSH_PROVIDER,
+        providerReference: null,
+        proof: null,
+        reasonCode: 'EXPO_HTTP_SERVER_ERROR',
+        diagnosticDigest: null,
+      },
+      delayMilliseconds,
+      nextAttemptNumber,
+      reasonCode: 'EXPO_HTTP_SERVER_ERROR',
+    });
+
+    for (const invalidDelay of [999, 1_001]) {
+      const app = workerRuntime();
+      app.store.lookupOverride = {
+        kind: 'completed',
+        completion: retryCompletion(invalidDelay, 2),
+      };
+      await expect(
+        app.worker.process(itemWithAttempt(72, 1)),
+      ).rejects.toThrow();
+      expect(app.writer.evidence).toHaveLength(0);
+    }
+
+    const threeAttemptPolicy = Object.freeze({
+      ...RETRY_POLICY,
+      maxAttempts: 3,
+    });
+    const wrongPhaseStore = new MemoryExecutionStore();
+    wrongPhaseStore.lookupOverride = {
+      kind: 'completed',
+      completion: retryCompletion(1_000, 3),
+    };
+    const wrongPhase = executionStoreRuntime(
+      wrongPhaseStore,
+      threeAttemptPolicy,
+    );
+    await expect(
+      wrongPhase.worker.process(itemWithAttempt(73, 2)),
+    ).rejects.toThrow();
+    expect(wrongPhase.writer.evidence).toHaveLength(0);
+
+    const jitterPolicy = Object.freeze({
+      ...threeAttemptPolicy,
+      jitterRatio: 0.2,
+    });
+    for (const genuineBoundary of [800, 1_200]) {
+      const store = new MemoryExecutionStore();
+      store.lookupOverride = {
+        kind: 'completed',
+        completion: retryCompletion(genuineBoundary, 2),
+      };
+      await expect(
+        executionStoreRuntime(store, jitterPolicy).worker.process(
+          itemWithAttempt(74 + genuineBoundary, 1),
+        ),
+      ).resolves.toMatchObject({
+        kind: 'retry',
+        replayed: true,
+        delayMilliseconds: genuineBoundary,
+      });
+    }
+
+    const recoveryAdapter = new OverBudgetRecoveryAdapter();
+    const late = customAdapterRuntime(recoveryAdapter);
+    const lateItem = itemWithAttempt(75, 3);
+    await expect(late.worker.process(lateItem)).resolves.toMatchObject({
+      kind: 'dlq',
+      replayed: true,
+      outcome: { reasonCode: 'PROVIDER_RETRY_EXHAUSTED' },
+    });
+    await expect(late.worker.process(lateItem)).resolves.toMatchObject({
+      kind: 'dlq',
+      replayed: true,
+      outcome: { reasonCode: 'PROVIDER_RETRY_EXHAUSTED' },
+    });
+    expect(recoveryAdapter.recoveries).toBe(1);
+    expect(late.writer.evidence.map((entry) => entry.state)).toEqual([
+      'attempted',
+      'failed',
+    ]);
+  });
+
+  test('snapshots store lookup and claim identity before untrusted async work', async () => {
+    for (const phase of ['lookup', 'claim'] as const) {
+      const store = new ConcurrentMutationExecutionStore(phase);
+      const app = executionStoreRuntime(store);
+      const first = app.worker.process(itemWithAttempt(76, 1));
+      await store.waitForFirstRequest();
+      const second = app.worker.process(itemWithAttempt(77, 2));
+      const results = await Promise.allSettled([first, second]);
+
+      expect(results[0]?.status).toBe('rejected');
+      expect(results[1]).toMatchObject({
+        status: 'fulfilled',
+        value: { kind: 'in-progress' },
+      });
+      expect(store.requestWasFrozen).toBe(true);
+      expect(store.mutationResults).toEqual([false, false]);
+      expect(app.adapter.logicalSends).toBe(0);
+      expect(app.writer.evidence).toHaveLength(0);
+      expect(app.scheduler.schedules).toHaveLength(0);
+      expect(app.invalidator.inputs).toHaveLength(0);
+    }
   });
 
   test('uses shared durable processing and replays without another logical send', async () => {
@@ -552,6 +1024,23 @@ describe('Expo durable attempt worker', () => {
     expect(app.writer.evidence.map((entry) => entry.state)).toEqual([
       'attempted',
       'provider-accepted',
+    ]);
+  });
+
+  test('snapshots recovered provider errors before classifying retained truth', async () => {
+    const app = customAdapterRuntime(new StatefulRecoveryErrorAdapter());
+
+    await expect(app.worker.process(workItem())).resolves.toMatchObject({
+      kind: 'dlq',
+      replayed: true,
+      outcome: {
+        state: 'failed',
+        reasonCode: 'EXPO_HTTP_CLIENT_ERROR',
+      },
+    });
+    expect(app.writer.evidence.map((entry) => entry.state)).toEqual([
+      'attempted',
+      'failed',
     ]);
   });
 
@@ -915,6 +1404,54 @@ describe('Expo durable attempt worker', () => {
     expect(writer.evidence).toHaveLength(6);
     expect(invalidator.inputs).toHaveLength(1);
     expect(scheduler.schedules).toHaveLength(1);
+  });
+
+  test('replays retained live Expo truth after outer authorization turns dark', async () => {
+    const transport = new WorkerRecordingLiveTransport();
+    const ledger = new WorkerMemoryExpoLedger();
+    const adapter = new LedgeredExpoPushAdapter({
+      transport,
+      sendLedger: ledger,
+      batchWindowMilliseconds: 0,
+      clock: () => realBatch().createdAt,
+    });
+    const firstStore = new MemoryExecutionStore();
+    const first = new ExpoPushWorker({
+      adapter,
+      executionStore: firstStore,
+      evidenceWriter: new MemoryEvidenceWriter(),
+      endpointInvalidator: new RecordingInvalidator(),
+      receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
+      authorizeLiveProvider: () => true,
+    });
+    const item = workItem(realBatch());
+
+    await expect(first.process(item)).resolves.toMatchObject({
+      kind: 'completed',
+      replayed: false,
+    });
+    const darkWriter = new MemoryEvidenceWriter();
+    const darkScheduler = new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER);
+    const dark = new ExpoPushWorker({
+      adapter,
+      executionStore: new MemoryExecutionStore(),
+      evidenceWriter: darkWriter,
+      endpointInvalidator: new RecordingInvalidator(),
+      receiptScheduler: darkScheduler,
+    });
+
+    await expect(dark.process(item)).resolves.toMatchObject({
+      kind: 'completed',
+      replayed: true,
+      outcome: { state: 'provider-accepted' },
+    });
+    expect(transport.chunks).toHaveLength(1);
+    expect(ledger.claims).toHaveLength(1);
+    expect(darkWriter.evidence.map((entry) => entry.state)).toEqual([
+      'attempted',
+      'provider-accepted',
+    ]);
+    expect(darkScheduler.schedules).toHaveLength(1);
   });
 
   test('backs off retryable failures and reaches terminal DLQ at the bound', async () => {

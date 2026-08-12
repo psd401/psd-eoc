@@ -16,6 +16,7 @@ import {
   type CompleteExpoProviderIoRequest,
   type DurableExpoSendLedger,
   type ExpoSendLedgerClaim,
+  type ExpoSendLedgerLookup,
 } from './adapter';
 import { failed, retry, unknown, type ExpoProviderOutcome } from './protocol';
 import type { ExpoPushTransport } from './transport';
@@ -73,11 +74,33 @@ type LedgerState =
 class MemoryDurableLedger implements DurableExpoSendLedger {
   public readonly claims: ClaimExpoProviderIoRequest[] = [];
   public readonly completions: CompleteExpoProviderIoRequest[] = [];
+  public readonly lookups: ClaimExpoProviderIoRequest[] = [];
   public beginError: Error | null = null;
+  public lookupError: Error | null = null;
   public readonly beginErrorAttemptIds = new Set<string>();
   public completionError: Error | null = null;
   public overrideClaim: ExpoSendLedgerClaim | null = null;
+  public overrideLookup: ExpoSendLedgerLookup | null = null;
   readonly #states = new Map<string, LedgerState>();
+
+  public lookupProviderIo(
+    request: ClaimExpoProviderIoRequest,
+  ): Promise<ExpoSendLedgerLookup> {
+    this.lookups.push(request);
+    if (this.lookupError !== null) return Promise.reject(this.lookupError);
+    if (this.overrideLookup !== null)
+      return Promise.resolve(this.overrideLookup);
+    const existing = this.#states.get(request.attemptId);
+    if (existing === undefined) return Promise.resolve({ kind: 'missing' });
+    if (existing.fingerprint !== request.workFingerprint) {
+      return Promise.resolve({ kind: 'conflict' });
+    }
+    return Promise.resolve(
+      existing.kind === 'completed'
+        ? { kind: 'completed', completion: existing.completion }
+        : { kind: 'uncertain' },
+    );
+  }
 
   public seedUncertain(attemptId: string, fingerprint = 'a'.repeat(64)): void {
     this.#states.set(attemptId, { kind: 'uncertain', fingerprint });
@@ -259,6 +282,54 @@ describe('ledgered Expo live adapter', () => {
     expect(app.ledger.completions).toHaveLength(1);
   });
 
+  test('recovers completed provider truth read-only without a new claim or send', async () => {
+    const app = adapterRuntime();
+    const first = await app.adapter.send(request());
+    const claimsAfterSend = app.ledger.claims.length;
+    const providerCallsAfterSend = app.transport.calls;
+
+    await expect(app.adapter.recover(request())).resolves.toEqual({
+      kind: 'outcome',
+      outcome: first,
+    });
+    expect(app.ledger.lookups).toHaveLength(1);
+    expect(app.ledger.claims).toHaveLength(claimsAfterSend);
+    expect(app.transport.calls).toBe(providerCallsAfterSend);
+  });
+
+  test('fails closed on malformed or unavailable read-only recovery', async () => {
+    const malformed = adapterRuntime();
+    malformed.ledger.overrideLookup = {
+      kind: 'completed',
+      completion: {
+        kind: 'outcome',
+        outcome: {
+          state: 'failed',
+          provider: 'expo-push',
+          providerReference: 'c'.repeat(64),
+          proof: null,
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+          diagnosticDigest: null,
+        },
+      },
+    };
+    await expect(malformed.adapter.recover(request())).rejects.toMatchObject({
+      code: 'EXPO_SEND_LEDGER_INVALID',
+      disposition: 'ambiguous',
+    });
+    expect(malformed.ledger.claims).toHaveLength(0);
+    expect(malformed.transport.calls).toBe(0);
+
+    const unavailable = adapterRuntime();
+    unavailable.ledger.lookupError = new Error('synthetic lookup outage');
+    await expect(unavailable.adapter.recover(request())).rejects.toMatchObject({
+      code: 'EXPO_SEND_LEDGER_FAILED',
+      disposition: 'ambiguous',
+    });
+    expect(unavailable.ledger.claims).toHaveLength(0);
+    expect(unavailable.transport.calls).toBe(0);
+  });
+
   test('treats a recovered irreversible pre-send claim as unknown without I/O', async () => {
     const app = adapterRuntime();
     const item = workItem(realBatch());
@@ -364,6 +435,39 @@ describe('ledgered Expo live adapter', () => {
         disposition: 'safe-to-retry',
       },
     });
+    expect(app.ledger.completions).toHaveLength(3);
+  });
+
+  test('makes every duplicate accepted ticket in one chunk unknown', async () => {
+    const app = adapterRuntime([
+      accepted('duplicate-ticket'),
+      accepted('unique-ticket'),
+      accepted('duplicate-ticket'),
+    ]);
+    const items = [
+      liveItemWithAttempt(141),
+      liveItemWithAttempt(142),
+      liveItemWithAttempt(143),
+    ];
+
+    await expect(
+      Promise.all(items.map((item) => app.adapter.send(request(item)))),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        state: 'unknown',
+        providerReference: null,
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+      }),
+      expect.objectContaining({
+        state: 'provider-accepted',
+        providerReference: 'unique-ticket',
+      }),
+      expect.objectContaining({
+        state: 'unknown',
+        providerReference: null,
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+      }),
+    ]);
     expect(app.ledger.completions).toHaveLength(3);
   });
 
@@ -872,10 +976,12 @@ describe('ledgered Expo live adapter', () => {
     expect(JSON.stringify(app.ledger.completions)).not.toContain('forged');
   });
 
-  test('makes a throwing fulfilled transport container unknown, never retryable', async () => {
+  test('reads fulfilled transport arrays through descriptors without invoking get traps', async () => {
+    let lengthGetCalls = 0;
     const hostile = new Proxy([accepted()], {
       get(target, property, receiver) {
         if (property === 'length') {
+          lengthGetCalls += 1;
           throw new ProviderDispatchError(
             'EXPO_HTTP_SERVER_ERROR',
             'safe-to-retry',
@@ -890,16 +996,17 @@ describe('ledgered Expo live adapter', () => {
 
     for (let replay = 0; replay < 2; replay += 1) {
       await expect(app.adapter.send(request())).resolves.toMatchObject({
-        state: 'unknown',
-        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+        state: 'provider-accepted',
+        providerReference: 'ticket-1',
       });
     }
+    expect(lengthGetCalls).toBe(0);
     expect(app.transport.calls).toBe(1);
     expect(app.ledger.completions[0]?.completion).toMatchObject({
       kind: 'outcome',
       outcome: {
-        state: 'unknown',
-        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+        state: 'provider-accepted',
+        providerReference: 'ticket-1',
       },
     });
   });
@@ -929,6 +1036,42 @@ describe('ledgered Expo live adapter', () => {
       }),
     ]);
     expect(app.transport.calls).toBe(1);
+  });
+
+  test('never trusts inherited or accessor-backed fulfilled transport slots', async () => {
+    let getterCalls = 0;
+    const inherited = new Array<ExpoProviderOutcome>(1);
+    Object.setPrototypeOf(inherited, {
+      0: accepted('inherited-ticket'),
+      __proto__: Array.prototype,
+    });
+    const inheritedApp = adapterRuntime(async () => inherited);
+    await expect(inheritedApp.adapter.send(request())).resolves.toMatchObject({
+      state: 'unknown',
+      providerReference: null,
+    });
+
+    const accessor = [accepted('placeholder-ticket')];
+    Object.defineProperty(accessor, 0, {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return accepted('accessor-ticket');
+      },
+    });
+    const accessorApp = adapterRuntime(async () => accessor);
+    await expect(accessorApp.adapter.send(request())).resolves.toMatchObject({
+      state: 'unknown',
+      providerReference: null,
+    });
+    expect(getterCalls).toBe(0);
+    expect(JSON.stringify(inheritedApp.ledger.completions)).not.toContain(
+      'inherited-ticket',
+    );
+    expect(JSON.stringify(accessorApp.ledger.completions)).not.toContain(
+      'accessor-ticket',
+    );
   });
 
   test('settles every claimed item as unknown if the pre-I/O clock throws', async () => {
