@@ -9,7 +9,6 @@ export interface EventTypeChoiceProps {
   readonly mode: TemplateMode;
   readonly name: string;
   readonly onPress: () => void;
-  readonly separateEvent?: boolean;
   readonly testID?: string;
 }
 
@@ -20,16 +19,14 @@ export function EventTypeChoice({
   mode,
   name,
   onPress,
-  separateEvent = false,
   testID,
 }: EventTypeChoiceProps) {
   const theme = getEventTheme(mode);
-  const separateCopy = separateEvent ? ' for a separate event' : '';
 
   return (
     <ClassifiedActionButton
       accessibilityHint="Opens a current consequence preview. No event is started and nothing is queued by this choice."
-      accessibilityLabel={`${theme.classificationWord}. Choose ${name}${separateCopy}`}
+      accessibilityLabel={`${theme.classificationWord}. Choose ${name}`}
       disabled={disabled}
       mode={mode}
       onPress={onPress}
