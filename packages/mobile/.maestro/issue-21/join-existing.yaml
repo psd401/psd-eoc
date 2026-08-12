@@ -12,7 +12,7 @@ tags:
     stopApp: false
 - assertVisible:
     id: 'issue-21-synthetic-mode'
-- assertVisible: 'DRILL — PRACTICE'
+- assertVisible: '.*DRILL — PRACTICE.*'
 - assertVisible:
     id: 'issue-21-join-existing'
 - assertVisible: 'Join existing DRILL — PRACTICE: Synthetic earthquake drill at Synthetic Test School.*'

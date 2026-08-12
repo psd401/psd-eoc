@@ -33,6 +33,12 @@ tester must also complete both flows without sighted assistance on a physical
 iPhone with VoiceOver and on an Android device or Play-enabled emulator with
 TalkBack, including reading every exact consequence before confirmation.
 
+## Maestro device evidence
+
+| Platform      | Device and OS           | Date       | Flows completed                          | Result |
+| ------------- | ----------------------- | ---------- | ---------------------------------------- | ------ |
+| iOS Simulator | iPhone 17 Pro, iOS 26.5 | 2026-08-12 | `join-existing.yaml`, `start-drill.yaml` | Pass   |
+
 ## Human screen-reader evidence
 
 Record the tester, date, device and OS version, flows completed, and result

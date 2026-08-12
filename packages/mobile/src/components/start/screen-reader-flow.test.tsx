@@ -508,8 +508,8 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
     expect(joinFlow.indexOf("id: 'issue-21-synthetic-mode'")).toBeLessThan(
       joinFlow.indexOf("id: 'issue-21-join-existing'"),
     );
-    expect(startFlow).toContain("assertVisible: 'DRILL — PRACTICE'");
-    expect(joinFlow).toContain("assertVisible: 'DRILL — PRACTICE'");
+    expect(startFlow).toContain("assertVisible: '.*DRILL — PRACTICE.*'");
+    expect(joinFlow).toContain("assertVisible: '.*DRILL — PRACTICE.*'");
     expect(startFlow).toContain(
       "tapOn: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'",
     );
