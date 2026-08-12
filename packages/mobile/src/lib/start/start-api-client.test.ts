@@ -58,6 +58,12 @@ const IDS = Object.freeze({
 });
 
 const NOW = '2026-08-11T18:00:00.000Z';
+const ALL_CLEAR_AT = '2026-08-11T18:01:00.000Z';
+const INTERMEDIATE_ALL_CLEAR_AT = '2026-08-11T18:02:00.000Z';
+const REACTIVATED_AT = '2026-08-11T18:02:00.000Z';
+const LATER_ALL_CLEAR_AT = '2026-08-11T18:03:00.000Z';
+const LATER_REACTIVATED_AT = '2026-08-11T18:04:00.000Z';
+const LATEST_REACTIVATED_AT = '2026-08-11T18:05:00.000Z';
 const EXPIRES = '2026-08-11T18:10:00.000Z';
 const IDEMPOTENCY_KEY = 'mobile-start-idempotency-0001';
 
@@ -555,6 +561,43 @@ describe('mobile start API client', () => {
     });
   });
 
+  test('rejects a schema-valid non-active event from the active-event endpoint', async () => {
+    const selectedEvent = activeEventFixture(selectionFixture());
+    const allClearEvent = EventSchema.parse({
+      ...selectedEvent,
+      status: 'all-clear',
+      allClearAt: ALL_CLEAR_AT,
+    });
+    const request: StartAuthenticatedRequest = async <Output>(
+      input: AuthenticatedRequestOptions<Output>,
+    ): Promise<Output> => {
+      if (input.path === '/api/mobile/start/facilities') {
+        return parseResponse(input, {
+          items: [],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+      }
+      if (input.path === '/event-types/api?operation=list&enabled=true') {
+        return parseResponse(input, {
+          items: [],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+      }
+      if (input.path === '/api/events') {
+        return parseResponse(input, {
+          items: [allClearEvent],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+      }
+      throw new Error(`Unexpected synthetic request: ${input.path}`);
+    };
+
+    await expect(loadStartHomeData(request)).rejects.toMatchObject({
+      name: 'StartClientError',
+      outcomeUnknown: false,
+    });
+  });
+
   test('creates a contract-validated preview bound to the exact selection', async () => {
     const selection = selectionFixture();
     const preview = previewFixture(selection, {
@@ -766,6 +809,121 @@ describe('mobile start API client', () => {
     });
   });
 
+  test('accepts a legitimate join after the event is all-cleared and reactivated', async () => {
+    const selectedEvent = activeEventFixture(selectionFixture());
+    const reactivatedEvent = EventSchema.parse({
+      ...selectedEvent,
+      allClearAt: ALL_CLEAR_AT,
+      reactivatedAt: REACTIVATED_AT,
+    });
+    const result = JoinEventResultSchema.parse({
+      event: reactivatedEvent,
+      participantId: IDS.participant,
+      joined: true,
+    });
+    const calls: RecordedAuthenticatedRequest[] = [];
+
+    await expect(
+      join(oneResponseRequest(result, calls), selectedEvent, IDEMPOTENCY_KEY),
+    ).resolves.toEqual(result);
+    expect(calls).toHaveLength(1);
+  });
+
+  test('rejects rollback from a reactivated event to initial or older lifecycle truth', async () => {
+    const initialEvent = activeEventFixture(selectionFixture());
+    const selectedEvent = EventSchema.parse({
+      ...initialEvent,
+      allClearAt: LATER_ALL_CLEAR_AT,
+      reactivatedAt: LATER_REACTIVATED_AT,
+    });
+    const olderReactivation = EventSchema.parse({
+      ...initialEvent,
+      allClearAt: ALL_CLEAR_AT,
+      reactivatedAt: REACTIVATED_AT,
+    });
+
+    for (const event of [initialEvent, olderReactivation]) {
+      const result = JoinEventResultSchema.parse({
+        event,
+        participantId: IDS.participant,
+        joined: true,
+      });
+      await expect(
+        join(oneResponseRequest(result), selectedEvent, IDEMPOTENCY_KEY),
+      ).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+      });
+    }
+  });
+
+  test('rejects a rewritten pair whose all-clear predates the observed reactivation', async () => {
+    const initialEvent = activeEventFixture(selectionFixture());
+    const selectedEvent = EventSchema.parse({
+      ...initialEvent,
+      allClearAt: ALL_CLEAR_AT,
+      reactivatedAt: LATER_REACTIVATED_AT,
+    });
+    const rewrittenEvent = EventSchema.parse({
+      ...initialEvent,
+      allClearAt: INTERMEDIATE_ALL_CLEAR_AT,
+      reactivatedAt: LATEST_REACTIVATED_AT,
+    });
+    const result = JoinEventResultSchema.parse({
+      event: rewrittenEvent,
+      participantId: IDS.participant,
+      joined: true,
+    });
+
+    await expect(
+      join(oneResponseRequest(result), selectedEvent, IDEMPOTENCY_KEY),
+    ).rejects.toMatchObject({
+      name: 'StartClientError',
+      retryable: false,
+      outcomeUnknown: true,
+    });
+  });
+
+  test('accepts an unchanged reactivation pair', async () => {
+    const selectedEvent = EventSchema.parse({
+      ...activeEventFixture(selectionFixture()),
+      allClearAt: ALL_CLEAR_AT,
+      reactivatedAt: REACTIVATED_AT,
+    });
+    const result = JoinEventResultSchema.parse({
+      event: selectedEvent,
+      participantId: IDS.participant,
+      joined: true,
+    });
+
+    await expect(
+      join(oneResponseRequest(result), selectedEvent, IDEMPOTENCY_KEY),
+    ).resolves.toEqual(result);
+  });
+
+  test('accepts a later complete reactivation cycle', async () => {
+    const initialEvent = activeEventFixture(selectionFixture());
+    const selectedEvent = EventSchema.parse({
+      ...initialEvent,
+      allClearAt: ALL_CLEAR_AT,
+      reactivatedAt: REACTIVATED_AT,
+    });
+    const result = JoinEventResultSchema.parse({
+      event: EventSchema.parse({
+        ...initialEvent,
+        allClearAt: LATER_ALL_CLEAR_AT,
+        reactivatedAt: LATER_REACTIVATED_AT,
+      }),
+      participantId: IDS.participant,
+      joined: true,
+    });
+
+    await expect(
+      join(oneResponseRequest(result), selectedEvent, IDEMPOTENCY_KEY),
+    ).resolves.toEqual(result);
+  });
+
   test('treats a schema-valid join for another event as outcome-unknown', async () => {
     const wrongResult = JoinEventResultSchema.parse({
       event: activeEventFixture(selectionFixture(), IDS.otherEvent),
@@ -798,6 +956,92 @@ describe('mobile start API client', () => {
 
     await expect(
       join(oneResponseRequest(driftedResult), selectedEvent, IDEMPOTENCY_KEY),
+    ).rejects.toMatchObject({
+      name: 'StartClientError',
+      retryable: false,
+      outcomeUnknown: true,
+    });
+  });
+
+  test('rejects facility or roster identity drift for the selected event ID', async () => {
+    const selectedEvent = activeEventFixture(selectionFixture());
+    const mismatches = [
+      EventSchema.parse({
+        ...selectedEvent,
+        facilityId: IDS.otherFacility,
+      }),
+      EventSchema.parse({
+        ...selectedEvent,
+        rosterSnapshotId: uuid(21),
+      }),
+    ];
+
+    for (const event of mismatches) {
+      const result = JoinEventResultSchema.parse({
+        event,
+        participantId: IDS.participant,
+        joined: true,
+      });
+      await expect(
+        join(oneResponseRequest(result), selectedEvent, IDEMPOTENCY_KEY),
+      ).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+      });
+    }
+  });
+
+  test('rejects immutable creator or activation-authorization provenance drift', async () => {
+    const selectedEvent = activeEventFixture(selectionFixture('real'));
+    const mismatches = [
+      EventSchema.parse({
+        ...selectedEvent,
+        createdBy: {
+          kind: 'human',
+          userId: uuid(22),
+          sessionId: IDS.session,
+        },
+      }),
+      EventSchema.parse({
+        ...selectedEvent,
+        activationAuthorization: {
+          ...selectedEvent.activationAuthorization,
+          confirmationId: uuid(23),
+        },
+      }),
+    ];
+
+    for (const event of mismatches) {
+      const result = JoinEventResultSchema.parse({
+        event,
+        participantId: IDS.participant,
+        joined: true,
+      });
+      await expect(
+        join(oneResponseRequest(result), selectedEvent, IDEMPOTENCY_KEY),
+      ).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+      });
+    }
+  });
+
+  test('rejects a same-ID join response that is no longer active', async () => {
+    const selectedEvent = activeEventFixture(selectionFixture());
+    const result = JoinEventResultSchema.parse({
+      event: EventSchema.parse({
+        ...selectedEvent,
+        status: 'all-clear',
+        allClearAt: ALL_CLEAR_AT,
+      }),
+      participantId: IDS.participant,
+      joined: true,
+    });
+
+    await expect(
+      join(oneResponseRequest(result), selectedEvent, IDEMPOTENCY_KEY),
     ).rejects.toMatchObject({
       name: 'StartClientError',
       retryable: false,
