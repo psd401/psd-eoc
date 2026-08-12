@@ -129,6 +129,7 @@ describe('agent stale-roster report adapter', () => {
       latestCompleteAgeSeconds: null,
       failedGroups: [],
       staleRecipients: [],
+      staleEndpoints: [],
     });
     expect(reads).toEqual([
       {
@@ -200,6 +201,8 @@ describe('agent stale-roster report adapter', () => {
         capturedAt,
         recipientHealth: [],
         hasUnreportedStaleRecipients: false,
+        staleEndpoints: [],
+        hasUnreportedStaleEndpoints: false,
       },
       latestFailedSync: null,
     });

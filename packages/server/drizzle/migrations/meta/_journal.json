@@ -50,6 +50,13 @@
       "when": 1786462777733,
       "tag": "0006_media_record_immutability",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786487369781,
+      "tag": "0007_pretty_puppet_master",
+      "breakpoints": true
     }
   ]
 }
