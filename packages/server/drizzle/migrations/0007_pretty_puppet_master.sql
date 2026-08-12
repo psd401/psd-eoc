@@ -7,6 +7,10 @@ ALTER TABLE "endpoint_status_records" ADD COLUMN "provider" varchar(100);--> sta
 ALTER TABLE "endpoint_status_records" ADD COLUMN "provider_reference" varchar(500);--> statement-breakpoint
 ALTER TABLE "endpoint_status_records" ADD COLUMN "provider_occurred_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "sms_opt_out_records" ADD COLUMN "provider_occurred_at" timestamp with time zone;--> statement-breakpoint
+-- Legacy rows predate provider occurrence truth and may contain duplicate
+-- immutable facts. Preserve them while enforcing uniqueness for every
+-- canonical row written after this migration.
+CREATE UNIQUE INDEX "sms_opt_out_records_provider_reference_uq" ON "sms_opt_out_records" USING btree ("roster_snapshot_id","recipient_id","endpoint_id","provider","provider_reference") WHERE "sms_opt_out_records"."provider_occurred_at" is not null;--> statement-breakpoint
 -- Preserve immutable legacy status rows. Append one canonical provider fact
 -- for each endpoint whose retained opt-out record proves the old status.
 INSERT INTO "endpoint_status_records" (

@@ -122,6 +122,7 @@ function smsWorkItem(): WorkerAttemptWorkItem {
 function noNetworkTransport() {
   return {
     requests: 0,
+    requestBodies: [] as Readonly<Record<string, unknown>>[],
     metadata: { handlerProtocol: 'http/1.1' as const },
     updateHttpClientConfig(): void {},
     httpHandlerConfigs(): Record<string, never> {
@@ -136,17 +137,50 @@ function noNetworkTransport() {
 }
 
 function providerResponseTransport(
-  response: Readonly<Record<string, unknown>>,
+  responses: readonly Readonly<Record<string, unknown>>[],
 ) {
   return {
     requests: 0,
+    requestBodies: [] as Readonly<Record<string, unknown>>[],
     metadata: { handlerProtocol: 'http/1.1' as const },
     updateHttpClientConfig(): void {},
     httpHandlerConfigs(): Record<string, never> {
       return {};
     },
     destroy(): void {},
-    handle() {
+    handle(request: unknown) {
+      if (request === null || typeof request !== 'object') {
+        return Promise.reject(new Error('Synthetic AWS request is malformed.'));
+      }
+      const body = Reflect.get(request, 'body') as unknown;
+      const bodyText =
+        typeof body === 'string'
+          ? body
+          : body instanceof Uint8Array
+            ? new TextDecoder().decode(body)
+            : null;
+      if (bodyText === null) {
+        return Promise.reject(
+          new Error('Synthetic AWS request body is unavailable.'),
+        );
+      }
+      const parsedBody: unknown = JSON.parse(bodyText);
+      if (
+        parsedBody === null ||
+        typeof parsedBody !== 'object' ||
+        Array.isArray(parsedBody)
+      ) {
+        return Promise.reject(
+          new Error('Synthetic AWS request body is malformed.'),
+        );
+      }
+      const response = responses[this.requests];
+      if (response === undefined) {
+        return Promise.reject(
+          new Error('Synthetic AWS response sequence was exhausted.'),
+        );
+      }
+      this.requestBodies.push(parsedBody as Readonly<Record<string, unknown>>);
       this.requests += 1;
       return Promise.resolve({
         response: {
@@ -278,14 +312,20 @@ interface HarnessOverrides {
   readonly mode?: SmsRuntimeMode;
   readonly optOutList?: unknown;
   readonly providerResponse?: Readonly<Record<string, unknown>>;
+  readonly providerResponses?: readonly Readonly<Record<string, unknown>>[];
   readonly resolveDestination?: boolean;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
+  const responses =
+    overrides.providerResponses ??
+    (overrides.providerResponse === undefined
+      ? undefined
+      : [overrides.providerResponse]);
   const transport =
-    overrides.providerResponse === undefined
+    responses === undefined
       ? noNetworkTransport()
-      : providerResponseTransport(overrides.providerResponse);
+      : providerResponseTransport(responses);
   const executionStore = overrides.executionStore ?? new ExecutionStore();
   const sendLedger = new SmsSendLedger();
   const evidenceWriter = new EvidenceWriter();
@@ -626,6 +666,73 @@ describe('AWS EUM SMS production runtime boundary', () => {
       },
     ]);
     expect(value.transport.requests).toBe(1);
+  });
+
+  test('round-trips a reconciliation continuation through a second authenticated scheduled invocation', async () => {
+    const optedOutAt = new Date(TIMES.attempted).getTime() / 1_000;
+    const pages = Array.from({ length: 12 }, (_, pageIndex) => ({
+      OptOutListArn: OPT_OUT_LIST.arn,
+      OptOutListName: OPT_OUT_LIST.name,
+      OptedOutNumbers: Array.from({ length: 100 }, (_, numberIndex) => ({
+        EndUserOptedOut: true,
+        OptedOutNumber: `+1202${String(5_550_000 + pageIndex * 100 + numberIndex)}`,
+        OptedOutTimestamp: optedOutAt,
+      })),
+      NextToken: `page-${pageIndex + 1}`,
+    }));
+    const value = harness({
+      mode: {
+        state: 'enabled',
+        authorizeLiveProvider: () => true,
+        authorizeLiveSend: () => true,
+      },
+      providerResponses: [
+        ...pages,
+        {
+          OptOutListArn: OPT_OUT_LIST.arn,
+          OptOutListName: OPT_OUT_LIST.name,
+          OptedOutNumbers: [],
+        },
+      ],
+    });
+
+    const firstReport = await value.runtime.reconcileOptOuts(
+      { rosterSnapshotId: IDS.roster },
+      SCHEDULE_INVOCATION,
+    );
+    expect(firstReport).toEqual({
+      examinedCount: 1_200,
+      recordedCount: 0,
+      unresolvedCount: 1_200,
+      pageCount: 12,
+      continuationToken: 'page-12',
+    });
+
+    await expect(
+      value.runtime.reconcileOptOuts(
+        {
+          rosterSnapshotId: IDS.roster,
+          continuationToken: firstReport.continuationToken,
+        },
+        {
+          ...SCHEDULE_INVOCATION,
+          requestId: '00000000-0000-4000-8000-000000000309',
+        },
+      ),
+    ).resolves.toEqual({
+      examinedCount: 0,
+      recordedCount: 0,
+      unresolvedCount: 0,
+      pageCount: 1,
+      continuationToken: null,
+    });
+    expect(value.transport.requests).toBe(13);
+    expect(value.transport.requestBodies[12]).toEqual(
+      expect.objectContaining({ NextToken: 'page-12' }),
+    );
+    expect(value.counters.scheduleAuthorizations).toBe(2);
+    expect(value.counters.destinationLookups).toBe(1_200);
+    expect(value.capabilities.requests).toHaveLength(0);
   });
 
   test('binds verified START writes to the exact authenticated provider webhook invocation', async () => {

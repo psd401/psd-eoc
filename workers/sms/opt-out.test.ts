@@ -52,6 +52,7 @@ const IDS = Object.freeze({
   optOut: '00000000-0000-4000-8000-000000000212',
   endpointStatus: '00000000-0000-4000-8000-000000000213',
   otherRecipient: '00000000-0000-4000-8000-000000000214',
+  otherRoster: '00000000-0000-4000-8000-000000000216',
 });
 
 function workItem(): WorkerAttemptWorkItem {
@@ -211,6 +212,54 @@ describe('AWS-managed SMS opt-out capture', () => {
     ).rejects.toEqual(
       expect.objectContaining({ code: 'INVALID_RECORDER_RESPONSE' }),
     );
+  });
+
+  test('rejects a resolved non-SMS work item before recording an opt-out', async () => {
+    const sms = workItem();
+    const pushBatch = DispatchBatchSchema.parse({
+      ...sms.batch,
+      channel: 'push',
+      renderedMessage: {
+        eventKind: 'test',
+        templateMode: 'drill',
+        purpose: 'activation',
+        classificationMarker: 'DRILL',
+        channel: 'push',
+        title: '[DRILL] TRAINING ONLY',
+        body: '[DRILL] TRAINING ONLY - Synthetic test. [DRILL]',
+      },
+      integrationStatus: {
+        ...sms.batch.integrationStatus,
+        integrationId: 'expo-push',
+      },
+    });
+    const recorder = new MemoryRecorder();
+
+    await expect(
+      recordAwsManagedOptOutConflict(
+        {
+          batch: pushBatch,
+          attempt: ChannelAttemptSchema.parse({
+            ...sms.attempt,
+            channel: 'push',
+          }),
+          endpoint: EndpointSchema.parse({
+            id: IDS.endpoint,
+            status: 'active',
+            capturedAt: pushBatch.createdAt,
+            channel: 'push',
+            platform: 'ios',
+            token: 'synthetic-unroutable:push-device-issue-14',
+          }),
+        },
+        'synthetic-aws-request-id',
+        '2026-08-11T18:00:30.000Z',
+        recorder,
+      ),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'OPT_OUT_ENDPOINT_MISMATCH' }),
+    );
+    expect(recorder.inputs).toEqual([]);
   });
 });
 
@@ -514,6 +563,44 @@ describe('AWS-managed opt-out reconciliation', () => {
     );
   });
 
+  test('rejects a resolver result from another roster snapshot before recording', async () => {
+    const recorder = new MemoryRecorder();
+    const reconciler = new SmsOptOutReconciler({
+      transport: {
+        describeOptedOutNumbers: () =>
+          Promise.resolve({
+            OptOutListName: OPT_OUT_LIST.name,
+            OptOutListArn: OPT_OUT_LIST.arn,
+            OptedOutNumbers: [
+              {
+                EndUserOptedOut: true,
+                OptedOutNumber: '+12025550123',
+                OptedOutTimestamp: new Date('2026-08-11T18:00:00.000Z'),
+              },
+            ],
+          }),
+      },
+      resolver: {
+        resolveSmsDestination: () =>
+          Promise.resolve({
+            rosterSnapshotId: IDS.otherRoster,
+            recipientId: IDS.recipient,
+            endpointId: IDS.endpoint,
+          }),
+      },
+      recorder,
+      optOutListName: OPT_OUT_LIST.name,
+      optOutListArn: OPT_OUT_LIST.arn,
+    });
+
+    await expect(
+      reconciler.reconcile({ rosterSnapshotId: IDS.roster }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'OPT_OUT_ENDPOINT_MISMATCH' }),
+    );
+    expect(recorder.inputs).toEqual([]);
+  });
+
   test('replaces provider read failures with a fixed PII-free error', async () => {
     const leakedProviderMessage =
       'AWS rejected DescribeOptedOutNumbers for +12025550123';
@@ -673,6 +760,42 @@ describe('AWS-managed SMS opt-in supersession', () => {
     ).rejects.toEqual(
       expect.objectContaining({ code: 'INVALID_RECORDER_RESPONSE' }),
     );
+  });
+
+  test('rejects an opt-in resolver result from another roster snapshot', async () => {
+    const recorder = new MemoryEndpointStatusRecorder();
+
+    await expect(
+      recordAwsManagedOptIn(
+        { rosterSnapshotId: IDS.roster },
+        OPT_OUT_LIST,
+        OPT_IN_INVOCATION,
+        {
+          transport: {
+            describeOptedOutNumbers: () =>
+              Promise.resolve({
+                OptOutListName: OPT_OUT_LIST.name,
+                OptOutListArn: OPT_OUT_LIST.arn,
+                OptedOutNumbers: [],
+              }),
+          },
+          resolver: {
+            resolveSmsDestination: () =>
+              Promise.resolve({
+                rosterSnapshotId: IDS.otherRoster,
+                recipientId: IDS.recipient,
+                endpointId: IDS.endpoint,
+              }),
+          },
+          recorder,
+          authorizeInvocation: (invocation) =>
+            invocation.authorization === TRUSTED_OPT_IN_INVOCATION,
+        },
+      ),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'OPT_OUT_ENDPOINT_MISMATCH' }),
+    );
+    expect(recorder.inputs).toEqual([]);
   });
 
   test('authorizes START/UNSTOP before reads and refuses reactivation while AWS still lists the number', async () => {
