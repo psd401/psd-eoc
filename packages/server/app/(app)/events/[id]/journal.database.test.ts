@@ -142,22 +142,29 @@ function store(): JournalCapabilityStore {
 function humanMutationInvocation(
   idempotencyKey: string,
   scope: TrustedCapabilityInvocation['scope'] = DISTRICT_SCOPE,
+  source: AuthenticatedSession['source'] = 'web',
 ): TrustedCapabilityInvocation {
   return {
     actor: HUMAN_ACTOR,
-    source: 'web',
+    source,
     scope,
     requestId: randomUUID(),
     serverTime: new Date(),
     connectivityEpochId: CONNECTIVITY_EPOCH_ID,
     mutation: {
       idempotencyKey,
-      transport: {
-        kind: 'web-interactive',
-        method: 'POST',
-        interaction: 'explicit-user-submit',
-        csrfVerified: true,
-      },
+      transport:
+        source === 'web'
+          ? {
+              kind: 'web-interactive',
+              method: 'POST',
+              interaction: 'explicit-user-submit',
+              csrfVerified: true,
+            }
+          : {
+              kind: 'mobile-interactive',
+              interaction: 'explicit-user-submit',
+            },
       humanConfirmationId: null,
     },
   };
@@ -187,22 +194,30 @@ function confirmedHumanMutationInvocation(input: {
   >;
   readonly connectivityEpochId?: string;
   readonly serverTime?: Date;
+  readonly source?: AuthenticatedSession['source'];
 }): TrustedCapabilityInvocation {
+  const source = input.source ?? 'web';
   return {
     actor: input.actor ?? HUMAN_ACTOR,
-    source: 'web',
+    source,
     scope: DISTRICT_SCOPE,
     requestId: input.requestId ?? randomUUID(),
     serverTime: input.serverTime ?? new Date(),
     connectivityEpochId: input.connectivityEpochId ?? CONNECTIVITY_EPOCH_ID,
     mutation: {
       idempotencyKey: input.idempotencyKey,
-      transport: {
-        kind: 'web-interactive',
-        method: 'POST',
-        interaction: 'explicit-user-submit',
-        csrfVerified: true,
-      },
+      transport:
+        source === 'web'
+          ? {
+              kind: 'web-interactive',
+              method: 'POST',
+              interaction: 'explicit-user-submit',
+              csrfVerified: true,
+            }
+          : {
+              kind: 'mobile-interactive',
+              interaction: 'explicit-user-submit',
+            },
       humanConfirmationId: input.confirmationId,
     },
   };
@@ -1732,7 +1747,7 @@ describeWithDatabase('event journal database guarantees', () => {
     });
   });
 
-  test('binds one real staff all-clear to exact fresh human confirmation without dispatching it', async () => {
+  test('binds mobile real staff all-clear and close to exact fresh human confirmations', async () => {
     const ids = syntheticFixtureIds();
     const rollbackFixture = new Error(
       'Rollback the isolated real/staff confirmation fixture.',
@@ -1835,8 +1850,8 @@ describeWithDatabase('event journal database guarantees', () => {
         await transaction.insert(deviceEnrollments).values({
           id: deviceEnrollmentId,
           userId: HUMAN_ACTOR.userId,
-          platform: 'web',
-          unlockMethod: 'secure-session-cookie',
+          platform: 'ios',
+          unlockMethod: 'biometric',
           installationId: `synthetic-issue77-${suffix}`,
           enrolledAt: identityCreatedAt,
           lastSeenAt: fixtureTime,
@@ -1897,8 +1912,8 @@ describeWithDatabase('event journal database guarantees', () => {
           deviceEnrollment: {
             id: deviceEnrollmentId,
             userId: HUMAN_ACTOR.userId,
-            platform: 'web',
-            unlockMethod: 'secure-session-cookie',
+            platform: 'ios',
+            unlockMethod: 'biometric',
             installationId: `synthetic-issue77-${suffix}`,
             enrolledAt: identityCreatedAt.toISOString(),
             lastSeenAt: fixtureTime.toISOString(),
@@ -1912,11 +1927,31 @@ describeWithDatabase('event journal database guarantees', () => {
         });
         const authenticated: AuthenticatedSession = Object.freeze({
           actor: HUMAN_ACTOR,
-          source: 'web',
+          source: 'mobile',
           roles: ['staff'] as const,
           scope: DISTRICT_SCOPE,
           membershipState: 'fresh',
           result: sessionResult,
+        });
+        const webEnrollmentSessionResult =
+          SessionEstablishmentResultSchema.parse({
+            ...sessionResult,
+            deviceEnrollment: {
+              ...sessionResult.deviceEnrollment,
+              platform: 'web',
+              unlockMethod: 'secure-session-cookie',
+            },
+          });
+        const androidAuthenticated: AuthenticatedSession = Object.freeze({
+          ...authenticated,
+          result: SessionEstablishmentResultSchema.parse({
+            ...sessionResult,
+            deviceEnrollment: {
+              ...sessionResult.deviceEnrollment,
+              platform: 'android',
+              unlockMethod: 'biometric',
+            },
+          }),
         });
 
         if (
@@ -2257,13 +2292,21 @@ describeWithDatabase('event journal database guarantees', () => {
           const firstPreview = await executeJournalCapability(
             'create-lifecycle-consequence-preview',
             { eventId, purpose: 'all-clear' },
-            humanMutationInvocation(`issue77-real-preview-a-${suffix}`),
+            humanMutationInvocation(
+              `issue77-real-preview-a-${suffix}`,
+              DISTRICT_SCOPE,
+              'mobile',
+            ),
             journalStore,
           );
           const secondPreview = await executeJournalCapability(
             'create-lifecycle-consequence-preview',
             { eventId, purpose: 'all-clear' },
-            humanMutationInvocation(`issue77-real-preview-b-${suffix}`),
+            humanMutationInvocation(
+              `issue77-real-preview-b-${suffix}`,
+              DISTRICT_SCOPE,
+              'mobile',
+            ),
             journalStore,
           );
           expect(firstPreview).toMatchObject({
@@ -2287,6 +2330,60 @@ describeWithDatabase('event journal database guarantees', () => {
           expect(secondPreview.consequenceDigest).not.toBe(
             firstPreview.consequenceDigest,
           );
+
+          // Android biometric enrollment crosses the same trusted mobile
+          // identity boundary as iOS; the deliberately wrong phrase then
+          // fails at validation rather than at the human-only source check.
+          await expect(
+            journalRuntime.issueHumanConfirmation({
+              authenticated: androidAuthenticated,
+              eventId,
+              action: 'all-clear',
+              lifecyclePreviewId: firstPreview.id,
+              confirmationPhrase: 'NOT THE CONFIRMATION PHRASE',
+              requestId: randomUUID(),
+              now: new Date(),
+            }),
+          ).rejects.toMatchObject({
+            code: 'VALIDATION_ERROR',
+            reasonCode: 'PERSISTENCE_CONFLICT',
+            status: 400,
+          });
+
+          const mismatchedAuthenticatedSessions = [
+            {
+              name: 'web source with native enrollment',
+              value: Object.freeze({
+                ...authenticated,
+                source: 'web' as const,
+              }),
+            },
+            {
+              name: 'mobile source with web enrollment',
+              value: Object.freeze({
+                ...authenticated,
+                result: webEnrollmentSessionResult,
+              }),
+            },
+          ] as const;
+          for (const mismatch of mismatchedAuthenticatedSessions) {
+            await expect(
+              journalRuntime.issueHumanConfirmation({
+                authenticated: mismatch.value,
+                eventId,
+                action: 'all-clear',
+                lifecyclePreviewId: firstPreview.id,
+                confirmationPhrase: EVENT_CONFIRMATION_PHRASES['all-clear'],
+                requestId: randomUUID(),
+                now: new Date(),
+              }),
+              mismatch.name,
+            ).rejects.toMatchObject({
+              code: 'FORBIDDEN',
+              reasonCode: 'HUMAN_ONLY_REQUIRED',
+              status: 403,
+            });
+          }
 
           expect(EVENT_CONFIRMATION_PHRASES['all-clear']).toBe('ALL CLEAR');
           await expect(
@@ -2375,6 +2472,7 @@ describeWithDatabase('event journal database guarantees', () => {
               invocation: confirmedHumanMutationInvocation({
                 idempotencyKey: `issue77-real-wrong-user-${suffix}`,
                 confirmationId,
+                source: 'mobile',
                 actor: {
                   kind: 'human',
                   userId: randomUUID(),
@@ -2388,6 +2486,7 @@ describeWithDatabase('event journal database guarantees', () => {
               invocation: confirmedHumanMutationInvocation({
                 idempotencyKey: `issue77-real-wrong-session-${suffix}`,
                 confirmationId,
+                source: 'mobile',
                 actor: {
                   kind: 'human',
                   userId: HUMAN_ACTOR.userId,
@@ -2401,6 +2500,7 @@ describeWithDatabase('event journal database guarantees', () => {
               invocation: confirmedHumanMutationInvocation({
                 idempotencyKey: `issue77-real-wrong-epoch-${suffix}`,
                 confirmationId,
+                source: 'mobile',
                 connectivityEpochId: randomUUID(),
               }),
             },
@@ -2410,6 +2510,7 @@ describeWithDatabase('event journal database guarantees', () => {
               invocation: confirmedHumanMutationInvocation({
                 idempotencyKey: `issue77-real-wrong-digest-${suffix}`,
                 confirmationId,
+                source: 'mobile',
               }),
             },
           ] as const;
@@ -2469,6 +2570,7 @@ describeWithDatabase('event journal database guarantees', () => {
               confirmedHumanMutationInvocation({
                 idempotencyKey: `issue77-real-expired-${suffix}`,
                 confirmationId: expiredConfirmationId,
+                source: 'mobile',
               }),
               eventStore,
             ),
@@ -2513,6 +2615,7 @@ describeWithDatabase('event journal database guarantees', () => {
               confirmedHumanMutationInvocation({
                 idempotencyKey: `issue77-real-stale-integration-${suffix}`,
                 confirmationId,
+                source: 'mobile',
               }),
               eventStore,
             ),
@@ -2545,6 +2648,7 @@ describeWithDatabase('event journal database guarantees', () => {
               idempotencyKey: allClearIdempotencyKey,
               confirmationId,
               requestId: actionRequestId,
+              source: 'mobile',
             }),
             eventStore,
           );
@@ -2557,6 +2661,7 @@ describeWithDatabase('event journal database guarantees', () => {
           });
           expect(allClear.transition).toMatchObject({
             transition: 'all-clear',
+            source: 'mobile',
             confirmationId,
             consequenceDigest: firstPreview.consequenceDigest,
             requestId: actionRequestId,
@@ -2595,11 +2700,21 @@ describeWithDatabase('event journal database guarantees', () => {
                 channel.integrationStatus.label === 'live-verified',
             ),
           ).toBe(true);
+          expect(allClear.journalEntries.map(systemJournalCode)).toContain(
+            'all-clear-issued',
+          );
+          expect(
+            allClear.journalEntries.every((entry) => entry.source === 'mobile'),
+          ).toBe(true);
 
           const replay = await executeEventCapability(
             'all-clear-event',
             { eventId, lifecyclePreviewId: firstPreview.id },
-            humanMutationInvocation(allClearIdempotencyKey),
+            humanMutationInvocation(
+              allClearIdempotencyKey,
+              DISTRICT_SCOPE,
+              'mobile',
+            ),
             eventStore,
           );
           expect(replay).toEqual(allClear);
@@ -2683,6 +2798,146 @@ describeWithDatabase('event journal database guarantees', () => {
               .from(deliveryEvidence)
               .where(eq(deliveryEvidence.intentId, allClearIntent.id)),
           ).toEqual([]);
+
+          expect(EVENT_CONFIRMATION_PHRASES.close).toBe('CLOSE EVENT');
+          const closeRequestId = randomUUID();
+          const issuedClose = await journalRuntime.issueHumanConfirmation({
+            authenticated,
+            eventId,
+            action: 'close',
+            lifecyclePreviewId: null,
+            confirmationPhrase: EVENT_CONFIRMATION_PHRASES.close,
+            requestId: closeRequestId,
+            now: new Date(),
+          });
+          if (issuedClose.confirmationId === null) {
+            throw new Error(
+              'The mobile real-event close omitted confirmation.',
+            );
+          }
+          const closeConfirmationId = issuedClose.confirmationId;
+          const [closeConfirmationBeforeUse] = await transaction
+            .select()
+            .from(humanConfirmationRecords)
+            .where(eq(humanConfirmationRecords.id, closeConfirmationId))
+            .limit(1);
+          if (closeConfirmationBeforeUse === undefined) {
+            throw new Error('The mobile close confirmation was not persisted.');
+          }
+          const closeConfirmationActions = await transaction
+            .select({ actionId: humanConfirmationActions.actionId })
+            .from(humanConfirmationActions)
+            .where(
+              eq(humanConfirmationActions.confirmationId, closeConfirmationId),
+            );
+          expect(closeConfirmationBeforeUse).toMatchObject({
+            capabilityId: 'close-event',
+            connectivityEpochId: CONNECTIVITY_EPOCH_ID,
+            confirmedByUserId: HUMAN_ACTOR.userId,
+            confirmedWithSessionId: HUMAN_ACTOR.sessionId,
+            status: 'issued',
+            consumedAt: null,
+            consumedForRequestId: null,
+            expiredAt: null,
+          });
+          expect(
+            closeConfirmationActions.map(({ actionId }) => actionId),
+          ).toEqual(['close-real-event']);
+
+          const closeIdempotencyKey = `issue77-real-close-${suffix}`;
+          const closed = await executeEventCapability(
+            'close-event',
+            { eventId },
+            confirmedHumanMutationInvocation({
+              idempotencyKey: closeIdempotencyKey,
+              confirmationId: closeConfirmationId,
+              requestId: closeRequestId,
+              source: 'mobile',
+            }),
+            eventStore,
+          );
+          expect(closed.event).toMatchObject({
+            id: eventId,
+            status: 'closed',
+            kind: 'incident',
+            templateMode: 'real',
+            rosterPopulation: 'staff',
+          });
+          expect(closed.transition).toMatchObject({
+            transition: 'close',
+            source: 'mobile',
+            confirmationId: closeConfirmationId,
+            consequenceDigest: closeConfirmationBeforeUse.consequenceDigest,
+            requestId: closeRequestId,
+          });
+          expect(closed.notificationIntent).toBeNull();
+          expect(closed.journalEntries).toHaveLength(1);
+          expect(closed.journalEntries[0]).toMatchObject({
+            source: 'mobile',
+            payload: { code: 'event-closed' },
+          });
+
+          const closeReplay = await executeEventCapability(
+            'close-event',
+            { eventId },
+            humanMutationInvocation(
+              closeIdempotencyKey,
+              DISTRICT_SCOPE,
+              'mobile',
+            ),
+            eventStore,
+          );
+          expect(closeReplay).toEqual(closed);
+
+          const [consumedCloseConfirmation] = await transaction
+            .select()
+            .from(humanConfirmationRecords)
+            .where(eq(humanConfirmationRecords.id, closeConfirmationId))
+            .limit(1);
+          expect(consumedCloseConfirmation).toMatchObject({
+            status: 'consumed',
+            consumedForRequestId: closeRequestId,
+            expiredAt: null,
+          });
+          expect(consumedCloseConfirmation?.consumedAt).not.toBeNull();
+          expect(
+            await transaction
+              .select({
+                confirmationId: eventTransitions.confirmationId,
+                confirmationStatus: eventTransitions.confirmationStatus,
+                source: eventTransitions.source,
+                requestId: eventTransitions.requestId,
+              })
+              .from(eventTransitions)
+              .where(
+                and(
+                  eq(eventTransitions.eventId, eventId),
+                  eq(eventTransitions.transition, 'close'),
+                ),
+              ),
+          ).toEqual([
+            {
+              confirmationId: closeConfirmationId,
+              confirmationStatus: 'consumed',
+              source: 'mobile',
+              requestId: closeRequestId,
+            },
+          ]);
+          expect(
+            await transaction
+              .select({
+                id: notificationIntents.id,
+                purpose: notificationIntents.purpose,
+              })
+              .from(notificationIntents)
+              .where(eq(notificationIntents.eventId, eventId)),
+          ).toEqual([{ id: allClearIntent.id, purpose: 'all-clear' }]);
+          expect(
+            await transaction
+              .select({ intentId: outbox.intentId, purpose: outbox.purpose })
+              .from(outbox)
+              .where(eq(outbox.eventId, eventId)),
+          ).toEqual([{ intentId: allClearIntent.id, purpose: 'all-clear' }]);
         } finally {
           for (const configuration of originalConfigurations) {
             await transaction

@@ -12,6 +12,7 @@ import {
   type PropsWithChildren,
 } from 'react';
 
+import { AuthenticatedApiClient, type RequestAuthenticated } from '../api';
 import { AuthApiClient, parseAuthApiBaseUrl } from './auth-api-client';
 import { MobileAuthController, type AuthState } from './auth-controller';
 import { MobileAuthError } from './auth-errors';
@@ -29,6 +30,7 @@ export interface MobileAuthContextValue {
   readonly unlock: () => Promise<void>;
   readonly retryConnection: () => Promise<void>;
   readonly signOut: () => Promise<void>;
+  readonly requestAuthenticated: RequestAuthenticated;
   readonly assertMutationAllowed: () => Readonly<{
     connectivityEpochId: string;
   }>;
@@ -44,11 +46,12 @@ const MobileAuthContext = createContext<MobileAuthContextValue | null>(null);
 
 function createRuntime(): AuthRuntime {
   const storage = createSecureSessionStore();
-  const api = new AuthApiClient(() =>
-    parseAuthApiBaseUrl(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL, __DEV__),
-  );
+  const baseUrl = () =>
+    parseAuthApiBaseUrl(process.env.EXPO_PUBLIC_PSD_EOC_API_BASE_URL, __DEV__);
+  const api = new AuthApiClient(baseUrl);
   const controller = new MobileAuthController({
     api,
+    authenticatedApi: new AuthenticatedApiClient(baseUrl),
     storage,
     localAuthenticator: createLocalAuthenticator(),
     createIdempotencyKey: () => Crypto.randomUUID(),
@@ -147,6 +150,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       beginGoogleSignIn,
       unlock: () => runtime.controller.foreground(),
       retryConnection: () => runtime.controller.retryConnection(),
+      requestAuthenticated: runtime.controller.requestAuthenticated,
       signOut: async () => {
         setSignInError(null);
         await runtime.controller.signOut();
