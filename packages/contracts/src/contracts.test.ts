@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { z } from 'zod';
 
 import * as Contracts from './index';
 import {
@@ -27,11 +28,14 @@ import {
   EventClassificationSchema,
   EventRoomSyncResultSchema,
   EventSchema,
+  EventSummaryExportSchema,
   EventTargetingSchema,
   EventTransitionSchema,
   EventTypeRenderingPreviewSchema,
   EventTypeVersionSchema,
   EventTypeVersionDraftSchema,
+  ExportDrillRecordsInputSchema,
+  ExportEventSummaryInputSchema,
   GroupSourceSchema,
   HUMAN_ONLY_ACTION_IDS,
   HttpsUrlSchema,
@@ -44,7 +48,10 @@ import {
   IntegrationChannelChangeAuthorizationSchema,
   IntegrationStatusSchema,
   LifecycleConsequencePreviewSchema,
+  ListDrillRecordsInputSchema,
   MediaReadGrantSchema,
+  McpDraftMessageRevisionInputSchema,
+  McpDraftMessageRevisionResultSchema,
   MutationCapabilityEnvelopeSchema,
   MobileOidcExchangeRequestSchema,
   MobileOidcStartRequestSchema,
@@ -64,6 +71,7 @@ import {
   RosterSyncResultSchema,
   RefreshCredentialRejectionEvidenceSchema,
   RenderedMessageSchema,
+  RecordsExportSchema,
   SecurityAuditEntrySchema,
   SecurityAuditQuerySchema,
   SetChannelEnabledInputSchema,
@@ -3688,6 +3696,141 @@ describe('records and report projections', () => {
       }).success,
     ).toBe(true);
   });
+
+  test('requires an explicit nullable event-type filter for drill-record lists', () => {
+    const input = {
+      facilityId: ids.facility,
+      eventTypeId: null,
+      startedFrom: null,
+      startedThrough: null,
+      cursor: null,
+      limit: 100,
+    } as const;
+
+    expect(ListDrillRecordsInputSchema.parse(input)).toEqual(input);
+    expect(
+      ListDrillRecordsInputSchema.safeParse({
+        ...input,
+        eventTypeId: ids.eventType,
+      }).success,
+    ).toBe(true);
+    expect(
+      ListDrillRecordsInputSchema.safeParse({
+        facilityId: input.facilityId,
+        startedFrom: input.startedFrom,
+        startedThrough: input.startedThrough,
+        cursor: input.cursor,
+        limit: input.limit,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('bounds CSV drill exports to one explicit facility and 366 Pacific calendar days', () => {
+    const input = {
+      facilityId: ids.facility,
+      eventTypeId: null,
+      startedFrom: '2024-01-01T00:00:00.000Z',
+      startedThrough: '2025-01-01T00:00:00.000Z',
+      format: 'csv',
+    } as const;
+
+    expect(ExportDrillRecordsInputSchema.parse(input)).toEqual(input);
+    expect(
+      ExportDrillRecordsInputSchema.safeParse({
+        ...input,
+        eventTypeId: ids.eventType,
+      }).success,
+    ).toBe(true);
+    expect(
+      ExportDrillRecordsInputSchema.safeParse({
+        ...input,
+        startedFrom: '2024-11-02T07:00:00.000Z',
+        startedThrough: '2025-11-03T07:59:59.999Z',
+      }).success,
+    ).toBe(true);
+    for (const rejectedInput of [
+      { ...input, facilityId: null },
+      { ...input, eventTypeId: undefined },
+      { ...input, startedFrom: null },
+      { ...input, startedThrough: null },
+      { ...input, startedThrough: '2025-01-01T01:00:00.001Z' },
+      {
+        ...input,
+        startedFrom: '2025-01-01T00:00:00.000Z',
+        startedThrough: '2024-01-01T00:00:00.000Z',
+      },
+      { ...input, format: 'pdf' },
+    ]) {
+      expect(
+        ExportDrillRecordsInputSchema.safeParse(rejectedInput).success,
+      ).toBe(false);
+    }
+  });
+
+  test('keeps per-event summaries PDF-only', () => {
+    const input = { eventId: ids.event, format: 'pdf' } as const;
+
+    expect(ExportEventSummaryInputSchema.parse(input)).toEqual(input);
+    expect(
+      ExportEventSummaryInputSchema.safeParse({ ...input, format: 'csv' })
+        .success,
+    ).toBe(false);
+  });
+
+  test('binds private export grants to exact safe artifact metadata', () => {
+    const csvArtifact = {
+      id: ids.outbox,
+      format: 'csv',
+      contentType: 'text/csv; charset=utf-8',
+      fileName: 'drill-records-2026-08-11.csv',
+      byteLength: 128,
+      contentSha256: 'a'.repeat(64),
+      rowCount: 2,
+      downloadUrl: 'https://example.invalid/private/drill-records',
+      generatedAt: times.created,
+      expiresAt: times.activated,
+    } as const;
+
+    expect(RecordsExportSchema.parse(csvArtifact)).toEqual(csvArtifact);
+    const pdfArtifact = {
+      ...csvArtifact,
+      format: 'pdf' as const,
+      contentType: 'application/pdf' as const,
+      fileName: 'event-summary.pdf',
+    };
+    expect(RecordsExportSchema.safeParse(pdfArtifact).success).toBe(true);
+    expect(
+      EventSummaryExportSchema.safeParse({
+        eventId: ids.event,
+        artifact: pdfArtifact,
+      }).success,
+    ).toBe(true);
+    expect(
+      EventSummaryExportSchema.safeParse({
+        eventId: ids.event,
+        artifact: csvArtifact,
+      }).success,
+    ).toBe(false);
+    for (const rejectedArtifact of [
+      { ...csvArtifact, contentType: 'application/pdf' },
+      { ...csvArtifact, contentType: 'text/csv' },
+      { ...csvArtifact, fileName: 'drill-records.pdf' },
+      { ...csvArtifact, fileName: '../drill-records.csv' },
+      { ...csvArtifact, fileName: 'drill records.csv' },
+      { ...csvArtifact, fileName: 'drill..records.csv' },
+      { ...csvArtifact, fileName: 'drill.records.csv' },
+      { ...csvArtifact, fileName: 'drill-records.csv.pdf' },
+      { ...csvArtifact, byteLength: 0 },
+      { ...csvArtifact, contentSha256: 'A'.repeat(64) },
+      { ...csvArtifact, rowCount: -1 },
+      { ...csvArtifact, downloadUrl: 'http://example.invalid/public.csv' },
+      { ...csvArtifact, expiresAt: times.afterExpiry },
+    ]) {
+      expect(RecordsExportSchema.safeParse(rejectedArtifact).success).toBe(
+        false,
+      );
+    }
+  });
 });
 
 describe('agent key credential boundaries', () => {
@@ -3724,6 +3867,75 @@ describe('agent key credential boundaries', () => {
   });
 });
 
+describe('MCP message-revision facade', () => {
+  test('owns a safe single-channel revision without protected action vocabulary', () => {
+    const input = {
+      source: {
+        kind: 'published-version',
+        baseVersionId: ids.eventTypeVersion,
+      },
+      phase: 'resolution',
+      wording: {
+        channel: 'push',
+        title: 'Resolved at {{site}}',
+        body: 'Follow the next instructions from PSD EOC.',
+      },
+    } as const;
+
+    expect(McpDraftMessageRevisionInputSchema.parse(input)).toEqual(input);
+    expect(
+      McpDraftMessageRevisionInputSchema.safeParse({
+        ...input,
+        phase: 'all-clear',
+      }).success,
+    ).toBe(false);
+    expect(
+      McpDraftMessageRevisionInputSchema.safeParse({
+        ...input,
+        wording: { ...input.wording, title: 'Malformed {{unknown}}' },
+      }).success,
+    ).toBe(false);
+
+    const serializedSchema = JSON.stringify(
+      z.toJSONSchema(McpDraftMessageRevisionInputSchema),
+    );
+    for (const protectedActionId of HUMAN_ONLY_ACTION_IDS) {
+      expect(serializedSchema).not.toContain(protectedActionId);
+    }
+  });
+
+  test('accepts exact draft concurrency and returns only a bounded summary', () => {
+    expect(
+      McpDraftMessageRevisionInputSchema.safeParse({
+        source: {
+          kind: 'existing-draft',
+          draftId: ids.preview,
+          expectedDraftRevision: 'a'.repeat(64),
+        },
+        phase: 'reactivation',
+        wording: {
+          channel: 'email',
+          subject: 'Synthetic operational update',
+          textBody: 'Continue following staff instructions.',
+        },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      McpDraftMessageRevisionResultSchema.safeParse({
+        draftId: ids.preview,
+        draftRevision: 'b'.repeat(64),
+        eventTypeId: ids.eventType,
+        baseVersionId: ids.eventTypeVersion,
+        templateMode: 'drill',
+        changedPhase: 'resolution',
+        changedChannel: 'sms',
+        createdAt: times.created,
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe('barrel exports', () => {
   test('exposes stable downstream schemas from the package entry point', () => {
     expect(typeof Contracts.EventSchema.parse).toBe('function');
@@ -3734,6 +3946,9 @@ describe('barrel exports', () => {
     expect(typeof Contracts.StaleRosterReportSchema.parse).toBe('function');
     expect(typeof Contracts.SecurityAuditEntrySchema.parse).toBe('function');
     expect(typeof Contracts.JournalEntrySchema.parse).toBe('function');
+    expect(typeof Contracts.McpDraftMessageRevisionInputSchema.parse).toBe(
+      'function',
+    );
     expect(typeof Contracts.defineCapability).toBe('function');
     expect(Contracts.HUMAN_ONLY_ACTION_IDS).toHaveLength(4);
   });
