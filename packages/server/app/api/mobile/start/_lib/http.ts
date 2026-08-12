@@ -136,7 +136,7 @@ function parseFacilitiesInput(
   }
   const limit = parameters.get('limit');
   return ListFacilitiesInputSchema.parse({
-    includeInactive: false,
+    includeInactive: true,
     cursor: parameters.get('cursor'),
     limit: limit === null ? DEFAULT_FACILITY_PAGE_LIMIT : Number(limit),
   });
@@ -154,7 +154,7 @@ function queryInvocation(
   });
 }
 
-/** Lists active facilities after applying the mobile session's server scope. */
+/** Lists authorized facilities so active events retain names after deactivation. */
 export async function handleListMobileStartFacilities(
   request: Request,
   runtimeValue?: MobileStartRouteRuntime,

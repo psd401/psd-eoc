@@ -381,6 +381,15 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
 
   test('announces an exact join choice without implying another notification', () => {
     const joinChoice = ActiveEventJoinAction({
+      eventId: '21000000-0000-4000-8000-000000000001',
+      eventTypeName: 'Earthquake drill',
+      facilityName: 'Synthetic Test School',
+      mode: 'drill',
+      onPress: () => {},
+      startedLabel: 'Aug 11, 2026 at 10:00 AM',
+    }) as Element;
+    const concurrentChoice = ActiveEventJoinAction({
+      eventId: '21000000-0000-4000-8000-000000000002',
       eventTypeName: 'Earthquake drill',
       facilityName: 'Synthetic Test School',
       mode: 'drill',
@@ -388,10 +397,23 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
       startedLabel: 'Aug 11, 2026 at 10:00 AM',
     }) as Element;
     const joinButton = renderClassifiedAction(joinChoice);
+    const concurrentButton = renderClassifiedAction(concurrentChoice);
 
     expect(joinButton.props.accessibilityRole).toBe('button');
     expect(joinButton.props.accessibilityLabel).toContain(
       'Join existing DRILL — PRACTICE',
+    );
+    expect(joinButton.props.accessibilityLabel).toContain(
+      'Event ID 21000000-0000-4000-8000-000000000001',
+    );
+    expect(renderedText(joinButton).join(' ')).toContain(
+      'Event ID 21000000-0000-4000-8000-000000000001',
+    );
+    expect(concurrentButton.props.accessibilityLabel).toContain(
+      'Event ID 21000000-0000-4000-8000-000000000002',
+    );
+    expect(concurrentButton.props.accessibilityLabel).not.toBe(
+      joinButton.props.accessibilityLabel,
     );
     expect(joinButton.props.accessibilityHint).toContain(
       'does not create another event or notification intent',

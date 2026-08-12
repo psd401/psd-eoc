@@ -2,6 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import ts from 'typescript';
 
 const LAYOUT_PATH = new URL('../../app/_layout.tsx', import.meta.url);
+const OUTCOME_CHECK_SCREEN_PATHS = [
+  new URL('../../app/index.tsx', import.meta.url),
+  new URL('../../app/start/index.tsx', import.meta.url),
+] as const;
 
 function returnedExpression(
   sourceFile: ts.SourceFile,
@@ -65,6 +69,38 @@ function stackScreenNames(
   };
   visit(node);
   return names;
+}
+
+function outcomeCheckResetDependencies(
+  sourceFile: ts.SourceFile,
+): readonly string[] {
+  let dependencies: readonly string[] | null = null;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'useEffect'
+    ) {
+      const [callback, dependencyValue] = node.arguments;
+      if (
+        callback !== undefined &&
+        callback.getText(sourceFile).includes('setCheckingOutcome(false)') &&
+        callback.getText(sourceFile).includes('setOutcomeCheckError(null)') &&
+        dependencyValue !== undefined &&
+        ts.isArrayLiteralExpression(dependencyValue)
+      ) {
+        dependencies = dependencyValue.elements.map((element) =>
+          element.getText(sourceFile),
+        );
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  if (dependencies === null) {
+    throw new Error('The outcome-check reset effect is missing.');
+  }
+  return dependencies;
 }
 
 describe('root layout provider placement', () => {
@@ -177,5 +213,24 @@ describe('root layout provider placement', () => {
     expect(committedReconcile).toBe(true);
     expect(source).toContain("phase: 'checking-recovery'");
     expect(source).toContain("snapshot.phase === 'checking-recovery'");
+  });
+
+  test('cancels stale outcome checks across every connectivity phase change', async () => {
+    for (const path of OUTCOME_CHECK_SCREEN_PATHS) {
+      const source = await Bun.file(path).text();
+      const sourceFile = ts.createSourceFile(
+        path.pathname,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TSX,
+      );
+      const dependencies = outcomeCheckResetDependencies(sourceFile);
+
+      expect(dependencies).toContain('requestAuthenticated');
+      expect(dependencies).toContain('isFocused');
+      expect(dependencies).toContain('state.phase');
+      expect(dependencies).toContain('state.session?.session.id');
+    }
   });
 });

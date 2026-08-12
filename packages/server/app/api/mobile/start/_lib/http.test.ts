@@ -216,7 +216,7 @@ describe('mobile start authentication', () => {
 });
 
 describe('mobile start route handlers', () => {
-  test('lists only active facilities through the authenticated mobile scope', async () => {
+  test('lists authorized facilities for naming while preserving mobile scope', async () => {
     const { authentications, executions, runtime } = testRuntime();
     const request = new Request(
       'https://eoc.example.test/api/mobile/start/facilities?cursor=cursor_1&limit=25',
@@ -234,7 +234,7 @@ describe('mobile start route handlers', () => {
       {
         capabilityId: 'list-facilities',
         input: {
-          includeInactive: false,
+          includeInactive: true,
           cursor: 'cursor_1',
           limit: 25,
         },
@@ -255,6 +255,7 @@ describe('mobile start route handlers', () => {
   test('rejects unsupported facility query input before capability execution', async () => {
     for (const path of [
       '/api/mobile/start/facilities?includeInactive=true',
+      '/api/mobile/start/facilities?includeInactive=false',
       '/api/mobile/start/facilities?limit=201',
       '/api/mobile/start/facilities?limit=10&limit=20',
     ]) {
