@@ -8,18 +8,28 @@ import {
   FacilityPageSchema,
   IdempotencyKeySchema,
   JoinEventResultSchema,
+  MobileSessionResponseSchema,
+  NativeDevicePlatformSchema,
+  OpaqueSessionBearerSchema,
+  SessionEstablishmentResultSchema,
   StartEventInputSchema,
   StartEventResultSchema,
   type ActivationPreview,
   type Event,
   type EventTypeVersion,
+  type MobileSessionResponse,
+  type NativeDevicePlatform,
   type NotificationPurpose,
 } from '@psd-eoc/contracts';
 
 import type {
+  AuthStorage,
   AuthenticatedRequestInput,
   AuthenticatedRequestTransport,
+  SessionApi,
+  StoredAuthVault,
 } from '../auth/auth-controller';
+import { MobileAuthError } from '../auth/auth-errors';
 
 const uuid = (suffix: number): string =>
   `71000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
@@ -41,6 +51,9 @@ const IDS = Object.freeze({
   journal: uuid(14),
   intent: uuid(15),
   participant: uuid(16),
+  deviceEnrollment: uuid(17),
+  membershipSnapshot: uuid(18),
+  initialConnectivityEpoch: uuid(19),
 });
 
 const FIXTURE_CREATED_AT = '2026-08-11T17:00:00.000Z';
@@ -340,6 +353,204 @@ export function isIssue21SyntheticFixtureEnabled(): boolean {
   );
 }
 
+function requireIssue21SyntheticFixture(): void {
+  if (!isIssue21SyntheticFixtureEnabled()) {
+    throw new TypeError('The issue-21 synthetic fixture is disabled.');
+  }
+}
+
+function syntheticBearer(generation: number): string {
+  return OpaqueSessionBearerSchema.parse(
+    `issue21_synthetic_refresh_${String(generation).padStart(17, '0')}`,
+  );
+}
+
+function syntheticSession(
+  platform: NativeDevicePlatform,
+  createdAt: Date,
+  refreshedAt: Date,
+  connectivityEpochId: string,
+) {
+  const oneDay = 24 * 60 * 60_000;
+  return SessionEstablishmentResultSchema.parse({
+    user: {
+      id: IDS.user,
+      googleSubject: 'issue-21-synthetic-staff-subject',
+      email: 'synthetic.staff@psd401.net',
+      displayName: 'Issue 21 Synthetic Staff',
+      roles: ['staff'],
+      facilityScope: {
+        kind: 'facilities',
+        facilityIds: [IDS.facility],
+      },
+      createdAt: createdAt.toISOString(),
+      disabledAt: null,
+    },
+    session: {
+      id: IDS.session,
+      userId: IDS.user,
+      deviceEnrollmentId: IDS.deviceEnrollment,
+      createdAt: createdAt.toISOString(),
+      expiresAt: new Date(createdAt.getTime() + 7 * oneDay).toISOString(),
+      authorization: {
+        kind: 'group-membership',
+        source: 'google-group-snapshot',
+        membershipSnapshotId: IDS.membershipSnapshot,
+        membershipValidUntil: new Date(
+          createdAt.getTime() + oneDay,
+        ).toISOString(),
+        membershipGraceUntil: new Date(
+          createdAt.getTime() + 7 * oneDay,
+        ).toISOString(),
+      },
+      revokedAt: null,
+    },
+    deviceEnrollment: {
+      id: IDS.deviceEnrollment,
+      userId: IDS.user,
+      platform,
+      unlockMethod: 'biometric',
+      installationId: 'issue-21-synthetic-installation',
+      enrolledAt: createdAt.toISOString(),
+      lastSeenAt: refreshedAt.toISOString(),
+      revokedAt: null,
+    },
+    connectivityEpoch: {
+      id: connectivityEpochId,
+      sessionId: IDS.session,
+      establishedAt: refreshedAt.toISOString(),
+    },
+  });
+}
+
+export interface Issue21SyntheticAuthFixture {
+  readonly api: SessionApi;
+  readonly storage: AuthStorage;
+}
+
+/**
+ * Seeds a development-only, in-memory enrollment so physical accessibility
+ * testing never needs Google, SecureStore credentials, or a server. The
+ * ordinary MobileAuthController still requires the real OS authentication
+ * challenge before it reads this vault. Sign-out clears the enrollment for
+ * the lifetime of the process, and all auth operations fail closed if the
+ * exact fixture flag is removed.
+ */
+export function createIssue21SyntheticAuthFixture(
+  rawPlatform: NativeDevicePlatform,
+  now: () => Date = () => new Date(),
+): Issue21SyntheticAuthFixture {
+  requireIssue21SyntheticFixture();
+  const platform = NativeDevicePlatformSchema.parse(rawPlatform);
+  const createdAt = now();
+  let generation = 0;
+  let revoked = false;
+  let currentToken = syntheticBearer(generation);
+  let vault: StoredAuthVault | null = Object.freeze({
+    refreshToken: currentToken,
+    pendingRefreshIdempotencyKey: null,
+    session: syntheticSession(
+      platform,
+      createdAt,
+      createdAt,
+      IDS.initialConnectivityEpoch,
+    ),
+  });
+  const refreshReplays = new Map<string, MobileSessionResponse>();
+
+  const storage: AuthStorage = Object.freeze({
+    async getOrCreateInstallationId(): Promise<string> {
+      requireIssue21SyntheticFixture();
+      return 'issue-21-synthetic-installation';
+    },
+    async hasEnrollment(): Promise<boolean> {
+      requireIssue21SyntheticFixture();
+      return vault !== null;
+    },
+    async readVault(): Promise<StoredAuthVault | null> {
+      requireIssue21SyntheticFixture();
+      return vault;
+    },
+    async writeVault(nextVault: StoredAuthVault): Promise<void> {
+      requireIssue21SyntheticFixture();
+      const pendingRefreshIdempotencyKey =
+        nextVault.pendingRefreshIdempotencyKey === null
+          ? null
+          : IdempotencyKeySchema.parse(nextVault.pendingRefreshIdempotencyKey);
+      vault = Object.freeze({
+        refreshToken: OpaqueSessionBearerSchema.parse(nextVault.refreshToken),
+        pendingRefreshIdempotencyKey,
+        session: SessionEstablishmentResultSchema.parse(nextVault.session),
+      });
+    },
+    async clearSession(): Promise<void> {
+      requireIssue21SyntheticFixture();
+      vault = null;
+    },
+  });
+
+  const api: SessionApi = Object.freeze({
+    async refresh(
+      rawRefreshToken: string,
+      rawIdempotencyKey: string,
+      signal: AbortSignal,
+    ): Promise<MobileSessionResponse> {
+      requireIssue21SyntheticFixture();
+      const refreshToken = OpaqueSessionBearerSchema.parse(rawRefreshToken);
+      const idempotencyKey = IdempotencyKeySchema.parse(rawIdempotencyKey);
+      if (signal.aborted) {
+        throw new DOMException(
+          'The synthetic refresh was aborted.',
+          'AbortError',
+        );
+      }
+      const replayKey = `${refreshToken}:${idempotencyKey}`;
+      const replay = refreshReplays.get(replayKey);
+      if (replay !== undefined) {
+        return replay;
+      }
+      if (revoked || refreshToken !== currentToken) {
+        throw new MobileAuthError(
+          'rejected',
+          'The synthetic session is no longer available.',
+        );
+      }
+      generation += 1;
+      currentToken = syntheticBearer(generation);
+      const refreshedAt = now();
+      const response = MobileSessionResponseSchema.parse({
+        tokenType: 'Bearer',
+        refreshToken: currentToken,
+        session: syntheticSession(
+          platform,
+          createdAt,
+          refreshedAt,
+          uuid(19 + generation),
+        ),
+      });
+      refreshReplays.set(replayKey, response);
+      return response;
+    },
+    async revoke(
+      rawRefreshToken: string,
+      sessionId: string,
+      rawIdempotencyKey: string,
+    ): Promise<void> {
+      requireIssue21SyntheticFixture();
+      const refreshToken = OpaqueSessionBearerSchema.parse(rawRefreshToken);
+      IdempotencyKeySchema.parse(rawIdempotencyKey);
+      if (sessionId !== IDS.session || refreshToken !== currentToken) {
+        throw new TypeError(
+          'The issue-21 fixture rejected an unexpected session revocation.',
+        );
+      }
+      revoked = true;
+    },
+  });
+
+  return Object.freeze({ api, storage });
+}
+
 /**
  * In-memory, development-only operational transport for Maestro. It accepts
  * only one synthetic drill fixture, labels every integration mocked, performs
@@ -364,9 +575,7 @@ export function createIssue21SyntheticFixtureTransport(
   let currentPreview: ActivationPreview | null = null;
 
   return async (_bearer, input) => {
-    if (!isIssue21SyntheticFixtureEnabled()) {
-      throw new TypeError('The issue-21 synthetic fixture is disabled.');
-    }
+    requireIssue21SyntheticFixture();
     if (input.signal?.aborted === true) {
       throw new DOMException(
         'The synthetic request was aborted.',
