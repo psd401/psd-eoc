@@ -93,6 +93,12 @@ class TestDeviceTransaction implements DeviceCapabilityTransaction {
   > = [];
   public registrationActor: Extract<Actor, { kind: 'human' }> | null = null;
   public claimedInput: ClaimIdempotencyInput | null = null;
+  public idempotencyClaim: IdempotencyClaim = {
+    kind: 'new',
+    recordId: ids.registrationA,
+  };
+  public endpointStatusReplay: EndpointStatusRecord | null = null;
+  public endpointStatusReplayLoads = 0;
 
   public async readCurrentTime(): Promise<Date> {
     return now;
@@ -102,7 +108,7 @@ class TestDeviceTransaction implements DeviceCapabilityTransaction {
     input: ClaimIdempotencyInput,
   ): Promise<IdempotencyClaim> {
     this.claimedInput = input;
-    return { kind: 'new', recordId: ids.registrationA };
+    return this.idempotencyClaim;
   }
 
   public async completeIdempotency(
@@ -172,8 +178,9 @@ class TestDeviceTransaction implements DeviceCapabilityTransaction {
     return null;
   }
 
-  public async loadEndpointStatusReplay(): Promise<null> {
-    return null;
+  public async loadEndpointStatusReplay(): Promise<EndpointStatusRecord | null> {
+    this.endpointStatusReplayLoads += 1;
+    return this.endpointStatusReplay;
   }
 }
 
@@ -313,5 +320,103 @@ describe('canonical device capabilities', () => {
       ),
     ).rejects.toMatchObject({ status: 403 });
     expect(transaction.endpointStatusCalls).toHaveLength(0);
+  });
+
+  test('re-authorizes the dedicated worker before returning a completed replay', async () => {
+    const input = {
+      rosterSnapshotId: ids.roster,
+      recipientId: ids.recipient,
+      endpointId: ids.endpoint,
+      status: 'invalid' as const,
+      reasonCode: EXPO_DEVICE_NOT_REGISTERED_REASON,
+    };
+    const { store, transaction } = testStore();
+    const output = await executeDeviceCapability(
+      'record-endpoint-status',
+      input,
+      workerInvocation(),
+      store,
+    );
+    const claimedInput = transaction.claimedInput;
+    expect(claimedInput).not.toBeNull();
+    if (claimedInput === null) throw new Error('Expected idempotency claim.');
+
+    transaction.idempotencyClaim = {
+      kind: 'completed',
+      requestDigest: claimedInput.requestDigest,
+      resultReference: `endpoint-status:${output.id}`,
+    };
+    transaction.endpointStatusReplay = output;
+    const webhookInvocation: TrustedCapabilityInvocation = {
+      ...workerInvocation(),
+      source: 'webhook',
+      mutation: {
+        ...workerInvocation().mutation!,
+        transport: { kind: 'webhook-delivery' },
+      },
+    };
+
+    await expect(
+      executeDeviceCapability(
+        'record-endpoint-status',
+        input,
+        webhookInvocation,
+        store,
+      ),
+    ).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+      status: 403,
+    });
+    expect(transaction.endpointStatusReplayLoads).toBe(0);
+  });
+
+  test('rejects confirmation metadata before returning a completed worker replay', async () => {
+    const input = {
+      rosterSnapshotId: ids.roster,
+      recipientId: ids.recipient,
+      endpointId: ids.endpoint,
+      status: 'invalid' as const,
+      reasonCode: EXPO_DEVICE_NOT_REGISTERED_REASON,
+    };
+    const { store, transaction } = testStore();
+    const output = await executeDeviceCapability(
+      'record-endpoint-status',
+      input,
+      workerInvocation(),
+      store,
+    );
+    const claimedInput = transaction.claimedInput;
+    expect(claimedInput).not.toBeNull();
+    if (claimedInput === null) throw new Error('Expected idempotency claim.');
+
+    transaction.idempotencyClaim = {
+      kind: 'completed',
+      requestDigest: claimedInput.requestDigest,
+      resultReference: `endpoint-status:${output.id}`,
+    };
+    transaction.endpointStatusReplay = output;
+    const replayInvocation = workerInvocation();
+    const confirmedInvocation: TrustedCapabilityInvocation = {
+      ...replayInvocation,
+      mutation: {
+        ...replayInvocation.mutation!,
+        humanConfirmationId: ids.status,
+      },
+    };
+
+    await expect(
+      executeDeviceCapability(
+        'record-endpoint-status',
+        input,
+        confirmedInvocation,
+        store,
+      ),
+    ).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      reasonCode: 'CAPABILITY_INVOCATION_DENIED',
+      status: 403,
+    });
+    expect(transaction.endpointStatusReplayLoads).toBe(0);
   });
 });
