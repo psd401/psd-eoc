@@ -10,7 +10,7 @@ import {
   RosterHealthQuerySchema,
   type SmsLifecycleCapabilityContext,
 } from '@psd-eoc/contracts';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -440,11 +440,29 @@ describeWithDatabase('PostgreSQL SMS opt-out and stale-report proof', () => {
       endpointId: IDS.endpoint,
       status: 'invalid',
       reasonCode: 'SYNTHETIC_INVALID',
-      provider: null,
-      providerReference: null,
-      providerOccurredAt: null,
     });
     expect(invalid.id).toBe(IDS.baseInvalidStatus);
+    await expect(
+      store.recordEndpointStatus({
+        rosterSnapshotId: SEEDED_ROSTER,
+        recipientId: IDS.recipient,
+        endpointId: IDS.endpoint,
+        status: 'invalid',
+        reasonCode: 'SYNTHETIC_INVALID',
+      }),
+    ).resolves.toEqual(invalid);
+    const invalidRows = await database
+      .select({ id: endpointStatusRecords.id })
+      .from(endpointStatusRecords)
+      .where(
+        and(
+          eq(endpointStatusRecords.rosterSnapshotId, SEEDED_ROSTER),
+          eq(endpointStatusRecords.recipientId, IDS.recipient),
+          eq(endpointStatusRecords.endpointId, IDS.endpoint),
+          eq(endpointStatusRecords.reasonCode, 'SYNTHETIC_INVALID'),
+        ),
+      );
+    expect(invalidRows).toEqual([{ id: IDS.baseInvalidStatus }]);
 
     const newestActive = await executeRecordEndpointStatusCapability(
       {

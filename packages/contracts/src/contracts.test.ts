@@ -2611,6 +2611,54 @@ describe('human-only capability boundary', () => {
     expect(RecordEndpointStatusInputSchema.safeParse(active).success).toBe(
       true,
     );
+    const nonProviderStatus = {
+      rosterSnapshotId: ids.roster,
+      recipientId: ids.recipient,
+      endpointId: ids.smsEndpoint,
+      status: 'invalid',
+      reasonCode: 'PUSH_TOKEN_INVALID',
+    } as const;
+    expect(RecordEndpointStatusInputSchema.parse(nonProviderStatus)).toEqual(
+      nonProviderStatus,
+    );
+    expect(
+      RecordEndpointStatusInputSchema.safeParse({
+        ...nonProviderStatus,
+        provider: null,
+        providerReference: null,
+        providerOccurredAt: null,
+      }).success,
+    ).toBe(false);
+    for (const partialProvider of [
+      { provider: SMS_LIFECYCLE_PROVIDER },
+      {
+        provider: SMS_LIFECYCLE_PROVIDER,
+        providerReference: 'synthetic-incomplete-proof',
+      },
+      {
+        provider: SMS_LIFECYCLE_PROVIDER,
+        providerOccurredAt: '2026-08-11T18:00:00.000Z',
+      },
+    ]) {
+      expect(
+        RecordEndpointStatusInputSchema.safeParse({
+          ...nonProviderStatus,
+          ...partialProvider,
+        }).success,
+      ).toBe(false);
+    }
+    expect(RecordEndpointStatusInputSchema.parse(active)).toEqual(active);
+    for (const reservedReason of [
+      SMS_OPT_OUT_REASON_CODE,
+      SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
+    ]) {
+      expect(
+        RecordEndpointStatusInputSchema.safeParse({
+          ...nonProviderStatus,
+          reasonCode: reservedReason,
+        }).success,
+      ).toBe(false);
+    }
     const endpointStatusEnvelope = {
       capabilityId: 'record-endpoint-status',
       operation: 'mutation',
@@ -2620,12 +2668,7 @@ describe('human-only capability boundary', () => {
       requestId: ids.request,
       serverTime: times.later,
       input: {
-        ...active,
-        status: 'invalid',
-        reasonCode: 'PUSH_TOKEN_INVALID',
-        provider: null,
-        providerReference: null,
-        providerOccurredAt: null,
+        ...nonProviderStatus,
       },
       idempotencyKey: 'endpoint-status-worker-idempotent-0001',
       transport: { kind: 'worker-execution' },
