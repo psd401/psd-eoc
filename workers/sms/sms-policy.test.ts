@@ -271,7 +271,9 @@ describe('SMS endpoint policy', () => {
             id: IDS.preview,
             ...input,
             providerOccurredAt:
-              occurredAt === null ? null : new Date(occurredAt).toISOString(),
+              occurredAt === undefined
+                ? undefined
+                : new Date(occurredAt).toISOString(),
             recordedAt: '2026-08-11T18:05:00.000Z',
           }),
         );

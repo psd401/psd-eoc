@@ -472,13 +472,16 @@ export async function recordEndpointStatus(
       'The SMS endpoint-status request was invalid.',
     );
   }
-  const input = Object.freeze({
-    ...inputResult.data,
-    providerOccurredAt:
-      inputResult.data.providerOccurredAt === null
-        ? null
-        : new Date(inputResult.data.providerOccurredAt).toISOString(),
-  });
+  const parsedInput = inputResult.data;
+  const input =
+    parsedInput.providerOccurredAt === undefined
+      ? parsedInput
+      : RecordEndpointStatusInputSchema.parse({
+          ...parsedInput,
+          providerOccurredAt: new Date(
+            parsedInput.providerOccurredAt,
+          ).toISOString(),
+        });
   const recordResult = EndpointStatusRecordSchema.safeParse(
     await store.recordEndpointStatus(input),
   );
@@ -623,6 +626,20 @@ function smsOptOutFromRow(row: SmsOptOutRow): SmsOptOutRecord {
 }
 
 function endpointStatusFromRow(row: EndpointStatusRow): EndpointStatusRecord {
+  const hasNoProviderTruth =
+    row.provider === null &&
+    row.providerReference === null &&
+    row.providerOccurredAt === null;
+  const hasCompleteProviderTruth =
+    row.provider !== null &&
+    row.providerReference !== null &&
+    row.providerOccurredAt !== null;
+  if (!hasNoProviderTruth && !hasCompleteProviderTruth) {
+    throw new SmsPolicyError(
+      'SMS_ENDPOINT_STATUS_PERSISTENCE_INVALID',
+      'Persisted endpoint lifecycle provider evidence was incomplete.',
+    );
+  }
   return EndpointStatusRecordSchema.parse({
     id: row.id,
     rosterSnapshotId: row.rosterSnapshotId,
@@ -630,10 +647,13 @@ function endpointStatusFromRow(row: EndpointStatusRow): EndpointStatusRecord {
     endpointId: row.endpointId,
     status: row.status,
     reasonCode: row.reasonCode,
-    provider: row.provider,
-    providerReference: row.providerReference,
-    providerOccurredAt:
-      row.providerOccurredAt === null ? null : dateIso(row.providerOccurredAt),
+    ...(hasNoProviderTruth
+      ? {}
+      : {
+          provider: row.provider as string,
+          providerReference: row.providerReference as string,
+          providerOccurredAt: dateIso(row.providerOccurredAt as Date),
+        }),
     recordedAt: dateIso(row.recordedAt),
   });
 }
@@ -679,7 +699,7 @@ async function appendSmsEndpointStatus(
   recordedAt: Date,
   uuid: () => string,
 ): Promise<EndpointStatusRecord> {
-  if (input.provider !== null && input.providerReference !== null) {
+  if (input.provider !== undefined && input.providerReference !== undefined) {
     const exactRows = await database
       .select()
       .from(endpointStatusRecords)
@@ -738,11 +758,12 @@ async function appendSmsEndpointStatus(
     existing !== undefined &&
     existing.status === input.status &&
     existing.reasonCode === input.reasonCode &&
-    existing.provider === input.provider &&
-    existing.providerReference === input.providerReference &&
+    existing.provider === (input.provider ?? null) &&
+    existing.providerReference === (input.providerReference ?? null) &&
     (existing.providerOccurredAt === null
       ? null
-      : dateIso(existing.providerOccurredAt)) === input.providerOccurredAt
+      : dateIso(existing.providerOccurredAt)) ===
+      (input.providerOccurredAt ?? null)
   ) {
     return endpointStatusFromRow(existing);
   }
@@ -753,17 +774,25 @@ async function appendSmsEndpointStatus(
     endpointId: input.endpointId,
     status: input.status,
     reasonCode: input.reasonCode,
-    provider: input.provider,
-    providerReference: input.providerReference,
-    providerOccurredAt: input.providerOccurredAt,
+    ...(input.provider === undefined ||
+    input.providerReference === undefined ||
+    input.providerOccurredAt === undefined
+      ? {}
+      : {
+          provider: input.provider,
+          providerReference: input.providerReference,
+          providerOccurredAt: input.providerOccurredAt,
+        }),
     recordedAt: recordedAt.toISOString(),
   });
   await database.insert(endpointStatusRecords).values({
     ...record,
     population: endpoint.population,
     channel: endpoint.channel,
+    provider: record.provider ?? null,
+    providerReference: record.providerReference ?? null,
     providerOccurredAt:
-      record.providerOccurredAt === null
+      record.providerOccurredAt === undefined
         ? null
         : new Date(record.providerOccurredAt),
     recordedAt,
