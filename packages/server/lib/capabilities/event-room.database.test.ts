@@ -75,7 +75,11 @@ const DISTRICT_SCOPE = Object.freeze({
 
 interface FixtureIds {
   readonly facilityId: string;
+  readonly facilityCode: string;
+  readonly facilityName: string;
   readonly eventTypeVersionId: string;
+  readonly eventTypeVersionName: string;
+  readonly eventTypeTemplateMode: 'real' | 'drill';
   readonly rosterSnapshotId: string;
 }
 
@@ -139,10 +143,13 @@ function fixtures(): FixtureIds {
   return fixtureIds;
 }
 
-function invocation(requestId = randomUUID()): TrustedCapabilityInvocation {
+function invocation(
+  requestId = randomUUID(),
+  source: 'web' | 'mobile' = 'web',
+): TrustedCapabilityInvocation {
   return {
     actor: HUMAN_ACTOR,
-    source: 'web',
+    source,
     scope: DISTRICT_SCOPE,
     requestId,
     serverTime: new Date(),
@@ -151,7 +158,9 @@ function invocation(requestId = randomUUID()): TrustedCapabilityInvocation {
   };
 }
 
-async function createActiveEvent(): Promise<string> {
+async function createActiveEvent(
+  facilityId = fixtures().facilityId,
+): Promise<string> {
   const ids = fixtures();
   const eventId = randomUUID();
   const activatedAt = new Date();
@@ -159,7 +168,7 @@ async function createActiveEvent(): Promise<string> {
     .insert(events)
     .values({
       id: eventId,
-      facilityId: ids.facilityId,
+      facilityId,
       kind: 'test',
       templateMode: 'drill',
       eventTypeVersionId: ids.eventTypeVersionId,
@@ -182,6 +191,22 @@ async function createActiveEvent(): Promise<string> {
       },
     });
   return eventId;
+}
+
+function expectedHeader() {
+  const ids = fixtures();
+  return {
+    facility: {
+      id: ids.facilityId,
+      code: ids.facilityCode,
+      name: ids.facilityName,
+    },
+    eventType: {
+      id: ids.eventTypeVersionId,
+      name: ids.eventTypeVersionName,
+      templateMode: ids.eventTypeTemplateMode,
+    },
+  };
 }
 
 async function appendText(
@@ -263,6 +288,16 @@ describe('event-room AWS Data API transaction transport', () => {
         }),
       },
     ] satisfies Field[];
+    const facilityRecord = [
+      { stringValue: facilityId },
+      { stringValue: 'SYN-NORTH' },
+      { stringValue: 'Synthetic North School' },
+    ] satisfies Field[];
+    const eventTypeRecord = [
+      { stringValue: eventTypeVersionId },
+      { stringValue: 'Synthetic Exercise' },
+      { stringValue: 'drill' },
+    ] satisfies Field[];
     const fakeClient = {
       async send(command: ObservedDataApiCommand): Promise<unknown> {
         commands.push(command);
@@ -275,6 +310,18 @@ describe('event-room AWS Data API transaction transport', () => {
             return {
               $metadata: {},
               records: [eventRecord],
+            } satisfies ExecuteStatementCommandOutput;
+          }
+          if (statement.includes('from "facilities"')) {
+            return {
+              $metadata: {},
+              records: [facilityRecord],
+            } satisfies ExecuteStatementCommandOutput;
+          }
+          if (statement.includes('from "event_type_versions"')) {
+            return {
+              $metadata: {},
+              records: [eventTypeRecord],
             } satisfies ExecuteStatementCommandOutput;
           }
           if (
@@ -308,7 +355,7 @@ describe('event-room AWS Data API transaction transport', () => {
         'arn:aws:rds:us-west-2:000000000000:cluster:psd-eoc-synthetic',
       secretArn:
         'arn:aws:secretsmanager:us-west-2:000000000000:secret:psd-eoc-synthetic',
-      schema: { events, journalEntries },
+      schema: { events, eventTypeVersions, facilities, journalEntries },
     });
     const dataApiRuntime = createEventRoomCapabilityRuntime({
       driver: 'aws-data-api',
@@ -324,6 +371,18 @@ describe('event-room AWS Data API transaction transport', () => {
 
       expect(result).toMatchObject({
         eventId,
+        header: {
+          facility: {
+            id: facilityId,
+            code: 'SYN-NORTH',
+            name: 'Synthetic North School',
+          },
+          eventType: {
+            id: eventTypeVersionId,
+            name: 'Synthetic Exercise',
+            templateMode: 'drill',
+          },
+        },
         event: {
           id: eventId,
           facilityId,
@@ -344,6 +403,8 @@ describe('event-room AWS Data API transaction transport', () => {
         'ExecuteStatementCommand',
         'ExecuteStatementCommand',
         'ExecuteStatementCommand',
+        'ExecuteStatementCommand',
+        'ExecuteStatementCommand',
         'CommitTransactionCommand',
       ]);
       const executeCommands = commands.filter(
@@ -352,15 +413,19 @@ describe('event-room AWS Data API transaction transport', () => {
       );
       expect(
         executeCommands.map((command) => command.input.transactionId),
-      ).toEqual(Array.from({ length: 4 }, () => transactionId));
+      ).toEqual(Array.from({ length: 6 }, () => transactionId));
       expect(executeCommands[0]?.input.sql).toBe(
         'set transaction isolation level repeatable read read only',
       );
       expect(executeCommands[1]?.input.sql).toContain('from "events"');
-      expect(executeCommands[2]?.input.sql).toContain(
+      expect(executeCommands[2]?.input.sql).toContain('from "facilities"');
+      expect(executeCommands[3]?.input.sql).toContain(
+        'from "event_type_versions"',
+      );
+      expect(executeCommands[4]?.input.sql).toContain(
         'order by "journal_entries"."sequence" desc',
       );
-      expect(executeCommands[3]?.input.sql).toContain(
+      expect(executeCommands[5]?.input.sql).toContain(
         'order by "journal_entries"."sequence" asc',
       );
       expect(commands.at(-1)).toBeInstanceOf(CommitTransactionCommand);
@@ -403,12 +468,20 @@ describeWithDatabase('event-room atomic synchronization', () => {
 
     const [[facility], [version], [snapshot]] = await Promise.all([
       setupConnection.db
-        .select({ id: facilities.id })
+        .select({
+          id: facilities.id,
+          code: facilities.code,
+          name: facilities.name,
+        })
         .from(facilities)
         .where(eq(facilities.code, 'SYN-NORTH'))
         .limit(1),
       setupConnection.db
-        .select({ id: eventTypeVersions.id })
+        .select({
+          id: eventTypeVersions.id,
+          name: eventTypeVersions.name,
+          templateMode: eventTypeVersions.templateMode,
+        })
         .from(eventTypeVersions)
         .where(eq(eventTypeVersions.templateMode, 'drill'))
         .orderBy(asc(eventTypeVersions.id))
@@ -428,7 +501,11 @@ describeWithDatabase('event-room atomic synchronization', () => {
     }
     fixtureIds = {
       facilityId: facility.id,
+      facilityCode: facility.code,
+      facilityName: facility.name,
       eventTypeVersionId: version.id,
+      eventTypeVersionName: version.name,
+      eventTypeTemplateMode: version.templateMode,
       rosterSnapshotId: snapshot.id,
     };
     runtime = createEventRoomCapabilityRuntime(readConnection);
@@ -467,7 +544,17 @@ describeWithDatabase('event-room atomic synchronization', () => {
 
   test('returns either the coherent before-commit or after-commit lifecycle snapshot, never a mixed pair', async () => {
     if (testDatabaseUrl === undefined) throw new Error('Missing test URL.');
-    const eventId = await createActiveEvent();
+    const concurrentFacilityId = randomUUID();
+    const concurrentFacilityCode = `ROOM-${concurrentFacilityId.slice(0, 8).toUpperCase()}`;
+    const beforeFacilityName = 'Synthetic Before Commit School';
+    const afterFacilityName = 'Synthetic After Commit School';
+    await setupDatabase().insert(facilities).values({
+      id: concurrentFacilityId,
+      code: concurrentFacilityCode,
+      name: beforeFacilityName,
+      active: true,
+    });
+    const eventId = await createActiveEvent(concurrentFacilityId);
     await appendText(setupDatabase(), eventId, 1, 'projection:active');
 
     const eventRead = deferred<void>();
@@ -496,6 +583,10 @@ describeWithDatabase('event-room atomic synchronization', () => {
       const allClearAt = new Date();
       await writerDatabase().transaction(async (transaction) => {
         await transaction
+          .update(facilities)
+          .set({ name: afterFacilityName })
+          .where(eq(facilities.id, concurrentFacilityId));
+        await transaction
           .update(events)
           .set({ status: 'all-clear', allClearAt })
           .where(eq(events.id, eventId));
@@ -510,6 +601,14 @@ describeWithDatabase('event-room atomic synchronization', () => {
 
       const before = await duringCommitPromise;
       expect(before.event?.status).toBe('active');
+      expect(before.header).toEqual({
+        facility: {
+          id: concurrentFacilityId,
+          code: concurrentFacilityCode,
+          name: beforeFacilityName,
+        },
+        eventType: expectedHeader().eventType,
+      });
       expect(before.snapshotSequence).toBe(1);
       expect(
         before.entries.map((projection) =>
@@ -522,6 +621,14 @@ describeWithDatabase('event-room atomic synchronization', () => {
         invocation(),
       );
       expect(after.event?.status).toBe('all-clear');
+      expect(after.header).toEqual({
+        facility: {
+          id: concurrentFacilityId,
+          code: concurrentFacilityCode,
+          name: afterFacilityName,
+        },
+        eventType: expectedHeader().eventType,
+      });
       expect(after.snapshotSequence).toBe(2);
       expect(
         after.entries.map((projection) =>
@@ -797,6 +904,7 @@ describeWithDatabase('event-room atomic synchronization', () => {
         invocation(),
       );
       pageNumber += 1;
+      expect(page.header).toEqual(expectedHeader());
       seen.push(...page.entries.map(({ entry }) => entry.sequence));
       cursor = page.cursor;
       hasMore = page.hasMore;
@@ -821,6 +929,25 @@ describeWithDatabase('event-room atomic synchronization', () => {
     await eventRoomRuntime().execute(
       { eventId, cursor: null, limit: 100 },
       invocation(requestId),
+    );
+    const rows = await setupDatabase()
+      .select({ id: securityAuditEntries.id })
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, requestId));
+    expect(rows).toHaveLength(0);
+  });
+
+  test('returns the trusted header to an authenticated mobile human without a success-audit write', async () => {
+    const eventId = await createActiveEvent();
+    const requestId = randomUUID();
+    const result = await eventRoomRuntime().execute(
+      { eventId, cursor: null, limit: 100 },
+      invocation(requestId, 'mobile'),
+    );
+    expect(result.header).toEqual(expectedHeader());
+    expect(result.event?.eventTypeVersion.id).toBe(result.header.eventType.id);
+    expect(result.event?.templateMode).toBe(
+      result.header.eventType.templateMode,
     );
     const rows = await setupDatabase()
       .select({ id: securityAuditEntries.id })

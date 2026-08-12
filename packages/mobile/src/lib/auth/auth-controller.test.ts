@@ -3,6 +3,12 @@ import { describe, expect, test } from 'bun:test';
 import type { MobileSessionResponse } from '@psd-eoc/contracts';
 
 import {
+  AuthenticatedApiError,
+  AuthenticatedRequestFailure,
+  type AuthenticatedRequestOptions,
+  type AuthenticatedRequestTransport,
+} from '../api';
+import {
   MobileAuthController,
   type AuthStorage,
   type AuthTimer,
@@ -147,6 +153,7 @@ function controller(
     success: true as const,
   }),
   overrides: Readonly<{
+    authenticatedApi?: AuthenticatedRequestTransport;
     now?: () => Date;
     timer?: AuthTimer;
   }> = {},
@@ -154,12 +161,66 @@ function controller(
   return new MobileAuthController({
     storage,
     api,
+    ...(overrides.authenticatedApi === undefined
+      ? {}
+      : { authenticatedApi: overrides.authenticatedApi }),
     localAuthenticator: { authenticate },
     createIdempotencyKey: () => 'mobile-refresh-idempotency-0001',
     now: overrides.now ?? (() => TEST_NOW),
     timer: overrides.timer ?? inertTimer,
   });
 }
+
+const stringSchema = Object.freeze({
+  parse(value: unknown): string {
+    if (typeof value !== 'string') {
+      throw new Error('invalid synthetic response');
+    }
+    return value;
+  },
+});
+
+function pendingAuthenticatedRequest() {
+  const started = deferred<void>();
+  const result = deferred<unknown>();
+  let capturedBearer: string | null = null;
+  let capturedSignal: AbortSignal | null = null;
+  const api: AuthenticatedRequestTransport = {
+    async request<Output>(
+      bearer: string,
+      request: AuthenticatedRequestOptions<Output>,
+      signal: AbortSignal,
+    ): Promise<Output> {
+      capturedBearer = bearer;
+      capturedSignal = signal;
+      started.resolve();
+      return request.schema.parse(await result.promise);
+    },
+  };
+  return {
+    api,
+    started: started.promise,
+    resolve: result.resolve,
+    bearer(): string {
+      if (capturedBearer === null) {
+        throw new Error('No authenticated request has started.');
+      }
+      return capturedBearer;
+    },
+    signal(): AbortSignal {
+      if (capturedSignal === null) {
+        throw new Error('No authenticated request has started.');
+      }
+      return capturedSignal;
+    },
+  };
+}
+
+const authenticatedGet = Object.freeze({
+  method: 'GET' as const,
+  path: '/api/events/synthetic-event',
+  schema: stringSchema,
+});
 
 describe('mobile auth controller', () => {
   test('makes the cached shell available under three seconds without waiting on refresh', async () => {
@@ -610,5 +671,278 @@ describe('mobile auth controller', () => {
     expect(storage.clearCount).toBe(1);
     expect(revokeCount).toBe(1);
     expect(auth.getSnapshot().phase).toBe('signed-out');
+  });
+
+  test('keeps the bearer private while returning only caller-schema output', async () => {
+    const pending = pendingAuthenticatedRequest();
+    const storage = new FakeStorage(null);
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => successfulPayload(),
+        revoke: async () => {},
+      },
+      undefined,
+      { authenticatedApi: pending.api },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+
+    const requesting = auth.requestAuthenticated(authenticatedGet);
+    await pending.started;
+    expect(pending.bearer()).toBe(TEST_TOKEN);
+    expect(JSON.stringify(auth.getSnapshot())).not.toContain(TEST_TOKEN);
+    pending.resolve('schema output');
+    await expect(requesting).resolves.toBe('schema output');
+  });
+
+  test('requires a fresh online session for reads and mutations', async () => {
+    const storage = new FakeStorage(storedVault());
+    let requestCount = 0;
+    const authenticatedApi: AuthenticatedRequestTransport = {
+      async request<Output>(
+        _bearer: string,
+        request: AuthenticatedRequestOptions<Output>,
+      ): Promise<Output> {
+        requestCount += 1;
+        return request.schema.parse('unexpected');
+      },
+    };
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => {
+          throw new MobileAuthError('offline', 'unreachable');
+        },
+        revoke: async () => {},
+      },
+      undefined,
+      { authenticatedApi },
+    );
+    await auth.bootstrap();
+    await auth.foreground();
+    expect(auth.getSnapshot().phase).toBe('offline-cached');
+
+    await expect(
+      auth.requestAuthenticated(authenticatedGet),
+    ).rejects.toBeInstanceOf(OfflineMutationDeniedError);
+    await expect(
+      auth.requestAuthenticated({
+        method: 'POST',
+        path: '/api/events/synthetic-event/journal',
+        idempotencyKey: 'synthetic-post-key-0001',
+        body: { text: 'Synthetic update' },
+        schema: stringSchema,
+      }),
+    ).rejects.toBeInstanceOf(OfflineMutationDeniedError);
+    expect(requestCount).toBe(0);
+  });
+
+  test('aborts in-flight feature requests when the app backgrounds', async () => {
+    const pending = pendingAuthenticatedRequest();
+    const auth = controller(
+      new FakeStorage(null),
+      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      undefined,
+      { authenticatedApi: pending.api },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+    const requesting = auth.requestAuthenticated(authenticatedGet);
+    await pending.started;
+
+    auth.background();
+    expect(pending.signal().aborted).toBe(true);
+    pending.resolve('late response');
+    await expect(requesting).rejects.toMatchObject({ name: 'AbortError' });
+    expect(auth.getSnapshot().phase).toBe('locked');
+  });
+
+  test('aborts in-flight feature requests on sign-out', async () => {
+    const pending = pendingAuthenticatedRequest();
+    const storage = new FakeStorage(null);
+    const auth = controller(
+      storage,
+      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      undefined,
+      { authenticatedApi: pending.api },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+    const requesting = auth.requestAuthenticated(authenticatedGet);
+    await pending.started;
+
+    await auth.signOut();
+    expect(pending.signal().aborted).toBe(true);
+    pending.resolve('late response');
+    await expect(requesting).rejects.toMatchObject({ name: 'AbortError' });
+    expect(storage.vault).toBeNull();
+  });
+
+  test('aborts in-flight feature requests when the bearer rotates', async () => {
+    const pending = pendingAuthenticatedRequest();
+    const auth = controller(
+      new FakeStorage(null),
+      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      undefined,
+      { authenticatedApi: pending.api },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+    const requesting = auth.requestAuthenticated(authenticatedGet);
+    await pending.started;
+
+    await auth.enroll({
+      refreshToken: TEST_NEXT_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture('00000000-0000-4000-8000-000000000006'),
+    });
+    expect(pending.signal().aborted).toBe(true);
+    pending.resolve('late response');
+    await expect(requesting).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  test('aborts in-flight feature requests when local authorization expires', async () => {
+    const pending = pendingAuthenticatedRequest();
+    const timer = new FakeTimer();
+    let currentTime = TEST_NOW;
+    const storage = new FakeStorage(null);
+    const auth = controller(
+      storage,
+      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      undefined,
+      {
+        authenticatedApi: pending.api,
+        now: () => currentTime,
+        timer,
+      },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+    const requesting = auth.requestAuthenticated(authenticatedGet);
+    await pending.started;
+
+    currentTime = new Date(
+      Date.parse(sessionFixture().session.authorization.membershipGraceUntil),
+    );
+    timer.fireLatest();
+    expect(pending.signal().aborted).toBe(true);
+    pending.resolve('late response');
+    await expect(requesting).rejects.toMatchObject({ name: 'AbortError' });
+    await flush();
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+    expect(storage.vault).toBeNull();
+  });
+
+  test('links caller cancellation without exposing the internal lifecycle signal', async () => {
+    const pending = pendingAuthenticatedRequest();
+    const auth = controller(
+      new FakeStorage(null),
+      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      undefined,
+      { authenticatedApi: pending.api },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+    const caller = new AbortController();
+    const requesting = auth.requestAuthenticated({
+      ...authenticatedGet,
+      signal: caller.signal,
+    });
+    await pending.started;
+    expect(pending.signal()).not.toBe(caller.signal);
+
+    caller.abort();
+    expect(pending.signal().aborted).toBe(true);
+    pending.resolve('late response');
+    await expect(requesting).rejects.toMatchObject({ name: 'AbortError' });
+    expect(auth.getSnapshot().phase).toBe('online');
+  });
+
+  test('fails closed to cached offline state after a feature network failure', async () => {
+    const networkFailure = new AuthenticatedRequestFailure(
+      'network',
+      'Synthetic bounded network failure.',
+    );
+    const authenticatedApi: AuthenticatedRequestTransport = {
+      async request(): Promise<never> {
+        throw networkFailure;
+      },
+    };
+    const auth = controller(
+      new FakeStorage(null),
+      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      undefined,
+      { authenticatedApi },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+
+    await expect(auth.requestAuthenticated(authenticatedGet)).rejects.toBe(
+      networkFailure,
+    );
+    expect(auth.getSnapshot().phase).toBe('offline-cached');
+    expect(auth.getSnapshot().connectivityEpochId).toBeNull();
+    expect(() => auth.assertMutationAllowed()).toThrow(
+      OfflineMutationDeniedError,
+    );
+  });
+
+  test('clears a rejected bearer after a canonical 401 feature response', async () => {
+    const apiFailure = new AuthenticatedApiError(
+      {
+        code: 'UNAUTHENTICATED',
+        message: 'The synthetic device session was rejected.',
+        requestId: '00000000-0000-4000-8000-000000000007',
+        retryable: false,
+        fieldErrors: [],
+      },
+      401,
+    );
+    const authenticatedApi: AuthenticatedRequestTransport = {
+      async request(): Promise<never> {
+        throw apiFailure;
+      },
+    };
+    const storage = new FakeStorage(null);
+    const auth = controller(
+      storage,
+      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      undefined,
+      { authenticatedApi },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+
+    await expect(auth.requestAuthenticated(authenticatedGet)).rejects.toBe(
+      apiFailure,
+    );
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+    expect(auth.getSnapshot().session).toBeNull();
+    expect(storage.vault).toBeNull();
   });
 });
