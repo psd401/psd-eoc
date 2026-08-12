@@ -225,6 +225,25 @@ class AccessorDeliveredExpoAdapter implements AttemptIdempotentProviderAdapter {
   }
 }
 
+class CorruptProviderExpoAdapter implements AttemptIdempotentProviderAdapter {
+  public readonly channel = 'push' as const;
+  public readonly integrationId = 'expo-push' as const;
+  public readonly truthLabel = 'mocked' as const;
+  public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
+  public readonly deliverySemantics = 'attempt-id-idempotent' as const;
+
+  public send() {
+    return Promise.resolve({
+      state: 'failed' as const,
+      provider: null,
+      providerReference: 'ExponentPushToken[forbidden-reference]',
+      proof: null,
+      reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+      diagnosticDigest: null,
+    });
+  }
+}
+
 class RecordingInvalidator implements PushEndpointInvalidator {
   public readonly inputs: RecordEndpointStatusInput[] = [];
   public failOnce = false;
@@ -445,6 +464,7 @@ describe('Expo durable attempt worker', () => {
     for (const adapter of [
       new DeliveredExpoAdapter(),
       new AccessorDeliveredExpoAdapter(),
+      new CorruptProviderExpoAdapter(),
     ]) {
       const app = customAdapterRuntime(adapter);
       await expect(app.worker.process(workItem())).resolves.toMatchObject({
@@ -488,6 +508,26 @@ describe('Expo durable attempt worker', () => {
 
     await expect(app.worker.process(item)).rejects.toThrow();
     expect(app.writer.evidence).toHaveLength(0);
+
+    const corruptReplay = workerRuntime();
+    corruptReplay.store.executions.set(item.attempt.id, {
+      fingerprint: workerAttemptFingerprint(item),
+      leaseToken: `lease-${item.attempt.id}`,
+      completion: Object.freeze({
+        kind: 'final',
+        outcome: Object.freeze({
+          state: 'failed',
+          provider: null,
+          providerReference: 'ExponentPushToken[forbidden-replay-reference]',
+          proof: null,
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+          diagnosticDigest: null,
+        }),
+      }),
+    });
+    await expect(corruptReplay.worker.process(item)).rejects.toThrow();
+    expect(corruptReplay.writer.evidence).toHaveLength(0);
+    expect(corruptReplay.invalidator.inputs).toHaveLength(0);
   });
 
   test('uses shared durable processing and replays without another logical send', async () => {
