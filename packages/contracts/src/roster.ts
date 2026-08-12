@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { PaginationCursorSchema } from './api';
+import { NotificationChannelSchema } from './event-type';
 import { FacilityIdSchema } from './facility';
 import { type RosterGroupSourceRef, RosterGroupSourceRefSchema } from './group';
 import {
@@ -714,6 +715,33 @@ export const StaleRosterRecipientSchema = z
 export type StaleRosterRecipient = z.infer<typeof StaleRosterRecipientSchema>;
 
 /**
+ * Owns one PII-free unusable endpoint in a stale-roster report. Destination
+ * values never enter this projection; SMS opt-outs remain explicit even when
+ * the recipient still has another active channel.
+ */
+export const StaleRosterEndpointSchema = z
+  .object({
+    recipientId: RecipientIdSchema,
+    endpointId: EndpointIdSchema,
+    channel: NotificationChannelSchema,
+    reason: z.enum(['invalid', 'disabled', 'sms-opted-out']),
+  })
+  .strict()
+  .superRefine((endpoint, context) => {
+    if (endpoint.reason === 'sms-opted-out' && endpoint.channel !== 'sms') {
+      context.addIssue({
+        code: 'custom',
+        message: 'SMS opt-out evidence must identify an SMS endpoint.',
+        path: ['channel'],
+      });
+    }
+  })
+  .readonly();
+
+/** PII-free stale endpoint inferred from {@link StaleRosterEndpointSchema}. */
+export type StaleRosterEndpoint = z.infer<typeof StaleRosterEndpointSchema>;
+
+/**
  * Owns the bounded stale-roster report returned by a read capability. It
  * carries latest-success age, failed sources, and recipients lacking usable
  * endpoints without exposing endpoint values or raw external errors.
@@ -727,6 +755,11 @@ export const StaleRosterReportSchema = z
     latestCompleteAgeSeconds: z.number().int().nonnegative().nullable(),
     failedGroups: z.array(RosterGroupFailureSchema).max(500).readonly(),
     staleRecipients: z.array(StaleRosterRecipientSchema).max(1_200).readonly(),
+    staleEndpoints: z
+      .array(StaleRosterEndpointSchema)
+      .max(12_000)
+      .default([])
+      .readonly(),
   })
   .strict()
   .superRefine((report, context) => {
@@ -767,7 +800,9 @@ export const StaleRosterReportSchema = z
     }
     if (
       report.status === 'current' &&
-      (report.failedGroups.length > 0 || report.staleRecipients.length > 0)
+      (report.failedGroups.length > 0 ||
+        report.staleRecipients.length > 0 ||
+        report.staleEndpoints.length > 0)
     ) {
       context.addIssue({
         code: 'custom',
@@ -777,7 +812,9 @@ export const StaleRosterReportSchema = z
     }
     if (
       report.status === 'unknown' &&
-      (report.failedGroups.length > 0 || report.staleRecipients.length > 0)
+      (report.failedGroups.length > 0 ||
+        report.staleRecipients.length > 0 ||
+        report.staleEndpoints.length > 0)
     ) {
       context.addIssue({
         code: 'custom',
