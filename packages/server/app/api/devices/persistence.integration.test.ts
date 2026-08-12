@@ -9,8 +9,11 @@ import {
   test,
 } from 'bun:test';
 import {
+  AudienceConfigSchema,
   ChannelAttemptSchema,
+  DispatchBatchSchema,
   NotificationOutboxMessageSchema,
+  RosterSnapshotSchema,
 } from '@psd-eoc/contracts';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 
@@ -60,9 +63,11 @@ import {
 import type { TrustedCapabilityInvocation } from '../../../lib/capabilities/engine';
 import {
   createDrizzleDeviceCapabilityStore,
+  createDrizzlePushEndpointPolicyStore,
   EXPO_DEVICE_NOT_REGISTERED_REASON,
   executeDeviceCapability,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
+  resolvePushEndpoints,
 } from '../../../lib/capabilities/devices';
 import { createDrizzleRosterSyncStore } from '../../../lib/roster/groups-sync';
 
@@ -602,6 +607,100 @@ function mockedIntegrationStatus(integrationId: 'expo-push' | 'ses-email') {
   });
 }
 
+function pushResolutionFixture(
+  registration: Readonly<{ id: string; token: string }>,
+) {
+  const group = Object.freeze({
+    id: SEEDED.groupNorthId,
+    kind: 'synthetic' as const,
+    purpose: 'building' as const,
+    facilityId,
+  });
+  const audienceConfig = AudienceConfigSchema.parse({
+    id: SEEDED.audienceId,
+    facilityId,
+    version: 1,
+    targets: [{ kind: 'building', facilityId }],
+    createdAt: SEEDED.integrationObservedAt,
+  });
+  const rosterSnapshot = RosterSnapshotSchema.parse({
+    id: fixture.syntheticRosterSnapshotId,
+    version: fixture.syntheticRosterVersion,
+    population: 'synthetic',
+    complete: true,
+    sourceConfiguration: { id: SEEDED.rosterConfigurationId, version: 1 },
+    facilityIds: [facilityId],
+    expectedSourceGroupRefs: [group],
+    sourceGroupRefs: [group],
+    recipients: [
+      {
+        id: fixture.syntheticRecipientId,
+        population: 'synthetic',
+        googleSubject: null,
+        displayName: 'Synthetic Device Invalidation Recipient',
+        groupSourceRefs: [group],
+        endpoints: [
+          {
+            id: registration.id,
+            channel: 'push',
+            status: 'active',
+            capturedAt: SEEDED.integrationObservedAt,
+            platform: 'ios',
+            token: registration.token,
+          },
+        ],
+      },
+    ],
+    syncStartedAt: SEEDED.integrationObservedAt,
+    capturedAt: SEEDED.integrationObservedAt,
+  });
+  const requestId = randomUUID();
+  const batch = DispatchBatchSchema.parse({
+    id: randomUUID(),
+    intentId: randomUUID(),
+    eventId: randomUUID(),
+    eventKind: 'test',
+    templateMode: 'drill',
+    purpose: 'activation',
+    eventTypeVersion: {
+      id: SEEDED.eventTypeVersionId,
+      templateMode: 'drill',
+    },
+    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterPopulation: 'synthetic',
+    audienceConfig: { id: SEEDED.audienceId, version: 1 },
+    requestId,
+    authorization: {
+      kind: 'synthetic-training',
+      activationPreviewId: randomUUID(),
+      consequenceDigest: 'e'.repeat(64),
+      requestId,
+    },
+    channel: 'push',
+    renderedMessage: {
+      eventKind: 'test',
+      templateMode: 'drill',
+      purpose: 'activation',
+      classificationMarker: 'DRILL',
+      channel: 'push',
+      title: '[DRILL] Device status overlay test',
+      body: '[DRILL] Synthetic and unroutable test only.',
+    },
+    integrationStatus: mockedIntegrationStatus('expo-push'),
+    sequence: 1,
+    endpointCount: 1,
+    createdAt: SEEDED.integrationObservedAt,
+  });
+  return Object.freeze({
+    batch,
+    audience: Object.freeze({
+      audienceConfig,
+      neighborhoodVersions: Object.freeze([]),
+      rosterSnapshot,
+    }),
+  });
+}
+
 async function installDeviceNotRegisteredAttemptFixture(
   database: PostgresDatabase,
   endpointId: string,
@@ -1095,6 +1194,17 @@ describeWithDatabase('device push-token persistence', () => {
     }
     await publishRosterEndpointFixture(database, active);
     await publishSyntheticRosterEndpointFixture(database, active);
+    const pushResolution = pushResolutionFixture(active);
+    const pushPolicyStore = createDrizzlePushEndpointPolicyStore(database);
+    await expect(
+      resolvePushEndpoints(pushResolution, pushPolicyStore),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+        recipientId: fixture.syntheticRecipientId,
+        endpoint: expect.objectContaining({ id: active.id }),
+      }),
+    ]);
 
     const rosterStore = createDrizzleRosterSyncStore(database);
     const beforeInvalidation = await rosterStore.loadLocalContacts([
@@ -1180,6 +1290,9 @@ describeWithDatabase('device push-token persistence', () => {
       deviceEnrollmentId: fixture.deviceId,
     });
     expect(afterSameDeviceRace[0]?.id).not.toBe(active.id);
+    await expect(
+      resolvePushEndpoints(pushResolution, pushPolicyStore),
+    ).resolves.toEqual([]);
     expect(
       await database
         .select()

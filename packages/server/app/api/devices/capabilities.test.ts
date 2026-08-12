@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 
-import type {
-  Actor,
-  CapabilityInput,
-  DeviceEnrollmentPage,
-  EndpointStatusRecord,
-  PushTokenRegistrationReceipt,
-  PushTokenUnregistrationReceipt,
+import {
+  AudienceConfigSchema,
+  DispatchBatchSchema,
+  RosterSnapshotSchema,
+  type Actor,
+  type CapabilityInput,
+  type DeviceEnrollmentPage,
+  type EndpointStatusRecord,
+  type PushTokenRegistrationReceipt,
+  type PushTokenUnregistrationReceipt,
 } from '@psd-eoc/contracts';
 
 import {
@@ -21,8 +24,12 @@ import {
   executeDeviceCapability,
   planPushTokenRegistration,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
+  PushEndpointResolutionError,
+  resolvePushEndpoints,
   type DeviceCapabilityStore,
   type DeviceCapabilityTransaction,
+  type PushEndpointPolicyQuery,
+  type PushEndpointPolicyStore,
 } from '../../../lib/capabilities/devices';
 
 const ids = {
@@ -41,6 +48,141 @@ const ids = {
 
 const now = new Date('2026-08-11T18:00:00.000Z');
 const token = 'ExponentPushToken[synthetic-device-001]';
+
+const resolutionIds = Object.freeze({
+  facility: '00000000-0000-4000-8000-000000001230',
+  audience: '00000000-0000-4000-8000-000000001231',
+  group: '00000000-0000-4000-8000-000000001232',
+  configuration: '00000000-0000-4000-8000-000000001233',
+  preview: '00000000-0000-4000-8000-000000001234',
+  eventType: '00000000-0000-4000-8000-000000001235',
+  event: '00000000-0000-4000-8000-000000001236',
+  intent: '00000000-0000-4000-8000-000000001237',
+  batch: '00000000-0000-4000-8000-000000001238',
+});
+
+const resolutionGroup = Object.freeze({
+  id: resolutionIds.group,
+  kind: 'synthetic' as const,
+  purpose: 'building' as const,
+  facilityId: resolutionIds.facility,
+});
+
+const resolutionAudience = AudienceConfigSchema.parse({
+  id: resolutionIds.audience,
+  facilityId: resolutionIds.facility,
+  version: 1,
+  targets: [{ kind: 'building', facilityId: resolutionIds.facility }],
+  createdAt: now.toISOString(),
+});
+
+const resolutionRoster = RosterSnapshotSchema.parse({
+  id: ids.roster,
+  version: 1,
+  population: 'synthetic',
+  complete: true,
+  sourceConfiguration: { id: resolutionIds.configuration, version: 1 },
+  facilityIds: [resolutionIds.facility],
+  expectedSourceGroupRefs: [resolutionGroup],
+  sourceGroupRefs: [resolutionGroup],
+  recipients: [
+    {
+      id: ids.recipient,
+      population: 'synthetic',
+      googleSubject: null,
+      displayName: 'Synthetic push staff',
+      groupSourceRefs: [resolutionGroup],
+      endpoints: [
+        {
+          id: ids.endpoint,
+          channel: 'push',
+          status: 'active',
+          capturedAt: now.toISOString(),
+          platform: 'ios',
+          token: 'synthetic-unroutable:push-device-resolution',
+        },
+      ],
+    },
+  ],
+  syncStartedAt: now.toISOString(),
+  capturedAt: now.toISOString(),
+});
+
+function resolutionBatch(endpointCount = 1) {
+  return DispatchBatchSchema.parse({
+    id: resolutionIds.batch,
+    intentId: resolutionIds.intent,
+    eventId: resolutionIds.event,
+    eventKind: 'test',
+    templateMode: 'drill',
+    purpose: 'activation',
+    eventTypeVersion: {
+      id: resolutionIds.eventType,
+      templateMode: 'drill',
+    },
+    rosterSnapshotId: ids.roster,
+    rosterPopulation: 'synthetic',
+    audienceConfig: { id: resolutionIds.audience, version: 1 },
+    requestId: ids.request,
+    authorization: {
+      kind: 'synthetic-training',
+      activationPreviewId: resolutionIds.preview,
+      consequenceDigest: 'a'.repeat(64),
+      requestId: ids.request,
+    },
+    channel: 'push',
+    renderedMessage: {
+      eventKind: 'test',
+      templateMode: 'drill',
+      purpose: 'activation',
+      classificationMarker: 'DRILL',
+      channel: 'push',
+      title: '[DRILL] Synthetic push test',
+      body: '[DRILL] Synthetic training only.',
+    },
+    integrationStatus: {
+      integrationId: 'expo-push',
+      label: 'mocked',
+      verifiedAt: null,
+      verifiedByUserId: null,
+      authorizationReference: null,
+      reasonCode: null,
+      observedAt: now.toISOString(),
+    },
+    sequence: 1,
+    endpointCount,
+    createdAt: now.toISOString(),
+  });
+}
+
+function resolutionInput(endpointCount = 1) {
+  return {
+    batch: resolutionBatch(endpointCount),
+    audience: {
+      audienceConfig: resolutionAudience,
+      neighborhoodVersions: [],
+      rosterSnapshot: resolutionRoster,
+    },
+  };
+}
+
+class PushPolicyStore implements PushEndpointPolicyStore {
+  public readonly queries: PushEndpointPolicyQuery[] = [];
+
+  public constructor(
+    private readonly status: 'active' | 'disabled' | 'invalid' = 'active',
+  ) {}
+
+  public loadEndpointPolicy(query: PushEndpointPolicyQuery): Promise<unknown> {
+    this.queries.push(query);
+    return Promise.resolve(
+      query.candidates.map((candidate) => ({
+        ...candidate,
+        status: this.status,
+      })),
+    );
+  }
+}
 
 function humanActor(): Extract<Actor, { kind: 'human' }> {
   return { kind: 'human', userId: ids.user, sessionId: ids.session };
@@ -236,6 +378,89 @@ describe('device capability registration planning', () => {
       registrationRequired: false,
       unregisterRegistrationIds: [ids.registrationB],
     });
+  });
+});
+
+describe('pinned push endpoint resolution', () => {
+  test('overlays current endpoint status before exposing a pinned token', async () => {
+    const activeStore = new PushPolicyStore();
+    await expect(
+      resolvePushEndpoints(resolutionInput(), activeStore),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        rosterSnapshotId: ids.roster,
+        rosterPopulation: 'synthetic',
+        recipientId: ids.recipient,
+        endpoint: expect.objectContaining({
+          id: ids.endpoint,
+          channel: 'push',
+        }),
+      }),
+    ]);
+    expect(activeStore.queries).toEqual([
+      {
+        rosterSnapshotId: ids.roster,
+        rosterPopulation: 'synthetic',
+        candidates: [{ recipientId: ids.recipient, endpointId: ids.endpoint }],
+      },
+    ]);
+    expect(JSON.stringify(activeStore.queries)).not.toContain(
+      'synthetic-unroutable',
+    );
+
+    await expect(
+      resolvePushEndpoints(resolutionInput(), new PushPolicyStore('invalid')),
+    ).resolves.toEqual([]);
+    await expect(
+      resolvePushEndpoints(resolutionInput(), new PushPolicyStore('disabled')),
+    ).resolves.toEqual([]);
+  });
+
+  test('fails closed on incomplete, extra, accessor, or rejected status evidence', async () => {
+    const failures: PushEndpointPolicyStore[] = [
+      { loadEndpointPolicy: () => Promise.resolve([]) },
+      {
+        loadEndpointPolicy: (query) =>
+          Promise.resolve([
+            { ...query.candidates[0], status: 'active', extra: true },
+          ]),
+      },
+      {
+        loadEndpointPolicy: (query) =>
+          Promise.resolve([
+            Object.defineProperty(
+              {
+                ...query.candidates[0],
+                endpointId: ids.endpoint,
+              },
+              'status',
+              { enumerable: true, get: () => 'active' },
+            ),
+          ]),
+      },
+      {
+        loadEndpointPolicy: () =>
+          Promise.reject(new Error('synthetic store outage')),
+      },
+    ];
+    for (const store of failures) {
+      await expect(
+        resolvePushEndpoints(resolutionInput(), store),
+      ).rejects.toMatchObject({
+        code: 'INVALID_PUSH_ENDPOINT_POLICY',
+      });
+    }
+  });
+
+  test('rejects a mismatched endpoint count before reading policy state', async () => {
+    const store = new PushPolicyStore();
+    await expect(
+      resolvePushEndpoints(resolutionInput(0), store),
+    ).rejects.toBeInstanceOf(PushEndpointResolutionError);
+    await expect(
+      resolvePushEndpoints(resolutionInput(0), store),
+    ).rejects.toMatchObject({ code: 'PUSH_ENDPOINT_COUNT_MISMATCH' });
+    expect(store.queries).toEqual([]);
   });
 });
 

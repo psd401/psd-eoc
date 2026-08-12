@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import {
+  DispatchBatchSchema,
   DeviceEnrollmentPageSchema,
   DeviceEnrollmentSchema,
+  EndpointStatusSchema,
   EndpointStatusRecordSchema,
   PushTokenRegistrationReceiptSchema,
   PushTokenUnregistrationReceiptSchema,
@@ -11,7 +13,10 @@ import {
   type CapabilityInput,
   type CapabilityOutput,
   type DeviceEnrollmentPage,
+  type DispatchBatch,
+  type EndpointStatus,
   type EndpointStatusRecord,
+  type PushEndpoint,
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
@@ -59,6 +64,7 @@ import {
   securityAuditFactFromEntry,
   toSecurityAuditInsertValues,
 } from '../audit';
+import { resolveAudience, type ResolveAudienceInput } from '../roster/resolve';
 
 import {
   CapabilityEngineError,
@@ -82,6 +88,344 @@ export const PUSH_ENDPOINT_INVALIDATION_SERVICE_ID =
 /** Provider-terminal reason retained without copying the rejected token. */
 export const EXPO_DEVICE_NOT_REGISTERED_REASON =
   'EXPO_DEVICE_NOT_REGISTERED' as const;
+
+const MAX_PUSH_ENDPOINTS = 12_000;
+
+export type PushEndpointResolutionErrorCode =
+  | 'INVALID_PUSH_AUDIENCE'
+  | 'INVALID_PUSH_ENDPOINT_POLICY'
+  | 'PUSH_AUDIENCE_MISMATCH'
+  | 'PUSH_ENDPOINT_COUNT_MISMATCH'
+  | 'PUSH_ROSTER_MISMATCH'
+  | 'PUSH_BATCH_INVALID';
+
+/** Public-safe resolution error which never reflects a token or recipient. */
+export class PushEndpointResolutionError extends Error {
+  public constructor(public readonly code: PushEndpointResolutionErrorCode) {
+    super('Push endpoint resolution failed safely.');
+    this.name = 'PushEndpointResolutionError';
+  }
+}
+
+export interface PushEndpointPolicyCandidate {
+  readonly recipientId: string;
+  readonly endpointId: string;
+}
+
+export interface PushEndpointPolicyQuery {
+  readonly rosterSnapshotId: string;
+  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly candidates: readonly PushEndpointPolicyCandidate[];
+}
+
+export interface PushEndpointPolicyEvidence
+  extends PushEndpointPolicyCandidate {
+  readonly status: EndpointStatus;
+}
+
+/** Token-free read boundary for append-only endpoint lifecycle evidence. */
+export interface PushEndpointPolicyStore {
+  loadEndpointPolicy(query: PushEndpointPolicyQuery): Promise<unknown>;
+}
+
+export interface ResolvePushEndpointsInput {
+  readonly batch: unknown;
+  readonly audience: ResolveAudienceInput;
+}
+
+export interface ResolvedPushEndpoint {
+  readonly rosterSnapshotId: string;
+  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly recipientId: string;
+  readonly endpoint: PushEndpoint;
+}
+
+function pushCandidateKey(candidate: PushEndpointPolicyCandidate): string {
+  return `${candidate.recipientId}:${candidate.endpointId}`;
+}
+
+function exactDataRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Readonly<Record<string, unknown>> | null {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (
+      keys.length !== expectedKeys.length ||
+      keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
+    ) {
+      return null;
+    }
+    const properties: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    for (const key of expectedKeys) {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined ||
+        descriptor.enumerable !== true ||
+        !Object.hasOwn(descriptor, 'value')
+      ) {
+        return null;
+      }
+      properties[key] = descriptor.value;
+    }
+    return properties;
+  } catch {
+    return null;
+  }
+}
+
+function parsePushEndpointPolicyEvidence(
+  value: unknown,
+  query: PushEndpointPolicyQuery,
+): ReadonlyMap<string, PushEndpointPolicyEvidence> {
+  try {
+    if (!Array.isArray(value)) throw new TypeError();
+    const length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
+    if (
+      !Number.isSafeInteger(length) ||
+      Number(length) !== query.candidates.length ||
+      Number(length) > MAX_PUSH_ENDPOINTS
+    ) {
+      throw new TypeError();
+    }
+    const expected = new Set(query.candidates.map(pushCandidateKey));
+    if (expected.size !== query.candidates.length) throw new TypeError();
+    const evidence = new Map<string, PushEndpointPolicyEvidence>();
+    for (let index = 0; index < Number(length); index += 1) {
+      const slot = Object.getOwnPropertyDescriptor(value, String(index));
+      const properties =
+        slot !== undefined &&
+        slot.enumerable === true &&
+        Object.hasOwn(slot, 'value')
+          ? exactDataRecord(slot.value, ['recipientId', 'endpointId', 'status'])
+          : null;
+      const status = EndpointStatusSchema.safeParse(properties?.status);
+      if (
+        properties === null ||
+        typeof properties.recipientId !== 'string' ||
+        typeof properties.endpointId !== 'string' ||
+        !status.success
+      ) {
+        throw new TypeError();
+      }
+      const item = Object.freeze({
+        recipientId: properties.recipientId,
+        endpointId: properties.endpointId,
+        status: status.data,
+      });
+      const key = pushCandidateKey(item);
+      if (!expected.has(key) || evidence.has(key)) throw new TypeError();
+      evidence.set(key, item);
+    }
+    if (evidence.size !== expected.size) throw new TypeError();
+    return evidence;
+  } catch {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+}
+
+function parsePushBatch(value: unknown): DispatchBatch {
+  const parsed = DispatchBatchSchema.safeParse(value);
+  if (
+    !parsed.success ||
+    parsed.data.channel !== 'push' ||
+    parsed.data.integrationStatus.integrationId !== 'expo-push'
+  ) {
+    throw new PushEndpointResolutionError('PUSH_BATCH_INVALID');
+  }
+  return parsed.data;
+}
+
+/**
+ * Resolves the immutable audience, then overlays append-only lifecycle truth
+ * before exposing any push token to worker composition. Invalid or disabled
+ * endpoints from the same pinned snapshot are therefore excluded on every
+ * later resolution without rewriting that snapshot.
+ */
+export async function resolvePushEndpoints(
+  input: ResolvePushEndpointsInput,
+  store: PushEndpointPolicyStore,
+): Promise<readonly ResolvedPushEndpoint[]> {
+  const batch = parsePushBatch(input.batch);
+  let audience: ReturnType<typeof resolveAudience>;
+  try {
+    audience = resolveAudience(input.audience);
+  } catch {
+    throw new PushEndpointResolutionError('INVALID_PUSH_AUDIENCE');
+  }
+  if (
+    audience.rosterSnapshot.id !== batch.rosterSnapshotId ||
+    audience.rosterSnapshot.population !== batch.rosterPopulation
+  ) {
+    throw new PushEndpointResolutionError('PUSH_ROSTER_MISMATCH');
+  }
+  if (
+    audience.audienceConfig.id !== batch.audienceConfig.id ||
+    audience.audienceConfig.version !== batch.audienceConfig.version
+  ) {
+    throw new PushEndpointResolutionError('PUSH_AUDIENCE_MISMATCH');
+  }
+
+  const candidates = audience.recipients.flatMap((recipient) =>
+    recipient.endpoints.flatMap((endpoint) =>
+      endpoint.channel === 'push' && endpoint.status === 'active'
+        ? [
+            Object.freeze({
+              recipientId: recipient.recipientId,
+              endpoint,
+            }),
+          ]
+        : [],
+    ),
+  );
+  if (candidates.length !== batch.endpointCount) {
+    throw new PushEndpointResolutionError('PUSH_ENDPOINT_COUNT_MISMATCH');
+  }
+  const query = Object.freeze({
+    rosterSnapshotId: batch.rosterSnapshotId,
+    rosterPopulation: batch.rosterPopulation,
+    candidates: Object.freeze(
+      candidates.map(({ recipientId, endpoint }) =>
+        Object.freeze({ recipientId, endpointId: endpoint.id }),
+      ),
+    ),
+  });
+  let rawPolicy: unknown;
+  try {
+    rawPolicy = await store.loadEndpointPolicy(query);
+  } catch {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const policy = parsePushEndpointPolicyEvidence(rawPolicy, query);
+  return Object.freeze(
+    candidates.flatMap(({ recipientId, endpoint }) => {
+      const evidence = policy.get(
+        pushCandidateKey({ recipientId, endpointId: endpoint.id }),
+      );
+      return evidence?.status === 'active'
+        ? [
+            Object.freeze({
+              rosterSnapshotId: batch.rosterSnapshotId,
+              rosterPopulation: batch.rosterPopulation,
+              recipientId,
+              endpoint,
+            }),
+          ]
+        : [];
+    }),
+  );
+}
+
+async function loadDrizzlePushEndpointPolicy(
+  database: DeviceQueryDatabase,
+  query: PushEndpointPolicyQuery,
+): Promise<readonly PushEndpointPolicyEvidence[]> {
+  if (
+    !Array.isArray(query.candidates) ||
+    query.candidates.length > MAX_PUSH_ENDPOINTS ||
+    new Set(query.candidates.map(pushCandidateKey)).size !==
+      query.candidates.length
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  if (query.candidates.length === 0) return Object.freeze([]);
+  const endpointIds = query.candidates.map(({ endpointId }) => endpointId);
+  const endpointRows = await database
+    .select({
+      endpointId: rosterEndpoints.id,
+      recipientId: rosterEndpoints.recipientId,
+      status: rosterEndpoints.status,
+    })
+    .from(rosterEndpoints)
+    .where(
+      and(
+        eq(rosterEndpoints.rosterSnapshotId, query.rosterSnapshotId),
+        eq(rosterEndpoints.population, query.rosterPopulation),
+        eq(rosterEndpoints.channel, 'push'),
+        inArray(rosterEndpoints.id, endpointIds),
+      ),
+    );
+  const statusRows = await database
+    .selectDistinctOn([endpointStatusRecords.endpointId], {
+      endpointId: endpointStatusRecords.endpointId,
+      recipientId: endpointStatusRecords.recipientId,
+      status: endpointStatusRecords.status,
+      reasonCode: endpointStatusRecords.reasonCode,
+      provider: endpointStatusRecords.provider,
+      providerReference: endpointStatusRecords.providerReference,
+      providerOccurredAt: endpointStatusRecords.providerOccurredAt,
+      sequence: endpointStatusRecords.sequence,
+    })
+    .from(endpointStatusRecords)
+    .where(
+      and(
+        eq(endpointStatusRecords.rosterSnapshotId, query.rosterSnapshotId),
+        eq(endpointStatusRecords.population, query.rosterPopulation),
+        eq(endpointStatusRecords.channel, 'push'),
+        inArray(endpointStatusRecords.endpointId, endpointIds),
+      ),
+    )
+    .orderBy(
+      endpointStatusRecords.endpointId,
+      desc(endpointStatusRecords.recordedAt),
+      desc(endpointStatusRecords.sequence),
+    );
+  const effectiveStatuses = new Map<string, EndpointStatus>();
+  endpointRows.forEach((endpoint) =>
+    effectiveStatuses.set(
+      pushCandidateKey(endpoint),
+      EndpointStatusSchema.parse(endpoint.status),
+    ),
+  );
+  statusRows.forEach((status) => {
+    if (
+      status.status !== 'invalid' ||
+      status.reasonCode !== EXPO_DEVICE_NOT_REGISTERED_REASON ||
+      status.provider !== null ||
+      status.providerReference !== null ||
+      status.providerOccurredAt !== null
+    ) {
+      throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+    }
+    effectiveStatuses.set(pushCandidateKey(status), 'invalid');
+  });
+  return Object.freeze(
+    endpointRows
+      .map((endpoint) =>
+        Object.freeze({
+          recipientId: endpoint.recipientId,
+          endpointId: endpoint.endpointId,
+          status:
+            effectiveStatuses.get(pushCandidateKey(endpoint)) ??
+            EndpointStatusSchema.parse(endpoint.status),
+        }),
+      )
+      .sort(
+        (left, right) =>
+          left.recipientId.localeCompare(right.recipientId) ||
+          left.endpointId.localeCompare(right.endpointId),
+      ),
+  );
+}
+
+/** Production token-free status overlay for pinned push endpoint resolution. */
+export function createDrizzlePushEndpointPolicyStore(
+  database: Database,
+): PushEndpointPolicyStore {
+  return Object.freeze({
+    loadEndpointPolicy: (query: PushEndpointPolicyQuery) =>
+      loadDrizzlePushEndpointPolicy(deviceQueryDatabase(database), query),
+  });
+}
 
 /** Device-specific persistence added to the canonical capability transaction. */
 export interface DeviceCapabilityTransaction
