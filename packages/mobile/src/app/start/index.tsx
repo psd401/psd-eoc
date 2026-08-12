@@ -5,6 +5,7 @@ import {
   type EventTypeListItem,
   type TemplateMode,
 } from '@psd-eoc/contracts';
+import * as Crypto from 'expo-crypto';
 import * as Haptics from 'expo-haptics';
 import {
   type Href,
@@ -98,7 +99,7 @@ export default function StartEventScreen() {
   const parameters = useLocalSearchParams();
   const router = useRouter();
   const isFocused = useIsFocused();
-  const { authenticatedRequest, state } = useMobileAuth();
+  const { requestAuthenticated, state } = useMobileAuth();
   const startMutation = useStartMutation();
   const facilityResult = FacilityIdSchema.safeParse(one(parameters.facilityId));
   const modeValue = one(parameters.mode);
@@ -170,7 +171,7 @@ export default function StartEventScreen() {
     return () => {
       outcomeRequestGeneration.current += 1;
     };
-  }, [authenticatedRequest, isFocused, state.session?.session.id]);
+  }, [requestAuthenticated, isFocused, state.session?.session.id]);
 
   useEffect(() => {
     previewRequestGeneration.current += 1;
@@ -198,7 +199,7 @@ export default function StartEventScreen() {
     let active = true;
     setLoading(true);
     setLoadError(null);
-    void loadStartHomeData(authenticatedRequest).then(
+    void loadStartHomeData(requestAuthenticated).then(
       (nextData) => {
         if (!active) return;
         setData(nextData);
@@ -215,7 +216,7 @@ export default function StartEventScreen() {
       previewRequestGeneration.current += 1;
       previewInFlight.current = false;
     };
-  }, [authenticatedRequest, facilityId, mode, state.message, state.phase]);
+  }, [requestAuthenticated, facilityId, mode, state.message, state.phase]);
 
   const facility =
     facilityId === null
@@ -257,7 +258,7 @@ export default function StartEventScreen() {
     setPreviewLoading(true);
     try {
       const nextPreview = await createPreview(
-        authenticatedRequest,
+        requestAuthenticated,
         CreateActivationPreviewInputSchema.parse({
           facilityId: selectedFacilityId,
           kind: selectedMode === 'real' ? 'incident' : 'drill',
@@ -268,6 +269,7 @@ export default function StartEventScreen() {
           },
           rosterPopulation: SYNTHETIC_FIXTURE_ENABLED ? 'synthetic' : 'staff',
         }),
+        Crypto.randomUUID(),
       );
       if (previewRequestGeneration.current !== requestGeneration) return;
 
@@ -280,7 +282,7 @@ export default function StartEventScreen() {
           (eventId) => !knownEventIds.has(eventId),
         )
       ) {
-        currentData = await loadStartHomeData(authenticatedRequest);
+        currentData = await loadStartHomeData(requestAuthenticated);
         if (previewRequestGeneration.current !== requestGeneration) return;
       }
       const refreshedIds = new Set(
@@ -432,7 +434,7 @@ export default function StartEventScreen() {
                   const requestOwnerKey = outcomeOwnerKeyRef.current;
                   setCheckingOutcome(true);
                   setOutcomeCheckError(null);
-                  void loadStartHomeData(authenticatedRequest).then(
+                  void loadStartHomeData(requestAuthenticated).then(
                     (nextData) => {
                       if (
                         outcomeRequestGeneration.current !==
@@ -476,7 +478,7 @@ export default function StartEventScreen() {
                     const operation = mutationSnapshot.operation;
                     setCheckingOutcome(true);
                     setOutcomeCheckError(null);
-                    void loadStartHomeData(authenticatedRequest).then(
+                    void loadStartHomeData(requestAuthenticated).then(
                       (nextData) => {
                         if (
                           outcomeRequestGeneration.current !==

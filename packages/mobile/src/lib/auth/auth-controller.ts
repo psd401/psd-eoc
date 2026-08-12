@@ -1,13 +1,19 @@
-import {
-  IdempotencyKeySchema,
-  type ConnectivityEpochId,
-  type DeviceEnrollmentId,
-  type MobileSessionResponse,
-  type SessionId,
-  type SessionEstablishmentResult,
-  type UserId,
+import type {
+  ConnectivityEpochId,
+  DeviceEnrollmentId,
+  MobileSessionResponse,
+  SessionId,
+  SessionEstablishmentResult,
+  UserId,
 } from '@psd-eoc/contracts';
 
+import {
+  AuthenticatedApiError,
+  AuthenticatedRequestFailure,
+  type AuthenticatedRequestOptions,
+  type AuthenticatedRequestTransport,
+  type RequestAuthenticated,
+} from '../api';
 import { MobileAuthError, OfflineMutationDeniedError } from './auth-errors';
 
 export const OFFLINE_ACTION_MESSAGE =
@@ -35,7 +41,7 @@ export interface StoredAuthVault {
 export interface AuthState {
   readonly phase: AuthPhase;
   readonly session: SessionEstablishmentResult | null;
-  readonly connectivityEpochId: string | null;
+  readonly connectivityEpochId: ConnectivityEpochId | null;
   readonly message: string | null;
 }
 
@@ -66,29 +72,6 @@ export interface SessionApi {
   ): Promise<void>;
 }
 
-export interface AuthenticatedRequestInput {
-  readonly operation: 'query' | 'mutation';
-  readonly method: 'GET' | 'POST';
-  readonly path: string;
-  readonly body?: string;
-  readonly idempotencyKey?: string;
-  readonly signal?: AbortSignal;
-}
-
-export type MobileAuthenticatedRequest = (
-  input: AuthenticatedRequestInput,
-) => Promise<Response>;
-
-export type AuthenticatedFetch = (
-  input: string,
-  init: RequestInit,
-) => Promise<Response>;
-
-export type AuthenticatedRequestTransport = (
-  bearer: string,
-  input: AuthenticatedRequestInput,
-) => Promise<Response>;
-
 export interface AuthTimer {
   schedule(callback: () => void, delayMilliseconds: number): unknown;
   cancel(handle: unknown): void;
@@ -96,114 +79,12 @@ export interface AuthTimer {
 
 export interface MobileAuthControllerDependencies {
   readonly api: SessionApi;
-  readonly authenticatedRequest: AuthenticatedRequestTransport;
+  readonly authenticatedApi?: AuthenticatedRequestTransport;
   readonly createIdempotencyKey: () => string;
   readonly localAuthenticator: LocalAuthenticator;
   readonly now?: () => Date;
   readonly storage: AuthStorage;
   readonly timer?: AuthTimer;
-}
-
-function hasAsciiControlCharacter(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    if (codePoint <= 0x1f || codePoint === 0x7f) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function validatedAuthenticatedRequest(
-  input: AuthenticatedRequestInput,
-): AuthenticatedRequestInput {
-  if (
-    !input.path.startsWith('/') ||
-    input.path.startsWith('//') ||
-    hasAsciiControlCharacter(input.path) ||
-    input.path.includes('#')
-  ) {
-    throw new TypeError('Authenticated requests require an app-relative path.');
-  }
-  const parsedPath = new URL(input.path, 'https://psd-eoc.invalid');
-  if (
-    parsedPath.origin !== 'https://psd-eoc.invalid' ||
-    parsedPath.username.length > 0 ||
-    parsedPath.password.length > 0
-  ) {
-    throw new TypeError('Authenticated requests require an app-relative path.');
-  }
-  if (input.method === 'GET' && input.body !== undefined) {
-    throw new TypeError('Authenticated GET requests cannot carry a body.');
-  }
-  if (input.method === 'GET' && input.idempotencyKey !== undefined) {
-    throw new TypeError(
-      'Authenticated GET requests cannot carry mutation metadata.',
-    );
-  }
-  if (input.method === 'POST' && input.body === undefined) {
-    throw new TypeError('Authenticated POST requests require a JSON body.');
-  }
-  if (input.operation === 'mutation') {
-    if (input.method !== 'POST') {
-      throw new TypeError('Authenticated mutations require POST.');
-    }
-    IdempotencyKeySchema.parse(input.idempotencyKey ?? '');
-  } else if (input.idempotencyKey !== undefined) {
-    throw new TypeError(
-      'Authenticated queries cannot carry mutation metadata.',
-    );
-  }
-  return Object.freeze({ ...input });
-}
-
-/**
- * Builds the only bearer-aware network adapter used by mobile UI code. The
- * caller supplies app-relative paths, while this closure resolves them against
- * the already-validated PSD EOC origin and injects the credential privately.
- */
-export function createAuthenticatedRequestTransport(
-  getApiOrigin: () => string,
-  fetchImplementation: AuthenticatedFetch = fetch,
-): AuthenticatedRequestTransport {
-  return async (bearer, rawInput) => {
-    const input = validatedAuthenticatedRequest(rawInput);
-    const configuredValue = getApiOrigin();
-    const configured = new URL(configuredValue);
-    if (
-      configured.origin !== configuredValue ||
-      configured.pathname !== '/' ||
-      configured.search.length > 0 ||
-      configured.hash.length > 0 ||
-      configured.username.length > 0 ||
-      configured.password.length > 0
-    ) {
-      throw new TypeError('The PSD EOC API origin is invalid.');
-    }
-    const target = new URL(input.path, `${configured.origin}/`);
-    if (target.origin !== configured.origin) {
-      throw new TypeError(
-        'Authenticated requests require an app-relative path.',
-      );
-    }
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-      Authorization: `Bearer ${bearer}`,
-      'Cache-Control': 'no-store',
-    };
-    if (input.method === 'POST') {
-      headers['Content-Type'] = 'application/json';
-    }
-    if (input.idempotencyKey !== undefined) {
-      headers['Idempotency-Key'] = input.idempotencyKey;
-    }
-    return fetchImplementation(target.toString(), {
-      method: input.method,
-      headers,
-      ...(input.body === undefined ? {} : { body: input.body }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
-  };
 }
 
 type AuthListener = () => void;
@@ -251,6 +132,12 @@ function localSessionDeadline(session: SessionEstablishmentResult): number {
   );
 }
 
+function authenticatedRequestAborted(): Error {
+  const error = new Error('The authenticated request was cancelled.');
+  error.name = 'AbortError';
+  return error;
+}
+
 /**
  * Pure session lifecycle. Native modules are injected, making every safety
  * transition independently testable without a simulator or live provider.
@@ -260,6 +147,7 @@ export class MobileAuthController {
   private readonly listeners = new Set<AuthListener>();
   private vault: StoredAuthVault | null = null;
   private refreshAbortController: AbortController | null = null;
+  private readonly featureRequestAbortControllers = new Set<AbortController>();
   private lifecycleGeneration = 0;
   private credentialGeneration = 0;
   private credentialOperationTail: Promise<void> = Promise.resolve();
@@ -342,6 +230,13 @@ export class MobileAuthController {
     }
   }
 
+  private abortFeatureRequests(): void {
+    for (const controller of this.featureRequestAbortControllers) {
+      controller.abort();
+    }
+    this.featureRequestAbortControllers.clear();
+  }
+
   private scheduleExpiry(
     session: SessionEstablishmentResult,
     expectedCredentialGeneration = this.credentialGeneration,
@@ -408,6 +303,7 @@ export class MobileAuthController {
     this.credentialGeneration += 1;
     this.refreshAbortController?.abort();
     this.refreshAbortController = null;
+    this.abortFeatureRequests();
     this.cancelExpiryTimer();
     this.vault = null;
     return this.credentialGeneration;
@@ -531,6 +427,7 @@ export class MobileAuthController {
     this.lifecycleGeneration += 1;
     this.refreshAbortController?.abort();
     this.refreshAbortController = null;
+    this.abortFeatureRequests();
     this.cancelExpiryTimer();
     this.vault = null;
     if (
@@ -596,6 +493,9 @@ export class MobileAuthController {
       await this.revokeIssuedSession(payload);
       return false;
     }
+    // Enrollment replaces the credential held by the controller. No feature
+    // request authenticated with the previous bearer may outlive that change.
+    this.abortFeatureRequests();
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       // Backgrounding is not a credential tombstone, so a completed enrollment
       // may remain encrypted. Never restore it to memory or bypass a fresh
@@ -800,6 +700,9 @@ export class MobileAuthController {
     if (credentialGeneration !== this.credentialGeneration) {
       return;
     }
+    // The server has rotated the bearer. Abort requests that may still be
+    // using the retired credential before making the replacement current.
+    this.abortFeatureRequests();
     const rotated: StoredAuthVault = Object.freeze({
       refreshToken: refreshed.refreshToken,
       pendingRefreshIdempotencyKey: null,
@@ -855,38 +758,131 @@ export class MobileAuthController {
     sessionId: SessionId;
     deviceEnrollmentId: DeviceEnrollmentId;
   }> {
+    const session = this.state.session;
+    const vault = this.vault;
     if (
       this.state.phase !== 'online' ||
       this.state.connectivityEpochId === null ||
-      this.state.session === null
+      session === null ||
+      vault === null
     ) {
       throw new OfflineMutationDeniedError();
     }
-    if (!locallyUsableSession(this.state.session, this.now())) {
+    if (
+      !locallyUsableSession(session, this.now()) ||
+      vault.session.user.id !== session.user.id ||
+      vault.session.session.id !== session.session.id ||
+      vault.session.deviceEnrollment.id !== session.deviceEnrollment.id ||
+      vault.session.connectivityEpoch.id !== this.state.connectivityEpochId
+    ) {
       void this.expireSession();
       throw new OfflineMutationDeniedError();
     }
     return Object.freeze({
       connectivityEpochId: this.state.connectivityEpochId,
-      userId: this.state.session.user.id,
-      sessionId: this.state.session.session.id,
-      deviceEnrollmentId: this.state.session.deviceEnrollment.id,
+      userId: session.user.id,
+      sessionId: session.session.id,
+      deviceEnrollmentId: session.deviceEnrollment.id,
     });
   }
 
-  /**
-   * Performs one online request without returning the bearer to React state or
-   * the caller. Mutations fail before transport whenever connectivity has not
-   * been freshly established, so no offline action can be queued for replay.
-   */
-  public authenticatedRequest: MobileAuthenticatedRequest = (rawInput) => {
-    const input = validatedAuthenticatedRequest(rawInput);
+  private currentAuthenticatedBearer(): Readonly<{
+    bearer: string;
+    credentialGeneration: number;
+  }> {
     this.assertMutationAllowed();
-    const vault = this.vault;
-    if (vault === null) {
-      throw new OfflineMutationDeniedError();
+    const current = this.vault;
+    if (current === null) throw new OfflineMutationDeniedError();
+    return Object.freeze({
+      bearer: current.refreshToken,
+      credentialGeneration: this.credentialGeneration,
+    });
+  }
+
+  private markOfflineAfterRequestFailure(
+    expectedCredentialGeneration: number,
+  ): void {
+    if (
+      expectedCredentialGeneration !== this.credentialGeneration ||
+      this.state.phase !== 'online' ||
+      this.state.session === null ||
+      this.vault === null
+    ) {
+      return;
     }
-    return this.dependencies.authenticatedRequest(vault.refreshToken, input);
+    const session = this.state.session;
+    this.abortFeatureRequests();
+    this.update({
+      phase: 'offline-cached',
+      session,
+      connectivityEpochId: null,
+      message: OFFLINE_ACTION_MESSAGE,
+    });
+  }
+
+  public requestAuthenticated: RequestAuthenticated = async <Output>(
+    request: AuthenticatedRequestOptions<Output>,
+  ): Promise<Output> => {
+    const credential = this.currentAuthenticatedBearer();
+    const authenticatedApi = this.dependencies.authenticatedApi;
+    if (authenticatedApi === undefined) {
+      throw new AuthenticatedRequestFailure(
+        'configuration',
+        'PSD EOC authenticated requests are not configured for this build.',
+      );
+    }
+
+    const controller = new AbortController();
+    const abortFromCaller = () => {
+      controller.abort();
+    };
+    if (request.signal !== undefined) {
+      request.signal?.addEventListener('abort', abortFromCaller, {
+        once: true,
+      });
+      // Recheck after subscribing so an abort racing listener registration
+      // cannot let a caller-cancelled request escape the auth lifecycle.
+      if (request.signal.aborted) controller.abort();
+    }
+    this.featureRequestAbortControllers.add(controller);
+
+    try {
+      const result = await authenticatedApi.request(
+        credential.bearer,
+        request,
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted ||
+        credential.credentialGeneration !== this.credentialGeneration ||
+        this.state.phase !== 'online' ||
+        this.vault?.refreshToken !== credential.bearer
+      ) {
+        throw authenticatedRequestAborted();
+      }
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw authenticatedRequestAborted();
+      }
+      if (
+        error instanceof AuthenticatedRequestFailure &&
+        error.kind === 'network'
+      ) {
+        this.markOfflineAfterRequestFailure(credential.credentialGeneration);
+      } else if (
+        (error instanceof AuthenticatedApiError && error.status === 401) ||
+        (error instanceof AuthenticatedRequestFailure && error.status === 401)
+      ) {
+        await this.clearAndSignOut(
+          'This device session is no longer available. Sign in again or contact district technology support.',
+        );
+      }
+      throw error;
+    } finally {
+      this.featureRequestAbortControllers.delete(controller);
+      request.signal?.removeEventListener('abort', abortFromCaller);
+    }
   };
 
   public async signOut(): Promise<void> {

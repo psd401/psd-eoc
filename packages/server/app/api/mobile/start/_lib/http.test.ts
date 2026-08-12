@@ -274,7 +274,9 @@ describe('mobile start route handlers', () => {
   test('creates a drill preview as a non-mutating mobile capability query', async () => {
     const { confirmations, executions, runtime } = testRuntime();
     const response = await handleMobileActivationPreview(
-      postRequest('/api/mobile/start/preview', previewInput()),
+      postRequest('/api/mobile/start/preview', previewInput(), {
+        'idempotency-key': IDEMPOTENCY_KEY,
+      }),
       runtime,
     );
 
@@ -291,6 +293,18 @@ describe('mobile start route handlers', () => {
         }),
       }),
     ]);
+  });
+
+  test('rejects a missing preview transport key before capability execution', async () => {
+    const { confirmations, executions, runtime } = testRuntime();
+    const response = await handleMobileActivationPreview(
+      postRequest('/api/mobile/start/preview', previewInput()),
+      runtime,
+    );
+
+    expect(response.status).toBe(400);
+    expect(confirmations).toEqual([]);
+    expect(executions).toEqual([]);
   });
 
   test('keeps confirmation server-side and executes a mobile-interactive start', async () => {
@@ -354,7 +368,9 @@ describe('mobile start route handlers', () => {
       ),
     });
     const response = await handleMobileActivationPreview(
-      postRequest('/api/mobile/start/preview', previewInput()),
+      postRequest('/api/mobile/start/preview', previewInput(), {
+        'idempotency-key': IDEMPOTENCY_KEY,
+      }),
       runtime,
     );
 

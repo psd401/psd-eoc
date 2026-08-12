@@ -1,6 +1,5 @@
 import {
   ActivationPreviewSchema,
-  ApiErrorSchema,
   CreateActivationPreviewInputSchema,
   EventIdSchema,
   EventPageSchema,
@@ -22,10 +21,16 @@ import {
   type StartEventResult,
 } from '@psd-eoc/contracts';
 
-import type { MobileAuthenticatedRequest } from '../auth/auth-controller';
+import {
+  AuthenticatedApiError,
+  AuthenticatedRequestFailure,
+  type AuthenticatedRequestOptions,
+  type JsonResponseSchema,
+  type RequestAuthenticated,
+} from '../api';
 import { OfflineMutationDeniedError } from '../auth/auth-errors';
 
-export type StartAuthenticatedRequest = MobileAuthenticatedRequest;
+export type StartAuthenticatedRequest = RequestAuthenticated;
 
 export interface StartHomeActiveEvent {
   readonly event: Event;
@@ -51,10 +56,6 @@ export class StartClientError extends Error {
     super(message);
     this.name = 'StartClientError';
   }
-}
-
-interface Schema<Output> {
-  parse(value: unknown): Output;
 }
 
 interface ParsedPage<Item> {
@@ -102,67 +103,40 @@ function isAbortError(error: unknown): boolean {
 
 async function executeJsonRequest<Output>(
   request: StartAuthenticatedRequest,
-  input: Parameters<StartAuthenticatedRequest>[0],
-  schema: Schema<Output>,
+  input: AuthenticatedRequestOptions<Output>,
   kind: RequestKind,
 ): Promise<Output> {
-  let response: Response;
   try {
-    response = await request(input);
+    return await request(input);
   } catch (error) {
     if (error instanceof OfflineMutationDeniedError || isAbortError(error)) {
       throw error;
     }
-    throw requestFailure(kind);
-  }
-
-  let payload: unknown;
-  try {
-    payload = (await response.json()) as unknown;
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw error;
+    if (error instanceof AuthenticatedApiError) {
+      const outcomeUnknown = kind === 'mutation' && error.status >= 500;
+      throw new StartClientError(
+        error.apiError.message,
+        !outcomeUnknown && error.apiError.retryable,
+        outcomeUnknown,
+        error.apiError.code,
+        error.apiError.requestId,
+      );
     }
-    const outcomeUnknown =
-      kind === 'mutation' && (response.ok || response.status >= 500);
-    throw new StartClientError(
-      kind === 'mutation'
-        ? outcomeUnknown
-          ? 'PSD EOC received an unreadable server response. Treat the outcome as unresolved; no automatic retry will occur.'
-          : 'The request was not accepted. Check active events before trying again.'
-        : kind === 'preview'
-          ? 'PSD EOC received an unreadable consequence preview. No event was started and no notification was queued.'
-          : 'PSD EOC received unreadable start information. No event was started and no notification was queued.',
-      kind !== 'mutation',
-      outcomeUnknown,
-    );
-  }
-
-  if (!response.ok) {
-    const parsedError = ApiErrorSchema.safeParse(payload);
-    const outcomeUnknown = kind === 'mutation' && response.status >= 500;
-    throw new StartClientError(
-      parsedError.success
-        ? parsedError.data.message
-        : 'The request was not accepted. Review the current event state before trying again.',
-      !outcomeUnknown && parsedError.success && parsedError.data.retryable,
-      outcomeUnknown,
-      parsedError.success ? parsedError.data.code : null,
-      parsedError.success ? parsedError.data.requestId : null,
-    );
-  }
-
-  try {
-    return schema.parse(payload);
-  } catch {
-    throw requestFailure(
-      kind,
-      kind === 'mutation'
-        ? 'PSD EOC returned an invalid success response. Treat the outcome as unresolved; no automatic retry will occur.'
-        : kind === 'preview'
-          ? 'PSD EOC returned an invalid consequence preview. No event was started and no notification was queued.'
-          : 'PSD EOC returned invalid start information. No event was started and no notification was queued.',
-    );
+    if (error instanceof AuthenticatedRequestFailure) {
+      const knownClientFailure =
+        error.kind === 'configuration' ||
+        error.kind === 'invalid-request' ||
+        (error.status !== null && error.status >= 400 && error.status < 500);
+      const outcomeUnknown = kind === 'mutation' && !knownClientFailure;
+      throw new StartClientError(
+        outcomeUnknown
+          ? 'PSD EOC did not return a trustworthy acknowledgement. Treat the outcome as unresolved; no automatic retry will occur.'
+          : error.message,
+        kind !== 'mutation' && error.kind === 'network',
+        outcomeUnknown,
+      );
+    }
+    throw requestFailure(kind);
   }
 }
 
@@ -183,8 +157,7 @@ function timeoutFailure(kind: RequestKind): StartClientError {
 
 async function requestJson<Output>(
   request: StartAuthenticatedRequest,
-  input: Parameters<StartAuthenticatedRequest>[0],
-  schema: Schema<Output>,
+  input: AuthenticatedRequestOptions<Output>,
   kind: RequestKind,
 ): Promise<Output> {
   const controller = new AbortController();
@@ -200,7 +173,6 @@ async function requestJson<Output>(
     return await executeJsonRequest(
       request,
       { ...input, signal: controller.signal },
-      schema,
       kind,
     );
   } catch (error) {
@@ -221,7 +193,7 @@ function pagePath(firstPath: string, cursor: string): string {
 async function loadAllPages<Item>(
   request: StartAuthenticatedRequest,
   firstPath: string,
-  schema: Schema<ParsedPage<Item>>,
+  schema: JsonResponseSchema<ParsedPage<Item>>,
 ): Promise<readonly Item[]> {
   const items: Item[] = [];
   const seenCursors = new Set<string>();
@@ -234,8 +206,7 @@ async function loadAllPages<Item>(
   ) {
     const page = await requestJson(
       request,
-      { operation: 'query', method: 'GET', path },
-      schema,
+      { method: 'GET', path, schema },
       'query',
     );
     items.push(...page.items);
@@ -274,11 +245,10 @@ async function historicalEventTypeName(
     const version = await requestJson(
       request,
       {
-        operation: 'query',
         method: 'GET',
         path: `/event-types/api?operation=version&eventTypeVersionId=${encodeURIComponent(event.eventTypeVersion.id)}`,
+        schema: EventTypeVersionSchema,
       },
-      EventTypeVersionSchema,
       'query',
     );
     return version.id === event.eventTypeVersion.id &&
@@ -363,17 +333,19 @@ function sameVersion(
 export async function createPreview(
   request: StartAuthenticatedRequest,
   input: CreateActivationPreviewInput,
+  idempotencyKeyInput: string,
 ): Promise<ActivationPreview> {
   const selection = CreateActivationPreviewInputSchema.parse(input);
+  const idempotencyKey = IdempotencyKeySchema.parse(idempotencyKeyInput);
   const preview = await requestJson(
     request,
     {
-      operation: 'query',
       method: 'POST',
       path: '/api/mobile/start/preview',
-      body: JSON.stringify(selection),
+      body: selection,
+      idempotencyKey,
+      schema: ActivationPreviewSchema,
     },
-    ActivationPreviewSchema,
     'preview',
   );
   if (
@@ -478,13 +450,12 @@ export async function activate(
   const result = await requestJson(
     request,
     {
-      operation: 'mutation',
       method: 'POST',
       path: '/api/mobile/start/activate',
-      body: JSON.stringify(body),
+      body,
       idempotencyKey,
+      schema: StartEventResultSchema,
     },
-    StartEventResultSchema,
     'mutation',
   );
   if (!activationMatchesPreview(result, preview)) {
@@ -508,13 +479,12 @@ export async function join(
   const result = await requestJson(
     request,
     {
-      operation: 'mutation',
       method: 'POST',
       path: `/api/events/${encodeURIComponent(eventId)}/join`,
-      body: '{}',
+      body: {},
       idempotencyKey,
+      schema: JoinEventResultSchema,
     },
-    JoinEventResultSchema,
     'mutation',
   );
   if (

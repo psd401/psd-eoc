@@ -23,9 +23,11 @@ import {
 } from '@psd-eoc/contracts';
 
 import type {
-  AuthStorage,
-  AuthenticatedRequestInput,
+  AuthenticatedRequestOptions,
   AuthenticatedRequestTransport,
+} from '../api';
+import type {
+  AuthStorage,
   SessionApi,
   StoredAuthVault,
 } from '../auth/auth-controller';
@@ -59,25 +61,13 @@ const IDS = Object.freeze({
 const FIXTURE_CREATED_AT = '2026-08-11T17:00:00.000Z';
 const FIXTURE_DIGEST = 'a'.repeat(64);
 
-function jsonResponse(payload: unknown): Response {
-  return new Response(JSON.stringify(payload), {
-    status: 200,
-    headers: {
-      'Cache-Control': 'no-store',
-      'Content-Type': 'application/json',
-    },
-  });
-}
-
-function parseBody(input: AuthenticatedRequestInput): unknown {
-  if (input.body === undefined) {
+function requireBody<Output>(
+  input: AuthenticatedRequestOptions<Output>,
+): unknown {
+  if (input.method === 'GET' || input.body === undefined) {
     throw new TypeError('The synthetic fixture requires a JSON body.');
   }
-  try {
-    return JSON.parse(input.body) as unknown;
-  } catch {
-    throw new TypeError('The synthetic fixture received invalid JSON.');
-  }
+  return input.body;
 }
 
 function templateSet(purpose: NotificationPurpose) {
@@ -574,22 +564,27 @@ export function createIssue21SyntheticFixtureTransport(
   >();
   let currentPreview: ActivationPreview | null = null;
 
-  return async (_bearer, input) => {
-    requireIssue21SyntheticFixture();
-    if (input.signal?.aborted === true) {
-      throw new DOMException(
-        'The synthetic request was aborted.',
-        'AbortError',
-      );
-    }
+  return Object.freeze({
+    async request<Output>(
+      _bearer: string,
+      input: AuthenticatedRequestOptions<Output>,
+      signal: AbortSignal,
+    ): Promise<Output> {
+      requireIssue21SyntheticFixture();
+      if (signal.aborted) {
+        throw new DOMException(
+          'The synthetic request was aborted.',
+          'AbortError',
+        );
+      }
 
-    if (
-      input.operation === 'query' &&
-      input.method === 'GET' &&
-      input.path === '/api/mobile/start/facilities'
-    ) {
-      return jsonResponse(
-        FacilityPageSchema.parse({
+      let payload: unknown;
+
+      if (
+        input.method === 'GET' &&
+        input.path === '/api/mobile/start/facilities'
+      ) {
+        payload = FacilityPageSchema.parse({
           items: [
             {
               id: IDS.facility,
@@ -600,17 +595,15 @@ export function createIssue21SyntheticFixtureTransport(
             },
           ],
           pageInfo: { hasMore: false, nextCursor: null },
-        }),
-      );
-    }
+        });
+        return input.schema.parse(payload);
+      }
 
-    if (
-      input.operation === 'query' &&
-      input.method === 'GET' &&
-      input.path === '/event-types/api?operation=list&enabled=true'
-    ) {
-      return jsonResponse(
-        EventTypePageSchema.parse({
+      if (
+        input.method === 'GET' &&
+        input.path === '/event-types/api?operation=list&enabled=true'
+      ) {
+        payload = EventTypePageSchema.parse({
           items: [
             {
               eventType: {
@@ -624,101 +617,95 @@ export function createIssue21SyntheticFixtureTransport(
             },
           ],
           pageInfo: { hasMore: false, nextCursor: null },
-        }),
-      );
-    }
+        });
+        return input.schema.parse(payload);
+      }
 
-    if (
-      input.operation === 'query' &&
-      input.method === 'GET' &&
-      input.path === '/api/events'
-    ) {
-      return jsonResponse(
-        EventPageSchema.parse({
+      if (input.method === 'GET' && input.path === '/api/events') {
+        payload = EventPageSchema.parse({
           items: [seededEvent, ...activatedEvents],
           pageInfo: { hasMore: false, nextCursor: null },
-        }),
-      );
-    }
-
-    if (
-      input.operation === 'query' &&
-      input.method === 'POST' &&
-      input.path === '/api/mobile/start/preview'
-    ) {
-      assertSyntheticPreviewSelection(parseBody(input));
-      currentPreview = activationPreview(now());
-      return jsonResponse(currentPreview);
-    }
-
-    if (
-      input.operation === 'mutation' &&
-      input.method === 'POST' &&
-      input.path === '/api/mobile/start/activate'
-    ) {
-      const idempotencyKey = IdempotencyKeySchema.parse(input.idempotencyKey);
-      const startInput = StartEventInputSchema.parse(parseBody(input));
-      const preview = currentPreview;
-      if (
-        preview === null ||
-        startInput.source !== 'activation-preview' ||
-        startInput.activationPreviewId !== preview.id ||
-        startInput.activeEventDecision.decision !== 'start-new' ||
-        startInput.activeEventDecision.activeEventIdsSeen.length !== 1 ||
-        startInput.activeEventDecision.activeEventIdsSeen[0] !==
-          IDS.initialEvent
-      ) {
-        throw new TypeError(
-          'The synthetic activation does not match its current preview.',
-        );
+        });
+        return input.schema.parse(payload);
       }
-      let result = activationResults.get(idempotencyKey);
-      if (result === undefined) {
-        if (activationResults.size > 0) {
+
+      if (
+        input.method === 'POST' &&
+        input.path === '/api/mobile/start/preview'
+      ) {
+        IdempotencyKeySchema.parse(input.idempotencyKey);
+        assertSyntheticPreviewSelection(requireBody(input));
+        currentPreview = activationPreview(now());
+        return input.schema.parse(currentPreview);
+      }
+
+      if (
+        input.method === 'POST' &&
+        input.path === '/api/mobile/start/activate'
+      ) {
+        const idempotencyKey = IdempotencyKeySchema.parse(input.idempotencyKey);
+        const startInput = StartEventInputSchema.parse(requireBody(input));
+        const preview = currentPreview;
+        if (
+          preview === null ||
+          startInput.source !== 'activation-preview' ||
+          startInput.activationPreviewId !== preview.id ||
+          startInput.activeEventDecision.decision !== 'start-new' ||
+          startInput.activeEventDecision.activeEventIdsSeen.length !== 1 ||
+          startInput.activeEventDecision.activeEventIdsSeen[0] !==
+            IDS.initialEvent
+        ) {
           throw new TypeError(
-            'The issue-21 fixture permits only one synthetic activation.',
+            'The synthetic activation does not match its current preview.',
           );
         }
-        result = activationResult(preview, idempotencyKey, now().toISOString());
-        activationResults.set(idempotencyKey, result);
-        activatedEvents.push(result.event);
+        let result = activationResults.get(idempotencyKey);
+        if (result === undefined) {
+          if (activationResults.size > 0) {
+            throw new TypeError(
+              'The issue-21 fixture permits only one synthetic activation.',
+            );
+          }
+          result = activationResult(
+            preview,
+            idempotencyKey,
+            now().toISOString(),
+          );
+          activationResults.set(idempotencyKey, result);
+          activatedEvents.push(result.event);
+        }
+        return input.schema.parse(result);
       }
-      return jsonResponse(result);
-    }
 
-    const joinMatch = /^\/api\/events\/([0-9a-f-]+)\/join$/u.exec(input.path);
-    if (
-      input.operation === 'mutation' &&
-      input.method === 'POST' &&
-      joinMatch?.[1] !== undefined
-    ) {
-      IdempotencyKeySchema.parse(input.idempotencyKey);
-      const body = parseBody(input);
-      if (
-        typeof body !== 'object' ||
-        body === null ||
-        Array.isArray(body) ||
-        Object.keys(body).length !== 0
-      ) {
-        throw new TypeError('The synthetic join body must be empty.');
-      }
-      const event = [seededEvent, ...activatedEvents].find(
-        (candidate) => candidate.id === joinMatch[1],
-      );
-      if (event === undefined) {
-        throw new TypeError('The synthetic join target is unavailable.');
-      }
-      return jsonResponse(
-        JoinEventResultSchema.parse({
+      const joinMatch = /^\/api\/events\/([0-9a-f-]+)\/join$/u.exec(input.path);
+      if (input.method === 'POST' && joinMatch?.[1] !== undefined) {
+        IdempotencyKeySchema.parse(input.idempotencyKey);
+        const body = requireBody(input);
+        if (
+          typeof body !== 'object' ||
+          body === null ||
+          Array.isArray(body) ||
+          Object.keys(body).length !== 0
+        ) {
+          throw new TypeError('The synthetic join body must be empty.');
+        }
+        const event = [seededEvent, ...activatedEvents].find(
+          (candidate) => candidate.id === joinMatch[1],
+        );
+        if (event === undefined) {
+          throw new TypeError('The synthetic join target is unavailable.');
+        }
+        payload = JoinEventResultSchema.parse({
           event,
           participantId: IDS.participant,
           joined: true,
-        }),
-      );
-    }
+        });
+        return input.schema.parse(payload);
+      }
 
-    throw new TypeError(
-      'The issue-21 fixture rejected an unexpected operational request.',
-    );
-  };
+      throw new TypeError(
+        'The issue-21 fixture rejected an unexpected operational request.',
+      );
+    },
+  });
 }

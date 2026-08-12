@@ -83,7 +83,7 @@ export function deliverClaimedStartMutationSuccessFeedback(
 
 type StartMutationAuth = Pick<
   MobileAuthContextValue,
-  'assertMutationAllowed' | 'authenticatedRequest' | 'state'
+  'assertMutationAllowed' | 'requestAuthenticated' | 'state'
 >;
 
 export interface StartMutationProviderControllerDependencies {
@@ -246,7 +246,7 @@ export class StartMutationProviderController {
     // No await may occur between the idle check above and coordinator.submit.
     // That makes this UUID belong to exactly this synchronously admitted tap.
     const idempotencyKey = this.createIdempotencyKey();
-    const request = auth.authenticatedRequest;
+    const request = auth.requestAuthenticated;
     return this.coordinator.submit({
       operation: 'activate',
       owner,
@@ -274,7 +274,7 @@ export class StartMutationProviderController {
     }
 
     const idempotencyKey = this.createIdempotencyKey();
-    const request = auth.authenticatedRequest;
+    const request = auth.requestAuthenticated;
     return this.coordinator.submit({
       operation: 'join',
       owner,

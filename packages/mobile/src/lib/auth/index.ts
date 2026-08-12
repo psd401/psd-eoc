@@ -10,3 +10,12 @@ export {
   type AuthState,
 } from './auth-controller';
 export { OfflineMutationDeniedError } from './auth-errors';
+export {
+  AuthenticatedApiError,
+  AuthenticatedRequestFailure,
+  type AuthenticatedMutationMethod,
+  type AuthenticatedRequestOptions,
+  type AuthenticatedRequestFailureKind,
+  type JsonResponseSchema,
+  type RequestAuthenticated,
+} from '../api';

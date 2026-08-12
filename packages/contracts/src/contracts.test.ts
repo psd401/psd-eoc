@@ -26,6 +26,7 @@ import {
   DispatchBatchSchema,
   DrillRecordSchema,
   EventClassificationSchema,
+  EventRoomHeaderSchema,
   EventRoomSyncResultSchema,
   EventSchema,
   EventSummaryExportSchema,
@@ -1435,13 +1436,13 @@ describe('event type, targeting, and activation contracts', () => {
 });
 
 describe('human-only capability boundary', () => {
-  test('catalogs room sync as the sole web-only reduced-success-audit query', () => {
+  test('catalogs room sync as the sole human-interactive reduced-success-audit query', () => {
     const sync = defineCapability('sync-event-room');
     expect(sync.operation).toBe('query');
     expect(sync.auditPolicy).toBe('denied-and-failed');
     expect(getCapabilityInvocationPolicy('sync-event-room')).toEqual({
       principalKinds: ['human'],
-      sources: ['web'],
+      sources: ['web', 'mobile'],
       agentGrantable: false,
     });
     expect(
@@ -1482,8 +1483,21 @@ describe('human-only capability boundary', () => {
       supersedes: null,
       payload: { text: 'Synthetic room update.' },
     } as const;
+    const header = {
+      facility: {
+        id: ids.facility,
+        code: 'SYN-NORTH',
+        name: 'Synthetic North School',
+      },
+      eventType: {
+        id: ids.eventTypeVersion,
+        name: 'Synthetic Lockdown',
+        templateMode: 'real',
+      },
+    } as const;
     const result = {
       eventId: ids.event,
+      header,
       event: activeEvent('incident', 'real', 'staff'),
       entries: [{ visibility: 'visible', entry }],
       cursor,
@@ -1491,6 +1505,49 @@ describe('human-only capability boundary', () => {
       snapshotSequence: 1,
     } as const;
     expect(EventRoomSyncResultSchema.safeParse(result).success).toBe(true);
+    expect(EventRoomHeaderSchema.parse(header)).toEqual(header);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        header: {
+          ...header,
+          facility: { ...header.facility, id: ids.otherFacility },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        header: {
+          ...header,
+          eventType: { ...header.eventType, id: ids.otherFacility },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        header: {
+          ...header,
+          eventType: { ...header.eventType, templateMode: 'drill' },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        header: {
+          ...header,
+          facility: { ...header.facility, code: 'synthetic north' },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        header: undefined,
+      }).success,
+    ).toBe(false);
     expect(
       EventRoomSyncResultSchema.safeParse({
         ...result,
@@ -1522,6 +1579,18 @@ describe('human-only capability boundary', () => {
         hasMore: true,
       }).success,
     ).toBe(false);
+
+    expect(
+      EventRoomSyncResultSchema.safeParse({
+        ...result,
+        event: null,
+        entries: [],
+        cursor: Buffer.from(
+          JSON.stringify({ v: 1, e: ids.event, s: 1 }),
+          'utf8',
+        ).toString('base64url'),
+      }).success,
+    ).toBe(true);
 
     const terminal = EventRoomSyncResultSchema.parse(result);
     expect(terminal.hasMore).toBe(false);
