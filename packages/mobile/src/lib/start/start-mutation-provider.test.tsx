@@ -16,8 +16,53 @@ import type {
   StartMutationRecoveryRecord,
 } from './start-mutation-coordinator';
 
+const encoder = new TextEncoder();
+let cryptoUuidCounter = 1;
+
+function syntheticCryptoHash(bytes: Uint8Array): Uint8Array {
+  const output = new Uint8Array(32);
+  for (let index = 0; index < bytes.length; index += 1) {
+    const slot = index % output.length;
+    output[slot] = (output[slot]! * 33 + bytes[index]! + index) & 0xff;
+  }
+  return output;
+}
+
+function cryptoHex(bytes: Uint8Array): string {
+  return [...bytes]
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// Bun's module mocks are process-wide. Keep this issue-owned mock compatible
+// with every expo-crypto operation exercised by the repository test process so
+// test-file discovery order cannot replace a complete mock with a partial one.
 mock.module('expo-crypto', () => ({
-  randomUUID: (): string => 'unused-default-key',
+  CryptoDigestAlgorithm: { SHA256: 'SHA-256' },
+  CryptoEncoding: { BASE64: 'base64', HEX: 'hex' },
+  randomUUID(): string {
+    const suffix = String(cryptoUuidCounter++).padStart(12, '0');
+    return `20000000-0000-4000-8000-${suffix}`;
+  },
+  async getRandomBytesAsync(length: number): Promise<Uint8Array> {
+    return Uint8Array.from({ length }, (_, index) => index & 0xff);
+  },
+  async digest(
+    _algorithm: string,
+    value: ArrayBufferView,
+  ): Promise<ArrayBuffer> {
+    const bytes = new Uint8Array(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength,
+    );
+    const result = new ArrayBuffer(32);
+    new Uint8Array(result).set(syntheticCryptoHash(bytes));
+    return result;
+  },
+  async digestStringAsync(_algorithm: string, value: string): Promise<string> {
+    return cryptoHex(syntheticCryptoHash(encoder.encode(value)));
+  },
 }));
 mock.module('expo-secure-store', () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 7,
