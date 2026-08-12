@@ -31,9 +31,9 @@ import {
   DEFAULT_RETRY_POLICY,
   ProviderDispatchError,
   parseRetryPolicy,
-  type ProviderFailureDisposition,
   type RetryPolicy,
 } from '../shared/retry';
+import { expoProviderFailureDisposition } from './adapter';
 import type { PushEndpointInvalidator } from './invalidation';
 import type { ExpoReceiptScheduler } from './receipt-lifecycle';
 
@@ -94,20 +94,6 @@ const EXPO_RETRY_REASONS: ReadonlySet<string> = new Set([
   'EXPO_HTTP_RATE_LIMITED',
   'EXPO_HTTP_SERVER_ERROR',
   'EXPO_MESSAGE_RATE_EXCEEDED',
-]);
-const EXPO_RECOVERY_FAILURE_DISPOSITIONS: ReadonlyMap<
-  string,
-  ProviderFailureDisposition
-> = new Map([
-  ['EXPO_HTTP_RATE_LIMITED', 'safe-to-retry'],
-  ['EXPO_HTTP_SERVER_ERROR', 'safe-to-retry'],
-  ['EXPO_MESSAGE_RATE_EXCEEDED', 'safe-to-retry'],
-  ['EXPO_HTTP_CLIENT_ERROR', 'terminal-failure'],
-  ['EXPO_INVALID_CREDENTIALS', 'terminal-failure'],
-  ['EXPO_LIVE_TRANSPORT_DISABLED', 'terminal-failure'],
-  ['EXPO_NETWORK_OUTCOME_AMBIGUOUS', 'ambiguous'],
-  ['EXPO_RESPONSE_TOO_LARGE', 'ambiguous'],
-  ['PROVIDER_OUTCOME_AMBIGUOUS', 'ambiguous'],
 ]);
 const EXPO_OUTCOME_KEYS = Object.freeze([
   'state',
@@ -572,7 +558,7 @@ function canonicalExpoRecovery(
       typeof code !== 'string' ||
       typeof disposition !== 'string' ||
       diagnosticDigest !== null ||
-      EXPO_RECOVERY_FAILURE_DISPOSITIONS.get(code) !== disposition
+      expoProviderFailureDisposition(code) !== disposition
     ) {
       throw new ProviderDispatchError(
         EXPO_FORBIDDEN_DELIVERY_REASON,
@@ -581,10 +567,7 @@ function canonicalExpoRecovery(
     }
     return Object.freeze({
       kind: 'provider-error',
-      error: new ProviderDispatchError(
-        code,
-        disposition as ProviderFailureDisposition,
-      ),
+      error: new ProviderDispatchError(code, disposition),
     });
   }
   throw new ProviderDispatchError(EXPO_FORBIDDEN_DELIVERY_REASON, 'ambiguous');

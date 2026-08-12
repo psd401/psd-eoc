@@ -44,19 +44,29 @@ const CANONICAL_SEND_OUTCOME_UNKNOWN_REASONS: ReadonlySet<string> = new Set([
   'EXPO_TICKET_RESPONSE_INVALID',
 ]);
 
-const CANONICAL_LEDGER_FAILURE_DISPOSITIONS = Object.freeze(
-  new Map<string, ProviderFailure['disposition']>([
-    ['EXPO_HTTP_RATE_LIMITED', 'safe-to-retry'],
-    ['EXPO_HTTP_SERVER_ERROR', 'safe-to-retry'],
-    ['EXPO_MESSAGE_RATE_EXCEEDED', 'safe-to-retry'],
-    ['EXPO_HTTP_CLIENT_ERROR', 'terminal-failure'],
-    ['EXPO_INVALID_CREDENTIALS', 'terminal-failure'],
-    ['EXPO_LIVE_TRANSPORT_DISABLED', 'terminal-failure'],
-    ['EXPO_NETWORK_OUTCOME_AMBIGUOUS', 'ambiguous'],
-    ['EXPO_RESPONSE_TOO_LARGE', 'ambiguous'],
-    ['PROVIDER_OUTCOME_AMBIGUOUS', 'ambiguous'],
-  ]),
-);
+const EXPO_PROVIDER_FAILURE_DISPOSITIONS = Object.freeze({
+  EXPO_HTTP_RATE_LIMITED: 'safe-to-retry',
+  EXPO_HTTP_SERVER_ERROR: 'safe-to-retry',
+  EXPO_MESSAGE_RATE_EXCEEDED: 'safe-to-retry',
+  EXPO_HTTP_CLIENT_ERROR: 'terminal-failure',
+  EXPO_INVALID_CREDENTIALS: 'terminal-failure',
+  EXPO_LIVE_TRANSPORT_DISABLED: 'terminal-failure',
+  EXPO_NETWORK_OUTCOME_AMBIGUOUS: 'ambiguous',
+  EXPO_RESPONSE_TOO_LARGE: 'ambiguous',
+  PROVIDER_OUTCOME_AMBIGUOUS: 'ambiguous',
+} satisfies Readonly<Record<string, ProviderFailure['disposition']>>);
+
+/** One immutable Expo failure classification for ledger and worker recovery. */
+export function expoProviderFailureDisposition(
+  code: string,
+): ProviderFailure['disposition'] | undefined {
+  if (!Object.hasOwn(EXPO_PROVIDER_FAILURE_DISPOSITIONS, code)) {
+    return undefined;
+  }
+  return EXPO_PROVIDER_FAILURE_DISPOSITIONS[
+    code as keyof typeof EXPO_PROVIDER_FAILURE_DISPOSITIONS
+  ];
+}
 
 export type ExpoSendLedgerCompletion =
   | Readonly<{
@@ -291,8 +301,7 @@ function parseLedgerFailure(value: unknown): ProviderFailure {
     typeof properties.code !== 'string' ||
     typeof properties.disposition !== 'string' ||
     properties.diagnosticDigest !== null ||
-    CANONICAL_LEDGER_FAILURE_DISPOSITIONS.get(properties.code) !==
-      properties.disposition
+    expoProviderFailureDisposition(properties.code) !== properties.disposition
   ) {
     throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
   }
@@ -395,8 +404,7 @@ function failureFromError(error: unknown): ProviderFailure {
   const failure = normalizeProviderFailure(error);
   if (
     failure.diagnosticDigest === null &&
-    CANONICAL_LEDGER_FAILURE_DISPOSITIONS.get(failure.code) ===
-      failure.disposition
+    expoProviderFailureDisposition(failure.code) === failure.disposition
   ) {
     return failure;
   }
