@@ -11,6 +11,8 @@ export const MCP_TOOL_CAPABILITY_IDS = Object.freeze([
   'get-event',
   'search-journal-entries',
   'list-drill-records',
+  'export-drill-records',
+  'export-event-summary',
   'get-stale-roster-report',
   'list-facilities',
   'get-facility',
@@ -65,6 +67,16 @@ const descriptions = Object.freeze({
     description:
       'List retained drill and test records by site and time range, including date/time and event type. The result is records evidence, not a legal or policy compliance determination.',
   }),
+  'export-drill-records': Object.freeze({
+    title: 'Export drill records',
+    description:
+      'Create a private, short-lived CSV export of authorized retained drill and test records by site and time range. The export is records evidence, not a legal or district-policy compliance determination.',
+  }),
+  'export-event-summary': Object.freeze({
+    title: 'Export event summary',
+    description:
+      'Create a private, short-lived PDF summary of one authorized event, preserving append-only journal provenance, photo checksums, and exact delivery truth states without recipient contact data. The export is records evidence, not a legal or district-policy compliance determination.',
+  }),
   'get-stale-roster-report': Object.freeze({
     title: 'Read roster staleness report',
     description:
@@ -111,6 +123,11 @@ const descriptions = Object.freeze({
 >);
 
 const humanOnlyActionIds = new Set<string>(HUMAN_ONLY_ACTION_IDS);
+const queryToolsWithRetainedSideEffects = new Set<McpToolCapabilityId>([
+  'create-activation-preview',
+  'export-drill-records',
+  'export-event-summary',
+]);
 
 function containsHumanOnlyActionId(value: unknown): boolean {
   if (typeof value === 'string') return humanOnlyActionIds.has(value);
@@ -161,10 +178,12 @@ const directMcpTools: readonly McpToolDefinition[] = Object.freeze(
       annotations: Object.freeze({
         title: copy.title,
         readOnlyHint:
-          operation === 'query' && capabilityId !== 'create-activation-preview',
+          operation === 'query' &&
+          !queryToolsWithRetainedSideEffects.has(capabilityId),
         destructiveHint: false as const,
         idempotentHint:
-          operation === 'query' && capabilityId !== 'create-activation-preview',
+          operation === 'query' &&
+          !queryToolsWithRetainedSideEffects.has(capabilityId),
         openWorldHint: false as const,
       }),
     });

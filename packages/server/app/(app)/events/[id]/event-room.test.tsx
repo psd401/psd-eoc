@@ -230,6 +230,7 @@ function render(
       eventTypeLabel={
         event.templateMode === 'real' ? 'Lockdown' : 'Lockdown Drill'
       }
+      exportSummaryPath={`/records/export/events/${encodeURIComponent(event.id)}`}
       facilityLabel="Synthetic North Campus"
       initialCursor="eyJ2IjoxfQ"
       initialEntries={entries.map((entry) =>
@@ -487,6 +488,10 @@ describe('event room server-rendered safety and history state', () => {
     expect(drill).not.toContain('REAL INCIDENT');
     expect(real).toContain('aria-hidden="true"');
     expect(drill).toContain('aria-hidden="true"');
+    expect(real).toContain('Download PDF summary');
+    expect(real).toContain(
+      `/records/export/events/${encodeURIComponent(IDS.event)}`,
+    );
   });
 
   test('announces complete SSR history as connected and paginated history as loading', () => {
@@ -655,6 +660,7 @@ describe('event room server-rendered safety and history state', () => {
         csrfCookieName="__Host-psd-eoc-csrf"
         event={activeEvent('real')}
         eventTypeLabel="Lockdown"
+        exportSummaryPath={`/records/export/events/${encodeURIComponent(IDS.event)}`}
         facilityLabel="Synthetic North Campus"
         initialCursor="eyJ2IjoxfQ"
         initialEntries={[redactedProjection]}

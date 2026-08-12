@@ -58,6 +58,27 @@ button.secondary:hover:not(:disabled) {
   color: #fff;
 }
 
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #174ea6;
+  border-radius: 0.4rem;
+  background: #fff;
+  color: #174ea6;
+  font-weight: 750;
+  line-height: 1.25;
+  padding: 0.6rem 1rem;
+  text-align: center;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  border-color: #123b7d;
+  background: #e8eef7;
+  color: #123b7d;
+}
+
 button.caution {
   border-color: #9a3412;
   background: #9a3412;
@@ -195,6 +216,10 @@ dd {
 .event-facts dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.event-export-link {
+  margin-top: 1rem;
 }
 
 .event-status {
