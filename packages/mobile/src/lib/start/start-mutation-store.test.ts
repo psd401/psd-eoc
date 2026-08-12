@@ -31,6 +31,7 @@ const OWNER = Object.freeze({
   deviceEnrollmentId: '00000000-0000-4000-8000-000000000003',
 });
 const KEY = 'start-mutation-store-key-0001';
+const SUCCEEDED_EVENT_ID = '00000000-0000-4000-8000-000000000008';
 const ACTIVATION_EVIDENCE = Object.freeze({
   previewId: '00000000-0000-4000-8000-000000000004',
   facilityId: '00000000-0000-4000-8000-000000000005',
@@ -69,6 +70,7 @@ const SUCCEEDED = Object.freeze({
   activationEvidence: null,
   completion: Object.freeze({
     kind: 'joined' as const,
+    eventId: SUCCEEDED_EVENT_ID,
     eventTypeName: 'Lockdown',
     mode: 'real' as const,
   }),
@@ -208,6 +210,10 @@ describe('start mutation store', () => {
     expectRejected({ ...UNRESOLVED, operation: 'close' });
     expectRejected({ ...UNRESOLVED, eventTypeName: '   ' });
     expectRejected({ ...UNRESOLVED, idempotencyKey: 'too-short' });
+    expectRejected({
+      ...SUCCEEDED,
+      completion: { ...SUCCEEDED.completion, eventId: 'not-an-event-id' },
+    });
     expectRejected({
       ...UNRESOLVED,
       activationEvidence: {

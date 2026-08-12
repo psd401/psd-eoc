@@ -118,8 +118,11 @@ const PREVIEW = {
   rosterPopulation: 'synthetic',
   consequenceDigest: 'a'.repeat(64),
 } as ActivationPreview;
+const ACTIVATED_EVENT_ID = '00000000-0000-4000-8000-000000000022';
+const JOIN_EVENT_ID = '00000000-0000-4000-8000-000000000023';
 const CHOICE = {
   event: {
+    id: JOIN_EVENT_ID,
     templateMode: 'real',
   } as Event,
   eventTypeName: 'Synthetic lockdown',
@@ -129,6 +132,7 @@ const CHOICE = {
 function activationResult(): StartEventResult {
   return {
     event: {
+      id: ACTIVATED_EVENT_ID,
       templateMode: 'drill',
       eventTypeVersion: { templateMode: 'drill' },
     },
@@ -139,6 +143,7 @@ function activationResult(): StartEventResult {
 function joinResult(): JoinEventResult {
   return {
     event: {
+      id: JOIN_EVENT_ID,
       templateMode: 'real',
       eventTypeVersion: { templateMode: 'real' },
     },
@@ -324,6 +329,7 @@ describe('StartMutationProviderController retention', () => {
       phase: 'succeeded',
       completion: {
         kind: 'activated',
+        eventId: ACTIVATED_EVENT_ID,
         eventTypeName: 'Synthetic earthquake drill',
         mode: 'drill',
       },
@@ -676,11 +682,18 @@ describe('StartMutationProviderController admission and terminal API', () => {
     });
     controller.reconcile(authBinding());
     const admission = controller.submitJoin({ choice: CHOICE });
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'pending',
+      visibility: 'owner',
+      operation: 'join',
+      eventId: JOIN_EVENT_ID,
+    });
     if (admission.accepted) await admission.completion;
 
     expect(controller.isPendingNow()).toBe(false);
     expect(controller.claimSuccessFeedback()).toEqual({
       kind: 'joined',
+      eventId: JOIN_EVENT_ID,
       eventTypeName: 'Synthetic lockdown',
       mode: 'real',
     });

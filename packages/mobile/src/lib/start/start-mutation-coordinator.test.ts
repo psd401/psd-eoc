@@ -37,6 +37,8 @@ const EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000303';
 const ROSTER_SNAPSHOT_ID = '00000000-0000-4000-8000-000000000304';
 const MATCHING_EVENT_ID = '00000000-0000-4000-8000-000000000305';
 const ACTIVATION_REQUEST_ID = '00000000-0000-4000-8000-000000000306';
+const ACTIVATED_EVENT_ID = '00000000-0000-4000-8000-000000000101';
+const JOIN_EVENT_ID = '00000000-0000-4000-8000-000000000201';
 const ACTIVATION_DIGEST = 'a'.repeat(64);
 const ACTIVATION_EVIDENCE: StartMutationActivationEvidence = Object.freeze({
   previewId: ACTIVATION_PREVIEW_ID,
@@ -132,7 +134,7 @@ function deferred<Value>(): Deferred<Value> {
 function activationResult(mode: TemplateMode = 'drill'): StartEventResult {
   return {
     event: {
-      id: '00000000-0000-4000-8000-000000000101',
+      id: ACTIVATED_EVENT_ID,
       templateMode: mode,
       eventTypeVersion: { templateMode: mode },
     },
@@ -143,7 +145,7 @@ function activationResult(mode: TemplateMode = 'drill'): StartEventResult {
 function joinResult(mode: TemplateMode = 'real'): JoinEventResult {
   return {
     event: {
-      id: '00000000-0000-4000-8000-000000000201',
+      id: JOIN_EVENT_ID,
       templateMode: mode,
       eventTypeVersion: { templateMode: mode },
     },
@@ -181,6 +183,7 @@ function joinSubmission(
   return {
     operation: 'join',
     owner,
+    eventId: JOIN_EVENT_ID,
     eventTypeName: 'Lockdown',
     mode: 'real',
     idempotencyKey: JOIN_KEY,
@@ -227,6 +230,46 @@ describe('StartMutationCoordinator admission', () => {
     );
     operation.resolve(activationResult());
     if (first.accepted) await first.completion;
+  });
+
+  test('retains only the exact pending join event identity for its owner', async () => {
+    const coordinator = new StartMutationCoordinator();
+    const operation = deferred<JoinEventResult>();
+    online(coordinator);
+
+    const admission = coordinator.submit(
+      joinSubmission(() => operation.promise),
+    );
+    expect(coordinator.getSnapshot()).toEqual({
+      phase: 'pending',
+      visibility: 'owner',
+      operation: 'join',
+      eventId: JOIN_EVENT_ID,
+      eventTypeName: 'Lockdown',
+      mode: 'real',
+    });
+
+    coordinator.reconcile({ phase: 'locked', owner: null });
+    expect(coordinator.getSnapshot()).toEqual({
+      phase: 'pending',
+      visibility: 'pending-other-session',
+    });
+    expect(JSON.stringify(coordinator.getSnapshot())).not.toContain(
+      JOIN_EVENT_ID,
+    );
+
+    online(coordinator);
+    expect(coordinator.getSnapshot()).toMatchObject({
+      operation: 'join',
+      eventId: JOIN_EVENT_ID,
+      eventTypeName: 'Lockdown',
+    });
+    expect(coordinator.getSnapshot()).not.toMatchObject({
+      eventId: '00000000-0000-4000-8000-000000000299',
+    });
+
+    operation.resolve(joinResult());
+    if (admission.accepted) await admission.completion;
   });
 
   test('blocks join doubles and both activation/join cross-kind races', async () => {
@@ -335,6 +378,7 @@ describe('StartMutationCoordinator app-lifetime retention', () => {
       phase: 'succeeded',
       completion: {
         kind: 'activated',
+        eventId: ACTIVATED_EVENT_ID,
         eventTypeName: 'Practice Lockdown',
         mode: 'drill',
       },
@@ -547,6 +591,7 @@ describe('StartMutationCoordinator durable recovery', () => {
       phase: 'succeeded',
       completion: {
         kind: 'activated',
+        eventId: MATCHING_EVENT_ID,
         eventTypeName: 'Practice Lockdown',
         mode: 'drill',
       },
@@ -600,6 +645,7 @@ describe('StartMutationCoordinator durable recovery', () => {
     expect(firstRestart.hydrate()).toBe(true);
     expect(firstRestart.claimSuccessFeedback(OWNER)).toEqual({
       kind: 'activated',
+      eventId: ACTIVATED_EVENT_ID,
       eventTypeName: 'Practice Lockdown',
       mode: 'drill',
     });
@@ -749,6 +795,7 @@ describe('StartMutationCoordinator terminal handling', () => {
       phase: 'succeeded',
       completion: {
         kind: 'joined',
+        eventId: JOIN_EVENT_ID,
         eventTypeName: 'Lockdown',
         mode: 'real',
       },
@@ -875,6 +922,7 @@ describe('StartMutationCoordinator terminal handling', () => {
     expect(coordinator.claimSuccessFeedback(OTHER_OWNER)).toBeNull();
     expect(coordinator.claimSuccessFeedback(OWNER)).toEqual({
       kind: 'activated',
+      eventId: ACTIVATED_EVENT_ID,
       eventTypeName: 'Practice Lockdown',
       mode: 'drill',
     });

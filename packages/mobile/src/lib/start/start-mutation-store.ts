@@ -1,6 +1,7 @@
 import {
   ActivationPreviewIdSchema,
   DeviceEnrollmentIdSchema,
+  EventIdSchema,
   EventKindSchema,
   EventTypeVersionRefSchema,
   FacilityIdSchema,
@@ -222,7 +223,7 @@ function parseCompletion(
   display: StartMutationDisplay,
 ): StartMutationCompletion {
   const completion = objectRecord(value);
-  assertExactKeys(completion, ['kind', 'eventTypeName', 'mode']);
+  assertExactKeys(completion, ['kind', 'eventId', 'eventTypeName', 'mode']);
   const expectedKind =
     display.operation === 'activate' ? 'activated' : 'joined';
   if (
@@ -238,8 +239,15 @@ function parseCompletion(
     return invalidRecord();
   }
   if (mode !== display.mode) return invalidRecord();
+  let eventId: StartMutationCompletion['eventId'];
+  try {
+    eventId = EventIdSchema.parse(completion.eventId);
+  } catch {
+    return invalidRecord();
+  }
   return Object.freeze({
     kind: expectedKind,
+    eventId,
     eventTypeName: display.eventTypeName,
     mode,
   });

@@ -1,5 +1,6 @@
 import {
   DeviceEnrollmentIdSchema,
+  EventIdSchema,
   EventSchema,
   IdempotencyKeySchema,
   SessionIdSchema,
@@ -8,6 +9,7 @@ import {
   type ActivationPreview,
   type DeviceEnrollmentId,
   type Event,
+  type EventId,
   type EventKind,
   type EventTypeVersionRef,
   type IdempotencyKey,
@@ -33,6 +35,7 @@ export type StartMutationOperation = 'activate' | 'join';
 
 export interface StartMutationCompletion {
   readonly kind: 'activated' | 'joined';
+  readonly eventId: EventId;
   readonly eventTypeName: string;
   readonly mode: TemplateMode;
 }
@@ -106,9 +109,18 @@ export type StartMutationSnapshot =
   | Readonly<{ phase: 'idle' }>
   | Readonly<{ phase: 'checking-recovery' }>
   | Readonly<
-      StartMutationDisplay & {
+      Omit<StartMutationDisplay, 'operation'> & {
         phase: 'pending';
         visibility: 'owner';
+        operation: 'activate';
+      }
+    >
+  | Readonly<
+      Omit<StartMutationDisplay, 'operation'> & {
+        phase: 'pending';
+        visibility: 'owner';
+        operation: 'join';
+        eventId: EventId;
       }
     >
   | Readonly<{
@@ -154,6 +166,7 @@ export type StartMutationSubmission =
   | Readonly<
       StartMutationSubmissionCommon & {
         operation: 'join';
+        eventId: EventId;
         activationEvidence?: never;
         run: () => Promise<JoinEventResult>;
       }
@@ -356,15 +369,25 @@ function eventMatchesActivationEvidence(
 }
 
 function pendingOwnerSnapshot(
+  submission: StartMutationSubmission,
   presentation: StartMutationPresentation,
 ): PendingState['ownerSnapshot'] {
-  return Object.freeze({
-    phase: 'pending',
-    visibility: 'owner',
-    operation: presentation.operation,
-    eventTypeName: presentation.eventTypeName,
-    mode: presentation.mode,
-  });
+  return submission.operation === 'join'
+    ? Object.freeze({
+        phase: 'pending',
+        visibility: 'owner',
+        operation: 'join',
+        eventId: EventIdSchema.parse(submission.eventId),
+        eventTypeName: presentation.eventTypeName,
+        mode: presentation.mode,
+      })
+    : Object.freeze({
+        phase: 'pending',
+        visibility: 'owner',
+        operation: 'activate',
+        eventTypeName: presentation.eventTypeName,
+        mode: presentation.mode,
+      });
 }
 
 function succeededOwnerSnapshot(
@@ -425,6 +448,7 @@ function resultCompletion(
 
   return Object.freeze({
     kind: submission.operation === 'activate' ? 'activated' : 'joined',
+    eventId: EventIdSchema.parse(result.event.id),
     eventTypeName: submission.eventTypeName,
     mode,
   });
@@ -677,6 +701,7 @@ export class StartMutationCoordinator {
     }
 
     const presentation = presentationOf(submission);
+    const ownerSnapshot = pendingOwnerSnapshot(submission, presentation);
     const activationEvidence =
       submission.operation === 'activate'
         ? submission.activationEvidence
@@ -711,7 +736,7 @@ export class StartMutationCoordinator {
       quarantined: false,
       activationEvidence,
       ...presentation,
-      ownerSnapshot: pendingOwnerSnapshot(presentation),
+      ownerSnapshot,
     });
     this.refreshSnapshot(true);
 
@@ -899,14 +924,18 @@ export class StartMutationCoordinator {
     }
     const unresolved = this.state;
     const evidence = unresolved.activationEvidence;
-    if (
-      evidence === null ||
-      !events.some((event) => eventMatchesActivationEvidence(event, evidence))
-    ) {
+    const matchingEvent =
+      evidence === null
+        ? undefined
+        : events.find((event) =>
+            eventMatchesActivationEvidence(event, evidence),
+          );
+    if (matchingEvent === undefined) {
       return false;
     }
     const completion = Object.freeze({
       kind: 'activated' as const,
+      eventId: EventIdSchema.parse(matchingEvent.id),
       eventTypeName: unresolved.eventTypeName,
       mode: unresolved.mode,
     });
