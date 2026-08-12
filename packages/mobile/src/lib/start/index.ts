@@ -17,3 +17,11 @@ export {
   createIssue21SyntheticFixtureTransport,
   isIssue21SyntheticFixtureEnabled,
 } from './issue-21-synthetic-fixture';
+export { useStartMutationHardwareBackGuard } from './mutation-hardware-back-guard';
+export {
+  PENDING_START_MUTATION_MESSAGE,
+  isStartMutationPending,
+  requestStartRouteNavigation,
+  subscribeToStartMutationHardwareBack,
+  useStartMutationNavigationGuard,
+} from './mutation-navigation-guard';

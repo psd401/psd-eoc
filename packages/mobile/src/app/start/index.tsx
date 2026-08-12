@@ -10,7 +10,7 @@ import {
 import * as Crypto from 'expo-crypto';
 import * as Haptics from 'expo-haptics';
 import { type Href, useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -42,13 +42,17 @@ import {
   activate,
   createIdempotentSubmission,
   createPreview,
+  isStartMutationPending,
   type IdempotentSubmissionController,
   isIssue21SyntheticFixtureEnabled,
   join,
   loadStartHomeData,
+  requestStartRouteNavigation,
   StartClientError,
   type StartHomeActiveEvent,
   type StartHomeData,
+  useStartMutationHardwareBackGuard,
+  useStartMutationNavigationGuard,
 } from '../../lib/start';
 import { getEventTheme } from '../../theme/event-theme';
 
@@ -129,6 +133,22 @@ export default function StartEventScreen() {
     useRef<IdempotentSubmissionController<StartEventResult> | null>(null);
   const joinSubmissions = useRef(
     new Map<string, IdempotentSubmissionController<JoinEventResult>>(),
+  );
+  const mutationPending = isStartMutationPending(pendingAction);
+  const announcePendingMutation = useCallback((message: string): void => {
+    AccessibilityInfo.announceForAccessibility(message);
+  }, []);
+  const isMutationPendingNow = useCallback(
+    () => mutationInFlight.current || mutationPending,
+    [mutationPending],
+  );
+  useStartMutationNavigationGuard(
+    mutationPending && state.phase === 'online',
+    announcePendingMutation,
+  );
+  useStartMutationHardwareBackGuard(
+    isMutationPendingNow,
+    announcePendingMutation,
   );
 
   useEffect(() => {
@@ -408,10 +428,23 @@ export default function StartEventScreen() {
       >
         <View style={styles.topBar}>
           <Pressable
+            accessibilityHint={
+              mutationPending
+                ? 'Wait for the current request to finish before leaving this screen.'
+                : undefined
+            }
             accessibilityLabel="Back to active events"
             accessibilityRole="button"
+            accessibilityState={{ disabled: mutationPending }}
+            disabled={mutationPending}
             onPress={() => {
-              router.back();
+              requestStartRouteNavigation(
+                mutationInFlight.current || mutationPending,
+                () => {
+                  router.back();
+                },
+                announcePendingMutation,
+              );
             }}
             style={({ pressed }) => [
               styles.backButton,

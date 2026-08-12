@@ -4,6 +4,7 @@ import * as Haptics from 'expo-haptics';
 import { type Href, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Pressable,
   ScrollView,
@@ -30,11 +31,15 @@ import {
   createIdempotentSubmission,
   type IdempotentSubmissionController,
   isIssue21SyntheticFixtureEnabled,
+  isStartMutationPending,
   join,
   loadStartHomeData,
+  requestStartRouteNavigation,
   StartClientError,
   type StartHomeActiveEvent,
   type StartHomeData,
+  useStartMutationHardwareBackGuard,
+  useStartMutationNavigationGuard,
 } from '../lib/start';
 
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
@@ -85,6 +90,22 @@ export default function HomeScreen() {
   const joinSubmissions = useRef(
     new Map<string, IdempotentSubmissionController<JoinEventResult>>(),
   );
+  const mutationPending = isStartMutationPending(joiningEventId);
+  const announcePendingMutation = useCallback((message: string): void => {
+    AccessibilityInfo.announceForAccessibility(message);
+  }, []);
+  const isMutationPendingNow = useCallback(
+    () => joinInFlight.current || mutationPending,
+    [mutationPending],
+  );
+  useStartMutationHardwareBackGuard(
+    isMutationPendingNow,
+    announcePendingMutation,
+  );
+  useStartMutationNavigationGuard(
+    mutationPending && state.phase === 'online',
+    announcePendingMutation,
+  );
 
   const load = useCallback(() => {
     let active = true;
@@ -124,10 +145,16 @@ export default function HomeScreen() {
   useFocusEffect(load);
 
   function openStart(facilityId: string, mode: TemplateMode): void {
-    router.push({
-      pathname: '/start',
-      params: { facilityId, mode },
-    } as Href);
+    requestStartRouteNavigation(
+      joinInFlight.current || mutationPending,
+      () => {
+        router.push({
+          pathname: '/start',
+          params: { facilityId, mode },
+        } as Href);
+      },
+      announcePendingMutation,
+    );
   }
 
   async function joinExisting(choice: StartHomeActiveEvent): Promise<void> {
@@ -272,10 +299,7 @@ export default function HomeScreen() {
                   {data.activeEvents.map((choice, index) => (
                     <ActiveEventJoinAction
                       busy={joiningEventId === choice.event.id}
-                      disabled={
-                        joiningEventId !== null &&
-                        joiningEventId !== choice.event.id
-                      }
+                      disabled={joiningEventId !== null}
                       eventTypeName={choice.eventTypeName}
                       facilityName={choice.facilityName}
                       key={choice.event.id}
@@ -336,6 +360,7 @@ export default function HomeScreen() {
                         {facility.name}
                       </Text>
                       <StartModeAction
+                        disabled={mutationPending}
                         facilityName={facility.name}
                         mode="real"
                         onPress={() => {
@@ -343,6 +368,7 @@ export default function HomeScreen() {
                         }}
                       />
                       <StartModeAction
+                        disabled={mutationPending}
                         facilityName={facility.name}
                         mode="drill"
                         onPress={() => {
