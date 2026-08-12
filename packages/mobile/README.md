@@ -115,6 +115,14 @@ plugins use the same plain-language Face ID permission. `expo-web-browser` is
 an AuthSession transitive dependency; the native app does not import it
 directly.
 
+`expo-image-picker` supplies consent-based library image selection without
+camera or microphone access,
+`expo-file-system` retains a private retryable photo draft through app
+backgrounding, and `expo-location` supplies foreground-only coordinates with
+their measured accuracy; none enables background collection or a live send.
+Jest Expo and React Native Testing Library provide native accessibility and
+interaction tests in addition to the Bun unit suite.
+
 `react-dom` is pinned beside mobile React so Expo resolves a matched 19.2.3
 runtime. The server uses the same exact React pair so Bun cannot make Next and
 the mobile dependency graph load incompatible React copies. The mobile CI job
