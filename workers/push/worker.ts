@@ -4,6 +4,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
+  workerAttemptFingerprint,
   parseWorkerAttemptWorkItem,
   type WorkerAttemptWorkItem,
 } from '../shared/attempt';
@@ -13,16 +14,26 @@ import {
   type AttemptExecutionClaim,
   type AttemptExecutionClaimRequest,
   type AttemptExecutionCompletion,
+  type AttemptExecutionLookup,
+  type AttemptExecutionLookupRequest,
   type AttemptExecutionStore,
   type AttemptIdempotentProviderAdapter,
   type CompleteAttemptExecutionRequest,
   type LiveProviderAuthorizer,
+  type ProviderRecoveryResult,
   type ProviderSendOutcome,
   type ProviderSendRequest,
   type ReleaseAttemptExecutionRequest,
   type WorkerAttemptProcessResult,
 } from '../shared/processor';
-import { ProviderDispatchError, type RetryPolicy } from '../shared/retry';
+import {
+  calculateRetryDelayMilliseconds,
+  DEFAULT_RETRY_POLICY,
+  ProviderDispatchError,
+  parseRetryPolicy,
+  type ProviderFailureDisposition,
+  type RetryPolicy,
+} from '../shared/retry';
 import type { PushEndpointInvalidator } from './invalidation';
 import type { ExpoReceiptScheduler } from './receipt-lifecycle';
 
@@ -54,6 +65,50 @@ const EXPO_FORBIDDEN_DELIVERY_REASON = 'EXPO_DELIVERED_TRUTH_FORBIDDEN';
 const MAX_EXPO_WORK_ITEMS = 12_000;
 const SAFE_EXPO_PROVIDER_REFERENCE_PATTERN =
   /^[A-Za-z0-9][A-Za-z0-9._:-]{0,499}$/u;
+const EXPO_ADAPTER_FAILED_REASONS: ReadonlySet<string> = new Set([
+  'EXPO_DEVICE_NOT_REGISTERED',
+  'EXPO_INVALID_CREDENTIALS',
+  'EXPO_MESSAGE_TOO_BIG',
+  'EXPO_MISMATCH_SENDER_ID',
+]);
+const EXPO_STORED_FINAL_FAILED_REASONS: ReadonlySet<string> = new Set([
+  ...EXPO_ADAPTER_FAILED_REASONS,
+  'EXPO_HTTP_CLIENT_ERROR',
+  'EXPO_LIVE_TRANSPORT_DISABLED',
+  'EXPO_SEND_LEDGER_CONFLICT',
+  'EXPO_SEND_REQUEST_INVALID',
+  'PROVIDER_RETRY_EXHAUSTED',
+]);
+const EXPO_ADAPTER_UNKNOWN_REASONS: ReadonlySet<string> = new Set([
+  'EXPO_SEND_OUTCOME_AMBIGUOUS',
+  'EXPO_TICKET_ERROR_UNKNOWN',
+  'EXPO_TICKET_MISSING',
+  'EXPO_TICKET_RESPONSE_INVALID',
+]);
+const EXPO_STORED_FINAL_UNKNOWN_REASONS: ReadonlySet<string> = new Set([
+  ...EXPO_ADAPTER_UNKNOWN_REASONS,
+  'PROVIDER_OUTCOME_AMBIGUOUS',
+  'PROVIDER_OUTCOME_INVALID',
+]);
+const EXPO_RETRY_REASONS: ReadonlySet<string> = new Set([
+  'EXPO_HTTP_RATE_LIMITED',
+  'EXPO_HTTP_SERVER_ERROR',
+  'EXPO_MESSAGE_RATE_EXCEEDED',
+]);
+const EXPO_RECOVERY_FAILURE_DISPOSITIONS: ReadonlyMap<
+  string,
+  ProviderFailureDisposition
+> = new Map([
+  ['EXPO_HTTP_RATE_LIMITED', 'safe-to-retry'],
+  ['EXPO_HTTP_SERVER_ERROR', 'safe-to-retry'],
+  ['EXPO_MESSAGE_RATE_EXCEEDED', 'safe-to-retry'],
+  ['EXPO_HTTP_CLIENT_ERROR', 'terminal-failure'],
+  ['EXPO_INVALID_CREDENTIALS', 'terminal-failure'],
+  ['EXPO_LIVE_TRANSPORT_DISABLED', 'terminal-failure'],
+  ['EXPO_NETWORK_OUTCOME_AMBIGUOUS', 'ambiguous'],
+  ['EXPO_RESPONSE_TOO_LARGE', 'ambiguous'],
+  ['PROVIDER_OUTCOME_AMBIGUOUS', 'ambiguous'],
+]);
 const EXPO_OUTCOME_KEYS = Object.freeze([
   'state',
   'provider',
@@ -63,9 +118,79 @@ const EXPO_OUTCOME_KEYS = Object.freeze([
   'diagnosticDigest',
 ] as const);
 
+type ExpoOutcomeContext = 'adapter' | 'stored-final' | 'stored-retry';
+
+interface ExpoExecutionContext {
+  readonly attemptNumber: number;
+  readonly retryPolicy: RetryPolicy;
+}
+
+interface RegisteredExpoExecutionContext extends ExpoExecutionContext {
+  readonly fingerprint: string;
+  activeCalls: number;
+}
+
+class ExpoExecutionContextRegistry {
+  readonly #contexts = new Map<string, RegisteredExpoExecutionContext>();
+
+  public constructor(private readonly retryPolicy: RetryPolicy) {}
+
+  public register(workItem: WorkerAttemptWorkItem): () => void {
+    const attemptId = workItem.attempt.id;
+    const fingerprint = workerAttemptFingerprint(workItem);
+    const existing = this.#contexts.get(attemptId);
+    if (existing !== undefined) {
+      if (
+        existing.fingerprint !== fingerprint ||
+        existing.attemptNumber !== workItem.attempt.attemptNumber
+      ) {
+        throw new TypeError('Expo push execution context is invalid.');
+      }
+      existing.activeCalls += 1;
+    } else {
+      this.#contexts.set(attemptId, {
+        fingerprint,
+        attemptNumber: workItem.attempt.attemptNumber,
+        retryPolicy: this.retryPolicy,
+        activeCalls: 1,
+      });
+    }
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      const current = this.#contexts.get(attemptId);
+      if (current === undefined || current.fingerprint !== fingerprint) return;
+      current.activeCalls -= 1;
+      if (current.activeCalls === 0) this.#contexts.delete(attemptId);
+    };
+  }
+
+  public require(
+    request: AttemptExecutionLookupRequest | AttemptExecutionClaimRequest,
+  ): ExpoExecutionContext {
+    const context = this.#contexts.get(request.attemptId);
+    if (
+      context === undefined ||
+      context.fingerprint !== request.fingerprint ||
+      context.activeCalls < 1
+    ) {
+      throw new ProviderDispatchError(
+        EXPO_FORBIDDEN_DELIVERY_REASON,
+        'ambiguous',
+      );
+    }
+    return Object.freeze({
+      attemptNumber: context.attemptNumber,
+      retryPolicy: context.retryPolicy,
+    });
+  }
+}
+
 function canonicalExpoOutcome(
   value: unknown,
   expectedProvider: string,
+  context: ExpoOutcomeContext,
 ): ProviderSendOutcome {
   try {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -102,24 +227,45 @@ function canonicalExpoOutcome(
       }
       properties[key] = descriptor.value;
     }
+    const providerReference = properties.providerReference;
+    const reasonCode = properties.reasonCode;
+    const failedReasons =
+      context === 'adapter'
+        ? EXPO_ADAPTER_FAILED_REASONS
+        : EXPO_STORED_FINAL_FAILED_REASONS;
+    const unknownReasons =
+      context === 'adapter'
+        ? EXPO_ADAPTER_UNKNOWN_REASONS
+        : EXPO_STORED_FINAL_UNKNOWN_REASONS;
+    const accepted =
+      context !== 'stored-retry' &&
+      properties.state === 'provider-accepted' &&
+      typeof providerReference === 'string' &&
+      SAFE_EXPO_PROVIDER_REFERENCE_PATTERN.test(providerReference) &&
+      reasonCode === null;
+    const failed =
+      properties.state === 'failed' &&
+      providerReference === null &&
+      typeof reasonCode === 'string' &&
+      (context === 'stored-retry'
+        ? EXPO_RETRY_REASONS.has(reasonCode)
+        : failedReasons.has(reasonCode));
+    const expired =
+      context !== 'stored-retry' &&
+      properties.state === 'expired' &&
+      providerReference === null &&
+      reasonCode === 'EXPO_NOTIFICATION_EXPIRED';
+    const unknown =
+      context !== 'stored-retry' &&
+      properties.state === 'unknown' &&
+      providerReference === null &&
+      typeof reasonCode === 'string' &&
+      unknownReasons.has(reasonCode);
     if (
-      properties.state === 'delivered' ||
       properties.provider !== expectedProvider ||
       properties.proof !== null ||
-      (properties.providerReference !== null &&
-        (typeof properties.providerReference !== 'string' ||
-          !SAFE_EXPO_PROVIDER_REFERENCE_PATTERN.test(
-            properties.providerReference,
-          ))) ||
-      (properties.state === 'provider-accepted' &&
-        (properties.providerReference === null ||
-          properties.reasonCode !== null ||
-          properties.diagnosticDigest !== null)) ||
-      ((properties.state === 'failed' ||
-        properties.state === 'expired' ||
-        properties.state === 'unknown') &&
-        (typeof properties.reasonCode !== 'string' ||
-          properties.reasonCode.length < 1))
+      properties.diagnosticDigest !== null ||
+      (!accepted && !failed && !expired && !unknown)
     ) {
       throw new TypeError();
     }
@@ -148,12 +294,25 @@ function failClosedExpoAdapter(
     truthLabel: adapter.truthLabel,
     provider: adapter.provider,
     deliverySemantics: adapter.deliverySemantics,
+    ...(adapter.recover === undefined
+      ? {}
+      : {
+          async recover(
+            request: ProviderSendRequest,
+          ): Promise<ProviderRecoveryResult> {
+            return canonicalExpoRecovery(
+              await adapter.recover!(request),
+              adapter.provider,
+            );
+          },
+        }),
     async send(
       request: ProviderSendRequest,
     ): Promise<ProviderSendOutcome | unknown> {
       return canonicalExpoOutcome(
         await adapter.send(request),
         adapter.provider,
+        'adapter',
       );
     },
   });
@@ -162,20 +321,75 @@ function failClosedExpoAdapter(
 function failClosedExecutionStore(
   store: AttemptExecutionStore,
   provider: string,
+  contexts: ExpoExecutionContextRegistry,
 ): AttemptExecutionStore {
   return Object.freeze({
+    async lookup(
+      request: AttemptExecutionLookupRequest,
+    ): Promise<AttemptExecutionLookup> {
+      const safeRequest = Object.freeze({
+        attemptId: request.attemptId,
+        fingerprint: request.fingerprint,
+      });
+      const context = contexts.require(safeRequest);
+      return canonicalExecutionLookup(
+        await store.lookup(safeRequest),
+        provider,
+        context,
+      );
+    },
     async claim(
       request: AttemptExecutionClaimRequest,
     ): Promise<AttemptExecutionClaim> {
-      return canonicalExecutionClaim(await store.claim(request), provider);
+      const safeRequest = Object.freeze({
+        attemptId: request.attemptId,
+        fingerprint: request.fingerprint,
+        leaseMilliseconds: request.leaseMilliseconds,
+      });
+      const context = contexts.require(safeRequest);
+      return canonicalExecutionClaim(
+        await store.claim(safeRequest),
+        provider,
+        context,
+      );
     },
     complete(request: CompleteAttemptExecutionRequest) {
-      return store.complete(request);
+      return store.complete(
+        Object.freeze({
+          attemptId: request.attemptId,
+          fingerprint: request.fingerprint,
+          leaseToken: request.leaseToken,
+          completion: request.completion,
+        }),
+      );
     },
     release(request: ReleaseAttemptExecutionRequest) {
-      return store.release(request);
+      return store.release(
+        Object.freeze({
+          attemptId: request.attemptId,
+          fingerprint: request.fingerprint,
+          leaseToken: request.leaseToken,
+        }),
+      );
     },
   });
+}
+
+function retryDelayBounds(
+  context: ExpoExecutionContext,
+): readonly [minimum: number, maximum: number] {
+  return Object.freeze([
+    calculateRetryDelayMilliseconds(
+      context.attemptNumber,
+      context.retryPolicy,
+      () => 0,
+    ),
+    calculateRetryDelayMilliseconds(
+      context.attemptNumber,
+      context.retryPolicy,
+      () => 1,
+    ),
+  ]);
 }
 
 function exactDataProperties(
@@ -220,12 +434,13 @@ function exactDataProperties(
 function canonicalExecutionCompletion(
   value: unknown,
   provider: string,
+  context: ExpoExecutionContext,
 ): AttemptExecutionCompletion {
   const final = exactDataProperties(value, ['kind', 'outcome']);
   if (final?.kind === 'final') {
     return Object.freeze({
       kind: 'final',
-      outcome: canonicalExpoOutcome(final.outcome, provider),
+      outcome: canonicalStoredFinalOutcome(final.outcome, provider, context),
     });
   }
   const retry = exactDataProperties(value, [
@@ -236,13 +451,28 @@ function canonicalExecutionCompletion(
     'reasonCode',
   ]);
   if (retry?.kind === 'retry') {
+    const [minimumDelay, maximumDelay] = retryDelayBounds(context);
     if (
       !Number.isSafeInteger(retry.delayMilliseconds) ||
-      Number(retry.delayMilliseconds) < 1 ||
+      Number(retry.delayMilliseconds) < minimumDelay ||
+      Number(retry.delayMilliseconds) > maximumDelay ||
       !Number.isSafeInteger(retry.nextAttemptNumber) ||
-      Number(retry.nextAttemptNumber) < 2 ||
-      typeof retry.reasonCode !== 'string'
+      Number(retry.nextAttemptNumber) !== context.attemptNumber + 1 ||
+      Number(retry.nextAttemptNumber) > context.retryPolicy.maxAttempts ||
+      typeof retry.reasonCode !== 'string' ||
+      !EXPO_RETRY_REASONS.has(retry.reasonCode)
     ) {
+      throw new ProviderDispatchError(
+        EXPO_FORBIDDEN_DELIVERY_REASON,
+        'ambiguous',
+      );
+    }
+    const outcome = canonicalExpoOutcome(
+      retry.outcome,
+      provider,
+      'stored-retry',
+    );
+    if (outcome.reasonCode !== retry.reasonCode) {
       throw new ProviderDispatchError(
         EXPO_FORBIDDEN_DELIVERY_REASON,
         'ambiguous',
@@ -250,7 +480,7 @@ function canonicalExecutionCompletion(
     }
     return Object.freeze({
       kind: 'retry',
-      outcome: canonicalExpoOutcome(retry.outcome, provider),
+      outcome,
       delayMilliseconds: retry.delayMilliseconds as number,
       nextAttemptNumber: retry.nextAttemptNumber as number,
       reasonCode: retry.reasonCode as string,
@@ -259,9 +489,111 @@ function canonicalExecutionCompletion(
   throw new ProviderDispatchError(EXPO_FORBIDDEN_DELIVERY_REASON, 'ambiguous');
 }
 
+function canonicalStoredFinalOutcome(
+  value: unknown,
+  provider: string,
+  context: ExpoExecutionContext,
+): ProviderSendOutcome {
+  const outcome = canonicalExpoOutcome(value, provider, 'stored-final');
+  if (
+    outcome.reasonCode === 'PROVIDER_RETRY_EXHAUSTED' &&
+    context.attemptNumber < context.retryPolicy.maxAttempts
+  ) {
+    throw new ProviderDispatchError(
+      EXPO_FORBIDDEN_DELIVERY_REASON,
+      'ambiguous',
+    );
+  }
+  return outcome;
+}
+
+function canonicalExecutionLookup(
+  value: unknown,
+  provider: string,
+  context: ExpoExecutionContext,
+): AttemptExecutionLookup {
+  const missing = exactDataProperties(value, ['kind']);
+  if (missing?.kind === 'missing') return Object.freeze({ kind: 'missing' });
+  if (missing?.kind === 'in-progress') {
+    return Object.freeze({ kind: 'in-progress' });
+  }
+  const completed = exactDataProperties(value, ['kind', 'completion']);
+  if (completed?.kind === 'completed') {
+    return Object.freeze({
+      kind: 'completed',
+      completion: canonicalExecutionCompletion(
+        completed.completion,
+        provider,
+        context,
+      ),
+    });
+  }
+  throw new ProviderDispatchError(EXPO_FORBIDDEN_DELIVERY_REASON, 'ambiguous');
+}
+
+function canonicalExpoRecovery(
+  value: unknown,
+  provider: string,
+): ProviderRecoveryResult {
+  const terminal = exactDataProperties(value, ['kind']);
+  if (terminal?.kind === 'missing' || terminal?.kind === 'in-progress') {
+    return Object.freeze({ kind: terminal.kind });
+  }
+  const outcome = exactDataProperties(value, ['kind', 'outcome']);
+  if (outcome?.kind === 'outcome') {
+    return Object.freeze({
+      kind: 'outcome',
+      outcome: canonicalExpoOutcome(outcome.outcome, provider, 'adapter'),
+    });
+  }
+  const providerError = exactDataProperties(value, ['kind', 'error']);
+  if (providerError?.kind === 'provider-error') {
+    const rawError = providerError.error;
+    if (!(rawError instanceof ProviderDispatchError)) {
+      throw new ProviderDispatchError(
+        EXPO_FORBIDDEN_DELIVERY_REASON,
+        'ambiguous',
+      );
+    }
+    let code: unknown;
+    let disposition: unknown;
+    let diagnosticDigest: unknown;
+    try {
+      code = rawError.code;
+      disposition = rawError.disposition;
+      diagnosticDigest = rawError.diagnosticDigest;
+    } catch {
+      throw new ProviderDispatchError(
+        EXPO_FORBIDDEN_DELIVERY_REASON,
+        'ambiguous',
+      );
+    }
+    if (
+      typeof code !== 'string' ||
+      typeof disposition !== 'string' ||
+      diagnosticDigest !== null ||
+      EXPO_RECOVERY_FAILURE_DISPOSITIONS.get(code) !== disposition
+    ) {
+      throw new ProviderDispatchError(
+        EXPO_FORBIDDEN_DELIVERY_REASON,
+        'ambiguous',
+      );
+    }
+    return Object.freeze({
+      kind: 'provider-error',
+      error: new ProviderDispatchError(
+        code,
+        disposition as ProviderFailureDisposition,
+      ),
+    });
+  }
+  throw new ProviderDispatchError(EXPO_FORBIDDEN_DELIVERY_REASON, 'ambiguous');
+}
+
 function canonicalExecutionClaim(
   value: unknown,
   provider: string,
+  context: ExpoExecutionContext,
 ): AttemptExecutionClaim {
   const acquired = exactDataProperties(value, ['kind', 'leaseToken']);
   if (acquired?.kind === 'acquired') {
@@ -274,7 +606,11 @@ function canonicalExecutionClaim(
   if (completed?.kind === 'completed') {
     return Object.freeze({
       kind: 'completed',
-      completion: canonicalExecutionCompletion(completed.completion, provider),
+      completion: canonicalExecutionCompletion(
+        completed.completion,
+        provider,
+        context,
+      ),
     });
   }
   const inProgress = exactDataProperties(value, ['kind']);
@@ -351,6 +687,7 @@ export class ExpoPushWorker {
   readonly #processor: WorkerAttemptProcessor;
   readonly #invalidator: PushEndpointInvalidator;
   readonly #receiptScheduler: ExpoReceiptScheduler;
+  readonly #executionContexts: ExpoExecutionContextRegistry;
 
   public constructor(options: ExpoPushWorkerOptions) {
     if (
@@ -366,16 +703,19 @@ export class ExpoPushWorker {
     ) {
       throw new TypeError('Expo receipt scheduler is invalid.');
     }
+    const retryPolicy = parseRetryPolicy(
+      options.retryPolicy ?? DEFAULT_RETRY_POLICY,
+    );
+    this.#executionContexts = new ExpoExecutionContextRegistry(retryPolicy);
     this.#processor = new WorkerAttemptProcessor({
       adapter: failClosedExpoAdapter(options.adapter),
       executionStore: failClosedExecutionStore(
         options.executionStore,
         options.adapter.provider,
+        this.#executionContexts,
       ),
       evidenceWriter: options.evidenceWriter,
-      ...(options.retryPolicy === undefined
-        ? {}
-        : { retryPolicy: options.retryPolicy }),
+      retryPolicy,
       ...(options.leaseMilliseconds === undefined
         ? {}
         : { leaseMilliseconds: options.leaseMilliseconds }),
@@ -392,7 +732,13 @@ export class ExpoPushWorker {
     workValue: WorkerAttemptWorkItem | unknown,
   ): Promise<WorkerAttemptProcessResult> {
     const workItem = parseWorkerAttemptWorkItem(workValue);
-    const result = await this.#processor.process(workItem);
+    const unregister = this.#executionContexts.register(workItem);
+    let result: WorkerAttemptProcessResult;
+    try {
+      result = await this.#processor.process(workItem);
+    } finally {
+      unregister();
+    }
     if ('outcome' in result && result.outcome.state === 'delivered') {
       throw new TypeError('Expo push delivery truth is invalid.');
     }

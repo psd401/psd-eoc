@@ -7,6 +7,7 @@ import {
 } from '../shared/attempt';
 import type {
   AttemptIdempotentProviderAdapter,
+  ProviderRecoveryResult,
   ProviderSendOutcome,
   ProviderSendRequest,
 } from '../shared/processor';
@@ -79,6 +80,12 @@ export interface ClaimExpoProviderIoRequest {
   readonly workFingerprint: string;
 }
 
+export type ExpoSendLedgerLookup =
+  | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'completed'; completion: ExpoSendLedgerCompletion }>
+  | Readonly<{ kind: 'uncertain' }>
+  | Readonly<{ kind: 'conflict' }>;
+
 export interface CompleteExpoProviderIoRequest
   extends ClaimExpoProviderIoRequest {
   readonly claimToken: string;
@@ -93,6 +100,10 @@ export interface CompleteExpoProviderIoRequest
  * whether a completed provider-I/O record already exists.
  */
 export interface DurableExpoSendLedger {
+  /** Read-only recovery never grants a new provider-I/O permit. */
+  lookupProviderIo(
+    request: ClaimExpoProviderIoRequest,
+  ): Promise<ExpoSendLedgerLookup>;
   claimProviderIo(
     request: ClaimExpoProviderIoRequest,
   ): Promise<ExpoSendLedgerClaim>;
@@ -347,6 +358,28 @@ function parseLedgerClaim(
   throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
 }
 
+function parseLedgerLookup(
+  value: unknown,
+  attemptId: string,
+): ExpoSendLedgerLookup {
+  const completed = exactDataProperties(value, ['completion', 'kind']);
+  if (completed?.kind === 'completed') {
+    return Object.freeze({
+      kind: 'completed',
+      completion: parseLedgerCompletion(completed.completion, attemptId),
+    });
+  }
+  const terminal = exactDataProperties(value, ['kind']);
+  if (
+    terminal?.kind === 'missing' ||
+    terminal?.kind === 'uncertain' ||
+    terminal?.kind === 'conflict'
+  ) {
+    return Object.freeze({ kind: terminal.kind });
+  }
+  throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_INVALID');
+}
+
 function outcomeFromExpo(value: ExpoProviderOutcome): ProviderSendOutcome {
   return Object.freeze({
     state: value.state,
@@ -470,18 +503,54 @@ export class LedgeredExpoPushAdapter
     this.#clock = options.clock ?? Date.now;
   }
 
+  /** Read-only recovery runs before the outer live-provider authorization. */
+  public async recover(
+    request: ProviderSendRequest,
+  ): Promise<ProviderRecoveryResult> {
+    const workItem = this.#parseRequest(request);
+    let lookup: ExpoSendLedgerLookup;
+    try {
+      lookup = parseLedgerLookup(
+        await this.#ledger.lookupProviderIo({
+          attemptId: workItem.attempt.id,
+          workFingerprint: workerAttemptFingerprint(workItem),
+        }),
+        workItem.attempt.id,
+      );
+    } catch (error) {
+      if (error instanceof LedgeredExpoPushAdapterError) throw error;
+      throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_FAILED');
+    }
+    if (lookup.kind === 'completed') {
+      if (lookup.completion.kind === 'outcome') {
+        return Object.freeze({
+          kind: 'outcome',
+          outcome: lookup.completion.outcome,
+        });
+      }
+      return Object.freeze({
+        kind: 'provider-error',
+        error: new ProviderDispatchError(
+          lookup.completion.failure.code,
+          lookup.completion.failure.disposition,
+          lookup.completion.failure.diagnosticDigest,
+        ),
+      });
+    }
+    if (lookup.kind === 'missing') return Object.freeze({ kind: 'missing' });
+    if (lookup.kind === 'uncertain') {
+      return Object.freeze({
+        kind: 'outcome',
+        outcome: unknownSendOutcome(),
+      });
+    }
+    throw new LedgeredExpoPushAdapterError('EXPO_SEND_LEDGER_CONFLICT');
+  }
+
   public async send(
     request: ProviderSendRequest,
   ): Promise<ProviderSendOutcome> {
-    const workItem = parseWorkerAttemptWorkItem(request.workItem);
-    if (
-      request.idempotencyKey !== workItem.attempt.id ||
-      workItem.batch.integrationStatus.integrationId !== this.integrationId ||
-      workItem.batch.integrationStatus.label !== this.truthLabel ||
-      workItem.batch.rosterPopulation !== 'staff'
-    ) {
-      throw new LedgeredExpoPushAdapterError('EXPO_SEND_REQUEST_INVALID');
-    }
+    const workItem = this.#parseRequest(request);
     const workFingerprint = workerAttemptFingerprint(workItem);
     let rawClaim: unknown;
     try {
@@ -524,6 +593,24 @@ export class LedgeredExpoPushAdapter
       return throwFailure(completion.failure);
     }
     return completion.outcome;
+  }
+
+  #parseRequest(request: ProviderSendRequest): WorkerAttemptWorkItem {
+    let workItem: WorkerAttemptWorkItem;
+    try {
+      workItem = parseWorkerAttemptWorkItem(request.workItem);
+    } catch {
+      throw new LedgeredExpoPushAdapterError('EXPO_SEND_REQUEST_INVALID');
+    }
+    if (
+      request.idempotencyKey !== workItem.attempt.id ||
+      workItem.batch.integrationStatus.integrationId !== this.integrationId ||
+      workItem.batch.integrationStatus.label !== this.truthLabel ||
+      workItem.batch.rosterPopulation !== 'staff'
+    ) {
+      throw new LedgeredExpoPushAdapterError('EXPO_SEND_REQUEST_INVALID');
+    }
+    return workItem;
   }
 
   #enqueueProviderIo(
@@ -617,7 +704,8 @@ export class LedgeredExpoPushAdapter
         try {
           if (
             !Array.isArray(rawOutcomes) ||
-            rawOutcomes.length !== fresh.length
+            Object.getOwnPropertyDescriptor(rawOutcomes, 'length')?.value !==
+              fresh.length
           ) {
             throw new TypeError('Expo send outcomes are invalid.');
           }
@@ -625,7 +713,18 @@ export class LedgeredExpoPushAdapter
             { length: fresh.length },
             (_unused, index) => {
               try {
-                return safeCompletionFromExpoOutcome(rawOutcomes[index]);
+                const descriptor = Object.getOwnPropertyDescriptor(
+                  rawOutcomes,
+                  String(index),
+                );
+                if (
+                  descriptor === undefined ||
+                  descriptor.enumerable !== true ||
+                  !Object.hasOwn(descriptor, 'value')
+                ) {
+                  throw new TypeError('Expo send outcome slot is invalid.');
+                }
+                return safeCompletionFromExpoOutcome(descriptor.value);
               } catch {
                 return Object.freeze({
                   kind: 'outcome' as const,
@@ -634,6 +733,38 @@ export class LedgeredExpoPushAdapter
               }
             },
           );
+          const acceptedReferences = new Map<string, number[]>();
+          freshCompletions.forEach((completion, index) => {
+            if (
+              completion.kind === 'outcome' &&
+              completion.outcome.state === 'provider-accepted' &&
+              completion.outcome.providerReference !== null
+            ) {
+              const indexes =
+                acceptedReferences.get(completion.outcome.providerReference) ??
+                [];
+              indexes.push(index);
+              acceptedReferences.set(
+                completion.outcome.providerReference,
+                indexes,
+              );
+            }
+          });
+          const duplicateIndexes = new Set(
+            Array.from(acceptedReferences.values())
+              .filter((indexes) => indexes.length > 1)
+              .flat(),
+          );
+          if (duplicateIndexes.size > 0) {
+            freshCompletions = freshCompletions.map((completion, index) =>
+              duplicateIndexes.has(index)
+                ? Object.freeze({
+                    kind: 'outcome' as const,
+                    outcome: unknownSendOutcome(),
+                  })
+                : completion,
+            );
+          }
         } catch {
           // Provider I/O returned successfully, so failures while validating
           // the untrusted result container are ambiguous and never retryable.
