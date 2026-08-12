@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import {
   ACTIVATION_PREVIEW_MAX_AGE_SECONDS,
   ActivationPreviewSchema,
+  DrillRecordPageSchema,
+  DrillRecordSchema,
   EventSchema,
   FacilitySchema,
   HUMAN_CONFIRMATION_MAX_AGE_SECONDS,
@@ -19,6 +21,8 @@ import {
   type ActivationPreview,
   type CapabilityInput,
   type CapabilityOutput,
+  type DrillRecord,
+  type DrillRecordPage,
   type Event,
   type Facility,
   type HumanConfirmationRecord,
@@ -27,7 +31,25 @@ import {
   type LifecycleConsequencePreview,
   type RegisteredCapabilityId,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  lt,
+  lte,
+  ne,
+  notExists,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 
 import {
   createDatabaseClient,
@@ -80,6 +102,12 @@ import {
 import type { AuthenticatedSession } from '../auth/sessions';
 import { renderTemplateSet } from '../notify/render';
 import { deriveCloseConsequenceDigest } from './events';
+import type { DrillRecordCsvRow } from './records/csv';
+import type { EventSummarySnapshot } from './records/pdf';
+import {
+  loadDrillRecordsExportSnapshot,
+  loadEventSummarySnapshot,
+} from './records/snapshot';
 
 /** Event state and the next append position held under the event-row lock. */
 export interface LockedJournalEvent {
@@ -106,6 +134,21 @@ export interface JournalCapabilityTransaction
   listJournalEntries(
     input: CapabilityInput<'list-journal-entries'>,
   ): Promise<JournalEntryPage>;
+  searchJournalEntries(
+    input: CapabilityInput<'search-journal-entries'>,
+    scope: TrustedCapabilityInvocation['scope'],
+  ): Promise<JournalEntryPage>;
+  listDrillRecords(
+    input: CapabilityInput<'list-drill-records'>,
+    scope: TrustedCapabilityInvocation['scope'],
+  ): Promise<DrillRecordPage>;
+  loadDrillRecordsExportSnapshot(
+    input: CapabilityInput<'export-drill-records'>,
+  ): Promise<readonly DrillRecordCsvRow[]>;
+  loadEventSummarySnapshot(
+    eventId: string,
+    generatedAt: string,
+  ): Promise<EventSummarySnapshot>;
   getFacility(facilityId: string): Promise<Facility | null>;
   createLifecycleConsequencePreview(
     input: CapabilityInput<'create-lifecycle-consequence-preview'>,
@@ -133,6 +176,7 @@ export type JournalCapabilityId = Extract<
   | 'correct-journal-entry'
   | 'redact-journal-entry'
   | 'list-journal-entries'
+  | 'search-journal-entries'
   | 'create-lifecycle-consequence-preview'
   | 'get-facility'
 >;
@@ -140,6 +184,8 @@ export type JournalCapabilityId = Extract<
 const EVENT_FACILITY_CACHE_PREFIX = 'journal:event-facility:';
 const LOCKED_EVENT_CACHE_PREFIX = 'journal:locked-event:';
 const JOURNAL_CURSOR_VERSION = 1;
+const JOURNAL_SEARCH_CURSOR_VERSION = 1;
+const DRILL_RECORD_CURSOR_VERSION = 1;
 
 function notFound(message = 'The event was not found.'): CapabilityEngineError {
   return new CapabilityEngineError(
@@ -345,6 +391,20 @@ interface JournalCursorPayload {
   readonly s: number;
 }
 
+interface JournalSearchCursorPayload {
+  readonly v: 1;
+  readonly t: string;
+  readonly i: string;
+  readonly f: string;
+}
+
+interface DrillRecordCursorPayload {
+  readonly v: 1;
+  readonly t: string;
+  readonly i: string;
+  readonly f: string;
+}
+
 /**
  * Creates an opaque event-bound resume token after an observed sequence.
  * Unlike pageInfo.nextCursor, this remains useful at the live edge for polling.
@@ -394,6 +454,153 @@ function decodeJournalCursor(cursor: string | null, eventId: string): number {
     return Number(Reflect.get(parsed, 's'));
   } catch {
     throw invalid('The journal cursor is invalid for this event.');
+  }
+}
+
+function journalSearchFingerprint(
+  input: CapabilityInput<'search-journal-entries'>,
+  scope: TrustedCapabilityInvocation['scope'],
+): string {
+  return digestCapabilityValue({
+    input: { ...input, cursor: null, limit: 1 },
+    facilityScope:
+      scope.facilityScope.kind === 'district'
+        ? scope.facilityScope
+        : {
+            kind: scope.facilityScope.kind,
+            facilityIds: [...scope.facilityScope.facilityIds].sort(),
+          },
+  });
+}
+
+function createJournalSearchCursor(
+  input: CapabilityInput<'search-journal-entries'>,
+  scope: TrustedCapabilityInvocation['scope'],
+  row: Pick<typeof journalEntries.$inferSelect, 'id' | 'serverTime'>,
+): string {
+  return PaginationCursorSchema.parse(
+    Buffer.from(
+      JSON.stringify({
+        v: JOURNAL_SEARCH_CURSOR_VERSION,
+        t: dateIso(row.serverTime),
+        i: UuidSchema.parse(row.id),
+        f: journalSearchFingerprint(input, scope),
+      } satisfies JournalSearchCursorPayload),
+      'utf8',
+    ).toString('base64url'),
+  );
+}
+
+function decodeJournalSearchCursor(
+  input: CapabilityInput<'search-journal-entries'>,
+  scope: TrustedCapabilityInvocation['scope'],
+): Readonly<{ serverTime: Date; entryId: string }> | null {
+  if (input.cursor === null) {
+    return null;
+  }
+  try {
+    const parsedCursor = PaginationCursorSchema.parse(input.cursor);
+    const decodedText = Buffer.from(parsedCursor, 'base64url').toString('utf8');
+    if (
+      Buffer.from(decodedText, 'utf8').toString('base64url') !== parsedCursor
+    ) {
+      throw new TypeError('invalid cursor');
+    }
+    const value: unknown = JSON.parse(decodedText);
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value) ||
+      Reflect.get(value, 'v') !== JOURNAL_SEARCH_CURSOR_VERSION ||
+      !UuidSchema.safeParse(Reflect.get(value, 'i')).success ||
+      typeof Reflect.get(value, 't') !== 'string' ||
+      !Number.isFinite(Date.parse(String(Reflect.get(value, 't')))) ||
+      Reflect.get(value, 'f') !== journalSearchFingerprint(input, scope) ||
+      Object.keys(value).sort().join(',') !== 'f,i,t,v'
+    ) {
+      throw new TypeError('invalid cursor');
+    }
+    return Object.freeze({
+      serverTime: new Date(String(Reflect.get(value, 't'))),
+      entryId: UuidSchema.parse(Reflect.get(value, 'i')),
+    });
+  } catch {
+    throw invalid('The journal search cursor is invalid for this query.');
+  }
+}
+
+function drillRecordFingerprint(
+  input: CapabilityInput<'list-drill-records'>,
+  scope: TrustedCapabilityInvocation['scope'],
+): string {
+  return digestCapabilityValue({
+    input: { ...input, cursor: null, limit: 1 },
+    facilityScope:
+      scope.facilityScope.kind === 'district'
+        ? scope.facilityScope
+        : {
+            kind: scope.facilityScope.kind,
+            facilityIds: [...scope.facilityScope.facilityIds].sort(),
+          },
+  });
+}
+
+function createDrillRecordCursor(
+  input: CapabilityInput<'list-drill-records'>,
+  scope: TrustedCapabilityInvocation['scope'],
+  event: Pick<typeof events.$inferSelect, 'id' | 'activatedAt'>,
+): string {
+  if (event.activatedAt === null) {
+    throw conflict('An activated drill record is missing its start time.');
+  }
+  return PaginationCursorSchema.parse(
+    Buffer.from(
+      JSON.stringify({
+        v: DRILL_RECORD_CURSOR_VERSION,
+        t: dateIso(event.activatedAt),
+        i: UuidSchema.parse(event.id),
+        f: drillRecordFingerprint(input, scope),
+      } satisfies DrillRecordCursorPayload),
+      'utf8',
+    ).toString('base64url'),
+  );
+}
+
+function decodeDrillRecordCursor(
+  input: CapabilityInput<'list-drill-records'>,
+  scope: TrustedCapabilityInvocation['scope'],
+): Readonly<{ startedAt: Date; eventId: string }> | null {
+  if (input.cursor === null) {
+    return null;
+  }
+  try {
+    const parsedCursor = PaginationCursorSchema.parse(input.cursor);
+    const decodedText = Buffer.from(parsedCursor, 'base64url').toString('utf8');
+    if (
+      Buffer.from(decodedText, 'utf8').toString('base64url') !== parsedCursor
+    ) {
+      throw new TypeError('invalid cursor');
+    }
+    const value: unknown = JSON.parse(decodedText);
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value) ||
+      Reflect.get(value, 'v') !== DRILL_RECORD_CURSOR_VERSION ||
+      !UuidSchema.safeParse(Reflect.get(value, 'i')).success ||
+      typeof Reflect.get(value, 't') !== 'string' ||
+      !Number.isFinite(Date.parse(String(Reflect.get(value, 't')))) ||
+      Reflect.get(value, 'f') !== drillRecordFingerprint(input, scope) ||
+      Object.keys(value).sort().join(',') !== 'f,i,t,v'
+    ) {
+      throw new TypeError('invalid cursor');
+    }
+    return Object.freeze({
+      startedAt: new Date(String(Reflect.get(value, 't'))),
+      eventId: UuidSchema.parse(Reflect.get(value, 'i')),
+    });
+  } catch {
+    throw invalid('The drill-record cursor is invalid for this query.');
   }
 }
 
@@ -901,6 +1108,23 @@ export const listJournalEntriesRegistration: ServerCapabilityRegistration<
   },
 };
 
+export const searchJournalEntriesRegistration: ServerCapabilityRegistration<
+  'search-journal-entries',
+  JournalCapabilityTransaction
+> = {
+  id: 'search-journal-entries',
+  resolveFacilityId: (input, context) =>
+    input.eventId === null ? null : eventFacilityId(input.eventId, context),
+  async handler(input, context): Promise<JournalEntryPage> {
+    return JournalEntryPageSchema.parse(
+      await context.transaction.searchJournalEntries(
+        input,
+        context.invocation.scope,
+      ),
+    );
+  },
+};
+
 export const createLifecycleConsequencePreviewRegistration: ServerCapabilityRegistration<
   'create-lifecycle-consequence-preview',
   JournalCapabilityTransaction
@@ -940,6 +1164,7 @@ const registrations = Object.freeze({
   'correct-journal-entry': correctJournalEntryRegistration,
   'redact-journal-entry': redactJournalEntryRegistration,
   'list-journal-entries': listJournalEntriesRegistration,
+  'search-journal-entries': searchJournalEntriesRegistration,
   'create-lifecycle-consequence-preview':
     createLifecycleConsequencePreviewRegistration,
   'get-facility': getFacilityRegistration,
@@ -1332,6 +1557,229 @@ async function listJournalEntriesFromDatabase(
   });
 }
 
+function journalMessageContains(query: string): SQL {
+  return sql`strpos(
+    lower(
+      case
+        when ${journalEntries.kind} = 'text'
+          then coalesce(${journalEntries.payload} ->> 'text', '')
+        when ${journalEntries.kind} = 'photo'
+          then concat_ws(' ', ${journalEntries.payload} ->> 'altText', ${journalEntries.payload} ->> 'caption')
+        when ${journalEntries.kind} = 'location'
+          then concat_ws(' ', ${journalEntries.payload} ->> 'label', ${journalEntries.payload} ->> 'reason')
+        when ${journalEntries.kind} = 'system'
+          then concat_ws(' ', ${journalEntries.payload} ->> 'summary', ${journalEntries.payload} ->> 'code')
+        else ''
+      end
+    ),
+    lower(${query})
+  ) > 0`;
+}
+
+async function searchJournalEntriesFromDatabase(
+  database: JournalQueryDatabase,
+  input: CapabilityInput<'search-journal-entries'>,
+  scope: TrustedCapabilityInvocation['scope'],
+): Promise<JournalEntryPage> {
+  const cursor = decodeJournalSearchCursor(input, scope);
+  const conditions: SQL[] = [];
+  if (input.eventId !== null) {
+    conditions.push(eq(journalEntries.eventId, input.eventId));
+  }
+  if (scope.facilityScope.kind === 'facilities') {
+    conditions.push(
+      inArray(events.facilityId, scope.facilityScope.facilityIds),
+    );
+  }
+  if (input.kind !== null) {
+    conditions.push(eq(journalEntries.kind, input.kind));
+  }
+  if (input.occurredFrom !== null) {
+    conditions.push(
+      gte(journalEntries.serverTime, new Date(input.occurredFrom)),
+    );
+  }
+  if (input.occurredThrough !== null) {
+    conditions.push(
+      lte(journalEntries.serverTime, new Date(input.occurredThrough)),
+    );
+  }
+  if (cursor !== null) {
+    conditions.push(
+      or(
+        gt(journalEntries.serverTime, cursor.serverTime),
+        and(
+          eq(journalEntries.serverTime, cursor.serverTime),
+          gt(journalEntries.id, cursor.entryId),
+        ),
+      ) as SQL,
+    );
+  }
+
+  const redactions = alias(journalEntries, 'journal_search_redactions');
+  const redactionQuery = () =>
+    database
+      .select({ id: redactions.id })
+      .from(redactions)
+      .where(
+        and(
+          eq(redactions.eventId, journalEntries.eventId),
+          eq(redactions.supersedesEntryId, journalEntries.id),
+          eq(redactions.supersedesEntrySequence, journalEntries.sequence),
+          eq(redactions.supersessionKind, 'redaction'),
+        ),
+      );
+  if (input.query !== null) {
+    // Match only entries whose payload was outward-visible in the same SQL
+    // snapshot. A redacted original therefore cannot act as a search oracle.
+    conditions.push(journalMessageContains(input.query));
+    conditions.push(notExists(redactionQuery()));
+  }
+
+  const rows = await database
+    .select({
+      entry: journalEntries,
+      redacted: exists(redactionQuery()),
+    })
+    .from(journalEntries)
+    .innerJoin(events, eq(events.id, journalEntries.eventId))
+    .where(conditions.length === 0 ? undefined : and(...conditions))
+    .orderBy(asc(journalEntries.serverTime), asc(journalEntries.id))
+    .limit(input.limit + 1);
+  const hasMore = rows.length > input.limit;
+  const visibleRows = rows.slice(0, input.limit);
+  const last = visibleRows.at(-1)?.entry;
+  return JournalEntryPageSchema.parse({
+    items: visibleRows.map((row) =>
+      projectJournalEntryForRead(
+        journalFromRow(row.entry),
+        row.redacted === true,
+      ),
+    ),
+    pageInfo: {
+      hasMore,
+      nextCursor:
+        hasMore && last !== undefined
+          ? createJournalSearchCursor(input, scope, last)
+          : null,
+    },
+  });
+}
+
+interface DrillRecordDatabaseRow {
+  readonly event: typeof events.$inferSelect;
+  readonly eventTypeName: string;
+  readonly eventTypeTemplateMode: 'real' | 'drill';
+}
+
+function drillRecordFromDatabaseRow(row: DrillRecordDatabaseRow): DrillRecord {
+  const { event } = row;
+  if (
+    (event.kind !== 'drill' && event.kind !== 'test') ||
+    event.templateMode !== 'drill' ||
+    row.eventTypeTemplateMode !== 'drill' ||
+    event.status === 'draft' ||
+    event.activatedAt === null
+  ) {
+    throw new CapabilityEngineError(
+      'INTERNAL_ERROR',
+      'PERSISTENCE_CONFLICT',
+      'Persisted drill-record classification is inconsistent.',
+      500,
+    );
+  }
+  return DrillRecordSchema.parse({
+    id: event.id,
+    eventId: event.id,
+    facilityId: event.facilityId,
+    kind: event.kind,
+    eventTypeVersion: {
+      id: event.eventTypeVersionId,
+      templateMode: 'drill',
+    },
+    eventTypeName: row.eventTypeName,
+    status: event.status,
+    startedAt: dateIso(event.activatedAt),
+    allClearAt: event.allClearAt === null ? null : dateIso(event.allClearAt),
+    reactivatedAt:
+      event.reactivatedAt === null ? null : dateIso(event.reactivatedAt),
+    closedAt: event.closedAt === null ? null : dateIso(event.closedAt),
+  });
+}
+
+async function listDrillRecordsFromDatabase(
+  database: JournalQueryDatabase,
+  input: CapabilityInput<'list-drill-records'>,
+  scope: TrustedCapabilityInvocation['scope'],
+): Promise<DrillRecordPage> {
+  const cursor = decodeDrillRecordCursor(input, scope);
+  const conditions: SQL[] = [
+    inArray(events.kind, ['drill', 'test']),
+    eq(events.templateMode, 'drill'),
+    eq(eventTypeVersions.templateMode, 'drill'),
+    ne(events.status, 'draft'),
+    isNotNull(events.activatedAt),
+  ];
+  if (input.facilityId !== null) {
+    conditions.push(eq(events.facilityId, input.facilityId));
+  } else if (scope.facilityScope.kind === 'facilities') {
+    conditions.push(
+      inArray(events.facilityId, scope.facilityScope.facilityIds),
+    );
+  }
+  if (input.startedFrom !== null) {
+    conditions.push(gte(events.activatedAt, new Date(input.startedFrom)));
+  }
+  if (input.startedThrough !== null) {
+    conditions.push(lte(events.activatedAt, new Date(input.startedThrough)));
+  }
+  if (input.eventTypeId !== null) {
+    conditions.push(eq(eventTypeVersions.eventTypeId, input.eventTypeId));
+  }
+  if (cursor !== null) {
+    conditions.push(
+      or(
+        lt(events.activatedAt, cursor.startedAt),
+        and(
+          eq(events.activatedAt, cursor.startedAt),
+          gt(events.id, cursor.eventId),
+        ),
+      ) as SQL,
+    );
+  }
+
+  const rows = await database
+    .select({
+      event: events,
+      eventTypeName: eventTypeVersions.name,
+      eventTypeTemplateMode: eventTypeVersions.templateMode,
+    })
+    .from(events)
+    .innerJoin(
+      eventTypeVersions,
+      and(
+        eq(eventTypeVersions.id, events.eventTypeVersionId),
+        eq(eventTypeVersions.templateMode, events.templateMode),
+      ),
+    )
+    .where(and(...conditions))
+    .orderBy(desc(events.activatedAt), asc(events.id))
+    .limit(input.limit + 1);
+  const hasMore = rows.length > input.limit;
+  const visibleRows = rows.slice(0, input.limit);
+  const last = visibleRows.at(-1)?.event;
+  return DrillRecordPageSchema.parse({
+    items: visibleRows.map(drillRecordFromDatabaseRow),
+    pageInfo: {
+      hasMore,
+      nextCursor:
+        hasMore && last !== undefined
+          ? createDrillRecordCursor(input, scope, last)
+          : null,
+    },
+  });
+}
+
 const INTEGRATION_BY_CHANNEL = Object.freeze({
   push: 'expo-push',
   email: 'ses-email',
@@ -1717,6 +2165,14 @@ function createDrizzleJournalTransaction(
     },
     listJournalEntries: (input) =>
       listJournalEntriesFromDatabase(database, input),
+    searchJournalEntries: (input, scope) =>
+      searchJournalEntriesFromDatabase(database, input, scope),
+    listDrillRecords: (input, scope) =>
+      listDrillRecordsFromDatabase(database, input, scope),
+    loadDrillRecordsExportSnapshot: (input) =>
+      loadDrillRecordsExportSnapshot(database, input),
+    loadEventSummarySnapshot: (eventId, generatedAt) =>
+      loadEventSummarySnapshot(database, eventId, generatedAt),
     getFacility: (facilityId) => getFacilityFromDatabase(database, facilityId),
     createLifecycleConsequencePreview: (input) =>
       createLifecycleConsequencePreviewFromDatabase(database, input),
@@ -1743,6 +2199,34 @@ export function createDrizzleJournalCapabilityStore(
         operation(
           createDrizzleJournalTransaction(journalQueryDatabase(transaction)),
         ),
+      );
+    },
+    appendCapabilityAudit(event) {
+      return database.transaction(async (transaction) =>
+        appendCapabilityAuditEntry(journalQueryDatabase(transaction), event),
+      );
+    },
+  };
+}
+
+/**
+ * Creates the records/report store with one repeatable-read snapshot. The
+ * transaction remains read-write solely so the canonical success audit can be
+ * appended atomically; report assembly never updates operational truth.
+ */
+export function createDrizzleRecordsCapabilityStore(
+  database: Database,
+): JournalCapabilityStore {
+  return {
+    transaction<Result>(
+      operation: (transaction: JournalCapabilityTransaction) => Promise<Result>,
+    ): Promise<Result> {
+      return database.transaction(
+        async (transaction) =>
+          operation(
+            createDrizzleJournalTransaction(journalQueryDatabase(transaction)),
+          ),
+        { isolationLevel: 'repeatable read', accessMode: 'read write' },
       );
     },
     appendCapabilityAudit(event) {

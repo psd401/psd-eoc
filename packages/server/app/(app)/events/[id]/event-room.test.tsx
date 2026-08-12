@@ -5,6 +5,7 @@ import {
   projectJournalEntryForRead,
   type Event,
   type JournalEntry,
+  type LocationPayload,
 } from '@psd-eoc/contracts';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -12,6 +13,7 @@ import {
   EventRoom,
   PrivatePhotoLoadCoordinator,
   eventRoomPollDelay,
+  locationPayloadFromDraft,
 } from './event-room';
 
 const IDS = {
@@ -31,6 +33,10 @@ const IDS = {
   photo: '10000000-0000-4000-8000-000000000014',
   media: '10000000-0000-4000-8000-000000000015',
   photoRedaction: '10000000-0000-4000-8000-000000000016',
+  knownLocation: '10000000-0000-4000-8000-000000000017',
+  ambiguousLocation: '10000000-0000-4000-8000-000000000018',
+  unknownLocation: '10000000-0000-4000-8000-000000000019',
+  correctedLocation: '10000000-0000-4000-8000-000000000020',
 } as const;
 
 const ACTOR = {
@@ -141,6 +147,30 @@ function historicalPhotoEntry(sequence: number): JournalEntry {
   });
 }
 
+function locationEntry(
+  input: Readonly<{
+    id: string;
+    sequence: number;
+    payload: LocationPayload;
+    supersedes?: JournalEntry['supersedes'];
+  }>,
+): JournalEntry {
+  return JournalEntrySchema.parse({
+    id: input.id,
+    eventId: IDS.event,
+    sequence: input.sequence,
+    author: ACTOR,
+    source: 'web',
+    serverTime: new Date(
+      Date.parse('2026-08-10T16:00:00.000Z') + input.sequence * 60_000,
+    ).toISOString(),
+    clientTime: '2026-08-10T16:00:30.000Z',
+    supersedes: input.supersedes ?? null,
+    kind: 'location',
+    payload: input.payload,
+  });
+}
+
 const ENTRIES = [
   textEntry({
     id: IDS.original,
@@ -200,6 +230,7 @@ function render(
       eventTypeLabel={
         event.templateMode === 'real' ? 'Lockdown' : 'Lockdown Drill'
       }
+      exportSummaryPath={`/records/export/events/${encodeURIComponent(event.id)}`}
       facilityLabel="Synthetic North Campus"
       initialCursor="eyJ2IjoxfQ"
       initialEntries={entries.map((entry) =>
@@ -270,6 +301,181 @@ describe('event room server-rendered safety and history state', () => {
     expect(eventRoomPollDelay(99, 1)).toBe(30_000);
   });
 
+  test('builds only canonical explicit location states from editor drafts', () => {
+    expect(
+      locationPayloadFromDraft({
+        state: 'known',
+        latitude: '47.385612',
+        longitude: '-122.622407',
+        accuracyMeters: '23.4',
+        label: ' North staff entrance ',
+        reason: '',
+      }),
+    ).toEqual({
+      state: 'known',
+      latitude: 47.385612,
+      longitude: -122.622407,
+      accuracyMeters: 23.4,
+      label: 'North staff entrance',
+    });
+    expect(
+      locationPayloadFromDraft({
+        state: 'known',
+        latitude: '47.385612',
+        longitude: '-122.622407',
+        accuracyMeters: '',
+        label: '',
+        reason: '',
+      }),
+    ).toBeNull();
+    expect(
+      locationPayloadFromDraft({
+        state: 'ambiguous',
+        latitude: '',
+        longitude: '',
+        accuracyMeters: '',
+        label: ' Near the west field ',
+        reason: ' Two possible assembly points ',
+      }),
+    ).toEqual({
+      state: 'ambiguous',
+      label: 'Near the west field',
+      reason: 'Two possible assembly points',
+    });
+    expect(
+      locationPayloadFromDraft({
+        state: 'unknown',
+        latitude: '',
+        longitude: '',
+        accuracyMeters: '',
+        label: '',
+        reason: ' Reporter could not verify a location ',
+      }),
+    ).toEqual({
+      state: 'unknown',
+      reason: 'Reporter could not verify a location',
+    });
+  });
+
+  test('renders permanent text equivalents for known, ambiguous, and unknown locations', () => {
+    const known = locationEntry({
+      id: IDS.knownLocation,
+      sequence: 5,
+      payload: {
+        state: 'known',
+        latitude: 47.385612,
+        longitude: -122.622407,
+        accuracyMeters: 23.4,
+        label: 'North staff entrance',
+      },
+    });
+    const ambiguous = locationEntry({
+      id: IDS.ambiguousLocation,
+      sequence: 6,
+      payload: {
+        state: 'ambiguous',
+        label: 'Near the west field',
+        reason: 'Two possible assembly points',
+      },
+    });
+    const unknown = locationEntry({
+      id: IDS.unknownLocation,
+      sequence: 7,
+      payload: {
+        state: 'unknown',
+        reason: 'Reporter could not verify a location',
+      },
+    });
+    const secondKnown = locationEntry({
+      id: IDS.correctedLocation,
+      sequence: 8,
+      payload: {
+        state: 'known',
+        latitude: 47.386,
+        longitude: -122.623,
+        accuracyMeters: 40,
+        label: null,
+      },
+    });
+    const html = render(activeEvent('real'), [
+      known,
+      ambiguous,
+      unknown,
+      secondKnown,
+    ]);
+
+    expect(html).toContain(
+      'North staff entrance: latitude 47.385612, longitude -122.622407; GPS accuracy radius ±23.4 meters.',
+    );
+    expect(html).toContain(
+      'Browser GPS does not establish room-level location.',
+    );
+    expect(
+      html.match(/<time dateTime="2026-08-10T16:05:00\.000Z">[^<]+<\/time>/gu),
+    ).toHaveLength(1);
+    expect(html).not.toContain('Server-recorded time:');
+    expect(html).toContain('Ambiguous location: Near the west field.');
+    expect(html).toContain('Reason: Two possible assembly points.');
+    expect(html).toContain('Location unknown.');
+    expect(html).toContain('Reason: Reporter could not verify a location.');
+    expect(
+      html.match(/Coordinates and accuracy are unavailable\./gu),
+    ).toHaveLength(2);
+    expect(html).toContain('Show map for entry 5');
+    expect(html).toContain('Show map for entry 8');
+    expect(html.match(/Show map for entry/gu)).toHaveLength(2);
+    expect(html).not.toContain('location-map-frame');
+    expect(html).not.toContain('Posted location pin and accuracy radius');
+  });
+
+  test('keeps posted locations immutable and offers append-only correction', () => {
+    const known = locationEntry({
+      id: IDS.knownLocation,
+      sequence: 5,
+      payload: {
+        state: 'known',
+        latitude: 47.385612,
+        longitude: -122.622407,
+        accuracyMeters: 23.4,
+        label: 'North staff entrance',
+      },
+    });
+    const correction = locationEntry({
+      id: IDS.correctedLocation,
+      sequence: 6,
+      payload: {
+        state: 'ambiguous',
+        label: 'North side of campus',
+        reason: 'Device evidence did not distinguish two entrances',
+      },
+      supersedes: {
+        entryId: IDS.knownLocation,
+        entrySequence: 5,
+        kind: 'correction',
+        reason: 'Reduced precision to match verified evidence.',
+      },
+    });
+
+    const originalHtml = render(activeEvent('real'), [known]);
+    expect(originalHtml).toContain('Correct entry 5');
+    expect(originalHtml).toContain('Post a location');
+    expect(originalHtml).toContain('Known coordinates');
+    expect(originalHtml).toContain('Ambiguous location');
+    expect(originalHtml).toContain('Unknown location');
+
+    const correctedHtml = render(activeEvent('real'), [known, correction]);
+    expect(correctedHtml).toContain(
+      'This original entry was superseded, not deleted.',
+    );
+    expect(correctedHtml).toContain(
+      'Reduced precision to match verified evidence.',
+    );
+    expect(correctedHtml).toContain(
+      'Device evidence did not distinguish two entrances',
+    );
+    expect(correctedHtml).not.toContain('Correct entry 5');
+  });
+
   test('renders real and drill classification with words and symbols, not color alone', () => {
     const real = render(activeEvent('real'), []);
     const drill = render(activeEvent('drill'), []);
@@ -282,6 +488,10 @@ describe('event room server-rendered safety and history state', () => {
     expect(drill).not.toContain('REAL INCIDENT');
     expect(real).toContain('aria-hidden="true"');
     expect(drill).toContain('aria-hidden="true"');
+    expect(real).toContain('Download PDF summary');
+    expect(real).toContain(
+      `/records/export/events/${encodeURIComponent(IDS.event)}`,
+    );
   });
 
   test('announces complete SSR history as connected and paginated history as loading', () => {
@@ -373,7 +583,7 @@ describe('event room server-rendered safety and history state', () => {
       'This private photo is not loaded. Load it explicitly if it is operationally needed.',
     );
     expect(html).toContain('Load private photo for entry 5');
-    expect(html.match(/dialog-classification mode-real/gu)).toHaveLength(2);
+    expect(html.match(/dialog-classification mode-real/gu)).toHaveLength(3);
     expect(html.match(/REAL INCIDENT/gu)?.length ?? 0).toBeGreaterThanOrEqual(
       3,
     );
@@ -450,6 +660,7 @@ describe('event room server-rendered safety and history state', () => {
         csrfCookieName="__Host-psd-eoc-csrf"
         event={activeEvent('real')}
         eventTypeLabel="Lockdown"
+        exportSummaryPath={`/records/export/events/${encodeURIComponent(IDS.event)}`}
         facilityLabel="Synthetic North Campus"
         initialCursor="eyJ2IjoxfQ"
         initialEntries={[redactedProjection]}

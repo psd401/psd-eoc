@@ -103,6 +103,7 @@ export default async function EventRoomPage({
         csrfCookieName={WEB_CSRF_COOKIE_NAME}
         event={event}
         eventTypeLabel={eventTypeVersion.name}
+        exportSummaryPath={`/records/export/events/${encodeURIComponent(event.id)}`}
         facilityLabel={facility.name}
         initialCursor={initialSync.cursor}
         initialEntries={initialSync.entries}
