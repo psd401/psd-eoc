@@ -127,7 +127,7 @@ export default function HomeScreen() {
     return () => {
       outcomeRequestGeneration.current += 1;
     };
-  }, [requestAuthenticated, isFocused, state.session?.session.id]);
+  }, [requestAuthenticated, isFocused, state.phase, state.session?.session.id]);
 
   const load = useCallback(() => {
     let active = true;
@@ -467,6 +467,7 @@ export default function HomeScreen() {
                         mutationSnapshot.eventTypeName === choice.eventTypeName
                       }
                       disabled={mutationPending}
+                      eventId={choice.event.id}
                       eventTypeName={choice.eventTypeName}
                       facilityName={choice.facilityName}
                       key={choice.event.id}

@@ -171,7 +171,7 @@ export default function StartEventScreen() {
     return () => {
       outcomeRequestGeneration.current += 1;
     };
-  }, [requestAuthenticated, isFocused, state.session?.session.id]);
+  }, [requestAuthenticated, isFocused, state.phase, state.session?.session.id]);
 
   useEffect(() => {
     previewRequestGeneration.current += 1;
@@ -766,6 +766,7 @@ export default function StartEventScreen() {
                       mutationSnapshot.eventTypeName === choice.eventTypeName
                     }
                     disabled={mutationPending}
+                    eventId={choice.event.id}
                     eventTypeName={choice.eventTypeName}
                     facilityName={choice.facilityName}
                     key={choice.event.id}

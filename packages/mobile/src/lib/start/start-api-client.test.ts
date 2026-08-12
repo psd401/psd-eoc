@@ -403,7 +403,7 @@ function oneResponseRequest(
 }
 
 describe('mobile start API client', () => {
-  test('loads every page and resolves a historical active-event type name', async () => {
+  test('loads every page while retaining inactive-site names only for active events', async () => {
     const latestVersion = eventTypeVersionFixture({
       id: IDS.latestVersion,
       name: 'Latest practice type',
@@ -414,10 +414,10 @@ describe('mobile start API client', () => {
       id: IDS.historicalVersion,
       name: 'Historical practice type',
     });
-    const historicalSelection = selectionFixture(
-      'drill',
-      IDS.historicalVersion,
-    );
+    const historicalSelection = CreateActivationPreviewInputSchema.parse({
+      ...selectionFixture('drill', IDS.historicalVersion),
+      facilityId: IDS.secondFacility,
+    });
     const activeEvent = activeEventFixture(historicalSelection);
     const calls: RecordedAuthenticatedRequest[] = [];
     const request: StartAuthenticatedRequest = async <Output>(
@@ -445,7 +445,7 @@ describe('mobile start API client', () => {
                 id: IDS.secondFacility,
                 code: 'SOUTH',
                 name: 'South Synthetic School',
-                active: true,
+                active: false,
                 createdAt: NOW,
               },
             ],
@@ -488,13 +488,12 @@ describe('mobile start API client', () => {
 
     expect(result.facilities.map((facility) => facility.name)).toEqual([
       'North Synthetic School',
-      'South Synthetic School',
     ]);
     expect(result.eventTypes).toHaveLength(1);
     expect(result.activeEvents).toEqual([
       {
         event: activeEvent,
-        facilityName: 'North Synthetic School',
+        facilityName: 'South Synthetic School',
         eventTypeName: 'Historical practice type',
       },
     ]);

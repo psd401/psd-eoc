@@ -305,7 +305,9 @@ export async function loadStartHomeData(
   );
 
   return Object.freeze({
-    facilities,
+    // Inactive authorized facilities remain available above for naming any
+    // still-active event, but can never be offered as a new start target.
+    facilities: Object.freeze(facilities.filter((facility) => facility.active)),
     eventTypes,
     activeEvents: Object.freeze(
       activeEvents.map((event) =>
