@@ -1,0 +1,151 @@
+.records-page {
+  --records-drill: #1e3a8a;
+  --records-drill-surface: #eff6ff;
+}
+
+.records-heading {
+  align-items: center;
+}
+
+.records-classification {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  border: 0.2rem solid var(--records-drill);
+  border-radius: 0.6rem;
+  background: var(--records-drill-surface);
+  color: var(--records-drill);
+  padding: 0.8rem 1rem;
+}
+
+.records-classification strong {
+  letter-spacing: 0.035em;
+}
+
+.records-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: 1rem;
+  align-items: end;
+  margin-top: 1.5rem;
+  border: 0.0625rem solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  box-shadow: 0 0.3rem 1rem rgb(15 23 42 / 8%);
+  padding: clamp(1rem, 3vw, 1.5rem);
+}
+
+.filter-field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.filter-field label {
+  font-weight: 800;
+}
+
+.filter-field input,
+.filter-field select {
+  width: 100%;
+  border: 0.125rem solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.55rem 0.65rem;
+}
+
+.records-error {
+  margin-top: 1.5rem;
+  border: 0.125rem solid var(--danger);
+  border-radius: 0.6rem;
+  background: var(--danger-surface);
+  color: #7f1d1d;
+  padding: 1rem;
+}
+
+.records-error h2,
+.records-error p,
+.records-results-heading p,
+.export-note {
+  margin-bottom: 0;
+}
+
+.records-results-heading {
+  align-items: end;
+}
+
+.export-note {
+  margin-top: -0.25rem;
+  color: var(--text-muted);
+}
+
+.records-table-scroll {
+  margin-top: 1rem;
+  overflow-x: auto;
+  border: 0.0625rem solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--surface);
+}
+
+.records-table {
+  width: 100%;
+  min-width: 62rem;
+  border-collapse: collapse;
+}
+
+.records-table caption {
+  padding: 0.8rem 1rem;
+  color: var(--text-muted);
+  font-weight: 700;
+  text-align: left;
+}
+
+.records-table th,
+.records-table td {
+  border-top: 0.0625rem solid var(--border-subtle);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.records-table th {
+  background: #e8eef7;
+  color: var(--text);
+  font-size: 0.9rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.records-table tbody tr:nth-child(even) {
+  background: var(--surface-muted);
+}
+
+.record-kind {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--records-drill);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.025em;
+}
+
+.records-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+@media (max-width: 42rem) {
+  .records-heading > .button,
+  .records-results-heading .button {
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .records-classification,
+  .records-table-scroll {
+    forced-color-adjust: auto;
+  }
+}
