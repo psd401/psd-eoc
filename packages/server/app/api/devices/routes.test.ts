@@ -23,6 +23,7 @@ const ids = {
   session: '00000000-0000-4000-8000-000000001222',
   epoch: '00000000-0000-4000-8000-000000001223',
   request: '00000000-0000-4000-8000-000000001224',
+  secondRequest: '00000000-0000-4000-8000-000000001230',
   device: '00000000-0000-4000-8000-000000001225',
   roster: '00000000-0000-4000-8000-000000001226',
   recipient: '00000000-0000-4000-8000-000000001227',
@@ -276,6 +277,41 @@ describe('push endpoint invalidation route', () => {
     expect(dependencies.calls[0]?.invocation.mutation?.idempotencyKey).toMatch(
       /^push-endpoint-invalid:[a-f0-9]{64}$/u,
     );
+  });
+
+  test('reconciles repeated endpoint input as distinct authenticated deliveries', async () => {
+    const base = workerDependencies();
+    const requestIds = [ids.request, ids.secondRequest] as const;
+    let requestIndex = 0;
+    const dependencies: PushEndpointInvalidationRouteDependencies & {
+      readonly calls: typeof base.calls;
+    } = {
+      ...base,
+      createRequestId: () => requestIds[requestIndex++] ?? ids.secondRequest,
+    };
+
+    const first = await handlePushEndpointInvalidation(
+      pushInvalidationRequest(canonicalInput),
+      dependencies,
+    );
+    const second = await handlePushEndpointInvalidation(
+      pushInvalidationRequest(canonicalInput),
+      dependencies,
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(dependencies.calls).toHaveLength(2);
+    expect(dependencies.calls.map((call) => call.invocation.requestId)).toEqual(
+      [...requestIds],
+    );
+    expect(
+      new Set(
+        dependencies.calls.map(
+          (call) => call.invocation.mutation?.idempotencyKey,
+        ),
+      ).size,
+    ).toBe(2);
   });
 
   test('rejects broader status writes and token-bearing request fields', async () => {

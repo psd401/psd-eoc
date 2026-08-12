@@ -35,12 +35,15 @@ function accepted(reference = 'ticket-1'): ExpoProviderOutcome {
 class ControlledTransport implements ExpoPushTransport {
   public calls = 0;
   public readonly work = [] as ProviderSendRequest['workItem'][];
+  public readonly chunks = [] as ProviderSendRequest['workItem'][][];
 
   public constructor(
     private readonly behavior:
       | readonly ExpoProviderOutcome[]
       | Error
-      | (() => Promise<readonly ExpoProviderOutcome[]>),
+      | ((
+          workItems: readonly ProviderSendRequest['workItem'][],
+        ) => Promise<readonly ExpoProviderOutcome[]>),
   ) {}
 
   public sendChunk(
@@ -48,7 +51,8 @@ class ControlledTransport implements ExpoPushTransport {
   ): Promise<readonly ExpoProviderOutcome[]> {
     this.calls += 1;
     this.work.push(...workItems);
-    if (typeof this.behavior === 'function') return this.behavior();
+    this.chunks.push([...workItems]);
+    if (typeof this.behavior === 'function') return this.behavior(workItems);
     if (this.behavior instanceof Error) return Promise.reject(this.behavior);
     return Promise.resolve(this.behavior);
   }
@@ -70,6 +74,7 @@ class MemoryDurableLedger implements DurableExpoSendLedger {
   public readonly claims: ClaimExpoProviderIoRequest[] = [];
   public readonly completions: CompleteExpoProviderIoRequest[] = [];
   public beginError: Error | null = null;
+  public readonly beginErrorAttemptIds = new Set<string>();
   public completionError: Error | null = null;
   public overrideClaim: ExpoSendLedgerClaim | null = null;
   readonly #states = new Map<string, LedgerState>();
@@ -82,7 +87,14 @@ class MemoryDurableLedger implements DurableExpoSendLedger {
     request: ClaimExpoProviderIoRequest,
   ): Promise<ExpoSendLedgerClaim> {
     this.claims.push(request);
-    if (this.beginError !== null) return Promise.reject(this.beginError);
+    if (
+      this.beginError !== null ||
+      this.beginErrorAttemptIds.has(request.attemptId)
+    ) {
+      return Promise.reject(
+        this.beginError ?? new Error('synthetic per-attempt ledger outage'),
+      );
+    }
     if (this.overrideClaim !== null) return Promise.resolve(this.overrideClaim);
     const existing = this.#states.get(request.attemptId);
     if (existing !== undefined) {
@@ -131,13 +143,18 @@ function adapterRuntime(
   behavior:
     | readonly ExpoProviderOutcome[]
     | Error
-    | (() => Promise<readonly ExpoProviderOutcome[]>) = [accepted()],
+    | ((
+        workItems: readonly ProviderSendRequest['workItem'][],
+      ) => Promise<readonly ExpoProviderOutcome[]>) = [accepted()],
+  clock: () => Date | string | number = () => realBatch().createdAt,
 ) {
   const transport = new ControlledTransport(behavior);
   const ledger = new MemoryDurableLedger();
   const adapter = new LedgeredExpoPushAdapter({
     transport,
     sendLedger: ledger,
+    batchWindowMilliseconds: 0,
+    clock,
   });
   return { adapter, ledger, transport };
 }
@@ -146,6 +163,12 @@ function request(item = workItem(realBatch())): ProviderSendRequest {
   return Object.freeze({
     workItem: item,
     idempotencyKey: item.attempt.id,
+  });
+}
+
+function liveItemWithAttempt(suffix: number) {
+  return workItem(realBatch(), {
+    attemptId: `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`,
   });
 }
 
@@ -204,7 +227,14 @@ describe('ledgered Expo live adapter', () => {
     const response = new Promise<readonly ExpoProviderOutcome[]>((resolve) => {
       release = resolve;
     });
-    const app = adapterRuntime(() => response);
+    let markProviderStarted: (() => void) | undefined;
+    const providerStarted = new Promise<void>((resolve) => {
+      markProviderStarted = resolve;
+    });
+    const app = adapterRuntime(() => {
+      markProviderStarted?.();
+      return response;
+    });
 
     const first = app.adapter.send(request());
     const second = app.adapter.send(request());
@@ -212,6 +242,7 @@ describe('ledgered Expo live adapter', () => {
       state: 'unknown',
       reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
     });
+    await providerStarted;
     expect(app.transport.calls).toBe(1);
     release?.([accepted()]);
     await expect(first).resolves.toMatchObject({ state: 'provider-accepted' });
@@ -293,6 +324,179 @@ describe('ledgered Expo live adapter', () => {
     expect(app.transport.calls).toBe(1);
   });
 
+  test('batches ledger-claimed provider I/O and preserves positional partial outcomes', async () => {
+    const app = adapterRuntime([
+      accepted('ticket-batch-1'),
+      failed('EXPO_DEVICE_NOT_REGISTERED', null, true),
+      retry('EXPO_MESSAGE_RATE_EXCEEDED'),
+    ]);
+    const items = [
+      liveItemWithAttempt(101),
+      liveItemWithAttempt(102),
+      liveItemWithAttempt(103),
+    ];
+
+    const settled = await Promise.allSettled(
+      items.map((item) => app.adapter.send(request(item))),
+    );
+
+    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([3]);
+    expect(settled[0]).toMatchObject({
+      status: 'fulfilled',
+      value: {
+        state: 'provider-accepted',
+        providerReference: 'ticket-batch-1',
+      },
+    });
+    expect(settled[1]).toMatchObject({
+      status: 'fulfilled',
+      value: { state: 'failed', reasonCode: 'EXPO_DEVICE_NOT_REGISTERED' },
+    });
+    expect(settled[2]).toMatchObject({
+      status: 'rejected',
+      reason: {
+        code: 'EXPO_MESSAGE_RATE_EXCEEDED',
+        disposition: 'safe-to-retry',
+      },
+    });
+    expect(app.ledger.completions).toHaveLength(3);
+  });
+
+  test('expires stale claimed work without provider I/O and preserves fresh siblings', async () => {
+    const batch = realBatch();
+    const staleItem = liveItemWithAttempt(104);
+    const freshBatch = {
+      ...batch,
+      id: '00000000-0000-4000-8000-000000000105',
+      createdAt: '2026-08-10T16:00:00.500Z',
+    };
+    const freshItem = workItem(freshBatch, {
+      attemptId: '00000000-0000-4000-8000-000000000106',
+    });
+    const app = adapterRuntime(
+      (items) =>
+        Promise.resolve(
+          items.map((item) => accepted(`ticket-${item.attempt.id}`)),
+        ),
+      () => '2026-08-10T17:00:00.000Z',
+    );
+
+    const outcomes = await Promise.all([
+      app.adapter.send(request(staleItem)),
+      app.adapter.send(request(freshItem)),
+    ]);
+
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        state: 'expired',
+        reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+      }),
+      expect.objectContaining({
+        state: 'provider-accepted',
+        providerReference: `ticket-${freshItem.attempt.id}`,
+      }),
+    ]);
+    expect(app.transport.chunks).toEqual([[freshItem]]);
+    expect(app.ledger.completions).toHaveLength(2);
+  });
+
+  test('isolates malformed item outcomes without discarding valid siblings', async () => {
+    const app = adapterRuntime([
+      accepted('ticket-isolated-1'),
+      {
+        kind: 'provider-accepted',
+        state: 'delivered',
+        providerReference:
+          'ticket-isolated-2\nExponentPushToken[hostile-ledger-text]',
+        reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+        invalidatesEndpoint: true,
+      } as never,
+      accepted('ticket-isolated-3'),
+    ]);
+    const items = [
+      liveItemWithAttempt(111),
+      liveItemWithAttempt(112),
+      liveItemWithAttempt(113),
+    ];
+
+    const outcomes = await Promise.all(
+      items.map((item) => app.adapter.send(request(item))),
+    );
+
+    expect(outcomes.map((outcome) => outcome.state)).toEqual([
+      'provider-accepted',
+      'unknown',
+      'provider-accepted',
+    ]);
+    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([3]);
+    expect(app.ledger.completions).toHaveLength(3);
+    expect(app.ledger.completions[1]?.completion).toEqual({
+      kind: 'outcome',
+      outcome: {
+        state: 'unknown',
+        provider: 'expo-push',
+        providerReference: null,
+        proof: null,
+        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+        diagnosticDigest: null,
+      },
+    });
+    const durableJson = JSON.stringify(app.ledger.completions);
+    expect(durableJson).not.toContain('hostile-ledger-text');
+    expect(durableJson).not.toContain('ExponentPushToken');
+  });
+
+  test('isolates a pre-send ledger outage while batching eligible siblings', async () => {
+    const app = adapterRuntime((items) =>
+      Promise.resolve(
+        items.map((item) => accepted(`ticket-${item.attempt.id}`)),
+      ),
+    );
+    const items = [
+      liveItemWithAttempt(121),
+      liveItemWithAttempt(122),
+      liveItemWithAttempt(123),
+    ];
+    app.ledger.beginErrorAttemptIds.add(items[1]!.attempt.id);
+
+    const settled = await Promise.allSettled(
+      items.map((item) => app.adapter.send(request(item))),
+    );
+
+    expect(settled.map((result) => result.status)).toEqual([
+      'fulfilled',
+      'rejected',
+      'fulfilled',
+    ]);
+    expect(settled[1]).toMatchObject({
+      status: 'rejected',
+      reason: {
+        code: 'EXPO_SEND_LEDGER_FAILED',
+        disposition: 'safe-to-retry',
+      },
+    });
+    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([2]);
+    expect(app.ledger.completions).toHaveLength(2);
+  });
+
+  test('never sends more than 100 ledger-claimed attempts per provider request', async () => {
+    const app = adapterRuntime((items) =>
+      Promise.resolve(
+        items.map((item) => accepted(`ticket-${item.attempt.id}`)),
+      ),
+    );
+    const items = Array.from({ length: 201 }, (_unused, index) =>
+      liveItemWithAttempt(index + 1_000),
+    );
+
+    await Promise.all(items.map((item) => app.adapter.send(request(item))));
+
+    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([
+      100, 100, 1,
+    ]);
+    expect(app.ledger.completions).toHaveLength(201);
+  });
+
   test('durably replays terminal and unknown item outcomes without overclaiming', async () => {
     const cases: readonly (readonly ExpoProviderOutcome[])[] = [
       [failed('EXPO_DEVICE_NOT_REGISTERED', null, true)],
@@ -319,6 +523,7 @@ describe('ledgered Expo live adapter', () => {
     );
     await expect(conflict.adapter.send(request())).rejects.toMatchObject({
       code: 'EXPO_SEND_LEDGER_CONFLICT',
+      disposition: 'terminal-failure',
     });
     expect(conflict.transport.calls).toBe(0);
 
@@ -326,6 +531,7 @@ describe('ledgered Expo live adapter', () => {
     unavailable.ledger.beginError = new Error('synthetic ledger outage');
     await expect(unavailable.adapter.send(request())).rejects.toMatchObject({
       code: 'EXPO_SEND_LEDGER_FAILED',
+      disposition: 'safe-to-retry',
     });
     expect(unavailable.transport.calls).toBe(0);
 
@@ -336,6 +542,7 @@ describe('ledgered Expo live adapter', () => {
     };
     await expect(malformed.adapter.send(request())).rejects.toMatchObject({
       code: 'EXPO_SEND_LEDGER_INVALID',
+      disposition: 'ambiguous',
     });
     expect(malformed.transport.calls).toBe(0);
   });
@@ -359,6 +566,31 @@ describe('ledgered Expo live adapter', () => {
 
     await expect(app.adapter.send(request())).rejects.toMatchObject({
       code: 'EXPO_SEND_LEDGER_INVALID',
+      disposition: 'ambiguous',
+    });
+    expect(app.transport.calls).toBe(0);
+  });
+
+  test('treats contradictory completed DeviceNotRegistered truth as ambiguous', async () => {
+    const app = adapterRuntime();
+    app.ledger.overrideClaim = {
+      kind: 'completed',
+      completion: {
+        kind: 'outcome',
+        outcome: {
+          state: 'unknown',
+          provider: 'expo-push',
+          providerReference: null,
+          proof: null,
+          reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+          diagnosticDigest: null,
+        },
+      },
+    };
+
+    await expect(app.adapter.send(request())).rejects.toMatchObject({
+      code: 'EXPO_SEND_LEDGER_INVALID',
+      disposition: 'ambiguous',
     });
     expect(app.transport.calls).toBe(0);
   });

@@ -455,9 +455,10 @@ function defaultPushInvalidationDependencies(): PushEndpointInvalidationRouteDep
 
 function pushInvalidationIdempotencyKey(
   input: RecordEndpointStatusInput,
+  requestId: string,
 ): string {
   const digest = createHash('sha256')
-    .update(JSON.stringify(input), 'utf8')
+    .update(JSON.stringify({ input, requestId }), 'utf8')
     .digest('hex');
   return IdempotencyKeySchema.parse(`push-endpoint-invalid:${digest}`);
 }
@@ -531,7 +532,11 @@ export async function handlePushEndpointInvalidation(
       serverTime,
       connectivityEpochId: null,
       mutation: {
-        idempotencyKey: pushInvalidationIdempotencyKey(input),
+        // Each authenticated delivery must reconcile against the latest
+        // retained provider evidence. Database writes are semantically
+        // idempotent, while reusing an input-only key would replay the first
+        // result forever and skip later DeviceNotRegistered evidence.
+        idempotencyKey: pushInvalidationIdempotencyKey(input, requestId),
         transport: { kind: 'worker-execution' as const },
         humanConfirmationId: null,
       },

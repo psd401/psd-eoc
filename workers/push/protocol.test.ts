@@ -4,17 +4,25 @@ import { realBatch, syntheticBatch, workItem } from '../shared/test-fixtures';
 import {
   EXPO_ANDROID_CHANNEL_ID,
   EXPO_DRILL_CATEGORY_ID,
+  EXPO_EMERGENCY_TTL_SECONDS,
   EXPO_INCIDENT_CATEGORY_ID,
   chunkExpoValues,
   createExpoPushMessage,
   parseExpoReceiptResponse,
+  parseExpoProviderOutcome,
   parseExpoTicketResponse,
 } from './protocol';
 
 describe('Expo canonical payload', () => {
   test('preserves exact renderer titles and uses distinct real/drill categories', () => {
-    const real = createExpoPushMessage(workItem(realBatch()));
-    const drill = createExpoPushMessage(workItem(syntheticBatch()));
+    const real = createExpoPushMessage(
+      workItem(realBatch()),
+      realBatch().createdAt,
+    );
+    const drill = createExpoPushMessage(
+      workItem(syntheticBatch()),
+      syntheticBatch().createdAt,
+    );
 
     expect(real.title).toBe('[INCIDENT] Lockdown');
     expect(drill.title).toBe('[DRILL] Synthetic lockdown test');
@@ -25,6 +33,13 @@ describe('Expo canonical payload', () => {
     expect(real.categoryId).not.toBe(drill.categoryId);
     expect(real.channelId).toBe(EXPO_ANDROID_CHANNEL_ID);
     expect(drill.channelId).toBe(EXPO_ANDROID_CHANNEL_ID);
+    expect(real.ttl).toBe(EXPO_EMERGENCY_TTL_SECONDS);
+    expect(drill.ttl).toBe(EXPO_EMERGENCY_TTL_SECONDS);
+    expect(real.expiration).toBe(
+      Date.parse(realBatch().createdAt) / 1_000 + EXPO_EMERGENCY_TTL_SECONDS,
+    );
+    expect(EXPO_EMERGENCY_TTL_SECONDS).toBeGreaterThan(0);
+    expect(EXPO_EMERGENCY_TTL_SECONDS).toBeLessThanOrEqual(60 * 60);
     expect(real.data).toMatchObject({
       eventKind: 'incident',
       templateMode: 'real',
@@ -33,6 +48,70 @@ describe('Expo canonical payload', () => {
       eventKind: 'test',
       templateMode: 'drill',
     });
+  });
+
+  test('derives a shrinking TTL and immutable expiration from batch creation', () => {
+    const batch = realBatch();
+    const halfway = new Date(
+      Date.parse(batch.createdAt) + (EXPO_EMERGENCY_TTL_SECONDS / 2) * 1_000,
+    );
+    const atHorizon = new Date(
+      Date.parse(batch.createdAt) + EXPO_EMERGENCY_TTL_SECONDS * 1_000,
+    );
+
+    const active = createExpoPushMessage(workItem(batch), halfway);
+    const stale = createExpoPushMessage(workItem(batch), atHorizon);
+
+    expect(active.ttl).toBe(EXPO_EMERGENCY_TTL_SECONDS / 2);
+    expect(stale.ttl).toBe(0);
+    expect(stale.expiration).toBe(active.expiration);
+  });
+
+  test('never extends relative TTL beyond the immutable batch lifetime', () => {
+    const batch = realBatch();
+    const beforeCreation = new Date(
+      Date.parse(batch.createdAt) - EXPO_EMERGENCY_TTL_SECONDS * 1_000,
+    );
+    const oneMillisecondBeforeExpiry = new Date(
+      Date.parse(batch.createdAt) + EXPO_EMERGENCY_TTL_SECONDS * 1_000 - 1,
+    );
+
+    expect(createExpoPushMessage(workItem(batch), beforeCreation).ttl).toBe(
+      EXPO_EMERGENCY_TTL_SECONDS,
+    );
+    expect(
+      createExpoPushMessage(workItem(batch), oneMillisecondBeforeExpiry).ttl,
+    ).toBe(0);
+  });
+
+  test('rejects real/drill marker tampering before building a provider payload', () => {
+    const real = workItem(realBatch());
+    const drill = workItem(syntheticBatch());
+
+    expect(() =>
+      createExpoPushMessage({
+        ...real,
+        batch: {
+          ...real.batch,
+          renderedMessage: {
+            ...real.batch.renderedMessage,
+            title: '[DRILL] Tampered incident',
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      createExpoPushMessage({
+        ...drill,
+        batch: {
+          ...drill.batch,
+          renderedMessage: {
+            ...drill.batch.renderedMessage,
+            body: '[INCIDENT] Tampered drill',
+          },
+        },
+      }),
+    ).toThrow();
   });
 
   test('creates stable chunks without exceeding provider bounds', () => {
@@ -48,6 +127,73 @@ describe('Expo canonical payload', () => {
 });
 
 describe('Expo untrusted provider response mapping', () => {
+  test('accepts only exact and internally consistent provider outcomes', () => {
+    const accepted = {
+      kind: 'provider-accepted',
+      state: 'provider-accepted',
+      providerReference: 'ticket-canonical-1',
+      reasonCode: null,
+      invalidatesEndpoint: false,
+    } as const;
+
+    const parsed = parseExpoProviderOutcome(accepted);
+    expect(parsed).toEqual(accepted);
+    expect(parsed).not.toBe(accepted);
+    expect(Object.isFrozen(parsed)).toBe(true);
+
+    const malformed = [
+      { ...accepted, extra: 'hostile' },
+      { ...accepted, state: 'delivered' },
+      { ...accepted, providerReference: 'ticket-1\nsecret' },
+      { ...accepted, reasonCode: 'EXPO_DEVICE_NOT_REGISTERED' },
+      {
+        kind: 'failed',
+        state: 'failed',
+        providerReference: null,
+        reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+        invalidatesEndpoint: false,
+      },
+      {
+        kind: 'failed',
+        state: 'failed',
+        providerReference: null,
+        reasonCode: 'EXPO_MESSAGE_TOO_BIG',
+        invalidatesEndpoint: true,
+      },
+      {
+        kind: 'retry',
+        state: 'failed',
+        providerReference: null,
+        reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+        invalidatesEndpoint: false,
+      },
+      {
+        kind: 'failed',
+        state: 'failed',
+        providerReference: null,
+        reasonCode: 'EXPO_MESSAGE_RATE_EXCEEDED',
+        invalidatesEndpoint: false,
+      },
+      {
+        kind: 'unknown',
+        state: 'unknown',
+        providerReference: null,
+        reasonCode: 'untrusted provider text',
+        invalidatesEndpoint: false,
+      },
+    ];
+    expect(malformed.map(parseExpoProviderOutcome)).toEqual(
+      malformed.map(() => null),
+    );
+
+    const accessorOutcome = { ...accepted };
+    Object.defineProperty(accessorOutcome, 'providerReference', {
+      enumerable: true,
+      get: () => 'ticket-accessor',
+    });
+    expect(parseExpoProviderOutcome(accessorOutcome)).toBeNull();
+  });
+
   test('maps partial tickets independently', () => {
     const outcomes = parseExpoTicketResponse(
       {
@@ -86,6 +232,71 @@ describe('Expo untrusted provider response mapping', () => {
       expect.objectContaining({
         kind: 'unknown',
         reasonCode: 'EXPO_TICKET_MISSING',
+      }),
+    ]);
+  });
+
+  test('rejects contradictory successes, duplicate ticket IDs, and malformed top-level errors', () => {
+    expect(
+      parseExpoTicketResponse(
+        {
+          data: [
+            {
+              status: 'ok',
+              id: 'ticket-contradictory',
+              details: { error: 'DeviceNotRegistered' },
+            },
+          ],
+        },
+        1,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: 'unknown',
+        reasonCode: 'EXPO_TICKET_RESPONSE_INVALID',
+      }),
+    ]);
+    expect(
+      parseExpoTicketResponse(
+        {
+          data: [
+            { status: 'ok', id: 'ticket-duplicate' },
+            { status: 'ok', id: 'ticket-duplicate' },
+          ],
+        },
+        2,
+      ).map((outcome) => outcome.reasonCode),
+    ).toEqual(['EXPO_TICKET_RESPONSE_INVALID', 'EXPO_TICKET_RESPONSE_INVALID']);
+    expect(
+      parseExpoTicketResponse(
+        {
+          data: [{ status: 'ok', id: 'ticket-1' }],
+          errors: { code: 'malformed' },
+        },
+        1,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: 'unknown',
+        reasonCode: 'EXPO_TICKET_RESPONSE_INVALID',
+      }),
+    ]);
+    expect(
+      parseExpoReceiptResponse(
+        {
+          data: {
+            'ticket-1': {
+              status: 'ok',
+              details: { error: 'DeviceNotRegistered' },
+            },
+          },
+        },
+        ['ticket-1'],
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: 'unknown',
+        reasonCode: 'EXPO_RECEIPT_RESPONSE_INVALID',
       }),
     ]);
   });

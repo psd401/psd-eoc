@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   DeliveryEvidenceSchema,
   DeliveryTruthTransitionSchema,
-  type ChannelAttempt,
   type DeliveryEvidence,
   type RecordEndpointStatusInput,
 } from '@psd-eoc/contracts';
@@ -17,10 +16,34 @@ import {
   type CompleteAttemptExecutionRequest,
   type ReleaseAttemptExecutionRequest,
 } from '../shared/processor';
-import { IDS, TIMES, syntheticBatch, workItem } from '../shared/test-fixtures';
+import {
+  IDS,
+  TIMES,
+  realBatch,
+  syntheticBatch,
+  workItem,
+} from '../shared/test-fixtures';
 import type { PushEndpointInvalidator } from './invalidation';
-import { MOCK_EXPO_PUSH_PROVIDER, MockExpoPushAdapter } from './mock';
+import {
+  LedgeredExpoPushAdapter,
+  type ClaimExpoProviderIoRequest,
+  type CompleteExpoProviderIoRequest,
+  type DurableExpoSendLedger,
+  type ExpoSendLedgerClaim,
+} from './adapter';
+import {
+  MOCK_EXPO_PUSH_PROVIDER,
+  MockExpoPushAdapter,
+  MockExpoPushTransport,
+} from './mock';
 import type { ExpoReceiptScheduler } from './receipt-lifecycle';
+import {
+  EXPO_PUSH_PROVIDER,
+  failed,
+  retry,
+  type ExpoProviderOutcome,
+} from './protocol';
+import type { ExpoPushTransport } from './transport';
 import { ExpoPushWorker } from './worker';
 
 const RETRY_POLICY = Object.freeze({
@@ -160,23 +183,53 @@ class RecordingInvalidator implements PushEndpointInvalidator {
 }
 
 class RecordingReceiptScheduler implements ExpoReceiptScheduler {
-  public readonly provider = MOCK_EXPO_PUSH_PROVIDER;
   public readonly schedules: Array<{
-    attempt: ChannelAttempt;
+    workItem: ReturnType<typeof workItem>;
     evidence: DeliveryEvidence;
   }> = [];
   public failOnce = false;
+  public failAttemptId: string | null = null;
+  public delayAttemptId: string | null = null;
+  public failureObserved = false;
+  readonly #delayStarted: Promise<void>;
+  readonly #releaseDelay: Promise<void>;
+  #markDelayStarted: (() => void) | undefined;
+  #releaseDelayedSchedule: (() => void) | undefined;
 
-  public scheduleProviderAccepted(
-    attempt: ChannelAttempt,
+  public constructor(
+    public readonly provider: string = MOCK_EXPO_PUSH_PROVIDER,
+  ) {
+    this.#delayStarted = new Promise((resolve) => {
+      this.#markDelayStarted = resolve;
+    });
+    this.#releaseDelay = new Promise((resolve) => {
+      this.#releaseDelayedSchedule = resolve;
+    });
+  }
+
+  public async scheduleProviderAccepted(
+    scheduledWorkItem: ReturnType<typeof workItem>,
     evidence: DeliveryEvidence,
   ): Promise<void> {
-    this.schedules.push({ attempt, evidence });
-    if (this.failOnce) {
+    if (this.failOnce || this.failAttemptId === scheduledWorkItem.attempt.id) {
       this.failOnce = false;
+      this.failAttemptId = null;
+      this.failureObserved = true;
       throw new Error('Synthetic receipt schedule failure.');
     }
-    return Promise.resolve();
+    if (this.delayAttemptId === scheduledWorkItem.attempt.id) {
+      this.#markDelayStarted?.();
+      await this.#releaseDelay;
+    }
+    this.schedules.push({ workItem: scheduledWorkItem, evidence });
+  }
+
+  public waitForDelayedSchedule(): Promise<void> {
+    return this.#delayStarted;
+  }
+
+  public releaseDelayedSchedule(): void {
+    this.#releaseDelayedSchedule?.();
   }
 }
 
@@ -207,7 +260,81 @@ function itemWithAttempt(suffix: number, attemptNumber = 1) {
   });
 }
 
+class WorkerMemoryExpoLedger implements DurableExpoSendLedger {
+  public readonly claims: ClaimExpoProviderIoRequest[] = [];
+  public readonly completions: CompleteExpoProviderIoRequest[] = [];
+  readonly #claimed = new Set<string>();
+
+  public claimProviderIo(
+    request: ClaimExpoProviderIoRequest,
+  ): Promise<ExpoSendLedgerClaim> {
+    this.claims.push(request);
+    if (this.#claimed.has(request.attemptId)) {
+      return Promise.resolve({ kind: 'uncertain' });
+    }
+    this.#claimed.add(request.attemptId);
+    return Promise.resolve({
+      kind: 'execute',
+      claimToken: 'synthetic-worker-claim-token-0001',
+    });
+  }
+
+  public completeProviderIo(
+    request: CompleteExpoProviderIoRequest,
+  ): Promise<void> {
+    this.completions.push(request);
+    return Promise.resolve();
+  }
+}
+
+class WorkerRecordingLiveTransport implements ExpoPushTransport {
+  public readonly chunks: string[][] = [];
+
+  public sendChunk(
+    workItems: readonly ReturnType<typeof workItem>[],
+  ): Promise<readonly ExpoProviderOutcome[]> {
+    this.chunks.push(workItems.map((item) => item.attempt.id));
+    return Promise.resolve(
+      workItems.map((item) => {
+        const suffix = item.attempt.id.slice(-3);
+        if (suffix === '032') {
+          return failed('EXPO_DEVICE_NOT_REGISTERED', null, true);
+        }
+        if (suffix === '033') {
+          return retry('EXPO_MESSAGE_RATE_EXCEEDED');
+        }
+        return Object.freeze({
+          kind: 'provider-accepted' as const,
+          state: 'provider-accepted' as const,
+          providerReference: `ticket-${item.attempt.id}`,
+          reasonCode: null,
+          invalidatesEndpoint: false as const,
+        });
+      }),
+    );
+  }
+
+  public queryReceiptChunk(): Promise<readonly ExpoProviderOutcome[]> {
+    throw new Error('Worker send test must not query receipts.');
+  }
+}
+
 describe('Expo durable attempt worker', () => {
+  test('mock transport and adapter refuse live real-shaped work', () => {
+    const item = workItem(realBatch());
+    const transport = new MockExpoPushTransport();
+    const adapter = new MockExpoPushAdapter();
+
+    expect(() => transport.sendChunk([item])).toThrow(
+      'Mock Expo transport accepts synthetic work only.',
+    );
+    expect(() =>
+      adapter.send({ workItem: item, idempotencyKey: item.attempt.id }),
+    ).toThrow('Mock Expo transport accepts synthetic work only.');
+    expect(transport.sends).toHaveLength(0);
+    expect(adapter.logicalSends).toBe(0);
+  });
+
   test('rejects missing or provider-mismatched receipt schedulers before provider I/O', () => {
     const adapter = new MockExpoPushAdapter();
     const dependencies = {
@@ -278,7 +405,7 @@ describe('Expo durable attempt worker', () => {
       replayed: true,
     });
     expect(app.adapter.logicalSends).toBe(1);
-    expect(scheduler.schedules).toHaveLength(2);
+    expect(scheduler.schedules).toHaveLength(1);
   });
 
   test('records DeviceNotRegistered before token-free invalidation', async () => {
@@ -330,6 +457,116 @@ describe('Expo durable attempt worker', () => {
     ]);
     expect(app.adapter.logicalSends).toBe(3);
     expect(app.invalidator.inputs).toHaveLength(1);
+  });
+
+  test('waits for sibling completion before propagating one receipt-scheduler failure', async () => {
+    const scheduler = new RecordingReceiptScheduler();
+    const items = [
+      itemWithAttempt(24),
+      itemWithAttempt(25),
+      itemWithAttempt(26),
+    ];
+    scheduler.failAttemptId = items[1]!.attempt.id;
+    scheduler.delayAttemptId = items[2]!.attempt.id;
+    const app = workerRuntime(new MockExpoPushAdapter(), [], scheduler);
+
+    const processing = app.worker.processAll(items);
+    let settled = false;
+    void processing.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await scheduler.waitForDelayedSchedule();
+    await Promise.resolve();
+    expect(scheduler.failureObserved).toBe(true);
+    expect(settled).toBe(false);
+
+    scheduler.releaseDelayedSchedule();
+    await expect(processing).rejects.toThrow(
+      'Synthetic receipt schedule failure.',
+    );
+
+    expect(app.adapter.logicalSends).toBe(3);
+    expect(app.store.executions).toHaveLength(3);
+    expect(
+      [...app.store.executions.values()].every(
+        (execution) => execution.completion !== null,
+      ),
+    ).toBe(true);
+    expect(scheduler.schedules).toHaveLength(2);
+
+    await expect(app.worker.process(items[1]!)).resolves.toMatchObject({
+      kind: 'completed',
+      replayed: true,
+    });
+    expect(app.adapter.logicalSends).toBe(3);
+    expect(scheduler.schedules).toHaveLength(3);
+  });
+
+  test('keeps whole-batch validation fail closed before durable or provider work', async () => {
+    const app = workerRuntime();
+
+    await expect(
+      app.worker.processAll([itemWithAttempt(27), { malformed: true }]),
+    ).rejects.toThrow();
+
+    expect(app.store.executions).toHaveLength(0);
+    expect(app.adapter.logicalSends).toBe(0);
+    expect(app.adapter.requests).toHaveLength(0);
+    expect(app.writer.evidence).toHaveLength(0);
+    expect(app.scheduler.schedules).toHaveLength(0);
+  });
+
+  test('batches the operative ledger and evidence path with per-item outcomes', async () => {
+    const transport = new WorkerRecordingLiveTransport();
+    const ledger = new WorkerMemoryExpoLedger();
+    const adapter = new LedgeredExpoPushAdapter({
+      transport,
+      sendLedger: ledger,
+      batchWindowMilliseconds: 0,
+      clock: () => realBatch().createdAt,
+    });
+    const writer = new MemoryEvidenceWriter();
+    const invalidator = new RecordingInvalidator();
+    const scheduler = new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER);
+    const worker = new ExpoPushWorker({
+      adapter,
+      executionStore: new MemoryExecutionStore(),
+      evidenceWriter: writer,
+      endpointInvalidator: invalidator,
+      receiptScheduler: scheduler,
+      retryPolicy: RETRY_POLICY,
+      random: () => 0.5,
+      authorizeLiveProvider: () => true,
+    });
+    const items = [
+      workItem(realBatch(), {
+        attemptId: '00000000-0000-4000-8000-000000000031',
+      }),
+      workItem(realBatch(), {
+        attemptId: '00000000-0000-4000-8000-000000000032',
+      }),
+      workItem(realBatch(), {
+        attemptId: '00000000-0000-4000-8000-000000000033',
+      }),
+    ];
+
+    const results = await worker.processAll(items);
+
+    expect(transport.chunks).toEqual([items.map((item) => item.attempt.id)]);
+    expect(results.map((result) => result.kind)).toEqual([
+      'completed',
+      'dlq',
+      'retry',
+    ]);
+    expect(ledger.completions).toHaveLength(3);
+    expect(writer.evidence).toHaveLength(6);
+    expect(invalidator.inputs).toHaveLength(1);
+    expect(scheduler.schedules).toHaveLength(1);
   });
 
   test('backs off retryable failures and reaches terminal DLQ at the bound', async () => {
