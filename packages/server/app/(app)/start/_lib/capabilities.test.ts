@@ -13,7 +13,9 @@ import {
   type CapabilityAuditEvent,
   type TrustedCapabilityInvocation,
 } from '../../../../lib/capabilities/engine';
+import type { Database } from '../../../../db/client';
 import {
+  createDrizzleStartFlowCapabilityStore,
   deliveryTestCredentialIsVerified,
   executeStartFlowCapability,
   readDeliveryTestCredentialVerificationReferences,
@@ -247,6 +249,53 @@ class MemoryStartFlowStore implements StartFlowCapabilityStore {
   }
 }
 
+function fanoutGateDatabase(
+  rows: readonly Readonly<Record<string, unknown>>[],
+): Readonly<{
+  database: Database;
+  counts: Readonly<{ execute: () => number; select: () => number }>;
+}> {
+  let executeCalls = 0;
+  let selectCalls = 0;
+  const transaction = {
+    async execute() {
+      executeCalls += 1;
+      return [];
+    },
+    select() {
+      selectCalls += 1;
+      return {
+        from() {
+          return {
+            orderBy() {
+              return {
+                async limit() {
+                  return rows;
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  const database = {
+    async transaction(
+      operation: (query: typeof transaction) => Promise<unknown>,
+    ) {
+      return operation(transaction);
+    },
+  } as unknown as Database;
+
+  return Object.freeze({
+    database,
+    counts: Object.freeze({
+      execute: () => executeCalls,
+      select: () => selectCalls,
+    }),
+  });
+}
+
 async function captureEngineError(
   operation: () => Promise<unknown>,
 ): Promise<CapabilityEngineError> {
@@ -311,6 +360,59 @@ describe('start-flow canonical capability execution', () => {
       requestId: IDS.requestPreview,
     });
     expect(store.failureAudits).toEqual([]);
+  });
+
+  test('denies preview construction before consequence reads when fanout state is missing or disabled', async () => {
+    const disabledRecord = Object.freeze({
+      id: uuid(40),
+      revision: 1,
+      previousRecordId: null,
+      mode: 'emergency-disabled',
+      enableEpochId: null,
+      reason: 'Synthetic emergency disable for a unit boundary test.',
+      productOwnerApprovalReference: null,
+      changedByUserId: IDS.user,
+      changedWithSessionId: IDS.session,
+      changedAt: NOW,
+      requestId: uuid(41),
+    });
+
+    for (const rows of [[], [disabledRecord]] as const) {
+      const seam = fanoutGateDatabase(rows);
+      const store = createDrizzleStartFlowCapabilityStore(seam.database);
+      const error = await captureEngineError(() =>
+        store.transaction((transaction) =>
+          transaction.createActivationPreview(
+            {
+              facilityId: IDS.facility,
+              kind: 'drill',
+              templateMode: 'drill',
+              eventTypeVersion: {
+                id: IDS.eventTypeVersion,
+                templateMode: 'drill',
+              },
+              rosterPopulation: 'synthetic',
+            },
+            {
+              kind: 'human',
+              userId: IDS.user,
+              sessionId: IDS.session,
+            },
+            NOW,
+          ),
+        ),
+      );
+
+      expect(error).toMatchObject({
+        code: 'LIVE_ACTION_UNAVAILABLE',
+        reasonCode: 'PERSISTENCE_CONFLICT',
+        status: 503,
+        message:
+          'Notification fan-out is emergency-disabled or unavailable. No activation preview was created.',
+      });
+      expect(seam.counts.execute()).toBe(1);
+      expect(seam.counts.select()).toBe(1);
+    }
   });
 
   test('denies out-of-scope preview before reading consequence details and audits it', async () => {

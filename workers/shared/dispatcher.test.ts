@@ -17,6 +17,7 @@ import {
   OutboxDispatcherError,
   QueuePublishError,
   computeOutboxBackoffMilliseconds,
+  createDrizzleOutboxFanoutAuthorizer,
   dispatchOutbox,
   dispatchOutboxAfterCommit,
   parseSqsSendMessageBatchResponse,
@@ -443,17 +444,161 @@ function deferred<T>() {
 }
 
 describe('dispatcher crash, replay, and stable worker idempotency', () => {
+  test('production database authorizer binds the claimed immutable intent and fails closed', async () => {
+    const store = new DeterministicOutboxStore();
+    const claimed = await store.claimOutbox(IDS.outbox);
+    if (claimed.kind !== 'claimed') throw new Error('Expected a claim.');
+    const intentIds: string[] = [];
+    const enabledDatabase = {
+      transaction: async (operation: (database: unknown) => Promise<unknown>) =>
+        operation({
+          execute: () => Promise.resolve([]),
+          select: () => ({
+            from: () => ({
+              orderBy: () => ({
+                limit: () =>
+                  Promise.resolve([
+                    {
+                      id: '00000000-0000-4000-8000-000000001020',
+                      revision: 1,
+                      previousRecordId: null,
+                      mode: 'enabled',
+                      enableEpochId: '00000000-0000-4000-8000-000000001021',
+                      reason: 'Synthetic dispatcher authorization.',
+                      productOwnerApprovalReference: 'synthetic-po-reference',
+                      changedByUserId: '00000000-0000-4000-8000-000000001022',
+                      changedWithSessionId:
+                        '00000000-0000-4000-8000-000000001023',
+                      changedAt: new Date(TIMES.created),
+                      requestId: '00000000-0000-4000-8000-000000001024',
+                    },
+                  ]),
+              }),
+              where: (condition: unknown) => {
+                void condition;
+                intentIds.push(IDS.intent);
+                return {
+                  limit: () =>
+                    Promise.resolve([
+                      {
+                        enableEpochId: '00000000-0000-4000-8000-000000001021',
+                      },
+                    ]),
+                };
+              },
+            }),
+          }),
+        }),
+    };
+
+    const authorize = createDrizzleOutboxFanoutAuthorizer(
+      enabledDatabase as never,
+    );
+    await expect(authorize(claimed.claim)).resolves.toBe(true);
+
+    const unavailable = createDrizzleOutboxFanoutAuthorizer({
+      transaction: () => Promise.reject(new Error('unavailable')),
+    } as never);
+    await expect(unavailable(claimed.claim)).resolves.toBe(false);
+    expect(intentIds).toEqual([IDS.intent]);
+  });
+
+  test('emergency disable terminally suppresses a claimed outbox before SQS', async () => {
+    const store = new DeterministicOutboxStore();
+    const queue = new CapturingQueue();
+
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => false,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        code: 'FANOUT_EMERGENCY_DISABLED',
+        retryable: false,
+      }),
+    );
+    expect(queue.calls).toHaveLength(0);
+    expect(store.status).toBe('failed');
+    expect(store.lastErrorCode).toBe('FANOUT_EMERGENCY_DISABLED');
+
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'OUTBOX_ALREADY_FAILED' }),
+    );
+    expect(queue.calls).toHaveLength(0);
+  });
+
+  test('an unavailable fan-out authorizer fails closed before SQS', async () => {
+    const store = new DeterministicOutboxStore();
+    const queue = new CapturingQueue();
+
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => Promise.reject(new Error('unavailable')),
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({ code: 'FANOUT_EMERGENCY_DISABLED' }),
+    );
+    expect(queue.calls).toHaveLength(0);
+    expect(store.status).toBe('failed');
+  });
+
+  test('uses the locked authorization as the final operation before SQS handoff', async () => {
+    const operations: string[] = [];
+    const store = new DeterministicOutboxStore();
+    const captured = new CapturingQueue();
+    const queue = {
+      send(batches: Parameters<CapturingQueue['send']>[0]) {
+        operations.push('sqs-send');
+        return captured.send(batches);
+      },
+    };
+
+    await dispatchOutbox(IDS.outbox, {
+      store,
+      queue,
+      authorizeFanout: () => {
+        operations.push('fanout-check');
+        return true;
+      },
+    });
+
+    expect(operations).toEqual(['fanout-check', 'sqs-send']);
+    expect(captured.calls).toHaveLength(1);
+  });
+
   test('SQS success before publication crash retries stable bodies and sends logically once', async () => {
     const store = new DeterministicOutboxStore();
     store.publicationCrashesRemaining = 1;
     const queue = new CapturingQueue();
 
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).rejects.toEqual(
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).rejects.toEqual(
       expect.objectContaining({ code: 'OUTBOX_PERSISTENCE_FAILED' }),
     );
     expect(store.status).toBe('processing');
     store.expireLease();
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).resolves.toEqual(
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).resolves.toEqual(
       expect.objectContaining({
         outboxRecord: expect.objectContaining({ status: 'published' }),
       }),
@@ -494,6 +639,7 @@ describe('dispatcher crash, replay, and stable worker idempotency', () => {
       executionStore: new WorkerExecutionStore(),
       evidenceWriter: new WorkerEvidenceWriter(),
       random: () => 0.5,
+      authorizeFanout: () => true,
     });
     const pushBatch = queue.calls[0]
       ?.map((entry) => DispatchBatchSchema.parse(JSON.parse(entry.body)))
@@ -515,14 +661,24 @@ describe('dispatcher crash, replay, and stable worker idempotency', () => {
 
     for (let crash = 0; crash < 4; crash += 1) {
       await expect(
-        dispatchOutbox(IDS.outbox, { store, queue }),
+        dispatchOutbox(IDS.outbox, {
+          store,
+          queue,
+          authorizeFanout: () => true,
+        }),
       ).rejects.toEqual(
         expect.objectContaining({ code: 'OUTBOX_PERSISTENCE_FAILED' }),
       );
       expect(store.attempts).toBe(1);
       store.expireLease();
     }
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).resolves.toEqual(
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).resolves.toEqual(
       expect.objectContaining({
         outboxRecord: expect.objectContaining({ status: 'published' }),
       }),
@@ -557,11 +713,19 @@ describe('dispatcher crash, replay, and stable worker idempotency', () => {
       },
     };
 
-    const first = dispatchOutbox(IDS.outbox, { store, queue });
+    const first = dispatchOutbox(IDS.outbox, {
+      store,
+      queue,
+      authorizeFanout: () => true,
+    });
     await started.promise;
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).rejects.toEqual(
-      expect.objectContaining({ code: 'OUTBOX_CLAIM_BUSY' }),
-    );
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).rejects.toEqual(expect.objectContaining({ code: 'OUTBOX_CLAIM_BUSY' }));
     completion.resolve(heldAcknowledgements);
     await expect(first).resolves.toEqual(
       expect.objectContaining({
@@ -609,14 +773,26 @@ describe('queue failure and terminal truth', () => {
       },
     };
 
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).rejects.toEqual(
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).rejects.toEqual(
       expect.objectContaining({
         code: 'SQS_BATCH_ENTRY_REJECTED',
         retryable: true,
         outcome: 'partial',
       }),
     );
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).resolves.toEqual(
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).resolves.toEqual(
       expect.objectContaining({
         outboxRecord: expect.objectContaining({ status: 'published' }),
       }),
@@ -641,11 +817,23 @@ describe('queue failure and terminal truth', () => {
       },
     };
 
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).rejects.toEqual(
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).rejects.toEqual(
       expect.objectContaining({ code: 'SQS_REQUEST_FAILED', retryable: true }),
     );
     expect(store.status).toBe('pending');
-    await expect(dispatchOutbox(IDS.outbox, { store, queue })).rejects.toEqual(
+    await expect(
+      dispatchOutbox(IDS.outbox, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      }),
+    ).rejects.toEqual(
       expect.objectContaining({
         code: 'OUTBOX_DISPATCH_RETRY_EXHAUSTED',
         retryable: false,
@@ -682,7 +870,7 @@ describe('queue failure and terminal truth', () => {
     await expect(
       dispatchOutboxAfterCommit(
         IDS.outbox,
-        { store, queue },
+        { store, queue, authorizeFanout: () => true },
         IDS.directRequest,
       ),
     ).resolves.toEqual({

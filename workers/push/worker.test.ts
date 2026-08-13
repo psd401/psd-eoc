@@ -536,6 +536,7 @@ function workerRuntime(
     endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
     retryPolicy: RETRY_POLICY,
     random: () => 0.5,
+    authorizeFanout: () => true,
   });
   return { adapter, writer, invalidator, scheduler, store, worker };
 }
@@ -554,6 +555,7 @@ function customAdapterRuntime(adapter: AttemptIdempotentProviderAdapter) {
     endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
     retryPolicy: RETRY_POLICY,
     random: () => 0.5,
+    authorizeFanout: () => true,
   });
   return { writer, invalidator, scheduler, store, worker };
 }
@@ -575,6 +577,7 @@ function executionStoreRuntime(
     endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
     retryPolicy,
     random: () => 0.5,
+    authorizeFanout: () => true,
   });
   return { adapter, writer, invalidator, scheduler, store, worker };
 }
@@ -713,6 +716,7 @@ describe('Expo durable attempt worker', () => {
       evidenceWriter: new MemoryEvidenceWriter(),
       endpointInvalidator: new RecordingInvalidator(),
       endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
+      authorizeFanout: () => true,
     };
 
     expect(
@@ -743,6 +747,7 @@ describe('Expo durable attempt worker', () => {
       evidenceWriter: new MemoryEvidenceWriter(),
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: new RecordingReceiptScheduler(),
+      authorizeFanout: () => true,
     };
     expect(
       () =>
@@ -790,6 +795,7 @@ describe('Expo durable attempt worker', () => {
           endpointInvalidator: new RecordingInvalidator(),
           receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
           endpointEligibility: workerChecker,
+          authorizeFanout: () => true,
           authorizeLiveProvider: () => true,
         }),
     ).toThrow('Live Expo adapter endpoint eligibility checker is invalid.');
@@ -831,6 +837,7 @@ describe('Expo durable attempt worker', () => {
         evidenceWriter: new MemoryEvidenceWriter(),
         endpointInvalidator: new RecordingInvalidator(),
         receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
+        authorizeFanout: () => true,
         authorizeLiveProvider: () => true,
         endpointEligibilityService: {
           serviceOrigin: 'https://eoc.example.test',
@@ -884,6 +891,7 @@ describe('Expo durable attempt worker', () => {
       endpointEligibility: {
         isEligible: () => Promise.resolve(eligible),
       },
+      authorizeFanout: () => true,
       retryPolicy: RETRY_POLICY,
       random: () => 0.5,
     });
@@ -1554,6 +1562,7 @@ describe('Expo durable attempt worker', () => {
       endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       retryPolicy: RETRY_POLICY,
       random: () => 0.5,
+      authorizeFanout: () => true,
       authorizeLiveProvider: () => true,
     });
     const items = [
@@ -1615,6 +1624,7 @@ describe('Expo durable attempt worker', () => {
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
       endpointEligibility: sharedEligibility,
+      authorizeFanout: () => true,
       authorizeLiveProvider: () => true,
     });
     const item = workItem(realBatch());
@@ -1634,6 +1644,7 @@ describe('Expo durable attempt worker', () => {
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: darkScheduler,
       endpointEligibility: sharedEligibility,
+      authorizeFanout: () => true,
     });
 
     await expect(dark.process(item)).resolves.toMatchObject({
