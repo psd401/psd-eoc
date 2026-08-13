@@ -13,6 +13,7 @@ import {
   WorkerAttemptProcessor,
   type AttemptEvidenceWriter,
   type AttemptExecutionStore,
+  type FanoutControlAuthorizer,
   type LiveProviderAuthorizer,
   type WorkerAttemptProcessResult,
 } from '../shared';
@@ -106,6 +107,7 @@ export type SmsRuntimeMode =
     }>;
 
 export interface AwsEumSmsRuntimeOptions {
+  readonly authorizeFanout: FanoutControlAuthorizer;
   readonly mode?: SmsRuntimeMode;
   readonly awsClient: AwsEumSingleAttemptClientConfig;
   readonly adapter: Omit<
@@ -329,6 +331,7 @@ export class AwsEumSmsRuntime {
       adapter,
       executionStore: options.executionStore,
       evidenceWriter: options.evidenceWriter,
+      authorizeFanout: options.authorizeFanout,
       ...(mode.state === 'enabled'
         ? { authorizeLiveProvider: mode.authorizeLiveProvider }
         : {}),

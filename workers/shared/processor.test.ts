@@ -277,6 +277,7 @@ function runtime(
   writer = new MemoryEvidenceWriter(),
   options: Readonly<{
     maxAttempts?: number;
+    authorizeFanout?: boolean | (() => boolean | Promise<boolean>);
     authorizeLive?: boolean;
     authorizeSend?: () => boolean | Promise<boolean>;
   }> = {},
@@ -296,6 +297,10 @@ function runtime(
         jitterRatio: 0,
       },
       random: () => 0.5,
+      authorizeFanout:
+        typeof options.authorizeFanout === 'function'
+          ? options.authorizeFanout
+          : () => options.authorizeFanout !== false,
       ...(options.authorizeLive === undefined
         ? {}
         : { authorizeLiveProvider: () => options.authorizeLive === true }),
@@ -620,6 +625,104 @@ describe('attempt-ID idempotent processing', () => {
 });
 
 describe('bounded retries and live-provider fail closed', () => {
+  test('global emergency disable terminally suppresses mocked work before provider I/O', async () => {
+    const adapter = new MockAdapter('mocked');
+    const app = runtime(adapter, undefined, undefined, {
+      authorizeFanout: false,
+    });
+    const item = workItem();
+
+    await expect(app.processor.process(item)).resolves.toEqual(
+      expect.objectContaining({
+        kind: 'dlq',
+        replayed: false,
+        outcome: expect.objectContaining({
+          state: 'failed',
+          reasonCode: 'FANOUT_EMERGENCY_DISABLED',
+        }),
+      }),
+    );
+    await expect(app.processor.process(item)).resolves.toEqual(
+      expect.objectContaining({ kind: 'dlq', replayed: true }),
+    );
+    expect(adapter.requests).toHaveLength(0);
+    expect(app.store.claimCalls).toBe(1);
+    expect(app.store.completeCalls).toBe(1);
+    expect(app.writer.evidence.map((entry) => entry.state)).toEqual([
+      'attempted',
+      'failed',
+    ]);
+  });
+
+  test('suppresses real and drill work without changing their classification', async () => {
+    for (const batch of [syntheticBatch(), realBatch()]) {
+      const adapter = new MockAdapter(
+        batch.eventKind === 'incident' ? 'live-verified' : 'mocked',
+      );
+      const app = runtime(adapter, undefined, undefined, {
+        authorizeFanout: false,
+        ...(batch.eventKind === 'incident' ? { authorizeLive: true } : {}),
+      });
+      const item = workItem(batch);
+      const result = await app.processor.process(item);
+
+      expect(result).toMatchObject({
+        kind: 'dlq',
+        outcome: { reasonCode: 'FANOUT_EMERGENCY_DISABLED' },
+      });
+      expect(item.batch.eventKind).toBe(batch.eventKind);
+      expect(item.batch.templateMode).toBe(batch.templateMode);
+      expect(item.attempt.eventKind).toBe(batch.eventKind);
+      expect(item.attempt.templateMode).toBe(batch.templateMode);
+      expect(adapter.requests).toHaveLength(0);
+    }
+  });
+
+  test('fan-out authorization failure is fail-closed and terminal', async () => {
+    const adapter = new MockAdapter('mocked');
+    const app = runtime(adapter, undefined, undefined, {
+      authorizeFanout: () => Promise.reject(new Error('unavailable')),
+    });
+
+    await expect(app.processor.process(workItem())).resolves.toEqual(
+      expect.objectContaining({
+        kind: 'dlq',
+        outcome: expect.objectContaining({
+          reasonCode: 'FANOUT_EMERGENCY_DISABLED',
+        }),
+      }),
+    );
+    expect(adapter.requests).toHaveLength(0);
+  });
+
+  test('rechecks fan-out after attempted evidence and directly before provider I/O', async () => {
+    const operations: string[] = [];
+    const adapter = new MockAdapter('mocked', () => {
+      operations.push('provider-send');
+      return Promise.resolve(ACCEPTED);
+    });
+    const writer = new MemoryEvidenceWriter();
+    const originalWrite = writer.recordAttemptEvidence.bind(writer);
+    writer.recordAttemptEvidence = async (request) => {
+      const parsed = parseDeliveryStateWriteRequest(request);
+      operations.push(`evidence:${parsed.evidence.state}`);
+      return originalWrite(request);
+    };
+    const app = runtime(adapter, undefined, writer, {
+      authorizeFanout: () => {
+        operations.push('fanout-check');
+        return true;
+      },
+    });
+
+    await app.processor.process(workItem());
+    expect(operations.slice(0, 3)).toEqual([
+      'evidence:attempted',
+      'fanout-check',
+      'provider-send',
+    ]);
+  });
+
   test('safe retries stop at the bound and produce failed plus DLQ', async () => {
     const adapter = new MockAdapter('mocked', () =>
       Promise.reject(

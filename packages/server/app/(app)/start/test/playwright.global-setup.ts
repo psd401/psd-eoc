@@ -8,6 +8,8 @@ import { promisify } from 'node:util';
 import {
   ActivationAuthorizationSchema,
   ActorSchema,
+  FanoutControlEffectiveStateSchema,
+  FanoutControlRecordSchema,
   IdempotencyPrincipalSchema,
   type Actor,
   type SessionEstablishmentResult,
@@ -60,6 +62,11 @@ import {
 } from '../../../../lib/capabilities/events';
 import type { TrustedCapabilityInvocation } from '../../../../lib/capabilities/engine';
 import {
+  appendFanoutControlRecord,
+  assertCurrentNotificationFanoutEnabled,
+  readFanoutControlEffectiveState,
+} from '../../../../lib/notify/fanout-control';
+import {
   createDrizzleStartFlowCapabilityStore,
   executeStartFlowCapability,
 } from '../_lib/capabilities';
@@ -93,6 +100,10 @@ const MEMBER_USER_ID = PLAYWRIGHT_IDS.user;
 const MEMBER_SUBJECT = 'mock-google-subject-member';
 const FIXTURE_TIME = new Date('2026-08-10T18:00:00.000Z');
 const REQUIRED_SYNTHETIC_CHANNELS = ['expo-push', 'ses-email'] as const;
+const SYNTHETIC_FANOUT_REASON =
+  'Synthetic Playwright fixture only; no live provider sends.';
+const SYNTHETIC_FANOUT_PRODUCT_OWNER_REFERENCE =
+  'synthetic-playwright-po-reference-not-live';
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const runFile = promisify(execFile);
 const serverRoot = resolve(
@@ -111,6 +122,12 @@ interface AccessFixture {
 interface BrowserIdentity {
   readonly actor: Extract<Actor, { kind: 'human' }>;
   readonly connectivityEpochId: string;
+}
+
+interface FanoutEnabledBrowserIdentity extends BrowserIdentity {
+  readonly fanoutControlChangedAt: Date;
+  readonly fanoutControlEpochId: string;
+  readonly fanoutControlRecordId: string;
 }
 
 function digest(value: string): string {
@@ -374,6 +391,86 @@ async function issueSyntheticStaffSession(
       sessionId: result.session.id,
     },
     connectivityEpochId: result.connectivityEpoch.id,
+  };
+}
+
+async function enableSyntheticNotificationFanout(
+  connection: PostgresDatabaseConnection,
+  identity: BrowserIdentity,
+): Promise<FanoutEnabledBrowserIdentity> {
+  const database = connection.db;
+  const initialState = FanoutControlEffectiveStateSchema.parse(
+    await readFanoutControlEffectiveState(database),
+  );
+  if (initialState.kind !== 'missing') {
+    throw new Error(
+      'The isolated start-flow database unexpectedly has fan-out control history.',
+    );
+  }
+  if (
+    initialState.effectiveMode !== 'emergency-disabled' ||
+    initialState.currentEpochId !== null ||
+    initialState.currentRecord !== null ||
+    initialState.reasonCode !== 'CONTROL_STATE_MISSING'
+  ) {
+    throw new Error('Missing fan-out control did not fail closed.');
+  }
+
+  const requestId = randomUUID();
+  const changedAt = new Date();
+  const appendedRecord = FanoutControlRecordSchema.parse(
+    await database.transaction((transaction) =>
+      appendFanoutControlRecord({
+        database: transaction,
+        actor: identity.actor,
+        requestId,
+        expectedCurrentRecordId: null,
+        desiredMode: 'enabled',
+        reason: SYNTHETIC_FANOUT_REASON,
+        productOwnerApprovalReference: SYNTHETIC_FANOUT_PRODUCT_OWNER_REFERENCE,
+        changedAt,
+      }),
+    ),
+  );
+  if (appendedRecord.enableEpochId === null) {
+    throw new Error('Synthetic fan-out enablement omitted its epoch.');
+  }
+
+  const effectiveState = FanoutControlEffectiveStateSchema.parse(
+    await readFanoutControlEffectiveState(database),
+  );
+  const enabledRecord = await database.transaction((transaction) =>
+    assertCurrentNotificationFanoutEnabled(transaction),
+  );
+  if (
+    appendedRecord.revision !== 1 ||
+    appendedRecord.previousRecordId !== null ||
+    appendedRecord.mode !== 'enabled' ||
+    appendedRecord.reason !== SYNTHETIC_FANOUT_REASON ||
+    appendedRecord.productOwnerApprovalReference !==
+      SYNTHETIC_FANOUT_PRODUCT_OWNER_REFERENCE ||
+    appendedRecord.changedByUserId !== identity.actor.userId ||
+    appendedRecord.changedWithSessionId !== identity.actor.sessionId ||
+    appendedRecord.requestId !== requestId ||
+    appendedRecord.changedAt !== changedAt.toISOString() ||
+    effectiveState.kind !== 'current' ||
+    effectiveState.effectiveMode !== 'enabled' ||
+    effectiveState.currentEpochId !== appendedRecord.enableEpochId ||
+    JSON.stringify(effectiveState.currentRecord) !==
+      JSON.stringify(appendedRecord) ||
+    enabledRecord.id !== appendedRecord.id ||
+    enabledRecord.enableEpochId !== appendedRecord.enableEpochId
+  ) {
+    throw new Error(
+      'Synthetic fan-out control append did not survive exact enabled readback.',
+    );
+  }
+
+  return {
+    ...identity,
+    fanoutControlChangedAt: changedAt,
+    fanoutControlEpochId: appendedRecord.enableEpochId,
+    fanoutControlRecordId: appendedRecord.id,
   };
 }
 
@@ -651,7 +748,7 @@ async function prepareStaffRosterEvidence(
 }
 
 function capabilityInvocation(
-  identity: BrowserIdentity,
+  identity: FanoutEnabledBrowserIdentity,
   requestId: string,
   mutation: TrustedCapabilityInvocation['mutation'],
 ): TrustedCapabilityInvocation {
@@ -660,7 +757,9 @@ function capabilityInvocation(
     source: 'web',
     scope: { facilityScope: { kind: 'district' } },
     requestId,
-    serverTime: new Date(),
+    serverTime: new Date(
+      Math.max(Date.now(), identity.fanoutControlChangedAt.getTime() + 1),
+    ),
     connectivityEpochId: identity.connectivityEpochId,
     mutation,
   };
@@ -789,7 +888,7 @@ async function persistedActiveEventEvidence(
 
 async function prepareCanonicalActiveEvents(
   connection: PostgresDatabaseConnection,
-  identity: BrowserIdentity,
+  identity: FanoutEnabledBrowserIdentity,
 ): Promise<StartFlowPlaywrightFixture['activeEvents']> {
   const database = connection.db;
   const originalConfigurations = await database
@@ -947,10 +1046,14 @@ export default async function prepareStartFlowBrowserSession(): Promise<void> {
       throw new Error('Start-flow Playwright requires PostgreSQL.');
     }
     const accessFixture = await prepareAccessEvidence(created);
-    const identity = await issueSyntheticStaffSession(
+    const authenticatedIdentity = await issueSyntheticStaffSession(
       created,
       accessFixture,
       paths.storageState,
+    );
+    const identity = await enableSyntheticNotificationFanout(
+      created,
+      authenticatedIdentity,
     );
     await prepareStaffRosterEvidence(created);
     const activeEvents = await prepareCanonicalActiveEvents(created, identity);
