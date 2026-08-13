@@ -3,6 +3,7 @@ export * from './api';
 export * from './audit';
 export * from './capability-catalog';
 export * from './capability';
+export * from './delivery-test';
 export * from './event';
 export * from './event-room';
 export * from './event-type';

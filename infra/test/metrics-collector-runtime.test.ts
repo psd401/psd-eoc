@@ -43,6 +43,7 @@ function completeResults() {
         state_count: 0,
       },
     ],
+    deliveryTestHealth: [{ failed_run_count: 2, missed_count: 1 }],
     outboxToProvider: ['push', 'email', 'sms'].map((channel) => ({
       ...percentile,
       channel,
@@ -76,9 +77,9 @@ describe('operational collector runtime boundaries', () => {
     );
   });
 
-  it('builds the exact 29-datum maximum and rejects invalid latency truth', () => {
+  it('builds the exact 31-datum maximum and rejects invalid metric truth', () => {
     const metrics = buildMetrics(completeResults());
-    expect(metrics).toHaveLength(29);
+    expect(metrics).toHaveLength(31);
     const attempted = metrics.find(
       ({ MetricName }) => MetricName === 'DeliveryStateCount',
     );
@@ -93,6 +94,17 @@ describe('operational collector runtime boundaries', () => {
         ({ MetricName }) => MetricName === 'DeliveryEvidenceGapCount',
       )?.Value,
     ).toBe(1);
+    expect(
+      metrics.find(
+        ({ MetricName }) =>
+          MetricName === 'MonthlyLiveDeliveryTestFailedRunCount',
+      )?.Value,
+    ).toBe(2);
+    expect(
+      metrics.find(
+        ({ MetricName }) => MetricName === 'MonthlyLiveDeliveryTestMissed',
+      )?.Value,
+    ).toBe(1);
     const invalid = completeResults();
     invalid.activationAccept[0]!.invalid_count = 1;
     expect(() => buildMetrics(invalid)).toThrow(
@@ -102,6 +114,16 @@ describe('operational collector runtime boundaries', () => {
     fractional.outboxToProvider[0]!.sample_count = 9.5;
     expect(() => buildMetrics(fractional)).toThrow(
       'OutboxToProviderSampleCount is unavailable.',
+    );
+    const impossibleMiss = completeResults();
+    impossibleMiss.deliveryTestHealth[0]!.missed_count = 2;
+    expect(() => buildMetrics(impossibleMiss)).toThrow(
+      'Monthly delivery-test missed truth is unavailable.',
+    );
+    const fractionalFailure = completeResults();
+    fractionalFailure.deliveryTestHealth[0]!.failed_run_count = 0.5;
+    expect(() => buildMetrics(fractionalFailure)).toThrow(
+      'MonthlyLiveDeliveryTestFailedRunCount is unavailable.',
     );
   });
 
@@ -162,6 +184,7 @@ describe('operational collector runtime boundaries', () => {
       [],
       [{ missing_count: 0, ready: 1 }],
       [],
+      [{ failed_run_count: 0, missed_count: 0 }],
       [],
       [{ failure_age_seconds: 0, success_age_seconds: 30 }],
       [{ stuck_count: 0 }],
@@ -199,18 +222,28 @@ describe('operational collector runtime boundaries', () => {
         },
       });
 
-      expect(selectIndex).toBe(6);
+      expect(selectIndex).toBe(7);
       expect(timeline.at(-3)).toBe('rollback');
       expect(timeline.at(-2)).toBe('publish-1');
       expect(timeline.at(-1)).toBe('publish-2');
       expect(publications).toHaveLength(2);
+      const operationalMetrics = publications[0];
       expect(
-        publications[0]?.every(
-          (datum) =>
-            (datum.Timestamp as Date).toISOString() ===
-            '2026-08-12T19:18:00.000Z',
-        ),
+        operationalMetrics
+          ?.filter(
+            ({ MetricName }) => MetricName !== 'MonthlyLiveDeliveryTestMissed',
+          )
+          .every(
+            (datum) =>
+              (datum.Timestamp as Date).toISOString() ===
+              '2026-08-12T19:18:00.000Z',
+          ),
       ).toBe(true);
+      expect(
+        operationalMetrics?.find(
+          ({ MetricName }) => MetricName === 'MonthlyLiveDeliveryTestMissed',
+        )?.Timestamp,
+      ).toEqual(new Date('2026-08-12T19:20:00.000Z'));
       expect(publications[1]).toEqual([
         {
           MetricName: 'MetricsCollectorSuccess',

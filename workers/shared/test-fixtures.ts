@@ -25,6 +25,7 @@ export const IDS = Object.freeze({
   endpoint: '00000000-0000-4000-8000-000000000012',
   attempt: '00000000-0000-4000-8000-000000000013',
   secondAttempt: '00000000-0000-4000-8000-000000000014',
+  deliveryTargetSet: '00000000-0000-4000-8000-000000000015',
 });
 
 export const TIMES = Object.freeze({
@@ -125,6 +126,58 @@ export function realBatch(): DispatchBatch {
   });
 }
 
+export function deliveryTestBatch(): DispatchBatch {
+  return DispatchBatchSchema.parse({
+    id: IDS.batch,
+    intentId: IDS.intent,
+    eventId: IDS.event,
+    facilityId: IDS.facility,
+    eventKind: 'drill',
+    templateMode: 'drill',
+    purpose: 'activation',
+    eventTypeVersion: { id: IDS.eventTypeVersion, templateMode: 'drill' },
+    rosterSnapshotId: IDS.roster,
+    rosterPopulation: 'staff',
+    audienceConfig: { id: IDS.audience, version: 1 },
+    deliveryTest: {
+      purpose: 'monthly-live-delivery-test',
+      targetSet: { id: IDS.deliveryTargetSet, version: 1 },
+      endpointReferenceDigest: 'd'.repeat(64),
+    },
+    requestId: IDS.request,
+    authorization: {
+      kind: 'human-confirmed',
+      activationPreviewId: IDS.preview,
+      preparedActivationId: null,
+      confirmationId: IDS.confirmation,
+      consequenceDigest: 'b'.repeat(64),
+      requestId: IDS.request,
+    },
+    channel: 'push',
+    renderedMessage: {
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      classificationMarker: 'DRILL',
+      channel: 'push',
+      title: '[DRILL] Live canary test',
+      body: '[DRILL] LIVE CANARY — TRAINING ONLY.',
+    },
+    integrationStatus: {
+      integrationId: 'expo-push',
+      label: 'live-verified',
+      verifiedAt: TIMES.created,
+      verifiedByUserId: IDS.actor,
+      authorizationReference: 'synthetic-live-verification-reference',
+      reasonCode: null,
+      observedAt: TIMES.created,
+    },
+    sequence: 1,
+    endpointCount: 1,
+    createdAt: TIMES.created,
+  });
+}
+
 export function attemptFor(
   batch: DispatchBatch,
   options: Readonly<{ id?: string; number?: number }> = {},
@@ -140,6 +193,7 @@ export function attemptFor(
     eventTypeVersion: batch.eventTypeVersion,
     rosterSnapshotId: batch.rosterSnapshotId,
     rosterPopulation: batch.rosterPopulation,
+    ...(batch.deliveryTest == null ? {} : { deliveryTest: batch.deliveryTest }),
     recipientId: IDS.recipient,
     endpointId: IDS.endpoint,
     channel: batch.channel,

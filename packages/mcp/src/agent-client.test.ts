@@ -14,10 +14,52 @@ const IDS = Object.freeze({
   facility: '10000000-0000-4000-8000-000000000001',
   preview: '10000000-0000-4000-8000-000000000002',
   request: '10000000-0000-4000-8000-000000000003',
+  report: '10000000-0000-4000-8000-000000000004',
+  run: '10000000-0000-4000-8000-000000000005',
 });
 
 const PAGE = Object.freeze({
   items: Object.freeze([]),
+  pageInfo: Object.freeze({ nextCursor: null, hasMore: false }),
+});
+
+const DELIVERY_TEST_REPORT_PAGE = Object.freeze({
+  items: Object.freeze([
+    Object.freeze({
+      id: IDS.report,
+      runId: IDS.run,
+      sequence: 1,
+      supersedesReportId: null,
+      status: 'succeeded',
+      channels: Object.freeze([
+        Object.freeze({
+          channel: 'push',
+          endpointCount: 1,
+          activationToProviderAcceptMs: 125,
+          latestStateCounts: Object.freeze([
+            Object.freeze({ state: 'provider-accepted', count: 1 }),
+          ]),
+          completedAt: '2026-08-12T17:00:01.000Z',
+        }),
+        Object.freeze({
+          channel: 'email',
+          endpointCount: 1,
+          activationToProviderAcceptMs: 250,
+          latestStateCounts: Object.freeze([
+            Object.freeze({ state: 'delivered', count: 1 }),
+          ]),
+          completedAt: '2026-08-12T17:00:02.000Z',
+        }),
+      ]),
+      generatedAt: '2026-08-12T17:00:03.000Z',
+      finalizedBy: Object.freeze({
+        kind: 'system',
+        serviceId: 'delivery-test-reporter',
+      }),
+      source: 'worker',
+      reasonCode: null,
+    }),
+  ]),
   pageInfo: Object.freeze({ nextCursor: null, hasMore: false }),
 });
 
@@ -104,6 +146,36 @@ describe('AgentApiClient', () => {
       cursor: null,
       limit: 20,
     });
+  });
+
+  test('proxies destination-free delivery-test report reads without mutation headers', async () => {
+    let captured: Readonly<{ url: string; init: RequestInit }> | undefined;
+    const client = clientWithFetch(async (input, init = {}) => {
+      captured = Object.freeze({ url: String(input), init });
+      return Response.json(DELIVERY_TEST_REPORT_PAGE);
+    });
+    const input = {
+      facilityId: IDS.facility,
+      status: 'succeeded',
+      generatedFrom: '2026-08-01T07:00:00.000Z',
+      generatedThrough: '2026-09-01T06:59:59.999Z',
+      cursor: null,
+      limit: 50,
+    } as const;
+
+    await expect(
+      client.call('list-delivery-test-reports', input),
+    ).resolves.toEqual(DELIVERY_TEST_REPORT_PAGE);
+    expect(captured?.url).toBe(
+      'https://eoc.example.test/api/agent/v1/capabilities/list-delivery-test-reports',
+    );
+    expect(captured?.init.method).toBe('POST');
+    const headers = new Headers(captured?.init.headers);
+    expect(headers.has('idempotency-key')).toBe(false);
+    expect(JSON.parse(String(captured?.init.body))).toEqual(input);
+    expect(JSON.stringify(DELIVERY_TEST_REPORT_PAGE)).not.toMatch(
+      /recipientId|endpointId|phoneNumber|emailAddress|token|destination/u,
+    );
   });
 
   test('adds transport idempotency for safe draft/prepare mutations', async () => {

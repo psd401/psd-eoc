@@ -4,6 +4,8 @@ import {
   ActivationPreviewSchema,
   AudienceConfigSchema,
   ChannelConfigurationSchema,
+  DeliveryTestPreviewSchema,
+  DeliveryTestTargetSetVersionSchema,
   EndpointSchema,
   FacilityPageSchema,
   FacilitySchema,
@@ -19,8 +21,12 @@ import {
   type CapabilityOutput,
   type CapabilityScope,
   type ChannelConfiguration,
+  type DeliveryTestNotificationMetadata,
+  type DeliveryTestPreview,
+  type DeliveryTestTargetSetVersion,
   type FacilityPage,
   type Neighborhood,
+  type NotificationChannel,
   type RegisteredCapabilityId,
   type RosterGroupSourceRef,
   type RosterPopulation,
@@ -42,6 +48,9 @@ import {
   audienceConfigurations,
   audienceTargets,
   channelConfigurations,
+  deliveryTestCanaryEligibilityFacts,
+  deliveryTestTargetEndpoints,
+  deliveryTestTargetSetVersions,
   events,
   facilities,
   groupSources,
@@ -77,9 +86,19 @@ import {
   DrizzleEventTypeStore,
   EventTypeCapabilityError,
 } from '../../../../lib/capabilities/event-types';
-import { AudienceResolutionError } from '../../../../lib/roster/resolve';
+import {
+  AudienceResolutionError,
+  resolveAudience,
+} from '../../../../lib/roster/resolve';
+import {
+  DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
+  deliveryTestEndpointReferenceDigest,
+  deliveryTestTargetLockIdentity,
+  isDeliveryTestEndpointReferenceSubset,
+} from '../../../../lib/testing/e2e-delivery';
 import {
   BoundedDatabaseQueryError,
+  START_FLOW_DATABASE_PAGE_SIZE,
   collectBoundedDatabaseRows,
   START_FLOW_ENDPOINT_PAGE_SIZE,
 } from './bounded-query';
@@ -87,7 +106,9 @@ import { ActivationPreviewBuildError, buildActivationPreview } from './preview';
 
 type StartFlowCapabilityId = Extract<
   RegisteredCapabilityId,
-  'create-activation-preview' | 'list-facilities'
+  | 'create-activation-preview'
+  | 'create-delivery-test-preview'
+  | 'list-facilities'
 >;
 
 type StartFlowQueryDatabase = DatabaseQuery;
@@ -110,6 +131,59 @@ const AUDIENCE_QUERY_LIMITS = Object.freeze({
   targets: 500,
 });
 
+export const DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV =
+  Object.freeze({
+    push: 'PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE',
+    email: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
+    sms: 'PSD_EOC_SMS_CREDENTIAL_VERIFICATION_REFERENCE',
+  } as const satisfies Readonly<Record<NotificationChannel, string>>);
+
+export type DeliveryTestCredentialVerificationReferences = Readonly<
+  Record<NotificationChannel, string | null>
+>;
+
+/**
+ * Loads non-secret, deploy-time credential verification references. A live
+ * truth label alone is deliberately insufficient; the reference must bind the
+ * running deployment to the exact append-only integration verification row.
+ */
+export function readDeliveryTestCredentialVerificationReferences(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): DeliveryTestCredentialVerificationReferences {
+  const read = (channel: NotificationChannel): string | null => {
+    const value =
+      environment[DELIVERY_TEST_CREDENTIAL_VERIFICATION_REFERENCE_ENV[channel]];
+    return value !== undefined &&
+      value === value.trim() &&
+      value.length >= 16 &&
+      value.length <= 255 &&
+      /^[A-Za-z0-9._:-]+$/u.test(value)
+      ? value
+      : null;
+  };
+  return Object.freeze({
+    push: read('push'),
+    email: read('email'),
+    sms: read('sms'),
+  });
+}
+
+export function deliveryTestCredentialIsVerified(
+  status: Readonly<{
+    label: string;
+    verifiedAt: string | null;
+    authorizationReference: string | null;
+  }>,
+  verificationReference: string | null,
+): boolean {
+  return (
+    status.label === 'live-verified' &&
+    status.verifiedAt !== null &&
+    verificationReference !== null &&
+    status.authorizationReference === verificationReference
+  );
+}
+
 /** Persistence boundary for the two query capabilities owned by start flow. */
 export interface StartFlowCapabilityTransaction
   extends CapabilityEngineTransaction {
@@ -122,10 +196,22 @@ export interface StartFlowCapabilityTransaction
     actor: Actor,
     now: Date,
   ): Promise<ActivationPreview>;
+  resolveDeliveryTestFacilityId?(
+    input: CapabilityInput<'create-delivery-test-preview'>,
+  ): Promise<string | null>;
+  createDeliveryTestPreview?(
+    input: CapabilityInput<'create-delivery-test-preview'>,
+    actor: Actor,
+    now: Date,
+  ): Promise<DeliveryTestPreview>;
 }
 
 export type StartFlowCapabilityStore =
   CapabilityEngineStore<StartFlowCapabilityTransaction>;
+
+interface RosterSnapshotHydrationCache {
+  snapshot: RosterSnapshot | null;
+}
 
 function conflict(message: string): CapabilityEngineError {
   return new CapabilityEngineError(
@@ -511,10 +597,12 @@ export async function loadAudienceConfiguration(
   });
 }
 
-async function loadRosterSnapshot(
+export async function loadRosterSnapshot(
   database: StartFlowQueryDatabase,
   population: RosterPopulation,
   facilityId: string,
+  exactSnapshotId?: string,
+  hydrationCache?: RosterSnapshotHydrationCache,
 ): Promise<RosterSnapshot | null> {
   const [snapshot] = await database
     .select({ snapshot: rosterSnapshots })
@@ -528,6 +616,9 @@ async function loadRosterSnapshot(
         eq(rosterSnapshots.population, population),
         eq(rosterSnapshots.complete, true),
         eq(rosterSnapshotFacilities.facilityId, facilityId),
+        exactSnapshotId === undefined
+          ? undefined
+          : eq(rosterSnapshots.id, exactSnapshotId),
       ),
     )
     .orderBy(
@@ -540,6 +631,16 @@ async function loadRosterSnapshot(
     return null;
   }
   const snapshotId = snapshot.snapshot.id;
+  const cached = hydrationCache?.snapshot;
+  if (
+    cached !== null &&
+    cached !== undefined &&
+    cached.id === snapshotId &&
+    cached.population === population &&
+    cached.facilityIds.includes(facilityId)
+  ) {
+    return cached;
+  }
   const facilityRows = await collectBoundedDatabaseRows(
     (offset, limit) =>
       database
@@ -610,19 +711,41 @@ async function loadRosterSnapshot(
         .limit(limit),
     { maxRows: ROSTER_QUERY_LIMITS.provenance },
   );
-  const endpointRows = await collectBoundedDatabaseRows(
-    (offset, limit) =>
-      database
-        .select()
-        .from(rosterEndpoints)
-        .where(eq(rosterEndpoints.rosterSnapshotId, snapshotId))
-        .orderBy(asc(rosterEndpoints.recipientId), asc(rosterEndpoints.id))
-        .offset(offset)
-        .limit(limit),
-    {
-      maxRows: ROSTER_QUERY_LIMITS.endpoints,
-      pageSize: START_FLOW_ENDPOINT_PAGE_SIZE,
-    },
+  const endpointRows: Array<typeof rosterEndpoints.$inferSelect> = [];
+  // Push tokens have a much larger contract ceiling than email addresses or
+  // phone numbers. Keep push pages at the conservative Data API bound while
+  // reading the two compact channel shapes in normal bounded pages. This
+  // preserves the aggregate endpoint ceiling without forcing every compact
+  // row through worst-case push-token pagination.
+  for (const channel of ['push', 'email', 'sms'] as const) {
+    const channelRows = await collectBoundedDatabaseRows(
+      (offset, limit) =>
+        database
+          .select()
+          .from(rosterEndpoints)
+          .where(
+            and(
+              eq(rosterEndpoints.rosterSnapshotId, snapshotId),
+              eq(rosterEndpoints.channel, channel),
+            ),
+          )
+          .orderBy(asc(rosterEndpoints.recipientId), asc(rosterEndpoints.id))
+          .offset(offset)
+          .limit(limit),
+      {
+        maxRows: ROSTER_QUERY_LIMITS.endpoints - endpointRows.length,
+        pageSize:
+          channel === 'push'
+            ? START_FLOW_ENDPOINT_PAGE_SIZE
+            : START_FLOW_DATABASE_PAGE_SIZE,
+      },
+    );
+    endpointRows.push(...channelRows);
+  }
+  endpointRows.sort(
+    (left, right) =>
+      left.recipientId.localeCompare(right.recipientId) ||
+      left.id.localeCompare(right.id),
   );
 
   const groupRefsForRecipient = new Map<string, RosterGroupSourceRef[]>();
@@ -694,7 +817,7 @@ async function loadRosterSnapshot(
     };
   });
 
-  return RosterSnapshotSchema.parse({
+  const parsed = RosterSnapshotSchema.parse({
     id: snapshot.snapshot.id,
     version: snapshot.snapshot.version,
     population: snapshot.snapshot.population,
@@ -714,6 +837,10 @@ async function loadRosterSnapshot(
     syncStartedAt: dateIso(snapshot.snapshot.syncStartedAt),
     capturedAt: dateIso(snapshot.snapshot.capturedAt),
   });
+  if (hydrationCache !== undefined) {
+    hydrationCache.snapshot = parsed;
+  }
+  return parsed;
 }
 
 async function loadChannelConfigurations(
@@ -817,11 +944,313 @@ function mapPreviewConstructionError(error: unknown): never {
   throw error;
 }
 
+export type DeliveryTestEndpointReference = Readonly<{
+  recipientId: string;
+  endpointId: string;
+  channel: 'push' | 'email' | 'sms';
+}>;
+
+interface DeliveryTestPreviewContext {
+  readonly targetSet: DeliveryTestTargetSetVersion;
+  readonly metadata: DeliveryTestNotificationMetadata;
+  readonly credentialVerificationReferences: DeliveryTestCredentialVerificationReferences;
+}
+
+const DELIVERY_TEST_CHANNEL_BY_INTEGRATION_ID = Object.freeze({
+  'expo-push': 'push',
+  'ses-email': 'email',
+  'aws-eum-sms': 'sms',
+} as const);
+
+function deliveryTestCredentialBlockingReasonCodes(
+  configurations: readonly ChannelConfiguration[],
+  targetSet: DeliveryTestTargetSetVersion,
+  references: DeliveryTestCredentialVerificationReferences,
+): readonly string[] {
+  const targetedChannels = new Set(
+    targetSet.endpoints.map((endpoint) => endpoint.channel),
+  );
+  const statusByChannel = new Map(
+    configurations.flatMap((configuration) => {
+      const channel =
+        DELIVERY_TEST_CHANNEL_BY_INTEGRATION_ID[
+          configuration.integrationId as keyof typeof DELIVERY_TEST_CHANNEL_BY_INTEGRATION_ID
+        ];
+      return channel === undefined
+        ? []
+        : ([[channel, configuration.status]] as const);
+    }),
+  );
+  return Object.freeze(
+    [...targetedChannels]
+      .filter(
+        (channel) =>
+          !deliveryTestCredentialIsVerified(
+            statusByChannel.get(channel) ?? {
+              label: 'configured-unverified',
+              verifiedAt: null,
+              authorizationReference: null,
+            },
+            references[channel],
+          ),
+      )
+      .map((channel) => `${channel.toUpperCase()}_CREDENTIAL_UNVERIFIED`)
+      .sort(),
+  );
+}
+
+function endpointReferenceKey(
+  reference: DeliveryTestEndpointReference,
+): string {
+  return `${reference.channel}:${reference.recipientId}:${reference.endpointId}`;
+}
+
+export async function loadDeliveryTestTargetSet(
+  database: StartFlowQueryDatabase,
+  reference: Readonly<{ id: string; version: number }>,
+): Promise<DeliveryTestTargetSetVersion | null> {
+  const [row] = await database
+    .select()
+    .from(deliveryTestTargetSetVersions)
+    .where(
+      and(
+        eq(deliveryTestTargetSetVersions.id, reference.id),
+        eq(deliveryTestTargetSetVersions.version, reference.version),
+      ),
+    )
+    .limit(1);
+  if (row === undefined) return null;
+  const endpoints = await database
+    .select()
+    .from(deliveryTestTargetEndpoints)
+    .where(eq(deliveryTestTargetEndpoints.targetSetVersionId, row.id))
+    .orderBy(
+      asc(deliveryTestTargetEndpoints.channel),
+      asc(deliveryTestTargetEndpoints.recipientId),
+      asc(deliveryTestTargetEndpoints.endpointId),
+    );
+  return DeliveryTestTargetSetVersionSchema.parse({
+    id: row.id,
+    version: row.version,
+    facilityId: row.facilityId,
+    rosterSnapshotId: row.rosterSnapshotId,
+    supersedesVersionId: row.supersedesVersionId,
+    endpoints: endpoints.map((endpoint) => ({
+      eligibilityFactId: endpoint.eligibilityFactId,
+      recipientId: endpoint.recipientId,
+      endpointId: endpoint.endpointId,
+      channel: endpoint.channel,
+      attestation: endpoint.attestation,
+      optedInAt: dateIso(endpoint.optedInAt),
+      attestedAt: dateIso(endpoint.attestedAt),
+      attestedByUserId: endpoint.attestedByUserId,
+      authorizationReference: endpoint.authorizationReference,
+    })),
+    endpointReferenceDigest: row.endpointReferenceDigest,
+    approvedByUserId: row.approvedByUserId,
+    approvedWithSessionId: row.approvedWithSessionId,
+    approvedAt: dateIso(row.approvedAt),
+    createdAt: dateIso(row.createdAt),
+  });
+}
+
+export async function currentActiveAudienceEndpointReferences(
+  database: StartFlowQueryDatabase,
+  rosterSnapshot: RosterSnapshot,
+  audience: Awaited<ReturnType<typeof loadAudienceConfiguration>>,
+): Promise<readonly DeliveryTestEndpointReference[]> {
+  const references = allAudienceEndpointReferences(rosterSnapshot, audience);
+  const endpointIds = references.map((endpoint) => endpoint.endpointId);
+  if (endpointIds.length === 0) return [];
+  const rows = await database
+    .select({
+      endpointId: rosterEndpoints.id,
+      recipientId: rosterEndpoints.recipientId,
+      channel: rosterEndpoints.channel,
+      baseStatus: rosterEndpoints.status,
+      latestStatus: sql<'active' | 'invalid' | 'disabled' | null>`(
+        select esr.status
+        from endpoint_status_records esr
+        where esr.roster_snapshot_id = ${rosterEndpoints.rosterSnapshotId}
+          and esr.endpoint_id = ${rosterEndpoints.id}
+        order by esr.recorded_at desc, esr.sequence desc
+        limit 1
+      )`,
+    })
+    .from(rosterEndpoints)
+    .where(
+      and(
+        eq(rosterEndpoints.rosterSnapshotId, rosterSnapshot.id),
+        inArray(rosterEndpoints.id, endpointIds),
+      ),
+    );
+  if (rows.length !== endpointIds.length) {
+    throw unavailable('The configured canary audience is unavailable.');
+  }
+  const referenceKeys = new Set(references.map(endpointReferenceKey));
+  if (
+    rows.some(
+      (row) =>
+        !referenceKeys.has(
+          endpointReferenceKey({
+            endpointId: row.endpointId,
+            recipientId: row.recipientId,
+            channel: row.channel,
+          }),
+        ),
+    )
+  ) {
+    throw conflict('The configured canary audience is inconsistent.');
+  }
+  return Object.freeze(
+    rows
+      .filter((row) => (row.latestStatus ?? row.baseStatus) === 'active')
+      .map((row) =>
+        Object.freeze({
+          recipientId: row.recipientId,
+          endpointId: row.endpointId,
+          channel: row.channel,
+        }),
+      ),
+  );
+}
+
+/**
+ * Revalidates the independently authored, append-only eligibility facts and
+ * current active audience for a pinned delivery-test target. Callers hold the
+ * facility target-set advisory lock so a concurrent revocation cannot race a
+ * preview or event start.
+ */
+export async function requireCurrentDeliveryTestTargetEligibility(
+  database: StartFlowQueryDatabase,
+  targetSet: DeliveryTestTargetSetVersion,
+  now: Date,
+  hydrationCache?: RosterSnapshotHydrationCache,
+): Promise<void> {
+  const factIds = targetSet.endpoints.map(
+    (endpoint) => endpoint.eligibilityFactId,
+  );
+  const [facility] = await database
+    .select({ active: facilities.active })
+    .from(facilities)
+    .where(eq(facilities.id, targetSet.facilityId))
+    .limit(1);
+  const roster = await loadRosterSnapshot(
+    database,
+    'staff',
+    targetSet.facilityId,
+    undefined,
+    hydrationCache,
+  );
+  const audience = await loadAudienceConfiguration(
+    database,
+    targetSet.facilityId,
+  );
+  if (
+    facility === undefined ||
+    !facility.active ||
+    roster === null ||
+    roster.id !== targetSet.rosterSnapshotId ||
+    audience === null
+  ) {
+    throw new CapabilityEngineError(
+      'FORBIDDEN',
+      'CAPABILITY_INVOCATION_DENIED',
+      'The pinned canary target no longer belongs to the current active staff audience.',
+      403,
+    );
+  }
+
+  const facts = await database
+    .select()
+    .from(deliveryTestCanaryEligibilityFacts)
+    .where(inArray(deliveryTestCanaryEligibilityFacts.id, factIds));
+  const successors = await database
+    .select({
+      supersedesFactId: deliveryTestCanaryEligibilityFacts.supersedesFactId,
+    })
+    .from(deliveryTestCanaryEligibilityFacts)
+    .where(
+      inArray(deliveryTestCanaryEligibilityFacts.supersedesFactId, factIds),
+    );
+  const activeReferences = await currentActiveAudienceEndpointReferences(
+    database,
+    roster,
+    audience,
+  );
+  const activeKeys = new Set(activeReferences.map(endpointReferenceKey));
+  const factsById = new Map(facts.map((fact) => [fact.id, fact]));
+  const valid =
+    facts.length === factIds.length &&
+    new Set(factIds).size === factIds.length &&
+    successors.length === 0 &&
+    targetSet.endpoints.every((endpoint) => {
+      const fact = factsById.get(endpoint.eligibilityFactId);
+      return (
+        fact !== undefined &&
+        fact.facilityId === targetSet.facilityId &&
+        fact.rosterSnapshotId === targetSet.rosterSnapshotId &&
+        fact.rosterPopulation === 'staff' &&
+        fact.recipientId === endpoint.recipientId &&
+        fact.endpointId === endpoint.endpointId &&
+        fact.channel === endpoint.channel &&
+        fact.decision === 'approved-synthetic-canary' &&
+        dateIso(fact.optedInAt) === endpoint.optedInAt &&
+        dateIso(fact.decidedAt) === endpoint.attestedAt &&
+        fact.decidedAt.getTime() <= now.getTime() &&
+        fact.decidedByUserId === endpoint.attestedByUserId &&
+        fact.authorizationReference === endpoint.authorizationReference &&
+        activeKeys.has(endpointReferenceKey(endpoint))
+      );
+    });
+  if (!valid) {
+    throw new CapabilityEngineError(
+      'FORBIDDEN',
+      'CAPABILITY_INVOCATION_DENIED',
+      'The pinned canary target no longer has exact current eligibility and active-audience evidence.',
+      403,
+    );
+  }
+}
+
+function allAudienceEndpointReferences(
+  rosterSnapshot: RosterSnapshot,
+  audience: Awaited<ReturnType<typeof loadAudienceConfiguration>>,
+): readonly DeliveryTestEndpointReference[] {
+  if (audience === null) return [];
+  // Resolve audience membership independently from mutable endpoint health;
+  // the caller applies the latest status overlay before comparing exact sets.
+  const allEndpointsActive = {
+    ...rosterSnapshot,
+    recipients: rosterSnapshot.recipients.map((recipient) => ({
+      ...recipient,
+      endpoints: recipient.endpoints.map((endpoint) => ({
+        ...endpoint,
+        status: 'active' as const,
+      })),
+    })),
+  };
+  const resolved = resolveAudience({
+    audienceConfig: audience.audienceConfig,
+    neighborhoodVersions: audience.neighborhoodVersions,
+    rosterSnapshot: allEndpointsActive,
+  });
+  return resolved.recipients.flatMap((recipient) =>
+    recipient.endpoints.map((endpoint) => ({
+      recipientId: recipient.recipientId,
+      endpointId: endpoint.id,
+      channel: endpoint.channel,
+    })),
+  );
+}
+
 async function createActivationPreviewFromDatabase(
   database: StartFlowQueryDatabase,
   input: CapabilityInput<'create-activation-preview'>,
   actor: Actor,
   now: Date,
+  deliveryTestContext?: DeliveryTestPreviewContext,
+  hydrationCache?: RosterSnapshotHydrationCache,
 ): Promise<ActivationPreview> {
   try {
     // The Data API permits only one in-flight statement for a transaction ID.
@@ -840,6 +1269,8 @@ async function createActivationPreviewFromDatabase(
       database,
       input.rosterPopulation,
       input.facilityId,
+      deliveryTestContext?.targetSet.rosterSnapshotId,
+      hydrationCache,
     );
     const channelConfigurationsValue =
       await loadChannelConfigurations(database);
@@ -851,6 +1282,33 @@ async function createActivationPreviewFromDatabase(
     }
     if (rosterSnapshot === null) {
       throw unavailable('A complete roster snapshot is unavailable.');
+    }
+    if (deliveryTestContext !== undefined) {
+      const targetReferences = deliveryTestContext.targetSet.endpoints.map(
+        (endpoint) => ({
+          recipientId: endpoint.recipientId,
+          endpointId: endpoint.endpointId,
+          channel: endpoint.channel,
+        }),
+      );
+      const activeReferences = await currentActiveAudienceEndpointReferences(
+        database,
+        rosterSnapshot,
+        audience,
+      );
+      if (
+        targetReferences.length === 0 ||
+        !isDeliveryTestEndpointReferenceSubset(
+          targetReferences,
+          activeReferences,
+        ) ||
+        deliveryTestEndpointReferenceDigest(targetReferences) !==
+          deliveryTestContext.targetSet.endpointReferenceDigest
+      ) {
+        throw conflict(
+          'An approved canary endpoint is no longer active in the configured audience.',
+        );
+      }
     }
     const eventTypeVersion = await new DrizzleEventTypeStore(
       eventTypeStoreDatabase(database),
@@ -888,6 +1346,19 @@ async function createActivationPreviewFromDatabase(
       initiator: actor,
       initiatorDisplayName,
       createdAt: now,
+      ...(deliveryTestContext === undefined
+        ? {}
+        : {
+            deliveryTest: deliveryTestContext.metadata,
+            deliveryTestEndpointReferences:
+              deliveryTestContext.targetSet.endpoints,
+            additionalBlockingReasonCodes:
+              deliveryTestCredentialBlockingReasonCodes(
+                channelConfigurationsValue,
+                deliveryTestContext.targetSet,
+                deliveryTestContext.credentialVerificationReferences,
+              ),
+          }),
     });
     await database.insert(activationPreviews).values({
       id: preview.id,
@@ -905,6 +1376,11 @@ async function createActivationPreviewFromDatabase(
       blockingReasonCodes: preview.blockingReasonCodes,
       activeEventIds: preview.activeEventIds,
       consequenceDigest: preview.consequenceDigest,
+      deliveryTestTargetSetId: preview.deliveryTest?.targetSet.id ?? null,
+      deliveryTestTargetSetVersion:
+        preview.deliveryTest?.targetSet.version ?? null,
+      deliveryTestEndpointReferenceDigest:
+        preview.deliveryTest?.endpointReferenceDigest ?? null,
       createdAt: new Date(preview.createdAt),
       expiresAt: new Date(preview.expiresAt),
     });
@@ -912,6 +1388,84 @@ async function createActivationPreviewFromDatabase(
   } catch (error) {
     mapPreviewConstructionError(error);
   }
+}
+
+async function createDeliveryTestPreviewFromDatabase(
+  database: StartFlowQueryDatabase,
+  input: CapabilityInput<'create-delivery-test-preview'>,
+  actor: Actor,
+  now: Date,
+  credentialVerificationReferences: DeliveryTestCredentialVerificationReferences,
+  hydrationCache?: RosterSnapshotHydrationCache,
+): Promise<DeliveryTestPreview> {
+  if (actor.kind !== 'human') {
+    throw new CapabilityEngineError(
+      'FORBIDDEN',
+      'CAPABILITY_INVOCATION_DENIED',
+      'A monthly live delivery-test preview requires an authenticated human.',
+      403,
+    );
+  }
+  const targetSet = await loadDeliveryTestTargetSet(database, input.targetSet);
+  if (targetSet === null) {
+    throw unavailable('The approved canary target-set version is unavailable.');
+  }
+  await database.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${deliveryTestTargetLockIdentity(targetSet.facilityId)}, ${DELIVERY_TEST_TARGET_LOCK_NAMESPACE}))`,
+  );
+  const [successor] = await database
+    .select({ id: deliveryTestTargetSetVersions.id })
+    .from(deliveryTestTargetSetVersions)
+    .where(eq(deliveryTestTargetSetVersions.supersedesVersionId, targetSet.id))
+    .limit(1);
+  if (successor !== undefined) {
+    throw conflict(
+      'The approved canary target-set version has been superseded.',
+    );
+  }
+  await requireCurrentDeliveryTestTargetEligibility(
+    database,
+    targetSet,
+    now,
+    hydrationCache,
+  );
+  const metadata: DeliveryTestNotificationMetadata = Object.freeze({
+    purpose: 'monthly-live-delivery-test',
+    targetSet: input.targetSet,
+    endpointReferenceDigest: targetSet.endpointReferenceDigest,
+  });
+  const activationPreview = await createActivationPreviewFromDatabase(
+    database,
+    {
+      facilityId: targetSet.facilityId,
+      kind: 'drill',
+      templateMode: 'drill',
+      eventTypeVersion: input.eventTypeVersion,
+      rosterPopulation: 'staff',
+    },
+    actor,
+    now,
+    { targetSet, metadata, credentialVerificationReferences },
+    hydrationCache,
+  );
+  return DeliveryTestPreviewSchema.parse({
+    purpose: 'monthly-live-delivery-test',
+    activationPreview,
+    targetSet: input.targetSet,
+    endpointReferenceDigest: targetSet.endpointReferenceDigest,
+    channels: activationPreview.channels.map((channel) => ({
+      channel: channel.channel,
+      endpointCount: channel.endpointCount,
+      integrationStatus: channel.integrationStatus,
+      credentialVerified: deliveryTestCredentialIsVerified(
+        channel.integrationStatus,
+        credentialVerificationReferences[channel.channel],
+      ),
+    })),
+    consequenceDigest: activationPreview.consequenceDigest,
+    createdAt: activationPreview.createdAt,
+    expiresAt: activationPreview.expiresAt,
+  });
 }
 
 export interface ActivationPreviewLoadOptions {
@@ -980,6 +1534,19 @@ export async function loadActivationPreview(
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,
     activeEventIds: row.activeEventIds,
+    deliveryTest:
+      row.deliveryTestTargetSetId === null ||
+      row.deliveryTestTargetSetVersion === null ||
+      row.deliveryTestEndpointReferenceDigest === null
+        ? null
+        : {
+            purpose: 'monthly-live-delivery-test',
+            targetSet: {
+              id: row.deliveryTestTargetSetId,
+              version: row.deliveryTestTargetSetVersion,
+            },
+            endpointReferenceDigest: row.deliveryTestEndpointReferenceDigest,
+          },
     consequenceDigest: row.consequenceDigest,
     createdAt: dateIso(row.createdAt),
     expiresAt: dateIso(row.expiresAt),
@@ -988,6 +1555,8 @@ export async function loadActivationPreview(
 
 function createDrizzleStartFlowTransaction(
   database: StartFlowQueryDatabase,
+  credentialVerificationReferences: DeliveryTestCredentialVerificationReferences,
+  hydrationCache: RosterSnapshotHydrationCache,
 ): StartFlowCapabilityTransaction {
   return {
     readCurrentTime: () => readDatabaseTime(database),
@@ -1000,14 +1569,50 @@ function createDrizzleStartFlowTransaction(
     listFacilities: (input, scope) =>
       listFacilitiesFromDatabase(database, input, scope),
     createActivationPreview: (input, actor, now) =>
-      createActivationPreviewFromDatabase(database, input, actor, now),
+      createActivationPreviewFromDatabase(
+        database,
+        input,
+        actor,
+        now,
+        undefined,
+        hydrationCache,
+      ),
+    async resolveDeliveryTestFacilityId(input) {
+      const [row] = await database
+        .select({ facilityId: deliveryTestTargetSetVersions.facilityId })
+        .from(deliveryTestTargetSetVersions)
+        .where(
+          and(
+            eq(deliveryTestTargetSetVersions.id, input.targetSet.id),
+            eq(deliveryTestTargetSetVersions.version, input.targetSet.version),
+          ),
+        )
+        .limit(1);
+      return row?.facilityId ?? null;
+    },
+    createDeliveryTestPreview: (input, actor, now) =>
+      createDeliveryTestPreviewFromDatabase(
+        database,
+        input,
+        actor,
+        now,
+        credentialVerificationReferences,
+        hydrationCache,
+      ),
   };
 }
 
 /** Production Drizzle store; preview persistence and success audit are atomic. */
 export function createDrizzleStartFlowCapabilityStore(
   database: Database,
+  options: Readonly<{
+    credentialVerificationReferences?: DeliveryTestCredentialVerificationReferences;
+  }> = {},
 ): StartFlowCapabilityStore {
+  const credentialVerificationReferences =
+    options.credentialVerificationReferences ??
+    readDeliveryTestCredentialVerificationReferences();
+  const hydrationCache: RosterSnapshotHydrationCache = { snapshot: null };
   return {
     transaction<Result>(
       operation: (
@@ -1018,6 +1623,8 @@ export function createDrizzleStartFlowCapabilityStore(
         operation(
           createDrizzleStartFlowTransaction(
             startFlowQueryDatabase(transaction),
+            credentialVerificationReferences,
+            hydrationCache,
           ),
         ),
       );
@@ -1060,9 +1667,37 @@ export const createActivationPreviewRegistration: ServerCapabilityRegistration<
   },
 };
 
+export const createDeliveryTestPreviewRegistration: ServerCapabilityRegistration<
+  'create-delivery-test-preview',
+  StartFlowCapabilityTransaction
+> = {
+  id: 'create-delivery-test-preview',
+  resolveFacilityId(input, context) {
+    const resolveFacilityId = context.transaction.resolveDeliveryTestFacilityId;
+    if (resolveFacilityId === undefined) {
+      throw unavailable('The monthly delivery-test preview is unavailable.');
+    }
+    return resolveFacilityId(input);
+  },
+  async handler(input, context): Promise<DeliveryTestPreview> {
+    const createPreview = context.transaction.createDeliveryTestPreview;
+    if (createPreview === undefined) {
+      throw unavailable('The monthly delivery-test preview is unavailable.');
+    }
+    return DeliveryTestPreviewSchema.parse(
+      await createPreview(
+        input,
+        context.invocation.actor,
+        await readCapabilityTime(context),
+      ),
+    );
+  },
+};
+
 const registrations = Object.freeze({
   'list-facilities': listFacilitiesRegistration,
   'create-activation-preview': createActivationPreviewRegistration,
+  'create-delivery-test-preview': createDeliveryTestPreviewRegistration,
 });
 
 /** Executes one start-flow query through the canonical capability engine. */
