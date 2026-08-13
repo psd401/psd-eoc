@@ -1,0 +1,53 @@
+name: Web E2E
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-e2e-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  web-e2e:
+    name: Playwright and axe (synthetic only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: psd_eoc_test
+          POSTGRES_PASSWORD: synthetic_test_password
+          POSTGRES_USER: psd_eoc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U psd_eoc_test -d psd_eoc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CI: 'true'
+      PSD_EOC_E2E_SYNTHETIC_ONLY: 'true'
+      TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@127.0.0.1:5432/psd_eoc_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install dependencies from the lockfile
+        run: bun install --frozen-lockfile
+
+      - name: Install the Playwright browser
+        run: bunx playwright install --with-deps chrome
+
+      - name: Run the synthetic web E2E suite
+        run: bun packages/server/e2e/run-ci.ts
