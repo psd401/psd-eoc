@@ -1,5 +1,5 @@
 appId: net.psd401.eoc
-name: Issue 32 - request Android unlock from synthetic drill notification
+name: Issue 32 - open the synthetic drill notification on Android
 tags: [issue-32, synthetic-only, android, notification, pre-auth]
 ---
 - runFlow:
@@ -10,10 +10,5 @@ tags: [issue-32, synthetic-only, android, notification, pre-auth]
 - assertVisible: '\[DRILL\] Synthetic lockdown drill'
 - assertNotVisible: '.*\[INCIDENT\].*'
 - tapOn: '\[DRILL\] Synthetic lockdown drill'
-- extendedWaitUntil:
-    visible: 'Unlock PSD EOC'
-    timeout: 30000
-- tapOn:
-    text: 'Unlock with device security'
-    enabled: true
-# Stop with Android SystemUI device authentication pending.
+# The production foreground bootstrap now requests LocalAuthentication itself.
+# Stop here so the runner can prove and answer that exact SystemUI request.

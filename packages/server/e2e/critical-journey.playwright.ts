@@ -1,11 +1,13 @@
 import {
   CreateActivationPreviewInputSchema,
+  JournalEntrySchema,
   StartEventInputSchema,
   StartEventResultSchema,
   type ActivationPreview,
   type StartEventResult,
 } from '@psd-eoc/contracts';
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { asc, eq, inArray } from 'drizzle-orm';
 import { readFile } from 'node:fs/promises';
 
 import {
@@ -19,7 +21,16 @@ import {
   activationResultFixture,
   type StartFlowPlaywrightFixture,
 } from '../app/(app)/start/test/playwright.fixtures';
+import { startFlowPlaywrightDatabaseUrl } from '../app/(app)/start/test/playwright-database';
 import { startFlowPlaywrightPaths } from '../app/(app)/start/test/playwright-run';
+import { createDatabaseClient } from '../db/client';
+import {
+  activationPreviews,
+  events,
+  journalEntries,
+  notificationIntents,
+  outbox,
+} from '../db/schema';
 
 let fixture: StartFlowPlaywrightFixture;
 
@@ -498,6 +509,237 @@ test.beforeAll(async ({ request }) => {
 
 test.beforeEach(async ({ context }) => {
   await installAxe(context);
+});
+
+test('production capability-backed synthetic drill supports join and location without provider I/O', async ({
+  page,
+}) => {
+  const seededEvent = fixture.activeEvents[1];
+  if (seededEvent === undefined) {
+    throw new Error('The second production-seeded synthetic drill is absent.');
+  }
+  const connection = createDatabaseClient({
+    driver: 'postgres',
+    url: startFlowPlaywrightDatabaseUrl(),
+    maxConnections: 2,
+  });
+  if (connection.driver !== 'postgres') {
+    throw new Error('Critical-journey Playwright requires PostgreSQL.');
+  }
+
+  try {
+    const [
+      [persistedEvent],
+      [persistedPreview],
+      [persistedIntent],
+      [persistedOutbox],
+      persistedActivationJournals,
+    ] = await Promise.all([
+      connection.db
+        .select({
+          id: events.id,
+          status: events.status,
+          kind: events.kind,
+          templateMode: events.templateMode,
+          rosterPopulation: events.rosterPopulation,
+          activationAuthorization: events.activationAuthorization,
+        })
+        .from(events)
+        .where(eq(events.id, seededEvent.id))
+        .limit(1),
+      connection.db
+        .select({
+          id: activationPreviews.id,
+          kind: activationPreviews.kind,
+          templateMode: activationPreviews.templateMode,
+          rosterPopulation: activationPreviews.rosterPopulation,
+          sendReadiness: activationPreviews.sendReadiness,
+          channels: activationPreviews.channels,
+        })
+        .from(activationPreviews)
+        .where(eq(activationPreviews.id, seededEvent.previewId))
+        .limit(1),
+      connection.db
+        .select({
+          id: notificationIntents.id,
+          eventId: notificationIntents.eventId,
+          eventKind: notificationIntents.eventKind,
+          templateMode: notificationIntents.templateMode,
+          purpose: notificationIntents.purpose,
+          rosterPopulation: notificationIntents.rosterPopulation,
+          requestId: notificationIntents.requestId,
+        })
+        .from(notificationIntents)
+        .where(eq(notificationIntents.id, seededEvent.notificationIntentId))
+        .limit(1),
+      connection.db
+        .select({
+          id: outbox.id,
+          eventId: outbox.eventId,
+          intentId: outbox.intentId,
+          templateMode: outbox.templateMode,
+          rosterPopulation: outbox.rosterPopulation,
+          status: outbox.status,
+          attempts: outbox.attempts,
+          publishedAt: outbox.publishedAt,
+        })
+        .from(outbox)
+        .where(eq(outbox.id, seededEvent.outboxId))
+        .limit(1),
+      connection.db
+        .select({
+          id: journalEntries.id,
+          eventId: journalEntries.eventId,
+          sequence: journalEntries.sequence,
+        })
+        .from(journalEntries)
+        .where(inArray(journalEntries.id, seededEvent.journalEntryIds))
+        .orderBy(asc(journalEntries.sequence)),
+    ]);
+
+    expect(persistedEvent).toMatchObject({
+      id: seededEvent.id,
+      status: 'active',
+      kind: 'drill',
+      templateMode: 'drill',
+      rosterPopulation: 'synthetic',
+      activationAuthorization: {
+        kind: 'synthetic-training',
+        activationPreviewId: seededEvent.previewId,
+        requestId: seededEvent.requestId,
+      },
+    });
+    expect(persistedPreview).toMatchObject({
+      id: seededEvent.previewId,
+      kind: 'drill',
+      templateMode: 'drill',
+      rosterPopulation: 'synthetic',
+      sendReadiness: 'ready',
+    });
+    const previewChannels = JSON.stringify(persistedPreview?.channels);
+    expect(previewChannels).toContain('mocked');
+    expect(previewChannels).not.toContain('live-verified');
+    expect(persistedIntent).toEqual({
+      id: seededEvent.notificationIntentId,
+      eventId: seededEvent.id,
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      rosterPopulation: 'synthetic',
+      requestId: seededEvent.requestId,
+    });
+    expect(persistedOutbox).toEqual({
+      id: seededEvent.outboxId,
+      eventId: seededEvent.id,
+      intentId: seededEvent.notificationIntentId,
+      templateMode: 'drill',
+      rosterPopulation: 'synthetic',
+      status: 'pending',
+      attempts: 0,
+      publishedAt: null,
+    });
+    expect(
+      persistedActivationJournals.map((entry) => ({
+        id: entry.id,
+        eventId: entry.eventId,
+      })),
+    ).toEqual(
+      seededEvent.journalEntryIds.map((id) => ({
+        id,
+        eventId: seededEvent.id,
+      })),
+    );
+
+    await page.goto('/');
+    await assertAxeClean(page, 'production-backed synthetic drill dashboard');
+    const joinButton = page
+      .getByRole('button')
+      .filter({ hasText: seededEvent.id.slice(-8) });
+    await expect(joinButton).toHaveCount(1);
+    const joinResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === '/start/api/join' &&
+        response.request().method() === 'POST',
+    );
+    await joinButton.press('Enter');
+    expect((await joinResponse).status()).toBe(200);
+    const joinedStatus = page.getByRole('status').filter({
+      hasText: 'DRILL — TRAINING ONLY event joined.',
+    });
+    await expect(joinedStatus).toBeFocused();
+    await assertAxeClean(page, 'production join result');
+
+    await joinedStatus.getByRole('link', { name: 'Open event' }).press('Enter');
+    await expect(page).toHaveURL(new RegExp(`/events/${seededEvent.id}$`, 'u'));
+    await expect(page.locator('.event-status')).toHaveText('Active');
+    await assertEventRoomAxeClean(page, 'production-joined drill room');
+
+    const locationReason =
+      'Synthetic E2E reporter could not verify a precise location';
+    const composer = page.locator('.location-composer');
+    await composer
+      .getByLabel('Why the location is unknown')
+      .fill(locationReason);
+    const locationResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === `/events/${seededEvent.id}/api` &&
+        response.request().method() === 'POST' &&
+        (response.request().postDataJSON() as { operation?: unknown })
+          .operation === 'post-location',
+    );
+    await composer
+      .getByRole('button', { name: 'Post location' })
+      .press('Enter');
+    const response = await locationResponse;
+    expect(response.status()).toBe(200);
+    const responseBody = (await response.json()) as { entry?: unknown };
+    const locationEntry = JournalEntrySchema.parse(responseBody.entry);
+    expect(locationEntry).toMatchObject({
+      eventId: seededEvent.id,
+      kind: 'location',
+      payload: { state: 'unknown', reason: locationReason },
+    });
+    await expect(
+      page.getByText(
+        `Location unknown. Coordinates and accuracy are unavailable. Reason: ${locationReason}.`,
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await assertEventRoomAxeClean(page, 'production location result');
+
+    const [persistedLocation] = await connection.db
+      .select({
+        id: journalEntries.id,
+        eventId: journalEntries.eventId,
+        kind: journalEntries.kind,
+        payload: journalEntries.payload,
+      })
+      .from(journalEntries)
+      .where(eq(journalEntries.id, locationEntry.id))
+      .limit(1);
+    expect(persistedLocation).toEqual({
+      id: locationEntry.id,
+      eventId: seededEvent.id,
+      kind: 'location',
+      payload: { state: 'unknown', reason: locationReason },
+    });
+    const [unchangedOutbox] = await connection.db
+      .select({
+        status: outbox.status,
+        attempts: outbox.attempts,
+        publishedAt: outbox.publishedAt,
+      })
+      .from(outbox)
+      .where(eq(outbox.id, seededEvent.outboxId))
+      .limit(1);
+    expect(unchangedOutbox).toEqual({
+      status: 'pending',
+      attempts: 0,
+      publishedAt: null,
+    });
+  } finally {
+    await connection.close();
+  }
 });
 
 test('keyboard-only synthetic activation continues through event-room all-clear', async ({

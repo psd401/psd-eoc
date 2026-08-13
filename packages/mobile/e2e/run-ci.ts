@@ -28,6 +28,7 @@ import {
   mobileE2ELoopbackMetroEnvironment,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
+  isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
   isMobileE2EIosApplicationReadyAfterHandoff,
   isMobileE2EIosAuthenticationSheetReady,
@@ -1352,6 +1353,41 @@ async function injectAndroidNotification(
   artifactRoot: string,
   manifest: MobileRuntimeManifest,
 ): Promise<void> {
+  await runCommand([
+    'adb',
+    '-s',
+    serial,
+    'shell',
+    'am',
+    'force-stop',
+    MOBILE_E2E_APPLICATION_ID,
+  ]);
+  await runCommand([
+    'adb',
+    '-s',
+    serial,
+    'shell',
+    'input',
+    'keyevent',
+    'KEYCODE_HOME',
+  ]);
+  const stoppedProcess = await runCommand(
+    ['adb', '-s', serial, 'shell', 'pidof', MOBILE_E2E_APPLICATION_ID],
+    {
+      allowFailure: true,
+      quiet: true,
+      logPath: resolve(
+        artifactRoot,
+        'android-notification-stopped-process.log',
+      ),
+    },
+  );
+  if (stoppedProcess.stdout.trim().length > 0) {
+    throw new Error(
+      'PSD EOC was still running before Android background notification injection.',
+    );
+  }
+
   await runCommand(
     [
       resolve(paths.copiedMobile, 'android/gradlew'),
@@ -1373,6 +1409,21 @@ async function injectAndroidNotification(
       logPath: resolve(artifactRoot, 'android-provider-free-injection.log'),
     },
   );
+  const activityState = await runCommand(
+    ['adb', '-s', serial, 'shell', 'dumpsys', 'activity', 'activities'],
+    {
+      quiet: true,
+      logPath: resolve(
+        artifactRoot,
+        'android-notification-background-activity.log',
+      ),
+    },
+  );
+  if (isMobileE2EAndroidApplicationForeground(activityState.stdout)) {
+    throw new Error(
+      'PSD EOC entered the foreground during Android notification injection.',
+    );
+  }
   await runCommand([
     'adb',
     '-s',

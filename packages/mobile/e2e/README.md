@@ -45,11 +45,82 @@ Install the repository with its pinned Bun version first:
 bun install --frozen-lockfile
 ```
 
-Both platforms require Maestro 2.7.0 on `PATH` and Java 17. Use only a local
-PostgreSQL test database containing no real recipient or student data. The
-runner creates and later removes only its marker-owned temporary workspace;
-Maestro reports and platform diagnostics remain in a fresh requested artifact
-directory. Use a new artifact base for each local invocation.
+Both platforms require Java 17. Install the exact Maestro archive used by CI;
+the checksum gate prevents a changed download from silently becoming test
+evidence:
+
+```sh
+export PSD_EOC_MAESTRO_VERSION='2.7.0'
+export PSD_EOC_MAESTRO_SHA256='a4ccab6b604617e7aef6db4f885666056eabe5cfa32befaa3bc994041b8fcbb5'
+export PSD_EOC_MAESTRO_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/psd-eoc-maestro.XXXXXX")"
+export PSD_EOC_MAESTRO_ARCHIVE="$PSD_EOC_MAESTRO_ROOT/maestro.zip"
+curl --fail --location --retry 3 --retry-all-errors \
+  --output "$PSD_EOC_MAESTRO_ARCHIVE" \
+  "https://github.com/mobile-dev-inc/maestro/releases/download/cli-$PSD_EOC_MAESTRO_VERSION/maestro.zip"
+if command -v shasum >/dev/null 2>&1; then
+  printf '%s  %s\n' "$PSD_EOC_MAESTRO_SHA256" "$PSD_EOC_MAESTRO_ARCHIVE" \
+    | shasum -a 256 --check
+else
+  printf '%s  %s\n' "$PSD_EOC_MAESTRO_SHA256" "$PSD_EOC_MAESTRO_ARCHIVE" \
+    | sha256sum --check
+fi
+unzip -q "$PSD_EOC_MAESTRO_ARCHIVE" -d "$PSD_EOC_MAESTRO_ROOT"
+export PATH="$PSD_EOC_MAESTRO_ROOT/maestro/bin:$PATH"
+test "$(maestro --version | tail -n 1 | tr -d '\r')" = "$PSD_EOC_MAESTRO_VERSION"
+```
+
+Provision one loopback-only PostgreSQL 16 database for the platform being run.
+The following clean-machine option uses Docker and exactly the synthetic role,
+port, and database expected by the examples below. Set the database name to
+`psd_eoc_mobile_android_test` for Android.
+
+```sh
+export PSD_EOC_LOCAL_DATABASE='psd_eoc_mobile_ios_test'
+docker run --rm --detach \
+  --name psd-eoc-mobile-e2e-postgres \
+  --publish 127.0.0.1:54329:5432 \
+  --env POSTGRES_DB="$PSD_EOC_LOCAL_DATABASE" \
+  --env POSTGRES_USER='psd_eoc_test' \
+  --env POSTGRES_PASSWORD='synthetic_test_password' \
+  postgres:16-alpine
+until docker exec psd-eoc-mobile-e2e-postgres \
+  pg_isready --username psd_eoc_test --dbname "$PSD_EOC_LOCAL_DATABASE"; do
+  sleep 1
+done
+export TEST_DATABASE_URL="postgresql://psd_eoc_test:synthetic_test_password@127.0.0.1:54329/$PSD_EOC_LOCAL_DATABASE"
+```
+
+On macOS, if Homebrew PostgreSQL 16 is already installed locally, this is the
+equivalent container-free provisioning. It creates both platform databases so
+the same server can be reused for consecutive iOS and Android runs:
+
+```sh
+export PSD_EOC_POSTGRES_BIN="$(brew --prefix postgresql@16)/bin"
+export PSD_EOC_POSTGRES_DATA="$(mktemp -d "${TMPDIR:-/tmp}/psd-eoc-postgres.XXXXXX")"
+"$PSD_EOC_POSTGRES_BIN/initdb" \
+  --pgdata "$PSD_EOC_POSTGRES_DATA" \
+  --username psd_eoc_test \
+  --auth trust \
+  --encoding UTF8 \
+  --no-locale
+"$PSD_EOC_POSTGRES_BIN/pg_ctl" \
+  --pgdata "$PSD_EOC_POSTGRES_DATA" \
+  --log "$PSD_EOC_POSTGRES_DATA.log" \
+  --options '-h 127.0.0.1 -p 54329' \
+  start
+"$PSD_EOC_POSTGRES_BIN/createdb" --host 127.0.0.1 --port 54329 \
+  --username psd_eoc_test psd_eoc_mobile_ios_test
+"$PSD_EOC_POSTGRES_BIN/createdb" --host 127.0.0.1 --port 54329 \
+  --username psd_eoc_test psd_eoc_mobile_android_test
+```
+
+Use only these local test databases containing no real recipient or student
+data. The runner creates and later removes only its marker-owned temporary
+workspace; Maestro reports and platform diagnostics remain in a fresh
+requested artifact directory. Use a new artifact base for each invocation.
+Afterward, stop the Docker container with
+`docker stop psd-eoc-mobile-e2e-postgres`, or stop the native server with
+`"$PSD_EOC_POSTGRES_BIN/pg_ctl" --pgdata "$PSD_EOC_POSTGRES_DATA" --mode fast stop`.
 
 For iOS, install Xcode with an available iOS Simulator runtime, CocoaPods, and
 CMake. The runner creates a dedicated simulator, enrolls simulated biometrics,
@@ -63,7 +134,7 @@ remains separate release evidence and is not claimed here.
 
 ```sh
 export PSD_EOC_E2E_SYNTHETIC_ONLY=true
-export TEST_DATABASE_URL='postgresql://psd_eoc_test@127.0.0.1:54329/psd_eoc_mobile_ios_test'
+export TEST_DATABASE_URL='postgresql://psd_eoc_test:synthetic_test_password@127.0.0.1:54329/psd_eoc_mobile_ios_test'
 export PSD_EOC_MOBILE_E2E_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/psd-eoc-mobile-e2e-artifacts.XXXXXX")"
 bun packages/mobile/e2e/run-ci.ts ios
 ```
@@ -71,12 +142,15 @@ bun packages/mobile/e2e/run-ci.ts ios
 For Android, start one API 36 Google APIs emulator, export its serial as
 `ANDROID_SERIAL`, and ensure the SDK and Java 17 are configured. The runner
 sets a synthetic emulator-only device credential, reverses only its loopback
-ports, and invokes the issue-owned instrumentation source through the generated
-Expo Gradle project.
+ports, force-stops the app and verifies it has no resumed activity, then invokes
+the issue-owned instrumentation source through the generated Expo Gradle
+project. The instrumentation runs the installed Expo delegate without
+foregrounding an activity; the runner verifies that background state again
+before opening the exact system notification.
 
 ```sh
 export PSD_EOC_E2E_SYNTHETIC_ONLY=true
-export TEST_DATABASE_URL='postgresql://psd_eoc_test@127.0.0.1:54329/psd_eoc_mobile_android_test'
+export TEST_DATABASE_URL='postgresql://psd_eoc_test:synthetic_test_password@127.0.0.1:54329/psd_eoc_mobile_android_test'
 export PSD_EOC_MOBILE_E2E_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/psd-eoc-mobile-e2e-artifacts.XXXXXX")"
 export ANDROID_SERIAL='emulator-5554'
 bun packages/mobile/e2e/run-ci.ts android

@@ -34,6 +34,7 @@ import {
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
   mobileE2ERunnerPaths,
+  isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
   isMobileE2EIosApplicationReadyAfterHandoff,
   isMobileE2EIosAuthenticationSheetReady,
@@ -553,6 +554,29 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(
       isMobileE2EAndroidDeviceAuthenticationPrompt(
         '<node package="net.psd401.eoc" text="Unlock PSD EOC" />',
+      ),
+    ).toBe(false);
+  });
+
+  test('recognizes only a resumed PSD EOC Android activity as foreground', () => {
+    expect(
+      isMobileE2EAndroidApplicationForeground(
+        'mResumedActivity: ActivityRecord{abc u0 net.psd401.eoc/.MainActivity t12}',
+      ),
+    ).toBe(true);
+    expect(
+      isMobileE2EAndroidApplicationForeground(
+        'topResumedActivity=ActivityRecord{abc u0 net.psd401.eoc/net.psd401.eoc.MainActivity}',
+      ),
+    ).toBe(true);
+    expect(
+      isMobileE2EAndroidApplicationForeground(
+        'mResumedActivity: ActivityRecord{abc u0 com.android.launcher3/.Launcher}\nTask{net.psd401.eoc}',
+      ),
+    ).toBe(false);
+    expect(
+      isMobileE2EAndroidApplicationForeground(
+        'mResumedActivity: ActivityRecord{abc u0 net.psd401.eoc.preview/.MainActivity}',
       ),
     ).toBe(false);
   });

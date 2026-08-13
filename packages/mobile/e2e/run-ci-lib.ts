@@ -698,6 +698,23 @@ export function isMobileE2EAndroidDeviceAuthenticationPrompt(
   );
 }
 
+/** Detects only an actually resumed PSD EOC activity in Android diagnostics. */
+export function isMobileE2EAndroidApplicationForeground(
+  activityState: string,
+): boolean {
+  return activityState.split(/\r?\n/u).some((line) => {
+    if (
+      !/(?:mResumedActivity|topResumedActivity|ResumedActivity)/u.test(line)
+    ) {
+      return false;
+    }
+    return new RegExp(
+      String.raw`(?:^|[\s{/])${MOBILE_E2E_APPLICATION_ID.replaceAll('.', String.raw`\.`)}(?:[/\s}:]|$)`,
+      'u',
+    ).test(line);
+  });
+}
+
 /** Synchronizes on iOS's secure sheet without treating it as pass evidence. */
 export function isMobileE2EIosAuthenticationSheetReady(
   hierarchy: string,
