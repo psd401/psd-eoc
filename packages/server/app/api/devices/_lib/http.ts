@@ -4,6 +4,8 @@ import {
   ApiErrorSchema,
   IdempotencyKeySchema,
   ListMyDevicesInputSchema,
+  PushEndpointSendEligibilityInputSchema,
+  PushEndpointSendEligibilityResultSchema,
   RecordEndpointStatusInputSchema,
   RegisterPushTokenInputSchema,
   UnregisterPushTokenInputSchema,
@@ -373,6 +375,12 @@ export interface PushEndpointInvalidationRouteDependencies {
   now(): Date;
 }
 
+export interface PushEndpointEligibilityRouteDependencies {
+  readExpectedBearerToken(): string;
+  checkEligibility(input: unknown): Promise<unknown>;
+  createRequestId(): string;
+}
+
 class PushEndpointRouteError extends Error {
   public constructor(
     public readonly status: 503,
@@ -451,6 +459,89 @@ function defaultPushInvalidationDependencies(): PushEndpointInvalidationRouteDep
         invocation,
       ),
   };
+}
+
+function defaultPushEligibilityDependencies(): PushEndpointEligibilityRouteDependencies {
+  return {
+    readExpectedBearerToken: readPushEndpointWorkerToken,
+    createRequestId: randomUUID,
+    checkEligibility: (input) =>
+      getDefaultDeviceCapabilityRuntime().checkPushEndpointSendEligibility(
+        input,
+      ),
+  };
+}
+
+/**
+ * Authenticates before reading bytes or touching persistence, then performs
+ * the one token-free endpoint policy read exposed to the Expo worker.
+ */
+export async function handlePushEndpointEligibility(
+  request: Request,
+  dependencies?: PushEndpointEligibilityRouteDependencies,
+): Promise<NextResponse> {
+  const runtime = dependencies ?? defaultPushEligibilityDependencies();
+  let requestId: string = randomUUID();
+  try {
+    requestId = runtime.createRequestId();
+    let expectedToken: string;
+    try {
+      expectedToken = runtime.readExpectedBearerToken();
+    } catch {
+      return workerErrorResponse(
+        503,
+        'INTERNAL_ERROR',
+        'Push endpoint eligibility is temporarily unavailable.',
+        requestId,
+      );
+    }
+    if (
+      !verifyPushEndpointWorkerToken(
+        request.headers.get('authorization'),
+        expectedToken,
+      )
+    ) {
+      return workerErrorResponse(
+        401,
+        'UNAUTHENTICATED',
+        'A valid push endpoint worker credential is required.',
+        requestId,
+        { 'WWW-Authenticate': 'Bearer realm="psd-eoc-push-endpoint"' },
+      );
+    }
+    let input: unknown;
+    try {
+      input = PushEndpointSendEligibilityInputSchema.parse(
+        await readBoundedJson(request, PUSH_ENDPOINT_MAX_BODY_BYTES),
+      );
+    } catch (error) {
+      const routeError = error instanceof DeviceRequestError ? error : null;
+      return workerErrorResponse(
+        routeError?.status ?? 400,
+        'VALIDATION_ERROR',
+        'The push endpoint eligibility request is invalid.',
+        requestId,
+      );
+    }
+    const eligible = await runtime.checkEligibility(input);
+    if (eligible !== true && eligible !== false) {
+      throw new TypeError('Invalid push endpoint eligibility result.');
+    }
+    return NextResponse.json(
+      PushEndpointSendEligibilityResultSchema.parse({
+        version: 1,
+        eligible,
+      }),
+      { headers: WORKER_RESPONSE_HEADERS },
+    );
+  } catch {
+    return workerErrorResponse(
+      503,
+      'INTERNAL_ERROR',
+      'Push endpoint eligibility failed safely.',
+      requestId,
+    );
+  }
 }
 
 function pushInvalidationIdempotencyKey(

@@ -1,17 +1,23 @@
 import { randomUUID } from 'node:crypto';
 
-import { ApiErrorSchema, RevokeSessionInputSchema } from '@psd-eoc/contracts';
+import {
+  ApiErrorSchema,
+  RevokeSessionInputSchema,
+  type SessionRevocation,
+} from '@psd-eoc/contracts';
 import { NextResponse, type NextRequest } from 'next/server';
 import { ZodError } from 'zod';
 
 import {
   authenticateSessionRequest,
   clearBrowserSessionCookies,
+  readPresentedSessionCredential,
 } from '../../../../lib/auth/middleware';
 import {
   SessionAccessError,
   executeRevokeSessionCapability,
   getDefaultSessionService,
+  type SessionService,
 } from '../../../../lib/auth/sessions';
 
 function apiErrorResponse(error: unknown, requestId: string): NextResponse {
@@ -46,34 +52,70 @@ function apiErrorResponse(error: unknown, requestId: string): NextResponse {
   );
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
-  const requestId = randomUUID();
-  try {
-    const service = getDefaultSessionService();
-    const authenticated = await authenticateSessionRequest(request, service, {
-      mutation: true,
-    });
-    const body = RevokeSessionInputSchema.parse(await request.json());
-    const revocation = await executeRevokeSessionCapability({
-      service,
-      authenticated,
-      sessionId: body.sessionId,
-      reasonCode: body.reasonCode,
-      idempotencyKey: request.headers.get('idempotency-key') ?? '',
-      csrfVerified: authenticated.source === 'web',
-      requestId,
-    });
-    const response = NextResponse.json(revocation, {
-      headers: { 'Cache-Control': 'no-store' },
-    });
-    if (
-      authenticated.source === 'web' &&
-      body.sessionId === authenticated.actor.sessionId
-    ) {
-      clearBrowserSessionCookies(response.cookies);
-    }
-    return response;
-  } catch (error) {
-    return apiErrorResponse(error, requestId);
+function revocationResponse(
+  revocation: SessionRevocation,
+  clearWebCredentials: boolean,
+): NextResponse {
+  const response = NextResponse.json(revocation, {
+    headers: { 'Cache-Control': 'no-store' },
+  });
+  if (clearWebCredentials) {
+    clearBrowserSessionCookies(response.cookies);
   }
+  return response;
 }
+
+export function createRevokeSessionRouteHandler(
+  getSessionService: () => SessionService = getDefaultSessionService,
+): (request: NextRequest) => Promise<NextResponse> {
+  return async (request: NextRequest): Promise<NextResponse> => {
+    const requestId = randomUUID();
+    try {
+      const service = getSessionService();
+      let authenticated;
+      try {
+        authenticated = await authenticateSessionRequest(request, service, {
+          mutation: true,
+        });
+      } catch (authenticationError) {
+        if (
+          !(authenticationError instanceof SessionAccessError) ||
+          authenticationError.code !== 'SESSION_REVOKED'
+        ) {
+          throw authenticationError;
+        }
+        const presented = readPresentedSessionCredential(request, {
+          mutation: true,
+        });
+        const body = RevokeSessionInputSchema.parse(await request.json());
+        const recovered = await service.recoverCompletedSelfRevocation(
+          presented.token,
+          presented.source,
+          body,
+          request.headers.get('idempotency-key') ?? '',
+        );
+        if (recovered === null) throw authenticationError;
+        return revocationResponse(recovered, presented.source === 'web');
+      }
+      const body = RevokeSessionInputSchema.parse(await request.json());
+      const revocation = await executeRevokeSessionCapability({
+        service,
+        authenticated,
+        sessionId: body.sessionId,
+        reasonCode: body.reasonCode,
+        idempotencyKey: request.headers.get('idempotency-key') ?? '',
+        csrfVerified: authenticated.source === 'web',
+        requestId,
+      });
+      return revocationResponse(
+        revocation,
+        authenticated.source === 'web' &&
+          body.sessionId === authenticated.actor.sessionId,
+      );
+    } catch (error) {
+      return apiErrorResponse(error, requestId);
+    }
+  };
+}
+
+export const POST = createRevokeSessionRouteHandler();

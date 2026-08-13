@@ -113,6 +113,7 @@ function resolutionBatch(endpointCount = 1) {
     id: resolutionIds.batch,
     intentId: resolutionIds.intent,
     eventId: resolutionIds.event,
+    facilityId: resolutionIds.facility,
     eventKind: 'test',
     templateMode: 'drill',
     purpose: 'activation',
@@ -416,7 +417,7 @@ describe('pinned push endpoint resolution', () => {
     ).resolves.toEqual([]);
   });
 
-  test('fails closed on incomplete, extra, accessor, or rejected status evidence', async () => {
+  test('fails closed on incomplete, extra, accessor, cross-bound, or rejected status evidence', async () => {
     const failures: PushEndpointPolicyStore[] = [
       { loadEndpointPolicy: () => Promise.resolve([]) },
       {
@@ -436,6 +437,16 @@ describe('pinned push endpoint resolution', () => {
               'status',
               { enumerable: true, get: () => 'active' },
             ),
+          ]),
+      },
+      {
+        loadEndpointPolicy: (query) =>
+          Promise.resolve([
+            {
+              recipientId: ids.user,
+              endpointId: query.candidates[0]?.endpointId,
+              status: 'active',
+            },
           ]),
       },
       {

@@ -18,7 +18,17 @@ import {
   type ExpoSendLedgerClaim,
   type ExpoSendLedgerLookup,
 } from './adapter';
-import { failed, retry, unknown, type ExpoProviderOutcome } from './protocol';
+import {
+  PushEndpointEligibilityError,
+  type PushEndpointEligibilityChecker,
+} from './eligibility';
+import {
+  EXPO_EMERGENCY_TTL_SECONDS,
+  failed,
+  retry,
+  unknown,
+  type ExpoProviderOutcome,
+} from './protocol';
 import type { ExpoPushTransport } from './transport';
 
 const CLAIM_TOKEN = 'synthetic-claim-token-0001';
@@ -81,6 +91,7 @@ class MemoryDurableLedger implements DurableExpoSendLedger {
   public completionError: Error | null = null;
   public overrideClaim: ExpoSendLedgerClaim | null = null;
   public overrideLookup: ExpoSendLedgerLookup | null = null;
+  public claimGate: Promise<void> | null = null;
   readonly #states = new Map<string, LedgerState>();
 
   public lookupProviderIo(
@@ -106,35 +117,32 @@ class MemoryDurableLedger implements DurableExpoSendLedger {
     this.#states.set(attemptId, { kind: 'uncertain', fingerprint });
   }
 
-  public claimProviderIo(
+  public async claimProviderIo(
     request: ClaimExpoProviderIoRequest,
   ): Promise<ExpoSendLedgerClaim> {
     this.claims.push(request);
+    if (this.claimGate !== null) await this.claimGate;
     if (
       this.beginError !== null ||
       this.beginErrorAttemptIds.has(request.attemptId)
     ) {
-      return Promise.reject(
-        this.beginError ?? new Error('synthetic per-attempt ledger outage'),
-      );
+      throw this.beginError ?? new Error('synthetic per-attempt ledger outage');
     }
-    if (this.overrideClaim !== null) return Promise.resolve(this.overrideClaim);
+    if (this.overrideClaim !== null) return this.overrideClaim;
     const existing = this.#states.get(request.attemptId);
     if (existing !== undefined) {
       if (existing.fingerprint !== request.workFingerprint) {
-        return Promise.resolve({ kind: 'conflict' });
+        return { kind: 'conflict' };
       }
-      return Promise.resolve(
-        existing.kind === 'completed'
-          ? { kind: 'completed', completion: existing.completion }
-          : { kind: 'uncertain' },
-      );
+      return existing.kind === 'completed'
+        ? { kind: 'completed', completion: existing.completion }
+        : { kind: 'uncertain' };
     }
     this.#states.set(request.attemptId, {
       kind: 'uncertain',
       fingerprint: request.workFingerprint,
     });
-    return Promise.resolve({ kind: 'execute', claimToken: CLAIM_TOKEN });
+    return { kind: 'execute', claimToken: CLAIM_TOKEN };
   }
 
   public completeProviderIo(
@@ -162,6 +170,28 @@ class MemoryDurableLedger implements DurableExpoSendLedger {
   }
 }
 
+type EligibilityBehavior =
+  | boolean
+  | Error
+  | ((workItem: ProviderSendRequest['workItem']) => boolean | Promise<boolean>);
+
+class ControlledEndpointEligibility implements PushEndpointEligibilityChecker {
+  public readonly work: ProviderSendRequest['workItem'][] = [];
+
+  public constructor(private readonly behavior: EligibilityBehavior = true) {}
+
+  public async isEligible(
+    workItem: ProviderSendRequest['workItem'],
+  ): Promise<boolean> {
+    this.work.push(workItem);
+    if (typeof this.behavior === 'function') {
+      return this.behavior(workItem);
+    }
+    if (this.behavior instanceof Error) throw this.behavior;
+    return this.behavior;
+  }
+}
+
 function adapterRuntime(
   behavior:
     | readonly ExpoProviderOutcome[]
@@ -170,6 +200,7 @@ function adapterRuntime(
         workItems: readonly ProviderSendRequest['workItem'][],
       ) => Promise<readonly ExpoProviderOutcome[]>) = [accepted()],
   clock: () => Date | string | number = () => realBatch().createdAt,
+  endpointEligibility = new ControlledEndpointEligibility(),
 ) {
   const transport = new ControlledTransport(behavior);
   const ledger = new MemoryDurableLedger();
@@ -178,8 +209,9 @@ function adapterRuntime(
     sendLedger: ledger,
     batchWindowMilliseconds: 0,
     clock,
+    endpointEligibility,
   });
-  return { adapter, ledger, transport };
+  return { adapter, endpointEligibility, ledger, transport };
 }
 
 function request(item = workItem(realBatch())): ProviderSendRequest {
@@ -196,6 +228,48 @@ function liveItemWithAttempt(suffix: number) {
 }
 
 describe('ledgered Expo live adapter', () => {
+  test('requires one executable checker and exposes only exact checker identity', () => {
+    const transport = new ControlledTransport([accepted()]);
+    const ledger = new MemoryDurableLedger();
+    const checker = new ControlledEndpointEligibility();
+    const adapter = new LedgeredExpoPushAdapter({
+      transport,
+      sendLedger: ledger,
+      endpointEligibility: checker,
+    });
+
+    expect(
+      LedgeredExpoPushAdapter.usesEndpointEligibility(adapter, checker),
+    ).toBe(true);
+    expect(
+      LedgeredExpoPushAdapter.usesEndpointEligibility(
+        adapter,
+        new ControlledEndpointEligibility(),
+      ),
+    ).toBe(false);
+    expect(
+      LedgeredExpoPushAdapter.usesEndpointEligibility(
+        new Proxy(adapter, {}),
+        checker,
+      ),
+    ).toBe(false);
+    expect(
+      () =>
+        new LedgeredExpoPushAdapter({
+          transport,
+          sendLedger: ledger,
+        } as never),
+    ).toThrow('Expo endpoint eligibility checker is invalid.');
+    expect(
+      () =>
+        new LedgeredExpoPushAdapter({
+          transport,
+          sendLedger: ledger,
+          endpointEligibility: { isEligible: true },
+        } as never),
+    ).toThrow('Expo endpoint eligibility checker is invalid.');
+  });
+
   test('has conditional live metadata and records only PII-safe ledger inputs', async () => {
     const app = adapterRuntime();
 
@@ -279,6 +353,50 @@ describe('ledgered Expo live adapter', () => {
 
     expect(replay).toEqual(first);
     expect(app.transport.calls).toBe(1);
+    expect(app.ledger.completions).toHaveLength(1);
+    expect(app.endpointEligibility.work).toHaveLength(1);
+  });
+
+  test('rechecks after a deferred durable claim and retains a subsequent revocation without transport I/O', async () => {
+    let releaseClaim: (() => void) | undefined;
+    const claimGate = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    let currentlyEligible = true;
+    const checker = new ControlledEndpointEligibility(() => currentlyEligible);
+    const app = adapterRuntime([accepted()], undefined, checker);
+    app.ledger.claimGate = claimGate;
+
+    const first = app.adapter.send(request());
+    expect(app.ledger.claims).toHaveLength(1);
+    expect(checker.work).toHaveLength(0);
+
+    currentlyEligible = false;
+    releaseClaim?.();
+
+    await expect(first).rejects.toMatchObject({
+      code: 'EXPO_ENDPOINT_INELIGIBLE',
+      disposition: 'terminal-failure',
+      diagnosticDigest: null,
+    });
+    expect(app.transport.calls).toBe(0);
+    expect(checker.work).toHaveLength(1);
+    expect(app.ledger.completions).toHaveLength(1);
+    expect(app.ledger.completions[0]?.completion).toEqual({
+      kind: 'failure',
+      failure: {
+        code: 'EXPO_ENDPOINT_INELIGIBLE',
+        disposition: 'terminal-failure',
+        diagnosticDigest: null,
+      },
+    });
+
+    await expect(app.adapter.send(request())).rejects.toMatchObject({
+      code: 'EXPO_ENDPOINT_INELIGIBLE',
+      disposition: 'terminal-failure',
+    });
+    expect(app.transport.calls).toBe(0);
+    expect(checker.work).toHaveLength(1);
     expect(app.ledger.completions).toHaveLength(1);
   });
 
@@ -401,11 +519,18 @@ describe('ledgered Expo live adapter', () => {
   });
 
   test('batches ledger-claimed provider I/O and preserves positional partial outcomes', async () => {
-    const app = adapterRuntime([
-      accepted('ticket-batch-1'),
-      failed('EXPO_DEVICE_NOT_REGISTERED', null, true),
-      retry('EXPO_MESSAGE_RATE_EXCEEDED'),
-    ]);
+    const app = adapterRuntime((sent) => {
+      const suffix = sent[0]!.attempt.id.slice(-3);
+      if (suffix === '101') {
+        return Promise.resolve([accepted('ticket-batch-1')]);
+      }
+      if (suffix === '102') {
+        return Promise.resolve([
+          failed('EXPO_DEVICE_NOT_REGISTERED', null, true),
+        ]);
+      }
+      return Promise.resolve([retry('EXPO_MESSAGE_RATE_EXCEEDED')]);
+    });
     const items = [
       liveItemWithAttempt(101),
       liveItemWithAttempt(102),
@@ -416,7 +541,9 @@ describe('ledgered Expo live adapter', () => {
       items.map((item) => app.adapter.send(request(item))),
     );
 
-    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([3]);
+    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([
+      1, 1, 1,
+    ]);
     expect(settled[0]).toMatchObject({
       status: 'fulfilled',
       value: {
@@ -438,12 +565,157 @@ describe('ledgered Expo live adapter', () => {
     expect(app.ledger.completions).toHaveLength(3);
   });
 
-  test('makes every duplicate accepted ticket in one chunk unknown', async () => {
-    const app = adapterRuntime([
-      accepted('duplicate-ticket'),
-      accepted('unique-ticket'),
-      accepted('duplicate-ticket'),
+  test('filters mixed endpoint eligibility independently and safely completes every irreversible claim', async () => {
+    const items = [
+      liveItemWithAttempt(201),
+      liveItemWithAttempt(202),
+      liveItemWithAttempt(203),
+      liveItemWithAttempt(204),
+      liveItemWithAttempt(205),
+    ];
+    const hostileToken = 'ExponentPushToken[hostile-policy-error]';
+    const checker = new ControlledEndpointEligibility((item) => {
+      switch (item.attempt.id) {
+        case items[0]?.attempt.id:
+          return true;
+        case items[1]?.attempt.id:
+          return false;
+        case items[2]?.attempt.id:
+          throw new PushEndpointEligibilityError(
+            'RETRYABLE_RESPONSE',
+            true,
+            503,
+          );
+        case items[3]?.attempt.id:
+          throw new PushEndpointEligibilityError(
+            'REQUEST_UNAUTHORIZED',
+            false,
+            403,
+          );
+        default:
+          throw new Error(`hostile checker detail ${hostileToken}`);
+      }
+    });
+    const app = adapterRuntime(
+      [accepted('ticket-only-eligible')],
+      undefined,
+      checker,
+    );
+
+    const settled = await Promise.allSettled(
+      items.map((item) => app.adapter.send(request(item))),
+    );
+
+    expect(app.transport.chunks).toEqual([[items[0]!]]);
+    expect(checker.work).toEqual(items);
+    expect(settled).toEqual([
+      {
+        status: 'fulfilled',
+        value: expect.objectContaining({
+          state: 'provider-accepted',
+          providerReference: 'ticket-only-eligible',
+        }),
+      },
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({
+          code: 'EXPO_ENDPOINT_INELIGIBLE',
+          disposition: 'terminal-failure',
+          diagnosticDigest: null,
+        }),
+      },
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({
+          code: 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE',
+          disposition: 'safe-to-retry',
+          diagnosticDigest: null,
+        }),
+      },
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({
+          code: 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+          disposition: 'terminal-failure',
+          diagnosticDigest: null,
+        }),
+      },
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({
+          code: 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+          disposition: 'terminal-failure',
+          diagnosticDigest: null,
+        }),
+      },
     ]);
+    expect(app.ledger.completions).toHaveLength(items.length);
+    expect(
+      app.ledger.completions.map((completion) =>
+        completion.completion.kind === 'failure'
+          ? completion.completion.failure.code
+          : completion.completion.outcome.state,
+      ),
+    ).toEqual([
+      'provider-accepted',
+      'EXPO_ENDPOINT_INELIGIBLE',
+      'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE',
+      'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+      'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+    ]);
+    const serializedSafeState = JSON.stringify({
+      completions: app.ledger.completions,
+      settled,
+    });
+    expect(serializedSafeState).not.toContain(hostileToken);
+    expect(serializedSafeState).not.toContain('hostile checker detail');
+  });
+
+  test('fails an entirely unavailable eligibility batch safely without transport I/O and replays retained failures', async () => {
+    const checker = new ControlledEndpointEligibility(
+      new PushEndpointEligibilityError('REQUEST_FAILED', true),
+    );
+    const app = adapterRuntime([accepted()], undefined, checker);
+    const items = [
+      liveItemWithAttempt(211),
+      liveItemWithAttempt(212),
+      liveItemWithAttempt(213),
+    ];
+
+    const settled = await Promise.allSettled(
+      items.map((item) => app.adapter.send(request(item))),
+    );
+
+    expect(settled).toEqual(
+      items.map(() => ({
+        status: 'rejected',
+        reason: expect.objectContaining({
+          code: 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE',
+          disposition: 'safe-to-retry',
+          diagnosticDigest: null,
+        }),
+      })),
+    );
+    expect(app.transport.calls).toBe(0);
+    expect(checker.work).toEqual(items);
+    expect(app.ledger.completions).toHaveLength(items.length);
+
+    await expect(app.adapter.send(request(items[0]))).rejects.toMatchObject({
+      code: 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE',
+      disposition: 'safe-to-retry',
+    });
+    expect(app.transport.calls).toBe(0);
+    expect(checker.work).toHaveLength(items.length);
+    expect(app.ledger.completions).toHaveLength(items.length);
+  });
+
+  test('preserves duplicate accepted references across isolated requests', async () => {
+    const app = adapterRuntime((sent) => {
+      const suffix = sent[0]!.attempt.id.slice(-3);
+      return Promise.resolve([
+        accepted(suffix === '142' ? 'unique-ticket' : 'duplicate-ticket'),
+      ]);
+    });
     const items = [
       liveItemWithAttempt(141),
       liveItemWithAttempt(142),
@@ -454,18 +726,16 @@ describe('ledgered Expo live adapter', () => {
       Promise.all(items.map((item) => app.adapter.send(request(item)))),
     ).resolves.toEqual([
       expect.objectContaining({
-        state: 'unknown',
-        providerReference: null,
-        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+        state: 'provider-accepted',
+        providerReference: 'duplicate-ticket',
       }),
       expect.objectContaining({
         state: 'provider-accepted',
         providerReference: 'unique-ticket',
       }),
       expect.objectContaining({
-        state: 'unknown',
-        providerReference: null,
-        reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
+        state: 'provider-accepted',
+        providerReference: 'duplicate-ticket',
       }),
     ]);
     expect(app.ledger.completions).toHaveLength(3);
@@ -509,19 +779,86 @@ describe('ledgered Expo live adapter', () => {
     expect(app.ledger.completions).toHaveLength(2);
   });
 
-  test('isolates malformed item outcomes without discarding valid siblings', async () => {
-    const app = adapterRuntime([
-      accepted('ticket-isolated-1'),
+  test('expires work that crosses its TTL during eligibility and never enters transport', async () => {
+    const item = liveItemWithAttempt(221);
+    const expiresAt =
+      Date.parse(item.batch.createdAt) + EXPO_EMERGENCY_TTL_SECONDS * 1_000;
+    let now = expiresAt - 1;
+    const checker = new ControlledEndpointEligibility(() => {
+      now = expiresAt;
+      return true;
+    });
+    const app = adapterRuntime([accepted()], () => now, checker);
+
+    await expect(app.adapter.send(request(item))).resolves.toMatchObject({
+      state: 'expired',
+      reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+    });
+    expect(checker.work).toEqual([item]);
+    expect(app.transport.calls).toBe(0);
+    expect(app.ledger.completions).toHaveLength(1);
+    expect(app.ledger.completions[0]?.completion).toMatchObject({
+      kind: 'outcome',
+      outcome: {
+        state: 'expired',
+        reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+      },
+    });
+  });
+
+  test('skips current eligibility for already-expired and retained completed truth', async () => {
+    const item = liveItemWithAttempt(222);
+    const expiresAt =
+      Date.parse(item.batch.createdAt) + EXPO_EMERGENCY_TTL_SECONDS * 1_000;
+    const expiredChecker = new ControlledEndpointEligibility(
+      new Error('expired work must not be checked'),
+    );
+    const expiredApp = adapterRuntime(
+      [accepted()],
+      () => expiresAt,
+      expiredChecker,
+    );
+
+    await expect(expiredApp.adapter.send(request(item))).resolves.toMatchObject(
       {
-        kind: 'provider-accepted',
-        state: 'delivered',
-        providerReference:
-          'ticket-isolated-2\nExponentPushToken[hostile-ledger-text]',
-        reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
-        invalidatesEndpoint: true,
-      } as never,
-      accepted('ticket-isolated-3'),
-    ]);
+        state: 'expired',
+        reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+      },
+    );
+    expect(expiredChecker.work).toHaveLength(0);
+    expect(expiredApp.transport.calls).toBe(0);
+
+    const completedChecker = new ControlledEndpointEligibility();
+    const completedApp = adapterRuntime(
+      [accepted('ticket-retained')],
+      undefined,
+      completedChecker,
+    );
+    const first = await completedApp.adapter.send(request());
+    const replay = await completedApp.adapter.send(request());
+
+    expect(replay).toEqual(first);
+    expect(completedChecker.work).toHaveLength(1);
+    expect(completedApp.transport.calls).toBe(1);
+    expect(completedApp.ledger.completions).toHaveLength(1);
+  });
+
+  test('isolates malformed item outcomes without discarding valid siblings', async () => {
+    const app = adapterRuntime((sent) => {
+      const suffix = sent[0]!.attempt.id.slice(-3);
+      return Promise.resolve([
+        suffix === '112'
+          ? ({
+              kind: 'provider-accepted',
+              state: 'delivered',
+              providerReference:
+                'ticket-isolated-2\nExponentPushToken[hostile-ledger-text]',
+              reasonCode: 'EXPO_DEVICE_NOT_REGISTERED',
+              invalidatesEndpoint: true,
+            } as never)
+          : accepted(`ticket-isolated-${suffix}`),
+      ]);
+    });
     const items = [
       liveItemWithAttempt(111),
       liveItemWithAttempt(112),
@@ -537,7 +874,9 @@ describe('ledgered Expo live adapter', () => {
       'unknown',
       'provider-accepted',
     ]);
-    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([3]);
+    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([
+      1, 1, 1,
+    ]);
     expect(app.ledger.completions).toHaveLength(3);
     expect(app.ledger.completions[1]?.completion).toEqual({
       kind: 'outcome',
@@ -584,11 +923,11 @@ describe('ledgered Expo live adapter', () => {
         disposition: 'ambiguous',
       },
     });
-    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([2]);
+    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([1, 1]);
     expect(app.ledger.completions).toHaveLength(2);
   });
 
-  test('never sends more than 100 ledger-claimed attempts per provider request', async () => {
+  test('sends every ledger-claimed attempt through an isolated provider request', async () => {
     const app = adapterRuntime((items) =>
       Promise.resolve(
         items.map((item) => accepted(`ticket-${item.attempt.id}`)),
@@ -600,9 +939,10 @@ describe('ledgered Expo live adapter', () => {
 
     await Promise.all(items.map((item) => app.adapter.send(request(item))));
 
-    expect(app.transport.chunks.map((chunk) => chunk.length)).toEqual([
-      100, 100, 1,
-    ]);
+    expect(app.transport.chunks).toHaveLength(201);
+    expect(app.transport.chunks.every((chunk) => chunk.length === 1)).toBe(
+      true,
+    );
     expect(app.ledger.completions).toHaveLength(201);
   });
 
@@ -1013,15 +1353,20 @@ describe('ledgered Expo live adapter', () => {
 
   test('isolates a throwing fulfilled item while preserving its valid sibling', async () => {
     const items = [liveItemWithAttempt(132), liveItemWithAttempt(133)];
-    const hostile = [accepted('ticket-valid'), accepted('ticket-hostile')];
-    Object.defineProperty(hostile, 1, {
-      configurable: true,
-      enumerable: true,
-      get: () => {
-        throw new Error('synthetic hostile outcome slot');
-      },
+    let call = 0;
+    const app = adapterRuntime(async () => {
+      call += 1;
+      if (call === 1) return [accepted('ticket-valid')];
+      const hostile = [accepted('ticket-hostile')];
+      Object.defineProperty(hostile, 0, {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          throw new Error('synthetic hostile outcome slot');
+        },
+      });
+      return hostile;
     });
-    const app = adapterRuntime(async () => hostile);
 
     await expect(
       Promise.all(items.map((item) => app.adapter.send(request(item)))),
@@ -1035,7 +1380,7 @@ describe('ledgered Expo live adapter', () => {
         reasonCode: 'EXPO_SEND_OUTCOME_AMBIGUOUS',
       }),
     ]);
-    expect(app.transport.calls).toBe(1);
+    expect(app.transport.calls).toBe(2);
   });
 
   test('never trusts inherited or accessor-backed fulfilled transport slots', async () => {

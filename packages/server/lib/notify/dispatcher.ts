@@ -3,6 +3,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import {
   DispatchBatchSchema,
   DispatchOutboxResultSchema,
+  FacilityIdSchema,
   IdempotencyKeySchema,
   NotificationOutboxMessageSchema,
   OutboxRecordSchema,
@@ -29,6 +30,7 @@ import {
 } from '../../db/client';
 import {
   dispatchBatches,
+  events,
   notificationIntentChannels,
   outbox,
 } from '../../db/schema';
@@ -134,6 +136,7 @@ export interface DispatchBatchQueue {
 /** Fencing token carried from the short claim transaction to finalization. */
 export interface OutboxDispatchClaim {
   readonly outboxId: string;
+  readonly facilityId: string;
   readonly attempt: number;
   readonly lockedUntil: string;
   readonly processingRecord: OutboxRecord;
@@ -1360,6 +1363,16 @@ type DispatcherQueryDatabase = DatabaseQuery;
 type OutboxRow = typeof outbox.$inferSelect;
 type DispatchBatchRow = typeof dispatchBatches.$inferSelect;
 
+interface ResolvedOutboxMessage {
+  readonly facilityId: string;
+  readonly message: NotificationOutboxMessage;
+}
+
+interface ResolvedDispatchBatches {
+  readonly facilityId: string;
+  readonly batches: readonly DispatchBatch[];
+}
+
 function dispatcherQueryDatabase(database: unknown): DispatcherQueryDatabase {
   // Both configured Drizzle PostgreSQL transports expose this common query
   // surface. The direct type avoids a union of overloaded method signatures.
@@ -1397,8 +1410,20 @@ async function readDatabaseTime(
   return parsedDate(value, 'database clock');
 }
 
-function outboxRecordFromRow(row: OutboxRow): OutboxRecord {
+function outboxMessageFromRow(row: OutboxRow): NotificationOutboxMessage {
   const message = NotificationOutboxMessageSchema.parse(row.message);
+  if (message.version !== row.messageVersion) {
+    throw new OutboxDispatcherError(
+      'OUTBOX_PERSISTENCE_FAILED',
+      'The persisted outbox message version is inconsistent.',
+      false,
+    );
+  }
+  return message;
+}
+
+function outboxRecordFromRow(row: OutboxRow): OutboxRecord {
+  const message = outboxMessageFromRow(row);
   return OutboxRecordSchema.parse({
     id: row.id,
     message,
@@ -1415,6 +1440,7 @@ function outboxRecordFromRow(row: OutboxRow): OutboxRecord {
 function batchFromRow(
   row: DispatchBatchRow,
   message: NotificationOutboxMessage,
+  facilityId: string,
 ): DispatchBatch {
   const planned = message.channels.find(
     (candidate) => candidate.channel === row.channel,
@@ -1430,6 +1456,7 @@ function batchFromRow(
     id: row.id,
     intentId: row.intentId,
     eventId: row.eventId,
+    facilityId,
     eventKind: row.eventKind,
     templateMode: row.templateMode,
     purpose: row.purpose,
@@ -1454,17 +1481,66 @@ function batchFromRow(
   });
 }
 
+async function resolveOutboxMessage(
+  database: DispatcherQueryDatabase,
+  outboxRow: OutboxRow,
+): Promise<ResolvedOutboxMessage> {
+  const message = outboxMessageFromRow(outboxRow);
+  const [event] = await database
+    .select({ facilityId: events.facilityId })
+    .from(events)
+    .where(
+      and(
+        eq(events.id, outboxRow.eventId),
+        eq(events.kind, outboxRow.eventKind),
+        eq(events.templateMode, outboxRow.templateMode),
+        eq(events.rosterPopulation, outboxRow.rosterPopulation),
+      ),
+    )
+    .limit(1);
+  if (event === undefined) {
+    throw new OutboxDispatcherError(
+      'OUTBOX_PERSISTENCE_FAILED',
+      'The persisted outbox event facility is unavailable.',
+      false,
+    );
+  }
+  const facilityId = FacilityIdSchema.parse(event.facilityId);
+  if (message.version === 2 && message.facilityId !== facilityId) {
+    throw new OutboxDispatcherError(
+      'OUTBOX_PERSISTENCE_FAILED',
+      'The version 2 outbox facility does not match immutable event truth.',
+      false,
+    );
+  }
+  return Object.freeze({ facilityId, message });
+}
+
 async function loadDispatchBatches(
   database: DispatcherQueryDatabase,
   outboxRow: OutboxRow,
+  resolved: ResolvedOutboxMessage,
 ): Promise<readonly DispatchBatch[]> {
-  const message = NotificationOutboxMessageSchema.parse(outboxRow.message);
   const rows = await database
     .select()
     .from(dispatchBatches)
     .where(eq(dispatchBatches.outboxId, outboxRow.id))
     .orderBy(asc(dispatchBatches.sequence));
-  return Object.freeze(rows.map((row) => batchFromRow(row, message)));
+  return Object.freeze(
+    rows.map((row) => batchFromRow(row, resolved.message, resolved.facilityId)),
+  );
+}
+
+async function dispatchResultFromRow(
+  database: DispatcherQueryDatabase,
+  row: OutboxRow,
+): Promise<DispatchOutboxResult> {
+  const resolved = await resolveOutboxMessage(database, row);
+  return DispatchOutboxResultSchema.parse({
+    facilityId: resolved.facilityId,
+    outboxRecord: outboxRecordFromRow(row),
+    batches: await loadDispatchBatches(database, row, resolved),
+  });
 }
 
 async function loadDispatchResult(
@@ -1479,18 +1555,16 @@ async function loadDispatchResult(
   if (row === undefined) {
     return null;
   }
-  return DispatchOutboxResultSchema.parse({
-    outboxRecord: outboxRecordFromRow(row),
-    batches: await loadDispatchBatches(database, row),
-  });
+  return dispatchResultFromRow(database, row);
 }
 
 async function ensureStableDispatchBatches(
   database: DispatcherQueryDatabase,
   outboxRow: OutboxRow,
   createdAt: Date,
-): Promise<readonly DispatchBatch[]> {
-  const message = NotificationOutboxMessageSchema.parse(outboxRow.message);
+): Promise<ResolvedDispatchBatches> {
+  const resolved = await resolveOutboxMessage(database, outboxRow);
+  const { facilityId, message } = resolved;
   const channelRows = await database
     .select()
     .from(notificationIntentChannels)
@@ -1564,12 +1638,13 @@ async function ensureStableDispatchBatches(
     });
   }
 
-  const batches = await loadDispatchBatches(database, outboxRow);
+  const batches = await loadDispatchBatches(database, outboxRow, resolved);
   DispatchOutboxResultSchema.parse({
+    facilityId,
     outboxRecord: outboxRecordFromRow(outboxRow),
     batches,
   });
-  return batches;
+  return Object.freeze({ facilityId, batches });
 }
 
 async function failExhaustedClaim(
@@ -1768,7 +1843,7 @@ export function createDrizzleOutboxDispatcherStore(
           return Object.freeze({ kind: 'busy' as const });
         }
 
-        const batches = await ensureStableDispatchBatches(
+        const resolvedBatches = await ensureStableDispatchBatches(
           transaction,
           claimed,
           now,
@@ -1776,10 +1851,11 @@ export function createDrizzleOutboxDispatcherStore(
         const processingRecord = outboxRecordFromRow(claimed);
         const claim: OutboxDispatchClaim = Object.freeze({
           outboxId: claimed.id,
+          facilityId: resolvedBatches.facilityId,
           attempt: claimed.attempts,
           lockedUntil: dateIso(lockedUntil),
           processingRecord,
-          batches,
+          batches: resolvedBatches.batches,
         });
         return Object.freeze({ kind: 'claimed' as const, claim });
       });
@@ -1804,10 +1880,7 @@ export function createDrizzleOutboxDispatcherStore(
         if (published === undefined) {
           return null;
         }
-        return DispatchOutboxResultSchema.parse({
-          outboxRecord: outboxRecordFromRow(published),
-          batches: await loadDispatchBatches(transaction, published),
-        });
+        return dispatchResultFromRow(transaction, published);
       });
     },
 
@@ -1858,6 +1931,7 @@ export function createDrizzleOutboxDispatcherStore(
 
 function parseDispatchClaim(value: OutboxDispatchClaim): OutboxDispatchClaim {
   UuidSchema.parse(value.outboxId);
+  const facilityId = FacilityIdSchema.parse(value.facilityId);
   assertPositiveBoundedInteger(value.attempt, 'claim attempt', 100);
   const lockedUntil = parsedDate(value.lockedUntil, 'claim lease');
   const processingRecord = OutboxRecordSchema.parse(value.processingRecord);
@@ -1876,9 +1950,14 @@ function parseDispatchClaim(value: OutboxDispatchClaim): OutboxDispatchClaim {
   const batches = value.batches.map((batch) =>
     DispatchBatchSchema.parse(batch),
   );
-  DispatchOutboxResultSchema.parse({ outboxRecord: processingRecord, batches });
+  DispatchOutboxResultSchema.parse({
+    facilityId,
+    outboxRecord: processingRecord,
+    batches,
+  });
   return Object.freeze({
     outboxId: value.outboxId,
+    facilityId,
     attempt: value.attempt,
     lockedUntil: lockedUntil.toISOString(),
     processingRecord,
