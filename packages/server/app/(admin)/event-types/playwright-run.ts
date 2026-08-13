@@ -455,6 +455,7 @@ export function prepareEventTypePlaywrightServerWorkspace(
     });
     cpSync(sourceServerDirectory, stagingServerDirectory, {
       errorOnExist: true,
+      force: false,
       filter: (source) => {
         const sourceRelativePath = relative(sourceServerDirectory, source);
         return !(
