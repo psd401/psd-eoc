@@ -42,6 +42,8 @@ const IDS = Object.freeze({
   verifier: '00000000-0000-4000-8000-000000000015',
   activeEventA: '00000000-0000-4000-8000-000000000016',
   activeEventB: '00000000-0000-4000-8000-000000000017',
+  targetSet: '00000000-0000-4000-8000-000000000018',
+  ordinaryEndpoint: '00000000-0000-4000-8000-000000000019',
 });
 
 const ACTOR = Object.freeze({
@@ -309,6 +311,65 @@ describe('activation consequence preview', () => {
           renderedMessage.eventKind === 'incident',
       ),
     ).toBe(true);
+  });
+
+  test('narrows a live delivery-test consequence to exact approved refs', () => {
+    const base = evidence('drill', 'staff');
+    const snapshot = roster('staff');
+    const recipients = snapshot.recipients.map((recipient) =>
+      recipient.id === IDS.recipientPush
+        ? {
+            ...recipient,
+            endpoints: [
+              ...recipient.endpoints,
+              {
+                id: IDS.ordinaryEndpoint,
+                channel: 'email' as const,
+                status: 'active' as const,
+                capturedAt: CREATED_AT_ISO,
+                email: 'ordinary-staff@example.invalid',
+              },
+            ],
+          }
+        : recipient,
+    );
+    const endpointReferenceDigest = 'a'.repeat(64);
+    const preview = buildActivationPreview({
+      ...base,
+      rosterSnapshot: { ...snapshot, recipients },
+      deliveryTest: {
+        purpose: 'monthly-live-delivery-test',
+        targetSet: { id: IDS.targetSet, version: 1 },
+        endpointReferenceDigest,
+      },
+      deliveryTestEndpointReferences: [
+        {
+          recipientId: IDS.recipientEmail,
+          endpointId: IDS.emailEndpoint,
+          channel: 'email',
+        },
+        {
+          recipientId: IDS.recipientPush,
+          endpointId: IDS.pushEndpoint,
+          channel: 'push',
+        },
+      ],
+    });
+
+    expect(preview.recipientCount).toBe(2);
+    expect(
+      preview.channels.map(({ channel, endpointCount }) => [
+        channel,
+        endpointCount,
+      ]),
+    ).toEqual([
+      ['push', 1],
+      ['email', 1],
+    ]);
+    expect(JSON.stringify(preview)).not.toContain(IDS.ordinaryEndpoint);
+    expect(preview.deliveryTest?.endpointReferenceDigest).toBe(
+      endpointReferenceDigest,
+    );
   });
 
   test('keeps exact persisted activation copy independent of preview creation time', () => {

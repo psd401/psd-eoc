@@ -1258,6 +1258,8 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
   'refresh-session': 'none',
   'revoke-session': 'none',
   'sync-roster': 'none',
+  'record-delivery-test-canary-eligibility': 'none',
+  'create-delivery-test-target-set-version': 'none',
   'prepare-activation': 'none',
   'start-event': 'start-event',
   'join-event': 'none',
@@ -1278,6 +1280,7 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
   'reconcile-delivery-attempts': 'none',
   'record-endpoint-status': 'none',
   'record-sms-opt-out': 'none',
+  'finalize-delivery-test-report': 'none',
   'register-push-token': 'none',
   'unregister-push-token': 'none',
   'create-facility': 'none',
@@ -1300,6 +1303,7 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
  */
 export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
   'create-activation-preview': 'none',
+  'create-delivery-test-preview': 'none',
   'get-prepared-activation': 'none',
   'get-current-session': 'none',
   'list-device-sessions': 'none',
@@ -1326,6 +1330,7 @@ export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
   'query-security-audit': 'none',
   'verify-security-audit-chain': 'none',
   'run-delivery-report': 'none',
+  'list-delivery-test-reports': 'none',
   'list-my-devices': 'none',
   'list-neighborhood-versions': 'none',
   'get-neighborhood-version': 'none',

@@ -111,6 +111,59 @@ export const MONITORING_QUERIES = Object.freeze({
     HAVING count(*) FILTER (WHERE evidence_gap) > 0
     ORDER BY state
   `,
+  deliveryTestHealth: `
+    WITH pacific_month AS MATERIALIZED (
+      SELECT
+        date_trunc('month', observation.local_time)
+          AS current_month_start_local
+      FROM (
+        SELECT (CAST(:bucket_end AS timestamptz) + interval '1 minute')
+          AT TIME ZONE 'America/Los_Angeles' AS local_time
+      ) AS observation
+    ), month_bounds AS (
+      SELECT
+        (current_month_start_local - interval '1 month')
+          AT TIME ZONE 'America/Los_Angeles' AS previous_month_start,
+        current_month_start_local
+          AT TIME ZONE 'America/Los_Angeles' AS current_month_start
+      FROM pacific_month
+    ), report_heads_at_bucket_end AS MATERIALIZED (
+      SELECT DISTINCT ON (report.run_id)
+        report.run_id,
+        report.status,
+        report.generated_at,
+        run.started_at
+      FROM public.delivery_test_reports AS report
+      INNER JOIN public.delivery_test_runs AS run ON run.id = report.run_id
+      WHERE report.generated_at < CAST(:bucket_end AS timestamptz)
+      ORDER BY report.run_id, report.sequence DESC, report.generated_at DESC, report.id DESC
+    ), report_heads_at_observation AS MATERIALIZED (
+      SELECT DISTINCT ON (report.run_id)
+        report.run_id,
+        report.status,
+        run.started_at
+      FROM public.delivery_test_reports AS report
+      INNER JOIN public.delivery_test_runs AS run ON run.id = report.run_id
+      WHERE report.generated_at < CAST(:bucket_end AS timestamptz) + interval '1 minute'
+      ORDER BY report.run_id, report.sequence DESC, report.generated_at DESC, report.id DESC
+    )
+    SELECT
+      (
+        SELECT count(DISTINCT head.run_id)
+        FROM report_heads_at_bucket_end AS head
+        WHERE head.status = 'failed'
+          AND head.generated_at >= CAST(:bucket_start AS timestamptz)
+          AND head.generated_at < CAST(:bucket_end AS timestamptz)
+      )::double precision AS failed_run_count,
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM report_heads_at_observation AS head
+        WHERE head.status = 'succeeded'
+          AND head.started_at >= month_bounds.previous_month_start
+          AND head.started_at < month_bounds.current_month_start
+      ) THEN 0::double precision ELSE 1::double precision END AS missed_count
+    FROM month_bounds
+  `,
   outboxToProvider: `
     WITH target_channels AS MATERIALIZED (
       SELECT outbox.intent_id,
@@ -222,7 +275,7 @@ export const MONITORING_QUERIES = Object.freeze({
   `,
 });
 
-const METRIC_LIMIT_PER_INVOCATION = 29;
+const METRIC_LIMIT_PER_INVOCATION = 31;
 const CLOUDWATCH_BATCH_SIZE = 100;
 const PERCENTILES = Object.freeze([
   ['P50', 'p50_ms'],
@@ -445,6 +498,24 @@ export function buildMetrics(results) {
     );
   }
   output.push(metric('DeliveryEvidenceGapCount', evidenceGapCount, 'Count'));
+  if (results.deliveryTestHealth.length !== 1) {
+    throw new Error('Monthly delivery-test snapshot is unavailable.');
+  }
+  const failedRunCount = nonnegativeInteger(
+    results.deliveryTestHealth[0].failed_run_count,
+    'MonthlyLiveDeliveryTestFailedRunCount',
+  );
+  const missedCount = nonnegativeInteger(
+    results.deliveryTestHealth[0].missed_count,
+    'MonthlyLiveDeliveryTestMissed',
+  );
+  if (missedCount > 1) {
+    throw new Error('Monthly delivery-test missed truth is unavailable.');
+  }
+  output.push(
+    metric('MonthlyLiveDeliveryTestFailedRunCount', failedRunCount, 'Count'),
+    metric('MonthlyLiveDeliveryTestMissed', missedCount, 'Count'),
+  );
   if (results.stuckOutbox.length !== 1 || results.rosterAge.length !== 1) {
     throw new Error('Operational snapshot is unavailable.');
   }
@@ -574,6 +645,12 @@ export async function collectOperationalMetrics(event, dependencies = {}) {
         'deliveryStates',
         parameters,
       ),
+      deliveryTestHealth: await executeStaticSelect(
+        client,
+        transactionId,
+        'deliveryTestHealth',
+        parameters,
+      ),
       outboxToProvider: await executeStaticSelect(
         client,
         transactionId,
@@ -624,7 +701,10 @@ export async function collectOperationalMetrics(event, dependencies = {}) {
   await publishMetrics(
     buildMetrics(results).map((datum) => ({
       ...datum,
-      Timestamp: bucket.cohortTimestamp,
+      Timestamp:
+        datum.MetricName === 'MonthlyLiveDeliveryTestMissed'
+          ? bucket.scheduleTimestamp
+          : bucket.cohortTimestamp,
     })),
   );
   await publishMetrics([metric('MetricsCollectorSuccess', 1, 'Count')]);

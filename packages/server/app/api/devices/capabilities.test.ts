@@ -21,6 +21,7 @@ import {
 } from '../../../lib/capabilities/engine';
 import {
   EXPO_DEVICE_NOT_REGISTERED_REASON,
+  createDrizzlePushEndpointPolicyStore,
   executeDeviceCapability,
   planPushTokenRegistration,
   PUSH_ENDPOINT_INVALIDATION_SERVICE_ID,
@@ -31,6 +32,7 @@ import {
   type PushEndpointPolicyQuery,
   type PushEndpointPolicyStore,
 } from '../../../lib/capabilities/devices';
+import type { Database } from '../../../db/client';
 
 const ids = {
   user: '00000000-0000-4000-8000-000000001201',
@@ -41,6 +43,10 @@ const ids = {
   roster: '00000000-0000-4000-8000-000000001206',
   recipient: '00000000-0000-4000-8000-000000001207',
   endpoint: '00000000-0000-4000-8000-000000001208',
+  ordinaryRecipient: '00000000-0000-4000-8000-000000001212',
+  ordinaryEndpoint: '00000000-0000-4000-8000-000000001213',
+  deliveryTargetSet: '00000000-0000-4000-8000-000000001214',
+  confirmation: '00000000-0000-4000-8000-000000001215',
   status: '00000000-0000-4000-8000-000000001209',
   registrationA: '00000000-0000-4000-8000-000000001210',
   registrationB: '00000000-0000-4000-8000-000000001211',
@@ -167,11 +173,158 @@ function resolutionInput(endpointCount = 1) {
   };
 }
 
+function deliveryTestPushResolutionInput() {
+  const staffGroup = Object.freeze({
+    ...resolutionGroup,
+    kind: 'google-group' as const,
+  });
+  const rosterSnapshot = RosterSnapshotSchema.parse({
+    ...resolutionRoster,
+    population: 'staff',
+    expectedSourceGroupRefs: [staffGroup],
+    sourceGroupRefs: [staffGroup],
+    recipients: [
+      {
+        id: ids.recipient,
+        population: 'staff',
+        googleSubject: 'synthetic-approved-canary-subject',
+        displayName: 'Approved synthetic canary fixture',
+        groupSourceRefs: [staffGroup],
+        endpoints: [
+          {
+            id: ids.endpoint,
+            channel: 'push',
+            status: 'active',
+            capturedAt: now.toISOString(),
+            platform: 'ios',
+            token: 'ExponentPushToken[approved-synthetic-canary-fixture]',
+          },
+        ],
+      },
+      {
+        id: ids.ordinaryRecipient,
+        population: 'staff',
+        googleSubject: 'synthetic-ordinary-staff-subject',
+        displayName: 'Ordinary synthetic staff fixture',
+        groupSourceRefs: [staffGroup],
+        endpoints: [
+          {
+            id: ids.ordinaryEndpoint,
+            channel: 'push',
+            status: 'active',
+            capturedAt: now.toISOString(),
+            platform: 'android',
+            token: 'ExponentPushToken[ordinary-staff-must-not-send]',
+          },
+        ],
+      },
+    ],
+  });
+  const deliveryTest = Object.freeze({
+    purpose: 'monthly-live-delivery-test' as const,
+    targetSet: { id: ids.deliveryTargetSet, version: 1 },
+    endpointReferenceDigest: 'd'.repeat(64),
+  });
+  const batch = DispatchBatchSchema.parse({
+    ...resolutionBatch(),
+    eventKind: 'drill',
+    rosterPopulation: 'staff',
+    deliveryTest,
+    authorization: {
+      kind: 'human-confirmed',
+      activationPreviewId: resolutionIds.preview,
+      preparedActivationId: null,
+      confirmationId: ids.confirmation,
+      consequenceDigest: 'b'.repeat(64),
+      requestId: ids.request,
+    },
+    renderedMessage: {
+      eventKind: 'drill',
+      templateMode: 'drill',
+      purpose: 'activation',
+      classificationMarker: 'DRILL',
+      channel: 'push',
+      title: '[DRILL] Live canary test',
+      body: '[DRILL] LIVE CANARY — TRAINING ONLY.',
+    },
+    integrationStatus: {
+      integrationId: 'expo-push',
+      label: 'live-verified',
+      verifiedAt: now.toISOString(),
+      verifiedByUserId: ids.user,
+      authorizationReference: 'synthetic-live-verification-reference',
+      reasonCode: null,
+      observedAt: now.toISOString(),
+    },
+    endpointCount: 1,
+  });
+  return Object.freeze({
+    deliveryTest,
+    input: Object.freeze({
+      batch,
+      audience: Object.freeze({
+        audienceConfig: resolutionAudience,
+        neighborhoodVersions: Object.freeze([]),
+        rosterSnapshot,
+      }),
+    }),
+  });
+}
+
+function supersededTargetDatabase(target: Readonly<Record<string, unknown>>) {
+  const queuedRows: readonly (readonly unknown[])[] = [
+    [{ facilityId: resolutionIds.facility }],
+    [target],
+    [{ id: '00000000-0000-4000-8000-000000001239' }],
+  ];
+  let selectCalls = 0;
+  let executeCalls = 0;
+  let transactionCalls = 0;
+  const queryDatabase = {
+    select() {
+      const rows = queuedRows[selectCalls] ?? [];
+      selectCalls += 1;
+      const builder = {
+        from() {
+          return builder;
+        },
+        where() {
+          return builder;
+        },
+        limit() {
+          return Promise.resolve(rows);
+        },
+      };
+      return builder;
+    },
+    execute() {
+      executeCalls += 1;
+      return Promise.resolve([]);
+    },
+  };
+  const database = {
+    ...queryDatabase,
+    transaction<Result>(
+      operation: (transaction: typeof queryDatabase) => Promise<Result>,
+    ) {
+      transactionCalls += 1;
+      return operation(queryDatabase);
+    },
+  } as unknown as Database;
+  return Object.freeze({
+    database,
+    executeCalls: () => executeCalls,
+    selectCalls: () => selectCalls,
+    transactionCalls: () => transactionCalls,
+  });
+}
+
 class PushPolicyStore implements PushEndpointPolicyStore {
   public readonly queries: PushEndpointPolicyQuery[] = [];
 
   public constructor(
     private readonly status: 'active' | 'disabled' | 'invalid' = 'active',
+    private readonly approvedEndpointIds: ReadonlySet<string> | null = null,
   ) {}
 
   public loadEndpointPolicy(query: PushEndpointPolicyQuery): Promise<unknown> {
@@ -180,6 +333,10 @@ class PushPolicyStore implements PushEndpointPolicyStore {
       query.candidates.map((candidate) => ({
         ...candidate,
         status: this.status,
+        approvedForDeliveryTest:
+          query.deliveryTest === null ||
+          this.approvedEndpointIds === null ||
+          this.approvedEndpointIds.has(candidate.endpointId),
       })),
     );
   }
@@ -402,6 +559,8 @@ describe('pinned push endpoint resolution', () => {
       {
         rosterSnapshotId: ids.roster,
         rosterPopulation: 'synthetic',
+        endpointCount: 1,
+        deliveryTest: null,
         candidates: [{ recipientId: ids.recipient, endpointId: ids.endpoint }],
       },
     ]);
@@ -472,6 +631,60 @@ describe('pinned push endpoint resolution', () => {
       resolvePushEndpoints(resolutionInput(0), store),
     ).rejects.toMatchObject({ code: 'PUSH_ENDPOINT_COUNT_MISMATCH' });
     expect(store.queries).toEqual([]);
+  });
+
+  test('returns only the approved canary endpoint from a staff audience', async () => {
+    const { deliveryTest, input } = deliveryTestPushResolutionInput();
+    const store = new PushPolicyStore('active', new Set([ids.endpoint]));
+
+    const resolved = await resolvePushEndpoints(input, store);
+
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.recipientId).toBe(ids.recipient);
+    expect(resolved[0]?.endpoint.id).toBe(ids.endpoint);
+    expect(JSON.stringify(resolved)).not.toContain(
+      'ordinary-staff-must-not-send',
+    );
+    expect(store.queries[0]).toMatchObject({
+      rosterPopulation: 'staff',
+      endpointCount: 1,
+      deliveryTest,
+      candidates: [
+        { recipientId: ids.recipient, endpointId: ids.endpoint },
+        {
+          recipientId: ids.ordinaryRecipient,
+          endpointId: ids.ordinaryEndpoint,
+        },
+      ],
+    });
+  });
+
+  test('rejects a superseded target under the facility lock before exposing a token', async () => {
+    const { deliveryTest, input } = deliveryTestPushResolutionInput();
+    const fixture = supersededTargetDatabase({
+      id: deliveryTest.targetSet.id,
+      version: deliveryTest.targetSet.version,
+      facilityId: resolutionIds.facility,
+      rosterSnapshotId: ids.roster,
+      rosterPopulation: 'staff',
+      endpointReferenceDigest: deliveryTest.endpointReferenceDigest,
+    });
+    const store = createDrizzlePushEndpointPolicyStore(fixture.database);
+    let releasedTokens: readonly string[] | undefined;
+    let providerCalls = 0;
+
+    await expect(
+      resolvePushEndpoints(input, store).then((resolved) => {
+        releasedTokens = resolved.map(({ endpoint }) => endpoint.token);
+        providerCalls += resolved.length;
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PUSH_ENDPOINT_POLICY' });
+
+    expect(releasedTokens).toBeUndefined();
+    expect(providerCalls).toBe(0);
+    expect(fixture.transactionCalls()).toBe(1);
+    expect(fixture.executeCalls()).toBe(1);
+    expect(fixture.selectCalls()).toBe(3);
   });
 });
 

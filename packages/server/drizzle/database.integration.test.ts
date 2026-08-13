@@ -14,11 +14,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../db/client';
 import { seedDatabase, type SeedSummary } from '../db/seed';
-import {
-  notificationIntentChannels,
-  notificationIntents,
-  outbox,
-} from '../db/schema';
+import { notificationIntentChannels, outbox } from '../db/schema';
 import { migrateDatabase } from './migrate';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -29,6 +25,24 @@ setDefaultTimeout(30_000);
 
 let connection: PostgresDatabaseConnection | undefined;
 let firstSeedSummary: SeedSummary | undefined;
+
+const metricsCollectorSource = await Bun.file(
+  new URL('../../../infra/lambda/metrics-collector/index.mjs', import.meta.url),
+).text();
+const deliveryTestHealthQueryMatches = [
+  ...metricsCollectorSource.matchAll(
+    /\n\s*deliveryTestHealth:\s*`([\s\S]*?)`,\n\s*outboxToProvider:/gu,
+  ),
+];
+if (
+  deliveryTestHealthQueryMatches.length !== 1 ||
+  deliveryTestHealthQueryMatches[0]?.[1] === undefined
+) {
+  throw new Error(
+    'The deployed delivery-test health monitoring query could not be extracted exactly once.',
+  );
+}
+const deliveryTestHealthMonitoringQuery = deliveryTestHealthQueryMatches[0][1];
 
 const ISSUE_14_PRE_LIFECYCLE_MIGRATIONS = [
   '0000_youthful_captain_stacy.sql',
@@ -389,6 +403,1066 @@ const insertSyntheticChannelChangeAuthorization = sql`
     '2026-08-10T16:02:00.000Z'::timestamptz
   )
 `;
+
+type PostgresTransaction = Parameters<
+  Parameters<PostgresDatabaseConnection['db']['transaction']>[0]
+>[0];
+
+/**
+ * Builds a fully synthetic staff/canary graph for database-only delivery-test
+ * safety proofs. `.invalid` addresses and unroutable tokens ensure this
+ * fixture cannot reach a recipient or provider.
+ */
+async function insertDeliveryTestStructuralFixture(
+  transaction: PostgresTransaction,
+): Promise<void> {
+  for (const statement of syntheticAdminEvidencePrerequisites) {
+    await transaction.execute(statement);
+  }
+
+  const fixtureStatements = [
+    sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values (
+        '00000000-0000-4000-8000-000000030001'::uuid,
+        'google-group'::group_source_kind,
+        'building'::group_purpose,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        'Synthetic Delivery Test Staff',
+        true,
+        'synthetic-delivery-test-staff-group',
+        'synthetic-delivery-test-group@example.invalid',
+        null,
+        '2026-08-10T16:00:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into roster_source_configurations (
+        id, version, population, created_at
+      ) values (
+        '00000000-0000-4000-8000-000000030002'::uuid,
+        1,
+        'staff'::roster_population,
+        '2026-08-10T16:00:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into roster_source_configuration_facilities (
+        configuration_id, configuration_version, facility_id
+      ) values (
+        '00000000-0000-4000-8000-000000030002'::uuid,
+        1,
+        '00000000-0000-4000-8000-000000000001'::uuid
+      )
+    `,
+    sql`
+      insert into roster_source_configuration_groups (
+        configuration_id, configuration_version, population,
+        group_source_id, group_source_kind, group_purpose
+      ) values (
+        '00000000-0000-4000-8000-000000030002'::uuid,
+        1,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030001'::uuid,
+        'google-group'::group_source_kind,
+        'building'::group_purpose
+      )
+    `,
+    sql`
+      insert into roster_snapshots (
+        id, version, population, complete, source_configuration_id,
+        source_configuration_version, sync_started_at, captured_at
+      ) values (
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        1,
+        'staff'::roster_population,
+        true,
+        '00000000-0000-4000-8000-000000030002'::uuid,
+        1,
+        '2026-08-10T16:00:00.000Z'::timestamptz,
+        '2026-08-10T16:01:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into roster_snapshot_facilities (
+        roster_snapshot_id, facility_id
+      ) values (
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        '00000000-0000-4000-8000-000000000001'::uuid
+      )
+    `,
+    sql`
+      insert into roster_snapshot_sources (
+        roster_snapshot_id, population, group_source_id,
+        group_source_kind, group_purpose, completion_kind
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030001'::uuid,
+        'google-group'::group_source_kind,
+        'building'::group_purpose,
+        'expected'::group_completion_kind
+      ),
+      (
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030001'::uuid,
+        'google-group'::group_source_kind,
+        'building'::group_purpose,
+        'completed'::group_completion_kind
+      )
+    `,
+    sql`
+      insert into roster_recipients (
+        id, roster_snapshot_id, population, google_subject, display_name
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030004'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        'synthetic-delivery-test-staff-one',
+        'Synthetic Delivery Test Staff One'
+      ),
+      (
+        '00000000-0000-4000-8000-000000030005'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        'synthetic-delivery-test-staff-two',
+        'Synthetic Delivery Test Staff Two'
+      )
+    `,
+    sql`
+      insert into roster_recipient_group_sources (
+        roster_snapshot_id, recipient_id, population, group_source_id,
+        group_source_kind, group_purpose
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        '00000000-0000-4000-8000-000000030004'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030001'::uuid,
+        'google-group'::group_source_kind,
+        'building'::group_purpose
+      ),
+      (
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        '00000000-0000-4000-8000-000000030005'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030001'::uuid,
+        'google-group'::group_source_kind,
+        'building'::group_purpose
+      )
+    `,
+    sql`
+      insert into roster_endpoints (
+        id, roster_snapshot_id, recipient_id, population, channel, status,
+        captured_at, platform, token, email, phone_number
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030006'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        '00000000-0000-4000-8000-000000030004'::uuid,
+        'staff'::roster_population,
+        'push'::notification_channel,
+        'active'::endpoint_status,
+        '2026-08-10T16:01:00.000Z'::timestamptz,
+        'ios'::push_platform,
+        'synthetic-unroutable:delivery-test-listed-push',
+        null,
+        null
+      ),
+      (
+        '00000000-0000-4000-8000-000000030007'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        '00000000-0000-4000-8000-000000030005'::uuid,
+        'staff'::roster_population,
+        'email'::notification_channel,
+        'active'::endpoint_status,
+        '2026-08-10T16:01:00.000Z'::timestamptz,
+        null,
+        null,
+        'synthetic-delivery-test-listed@example.invalid',
+        null
+      ),
+      (
+        '00000000-0000-4000-8000-000000030008'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        '00000000-0000-4000-8000-000000030005'::uuid,
+        'staff'::roster_population,
+        'push'::notification_channel,
+        'active'::endpoint_status,
+        '2026-08-10T16:01:00.000Z'::timestamptz,
+        'android'::push_platform,
+        'synthetic-unroutable:delivery-test-unlisted-push',
+        null,
+        null
+      )
+    `,
+    sql`
+      insert into delivery_test_canary_eligibility_facts (
+        id, supersedes_fact_id, facility_id, roster_snapshot_id,
+        roster_population, recipient_id, endpoint_id, channel, decision,
+        opted_in_at, decided_at, decided_by_user_id,
+        decided_with_session_id, authorization_reference
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030012'::uuid,
+        null,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030004'::uuid,
+        '00000000-0000-4000-8000-000000030006'::uuid,
+        'push'::notification_channel,
+        'approved-synthetic-canary',
+        '2026-08-10T15:00:00.000Z'::timestamptz,
+        '2026-08-10T16:03:00.000Z'::timestamptz,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        '00000000-0000-4000-8000-000000026004'::uuid,
+        'synthetic-product-owner-delivery-test-approval'
+      ),
+      (
+        '00000000-0000-4000-8000-000000030013'::uuid,
+        null,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030005'::uuid,
+        '00000000-0000-4000-8000-000000030007'::uuid,
+        'email'::notification_channel,
+        'approved-synthetic-canary',
+        '2026-08-10T15:00:00.000Z'::timestamptz,
+        '2026-08-10T16:03:00.000Z'::timestamptz,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        '00000000-0000-4000-8000-000000026004'::uuid,
+        'synthetic-product-owner-delivery-test-approval'
+      )
+    `,
+    sql`
+      insert into delivery_test_target_set_versions (
+        id, version, facility_id, roster_snapshot_id, roster_population,
+        supersedes_version_id, endpoint_reference_digest,
+        idempotency_request_id, approved_by_user_id,
+        approved_with_session_id, approved_at, created_at
+      ) values (
+        '00000000-0000-4000-8000-000000030010'::uuid,
+        1,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        null,
+        repeat('e', 64),
+        '00000000-0000-4000-8000-000000030011'::uuid,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        '00000000-0000-4000-8000-000000026004'::uuid,
+        '2026-08-10T16:04:00.000Z'::timestamptz,
+        '2026-08-10T16:03:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into delivery_test_target_endpoints (
+        target_set_version_id, target_set_version, eligibility_fact_id,
+        roster_snapshot_id,
+        roster_population, recipient_id, endpoint_id, channel, attestation,
+        opted_in_at, attested_at, attested_by_user_id,
+        authorization_reference
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030010'::uuid,
+        1,
+        '00000000-0000-4000-8000-000000030012'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030004'::uuid,
+        '00000000-0000-4000-8000-000000030006'::uuid,
+        'push'::notification_channel,
+        'approved-synthetic-canary',
+        '2026-08-10T15:00:00.000Z'::timestamptz,
+        '2026-08-10T16:03:00.000Z'::timestamptz,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        'synthetic-product-owner-delivery-test-approval'
+      ),
+      (
+        '00000000-0000-4000-8000-000000030010'::uuid,
+        1,
+        '00000000-0000-4000-8000-000000030013'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000030005'::uuid,
+        '00000000-0000-4000-8000-000000030007'::uuid,
+        'email'::notification_channel,
+        'approved-synthetic-canary',
+        '2026-08-10T15:00:00.000Z'::timestamptz,
+        '2026-08-10T16:03:00.000Z'::timestamptz,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        'synthetic-product-owner-delivery-test-approval'
+      )
+    `,
+    sql`set constraints "delivery_test_target_sets_complete_guard" immediate`,
+    sql`set constraints "delivery_test_target_sets_complete_guard" deferred`,
+    sql`
+      insert into integration_statuses (
+        id, integration_id, label, verified_at, verified_by_user_id,
+        authorization_reference, reason_code, observed_at
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030050'::uuid,
+        'expo-push',
+        'live-verified'::integration_truth_label,
+        '2026-08-10T16:02:00.000Z'::timestamptz,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        'synthetic-product-owner-push-live-verification',
+        null,
+        '2026-08-10T16:02:00.000Z'::timestamptz
+      ),
+      (
+        '00000000-0000-4000-8000-000000030051'::uuid,
+        'ses-email',
+        'live-verified'::integration_truth_label,
+        '2026-08-10T16:02:00.000Z'::timestamptz,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        'synthetic-product-owner-email-live-verification',
+        null,
+        '2026-08-10T16:02:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into connectivity_epochs (id, session_id, established_at)
+      values (
+        '00000000-0000-4000-8000-000000030040'::uuid,
+        '00000000-0000-4000-8000-000000026004'::uuid,
+        '2026-08-10T16:03:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into human_confirmation_records (
+        id, capability_id, connectivity_epoch_id, confirmed_by_user_id,
+        confirmed_with_session_id, consequence_digest, issued_at, expires_at,
+        status, consumed_at, consumed_for_request_id, expired_at
+      ) values (
+        '00000000-0000-4000-8000-000000030041'::uuid,
+        'start-event'::mutation_capability,
+        '00000000-0000-4000-8000-000000030040'::uuid,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        '00000000-0000-4000-8000-000000026004'::uuid,
+        repeat('d', 64),
+        '2026-08-10T16:04:00.000Z'::timestamptz,
+        '2026-08-10T16:09:00.000Z'::timestamptz,
+        'consumed'::human_confirmation_status,
+        '2026-08-10T16:06:00.000Z'::timestamptz,
+        '00000000-0000-4000-8000-000000030031'::uuid,
+        null
+      )
+    `,
+    sql`
+      insert into human_confirmation_actions (confirmation_id, action_id)
+      values (
+        '00000000-0000-4000-8000-000000030041'::uuid,
+        'send-real-notification'::human_only_action
+      )
+    `,
+    sql`
+      insert into activation_previews (
+        id, facility_id, kind, template_mode, event_type_version_id,
+        roster_snapshot_id, roster_population, audience_config_id,
+        audience_config_version, recipient_count, channels, send_readiness,
+        blocking_reason_codes, active_event_ids, consequence_digest,
+        delivery_test_target_set_id, delivery_test_target_set_version,
+        delivery_test_endpoint_reference_digest, created_at, expires_at
+      ) values (
+        '00000000-0000-4000-8000-000000030020'::uuid,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        'drill'::event_kind,
+        'drill'::template_mode,
+        '00000000-0000-4000-8000-000000000201'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000000020'::uuid,
+        1,
+        2,
+        '[]'::jsonb,
+        'ready',
+        '[]'::jsonb,
+        '[]'::jsonb,
+        repeat('d', 64),
+        '00000000-0000-4000-8000-000000030010'::uuid,
+        1,
+        repeat('e', 64),
+        '2026-08-10T16:05:00.000Z'::timestamptz,
+        '2026-08-10T16:10:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into events (
+        id, facility_id, kind, template_mode, event_type_version_id, status,
+        roster_snapshot_id, roster_population, created_by, created_at,
+        activated_at, all_clear_at, reactivated_at, closed_at,
+        correction_of_event_id, correction_reason, activation_authorization
+      ) values (
+        '00000000-0000-4000-8000-000000030030'::uuid,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        'drill'::event_kind,
+        'drill'::template_mode,
+        '00000000-0000-4000-8000-000000000201'::uuid,
+        'active'::event_status,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        jsonb_build_object(
+          'kind', 'human',
+          'userId', '00000000-0000-4000-8000-000000026001',
+          'sessionId', '00000000-0000-4000-8000-000000026004'
+        ),
+        '2026-08-10T16:05:00.000Z'::timestamptz,
+        '2026-08-10T16:06:00.000Z'::timestamptz,
+        null,
+        null,
+        null,
+        null,
+        null,
+        jsonb_build_object(
+          'kind', 'human-confirmed',
+          'activationPreviewId', '00000000-0000-4000-8000-000000030020',
+          'preparedActivationId', null,
+          'confirmationId', '00000000-0000-4000-8000-000000030041',
+          'consequenceDigest', repeat('d', 64),
+          'requestId', '00000000-0000-4000-8000-000000030031'
+        )
+      )
+    `,
+    sql`
+      insert into notification_intents (
+        id, event_id, event_kind, template_mode, purpose,
+        event_type_version_id, roster_snapshot_id, roster_population,
+        audience_config_id, audience_config_version, created_by, source,
+        request_id, "authorization", delivery_test_target_set_id,
+        delivery_test_target_set_version,
+        delivery_test_endpoint_reference_digest, created_at
+      ) values (
+        '00000000-0000-4000-8000-000000030032'::uuid,
+        '00000000-0000-4000-8000-000000030030'::uuid,
+        'drill'::event_kind,
+        'drill'::template_mode,
+        'activation'::notification_purpose,
+        '00000000-0000-4000-8000-000000000201'::uuid,
+        '00000000-0000-4000-8000-000000030003'::uuid,
+        'staff'::roster_population,
+        '00000000-0000-4000-8000-000000000020'::uuid,
+        1,
+        jsonb_build_object(
+          'kind', 'human',
+          'userId', '00000000-0000-4000-8000-000000026001',
+          'sessionId', '00000000-0000-4000-8000-000000026004'
+        ),
+        'web'::invocation_source,
+        '00000000-0000-4000-8000-000000030031'::uuid,
+        jsonb_build_object(
+          'kind', 'human-confirmed',
+          'activationPreviewId', '00000000-0000-4000-8000-000000030020',
+          'preparedActivationId', null,
+          'confirmationId', '00000000-0000-4000-8000-000000030041',
+          'consequenceDigest', repeat('d', 64),
+          'requestId', '00000000-0000-4000-8000-000000030031'
+        ),
+        '00000000-0000-4000-8000-000000030010'::uuid,
+        1,
+        repeat('e', 64),
+        '2026-08-10T16:06:00.000Z'::timestamptz
+      )
+    `,
+    sql`
+      insert into notification_intent_channels (
+        intent_id, sequence, channel, event_kind, template_mode, purpose,
+        roster_population, classification_marker, endpoint_count,
+        rendered_message, integration_status_id, integration_id,
+        integration_label
+      ) values
+      (
+        '00000000-0000-4000-8000-000000030032'::uuid,
+        1,
+        'push'::notification_channel,
+        'drill'::event_kind,
+        'drill'::template_mode,
+        'activation'::notification_purpose,
+        'staff'::roster_population,
+        'DRILL'::classification_marker,
+        1,
+        '{"channel":"push","eventKind":"drill","templateMode":"drill","purpose":"activation","classificationMarker":"DRILL","title":"[DRILL] Monthly delivery test","body":"[DRILL] Synthetic canary only."}'::jsonb,
+        '00000000-0000-4000-8000-000000030050'::uuid,
+        'expo-push',
+        'live-verified'::integration_truth_label
+      ),
+      (
+        '00000000-0000-4000-8000-000000030032'::uuid,
+        2,
+        'email'::notification_channel,
+        'drill'::event_kind,
+        'drill'::template_mode,
+        'activation'::notification_purpose,
+        'staff'::roster_population,
+        'DRILL'::classification_marker,
+        1,
+        '{"channel":"email","eventKind":"drill","templateMode":"drill","purpose":"activation","classificationMarker":"DRILL","subject":"[DRILL] Monthly delivery test","textBody":"[DRILL] Synthetic canary only."}'::jsonb,
+        '00000000-0000-4000-8000-000000030051'::uuid,
+        'ses-email',
+        'live-verified'::integration_truth_label
+      )
+    `,
+    sql`
+      insert into outbox (
+        id, message_version, intent_id, event_id, event_kind, template_mode,
+        purpose, event_type_version_id, roster_snapshot_id,
+        roster_population, audience_config_id, audience_config_version,
+        request_id, "authorization", channels, message, status, attempts,
+        available_at, locked_until, published_at, failed_at,
+        last_error_code, created_at
+      )
+      select
+        '00000000-0000-4000-8000-000000030033'::uuid,
+        1,
+        intent.id,
+        intent.event_id,
+        intent.event_kind,
+        intent.template_mode,
+        intent.purpose,
+        intent.event_type_version_id,
+        intent.roster_snapshot_id,
+        intent.roster_population,
+        intent.audience_config_id,
+        intent.audience_config_version,
+        intent.request_id,
+        intent."authorization",
+        planned.channels,
+        jsonb_build_object(
+          'version', 1,
+          'outboxId', '00000000-0000-4000-8000-000000030033',
+          'intentId', intent.id::text,
+          'eventId', intent.event_id::text,
+          'eventKind', intent.event_kind::text,
+          'templateMode', intent.template_mode::text,
+          'purpose', intent.purpose::text,
+          'eventTypeVersion', jsonb_build_object(
+            'id', intent.event_type_version_id::text,
+            'templateMode', intent.template_mode::text
+          ),
+          'rosterSnapshotId', intent.roster_snapshot_id::text,
+          'rosterPopulation', intent.roster_population::text,
+          'audienceConfig', jsonb_build_object(
+            'id', intent.audience_config_id::text,
+            'version', intent.audience_config_version
+          ),
+          'requestId', intent.request_id::text,
+          'authorization', intent."authorization",
+          'deliveryTest', jsonb_build_object(
+            'purpose', 'monthly-live-delivery-test',
+            'targetSet', jsonb_build_object(
+              'id', intent.delivery_test_target_set_id::text,
+              'version', intent.delivery_test_target_set_version
+            ),
+            'endpointReferenceDigest',
+              intent.delivery_test_endpoint_reference_digest
+          ),
+          'channels', planned.channels,
+          'createdAt', intent.created_at
+        ),
+        'pending'::outbox_status,
+        0,
+        intent.created_at,
+        null,
+        null,
+        null,
+        null,
+        intent.created_at
+      from notification_intents as intent
+      cross join lateral (
+        select jsonb_agg(
+          jsonb_build_object(
+            'channel', channel.channel::text,
+            'endpointCount', channel.endpoint_count,
+            'renderedMessage', channel.rendered_message,
+            'integrationStatus', jsonb_build_object(
+              'integrationId', channel.integration_id,
+              'label', channel.integration_label::text
+            )
+          ) order by channel.sequence
+        ) as channels
+        from notification_intent_channels as channel
+        where channel.intent_id = intent.id
+      ) as planned
+      where intent.id = '00000000-0000-4000-8000-000000030032'::uuid
+    `,
+    sql`
+      insert into dispatch_batches (
+        id, outbox_id, intent_id, event_id, event_kind, template_mode,
+        purpose, event_type_version_id, roster_snapshot_id,
+        roster_population, audience_config_id, audience_config_version,
+        request_id, "authorization", channel, rendered_message,
+        integration_status_id, integration_id, integration_label,
+        sequence, endpoint_count, created_at
+      )
+      select
+        case channel.channel
+          when 'push' then '00000000-0000-4000-8000-000000030034'::uuid
+          when 'email' then '00000000-0000-4000-8000-000000030035'::uuid
+        end,
+        outbox.id,
+        outbox.intent_id,
+        outbox.event_id,
+        outbox.event_kind,
+        outbox.template_mode,
+        outbox.purpose,
+        outbox.event_type_version_id,
+        outbox.roster_snapshot_id,
+        outbox.roster_population,
+        outbox.audience_config_id,
+        outbox.audience_config_version,
+        outbox.request_id,
+        outbox."authorization",
+        channel.channel,
+        channel.rendered_message,
+        channel.integration_status_id,
+        channel.integration_id,
+        channel.integration_label,
+        channel.sequence,
+        channel.endpoint_count,
+        '2026-08-10T16:06:30.000Z'::timestamptz
+      from outbox
+      join notification_intent_channels as channel
+        on channel.intent_id = outbox.intent_id
+      where outbox.id = '00000000-0000-4000-8000-000000030033'::uuid
+    `,
+    sql`
+      insert into delivery_test_runs (
+        id, activation_preview_id, event_id, notification_intent_id,
+        target_set_version_id, target_set_version,
+        endpoint_reference_digest, consequence_digest, confirmation_id,
+        confirmation_status, request_id, started_by_user_id,
+        started_with_session_id, started_at
+      ) values (
+        '00000000-0000-4000-8000-000000030042'::uuid,
+        '00000000-0000-4000-8000-000000030020'::uuid,
+        '00000000-0000-4000-8000-000000030030'::uuid,
+        '00000000-0000-4000-8000-000000030032'::uuid,
+        '00000000-0000-4000-8000-000000030010'::uuid,
+        1,
+        repeat('e', 64),
+        repeat('d', 64),
+        '00000000-0000-4000-8000-000000030041'::uuid,
+        'consumed'::human_confirmation_status,
+        '00000000-0000-4000-8000-000000030031'::uuid,
+        '00000000-0000-4000-8000-000000026001'::uuid,
+        '00000000-0000-4000-8000-000000026004'::uuid,
+        '2026-08-10T16:06:00.000Z'::timestamptz
+      )
+    `,
+  ] as const;
+
+  for (const statement of fixtureStatements) {
+    await transaction.execute(statement);
+  }
+}
+
+async function insertInitialDeliveryTestEvidence(
+  transaction: PostgresTransaction,
+  pushTerminalState: 'failed' | 'unknown',
+): Promise<void> {
+  const pushReasonCode =
+    pushTerminalState === 'failed'
+      ? 'PROVIDER_REJECTED'
+      : 'PROVIDER_OUTCOME_UNKNOWN';
+  await transaction.execute(sql`
+    insert into channel_attempts (
+      id, batch_id, intent_id, event_id, event_kind, template_mode,
+      purpose, event_type_version_id, roster_snapshot_id,
+      roster_population, recipient_id, endpoint_id, channel,
+      attempt_number, attempted_at
+    ) values
+    (
+      '00000000-0000-4000-8000-000000030090'::uuid,
+      '00000000-0000-4000-8000-000000030034'::uuid,
+      '00000000-0000-4000-8000-000000030032'::uuid,
+      '00000000-0000-4000-8000-000000030030'::uuid,
+      'drill'::event_kind,
+      'drill'::template_mode,
+      'activation'::notification_purpose,
+      '00000000-0000-4000-8000-000000000201'::uuid,
+      '00000000-0000-4000-8000-000000030003'::uuid,
+      'staff'::roster_population,
+      '00000000-0000-4000-8000-000000030004'::uuid,
+      '00000000-0000-4000-8000-000000030006'::uuid,
+      'push'::notification_channel,
+      1,
+      '2026-08-10T16:06:31.000Z'::timestamptz
+    ),
+    (
+      '00000000-0000-4000-8000-000000030091'::uuid,
+      '00000000-0000-4000-8000-000000030035'::uuid,
+      '00000000-0000-4000-8000-000000030032'::uuid,
+      '00000000-0000-4000-8000-000000030030'::uuid,
+      'drill'::event_kind,
+      'drill'::template_mode,
+      'activation'::notification_purpose,
+      '00000000-0000-4000-8000-000000000201'::uuid,
+      '00000000-0000-4000-8000-000000030003'::uuid,
+      'staff'::roster_population,
+      '00000000-0000-4000-8000-000000030005'::uuid,
+      '00000000-0000-4000-8000-000000030007'::uuid,
+      'email'::notification_channel,
+      1,
+      '2026-08-10T16:06:31.000Z'::timestamptz
+    )
+  `);
+  await transaction.execute(sql`
+    insert into delivery_evidence (
+      id, subject_kind, subject_id, intent_id, attempt_id, sequence,
+      previous_evidence_id, state, recorded_at, provider,
+      provider_reference, proof, reason_code, diagnostic_digest
+    ) values
+    (
+      '00000000-0000-4000-8000-000000030093'::uuid,
+      'attempt'::delivery_evidence_subject_kind,
+      '00000000-0000-4000-8000-000000030090'::uuid,
+      null,
+      '00000000-0000-4000-8000-000000030090'::uuid,
+      1,
+      null,
+      'attempted'::delivery_truth_state,
+      '2026-08-10T16:06:31.100Z'::timestamptz,
+      null,
+      null,
+      null,
+      null,
+      null
+    ),
+    (
+      '00000000-0000-4000-8000-000000030094'::uuid,
+      'attempt'::delivery_evidence_subject_kind,
+      '00000000-0000-4000-8000-000000030090'::uuid,
+      null,
+      '00000000-0000-4000-8000-000000030090'::uuid,
+      2,
+      '00000000-0000-4000-8000-000000030093'::uuid,
+      ${pushTerminalState}::delivery_truth_state,
+      '2026-08-10T16:06:31.500Z'::timestamptz,
+      null,
+      null,
+      null,
+      ${pushReasonCode},
+      null
+    ),
+    (
+      '00000000-0000-4000-8000-000000030095'::uuid,
+      'attempt'::delivery_evidence_subject_kind,
+      '00000000-0000-4000-8000-000000030091'::uuid,
+      null,
+      '00000000-0000-4000-8000-000000030091'::uuid,
+      1,
+      null,
+      'attempted'::delivery_truth_state,
+      '2026-08-10T16:06:31.100Z'::timestamptz,
+      null,
+      null,
+      null,
+      null,
+      null
+    ),
+    (
+      '00000000-0000-4000-8000-000000030096'::uuid,
+      'attempt'::delivery_evidence_subject_kind,
+      '00000000-0000-4000-8000-000000030091'::uuid,
+      null,
+      '00000000-0000-4000-8000-000000030091'::uuid,
+      2,
+      '00000000-0000-4000-8000-000000030095'::uuid,
+      'provider-accepted'::delivery_truth_state,
+      '2026-08-10T16:06:31.700Z'::timestamptz,
+      'ses-email',
+      'synthetic-provider-reference:email:1',
+      null,
+      null,
+      null
+    )
+  `);
+}
+
+async function insertSucceededDeliveryTestEvidence(
+  transaction: PostgresTransaction,
+): Promise<void> {
+  await transaction.execute(sql`
+    insert into channel_attempts (
+      id, batch_id, intent_id, event_id, event_kind, template_mode,
+      purpose, event_type_version_id, roster_snapshot_id,
+      roster_population, recipient_id, endpoint_id, channel,
+      attempt_number, attempted_at
+    ) values (
+      '00000000-0000-4000-8000-000000030092'::uuid,
+      '00000000-0000-4000-8000-000000030034'::uuid,
+      '00000000-0000-4000-8000-000000030032'::uuid,
+      '00000000-0000-4000-8000-000000030030'::uuid,
+      'drill'::event_kind,
+      'drill'::template_mode,
+      'activation'::notification_purpose,
+      '00000000-0000-4000-8000-000000000201'::uuid,
+      '00000000-0000-4000-8000-000000030003'::uuid,
+      'staff'::roster_population,
+      '00000000-0000-4000-8000-000000030004'::uuid,
+      '00000000-0000-4000-8000-000000030006'::uuid,
+      'push'::notification_channel,
+      2,
+      '2026-08-10T16:07:10.000Z'::timestamptz
+    )
+  `);
+  await transaction.execute(sql`
+    insert into delivery_evidence (
+      id, subject_kind, subject_id, intent_id, attempt_id, sequence,
+      previous_evidence_id, state, recorded_at, provider,
+      provider_reference, proof, reason_code, diagnostic_digest
+    ) values
+    (
+      '00000000-0000-4000-8000-000000030097'::uuid,
+      'attempt'::delivery_evidence_subject_kind,
+      '00000000-0000-4000-8000-000000030092'::uuid,
+      null,
+      '00000000-0000-4000-8000-000000030092'::uuid,
+      1,
+      null,
+      'attempted'::delivery_truth_state,
+      '2026-08-10T16:07:10.100Z'::timestamptz,
+      null,
+      null,
+      null,
+      null,
+      null
+    ),
+    (
+      '00000000-0000-4000-8000-000000030098'::uuid,
+      'attempt'::delivery_evidence_subject_kind,
+      '00000000-0000-4000-8000-000000030092'::uuid,
+      null,
+      '00000000-0000-4000-8000-000000030092'::uuid,
+      2,
+      '00000000-0000-4000-8000-000000030097'::uuid,
+      'provider-accepted'::delivery_truth_state,
+      '2026-08-10T16:07:10.500Z'::timestamptz,
+      'expo-push',
+      'synthetic-provider-reference:push:2',
+      null,
+      null,
+      null
+    )
+  `);
+}
+
+async function insertCrossFacilityDeliveryTestEligibility(
+  transaction: PostgresTransaction,
+): Promise<void> {
+  await transaction.execute(sql`
+    insert into roster_snapshot_facilities (roster_snapshot_id, facility_id)
+    values (
+      '00000000-0000-4000-8000-000000030003'::uuid,
+      '00000000-0000-4000-8000-000000000002'::uuid
+    )
+  `);
+  await transaction.execute(sql`
+    insert into delivery_test_canary_eligibility_facts (
+      id, supersedes_fact_id, facility_id, roster_snapshot_id,
+      roster_population, recipient_id, endpoint_id, channel, decision,
+      opted_in_at, decided_at, decided_by_user_id,
+      decided_with_session_id, authorization_reference
+    ) values (
+      '00000000-0000-4000-8000-000000030085'::uuid,
+      null,
+      '00000000-0000-4000-8000-000000000002'::uuid,
+      '00000000-0000-4000-8000-000000030003'::uuid,
+      'staff'::roster_population,
+      '00000000-0000-4000-8000-000000030004'::uuid,
+      '00000000-0000-4000-8000-000000030006'::uuid,
+      'push'::notification_channel,
+      'approved-synthetic-canary',
+      '2026-08-10T15:00:00.000Z'::timestamptz,
+      '2026-08-10T16:08:00.000Z'::timestamptz,
+      '00000000-0000-4000-8000-000000026001'::uuid,
+      '00000000-0000-4000-8000-000000026004'::uuid,
+      'synthetic-cross-facility-canary-proof'
+    )
+  `);
+}
+
+const insertIncompleteDeliveryTestReport = sql`
+  insert into delivery_test_reports (
+    id, run_id, run_started_at, sequence, supersedes_report_id, status,
+    channels, generated_at, finalized_by, source, reason_code
+  ) values (
+    '00000000-0000-4000-8000-000000030043'::uuid,
+    '00000000-0000-4000-8000-000000030042'::uuid,
+    '2026-08-10T16:06:00.000Z'::timestamptz,
+    1,
+    null,
+    'incomplete'::delivery_test_report_status,
+    jsonb_build_array(
+      jsonb_build_object(
+        'channel', 'push',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', null,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'unknown', 'count', 1)
+        ),
+        'completedAt', null
+      ),
+      jsonb_build_object(
+        'channel', 'email',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', 31700,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'provider-accepted', 'count', 1)
+        ),
+        'completedAt', '2026-08-10T16:06:31.700Z'
+      )
+    ),
+    '2026-08-10T16:07:00.000Z'::timestamptz,
+    jsonb_build_object(
+      'kind', 'system',
+      'serviceId', 'delivery-test-reporter'
+    ),
+    'worker'::invocation_source,
+    'PROVIDER_TRUTH_PENDING'
+  )
+`;
+
+const insertFailedDeliveryTestReport = sql`
+  insert into delivery_test_reports (
+    id, run_id, run_started_at, sequence, supersedes_report_id, status,
+    channels, generated_at, finalized_by, source, reason_code
+  ) values (
+    '00000000-0000-4000-8000-000000030043'::uuid,
+    '00000000-0000-4000-8000-000000030042'::uuid,
+    '2026-08-10T16:06:00.000Z'::timestamptz,
+    1,
+    null,
+    'failed'::delivery_test_report_status,
+    jsonb_build_array(
+      jsonb_build_object(
+        'channel', 'push',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', null,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'failed', 'count', 1)
+        ),
+        'completedAt', null
+      ),
+      jsonb_build_object(
+        'channel', 'email',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', 31700,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'provider-accepted', 'count', 1)
+        ),
+        'completedAt', '2026-08-10T16:06:31.700Z'
+      )
+    ),
+    '2026-08-10T16:07:00.000Z'::timestamptz,
+    jsonb_build_object(
+      'kind', 'system',
+      'serviceId', 'delivery-test-reporter'
+    ),
+    'worker'::invocation_source,
+    'DELIVERY_TEST_PROVIDER_FAILURE'
+  )
+`;
+
+const insertSucceededDeliveryTestReport = sql`
+  insert into delivery_test_reports (
+    id, run_id, run_started_at, sequence, supersedes_report_id, status,
+    channels, generated_at, finalized_by, source, reason_code
+  ) values (
+    '00000000-0000-4000-8000-000000030044'::uuid,
+    '00000000-0000-4000-8000-000000030042'::uuid,
+    '2026-08-10T16:06:00.000Z'::timestamptz,
+    2,
+    '00000000-0000-4000-8000-000000030043'::uuid,
+    'succeeded'::delivery_test_report_status,
+    jsonb_build_array(
+      jsonb_build_object(
+        'channel', 'push',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', 70500,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'provider-accepted', 'count', 1)
+        ),
+        'completedAt', '2026-08-10T16:07:10.500Z'
+      ),
+      jsonb_build_object(
+        'channel', 'email',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', 31700,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'provider-accepted', 'count', 1)
+        ),
+        'completedAt', '2026-08-10T16:06:31.700Z'
+      )
+    ),
+    '2026-08-10T16:08:00.000Z'::timestamptz,
+    jsonb_build_object(
+      'kind', 'system',
+      'serviceId', 'delivery-test-reporter'
+    ),
+    'worker'::invocation_source,
+    null
+  )
+`;
+
+const insertFabricatedSucceededDeliveryTestReport = sql`
+  insert into delivery_test_reports (
+    id, run_id, run_started_at, sequence, supersedes_report_id, status,
+    channels, generated_at, finalized_by, source, reason_code
+  ) values (
+    '00000000-0000-4000-8000-000000030075'::uuid,
+    '00000000-0000-4000-8000-000000030042'::uuid,
+    '2026-08-10T16:06:00.000Z'::timestamptz,
+    1,
+    null,
+    'succeeded'::delivery_test_report_status,
+    jsonb_build_array(
+      jsonb_build_object(
+        'channel', 'push',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', 500,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'provider-accepted', 'count', 1)
+        ),
+        'completedAt', '2026-08-10T16:06:00.500Z'
+      ),
+      jsonb_build_object(
+        'channel', 'email',
+        'endpointCount', 1,
+        'activationToProviderAcceptMs', 700,
+        'latestStateCounts', jsonb_build_array(
+          jsonb_build_object('state', 'provider-accepted', 'count', 1)
+        ),
+        'completedAt', '2026-08-10T16:06:00.700Z'
+      )
+    ),
+    '2026-08-10T16:08:00.000Z'::timestamptz,
+    jsonb_build_object(
+      'kind', 'system',
+      'serviceId', 'delivery-test-reporter'
+    ),
+    'worker'::invocation_source,
+    null
+  )
+`;
+
+function monitoringQueryWithBucket(
+  query: string,
+  bucketStart: string,
+  bucketEnd: string,
+): string {
+  return query
+    .replaceAll(':bucket_start', `'${bucketStart}'`)
+    .replaceAll(':bucket_end', `'${bucketEnd}'`);
+}
 
 describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
   beforeAll(async () => {
@@ -1874,26 +2948,44 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
 
       await createdConnection.db.transaction(async (transaction) => {
         await transaction.execute(insertSyntheticTestEvent);
-        await transaction.insert(notificationIntents).values({
-          id: ISSUE_23_OUTBOX_IDS.intent,
-          eventId: ISSUE_23_OUTBOX_IDS.event,
-          eventKind: 'test',
-          templateMode: 'drill',
-          purpose: 'activation',
-          eventTypeVersionId: ISSUE_23_OUTBOX_IDS.eventTypeVersion,
-          rosterSnapshotId: ISSUE_23_OUTBOX_IDS.roster,
-          rosterPopulation: 'synthetic',
-          audienceConfigId: ISSUE_23_OUTBOX_IDS.audience,
-          audienceConfigVersion: 1,
-          createdBy: {
-            kind: 'system',
-            serviceId: 'outbox-v1-migration-proof',
-          },
-          source: 'scheduled-job',
-          requestId: ISSUE_23_OUTBOX_IDS.request,
-          authorization,
-          createdAt,
-        });
+        // This fixture deliberately runs against the pre-0008 schema. Use its
+        // exact historical column set so the current Drizzle model cannot add
+        // later issue-30 columns before the migration under test exists.
+        await transaction.execute(sql`
+          insert into notification_intents (
+            id,
+            event_id,
+            event_kind,
+            template_mode,
+            purpose,
+            event_type_version_id,
+            roster_snapshot_id,
+            roster_population,
+            audience_config_id,
+            audience_config_version,
+            created_by,
+            source,
+            request_id,
+            "authorization",
+            created_at
+          ) values (
+            ${ISSUE_23_OUTBOX_IDS.intent}::uuid,
+            ${ISSUE_23_OUTBOX_IDS.event}::uuid,
+            'test'::event_kind,
+            'drill'::template_mode,
+            'activation'::notification_purpose,
+            ${ISSUE_23_OUTBOX_IDS.eventTypeVersion}::uuid,
+            ${ISSUE_23_OUTBOX_IDS.roster}::uuid,
+            'synthetic'::roster_population,
+            ${ISSUE_23_OUTBOX_IDS.audience}::uuid,
+            1,
+            ${JSON.stringify({ kind: 'system', serviceId: 'outbox-v1-migration-proof' })}::jsonb,
+            'scheduled-job'::invocation_source,
+            ${ISSUE_23_OUTBOX_IDS.request}::uuid,
+            ${JSON.stringify(authorization)}::jsonb,
+            ${createdAt.toISOString()}::timestamptz
+          )
+        `);
         await transaction.insert(notificationIntentChannels).values(
           legacyMessage.channels.map((channel, index) => ({
             intentId: ISSUE_23_OUTBOX_IDS.intent,
@@ -4296,6 +5388,984 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         }),
       'lifecycle_consequence_previews_event_truth_fk',
     );
+  });
+
+  test('makes every delivery-test approval, run, and report table append-only', async () => {
+    const db = databaseConnection().db;
+    const immutableTableNames = [
+      'delivery_test_canary_eligibility_facts',
+      'delivery_test_target_set_versions',
+      'delivery_test_target_endpoints',
+      'delivery_test_runs',
+      'delivery_test_reports',
+    ] as const;
+    const privileges = await db.execute<{
+      table_name: string;
+      can_update: boolean;
+      can_delete: boolean;
+    }>(sql`
+      select
+        immutable_table.table_name,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || immutable_table.table_name,
+          'UPDATE'
+        ) as can_update,
+        has_table_privilege(
+          'psd_eoc_app',
+          'public.' || immutable_table.table_name,
+          'DELETE'
+        ) as can_delete
+      from (
+        values
+          ('delivery_test_canary_eligibility_facts'),
+          ('delivery_test_target_set_versions'),
+          ('delivery_test_target_endpoints'),
+          ('delivery_test_runs'),
+          ('delivery_test_reports')
+      ) as immutable_table(table_name)
+      order by immutable_table.table_name
+    `);
+    expect(privileges.map((row) => row.table_name)).toEqual(
+      [...immutableTableNames].sort(),
+    );
+    expect(privileges.every((row) => !row.can_update && !row.can_delete)).toBe(
+      true,
+    );
+
+    const triggerEvents = await db.execute<{
+      event_object_table: string;
+      event_manipulation: string;
+    }>(sql`
+      select event_object_table, event_manipulation
+      from information_schema.triggers
+      where trigger_schema = 'public'
+        and event_object_table in (
+          'delivery_test_canary_eligibility_facts',
+          'delivery_test_target_set_versions',
+          'delivery_test_target_endpoints',
+          'delivery_test_runs',
+          'delivery_test_reports'
+        )
+        and event_manipulation in ('UPDATE', 'DELETE')
+    `);
+    for (const tableName of immutableTableNames) {
+      const events = triggerEvents
+        .filter((row) => row.event_object_table === tableName)
+        .map((row) => row.event_manipulation);
+      expect(events).toContain('UPDATE');
+      expect(events).toContain('DELETE');
+    }
+
+    const mutationProbes = [
+      {
+        tableName: 'delivery_test_canary_eligibility_facts',
+        updateStatement:
+          'update delivery_test_canary_eligibility_facts set decided_at = decided_at',
+      },
+      {
+        tableName: 'delivery_test_target_set_versions',
+        updateStatement:
+          'update delivery_test_target_set_versions set version = version',
+      },
+      {
+        tableName: 'delivery_test_target_endpoints',
+        updateStatement:
+          'update delivery_test_target_endpoints set opted_in_at = opted_in_at',
+      },
+      {
+        tableName: 'delivery_test_runs',
+        updateStatement:
+          'update delivery_test_runs set started_at = started_at',
+      },
+      {
+        tableName: 'delivery_test_reports',
+        updateStatement:
+          'update delivery_test_reports set generated_at = generated_at',
+      },
+    ] as const;
+    for (const probe of mutationProbes) {
+      await expectPostgresRejection(
+        () =>
+          db.transaction(async (transaction) => {
+            await insertDeliveryTestStructuralFixture(transaction);
+            if (probe.tableName === 'delivery_test_reports') {
+              await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+              await transaction.execute(insertIncompleteDeliveryTestReport);
+            }
+            await transaction.execute(sql.raw(probe.updateStatement));
+          }),
+        /immutable truth cannot be changed/u,
+      );
+      await expectPostgresRejection(
+        () =>
+          db.transaction(async (transaction) => {
+            await insertDeliveryTestStructuralFixture(transaction);
+            if (probe.tableName === 'delivery_test_reports') {
+              await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+              await transaction.execute(insertIncompleteDeliveryTestReport);
+            }
+            await transaction.execute(
+              sql.raw(`delete from ${probe.tableName}`),
+            );
+          }),
+        /records are retained/u,
+      );
+    }
+  });
+
+  test('reserves +999 SMS destinations for synthetic mock fixtures', async () => {
+    const db = databaseConnection().db;
+    await expectConstraintViolation(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`
+            insert into roster_endpoints (
+              id, roster_snapshot_id, recipient_id, population, channel,
+              status, captured_at, platform, token, email, phone_number
+            ) values (
+              '00000000-0000-4000-8000-000000030080'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              '00000000-0000-4000-8000-000000030004'::uuid,
+              'staff'::roster_population,
+              'sms'::notification_channel,
+              'active'::endpoint_status,
+              '2026-08-13T18:00:00.000Z'::timestamptz,
+              null,
+              null,
+              null,
+              '+999000000000000'
+            )
+          `);
+        }),
+      'roster_endpoints_synthetic_unroutable',
+    );
+
+    const rollbackProbe = new Error('rollback +999 synthetic endpoint proof');
+    try {
+      await db.transaction(async (transaction) => {
+        await transaction.execute(sql`
+          insert into roster_snapshots (
+            id, version, population, complete, source_configuration_id,
+            source_configuration_version, sync_started_at, captured_at
+          ) values (
+            '00000000-0000-4000-8000-000000030086'::uuid,
+            2,
+            'synthetic'::roster_population,
+            true,
+            '00000000-0000-4000-8000-000000000040'::uuid,
+            1,
+            '2026-08-13T17:59:00.000Z'::timestamptz,
+            '2026-08-13T18:00:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into roster_recipients (
+            id, roster_snapshot_id, population, google_subject, display_name
+          ) values (
+            '00000000-0000-4000-8000-000000030087'::uuid,
+            '00000000-0000-4000-8000-000000030086'::uuid,
+            'synthetic'::roster_population,
+            null,
+            'Synthetic +999 Constraint Probe'
+          )
+        `);
+        const inserted = await transaction.execute<{ phone_number: string }>(
+          sql`
+            insert into roster_endpoints (
+              id, roster_snapshot_id, recipient_id, population, channel,
+              status, captured_at, platform, token, email, phone_number
+            ) values (
+              '00000000-0000-4000-8000-000000030081'::uuid,
+              '00000000-0000-4000-8000-000000030086'::uuid,
+              '00000000-0000-4000-8000-000000030087'::uuid,
+              'synthetic'::roster_population,
+              'sms'::notification_channel,
+              'active'::endpoint_status,
+              '2026-08-13T18:00:00.000Z'::timestamptz,
+              null,
+              null,
+              null,
+              '+999000000000000'
+            )
+            returning phone_number
+          `,
+        );
+        expect(inserted[0]?.phone_number).toBe('+999000000000000');
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) throw error;
+    }
+  });
+
+  test('accepts a rotation-safe revoke and fresh re-approval eligibility chain', async () => {
+    const db = databaseConnection().db;
+    const rollbackProbe = new Error('rollback eligibility chain proof');
+    try {
+      await db.transaction(async (transaction) => {
+        await insertDeliveryTestStructuralFixture(transaction);
+        await transaction.execute(sql`
+          insert into delivery_test_canary_eligibility_facts (
+            id, supersedes_fact_id, facility_id, roster_snapshot_id,
+            roster_population, recipient_id, endpoint_id, channel, decision,
+            opted_in_at, decided_at, decided_by_user_id,
+            decided_with_session_id, authorization_reference
+          ) values (
+            '00000000-0000-4000-8000-000000030082'::uuid,
+            '00000000-0000-4000-8000-000000030012'::uuid,
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            '00000000-0000-4000-8000-000000030004'::uuid,
+            '00000000-0000-4000-8000-000000030006'::uuid,
+            'push'::notification_channel,
+            'revoked',
+            '2026-08-10T15:00:00.000Z'::timestamptz,
+            '2026-08-10T16:07:00.000Z'::timestamptz,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            '00000000-0000-4000-8000-000000026004'::uuid,
+            'synthetic-product-owner-delivery-test-revocation'
+          )
+        `);
+        await transaction.execute(sql`
+          insert into delivery_test_canary_eligibility_facts (
+            id, supersedes_fact_id, facility_id, roster_snapshot_id,
+            roster_population, recipient_id, endpoint_id, channel, decision,
+            opted_in_at, decided_at, decided_by_user_id,
+            decided_with_session_id, authorization_reference
+          ) values (
+            '00000000-0000-4000-8000-000000030083'::uuid,
+            '00000000-0000-4000-8000-000000030082'::uuid,
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            '00000000-0000-4000-8000-000000030003'::uuid,
+            'staff'::roster_population,
+            '00000000-0000-4000-8000-000000030004'::uuid,
+            '00000000-0000-4000-8000-000000030006'::uuid,
+            'push'::notification_channel,
+            'approved-synthetic-canary',
+            '2026-08-10T16:08:00.000Z'::timestamptz,
+            '2026-08-10T16:09:00.000Z'::timestamptz,
+            '00000000-0000-4000-8000-000000026001'::uuid,
+            '00000000-0000-4000-8000-000000026004'::uuid,
+            'synthetic-product-owner-delivery-test-reapproval'
+          )
+        `);
+        const chain = await transaction.execute<{
+          decision: string;
+          id: string;
+        }>(sql`
+          select id::text as id, decision
+          from delivery_test_canary_eligibility_facts
+          where endpoint_id = '00000000-0000-4000-8000-000000030006'::uuid
+          order by decided_at
+        `);
+        expect([...chain]).toEqual([
+          {
+            id: '00000000-0000-4000-8000-000000030012',
+            decision: 'approved-synthetic-canary',
+          },
+          {
+            id: '00000000-0000-4000-8000-000000030082',
+            decision: 'revoked',
+          },
+          {
+            id: '00000000-0000-4000-8000-000000030083',
+            decision: 'approved-synthetic-canary',
+          },
+        ]);
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) throw error;
+    }
+  });
+
+  test('rejects every prepared activation that references a delivery-test preview', async () => {
+    const db = databaseConnection().db;
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`
+            insert into prepared_activations (
+              id, activation_preview_id, facility_id, kind, template_mode,
+              event_type_version_id, roster_snapshot_id, roster_population,
+              audience_config_id, audience_config_version,
+              consequence_digest, prepared_by, prepared_at
+            ) values (
+              '00000000-0000-4000-8000-000000030060'::uuid,
+              '00000000-0000-4000-8000-000000030020'::uuid,
+              '00000000-0000-4000-8000-000000000001'::uuid,
+              'drill'::event_kind,
+              'drill'::template_mode,
+              '00000000-0000-4000-8000-000000000201'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000000020'::uuid,
+              1,
+              repeat('d', 64),
+              jsonb_build_object(
+                'kind', 'agent',
+                'agentId', '00000000-0000-4000-8000-000000030061',
+                'apiKeyId', '00000000-0000-4000-8000-000000030062'
+              ),
+              '2026-08-10T16:05:30.000Z'::timestamptz
+            )
+          `);
+        }),
+      /Delivery-test previews cannot be prepared/u,
+    );
+  });
+
+  test('rejects a delivery-test attempt for an endpoint outside its pinned target set before evidence exists', async () => {
+    const db = databaseConnection().db;
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`
+            insert into channel_attempts (
+              id, batch_id, intent_id, event_id, event_kind, template_mode,
+              purpose, event_type_version_id, roster_snapshot_id,
+              roster_population, recipient_id, endpoint_id, channel,
+              attempt_number, attempted_at
+            ) values (
+              '00000000-0000-4000-8000-000000030063'::uuid,
+              '00000000-0000-4000-8000-000000030034'::uuid,
+              '00000000-0000-4000-8000-000000030032'::uuid,
+              '00000000-0000-4000-8000-000000030030'::uuid,
+              'drill'::event_kind,
+              'drill'::template_mode,
+              'activation'::notification_purpose,
+              '00000000-0000-4000-8000-000000000201'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000030005'::uuid,
+              '00000000-0000-4000-8000-000000030008'::uuid,
+              'push'::notification_channel,
+              1,
+              '2026-08-10T16:06:31.000Z'::timestamptz
+            )
+          `);
+        }),
+      /not in the pinned approved target set/u,
+    );
+
+    const persistedEvidence = await db.execute<{ count: number }>(sql`
+      select count(*)::integer as count
+      from delivery_evidence
+      where attempt_id = '00000000-0000-4000-8000-000000030063'::uuid
+    `);
+    expect(persistedEvidence[0]?.count).toBe(0);
+  });
+
+  test('rejects an attempt after the run-pinned target set is superseded', async () => {
+    const db = databaseConnection().db;
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`
+            insert into delivery_test_target_set_versions (
+              id, version, facility_id, roster_snapshot_id,
+              roster_population, supersedes_version_id,
+              endpoint_reference_digest, idempotency_request_id,
+              approved_by_user_id, approved_with_session_id,
+              approved_at, created_at
+            ) values (
+              '00000000-0000-4000-8000-000000030100'::uuid,
+              2,
+              '00000000-0000-4000-8000-000000000001'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000030010'::uuid,
+              repeat('e', 64),
+              '00000000-0000-4000-8000-000000030101'::uuid,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '2026-08-10T16:09:00.000Z'::timestamptz,
+              '2026-08-10T16:08:30.000Z'::timestamptz
+            )
+          `);
+          await transaction.execute(sql`
+            insert into delivery_test_target_endpoints (
+              target_set_version_id, target_set_version,
+              eligibility_fact_id, roster_snapshot_id, roster_population,
+              recipient_id, endpoint_id, channel, attestation, opted_in_at,
+              attested_at, attested_by_user_id, authorization_reference
+            )
+            select
+              '00000000-0000-4000-8000-000000030100'::uuid,
+              2,
+              endpoint.eligibility_fact_id,
+              endpoint.roster_snapshot_id,
+              endpoint.roster_population,
+              endpoint.recipient_id,
+              endpoint.endpoint_id,
+              endpoint.channel,
+              endpoint.attestation,
+              endpoint.opted_in_at,
+              endpoint.attested_at,
+              endpoint.attested_by_user_id,
+              endpoint.authorization_reference
+            from delivery_test_target_endpoints as endpoint
+            where endpoint.target_set_version_id =
+              '00000000-0000-4000-8000-000000030010'::uuid
+          `);
+          await transaction.execute(
+            sql`set constraints "delivery_test_target_sets_complete_guard" immediate`,
+          );
+          await transaction.execute(
+            sql`set constraints "delivery_test_target_sets_complete_guard" deferred`,
+          );
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            insert into channel_attempts (
+              id, batch_id, intent_id, event_id, event_kind, template_mode,
+              purpose, event_type_version_id, roster_snapshot_id,
+              roster_population, recipient_id, endpoint_id, channel,
+              attempt_number, attempted_at
+            ) values (
+              '00000000-0000-4000-8000-000000030102'::uuid,
+              '00000000-0000-4000-8000-000000030034'::uuid,
+              '00000000-0000-4000-8000-000000030032'::uuid,
+              '00000000-0000-4000-8000-000000030030'::uuid,
+              'drill'::event_kind,
+              'drill'::template_mode,
+              'activation'::notification_purpose,
+              '00000000-0000-4000-8000-000000000201'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000030004'::uuid,
+              '00000000-0000-4000-8000-000000030006'::uuid,
+              'push'::notification_channel,
+              1,
+              '2026-08-10T16:09:30.000Z'::timestamptz
+            )
+          `);
+        }),
+      /target set has been superseded/u,
+    );
+  });
+
+  test('binds eligibility facts to the target-set facility during construction and attempt admission', async () => {
+    const db = databaseConnection().db;
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await insertCrossFacilityDeliveryTestEligibility(transaction);
+          await transaction.execute(sql`
+            insert into delivery_test_target_set_versions (
+              id, version, facility_id, roster_snapshot_id,
+              roster_population, supersedes_version_id,
+              endpoint_reference_digest, idempotency_request_id,
+              approved_by_user_id, approved_with_session_id,
+              approved_at, created_at
+            ) values (
+              '00000000-0000-4000-8000-000000030084'::uuid,
+              2,
+              '00000000-0000-4000-8000-000000000001'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000030010'::uuid,
+              repeat('f', 64),
+              '00000000-0000-4000-8000-000000030088'::uuid,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '2026-08-10T16:09:00.000Z'::timestamptz,
+              '2026-08-10T16:08:30.000Z'::timestamptz
+            )
+          `);
+          await transaction.execute(sql`
+            insert into delivery_test_target_endpoints (
+              target_set_version_id, target_set_version,
+              eligibility_fact_id, roster_snapshot_id, roster_population,
+              recipient_id, endpoint_id, channel, attestation, opted_in_at,
+              attested_at, attested_by_user_id, authorization_reference
+            ) values (
+              '00000000-0000-4000-8000-000000030084'::uuid,
+              2,
+              '00000000-0000-4000-8000-000000030085'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000030004'::uuid,
+              '00000000-0000-4000-8000-000000030006'::uuid,
+              'push'::notification_channel,
+              'approved-synthetic-canary',
+              '2026-08-10T15:00:00.000Z'::timestamptz,
+              '2026-08-10T16:08:00.000Z'::timestamptz,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              'synthetic-cross-facility-canary-proof'
+            )
+          `);
+        }),
+      /exact current approved eligibility fact/u,
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await insertCrossFacilityDeliveryTestEligibility(transaction);
+          // Simulate legacy/corrupt stored membership under the database owner;
+          // the worker-facing admission guard must still fail closed.
+          await transaction.execute(
+            sql.raw(`
+            alter table delivery_test_target_endpoints
+            disable trigger delivery_test_target_endpoints_immutable_guard
+          `),
+          );
+          await transaction.execute(sql`
+            update delivery_test_target_endpoints
+            set eligibility_fact_id =
+              '00000000-0000-4000-8000-000000030085'::uuid
+            where target_set_version_id =
+              '00000000-0000-4000-8000-000000030010'::uuid
+              and endpoint_id =
+                '00000000-0000-4000-8000-000000030006'::uuid
+          `);
+          await transaction.execute(
+            sql.raw(`
+            alter table delivery_test_target_endpoints
+            enable trigger delivery_test_target_endpoints_immutable_guard
+          `),
+          );
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            insert into channel_attempts (
+              id, batch_id, intent_id, event_id, event_kind, template_mode,
+              purpose, event_type_version_id, roster_snapshot_id,
+              roster_population, recipient_id, endpoint_id, channel,
+              attempt_number, attempted_at
+            ) values (
+              '00000000-0000-4000-8000-000000030089'::uuid,
+              '00000000-0000-4000-8000-000000030034'::uuid,
+              '00000000-0000-4000-8000-000000030032'::uuid,
+              '00000000-0000-4000-8000-000000030030'::uuid,
+              'drill'::event_kind,
+              'drill'::template_mode,
+              'activation'::notification_purpose,
+              '00000000-0000-4000-8000-000000000201'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000030004'::uuid,
+              '00000000-0000-4000-8000-000000030006'::uuid,
+              'push'::notification_channel,
+              1,
+              '2026-08-10T16:06:31.000Z'::timestamptz
+            )
+          `);
+        }),
+      /not in the pinned approved target set/u,
+    );
+  });
+
+  test('derives report truth at insert so the app role cannot fabricate provider outcomes', async () => {
+    const db = databaseConnection().db;
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(
+            insertFabricatedSucceededDeliveryTestReport,
+          );
+        }),
+      /must exactly match persisted attempt and evidence truth/u,
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(insertIncompleteDeliveryTestReport);
+          await transaction.execute(sql`
+            insert into delivery_test_reports (
+              id, run_id, run_started_at, sequence, supersedes_report_id,
+              status, channels, generated_at, finalized_by, source,
+              reason_code
+            )
+            select
+              '00000000-0000-4000-8000-000000030076'::uuid,
+              run_id,
+              run_started_at,
+              sequence + 1,
+              id,
+              status,
+              channels,
+              generated_at + interval '1 second',
+              finalized_by,
+              'scheduled-job'::invocation_source,
+              reason_code
+            from delivery_test_reports
+            where id = '00000000-0000-4000-8000-000000030043'::uuid
+          `);
+        }),
+      /explicit worker service|delivery_test_reports_system_finalizer/u,
+    );
+  });
+
+  test('requires contiguous target-set and destination-free report truth chains', async () => {
+    const db = databaseConnection().db;
+    const rollbackProbe = new Error(
+      'rollback synthetic delivery-test report chain probe',
+    );
+    try {
+      await db.transaction(async (transaction) => {
+        await insertDeliveryTestStructuralFixture(transaction);
+        await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+        await transaction.execute(insertIncompleteDeliveryTestReport);
+        await insertSucceededDeliveryTestEvidence(transaction);
+        await transaction.execute(insertSucceededDeliveryTestReport);
+        const reports = await transaction.execute<{
+          sequence: number;
+          status: string;
+          supersedes_report_id: string | null;
+        }>(sql`
+          select sequence, status, supersedes_report_id::text
+          from delivery_test_reports
+          where run_id = '00000000-0000-4000-8000-000000030042'::uuid
+          order by sequence
+        `);
+        expect([...reports]).toEqual([
+          {
+            sequence: 1,
+            status: 'incomplete',
+            supersedes_report_id: null,
+          },
+          {
+            sequence: 2,
+            status: 'succeeded',
+            supersedes_report_id: '00000000-0000-4000-8000-000000030043',
+          },
+        ]);
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) throw error;
+    }
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`
+            insert into delivery_test_target_set_versions (
+              id, version, facility_id, roster_snapshot_id,
+              roster_population, supersedes_version_id,
+              endpoint_reference_digest, idempotency_request_id,
+              approved_by_user_id, approved_with_session_id,
+              approved_at, created_at
+            ) values (
+              '00000000-0000-4000-8000-000000030070'::uuid,
+              3,
+              '00000000-0000-4000-8000-000000000001'::uuid,
+              '00000000-0000-4000-8000-000000030003'::uuid,
+              'staff'::roster_population,
+              '00000000-0000-4000-8000-000000030010'::uuid,
+              repeat('f', 64),
+              '00000000-0000-4000-8000-000000030071'::uuid,
+              '00000000-0000-4000-8000-000000026001'::uuid,
+              '00000000-0000-4000-8000-000000026004'::uuid,
+              '2026-08-10T16:06:00.000Z'::timestamptz,
+              '2026-08-10T16:05:00.000Z'::timestamptz
+            )
+          `);
+        }),
+      /must advance exactly once from the latest facility version/u,
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await insertInitialDeliveryTestEvidence(transaction, 'unknown');
+          await transaction.execute(insertIncompleteDeliveryTestReport);
+          await transaction.execute(sql`
+            insert into delivery_test_reports (
+              id, run_id, run_started_at, sequence, supersedes_report_id,
+              status, channels, generated_at, finalized_by, source,
+              reason_code
+            )
+            select
+              '00000000-0000-4000-8000-000000030072'::uuid,
+              run_id,
+              run_started_at,
+              3,
+              id,
+              'succeeded'::delivery_test_report_status,
+              jsonb_build_array(
+                jsonb_build_object(
+                  'channel', 'push',
+                  'endpointCount', 1,
+                  'activationToProviderAcceptMs', 500,
+                  'latestStateCounts', jsonb_build_array(
+                    jsonb_build_object('state', 'delivered', 'count', 1)
+                  ),
+                  'completedAt', '2026-08-10T16:06:01.000Z'
+                ),
+                jsonb_build_object(
+                  'channel', 'email',
+                  'endpointCount', 1,
+                  'activationToProviderAcceptMs', 700,
+                  'latestStateCounts', jsonb_build_array(
+                    jsonb_build_object(
+                      'state', 'provider-accepted', 'count', 1
+                    )
+                  ),
+                  'completedAt', '2026-08-10T16:06:01.000Z'
+                )
+              ),
+              '2026-08-10T16:08:00.000Z'::timestamptz,
+              jsonb_build_object(
+                'kind', 'system',
+                'serviceId', 'delivery-test-reporter'
+              ),
+              'worker'::invocation_source,
+              null
+            from delivery_test_reports
+            where id = '00000000-0000-4000-8000-000000030043'::uuid
+          `);
+        }),
+      /must supersede the latest report with the next sequence/u,
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`
+            insert into delivery_test_reports (
+              id, run_id, run_started_at, sequence, supersedes_report_id,
+              status, channels, generated_at, finalized_by, source,
+              reason_code
+            ) values (
+              '00000000-0000-4000-8000-000000030073'::uuid,
+              '00000000-0000-4000-8000-000000030042'::uuid,
+              '2026-08-10T16:06:00.000Z'::timestamptz,
+              1,
+              null,
+              'succeeded'::delivery_test_report_status,
+              jsonb_build_array(
+                jsonb_build_object(
+                  'channel', 'push',
+                  'endpointCount', 1,
+                  'activationToProviderAcceptMs', 500,
+                  'latestStateCounts', jsonb_build_array(
+                    jsonb_build_object('state', 'unknown', 'count', 1)
+                  ),
+                  'completedAt', '2026-08-10T16:06:01.000Z'
+                ),
+                jsonb_build_object(
+                  'channel', 'email',
+                  'endpointCount', 1,
+                  'activationToProviderAcceptMs', 700,
+                  'latestStateCounts', jsonb_build_array(
+                    jsonb_build_object(
+                      'state', 'provider-accepted', 'count', 1
+                    )
+                  ),
+                  'completedAt', '2026-08-10T16:06:01.000Z'
+                )
+              ),
+              '2026-08-10T16:08:00.000Z'::timestamptz,
+              jsonb_build_object(
+                'kind', 'system',
+                'serviceId', 'delivery-test-reporter'
+              ),
+              'worker'::invocation_source,
+              null
+            )
+          `);
+        }),
+      /require complete accepted or delivered truth/u,
+    );
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await insertDeliveryTestStructuralFixture(transaction);
+          await transaction.execute(sql`
+            insert into delivery_test_reports (
+              id, run_id, run_started_at, sequence, supersedes_report_id,
+              status, channels, generated_at, finalized_by, source,
+              reason_code
+            ) values (
+              '00000000-0000-4000-8000-000000030074'::uuid,
+              '00000000-0000-4000-8000-000000030042'::uuid,
+              '2026-08-10T16:06:00.000Z'::timestamptz,
+              1,
+              null,
+              'failed'::delivery_test_report_status,
+              jsonb_build_array(
+                jsonb_build_object(
+                  'channel', 'push',
+                  'endpointCount', 1,
+                  'activationToProviderAcceptMs', 500,
+                  'latestStateCounts', jsonb_build_array(
+                    jsonb_build_object(
+                      'state', 'provider-accepted', 'count', 1
+                    )
+                  ),
+                  'completedAt', '2026-08-10T16:06:01.000Z'
+                ),
+                jsonb_build_object(
+                  'channel', 'email',
+                  'endpointCount', 1,
+                  'activationToProviderAcceptMs', 700,
+                  'latestStateCounts', jsonb_build_array(
+                    jsonb_build_object('state', 'delivered', 'count', 1)
+                  ),
+                  'completedAt', '2026-08-10T16:06:01.000Z'
+                )
+              ),
+              '2026-08-10T16:08:00.000Z'::timestamptz,
+              jsonb_build_object(
+                'kind', 'system',
+                'serviceId', 'delivery-test-reporter'
+              ),
+              'worker'::invocation_source,
+              'PROVIDER_REJECTED'
+            )
+          `);
+        }),
+      /must retain failed or expired truth/u,
+    );
+  });
+
+  test('monthly health persists the preceding Pacific-month outcome at every observation', async () => {
+    const db = databaseConnection().db;
+    const rollbackProbe = new Error(
+      'rollback synthetic delivery-test report-head probe',
+    );
+    try {
+      await db.transaction(async (transaction) => {
+        await insertDeliveryTestStructuralFixture(transaction);
+        await insertInitialDeliveryTestEvidence(transaction, 'failed');
+        await transaction.execute(insertFailedDeliveryTestReport);
+        await insertSucceededDeliveryTestEvidence(transaction);
+        await transaction.execute(insertSucceededDeliveryTestReport);
+        const failedMinuteRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-08-10T16:07:00.000Z',
+              '2026-08-10T16:08:00.000Z',
+            ),
+          ),
+        );
+        expect([...failedMinuteRows]).toEqual([
+          { failed_run_count: 1, missed_count: 1 },
+        ]);
+
+        const monthCloseRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-09-01T06:58:00.000Z',
+              '2026-09-01T06:59:00.000Z',
+            ),
+          ),
+        );
+        expect([...monthCloseRows]).toEqual([
+          { failed_run_count: 0, missed_count: 0 },
+        ]);
+
+        const afterSuccessfulPdtMonthRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-09-01T07:03:00.000Z',
+              '2026-09-01T07:04:00.000Z',
+            ),
+          ),
+        );
+        expect([...afterSuccessfulPdtMonthRows]).toEqual([
+          { failed_run_count: 0, missed_count: 0 },
+        ]);
+
+        const missedPdtBoundaryRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-10-01T06:58:00.000Z',
+              '2026-10-01T06:59:00.000Z',
+            ),
+          ),
+        );
+        expect([...missedPdtBoundaryRows]).toEqual([
+          { failed_run_count: 0, missed_count: 1 },
+        ]);
+
+        const afterPdtBoundaryRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-10-01T07:03:00.000Z',
+              '2026-10-01T07:04:00.000Z',
+            ),
+          ),
+        );
+        expect([...afterPdtBoundaryRows]).toEqual([
+          { failed_run_count: 0, missed_count: 1 },
+        ]);
+
+        const missedPstBoundaryRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-12-01T07:58:00.000Z',
+              '2026-12-01T07:59:00.000Z',
+            ),
+          ),
+        );
+        expect([...missedPstBoundaryRows]).toEqual([
+          { failed_run_count: 0, missed_count: 1 },
+        ]);
+
+        const afterPstBoundaryRows = await transaction.execute<{
+          failed_run_count: number;
+          missed_count: number;
+        }>(
+          sql.raw(
+            monitoringQueryWithBucket(
+              deliveryTestHealthMonitoringQuery,
+              '2026-12-01T08:03:00.000Z',
+              '2026-12-01T08:04:00.000Z',
+            ),
+          ),
+        );
+        expect([...afterPstBoundaryRows]).toEqual([
+          { failed_run_count: 0, missed_count: 1 },
+        ]);
+        throw rollbackProbe;
+      });
+    } catch (error) {
+      if (error !== rollbackProbe) throw error;
+    }
   });
 
   test('rejects terminal-state rollback for idempotency, outbox, and human confirmation records', async () => {

@@ -14,10 +14,54 @@ import {
   type TrustedCapabilityInvocation,
 } from '../../../../lib/capabilities/engine';
 import {
+  deliveryTestCredentialIsVerified,
   executeStartFlowCapability,
+  readDeliveryTestCredentialVerificationReferences,
   type StartFlowCapabilityStore,
   type StartFlowCapabilityTransaction,
 } from './capabilities';
+
+describe('monthly delivery-test credential readiness', () => {
+  const liveStatus = Object.freeze({
+    label: 'live-verified',
+    verifiedAt: '2026-08-10T16:00:00.000Z',
+    authorizationReference: 'credential-verification-reference-v1',
+  });
+
+  test('fails closed unless deployment evidence exactly binds the live verification', () => {
+    expect(deliveryTestCredentialIsVerified(liveStatus, null)).toBe(false);
+    expect(
+      deliveryTestCredentialIsVerified(liveStatus, 'different-reference-v1'),
+    ).toBe(false);
+    expect(
+      deliveryTestCredentialIsVerified(
+        liveStatus,
+        'credential-verification-reference-v1',
+      ),
+    ).toBe(true);
+    expect(
+      deliveryTestCredentialIsVerified(
+        { ...liveStatus, label: 'mocked' },
+        'credential-verification-reference-v1',
+      ),
+    ).toBe(false);
+  });
+
+  test('accepts only bounded, non-secret deployment references', () => {
+    const references = readDeliveryTestCredentialVerificationReferences({
+      PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE:
+        'credential-verification-reference-v1',
+      PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE: ' too-short ',
+      PSD_EOC_SMS_CREDENTIAL_VERIFICATION_REFERENCE: 'short',
+    });
+    expect(references).toEqual({
+      push: 'credential-verification-reference-v1',
+      email: null,
+      sms: null,
+    });
+    expect(JSON.stringify(references)).not.toContain('token');
+  });
+});
 
 const uuid = (suffix: number): string =>
   `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;

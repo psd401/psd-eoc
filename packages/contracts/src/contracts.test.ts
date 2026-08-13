@@ -19,6 +19,13 @@ import {
   ConnectivityEpochSchema,
   CloseEventResultSchema,
   CreateActivationPreviewInputSchema,
+  CreateDeliveryTestPreviewInputSchema,
+  CreateDeliveryTestTargetSetVersionInputSchema,
+  DeliveryTestCanaryEligibilityFactSchema,
+  DeliveryTestPreviewChannelSchema,
+  DeliveryTestPreviewSchema,
+  DeliveryTestRunSchema,
+  DeliveryTestTargetSetVersionSchema,
   DeliveryEvidenceSchema,
   DeliveryReportSchema,
   DeliveryTruthStateSchema,
@@ -51,6 +58,7 @@ import {
   IntegrationStatusSchema,
   LifecycleConsequencePreviewSchema,
   ListDrillRecordsInputSchema,
+  ListDeliveryTestReportsInputSchema,
   MediaReadGrantSchema,
   McpDraftMessageRevisionInputSchema,
   McpDraftMessageRevisionResultSchema,
@@ -59,6 +67,8 @@ import {
   MobileOidcStartRequestSchema,
   MobileOidcStartResponseSchema,
   MessageTemplateCatalogSchema,
+  MonthlyDeliveryTestReportPageSchema,
+  MonthlyDeliveryTestReportSchema,
   MobilePushReceivePayloadSchema,
   PushEndpointSendEligibilityInputSchema,
   PushEndpointSendEligibilityResultSchema,
@@ -71,6 +81,7 @@ import {
   PreparedActivationSchema,
   PreviewEventTypeRenderingInputSchema,
   PublishEventTypeVersionInputSchema,
+  RecordDeliveryTestCanaryEligibilityInputSchema,
   RosterSnapshotSchema,
   RosterSourceConfigurationSchema,
   RosterSyncResultSchema,
@@ -144,6 +155,13 @@ const ids = {
   tokenIssuance: '00000000-0000-4000-8000-000000000039',
   transition: '00000000-0000-4000-8000-000000000040',
   media: '00000000-0000-4000-8000-000000000041',
+  deliveryTargetSet: '00000000-0000-4000-8000-000000000042',
+  priorDeliveryTargetSet: '00000000-0000-4000-8000-000000000043',
+  deliveryRun: '00000000-0000-4000-8000-000000000044',
+  deliveryReport: '00000000-0000-4000-8000-000000000045',
+  deliveryEligibilityPush: '00000000-0000-4000-8000-000000000046',
+  deliveryEligibilityEmail: '00000000-0000-4000-8000-000000000047',
+  deliveryEligibilityRevocation: '00000000-0000-4000-8000-000000000048',
 } as const;
 
 const times = {
@@ -341,6 +359,103 @@ function activationPreview(target = targeting('incident', 'real', 'staff')) {
     consequenceDigest: 'a'.repeat(64),
     createdAt: times.created,
     expiresAt: times.previewExpiry,
+  } as const;
+}
+
+const deliveryTestMetadata = {
+  purpose: 'monthly-live-delivery-test',
+  targetSet: { id: ids.deliveryTargetSet, version: 1 },
+  endpointReferenceDigest: 'd'.repeat(64),
+} as const;
+
+function deliveryTestTargetSetVersion() {
+  return {
+    id: ids.deliveryTargetSet,
+    version: 1,
+    facilityId: ids.facility,
+    rosterSnapshotId: ids.roster,
+    supersedesVersionId: null,
+    endpoints: [
+      {
+        eligibilityFactId: ids.deliveryEligibilityPush,
+        recipientId: ids.recipient,
+        endpointId: ids.pushEndpoint,
+        channel: 'push',
+        attestation: 'approved-synthetic-canary',
+        optedInAt: times.before,
+        attestedAt: times.created,
+        attestedByUserId: ids.actor,
+        authorizationReference: 'product-owner-canary-approval-2026-08',
+      },
+      {
+        eligibilityFactId: ids.deliveryEligibilityEmail,
+        recipientId: ids.secondRecipient,
+        endpointId: ids.secondEndpoint,
+        channel: 'email',
+        attestation: 'approved-synthetic-canary',
+        optedInAt: times.before,
+        attestedAt: times.created,
+        attestedByUserId: ids.actor,
+        authorizationReference: 'product-owner-canary-approval-2026-08',
+      },
+    ],
+    endpointReferenceDigest: deliveryTestMetadata.endpointReferenceDigest,
+    approvedByUserId: ids.actor,
+    approvedWithSessionId: ids.session,
+    approvedAt: times.activated,
+    createdAt: times.created,
+  } as const;
+}
+
+function monthlyDeliveryTestPreview() {
+  const activation = {
+    ...activationPreview(targeting('drill', 'drill', 'staff')),
+    deliveryTest: deliveryTestMetadata,
+  } as const;
+  return {
+    purpose: 'monthly-live-delivery-test',
+    activationPreview: activation,
+    targetSet: deliveryTestMetadata.targetSet,
+    endpointReferenceDigest: deliveryTestMetadata.endpointReferenceDigest,
+    channels: activation.channels.map((channel) => ({
+      channel: channel.channel,
+      endpointCount: channel.endpointCount,
+      integrationStatus: channel.integrationStatus,
+      credentialVerified: true,
+    })),
+    consequenceDigest: activation.consequenceDigest,
+    createdAt: activation.createdAt,
+    expiresAt: activation.expiresAt,
+  } as const;
+}
+
+function monthlyDeliveryTestReport() {
+  return {
+    id: ids.deliveryReport,
+    runId: ids.deliveryRun,
+    sequence: 1,
+    supersedesReportId: null,
+    status: 'succeeded',
+    channels: [
+      {
+        channel: 'push',
+        endpointCount: 1,
+        activationToProviderAcceptMs: 500,
+        latestStateCounts: [{ state: 'provider-accepted', count: 1 }],
+        completedAt: times.activated,
+      },
+      {
+        channel: 'email',
+        endpointCount: 1,
+        activationToProviderAcceptMs: 750,
+        latestStateCounts: [{ state: 'delivered', count: 1 }],
+        completedAt: times.activated,
+      },
+    ],
+    generatedAt: times.later,
+    finalizedBy: systemActor,
+    source: 'worker',
+    reasonCode: null,
   } as const;
 }
 
@@ -1093,6 +1208,15 @@ describe('event type, targeting, and activation contracts', () => {
       PreparedActivationSchema.safeParse({
         ...prepared,
         preview: activationPreview(targeting('test', 'drill', 'synthetic')),
+      }).success,
+    ).toBe(false);
+    expect(
+      PreparedActivationSchema.safeParse({
+        ...prepared,
+        preview: {
+          ...activationPreview(targeting('drill', 'drill', 'staff')),
+          deliveryTest: deliveryTestMetadata,
+        },
       }).success,
     ).toBe(false);
   });
@@ -3623,6 +3747,42 @@ describe('roster, facility, and identity boundaries', () => {
     expect(
       RosterSnapshotSchema.safeParse({
         ...syntheticSnapshot,
+        recipients: [
+          {
+            ...recipient,
+            endpoints: recipient.endpoints.map((endpoint) =>
+              endpoint.channel === 'sms'
+                ? { ...endpoint, phoneNumber: '+999000000000000' }
+                : endpoint,
+            ),
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    for (const phoneNumber of [
+      '+99900000000000',
+      '+9990000000000000',
+      '+998000000000000',
+    ]) {
+      expect(
+        RosterSnapshotSchema.safeParse({
+          ...syntheticSnapshot,
+          recipients: [
+            {
+              ...recipient,
+              endpoints: recipient.endpoints.map((endpoint) =>
+                endpoint.channel === 'sms'
+                  ? { ...endpoint, phoneNumber }
+                  : endpoint,
+              ),
+            },
+          ],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
         recipients: [{ ...recipient, googleSubject: 'real-looking-subject' }],
       }).success,
     ).toBe(false);
@@ -4027,6 +4187,560 @@ describe('client-facing transient links', () => {
   });
 });
 
+describe('monthly live delivery-test contracts', () => {
+  test('owns independent append-only destination-free eligibility facts', () => {
+    const approval = {
+      id: ids.deliveryEligibilityPush,
+      supersedesFactId: null,
+      facilityId: ids.facility,
+      rosterSnapshotId: ids.roster,
+      recipientId: ids.recipient,
+      endpointId: ids.pushEndpoint,
+      channel: 'push',
+      decision: 'approved-synthetic-canary',
+      optedInAt: times.before,
+      decidedAt: times.created,
+      decidedByUserId: ids.actor,
+      decidedWithSessionId: ids.session,
+      authorizationReference: 'product-owner-canary-approval-2026-08',
+    } as const;
+    expect(
+      DeliveryTestCanaryEligibilityFactSchema.safeParse(approval).success,
+    ).toBe(true);
+    expect(
+      RecordDeliveryTestCanaryEligibilityInputSchema.safeParse({
+        supersedesFactId: ids.deliveryEligibilityRevocation,
+        facilityId: ids.facility,
+        rosterSnapshotId: ids.roster,
+        recipientId: ids.recipient,
+        endpointId: ids.pushEndpoint,
+        channel: 'push',
+        decision: 'approved-synthetic-canary',
+        optedInAt: times.later,
+        authorizationReference: 'product-owner-canary-reapproval-2026-08',
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTestCanaryEligibilityFactSchema.safeParse({
+        ...approval,
+        destination: 'synthetic@example.invalid',
+      }).success,
+    ).toBe(false);
+    expect(
+      RecordDeliveryTestCanaryEligibilityInputSchema.safeParse({
+        supersedesFactId: null,
+        facilityId: ids.facility,
+        rosterSnapshotId: ids.roster,
+        recipientId: ids.recipient,
+        endpointId: ids.pushEndpoint,
+        channel: 'push',
+        decision: 'approved-synthetic-canary',
+        optedInAt: times.before,
+        authorizationReference: 'contact@example.invalid',
+      }).success,
+    ).toBe(false);
+    expect(
+      RecordDeliveryTestCanaryEligibilityInputSchema.safeParse({
+        supersedesFactId: null,
+        facilityId: ids.facility,
+        rosterSnapshotId: ids.roster,
+        recipientId: ids.recipient,
+        endpointId: ids.pushEndpoint,
+        channel: 'push',
+        decision: 'approved-synthetic-canary',
+        optedInAt: times.before,
+        authorizationReference: 'product-owner-canary-approval-2026-08',
+      }).success,
+    ).toBe(true);
+    expect(
+      RecordDeliveryTestCanaryEligibilityInputSchema.safeParse({
+        supersedesFactId: null,
+        facilityId: ids.facility,
+        rosterSnapshotId: ids.roster,
+        recipientId: ids.recipient,
+        endpointId: ids.pushEndpoint,
+        channel: 'push',
+        decision: 'revoked',
+        optedInAt: times.before,
+        authorizationReference: 'product-owner-canary-revocation-2026-08',
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestCanaryEligibilityFactSchema.safeParse({
+        ...approval,
+        id: ids.deliveryEligibilityRevocation,
+        decision: 'revoked',
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestCanaryEligibilityFactSchema.safeParse({
+        ...approval,
+        decidedAt: '2026-08-07T03:58:00.000Z',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('owns immutable destination-free product-owner-approved target versions', () => {
+    const targetSet = deliveryTestTargetSetVersion();
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse(targetSet).success,
+    ).toBe(true);
+    expect(
+      CreateDeliveryTestTargetSetVersionInputSchema.safeParse({
+        previousVersion: null,
+        facilityId: targetSet.facilityId,
+        rosterSnapshotId: targetSet.rosterSnapshotId,
+        eligibilityFactIds: targetSet.endpoints.map(
+          (endpoint) => endpoint.eligibilityFactId,
+        ),
+      }).success,
+    ).toBe(true);
+
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse({
+        ...targetSet,
+        endpoints: [
+          {
+            ...targetSet.endpoints[0],
+            destination: 'synthetic@example.invalid',
+          },
+          targetSet.endpoints[1],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse({
+        ...targetSet,
+        endpoints: [
+          targetSet.endpoints[0],
+          {
+            ...targetSet.endpoints[1],
+            attestedByUserId: ids.agent,
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse({
+        ...targetSet,
+        approvedAt: times.before,
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestTargetSetVersionSchema.safeParse({
+        ...targetSet,
+        version: 2,
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateDeliveryTestTargetSetVersionInputSchema.safeParse({
+        previousVersion: null,
+        facilityId: targetSet.facilityId,
+        rosterSnapshotId: targetSet.rosterSnapshotId,
+        eligibilityFactIds: targetSet.endpoints.map(
+          (endpoint) => endpoint.eligibilityFactId,
+        ),
+        destination: 'synthetic@example.invalid',
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateDeliveryTestTargetSetVersionInputSchema.safeParse({
+        previousVersion: null,
+        facilityId: targetSet.facilityId,
+        rosterSnapshotId: targetSet.rosterSnapshotId,
+        eligibilityFactIds: [
+          ids.deliveryEligibilityPush,
+          ids.deliveryEligibilityPush,
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateDeliveryTestTargetSetVersionInputSchema.safeParse({
+        previousVersion: null,
+        facilityId: targetSet.facilityId,
+        rosterSnapshotId: targetSet.rosterSnapshotId,
+        endpoints: targetSet.endpoints,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('binds a monthly test to the ordinary drill/staff activation preview', () => {
+    const preview = monthlyDeliveryTestPreview();
+    expect(DeliveryTestPreviewSchema.safeParse(preview).success).toBe(true);
+    expect(ActivationPreviewSchema.safeParse(activationPreview()).success).toBe(
+      true,
+    );
+    expect(
+      CreateDeliveryTestPreviewInputSchema.safeParse({
+        targetSet: deliveryTestMetadata.targetSet,
+        eventTypeVersion: drillTypeRef,
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateDeliveryTestPreviewInputSchema.safeParse({
+        targetSet: deliveryTestMetadata.targetSet,
+        eventTypeVersion: realTypeRef,
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestPreviewSchema.safeParse({
+        ...preview,
+        activationPreview: {
+          ...preview.activationPreview,
+          deliveryTest: null,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestPreviewSchema.safeParse({
+        ...preview,
+        endpointReferenceDigest: 'e'.repeat(64),
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestPreviewSchema.safeParse({
+        ...preview,
+        channels: preview.channels.map((channel, index) =>
+          index === 0
+            ? { ...channel, endpointCount: channel.endpointCount + 1 }
+            : channel,
+        ),
+      }).success,
+    ).toBe(false);
+    expect(
+      DeliveryTestPreviewSchema.safeParse({
+        ...preview,
+        activationPreview: {
+          ...preview.activationPreview,
+          sendReadiness: 'blocked',
+          blockingReasonCodes: ['DELIVERY_TEST_CREDENTIAL_UNVERIFIED'],
+        },
+        channels: preview.channels.map((channel, index) =>
+          index === 0 ? { ...channel, credentialVerified: false } : channel,
+        ),
+      }).success,
+    ).toBe(true);
+    expect(
+      DeliveryTestPreviewChannelSchema.safeParse({
+        ...preview.channels[0],
+        integrationStatus: {
+          label: 'mocked',
+          verifiedAt: null,
+          verifiedByUserId: null,
+          authorizationReference: null,
+          reasonCode: null,
+          observedAt: times.created,
+        },
+        credentialVerified: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      ActivationPreviewSchema.safeParse({
+        ...activationPreview(),
+        deliveryTest: deliveryTestMetadata,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('preserves monthly-test provenance across notification boundaries', () => {
+    const target = targeting('drill', 'drill', 'staff');
+    const intent = {
+      id: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('drill', 'drill', 'staff'),
+      purpose: 'activation',
+      eventTypeVersion: drillTypeRef,
+      rosterSnapshotId: ids.roster,
+      audienceConfig: audienceRef,
+      deliveryTest: deliveryTestMetadata,
+      createdBy: humanActor,
+      source: 'web',
+      requestId: ids.request,
+      authorization: activationAuthorization(target),
+      channels: channelPlan(target),
+      createdAt: times.created,
+    } as const;
+    const plannedChannel = intent.channels[0]!;
+    const outbox = {
+      version: 1,
+      outboxId: ids.outbox,
+      intentId: intent.id,
+      eventId: intent.eventId,
+      ...notificationClassification('drill', 'drill', 'staff'),
+      purpose: intent.purpose,
+      eventTypeVersion: intent.eventTypeVersion,
+      rosterSnapshotId: intent.rosterSnapshotId,
+      audienceConfig: intent.audienceConfig,
+      deliveryTest: deliveryTestMetadata,
+      requestId: intent.requestId,
+      authorization: intent.authorization,
+      channels: intent.channels,
+      createdAt: intent.createdAt,
+    } as const;
+    const batch = {
+      id: ids.batch,
+      intentId: intent.id,
+      eventId: intent.eventId,
+      facilityId: ids.facility,
+      ...notificationClassification('drill', 'drill', 'staff'),
+      purpose: intent.purpose,
+      eventTypeVersion: intent.eventTypeVersion,
+      rosterSnapshotId: intent.rosterSnapshotId,
+      audienceConfig: intent.audienceConfig,
+      deliveryTest: deliveryTestMetadata,
+      requestId: intent.requestId,
+      authorization: intent.authorization,
+      channel: plannedChannel.channel,
+      renderedMessage: plannedChannel.renderedMessage,
+      integrationStatus: plannedChannel.integrationStatus,
+      sequence: 1,
+      endpointCount: plannedChannel.endpointCount,
+      createdAt: times.activated,
+    } as const;
+    const attempt = {
+      id: ids.attempt,
+      batchId: ids.batch,
+      intentId: ids.intent,
+      eventId: ids.event,
+      ...notificationClassification('drill', 'drill', 'staff'),
+      purpose: 'activation',
+      eventTypeVersion: drillTypeRef,
+      rosterSnapshotId: ids.roster,
+      deliveryTest: deliveryTestMetadata,
+      recipientId: ids.recipient,
+      endpointId: ids.pushEndpoint,
+      channel: 'push',
+      attemptNumber: 1,
+      attemptedAt: times.activated,
+    } as const;
+
+    expect(NotificationIntentSchema.safeParse(intent).success).toBe(true);
+    expect(NotificationOutboxMessageSchema.safeParse(outbox).success).toBe(
+      true,
+    );
+    expect(DispatchBatchSchema.safeParse(batch).success).toBe(true);
+    expect(ChannelAttemptSchema.safeParse(attempt).success).toBe(true);
+    expect(
+      NotificationStatusSchema.safeParse({
+        intent,
+        batches: [batch],
+        stateCounts: [{ state: 'unknown', count: 1 }],
+        generatedAt: times.later,
+      }).success,
+    ).toBe(true);
+    expect(
+      NotificationStatusSchema.safeParse({
+        intent,
+        batches: [
+          {
+            ...batch,
+            deliveryTest: {
+              ...deliveryTestMetadata,
+              endpointReferenceDigest: 'e'.repeat(64),
+            },
+          },
+        ],
+        stateCounts: [],
+        generatedAt: times.later,
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationIntentSchema.safeParse({
+        ...intent,
+        purpose: 'all-clear',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('records immutable runs and evidence-honest append-only reports', () => {
+    const run = {
+      id: ids.deliveryRun,
+      activationPreviewId: ids.preview,
+      eventId: ids.event,
+      notificationIntentId: ids.intent,
+      targetSet: deliveryTestMetadata.targetSet,
+      endpointReferenceDigest: deliveryTestMetadata.endpointReferenceDigest,
+      consequenceDigest: 'a'.repeat(64),
+      confirmationId: ids.confirmation,
+      startedByUserId: ids.actor,
+      startedWithSessionId: ids.session,
+      startedAt: times.activated,
+    } as const;
+    expect(DeliveryTestRunSchema.safeParse(run).success).toBe(true);
+    expect(
+      DeliveryTestRunSchema.safeParse({
+        ...run,
+        destination: 'synthetic@example.invalid',
+      }).success,
+    ).toBe(false);
+
+    const succeeded = monthlyDeliveryTestReport();
+    expect(MonthlyDeliveryTestReportSchema.safeParse(succeeded).success).toBe(
+      true,
+    );
+    expect(
+      MonthlyDeliveryTestReportSchema.safeParse({
+        ...succeeded,
+        channels: [
+          {
+            ...succeeded.channels[0],
+            latestStateCounts: [{ state: 'unknown', count: 1 }],
+          },
+          succeeded.channels[1],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      MonthlyDeliveryTestReportSchema.safeParse({
+        ...succeeded,
+        channels: [
+          {
+            ...succeeded.channels[0],
+            activationToProviderAcceptMs: null,
+            completedAt: null,
+          },
+          succeeded.channels[1],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      MonthlyDeliveryTestReportSchema.safeParse({
+        ...succeeded,
+        channels: [
+          {
+            ...succeeded.channels[0],
+            latestStateCounts: [{ state: 'provider-accepted', count: 2 }],
+          },
+          succeeded.channels[1],
+        ],
+      }).success,
+    ).toBe(false);
+
+    const incomplete = {
+      ...succeeded,
+      status: 'incomplete',
+      reasonCode: 'PROVIDER_TRUTH_PENDING',
+      channels: [
+        {
+          ...succeeded.channels[0],
+          activationToProviderAcceptMs: null,
+          latestStateCounts: [{ state: 'unknown', count: 1 }],
+          completedAt: null,
+        },
+        succeeded.channels[1],
+      ],
+    } as const;
+    expect(MonthlyDeliveryTestReportSchema.safeParse(incomplete).success).toBe(
+      true,
+    );
+    expect(
+      MonthlyDeliveryTestReportSchema.safeParse({
+        ...incomplete,
+        reasonCode: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      MonthlyDeliveryTestReportSchema.safeParse({
+        ...incomplete,
+        channels: succeeded.channels,
+      }).success,
+    ).toBe(false);
+    expect(
+      MonthlyDeliveryTestReportSchema.safeParse({
+        ...succeeded,
+        status: 'failed',
+        reasonCode: 'PROVIDER_REJECTED',
+      }).success,
+    ).toBe(false);
+    expect(
+      MonthlyDeliveryTestReportSchema.safeParse({
+        ...succeeded,
+        status: 'failed',
+        reasonCode: 'PROVIDER_REJECTED',
+        channels: [
+          {
+            ...succeeded.channels[0],
+            activationToProviderAcceptMs: null,
+            latestStateCounts: [{ state: 'failed', count: 1 }],
+            completedAt: null,
+          },
+          succeeded.channels[1],
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      MonthlyDeliveryTestReportPageSchema.safeParse({
+        items: [incomplete],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }).success,
+    ).toBe(true);
+    expect(
+      ListDeliveryTestReportsInputSchema.safeParse({
+        facilityId: ids.facility,
+        status: null,
+        generatedFrom: times.later,
+        generatedThrough: times.created,
+        cursor: null,
+        limit: 50,
+      }).success,
+    ).toBe(false);
+  });
+
+  test('keeps sending behind start-event and grants agents only report reads', () => {
+    expect(
+      getCapabilityInvocationPolicy('record-delivery-test-canary-eligibility'),
+    ).toEqual({
+      principalKinds: ['human'],
+      sources: ['web'],
+      agentGrantable: false,
+    });
+    expect(
+      getCapabilityInvocationPolicy('create-delivery-test-target-set-version'),
+    ).toEqual({
+      principalKinds: ['human'],
+      sources: ['web'],
+      agentGrantable: false,
+    });
+    expect(
+      getCapabilityInvocationPolicy('create-delivery-test-preview'),
+    ).toEqual({
+      principalKinds: ['human'],
+      sources: ['web', 'mobile'],
+      agentGrantable: false,
+    });
+    expect(
+      getCapabilityInvocationPolicy('finalize-delivery-test-report'),
+    ).toEqual({
+      principalKinds: ['system'],
+      sources: ['worker'],
+      agentGrantable: false,
+    });
+    expect(getCapabilityInvocationPolicy('list-delivery-test-reports')).toEqual(
+      {
+        principalKinds: ['human', 'agent'],
+        sources: ['web', 'mobile', 'agent-rest', 'mcp'],
+        agentGrantable: true,
+      },
+    );
+    expect(
+      AgentCapabilityGrantSchema.safeParse('list-delivery-test-reports')
+        .success,
+    ).toBe(true);
+    for (const capabilityId of [
+      'record-delivery-test-canary-eligibility',
+      'create-delivery-test-target-set-version',
+      'create-delivery-test-preview',
+      'finalize-delivery-test-report',
+    ] as const) {
+      expect(AgentCapabilityGrantSchema.safeParse(capabilityId).success).toBe(
+        false,
+      );
+      expect(defineCapability(capabilityId).safetyEffect).toBe('none');
+    }
+    expect(defineCapability('start-event').safetyEffect).toBe('start-event');
+  });
+});
+
 describe('records and report projections', () => {
   test('cannot invent channels or overstate endpoint delivery counts', () => {
     const syntheticTarget = targeting('test', 'drill', 'synthetic');
@@ -4373,6 +5087,10 @@ describe('barrel exports', () => {
       'function',
     );
     expect(typeof Contracts.StaleRosterReportSchema.parse).toBe('function');
+    expect(typeof Contracts.DeliveryTestPreviewSchema.parse).toBe('function');
+    expect(typeof Contracts.MonthlyDeliveryTestReportSchema.parse).toBe(
+      'function',
+    );
     expect(typeof Contracts.SecurityAuditEntrySchema.parse).toBe('function');
     expect(typeof Contracts.JournalEntrySchema.parse).toBe('function');
     expect(typeof Contracts.McpDraftMessageRevisionInputSchema.parse).toBe(

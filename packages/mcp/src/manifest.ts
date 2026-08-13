@@ -13,6 +13,7 @@ export const MCP_TOOL_CAPABILITY_IDS = Object.freeze([
   'list-drill-records',
   'export-drill-records',
   'export-event-summary',
+  'list-delivery-test-reports',
   'get-stale-roster-report',
   'list-facilities',
   'get-facility',
@@ -76,6 +77,11 @@ const descriptions = Object.freeze({
     title: 'Export event summary',
     description:
       'Create a private, short-lived PDF summary of one authorized event, preserving append-only journal provenance, photo checksums, and exact delivery truth states without recipient contact data. The export is records evidence, not a legal or district-policy compliance determination.',
+  }),
+  'list-delivery-test-reports': Object.freeze({
+    title: 'List monthly delivery-test reports',
+    description:
+      'List authorized append-only monthly live delivery-test report snapshots. Results are destination-free and preserve provider acceptance, delivery, failure, and unknown as distinct evidence states. This is read-only and cannot start a test, send a notification, or change a report.',
   }),
   'get-stale-roster-report': Object.freeze({
     title: 'Read roster staleness report',

@@ -291,8 +291,9 @@ class FakeRdsDataClient {
       Math.max(this.maximumInFlight.get(transactionId) ?? 0, current),
     );
 
-    // Yield so concurrent sends on one transaction deterministically overlap.
-    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    // A microtask checkpoint lets synchronously-started concurrent sends
+    // overlap without making the detector depend on wall-clock scheduling.
+    await Promise.resolve();
     try {
       if (normalizedSql.startsWith('insert into "security_audit_entries"')) {
         const wait = this.auditInsertWait;
@@ -1204,6 +1205,26 @@ function fakeDatabase(client: FakeRdsDataClient): Database {
 }
 
 describe('admin Aurora Data API transport regression', () => {
+  test('detects overlapping sends that share one transaction ID', async () => {
+    const client = new FakeRdsDataClient();
+    const transactionId = 'synthetic-overlap-negative-control';
+    const statement = () =>
+      new ExecuteStatementCommand({
+        database: 'synthetic_admin_test',
+        resourceArn:
+          'arn:aws:rds:us-west-2:000000000000:cluster:synthetic-admin-test',
+        secretArn:
+          'arn:aws:secretsmanager:us-west-2:000000000000:secret:synthetic-admin-test',
+        transactionId,
+        sql: 'select clock_timestamp()',
+      });
+
+    await Promise.all([client.send(statement()), client.send(statement())]);
+
+    expect(client.statements).toHaveLength(2);
+    expect(client.maximumInFlight.get(transactionId)).toBe(2);
+  });
+
   test('keeps stale-report preflight failures asynchronous and transaction-free', async () => {
     const client = new FakeRdsDataClient();
     const store = createDrizzleStaleRosterReportStore(fakeDatabase(client));

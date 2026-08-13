@@ -12,6 +12,14 @@ const PAGE = Object.freeze({
   items: Object.freeze([]),
   pageInfo: Object.freeze({ nextCursor: null, hasMore: false }),
 });
+const DELIVERY_TEST_REPORT_INPUT = Object.freeze({
+  facilityId: '30000000-0000-4000-8000-000000000001',
+  status: null,
+  generatedFrom: null,
+  generatedThrough: null,
+  cursor: null,
+  limit: 20,
+});
 const CONFIG: StreamableHttpConfig = Object.freeze({
   hostname: '127.0.0.1',
   port: 3100,
@@ -20,8 +28,10 @@ const CONFIG: StreamableHttpConfig = Object.freeze({
 });
 
 function harness(
-  fetchImplementation: () => Promise<Response> = async () =>
-    Response.json(PAGE),
+  fetchImplementation: (
+    input: Parameters<typeof fetch>[0],
+    init?: RequestInit,
+  ) => Promise<Response> = async () => Response.json(PAGE),
 ) {
   const protocol = new PsdEocMcpProtocol(
     new AgentApiClient(
@@ -91,6 +101,34 @@ describe('Streamable HTTP transport', () => {
         cacheScope: 'public',
       },
     });
+  });
+
+  test('proxies the read-only delivery-test report tool with matching modern headers', async () => {
+    let capturedUrl = '';
+    let capturedHeaders = new Headers();
+    let capturedBody: unknown;
+    const handler = harness(async (input, init = {}) => {
+      capturedUrl = String(input);
+      capturedHeaders = new Headers(init.headers);
+      capturedBody = JSON.parse(String(init.body)) as unknown;
+      return Response.json(PAGE);
+    });
+    const response = await handler(
+      modernRequest('tools/call', {
+        name: 'list-delivery-test-reports',
+        arguments: DELIVERY_TEST_REPORT_INPUT,
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      result: { isError: false, structuredContent: PAGE },
+    });
+    expect(capturedUrl).toBe(
+      'https://eoc.example.test/api/agent/v1/capabilities/list-delivery-test-reports',
+    );
+    expect(capturedBody).toEqual(DELIVERY_TEST_REPORT_INPUT);
+    expect(capturedHeaders.has('idempotency-key')).toBe(false);
   });
 
   test('requires matching modern protocol, method, and name headers', async () => {

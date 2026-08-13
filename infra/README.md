@@ -10,7 +10,8 @@ only typechecks, tests, and synthesizes the CloudFormation template.
 The synthesized stack cannot send an application notification. It creates
 durable queues and defines retained DNS and SES resources, but repository CI
 does not deploy them. Its schedules are limited to a rollback-only TEST canary
-and a SELECT-only metrics collector. Neither role has queue, event-mutation,
+and a SELECT-only metrics collector, plus a targetless monthly reminder. The
+reminder has no invocation target. Neither role has queue, event-mutation,
 critical-capability, or provider-send permission. Alarm subscriptions use
 deployment parameters rather than repository recipient data. The generated
 Google and Expo secrets are deliberately unusable placeholders.
@@ -69,7 +70,8 @@ evidence and approval.
   or application secrets and never commits a database transaction.
 - Retained, non-expiring CloudWatch log groups; encrypted operations and
   critical-alarm topics; parameterized email/SMS subscriptions; one-minute
-  alarms; and the `psd-eoc-operations` dashboard.
+  alarms; a targetless monthly live-delivery-test due reminder; append-only
+  report-derived failed/missed alarms; and the `psd-eoc-operations` dashboard.
 - A retained public Route 53 zone for `alerts.psd401.net`, automatically
   delegated by a retained NS record in the existing same-account
   `psd401.net` zone. The three Easy DKIM CNAMEs and custom MAIL FROM MX and SPF
@@ -177,6 +179,34 @@ acceptance into endpoint outcomes or count superseded retries as separate
 deliveries. Attempts without any evidence remain a separate
 `DeliveryEvidenceGapCount`; they are never promoted to `unknown`.
 
+The monthly live-delivery-test reminder uses `cron(0 17 1 * ? *)`, the first
+day of every month at 17:00 UTC (09:00 Pacific Standard Time or 10:00 Pacific
+Daylight Time). The EventBridge rule deliberately has no target. Its native
+`AWS/Events` `TriggeredRules` metric drives an operations alarm, so the reminder
+cannot invoke the application, `executeCapability`, a queue, or a provider.
+
+The SELECT-only collector derives destination-free test health from immutable
+`delivery_test_runs` and append-only `delivery_test_reports`. It counts distinct
+runs whose chain head at the deterministic closed-minute boundary is a terminal
+`failed` report generated in that minute; a later correction cannot erase that
+already-observed failure. It publishes
+`MonthlyLiveDeliveryTestMissed = 1` on every observation after an
+`America/Los_Angeles` calendar month closes while that immediately preceding
+month has no terminal `succeeded` report for a run started within it; `failed`
+and `incomplete` never satisfy the monthly obligation. This makes the first
+actual observation authoritative even when the exact boundary invocation is
+delayed or a collector is newly deployed. CloudWatch alarm actions occur on the
+transition into alarm, so the asserted metric does not create repeated reminder
+authority. PostgreSQL computes the Pacific boundaries with `AT TIME ZONE
+'America/Los_Angeles'`, including daylight saving transitions. The detector
+derives the observation instant from the validated schedule time, while
+closed-minute failure metrics remain stamped at their source-cohort time. The
+metrics contain no run ID,
+target-set digest, endpoint, recipient, or destination, and they do not claim
+provider acceptance is human receipt. Missing collector output is monitoring
+impairment handled by the collector alarm, not fabricated failed or missed
+evidence.
+
 `track_commit_timestamp` is a static startup parameter. An approved deployment
 must verify it is active after the reviewed Aurora restart or failover; only
 transactions committed after activation have timestamps. A missing or null
@@ -246,6 +276,20 @@ static startup parameter state, and the shared closed-minute schedule boundary.
 The collector publishes success only after all SELECTs, unconditional rollback,
 and operational metric publication succeed. Do not grant write access, substitute
 an application/admin secret, or reinterpret missing latency data as success.
+
+### Runbook: Monthly live delivery test
+
+Treat the due alarm as a reminder only: it is not authority to start a test and
+has no execution target. Inspect the append-only run and report history and the
+canonical integration labels; never automatically retry, replay, supersede, or
+fabricate a report. A live run requires a fresh authenticated human decision
+through the canonical start-event path, verified credentials, `live-verified`
+integrations, the exact approved synthetic target set and consequence preview,
+and fresh confirmation. Standing approval may establish configuration evidence
+but never authorizes an individual run. Preserve the distinction between
+provider acceptance, delivery, human receipt, and `unknown`. If the collector
+is impaired, follow its runbook rather than declaring the month failed or
+missed.
 
 ### Runbook: Shallow canary
 
@@ -332,15 +376,19 @@ its reviewed consequence preview. A deploy must also have all of the following:
 - an approved bootstrap for `psd_eoc_monitoring` as a `NOINHERIT` LOGIN with
   `USAGE` on `public` and column-level SELECT only for the columns referenced by
   the static queries in `lambda/metrics-collector/index.mjs`, including an
-  explicit column-level `SELECT (xmin)` grant on `event_transitions`. Do not
+  explicit column-level `SELECT (xmin)` grant on `event_transitions`,
+  `SELECT (id, started_at)` on `delivery_test_runs`, and
+  `SELECT (id, run_id, sequence, status, generated_at)` on
+  `delivery_test_reports`. Do not
   grant whole-table SELECT on any table containing actor metadata, message
   content, or recipient/endpoint identifiers. Grant only the EXECUTE privilege
   needed for `pg_xact_commit_timestamp(xid)`; it receives no `psd_eoc_app`
   membership, write privilege, or default privilege;
 - reviewed `EXPLAIN` plans and representative-load verification for every
-  collector SELECT; issue #29 adds no schema index, so deploy must remain blocked
-  if any rolling-window or first-evidence query cannot finish well inside the
-  30-second collector timeout and two-minute collector alarm window;
+  collector SELECT; the monitoring changes add no schema index, so deploy must
+  remain blocked if any rolling-window, first-evidence, or monthly-report query
+  cannot finish well inside the 30-second collector timeout and two-minute
+  collector alarm window;
 - a narrowly granted facility-scoped agent key stored only in the canary
   credential secret and reviewed synthetic facility/drill-version IDs; the key
   exposes no human-only capability ID and its secret uses the AWS-managed
