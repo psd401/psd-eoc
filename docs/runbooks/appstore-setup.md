@@ -328,23 +328,40 @@ assignment as success.
 
 ## 5. EAS Submit wiring for P5.5
 
-Issue P5.5 owns the mobile EAS configuration. Add the following fields to its
-`production` iOS submit profile; do not commit the `.p8` file:
+P5.5's committed configuration deliberately keeps iOS submission free of
+credentials and distribution side effects. The complete submit profile is:
 
 ```json
 {
   "submit": {
     "production": {
-      "ios": {
-        "ascAppId": "NUMERIC_APPLE_ID",
-        "ascApiKeyPath": "/secure/temporary/AuthKey_KEY_ID.p8",
-        "ascApiKeyId": "KEY_ID",
-        "ascApiKeyIssuerId": "ISSUER_ID"
-      }
+      "android": {
+        "track": "alpha",
+        "releaseStatus": "draft",
+        "changesNotSentForReview": true
+      },
+      "ios": {}
     }
   }
 }
 ```
+
+The empty iOS object is a deliberate fail-closed stop state while the App Store
+Connect app record is unverified. EAS CLI 21.7 rejects a non-interactive iOS
+submission without `ascAppId`; an empty object does not prove that credentials
+or an app record exist. The read-only audit on 2026-08-12 found no connected
+App Store Connect integration and no finished iOS production build in EAS.
+
+After a human creates and verifies the exact app record, a reviewed repository
+change may add only its non-secret numeric `ascAppId` to this profile. Keep the
+credentials in the approved EAS credential store. Never add a `.p8` path,
+Apple ID, issuer, key, tester group, or other credential or recipient value to
+`eas.json`. The Android draft policy is governed separately by
+[the mobile release runbook](release.md); it has no effect on this Apple flow.
+
+Do not run the headless command below while `submit.production.ios` is empty,
+and do not use interactive submission to create or select an app implicitly.
+First record the verified numeric `ascAppId` through the reviewed change above.
 
 For a headless submission, materialize an approved Expo token from the approved
 secrets system only for the exact, freshly human-authorized run. Here,
@@ -372,10 +389,21 @@ on any mismatch. Recheck the same complete group/settings/membership inventory
 immediately after upload and before any distribution or review step; a racing
 change stops the run and requires a fresh authorization and preview.
 
-```sh
+The following legacy form is recorded only so operators can recognize and
+reject it. It relies on an unpinned global executable; **do not run it**:
+
+```text
 cd packages/mobile
 eas build:list --platform ios --build-profile production --status finished
-eas submit --platform ios --profile production \
+```
+
+Use only the pinned Bun commands below:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 build:list --platform ios \
+  --build-profile production --status finished
+bunx eas-cli@21.7.0 submit --platform ios --profile production \
   --id 'EXACT_REVIEWED_EAS_BUILD_ID' \
   --non-interactive
 ```
@@ -385,9 +413,10 @@ Alternatively, submit one exact reviewed local artifact with
 a write-capable submission: a newer build can finish between review and upload.
 
 EAS uploads the build to App Store Connect; it does not replace Beta App
-Review or release the app publicly. Do not commit the credential path shown in
-the example when P5.5 adds the real configuration—use its approved secret
-materialization mechanism.
+Review or release the app publicly. Authentication comes only from the
+approved, human-provisioned EAS credential store for the exact run, and the
+reviewed profile selects the already verified record by `ascAppId`; no local
+credential path is committed.
 
 ## 6. Select and distribute the first processed build
 

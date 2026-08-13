@@ -4,6 +4,28 @@
   "private": true,
   "type": "module",
   "main": "expo-router/entry",
+  "psdEocReleasePolicy": {
+    "otaAllowedChangeKinds": [
+      "copy-layout-style",
+      "javascript-bugfix-existing-contract"
+    ],
+    "storeBuildRequiredChangeKinds": [
+      "push",
+      "auth",
+      "native",
+      "runtime",
+      "persistent-data-shape",
+      "start-event",
+      "human-only-action",
+      "real-drill-classification",
+      "live-provider-gate"
+    ],
+    "otaRequiresPreviewChannel": true,
+    "otaVerificationBuildProfile": "ota-preview",
+    "otaPublishEnvironment": "production",
+    "safetyPathStoreBuildRequiresNewAppVersion": true,
+    "storeSubmissionRequiresHumanApproval": true
+  },
   "scripts": {
     "start": "expo start",
     "ios": "bun run prebuild:check && expo run:ios",
@@ -37,6 +59,7 @@
     "expo-splash-screen": "~57.0.6",
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.2",
+    "expo-updates": "~57.0.13",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.2",

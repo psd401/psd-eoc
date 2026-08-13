@@ -7,6 +7,16 @@
     "icon": "./assets/icon.png",
     "scheme": "psdeoc",
     "userInterfaceStyle": "light",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/24753a23-d863-41e6-8511-5e44c99fa6c2",
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "useEmbeddedUpdate": true,
+      "disableAntiBrickingMeasures": false
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "net.psd401.eoc",

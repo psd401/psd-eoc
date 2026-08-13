@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+  <title id="title">Android notification channel and Do Not Disturb settings screen reference</title>
+  <desc id="desc">Two illustrated Android Settings screens show the PSD EOC alerts channel set to alerting and PSD EOC allowed during Do Not Disturb.</desc>
+  <rect width="960" height="560" fill="#f4f7fa"/>
+  <text x="48" y="52" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#17324d">Keep PSD EOC alerts visible</text>
+  <text x="48" y="82" font-family="Arial, sans-serif" font-size="16" fill="#4c6275">Screen reference — names and paths vary by phone maker</text>
+  <g font-family="Arial, sans-serif">
+    <g transform="translate(105 112)">
+      <rect width="310" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
+      <rect x="110" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
+      <text x="20" y="62" font-size="13" fill="#4c6275">Settings › Apps › PSD EOC</text>
+      <text x="20" y="91" font-size="21" font-weight="700" fill="#17324d">Notifications</text>
+      <line x1="20" x2="290" y1="112" y2="112" stroke="#d3dde5"/>
+      <text x="20" y="145" font-size="15" fill="#17324d">Allow notifications</text>
+      <rect x="245" y="128" width="44" height="24" rx="12" fill="#26834a"/>
+      <circle cx="277" cy="140" r="9" fill="#fff"/>
+      <text x="20" y="190" font-size="14" font-weight="700" fill="#17324d">PSD EOC incident and drill alerts</text>
+      <rect x="20" y="212" width="270" height="88" rx="12" fill="#e8f0f7"/>
+      <text x="36" y="243" font-size="15" fill="#17324d">Alerting</text>
+      <text x="270" y="243" font-size="17" font-weight="700" fill="#26834a">✓</text>
+      <text x="36" y="272" font-size="14" fill="#17324d">Pop on screen</text>
+      <text x="270" y="272" font-size="17" font-weight="700" fill="#26834a">✓</text>
+      <text x="20" y="337" font-size="13" fill="#4c6275">Set a sound and vibration if your</text>
+      <text x="20" y="357" font-size="13" fill="#4c6275">phone offers those controls.</text>
+    </g>
+    <g transform="translate(545 112)">
+      <rect width="310" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
+      <rect x="110" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
+      <text x="20" y="62" font-size="13" fill="#4c6275">Settings › Notifications › Do Not Disturb</text>
+      <text x="20" y="91" font-size="21" font-weight="700" fill="#17324d">Apps that can interrupt</text>
+      <line x1="20" x2="290" y1="112" y2="112" stroke="#d3dde5"/>
+      <rect x="20" y="146" width="270" height="70" rx="12" fill="#e8f0f7"/>
+      <circle cx="54" cy="181" r="22" fill="#17324d"/>
+      <text x="42" y="187" font-size="14" font-weight="700" fill="#fff">EOC</text>
+      <text x="89" y="187" font-size="16" fill="#17324d">PSD EOC</text>
+      <text x="270" y="187" font-size="17" font-weight="700" fill="#26834a">✓</text>
+      <text x="20" y="258" font-size="13" fill="#334e62">Add PSD EOC to each Do Not</text>
+      <text x="20" y="278" font-size="13" fill="#334e62">Disturb mode you use.</text>
+      <text x="20" y="319" font-size="13" fill="#4c6275">Android and organization policies</text>
+      <text x="20" y="339" font-size="13" fill="#4c6275">can still affect sound. Confirm with</text>
+      <text x="20" y="359" font-size="13" fill="#4c6275">the approved test notification.</text>
+    </g>
+  </g>
+</svg>
