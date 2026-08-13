@@ -1,10 +1,7 @@
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
-
-export const EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH =
-  '/tmp/psd-eoc-issue10-storage-state.json';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
 
 /**
- * Fails closed before issue #10 tests can migrate, seed, or mutate a database.
+ * Fails closed before event-type tests can migrate, seed, or mutate a database.
  * Remote test services require an explicit opt-in and every database name must
  * end in `_test` or `-test` so an ordinary production URL cannot be reused.
  */

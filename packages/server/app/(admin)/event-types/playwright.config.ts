@@ -2,49 +2,51 @@ import { defineConfig } from '@playwright/test';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { requireSyntheticTestDatabaseUrl } from './test-database';
 import {
-  EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH,
-  requireSyntheticTestDatabaseUrl,
-} from './test-database';
+  prepareEventTypePlaywrightServerWorkspace,
+  resolveEventTypePlaywrightRunContext,
+} from './playwright-run';
 
-const appPort = Number(process.env.PSD_EOC_EVENT_TYPES_APP_PORT ?? '3110');
-const databaseUrl = requireSyntheticTestDatabaseUrl(
+const baseDatabaseUrl = requireSyntheticTestDatabaseUrl(
   process.env.TEST_DATABASE_URL,
 );
-if (!Number.isSafeInteger(appPort) || appPort < 1_024 || appPort > 65_535) {
-  throw new Error('The Playwright app port must be a user port.');
-}
+const eventTypeRun = resolveEventTypePlaywrightRunContext(baseDatabaseUrl);
 
-const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+const configDirectory = dirname(fileURLToPath(import.meta.url));
+const serverRoot = resolve(configDirectory, '../../..');
+prepareEventTypePlaywrightServerWorkspace(eventTypeRun, serverRoot);
 
 export default defineConfig({
+  metadata: { eventTypeRun },
   testDir: '.',
   testMatch: /event-types\.playwright\.ts$/u,
-  globalSetup: resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    'playwright.global-setup.ts',
-  ),
+  globalSetup: resolve(configDirectory, 'playwright.global-setup.ts'),
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,
   expect: { timeout: 8_000 },
-  outputDir: '/tmp/psd-eoc-issue10-playwright',
-  reporter: [['line']],
+  outputDir: eventTypeRun.outputDirectory,
+  reporter: [
+    ['line'],
+    [resolve(configDirectory, 'playwright.cleanup-reporter.ts')],
+  ],
   use: {
-    baseURL: `http://localhost:${appPort}`,
+    baseURL: `http://localhost:${eventTypeRun.appPort}`,
     channel: process.env.CI === 'true' ? 'chrome' : undefined,
-    storageState: EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH,
+    storageState: eventTypeRun.storageStatePath,
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: `bun run dev --hostname localhost --port ${appPort}`,
-    cwd: serverRoot,
+    command: 'exec bun "app/(admin)/event-types/playwright.web-server.ts"',
+    cwd: eventTypeRun.serverDirectory,
     env: {
       DATABASE_DRIVER: 'postgres',
-      DATABASE_URL: databaseUrl,
+      DATABASE_URL: eventTypeRun.databaseUrl,
       NODE_ENV: 'development',
     },
-    url: `http://localhost:${appPort}/login`,
+    url: `http://localhost:${eventTypeRun.appPort}/login`,
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
     reuseExistingServer: false,
     timeout: 120_000,
   },
