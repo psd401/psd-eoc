@@ -1,0 +1,9 @@
+appId: net.psd401.eoc
+name: Issue 32 - lock iOS before synthetic drill notification delivery
+tags: [issue-32, synthetic-only, ios, notification, system-lock]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- pressKey: lock
+# The runner now injects the provider-free notification and independently
+# proves the exact DRILL card appeared with the system lock-screen hierarchy.

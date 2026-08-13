@@ -1,0 +1,93 @@
+import groovy.json.JsonSlurper
+
+/*
+ * Issue #32 Android instrumentation wiring.
+ *
+ * Expo prebuild owns packages/mobile/android, so this init script attaches the
+ * issue-owned test source without modifying generated native files. Keep the
+ * version checks exact: this test deliberately calls an Expo Notifications
+ * native delegate, and a dependency upgrade needs an explicit compatibility
+ * review instead of silently exercising a different code path.
+ */
+
+def expectedApplicationId = 'net.psd401.eoc'
+def expectedTestClass =
+  'net.psd401.eoc.e2e.SyntheticDrillRemoteMessageTest'
+def expectedNativeVersions = [
+  expo: '57.0.12',
+  notifications: '57.0.10',
+  reactNative: '0.86.2',
+]
+
+gradle.beforeProject { project ->
+  if (project.path != ':app') {
+    return
+  }
+
+  project.pluginManager.withPlugin('com.android.application') {
+    def mobileRoot = project.rootDir.parentFile.canonicalFile
+    def expectedAndroidRoot = new File(mobileRoot, 'android').canonicalFile
+    if (project.rootDir.canonicalFile != expectedAndroidRoot) {
+      throw new GradleException(
+        "Issue #32 instrumentation must run against Expo's generated packages/mobile/android project."
+      )
+    }
+
+    def sourceRoot =
+      new File(mobileRoot, 'e2e/android/src/androidTest/kotlin').canonicalFile
+    if (!sourceRoot.isDirectory()) {
+      throw new GradleException(
+        "Issue #32 Android instrumentation source is missing: ${sourceRoot}"
+      )
+    }
+
+    def repositoryRoot = mobileRoot.parentFile.parentFile.canonicalFile
+    def installedPackages = [
+      expo: new File(repositoryRoot, 'node_modules/expo/package.json'),
+      notifications: new File(
+        repositoryRoot,
+        'node_modules/expo-notifications/package.json'
+      ),
+      reactNative: new File(repositoryRoot, 'node_modules/react-native/package.json'),
+    ]
+    installedPackages.each { name, packageFile ->
+      if (!packageFile.isFile()) {
+        throw new GradleException(
+          "Issue #32 requires the Bun-installed ${name} package at ${packageFile}."
+        )
+      }
+      def installedVersion = new JsonSlurper().parse(packageFile).version
+      if (installedVersion != expectedNativeVersions[name]) {
+        throw new GradleException(
+          "Issue #32 Android injector was reviewed for ${name} ${expectedNativeVersions[name]}, not ${installedVersion}. Review the Expo native delegate before updating this pin."
+        )
+      }
+    }
+
+    def android = project.extensions.getByName('android')
+    android.sourceSets.getByName('androidTest').java.srcDir(sourceRoot)
+    android.defaultConfig.testInstrumentationRunner =
+      'androidx.test.runner.AndroidJUnitRunner'
+    android.defaultConfig.testInstrumentationRunnerArguments['class'] =
+      expectedTestClass
+
+    project.dependencies.add(
+      'androidTestImplementation',
+      'androidx.test:runner:1.7.0'
+    )
+    project.dependencies.add(
+      'androidTestImplementation',
+      'androidx.test.ext:junit-ktx:1.3.0'
+    )
+
+    project.afterEvaluate {
+      def namespace = android.namespace?.toString()
+      def applicationId = android.defaultConfig.applicationId?.toString()
+      if (namespace != expectedApplicationId || applicationId != expectedApplicationId) {
+        throw new GradleException(
+          "Issue #32 refuses to instrument ${applicationId ?: '<missing>'} (${namespace ?: '<missing>'}); expected ${expectedApplicationId}."
+        )
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+appId: net.psd401.eoc
+---
+- extendedWaitUntil:
+    visible: '${EVENT_TYPE_NAME}. ${FACILITY_NAME}, ${FACILITY_CODE}.'
+    timeout: 60000
+- assertVisible: 'DRILL — PRACTICE. This visual state is for a drill or synthetic test only.'
+- assertNotVisible: 'REAL INCIDENT. This visual state is reserved for a real incident.'
+- assertVisible: 'Status: active'
+- extendedWaitUntil:
+    visible: '.*${EVENT_ROUTE_EVIDENCE}.*'
+    timeout: 30000

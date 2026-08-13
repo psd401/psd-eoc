@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": [
+    "./**/*.ts",
+    "../../server/e2e/mobile-mock-google-idp.ts",
+    "../../server/e2e/mobile-runtime-lib.test.ts",
+    "../../server/e2e/mobile-runtime-lib.ts",
+    "../../server/e2e/mobile-runtime.ts"
+  ],
+  "exclude": ["android/**", "node_modules"]
+}

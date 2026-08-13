@@ -1,0 +1,12 @@
+appId: com.apple.springboard
+---
+# iOS 26 asks for an explicit human-visible handoff before opening the locally
+# installed development client. This is an OS navigation choice only; it does
+# not authenticate, activate, notify, all-clear, or close an event.
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse the development-client handoff outside synthetic E2E
+- assertVisible: 'Open in “PSD EOC”?'
+- tapOn:
+    text: '^Open$'
+    retryTapIfNoChange: true

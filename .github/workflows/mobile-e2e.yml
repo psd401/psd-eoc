@@ -1,0 +1,261 @@
+name: Mobile E2E
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+  EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false'
+  MAESTRO_CLI_NO_ANALYTICS: '1'
+  MAESTRO_VERSION: '2.7.0'
+  MAESTRO_ZIP_SHA256: a4ccab6b604617e7aef6db4f885666056eabe5cfa32befaa3bc994041b8fcbb5
+  PSD_EOC_E2E_SYNTHETIC_ONLY: 'true'
+
+jobs:
+  ios:
+    name: Maestro iOS (synthetic only)
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DATABASE_URL: postgresql://psd_eoc_test@127.0.0.1:54329/psd_eoc_mobile_ios_test
+      TEST_DATABASE_URL: postgresql://psd_eoc_test@127.0.0.1:54329/psd_eoc_mobile_ios_test
+    steps:
+      - name: Initialize the synthetic artifact directory
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/psd-eoc-mobile-e2e-artifacts"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "PSD_EOC_MOBILE_E2E_ARTIFACT_DIR=$artifact_dir" >> "$GITHUB_ENV"
+          install -d -m 0700 "$artifact_dir"
+          printf '%s\n' \
+            'platform=ios' \
+            'classification=drill' \
+            'roster=synthetic' \
+            'providers=mocked' \
+            > "$artifact_dir/workflow-safety-context.txt"
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Set up Java for Maestro
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies from the lockfile
+        run: bun install --frozen-lockfile
+
+      - name: Strict-typecheck the issue-owned mobile harness
+        run: bun x tsc --project packages/mobile/e2e/tsconfig.json
+
+      - name: Ensure the React Native iOS source-build toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          fi
+          cmake --version
+          pod --version
+
+      - name: Install the pinned Maestro CLI
+        run: |
+          set -euo pipefail
+          maestro_archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
+          maestro_root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$maestro_archive" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$maestro_archive" \
+            | shasum -a 256 --check
+          unzip -q "$maestro_archive" -d "$maestro_root"
+          maestro_bin="$maestro_root/maestro/bin/maestro"
+          test -x "$maestro_bin"
+          test "$("$maestro_bin" --version | tail -n 1 | tr -d '\r')" = "$MAESTRO_VERSION"
+          echo "$(dirname "$maestro_bin")" >> "$GITHUB_PATH"
+
+      - name: Provision an isolated PostgreSQL test database
+        run: |
+          set -euo pipefail
+          if ! brew list --versions postgresql@16 >/dev/null 2>&1; then
+            brew install postgresql@16
+          fi
+          postgres_bin="$(brew --prefix postgresql@16)/bin"
+          echo "$postgres_bin" >> "$GITHUB_PATH"
+          "$postgres_bin/initdb" \
+            --pgdata "$RUNNER_TEMP/psd-eoc-postgres-ios" \
+            --username psd_eoc_test \
+            --auth trust \
+            --encoding UTF8 \
+            --no-locale
+          "$postgres_bin/pg_ctl" \
+            --pgdata "$RUNNER_TEMP/psd-eoc-postgres-ios" \
+            --log "$RUNNER_TEMP/psd-eoc-postgres-ios.log" \
+            --options '-h 127.0.0.1 -p 54329' \
+            start
+          "$postgres_bin/createdb" \
+            --host 127.0.0.1 \
+            --port 54329 \
+            --username psd_eoc_test \
+            psd_eoc_mobile_ios_test
+          "$postgres_bin/pg_isready" \
+            --host 127.0.0.1 \
+            --port 54329 \
+            --username psd_eoc_test \
+            --dbname psd_eoc_mobile_ios_test
+
+      - name: Verify the current Xcode iOS simulator runtime
+        run: |
+          set -euo pipefail
+          xcode-select --print-path
+          xcodebuild -version
+          xcrun simctl list runtimes available | tee "$PSD_EOC_MOBILE_E2E_ARTIFACT_DIR/ios-runtimes.txt"
+          grep -Fq 'iOS' "$PSD_EOC_MOBILE_E2E_ARTIFACT_DIR/ios-runtimes.txt"
+          xcrun simctl list devices available > "$PSD_EOC_MOBILE_E2E_ARTIFACT_DIR/ios-devices.txt"
+
+      - name: Run the synthetic iOS Maestro suite
+        run: bun packages/mobile/e2e/run-ci.ts ios
+
+      - name: Stop the isolated PostgreSQL server
+        if: always()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          postgres_bin="$(brew --prefix postgresql@16)/bin"
+          database_root="$RUNNER_TEMP/psd-eoc-postgres-ios"
+          if test -s "$database_root/postmaster.pid"; then
+            "$postgres_bin/pg_ctl" --pgdata "$database_root" --mode fast stop
+          fi
+
+      - name: Upload iOS E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-e2e-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/psd-eoc-mobile-e2e-artifacts
+            ${{ runner.temp }}/psd-eoc-postgres-ios.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  android:
+    name: Maestro Android (synthetic only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: psd_eoc_mobile_android_test
+          POSTGRES_PASSWORD: synthetic_test_password
+          POSTGRES_USER: psd_eoc_test
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U psd_eoc_test -d psd_eoc_mobile_android_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@127.0.0.1:54329/psd_eoc_mobile_android_test
+      TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@127.0.0.1:54329/psd_eoc_mobile_android_test
+    steps:
+      - name: Initialize the synthetic artifact directory
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/psd-eoc-mobile-e2e-artifacts"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "PSD_EOC_MOBILE_E2E_ARTIFACT_DIR=$artifact_dir" >> "$GITHUB_ENV"
+          install -d -m 0700 "$artifact_dir"
+          printf '%s\n' \
+            'platform=android' \
+            'classification=drill' \
+            'roster=synthetic' \
+            'providers=mocked' \
+            > "$artifact_dir/workflow-safety-context.txt"
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Set up Java for Maestro and Gradle
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies from the lockfile
+        run: bun install --frozen-lockfile
+
+      - name: Strict-typecheck the issue-owned mobile harness
+        run: bun x tsc --project packages/mobile/e2e/tsconfig.json
+
+      - name: Install the pinned Maestro CLI
+        run: |
+          set -euo pipefail
+          maestro_archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
+          maestro_root="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$maestro_archive" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          printf '%s  %s\n' "$MAESTRO_ZIP_SHA256" "$maestro_archive" \
+            | shasum -a 256 --check
+          unzip -q "$maestro_archive" -d "$maestro_root"
+          maestro_bin="$maestro_root/maestro/bin/maestro"
+          test -x "$maestro_bin"
+          test "$("$maestro_bin" --version | tail -n 1 | tr -d '\r')" = "$MAESTRO_VERSION"
+          echo "$(dirname "$maestro_bin")" >> "$GITHUB_PATH"
+
+      - name: Enable and verify Android hardware acceleration
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
+
+      - name: Run the synthetic Android Maestro suite
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          enable-hw-keyboard: true
+          emulator-boot-timeout: 900
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio
+            -no-boot-anim -camera-back none
+          script: ANDROID_SERIAL="emulator-$EMULATOR_PORT" bun packages/mobile/e2e/run-ci.ts android
+
+      - name: Upload Android E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-e2e-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/psd-eoc-mobile-e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 14

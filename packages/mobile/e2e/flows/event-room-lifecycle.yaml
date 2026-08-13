@@ -1,0 +1,111 @@
+appId: net.psd401.eoc
+name: Issue 32 - post synthetic text and all-clear the opened drill
+tags:
+  - issue-32
+  - synthetic-only
+  - event-room
+env:
+  TIMELINE_TEXT: ${TIMELINE_TEXT || "Synthetic mobile issue 32 update."}
+  EVENT_TYPE_NAME: ${EVENT_TYPE_NAME || "Lockdown Drill"}
+  FACILITY_NAME: ${FACILITY_NAME || "Synthetic North Campus"}
+  FACILITY_CODE: ${FACILITY_CODE || "SYN-NORTH"}
+---
+# Preconditions: a notification-event-room flow just opened the canonical
+# active synthetic drill through the production notification response path.
+# The loopback server exposes only mocked integrations and synthetic rosters;
+# no provider process is running. Every mutation below is a foreground app tap.
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse lifecycle mutations outside synthetic E2E
+- assertTrue:
+    condition: ${EVENT_ID != null && EVENT_ID.length == 36 && FACILITY_ID != null && FACILITY_ID.length == 36 && EVENT_TYPE_VERSION_ID != null && EVENT_TYPE_VERSION_ID.length == 36}
+    label: Require canonical event, facility, and type-version IDs
+- assertTrue:
+    condition: ${EVENT_ROUTE_EVIDENCE != null && EVENT_ROUTE_EVIDENCE.length > 0}
+    label: Require append-only route evidence for the opened event
+- assertTrue:
+    condition: ${TIMELINE_TEXT == 'Synthetic mobile issue 32 update.'}
+    label: Keep the journal fixture synthetic and free of recipient data
+- launchApp:
+    clearState: false
+    stopApp: false
+- runFlow:
+    file: shared/assert-active-drill-room.yaml
+    env:
+      EVENT_ROUTE_EVIDENCE: ${EVENT_ROUTE_EVIDENCE}
+      EVENT_TYPE_NAME: ${EVENT_TYPE_NAME}
+      FACILITY_CODE: ${FACILITY_CODE}
+      FACILITY_NAME: ${FACILITY_NAME}
+
+# Post one append-only synthetic text entry.
+- tapOn:
+    text: 'Timeline text update'
+    enabled: true
+- inputText: '${TIMELINE_TEXT}'
+- hideKeyboard
+- tapOn:
+    text: 'Post'
+    enabled: true
+- extendedWaitUntil:
+    visible: '.*${TIMELINE_TEXT}.*'
+    timeout: 30000
+- assertVisible: '.*Do not include student data.*append-only.*'
+
+# Obtain and review the fresh server consequence preview before the explicit
+# all-clear phrase. This remains a synthetic-roster drill with mocked channels.
+- tapOn:
+    text: 'All-clear…'
+    enabled: true
+- extendedWaitUntil:
+    visible:
+      id: 'all-clear-preview'
+    timeout: 30000
+- assertVisible: 'Confirm all-clear'
+- assertVisible: 'DRILL — PRACTICE. This visual state is for a drill or synthetic test only.'
+- assertNotVisible: 'REAL INCIDENT. This visual state is reserved for a real incident.'
+- assertVisible: '.*create a drill all-clear notification.*'
+- scrollUntilVisible:
+    element: 'push\. [0-9]+ endpoints\. Integration mocked\. Message preview: DRILL: \[DRILL\] DRILL — TRAINING ONLY ALL-CLEAR: Lockdown Drill\. DRILL — TRAINING ONLY ALL-CLEAR at Synthetic North Campus\..*'
+    direction: DOWN
+- assertVisible: 'push\. [0-9]+ endpoints\. Integration mocked\. Message preview: DRILL: \[DRILL\] DRILL — TRAINING ONLY ALL-CLEAR: Lockdown Drill\. DRILL — TRAINING ONLY ALL-CLEAR at Synthetic North Campus\..*'
+- scrollUntilVisible:
+    element: 'email\. [0-9]+ endpoints\. Integration mocked\. Message preview: DRILL: \[DRILL\] DRILL — TRAINING ONLY ALL-CLEAR: Lockdown Drill at Synthetic North Campus\. DRILL — TRAINING ONLY ALL-CLEAR.*'
+    direction: DOWN
+- assertVisible: 'email\. [0-9]+ endpoints\. Integration mocked\. Message preview: DRILL: \[DRILL\] DRILL — TRAINING ONLY ALL-CLEAR: Lockdown Drill at Synthetic North Campus\. DRILL — TRAINING ONLY ALL-CLEAR.*'
+- scrollUntilVisible:
+    element:
+      id: 'lifecycle-confirm-button'
+    direction: DOWN
+- assertVisible:
+    id: 'lifecycle-confirm-button'
+    enabled: false
+- scrollUntilVisible:
+    element:
+      id: 'lifecycle-confirmation-input'
+    direction: UP
+- tapOn:
+    id: 'lifecycle-confirmation-input'
+- inputText: 'ALL CLEAR'
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      id: 'lifecycle-confirm-button'
+    direction: DOWN
+- assertVisible:
+    id: 'lifecycle-confirm-button'
+    enabled: true
+- tapOn:
+    id: 'lifecycle-confirm-button'
+    enabled: true
+
+# The same room remains a drill, the canonical text is retained, and status is
+# now an explicit all-clear. The flow never closes the event.
+- extendedWaitUntil:
+    visible: 'Status: all clear'
+    timeout: 30000
+- assertVisible: 'DRILL — PRACTICE. This visual state is for a drill or synthetic test only.'
+- assertNotVisible: 'REAL INCIDENT. This visual state is reserved for a real incident.'
+- scrollUntilVisible:
+    element: '.*${TIMELINE_TEXT}.*'
+    direction: UP
+- assertVisible: '.*${TIMELINE_TEXT}.*'

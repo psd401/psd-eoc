@@ -1,0 +1,27 @@
+appId: net.psd401.eoc
+name: Issue 32 - open the synthetic drill notification from Notification Center
+tags: [issue-32, synthetic-only, ios, notification, simulator-lock]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- assertTrue:
+    condition: ${NOTIFICATION_TITLE == '[DRILL] Synthetic lockdown drill'}
+    label: Require the exact synthetic drill notification title
+- swipe:
+    start: 50%, 98%
+    end: 50%, 10%
+    duration: 1000
+- pressKey: home
+- swipe:
+    start: 50%, 0%
+    end: 50%, 80%
+    duration: 600
+- extendedWaitUntil:
+    visible: '\[DRILL\] Synthetic lockdown drill'
+    timeout: 30000
+- assertNotVisible: '.*\[INCIDENT\].*'
+- tapOn:
+    id: 'NotificationShortLookView'
+    text: 'PSD EOC, .*, \[DRILL\] Synthetic lockdown drill, \[DRILL\] Synthetic exercise only\. Open the synthetic event room\.'
+# Stop while the app's independent LocalAuthentication sheet is awaiting its
+# enrolled simulator biometric.

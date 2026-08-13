@@ -1,0 +1,34 @@
+appId: net.psd401.eoc
+name: Issue 32 - request iOS enrollment authentication through loopback OIDC
+tags: [issue-32, synthetic-only, ios, oidc, pre-auth]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- launchApp:
+    clearKeychain: false
+    clearState: false
+    stopApp: false
+    permissions:
+      notifications: allow
+- extendedWaitUntil:
+    visible: 'Sign in to PSD EOC'
+    timeout: 30000
+- assertVisible: '.*requires current membership in a designated PSD Google Group.*'
+- tapOn:
+    text: 'Sign in with Google'
+    enabled: true
+- extendedWaitUntil:
+    visible: '^Continue$'
+    timeout: 15000
+- tapOn: '^Continue$'
+- extendedWaitUntil:
+    visible: 'Synthetic Google sign-in'
+    timeout: 30000
+- assertVisible: 'This issue #32 loopback provider makes no Google network calls.'
+- assertVisible: 'Continue as access-group member'
+- tapOn: 'Continue as access-group member'
+- tapOn:
+    text: '^Open$'
+    optional: true
+# The loopback callback now requests LocalAuthentication. Stop with the native
+# sheet pending so the runner can observe it without a second XCTest client.

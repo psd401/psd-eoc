@@ -1,0 +1,42 @@
+appId: net.psd401.eoc
+name: Issue 32 - request Android enrollment authentication through loopback OIDC
+tags: [issue-32, synthetic-only, android, oidc, pre-auth]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- launchApp:
+    clearState: false
+    stopApp: false
+    permissions:
+      notifications: allow
+- extendedWaitUntil:
+    visible: 'Sign in to PSD EOC'
+    timeout: 30000
+- assertVisible: '.*requires current membership in a designated PSD Google Group.*'
+- tapOn:
+    text: 'Sign in with Google'
+    enabled: true
+- tapOn:
+    text: '^Use without an account$'
+    optional: true
+- tapOn:
+    text: '^Accept & continue$'
+    optional: true
+- tapOn:
+    text: '^No thanks$'
+    optional: true
+- tapOn:
+    text: '^Got it$'
+    optional: true
+- extendedWaitUntil:
+    visible: 'Synthetic Google sign-in'
+    timeout: 30000
+- assertVisible: 'This issue #32 loopback provider makes no Google network calls.'
+- tapOn: 'Continue as access-group member'
+- tapOn:
+    text: '^Open$'
+    optional: true
+- tapOn:
+    text: '^Just once$'
+    optional: true
+# Stop with Android SystemUI device authentication pending.

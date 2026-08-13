@@ -1,0 +1,13 @@
+appId: net.psd401.eoc
+name: Issue 32 - verify Android notification routed to exact drill room
+tags: [issue-32, synthetic-only, android, notification, post-auth]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- runFlow:
+    file: shared/assert-active-drill-room.yaml
+    env:
+      EVENT_ROUTE_EVIDENCE: ${EVENT_ROUTE_EVIDENCE}
+      EVENT_TYPE_NAME: ${EVENT_TYPE_NAME}
+      FACILITY_CODE: ${FACILITY_CODE}
+      FACILITY_NAME: ${FACILITY_NAME}

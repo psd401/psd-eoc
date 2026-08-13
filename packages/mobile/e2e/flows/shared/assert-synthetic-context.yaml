@@ -1,0 +1,8 @@
+appId: net.psd401.eoc
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse mobile E2E outside the isolated synthetic environment
+- assertTrue:
+    condition: ${EVENT_ID != null && EVENT_ID.length == 36 && FACILITY_ID != null && FACILITY_ID.length == 36 && EVENT_TYPE_VERSION_ID != null && EVENT_TYPE_VERSION_ID.length == 36}
+    label: Require canonical event, facility, and type-version IDs

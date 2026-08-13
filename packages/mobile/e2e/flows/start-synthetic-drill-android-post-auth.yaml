@@ -1,0 +1,7 @@
+appId: net.psd401.eoc
+name: Issue 32 - complete three-tap synthetic drill activation on Android
+tags: [issue-32, synthetic-only, android, activation, post-auth]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- runFlow: shared/start-synthetic-drill-after-auth.yaml
