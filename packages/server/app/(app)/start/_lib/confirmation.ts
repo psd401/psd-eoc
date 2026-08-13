@@ -90,7 +90,7 @@ export interface ActivationRateLimitReservationInput {
   readonly facilityId: string;
   readonly idempotencyKey: string;
   readonly occurredAt: Date;
-  readonly source: 'web';
+  readonly source: AuthenticatedSession['source'];
 }
 
 export type ActivationRateLimitDecision = 'denied' | 'fresh' | 'replay';
@@ -137,7 +137,7 @@ function unsupportedSyntheticPreview(): CapabilityEngineError {
   return new CapabilityEngineError(
     'VALIDATION_ERROR',
     'MUTATION_METADATA_INVALID',
-    'The browser activation flow supports staff roster previews only.',
+    'The interactive activation flow supports staff roster previews only.',
     400,
   );
 }
@@ -223,7 +223,7 @@ export async function issueStartEventConfirmation(
       confirmationId,
       consequenceDigest: preview.consequenceDigest,
       occurredAt: previewCheckedAt,
-      source: 'web',
+      source: input.authenticated.source,
     };
     const rateLimitDecision =
       await transaction.reserveActivationSubmission(reservationInput);

@@ -1,11 +1,13 @@
 import { Stack } from 'expo-router';
 import { useEffect } from 'react';
+import type { ReactNode } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { AuthProvider, ConnectivityBanner, useMobileAuth } from '../lib/auth';
+import { StartMutationProvider } from '../lib/start';
 import { configureAlertChannel } from '../notifications/alert-channel';
 
-function AuthenticatedStack() {
+export function AuthenticatedStack() {
   const { hasCachedShell, state } = useMobileAuth();
   const showUnlock =
     !hasCachedShell && (state.phase === 'booting' || state.phase === 'locked');
@@ -26,8 +28,12 @@ function AuthenticatedStack() {
         }}
       >
         <Stack.Protected guard={hasCachedShell}>
-          <Stack.Screen name="(app)" options={{ headerShown: false }} />
           <Stack.Screen name="index" options={{ title: 'PSD EOC' }} />
+          <Stack.Screen name="(app)" options={{ headerShown: false }} />
+          <Stack.Screen
+            name="start/index"
+            options={{ headerShown: false, title: 'Start event' }}
+          />
           <Stack.Screen
             name="preview/real"
             options={{ title: 'Real incident preview' }}
@@ -56,6 +62,26 @@ function AuthenticatedStack() {
   );
 }
 
+interface RootProviderBoundaryProps {
+  readonly children: ReactNode;
+}
+
+export function RootProviderBoundary({ children }: RootProviderBoundaryProps) {
+  return (
+    <AuthProvider>
+      <StartMutationProvider>{children}</StartMutationProvider>
+    </AuthProvider>
+  );
+}
+
+export function RootLayoutContent() {
+  return (
+    <RootProviderBoundary>
+      <AuthenticatedStack />
+    </RootProviderBoundary>
+  );
+}
+
 export default function RootLayout() {
   useEffect(() => {
     void configureAlertChannel().catch(() => {
@@ -63,11 +89,7 @@ export default function RootLayout() {
     });
   }, []);
 
-  return (
-    <AuthProvider>
-      <AuthenticatedStack />
-    </AuthProvider>
-  );
+  return <RootLayoutContent />;
 }
 
 const styles = StyleSheet.create({

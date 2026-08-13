@@ -1,6 +1,10 @@
 import type {
+  ConnectivityEpochId,
+  DeviceEnrollmentId,
   MobileSessionResponse,
+  SessionId,
   SessionEstablishmentResult,
+  UserId,
 } from '@psd-eoc/contracts';
 
 import {
@@ -37,7 +41,7 @@ export interface StoredAuthVault {
 export interface AuthState {
   readonly phase: AuthPhase;
   readonly session: SessionEstablishmentResult | null;
-  readonly connectivityEpochId: string | null;
+  readonly connectivityEpochId: ConnectivityEpochId | null;
   readonly message: string | null;
 }
 
@@ -749,21 +753,36 @@ export class MobileAuthController {
   }
 
   public assertMutationAllowed(): Readonly<{
-    connectivityEpochId: string;
+    connectivityEpochId: ConnectivityEpochId;
+    userId: UserId;
+    sessionId: SessionId;
+    deviceEnrollmentId: DeviceEnrollmentId;
   }> {
+    const session = this.state.session;
+    const vault = this.vault;
     if (
       this.state.phase !== 'online' ||
       this.state.connectivityEpochId === null ||
-      this.state.session === null
+      session === null ||
+      vault === null
     ) {
       throw new OfflineMutationDeniedError();
     }
-    if (!locallyUsableSession(this.state.session, this.now())) {
+    if (
+      !locallyUsableSession(session, this.now()) ||
+      vault.session.user.id !== session.user.id ||
+      vault.session.session.id !== session.session.id ||
+      vault.session.deviceEnrollment.id !== session.deviceEnrollment.id ||
+      vault.session.connectivityEpoch.id !== this.state.connectivityEpochId
+    ) {
       void this.expireSession();
       throw new OfflineMutationDeniedError();
     }
     return Object.freeze({
       connectivityEpochId: this.state.connectivityEpochId,
+      userId: session.user.id,
+      sessionId: session.session.id,
+      deviceEnrollmentId: session.deviceEnrollment.id,
     });
   }
 
@@ -773,15 +792,7 @@ export class MobileAuthController {
   }> {
     this.assertMutationAllowed();
     const current = this.vault;
-    if (
-      current === null ||
-      this.state.session === null ||
-      current.session.session.id !== this.state.session.session.id ||
-      current.session.connectivityEpoch.id !== this.state.connectivityEpochId
-    ) {
-      void this.expireSession();
-      throw new OfflineMutationDeniedError();
-    }
+    if (current === null) throw new OfflineMutationDeniedError();
     return Object.freeze({
       bearer: current.refreshToken,
       credentialGeneration: this.credentialGeneration,

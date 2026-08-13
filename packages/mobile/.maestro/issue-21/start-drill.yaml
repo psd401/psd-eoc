@@ -1,0 +1,53 @@
+appId: net.psd401.eoc
+name: Issue 21 - start a synthetic drill in exactly three taps
+tags:
+  - issue-21
+  - synthetic-only
+---
+# Preconditions are intentionally fail-visible: the app is already unlocked,
+# exactly one synthetic site is assigned, and every provider is a fail-closed
+# mock. Never bypass the synthetic-mode assertion or run this against live data.
+- launchApp:
+    clearState: false
+    stopApp: false
+- scrollUntilVisible:
+    element:
+      id: 'issue-21-synthetic-mode'
+    direction: UP
+- assertVisible:
+    id: 'issue-21-synthetic-mode'
+- scrollUntilVisible:
+    element:
+      id: 'issue-21-start-drill'
+    direction: DOWN
+- assertVisible:
+    id: 'issue-21-start-drill'
+- assertVisible: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
+
+# Tap 1: the one-site action chooses both site and DRILL mode.
+- tapOn: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
+- assertVisible: '.*DRILL — PRACTICE.*'
+- assertVisible:
+    id: 'issue-21-drill-event-type'
+- assertVisible: 'DRILL — PRACTICE. Choose Synthetic earthquake drill'
+
+# Tap 2: choose the seeded synthetic drill event type.
+- tapOn: 'DRILL — PRACTICE. Choose Synthetic earthquake drill'
+- assertVisible: '.*DRILL — PRACTICE.*'
+- assertVisible: '.*synthetic recipient.*'
+- scrollUntilVisible:
+    element:
+      id: 'issue-21-confirm-drill'
+    direction: DOWN
+- assertVisible:
+    id: 'issue-21-confirm-drill'
+- assertVisible: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'
+
+# Tap 3: the final authenticated-human confirmation performs the activation.
+- tapOn: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'
+- extendedWaitUntil:
+    visible:
+      id: 'issue-21-activation-result'
+    timeout: 15000
+- assertVisible: 'Drill started'
+- assertVisible: '.*durably accepted.*recorded its notification intent.*'

@@ -37,6 +37,7 @@ const IDEMPOTENCY_KEY = 'confirmation-boundary-key-0001';
 
 function authenticated(
   facilityIds: readonly string[] | null = null,
+  source: AuthenticatedSession['source'] = 'web',
 ): AuthenticatedSession {
   return {
     actor: {
@@ -44,7 +45,7 @@ function authenticated(
       userId: IDS.user,
       sessionId: IDS.session,
     },
-    source: 'web',
+    source,
     roles: ['staff'],
     scope: {
       facilityScope:
@@ -336,6 +337,25 @@ describe('start-event human confirmation boundary', () => {
     );
 
     expect(store.persisted[0]?.actionIds).toEqual(['send-real-notification']);
+  });
+
+  test('preserves mobile provenance when reserving an activation', async () => {
+    const store = new MemoryConfirmationStore(preview('drill', 'staff'));
+
+    await issueStartEventConfirmation(
+      {
+        authenticated: authenticated(null, 'mobile'),
+        idempotencyKey: IDEMPOTENCY_KEY,
+        startInput: startInput(),
+      },
+      store,
+    );
+
+    expect(store.rateChecks).toEqual([
+      expect.objectContaining({
+        source: 'mobile',
+      }),
+    ]);
   });
 
   test('recovers the committed confirmation when the engine was never entered', async () => {
