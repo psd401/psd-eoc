@@ -23,60 +23,328 @@ import { startFlowPlaywrightPaths } from '../app/(app)/start/test/playwright-run
 
 let fixture: StartFlowPlaywrightFixture;
 
-async function assertAxeZeroViolations(
+/**
+ * Axe cannot calculate color contrast for the aria-hidden diamond glyphs used
+ * beside drill labels. Chromium also reports every text descendant of a modal
+ * native dialog as partially obscured by that same dialog. Scan an open dialog
+ * non-modally for the duration of axe's contrast calculation, then restore its
+ * modality and focus. Every other incomplete result remains a gate failure.
+ */
+async function assertEventRoomAxeClean(
   page: Page,
   stateLabel: string,
+  expectedModalDialog = false,
 ): Promise<void> {
-  const result = await page.evaluate(async (expectedVersion) => {
-    const axe = Reflect.get(globalThis, 'axe') as
-      | Readonly<{
-          version: string;
-          run(
-            root: Document,
-            options: Readonly<{
-              runOnly: Readonly<{
-                type: 'tag';
-                values: readonly string[];
-              }>;
-            }>,
-          ): Promise<
-            Readonly<{
-              violations: readonly Readonly<{
-                id: string;
-                impact: string | null;
-                help: string;
-                nodes: readonly Readonly<{
-                  target: readonly unknown[];
-                  failureSummary?: string;
+  const openDialogs = page.locator('dialog[open]');
+  const openDialogCount = await openDialogs.count();
+  expect(
+    openDialogCount,
+    `${stateLabel} has an unexpected open-dialog count.`,
+  ).toBe(expectedModalDialog ? 1 : 0);
+  const contextSelector = expectedModalDialog ? 'dialog[open]' : null;
+  const decorativeTargets =
+    contextSelector === null
+      ? [
+          '.classification-icon',
+          '.location-composer > .dialog-classification.mode-drill > span[aria-hidden="true"]',
+          '.photo-composer > .dialog-classification.mode-drill > span[aria-hidden="true"]',
+        ]
+      : [
+          'dialog[open] form > .dialog-classification.mode-drill > span[aria-hidden="true"]',
+        ];
+  for (const selector of decorativeTargets) {
+    const element = page.locator(selector);
+    await expect(element).toHaveAttribute('aria-hidden', 'true');
+    await expect(element).toHaveText(/^◆\s*$/u);
+  }
+
+  const result = await page.evaluate(
+    async ({ expectedDecorativeSelectors, expectedVersion, rootSelector }) => {
+      const axe = Reflect.get(globalThis, 'axe') as
+        | Readonly<{
+            version: string;
+            run(
+              root: Document | Element,
+              options: Readonly<{
+                resultTypes: readonly (
+                  | 'violations'
+                  | 'incomplete'
+                  | 'passes'
+                )[];
+                runOnly: Readonly<{
+                  type: 'rule' | 'tag';
+                  values: readonly string[];
+                }>;
+              }>,
+            ): Promise<
+              Readonly<{
+                incomplete: readonly Readonly<{
+                  id: string;
+                  nodes: readonly Readonly<{
+                    any: readonly Readonly<{
+                      data?: Readonly<{ messageKey?: string }>;
+                      id: string;
+                      relatedNodes?: readonly Readonly<{
+                        target: readonly string[];
+                      }>[];
+                    }>[];
+                    target: readonly string[];
+                  }>[];
                 }>[];
-              }>[];
-            }>
-          >;
-        }>
-      | undefined;
-    if (axe === undefined || axe.version !== expectedVersion) {
-      throw new Error('The pinned axe browser engine is unavailable.');
-    }
-    const findings = await axe.run(document, {
-      runOnly: {
-        type: 'tag',
-        values: [
-          'wcag2a',
-          'wcag2aa',
-          'wcag21a',
-          'wcag21aa',
-          'wcag22a',
-          'wcag22aa',
-        ],
-      },
-    });
-    return { version: axe.version, violations: findings.violations };
-  }, AXE_CORE_VERSION);
-  expect(result.version).toBe(AXE_CORE_VERSION);
+                passes: readonly Readonly<{
+                  id: string;
+                  nodes: readonly Readonly<{ target: readonly string[] }>[];
+                }>[];
+                testEngine: Readonly<{ version: string }>;
+                violations: readonly unknown[];
+              }>
+            >;
+          }>
+        | undefined;
+      if (axe === undefined || axe.version !== expectedVersion) {
+        throw new Error('The pinned axe browser engine is unavailable.');
+      }
+      const root =
+        rootSelector === null ? document : document.querySelector(rootSelector);
+      if (root === null) {
+        throw new Error('The requested axe scan root is unavailable.');
+      }
+      let dialog:
+        | Readonly<{
+            documentScrollX: number;
+            documentScrollY: number;
+            element: HTMLDialogElement;
+            focusedElement: HTMLElement | null;
+            scrollLeft: number;
+            scrollTop: number;
+          }>
+        | undefined;
+      if (rootSelector !== null) {
+        if (
+          !(root instanceof HTMLDialogElement) ||
+          !root.open ||
+          !root.matches(':modal')
+        ) {
+          throw new Error('The requested axe dialog is not open and modal.');
+        }
+        const focusedElement =
+          document.activeElement instanceof HTMLElement &&
+          root.contains(document.activeElement)
+            ? document.activeElement
+            : null;
+        const closed = new Promise<void>((resolveClose) => {
+          root.addEventListener(
+            'close',
+            (event) => {
+              event.stopImmediatePropagation();
+              resolveClose();
+            },
+            { capture: true, once: true },
+          );
+        });
+        dialog = {
+          documentScrollX: window.scrollX,
+          documentScrollY: window.scrollY,
+          element: root,
+          focusedElement,
+          scrollLeft: root.scrollLeft,
+          scrollTop: root.scrollTop,
+        };
+        root.close();
+        await closed;
+        if (root.open || root.matches(':modal')) {
+          throw new Error('The axe dialog did not leave the modal top layer.');
+        }
+        root.show();
+        if (!root.open || root.matches(':modal')) {
+          throw new Error('The axe dialog did not enter non-modal mode.');
+        }
+        await new Promise<void>((resolveFrame) =>
+          requestAnimationFrame(() => resolveFrame()),
+        );
+      }
+
+      let findings: Awaited<ReturnType<NonNullable<typeof axe>['run']>>;
+      const verifiedDialogOcclusionKeys = new Set<string>();
+      const dialogOcclusionFailures: unknown[] = [];
+      let dialogRestored = true;
+      try {
+        findings = await axe.run(root, {
+          resultTypes: ['violations', 'incomplete'],
+          runOnly: {
+            type: 'tag',
+            values: [
+              'wcag2a',
+              'wcag2aa',
+              'wcag21a',
+              'wcag21aa',
+              'wcag22a',
+              'wcag22aa',
+            ],
+          },
+        });
+        if (dialog !== undefined) {
+          for (const finding of findings.incomplete) {
+            for (const node of finding.nodes) {
+              const selector =
+                node.target.length === 1 ? node.target[0] : undefined;
+              const exactNativeDialogOcclusion =
+                finding.id === 'color-contrast' &&
+                selector !== undefined &&
+                node.any.length > 0 &&
+                node.any.every(
+                  (check) =>
+                    check.id === 'color-contrast' &&
+                    check.data?.messageKey === 'elmPartiallyObscured' &&
+                    check.relatedNodes?.some(
+                      (related) =>
+                        related.target.length === 1 &&
+                        related.target[0] === 'dialog',
+                    ) === true,
+                );
+              const matches =
+                exactNativeDialogOcclusion && selector !== undefined
+                  ? dialog.element.querySelectorAll(selector)
+                  : [];
+              const element = matches.length === 1 ? matches[0] : undefined;
+              if (!(element instanceof HTMLElement)) continue;
+
+              element.scrollIntoView({ block: 'center', inline: 'center' });
+              await new Promise<void>((resolveFrame) =>
+                requestAnimationFrame(() => resolveFrame()),
+              );
+              const verification = await axe.run(element, {
+                resultTypes: ['violations', 'incomplete', 'passes'],
+                runOnly: { type: 'rule', values: ['color-contrast'] },
+              });
+              const passedContrast = verification.passes.some(
+                (pass) =>
+                  pass.id === 'color-contrast' &&
+                  pass.nodes.some(
+                    (passNode) =>
+                      passNode.target.length === 1 &&
+                      passNode.target[0] !== undefined &&
+                      element.matches(passNode.target[0]),
+                  ),
+              );
+              if (
+                verification.testEngine.version === expectedVersion &&
+                verification.violations.length === 0 &&
+                verification.incomplete.length === 0 &&
+                passedContrast
+              ) {
+                verifiedDialogOcclusionKeys.add(
+                  JSON.stringify({
+                    findingId: finding.id,
+                    messageKeys: node.any.map(
+                      (check) => check.data?.messageKey ?? null,
+                    ),
+                    target: node.target,
+                  }),
+                );
+              } else {
+                dialogOcclusionFailures.push({ node, verification });
+              }
+            }
+          }
+        }
+      } finally {
+        if (dialog !== undefined) {
+          dialog.element.removeAttribute('open');
+          dialog.element.showModal();
+          dialogRestored =
+            dialog.element.open && dialog.element.matches(':modal');
+          dialog.element.scrollTo(dialog.scrollLeft, dialog.scrollTop);
+          dialog.focusedElement?.focus({ preventScroll: true });
+          window.scrollTo(dialog.documentScrollX, dialog.documentScrollY);
+          await new Promise<void>((resolveFrame) =>
+            requestAnimationFrame(() => resolveFrame()),
+          );
+        }
+      }
+      if (!dialogRestored) {
+        throw new Error('The axe dialog did not restore modal behavior.');
+      }
+      const decorativeIncompleteSelectors: string[] = [];
+      const unexpectedIncomplete: unknown[] = [];
+      for (const finding of findings.incomplete) {
+        for (const node of finding.nodes) {
+          const selector =
+            node.target.length === 1 ? node.target[0] : undefined;
+          const matches =
+            selector === undefined
+              ? []
+              : rootSelector === null
+                ? document.querySelectorAll(selector)
+                : root.querySelectorAll(selector);
+          const element =
+            matches.length === 1 && matches[0] instanceof Element
+              ? matches[0]
+              : null;
+          const decorativeSelector = expectedDecorativeSelectors.find(
+            (expectedSelector) =>
+              element !== null &&
+              element === document.querySelector(expectedSelector),
+          );
+          const decorativeDiamond =
+            finding.id === 'color-contrast' &&
+            decorativeSelector !== undefined &&
+            element !== null &&
+            element.getAttribute('aria-hidden') === 'true' &&
+            /^\s*◆\s*$/u.test(element.textContent ?? '') &&
+            node.any.length > 0 &&
+            node.any.every(
+              (check) =>
+                check.id === 'color-contrast' &&
+                check.data?.messageKey === 'nonBmp',
+            );
+          if (decorativeDiamond) {
+            decorativeIncompleteSelectors.push(decorativeSelector);
+            continue;
+          }
+          if (
+            verifiedDialogOcclusionKeys.has(
+              JSON.stringify({
+                findingId: finding.id,
+                messageKeys: node.any.map(
+                  (check) => check.data?.messageKey ?? null,
+                ),
+                target: node.target,
+              }),
+            )
+          ) {
+            continue;
+          }
+
+          unexpectedIncomplete.push(node);
+        }
+      }
+      unexpectedIncomplete.push(...dialogOcclusionFailures);
+      return {
+        decorativeIncompleteSelectors,
+        testEngineVersion: findings.testEngine.version,
+        unexpectedIncomplete,
+        violations: findings.violations,
+      };
+    },
+    {
+      expectedDecorativeSelectors: decorativeTargets,
+      expectedVersion: AXE_CORE_VERSION,
+      rootSelector: contextSelector,
+    },
+  );
+  expect(result.testEngineVersion).toBe(AXE_CORE_VERSION);
   expect(
     result.violations,
     `${stateLabel} axe violations: ${JSON.stringify(result.violations)}`,
   ).toEqual([]);
+  expect(
+    result.unexpectedIncomplete,
+    `${stateLabel} unexpected axe incomplete results: ${JSON.stringify(result.unexpectedIncomplete)}`,
+  ).toEqual([]);
+  expect(result.decorativeIncompleteSelectors.sort()).toEqual(
+    [...decorativeTargets].sort(),
+  );
 }
 
 async function activateByKeyboard(page: Page, target: Locator): Promise<void> {
@@ -263,7 +531,7 @@ test('keyboard-only synthetic activation continues through event-room all-clear'
   );
   await expect(page).toHaveURL(/\/events\/[0-9a-f-]+$/u);
   await expect(page.locator('.event-status')).toHaveText('Active');
-  await assertAxeZeroViolations(page, 'keyboard-opened active drill room');
+  await assertEventRoomAxeClean(page, 'keyboard-opened active drill room');
 
   const update = page.getByLabel('Update text');
   await focusByKeyboard(page, update);
@@ -274,7 +542,7 @@ test('keyboard-only synthetic activation continues through event-room all-clear'
   await expect(
     page.getByText('Synthetic keyboard-only E2E update.', { exact: true }),
   ).toBeVisible();
-  await assertAxeZeroViolations(page, 'keyboard-posted drill room');
+  await assertEventRoomAxeClean(page, 'keyboard-posted drill room');
   const notificationIntents = page.getByText(
     'Notification fan-out intent recorded.',
     { exact: true },
@@ -294,7 +562,11 @@ test('keyboard-only synthetic activation continues through event-room all-clear'
   ).toBeVisible({ timeout: 20_000 });
   const confirmation = page.getByLabel('Type ALL CLEAR exactly');
   await focusByKeyboard(page, confirmation);
-  await assertAxeZeroViolations(page, 'keyboard all-clear consequence dialog');
+  await assertEventRoomAxeClean(
+    page,
+    'keyboard all-clear consequence dialog',
+    true,
+  );
   await page.keyboard.insertText('ALL CLEAR');
   const issueAllClear = page.getByRole('button', {
     name: 'Issue all-clear and notify',
@@ -303,7 +575,7 @@ test('keyboard-only synthetic activation continues through event-room all-clear'
   await activateByKeyboard(page, issueAllClear);
   await expect(page.locator('.event-status')).toHaveText('All-clear issued');
   await expect(notificationIntents).toHaveCount(2);
-  await assertAxeZeroViolations(page, 'keyboard-completed all-clear room');
+  await assertEventRoomAxeClean(page, 'keyboard-completed all-clear room');
 });
 
 test('activation remains operable in forced colors and at an explicit 200 percent page zoom', async ({
