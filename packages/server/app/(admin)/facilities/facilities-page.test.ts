@@ -8,7 +8,7 @@ import {
   isInvalidFacilitiesAdminQueryError,
   normalizeFacilitiesAdminCursorState,
 } from './facilities-page-state';
-import { redirectInvalidFacilitiesAdminQuery } from './page';
+import { redirectInvalidFacilitiesAdminQuery } from './facilities-page-state';
 
 describe('facilities administration page query state', () => {
   test('normalizes one independent cursor per collection', () => {

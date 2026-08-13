@@ -20,13 +20,13 @@ import {
   type RecordEndpointStatusInput,
 } from '@psd-eoc/contracts';
 
-import { DeliveryStateError } from '../../packages/server/app/api/internal/delivery-state/route';
+import { DeliveryStateError } from '../../packages/server/app/api/internal/delivery-state/runtime';
 import {
   SES_WEBHOOK_MAX_BODY_BYTES,
   createSesWebhookRouteHandler,
   type SesCallbackClaim,
   type SesWebhookStore,
-} from '../../packages/server/app/api/webhooks/ses/route';
+} from '../../packages/server/app/api/webhooks/ses/runtime';
 import { IDS } from '../shared/test-fixtures';
 import {
   SnsSignatureError,
