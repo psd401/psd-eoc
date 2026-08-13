@@ -750,6 +750,9 @@ describe('App Runner high availability', () => {
       '/psd-eoc/database/application',
     );
     const apiSaltSecretLogicalId = secretLogicalId('/psd-eoc/api-salt');
+    const deliveryStateWorkerTokenSecretLogicalId = secretLogicalId(
+      '/psd-eoc/delivery-state-worker-token',
+    );
     const googleOauthSecretLogicalId = secretLogicalId('/psd-eoc/google-oauth');
 
     expect([...environmentByName.keys()].sort()).toEqual(
@@ -763,6 +766,10 @@ describe('App Runner high availability', () => {
         'DATABASE_SECRET_ARN',
         'FANOUT_QUEUE_URL',
         'MEDIA_BUCKET_NAME',
+        'PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE',
+        'PSD_EOC_PRODUCT_OWNER_USER_ID',
+        'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
+        'PSD_EOC_SMS_CREDENTIAL_VERIFICATION_REFERENCE',
       ].sort(),
     );
     expect(environmentByName.get('AWS_REGION')).toBe(DEPLOYMENT_REGION);
@@ -773,6 +780,26 @@ describe('App Runner high availability', () => {
       Ref: applicationSecretLogicalId,
     });
     expect(environmentByName.has('DATABASE_CLUSTER_ARN')).toBe(false);
+    expect(environmentByName.get('PSD_EOC_PRODUCT_OWNER_USER_ID')).toEqual({
+      Ref: 'DeliveryTestProductOwnerUserId',
+    });
+    expect(
+      environmentByName.get('PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE'),
+    ).toEqual({ Ref: 'ExpoCredentialVerificationReference' });
+    expect(
+      environmentByName.get('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE'),
+    ).toEqual({ Ref: 'SesCredentialVerificationReference' });
+    expect(
+      environmentByName.get('PSD_EOC_SMS_CREDENTIAL_VERIFICATION_REFERENCE'),
+    ).toEqual({ Ref: 'SmsCredentialVerificationReference' });
+
+    const environmentSecrets = asArray(
+      imageConfiguration.RuntimeEnvironmentSecrets,
+    ).map(asRecord);
+    expect(environmentSecrets).toContainEqual({
+      Name: 'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+      Value: { Ref: deliveryStateWorkerTokenSecretLogicalId },
+    });
 
     const instanceConfiguration = asRecord(
       serviceProperties.InstanceConfiguration,
@@ -814,6 +841,7 @@ describe('App Runner high availability', () => {
       [
         apiSaltSecretLogicalId,
         applicationSecretLogicalId,
+        deliveryStateWorkerTokenSecretLogicalId,
         googleOauthSecretLogicalId,
       ].sort(),
     );
@@ -828,12 +856,13 @@ describe('App Runner high availability', () => {
 describe('fail-closed integration placeholders', () => {
   it('creates generated secrets without plaintext credential properties', () => {
     const secrets = resourceEntries('AWS::SecretsManager::Secret');
-    expect(secrets).toHaveLength(6);
+    expect(secrets).toHaveLength(7);
 
     const expectedNames = new Set([
       '/psd-eoc/api-salt',
       '/psd-eoc/database/admin',
       '/psd-eoc/database/application',
+      '/psd-eoc/delivery-state-worker-token',
       '/psd-eoc/database/monitoring',
       '/psd-eoc/expo-access-token',
       '/psd-eoc/google-oauth',
@@ -846,6 +875,23 @@ describe('fail-closed integration placeholders', () => {
       expect(secret.DeletionPolicy).toBe('Retain');
     }
     expect(expectedNames.size).toBe(0);
+  });
+
+  it('defaults credential readiness to fail closed and requires an explicit product owner', () => {
+    const parameters = asRecord(synthesizedTemplate.Parameters);
+    const owner = asRecord(parameters.DeliveryTestProductOwnerUserId);
+    expect(owner).not.toHaveProperty('Default');
+    expect(owner.AllowedPattern).toContain('4[0-9a-f]');
+
+    for (const name of [
+      'ExpoCredentialVerificationReference',
+      'SesCredentialVerificationReference',
+      'SmsCredentialVerificationReference',
+    ]) {
+      const parameter = asRecord(parameters[name]);
+      expect(parameter.Default).toBe('UNVERIFIED');
+      expect(parameter.AllowedPattern).toContain('UNVERIFIED');
+    }
   });
 
   it('creates a retained child zone with retained same-account delegation', () => {
@@ -1126,7 +1172,7 @@ describe('operational observability', () => {
     template.resourceCountIs('AWS::SNS::Subscription', 4);
     expect(
       resourceEntries('AWS::CloudWatch::Alarm').length,
-    ).toBeGreaterThanOrEqual(20);
+    ).toBeGreaterThanOrEqual(23);
   });
 
   it('scopes CloudWatch Logs service access to regional PSD EOC groups', () => {
@@ -1258,7 +1304,7 @@ describe('no automated critical-action path', () => {
     const rules = resourceEntries('AWS::Events::Rule').map(([, resource]) =>
       resourceProperties(resource),
     );
-    expect(rules).toHaveLength(3);
+    expect(rules).toHaveLength(4);
     expect(
       rules.filter((rule) => rule.ScheduleExpression === 'rate(1 minute)'),
     ).toHaveLength(2);
@@ -1269,6 +1315,12 @@ describe('no automated critical-action path', () => {
         ),
       ),
     ).toHaveLength(1);
+    const monthlyDueRules = rules.filter(
+      (rule) => rule.Name === 'psd-eoc-monthly-live-delivery-test-due-reminder',
+    );
+    expect(monthlyDueRules).toHaveLength(1);
+    expect(monthlyDueRules[0]?.ScheduleExpression).toBe('cron(0 17 1 * ? *)');
+    expect(monthlyDueRules[0]).not.toHaveProperty('Targets');
     const subscriptions = resourceEntries('AWS::SNS::Subscription').map(
       ([, resource]) => resourceProperties(resource),
     );

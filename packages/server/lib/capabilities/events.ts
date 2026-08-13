@@ -64,6 +64,9 @@ import {
   activationPreviews,
   audienceConfigurations,
   channelConfigurations,
+  deliveryTestRuns,
+  deliveryTestTargetEndpoints,
+  deliveryTestTargetSetVersions,
   eventTransitions,
   events,
   facilities,
@@ -81,6 +84,14 @@ import {
   securityAuditEntries,
 } from '../../db/schema';
 import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/access-gate';
+import {
+  currentActiveAudienceEndpointReferences,
+  deliveryTestCredentialIsVerified,
+  loadAudienceConfiguration,
+  loadRosterSnapshot,
+  readDeliveryTestCredentialVerificationReferences,
+  requireCurrentDeliveryTestTargetEligibility,
+} from '../../app/(app)/start/_lib/capabilities';
 import {
   CapabilityEngineError,
   digestCapabilityValue,
@@ -100,6 +111,11 @@ import {
   type TrustedCapabilityInvocation,
 } from './engine';
 import { transitionEventStatus } from '../events/state-machine';
+import {
+  DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
+  deliveryTestEndpointReferenceDigest,
+  deliveryTestTargetLockIdentity,
+} from '../testing/e2e-delivery';
 
 /** Preview plus server-only persistence references required for one send. */
 export interface ResolvedActivationSource {
@@ -485,6 +501,8 @@ function buildNotification(
     throw conflict('Activated notification provenance is incomplete.');
   }
   const at = timestamp(input.context.invocation.serverTime);
+  const deliveryTest =
+    'deliveryTest' in input.preview ? input.preview.deliveryTest : null;
   const intent = NotificationIntentSchema.parse({
     id: randomUUID(),
     eventId: input.event.id,
@@ -495,6 +513,7 @@ function buildNotification(
     rosterSnapshotId: input.event.rosterSnapshotId,
     rosterPopulation: input.event.rosterPopulation,
     audienceConfig: input.preview.audienceConfig,
+    deliveryTest,
     createdBy: input.context.invocation.actor,
     source: input.context.invocation.source,
     requestId: input.context.invocation.requestId,
@@ -516,6 +535,7 @@ function buildNotification(
     rosterSnapshotId: intent.rosterSnapshotId,
     rosterPopulation: intent.rosterPopulation,
     audienceConfig: intent.audienceConfig,
+    deliveryTest: intent.deliveryTest,
     requestId: intent.requestId,
     authorization: intent.authorization,
     channels: intent.channels,
@@ -1721,6 +1741,19 @@ async function activationPreviewById(
     sendReadiness: row.sendReadiness,
     blockingReasonCodes: row.blockingReasonCodes,
     activeEventIds: row.activeEventIds,
+    deliveryTest:
+      row.deliveryTestTargetSetId === null ||
+      row.deliveryTestTargetSetVersion === null ||
+      row.deliveryTestEndpointReferenceDigest === null
+        ? null
+        : {
+            purpose: 'monthly-live-delivery-test',
+            targetSet: {
+              id: row.deliveryTestTargetSetId,
+              version: row.deliveryTestTargetSetVersion,
+            },
+            endpointReferenceDigest: row.deliveryTestEndpointReferenceDigest,
+          },
     consequenceDigest: row.consequenceDigest,
     createdAt: dateIso(row.createdAt),
     expiresAt: dateIso(row.expiresAt),
@@ -1819,6 +1852,19 @@ async function notificationIntentById(
       id: row.audienceConfigId,
       version: row.audienceConfigVersion,
     },
+    deliveryTest:
+      row.deliveryTestTargetSetId === null ||
+      row.deliveryTestTargetSetVersion === null ||
+      row.deliveryTestEndpointReferenceDigest === null
+        ? null
+        : {
+            purpose: 'monthly-live-delivery-test',
+            targetSet: {
+              id: row.deliveryTestTargetSetId,
+              version: row.deliveryTestTargetSetVersion,
+            },
+            endpointReferenceDigest: row.deliveryTestEndpointReferenceDigest,
+          },
     createdBy: row.createdBy,
     source: row.source,
     requestId: row.requestId,
@@ -2187,6 +2233,11 @@ async function persistNotification(
     source: intent.source,
     requestId: intent.requestId,
     authorization: intent.authorization,
+    deliveryTestTargetSetId: intent.deliveryTest?.targetSet.id ?? null,
+    deliveryTestTargetSetVersion:
+      intent.deliveryTest?.targetSet.version ?? null,
+    deliveryTestEndpointReferenceDigest:
+      intent.deliveryTest?.endpointReferenceDigest ?? null,
     createdAt: new Date(intent.createdAt),
   });
   await database.insert(notificationIntentChannels).values(
@@ -2328,6 +2379,42 @@ async function persistLifecycleBundle(
       bundle.outboxRecord,
       bundle.integrationStatusIds,
     );
+    const intent = bundle.result.notificationIntent;
+    if (intent.deliveryTest != null) {
+      const authorization = intent.authorization;
+      if (
+        bundle.result.transition.transition !== 'activate' ||
+        authorization.kind !== 'human-confirmed' ||
+        intent.createdBy.kind !== 'human' ||
+        (intent.source !== 'web' && intent.source !== 'mobile') ||
+        bundle.result.event.kind !== 'drill' ||
+        bundle.result.event.templateMode !== 'drill' ||
+        bundle.result.event.rosterPopulation !== 'staff' ||
+        bundle.result.event.activatedAt === null ||
+        authorization.preparedActivationId !== null ||
+        bundle.result.transition.confirmationId !== authorization.confirmationId
+      ) {
+        throw conflict(
+          'The monthly delivery-test activation evidence is inconsistent.',
+        );
+      }
+      await database.insert(deliveryTestRuns).values({
+        id: randomUUID(),
+        activationPreviewId: authorization.activationPreviewId,
+        eventId: bundle.result.event.id,
+        notificationIntentId: intent.id,
+        targetSetVersionId: intent.deliveryTest.targetSet.id,
+        targetSetVersion: intent.deliveryTest.targetSet.version,
+        endpointReferenceDigest: intent.deliveryTest.endpointReferenceDigest,
+        consequenceDigest: authorization.consequenceDigest,
+        confirmationId: authorization.confirmationId,
+        confirmationStatus: 'consumed',
+        requestId: intent.requestId,
+        startedByUserId: intent.createdBy.userId,
+        startedWithSessionId: intent.createdBy.sessionId,
+        startedAt: new Date(bundle.result.event.activatedAt),
+      });
+    }
   } else if (bundle.outboxRecord !== null) {
     throw conflict(
       'An outbox record cannot exist without notification intent.',
@@ -2575,6 +2662,170 @@ async function resolveActivationSourceFromDatabase(
     (await activationPreviewById(database, previewId));
   if (preview === null) {
     return null;
+  }
+  if (preview.deliveryTest != null) {
+    if (preparedActivation !== null || input.source !== 'activation-preview') {
+      throw conflict(
+        'A monthly delivery test requires a fresh interactive activation preview.',
+      );
+    }
+    const metadata = preview.deliveryTest;
+    // Coordinate with target-version creation. Without this shared lineage
+    // lock a successor could commit after the stale check but before this
+    // activation transaction commits and queues its outbox.
+    await database.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${deliveryTestTargetLockIdentity(preview.facilityId)}, ${DELIVERY_TEST_TARGET_LOCK_NAMESPACE}))`,
+    );
+    const [targetSet] = await database
+      .select()
+      .from(deliveryTestTargetSetVersions)
+      .where(
+        and(
+          eq(deliveryTestTargetSetVersions.id, metadata.targetSet.id),
+          eq(deliveryTestTargetSetVersions.version, metadata.targetSet.version),
+        ),
+      )
+      .for('share')
+      .limit(1);
+    if (
+      targetSet === undefined ||
+      targetSet.facilityId !== preview.facilityId ||
+      targetSet.rosterSnapshotId !== preview.rosterSnapshotId ||
+      targetSet.rosterPopulation !== 'staff' ||
+      targetSet.endpointReferenceDigest !== metadata.endpointReferenceDigest
+    ) {
+      throw conflict(
+        'The monthly delivery-test target approval no longer matches its preview.',
+      );
+    }
+    const [successor] = await database
+      .select({ id: deliveryTestTargetSetVersions.id })
+      .from(deliveryTestTargetSetVersions)
+      .where(
+        eq(deliveryTestTargetSetVersions.supersedesVersionId, targetSet.id),
+      )
+      .limit(1);
+    if (successor !== undefined) {
+      throw conflict(
+        'The monthly delivery-test target approval has been superseded.',
+      );
+    }
+    const endpointRows = await database
+      .select({
+        eligibilityFactId: deliveryTestTargetEndpoints.eligibilityFactId,
+        recipientId: deliveryTestTargetEndpoints.recipientId,
+        endpointId: deliveryTestTargetEndpoints.endpointId,
+        channel: deliveryTestTargetEndpoints.channel,
+        attestation: deliveryTestTargetEndpoints.attestation,
+        optedInAt: deliveryTestTargetEndpoints.optedInAt,
+        attestedAt: deliveryTestTargetEndpoints.attestedAt,
+        attestedByUserId: deliveryTestTargetEndpoints.attestedByUserId,
+        authorizationReference:
+          deliveryTestTargetEndpoints.authorizationReference,
+      })
+      .from(deliveryTestTargetEndpoints)
+      .where(eq(deliveryTestTargetEndpoints.targetSetVersionId, targetSet.id))
+      .orderBy(
+        asc(deliveryTestTargetEndpoints.channel),
+        asc(deliveryTestTargetEndpoints.recipientId),
+        asc(deliveryTestTargetEndpoints.endpointId),
+      );
+    if (
+      endpointRows.length === 0 ||
+      deliveryTestEndpointReferenceDigest(endpointRows) !==
+        metadata.endpointReferenceDigest
+    ) {
+      throw conflict(
+        'The monthly delivery-test endpoint approval is inconsistent.',
+      );
+    }
+    await requireCurrentDeliveryTestTargetEligibility(
+      database,
+      {
+        id: targetSet.id,
+        version: targetSet.version,
+        facilityId: targetSet.facilityId,
+        rosterSnapshotId: targetSet.rosterSnapshotId,
+        supersedesVersionId: targetSet.supersedesVersionId,
+        endpoints: endpointRows.map((endpoint) => ({
+          ...endpoint,
+          attestation: 'approved-synthetic-canary' as const,
+          optedInAt: dateIso(endpoint.optedInAt),
+          attestedAt: dateIso(endpoint.attestedAt),
+          attestedByUserId: endpoint.attestedByUserId,
+          authorizationReference: endpoint.authorizationReference,
+        })),
+        endpointReferenceDigest: targetSet.endpointReferenceDigest,
+        approvedByUserId: targetSet.approvedByUserId,
+        approvedWithSessionId: targetSet.approvedWithSessionId,
+        approvedAt: dateIso(targetSet.approvedAt),
+        createdAt: dateIso(targetSet.createdAt),
+      },
+      await readDatabaseTime(database),
+    );
+    const credentialReferences =
+      readDeliveryTestCredentialVerificationReferences();
+    if (
+      preview.channels.some(
+        (channel) =>
+          !deliveryTestCredentialIsVerified(
+            channel.integrationStatus,
+            credentialReferences[channel.channel],
+          ),
+      )
+    ) {
+      throw conflict(
+        'The monthly delivery-test credential evidence no longer matches its preview.',
+      );
+    }
+    const audience = await loadAudienceConfiguration(
+      database,
+      preview.facilityId,
+    );
+    const rosterSnapshot = await loadRosterSnapshot(
+      database,
+      'staff',
+      preview.facilityId,
+      targetSet.rosterSnapshotId,
+    );
+    const activeAudienceEndpoints =
+      rosterSnapshot === null || audience === null
+        ? []
+        : await currentActiveAudienceEndpointReferences(
+            database,
+            rosterSnapshot,
+            audience,
+          );
+    const currentAudienceHeader = audience?.audienceConfig;
+    const activeKeys = new Set(
+      activeAudienceEndpoints.map(
+        (endpoint) =>
+          `${endpoint.channel}:${endpoint.recipientId}:${endpoint.endpointId}`,
+      ),
+    );
+    if (
+      rosterSnapshot === null ||
+      currentAudienceHeader === undefined ||
+      currentAudienceHeader.id !== preview.audienceConfig.id ||
+      currentAudienceHeader.version !== preview.audienceConfig.version ||
+      endpointRows.some(
+        (endpoint) =>
+          !activeKeys.has(
+            `${endpoint.channel}:${endpoint.recipientId}:${endpoint.endpointId}`,
+          ),
+      ) ||
+      preview.channels.some(
+        (channel) =>
+          channel.endpointCount !==
+          endpointRows.filter(
+            (endpoint) => endpoint.channel === channel.channel,
+          ).length,
+      )
+    ) {
+      throw conflict(
+        'The monthly delivery-test endpoints are no longer the exact active approved subset.',
+      );
+    }
   }
   await database
     .select({ id: facilities.id })

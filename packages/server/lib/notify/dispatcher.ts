@@ -1,8 +1,10 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 
 import {
+  DeliveryTestNotificationMetadataSchema,
   DispatchBatchSchema,
   DispatchOutboxResultSchema,
+  EndpointStatusSchema,
   FacilityIdSchema,
   IdempotencyKeySchema,
   NotificationOutboxMessageSchema,
@@ -13,15 +15,18 @@ import {
   type Actor,
   type CapabilityAuthorizationRequest,
   type CapabilityExecutionAuthorizer,
+  type DeliveryTestNotificationMetadata,
   type DispatchBatch,
   type DispatchOutboxResult,
+  type EmailEndpoint,
+  type EndpointStatus,
   type InvocationSource,
   type NotificationOutboxMessage,
   type OutboxRecord,
   type RegisteredCapabilityHandler,
   type RegisteredCapabilityId,
 } from '@psd-eoc/contracts';
-import { and, asc, eq, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, or, sql } from 'drizzle-orm';
 
 import {
   databaseExecuteRows,
@@ -29,11 +34,22 @@ import {
   type DatabaseQuery,
 } from '../../db/client';
 import {
+  deliveryTestCanaryEligibilityFacts,
+  deliveryTestTargetEndpoints,
+  deliveryTestTargetSetVersions,
   dispatchBatches,
+  endpointStatusRecords,
   events,
   notificationIntentChannels,
   outbox,
+  rosterEndpoints,
 } from '../../db/schema';
+import { resolveAudience, type ResolveAudienceInput } from '../roster/resolve';
+import {
+  DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
+  deliveryTestEndpointReferenceDigest,
+  deliveryTestTargetLockIdentity,
+} from '../testing/e2e-delivery';
 
 /** Maximum outbox rows considered by one bounded poll invocation. */
 export const MAX_OUTBOX_POLL_SIZE = 100;
@@ -111,6 +127,331 @@ export class QueuePublishError extends OutboxDispatcherError {
     super(code, message, retryable);
     this.name = 'QueuePublishError';
   }
+}
+
+/** Canonical email integration selected by every email dispatch batch. */
+export const EMAIL_INTEGRATION_ID = 'ses-email' as const;
+
+const MAX_EMAIL_ENDPOINTS = 12_000;
+
+export type EmailEndpointResolutionErrorCode =
+  | 'EMAIL_AUDIENCE_INVALID'
+  | 'EMAIL_AUDIENCE_MISMATCH'
+  | 'EMAIL_BATCH_INVALID'
+  | 'EMAIL_ENDPOINT_COUNT_MISMATCH'
+  | 'EMAIL_ENDPOINT_POLICY_INVALID'
+  | 'EMAIL_ROSTER_MISMATCH';
+
+/** Destination-safe email failure which never reflects an address or ID. */
+export class EmailEndpointResolutionError extends Error {
+  public constructor(public readonly code: EmailEndpointResolutionErrorCode) {
+    super('Email endpoint resolution failed safely.');
+    this.name = 'EmailEndpointResolutionError';
+  }
+}
+
+/** Opaque endpoint reference accepted by the destination-free policy store. */
+export interface EmailEndpointPolicyCandidate {
+  readonly recipientId: string;
+  readonly endpointId: string;
+}
+
+/**
+ * Complete policy query. It deliberately cannot carry an email address; the
+ * destination remains inside the trusted resolver until every check passes.
+ */
+export interface EmailEndpointPolicyQuery {
+  readonly rosterSnapshotId: string;
+  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly endpointCount: number;
+  readonly deliveryTest: DeliveryTestNotificationMetadata | null;
+  readonly candidates: readonly EmailEndpointPolicyCandidate[];
+}
+
+/** Destination-free current lifecycle and controlled-canary evidence. */
+export interface EmailEndpointPolicyEvidence
+  extends EmailEndpointPolicyCandidate {
+  readonly status: EndpointStatus;
+  readonly approvedForDeliveryTest: boolean;
+}
+
+/** Policy boundary which never receives or returns an email destination. */
+export interface EmailEndpointPolicyStore {
+  loadEndpointPolicy(query: EmailEndpointPolicyQuery): Promise<unknown>;
+}
+
+export interface ResolveEmailEndpointsInput {
+  readonly batch: unknown;
+  readonly audience: ResolveAudienceInput;
+}
+
+/** Email destination exposed only after immutable targeting policy succeeds. */
+export interface ResolvedEmailEndpoint {
+  readonly rosterSnapshotId: string;
+  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly recipientId: string;
+  readonly endpoint: EmailEndpoint;
+}
+
+function emailCandidateKey(value: {
+  readonly recipientId: string;
+  readonly endpointId: string;
+}): string {
+  return `${value.recipientId}:${value.endpointId}`;
+}
+
+function exactEmailPolicyRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Readonly<Record<string, unknown>> | null {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (
+      keys.length !== expectedKeys.length ||
+      keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
+    ) {
+      return null;
+    }
+    const properties: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    for (const key of expectedKeys) {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined ||
+        descriptor.enumerable !== true ||
+        !Object.hasOwn(descriptor, 'value')
+      ) {
+        return null;
+      }
+      properties[key] = descriptor.value;
+    }
+    return properties;
+  } catch {
+    return null;
+  }
+}
+
+function parseEmailEndpointPolicyQuery(
+  value: EmailEndpointPolicyQuery,
+): EmailEndpointPolicyQuery {
+  const properties = exactEmailPolicyRecord(value, [
+    'rosterSnapshotId',
+    'rosterPopulation',
+    'endpointCount',
+    'deliveryTest',
+    'candidates',
+  ]);
+  const deliveryTest =
+    properties?.deliveryTest === null
+      ? null
+      : DeliveryTestNotificationMetadataSchema.safeParse(
+          properties?.deliveryTest,
+        );
+  if (
+    properties === null ||
+    !UuidSchema.safeParse(properties.rosterSnapshotId).success ||
+    (properties.rosterPopulation !== 'staff' &&
+      properties.rosterPopulation !== 'synthetic') ||
+    !Number.isSafeInteger(properties.endpointCount) ||
+    Number(properties.endpointCount) < 0 ||
+    Number(properties.endpointCount) > MAX_EMAIL_ENDPOINTS ||
+    !Array.isArray(properties.candidates) ||
+    properties.candidates.length > MAX_EMAIL_ENDPOINTS ||
+    (deliveryTest !== null && !deliveryTest.success)
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+  const candidates = properties.candidates.map((candidate) => {
+    const candidateProperties = exactEmailPolicyRecord(candidate, [
+      'recipientId',
+      'endpointId',
+    ]);
+    if (
+      candidateProperties === null ||
+      !UuidSchema.safeParse(candidateProperties.recipientId).success ||
+      !UuidSchema.safeParse(candidateProperties.endpointId).success
+    ) {
+      throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+    }
+    return Object.freeze({
+      recipientId: String(candidateProperties.recipientId),
+      endpointId: String(candidateProperties.endpointId),
+    });
+  });
+  if (new Set(candidates.map(emailCandidateKey)).size !== candidates.length) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+  return Object.freeze({
+    rosterSnapshotId: String(properties.rosterSnapshotId),
+    rosterPopulation: properties.rosterPopulation,
+    endpointCount: Number(properties.endpointCount),
+    deliveryTest: deliveryTest === null ? null : deliveryTest.data,
+    candidates: Object.freeze(candidates),
+  });
+}
+
+function parseEmailEndpointPolicyEvidence(
+  value: unknown,
+  query: EmailEndpointPolicyQuery,
+): ReadonlyMap<string, EmailEndpointPolicyEvidence> {
+  try {
+    if (!Array.isArray(value)) throw new TypeError();
+    const length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
+    if (
+      !Number.isSafeInteger(length) ||
+      Number(length) !== query.candidates.length ||
+      Number(length) > MAX_EMAIL_ENDPOINTS
+    ) {
+      throw new TypeError();
+    }
+    const expected = new Set(query.candidates.map(emailCandidateKey));
+    const evidence = new Map<string, EmailEndpointPolicyEvidence>();
+    for (let index = 0; index < Number(length); index += 1) {
+      const slot = Object.getOwnPropertyDescriptor(value, String(index));
+      const properties =
+        slot !== undefined &&
+        slot.enumerable === true &&
+        Object.hasOwn(slot, 'value')
+          ? exactEmailPolicyRecord(slot.value, [
+              'recipientId',
+              'endpointId',
+              'status',
+              'approvedForDeliveryTest',
+            ])
+          : null;
+      const status = EndpointStatusSchema.safeParse(properties?.status);
+      if (
+        properties === null ||
+        typeof properties.recipientId !== 'string' ||
+        typeof properties.endpointId !== 'string' ||
+        typeof properties.approvedForDeliveryTest !== 'boolean' ||
+        !status.success
+      ) {
+        throw new TypeError();
+      }
+      const item = Object.freeze({
+        recipientId: properties.recipientId,
+        endpointId: properties.endpointId,
+        status: status.data,
+        approvedForDeliveryTest: properties.approvedForDeliveryTest,
+      });
+      const key = emailCandidateKey(item);
+      if (!expected.has(key) || evidence.has(key)) throw new TypeError();
+      evidence.set(key, item);
+    }
+    if (evidence.size !== expected.size) throw new TypeError();
+    return evidence;
+  } catch {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+}
+
+function parseEmailDispatchBatch(value: unknown): DispatchBatch {
+  const parsed = DispatchBatchSchema.safeParse(value);
+  if (
+    !parsed.success ||
+    parsed.data.channel !== 'email' ||
+    parsed.data.renderedMessage.channel !== 'email' ||
+    parsed.data.integrationStatus.integrationId !== EMAIL_INTEGRATION_ID
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_BATCH_INVALID');
+  }
+  return parsed.data;
+}
+
+/**
+ * Resolves immutable audience evidence, checks destination-free current
+ * policy, and only then releases approved email endpoints to composition.
+ */
+export async function resolveEmailEndpoints(
+  input: ResolveEmailEndpointsInput,
+  store: EmailEndpointPolicyStore,
+): Promise<readonly ResolvedEmailEndpoint[]> {
+  const batch = parseEmailDispatchBatch(input.batch);
+  let audience: ReturnType<typeof resolveAudience>;
+  try {
+    audience = resolveAudience(input.audience);
+  } catch {
+    throw new EmailEndpointResolutionError('EMAIL_AUDIENCE_INVALID');
+  }
+  if (
+    audience.rosterSnapshot.id !== batch.rosterSnapshotId ||
+    audience.rosterSnapshot.population !== batch.rosterPopulation
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_ROSTER_MISMATCH');
+  }
+  if (
+    audience.audienceConfig.id !== batch.audienceConfig.id ||
+    audience.audienceConfig.version !== batch.audienceConfig.version
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_AUDIENCE_MISMATCH');
+  }
+
+  const candidates = audience.recipients.flatMap((recipient) =>
+    recipient.endpoints.flatMap((endpoint) =>
+      endpoint.channel === 'email' && endpoint.status === 'active'
+        ? [Object.freeze({ recipientId: recipient.recipientId, endpoint })]
+        : [],
+    ),
+  );
+  if (batch.deliveryTest == null && candidates.length !== batch.endpointCount) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_COUNT_MISMATCH');
+  }
+  const query = parseEmailEndpointPolicyQuery({
+    rosterSnapshotId: batch.rosterSnapshotId,
+    rosterPopulation: batch.rosterPopulation,
+    endpointCount: batch.endpointCount,
+    deliveryTest: batch.deliveryTest ?? null,
+    candidates: candidates.map(({ recipientId, endpoint }) => ({
+      recipientId,
+      endpointId: endpoint.id,
+    })),
+  });
+  let rawPolicy: unknown;
+  try {
+    rawPolicy = await store.loadEndpointPolicy(query);
+  } catch {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+  const policy = parseEmailEndpointPolicyEvidence(rawPolicy, query);
+  if (batch.deliveryTest != null) {
+    const readyApprovedCount = [...policy.values()].filter(
+      (item) => item.status === 'active' && item.approvedForDeliveryTest,
+    ).length;
+    if (readyApprovedCount !== batch.endpointCount) {
+      throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_COUNT_MISMATCH');
+    }
+  }
+
+  return Object.freeze(
+    candidates.flatMap(({ recipientId, endpoint }) => {
+      const evidence = policy.get(
+        emailCandidateKey({ recipientId, endpointId: endpoint.id }),
+      );
+      if (
+        evidence?.status !== 'active' ||
+        (batch.deliveryTest != null && !evidence.approvedForDeliveryTest)
+      ) {
+        return [];
+      }
+      return [
+        Object.freeze({
+          rosterSnapshotId: batch.rosterSnapshotId,
+          rosterPopulation: batch.rosterPopulation,
+          recipientId,
+          endpoint,
+        }),
+      ];
+    }),
+  );
 }
 
 /** Stable SQS batch entry derived from one immutable dispatch batch. */
@@ -1379,6 +1720,281 @@ function dispatcherQueryDatabase(database: unknown): DispatcherQueryDatabase {
   return database as DispatcherQueryDatabase;
 }
 
+async function loadCurrentEmailDeliveryTestTargets(
+  database: DispatcherQueryDatabase,
+  query: EmailEndpointPolicyQuery,
+): Promise<ReadonlySet<string> | null> {
+  if (query.deliveryTest === null) return null;
+  if (query.rosterPopulation !== 'staff') {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+
+  // The immutable target row supplies the facility-scoped lock identity. A
+  // second read after lock acquisition is the authoritative current check.
+  const [unlockedTarget] = await database
+    .select({ facilityId: deliveryTestTargetSetVersions.facilityId })
+    .from(deliveryTestTargetSetVersions)
+    .where(
+      and(
+        eq(deliveryTestTargetSetVersions.id, query.deliveryTest.targetSet.id),
+        eq(
+          deliveryTestTargetSetVersions.version,
+          query.deliveryTest.targetSet.version,
+        ),
+      ),
+    )
+    .limit(1);
+  if (unlockedTarget === undefined) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+  await database.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${deliveryTestTargetLockIdentity(unlockedTarget.facilityId)}, ${DELIVERY_TEST_TARGET_LOCK_NAMESPACE}))`,
+  );
+
+  const [target] = await database
+    .select({
+      id: deliveryTestTargetSetVersions.id,
+      version: deliveryTestTargetSetVersions.version,
+      facilityId: deliveryTestTargetSetVersions.facilityId,
+      rosterSnapshotId: deliveryTestTargetSetVersions.rosterSnapshotId,
+      rosterPopulation: deliveryTestTargetSetVersions.rosterPopulation,
+      endpointReferenceDigest:
+        deliveryTestTargetSetVersions.endpointReferenceDigest,
+    })
+    .from(deliveryTestTargetSetVersions)
+    .where(
+      and(
+        eq(deliveryTestTargetSetVersions.id, query.deliveryTest.targetSet.id),
+        eq(
+          deliveryTestTargetSetVersions.version,
+          query.deliveryTest.targetSet.version,
+        ),
+      ),
+    )
+    .limit(1);
+  const [successor] = await database
+    .select({ id: deliveryTestTargetSetVersions.id })
+    .from(deliveryTestTargetSetVersions)
+    .where(
+      eq(
+        deliveryTestTargetSetVersions.supersedesVersionId,
+        query.deliveryTest.targetSet.id,
+      ),
+    )
+    .limit(1);
+  if (
+    target === undefined ||
+    target.facilityId !== unlockedTarget.facilityId ||
+    target.rosterSnapshotId !== query.rosterSnapshotId ||
+    target.rosterPopulation !== 'staff' ||
+    target.endpointReferenceDigest !==
+      query.deliveryTest.endpointReferenceDigest ||
+    successor !== undefined
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+
+  const targetRows = await database
+    .select({
+      rosterSnapshotId: deliveryTestTargetEndpoints.rosterSnapshotId,
+      rosterPopulation: deliveryTestTargetEndpoints.rosterPopulation,
+      recipientId: deliveryTestTargetEndpoints.recipientId,
+      endpointId: deliveryTestTargetEndpoints.endpointId,
+      channel: deliveryTestTargetEndpoints.channel,
+      attestation: deliveryTestTargetEndpoints.attestation,
+      eligibilityFacilityId: deliveryTestCanaryEligibilityFacts.facilityId,
+      eligibilityRosterSnapshotId:
+        deliveryTestCanaryEligibilityFacts.rosterSnapshotId,
+      eligibilityRosterPopulation:
+        deliveryTestCanaryEligibilityFacts.rosterPopulation,
+      eligibilityRecipientId: deliveryTestCanaryEligibilityFacts.recipientId,
+      eligibilityEndpointId: deliveryTestCanaryEligibilityFacts.endpointId,
+      eligibilityChannel: deliveryTestCanaryEligibilityFacts.channel,
+      eligibilityCurrent: sql<boolean>`
+        ${deliveryTestCanaryEligibilityFacts.decision} = 'approved-synthetic-canary'
+        and not exists (
+          select 1
+          from delivery_test_canary_eligibility_facts successor
+          where successor.supersedes_fact_id = ${deliveryTestCanaryEligibilityFacts.id}
+        )
+      `,
+    })
+    .from(deliveryTestTargetEndpoints)
+    .innerJoin(
+      deliveryTestCanaryEligibilityFacts,
+      eq(
+        deliveryTestTargetEndpoints.eligibilityFactId,
+        deliveryTestCanaryEligibilityFacts.id,
+      ),
+    )
+    .where(
+      and(
+        eq(deliveryTestTargetEndpoints.targetSetVersionId, target.id),
+        eq(deliveryTestTargetEndpoints.targetSetVersion, target.version),
+      ),
+    )
+    .orderBy(
+      asc(deliveryTestTargetEndpoints.channel),
+      asc(deliveryTestTargetEndpoints.recipientId),
+      asc(deliveryTestTargetEndpoints.endpointId),
+    );
+  if (
+    targetRows.length === 0 ||
+    targetRows.length > MAX_EMAIL_ENDPOINTS ||
+    targetRows.some(
+      (row) =>
+        row.rosterSnapshotId !== query.rosterSnapshotId ||
+        row.rosterPopulation !== 'staff' ||
+        row.attestation !== 'approved-synthetic-canary' ||
+        row.eligibilityFacilityId !== target.facilityId ||
+        row.eligibilityRosterSnapshotId !== row.rosterSnapshotId ||
+        row.eligibilityRosterPopulation !== row.rosterPopulation ||
+        row.eligibilityRecipientId !== row.recipientId ||
+        row.eligibilityEndpointId !== row.endpointId ||
+        row.eligibilityChannel !== row.channel ||
+        !row.eligibilityCurrent,
+    )
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+
+  let recomputedDigest: string;
+  try {
+    recomputedDigest = deliveryTestEndpointReferenceDigest(targetRows);
+  } catch {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+  if (
+    recomputedDigest !== target.endpointReferenceDigest ||
+    recomputedDigest !== query.deliveryTest.endpointReferenceDigest
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+
+  const emailTargets = targetRows.filter((row) => row.channel === 'email');
+  const candidateKeys = new Set(query.candidates.map(emailCandidateKey));
+  if (
+    emailTargets.length !== query.endpointCount ||
+    emailTargets.some(
+      (targetEndpoint) => !candidateKeys.has(emailCandidateKey(targetEndpoint)),
+    )
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_COUNT_MISMATCH');
+  }
+  return new Set(emailTargets.map(emailCandidateKey));
+}
+
+async function loadDrizzleEmailEndpointPolicy(
+  database: DispatcherQueryDatabase,
+  queryValue: EmailEndpointPolicyQuery,
+): Promise<readonly EmailEndpointPolicyEvidence[]> {
+  const query = parseEmailEndpointPolicyQuery(queryValue);
+  const approvedTargets = await loadCurrentEmailDeliveryTestTargets(
+    database,
+    query,
+  );
+  if (query.candidates.length === 0) return Object.freeze([]);
+
+  const expectedKeys = new Set(query.candidates.map(emailCandidateKey));
+  const endpointIds = query.candidates.map(({ endpointId }) => endpointId);
+  const endpointRows = await database
+    .select({
+      endpointId: rosterEndpoints.id,
+      recipientId: rosterEndpoints.recipientId,
+      status: rosterEndpoints.status,
+    })
+    .from(rosterEndpoints)
+    .where(
+      and(
+        eq(rosterEndpoints.rosterSnapshotId, query.rosterSnapshotId),
+        eq(rosterEndpoints.population, query.rosterPopulation),
+        eq(rosterEndpoints.channel, 'email'),
+        inArray(rosterEndpoints.id, endpointIds),
+      ),
+    );
+  if (
+    endpointRows.length !== query.candidates.length ||
+    endpointRows.some((row) => !expectedKeys.has(emailCandidateKey(row)))
+  ) {
+    throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+  }
+
+  const statusRows = await database
+    .selectDistinctOn([endpointStatusRecords.endpointId], {
+      endpointId: endpointStatusRecords.endpointId,
+      recipientId: endpointStatusRecords.recipientId,
+      status: endpointStatusRecords.status,
+    })
+    .from(endpointStatusRecords)
+    .where(
+      and(
+        eq(endpointStatusRecords.rosterSnapshotId, query.rosterSnapshotId),
+        eq(endpointStatusRecords.population, query.rosterPopulation),
+        eq(endpointStatusRecords.channel, 'email'),
+        inArray(endpointStatusRecords.endpointId, endpointIds),
+      ),
+    )
+    .orderBy(
+      endpointStatusRecords.endpointId,
+      desc(endpointStatusRecords.recordedAt),
+      desc(endpointStatusRecords.sequence),
+    );
+  const effectiveStatuses = new Map<string, EndpointStatus>();
+  for (const endpoint of endpointRows) {
+    effectiveStatuses.set(
+      emailCandidateKey(endpoint),
+      EndpointStatusSchema.parse(endpoint.status),
+    );
+  }
+  for (const status of statusRows) {
+    const key = emailCandidateKey(status);
+    if (!expectedKeys.has(key)) {
+      throw new EmailEndpointResolutionError('EMAIL_ENDPOINT_POLICY_INVALID');
+    }
+    effectiveStatuses.set(key, EndpointStatusSchema.parse(status.status));
+  }
+
+  return Object.freeze(
+    endpointRows
+      .map((endpoint) => {
+        const key = emailCandidateKey(endpoint);
+        const status = effectiveStatuses.get(key);
+        if (status === undefined) {
+          throw new EmailEndpointResolutionError(
+            'EMAIL_ENDPOINT_POLICY_INVALID',
+          );
+        }
+        return Object.freeze({
+          recipientId: endpoint.recipientId,
+          endpointId: endpoint.endpointId,
+          status,
+          approvedForDeliveryTest:
+            approvedTargets === null || approvedTargets.has(key),
+        });
+      })
+      .sort(
+        (left, right) =>
+          left.recipientId.localeCompare(right.recipientId) ||
+          left.endpointId.localeCompare(right.endpointId),
+      ),
+  );
+}
+
+/** Production destination-free policy overlay for email fan-out. */
+export function createDrizzleEmailEndpointPolicyStore(
+  database: Database,
+): EmailEndpointPolicyStore {
+  return Object.freeze({
+    loadEndpointPolicy: (query: EmailEndpointPolicyQuery) =>
+      database.transaction((rawTransaction) =>
+        loadDrizzleEmailEndpointPolicy(
+          dispatcherQueryDatabase(rawTransaction),
+          query,
+        ),
+      ),
+  });
+}
+
 function parsedDate(value: unknown, field: string): Date {
   const date = value instanceof Date ? value : new Date(String(value));
   if (!Number.isFinite(date.getTime())) {
@@ -1470,6 +2086,7 @@ function batchFromRow(
       id: row.audienceConfigId,
       version: row.audienceConfigVersion,
     },
+    deliveryTest: message.deliveryTest,
     requestId: row.requestId,
     authorization: row.authorization,
     channel: row.channel,

@@ -3,6 +3,7 @@ import {
   readDatabaseConfig,
   type DatabaseConnection,
 } from '../../db/client';
+import { createDeliveryTestReportRuntime } from '../../app/(app)/delivery-tests/capabilities';
 import { createStartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
 import {
   createDrizzleSecurityAuditRepository,
@@ -62,6 +63,7 @@ export function createAgentRestRuntime(
   const journal = createJournalCapabilityRuntime(connection);
   const activationPreviews = createStartFlowCapabilityRuntime(connection);
   const records = createRecordsCapabilityRuntime(connection);
+  const deliveryTestReports = createDeliveryTestReportRuntime(connection);
   const dispatcher = createDefaultAgentCapabilityDispatcher({
     events,
     journal,
@@ -70,6 +72,7 @@ export function createAgentRestRuntime(
     administration,
     administrationFacilities,
     eventTypes: createAtomicAgentEventTypeStore(connection.db),
+    deliveryTestReports,
     preparedActivations: createDrizzlePreparedActivationCapabilityStore(
       connection.db,
     ),

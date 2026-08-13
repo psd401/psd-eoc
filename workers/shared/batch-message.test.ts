@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import {
+  DispatchBatchSchema,
+  EndpointSchema,
+  type DispatchBatch,
+} from '@psd-eoc/contracts';
 
 import {
   MAX_WORKER_MESSAGE_BYTES,
@@ -12,7 +17,45 @@ import {
   parseWorkerAttemptWorkItem,
   workerAttemptFingerprint,
 } from './attempt';
-import { IDS, syntheticBatch, workItem } from './test-fixtures';
+import {
+  IDS,
+  TIMES,
+  attemptFor,
+  deliveryTestBatch,
+  syntheticBatch,
+  workItem,
+} from './test-fixtures';
+
+function syntheticSmsWorkItem(phoneNumber: string) {
+  const base = syntheticBatch();
+  const batch: DispatchBatch = DispatchBatchSchema.parse({
+    ...base,
+    channel: 'sms',
+    renderedMessage: {
+      eventKind: 'test',
+      templateMode: 'drill',
+      purpose: 'activation',
+      classificationMarker: 'DRILL',
+      channel: 'sms',
+      body: '[DRILL] TRAINING ONLY - ACTIVATION: Synthetic test. [DRILL]',
+    },
+    integrationStatus: {
+      ...base.integrationStatus,
+      integrationId: 'aws-eum-sms',
+    },
+  });
+  return {
+    batch,
+    attempt: attemptFor(batch),
+    endpoint: EndpointSchema.parse({
+      id: IDS.endpoint,
+      status: 'active',
+      capturedAt: TIMES.created,
+      channel: 'sms',
+      phoneNumber,
+    }),
+  };
+}
 
 describe('canonical worker batch message', () => {
   test('round-trips a raw destination-free DispatchBatch', () => {
@@ -94,5 +137,43 @@ describe('resolved endpoint attempt', () => {
 
     expect(digest).not.toBe(workerAttemptFingerprint(original));
     expect(digest).not.toContain('another-device');
+  });
+
+  test('requires attempt canary provenance to exactly match its batch', () => {
+    const item = workItem(deliveryTestBatch());
+    expect(parseWorkerAttemptWorkItem(item)).toEqual(item);
+
+    for (const deliveryTest of [
+      null,
+      {
+        ...item.attempt.deliveryTest,
+        endpointReferenceDigest: 'e'.repeat(64),
+      },
+      {
+        ...item.attempt.deliveryTest,
+        targetSet: {
+          ...item.attempt.deliveryTest?.targetSet,
+          version: 2,
+        },
+      },
+    ]) {
+      expect(() =>
+        parseWorkerAttemptWorkItem({
+          ...item,
+          attempt: { ...item.attempt, deliveryTest },
+        }),
+      ).toThrow(expect.objectContaining({ code: 'ATTEMPT_BATCH_MISMATCH' }));
+    }
+  });
+
+  test('accepts only the reserved synthetic SMS fixture namespaces', () => {
+    for (const phoneNumber of ['+12025550123', '+999000000000000']) {
+      expect(
+        parseWorkerAttemptWorkItem(syntheticSmsWorkItem(phoneNumber)).endpoint,
+      ).toMatchObject({ channel: 'sms', phoneNumber });
+    }
+    expect(() =>
+      parseWorkerAttemptWorkItem(syntheticSmsWorkItem('+998000000000000')),
+    ).toThrow(expect.objectContaining({ code: 'ROUTABLE_SYNTHETIC_ENDPOINT' }));
   });
 });

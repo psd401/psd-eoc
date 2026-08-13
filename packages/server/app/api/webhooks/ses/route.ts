@@ -31,6 +31,7 @@ import {
   channelAttempts,
   endpointStatusRecords,
   idempotencyRecords,
+  notificationIntents,
 } from '../../../../db/schema';
 import {
   DeliveryStateError,
@@ -672,6 +673,11 @@ export function createSesWebhookRouteHandler(
 type WebhookQueryDatabase = DatabaseQuery;
 type ChannelAttemptRow = typeof channelAttempts.$inferSelect;
 type EndpointStatusRow = typeof endpointStatusRecords.$inferSelect;
+type DeliveryTestIntentRow = Readonly<{
+  deliveryTestTargetSetId: string | null;
+  deliveryTestTargetSetVersion: number | null;
+  deliveryTestEndpointReferenceDigest: string | null;
+}>;
 
 function webhookQueryDatabase(database: unknown): WebhookQueryDatabase {
   return database as WebhookQueryDatabase;
@@ -685,7 +691,40 @@ function dateIso(value: Date | string): string {
   return date.toISOString();
 }
 
-function attemptFromRow(row: ChannelAttemptRow): ChannelAttempt {
+function deliveryTestFromIntentRow(
+  row: DeliveryTestIntentRow,
+): ChannelAttempt['deliveryTest'] {
+  const targetSetId = row.deliveryTestTargetSetId;
+  const targetSetVersion = row.deliveryTestTargetSetVersion;
+  const endpointReferenceDigest = row.deliveryTestEndpointReferenceDigest;
+  if (
+    targetSetId === null &&
+    targetSetVersion === null &&
+    endpointReferenceDigest === null
+  ) {
+    return null;
+  }
+  if (
+    targetSetId === null ||
+    targetSetVersion === null ||
+    endpointReferenceDigest === null
+  ) {
+    throw new SesWebhookPersistenceError();
+  }
+  return {
+    purpose: 'monthly-live-delivery-test',
+    targetSet: {
+      id: targetSetId,
+      version: targetSetVersion,
+    },
+    endpointReferenceDigest,
+  };
+}
+
+function attemptFromRow(
+  row: ChannelAttemptRow,
+  intent: DeliveryTestIntentRow,
+): ChannelAttempt {
   return ChannelAttemptSchema.parse({
     id: row.id,
     batchId: row.batchId,
@@ -700,6 +739,7 @@ function attemptFromRow(row: ChannelAttemptRow): ChannelAttempt {
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
+    deliveryTest: deliveryTestFromIntentRow(intent),
     recipientId: row.recipientId,
     endpointId: row.endpointId,
     channel: row.channel,
@@ -1039,11 +1079,29 @@ export function createDrizzleSesWebhookStore(
       failCallback(database, recordId, leaseToken, reasonCode),
     async loadAttempt(attemptId: string): Promise<ChannelAttempt | null> {
       const [row] = await database
-        .select()
+        .select({
+          attempt: channelAttempts,
+          deliveryTestTargetSetId: notificationIntents.deliveryTestTargetSetId,
+          deliveryTestTargetSetVersion:
+            notificationIntents.deliveryTestTargetSetVersion,
+          deliveryTestEndpointReferenceDigest:
+            notificationIntents.deliveryTestEndpointReferenceDigest,
+        })
         .from(channelAttempts)
+        .innerJoin(
+          notificationIntents,
+          eq(notificationIntents.id, channelAttempts.intentId),
+        )
         .where(eq(channelAttempts.id, UuidSchema.parse(attemptId)))
         .limit(1);
-      return row === undefined ? null : attemptFromRow(row);
+      return row === undefined
+        ? null
+        : attemptFromRow(row.attempt, {
+            deliveryTestTargetSetId: row.deliveryTestTargetSetId,
+            deliveryTestTargetSetVersion: row.deliveryTestTargetSetVersion,
+            deliveryTestEndpointReferenceDigest:
+              row.deliveryTestEndpointReferenceDigest,
+          });
     },
     recordAttemptEvidence(
       attempt: ChannelAttempt,

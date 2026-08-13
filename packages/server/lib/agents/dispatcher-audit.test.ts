@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   CAPABILITY_CATALOG,
   EventSchema,
+  HUMAN_ONLY_ACTION_IDS,
   type AgentGrantableCapabilityId,
   type FacilityScope,
 } from '@psd-eoc/contracts';
@@ -21,6 +22,7 @@ import type { RecordsCapabilityRuntime } from '../capabilities/records';
 import { AGENT_DEPLOYED_CAPABILITY_IDS } from './availability';
 import {
   createDefaultAgentCapabilityDispatcher,
+  type AgentDeliveryTestReportRuntime,
   type DefaultAgentCapabilityDispatcherDependencies,
 } from './dispatcher';
 import type { AuthenticatedAgentApiKey } from './keys';
@@ -103,6 +105,7 @@ function dispatcher(eventTypes: EventTypeStore) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes,
+    deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
     securityAudit: unavailableDependency,
@@ -120,6 +123,7 @@ function dispatcherWithEvents(events: EventCapabilityRuntime) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
     securityAudit: unavailableDependency,
@@ -137,6 +141,7 @@ function dispatcherWithJournal(journal: JournalCapabilityRuntime) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
     securityAudit: unavailableDependency,
@@ -156,6 +161,7 @@ function dispatcherWithActivationPreviews(
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    deliveryTestReports: unavailableDependency,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
     securityAudit: unavailableDependency,
@@ -173,6 +179,27 @@ function dispatcherWithRecords(records: RecordsCapabilityRuntime) {
     administration: unavailableDependency,
     administrationFacilities: unavailableDependency,
     eventTypes: new StubEventTypeStore(),
+    deliveryTestReports: unavailableDependency,
+    preparedActivations: unavailableDependency,
+    rosterReport: unavailableDependency,
+    securityAudit: unavailableDependency,
+  };
+  return createDefaultAgentCapabilityDispatcher(dependencies);
+}
+
+function dispatcherWithDeliveryTestReports(
+  deliveryTestReports: AgentDeliveryTestReportRuntime,
+) {
+  const unavailableDependency = undefined as never;
+  const dependencies: DefaultAgentCapabilityDispatcherDependencies = {
+    events: unavailableDependency,
+    journal: unavailableDependency,
+    activationPreviews: unavailableDependency,
+    records: unavailableDependency,
+    administration: unavailableDependency,
+    administrationFacilities: unavailableDependency,
+    eventTypes: new StubEventTypeStore(),
+    deliveryTestReports,
     preparedActivations: unavailableDependency,
     rosterReport: unavailableDependency,
     securityAudit: unavailableDependency,
@@ -207,6 +234,21 @@ function mutationInvocation(authenticated: AuthenticatedAgentApiKey) {
 }
 
 describe('default agent dispatcher routing', () => {
+  test('deploys only the destination-free delivery-test read to agents', () => {
+    const deployedIds = new Set<string>(AGENT_DEPLOYED_CAPABILITY_IDS);
+    expect(deployedIds.has('list-delivery-test-reports')).toBe(true);
+    for (const protectedWorkflowId of [
+      'create-delivery-test-target-set-version',
+      'create-delivery-test-preview',
+      'finalize-delivery-test-report',
+    ]) {
+      expect(deployedIds.has(protectedWorkflowId)).toBe(false);
+    }
+    for (const actionId of HUMAN_ONLY_ACTION_IDS) {
+      expect(deployedIds.has(actionId)).toBe(false);
+    }
+  });
+
   test('keeps every deployed mutation on canonical atomic audit ownership', () => {
     const subject = dispatcher(new StubEventTypeStore());
     const deployedMutations = AGENT_DEPLOYED_CAPABILITY_IDS.filter(
@@ -646,6 +688,59 @@ describe('default agent dispatcher routing', () => {
         auditOwnership: 'canonical',
       },
     ]);
+  });
+
+  test('routes delivery-test report reads through the scoped read-only runtime', async () => {
+    const calls: Array<{
+      input: unknown;
+      invocation: ReturnType<typeof invocation>;
+      authenticated: AuthenticatedAgentApiKey;
+    }> = [];
+    const expected = {
+      items: [],
+      pageInfo: { hasMore: false, nextCursor: null },
+    };
+    const deliveryTestReports: AgentDeliveryTestReportRuntime = {
+      async execute(input, callInvocation, authenticated) {
+        expect(authenticated).toBeDefined();
+        calls.push({
+          input,
+          invocation: callInvocation as ReturnType<typeof invocation>,
+          authenticated: authenticated as AuthenticatedAgentApiKey,
+        });
+        return expected;
+      },
+    };
+    const authenticated = authenticatedAgent(
+      { kind: 'facilities', facilityIds: [IDS.facility] },
+      ['list-delivery-test-reports'],
+    );
+    const callInvocation = invocation(authenticated);
+    const input = {
+      facilityId: IDS.facility,
+      status: null,
+      generatedFrom: null,
+      generatedThrough: null,
+      cursor: null,
+      limit: 25,
+    };
+
+    await expect(
+      dispatcherWithDeliveryTestReports(deliveryTestReports).execute(
+        'list-delivery-test-reports',
+        input,
+        callInvocation,
+        authenticated,
+      ),
+    ).resolves.toBe(expected);
+    expect(calls).toEqual([
+      { input, invocation: callInvocation, authenticated },
+    ]);
+    expect(
+      dispatcherWithDeliveryTestReports(deliveryTestReports).auditOwnership(
+        'list-delivery-test-reports',
+      ),
+    ).toBe('canonical');
   });
 
   test('routes activation preview creation before the existing prepare handoff', async () => {

@@ -143,6 +143,10 @@ export const deliveryEvidenceSubjectKindEnum = pgEnum(
   'delivery_evidence_subject_kind',
   ['intent', 'attempt'],
 );
+export const deliveryTestReportStatusEnum = pgEnum(
+  'delivery_test_report_status',
+  ['succeeded', 'failed', 'incomplete'],
+);
 export const outboxStatusEnum = pgEnum('outbox_status', [
   'pending',
   'processing',
@@ -1743,11 +1747,300 @@ export const rosterEndpoints = pgTable(
     ),
     check(
       'roster_endpoints_synthetic_unroutable',
-      sql`${table.population} = 'staff' or (
+      sql`(
+        ${table.population} = 'staff'
+        and not (${table.channel} = 'sms' and ${table.phoneNumber} ~ '^\\+999')
+      ) or (
+        ${table.population} = 'synthetic'
+        and (
         (${table.channel} = 'push' and ${table.token} like 'synthetic-unroutable:%')
         or (${table.channel} = 'email' and lower(${table.email}) like '%.invalid')
-        or (${table.channel} = 'sms' and ${table.phoneNumber} ~ '^\\+120255501[0-9]{2}$')
+        or (${table.channel} = 'sms' and (
+          ${table.phoneNumber} ~ '^\\+120255501[0-9]{2}$'
+          or ${table.phoneNumber} ~ '^\\+999[0-9]{12}$'
+        ))
+        )
       )`,
+    ),
+  ],
+);
+
+/**
+ * Independent append-only product-owner decisions about one controlled-canary
+ * endpoint. Revocation is a superseding fact; destinations remain only in the
+ * immutable roster and never enter this eligibility ledger.
+ */
+export const deliveryTestCanaryEligibilityFacts = pgTable(
+  'delivery_test_canary_eligibility_facts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    supersedesFactId: uuid('supersedes_fact_id'),
+    facilityId: uuid('facility_id')
+      .notNull()
+      .references(() => facilities.id, { onDelete: 'restrict' }),
+    rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .default('staff')
+      .notNull(),
+    recipientId: uuid('recipient_id').notNull(),
+    endpointId: uuid('endpoint_id').notNull(),
+    channel: notificationChannelEnum('channel').notNull(),
+    decision: varchar('decision', { length: 40 }).notNull(),
+    optedInAt: occurredAt('opted_in_at').notNull(),
+    decidedAt: occurredAt('decided_at').notNull(),
+    decidedByUserId: uuid('decided_by_user_id').notNull(),
+    decidedWithSessionId: uuid('decided_with_session_id').notNull(),
+    authorizationReference: varchar('authorization_reference', {
+      length: 255,
+    }).notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.rosterSnapshotId, table.facilityId],
+      foreignColumns: [
+        rosterSnapshotFacilities.rosterSnapshotId,
+        rosterSnapshotFacilities.facilityId,
+      ],
+      name: 'delivery_test_canary_eligibility_snapshot_facility_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.rosterSnapshotId,
+        table.recipientId,
+        table.endpointId,
+        table.rosterPopulation,
+        table.channel,
+      ],
+      foreignColumns: [
+        rosterEndpoints.rosterSnapshotId,
+        rosterEndpoints.recipientId,
+        rosterEndpoints.id,
+        rosterEndpoints.population,
+        rosterEndpoints.channel,
+      ],
+      name: 'delivery_test_canary_eligibility_roster_endpoint_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.decidedWithSessionId, table.decidedByUserId],
+      foreignColumns: [sessions.id, sessions.userId],
+      name: 'delivery_test_canary_eligibility_human_session_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.supersedesFactId],
+      foreignColumns: [table.id],
+      name: 'delivery_test_canary_eligibility_supersedes_fk',
+    }).onDelete('restrict'),
+    unique('delivery_test_canary_eligibility_successor_uq').on(
+      table.supersedesFactId,
+    ),
+    index('delivery_test_canary_eligibility_endpoint_idx').on(
+      table.facilityId,
+      table.rosterSnapshotId,
+      table.recipientId,
+      table.endpointId,
+      table.channel,
+      table.decidedAt.desc(),
+    ),
+    check(
+      'delivery_test_canary_eligibility_staff_only',
+      sql`${table.rosterPopulation} = 'staff'`,
+    ),
+    check(
+      'delivery_test_canary_eligibility_decision',
+      sql`${table.decision} in ('approved-synthetic-canary', 'revoked')`,
+    ),
+    check(
+      'delivery_test_canary_eligibility_revocation_chain',
+      sql`${table.decision} <> 'revoked' or ${table.supersedesFactId} is not null`,
+    ),
+    check(
+      'delivery_test_canary_eligibility_not_self_superseding',
+      sql`${table.supersedesFactId} is null or ${table.supersedesFactId} <> ${table.id}`,
+    ),
+    check(
+      'delivery_test_canary_eligibility_times',
+      sql`${table.decidedAt} >= ${table.optedInAt}`,
+    ),
+    check(
+      'delivery_test_canary_eligibility_reference_format',
+      sql`${table.authorizationReference} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$'`,
+    ),
+  ],
+);
+
+/**
+ * Immutable product-owner approvals for the exact staff endpoint references
+ * that may participate in a monthly live delivery test. Destinations never
+ * enter this table; endpoint IDs continue to resolve through the pinned roster.
+ */
+export const deliveryTestTargetSetVersions = pgTable(
+  'delivery_test_target_set_versions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    version: integer('version').notNull(),
+    facilityId: uuid('facility_id')
+      .notNull()
+      .references(() => facilities.id, { onDelete: 'restrict' }),
+    rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .default('staff')
+      .notNull(),
+    supersedesVersionId: uuid('supersedes_version_id'),
+    endpointReferenceDigest: digest('endpoint_reference_digest').notNull(),
+    idempotencyRequestId: uuid('idempotency_request_id').notNull(),
+    approvedByUserId: uuid('approved_by_user_id').notNull(),
+    approvedWithSessionId: uuid('approved_with_session_id').notNull(),
+    approvedAt: occurredAt('approved_at').notNull(),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    unique('delivery_test_target_sets_identity_version_uq').on(
+      table.id,
+      table.version,
+    ),
+    unique('delivery_test_target_sets_roster_anchor_uq').on(
+      table.id,
+      table.version,
+      table.rosterSnapshotId,
+    ),
+    unique('delivery_test_target_sets_request_uq').on(
+      table.idempotencyRequestId,
+    ),
+    foreignKey({
+      columns: [table.rosterSnapshotId, table.rosterPopulation],
+      foreignColumns: [rosterSnapshots.id, rosterSnapshots.population],
+      name: 'delivery_test_target_sets_roster_population_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.approvedWithSessionId, table.approvedByUserId],
+      foreignColumns: [sessions.id, sessions.userId],
+      name: 'delivery_test_target_sets_approver_session_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.supersedesVersionId],
+      foreignColumns: [table.id],
+      name: 'delivery_test_target_sets_supersedes_fk',
+    }).onDelete('restrict'),
+    index('delivery_test_target_sets_facility_version_idx').on(
+      table.facilityId,
+      table.version.desc(),
+    ),
+    check(
+      'delivery_test_target_sets_staff_only',
+      sql`${table.rosterPopulation} = 'staff'`,
+    ),
+    check(
+      'delivery_test_target_sets_version_positive',
+      sql`${table.version} > 0`,
+    ),
+    check(
+      'delivery_test_target_sets_version_chain',
+      sql`(${table.version} = 1) = (${table.supersedesVersionId} is null)`,
+    ),
+    check(
+      'delivery_test_target_sets_not_self_superseding',
+      sql`${table.supersedesVersionId} is null or ${table.supersedesVersionId} <> ${table.id}`,
+    ),
+    check(
+      'delivery_test_target_sets_digest_format',
+      sql`${table.endpointReferenceDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'delivery_test_target_sets_times',
+      sql`${table.approvedAt} >= ${table.createdAt}`,
+    ),
+  ],
+);
+
+/** Destination-free endpoint references separately attested by the approver. */
+export const deliveryTestTargetEndpoints = pgTable(
+  'delivery_test_target_endpoints',
+  {
+    targetSetVersionId: uuid('target_set_version_id').notNull(),
+    targetSetVersion: integer('target_set_version').notNull(),
+    eligibilityFactId: uuid('eligibility_fact_id').notNull(),
+    rosterSnapshotId: uuid('roster_snapshot_id').notNull(),
+    rosterPopulation: rosterPopulationEnum('roster_population')
+      .default('staff')
+      .notNull(),
+    recipientId: uuid('recipient_id').notNull(),
+    endpointId: uuid('endpoint_id').notNull(),
+    channel: notificationChannelEnum('channel').notNull(),
+    attestation: varchar('attestation', { length: 40 }).notNull(),
+    optedInAt: occurredAt('opted_in_at').notNull(),
+    attestedAt: occurredAt('attested_at').notNull(),
+    attestedByUserId: uuid('attested_by_user_id').notNull(),
+    authorizationReference: varchar('authorization_reference', {
+      length: 255,
+    }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.targetSetVersionId,
+        table.recipientId,
+        table.endpointId,
+        table.channel,
+      ],
+    }),
+    foreignKey({
+      columns: [table.eligibilityFactId],
+      foreignColumns: [deliveryTestCanaryEligibilityFacts.id],
+      name: 'delivery_test_target_endpoints_eligibility_fact_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.targetSetVersionId,
+        table.targetSetVersion,
+        table.rosterSnapshotId,
+      ],
+      foreignColumns: [
+        deliveryTestTargetSetVersions.id,
+        deliveryTestTargetSetVersions.version,
+        deliveryTestTargetSetVersions.rosterSnapshotId,
+      ],
+      name: 'delivery_test_target_endpoints_target_set_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.rosterSnapshotId,
+        table.recipientId,
+        table.endpointId,
+        table.rosterPopulation,
+        table.channel,
+      ],
+      foreignColumns: [
+        rosterEndpoints.rosterSnapshotId,
+        rosterEndpoints.recipientId,
+        rosterEndpoints.id,
+        rosterEndpoints.population,
+        rosterEndpoints.channel,
+      ],
+      name: 'delivery_test_target_endpoints_roster_endpoint_fk',
+    }).onDelete('restrict'),
+    index('delivery_test_target_endpoints_channel_idx').on(
+      table.targetSetVersionId,
+      table.channel,
+    ),
+    unique('delivery_test_target_endpoints_eligibility_fact_uq').on(
+      table.targetSetVersionId,
+      table.eligibilityFactId,
+    ),
+    check(
+      'delivery_test_target_endpoints_attestation_literal',
+      sql`${table.attestation} = 'approved-synthetic-canary'`,
+    ),
+    check(
+      'delivery_test_target_endpoints_staff_only',
+      sql`${table.rosterPopulation} = 'staff'`,
+    ),
+    check(
+      'delivery_test_target_endpoints_attestation_after_opt_in',
+      sql`${table.attestedAt} >= ${table.optedInAt}`,
+    ),
+    check(
+      'delivery_test_target_endpoints_reference_format',
+      sql`${table.authorizationReference} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$'`,
     ),
   ],
 );
@@ -2200,6 +2493,11 @@ export const activationPreviews = pgTable(
     blockingReasonCodes: jsonb('blocking_reason_codes').notNull(),
     activeEventIds: jsonb('active_event_ids').notNull(),
     consequenceDigest: digest('consequence_digest').notNull(),
+    deliveryTestTargetSetId: uuid('delivery_test_target_set_id'),
+    deliveryTestTargetSetVersion: integer('delivery_test_target_set_version'),
+    deliveryTestEndpointReferenceDigest: digest(
+      'delivery_test_endpoint_reference_digest',
+    ),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
     expiresAt: occurredAt('expires_at').notNull(),
   },
@@ -2214,6 +2512,13 @@ export const activationPreviews = pgTable(
       table.rosterPopulation,
       table.audienceConfigId,
       table.audienceConfigVersion,
+      table.consequenceDigest,
+    ),
+    unique('activation_previews_delivery_test_anchor_uq').on(
+      table.id,
+      table.deliveryTestTargetSetId,
+      table.deliveryTestTargetSetVersion,
+      table.deliveryTestEndpointReferenceDigest,
       table.consequenceDigest,
     ),
     foreignKey({
@@ -2233,6 +2538,19 @@ export const activationPreviews = pgTable(
         audienceConfigurations.version,
       ],
       name: 'activation_previews_audience_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.deliveryTestTargetSetId,
+        table.deliveryTestTargetSetVersion,
+        table.rosterSnapshotId,
+      ],
+      foreignColumns: [
+        deliveryTestTargetSetVersions.id,
+        deliveryTestTargetSetVersions.version,
+        deliveryTestTargetSetVersions.rosterSnapshotId,
+      ],
+      name: 'activation_previews_delivery_test_target_set_fk',
     }).onDelete('restrict'),
     check(
       'activation_previews_classification',
@@ -2262,6 +2580,26 @@ export const activationPreviews = pgTable(
     check(
       'activation_previews_digest_format',
       sql`${table.consequenceDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'activation_previews_delivery_test_truth',
+      sql`(
+        ${table.deliveryTestTargetSetId} is null
+        and ${table.deliveryTestTargetSetVersion} is null
+        and ${table.deliveryTestEndpointReferenceDigest} is null
+      ) or (
+        ${table.deliveryTestTargetSetId} is not null
+        and ${table.deliveryTestTargetSetVersion} is not null
+        and ${table.deliveryTestEndpointReferenceDigest} is not null
+        and ${table.kind} = 'drill'
+        and ${table.templateMode} = 'drill'
+        and ${table.rosterPopulation} = 'staff'
+      )`,
+    ),
+    check(
+      'activation_previews_delivery_test_digest_format',
+      sql`${table.deliveryTestEndpointReferenceDigest} is null
+        or ${table.deliveryTestEndpointReferenceDigest} ~ '^[a-f0-9]{64}$'`,
     ),
   ],
 );
@@ -3099,6 +3437,11 @@ export const notificationIntents = pgTable(
     source: invocationSourceEnum('source').notNull(),
     requestId: uuid('request_id').notNull(),
     authorization: jsonb('authorization').notNull(),
+    deliveryTestTargetSetId: uuid('delivery_test_target_set_id'),
+    deliveryTestTargetSetVersion: integer('delivery_test_target_set_version'),
+    deliveryTestEndpointReferenceDigest: digest(
+      'delivery_test_endpoint_reference_digest',
+    ),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
   },
   (table) => [
@@ -3125,6 +3468,14 @@ export const notificationIntents = pgTable(
       table.eventTypeVersionId,
       table.rosterSnapshotId,
       table.rosterPopulation,
+    ),
+    unique('notification_intents_delivery_test_anchor_uq').on(
+      table.id,
+      table.eventId,
+      table.requestId,
+      table.deliveryTestTargetSetId,
+      table.deliveryTestTargetSetVersion,
+      table.deliveryTestEndpointReferenceDigest,
     ),
     unique('notification_intents_worker_anchor_uq').on(
       table.id,
@@ -3177,6 +3528,19 @@ export const notificationIntents = pgTable(
       ],
       name: 'notification_intents_audience_fk',
     }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.deliveryTestTargetSetId,
+        table.deliveryTestTargetSetVersion,
+        table.rosterSnapshotId,
+      ],
+      foreignColumns: [
+        deliveryTestTargetSetVersions.id,
+        deliveryTestTargetSetVersions.version,
+        deliveryTestTargetSetVersions.rosterSnapshotId,
+      ],
+      name: 'notification_intents_delivery_test_target_set_fk',
+    }).onDelete('restrict'),
     check(
       'notification_intents_classification',
       sql`(
@@ -3217,6 +3581,30 @@ export const notificationIntents = pgTable(
         when 'system' then ${table.source} in ('worker', 'scheduled-job', 'webhook')
         else false
       end`,
+    ),
+    check(
+      'notification_intents_delivery_test_truth',
+      sql`(
+        ${table.deliveryTestTargetSetId} is null
+        and ${table.deliveryTestTargetSetVersion} is null
+        and ${table.deliveryTestEndpointReferenceDigest} is null
+      ) or (
+        ${table.deliveryTestTargetSetId} is not null
+        and ${table.deliveryTestTargetSetVersion} is not null
+        and ${table.deliveryTestEndpointReferenceDigest} is not null
+        and ${table.eventKind} = 'drill'
+        and ${table.templateMode} = 'drill'
+        and ${table.rosterPopulation} = 'staff'
+        and ${table.purpose} = 'activation'
+        and ${table.createdBy} ->> 'kind' is not distinct from 'human'
+        and ${table.source} in ('web', 'mobile')
+        and ${table.authorization} ->> 'kind' is not distinct from 'human-confirmed'
+      )`,
+    ),
+    check(
+      'notification_intents_delivery_test_digest_format',
+      sql`${table.deliveryTestEndpointReferenceDigest} is null
+        or ${table.deliveryTestEndpointReferenceDigest} ~ '^[a-f0-9]{64}$'`,
     ),
   ],
 );
@@ -4021,6 +4409,199 @@ export const deliveryEvidence = pgTable(
       'delivery_evidence_reason_truth',
       sql`(${table.state} in ('failed', 'expired', 'unknown')) = (${table.reasonCode} is not null)
         and (${table.diagnosticDigest} is null or ${table.reasonCode} is not null)`,
+    ),
+  ],
+);
+
+/**
+ * One authenticated-human monthly live delivery-test activation. This is
+ * written in the same transaction as the canonical start-event lifecycle.
+ */
+export const deliveryTestRuns = pgTable(
+  'delivery_test_runs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    activationPreviewId: uuid('activation_preview_id').notNull(),
+    eventId: uuid('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'restrict' }),
+    notificationIntentId: uuid('notification_intent_id').notNull(),
+    targetSetVersionId: uuid('target_set_version_id').notNull(),
+    targetSetVersion: integer('target_set_version').notNull(),
+    endpointReferenceDigest: digest('endpoint_reference_digest').notNull(),
+    consequenceDigest: digest('consequence_digest').notNull(),
+    confirmationId: uuid('confirmation_id').notNull(),
+    confirmationStatus: humanConfirmationStatusEnum('confirmation_status')
+      .default('consumed')
+      .notNull(),
+    requestId: uuid('request_id').notNull(),
+    startedByUserId: uuid('started_by_user_id').notNull(),
+    startedWithSessionId: uuid('started_with_session_id').notNull(),
+    startedAt: occurredAt('started_at').notNull(),
+  },
+  (table) => [
+    unique('delivery_test_runs_preview_uq').on(table.activationPreviewId),
+    unique('delivery_test_runs_event_uq').on(table.eventId),
+    unique('delivery_test_runs_intent_uq').on(table.notificationIntentId),
+    unique('delivery_test_runs_confirmation_uq').on(table.confirmationId),
+    unique('delivery_test_runs_request_uq').on(table.requestId),
+    unique('delivery_test_runs_identity_start_uq').on(
+      table.id,
+      table.startedAt,
+    ),
+    foreignKey({
+      columns: [
+        table.activationPreviewId,
+        table.targetSetVersionId,
+        table.targetSetVersion,
+        table.endpointReferenceDigest,
+        table.consequenceDigest,
+      ],
+      foreignColumns: [
+        activationPreviews.id,
+        activationPreviews.deliveryTestTargetSetId,
+        activationPreviews.deliveryTestTargetSetVersion,
+        activationPreviews.deliveryTestEndpointReferenceDigest,
+        activationPreviews.consequenceDigest,
+      ],
+      name: 'delivery_test_runs_activation_preview_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.notificationIntentId,
+        table.eventId,
+        table.requestId,
+        table.targetSetVersionId,
+        table.targetSetVersion,
+        table.endpointReferenceDigest,
+      ],
+      foreignColumns: [
+        notificationIntents.id,
+        notificationIntents.eventId,
+        notificationIntents.requestId,
+        notificationIntents.deliveryTestTargetSetId,
+        notificationIntents.deliveryTestTargetSetVersion,
+        notificationIntents.deliveryTestEndpointReferenceDigest,
+      ],
+      name: 'delivery_test_runs_notification_intent_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [
+        table.confirmationId,
+        table.confirmationStatus,
+        table.requestId,
+        table.consequenceDigest,
+      ],
+      foreignColumns: [
+        humanConfirmationRecords.id,
+        humanConfirmationRecords.status,
+        humanConfirmationRecords.consumedForRequestId,
+        humanConfirmationRecords.consequenceDigest,
+      ],
+      name: 'delivery_test_runs_consumed_confirmation_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.startedWithSessionId, table.startedByUserId],
+      foreignColumns: [sessions.id, sessions.userId],
+      name: 'delivery_test_runs_human_session_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.targetSetVersionId, table.targetSetVersion],
+      foreignColumns: [
+        deliveryTestTargetSetVersions.id,
+        deliveryTestTargetSetVersions.version,
+      ],
+      name: 'delivery_test_runs_target_set_fk',
+    }).onDelete('restrict'),
+    index('delivery_test_runs_started_at_idx').on(table.startedAt.desc()),
+    check(
+      'delivery_test_runs_consumed_confirmation',
+      sql`${table.confirmationStatus} = 'consumed'`,
+    ),
+    check(
+      'delivery_test_runs_digest_format',
+      sql`${table.endpointReferenceDigest} ~ '^[a-f0-9]{64}$'
+        and ${table.consequenceDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+/**
+ * Append-only report revisions. `incomplete` and `unknown` remain first-class
+ * truth states; a later correction supersedes rather than rewrites a report.
+ */
+export const deliveryTestReports = pgTable(
+  'delivery_test_reports',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    runId: uuid('run_id').notNull(),
+    runStartedAt: occurredAt('run_started_at').notNull(),
+    sequence: integer('sequence').notNull(),
+    supersedesReportId: uuid('supersedes_report_id'),
+    status: deliveryTestReportStatusEnum('status').notNull(),
+    channels: jsonb('channels').notNull(),
+    generatedAt: occurredAt('generated_at').defaultNow().notNull(),
+    finalizedBy: jsonb('finalized_by').notNull(),
+    source: invocationSourceEnum('source').notNull(),
+    reasonCode: auditCode('reason_code'),
+  },
+  (table) => [
+    unique('delivery_test_reports_run_sequence_uq').on(
+      table.runId,
+      table.sequence,
+    ),
+    unique('delivery_test_reports_identity_run_uq').on(table.id, table.runId),
+    foreignKey({
+      columns: [table.runId, table.runStartedAt],
+      foreignColumns: [deliveryTestRuns.id, deliveryTestRuns.startedAt],
+      name: 'delivery_test_reports_run_fk',
+    }).onDelete('restrict'),
+    foreignKey({
+      columns: [table.supersedesReportId, table.runId],
+      foreignColumns: [table.id, table.runId],
+      name: 'delivery_test_reports_supersedes_same_run_fk',
+    }).onDelete('restrict'),
+    index('delivery_test_reports_generated_at_idx').on(
+      table.generatedAt.desc(),
+    ),
+    check(
+      'delivery_test_reports_sequence_positive',
+      sql`${table.sequence} > 0`,
+    ),
+    check(
+      'delivery_test_reports_sequence_chain',
+      sql`(${table.sequence} = 1) = (${table.supersedesReportId} is null)`,
+    ),
+    check(
+      'delivery_test_reports_not_self_superseding',
+      sql`${table.supersedesReportId} is null or ${table.supersedesReportId} <> ${table.id}`,
+    ),
+    check(
+      'delivery_test_reports_channels_shape',
+      sql`jsonb_typeof(${table.channels}) is not distinct from 'array'
+        and jsonb_array_length(${table.channels}) between 2 and 3`,
+    ),
+    check(
+      'delivery_test_reports_status_reason_truth',
+      sql`(
+        ${table.status} = 'succeeded' and ${table.reasonCode} is null
+      ) or (
+        ${table.status} in ('failed', 'incomplete')
+        and ${table.reasonCode} is not null
+      )`,
+    ),
+    check(
+      'delivery_test_reports_reason_code_format',
+      sql`${table.reasonCode} is null or ${table.reasonCode} ~ '^[A-Z0-9_]+$'`,
+    ),
+    check(
+      'delivery_test_reports_system_finalizer',
+      sql`${table.finalizedBy} ->> 'kind' is not distinct from 'system'
+        and ${table.source} = 'worker'`,
+    ),
+    check(
+      'delivery_test_reports_after_run',
+      sql`${table.generatedAt} >= ${table.runStartedAt}`,
     ),
   ],
 );
