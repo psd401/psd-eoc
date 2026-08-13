@@ -59,6 +59,10 @@ function publicLoadError(error: unknown): string {
     : 'PSD EOC could not load the current authorized sites and events. No action was taken.';
 }
 
+export function unresolvedOutcomeRefreshError(): string {
+  return 'PSD EOC could not load fresh active events. This refresh did not determine the earlier request outcome. That outcome remains unresolved, and nothing retried automatically.';
+}
+
 function startedLabel(event: StartHomeActiveEvent): string {
   return DATE_FORMATTER.format(
     new Date(event.event.activatedAt ?? event.event.createdAt),
@@ -77,6 +81,9 @@ export default function HomeScreen() {
   const [outcomeCheckError, setOutcomeCheckError] = useState<string | null>(
     null,
   );
+  const [outcomeActiveEvents, setOutcomeActiveEvents] = useState<
+    readonly StartHomeActiveEvent[] | null
+  >(null);
   const outcomeRequestGeneration = useRef(0);
   const outcomeOwnerKey =
     state.phase === 'online' && state.session !== null
@@ -124,6 +131,7 @@ export default function HomeScreen() {
     outcomeRequestGeneration.current += 1;
     setCheckingOutcome(false);
     setOutcomeCheckError(null);
+    setOutcomeActiveEvents(null);
     return () => {
       outcomeRequestGeneration.current += 1;
     };
@@ -314,6 +322,17 @@ export default function HomeScreen() {
               }
             : unresolved
               ? {
+                  ...(outcomeActiveEvents === null
+                    ? {}
+                    : {
+                        activeEvents: outcomeActiveEvents.map((choice) => ({
+                          eventId: choice.event.id,
+                          eventTypeName: choice.eventTypeName,
+                          facilityName: choice.facilityName,
+                          mode: choice.event.templateMode,
+                          startedLabel: startedLabel(choice),
+                        })),
+                      }),
                   checkError: outcomeCheckError,
                   checking: checkingOutcome,
                   online: state.phase === 'online',
@@ -326,6 +345,7 @@ export default function HomeScreen() {
                     const operation = mutationSnapshot.operation;
                     setCheckingOutcome(true);
                     setOutcomeCheckError(null);
+                    setOutcomeActiveEvents(null);
                     void loadStartHomeData(requestAuthenticated).then(
                       (nextData) => {
                         if (
@@ -337,21 +357,15 @@ export default function HomeScreen() {
                         )
                           return;
                         setData(nextData);
+                        setOutcomeActiveEvents(nextData.activeEvents);
                         setCheckingOutcome(false);
-                        const resolved =
-                          operation === 'activate' &&
-                          startMutation.resolveActivationFromFreshEvents(
-                            nextData.activeEvents.map((choice) => choice.event),
-                          );
-                        if (!resolved) {
-                          setOutcomeCheckError(
-                            operation === 'activate'
-                              ? 'No exact matching activation evidence was found. Absence from this list is not proof of failure. The outcome remains unresolved; contact district technology support before making another start or join decision.'
-                              : 'The active-event list cannot prove participant join membership. The join outcome remains unresolved; contact district technology support before making another start or join decision.',
-                          );
-                        }
+                        setOutcomeCheckError(
+                          operation === 'activate'
+                            ? 'Active events were refreshed, but the list does not carry the request-specific idempotency evidence needed to prove which request created an event. The outcome remains unresolved; contact district technology support before making another start or join decision.'
+                            : 'The active-event list cannot prove participant join membership. The join outcome remains unresolved; contact district technology support before making another start or join decision.',
+                        );
                       },
-                      (error: unknown) => {
+                      () => {
                         if (
                           outcomeRequestGeneration.current !==
                             requestGeneration ||
@@ -360,7 +374,7 @@ export default function HomeScreen() {
                           !outcomeFocusedRef.current
                         )
                           return;
-                        setOutcomeCheckError(publicLoadError(error));
+                        setOutcomeCheckError(unresolvedOutcomeRefreshError());
                         setCheckingOutcome(false);
                       },
                     );

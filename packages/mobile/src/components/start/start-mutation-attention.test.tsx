@@ -169,7 +169,7 @@ describe('start mutation attention presentation', () => {
         expect(text).toContain('Load fresh active events');
         expect(text).toContain(
           operation === 'activate'
-            ? 'Absence is not proof of failure'
+            ? 'cannot prove which request created an event'
             : 'cannot prove join membership',
         );
         expect(checkAction?.props.accessibilityLabel).toBe(
@@ -177,7 +177,7 @@ describe('start mutation attention presentation', () => {
         );
         expect(checkAction?.props.accessibilityHint).toContain(
           operation === 'activate'
-            ? 'Absence is not proof of failure'
+            ? 'cannot prove which request created an event'
             : 'cannot prove join membership',
         );
         expect(checkAction?.props.accessibilityHint).toContain('never retries');
@@ -204,6 +204,74 @@ describe('start mutation attention presentation', () => {
     }
     press(checkAction);
     expect(checks).toBe(1);
+  });
+
+  test('renders refreshed active events as read-only classified evidence without resolving', () => {
+    const result = StartMutationAttentionContent({
+      activeEvents: [
+        {
+          eventId: '00000000-0000-4000-8000-000000000901',
+          eventTypeName: 'Synthetic lockdown',
+          facilityName: 'Synthetic High School',
+          mode: 'real',
+          startedLabel: 'Aug 12, 2026, 9:00 AM',
+        },
+        {
+          eventId: '00000000-0000-4000-8000-000000000902',
+          eventTypeName: 'Synthetic earthquake practice',
+          facilityName: 'Synthetic Middle School',
+          mode: 'drill',
+          startedLabel: 'Aug 12, 2026, 9:05 AM',
+        },
+      ],
+      eventTypeName: 'Synthetic medical response',
+      mode: 'drill',
+      onCheckActiveEvents: () => {},
+      operation: 'activate',
+      outcomeMessage: 'The server outcome is unknown.',
+      status: 'unresolved',
+    }) as Element;
+    const nodes = renderedElements(result);
+    const text = normalizedText(result);
+    const summaries = nodes.filter(
+      (node) => node.props.accessibilityRole === 'summary',
+    );
+
+    expect(text).toContain('Fresh active events');
+    expect(text).toContain('REAL INCIDENT');
+    expect(text).toContain('DRILL — PRACTICE');
+    expect(text).toContain('Synthetic High School');
+    expect(text).toContain('00000000-0000-4000-8000-000000000901');
+    expect(text).toContain('cannot prove which request created an event');
+    expect(summaries).toHaveLength(2);
+    expect(
+      summaries.every((summary) => summary.props.accessible === true),
+    ).toBe(true);
+    expect(
+      summaries.every((summary) =>
+        String(summary.props.accessibilityLabel).includes(
+          'does not resolve the earlier request',
+        ),
+      ),
+    ).toBe(true);
+    expect(nodes.filter((node) => node.type === 'Pressable')).toHaveLength(1);
+  });
+
+  test('renders an empty refreshed list without claiming prior failure', () => {
+    const result = StartMutationAttentionContent({
+      activeEvents: [],
+      eventTypeName: 'Synthetic medical response',
+      mode: 'drill',
+      onCheckActiveEvents: () => {},
+      operation: 'activate',
+      outcomeMessage: 'The server outcome is unknown.',
+      status: 'unresolved',
+    }) as Element;
+    const text = normalizedText(result);
+
+    expect(text).toContain('No active events appeared');
+    expect(text).toContain('Absence is not proof');
+    expect(text).toContain('does not clear the unresolved outcome');
   });
 
   test('disables refresh while checking and keeps refresh failures unresolved', () => {

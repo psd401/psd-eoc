@@ -151,37 +151,6 @@ function joinResult(): JoinEventResult {
   } as JoinEventResult;
 }
 
-function matchingActivationEvent(): Event {
-  return {
-    id: '00000000-0000-4000-8000-000000000020',
-    facilityId: PREVIEW.facilityId,
-    kind: PREVIEW.kind,
-    templateMode: PREVIEW.templateMode,
-    eventTypeVersion: PREVIEW.eventTypeVersion,
-    status: 'active',
-    rosterSnapshotId: PREVIEW.rosterSnapshotId,
-    rosterPopulation: PREVIEW.rosterPopulation,
-    createdBy: {
-      kind: 'human',
-      userId: ownerFixture().userId,
-      sessionId: ownerFixture().sessionId,
-    },
-    createdAt: '2026-08-12T12:00:00.000Z',
-    activatedAt: '2026-08-12T12:00:00.000Z',
-    allClearAt: null,
-    reactivatedAt: null,
-    closedAt: null,
-    correctionOfEventId: null,
-    correctionReason: null,
-    activationAuthorization: {
-      kind: 'synthetic-training',
-      activationPreviewId: PREVIEW.id,
-      consequenceDigest: PREVIEW.consequenceDigest,
-      requestId: '00000000-0000-4000-8000-000000000021',
-    },
-  } as Event;
-}
-
 function ownerFixture(): StartMutationOwner {
   const established = sessionFixture();
   return Object.freeze({
@@ -367,11 +336,9 @@ describe('StartMutationProviderController retention', () => {
       error: { outcomeUnknown: true },
     });
     controller.reconcile(authBinding('locked'));
-    expect(controller.resolveActivationFromFreshEvents([])).toBe(false);
     controller.reconcile(authBinding());
     expect(calls).toBe(1);
     expect(controller.acknowledge()).toBe(false);
-    expect(controller.resolveActivationFromFreshEvents([])).toBe(false);
     expect(controller.getSnapshot()).toMatchObject({
       phase: 'unresolved',
       operation: 'join',
@@ -600,11 +567,6 @@ describe('StartMutationProviderController admission and terminal API', () => {
       ...retainedAuth,
       assertMutationAllowed: newSessionAuth.assertMutationAllowed,
     });
-    expect(
-      unresolvedController.resolveActivationFromFreshEvents([
-        matchingActivationEvent(),
-      ]),
-    ).toBe(false);
     expect(unresolvedController.getSnapshot()).toMatchObject({
       phase: 'unresolved',
       eventTypeName: 'Recovered synthetic earthquake drill',

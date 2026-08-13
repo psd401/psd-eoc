@@ -1,14 +1,12 @@
 import {
   DeviceEnrollmentIdSchema,
   EventIdSchema,
-  EventSchema,
   IdempotencyKeySchema,
   SessionIdSchema,
   TemplateModeSchema,
   UserIdSchema,
   type ActivationPreview,
   type DeviceEnrollmentId,
-  type Event,
   type EventId,
   type EventKind,
   type EventTypeVersionRef,
@@ -341,31 +339,6 @@ export function createStartMutationActivationEvidence(
   preview: ActivationPreview,
 ): StartMutationActivationEvidence {
   return activationEvidenceFromPreview(preview);
-}
-
-function eventMatchesActivationEvidence(
-  eventInput: Event,
-  evidence: StartMutationActivationEvidence,
-): boolean {
-  const parsed = EventSchema.safeParse(eventInput);
-  if (!parsed.success) return false;
-  const event = parsed.data;
-  const authorization = event.activationAuthorization;
-  return (
-    event.id.length > 0 &&
-    event.facilityId === evidence.facilityId &&
-    event.kind === evidence.kind &&
-    event.templateMode === evidence.mode &&
-    event.eventTypeVersion.id === evidence.eventTypeVersion.id &&
-    event.eventTypeVersion.templateMode ===
-      evidence.eventTypeVersion.templateMode &&
-    event.rosterSnapshotId === evidence.rosterSnapshotId &&
-    event.rosterPopulation === evidence.rosterPopulation &&
-    event.status === 'active' &&
-    authorization !== null &&
-    authorization.activationPreviewId === evidence.previewId &&
-    authorization.consequenceDigest === evidence.consequenceDigest
-  );
 }
 
 function pendingOwnerSnapshot(
@@ -905,56 +878,6 @@ export class StartMutationCoordinator {
     });
     if (!this.persistCurrentStateOrBlock()) return null;
     return completion;
-  }
-
-  /** Resolves only exact durable activation evidence; absence never clears. */
-  public resolveActivationFromFreshEvents(
-    ownerInput: StartMutationOwner,
-    events: readonly Event[],
-  ): boolean {
-    const owner = validatedOwner(ownerInput);
-    if (
-      this.state.phase !== 'unresolved' ||
-      this.state.operation !== 'activate' ||
-      this.state.activationEvidence === null ||
-      !sameOwner(this.state.owner, owner) ||
-      !sameOwner(this.onlineOwner, owner)
-    ) {
-      return false;
-    }
-    const unresolved = this.state;
-    const evidence = unresolved.activationEvidence;
-    const matchingEvent =
-      evidence === null
-        ? undefined
-        : events.find((event) =>
-            eventMatchesActivationEvidence(event, evidence),
-          );
-    if (matchingEvent === undefined) {
-      return false;
-    }
-    const completion = Object.freeze({
-      kind: 'activated' as const,
-      eventId: EventIdSchema.parse(matchingEvent.id),
-      eventTypeName: unresolved.eventTypeName,
-      mode: unresolved.mode,
-    });
-    this.state = Object.freeze({
-      phase: 'succeeded',
-      owner: unresolved.owner,
-      presentation: Object.freeze({
-        operation: unresolved.operation,
-        eventTypeName: unresolved.eventTypeName,
-        mode: unresolved.mode,
-        idempotencyKey: unresolved.idempotencyKey,
-      }),
-      activationEvidence: evidence,
-      feedbackClaimed: false,
-      ownerSnapshot: succeededOwnerSnapshot(completion),
-    });
-    if (!this.persistCurrentStateOrBlock()) return false;
-    this.refreshSnapshot(true);
-    return true;
   }
 }
 
