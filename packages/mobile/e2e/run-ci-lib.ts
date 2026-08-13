@@ -758,6 +758,24 @@ export function isMobileE2EIosApplicationForeground(
   return foregroundSceneCard.test(hierarchy);
 }
 
+/**
+ * Synchronizes a direct dev-client launch on app-owned UI or its exact secure
+ * authentication transition. A stale external-URL alert never counts as app
+ * readiness, even if its hierarchy also contains an app label.
+ */
+export function isMobileE2EIosApplicationReady(
+  hierarchy: string,
+  expectedApplicationText: string,
+): boolean {
+  return (
+    expectedApplicationText.length > 0 &&
+    !hierarchy.includes('Open in “PSD EOC”?') &&
+    (hierarchy.includes(expectedApplicationText) ||
+      isMobileE2EIosAuthenticationSheetReady(hierarchy) ||
+      isMobileE2EIosApplicationForeground(hierarchy))
+  );
+}
+
 export interface MobileE2EIosSyntheticNotificationState {
   readonly valid: boolean;
   readonly locked: boolean;

@@ -42,6 +42,7 @@ import {
   isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
   isMobileE2EIosApplicationForeground,
+  isMobileE2EIosApplicationReady,
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
   isMobileE2EIosSyntheticNotificationVisible,
@@ -640,6 +641,51 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toBe(false);
   });
 
+  test('accepts direct iOS launch readiness only from exact app-owned states', () => {
+    const expectedText = 'Unlock PSD EOC';
+    const authenticationSheet =
+      '{"attributes":{"accessibilityText" : "Face ID"}}';
+    const foregroundScene =
+      '{"resource-id" : "card:net.psd401.eoc:sceneID:net.psd401.eoc-default"}';
+
+    expect(isMobileE2EIosApplicationReady(expectedText, expectedText)).toBe(
+      true,
+    );
+    expect(
+      isMobileE2EIosApplicationReady(authenticationSheet, expectedText),
+    ).toBe(true);
+    expect(isMobileE2EIosApplicationReady(foregroundScene, expectedText)).toBe(
+      true,
+    );
+    expect(
+      isMobileE2EIosApplicationReady(
+        `Open in “PSD EOC”? ${expectedText}`,
+        expectedText,
+      ),
+    ).toBe(false);
+    expect(
+      isMobileE2EIosApplicationReady(
+        `Open in “PSD EOC”? ${authenticationSheet}`,
+        expectedText,
+      ),
+    ).toBe(false);
+    expect(
+      isMobileE2EIosApplicationReady(
+        `Open in “PSD EOC”? ${foregroundScene}`,
+        expectedText,
+      ),
+    ).toBe(false);
+    expect(
+      isMobileE2EIosApplicationReady(
+        '{"resource-id":"card:com.example.other:sceneID:default"}',
+        expectedText,
+      ),
+    ).toBe(false);
+    expect(isMobileE2EIosApplicationReady('PSD EOC is loading', '')).toBe(
+      false,
+    );
+  });
+
   test('uses direct iOS launch without an external URL handoff', async () => {
     const runner = await readFile(
       new URL('run-ci.ts', import.meta.url),
@@ -650,6 +696,10 @@ describe('issue #32 exact synthetic drill data', () => {
     );
     expect(runner).not.toMatch(/['"]openurl['"]/u);
     expect(runner).not.toContain('accept-dev-client-handoff-ios.yaml');
+    expect(runner).toContain('IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000');
+    expect(runner).toContain(
+      '`ios-direct-launch-${metroPort}-failure-hierarchy.txt`',
+    );
   });
 
   test('recognizes only the synthetic drill notification behind the iOS system lock', () => {

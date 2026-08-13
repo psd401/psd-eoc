@@ -34,6 +34,7 @@ import {
   mobileE2ENormalMetroEnvironment,
   isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
+  isMobileE2EIosApplicationReady,
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
   parseMobileE2EManifestText,
@@ -70,6 +71,7 @@ const RETRY_INTERVAL_MS = 500;
 const IOS_NOTIFICATION_RESPONSE_TIMEOUT_MS = 60_000;
 const IOS_NOTIFICATION_FIRST_RESPONSE_TIMEOUT_MS = 5_000;
 const IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS = 30_000;
+const IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000;
 const IOS_BUNDLE_RELATIVE_PATH =
   'ios/build/Build/Products/Debug-iphonesimulator/PSDEOC.app';
 const ANDROID_APK_RELATIVE_PATH =
@@ -801,7 +803,80 @@ async function launchIosBundleDirectly(
       logPath: resolve(artifactRoot, `ios-direct-launch-${metroPort}.log`),
     },
   );
-  await awaitApplicationReady('ios', device.udid, expectedApplicationText);
+  await awaitIosApplicationReady(
+    device.udid,
+    expectedApplicationText,
+    artifactRoot,
+    metroPort,
+  );
+}
+
+async function awaitIosApplicationReady(
+  deviceId: string,
+  expectedText: string,
+  artifactRoot: string,
+  metroPort: number,
+): Promise<void> {
+  const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
+  let firstPoll = true;
+  let lastHierarchy = '';
+  let lastHierarchyDiagnostic = 'No hierarchy command completed.\n';
+  while (Date.now() < deadline) {
+    const remainingMilliseconds = Math.max(1, deadline - Date.now());
+    const hierarchyTimeout = Math.min(
+      firstPoll ? IOS_INITIAL_HIERARCHY_TIMEOUT_MS : 30_000,
+      remainingMilliseconds,
+    );
+    firstPoll = false;
+    const result = await runCommand(
+      ['maestro', '--udid', deviceId, 'hierarchy'],
+      {
+        allowFailure: true,
+        quiet: true,
+        timeoutMilliseconds: hierarchyTimeout,
+      },
+    );
+    lastHierarchy = `${result.stdout}\n${result.stderr}`;
+    lastHierarchyDiagnostic = redactedProcessOutput(
+      `exit=${result.exitCode}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    if (
+      result.exitCode === 0 &&
+      isMobileE2EIosApplicationReady(lastHierarchy, expectedText)
+    ) {
+      return;
+    }
+    await Bun.sleep(RETRY_INTERVAL_MS);
+  }
+  await writeFile(
+    resolve(
+      artifactRoot,
+      `ios-direct-launch-${metroPort}-failure-hierarchy.txt`,
+    ),
+    lastHierarchyDiagnostic,
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+  await runCommand(
+    [
+      'xcrun',
+      'simctl',
+      'io',
+      deviceId,
+      'screenshot',
+      resolve(
+        artifactRoot,
+        `ios-direct-launch-${metroPort}-failure-screen.png`,
+      ),
+    ],
+    {
+      allowFailure: true,
+      logPath: resolve(
+        artifactRoot,
+        `ios-direct-launch-${metroPort}-failure-screenshot.log`,
+      ),
+    },
+  );
+  throw new Error(`ios app did not expose ${expectedText} in time.`);
 }
 
 async function installAndOpenAndroidBundle(
