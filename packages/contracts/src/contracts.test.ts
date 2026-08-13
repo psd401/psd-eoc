@@ -45,6 +45,11 @@ import {
   EventTypeVersionDraftSchema,
   ExportDrillRecordsInputSchema,
   ExportEventSummaryInputSchema,
+  FanoutAuthorizationCheckInputSchema,
+  FanoutAuthorizationDecisionSchema,
+  FanoutControlEffectiveStateSchema,
+  FanoutControlRecordSchema,
+  FanoutStatusSchema,
   GroupSourceSchema,
   HUMAN_ONLY_ACTION_IDS,
   HttpsUrlSchema,
@@ -96,6 +101,8 @@ import {
   SMS_PROVIDER_VERIFIED_OPT_IN_REASON_CODE,
   SmsLifecycleCapabilityContextSchema,
   SetChannelEnabledInputSchema,
+  SetFanoutControlInputSchema,
+  SetFanoutControlResultSchema,
   SessionSchema,
   SessionTokenIssuanceSchema,
   SessionTokenReplaySchema,
@@ -162,6 +169,9 @@ const ids = {
   deliveryEligibilityPush: '00000000-0000-4000-8000-000000000046',
   deliveryEligibilityEmail: '00000000-0000-4000-8000-000000000047',
   deliveryEligibilityRevocation: '00000000-0000-4000-8000-000000000048',
+  fanoutRecord: '00000000-0000-4000-8000-000000000049',
+  previousFanoutRecord: '00000000-0000-4000-8000-000000000050',
+  fanoutEnableEpoch: '00000000-0000-4000-8000-000000000051',
 } as const;
 
 const times = {
@@ -5073,6 +5083,247 @@ describe('MCP message-revision facade', () => {
   });
 });
 
+describe('district fanout emergency control', () => {
+  const enabledRecord = {
+    id: ids.fanoutRecord,
+    revision: 2,
+    previousRecordId: ids.previousFanoutRecord,
+    mode: 'enabled',
+    enableEpochId: ids.fanoutEnableEpoch,
+    reason: 'Product-owner approved controlled production enablement.',
+    productOwnerApprovalReference: 'go-live-approval-2026-08-12',
+    changedByUserId: ids.actor,
+    changedWithSessionId: ids.session,
+    changedAt: times.activated,
+    requestId: ids.request,
+  } as const;
+
+  test('owns an append-only state whose missing or unreadable forms fail disabled', () => {
+    expect(FanoutControlRecordSchema.parse(enabledRecord)).toEqual(
+      enabledRecord,
+    );
+    expect(
+      FanoutControlRecordSchema.safeParse({
+        ...enabledRecord,
+        mode: 'emergency-disabled',
+        enableEpochId: null,
+        productOwnerApprovalReference: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      FanoutControlRecordSchema.safeParse({
+        ...enabledRecord,
+        enableEpochId: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      FanoutControlRecordSchema.safeParse({
+        ...enabledRecord,
+        revision: 1,
+      }).success,
+    ).toBe(false);
+
+    for (const failClosedState of [
+      {
+        kind: 'missing',
+        effectiveMode: 'emergency-disabled',
+        currentEpochId: null,
+        currentRecord: null,
+        reasonCode: 'CONTROL_STATE_MISSING',
+      },
+      {
+        kind: 'unavailable',
+        effectiveMode: 'emergency-disabled',
+        currentEpochId: null,
+        currentRecord: null,
+        reasonCode: 'CONTROL_STATE_UNREADABLE',
+      },
+    ] as const) {
+      expect(FanoutControlEffectiveStateSchema.parse(failClosedState)).toEqual(
+        failClosedState,
+      );
+    }
+    expect(
+      FanoutControlEffectiveStateSchema.safeParse({
+        kind: 'missing',
+        effectiveMode: 'enabled',
+        currentEpochId: ids.fanoutEnableEpoch,
+        currentRecord: null,
+        reasonCode: 'CONTROL_STATE_MISSING',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('minimizes staff status to one honest non-provenance field', () => {
+    for (const status of [
+      'enabled',
+      'emergency-disabled',
+      'unavailable',
+    ] as const) {
+      expect(FanoutStatusSchema.parse({ status })).toEqual({ status });
+    }
+    for (const extraField of [
+      'currentRecord',
+      'currentEpochId',
+      'reasonCode',
+      'reason',
+      'productOwnerApprovalReference',
+      'changedByUserId',
+      'changedWithSessionId',
+      'requestId',
+      'changedAt',
+      'id',
+      'previousRecordId',
+      'revision',
+      'enableEpochId',
+    ] as const) {
+      expect(
+        FanoutStatusSchema.safeParse({
+          status: 'unavailable',
+          [extraField]: 'forbidden',
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  test('keeps enable epochs server-owned and requires approval only to enable', () => {
+    const disableInput = {
+      expectedCurrentRecordId: ids.fanoutRecord,
+      desiredMode: 'emergency-disabled',
+      reason: 'Pause all notification fanout during provider investigation.',
+    } as const;
+    const enableInput = {
+      expectedCurrentRecordId: ids.fanoutRecord,
+      desiredMode: 'enabled',
+      reason: 'Resume after product-owner review of the incident.',
+      productOwnerApprovalReference: 'approval-ticket-1234',
+    } as const;
+
+    expect(SetFanoutControlInputSchema.parse(disableInput)).toEqual(
+      disableInput,
+    );
+    expect(SetFanoutControlInputSchema.parse(enableInput)).toEqual(enableInput);
+    expect(
+      SetFanoutControlInputSchema.safeParse({
+        ...enableInput,
+        enableEpochId: ids.fanoutEnableEpoch,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetFanoutControlInputSchema.safeParse({
+        ...disableInput,
+        productOwnerApprovalReference: 'not-permitted-for-disable',
+      }).success,
+    ).toBe(false);
+    expect(
+      SetFanoutControlInputSchema.safeParse({
+        expectedCurrentRecordId: ids.fanoutRecord,
+        desiredMode: 'enabled',
+        reason: 'Missing approval must fail.',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      SetFanoutControlResultSchema.safeParse({
+        appendedRecord: enabledRecord,
+      }).success,
+    ).toBe(true);
+    expect(
+      SetFanoutControlResultSchema.safeParse({
+        appendedRecord: enabledRecord,
+        effectiveState: {
+          kind: 'current',
+          effectiveMode: 'enabled',
+          currentEpochId: ids.fanoutEnableEpoch,
+          currentRecord: enabledRecord,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('returns an explicit fail-closed worker authorization decision', () => {
+    expect(
+      FanoutAuthorizationCheckInputSchema.parse({ intentId: ids.intent }),
+    ).toEqual({ intentId: ids.intent });
+    expect(
+      FanoutAuthorizationCheckInputSchema.safeParse({
+        intentId: ids.intent,
+        expectedEnableEpochId: ids.fanoutEnableEpoch,
+      }).success,
+    ).toBe(false);
+    expect(
+      FanoutAuthorizationDecisionSchema.safeParse({
+        authorized: true,
+        currentEpochId: ids.fanoutEnableEpoch,
+      }).success,
+    ).toBe(true);
+    for (const reasonCode of [
+      'CONTROL_STATE_MISSING',
+      'CONTROL_STATE_UNREADABLE',
+      'EMERGENCY_DISABLED',
+    ] as const) {
+      expect(
+        FanoutAuthorizationDecisionSchema.safeParse({
+          authorized: false,
+          currentEpochId: null,
+          reasonCode,
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      FanoutAuthorizationDecisionSchema.safeParse({
+        authorized: false,
+        currentEpochId: ids.fanoutEnableEpoch,
+        reasonCode: 'ENABLE_EPOCH_MISMATCH',
+      }).success,
+    ).toBe(true);
+    expect(
+      FanoutAuthorizationDecisionSchema.safeParse({
+        authorized: false,
+        currentEpochId: null,
+        reasonCode: 'ENABLE_EPOCH_MISMATCH',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('catalogs fanout reads for humans and changes for human web only', () => {
+    expect(
+      getCapabilityInvocationPolicy('authorize-notification-fanout'),
+    ).toEqual({
+      principalKinds: ['system'],
+      sources: ['worker'],
+      agentGrantable: false,
+    });
+    expect(defineCapability('get-fanout-control').operation).toBe('query');
+    expect(defineCapability('get-fanout-status').operation).toBe('query');
+    expect(defineCapability('set-fanout-control').operation).toBe('mutation');
+    expect(getCapabilityInvocationPolicy('get-fanout-control')).toEqual({
+      principalKinds: ['human'],
+      sources: ['web'],
+      agentGrantable: false,
+    });
+    expect(getCapabilityInvocationPolicy('get-fanout-status')).toEqual({
+      principalKinds: ['human'],
+      sources: ['web', 'mobile'],
+      agentGrantable: false,
+    });
+    expect(getCapabilityInvocationPolicy('set-fanout-control')).toEqual({
+      principalKinds: ['human'],
+      sources: ['web'],
+      agentGrantable: false,
+    });
+    expect(
+      AgentCapabilityGrantSchema.safeParse('get-fanout-control').success,
+    ).toBe(false);
+    expect(
+      AgentCapabilityGrantSchema.safeParse('get-fanout-status').success,
+    ).toBe(false);
+    expect(
+      AgentCapabilityGrantSchema.safeParse('set-fanout-control').success,
+    ).toBe(false);
+  });
+});
+
 describe('barrel exports', () => {
   test('exposes stable downstream schemas from the package entry point', () => {
     expect(typeof Contracts.EventSchema.parse).toBe('function');
@@ -5096,6 +5347,7 @@ describe('barrel exports', () => {
     expect(typeof Contracts.McpDraftMessageRevisionInputSchema.parse).toBe(
       'function',
     );
+    expect(typeof Contracts.FanoutControlRecordSchema.parse).toBe('function');
     expect(typeof Contracts.defineCapability).toBe('function');
     expect(Contracts.HUMAN_ONLY_ACTION_IDS).toHaveLength(4);
   });
