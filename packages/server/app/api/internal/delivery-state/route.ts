@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
   ChannelAttemptSchema,
+  DeliveryTestNotificationMetadataSchema,
   DeliveryEvidenceSchema,
   DeliveryTruthTransitionSchema,
   IdempotencyKeySchema,
@@ -28,7 +29,16 @@ import {
   type Database,
   type DatabaseQuery,
 } from '../../../../db/client';
-import { channelAttempts, deliveryEvidence } from '../../../../db/schema';
+import {
+  channelAttempts,
+  deliveryEvidence,
+  notificationIntents,
+} from '../../../../db/schema';
+import {
+  createDeliveryTestReportRuntime,
+  type DeliveryTestReportRuntime,
+} from '../../../(app)/delivery-tests/capabilities';
+import type { TrustedCapabilityInvocation } from '../../../../lib/capabilities/engine';
 
 export const dynamic = 'force-dynamic';
 
@@ -122,6 +132,10 @@ export interface DeliveryStateRouteRuntime {
     DeliveryEvidenceCapabilityContext
   >;
   readonly authorizer: CapabilityExecutionAuthorizer<DeliveryEvidenceCapabilityContext>;
+  finalizeDeliveryTestReportByIntent(
+    intentId: string,
+    invocation: TrustedCapabilityInvocation,
+  ): Promise<unknown | null>;
   close(): Promise<void>;
 }
 
@@ -149,6 +163,13 @@ class DeliveryStateRouteRequestError extends Error {
 type DeliveryStateQueryDatabase = DatabaseQuery;
 type ChannelAttemptRow = typeof channelAttempts.$inferSelect;
 type DeliveryEvidenceRow = typeof deliveryEvidence.$inferSelect;
+type NotificationIntentDeliveryTestRow = Pick<
+  typeof notificationIntents.$inferSelect,
+  | 'id'
+  | 'deliveryTestTargetSetId'
+  | 'deliveryTestTargetSetVersion'
+  | 'deliveryTestEndpointReferenceDigest'
+>;
 
 function deliveryStateQueryDatabase(
   database: unknown,
@@ -170,7 +191,10 @@ function dateIso(value: Date | string): string {
   return date.toISOString();
 }
 
-function attemptFromRow(row: ChannelAttemptRow): ChannelAttempt {
+function attemptFromRow(
+  row: ChannelAttemptRow,
+  deliveryTest: ChannelAttempt['deliveryTest'],
+): ChannelAttempt {
   return ChannelAttemptSchema.parse({
     id: row.id,
     batchId: row.batchId,
@@ -185,12 +209,26 @@ function attemptFromRow(row: ChannelAttemptRow): ChannelAttempt {
     },
     rosterSnapshotId: row.rosterSnapshotId,
     rosterPopulation: row.rosterPopulation,
+    deliveryTest,
     recipientId: row.recipientId,
     endpointId: row.endpointId,
     channel: row.channel,
     attemptNumber: row.attemptNumber,
     attemptedAt: dateIso(row.attemptedAt),
   });
+}
+
+function sameDeliveryTestMetadata(
+  left: ChannelAttempt['deliveryTest'],
+  right: ChannelAttempt['deliveryTest'],
+): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  return (
+    left.purpose === right.purpose &&
+    left.targetSet.id === right.targetSet.id &&
+    left.targetSet.version === right.targetSet.version &&
+    left.endpointReferenceDigest === right.endpointReferenceDigest
+  );
 }
 
 function evidenceFromRow(row: DeliveryEvidenceRow): DeliveryEvidence {
@@ -226,12 +264,76 @@ function sameAttempt(left: ChannelAttempt, right: ChannelAttempt): boolean {
       right.eventTypeVersion.templateMode &&
     left.rosterSnapshotId === right.rosterSnapshotId &&
     left.rosterPopulation === right.rosterPopulation &&
+    sameDeliveryTestMetadata(left.deliveryTest, right.deliveryTest) &&
     left.recipientId === right.recipientId &&
     left.endpointId === right.endpointId &&
     left.channel === right.channel &&
     left.attemptNumber === right.attemptNumber &&
     Date.parse(left.attemptedAt) === Date.parse(right.attemptedAt)
   );
+}
+
+function deliveryTestMetadataFromIntent(
+  row: NotificationIntentDeliveryTestRow,
+): ChannelAttempt['deliveryTest'] {
+  const values = [
+    row.deliveryTestTargetSetId,
+    row.deliveryTestTargetSetVersion,
+    row.deliveryTestEndpointReferenceDigest,
+  ];
+  if (values.every((value) => value === null)) return null;
+
+  const result = DeliveryTestNotificationMetadataSchema.safeParse({
+    purpose: 'monthly-live-delivery-test',
+    targetSet: {
+      id: row.deliveryTestTargetSetId,
+      version: row.deliveryTestTargetSetVersion,
+    },
+    endpointReferenceDigest: row.deliveryTestEndpointReferenceDigest,
+  });
+  if (!result.success) {
+    throw new DeliveryStateError(
+      'DELIVERY_STATE_PERSISTENCE_INVALID',
+      503,
+      'The immutable notification intent had invalid delivery-test provenance.',
+    );
+  }
+  return result.data;
+}
+
+async function loadIntentDeliveryTestMetadata(
+  database: DeliveryStateQueryDatabase,
+  attempt: ChannelAttempt,
+): Promise<ChannelAttempt['deliveryTest']> {
+  const [row] = await database
+    .select({
+      id: notificationIntents.id,
+      deliveryTestTargetSetId: notificationIntents.deliveryTestTargetSetId,
+      deliveryTestTargetSetVersion:
+        notificationIntents.deliveryTestTargetSetVersion,
+      deliveryTestEndpointReferenceDigest:
+        notificationIntents.deliveryTestEndpointReferenceDigest,
+    })
+    .from(notificationIntents)
+    .where(eq(notificationIntents.id, attempt.intentId))
+    .limit(1);
+  if (row === undefined || row.id !== attempt.intentId) {
+    throw new DeliveryStateError(
+      'DELIVERY_STATE_PERSISTENCE_INVALID',
+      503,
+      'The immutable notification intent was unavailable.',
+    );
+  }
+
+  const expected = deliveryTestMetadataFromIntent(row);
+  if (!sameDeliveryTestMetadata(expected, attempt.deliveryTest)) {
+    throw new DeliveryStateError(
+      'ATTEMPT_CONFLICT',
+      409,
+      'The attempt delivery-test provenance does not match its immutable notification intent.',
+    );
+  }
+  return expected;
 }
 
 function evidenceMatchesInput(
@@ -444,6 +546,14 @@ export function createDrizzleDeliveryEvidenceStore(
           );
         }
 
+        // Attempts intentionally do not duplicate monthly live-test columns.
+        // Bind both the first write and every replay to the immutable intent so
+        // a worker cannot omit, introduce, or alter canary-set provenance.
+        const intentDeliveryTest = await loadIntentDeliveryTestMetadata(
+          query,
+          request.attempt,
+        );
+
         if (existingById === undefined) {
           if (request.evidence.state !== 'attempted') {
             throw new DeliveryStateError(
@@ -472,7 +582,12 @@ export function createDrizzleDeliveryEvidenceStore(
           return appendEvidence(query, request.evidence, null, uuid);
         }
 
-        if (!sameAttempt(attemptFromRow(existingById), request.attempt)) {
+        if (
+          !sameAttempt(
+            attemptFromRow(existingById, intentDeliveryTest),
+            request.attempt,
+          )
+        ) {
           throw new DeliveryStateError(
             'ATTEMPT_CONFLICT',
             409,
@@ -600,6 +715,37 @@ function capabilityContextFor(
     requestId: UuidSchema.parse(request.attempt.id),
     idempotencyKey: idempotencyKeyFor(request.attempt, request.evidence),
     attempt: request.attempt,
+  });
+}
+
+/**
+ * Correlates report idempotency to the immutable evidence fact. Each execution
+ * receives a fresh audit request ID so a retained failure audit cannot block a
+ * later successful retry; exact callback replays still share one canonical
+ * idempotency key and therefore cannot duplicate a report.
+ */
+function deliveryTestReportInvocationFor(
+  evidence: DeliveryEvidence,
+): TrustedCapabilityInvocation {
+  return Object.freeze({
+    actor: Object.freeze({
+      kind: 'system' as const,
+      serviceId: DELIVERY_STATE_WORKER_SERVICE_ID,
+    }),
+    source: 'worker' as const,
+    scope: Object.freeze({
+      facilityScope: Object.freeze({ kind: 'district' as const }),
+    }),
+    requestId: randomUUID(),
+    serverTime: new Date(dateIso(evidence.recordedAt)),
+    connectivityEpochId: null,
+    mutation: Object.freeze({
+      idempotencyKey: IdempotencyKeySchema.parse(
+        `delivery-test-report:${evidence.id}`,
+      ),
+      transport: Object.freeze({ kind: 'worker-execution' as const }),
+      humanConfirmationId: null,
+    }),
   });
 }
 
@@ -896,6 +1042,23 @@ export function createDeliveryStateRouteHandler(
         safetyResolver: null,
         authorizer: runtime.authorizer,
       });
+      // Evidence is committed before report projection begins. The canonical
+      // report runtime resolves the pinned test run and returns null until its
+      // exact target endpoint aggregate is terminal; this adapter never
+      // inserts or fabricates a report itself.
+      if (
+        body.attempt.deliveryTest != null &&
+        (result.state === 'provider-accepted' ||
+          result.state === 'delivered' ||
+          result.state === 'failed' ||
+          result.state === 'expired' ||
+          result.state === 'unknown')
+      ) {
+        await runtime.finalizeDeliveryTestReportByIntent(
+          body.attempt.intentId,
+          deliveryTestReportInvocationFor(result),
+        );
+      }
       return safeJson(200, { result });
     } catch (error) {
       if (error instanceof DeliveryStateError) {
@@ -918,10 +1081,13 @@ async function createDefaultRuntime(): Promise<DeliveryStateRouteRuntime> {
   const connection = createDatabaseClient(readDatabaseConfig());
   try {
     const store = createDrizzleDeliveryEvidenceStore(connection.db);
+    const reportRuntime: DeliveryTestReportRuntime =
+      createDeliveryTestReportRuntime(connection);
     return Object.freeze({
       handler: createRecordDeliveryEvidenceHandler(store),
       authorizer: createDeliveryStateAuthorizer(),
-      close: connection.close,
+      finalizeDeliveryTestReportByIntent: reportRuntime.finalizeByIntent,
+      close: reportRuntime.close,
     });
   } catch (error) {
     await connection.close().catch(() => undefined);

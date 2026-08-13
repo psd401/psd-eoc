@@ -9,6 +9,7 @@ import { AudienceConfigRefSchema } from './facility';
 import { IntegrationStatusSchema } from './integration';
 import {
   ActivationAuthorizationSchema,
+  DeliveryTestNotificationMetadataSchema,
   EventIdSchema,
   EventKindSchema,
   EventTargetingSchema,
@@ -133,6 +134,35 @@ function addNotificationTargetingIssues(
       code: 'custom',
       message: 'Notification targeting classification is incompatible.',
       path: ['rosterPopulation'],
+    });
+  }
+}
+
+function addDeliveryTestNotificationIssues(
+  value: {
+    readonly eventKind: EventKind;
+    readonly templateMode: TemplateMode;
+    readonly rosterPopulation: RosterPopulation;
+    readonly purpose: NotificationPurpose;
+    readonly deliveryTest?:
+      | z.infer<typeof DeliveryTestNotificationMetadataSchema>
+      | null
+      | undefined;
+  },
+  context: z.RefinementCtx,
+): void {
+  if (
+    value.deliveryTest != null &&
+    (value.eventKind !== 'drill' ||
+      value.templateMode !== 'drill' ||
+      value.rosterPopulation !== 'staff' ||
+      value.purpose !== 'activation')
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message:
+        'Monthly live delivery-test provenance is valid only for a staff drill activation.',
+      path: ['deliveryTest'],
     });
   }
 }
@@ -269,6 +299,7 @@ export const NotificationIntentSchema = z
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
     audienceConfig: AudienceConfigRefSchema,
+    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     createdBy: ActorSchema,
     source: InvocationSourceSchema,
     requestId: UuidSchema,
@@ -279,6 +310,7 @@ export const NotificationIntentSchema = z
   .strict()
   .superRefine((intent, context) => {
     addNotificationTargetingIssues(intent, context);
+    addDeliveryTestNotificationIssues(intent, context);
     addChannelPlanIssues(intent, context);
     addNotificationAuthorizationIssues(intent, context);
     if (intent.eventTypeVersion.templateMode !== intent.templateMode) {
@@ -328,6 +360,7 @@ export const DispatchBatchSchema = z
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
     audienceConfig: AudienceConfigRefSchema,
+    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     requestId: UuidSchema,
     authorization: NotificationAuthorizationSchema,
     channel: NotificationChannelSchema,
@@ -340,6 +373,7 @@ export const DispatchBatchSchema = z
   .strict()
   .superRefine((batch, context) => {
     addNotificationTargetingIssues(batch, context);
+    addDeliveryTestNotificationIssues(batch, context);
     addNotificationAuthorizationIssues(batch, context);
     if (batch.eventTypeVersion.templateMode !== batch.templateMode) {
       context.addIssue({
@@ -407,6 +441,7 @@ export const ChannelAttemptSchema = z
     eventTypeVersion: EventTypeVersionRefSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
+    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     recipientId: RecipientIdSchema,
     endpointId: EndpointIdSchema,
     channel: NotificationChannelSchema,
@@ -416,6 +451,7 @@ export const ChannelAttemptSchema = z
   .strict()
   .superRefine((attempt, context) => {
     addNotificationTargetingIssues(attempt, context);
+    addDeliveryTestNotificationIssues(attempt, context);
     if (attempt.eventTypeVersion.templateMode !== attempt.templateMode) {
       context.addIssue({
         code: 'custom',
@@ -730,6 +766,7 @@ export const NotificationOutboxMessageSchema = z
     rosterSnapshotId: RosterSnapshotIdSchema,
     rosterPopulation: RosterPopulationSchema,
     audienceConfig: AudienceConfigRefSchema,
+    deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
     requestId: UuidSchema,
     authorization: NotificationAuthorizationSchema,
     channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
@@ -738,6 +775,7 @@ export const NotificationOutboxMessageSchema = z
   .strict()
   .superRefine((message, context) => {
     addNotificationTargetingIssues(message, context);
+    addDeliveryTestNotificationIssues(message, context);
     addChannelPlanIssues(message, context);
     addNotificationAuthorizationIssues(message, context);
     if (message.eventTypeVersion.templateMode !== message.templateMode) {
@@ -906,6 +944,8 @@ export const DispatchOutboxResultSchema = z
         batch.rosterPopulation !== message.rosterPopulation ||
         batch.audienceConfig.id !== message.audienceConfig.id ||
         batch.audienceConfig.version !== message.audienceConfig.version ||
+        JSON.stringify(batch.deliveryTest) !==
+          JSON.stringify(message.deliveryTest) ||
         batch.requestId !== message.requestId ||
         JSON.stringify(batch.authorization) !==
           JSON.stringify(message.authorization) ||
@@ -1373,6 +1413,8 @@ export const NotificationStatusSchema = z
         batch.rosterPopulation !== status.intent.rosterPopulation ||
         batch.audienceConfig.id !== status.intent.audienceConfig.id ||
         batch.audienceConfig.version !== status.intent.audienceConfig.version ||
+        JSON.stringify(batch.deliveryTest) !==
+          JSON.stringify(status.intent.deliveryTest) ||
         batch.requestId !== status.intent.requestId ||
         JSON.stringify(batch.authorization) !==
           JSON.stringify(status.intent.authorization) ||

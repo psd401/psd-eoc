@@ -15,6 +15,10 @@ export const facilitiesRelations = relations(schema.facilities, ({ many }) => ({
     schema.rosterSourceConfigurationFacilities,
   ),
   rosterSnapshotFacilities: many(schema.rosterSnapshotFacilities),
+  deliveryTestTargetSetVersions: many(schema.deliveryTestTargetSetVersions),
+  deliveryTestCanaryEligibilityFacts: many(
+    schema.deliveryTestCanaryEligibilityFacts,
+  ),
   events: many(schema.events),
   activationPreviews: many(schema.activationPreviews),
   securityAuditEntries: many(schema.securityAuditEntries),
@@ -141,6 +145,19 @@ export const usersRelations = relations(schema.users, ({ many }) => ({
     relationName: 'channelChangeConsumer',
   }),
   humanConfirmationRecords: many(schema.humanConfirmationRecords),
+  deliveryTestCanaryEligibilityDecisions: many(
+    schema.deliveryTestCanaryEligibilityFacts,
+    { relationName: 'deliveryTestCanaryEligibilityDecider' },
+  ),
+  deliveryTestTargetSetsApproved: many(schema.deliveryTestTargetSetVersions, {
+    relationName: 'deliveryTestTargetSetApprover',
+  }),
+  deliveryTestEndpointAttestations: many(schema.deliveryTestTargetEndpoints, {
+    relationName: 'deliveryTestEndpointAttester',
+  }),
+  deliveryTestRunsStarted: many(schema.deliveryTestRuns, {
+    relationName: 'deliveryTestRunStarter',
+  }),
 }));
 
 export const userRolesRelations = relations(schema.userRoles, ({ one }) => ({
@@ -305,6 +322,16 @@ export const sessionsRelations = relations(
       { relationName: 'channelChangeConsumerSession' },
     ),
     humanConfirmationRecords: many(schema.humanConfirmationRecords),
+    deliveryTestCanaryEligibilityDecisions: many(
+      schema.deliveryTestCanaryEligibilityFacts,
+      { relationName: 'deliveryTestCanaryEligibilitySession' },
+    ),
+    deliveryTestTargetSetsApproved: many(schema.deliveryTestTargetSetVersions, {
+      relationName: 'deliveryTestTargetSetApprovalSession',
+    }),
+    deliveryTestRunsStarted: many(schema.deliveryTestRuns, {
+      relationName: 'deliveryTestRunSession',
+    }),
   }),
 );
 
@@ -414,6 +441,7 @@ export const humanConfirmationRecordsRelations = relations(
     actions: many(schema.humanConfirmationActions),
     eventTransitions: many(schema.eventTransitions),
     securityAuditEntries: many(schema.securityAuditEntries),
+    deliveryTestRun: many(schema.deliveryTestRuns),
   }),
 );
 
@@ -560,6 +588,11 @@ export const rosterSnapshotsRelations = relations(
     outboxRecords: many(schema.outbox),
     dispatchBatches: many(schema.dispatchBatches),
     channelAttempts: many(schema.channelAttempts),
+    deliveryTestTargetSetVersions: many(schema.deliveryTestTargetSetVersions),
+    deliveryTestCanaryEligibilityFacts: many(
+      schema.deliveryTestCanaryEligibilityFacts,
+    ),
+    deliveryTestTargetEndpoints: many(schema.deliveryTestTargetEndpoints),
     publishedBySyncResults: many(schema.rosterSyncResults),
   }),
 );
@@ -695,6 +728,114 @@ export const rosterRecipientsRelations = relations(
     attempts: many(schema.channelAttempts),
     endpointStatusRecords: many(schema.endpointStatusRecords),
     smsOptOutRecords: many(schema.smsOptOutRecords),
+    deliveryTestAttestations: many(schema.deliveryTestTargetEndpoints),
+    deliveryTestCanaryEligibilityFacts: many(
+      schema.deliveryTestCanaryEligibilityFacts,
+    ),
+  }),
+);
+
+export const deliveryTestCanaryEligibilityFactsRelations = relations(
+  schema.deliveryTestCanaryEligibilityFacts,
+  ({ one, many }) => ({
+    facility: one(schema.facilities, {
+      fields: [schema.deliveryTestCanaryEligibilityFacts.facilityId],
+      references: [schema.facilities.id],
+    }),
+    rosterEndpoint: one(schema.rosterEndpoints, {
+      fields: [
+        schema.deliveryTestCanaryEligibilityFacts.rosterSnapshotId,
+        schema.deliveryTestCanaryEligibilityFacts.endpointId,
+      ],
+      references: [
+        schema.rosterEndpoints.rosterSnapshotId,
+        schema.rosterEndpoints.id,
+      ],
+    }),
+    decidedBy: one(schema.users, {
+      fields: [schema.deliveryTestCanaryEligibilityFacts.decidedByUserId],
+      references: [schema.users.id],
+      relationName: 'deliveryTestCanaryEligibilityDecider',
+    }),
+    decidedWithSession: one(schema.sessions, {
+      fields: [schema.deliveryTestCanaryEligibilityFacts.decidedWithSessionId],
+      references: [schema.sessions.id],
+      relationName: 'deliveryTestCanaryEligibilitySession',
+    }),
+    supersedes: one(schema.deliveryTestCanaryEligibilityFacts, {
+      fields: [schema.deliveryTestCanaryEligibilityFacts.supersedesFactId],
+      references: [schema.deliveryTestCanaryEligibilityFacts.id],
+      relationName: 'deliveryTestCanaryEligibilityChain',
+    }),
+    supersededBy: many(schema.deliveryTestCanaryEligibilityFacts, {
+      relationName: 'deliveryTestCanaryEligibilityChain',
+    }),
+    targetEndpoints: many(schema.deliveryTestTargetEndpoints),
+  }),
+);
+
+export const deliveryTestTargetSetVersionsRelations = relations(
+  schema.deliveryTestTargetSetVersions,
+  ({ one, many }) => ({
+    facility: one(schema.facilities, {
+      fields: [schema.deliveryTestTargetSetVersions.facilityId],
+      references: [schema.facilities.id],
+    }),
+    rosterSnapshot: one(schema.rosterSnapshots, {
+      fields: [schema.deliveryTestTargetSetVersions.rosterSnapshotId],
+      references: [schema.rosterSnapshots.id],
+    }),
+    approvedBy: one(schema.users, {
+      fields: [schema.deliveryTestTargetSetVersions.approvedByUserId],
+      references: [schema.users.id],
+      relationName: 'deliveryTestTargetSetApprover',
+    }),
+    approvedWithSession: one(schema.sessions, {
+      fields: [schema.deliveryTestTargetSetVersions.approvedWithSessionId],
+      references: [schema.sessions.id],
+      relationName: 'deliveryTestTargetSetApprovalSession',
+    }),
+    supersedes: one(schema.deliveryTestTargetSetVersions, {
+      fields: [schema.deliveryTestTargetSetVersions.supersedesVersionId],
+      references: [schema.deliveryTestTargetSetVersions.id],
+      relationName: 'deliveryTestTargetSetVersionChain',
+    }),
+    supersededBy: many(schema.deliveryTestTargetSetVersions, {
+      relationName: 'deliveryTestTargetSetVersionChain',
+    }),
+    endpoints: many(schema.deliveryTestTargetEndpoints),
+    activationPreviews: many(schema.activationPreviews),
+    notificationIntents: many(schema.notificationIntents),
+    runs: many(schema.deliveryTestRuns),
+  }),
+);
+
+export const deliveryTestTargetEndpointsRelations = relations(
+  schema.deliveryTestTargetEndpoints,
+  ({ one }) => ({
+    targetSetVersion: one(schema.deliveryTestTargetSetVersions, {
+      fields: [schema.deliveryTestTargetEndpoints.targetSetVersionId],
+      references: [schema.deliveryTestTargetSetVersions.id],
+    }),
+    rosterEndpoint: one(schema.rosterEndpoints, {
+      fields: [
+        schema.deliveryTestTargetEndpoints.rosterSnapshotId,
+        schema.deliveryTestTargetEndpoints.endpointId,
+      ],
+      references: [
+        schema.rosterEndpoints.rosterSnapshotId,
+        schema.rosterEndpoints.id,
+      ],
+    }),
+    attestedBy: one(schema.users, {
+      fields: [schema.deliveryTestTargetEndpoints.attestedByUserId],
+      references: [schema.users.id],
+      relationName: 'deliveryTestEndpointAttester',
+    }),
+    eligibilityFact: one(schema.deliveryTestCanaryEligibilityFacts, {
+      fields: [schema.deliveryTestTargetEndpoints.eligibilityFactId],
+      references: [schema.deliveryTestCanaryEligibilityFacts.id],
+    }),
   }),
 );
 
@@ -734,6 +875,9 @@ export const rosterEndpointsRelations = relations(
     attempts: many(schema.channelAttempts),
     statusRecords: many(schema.endpointStatusRecords),
     smsOptOutRecords: many(schema.smsOptOutRecords),
+    deliveryTestCanaryEligibilityFacts: many(
+      schema.deliveryTestCanaryEligibilityFacts,
+    ),
   }),
 );
 
@@ -889,7 +1033,12 @@ export const activationPreviewsRelations = relations(
         schema.audienceConfigurations.version,
       ],
     }),
+    deliveryTestTargetSetVersion: one(schema.deliveryTestTargetSetVersions, {
+      fields: [schema.activationPreviews.deliveryTestTargetSetId],
+      references: [schema.deliveryTestTargetSetVersions.id],
+    }),
     preparedActivations: many(schema.preparedActivations),
+    deliveryTestRuns: many(schema.deliveryTestRuns),
   }),
 );
 
@@ -941,6 +1090,7 @@ export const eventsRelations = relations(schema.events, ({ one, many }) => ({
   outboxRecords: many(schema.outbox),
   dispatchBatches: many(schema.dispatchBatches),
   channelAttempts: many(schema.channelAttempts),
+  deliveryTestRuns: many(schema.deliveryTestRuns),
 }));
 
 export const lifecycleConsequencePreviewsRelations = relations(
@@ -1089,11 +1239,16 @@ export const notificationIntentsRelations = relations(
         schema.audienceConfigurations.version,
       ],
     }),
+    deliveryTestTargetSetVersion: one(schema.deliveryTestTargetSetVersions, {
+      fields: [schema.notificationIntents.deliveryTestTargetSetId],
+      references: [schema.deliveryTestTargetSetVersions.id],
+    }),
     channels: many(schema.notificationIntentChannels),
     outboxRecords: many(schema.outbox),
     dispatchBatches: many(schema.dispatchBatches),
     attempts: many(schema.channelAttempts),
     deliveryEvidence: many(schema.deliveryEvidence),
+    deliveryTestRuns: many(schema.deliveryTestRuns),
   }),
 );
 
@@ -1247,6 +1402,61 @@ export const deliveryEvidenceRelations = relations(
     }),
     nextEvidence: many(schema.deliveryEvidence, {
       relationName: 'deliveryEvidenceChain',
+    }),
+  }),
+);
+
+export const deliveryTestRunsRelations = relations(
+  schema.deliveryTestRuns,
+  ({ one, many }) => ({
+    activationPreview: one(schema.activationPreviews, {
+      fields: [schema.deliveryTestRuns.activationPreviewId],
+      references: [schema.activationPreviews.id],
+    }),
+    event: one(schema.events, {
+      fields: [schema.deliveryTestRuns.eventId],
+      references: [schema.events.id],
+    }),
+    notificationIntent: one(schema.notificationIntents, {
+      fields: [schema.deliveryTestRuns.notificationIntentId],
+      references: [schema.notificationIntents.id],
+    }),
+    targetSetVersion: one(schema.deliveryTestTargetSetVersions, {
+      fields: [schema.deliveryTestRuns.targetSetVersionId],
+      references: [schema.deliveryTestTargetSetVersions.id],
+    }),
+    confirmation: one(schema.humanConfirmationRecords, {
+      fields: [schema.deliveryTestRuns.confirmationId],
+      references: [schema.humanConfirmationRecords.id],
+    }),
+    startedBy: one(schema.users, {
+      fields: [schema.deliveryTestRuns.startedByUserId],
+      references: [schema.users.id],
+      relationName: 'deliveryTestRunStarter',
+    }),
+    startedWithSession: one(schema.sessions, {
+      fields: [schema.deliveryTestRuns.startedWithSessionId],
+      references: [schema.sessions.id],
+      relationName: 'deliveryTestRunSession',
+    }),
+    reports: many(schema.deliveryTestReports),
+  }),
+);
+
+export const deliveryTestReportsRelations = relations(
+  schema.deliveryTestReports,
+  ({ one, many }) => ({
+    run: one(schema.deliveryTestRuns, {
+      fields: [schema.deliveryTestReports.runId],
+      references: [schema.deliveryTestRuns.id],
+    }),
+    supersedes: one(schema.deliveryTestReports, {
+      fields: [schema.deliveryTestReports.supersedesReportId],
+      references: [schema.deliveryTestReports.id],
+      relationName: 'deliveryTestReportChain',
+    }),
+    supersededBy: many(schema.deliveryTestReports, {
+      relationName: 'deliveryTestReportChain',
     }),
   }),
 );

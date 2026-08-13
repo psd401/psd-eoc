@@ -25,4 +25,21 @@ describe('human-only agent-surface manifest guard', () => {
 
     expect(exposures).toEqual([]);
   });
+
+  test('exposes only the destination-free delivery-test report query', () => {
+    expect(AGENT_GRANTABLE_CAPABILITY_IDS).toContain(
+      'list-delivery-test-reports',
+    );
+    const agentSurfaceIds: ReadonlySet<string> = new Set(
+      AGENT_GRANTABLE_CAPABILITY_IDS,
+    );
+    for (const protectedWorkflowId of [
+      'record-delivery-test-canary-eligibility',
+      'create-delivery-test-target-set-version',
+      'create-delivery-test-preview',
+      'finalize-delivery-test-report',
+    ]) {
+      expect(agentSurfaceIds.has(protectedWorkflowId)).toBe(false);
+    }
+  });
 });

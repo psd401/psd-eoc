@@ -10,6 +10,8 @@ import {
   type AudienceConfig,
   type ChannelConfiguration,
   type CreateActivationPreviewInput,
+  type DeliveryTestNotificationMetadata,
+  type DeliveryTestTargetEndpointRef,
   type EventTypeVersion,
   type Facility,
   type Neighborhood,
@@ -83,6 +85,14 @@ export interface ActivationPreviewEvidence {
   readonly initiatorDisplayName: string;
   readonly createdAt: Date;
   readonly expiresAt?: Date;
+  readonly deliveryTest?: DeliveryTestNotificationMetadata;
+  /** Exact approved opaque refs which narrow the ordinary staff audience. */
+  readonly deliveryTestEndpointReferences?: readonly Pick<
+    DeliveryTestTargetEndpointRef,
+    'recipientId' | 'endpointId' | 'channel'
+  >[];
+  /** Server-owned readiness facts which must be included in confirmation. */
+  readonly additionalBlockingReasonCodes?: readonly string[];
 }
 
 function configurationByChannel(
@@ -195,13 +205,52 @@ export function buildActivationPreview(
     neighborhoodVersions: evidenceValue.neighborhoodVersions,
     rosterSnapshot: evidenceValue.rosterSnapshot,
   });
-  const recipientCount = resolvedAudience.recipients.length;
+  const approvedEndpointKeys =
+    evidenceValue.deliveryTestEndpointReferences === undefined
+      ? null
+      : new Set(
+          evidenceValue.deliveryTestEndpointReferences.map(
+            (reference) =>
+              `${reference.channel}:${reference.recipientId}:${reference.endpointId}`,
+          ),
+        );
+  if (
+    (evidenceValue.deliveryTest === undefined) !==
+      (approvedEndpointKeys === null) ||
+    (approvedEndpointKeys !== null &&
+      approvedEndpointKeys.size !==
+        evidenceValue.deliveryTestEndpointReferences?.length)
+  ) {
+    throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
+  }
+  const selectedRecipients = resolvedAudience.recipients.flatMap(
+    (recipient) => {
+      const endpoints = recipient.endpoints.filter(
+        (endpoint) =>
+          approvedEndpointKeys === null ||
+          approvedEndpointKeys.has(
+            `${endpoint.channel}:${recipient.recipientId}:${endpoint.id}`,
+          ),
+      );
+      return endpoints.length === 0 ? [] : [{ ...recipient, endpoints }];
+    },
+  );
+  if (
+    approvedEndpointKeys !== null &&
+    selectedRecipients.reduce(
+      (count, recipient) => count + recipient.endpoints.length,
+      0,
+    ) !== approvedEndpointKeys.size
+  ) {
+    throw new ActivationPreviewBuildError('AUDIENCE_UNAVAILABLE');
+  }
+  const recipientCount = selectedRecipients.length;
   const endpointCounts: Record<NotificationChannel, number> = {
     push: 0,
     email: 0,
     sms: 0,
   };
-  for (const recipient of resolvedAudience.recipients) {
+  for (const recipient of selectedRecipients) {
     for (const endpoint of recipient.endpoints) {
       endpointCounts[endpoint.channel] += 1;
     }
@@ -252,7 +301,9 @@ export function buildActivationPreview(
     });
   });
 
-  const blockingReasonCodes: string[] = [];
+  const blockingReasonCodes: string[] = [
+    ...(evidenceValue.additionalBlockingReasonCodes ?? []),
+  ];
   if (recipientCount === 0) {
     blockingReasonCodes.push('NO_RECIPIENTS');
   }
@@ -300,6 +351,7 @@ export function buildActivationPreview(
         : ('blocked' as const),
     blockingReasonCodes: uniqueBlockingReasonCodes,
     activeEventIds,
+    deliveryTest: evidenceValue.deliveryTest ?? null,
     createdAt: createdAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
   });

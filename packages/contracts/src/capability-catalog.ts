@@ -31,6 +31,18 @@ import {
   SyncEventRoomInputSchema,
 } from './event-room';
 import {
+  CreateDeliveryTestPreviewInputSchema,
+  CreateDeliveryTestTargetSetVersionInputSchema,
+  DeliveryTestPreviewSchema,
+  DeliveryTestTargetSetVersionSchema,
+  FinalizeDeliveryTestReportInputSchema,
+  ListDeliveryTestReportsInputSchema,
+  MonthlyDeliveryTestReportPageSchema,
+  MonthlyDeliveryTestReportSchema,
+  RecordDeliveryTestCanaryEligibilityInputSchema,
+  DeliveryTestCanaryEligibilityFactSchema,
+} from './delivery-test';
+import {
   CreateEventTypeDraftInputSchema,
   EventTypePageSchema,
   EventTypeRenderingPreviewSchema,
@@ -929,7 +941,7 @@ export type ReopenAsCorrectionResult = z.infer<
 >;
 
 /**
- * Closed release-one capability catalog for issues #6 through #28. This is the
+ * Closed release-one capability catalog through issue #30. This is the
  * sole owner of callable IDs and their complete signatures. Provider adapters
  * may normalize untrusted input before invocation, but they may not substitute
  * a different operation, effect, policy, input schema, or output schema.
@@ -962,6 +974,20 @@ export const CAPABILITY_CATALOG = Object.freeze({
     safetyEffect: 'none',
     inputSchema: SyncRosterInputSchema,
     outputSchema: RosterSyncResultSchema,
+  }),
+  'record-delivery-test-canary-eligibility': canonicalCapability({
+    id: 'record-delivery-test-canary-eligibility',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    inputSchema: RecordDeliveryTestCanaryEligibilityInputSchema,
+    outputSchema: DeliveryTestCanaryEligibilityFactSchema,
+  }),
+  'create-delivery-test-target-set-version': canonicalCapability({
+    id: 'create-delivery-test-target-set-version',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    inputSchema: CreateDeliveryTestTargetSetVersionInputSchema,
+    outputSchema: DeliveryTestTargetSetVersionSchema,
   }),
   'prepare-activation': canonicalCapability({
     id: 'prepare-activation',
@@ -1103,6 +1129,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: RecordSmsOptOutInputSchema,
     outputSchema: SmsOptOutRecordSchema,
   }),
+  'finalize-delivery-test-report': canonicalCapability({
+    id: 'finalize-delivery-test-report',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    inputSchema: FinalizeDeliveryTestReportInputSchema,
+    outputSchema: MonthlyDeliveryTestReportSchema,
+  }),
   'register-push-token': canonicalCapability({
     id: 'register-push-token',
     operation: 'mutation',
@@ -1193,6 +1226,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     safetyEffect: 'none',
     inputSchema: CreateActivationPreviewInputSchema,
     outputSchema: ActivationPreviewSchema,
+  }),
+  'create-delivery-test-preview': canonicalCapability({
+    id: 'create-delivery-test-preview',
+    operation: 'query',
+    safetyEffect: 'none',
+    inputSchema: CreateDeliveryTestPreviewInputSchema,
+    outputSchema: DeliveryTestPreviewSchema,
   }),
   'create-lifecycle-consequence-preview': canonicalCapability({
     id: 'create-lifecycle-consequence-preview',
@@ -1339,6 +1379,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     safetyEffect: 'none',
     inputSchema: RunDeliveryReportInputSchema,
     outputSchema: DeliveryReportSchema,
+  }),
+  'list-delivery-test-reports': canonicalCapability({
+    id: 'list-delivery-test-reports',
+    operation: 'query',
+    safetyEffect: 'none',
+    inputSchema: ListDeliveryTestReportsInputSchema,
+    outputSchema: MonthlyDeliveryTestReportPageSchema,
   }),
   'get-integration-health': canonicalCapability({
     id: 'get-integration-health',
@@ -1503,6 +1550,7 @@ const systemWorkerScheduledInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'scheduled-job'],
 );
+const systemWorkerInvocationPolicy = invocationPolicy(['system'], ['worker']);
 const systemWorkerWebhookInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'webhook'],
@@ -1518,6 +1566,10 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'refresh-session': verifiedRefreshInvocationPolicy,
   'revoke-session': humanInteractiveInvocationPolicy,
   'sync-roster': humanAgentScheduledInvocationPolicy,
+  'record-delivery-test-canary-eligibility':
+    humanWebAdministrationInvocationPolicy,
+  'create-delivery-test-target-set-version':
+    humanWebAdministrationInvocationPolicy,
   'prepare-activation': humanAgentInvocationPolicy,
   'start-event': humanAgentScheduledInvocationPolicy,
   'join-event': humanAgentInvocationPolicy,
@@ -1538,6 +1590,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'reconcile-delivery-attempts': systemWorkerScheduledInvocationPolicy,
   'record-endpoint-status': systemWorkerWebhookInvocationPolicy,
   'record-sms-opt-out': systemWorkerScheduledInvocationPolicy,
+  'finalize-delivery-test-report': systemWorkerInvocationPolicy,
   'register-push-token': humanInteractiveInvocationPolicy,
   'unregister-push-token': humanInteractiveInvocationPolicy,
   'create-facility': humanAgentInvocationPolicy,
@@ -1551,6 +1604,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'issue-agent-api-key': humanWebAdministrationInvocationPolicy,
   'revoke-agent-api-key': humanWebAdministrationInvocationPolicy,
   'create-activation-preview': humanAgentInvocationPolicy,
+  'create-delivery-test-preview': humanInteractiveInvocationPolicy,
   'create-lifecycle-consequence-preview': humanAgentInvocationPolicy,
   'get-prepared-activation': humanAgentInvocationPolicy,
   'get-current-session': humanInteractiveInvocationPolicy,
@@ -1571,6 +1625,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'preview-event-type-rendering': humanAgentInvocationPolicy,
   'get-notification-status': humanAgentInvocationPolicy,
   'run-delivery-report': humanAgentInvocationPolicy,
+  'list-delivery-test-reports': humanAgentInvocationPolicy,
   'get-integration-health': humanAgentScheduledInvocationPolicy,
   'list-my-devices': humanInteractiveInvocationPolicy,
   'list-facilities': humanAgentInvocationPolicy,

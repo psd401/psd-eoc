@@ -13,6 +13,7 @@ import {
   type CapabilityInput,
   type CapabilityOutput,
   type DeviceEnrollmentPage,
+  type DeliveryTestNotificationMetadata,
   type DispatchBatch,
   type EndpointStatus,
   type EndpointStatusRecord,
@@ -45,6 +46,9 @@ import {
 import {
   channelAttempts,
   deliveryEvidence,
+  deliveryTestCanaryEligibilityFacts,
+  deliveryTestTargetEndpoints,
+  deliveryTestTargetSetVersions,
   deviceEnrollments,
   devicePushTokenRegistrations,
   devicePushTokenUnregistrations,
@@ -65,6 +69,11 @@ import {
   toSecurityAuditInsertValues,
 } from '../audit';
 import { resolveAudience, type ResolveAudienceInput } from '../roster/resolve';
+import {
+  DELIVERY_TEST_TARGET_LOCK_NAMESPACE,
+  deliveryTestEndpointReferenceDigest,
+  deliveryTestTargetLockIdentity,
+} from '../testing/e2e-delivery';
 
 import {
   CapabilityEngineError,
@@ -115,12 +124,15 @@ export interface PushEndpointPolicyCandidate {
 export interface PushEndpointPolicyQuery {
   readonly rosterSnapshotId: string;
   readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly endpointCount: number;
+  readonly deliveryTest: DeliveryTestNotificationMetadata | null;
   readonly candidates: readonly PushEndpointPolicyCandidate[];
 }
 
 export interface PushEndpointPolicyEvidence
   extends PushEndpointPolicyCandidate {
   readonly status: EndpointStatus;
+  readonly approvedForDeliveryTest: boolean;
 }
 
 /** Token-free read boundary for append-only endpoint lifecycle evidence. */
@@ -206,13 +218,19 @@ function parsePushEndpointPolicyEvidence(
         slot !== undefined &&
         slot.enumerable === true &&
         Object.hasOwn(slot, 'value')
-          ? exactDataRecord(slot.value, ['recipientId', 'endpointId', 'status'])
+          ? exactDataRecord(slot.value, [
+              'recipientId',
+              'endpointId',
+              'status',
+              'approvedForDeliveryTest',
+            ])
           : null;
       const status = EndpointStatusSchema.safeParse(properties?.status);
       if (
         properties === null ||
         typeof properties.recipientId !== 'string' ||
         typeof properties.endpointId !== 'string' ||
+        typeof properties.approvedForDeliveryTest !== 'boolean' ||
         !status.success
       ) {
         throw new TypeError();
@@ -221,6 +239,7 @@ function parsePushEndpointPolicyEvidence(
         recipientId: properties.recipientId,
         endpointId: properties.endpointId,
         status: status.data,
+        approvedForDeliveryTest: properties.approvedForDeliveryTest,
       });
       const key = pushCandidateKey(item);
       if (!expected.has(key) || evidence.has(key)) throw new TypeError();
@@ -287,12 +306,14 @@ export async function resolvePushEndpoints(
         : [],
     ),
   );
-  if (candidates.length !== batch.endpointCount) {
+  if (batch.deliveryTest == null && candidates.length !== batch.endpointCount) {
     throw new PushEndpointResolutionError('PUSH_ENDPOINT_COUNT_MISMATCH');
   }
   const query = Object.freeze({
     rosterSnapshotId: batch.rosterSnapshotId,
     rosterPopulation: batch.rosterPopulation,
+    endpointCount: batch.endpointCount,
+    deliveryTest: batch.deliveryTest ?? null,
     candidates: Object.freeze(
       candidates.map(({ recipientId, endpoint }) =>
         Object.freeze({ recipientId, endpointId: endpoint.id }),
@@ -306,12 +327,18 @@ export async function resolvePushEndpoints(
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
   }
   const policy = parsePushEndpointPolicyEvidence(rawPolicy, query);
+  const approvedCount = [...policy.values()].filter(
+    ({ approvedForDeliveryTest }) => approvedForDeliveryTest,
+  ).length;
+  if (batch.deliveryTest != null && approvedCount !== batch.endpointCount) {
+    throw new PushEndpointResolutionError('PUSH_ENDPOINT_COUNT_MISMATCH');
+  }
   return Object.freeze(
     candidates.flatMap(({ recipientId, endpoint }) => {
       const evidence = policy.get(
         pushCandidateKey({ recipientId, endpointId: endpoint.id }),
       );
-      return evidence?.status === 'active'
+      return evidence?.status === 'active' && evidence.approvedForDeliveryTest
         ? [
             Object.freeze({
               rosterSnapshotId: batch.rosterSnapshotId,
@@ -323,6 +350,168 @@ export async function resolvePushEndpoints(
         : [];
     }),
   );
+}
+
+async function loadPushDeliveryTestTargets(
+  database: DeviceQueryDatabase,
+  query: PushEndpointPolicyQuery,
+): Promise<ReadonlySet<string> | null> {
+  if (query.deliveryTest === null) return null;
+  if (query.rosterPopulation !== 'staff') {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+
+  // Resolve only the facility needed for the shared lineage lock, then reload
+  // every target fact after acquiring it. Under READ COMMITTED this makes a
+  // successor or revocation that won the lock visible before any token leaves
+  // the trusted resolver boundary.
+  const [unlockedTarget] = await database
+    .select({ facilityId: deliveryTestTargetSetVersions.facilityId })
+    .from(deliveryTestTargetSetVersions)
+    .where(
+      and(
+        eq(deliveryTestTargetSetVersions.id, query.deliveryTest.targetSet.id),
+        eq(
+          deliveryTestTargetSetVersions.version,
+          query.deliveryTest.targetSet.version,
+        ),
+      ),
+    )
+    .limit(1);
+  if (unlockedTarget === undefined) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  await database.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${deliveryTestTargetLockIdentity(unlockedTarget.facilityId)}, ${DELIVERY_TEST_TARGET_LOCK_NAMESPACE}))`,
+  );
+
+  const [target] = await database
+    .select({
+      id: deliveryTestTargetSetVersions.id,
+      version: deliveryTestTargetSetVersions.version,
+      facilityId: deliveryTestTargetSetVersions.facilityId,
+      rosterSnapshotId: deliveryTestTargetSetVersions.rosterSnapshotId,
+      rosterPopulation: deliveryTestTargetSetVersions.rosterPopulation,
+      endpointReferenceDigest:
+        deliveryTestTargetSetVersions.endpointReferenceDigest,
+    })
+    .from(deliveryTestTargetSetVersions)
+    .where(
+      and(
+        eq(deliveryTestTargetSetVersions.id, query.deliveryTest.targetSet.id),
+        eq(
+          deliveryTestTargetSetVersions.version,
+          query.deliveryTest.targetSet.version,
+        ),
+      ),
+    )
+    .limit(1);
+  const [successor] = await database
+    .select({ id: deliveryTestTargetSetVersions.id })
+    .from(deliveryTestTargetSetVersions)
+    .where(
+      eq(
+        deliveryTestTargetSetVersions.supersedesVersionId,
+        query.deliveryTest.targetSet.id,
+      ),
+    )
+    .limit(1);
+  if (
+    target === undefined ||
+    target.facilityId !== unlockedTarget.facilityId ||
+    target.rosterSnapshotId !== query.rosterSnapshotId ||
+    target.rosterPopulation !== 'staff' ||
+    target.endpointReferenceDigest !==
+      query.deliveryTest.endpointReferenceDigest ||
+    successor !== undefined
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+
+  const targetRows = await database
+    .select({
+      rosterSnapshotId: deliveryTestTargetEndpoints.rosterSnapshotId,
+      rosterPopulation: deliveryTestTargetEndpoints.rosterPopulation,
+      recipientId: deliveryTestTargetEndpoints.recipientId,
+      endpointId: deliveryTestTargetEndpoints.endpointId,
+      channel: deliveryTestTargetEndpoints.channel,
+      attestation: deliveryTestTargetEndpoints.attestation,
+      eligibilityFacilityId: deliveryTestCanaryEligibilityFacts.facilityId,
+      eligibilityRosterSnapshotId:
+        deliveryTestCanaryEligibilityFacts.rosterSnapshotId,
+      eligibilityRosterPopulation:
+        deliveryTestCanaryEligibilityFacts.rosterPopulation,
+      eligibilityRecipientId: deliveryTestCanaryEligibilityFacts.recipientId,
+      eligibilityEndpointId: deliveryTestCanaryEligibilityFacts.endpointId,
+      eligibilityChannel: deliveryTestCanaryEligibilityFacts.channel,
+      eligibilityCurrent: sql<boolean>`
+        ${deliveryTestCanaryEligibilityFacts.decision} = 'approved-synthetic-canary'
+        and not exists (
+          select 1
+          from delivery_test_canary_eligibility_facts successor
+          where successor.supersedes_fact_id = ${deliveryTestCanaryEligibilityFacts.id}
+        )
+      `,
+    })
+    .from(deliveryTestTargetEndpoints)
+    .innerJoin(
+      deliveryTestCanaryEligibilityFacts,
+      eq(
+        deliveryTestTargetEndpoints.eligibilityFactId,
+        deliveryTestCanaryEligibilityFacts.id,
+      ),
+    )
+    .where(
+      and(
+        eq(deliveryTestTargetEndpoints.targetSetVersionId, target.id),
+        eq(deliveryTestTargetEndpoints.targetSetVersion, target.version),
+      ),
+    )
+    .orderBy(
+      asc(deliveryTestTargetEndpoints.channel),
+      asc(deliveryTestTargetEndpoints.recipientId),
+      asc(deliveryTestTargetEndpoints.endpointId),
+    );
+  if (
+    targetRows.length === 0 ||
+    targetRows.length > MAX_PUSH_ENDPOINTS ||
+    targetRows.some(
+      (target) =>
+        target.rosterSnapshotId !== query.rosterSnapshotId ||
+        target.rosterPopulation !== 'staff' ||
+        target.attestation !== 'approved-synthetic-canary' ||
+        target.eligibilityFacilityId !== unlockedTarget.facilityId ||
+        target.eligibilityRosterSnapshotId !== target.rosterSnapshotId ||
+        target.eligibilityRosterPopulation !== target.rosterPopulation ||
+        target.eligibilityRecipientId !== target.recipientId ||
+        target.eligibilityEndpointId !== target.endpointId ||
+        target.eligibilityChannel !== target.channel ||
+        !target.eligibilityCurrent,
+    )
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  let targetDigest: string;
+  try {
+    targetDigest = deliveryTestEndpointReferenceDigest(targetRows);
+  } catch {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  if (
+    targetDigest !== target.endpointReferenceDigest ||
+    targetDigest !== query.deliveryTest.endpointReferenceDigest
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const pushTargets = targetRows.filter(({ channel }) => channel === 'push');
+  const candidateKeys = new Set(query.candidates.map(pushCandidateKey));
+  if (
+    pushTargets.length !== query.endpointCount ||
+    pushTargets.some((target) => !candidateKeys.has(pushCandidateKey(target)))
+  ) {
+    throw new PushEndpointResolutionError('PUSH_ENDPOINT_COUNT_MISMATCH');
+  }
+  return new Set(pushTargets.map(pushCandidateKey));
 }
 
 async function loadDrizzlePushEndpointPolicy(
@@ -337,6 +526,7 @@ async function loadDrizzlePushEndpointPolicy(
   ) {
     throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
   }
+  const approvedTargets = await loadPushDeliveryTestTargets(database, query);
   if (query.candidates.length === 0) return Object.freeze([]);
   const endpointIds = query.candidates.map(({ endpointId }) => endpointId);
   const endpointRows = await database
@@ -407,6 +597,9 @@ async function loadDrizzlePushEndpointPolicy(
           status:
             effectiveStatuses.get(pushCandidateKey(endpoint)) ??
             EndpointStatusSchema.parse(endpoint.status),
+          approvedForDeliveryTest:
+            approvedTargets === null ||
+            approvedTargets.has(pushCandidateKey(endpoint)),
         }),
       )
       .sort(
@@ -423,7 +616,9 @@ export function createDrizzlePushEndpointPolicyStore(
 ): PushEndpointPolicyStore {
   return Object.freeze({
     loadEndpointPolicy: (query: PushEndpointPolicyQuery) =>
-      loadDrizzlePushEndpointPolicy(deviceQueryDatabase(database), query),
+      database.transaction((transaction) =>
+        loadDrizzlePushEndpointPolicy(deviceQueryDatabase(transaction), query),
+      ),
   });
 }
 
