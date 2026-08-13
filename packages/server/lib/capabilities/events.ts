@@ -100,6 +100,10 @@ import {
   type TrustedCapabilityInvocation,
 } from './engine';
 import { transitionEventStatus } from '../events/state-machine';
+import {
+  FanoutControlDeniedError,
+  authorizeCurrentNotificationIntentForFanout,
+} from '../notify/fanout-control';
 
 /** Preview plus server-only persistence references required for one send. */
 export interface ResolvedActivationSource {
@@ -126,6 +130,8 @@ export interface LifecyclePersistenceBundle {
   readonly result: EventLifecycleMutationResult;
   readonly outboxRecord: OutboxRecord | null;
   readonly integrationStatusIds: Readonly<Record<string, string>>;
+  /** Exact reviewed preview time; null only for non-notifying lifecycle work. */
+  readonly fanoutPreviewCreatedAt: string | null;
 }
 
 export interface JoinPersistenceBundle {
@@ -739,6 +745,7 @@ export const startEventRegistration: ServerCapabilityRegistration<
       result,
       outboxRecord: notification.outbox,
       integrationStatusIds: resolved.integrationStatusIds,
+      fanoutPreviewCreatedAt: preview.createdAt,
     });
     return result;
   },
@@ -902,6 +909,7 @@ async function notifyingLifecycleResult(
     result,
     outboxRecord: notification.outbox,
     integrationStatusIds: resolvedPreview.integrationStatusIds,
+    fanoutPreviewCreatedAt: resolvedPreview.preview.createdAt,
   });
   return result;
 }
@@ -1076,6 +1084,7 @@ export const closeEventRegistration: ServerCapabilityRegistration<
       result,
       outboxRecord: null,
       integrationStatusIds: {},
+      fanoutPreviewCreatedAt: null,
     });
     return result;
   },
@@ -1177,6 +1186,7 @@ export const reopenAsCorrectionRegistration: ServerCapabilityRegistration<
       result,
       outboxRecord: null,
       integrationStatusIds: {},
+      fanoutPreviewCreatedAt: null,
     });
     return result;
   },
@@ -2170,6 +2180,7 @@ async function persistNotification(
   intent: NotificationIntent,
   outboxRecord: OutboxRecord,
   integrationStatusIds: Readonly<Record<string, string>>,
+  previewCreatedAtValue: string,
 ): Promise<void> {
   await database.insert(notificationIntents).values({
     id: intent.id,
@@ -2188,6 +2199,21 @@ async function persistNotification(
     authorization: intent.authorization,
     createdAt: new Date(intent.createdAt),
   });
+  try {
+    await authorizeCurrentNotificationIntentForFanout({
+      database,
+      intentId: intent.id,
+      previewCreatedAt: new Date(previewCreatedAtValue),
+      authorizedAt: new Date(intent.createdAt),
+    });
+  } catch (error) {
+    if (error instanceof FanoutControlDeniedError) {
+      throw unavailable(
+        'Notification fan-out is emergency-disabled or unavailable. Create a fresh consequence preview after re-enable.',
+      );
+    }
+    throw error;
+  }
   await database.insert(notificationIntentChannels).values(
     intent.channels.map((channel, index) => {
       const integrationStatusId = integrationStatusIds[channel.channel];
@@ -2321,15 +2347,24 @@ async function persistLifecycleBundle(
     if (bundle.outboxRecord === null) {
       throw conflict('Notification intent requires an atomic outbox record.');
     }
+    if (bundle.fanoutPreviewCreatedAt === null) {
+      throw conflict(
+        'Notification intent requires exact consequence-preview provenance.',
+      );
+    }
     await persistNotification(
       database,
       bundle.result.notificationIntent,
       bundle.outboxRecord,
       bundle.integrationStatusIds,
+      bundle.fanoutPreviewCreatedAt,
     );
-  } else if (bundle.outboxRecord !== null) {
+  } else if (
+    bundle.outboxRecord !== null ||
+    bundle.fanoutPreviewCreatedAt !== null
+  ) {
     throw conflict(
-      'An outbox record cannot exist without notification intent.',
+      'Fan-out provenance cannot exist without a notification intent.',
     );
   }
 }

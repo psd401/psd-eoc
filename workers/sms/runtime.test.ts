@@ -422,6 +422,7 @@ function harness(overrides: HarnessOverrides = {}) {
   };
 
   const runtime = createAwsEumSmsRuntime({
+    authorizeFanout: () => true,
     ...(overrides.mode === undefined ? {} : { mode: overrides.mode }),
     awsClient: {
       region: REGION,

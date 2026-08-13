@@ -1288,6 +1288,7 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
   'update-group-source': 'none',
   'set-user-roles': 'none',
   'set-channel-enabled': 'none',
+  'set-fanout-control': 'none',
   'issue-agent-api-key': 'none',
   'revoke-agent-api-key': 'none',
   'create-lifecycle-consequence-preview': 'none',
@@ -1299,6 +1300,7 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
  * registration and envelope parsing rather than becoming GET aliases.
  */
 export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
+  'authorize-notification-fanout': 'none',
   'create-activation-preview': 'none',
   'get-prepared-activation': 'none',
   'get-current-session': 'none',
@@ -1323,6 +1325,7 @@ export const CAPABILITY_QUERY_MANIFEST = Object.freeze({
   'preview-event-type-rendering': 'none',
   'get-notification-status': 'none',
   'get-integration-health': 'none',
+  'get-fanout-control': 'none',
   'query-security-audit': 'none',
   'verify-security-audit-chain': 'none',
   'run-delivery-report': 'none',

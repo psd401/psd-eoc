@@ -91,6 +91,14 @@ import {
   ListGroupSourcesInputSchema,
   UpdateGroupSourceInputSchema,
 } from './group';
+import {
+  FanoutAuthorizationCheckInputSchema,
+  FanoutAuthorizationDecisionSchema,
+  GetFanoutControlInputSchema,
+  GetFanoutControlResultSchema,
+  SetFanoutControlInputSchema,
+  SetFanoutControlResultSchema,
+} from './fanout-control';
 import type { HumanOnlyActionId } from './human-only';
 import {
   CompleteOidcSignInInputSchema,
@@ -1173,6 +1181,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: SetChannelEnabledInputSchema,
     outputSchema: ChannelConfigurationSchema,
   }),
+  'set-fanout-control': canonicalCapability({
+    id: 'set-fanout-control',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    inputSchema: SetFanoutControlInputSchema,
+    outputSchema: SetFanoutControlResultSchema,
+  }),
   'issue-agent-api-key': canonicalCapability({
     id: 'issue-agent-api-key',
     operation: 'mutation',
@@ -1347,6 +1362,20 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: GetIntegrationHealthInputSchema,
     outputSchema: IntegrationHealthSchema,
   }),
+  'authorize-notification-fanout': canonicalCapability({
+    id: 'authorize-notification-fanout',
+    operation: 'query',
+    safetyEffect: 'none',
+    inputSchema: FanoutAuthorizationCheckInputSchema,
+    outputSchema: FanoutAuthorizationDecisionSchema,
+  }),
+  'get-fanout-control': canonicalCapability({
+    id: 'get-fanout-control',
+    operation: 'query',
+    safetyEffect: 'none',
+    inputSchema: GetFanoutControlInputSchema,
+    outputSchema: GetFanoutControlResultSchema,
+  }),
   'list-my-devices': canonicalCapability({
     id: 'list-my-devices',
     operation: 'query',
@@ -1487,6 +1516,10 @@ const humanWebAdministrationInvocationPolicy = invocationPolicy(
   ['human'],
   ['web'],
 );
+const humanWebMobileReadInvocationPolicy = invocationPolicy(
+  ['human'],
+  ['web', 'mobile'],
+);
 const humanAgentInvocationPolicy = invocationPolicy(
   ['human', 'agent'],
   ['web', 'mobile', 'agent-rest', 'mcp'],
@@ -1503,6 +1536,7 @@ const systemWorkerScheduledInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'scheduled-job'],
 );
+const systemWorkerInvocationPolicy = invocationPolicy(['system'], ['worker']);
 const systemWorkerWebhookInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'webhook'],
@@ -1548,6 +1582,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'update-group-source': humanAgentInvocationPolicy,
   'set-user-roles': humanWebAdministrationInvocationPolicy,
   'set-channel-enabled': humanAgentInvocationPolicy,
+  'set-fanout-control': humanWebAdministrationInvocationPolicy,
   'issue-agent-api-key': humanWebAdministrationInvocationPolicy,
   'revoke-agent-api-key': humanWebAdministrationInvocationPolicy,
   'create-activation-preview': humanAgentInvocationPolicy,
@@ -1572,6 +1607,8 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'get-notification-status': humanAgentInvocationPolicy,
   'run-delivery-report': humanAgentInvocationPolicy,
   'get-integration-health': humanAgentScheduledInvocationPolicy,
+  'authorize-notification-fanout': systemWorkerInvocationPolicy,
+  'get-fanout-control': humanWebMobileReadInvocationPolicy,
   'list-my-devices': humanInteractiveInvocationPolicy,
   'list-facilities': humanAgentInvocationPolicy,
   'get-facility': humanAgentInvocationPolicy,

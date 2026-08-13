@@ -1457,6 +1457,22 @@ describe('event lifecycle capabilities', () => {
     expect(store.notificationIntents).toHaveLength(4);
     expect(store.outboxRecords).toHaveLength(4);
     expect(store.persistLifecycleCalls).toBe(5);
+    expect(
+      store.lifecycleBundles.map((bundle) => bundle.fanoutPreviewCreatedAt),
+    ).toEqual([
+      TIMES.previewCreated,
+      TIMES.firstAllClearPreview,
+      TIMES.reactivationPreview,
+      TIMES.secondAllClearPreview,
+      null,
+    ]);
+    expect(
+      store.lifecycleBundles.map((bundle) =>
+        bundle.result.notificationIntent === null
+          ? null
+          : bundle.result.notificationIntent.purpose,
+      ),
+    ).toEqual(['activation', 'all-clear', 'reactivation', 'all-clear', null]);
   });
 
   test('reopens a closed event as a distinct retained correction and replays it idempotently', async () => {
@@ -1517,6 +1533,12 @@ describe('event lifecycle capabilities', () => {
     expect(domainCounts(store)).toEqual(beforeReplay);
     expect(store.persistLifecycleCalls).toBe(1);
     expect(store.lifecycleReplayLoads).toBe(1);
+    expect(store.lifecycleBundles).toHaveLength(1);
+    expect(store.lifecycleBundles[0]).toMatchObject({
+      outboxRecord: null,
+      fanoutPreviewCreatedAt: null,
+      result: { notificationIntent: null },
+    });
   });
 
   test('allows authenticated humans to all-clear independently of staff or admin role', async () => {

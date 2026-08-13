@@ -157,6 +157,13 @@ export type LiveProviderAuthorizer = (
   workItem: WorkerAttemptWorkItem,
 ) => boolean | Promise<boolean>;
 
+/**
+ * Fresh global fan-out authorization checked after the immutable attempt is
+ * claimed and immediately before any provider adapter can perform I/O.
+ * Missing, stale, or unreadable control truth must resolve to `false`.
+ */
+export type FanoutControlAuthorizer = LiveProviderAuthorizer;
+
 export interface WorkerAttemptProcessorOptions {
   readonly adapter: AttemptIdempotentProviderAdapter;
   readonly executionStore: AttemptExecutionStore;
@@ -164,12 +171,15 @@ export interface WorkerAttemptProcessorOptions {
   readonly retryPolicy?: RetryPolicy;
   readonly leaseMilliseconds?: number;
   readonly random?: () => number;
+  /** Required for every mocked or live channel; omission is invalid. */
+  readonly authorizeFanout: FanoutControlAuthorizer;
   /** Omission disables live-verified providers. */
   readonly authorizeLiveProvider?: LiveProviderAuthorizer;
 }
 
 export type WorkerProcessingErrorCode =
   | 'INVALID_ADAPTER'
+  | 'FANOUT_AUTHORIZER_INVALID'
   | 'ADAPTER_MISMATCH'
   | 'LIVE_PROVIDER_DISABLED'
   | 'RETRY_BUDGET_EXCEEDED'
@@ -406,10 +416,14 @@ export class WorkerAttemptProcessor {
   readonly #retryPolicy: RetryPolicy;
   readonly #leaseMilliseconds: number;
   readonly #random: () => number;
+  readonly #authorizeFanout: FanoutControlAuthorizer;
   readonly #authorizeLive: LiveProviderAuthorizer | undefined;
 
   public constructor(options: WorkerAttemptProcessorOptions) {
     validateAdapter(options.adapter);
+    if (typeof options.authorizeFanout !== 'function') {
+      throw new WorkerProcessingError('FANOUT_AUTHORIZER_INVALID');
+    }
     this.#adapter = options.adapter;
     this.#store = options.executionStore;
     this.#writer = options.evidenceWriter;
@@ -418,6 +432,7 @@ export class WorkerAttemptProcessor {
     );
     this.#leaseMilliseconds = parseLease(options.leaseMilliseconds);
     this.#random = options.random ?? Math.random;
+    this.#authorizeFanout = options.authorizeFanout;
     this.#authorizeLive = options.authorizeLiveProvider;
   }
 
@@ -565,6 +580,7 @@ export class WorkerAttemptProcessor {
       fingerprint,
       leaseToken: claim.leaseToken,
     });
+
     let attemptedEvidence: DeliveryEvidence;
     try {
       attemptedEvidence = await this.#writer.recordAttemptEvidence({
@@ -578,6 +594,42 @@ export class WorkerAttemptProcessor {
         throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
       }
       throw error;
+    }
+
+    // This is deliberately the final awaited operation before adapter.send.
+    // Its locked transaction is the provider handoff's linearization point:
+    // an authorization ordered before disable is already admitted/in flight;
+    // disable ordered first denies. No later awaited work may reopen the gap.
+    let fanoutAuthorized = false;
+    try {
+      fanoutAuthorized = (await this.#authorizeFanout(workItem)) === true;
+    } catch {
+      fanoutAuthorized = false;
+    }
+    if (!fanoutAuthorized) {
+      const outcome = failureOutcome(
+        'failed',
+        this.#adapter.provider,
+        'FANOUT_EMERGENCY_DISABLED',
+        null,
+      );
+      const completion = Object.freeze({ kind: 'final' as const, outcome });
+      try {
+        await this.#store.complete({ ...lease, completion });
+      } catch {
+        throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
+      }
+      const outcomeEvidence = await this.#writer.recordAttemptEvidence({
+        attempt,
+        evidence: finalInput(attempt.id, outcome),
+      });
+      return Object.freeze({
+        kind: finalKind(outcome),
+        replayed: false,
+        outcome,
+        attemptedEvidence,
+        outcomeEvidence,
+      });
     }
 
     let rawOutcome: ProviderSendOutcome | unknown;

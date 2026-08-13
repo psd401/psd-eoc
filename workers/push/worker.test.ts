@@ -527,6 +527,7 @@ function workerRuntime(
     receiptScheduler: scheduler,
     retryPolicy: RETRY_POLICY,
     random: () => 0.5,
+    authorizeFanout: () => true,
   });
   return { adapter, writer, invalidator, scheduler, store, worker };
 }
@@ -544,6 +545,7 @@ function customAdapterRuntime(adapter: AttemptIdempotentProviderAdapter) {
     receiptScheduler: scheduler,
     retryPolicy: RETRY_POLICY,
     random: () => 0.5,
+    authorizeFanout: () => true,
   });
   return { writer, invalidator, scheduler, store, worker };
 }
@@ -564,6 +566,7 @@ function executionStoreRuntime(
     receiptScheduler: scheduler,
     retryPolicy,
     random: () => 0.5,
+    authorizeFanout: () => true,
   });
   return { adapter, writer, invalidator, scheduler, store, worker };
 }
@@ -701,6 +704,7 @@ describe('Expo durable attempt worker', () => {
       executionStore: new MemoryExecutionStore(),
       evidenceWriter: new MemoryEvidenceWriter(),
       endpointInvalidator: new RecordingInvalidator(),
+      authorizeFanout: () => true,
     };
 
     expect(
@@ -1374,6 +1378,7 @@ describe('Expo durable attempt worker', () => {
       receiptScheduler: scheduler,
       retryPolicy: RETRY_POLICY,
       random: () => 0.5,
+      authorizeFanout: () => true,
       authorizeLiveProvider: () => true,
     });
     const items = [
@@ -1422,6 +1427,7 @@ describe('Expo durable attempt worker', () => {
       evidenceWriter: new MemoryEvidenceWriter(),
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
+      authorizeFanout: () => true,
       authorizeLiveProvider: () => true,
     });
     const item = workItem(realBatch());
@@ -1438,6 +1444,7 @@ describe('Expo durable attempt worker', () => {
       evidenceWriter: darkWriter,
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: darkScheduler,
+      authorizeFanout: () => true,
     });
 
     await expect(dark.process(item)).resolves.toMatchObject({

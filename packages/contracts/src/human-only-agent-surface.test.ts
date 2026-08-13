@@ -1,14 +1,26 @@
 import { describe, expect, test } from 'bun:test';
 
 import { AGENT_GRANTABLE_CAPABILITY_IDS } from './agent-api';
+import { CAPABILITY_INVOCATION_POLICY } from './capability-catalog';
 import { HUMAN_ONLY_ACTION_IDS } from './human-only';
 
 /**
- * Every agent operation/tool manifest must be registered here. P4.1 extends
- * this guard when the REST and MCP surface manifests are introduced.
+ * Every agent operation/tool manifest must be registered here. Invocation
+ * policy is included so a capability cannot evade the key-grant guard while
+ * remaining callable from agent REST or MCP.
  */
+const agentTransportCapabilities = Object.entries(CAPABILITY_INVOCATION_POLICY)
+  .filter(
+    ([, policy]) =>
+      policy.principalKinds.includes('agent') ||
+      policy.sources.includes('agent-rest') ||
+      policy.sources.includes('mcp'),
+  )
+  .map(([capabilityId]) => capabilityId);
+
 const AGENT_SURFACE_MANIFESTS = {
   'contracts agent capability grants': AGENT_GRANTABLE_CAPABILITY_IDS,
+  'canonical agent REST and MCP invocation policy': agentTransportCapabilities,
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 
 describe('human-only agent-surface manifest guard', () => {
@@ -24,5 +36,34 @@ describe('human-only agent-surface manifest guard', () => {
     );
 
     expect(exposures).toEqual([]);
+  });
+
+  test('keeps district fanout control human-only and agent-free', () => {
+    for (const capabilityId of [
+      'get-fanout-control',
+      'set-fanout-control',
+    ] as const) {
+      expect(AGENT_GRANTABLE_CAPABILITY_IDS).not.toContain(capabilityId);
+      expect(agentTransportCapabilities).not.toContain(capabilityId);
+      expect(CAPABILITY_INVOCATION_POLICY[capabilityId]).toEqual({
+        principalKinds: ['human'],
+        sources:
+          capabilityId === 'get-fanout-control' ? ['web', 'mobile'] : ['web'],
+        agentGrantable: false,
+      });
+    }
+    expect(
+      CAPABILITY_INVOCATION_POLICY['authorize-notification-fanout'],
+    ).toEqual({
+      principalKinds: ['system'],
+      sources: ['worker'],
+      agentGrantable: false,
+    });
+    expect(AGENT_GRANTABLE_CAPABILITY_IDS).not.toContain(
+      'authorize-notification-fanout',
+    );
+    expect(agentTransportCapabilities).not.toContain(
+      'authorize-notification-fanout',
+    );
   });
 });

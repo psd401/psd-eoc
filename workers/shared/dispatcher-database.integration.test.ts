@@ -584,7 +584,11 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     };
 
     await expect(
-      dispatchOutbox(ids.outbox, { store: crashingStore, queue }),
+      dispatchOutbox(ids.outbox, {
+        store: crashingStore,
+        queue,
+        authorizeFanout: () => true,
+      }),
     ).rejects.toThrow('Synthetic process crash after SQS acceptance.');
     expect(queue.calls).toHaveLength(1);
 
@@ -592,6 +596,7 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     const replayed = await dispatchOutbox(ids.outbox, {
       store: durableStore,
       queue,
+      authorizeFanout: () => true,
     });
     expect(replayed.outboxRecord).toEqual(
       expect.objectContaining({ status: 'published', attempts: 1 }),
@@ -669,7 +674,11 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     const samples: number[] = [];
     for (const outboxId of outboxIds) {
       const startedAt = performance.now();
-      const result = await dispatchOutbox(outboxId, { store, queue });
+      const result = await dispatchOutbox(outboxId, {
+        store,
+        queue,
+        authorizeFanout: () => true,
+      });
       samples.push(performance.now() - startedAt);
       expect(result.batches).toHaveLength(3);
       expect(
@@ -694,6 +703,7 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     const published = await dispatchOutbox(ids.outbox, {
       store: durableStore,
       queue: batch,
+      authorizeFanout: () => true,
     });
     const pushBatch = published.batches.find(
       (candidate) => candidate.channel === 'push',

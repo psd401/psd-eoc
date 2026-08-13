@@ -57,6 +57,13 @@
       "when": 1786487369781,
       "tag": "0007_pretty_puppet_master",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786589359329,
+      "tag": "0008_mean_masque",
+      "breakpoints": true
     }
   ]
 }
