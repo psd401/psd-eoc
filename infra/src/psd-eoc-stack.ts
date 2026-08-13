@@ -47,6 +47,7 @@ import {
   SES_PARENT_HOSTED_ZONE_ID,
   SES_PARENT_HOSTED_ZONE_NAME,
 } from './config';
+import { configureMonitoring } from './monitoring';
 
 const CDK_BOOTSTRAP_QUALIFIER = 'hnb659fds';
 const MAX_QUEUE_RECEIVES = 5;
@@ -144,6 +145,7 @@ export class PsdEocStack extends Stack {
         engine: databaseEngine,
         parameters: {
           'rds.force_ssl': '1',
+          track_commit_timestamp: '1',
         },
       },
     );
@@ -649,6 +651,11 @@ export class PsdEocStack extends Stack {
         resourceArns: [dataKey.keyArn],
       }),
       fanout.queue.grantSendMessages(appRunnerInstanceRole),
+      iam.Grant.addToPrincipal({
+        actions: ['sqs:GetQueueAttributes'],
+        grantee: appRunnerInstanceRole,
+        resourceArns: [fanout.queue.queueArn],
+      }),
     ];
 
     const appRunnerScaling = new apprunner.CfnAutoScalingConfiguration(
@@ -662,6 +669,37 @@ export class PsdEocStack extends Stack {
       },
     );
 
+    const runtimeEnvironmentVariables: apprunner.CfnService.KeyValuePairProperty[] =
+      [
+        {
+          name: 'AWS_REGION',
+          value: DEPLOYMENT_REGION,
+        },
+        {
+          name: 'DATABASE_DRIVER',
+          value: 'aws-data-api',
+        },
+        {
+          name: 'DATABASE_NAME',
+          value: 'psd_eoc',
+        },
+        {
+          name: 'DATABASE_RESOURCE_ARN',
+          value: database.clusterArn,
+        },
+        {
+          name: 'DATABASE_SECRET_ARN',
+          value: databaseApplicationSecret.secretArn,
+        },
+        {
+          name: 'MEDIA_BUCKET_NAME',
+          value: mediaBucket.bucketName,
+        },
+        {
+          name: 'FANOUT_QUEUE_URL',
+          value: fanout.queue.queueUrl,
+        },
+      ];
     const appRunnerService = new apprunner.CfnService(
       this,
       'AppRunnerService',
@@ -700,36 +738,7 @@ export class PsdEocStack extends Stack {
                   value: apiSaltSecret.secretArn,
                 },
               ],
-              runtimeEnvironmentVariables: [
-                {
-                  name: 'AWS_REGION',
-                  value: DEPLOYMENT_REGION,
-                },
-                {
-                  name: 'DATABASE_DRIVER',
-                  value: 'aws-data-api',
-                },
-                {
-                  name: 'DATABASE_NAME',
-                  value: 'psd_eoc',
-                },
-                {
-                  name: 'DATABASE_RESOURCE_ARN',
-                  value: database.clusterArn,
-                },
-                {
-                  name: 'DATABASE_SECRET_ARN',
-                  value: databaseApplicationSecret.secretArn,
-                },
-                {
-                  name: 'MEDIA_BUCKET_NAME',
-                  value: mediaBucket.bucketName,
-                },
-                {
-                  name: 'FANOUT_QUEUE_URL',
-                  value: fanout.queue.queueUrl,
-                },
-              ],
+              runtimeEnvironmentVariables,
             },
             imageIdentifier: appImageIdentifier.valueAsString,
             imageRepositoryType: 'ECR',
@@ -740,6 +749,26 @@ export class PsdEocStack extends Stack {
     for (const grant of appRunnerRuntimeGrants) {
       grant.applyBefore(appRunnerService);
     }
+
+    const monitoringRuntime = configureMonitoring(this, {
+      appRunnerService,
+      channelQueues,
+      criticalAlarmTopic,
+      database,
+      fanout,
+      operationsAlarmTopic,
+      operationsKey,
+    });
+    runtimeEnvironmentVariables.push(
+      {
+        name: 'CANARY_FACILITY_ID',
+        value: monitoringRuntime.canaryFacilityId,
+      },
+      {
+        name: 'CANARY_EVENT_TYPE_VERSION_ID',
+        value: monitoringRuntime.canaryEventTypeVersionId,
+      },
+    );
 
     const emailConfigurationSetArn = `arn:aws:ses:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`;
     operationsKey.addToResourcePolicy(
