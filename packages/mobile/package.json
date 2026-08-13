@@ -20,8 +20,9 @@
       "real-drill-classification",
       "live-provider-gate"
     ],
-    "otaRequiresPreviewChannel": true,
+    "otaRequiresDedicatedVerificationChannel": true,
     "otaVerificationBuildProfile": "ota-preview",
+    "otaVerificationChannel": "ota-verification",
     "otaPublishEnvironment": "production",
     "safetyPathStoreBuildRequiresNewAppVersion": true,
     "storeSubmissionRequiresHumanApproval": true
