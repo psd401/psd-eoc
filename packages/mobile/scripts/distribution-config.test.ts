@@ -208,15 +208,23 @@ describe('mobile distribution configuration', () => {
       expect(normalizedRelease).toContain(command);
     }
     expect(release).toContain('complete, paginated inventory');
-    expect(release).toMatch(/only\s+when the inventory proves them absent/u);
     expect(compactRelease).toContain(
-      'An entirely absent expected pair—neither a `production` channel nor a `production` branch exists—may proceed only through the separately previewed same-name creation/link consequence',
+      'A separately previewed BUILD may create and link the same-name channel and branch only when both are absent',
     );
     expect(compactRelease).toContain(
-      'Partial absence, any unexpected mapping, an orphan existing branch',
+      "A missing channel with an existing same-name branch is partial state: linking it could expose that branch's updates to already installed clients",
     );
     expect(compactRelease).toContain(
-      'When neither the `production` channel nor same-name branch exists, EAS Build may create and link that routing',
+      'If the channel exists, it must already map to exactly one existing same-name branch; BUILD may not repair it',
+    );
+    expect(compactRelease).toContain(
+      'When neither the `production` channel nor same-name branch exists, EAS Build may create and link that pair',
+    );
+    expect(compactRelease).toContain(
+      'A missing channel with an existing same-name branch blocks BUILD',
+    );
+    expect(compactRelease).toContain(
+      "linking it can expose that branch's updates to installed production-channel clients and requires a separate routing/exposure review",
     );
     expect(release).toContain('After BUILD, even after a refusal or partial');
 
@@ -375,6 +383,67 @@ describe('mobile distribution configuration', () => {
     );
     expect(compactRelease).toContain(
       'Immediately before every OTA write, capture a fresh complete paginated channel, branch, destination-channel/branch, and both-platform exact-runtime update inventory',
+    );
+    expect(compactRelease).toContain(
+      'Every destination OTA routing pair must already exist before its write',
+    );
+    expect(compactRelease).toContain(
+      'Except for the paused-containment rollback path in section 8, the destination channel must also be active',
+    );
+    expect(compactRelease).toContain(
+      'each of these can create or link routing when its destination is absent: `update --channel ota-verification`, `update:republish --destination-channel production`, and `update:roll-back-to-embedded --channel production`',
+    );
+    expect(compactRelease).toContain(
+      'An OTA approval never authorizes channel or branch creation, linking, rerouting, pausing, or unpausing',
+    );
+    expect(compactRelease).toContain(
+      'Ordinary verification publication, production republish, and rollout increases also require the exact destination channel to report `isPaused: false`',
+    );
+    expect(compactRelease).toContain(
+      'canonical unconditional raw `branchMapping`: version `0`, exactly one data entry',
+    );
+    expect(compactRelease).toContain('`branchMappingLogic` exactly `"true"`');
+    expect(compactRelease).toContain(
+      '`branchId` equal to the exact same-name branch ID',
+    );
+    expect(compactRelease).toContain(
+      'the section 8 rollback exception instead requires a known unchanged pause status',
+    );
+    expect(compactRelease).toContain(
+      'unknown channel state, conditional mapping, zero or multiple mapping entries',
+    );
+    expect(compactRelease).toContain(
+      'A paused channel additionally blocks every non-rollback command',
+    );
+    expect(compactRelease).toContain(
+      'Unpause or remap a channel only through a separate routing mutation with its own exact preview, explicit product-owner approval, fresh authenticated-human confirmation, and complete read-back',
+    );
+    expect(compactRelease).toContain(
+      'The exact `production` channel must have a known pause status and the canonical unconditional raw mapping to the exact same-name branch as reviewed',
+    );
+    expect(compactRelease).toContain(
+      'For all three write families, success also requires zero routing drift',
+    );
+    expect(compactRelease).toContain(
+      'pre-existing destination channel must retain its exact reviewed pause status and the same version-0, one-entry, unconditional-`"true"` mapping to the reviewed branch',
+    );
+    expect(compactRelease).toContain(
+      'no channel or branch may have been created, linked, relinked, repaired, paused, or unpaused',
+    );
+    expect(compactRelease).toContain(
+      'For ordinary verification publication, production republish, and rollout increases, that unchanged status must be active (`isPaused: false`)',
+    );
+    expect(compactRelease).toContain(
+      'keep `isPaused: true` throughout the rollback command and its complete independent read-back; do not unpause first',
+    );
+    expect(compactRelease).toContain(
+      'A paused rollback succeeds only when the repaired update/control state is proven while the channel remains paused',
+    );
+    expect(compactRelease).toContain(
+      'Exposing that repaired state then requires a separate unpause consequence preview, explicit product-owner approval, fresh authenticated-human confirmation, and complete read-back',
+    );
+    expect(release).not.toContain(
+      'An absent `production` channel/branch means EAS Build may create and\ninventory.',
     );
     for (const success of [
       '`update`: exactly one new verification group',

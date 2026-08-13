@@ -569,7 +569,7 @@ export default function HomeScreen() {
             device without changing update or provider state.
           </Text>
           <Pressable
-            accessibilityHint="Shows read-only build and launched-update identity"
+            accessibilityHint="Shows read-only launched-update identity"
             accessibilityLabel="Open release diagnostics"
             accessibilityRole="button"
             accessibilityState={{ disabled: mutationPending }}
