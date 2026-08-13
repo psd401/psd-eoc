@@ -161,6 +161,93 @@ describe('mobile distribution configuration', () => {
     );
   });
 
+  test('fails closed on EAS environment, routing, credentials, and internal access', () => {
+    const release = repositoryText('docs/runbooks/release.md');
+    const readme = repositoryText('packages/mobile/README.md');
+    const normalizedRelease = release.replace(/\\\n\s*/gu, ' ');
+    const normalizedReadme = readme.replace(/\\\n\s*/gu, ' ');
+    const compactRelease = release.replace(/\s+/gu, ' ');
+    const releaseBuildCommands = normalizedRelease
+      .split('\n')
+      .filter((line) => line.includes('bunx eas-cli@21.7.0 build --platform'));
+
+    expect(release).toContain(
+      'env:list production --scope project --format long',
+    );
+    expect(release).toContain(
+      'env:list production --scope account --format long',
+    );
+    expect(release).toContain('env:exec production');
+    expect(release).toContain(
+      'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net"',
+    );
+    for (const command of [
+      'channel:list --limit 25',
+      'branch:list --limit 50',
+      'channel:view production',
+      'branch:view production',
+      'update:list --branch production --platform ios',
+      'update:list --branch production --platform android',
+      "update:view 'EACH_COMPATIBLE_UPDATE_GROUP_ID' --json",
+    ]) {
+      expect(normalizedRelease).toContain(command);
+    }
+    expect(release).toContain('complete, paginated inventory');
+    expect(release).toMatch(/only\s+when the inventory proves them absent/u);
+    expect(release).toContain('After BUILD, even after a refusal or partial');
+
+    expect(releaseBuildCommands).toHaveLength(4);
+    for (const command of releaseBuildCommands) {
+      expect(command).toContain('--non-interactive --freeze-credentials');
+    }
+    expect(normalizedReadme).toMatch(
+      /build --platform ios --profile preview\s+--non-interactive --freeze-credentials/u,
+    );
+    expect(readme).toContain('never replace `ios` with `all`');
+
+    expect(release).toContain('Unauthenticated access to internal builds');
+    expect(release).toContain('is disabled');
+    expect(compactRelease).toContain(
+      'bounded, staff-only technical-verifier audience',
+    );
+    expect(compactRelease).toContain('A URL alone is never privacy');
+    expect(compactRelease).toContain('launched embedded/update identity');
+    expect(compactRelease).toContain(
+      'provider inventory alone is not device-adoption',
+    );
+
+    for (const profile of [
+      '`development`:',
+      '`preview`:',
+      '`ota-preview`:',
+      '`production`:',
+    ]) {
+      expect(readme).toContain(profile);
+    }
+    expect(readme).toContain(
+      '`expo-updates` is required at runtime for runtime-bound staged OTA verification',
+    );
+    expect(normalizedRelease).toContain(
+      'env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL bunx eas-cli@21.7.0 env:exec production',
+    );
+    expect(release).toContain('does not reliably apply `--freeze-credentials`');
+    expect(release).toContain(
+      'build:version:get --platform ios --profile production --json',
+    );
+    expect(release).toContain(
+      'build:version:get --platform android --profile production --json',
+    );
+    expect(release).toContain(
+      'build:version:get --platform ios --profile ota-preview --json',
+    );
+    expect(release).toContain(
+      'build:version:get --platform android --profile ota-preview --json',
+    );
+    expect(compactRelease).toContain(
+      '`update:list` is only a group-level summary',
+    );
+  });
+
   test('uses progressive approvals without circular distribution gates', () => {
     const release = repositoryText('docs/runbooks/release.md');
     const headings = [
@@ -176,9 +263,12 @@ describe('mobile distribution configuration', () => {
     expect(release).not.toContain(
       'Issues #37 and #40 are complete with their required human and',
     );
-    expect(release).toMatch(
-      /Issue #37's first\s+manual AAB upload and issue #40's physical-device delivery consume these BUILD\s+artifacts; completion of #37 or #40 is not a BUILD prerequisite\./u,
+    expect(release.replace(/\s+/gu, ' ')).toContain(
+      "Issue #37's first manual AAB upload and issue #40's physical-device delivery consume these BUILD artifacts; completion of #37 or #40 is not a BUILD prerequisite.",
     );
+    expect(release).toContain('orphan same-name branch');
+    expect(release).toContain('source-upload/build-job');
+    expect(release).toContain('quota/cost state');
     expect(release).toContain(
       'Approval for one gate never authorizes another.',
     );
@@ -200,8 +290,8 @@ describe('mobile distribution configuration', () => {
     expect(release).toMatch(
       /FINAL ACCEPTANCE is a read-only evidence decision, not a provider-write\s+authorization/u,
     );
-    expect(release).toContain(
-      'integration truth labels that claim only what is proven',
+    expect(release).toMatch(
+      /integration truth labels that claim only what is\s+proven/u,
     );
     expect(release).toMatch(
       /This human-only FINAL ACCEPTANCE record does not itself authorize\s+go-live, production deployment, provider configuration, a real incident, a real\s+notification, an all-clear, or closing a real event/u,
