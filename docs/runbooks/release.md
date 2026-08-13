@@ -56,6 +56,12 @@ Do not proceed unless all of the following are true:
       release commit.
 - [ ] The mobile distribution configuration test and native prebuild check pass
       on that commit.
+- [ ] Read-only EAS production-environment evidence shows exactly one
+      `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` set to the public, non-secret origin
+      `https://eoc.psd401.net`. The resolved iOS and Android production build
+      profiles must contain that exact value; absence, another origin, a
+      credential/query/path fragment, or a conflicting account-level value
+      blocks the build.
 - [ ] A human has reviewed the exact build, target, audience count, invitation
       or install consequences, rollback target, and any provider warning.
 - [ ] The product owner has explicitly approved that exact provider write, and
@@ -65,6 +71,18 @@ An old approval, a credential, a passing mock, or a successful upload is not
 approval for distribution. A partial or indeterminate provider response is a
 stop condition: inspect provider state read-only and create a fresh plan; never
 blindly retry.
+
+Inspect the production environment without requesting sensitive values, then
+resolve both production profiles and verify the exact public API origin above.
+Do not use `--include-sensitive`, and do not copy the full output into a public
+record:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 env:list production --format long
+bunx eas-cli@21.7.0 config --platform ios --profile production --json
+bunx eas-cli@21.7.0 config --platform android --profile production --json
+```
 
 ## 2. Version and immutable-build policy
 
@@ -228,22 +246,29 @@ OTA is optional and may deliver only a reviewed JavaScript-only patch to an
 already compatible runtime. When classification is uncertain, require a new
 store build.
 
-| Change                                                                                                                                                               | OTA?                                 | Required path                                             |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------- |
-| Copy, layout, style, or JavaScript bug fix using the existing native modules, permissions, API contract, and persisted-data shape                                    | Eligible after preview-channel proof | Staged OTA below                                          |
-| Push registration, token lifecycle, payload handling, foreground/background/killed behavior, notification channels, sounds, or entitlements                          | No                                   | New store build and app version                           |
-| OIDC, sessions, SecureStore, biometrics, deep-link authentication, or authorization behavior                                                                         | No                                   | New store build and app version                           |
-| Native code, Expo/RN SDK, dependency or config-plugin change, permission, entitlement, scheme, app identifier, native asset, build property, or environment contract | No                                   | New store build and app version                           |
-| `expo-updates`, update URL/channel, runtime policy, persistent-data compatibility, or native/JS contract                                                             | No                                   | New store build and app version                           |
-| Start-event confirmation, human-only action boundary, real/drill classification, or live-provider gate                                                               | No, even if JavaScript-only          | New store build and app version plus safety-path evidence |
+This classification is a mandatory human release review, not an automated
+change classifier. The `psdEocReleasePolicy` metadata and its configuration test
+keep the documented categories synchronized; they do not authorize or publish
+an OTA update.
+
+| Change                                                                                                                                                               | OTA?                                      | Required path                                             |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | --------------------------------------------------------- |
+| Copy, layout, style, or JavaScript bug fix using the existing native modules, permissions, API contract, and persisted-data shape                                    | Eligible after verification-channel proof | Staged OTA below                                          |
+| Push registration, token lifecycle, payload handling, foreground/background/killed behavior, notification channels, sounds, or entitlements                          | No                                        | New store build and app version                           |
+| OIDC, sessions, SecureStore, biometrics, deep-link authentication, or authorization behavior                                                                         | No                                        | New store build and app version                           |
+| Native code, Expo/RN SDK, dependency or config-plugin change, permission, entitlement, scheme, app identifier, native asset, build property, or environment contract | No                                        | New store build and app version                           |
+| `expo-updates`, update URL/channel, runtime policy, persistent-data compatibility, or native/JS contract                                                             | No                                        | New store build and app version                           |
+| Start-event confirmation, human-only action boundary, real/drill classification, or live-provider gate                                                               | No, even if JavaScript-only               | New store build and app version plus safety-path evidence |
 
 The `ota-preview` build profile deliberately uses the `production` EAS
-environment while subscribing only to the `preview` update channel. This binds
-the tested JavaScript bundle to the same public environment values as the store
-build without exposing it on the production channel. Do not promote a bundle
-created with the ordinary `preview` profile or `preview` EAS environment. If
-update code signing is introduced, stop until the `ota-preview` and production
-verification configuration is proven identical and recorded.
+environment while subscribing only to the dedicated `ota-verification` update
+channel. The ordinary `preview` profile stays on its distinct `preview` channel
+and environment. This prevents a production-configured verification bundle
+from reaching ordinary preview builds that share the same app-version runtime.
+Do not promote a bundle created with the ordinary `preview` profile or
+`preview` EAS environment. If update code signing is introduced, stop until
+the `ota-preview` and production verification configuration is proven
+identical and recorded.
 
 For an eligible patch:
 
@@ -251,23 +276,31 @@ For an eligible patch:
    rollback compatibility. Run the full gate. Build and install an exact
    `ota-preview` binary for that runtime; verify its resolved profile, Git
    commit, application identifier, update channel, and production environment.
-2. After human approval, publish to `preview` using the production environment
-   explicitly. Record the returned immutable preview update-group ID:
+2. After human approval, publish to `ota-verification` using the production
+   environment explicitly. Record the returned immutable verification
+   update-group ID:
 
    ```sh
    cd packages/mobile
    bunx eas-cli@21.7.0 update \
-     --channel preview \
+     --channel ota-verification \
      --environment production \
-     --message 'APPROVED_PREVIEW_REFERENCE' \
+     --message 'APPROVED_VERIFICATION_REFERENCE' \
      --non-interactive
    bunx eas-cli@21.7.0 update:view \
-     'EXACT_PREVIEW_UPDATE_GROUP_ID' --json
+     'EXACT_VERIFICATION_UPDATE_GROUP_ID' --json
    ```
 
-   Test that exact group on physical `ota-preview` builds. A synthetic
-   notification test still requires a freshly confirmed human action and every
-   live-provider prerequisite; publishing an update never authorizes a send.
+   Test that exact group on physical `ota-preview` builds. With
+   `checkAutomatically: ON_LOAD` and `fallbackToCacheTimeout: 0`, the first
+   online cold launch normally starts the check and download without delaying
+   the cached or embedded launch; fully quit and cold-launch again to adopt the
+   downloaded update. Network or offline conditions can delay adoption beyond
+   two launches, so record the exact update-group identity and observed safe
+   behavior on every required device; otherwise adoption remains `unknown`.
+   A synthetic notification test still requires a freshly confirmed human
+   action and every live-provider prerequisite; publishing an update never
+   authorizes a send.
 
 3. Preview production consequences, including exact source update group,
    runtime, initial exposure, and rollback target. Obtain fresh product-owner
@@ -278,7 +311,7 @@ For an eligible patch:
    ```sh
    cd packages/mobile
    bunx eas-cli@21.7.0 update:republish \
-     --group 'EXACT_PREVIEW_UPDATE_GROUP_ID' \
+     --group 'EXACT_VERIFICATION_UPDATE_GROUP_ID' \
      --destination-channel production \
      --rollout-percentage 10 \
      --message 'APPROVED_RELEASE_REFERENCE'
@@ -305,6 +338,14 @@ For an eligible patch:
 Rollback is a human decision. First stop rollout expansion and preserve the
 bad build/update identifiers and evidence; append corrections rather than
 rewriting history.
+
+The same cold-launch behavior applies to rollback. On an online device, one
+cold launch normally obtains the rollback update or directive and the next
+cold launch adopts it. Offline or interrupted devices can remain on the bad
+bundle longer. Publishing a rollback and completing the first launch are not
+device-adoption proof: verify the known-good behavior and exact update identity
+after the second cold launch, and retain `unknown` for every device without
+that evidence.
 
 For a partial OTA rollout, revert the exact rollout so clients return to its
 control update. For a completed rollout, republish the exact compatible

@@ -32,19 +32,27 @@ const collectObjectKeys = (
 describe('mobile distribution configuration', () => {
   test('uses remote, monotonically increasing store build numbers', () => {
     expect(easConfig.cli.appVersionSource).toBe('remote');
+    expect(easConfig.cli.requireCommit).toBe(true);
     expect(easConfig.build.production.autoIncrement).toBe(true);
     expect(easConfig.build.production.distribution).toBe('store');
     expect(easConfig.build.production.credentialsSource).toBe('remote');
   });
 
-  test('keeps preview and production updates on distinct channels', () => {
+  test('isolates ordinary preview, OTA verification, and production updates', () => {
     expect(easConfig.build.preview.channel).toBe('preview');
     expect(easConfig.build.preview.environment).toBe('preview');
-    expect(easConfig.build['ota-preview'].channel).toBe('preview');
+    expect(easConfig.build['ota-preview'].channel).toBe('ota-verification');
     expect(easConfig.build['ota-preview'].environment).toBe('production');
     expect(easConfig.build['ota-preview'].distribution).toBe('internal');
     expect(easConfig.build.production.channel).toBe('production');
     expect(easConfig.build.production.environment).toBe('production');
+    expect(
+      new Set([
+        easConfig.build.preview.channel,
+        easConfig.build['ota-preview'].channel,
+        easConfig.build.production.channel,
+      ]).size,
+    ).toBe(3);
 
     expect(appConfig.expo.updates).toEqual({
       url: `https://u.expo.dev/${EAS_PROJECT_ID}`,
@@ -103,7 +111,7 @@ describe('mobile distribution configuration', () => {
     }
   });
 
-  test('limits OTA eligibility and requires store builds for sensitive changes', () => {
+  test('records the human-reviewed OTA and store-build classification policy', () => {
     expect(packageManifest.psdEocReleasePolicy).toEqual({
       otaAllowedChangeKinds: [
         'copy-layout-style',
@@ -120,8 +128,9 @@ describe('mobile distribution configuration', () => {
         'real-drill-classification',
         'live-provider-gate',
       ],
-      otaRequiresPreviewChannel: true,
+      otaRequiresDedicatedVerificationChannel: true,
       otaVerificationBuildProfile: 'ota-preview',
+      otaVerificationChannel: 'ota-verification',
       otaPublishEnvironment: 'production',
       safetyPathStoreBuildRequiresNewAppVersion: true,
       storeSubmissionRequiresHumanApproval: true,
@@ -134,6 +143,13 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain('no human install evidence recorded');
     expect(release).toContain('walkthrough not recorded');
     expect(release).toContain('product-owner sign-off not recorded');
+    expect(release).toContain('EXPO_PUBLIC_PSD_EOC_API_BASE_URL');
+    expect(release).toContain('https://eoc.psd401.net');
+    expect(release).toContain('a conflicting account-level value');
+    expect(release).toContain('--channel ota-verification');
+    expect(release).toContain('after the second cold launch');
+    expect(release).toContain('adoption remains `unknown`');
+    expect(release).not.toContain('--channel preview');
     expect(release).toMatch(/blocks\s+non-interactive submission/u);
     expect(release).toMatch(
       /do not use interactive submission to create or select an app\s+implicitly/u,
