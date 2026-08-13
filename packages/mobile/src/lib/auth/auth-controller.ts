@@ -152,6 +152,13 @@ export class MobileAuthController {
   private credentialGeneration = 0;
   private credentialOperationTail: Promise<void> = Promise.resolve();
   private unlockPromise: Promise<void> | null = null;
+  private signOutPromise: Promise<void> | null = null;
+  private signOutInProgress = false;
+  private cleanupConfirmedSessionId: string | null = null;
+  private pendingRevocation: Readonly<{
+    sessionId: string;
+    idempotencyKey: string;
+  }> | null = null;
   private expiryTimerHandle: unknown | null = null;
   private expiryClearPromise: Promise<void> | null = null;
 
@@ -301,6 +308,8 @@ export class MobileAuthController {
   private invalidateCredentials(): number {
     this.lifecycleGeneration += 1;
     this.credentialGeneration += 1;
+    this.cleanupConfirmedSessionId = null;
+    this.pendingRevocation = null;
     this.refreshAbortController?.abort();
     this.refreshAbortController = null;
     this.abortFeatureRequests();
@@ -347,6 +356,9 @@ export class MobileAuthController {
   }
 
   public foreground(): Promise<void> {
+    if (this.signOutInProgress) {
+      return Promise.resolve();
+    }
     if (this.state.phase !== 'locked') {
       return Promise.resolve();
     }
@@ -445,6 +457,10 @@ export class MobileAuthController {
   }
 
   public async enroll(payload: MobileSessionResponse): Promise<boolean> {
+    if (this.signOutInProgress) {
+      await this.revokeIssuedSession(payload);
+      return false;
+    }
     const lifecycleGeneration = this.lifecycleGeneration;
     const credentialGeneration = this.credentialGeneration;
     let unlocked: Awaited<ReturnType<LocalAuthenticator['authenticate']>>;
@@ -568,6 +584,7 @@ export class MobileAuthController {
 
   public async retryConnection(): Promise<void> {
     if (
+      this.signOutInProgress ||
       this.vault === null ||
       (this.state.phase !== 'offline-cached' &&
         this.state.phase !== 'cached-checking')
@@ -885,25 +902,184 @@ export class MobileAuthController {
     }
   };
 
-  public async signOut(): Promise<void> {
-    const current = this.vault;
-    const shouldRevoke = current !== null && this.state.phase === 'online';
-    await this.clearAndSignOut(null);
-    if (shouldRevoke) {
-      try {
-        await this.dependencies.api.revoke(
-          current.refreshToken,
-          current.session.session.id,
-          this.dependencies.createIdempotencyKey(),
-        );
-      } catch {
-        // Local sign-out is intentionally final. Remote revocation is not queued.
-      }
-    }
+  public signOut(): Promise<void> {
+    if (this.signOutPromise !== null) return this.signOutPromise;
+    this.signOutInProgress = true;
+    this.signOutPromise = this.signOutSafely().finally(() => {
+      this.signOutInProgress = false;
+      this.signOutPromise = null;
+    });
+    return this.signOutPromise;
   }
 
-  private async clearAndSignOut(message: string | null): Promise<void> {
+  private beginSignOutFence(): Readonly<{
+    credentialGeneration: number;
+    lifecycleGeneration: number;
+    previousState: AuthState;
+    refreshWasInFlight: boolean;
+  }> {
+    const previousState = this.state;
+    const refreshWasInFlight = this.refreshAbortController !== null;
+    this.lifecycleGeneration += 1;
+    this.credentialGeneration += 1;
+    this.cleanupConfirmedSessionId = null;
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const credentialGeneration = this.credentialGeneration;
+    this.refreshAbortController?.abort();
+    this.refreshAbortController = null;
+    this.abortFeatureRequests();
+    this.cancelExpiryTimer();
+    // Keep the credential in protected memory and storage until the server's
+    // canonical revocation receipt proves session and push cleanup. The locked
+    // state immediately closes every authenticated mutation path.
+    this.update({
+      phase: 'locked',
+      session: null,
+      connectivityEpochId: null,
+      message: 'Confirming server sign-out and push cleanup.',
+    });
+    return Object.freeze({
+      credentialGeneration,
+      lifecycleGeneration,
+      previousState,
+      refreshWasInFlight,
+    });
+  }
+
+  private restoreAfterFailedSignOut(
+    current: StoredAuthVault,
+    fence: ReturnType<MobileAuthController['beginSignOutFence']>,
+    message: string,
+  ): void {
+    const fenceIsCurrent =
+      fence.credentialGeneration === this.credentialGeneration &&
+      fence.lifecycleGeneration === this.lifecycleGeneration;
+    const canRestoreUnlockedState =
+      fenceIsCurrent &&
+      !fence.refreshWasInFlight &&
+      (fence.previousState.phase === 'online' ||
+        fence.previousState.phase === 'offline-cached') &&
+      locallyUsableSession(current.session, this.now());
+    if (!canRestoreUnlockedState) {
+      // A background transition or an interrupted credential rotation makes
+      // the in-memory bearer ambiguous. Keep encrypted enrollment intact but
+      // require a fresh device-authenticated refresh before any app access.
+      this.vault = null;
+      this.update({
+        phase: 'locked',
+        session: null,
+        connectivityEpochId: null,
+        message,
+      });
+      return;
+    }
+    this.vault = current;
+    this.update({ ...fence.previousState, message });
+    this.scheduleExpiry(current.session, fence.credentialGeneration);
+  }
+
+  private async signOutSafely(): Promise<void> {
+    const protectedReadRequired =
+      this.vault === null &&
+      (this.state.phase === 'locked' || this.state.phase === 'blocked');
+    let current = protectedReadRequired ? null : this.vault;
+    if (protectedReadRequired) {
+      const protectedPhase = this.state.phase;
+      let authenticated: Awaited<
+        ReturnType<LocalAuthenticator['authenticate']>
+      >;
+      try {
+        authenticated =
+          await this.dependencies.localAuthenticator.authenticate();
+      } catch {
+        authenticated = {
+          success: false,
+          message: 'Device authentication could not be verified.',
+        };
+      }
+      if (!authenticated.success) {
+        const message = `${authenticated.message} PSD EOC kept the enrolled session and push endpoint unchanged.`;
+        this.update({
+          phase: protectedPhase,
+          session: null,
+          connectivityEpochId: null,
+          message,
+        });
+        throw new MobileAuthError('rejected', message);
+      }
+      try {
+        current = await this.dependencies.storage.readVault();
+      } catch {
+        current = null;
+      }
+      if (current === null) {
+        const message =
+          'PSD EOC could not read the enrolled session, so sign-out and push cleanup were not attempted.';
+        this.update({
+          phase: protectedPhase,
+          session: null,
+          connectivityEpochId: null,
+          message,
+        });
+        throw new MobileAuthError('invalid-response', message);
+      }
+    }
+
+    if (
+      current !== null &&
+      this.state.phase === 'blocked' &&
+      this.cleanupConfirmedSessionId === current.session.session.id
+    ) {
+      await this.clearAndSignOut(null, this.cleanupConfirmedSessionId);
+      return;
+    }
+
+    if (current === null) {
+      if (this.state.phase === 'signed-out') {
+        await this.clearAndSignOut(null);
+        return;
+      }
+      const message =
+        'PSD EOC cannot confirm server and push cleanup without the protected device credential.';
+      this.update({ ...this.state, message });
+      throw new MobileAuthError('rejected', message);
+    }
+
+    const sessionId = current.session.session.id;
+    const pendingRevocation =
+      this.pendingRevocation?.sessionId === sessionId
+        ? this.pendingRevocation
+        : Object.freeze({
+            sessionId,
+            idempotencyKey: this.dependencies.createIdempotencyKey(),
+          });
+    this.pendingRevocation = pendingRevocation;
+    const fence = this.beginSignOutFence();
+
+    try {
+      // The server appends token-free push unregistration facts in the same
+      // transaction as session revocation. Local credentials remain intact
+      // unless that authoritative cleanup succeeds.
+      await this.dependencies.api.revoke(
+        current.refreshToken,
+        sessionId,
+        pendingRevocation.idempotencyKey,
+      );
+    } catch {
+      const message =
+        'Sign-out was not completed because PSD EOC could not confirm server and push cleanup. Reconnect and try again.';
+      this.restoreAfterFailedSignOut(current, fence, message);
+      throw new MobileAuthError('offline', message);
+    }
+    await this.clearAndSignOut(null, sessionId);
+  }
+
+  private async clearAndSignOut(
+    message: string | null,
+    cleanupConfirmedSessionId: string | null = null,
+  ): Promise<void> {
     const credentialGeneration = this.invalidateCredentials();
+    this.cleanupConfirmedSessionId = cleanupConfirmedSessionId;
     this.update({
       phase: 'blocked',
       session: null,
@@ -913,6 +1089,9 @@ export class MobileAuthController {
     const cleared = await this.clearStoredSession();
     if (credentialGeneration !== this.credentialGeneration) {
       return;
+    }
+    if (cleared) {
+      this.cleanupConfirmedSessionId = null;
     }
     this.update({
       phase: cleared ? 'signed-out' : 'blocked',

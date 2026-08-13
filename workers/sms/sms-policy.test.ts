@@ -101,6 +101,7 @@ function batch(): DispatchBatch {
     id: IDS.batch,
     intentId: IDS.intent,
     eventId: IDS.event,
+    facilityId: IDS.facility,
     eventKind: 'test',
     templateMode: 'drill',
     purpose: 'activation',

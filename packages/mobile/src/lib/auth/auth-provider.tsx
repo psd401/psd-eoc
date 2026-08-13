@@ -45,6 +45,12 @@ export interface MobileAuthContextValue {
   readonly unlock: () => Promise<void>;
   readonly retryConnection: () => Promise<void>;
   readonly signOut: () => Promise<void>;
+  /** Synchronous lifecycle observation for native work that React may suspend. */
+  readonly subscribeState: (listener: () => void) => () => void;
+  readonly isOnlineSession: (
+    sessionId: SessionId,
+    deviceEnrollmentId: DeviceEnrollmentId,
+  ) => boolean;
   readonly requestAuthenticated: RequestAuthenticated;
   readonly assertMutationAllowed: () => Readonly<{
     connectivityEpochId: ConnectivityEpochId;
@@ -186,6 +192,25 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
   }, [runtime]);
 
+  const subscribeState = useCallback(
+    (listener: () => void) => runtime.controller.subscribe(listener),
+    [runtime],
+  );
+  const isOnlineSession = useCallback(
+    (sessionId: SessionId, deviceEnrollmentId: DeviceEnrollmentId) => {
+      try {
+        const current = runtime.controller.assertMutationAllowed();
+        return (
+          current.sessionId === sessionId &&
+          current.deviceEnrollmentId === deviceEnrollmentId
+        );
+      } catch {
+        return false;
+      }
+    },
+    [runtime],
+  );
+
   const value = useMemo<MobileAuthContextValue>(
     () => ({
       state,
@@ -195,6 +220,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       beginGoogleSignIn,
       unlock: () => runtime.controller.foreground(),
       retryConnection: () => runtime.controller.retryConnection(),
+      subscribeState,
+      isOnlineSession,
       requestAuthenticated: runtime.controller.requestAuthenticated,
       signOut: async () => {
         setSignInError(null);
@@ -202,7 +229,15 @@ export function AuthProvider({ children }: PropsWithChildren) {
       },
       assertMutationAllowed: () => runtime.controller.assertMutationAllowed(),
     }),
-    [beginGoogleSignIn, isSigningIn, runtime, signInError, state],
+    [
+      beginGoogleSignIn,
+      isOnlineSession,
+      isSigningIn,
+      runtime,
+      signInError,
+      state,
+      subscribeState,
+    ],
   );
 
   return (

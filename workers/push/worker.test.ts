@@ -51,7 +51,11 @@ import {
   type ExpoProviderOutcome,
 } from './protocol';
 import type { ExpoPushTransport } from './transport';
-import { ExpoPushBatchError, ExpoPushWorker } from './worker';
+import {
+  ExpoPushBatchError,
+  ExpoPushWorker,
+  createProductionExpoPushWorker,
+} from './worker';
 
 const RETRY_POLICY = Object.freeze({
   maxAttempts: 2,
@@ -59,6 +63,10 @@ const RETRY_POLICY = Object.freeze({
   maxDelayMilliseconds: 5_000,
   multiplier: 2,
   jitterRatio: 0,
+});
+
+const ALLOWING_ENDPOINT_ELIGIBILITY = Object.freeze({
+  isEligible: () => Promise.resolve(true),
 });
 
 interface StoredExecution {
@@ -525,6 +533,7 @@ function workerRuntime(
     evidenceWriter: writer,
     endpointInvalidator: invalidator,
     receiptScheduler: scheduler,
+    endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
     retryPolicy: RETRY_POLICY,
     random: () => 0.5,
   });
@@ -542,6 +551,7 @@ function customAdapterRuntime(adapter: AttemptIdempotentProviderAdapter) {
     evidenceWriter: writer,
     endpointInvalidator: invalidator,
     receiptScheduler: scheduler,
+    endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
     retryPolicy: RETRY_POLICY,
     random: () => 0.5,
   });
@@ -562,6 +572,7 @@ function executionStoreRuntime(
     evidenceWriter: writer,
     endpointInvalidator: invalidator,
     receiptScheduler: scheduler,
+    endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
     retryPolicy,
     random: () => 0.5,
   });
@@ -701,6 +712,7 @@ describe('Expo durable attempt worker', () => {
       executionStore: new MemoryExecutionStore(),
       evidenceWriter: new MemoryEvidenceWriter(),
       endpointInvalidator: new RecordingInvalidator(),
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
     };
 
     expect(
@@ -721,6 +733,172 @@ describe('Expo durable attempt worker', () => {
         }),
     ).toThrow('Expo receipt scheduler is invalid.');
     expect(adapter.requests).toHaveLength(0);
+  });
+
+  test('requires executable endpoint eligibility and denies a revoked endpoint before send', async () => {
+    const adapter = new MockExpoPushAdapter();
+    const base = {
+      adapter,
+      executionStore: new MemoryExecutionStore(),
+      evidenceWriter: new MemoryEvidenceWriter(),
+      endpointInvalidator: new RecordingInvalidator(),
+      receiptScheduler: new RecordingReceiptScheduler(),
+    };
+    expect(
+      () =>
+        new ExpoPushWorker({
+          ...base,
+          endpointEligibility: undefined as never,
+        }),
+    ).toThrow('Expo endpoint eligibility checker is invalid.');
+
+    let checks = 0;
+    const worker = new ExpoPushWorker({
+      ...base,
+      endpointEligibility: {
+        isEligible: () => {
+          checks += 1;
+          return Promise.resolve(false);
+        },
+      },
+    });
+    await expect(worker.process(workItem())).rejects.toMatchObject({
+      code: 'PROVIDER_SEND_DISABLED',
+    });
+    expect(checks).toBe(1);
+    expect(adapter.requests).toHaveLength(0);
+    expect(base.evidenceWriter.evidence).toHaveLength(0);
+  });
+
+  test('requires one identical checker at both live Expo authorization boundaries', () => {
+    const adapterChecker = { isEligible: () => Promise.resolve(true) };
+    const workerChecker = { isEligible: () => Promise.resolve(true) };
+    const adapter = new LedgeredExpoPushAdapter({
+      transport: new WorkerRecordingLiveTransport(),
+      sendLedger: new WorkerMemoryExpoLedger(),
+      endpointEligibility: adapterChecker,
+      batchWindowMilliseconds: 0,
+      clock: () => realBatch().createdAt,
+    });
+
+    expect(
+      () =>
+        new ExpoPushWorker({
+          adapter,
+          executionStore: new MemoryExecutionStore(),
+          evidenceWriter: new MemoryEvidenceWriter(),
+          endpointInvalidator: new RecordingInvalidator(),
+          receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
+          endpointEligibility: workerChecker,
+          authorizeLiveProvider: () => true,
+        }),
+    ).toThrow('Live Expo adapter endpoint eligibility checker is invalid.');
+  });
+
+  test('production composition cannot replace the authenticated eligibility client', async () => {
+    const injectedAdapter = new MockExpoPushAdapter();
+    const sendLedger = new WorkerMemoryExpoLedger();
+    let canonicalCalls = 0;
+    let transportEligibilityCall = 0;
+    let injectedCalls = 0;
+    let providerCalls = 0;
+    const originalFetch = globalThis.fetch;
+    const originalDateNow = Date.now;
+    Date.now = () => Date.parse(realBatch().createdAt);
+    globalThis.fetch = ((input: string | URL | Request) => {
+      if (String(input).includes('push-endpoint-eligibility')) {
+        canonicalCalls += 1;
+        return Promise.resolve(
+          Response.json({
+            version: 1,
+            eligible: canonicalCalls !== transportEligibilityCall,
+          }),
+        );
+      }
+      providerCalls += 1;
+      return Promise.resolve(
+        Response.json({ data: [{ status: 'ok', id: 'ticket-forbidden' }] }),
+      );
+    }) as unknown as typeof globalThis.fetch;
+    let worker: ExpoPushWorker;
+    try {
+      worker = createProductionExpoPushWorker({
+        expoAccessToken: 'synthetic-expo-access-token-000000000001',
+        authorizeLiveTransport: () => true,
+        sendLedger,
+        batchWindowMilliseconds: 0,
+        executionStore: new MemoryExecutionStore(),
+        evidenceWriter: new MemoryEvidenceWriter(),
+        endpointInvalidator: new RecordingInvalidator(),
+        receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
+        authorizeLiveProvider: () => true,
+        endpointEligibilityService: {
+          serviceOrigin: 'https://eoc.example.test',
+          bearerToken: 'synthetic-production-worker-token-000000000001',
+          timeoutMilliseconds: 1_000,
+        },
+        adapter: injectedAdapter,
+        endpointEligibility: {
+          isEligible: () => {
+            injectedCalls += 1;
+            return Promise.resolve(true);
+          },
+        },
+      } as unknown as Parameters<typeof createProductionExpoPushWorker>[0]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      Date.now = originalDateNow;
+    }
+
+    // Two worker checks and one adapter check occur before the HTTP transport.
+    transportEligibilityCall = 4;
+    const productionResult = await worker!
+      .process(workItem(realBatch()))
+      .catch((error: unknown) => error);
+    expect(productionResult).toMatchObject({
+      kind: 'dlq',
+      outcome: {
+        state: 'failed',
+        reasonCode: 'EXPO_ENDPOINT_INELIGIBLE',
+      },
+    });
+    expect(canonicalCalls).toBe(4);
+    expect(injectedCalls).toBe(0);
+    expect(injectedAdapter.requests).toHaveLength(0);
+    expect(providerCalls).toBe(0);
+    expect(sendLedger.completions).toHaveLength(1);
+  });
+
+  test('rechecks a retry and prevents a send after intervening revocation', async () => {
+    const adapter = new MockExpoPushAdapter({
+      behaviors: ['message-rate-exceeded', 'accepted'],
+    });
+    let eligible = true;
+    const writer = new MemoryEvidenceWriter();
+    const worker = new ExpoPushWorker({
+      adapter,
+      executionStore: new MemoryExecutionStore(),
+      evidenceWriter: writer,
+      endpointInvalidator: new RecordingInvalidator(),
+      receiptScheduler: new RecordingReceiptScheduler(),
+      endpointEligibility: {
+        isEligible: () => Promise.resolve(eligible),
+      },
+      retryPolicy: RETRY_POLICY,
+      random: () => 0.5,
+    });
+
+    await expect(worker.process(itemWithAttempt(61, 1))).resolves.toMatchObject(
+      {
+        kind: 'retry',
+      },
+    );
+    eligible = false;
+    await expect(worker.process(itemWithAttempt(62, 2))).rejects.toMatchObject({
+      code: 'PROVIDER_SEND_DISABLED',
+    });
+    expect(adapter.requests).toHaveLength(1);
+    expect(writer.evidence).toHaveLength(2);
   });
 
   test('never permits Expo adapters or completed-store replays to append delivered truth', async () => {
@@ -1360,6 +1538,7 @@ describe('Expo durable attempt worker', () => {
     const adapter = new LedgeredExpoPushAdapter({
       transport,
       sendLedger: ledger,
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       batchWindowMilliseconds: 0,
       clock: () => realBatch().createdAt,
     });
@@ -1372,6 +1551,7 @@ describe('Expo durable attempt worker', () => {
       evidenceWriter: writer,
       endpointInvalidator: invalidator,
       receiptScheduler: scheduler,
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       retryPolicy: RETRY_POLICY,
       random: () => 0.5,
       authorizeLiveProvider: () => true,
@@ -1392,7 +1572,7 @@ describe('Expo durable attempt worker', () => {
       .processAll(items)
       .catch((error: unknown) => error);
 
-    expect(transport.chunks).toEqual([items.map((item) => item.attempt.id)]);
+    expect(transport.chunks).toEqual(items.map((item) => [item.attempt.id]));
     expect(batchError).toBeInstanceOf(ExpoPushBatchError);
     const results = (batchError as ExpoPushBatchError).results;
     expect(results.map((result) => result.kind)).toEqual([
@@ -1409,9 +1589,21 @@ describe('Expo durable attempt worker', () => {
   test('replays retained live Expo truth after outer authorization turns dark', async () => {
     const transport = new WorkerRecordingLiveTransport();
     const ledger = new WorkerMemoryExpoLedger();
+    let eligibilityChecks = 0;
+    let eligibilityMustStayDark = false;
+    const sharedEligibility = {
+      isEligible: () => {
+        eligibilityChecks += 1;
+        if (eligibilityMustStayDark) {
+          throw new Error('Retained provider truth must replay read-only.');
+        }
+        return Promise.resolve(true);
+      },
+    };
     const adapter = new LedgeredExpoPushAdapter({
       transport,
       sendLedger: ledger,
+      endpointEligibility: sharedEligibility,
       batchWindowMilliseconds: 0,
       clock: () => realBatch().createdAt,
     });
@@ -1422,6 +1614,7 @@ describe('Expo durable attempt worker', () => {
       evidenceWriter: new MemoryEvidenceWriter(),
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER),
+      endpointEligibility: sharedEligibility,
       authorizeLiveProvider: () => true,
     });
     const item = workItem(realBatch());
@@ -1430,6 +1623,8 @@ describe('Expo durable attempt worker', () => {
       kind: 'completed',
       replayed: false,
     });
+    const checksBeforeReplay = eligibilityChecks;
+    eligibilityMustStayDark = true;
     const darkWriter = new MemoryEvidenceWriter();
     const darkScheduler = new RecordingReceiptScheduler(EXPO_PUSH_PROVIDER);
     const dark = new ExpoPushWorker({
@@ -1438,6 +1633,7 @@ describe('Expo durable attempt worker', () => {
       evidenceWriter: darkWriter,
       endpointInvalidator: new RecordingInvalidator(),
       receiptScheduler: darkScheduler,
+      endpointEligibility: sharedEligibility,
     });
 
     await expect(dark.process(item)).resolves.toMatchObject({
@@ -1447,6 +1643,7 @@ describe('Expo durable attempt worker', () => {
     });
     expect(transport.chunks).toHaveLength(1);
     expect(ledger.claims).toHaveLength(1);
+    expect(eligibilityChecks).toBe(checksBeforeReplay);
     expect(darkWriter.evidence.map((entry) => entry.state)).toEqual([
       'attempted',
       'provider-accepted',
