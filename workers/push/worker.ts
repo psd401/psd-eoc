@@ -33,9 +33,22 @@ import {
   parseRetryPolicy,
   type RetryPolicy,
 } from '../shared/retry';
-import { expoProviderFailureDisposition } from './adapter';
+import {
+  LedgeredExpoPushAdapter,
+  expoProviderFailureDisposition,
+  type DurableExpoSendLedger,
+} from './adapter';
+import {
+  createProductionPushEndpointEligibilityClient,
+  type ProductionPushEndpointEligibilityClientOptions,
+  type PushEndpointEligibilityChecker,
+} from './eligibility';
 import type { PushEndpointInvalidator } from './invalidation';
 import type { ExpoReceiptScheduler } from './receipt-lifecycle';
+import {
+  ExpoPushHttpTransport,
+  type ExpoLiveTransportAuthorizer,
+} from './transport';
 
 function invalidationInput(
   workItem: WorkerAttemptWorkItem,
@@ -55,11 +68,27 @@ export interface ExpoPushWorkerOptions {
   readonly evidenceWriter: AttemptEvidenceWriter;
   readonly endpointInvalidator: PushEndpointInvalidator;
   readonly receiptScheduler: ExpoReceiptScheduler;
+  readonly endpointEligibility: PushEndpointEligibilityChecker;
   readonly retryPolicy?: RetryPolicy;
   readonly leaseMilliseconds?: number;
   readonly random?: () => number;
   readonly authorizeLiveProvider?: LiveProviderAuthorizer;
 }
+
+/**
+ * Deployable worker composition accepts only validated eligibility service
+ * configuration, never a caller-supplied eligibility implementation.
+ */
+export type ProductionExpoPushWorkerOptions = Readonly<
+  Omit<ExpoPushWorkerOptions, 'adapter' | 'endpointEligibility'> & {
+    readonly expoAccessToken: string;
+    readonly authorizeLiveTransport: ExpoLiveTransportAuthorizer;
+    readonly sendLedger: DurableExpoSendLedger;
+    readonly batchWindowMilliseconds?: number;
+    readonly transportTimeoutMilliseconds?: number;
+    readonly endpointEligibilityService: ProductionPushEndpointEligibilityClientOptions;
+  }
+>;
 
 const EXPO_FORBIDDEN_DELIVERY_REASON = 'EXPO_DELIVERED_TRUTH_FORBIDDEN';
 const MAX_EXPO_WORK_ITEMS = 12_000;
@@ -75,6 +104,8 @@ const EXPO_STORED_FINAL_FAILED_REASONS: ReadonlySet<string> = new Set([
   ...EXPO_ADAPTER_FAILED_REASONS,
   'EXPO_HTTP_CLIENT_ERROR',
   'EXPO_LIVE_TRANSPORT_DISABLED',
+  'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+  'EXPO_ENDPOINT_INELIGIBLE',
   'EXPO_SEND_LEDGER_CONFLICT',
   'EXPO_SEND_REQUEST_INVALID',
   'PROVIDER_RETRY_EXHAUSTED',
@@ -94,6 +125,7 @@ const EXPO_RETRY_REASONS: ReadonlySet<string> = new Set([
   'EXPO_HTTP_RATE_LIMITED',
   'EXPO_HTTP_SERVER_ERROR',
   'EXPO_MESSAGE_RATE_EXCEEDED',
+  'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE',
 ]);
 const EXPO_OUTCOME_KEYS = Object.freeze([
   'state',
@@ -686,6 +718,20 @@ export class ExpoPushWorker {
     ) {
       throw new TypeError('Expo receipt scheduler is invalid.');
     }
+    if (typeof options.endpointEligibility?.isEligible !== 'function') {
+      throw new TypeError('Expo endpoint eligibility checker is invalid.');
+    }
+    if (
+      options.adapter.truthLabel === 'live-verified' &&
+      !LedgeredExpoPushAdapter.usesEndpointEligibility(
+        options.adapter,
+        options.endpointEligibility,
+      )
+    ) {
+      throw new TypeError(
+        'Live Expo adapter endpoint eligibility checker is invalid.',
+      );
+    }
     const retryPolicy = parseRetryPolicy(
       options.retryPolicy ?? DEFAULT_RETRY_POLICY,
     );
@@ -706,6 +752,8 @@ export class ExpoPushWorker {
       ...(options.authorizeLiveProvider === undefined
         ? {}
         : { authorizeLiveProvider: options.authorizeLiveProvider }),
+      authorizeProviderSend: (workItem) =>
+        options.endpointEligibility.isEligible(workItem),
     });
     this.#invalidator = options.endpointInvalidator;
     this.#receiptScheduler = options.receiptScheduler;
@@ -793,4 +841,50 @@ export class ExpoPushWorker {
     }
     return results;
   }
+}
+
+/**
+ * Canonical production composition. Any runtime `endpointEligibility`
+ * property is overwritten by the authenticated fail-closed HTTP client.
+ */
+export function createProductionExpoPushWorker(
+  options: ProductionExpoPushWorkerOptions,
+): ExpoPushWorker {
+  const endpointEligibility = createProductionPushEndpointEligibilityClient(
+    options.endpointEligibilityService,
+  );
+  const transport = new ExpoPushHttpTransport({
+    accessToken: options.expoAccessToken,
+    authorizeLiveTransport: options.authorizeLiveTransport,
+    endpointEligibility,
+    ...(options.transportTimeoutMilliseconds === undefined
+      ? {}
+      : { timeoutMilliseconds: options.transportTimeoutMilliseconds }),
+  });
+  const adapter = new LedgeredExpoPushAdapter({
+    transport,
+    sendLedger: options.sendLedger,
+    endpointEligibility,
+    ...(options.batchWindowMilliseconds === undefined
+      ? {}
+      : { batchWindowMilliseconds: options.batchWindowMilliseconds }),
+  });
+  return new ExpoPushWorker({
+    adapter,
+    executionStore: options.executionStore,
+    evidenceWriter: options.evidenceWriter,
+    endpointInvalidator: options.endpointInvalidator,
+    receiptScheduler: options.receiptScheduler,
+    endpointEligibility,
+    ...(options.retryPolicy === undefined
+      ? {}
+      : { retryPolicy: options.retryPolicy }),
+    ...(options.leaseMilliseconds === undefined
+      ? {}
+      : { leaseMilliseconds: options.leaseMilliseconds }),
+    ...(options.random === undefined ? {} : { random: options.random }),
+    ...(options.authorizeLiveProvider === undefined
+      ? {}
+      : { authorizeLiveProvider: options.authorizeLiveProvider }),
+  });
 }

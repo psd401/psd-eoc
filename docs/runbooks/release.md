@@ -45,9 +45,11 @@ data, or raw provider response. Record:
 
 Do not proceed unless all of the following are true:
 
-- [ ] Issues #23, #37, #38, and #40 are complete with their required human and
-      physical-device evidence; integration truth labels agree with that
-      evidence.
+- [ ] Issues #37 and #40 are complete with their required human and
+      physical-device evidence. Closed issues #23 and #38 establish only their
+      recorded repository-side automation; neither substitutes for the
+      outstanding provider evidence. Integration truth labels agree with the
+      complete evidence set.
 - [ ] Credentials are verified, least privilege, and held in the approved
       secrets systems; no credential file is inside any Git repository.
 - [ ] The exact tester audience is product-owner approved, bounded, private,
@@ -422,7 +424,9 @@ provider-processing evidence.
 
 - Status: **BLOCKED — product-owner sign-off not recorded**
 - Exact consequence-preview and approval references: `BLOCKED`
-- Issue #23/#37/#38/#40 evidence links: `BLOCKED`
+- Issue #23 repository evidence: [mobile push evidence](../evidence/issue-23-mobile-push.md)
+- Issue #38 repository automation: [merged PR #56](https://github.com/psd401/psd-eoc/pull/56)
+- Issue #37/#40 provider and physical-device evidence links: `BLOCKED`
 - Integration truth-register review: `BLOCKED`
 
 Only the responsible human may replace a `BLOCKED` value with contemporaneous,

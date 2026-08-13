@@ -4,9 +4,12 @@ The PSD EOC native client is an Expo SDK 57 managed app for iOS and Android.
 Expo Router owns navigation. Shared domain types come from
 `@psd-eoc/contracts`; mobile code must not redefine them.
 
-This scaffold does not register a push token, request notification permission,
-or contact a notification provider. It only creates the local Android alert
-channel. Expo Push remains `mocked`, as recorded in `docs/INTEGRATIONS.md`.
+Push registration is implemented behind an exact, fail-closed build opt-in.
+Without that opt-in the app does not request notification permission or contact
+Expo, removes any earlier server endpoint when authenticated, and explains that
+registration is disabled. Expo Push remains `mocked`, as recorded in
+`docs/INTEGRATIONS.md`; working code and mock tests do not prove physical-device
+delivery.
 The native appearance stays light until the app has complete dark navigation,
 screen, and system-bar colors; this prevents unreadable system controls when a
 device itself uses dark mode.
@@ -24,6 +27,45 @@ bun run --cwd packages/mobile android
 The platform commands generate and build the local native project as needed,
 start Metro, and open the selected simulator or emulator. They do not send
 notifications or connect provider credentials.
+
+## Push registration configuration
+
+Push registration uses one non-secret public build switch:
+
+- `EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED`: only the exact value `true`
+  allows permission checks and Expo token acquisition. Missing, malformed, or
+  any other value fails closed.
+
+The EAS project UUID is pinned in `app.json`. Both values are public application
+configuration and must never contain a token or credential. On every launch the
+app writes Expo's persisted automatic server-registration state to the explicit
+non-null value `{ "isEnabled": false }`. Runtime code deliberately avoids the
+`expo-notifications` package barrel because Expo 57 evaluates persisted
+auto-registration when that barrel loads. Token acquisition instead performs
+one request to the fixed Expo token endpoint only after build opt-in,
+authenticated-online session, permission, and native-token gates. That request
+has an eight-second deadline, is cancelled if authenticated state is lost, and
+never re-enables Expo's independent registration side path. Only a response
+matching Expo's strict push-token shape is posted to PSD EOC's canonical device
+capability.
+
+Android creates `eoc-alerts` before permission/token work with maximum
+importance, default sound, vibration, and public lock-screen visibility. iOS
+declares the time-sensitive entitlement. If notification permission or the
+Android alert channel is disabled, the app appends server unregistration truth,
+shows platform-specific Settings instructions, and the stale-roster report
+marks the recipient as having no active push endpoint.
+
+Foreground notifications display only when the strict contracts payload and
+both visible real/drill markers agree. Notification taps from running,
+background, or terminated launches are deduplicated, retained through device
+unlock, and routed only by the canonical event ID. Sign-out authenticates when
+locked and requires successful server revocation/push cleanup before local
+SecureStore state is removed; cleanup is never queued offline.
+
+Physical delivery remains a controlled external-integration run. Follow
+`docs/evidence/issue-23-mobile-push.md`; never place push tokens, credentials,
+real recipients, or provider payloads in evidence.
 
 ## Authentication configuration
 
@@ -103,7 +145,9 @@ the required managed-app runtime. `expo-dev-client` supports the development
 profile, `expo-splash-screen` supplies the generated launch screen, and
 `expo-system-ui` applies the configured platform color scheme.
 `expo-notifications` supplies native notification configuration plus the local
-Android channel API. None of these dependencies enables a live send by itself.
+Android channel API, permission state, token rotation events, and notification
+response events through side-effect-free module entry points. None of these
+dependencies enables a live send by itself.
 
 `expo-auth-session` owns the native browser authorization-code + PKCE flow,
 and its required `expo-crypto` peer generates the PKCE material without a

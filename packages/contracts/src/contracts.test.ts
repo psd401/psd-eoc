@@ -24,6 +24,7 @@ import {
   DeliveryTruthStateSchema,
   DeliveryTruthTransitionSchema,
   DispatchBatchSchema,
+  DispatchOutboxResultSchema,
   DrillRecordSchema,
   EventClassificationSchema,
   EventRoomHeaderSchema,
@@ -58,6 +59,9 @@ import {
   MobileOidcStartRequestSchema,
   MobileOidcStartResponseSchema,
   MessageTemplateCatalogSchema,
+  MobilePushReceivePayloadSchema,
+  PushEndpointSendEligibilityInputSchema,
+  PushEndpointSendEligibilityResultSchema,
   NotificationIntentSchema,
   NotificationOutboxMessageSchema,
   NotificationStatusSchema,
@@ -3138,6 +3142,70 @@ describe('notification delivery truth', () => {
 });
 
 describe('notification and outbox classification continuity', () => {
+  test('accepts only complete, exact, classification-safe mobile push data', () => {
+    const payload = {
+      version: 1,
+      eventId: ids.event,
+      eventKind: 'incident',
+      templateMode: 'real',
+      facilityId: ids.facility,
+      eventTypeVersionId: ids.eventTypeVersion,
+      purpose: 'activation',
+    } as const;
+
+    const parsed = MobilePushReceivePayloadSchema.parse(payload);
+    expect(parsed).toEqual(payload);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(
+      MobilePushReceivePayloadSchema.safeParse({
+        ...payload,
+        eventKind: 'drill',
+      }).success,
+    ).toBe(false);
+    expect(
+      MobilePushReceivePayloadSchema.safeParse({
+        ...payload,
+        facilityId: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      MobilePushReceivePayloadSchema.safeParse({
+        ...payload,
+        site: 'untrusted display text',
+      }).success,
+    ).toBe(false);
+  });
+
+  test('binds token-free push send eligibility to one exact native endpoint', () => {
+    const input = {
+      version: 1,
+      rosterSnapshotId: ids.roster,
+      rosterPopulation: 'staff',
+      recipientId: ids.recipient,
+      endpointId: ids.endpoint,
+      platform: 'ios',
+      tokenDigest: 'a'.repeat(64),
+    } as const;
+
+    expect(PushEndpointSendEligibilityInputSchema.parse(input)).toEqual(input);
+    expect(
+      PushEndpointSendEligibilityInputSchema.safeParse({
+        ...input,
+        tokenDigest: 'ExponentPushToken[forbidden]',
+      }).success,
+    ).toBe(false);
+    expect(
+      PushEndpointSendEligibilityInputSchema.safeParse({ ...input, token: 'x' })
+        .success,
+    ).toBe(false);
+    expect(
+      PushEndpointSendEligibilityResultSchema.safeParse({
+        version: 1,
+        eligible: false,
+      }).success,
+    ).toBe(true);
+  });
+
   test('pins fresh purpose-specific all-clear authorization and copy', () => {
     const staffTarget = targeting('incident', 'real', 'staff');
     const allClearIntent = {
@@ -3208,6 +3276,7 @@ describe('notification and outbox classification continuity', () => {
       id: ids.batch,
       intentId: ids.intent,
       eventId: ids.event,
+      facilityId: ids.facility,
       ...notificationClassification('test', 'drill', 'synthetic'),
       purpose: 'activation',
       eventTypeVersion: drillTypeRef,
@@ -3293,10 +3362,11 @@ describe('notification and outbox classification continuity', () => {
   test('keeps the outbox destination-free and classification-pinned', () => {
     const syntheticTarget = targeting('drill', 'drill', 'synthetic');
     const message = {
-      version: 1,
+      version: 2,
       outboxId: ids.outbox,
       intentId: ids.intent,
       eventId: ids.event,
+      facilityId: ids.facility,
       ...notificationClassification('drill', 'drill', 'synthetic'),
       purpose: 'activation',
       eventTypeVersion: drillTypeRef,
@@ -3310,6 +3380,33 @@ describe('notification and outbox classification continuity', () => {
     expect(NotificationOutboxMessageSchema.safeParse(message).success).toBe(
       true,
     );
+    const { facilityId: version2FacilityId, ...legacyFields } = message;
+    expect(version2FacilityId).toBe(ids.facility);
+    const legacyMessage = { ...legacyFields, version: 1 } as const;
+    expect(
+      NotificationOutboxMessageSchema.safeParse(legacyMessage).success,
+    ).toBe(true);
+    expect(NotificationOutboxMessageSchema.parse(legacyMessage)).toEqual(
+      legacyMessage,
+    );
+    expect(
+      NotificationOutboxMessageSchema.safeParse({
+        ...legacyMessage,
+        facilityId: ids.facility,
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationOutboxMessageSchema.safeParse({
+        ...message,
+        facilityId: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationOutboxMessageSchema.safeParse({
+        ...message,
+        version: 3,
+      }).success,
+    ).toBe(false);
     expect(
       NotificationOutboxMessageSchema.safeParse({
         ...message,
@@ -3348,6 +3445,49 @@ describe('notification and outbox classification continuity', () => {
         publishedAt: times.later,
       }).success,
     ).toBe(true);
+
+    const batchIds = [ids.batch, ids.attempt, ids.evidence] as const;
+    const batches = message.channels.map((plan, index) =>
+      DispatchBatchSchema.parse({
+        id: batchIds[index],
+        intentId: message.intentId,
+        eventId: message.eventId,
+        facilityId: ids.facility,
+        eventKind: message.eventKind,
+        templateMode: message.templateMode,
+        purpose: message.purpose,
+        eventTypeVersion: message.eventTypeVersion,
+        rosterSnapshotId: message.rosterSnapshotId,
+        rosterPopulation: message.rosterPopulation,
+        audienceConfig: message.audienceConfig,
+        requestId: message.requestId,
+        authorization: message.authorization,
+        channel: plan.channel,
+        renderedMessage: plan.renderedMessage,
+        integrationStatus: plan.integrationStatus,
+        sequence: index + 1,
+        endpointCount: plan.endpointCount,
+        createdAt: message.createdAt,
+      }),
+    );
+    const result = {
+      facilityId: ids.facility,
+      outboxRecord: record,
+      batches,
+    } as const;
+    expect(DispatchOutboxResultSchema.safeParse(result).success).toBe(true);
+    expect(
+      DispatchOutboxResultSchema.safeParse({
+        ...result,
+        outboxRecord: { ...record, message: legacyMessage },
+      }).success,
+    ).toBe(true);
+    expect(
+      DispatchOutboxResultSchema.safeParse({
+        ...result,
+        facilityId: ids.otherFacility,
+      }).success,
+    ).toBe(false);
   });
 });
 
@@ -4223,6 +4363,12 @@ describe('barrel exports', () => {
   test('exposes stable downstream schemas from the package entry point', () => {
     expect(typeof Contracts.EventSchema.parse).toBe('function');
     expect(typeof Contracts.NotificationIntentSchema.parse).toBe('function');
+    expect(typeof Contracts.MobilePushReceivePayloadSchema.parse).toBe(
+      'function',
+    );
+    expect(typeof Contracts.PushEndpointSendEligibilityInputSchema.parse).toBe(
+      'function',
+    );
     expect(typeof Contracts.NotificationOutboxMessageSchema.parse).toBe(
       'function',
     );

@@ -1,4 +1,8 @@
-import * as Notifications from 'expo-notifications';
+import {
+  AndroidImportance,
+  AndroidNotificationVisibility,
+} from 'expo-notifications/build/NotificationChannelManager.types';
+import { setNotificationChannelAsync } from 'expo-notifications/build/setNotificationChannelAsync';
 import { Platform } from 'react-native';
 
 /** Stable channel ID shared with the expo-notifications config plugin. */
@@ -14,17 +18,14 @@ export async function configureAlertChannel(): Promise<void> {
     return;
   }
 
-  await Notifications.setNotificationChannelAsync(
-    ALERT_NOTIFICATION_CHANNEL_ID,
-    {
-      name: 'PSD EOC incident and drill alerts',
-      description: 'Incident and drill notifications from PSD EOC.',
-      importance: Notifications.AndroidImportance.MAX,
-      // Omitting sound selects Android's default notification sound. A string
-      // is treated as the filename of a bundled custom sound by SDK 57.
-      enableVibrate: true,
-      vibrationPattern: [0, 500, 250, 500],
-      showBadge: true,
-    },
-  );
+  await setNotificationChannelAsync(ALERT_NOTIFICATION_CHANNEL_ID, {
+    name: 'PSD EOC incident and drill alerts',
+    description: 'Incident and drill notifications from PSD EOC.',
+    importance: AndroidImportance.MAX,
+    sound: 'default',
+    enableVibrate: true,
+    vibrationPattern: [0, 500, 250, 500],
+    lockscreenVisibility: AndroidNotificationVisibility.PUBLIC,
+    showBadge: true,
+  });
 }
