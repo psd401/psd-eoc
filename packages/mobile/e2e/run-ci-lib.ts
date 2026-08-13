@@ -621,6 +621,11 @@ export function mobileE2EAndroidInstrumentationArguments(
 }
 
 export function mobileE2EDevClientUrl(port: number): string {
+  const metroOrigin = mobileE2ELoopbackMetroOrigin(port);
+  return `psdeoc://expo-development-client/?url=${encodeURIComponent(metroOrigin)}`;
+}
+
+function mobileE2ELoopbackMetroOrigin(port: number): string {
   if (
     !Number.isSafeInteger(port) ||
     port < USER_PORT_MINIMUM ||
@@ -630,8 +635,26 @@ export function mobileE2EDevClientUrl(port: number): string {
       `The Metro port must be from ${USER_PORT_MINIMUM} through ${USER_PORT_MAXIMUM}.`,
     );
   }
-  const metroOrigin = `http://${LOOPBACK_METRO_HOST}:${port}`;
-  return `psdeoc://expo-development-client/?url=${encodeURIComponent(metroOrigin)}`;
+  return `http://${LOOPBACK_METRO_HOST}:${port}`;
+}
+
+/** Launches the iOS dev client directly at synthetic loopback Metro. */
+export function mobileE2EIosDirectLaunchArguments(
+  deviceId: string,
+  port: number,
+): readonly string[] {
+  if (!IOS_SIMULATOR_UDID_PATTERN.test(deviceId)) {
+    throw new Error('The iOS simulator UDID is invalid.');
+  }
+  return Object.freeze([
+    'simctl',
+    'launch',
+    '--terminate-running-process',
+    deviceId,
+    MOBILE_E2E_APPLICATION_ID,
+    '--initialUrl',
+    mobileE2ELoopbackMetroOrigin(port),
+  ]);
 }
 
 /** Keeps Metro loopback-only without combining Expo's incompatible flags. */
@@ -733,19 +756,6 @@ export function isMobileE2EIosApplicationForeground(
     'u',
   );
   return foregroundSceneCard.test(hierarchy);
-}
-
-/** Refuses to count a reported tap while the iOS handoff alert remains. */
-export function isMobileE2EIosApplicationReadyAfterHandoff(
-  hierarchy: string,
-  expectedApplicationText: string,
-): boolean {
-  return (
-    !hierarchy.includes('Open in “PSD EOC”?') &&
-    (hierarchy.includes(expectedApplicationText) ||
-      isMobileE2EIosAuthenticationSheetReady(hierarchy) ||
-      isMobileE2EIosApplicationForeground(hierarchy))
-  );
 }
 
 export interface MobileE2EIosSyntheticNotificationState {

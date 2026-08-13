@@ -25,6 +25,7 @@ import {
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
+  mobileE2EIosDirectLaunchArguments,
   mobileE2EIsolatedExpoConfig,
   mobileE2EIosSimulatorPushPayload,
   mobileE2EIosNotificationActionLogEvidence,
@@ -33,7 +34,6 @@ import {
   mobileE2ENormalMetroEnvironment,
   isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
-  isMobileE2EIosApplicationReadyAfterHandoff,
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
   parseMobileE2EManifestText,
@@ -778,7 +778,7 @@ async function installAndOpenIosBundle(
     },
   );
   await runCommand(['xcrun', 'simctl', 'install', device.udid, appPath]);
-  await openIosBundleThroughSystemHandoff(
+  await launchIosBundleDirectly(
     device,
     metroPort,
     expectedApplicationText,
@@ -786,117 +786,22 @@ async function installAndOpenIosBundle(
   );
 }
 
-async function openIosBundleThroughSystemHandoff(
+async function launchIosBundleDirectly(
   device: IosDevice,
   metroPort: number,
   expectedApplicationText: string,
   artifactRoot: string,
 ): Promise<void> {
-  await openIosBundle(device, metroPort);
-  const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
-  let handoffAttempts = 0;
-  let quietPolls = 0;
-  let urlAttempts = 1;
-  let lastHierarchy = '';
-  const attemptExactSystemHandoff = async (): Promise<boolean> => {
-    if (handoffAttempts >= 8) return false;
-    handoffAttempts += 1;
-    await runCommand(
-      [
-        'maestro',
-        '--udid',
-        device.udid,
-        'test',
-        '--no-ansi',
-        '--env',
-        'PSD_EOC_E2E_SYNTHETIC_ONLY=true',
-        resolve(flowRoot, 'shared/accept-dev-client-handoff-ios.yaml'),
-      ],
-      {
-        allowFailure: true,
-        timeoutMilliseconds: 30_000,
-        logPath: resolve(
-          artifactRoot,
-          `ios-handoff-${metroPort}-open-attempt-${handoffAttempts}.log`,
-        ),
-      },
-    );
-    await Bun.sleep(RETRY_INTERVAL_MS);
-    return true;
-  };
-
-  // iOS 26 can omit this SpringBoard alert from Maestro's standalone
-  // hierarchy even while it is visibly blocking the app. The synthetic-only
-  // flow asserts the exact alert and exact Open label, so trying it after each
-  // bounded openurl attempt is safe; a missing alert simply fails the flow and
-  // readiness remains unproven.
-  await attemptExactSystemHandoff();
-  while (Date.now() < deadline) {
-    const hierarchy = await platformHierarchy('ios', device.udid);
-    lastHierarchy = hierarchy;
-    if (
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        hierarchy,
-        expectedApplicationText,
-      )
-    ) {
-      await writeFile(
-        resolve(artifactRoot, `ios-handoff-${metroPort}-ready-hierarchy.txt`),
-        hierarchy,
-        { encoding: 'utf8', flag: 'wx', mode: 0o600 },
-      );
-      return;
-    }
-    if (hierarchy.includes('Open in “PSD EOC”?')) {
-      quietPolls = 0;
-      if (!(await attemptExactSystemHandoff())) break;
-      continue;
-    }
-    quietPolls += 1;
-    if (quietPolls >= 5 && urlAttempts < 4) {
-      quietPolls = 0;
-      urlAttempts += 1;
-      await openIosBundle(device, metroPort);
-      if (!(await attemptExactSystemHandoff())) break;
-    }
-    await Bun.sleep(RETRY_INTERVAL_MS);
-  }
-  await writeFile(
-    resolve(artifactRoot, `ios-handoff-${metroPort}-failure-hierarchy.txt`),
-    lastHierarchy,
-    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
-  );
+  // Expo Dev Launcher consumes this process argument inside the installed app.
+  // Supplying the validated loopback URL directly avoids iOS's external-URL
+  // confirmation alert, which XCTest/Maestro cannot inspect on iOS 26.
   await runCommand(
-    [
-      'xcrun',
-      'simctl',
-      'io',
-      device.udid,
-      'screenshot',
-      resolve(artifactRoot, `ios-handoff-${metroPort}-failure-screen.png`),
-    ],
+    ['xcrun', ...mobileE2EIosDirectLaunchArguments(device.udid, metroPort)],
     {
-      allowFailure: true,
-      logPath: resolve(
-        artifactRoot,
-        `ios-handoff-${metroPort}-failure-screenshot.log`,
-      ),
+      logPath: resolve(artifactRoot, `ios-direct-launch-${metroPort}.log`),
     },
   );
-  throw new Error('The iOS development-client handoff did not open PSD EOC.');
-}
-
-async function openIosBundle(
-  device: IosDevice,
-  metroPort: number,
-): Promise<void> {
-  await runCommand([
-    'xcrun',
-    'simctl',
-    'openurl',
-    device.udid,
-    mobileE2EDevClientUrl(metroPort),
-  ]);
+  await awaitApplicationReady('ios', device.udid, expectedApplicationText);
 }
 
 async function installAndOpenAndroidBundle(
@@ -1056,7 +961,7 @@ async function respondToDeviceAuthentication(
     if (applesimutils === undefined) {
       throw new Error('The pinned Apple simulator helper is missing.');
     }
-    // Metro can still be compiling after the development-client handoff.
+    // Metro can still be compiling after the direct development-client launch.
     // Wait for the exact secure-sheet accessibility token retained by pinned
     // Maestro 2.7. This token is synchronization only: the following
     // authenticated post-state remains the executable pass gate.
@@ -1376,7 +1281,7 @@ async function resetIosForNormalApp(
     '--biometricEnrollment',
     'YES',
   ]);
-  await openIosBundleThroughSystemHandoff(
+  await launchIosBundleDirectly(
     device,
     normalMetroPort,
     'Sign in to PSD EOC',

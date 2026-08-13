@@ -30,6 +30,7 @@ import {
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
+  mobileE2EIosDirectLaunchArguments,
   mobileE2EIsolatedExpoConfig,
   mobileE2EIosNotificationActionLogEvidence,
   mobileE2EIosSimulatorPushPayload,
@@ -41,7 +42,6 @@ import {
   isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
   isMobileE2EIosApplicationForeground,
-  isMobileE2EIosApplicationReadyAfterHandoff,
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
   isMobileE2EIosSyntheticNotificationVisible,
@@ -455,6 +455,27 @@ describe('issue #32 exact synthetic drill data', () => {
     }
   });
 
+  test('launches the iOS development client directly at loopback Metro', () => {
+    const deviceId = '01234567-89AB-CDEF-0123-456789ABCDEF';
+    expect(mobileE2EIosDirectLaunchArguments(deviceId, 19_000)).toEqual([
+      'simctl',
+      'launch',
+      '--terminate-running-process',
+      deviceId,
+      MOBILE_E2E_APPLICATION_ID,
+      '--initialUrl',
+      'http://127.0.0.1:19000',
+    ]);
+    for (const port of [0, 80, 65_536, Number.NaN, 19_000.5]) {
+      expect(() => mobileE2EIosDirectLaunchArguments(deviceId, port)).toThrow(
+        'Metro port',
+      );
+    }
+    expect(() =>
+      mobileE2EIosDirectLaunchArguments('not-a-device', 19_000),
+    ).toThrow('simulator UDID');
+  });
+
   test('starts Expo on loopback without incompatible offline mode', () => {
     expect(mobileE2EExpoStartArguments(19_000)).toEqual([
       'x',
@@ -608,100 +629,27 @@ describe('issue #32 exact synthetic drill data', () => {
     );
   });
 
-  test('counts an iOS handoff only after its alert is gone and the app is ready', () => {
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff('', 'Unlock PSD EOC'),
-    ).toBe(false);
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        'Open in “PSD EOC”? Unlock PSD EOC',
-        'Unlock PSD EOC',
-      ),
-    ).toBe(false);
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        'Unlock PSD EOC',
-        'Unlock PSD EOC',
-      ),
-    ).toBe(true);
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        '{"attributes":{"accessibilityText" : "Face ID"}}',
-        'Unlock PSD EOC',
-      ),
-    ).toBe(true);
+  test('recognizes only the PSD EOC iOS foreground scene', () => {
     const foregroundScene =
       '{"resource-id" : "card:net.psd401.eoc:sceneID:net.psd401.eoc-default"}';
     expect(isMobileE2EIosApplicationForeground(foregroundScene)).toBe(true);
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        foregroundScene,
-        'Unlock PSD EOC',
-      ),
-    ).toBe(true);
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        `Open in “PSD EOC”? ${foregroundScene}`,
-        'Unlock PSD EOC',
-      ),
-    ).toBe(false);
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        '{"resource-id":"card:com.example.other:sceneID:default"}',
-        'Unlock PSD EOC',
-      ),
-    ).toBe(false);
     expect(
       isMobileE2EIosApplicationForeground(
         '{"resource-id":"card:com.example.other:sceneID:default"}',
       ),
     ).toBe(false);
-    expect(
-      isMobileE2EIosApplicationReadyAfterHandoff(
-        'PSD EOC is loading',
-        'Unlock PSD EOC',
-      ),
-    ).toBe(false);
   });
 
-  test('keeps the iOS development-client handoff synthetic, exact, and bounded', async () => {
-    const [flow, runner] = await Promise.all([
-      readFile(
-        new URL(
-          'flows/shared/accept-dev-client-handoff-ios.yaml',
-          import.meta.url,
-        ),
-        'utf8',
-      ),
-      readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
-    ]);
-
-    for (const exactBoundary of [
-      'appId: com.apple.springboard',
-      "condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}",
-      "- assertVisible: 'Open in “PSD EOC”?'",
-      "text: '^Open$'",
-    ]) {
-      expect(flow).toContain(exactBoundary);
-    }
-    for (const unsafeSelector of [
-      'point:',
-      'index:',
-      'longPressOn:',
-      'swipe:',
-    ]) {
-      expect(flow).not.toContain(unsafeSelector);
-    }
-
-    expect(runner).toContain('if (handoffAttempts >= 8) return false;');
-    expect(runner).toContain('if (quietPolls >= 5 && urlAttempts < 4)');
-    expect(runner).toContain('timeoutMilliseconds: 30_000');
-    expect(runner).toMatch(
-      /await openIosBundle\(device, metroPort\);[\s\S]+await attemptExactSystemHandoff\(\);[\s\S]+while \(Date\.now\(\) < deadline\)/u,
+  test('uses direct iOS launch without an external URL handoff', async () => {
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
     );
     expect(runner).toMatch(
-      /urlAttempts \+= 1;\s+await openIosBundle\(device, metroPort\);\s+if \(!\(await attemptExactSystemHandoff\(\)\)\) break;/u,
+      /\['xcrun',\s+\.\.\.mobileE2EIosDirectLaunchArguments\(device\.udid, metroPort\)\]/u,
     );
+    expect(runner).not.toMatch(/['"]openurl['"]/u);
+    expect(runner).not.toContain('accept-dev-client-handoff-ios.yaml');
   });
 
   test('recognizes only the synthetic drill notification behind the iOS system lock', () => {
