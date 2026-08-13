@@ -1,0 +1,23 @@
+appId: net.psd401.eoc
+name: Issue 32 - reveal Open for an exact synthetic iOS notification
+tags: [issue-32, synthetic-only, ios, notification, reveal-open]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- assertTrue:
+    condition: ${NOTIFICATION_TITLE == '[DRILL] Synthetic lockdown drill'}
+    label: Require the exact synthetic drill notification title
+- extendedWaitUntil:
+    visible: '^\[DRILL\] Synthetic lockdown drill$'
+    timeout: 15000
+- assertNotVisible: '.*\[INCIDENT\].*'
+# This flow only reveals the leading action. The runner measures the exact
+# card again and refuses to tap unless a stable >=44-point strip appeared.
+- swipe:
+    from:
+      id: 'NotificationShortLookView'
+      text: '^PSD EOC, .*, \[DRILL\] Synthetic lockdown drill, \[DRILL\] Synthetic exercise only\. Open the synthetic event room\.(?:, TIME SENSITIVE)?$'
+    direction: RIGHT
+    duration: 600
+- waitForAnimationToEnd:
+    timeout: 5000

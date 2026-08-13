@@ -725,6 +725,16 @@ export function isMobileE2EIosAuthenticationSheetReady(
   );
 }
 
+export function isMobileE2EIosApplicationForeground(
+  hierarchy: string,
+): boolean {
+  const foregroundSceneCard = new RegExp(
+    String.raw`"resource-id"\s*:\s*"card:${MOBILE_E2E_APPLICATION_ID.replaceAll('.', String.raw`\.`)}:sceneID:`,
+    'u',
+  );
+  return foregroundSceneCard.test(hierarchy);
+}
+
 /** Refuses to count a reported tap while the iOS handoff alert remains. */
 export function isMobileE2EIosApplicationReadyAfterHandoff(
   hierarchy: string,
@@ -733,23 +743,146 @@ export function isMobileE2EIosApplicationReadyAfterHandoff(
   return (
     !hierarchy.includes('Open in “PSD EOC”?') &&
     (hierarchy.includes(expectedApplicationText) ||
-      isMobileE2EIosAuthenticationSheetReady(hierarchy))
+      isMobileE2EIosAuthenticationSheetReady(hierarchy) ||
+      isMobileE2EIosApplicationForeground(hierarchy))
   );
 }
 
-/** Proves the synthetic notification is waiting behind the iOS system lock. */
-export function isMobileE2EIosNotificationOnLockedScreen(
-  hierarchy: string,
+export interface MobileE2EIosSyntheticNotificationState {
+  readonly valid: boolean;
+  readonly locked: boolean;
+  readonly visible: boolean;
+  readonly openable: boolean;
+  readonly coverSheetBounds: MobileE2EIosBounds | null;
+  readonly exactCardBounds: MobileE2EIosBounds | null;
+  readonly otherCardBounds: readonly MobileE2EIosBounds[];
+}
+
+export type MobileE2EIosNotificationResponseDecision =
+  | 'wait'
+  | 'response-started'
+  | 'open-explicit-notification'
+  | 'refuse-explicit-open';
+
+export interface MobileE2EIosRevealedOpenActionDecision {
+  readonly decision:
+    | 'wait'
+    | 'response-started'
+    | 'tap-revealed-open'
+    | 'refuse-revealed-open';
+  readonly tapPoint: string | null;
+}
+
+export interface MobileE2EIosNotificationActionLogEvidence {
+  readonly valid: boolean;
+  readonly requestId: string | null;
+}
+
+export interface MobileE2EIosBounds {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+function mobileE2EIosBounds(value: unknown): MobileE2EIosBounds | null {
+  if (typeof value !== 'string') return null;
+  const match = /^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/u.exec(value);
+  if (match === null) return null;
+  const [, leftText, topText, rightText, bottomText] = match;
+  const left = Number(leftText);
+  const top = Number(topText);
+  const right = Number(rightText);
+  const bottom = Number(bottomText);
+  if (
+    !Number.isSafeInteger(left) ||
+    !Number.isSafeInteger(top) ||
+    !Number.isSafeInteger(right) ||
+    !Number.isSafeInteger(bottom) ||
+    left < 0 ||
+    top < 0 ||
+    right <= left ||
+    bottom <= top
+  ) {
+    return null;
+  }
+  return Object.freeze({ left, top, right, bottom });
+}
+
+function mobileE2EIosBoundsOverlap(
+  left: MobileE2EIosBounds,
+  right: MobileE2EIosBounds,
 ): boolean {
+  return (
+    left.left < right.right &&
+    right.left < left.right &&
+    left.top < right.bottom &&
+    right.top < left.bottom
+  );
+}
+
+function mobileE2EIosBoundsInside(
+  child: MobileE2EIosBounds,
+  parent: MobileE2EIosBounds,
+): boolean {
+  return (
+    child.left >= parent.left &&
+    child.top >= parent.top &&
+    child.right <= parent.right &&
+    child.bottom <= parent.bottom
+  );
+}
+
+function mobileE2EIosBoundsEqual(
+  left: MobileE2EIosBounds | null,
+  right: MobileE2EIosBounds | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.left === right.left &&
+    left.top === right.top &&
+    left.right === right.right &&
+    left.bottom === right.bottom
+  );
+}
+
+export function mobileE2EIosSyntheticNotificationState(
+  hierarchy: string,
+): MobileE2EIosSyntheticNotificationState {
   let root: unknown;
   try {
     root = JSON.parse(hierarchy);
   } catch {
-    return false;
+    return {
+      valid: false,
+      locked: false,
+      visible: false,
+      openable: false,
+      coverSheetBounds: null,
+      exactCardBounds: null,
+      otherCardBounds: Object.freeze([]),
+    };
+  }
+  if (!isRecord(root)) {
+    return {
+      valid: false,
+      locked: false,
+      visible: false,
+      openable: false,
+      coverSheetBounds: null,
+      exactCardBounds: null,
+      otherCardBounds: Object.freeze([]),
+    };
   }
 
   let foundLockScreen = false;
-  let foundExactNotification = false;
+  let foundCoverSheet = false;
+  let coverSheetBounds: MobileE2EIosBounds | null = null;
+  let invalidNotificationBounds = false;
+  let foundIncidentNotification = false;
+  const notificationBounds: MobileE2EIosBounds[] = [];
+  const exactNotificationBounds: MobileE2EIosBounds[] = [];
   const visit = (value: unknown): void => {
     if (!isRecord(value)) return;
     const attributes = value.attributes;
@@ -757,15 +890,35 @@ export function isMobileE2EIosNotificationOnLockedScreen(
       if (attributes['resource-id'] === 'lockscreen-date-view') {
         foundLockScreen = true;
       }
-      if (
-        attributes['resource-id'] === 'NotificationShortLookView' &&
-        typeof attributes.accessibilityText === 'string' &&
-        attributes.accessibilityText.startsWith('PSD EOC, ') &&
-        attributes.accessibilityText.endsWith(
-          `${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
-        )
-      ) {
-        foundExactNotification = true;
+      if (attributes['resource-id'] === 'SBCoverSheetWindow') {
+        foundCoverSheet = true;
+        coverSheetBounds = mobileE2EIosBounds(attributes.bounds);
+      }
+      if (attributes['resource-id'] === 'NotificationShortLookView') {
+        const bounds = mobileE2EIosBounds(attributes.bounds);
+        if (bounds === null) {
+          invalidNotificationBounds = true;
+        } else {
+          notificationBounds.push(bounds);
+        }
+        const accessibilityText = attributes.accessibilityText;
+        if (
+          typeof accessibilityText === 'string' &&
+          accessibilityText.includes('[INCIDENT]')
+        ) {
+          foundIncidentNotification = true;
+        }
+        if (
+          bounds !== null &&
+          typeof accessibilityText === 'string' &&
+          accessibilityText.startsWith('PSD EOC, ') &&
+          accessibilityText.includes(
+            `${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
+          ) &&
+          !accessibilityText.includes('[INCIDENT]')
+        ) {
+          exactNotificationBounds.push(bounds);
+        }
       }
     }
     if (Array.isArray(value.children)) {
@@ -773,7 +926,246 @@ export function isMobileE2EIosNotificationOnLockedScreen(
     }
   };
   visit(root);
-  return foundLockScreen && foundExactNotification;
+  const exactBounds = exactNotificationBounds[0] ?? null;
+  const valid =
+    !invalidNotificationBounds &&
+    !foundIncidentNotification &&
+    exactNotificationBounds.length <= 1 &&
+    (!foundCoverSheet || coverSheetBounds !== null);
+  const boundsAreInsideCoverSheet =
+    coverSheetBounds !== null &&
+    notificationBounds.every((bounds) =>
+      mobileE2EIosBoundsInside(bounds, coverSheetBounds as MobileE2EIosBounds),
+    );
+  const exactCardIsDisjoint =
+    exactBounds !== null &&
+    notificationBounds
+      .filter((bounds) => bounds !== exactBounds)
+      .every((bounds) => !mobileE2EIosBoundsOverlap(exactBounds, bounds));
+  const openable =
+    valid &&
+    foundCoverSheet &&
+    boundsAreInsideCoverSheet &&
+    exactBounds !== null &&
+    exactCardIsDisjoint;
+  return {
+    valid,
+    locked: foundLockScreen,
+    visible: valid && exactNotificationBounds.length === 1,
+    openable,
+    coverSheetBounds,
+    exactCardBounds: exactBounds,
+    otherCardBounds: Object.freeze(
+      notificationBounds.filter((bounds) => bounds !== exactBounds),
+    ),
+  };
+}
+
+export function decideMobileE2EIosNotificationResponse(
+  hierarchies: readonly string[],
+): MobileE2EIosNotificationResponseDecision {
+  const latestHierarchy = hierarchies.at(-1);
+  if (latestHierarchy === undefined) return 'wait';
+  if (
+    isMobileE2EIosAuthenticationSheetReady(latestHierarchy) ||
+    isMobileE2EIosApplicationForeground(latestHierarchy)
+  ) {
+    return 'response-started';
+  }
+  const latest = mobileE2EIosSyntheticNotificationState(latestHierarchy);
+  if (!latest.valid || !latest.visible) return 'refuse-explicit-open';
+  const finalSamples = hierarchies.slice(-3);
+  if (
+    finalSamples.length === 3 &&
+    latest.exactCardBounds !== null &&
+    finalSamples.every((hierarchy) => {
+      const state = mobileE2EIosSyntheticNotificationState(hierarchy);
+      return (
+        state.valid &&
+        state.openable &&
+        mobileE2EIosBoundsEqual(
+          state.exactCardBounds,
+          latest.exactCardBounds,
+        ) &&
+        mobileE2EIosBoundsEqual(state.coverSheetBounds, latest.coverSheetBounds)
+      );
+    })
+  ) {
+    return 'open-explicit-notification';
+  }
+  return 'wait';
+}
+
+/**
+ * Admits one Open tap only after an exact-card right swipe has measurably and
+ * stably exposed a leading action strip. Notification disappearance alone is
+ * never treated as a response.
+ */
+export function decideMobileE2EIosRevealedOpenAction(
+  beforeRevealHierarchy: string,
+  afterRevealHierarchies: readonly string[],
+): MobileE2EIosRevealedOpenActionDecision {
+  const before = mobileE2EIosSyntheticNotificationState(beforeRevealHierarchy);
+  if (
+    !before.valid ||
+    !before.openable ||
+    before.exactCardBounds === null ||
+    before.coverSheetBounds === null
+  ) {
+    return Object.freeze({
+      decision: 'refuse-revealed-open',
+      tapPoint: null,
+    });
+  }
+
+  const latestHierarchy = afterRevealHierarchies.at(-1);
+  if (latestHierarchy === undefined) {
+    return Object.freeze({ decision: 'wait', tapPoint: null });
+  }
+  if (
+    isMobileE2EIosAuthenticationSheetReady(latestHierarchy) ||
+    isMobileE2EIosApplicationForeground(latestHierarchy)
+  ) {
+    return Object.freeze({
+      decision: 'response-started',
+      tapPoint: null,
+    });
+  }
+
+  const latest = mobileE2EIosSyntheticNotificationState(latestHierarchy);
+  if (
+    !latest.valid ||
+    !latest.visible ||
+    latest.exactCardBounds === null ||
+    !mobileE2EIosBoundsEqual(latest.coverSheetBounds, before.coverSheetBounds)
+  ) {
+    return Object.freeze({
+      decision: 'refuse-revealed-open',
+      tapPoint: null,
+    });
+  }
+
+  const finalSamples = afterRevealHierarchies.slice(-3);
+  if (
+    finalSamples.length < 3 ||
+    !finalSamples.every((hierarchy) => {
+      const state = mobileE2EIosSyntheticNotificationState(hierarchy);
+      return (
+        state.valid &&
+        state.visible &&
+        mobileE2EIosBoundsEqual(
+          state.exactCardBounds,
+          latest.exactCardBounds,
+        ) &&
+        mobileE2EIosBoundsEqual(state.coverSheetBounds, before.coverSheetBounds)
+      );
+    })
+  ) {
+    return Object.freeze({ decision: 'wait', tapPoint: null });
+  }
+
+  const beforeCard = before.exactCardBounds;
+  const revealedCard = latest.exactCardBounds;
+  const screen = before.coverSheetBounds;
+  const exposedWidth = revealedCard.left - beforeCard.left;
+  const beforeWidth = beforeCard.right - beforeCard.left;
+  const revealedWidth = revealedCard.right - revealedCard.left;
+  if (
+    exposedWidth < 44 ||
+    exposedWidth > (screen.right - screen.left) / 2 ||
+    beforeCard.top !== revealedCard.top ||
+    beforeCard.bottom !== revealedCard.bottom ||
+    beforeWidth !== revealedWidth
+  ) {
+    return Object.freeze({
+      decision: 'refuse-revealed-open',
+      tapPoint: null,
+    });
+  }
+
+  const openX = Math.round((beforeCard.left + revealedCard.left) / 2);
+  const openY = Math.round((revealedCard.top + revealedCard.bottom) / 2);
+  const pointInsideBounds = (bounds: MobileE2EIosBounds): boolean =>
+    openX >= bounds.left &&
+    openX < bounds.right &&
+    openY >= bounds.top &&
+    openY < bounds.bottom;
+  if (
+    openX < screen.left ||
+    openX >= screen.right ||
+    openX >= revealedCard.left ||
+    openY < screen.top ||
+    openY >= screen.bottom ||
+    latest.otherCardBounds.some(pointInsideBounds)
+  ) {
+    return Object.freeze({
+      decision: 'refuse-revealed-open',
+      tapPoint: null,
+    });
+  }
+  return Object.freeze({
+    decision: 'tap-revealed-open',
+    tapPoint: `${openX},${openY}`,
+  });
+}
+
+/**
+ * Requires one same-request SpringBoard default-action transaction after the
+ * measured Open tap. A prior hint/NO transaction cannot satisfy this gate.
+ */
+export function mobileE2EIosNotificationActionLogEvidence(
+  log: string,
+): MobileE2EIosNotificationActionLogEvidence {
+  const requestPattern = '[A-F0-9]{4}-[A-F0-9]{4}';
+  const executions = [
+    ...log.matchAll(
+      new RegExp(
+        String.raw`requests executing action com\.apple\.UNNotificationDefaultActionIdentifier for notification request (${requestPattern})`,
+        'gu',
+      ),
+    ),
+  ].map((match) => match[1] as string);
+  const removals = [
+    ...log.matchAll(
+      new RegExp(
+        String.raw`removing notification request (${requestPattern})`,
+        'gu',
+      ),
+    ),
+  ].map((match) => match[1] as string);
+  if (executions.length !== 1) {
+    return Object.freeze({ valid: false, requestId: null });
+  }
+  const requestId = executions[0] as string;
+  if (!removals.includes(requestId)) {
+    return Object.freeze({ valid: false, requestId: null });
+  }
+  const otherExecution = executions.some(
+    (candidate) => candidate !== requestId,
+  );
+  const refusalAfterExecution = new RegExp(
+    String.raw`(?:Action completion for ${requestId} didExecute\? NO|Hinting side swipe instead of executing action for ${requestId})`,
+    'u',
+  ).test(log.slice(log.indexOf('requests executing action')));
+  if (otherExecution || refusalAfterExecution) {
+    return Object.freeze({ valid: false, requestId: null });
+  }
+  return Object.freeze({ valid: true, requestId });
+}
+
+/** Detects only the complete synthetic DRILL card in iOS system UI. */
+export function isMobileE2EIosSyntheticNotificationVisible(
+  hierarchy: string,
+): boolean {
+  return mobileE2EIosSyntheticNotificationState(hierarchy).visible;
+}
+
+/** Proves the synthetic notification is waiting behind the iOS system lock. */
+export function isMobileE2EIosNotificationOnLockedScreen(
+  hierarchy: string,
+): boolean {
+  const state = mobileE2EIosSyntheticNotificationState(hierarchy);
+  return state.locked && state.visible;
 }
 
 /** Selects a newest available iOS runtime and an iPhone it explicitly supports. */

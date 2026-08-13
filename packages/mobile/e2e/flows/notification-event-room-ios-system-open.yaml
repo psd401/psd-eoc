@@ -11,6 +11,10 @@ tags: [issue-32, synthetic-only, ios, notification, simulator-lock]
     start: 50%, 98%
     end: 50%, 10%
     duration: 1000
+- extendedWaitUntil:
+    visible:
+      id: 'Home screen icons'
+    timeout: 15000
 - pressKey: home
 - swipe:
     start: 50%, 0%
@@ -21,7 +25,7 @@ tags: [issue-32, synthetic-only, ios, notification, simulator-lock]
     timeout: 30000
 - assertNotVisible: '.*\[INCIDENT\].*'
 - tapOn:
-    id: 'NotificationShortLookView'
-    text: 'PSD EOC, .*, \[DRILL\] Synthetic lockdown drill, \[DRILL\] Synthetic exercise only\. Open the synthetic event room\.'
+    id: 'NotificationTitle'
+    text: '^\[DRILL\] Synthetic lockdown drill$'
 # Stop while the app's independent LocalAuthentication sheet is awaiting its
 # enrolled simulator biometric.

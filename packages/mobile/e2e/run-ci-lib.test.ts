@@ -22,6 +22,8 @@ import {
   assertMobileE2EArtifactDirectoryOwned,
   assertMobileE2ERunnerRootOwned,
   createMobileE2ERunId,
+  decideMobileE2EIosRevealedOpenAction,
+  decideMobileE2EIosNotificationResponse,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EArtifactPaths,
   mobileE2EDevClientUrl,
@@ -29,16 +31,20 @@ import {
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
   mobileE2EIsolatedExpoConfig,
+  mobileE2EIosNotificationActionLogEvidence,
   mobileE2EIosSimulatorPushPayload,
+  mobileE2EIosSyntheticNotificationState,
   mobileE2ELoopbackMetroEnvironment,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
   mobileE2ERunnerPaths,
   isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
+  isMobileE2EIosApplicationForeground,
   isMobileE2EIosApplicationReadyAfterHandoff,
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
+  isMobileE2EIosSyntheticNotificationVisible,
   parseMobileE2EManifest,
   parseMobileE2EManifestText,
   parseMobileE2EPlatformCli,
@@ -621,6 +627,32 @@ describe('issue #32 exact synthetic drill data', () => {
         'Unlock PSD EOC',
       ),
     ).toBe(true);
+    const foregroundScene =
+      '{"resource-id" : "card:net.psd401.eoc:sceneID:net.psd401.eoc-default"}';
+    expect(isMobileE2EIosApplicationForeground(foregroundScene)).toBe(true);
+    expect(
+      isMobileE2EIosApplicationReadyAfterHandoff(
+        foregroundScene,
+        'Unlock PSD EOC',
+      ),
+    ).toBe(true);
+    expect(
+      isMobileE2EIosApplicationReadyAfterHandoff(
+        `Open in “PSD EOC”? ${foregroundScene}`,
+        'Unlock PSD EOC',
+      ),
+    ).toBe(false);
+    expect(
+      isMobileE2EIosApplicationReadyAfterHandoff(
+        '{"resource-id":"card:com.example.other:sceneID:default"}',
+        'Unlock PSD EOC',
+      ),
+    ).toBe(false);
+    expect(
+      isMobileE2EIosApplicationForeground(
+        '{"resource-id":"card:com.example.other:sceneID:default"}',
+      ),
+    ).toBe(false);
     expect(
       isMobileE2EIosApplicationReadyAfterHandoff(
         'PSD EOC is loading',
@@ -636,6 +668,7 @@ describe('issue #32 exact synthetic drill data', () => {
         {
           attributes: {
             'resource-id': 'NotificationShortLookView',
+            bounds: '[14,564][388,659]',
             accessibilityText: `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
           },
         },
@@ -644,6 +677,26 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(isMobileE2EIosNotificationOnLockedScreen(pendingHierarchy)).toBe(
       true,
     );
+    expect(isMobileE2EIosSyntheticNotificationVisible(pendingHierarchy)).toBe(
+      true,
+    );
+    expect(mobileE2EIosSyntheticNotificationState(pendingHierarchy)).toEqual({
+      valid: true,
+      locked: true,
+      visible: true,
+      openable: false,
+      coverSheetBounds: null,
+      exactCardBounds: { left: 14, top: 564, right: 388, bottom: 659 },
+      otherCardBounds: [],
+    });
+    expect(
+      isMobileE2EIosNotificationOnLockedScreen(
+        pendingHierarchy.replace(
+          MOBILE_E2E_NOTIFICATION_BODY,
+          `${MOBILE_E2E_NOTIFICATION_BODY}, Time Sensitive`,
+        ),
+      ),
+    ).toBe(true);
     expect(
       isMobileE2EIosNotificationOnLockedScreen(
         pendingHierarchy.replace(
@@ -653,15 +706,23 @@ describe('issue #32 exact synthetic drill data', () => {
       ),
     ).toBe(false);
     expect(
-      isMobileE2EIosNotificationOnLockedScreen(
-        JSON.stringify({
-          attributes: {
-            'resource-id': 'NotificationShortLookView',
-            accessibilityText: `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
-          },
-        }),
+      isMobileE2EIosSyntheticNotificationVisible(
+        pendingHierarchy.replace('PSD EOC, ', 'Other App, PSD EOC, '),
       ),
     ).toBe(false);
+    const unlockedNotification = JSON.stringify({
+      attributes: {
+        'resource-id': 'NotificationShortLookView',
+        bounds: '[14,564][388,659]',
+        accessibilityText: `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
+      },
+    });
+    expect(isMobileE2EIosNotificationOnLockedScreen(unlockedNotification)).toBe(
+      false,
+    );
+    expect(
+      isMobileE2EIosSyntheticNotificationVisible(unlockedNotification),
+    ).toBe(true);
     expect(
       isMobileE2EIosNotificationOnLockedScreen(
         JSON.stringify({
@@ -670,6 +731,7 @@ describe('issue #32 exact synthetic drill data', () => {
             {
               attributes: {
                 'resource-id': 'NotificationShortLookView',
+                bounds: '[14,564][388,659]',
                 accessibilityText: 'PSD EOC, now',
               },
             },
@@ -687,7 +749,393 @@ describe('issue #32 exact synthetic drill data', () => {
         pendingHierarchy.replace(MOBILE_E2E_NOTIFICATION_BODY, 'Open event.'),
       ),
     ).toBe(false);
+    expect(
+      isMobileE2EIosNotificationOnLockedScreen(
+        pendingHierarchy.replace(
+          MOBILE_E2E_NOTIFICATION_BODY,
+          `${MOBILE_E2E_NOTIFICATION_BODY}, [INCIDENT] Lockdown`,
+        ),
+      ),
+    ).toBe(false);
     expect(isMobileE2EIosNotificationOnLockedScreen('not JSON')).toBe(false);
+    expect(isMobileE2EIosSyntheticNotificationVisible('not JSON')).toBe(false);
+    expect(mobileE2EIosSyntheticNotificationState('not JSON')).toEqual({
+      valid: false,
+      locked: false,
+      visible: false,
+      openable: false,
+      coverSheetBounds: null,
+      exactCardBounds: null,
+      otherCardBounds: [],
+    });
+    const collapsedHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'SBCoverSheetWindow',
+        bounds: '[0,0][402,874]',
+      },
+      children: [
+        {
+          attributes: {
+            'resource-id': 'NotificationShortLookView',
+            bounds: '[14,613][388,705]',
+            accessibilityText: `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
+          },
+        },
+        {
+          attributes: {
+            'resource-id': 'NotificationShortLookView',
+            bounds: '[14,676][388,736]',
+            accessibilityText: 'Settings, Ready for synthetic setup',
+          },
+        },
+      ],
+    });
+    expect(mobileE2EIosSyntheticNotificationState(collapsedHierarchy)).toEqual({
+      valid: true,
+      locked: false,
+      visible: true,
+      openable: false,
+      coverSheetBounds: { left: 0, top: 0, right: 402, bottom: 874 },
+      exactCardBounds: { left: 14, top: 613, right: 388, bottom: 705 },
+      otherCardBounds: [{ left: 14, top: 676, right: 388, bottom: 736 }],
+    });
+    const expandedHierarchy = collapsedHierarchy
+      .replace('[14,613][388,705]', '[14,564][388,659]')
+      .replace('[14,676][388,736]', '[14,667][388,746]');
+    expect(mobileE2EIosSyntheticNotificationState(expandedHierarchy)).toEqual({
+      valid: true,
+      locked: false,
+      visible: true,
+      openable: true,
+      coverSheetBounds: { left: 0, top: 0, right: 402, bottom: 874 },
+      exactCardBounds: { left: 14, top: 564, right: 388, bottom: 659 },
+      otherCardBounds: [{ left: 14, top: 667, right: 388, bottom: 746 }],
+    });
+    const singleCardHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'SBCoverSheetWindow',
+        bounds: '[0,0][402,874]',
+      },
+      children: [
+        {
+          attributes: {
+            'resource-id': 'NotificationShortLookView',
+            bounds: '[14,613][388,705]',
+            accessibilityText: `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
+          },
+        },
+      ],
+    });
+    expect(mobileE2EIosSyntheticNotificationState(singleCardHierarchy)).toEqual(
+      {
+        valid: true,
+        locked: false,
+        visible: true,
+        openable: true,
+        coverSheetBounds: { left: 0, top: 0, right: 402, bottom: 874 },
+        exactCardBounds: { left: 14, top: 613, right: 388, bottom: 705 },
+        otherCardBounds: [],
+      },
+    );
+    expect(
+      mobileE2EIosSyntheticNotificationState(
+        expandedHierarchy.replace('[14,667][388,746]', '[14,667][500,746]'),
+      ).openable,
+    ).toBe(false);
+    expect(
+      mobileE2EIosSyntheticNotificationState(
+        expandedHierarchy.replace(
+          'Settings, Ready for synthetic setup',
+          `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
+        ),
+      ).valid,
+    ).toBe(false);
+    expect(
+      mobileE2EIosSyntheticNotificationState(
+        expandedHierarchy.replace(
+          'Settings, Ready for synthetic setup',
+          '[INCIDENT] Synthetic lockdown incident',
+        ),
+      ).valid,
+    ).toBe(false);
+    expect(
+      mobileE2EIosSyntheticNotificationState(
+        expandedHierarchy.replace('[14,667][388,746]', 'invalid-bounds'),
+      ).valid,
+    ).toBe(false);
+    expect(
+      mobileE2EIosSyntheticNotificationState(
+        expandedHierarchy.replace('[0,0][402,874]', '[0,0][40,87]'),
+      ).openable,
+    ).toBe(false);
+    expect(
+      mobileE2EIosSyntheticNotificationState(
+        expandedHierarchy.replace('[14,564][388,659]', '[250,564][500,659]'),
+      ).openable,
+    ).toBe(false);
+  });
+
+  test('fails closed while deciding whether an expanded iOS notification needs an explicit Open action', () => {
+    const expandedHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'SBCoverSheetWindow',
+        bounds: '[0,0][402,874]',
+      },
+      children: [
+        {
+          attributes: {
+            'resource-id': 'NotificationShortLookView',
+            bounds: '[14,564][388,659]',
+            accessibilityText: `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
+          },
+        },
+        {
+          attributes: {
+            'resource-id': 'NotificationShortLookView',
+            bounds: '[14,667][388,746]',
+            accessibilityText: 'Settings, Ready for synthetic setup',
+          },
+        },
+      ],
+    });
+    const absentHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'SBCoverSheetWindow',
+        bounds: '[0,0][402,874]',
+      },
+    });
+    const foregroundHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'card:net.psd401.eoc:sceneID:net.psd401.eoc-default',
+      },
+    });
+
+    expect(decideMobileE2EIosNotificationResponse([])).toBe('wait');
+    expect(
+      decideMobileE2EIosNotificationResponse([
+        expandedHierarchy,
+        expandedHierarchy,
+      ]),
+    ).toBe('wait');
+    expect(
+      decideMobileE2EIosNotificationResponse([
+        expandedHierarchy,
+        expandedHierarchy,
+        expandedHierarchy,
+      ]),
+    ).toBe('open-explicit-notification');
+    expect(decideMobileE2EIosNotificationResponse(['not JSON'])).toBe(
+      'refuse-explicit-open',
+    );
+    expect(
+      decideMobileE2EIosNotificationResponse([
+        expandedHierarchy,
+        foregroundHierarchy,
+      ]),
+    ).toBe('response-started');
+    expect(
+      decideMobileE2EIosNotificationResponse([
+        expandedHierarchy,
+        absentHierarchy,
+      ]),
+    ).toBe('refuse-explicit-open');
+    expect(
+      decideMobileE2EIosNotificationResponse([
+        expandedHierarchy,
+        expandedHierarchy.replace('[14,564][388,659]', '[14,565][388,660]'),
+        expandedHierarchy,
+      ]),
+    ).toBe('wait');
+    expect(
+      decideMobileE2EIosNotificationResponse([
+        expandedHierarchy,
+        expandedHierarchy.replace(
+          'Settings, Ready for synthetic setup',
+          '[INCIDENT] Synthetic lockdown incident',
+        ),
+      ]),
+    ).toBe('refuse-explicit-open');
+  });
+
+  test('admits one iOS Open tap only from a stable measured reveal strip', () => {
+    const beforeRevealHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'SBCoverSheetWindow',
+        bounds: '[0,0][402,874]',
+      },
+      children: [
+        {
+          attributes: {
+            'resource-id': 'NotificationShortLookView',
+            bounds: '[14,564][388,659]',
+            accessibilityText: `PSD EOC, now, ${MOBILE_E2E_NOTIFICATION_TITLE}, ${MOBILE_E2E_NOTIFICATION_BODY}`,
+          },
+        },
+        {
+          attributes: {
+            'resource-id': 'NotificationShortLookView',
+            bounds: '[14,667][388,746]',
+            accessibilityText: 'Settings, Ready for synthetic setup',
+          },
+        },
+      ],
+    });
+    const revealedHierarchy = beforeRevealHierarchy.replace(
+      '[14,564][388,659]',
+      '[112,564][486,659]',
+    );
+    const foregroundHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'card:net.psd401.eoc:sceneID:net.psd401.eoc-default',
+      },
+    });
+    const absentHierarchy = JSON.stringify({
+      attributes: {
+        'resource-id': 'SBCoverSheetWindow',
+        bounds: '[0,0][402,874]',
+      },
+    });
+
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, []),
+    ).toEqual({ decision: 'wait', tapPoint: null });
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        revealedHierarchy,
+        revealedHierarchy,
+      ]),
+    ).toEqual({ decision: 'wait', tapPoint: null });
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        revealedHierarchy,
+        revealedHierarchy,
+        revealedHierarchy,
+      ]),
+    ).toEqual({ decision: 'tap-revealed-open', tapPoint: '63,612' });
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        revealedHierarchy,
+        revealedHierarchy.replace('[112,564][486,659]', '[113,564][487,659]'),
+        revealedHierarchy,
+      ]),
+    ).toEqual({ decision: 'wait', tapPoint: null });
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        beforeRevealHierarchy,
+        beforeRevealHierarchy,
+        beforeRevealHierarchy,
+      ]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+    const partialReveal = beforeRevealHierarchy.replace(
+      '[14,564][388,659]',
+      '[50,564][424,659]',
+    );
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        partialReveal,
+        partialReveal,
+        partialReveal,
+      ]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+    const verticalShift = beforeRevealHierarchy.replace(
+      '[14,564][388,659]',
+      '[112,565][486,660]',
+    );
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        verticalShift,
+        verticalShift,
+        verticalShift,
+      ]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+    const resizedCard = beforeRevealHierarchy.replace(
+      '[14,564][388,659]',
+      '[112,564][485,659]',
+    );
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        resizedCard,
+        resizedCard,
+        resizedCard,
+      ]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        absentHierarchy,
+      ]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        revealedHierarchy.replace(
+          MOBILE_E2E_NOTIFICATION_TITLE,
+          '[INCIDENT] Synthetic lockdown incident',
+        ),
+      ]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        foregroundHierarchy,
+      ]),
+    ).toEqual({ decision: 'response-started', tapPoint: null });
+    const overlappingOtherCard = revealedHierarchy.replace(
+      '[14,667][388,746]',
+      '[40,580][100,650]',
+    );
+    expect(
+      decideMobileE2EIosRevealedOpenAction(beforeRevealHierarchy, [
+        overlappingOtherCard,
+        overlappingOtherCard,
+        overlappingOtherCard,
+      ]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+    expect(
+      decideMobileE2EIosRevealedOpenAction('not JSON', [revealedHierarchy]),
+    ).toEqual({ decision: 'refuse-revealed-open', tapPoint: null });
+  });
+
+  test('requires one same-request iOS default-action execution after the measured Open tap', () => {
+    const validLog = [
+      'Notification List requests executing action com.apple.UNNotificationDefaultActionIdentifier for notification request 71D9-8111',
+      'Notification List removing notification request 71D9-8111',
+    ].join('\n');
+    expect(mobileE2EIosNotificationActionLogEvidence(validLog)).toEqual({
+      valid: true,
+      requestId: '71D9-8111',
+    });
+    expect(mobileE2EIosNotificationActionLogEvidence('')).toEqual({
+      valid: false,
+      requestId: null,
+    });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        'Notification List removing notification request 71D9-8111',
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        validLog.replace('removing notification request 71D9-8111', ''),
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        `${validLog}\n${validLog.replaceAll('71D9-8111', '2D08-516E')}`,
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        `${validLog}\nAction completion for 71D9-8111 didExecute? NO`,
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        `${validLog}\nHinting side swipe instead of executing action for 71D9-8111`,
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        validLog.replaceAll('71D9-8111', 'not-a-request'),
+      ),
+    ).toEqual({ valid: false, requestId: null });
   });
 
   test('selects an iPhone explicitly supported by the newest usable runtime', () => {

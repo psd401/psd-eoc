@@ -18,6 +18,8 @@ import {
   acquireMobileE2EArtifactDirectory,
   acquireMobileE2ERunnerRoot,
   createMobileE2ERunId,
+  decideMobileE2EIosRevealedOpenAction,
+  decideMobileE2EIosNotificationResponse,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EDevClientUrl,
   mobileE2EExpoStartArguments,
@@ -25,6 +27,7 @@ import {
   mobileE2EIosBuildArguments,
   mobileE2EIsolatedExpoConfig,
   mobileE2EIosSimulatorPushPayload,
+  mobileE2EIosNotificationActionLogEvidence,
   mobileE2ELoopbackMetroEnvironment,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
@@ -64,6 +67,9 @@ const RUNTIME_TIMEOUT_MS = 4 * 60_000;
 const METRO_TIMEOUT_MS = 4 * 60_000;
 const PROCESS_TERMINATION_GRACE_MS = 15_000;
 const RETRY_INTERVAL_MS = 500;
+const IOS_NOTIFICATION_RESPONSE_TIMEOUT_MS = 60_000;
+const IOS_NOTIFICATION_FIRST_RESPONSE_TIMEOUT_MS = 5_000;
+const IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS = 30_000;
 const IOS_BUNDLE_RELATIVE_PATH =
   'ios/build/Build/Products/Debug-iphonesimulator/PSDEOC.app';
 const ANDROID_APK_RELATIVE_PATH =
@@ -757,6 +763,7 @@ async function installAndOpenIosBundle(
   appPath: string,
   metroPort: number,
   expectedApplicationText: string,
+  artifactRoot: string,
 ): Promise<void> {
   await runCommand(
     ['xcrun', 'simctl', 'terminate', device.udid, MOBILE_E2E_APPLICATION_ID],
@@ -775,6 +782,7 @@ async function installAndOpenIosBundle(
     device,
     metroPort,
     expectedApplicationText,
+    artifactRoot,
   );
 }
 
@@ -782,12 +790,17 @@ async function openIosBundleThroughSystemHandoff(
   device: IosDevice,
   metroPort: number,
   expectedApplicationText: string,
+  artifactRoot: string,
 ): Promise<void> {
   await openIosBundle(device, metroPort);
   const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
   let handoffAttempts = 0;
+  let quietPolls = 0;
+  let urlAttempts = 1;
+  let lastHierarchy = '';
   while (Date.now() < deadline) {
     const hierarchy = await platformHierarchy('ios', device.udid);
+    lastHierarchy = hierarchy;
     if (
       isMobileE2EIosApplicationReadyAfterHandoff(
         hierarchy,
@@ -797,6 +810,7 @@ async function openIosBundleThroughSystemHandoff(
       return;
     }
     if (hierarchy.includes('Open in “PSD EOC”?')) {
+      quietPolls = 0;
       handoffAttempts += 1;
       if (handoffAttempts > 3) {
         throw new Error(
@@ -816,8 +830,36 @@ async function openIosBundleThroughSystemHandoff(
       await Bun.sleep(RETRY_INTERVAL_MS);
       continue;
     }
+    quietPolls += 1;
+    if (quietPolls >= 5 && urlAttempts < 4) {
+      quietPolls = 0;
+      urlAttempts += 1;
+      await openIosBundle(device, metroPort);
+    }
     await Bun.sleep(RETRY_INTERVAL_MS);
   }
+  await writeFile(
+    resolve(artifactRoot, `ios-handoff-${metroPort}-failure-hierarchy.txt`),
+    lastHierarchy,
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+  await runCommand(
+    [
+      'xcrun',
+      'simctl',
+      'io',
+      device.udid,
+      'screenshot',
+      resolve(artifactRoot, `ios-handoff-${metroPort}-failure-screen.png`),
+    ],
+    {
+      allowFailure: true,
+      logPath: resolve(
+        artifactRoot,
+        `ios-handoff-${metroPort}-failure-screenshot.log`,
+      ),
+    },
+  );
   throw new Error('The iOS development-client handoff did not open PSD EOC.');
 }
 
@@ -947,6 +989,34 @@ async function platformHierarchy(
   return `${result.stdout}\n${result.stderr}`;
 }
 
+async function iosNotificationActionLogsSince(
+  deviceId: string,
+  seconds: number,
+): Promise<string> {
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 120) {
+    throw new Error('The iOS notification log window is invalid.');
+  }
+  const result = await runCommand(
+    [
+      'xcrun',
+      'simctl',
+      'spawn',
+      deviceId,
+      'log',
+      'show',
+      '--style',
+      'compact',
+      '--last',
+      `${seconds}s`,
+      '--predicate',
+      'subsystem == "com.apple.UserNotificationsKit" AND category == "Lists"',
+      '--info',
+    ],
+    { allowFailure: true, quiet: true, timeoutMilliseconds: 20_000 },
+  );
+  return `${result.stdout}\n${result.stderr}`;
+}
+
 async function respondToDeviceAuthentication(
   platform: MobileE2EPlatform,
   deviceId: string,
@@ -978,6 +1048,29 @@ async function respondToDeviceAuthentication(
       await Bun.sleep(RETRY_INTERVAL_MS);
     }
     if (readyHierarchy === undefined) {
+      const failureHierarchy = await platformHierarchy('ios', deviceId);
+      await writeFile(
+        resolve(artifactRoot, `device-auth-${flowName}-failure-hierarchy.txt`),
+        failureHierarchy,
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+      );
+      await runCommand(
+        [
+          'xcrun',
+          'simctl',
+          'io',
+          deviceId,
+          'screenshot',
+          resolve(artifactRoot, `device-auth-${flowName}-failure-prompt.png`),
+        ],
+        {
+          allowFailure: true,
+          logPath: resolve(
+            artifactRoot,
+            `device-auth-${flowName}-failure-screenshot.log`,
+          ),
+        },
+      );
       throw new Error('The iOS device-authentication sheet was not ready.');
     }
     await writeFile(
@@ -1182,18 +1275,67 @@ async function runLaunchAuthentication(
   );
 }
 
+async function holdEventRoomForOperatorScreenshot(
+  artifactRoot: string,
+): Promise<void> {
+  const requested = process.env.PSD_EOC_MOBILE_E2E_SCREENSHOT_HOLD_SECONDS;
+  if (requested === undefined) return;
+  if (!/^\d{1,3}$/u.test(requested)) {
+    throw new Error(
+      'PSD_EOC_MOBILE_E2E_SCREENSHOT_HOLD_SECONDS must be an integer from 1 through 600.',
+    );
+  }
+  const seconds = Number(requested);
+  if (seconds < 1 || seconds > 600) {
+    throw new Error(
+      'PSD_EOC_MOBILE_E2E_SCREENSHOT_HOLD_SECONDS must be an integer from 1 through 600.',
+    );
+  }
+  await writeFile(
+    resolve(artifactRoot, 'operator-screenshot-ready.txt'),
+    'The authenticated synthetic drill event room is ready for a screenshot.\n',
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+  const donePath = resolve(artifactRoot, 'operator-screenshot-done.txt');
+  console.log(
+    `[issue #32 mobile E2E] screenshot ready; holding the synthetic drill event room for up to ${seconds} seconds`,
+  );
+  const deadline = Date.now() + seconds * 1_000;
+  while (Date.now() < deadline) {
+    if (await Bun.file(donePath).exists()) {
+      const marker = await lstat(donePath);
+      if (!marker.isFile() || marker.isSymbolicLink() || marker.size > 64) {
+        throw new Error(
+          'The operator screenshot completion marker is invalid.',
+        );
+      }
+      console.log('[issue #32 mobile E2E] screenshot hold released');
+      return;
+    }
+    await Bun.sleep(1_000);
+  }
+}
+
 async function resetIosForNormalApp(
   device: IosDevice,
   appPath: string,
   normalMetroPort: number,
   applesimutils: string,
+  artifactRoot: string,
 ): Promise<void> {
-  await runCommand([applesimutils, '--byId', device.udid, '--clearKeychain']);
+  // The activation fixture exercises the real protected credential store.
+  // Xcode's native reset removes access-controlled vault items that uninstall
+  // and the older helper can retain, while preserving this dedicated
+  // simulator's enrolled biometric state for the next genuine auth prompt.
+  await runCommand(['xcrun', 'simctl', 'keychain', device.udid, 'reset'], {
+    logPath: resolve(artifactRoot, 'ios-normal-reset-keychain.log'),
+  });
   await installAndOpenIosBundle(
     device,
     appPath,
     normalMetroPort,
     'Sign in to PSD EOC',
+    artifactRoot,
   );
   await runCommand([
     applesimutils,
@@ -1215,6 +1357,47 @@ async function resetIosForNormalApp(
     device,
     normalMetroPort,
     'Sign in to PSD EOC',
+    artifactRoot,
+  );
+}
+
+async function awaitIosFreshEnrollmentReady(
+  deviceId: string,
+  artifactRoot: string,
+  applesimutils: string,
+): Promise<void> {
+  const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
+  let stableSignInSamples = 0;
+  let recoveredFixtureVault = false;
+  while (Date.now() < deadline) {
+    const hierarchy = await platformHierarchy('ios', deviceId);
+    if (isMobileE2EIosAuthenticationSheetReady(hierarchy)) {
+      if (recoveredFixtureVault) {
+        throw new Error(
+          'The iOS fixture-vault recovery requested authentication more than once.',
+        );
+      }
+      recoveredFixtureVault = true;
+      stableSignInSamples = 0;
+      await respondToDeviceAuthentication(
+        'ios',
+        deviceId,
+        artifactRoot,
+        'reset-fixture-vault-ios',
+        applesimutils,
+      );
+      continue;
+    }
+    if (hierarchy.includes('Sign in with Google')) {
+      stableSignInSamples += 1;
+      if (stableSignInSamples >= 3) return;
+    } else {
+      stableSignInSamples = 0;
+    }
+    await Bun.sleep(RETRY_INTERVAL_MS);
+  }
+  throw new Error(
+    'The iOS normal app did not reach a stable fresh-enrollment state.',
   );
 }
 
@@ -1318,6 +1501,28 @@ async function awaitIosNotificationOnLockedScreen(
     await Bun.sleep(RETRY_INTERVAL_MS);
   }
   if (!isMobileE2EIosNotificationOnLockedScreen(hierarchy)) {
+    await writeFile(
+      resolve(artifactRoot, 'notification-locked-ios-failure-hierarchy.txt'),
+      hierarchy,
+      { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+    );
+    await runCommand(
+      [
+        'xcrun',
+        'simctl',
+        'io',
+        deviceId,
+        'screenshot',
+        resolve(artifactRoot, 'notification-locked-ios-failure-screen.png'),
+      ],
+      {
+        allowFailure: true,
+        logPath: resolve(
+          artifactRoot,
+          'notification-locked-ios-failure-screenshot.log',
+        ),
+      },
+    );
     throw new Error(
       'The exact synthetic drill notification did not appear on the locked iOS simulator.',
     );
@@ -1344,6 +1549,152 @@ async function awaitIosNotificationOnLockedScreen(
     screenshot.size === 0
   ) {
     throw new Error('The locked iOS notification screenshot is invalid.');
+  }
+}
+
+async function satisfyIosSystemLockAuthentication(
+  deviceId: string,
+  applesimutils: string,
+  artifactRoot: string,
+): Promise<void> {
+  // This biometric response clears only the dedicated simulator's operating-
+  // system lock. The notification tap must still launch PSD EOC and produce a
+  // separate LocalAuthentication sheet before the event room can be read.
+  await runCommand([applesimutils, '--byId', deviceId, '--biometricMatch'], {
+    logPath: resolve(
+      artifactRoot,
+      'ios-notification-system-lock-biometric-response.log',
+    ),
+  });
+}
+
+async function openExplicitIosNotificationIfNeeded(
+  deviceId: string,
+  artifactRoot: string,
+  environment: Readonly<Record<string, string>>,
+): Promise<void> {
+  // Give the original tap a fixed opportunity to launch PSD EOC before any
+  // explicit-state decision. Each pinned-Maestro hierarchy starts a fresh JVM
+  // and can take several seconds, so valid sample collection has its own
+  // bounded window rather than pretending three samples fit in this grace.
+  await Bun.sleep(IOS_NOTIFICATION_FIRST_RESPONSE_TIMEOUT_MS);
+  const samplingDeadline = Date.now() + IOS_NOTIFICATION_RESPONSE_TIMEOUT_MS;
+  let hierarchy = '';
+  const responseHierarchies: string[] = [];
+  let beforeRevealHierarchy = '';
+  while (Date.now() < samplingDeadline) {
+    hierarchy = await platformHierarchy('ios', deviceId);
+    responseHierarchies.push(hierarchy);
+    const decision =
+      decideMobileE2EIosNotificationResponse(responseHierarchies);
+    if (decision === 'response-started') return;
+    if (decision === 'refuse-explicit-open') break;
+    if (decision === 'open-explicit-notification') {
+      beforeRevealHierarchy = hierarchy;
+      break;
+    }
+    await Bun.sleep(RETRY_INTERVAL_MS);
+  }
+  if (beforeRevealHierarchy.length === 0) {
+    await writeFile(
+      resolve(artifactRoot, 'notification-explicit-ios-unsafe-hierarchy.txt'),
+      hierarchy,
+      { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+    );
+    throw new Error(
+      'The synthetic iOS notification did not settle into one valid explicit-card state; an Open action was refused.',
+    );
+  }
+
+  // A pristine simulator stacks the synthetic card with Apple's first-run
+  // notification. iOS 26 expands that stack on the first exact-title tap but
+  // can then deliberately refuse a default-action tap. Three stable Cover
+  // Sheet samples provide the exact, unstacked card bounds. One element-
+  // scoped right swipe runs by itself; only a second set of stable hierarchies
+  // measuring a >=44-point revealed strip can admit one Open tap. No tap is
+  // retried.
+  await writeFile(
+    resolve(artifactRoot, 'notification-before-reveal-ios-hierarchy.txt'),
+    beforeRevealHierarchy,
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+  await runMaestroFlow(
+    deviceId,
+    'notification-event-room-ios-system-reveal-open',
+    artifactRoot,
+    environment,
+  );
+
+  const revealedDeadline = Date.now() + IOS_NOTIFICATION_RESPONSE_TIMEOUT_MS;
+  const revealedHierarchies: string[] = [];
+  let openActionTapPoint: string | null = null;
+  while (Date.now() < revealedDeadline) {
+    hierarchy = await platformHierarchy('ios', deviceId);
+    revealedHierarchies.push(hierarchy);
+    const result = decideMobileE2EIosRevealedOpenAction(
+      beforeRevealHierarchy,
+      revealedHierarchies,
+    );
+    if (result.decision === 'response-started') return;
+    if (result.decision === 'refuse-revealed-open') break;
+    if (result.decision === 'tap-revealed-open') {
+      openActionTapPoint = result.tapPoint;
+      break;
+    }
+    await Bun.sleep(RETRY_INTERVAL_MS);
+  }
+  if (openActionTapPoint === null) {
+    await writeFile(
+      resolve(artifactRoot, 'notification-revealed-ios-unsafe-hierarchy.txt'),
+      hierarchy,
+      { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+    );
+    throw new Error(
+      'The exact synthetic iOS notification did not expose one stable measured Open action; a tap was refused.',
+    );
+  }
+  await writeFile(
+    resolve(artifactRoot, 'notification-revealed-ios-hierarchy.txt'),
+    hierarchy,
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+  const actionTapStartedAt = Date.now();
+  await runMaestroFlow(
+    deviceId,
+    'notification-event-room-ios-system-tap-open',
+    artifactRoot,
+    Object.freeze({
+      ...environment,
+      IOS_NOTIFICATION_OPEN_POINT: openActionTapPoint,
+    }),
+  );
+
+  const actionLogDeadline = Date.now() + IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS;
+  let actionLog = '';
+  while (Date.now() < actionLogDeadline) {
+    const elapsedSeconds = Math.ceil((Date.now() - actionTapStartedAt) / 1_000);
+    actionLog = await iosNotificationActionLogsSince(
+      deviceId,
+      Math.min(120, Math.max(2, elapsedSeconds + 2)),
+    );
+    if (mobileE2EIosNotificationActionLogEvidence(actionLog).valid) break;
+    await Bun.sleep(RETRY_INTERVAL_MS);
+  }
+  const actionEvidence = mobileE2EIosNotificationActionLogEvidence(actionLog);
+  await writeFile(
+    resolve(
+      artifactRoot,
+      actionEvidence.valid
+        ? 'notification-default-action-ios.log'
+        : 'notification-default-action-ios-failure.log',
+    ),
+    actionLog,
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+  if (!actionEvidence.valid) {
+    throw new Error(
+      'SpringBoard did not prove one same-request default notification action after the measured Open tap.',
+    );
   }
 }
 
@@ -1524,6 +1875,7 @@ async function runPlatformSuite(
         appPath,
         ports.fixtureMetro,
         'Unlock PSD EOC',
+        artifacts.root,
       );
       await runLaunchAuthentication(
         platform,
@@ -1550,11 +1902,12 @@ async function runPlatformSuite(
         appPath,
         ports.normalMetro,
         applesimutils,
+        artifacts.root,
       );
-      await awaitApplicationReady(
-        platform,
+      await awaitIosFreshEnrollmentReady(
         iosDevice.udid,
-        'Sign in to PSD EOC',
+        artifacts.root,
+        applesimutils,
       );
       await runAuthenticationSplit(
         platform,
@@ -1573,9 +1926,19 @@ async function runPlatformSuite(
       );
       await injectIosNotification(iosDevice, paths, manifest);
       await awaitIosNotificationOnLockedScreen(iosDevice.udid, artifacts.root);
+      await satisfyIosSystemLockAuthentication(
+        iosDevice.udid,
+        applesimutils,
+        artifacts.root,
+      );
       await runMaestroFlow(
         iosDevice.udid,
         'notification-event-room-ios-system-open',
+        artifacts.root,
+        maestroEnvironment,
+      );
+      await openExplicitIosNotificationIfNeeded(
+        iosDevice.udid,
         artifacts.root,
         maestroEnvironment,
       );
@@ -1588,6 +1951,7 @@ async function runPlatformSuite(
         applesimutils,
       );
       cancellation.throwIfRequested();
+      await holdEventRoomForOperatorScreenshot(artifacts.root);
       await runMaestroFlow(
         iosDevice.udid,
         'event-room-lifecycle',
@@ -1673,6 +2037,7 @@ async function runPlatformSuite(
         maestroEnvironment,
       );
       cancellation.throwIfRequested();
+      await holdEventRoomForOperatorScreenshot(artifacts.root);
       await runMaestroFlow(
         androidSerial,
         'event-room-lifecycle',

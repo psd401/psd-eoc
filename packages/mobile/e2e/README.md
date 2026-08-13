@@ -124,13 +124,32 @@ Afterward, stop the Docker container with
 
 For iOS, install Xcode with an available iOS Simulator runtime, CocoaPods, and
 CMake. The runner creates a dedicated simulator, enrolls simulated biometrics,
+uses Xcode's native keychain reset between fixture activation and the fresh
+normal-app enrollment while preserving that biometric enrollment. If the
+production cleanup-first vault recovery requests authentication after reset,
+the runner answers that genuine system prompt and requires a stable fresh
+sign-in state before beginning loopback OIDC enrollment. It then
 explicitly locks it before provider-free notification injection, and proves
-the exact DRILL card appeared in the lock-screen hierarchy. It uses Maestro's
-bottom-edge swipe to dismiss the simulator lock, opens Notification Center,
-and taps that same exact synthetic card. Maestro's pinned `applesimutils`
-answers only the app's genuine LocalAuthentication request. The runner deletes
-that exact simulator during cleanup; physical-device system-lock behavior
-remains separate release evidence and is not claimed here.
+the exact DRILL card appeared in the lock-screen hierarchy. It then answers
+the dedicated simulator's system-lock Face ID challenge and requires Maestro
+to prove that iOS reached `Home screen icons` before opening Notification
+Center and tapping that same exact synthetic card. If iOS 26 leaves the card
+on the Cover Sheet (including after expanding a first-run notification stack),
+the runner waits a bounded first-response window, then requires three stable
+samples with exactly one complete DRILL card, bounds disjoint from every other
+notification, and no INCIDENT text. It performs one exact-card right swipe and
+then measures three more stable hierarchies. Only an unchanged card with a
+newly exposed leading strip at least 44 points wide admits one non-retrying
+Open tap at that measured strip's midpoint. The runner then requires
+SpringBoard to record exactly one `UNNotificationDefaultActionIdentifier`
+execution and removal for the same request after that tap.
+Notification disappearance alone is never pass evidence. A second,
+independent simulated biometric must answer the app's genuine
+LocalAuthentication request, after which Maestro requires the run-specific
+route evidence in the exact synthetic drill room. The runner deletes that
+exact simulator during cleanup;
+physical-device system-lock behavior remains separate release evidence and is
+not claimed here.
 
 ```sh
 export PSD_EOC_E2E_SYNTHETIC_ONLY=true
@@ -138,6 +157,14 @@ export TEST_DATABASE_URL='postgresql://psd_eoc_test:synthetic_test_password@127.
 export PSD_EOC_MOBILE_E2E_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/psd-eoc-mobile-e2e-artifacts.XXXXXX")"
 bun packages/mobile/e2e/run-ci.ts ios
 ```
+
+To pause an otherwise normal local run after the exact notification route has
+opened the authenticated synthetic drill event room, set
+`PSD_EOC_MOBILE_E2E_SCREENSHOT_HOLD_SECONDS` to an integer from 1 through 600.
+The runner writes `operator-screenshot-ready.txt` in the platform artifact and
+holds that screen for the requested interval before continuing the lifecycle
+journey. Creating a regular `operator-screenshot-done.txt` file in that same
+artifact releases the hold early. CI does not set this option.
 
 For Android, start one API 36 Google APIs emulator, export its serial as
 `ANDROID_SERIAL`, and ensure the SDK and Java 17 are configured. The runner
