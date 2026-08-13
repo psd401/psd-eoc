@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import { AdminForm, AdminFormError } from '../facilities/admin-request';
-import { parseEmergencyControlMutation } from './request';
+import {
+  EMERGENCY_CONTROL_RESOLVED_STATUS,
+  emergencyControlStatusMessage,
+  parseEmergencyControlMutation,
+} from './request';
 
 const CURRENT = '00000000-0000-4000-8000-000000003450';
 
@@ -18,6 +22,24 @@ function form(values: Record<string, string>): AdminForm {
 }
 
 describe('emergency-control native form parser', () => {
+  test('accepts only neutral replay-safe completion feedback', () => {
+    const message = emergencyControlStatusMessage(
+      EMERGENCY_CONTROL_RESOLVED_STATUS,
+    );
+    expect(message).toContain('authoritative current state');
+    expect(message).toContain('exact retry may have replayed');
+    expect(message).not.toContain('re-enabled');
+    expect(message).not.toContain('was appended');
+    expect(emergencyControlStatusMessage('fanout-enabled')).toBeNull();
+    expect(
+      emergencyControlStatusMessage('fanout-emergency-disabled'),
+    ).toBeNull();
+    expect(
+      emergencyControlStatusMessage([EMERGENCY_CONTROL_RESOLVED_STATUS]),
+    ).toBeNull();
+    expect(emergencyControlStatusMessage(undefined)).toBeNull();
+  });
+
   test('parses disable without accepting approval provenance', () => {
     expect(
       parseEmergencyControlMutation(

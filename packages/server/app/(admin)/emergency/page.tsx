@@ -12,19 +12,10 @@ import {
   EmergencyAdminView,
   NON_ADMIN_EMERGENCY_VIEW,
 } from './emergency-admin-view';
+import { emergencyControlStatusMessage } from './request';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-function statusMessage(value: string | string[] | undefined): string | null {
-  if (value === 'fanout-enabled') {
-    return 'Notification fan-out was re-enabled under a fresh epoch.';
-  }
-  if (value === 'fanout-emergency-disabled') {
-    return 'Emergency disablement was appended. Notification fan-out is blocked.';
-  }
-  return null;
-}
 
 export default async function EmergencyControlPage({
   searchParams,
@@ -57,7 +48,7 @@ export default async function EmergencyControlPage({
     return (
       <EmergencyAdminView
         csrfToken={csrfToken}
-        statusMessage={statusMessage(parameters.status)}
+        statusMessage={emergencyControlStatusMessage(parameters.status)}
         view={{ kind: 'authorized', state }}
       />
     );

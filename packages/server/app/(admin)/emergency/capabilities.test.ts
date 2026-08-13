@@ -395,7 +395,7 @@ describe('emergency fan-out admin capability boundary', () => {
     });
   });
 
-  test('replays the exact original set result without appending or re-reading freshness and conflicts on changed input', async () => {
+  test('replays only the exact immutable append result without claiming it remains current and conflicts on changed input', async () => {
     const authenticated = authenticatedSession({
       source: 'web',
       role: 'admin',
@@ -466,9 +466,10 @@ describe('emergency fan-out admin capability boundary', () => {
       ),
     );
 
-    expect(first.appendedRecord).toEqual(ENABLED_RECORD);
+    expect(first).toEqual({ appendedRecord: ENABLED_RECORD });
     expect(replay).toEqual(first);
     expect(replay.appendedRecord).toEqual(ENABLED_RECORD);
+    expect('effectiveState' in replay).toBe(false);
     expect(mismatch).toMatchObject({
       status: 409,
       reasonCode: 'IDEMPOTENCY_REQUEST_MISMATCH',

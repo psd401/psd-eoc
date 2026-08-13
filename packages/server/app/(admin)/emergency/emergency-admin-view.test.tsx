@@ -11,6 +11,7 @@ import {
 const CSRF = 'synthetic-csrf-token';
 const IDS = {
   record: '00000000-0000-4000-8000-000000003460',
+  previousRecord: '00000000-0000-4000-8000-000000003459',
   epoch: '00000000-0000-4000-8000-000000003461',
   user: '00000000-0000-4000-8000-000000003462',
   session: '00000000-0000-4000-8000-000000003463',
@@ -25,7 +26,7 @@ function enabledState() {
     currentRecord: {
       id: IDS.record,
       revision: 4,
-      previousRecordId: '00000000-0000-4000-8000-000000003459',
+      previousRecordId: IDS.previousRecord,
       mode: 'enabled',
       enableEpochId: IDS.epoch,
       reason: 'Synthetic recovery verification completed.',
@@ -65,7 +66,12 @@ describe('EmergencyAdminView consequence previews', () => {
     expect(html).toContain('Re-enabling creates a fresh epoch');
     expect(html).toContain('do not self-approve');
     expect(html).toContain('synthetic-po-reference');
-    expect(html).toContain(IDS.epoch);
+    for (const id of Object.values(IDS)) expect(html).toContain(id);
+    expect(html).toContain('Current record ID');
+    expect(html).toContain('Previous record ID');
+    expect(html).toContain('Changed by user ID');
+    expect(html).toContain('Changed with session ID');
+    expect(html).toContain('Request ID');
     expect(
       html.match(/<form action="\/emergency\/api" method="post">/gu),
     ).toHaveLength(2);

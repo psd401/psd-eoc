@@ -4369,25 +4369,20 @@ describe('district fanout emergency control', () => {
       }).success,
     ).toBe(false);
 
-    const effectiveState = {
-      kind: 'current',
-      effectiveMode: 'enabled',
-      currentEpochId: ids.fanoutEnableEpoch,
-      currentRecord: enabledRecord,
-    } as const;
     expect(
       SetFanoutControlResultSchema.safeParse({
         appendedRecord: enabledRecord,
-        effectiveState,
       }).success,
     ).toBe(true);
     expect(
       SetFanoutControlResultSchema.safeParse({
-        appendedRecord: {
-          ...enabledRecord,
-          reason: 'A conflicting result for the same record must fail.',
+        appendedRecord: enabledRecord,
+        effectiveState: {
+          kind: 'current',
+          effectiveMode: 'enabled',
+          currentEpochId: ids.fanoutEnableEpoch,
+          currentRecord: enabledRecord,
         },
-        effectiveState,
       }).success,
     ).toBe(false);
   });

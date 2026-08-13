@@ -50,6 +50,16 @@ function StateSummary({
       </p>
       {state.kind === 'current' ? (
         <dl>
+          <dt>Current record ID</dt>
+          <dd>
+            <code>{state.currentRecord.id}</code>
+          </dd>
+          <dt>Previous record ID</dt>
+          <dd>
+            <code>
+              {state.currentRecord.previousRecordId ?? 'None — first revision'}
+            </code>
+          </dd>
           <dt>Revision</dt>
           <dd>{state.currentRecord.revision}</dd>
           <dt>Changed</dt>
@@ -57,6 +67,18 @@ function StateSummary({
             <time dateTime={state.currentRecord.changedAt}>
               {state.currentRecord.changedAt}
             </time>
+          </dd>
+          <dt>Changed by user ID</dt>
+          <dd>
+            <code>{state.currentRecord.changedByUserId}</code>
+          </dd>
+          <dt>Changed with session ID</dt>
+          <dd>
+            <code>{state.currentRecord.changedWithSessionId}</code>
+          </dd>
+          <dt>Request ID</dt>
+          <dd>
+            <code>{state.currentRecord.requestId}</code>
           </dd>
           <dt>Reason</dt>
           <dd>{state.currentRecord.reason}</dd>

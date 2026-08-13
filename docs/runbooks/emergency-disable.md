@@ -71,7 +71,8 @@ unreliable and the product owner/incident lead chooses containment.
 ## Disable procedure
 
 1. Assign an operations incident lead. Record UTC time, reason, reporter,
-   environment, account/region, and the last provable control revision/epoch.
+   environment, and account/region in the access-controlled append-only
+   operations record.
 2. If the admin UI or control state cannot be read, treat fan-out as disabled
    immediately, announce that truth through the approved operations channel,
    and escalate. Do not bypass the control to create a record.
@@ -80,8 +81,13 @@ unreliable and the product owner/incident lead chooses containment.
    Never use REST, MCP, a script, an agent key, a bookmarked mutation, or a GET
    request.
 4. Verify the page shows the expected environment, current state, revision,
-   enable epoch, and no conflicting entry. On mismatch or unreadable state,
-   stop; the system remains disabled.
+   enable epoch, and no conflicting entry. Before submitting anything, copy
+   the current record ID, previous record ID, revision, actor/session/request
+   IDs, changed UTC time, and current enable epoch into the operations record.
+   A disabled entry correctly has no enable epoch, so retain the prior enabled
+   epoch from this pre-disable readback rather than trying to infer it after
+   the transition. On mismatch or unreadable state, stop; the system remains
+   disabled.
 5. Review the consequence: new notification-generating lifecycle actions are
    refused, current-epoch pending outbox/queue work is terminally suppressed at
    every boundary, old work cannot be released later, and provider requests
@@ -90,8 +96,11 @@ unreliable and the product owner/incident lead chooses containment.
 6. Enter a bounded non-sensitive reason and the incident/change reference, then
    explicitly submit the CSRF-protected disable form to append the disabled entry.
    Never include message content, recipients, secrets, or provider payloads.
-7. Read back the new entry ID, revision, disabled state, actor, reason, UTC
-   time, and retained enable epoch. Append those IDs to the operations record.
+7. Read back the new entry ID, previous record ID, revision, disabled state,
+   actor/session/request IDs, reason, and UTC time. Confirm that the current
+   enable epoch is `None — emergency-disabled`. Append those values to the
+   operations record and associate the pre-disable enable epoch captured in
+   step 4; the disabled row itself never carries an enable epoch.
 8. From authenticated read-only surfaces, verify:
    - web and mobile show a prominent unavailable/disabled banner;
    - creation of a fresh consequence preview fails closed;
@@ -161,7 +170,10 @@ judgment is insufficient.
 ## Evidence template
 
 - Incident/change reference: `[REQUIRED]`
-- Disable entry/revision/epoch and UTC time: `[REQUIRED]`
+- Pre-disable current entry/revision/enable epoch, actor/session/request IDs,
+  and UTC time: `[REQUIRED BEFORE SUBMISSION]`
+- Disable entry/previous entry/revision, actor/session/request IDs, and UTC
+  time (current enable epoch must be none): `[REQUIRED]`
 - Human administrator identity/role: `[REQUIRED]`
 - Trigger and consequence preview: `[REQUIRED]`
 - Boundary verification (UI, preview, lifecycle, outbox, central queue, push,

@@ -171,12 +171,6 @@ export function createSetFanoutControlRegistration(
       });
       return SetFanoutControlResultSchema.parse({
         appendedRecord,
-        effectiveState: {
-          kind: 'current',
-          effectiveMode: appendedRecord.mode,
-          currentEpochId: appendedRecord.enableEpochId,
-          currentRecord: appendedRecord,
-        },
       });
     },
     resultReference: (output) => resultReference(output.appendedRecord),
@@ -198,12 +192,6 @@ export function createSetFanoutControlRegistration(
       }
       return SetFanoutControlResultSchema.parse({
         appendedRecord: record,
-        effectiveState: {
-          kind: 'current',
-          effectiveMode: record.mode,
-          currentEpochId: record.enableEpochId,
-          currentRecord: record,
-        },
       });
     },
     resolveReplayFacilityId(reference, context) {

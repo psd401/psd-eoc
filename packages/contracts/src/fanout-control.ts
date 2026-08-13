@@ -247,29 +247,15 @@ export const SetFanoutControlInputSchema = z
 export type SetFanoutControlInput = z.infer<typeof SetFanoutControlInputSchema>;
 
 /**
- * Owns the exact append result. It cannot claim an effective state other than
- * the newly appended current record.
+ * Owns the exact immutable append result. An exact idempotent replay returns
+ * this original record even if a later transition has become current. Callers
+ * that need authoritative current state must use get-fanout-control.
  */
 export const SetFanoutControlResultSchema = z
   .object({
     appendedRecord: FanoutControlRecordSchema,
-    effectiveState: FanoutControlEffectiveStateSchema,
   })
   .strict()
-  .superRefine((result, context) => {
-    if (
-      result.effectiveState.kind !== 'current' ||
-      JSON.stringify(result.effectiveState.currentRecord) !==
-        JSON.stringify(result.appendedRecord)
-    ) {
-      context.addIssue({
-        code: 'custom',
-        message:
-          'A fanout-control append result must expose the appended record as current.',
-        path: ['effectiveState', 'currentRecord'],
-      });
-    }
-  })
   .readonly();
 
 /** Human web fanout-control mutation result inferred from its schema. */
