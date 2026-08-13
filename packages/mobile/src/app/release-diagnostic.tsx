@@ -46,7 +46,7 @@ function statusLabel(diagnostic: LaunchedUpdateDiagnostic): string {
 function launchSourceLabel(diagnostic: LaunchedUpdateDiagnostic): string {
   switch (diagnostic.launchSource) {
     case 'embedded':
-      return 'Embedded in this store build';
+      return 'Embedded in this installed binary';
     case 'downloaded':
       return 'Downloaded over-the-air update';
     case 'unknown':
@@ -76,7 +76,8 @@ export default function ReleaseDiagnosticScreen() {
           </Text>
           <Text style={styles.subtitle}>
             Use this read-only identity after the second online cold launch of a
-            physical TestFlight or Play installation.
+            physical installation approved for release verification, including
+            TestFlight, Play, or the private OTA verifier build.
           </Text>
         </View>
 

@@ -100,7 +100,10 @@ describe('authenticated release diagnostic', () => {
       screen.getByLabelText('Evidence status: Identity available'),
     ).toBeTruthy();
     expect(
-      screen.getByLabelText('Launch source: Embedded in this store build'),
+      screen.getByLabelText('Launch source: Embedded in this installed binary'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/TestFlight, Play, or the private OTA verifier build/iu),
     ).toBeTruthy();
     expect(
       screen.getByLabelText(`Update ID: ${EMBEDDED_UPDATE_ID}`),
@@ -114,6 +117,9 @@ describe('authenticated release diagnostic', () => {
     expect(
       screen.getByText(/cannot check for, download, apply, or publish/iu),
     ).toBeTruthy();
+    expect(JSON.stringify(screen.toJSON())).not.toContain(
+      'Embedded in this store build',
+    );
     expectNoUpdateSideEffects();
   });
 
@@ -228,6 +234,12 @@ describe('authenticated release diagnostic', () => {
     );
     expect(homeSource).toContain(
       'accessibilityLabel="Open release diagnostics"',
+    );
+    expect(homeSource).toContain(
+      'accessibilityHint="Shows read-only launched-update identity"',
+    );
+    expect(homeSource).not.toContain(
+      'accessibilityHint="Shows read-only build and launched-update identity"',
     );
     expect(homeSource).toContain("router.push('/release-diagnostic' as Href)");
 

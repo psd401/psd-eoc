@@ -105,17 +105,19 @@ it:
       indeterminate.
 - [ ] A complete, paginated inventory binds the exact `production`
       channel-to-branch mapping and every update compatible with the platform
-      and runtime. An entirely absent expected pair—neither a `production`
-      channel nor a `production` branch exists—may proceed only through the
-      separately previewed same-name creation/link consequence below. Partial
-      absence, any unexpected mapping, an orphan existing branch, an unreviewed
-      compatible update, an indeterminate rollout, or incomplete pagination is
-      recorded explicitly and fails closed.
+      and runtime. A separately previewed BUILD may create and link the
+      same-name channel and branch only when both are absent. A missing channel
+      with an existing same-name branch is partial state: linking it could
+      expose that branch's updates to already installed clients, so BUILD must
+      not proceed. If the channel exists, it must already map to exactly one
+      existing same-name branch; BUILD may not repair it. Any different,
+      partial, multiple, unreviewed, or indeterminate state or incomplete
+      pagination is recorded explicitly and fails closed.
 - [ ] The preview states that BUILD creates the exact EAS artifact and, only
-      when the inventory proves them absent, may create and link the exact
-      same-name `production` channel and branch. It does not submit, assign a
-      group, invite a tester, publish an OTA, expose a build, or authorize any
-      PSD EOC notification.
+      when the inventory proves both are absent, may create and link the exact
+      same-name `production` channel and branch under the rule above. It does
+      not submit, assign a group, invite a tester, publish an OTA, expose a
+      build, or authorize any PSD EOC notification.
 
 After BUILD, even after a refusal or partial failure, reread the exact remote
 native-version counter, credential identity, channel, branch, compatible-update
@@ -309,12 +311,15 @@ Before a build, enumerate every page of channels and branches, then bind the
 exact channel, its linked branch, and every compatible update for the target
 platform and runtime. Replace each `OFFSET` with successive offsets until the
 returned page is empty; retain a non-sensitive digest of the complete
-inventory. An absent `production` channel/branch means EAS Build may create and
 inventory. When neither the `production` channel nor same-name branch exists,
-EAS Build may create and link that routing as part of the separately approved
-BUILD consequence. An existing channel without its exact expected mapping, an
-orphan same-name branch, other partial state, or any compatible update whose
-source, rollout, and expected launch identity are not proven blocks the build:
+EAS Build may create and link that pair as part of the separately approved BUILD
+consequence. A missing channel with an existing same-name branch blocks BUILD:
+linking it can expose that branch's updates to installed production-channel
+clients and requires a separate routing/exposure review. When the channel
+already exists, it must map to exactly one existing same-name branch; BUILD may
+not create or repair routing. Any other partial, unexpected, multiple, or
+indeterminate state, or any compatible update whose source, rollout, and
+expected launch identity are not proven, blocks the build:
 
 ```sh
 cd packages/mobile
@@ -614,6 +619,29 @@ bunx eas-cli@21.7.0 config --platform ios --profile ota-preview --json
 bunx eas-cli@21.7.0 config --platform android --profile ota-preview --json
 ```
 
+Every destination OTA routing pair must already exist before its write. Except
+for the paused-containment rollback path in section 8, the destination channel
+must also be active. In EAS CLI 21.7.0, each of these can create or link routing
+when its destination is absent: `update --channel ota-verification`, `update:republish
+--destination-channel production`, and `update:roll-back-to-embedded --channel
+production`. Do not use that implicit mutation. The immediate preflight must
+prove the canonical unconditional raw `branchMapping`: version `0`, exactly one
+data entry, that entry's `branchMappingLogic` exactly `"true"`, and its
+`branchId` equal to the exact same-name branch ID. Ordinary verification
+publication, production republish, and rollout increases also require the exact
+destination channel to report `isPaused: false`; the section 8 rollback
+exception instead requires a known unchanged pause status. A missing channel,
+missing or orphaned branch, unknown channel state, conditional mapping, zero or
+multiple mapping entries, different branch ID, partial state, or indeterminate
+page blocks every command. A paused channel additionally blocks every
+non-rollback command. Establish an absent pair only through the separately
+previewed BUILD consequence. Unpause or remap a channel only through a separate
+routing mutation with its own exact preview, explicit product-owner approval,
+fresh authenticated-human confirmation, and complete read-back. In either case,
+repeat the complete inventory before publishing. An OTA approval never
+authorizes channel or branch creation, linking, rerouting, pausing, or
+unpausing.
+
 For an eligible patch:
 
 1. Record the exact clean commit, current runtime, known-good update group, and
@@ -712,6 +740,14 @@ never current-state proof. Success requires these exact independent read-backs:
 - `update:edit`: no new group and only the approved percentage changed on the
   exact single-platform group.
 
+For all three write families, success also requires zero routing drift: the
+pre-existing destination channel must retain its exact reviewed pause status
+and the same version-0, one-entry, unconditional-`"true"` mapping to the reviewed
+branch, and no channel or branch may have been created, linked, relinked,
+repaired, paused, or unpaused. For ordinary verification publication,
+production republish, and rollout increases, that unchanged status must be
+active (`isPaused: false`).
+
 After every OTA mutation in this section—including `update`,
 `update:republish`, and `update:edit`—and after success, error, interruption, or
 timeout, perform an independent complete paginated read-back of channels,
@@ -770,6 +806,20 @@ requires connected clients to check for an update. Expect an offline long tail.
 Never republish across runtimes. If an update made persisted state
 backward-incompatible, do not roll back blindly; fix forward with reviewed
 compatibility handling.
+
+The no-implicit-routing and canonical-mapping rules in section 7 apply to every
+rollback command. The exact `production` channel must have a known pause status
+and the canonical unconditional raw mapping to the exact same-name branch as
+reviewed. A known active channel may remain active during rollback. If an
+authenticated human separately paused the channel to contain the bad rollout,
+keep `isPaused: true` throughout the rollback command and its complete
+independent read-back; do not unpause first. Missing, unknown-status,
+conditional, partial, multiple, unexpected, or indeterminate routing blocks
+rollback instead of being created, repaired, remapped, or unpaused by the
+command. A paused rollback succeeds only when the repaired update/control state
+is proven while the channel remains paused. Exposing that repaired state then
+requires a separate unpause consequence preview, explicit product-owner
+approval, fresh authenticated-human confirmation, and complete read-back.
 
 Replace `APPROVED_PLATFORM` with exactly `ios` or `android`; never use `all`.
 Rollback each platform through a separately previewed, approved, confirmed, and
