@@ -161,6 +161,53 @@ describe('mobile distribution configuration', () => {
     );
   });
 
+  test('uses progressive approvals without circular distribution gates', () => {
+    const release = repositoryText('docs/runbooks/release.md');
+    const headings = [
+      '### BUILD',
+      '### SUBMIT',
+      '### TESTER EXPOSURE',
+      '### FINAL ACCEPTANCE',
+    ];
+    const headingOffsets = headings.map((heading) => release.indexOf(heading));
+
+    expect(headingOffsets.every((offset) => offset >= 0)).toBe(true);
+    expect(headingOffsets).toEqual([...headingOffsets].sort((a, b) => a - b));
+    expect(release).not.toContain(
+      'Issues #37 and #40 are complete with their required human and',
+    );
+    expect(release).toMatch(
+      /Issue #37's first\s+manual AAB upload and issue #40's physical-device delivery consume these BUILD\s+artifacts; completion of #37 or #40 is not a BUILD prerequisite\./u,
+    );
+    expect(release).toContain(
+      'Approval for one gate never authorizes another.',
+    );
+    expect(release).toMatch(
+      /Every provider write requires\s+a fresh exact consequence preview, explicit product-owner approval, and fresh\s+authenticated-human confirmation/u,
+    );
+    expect(release).toMatch(
+      /Tester exposure authorizes installation only\. It does not authorize a\s+PSD EOC notification/u,
+    );
+    for (const prerequisite of [
+      'verified credentials',
+      'an approved synthetic target list',
+      'a consequence preview',
+      'explicit product-owner authorization',
+      'authenticated-human confirmation',
+    ]) {
+      expect(release).toContain(prerequisite);
+    }
+    expect(release).toMatch(
+      /FINAL ACCEPTANCE is a read-only evidence decision, not a provider-write\s+authorization/u,
+    );
+    expect(release).toContain(
+      'integration truth labels that claim only what is proven',
+    );
+    expect(release).toMatch(
+      /This human-only FINAL ACCEPTANCE record does not itself authorize\s+go-live, production deployment, provider configuration, a real incident, a real\s+notification, an all-clear, or closing a real event/u,
+    );
+  });
+
   test('truth-labels every distribution provider without live claims', () => {
     const integrations = repositoryText('docs/INTEGRATIONS.md');
 

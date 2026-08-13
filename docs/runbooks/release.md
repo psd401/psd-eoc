@@ -23,11 +23,14 @@ Apple operation. Staff installation steps live in
 [the iOS guide](../guides/install-ios.md) and
 [the Android guide](../guides/install-android.md).
 
-## 1. Release record and stop conditions
+## 1. Release record and progressive gates
 
-Create one private operational record for the release. It must contain no
-credential, token, private key, tester address, real recipient export, student
-data, or raw provider response. Record:
+Create one private, append-only operational record for the release. Append the
+preview, exact product-owner approval, fresh authenticated-human confirmation,
+provider result, and read-back for each gate; correct mistakes with a
+superseding entry rather than rewriting earlier evidence. The record must
+contain no credential, token, private key, tester address, real recipient
+export, student data, or raw provider response. Record:
 
 - release owner and human operator roles;
 - product-owner approval reference, scope, and time;
@@ -43,31 +46,107 @@ data, or raw provider response. Record:
 - known-good store builds, OTA update groups, and embedded runtime to use for
   rollback.
 
-Do not proceed unless all of the following are true:
+A downstream identifier that does not exist yet is recorded as
+`PENDING — not created yet`. Never invent it or treat its absence as a reason to
+block an earlier gate that creates it.
 
-- [ ] Issues #37 and #40 are complete with their required human and
-      physical-device evidence. Closed issues #23 and #38 establish only their
-      recorded repository-side automation; neither substitutes for the
-      outstanding provider evidence. Integration truth labels agree with the
-      complete evidence set.
-- [ ] Credentials are verified, least privilege, and held in the approved
-      secrets systems; no credential file is inside any Git repository.
-- [ ] The exact tester audience is product-owner approved, bounded, private,
-      staff-only, and contains no student or guardian data.
+These conditions apply to every gate:
+
+- [ ] Credentials needed for the current gate are verified, least privilege,
+      and held in the approved secrets systems; no credential file is inside
+      any Git repository.
 - [ ] `bun install --frozen-lockfile` and `bun run check` pass on the exact
       release commit.
 - [ ] The mobile distribution configuration test and native prebuild check pass
       on that commit.
+- [ ] No gate uses student or guardian data, an unknown tester, a real recipient
+      export, or a real-incident activation as release evidence.
+- [ ] Missing, stale, conflicting, partial, or indeterminate identity,
+      credential, target, build, approval, provider result, or read-back stops
+      the current gate.
+
+Approval for one gate never authorizes another. Every provider write requires
+a fresh exact consequence preview, explicit product-owner approval, and fresh
+authenticated-human confirmation immediately before that write.
+
+### BUILD
+
+The BUILD preview binds the exact clean Git SHA, platform, `production` profile,
+application identifier, app version/runtime, public API origin, expected cost,
+and EAS remote build-number increment. Before an authorized human starts it:
+
 - [ ] Read-only EAS production-environment evidence shows exactly one
       `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` set to the public, non-secret origin
       `https://eoc.psd401.net`. The resolved iOS and Android production build
-      profiles must contain that exact value; absence, another origin, a
+      profiles contain that exact value; absence, another origin, a
       credential/query/path fragment, or a conflicting account-level value
       blocks the build.
-- [ ] A human has reviewed the exact build, target, audience count, invitation
-      or install consequences, rollback target, and any provider warning.
-- [ ] The product owner has explicitly approved that exact provider write, and
-      the human operator has freshly confirmed it.
+- [ ] The signing and EAS configuration required for that platform is verified
+      without placing credentials in the repository.
+- [ ] The preview states that BUILD creates only an EAS artifact. It does not
+      submit, assign a group, invite a tester, publish an OTA, expose a build,
+      or authorize any PSD EOC notification.
+
+After BUILD, append the immutable EAS build ID, resolved native build number,
+artifact digest, status, and provider-independent read-back. Issue #37's first
+manual AAB upload and issue #40's physical-device delivery consume these BUILD
+artifacts; completion of #37 or #40 is not a BUILD prerequisite.
+
+### SUBMIT
+
+The SUBMIT preview binds one exact finished EAS build ID and digest to one
+verified provider account and application record:
+
+- [ ] For iOS, the reviewed numeric `ascAppId` is present, the complete
+      TestFlight inventory has been reconciled, and automatic distribution is
+      disabled for every PSD EOC group.
+- [ ] For Android's first release, an authorized human uses Play Console to
+      upload the exact BUILD AAB and verify its digest as issue #37's bootstrap
+      step. Later EAS submissions require issue #37's completed first-upload
+      and release-scoped service-account evidence.
+- [ ] The preview is upload-only. The Play release remains an unreleased draft,
+      and neither provider action sends invitations or makes the build
+      installable.
+
+Append the provider build/release identity, processing state, warnings, and
+read-back. Upload acceptance is not tester exposure or human installation.
+
+### TESTER EXPOSURE
+
+The TESTER EXPOSURE preview binds one exact processed provider build/release to
+the fixed `District Technology` TestFlight group or Play `alpha` track. It also
+binds the approved tester-list digest and count, invitation/installability
+consequences, and the withdrawal or fix-forward target.
+
+- [ ] The bounded private audience is product-owner approved, staff-only, and
+      contains no student, guardian, real recipient export, or unknown member.
+- [ ] Apple build/group association or invitation and Play draft
+      completion/release are separately previewed, approved, freshly confirmed,
+      and read back; one never authorizes the other.
+- [ ] Tester exposure authorizes installation only. It does not authorize a
+      PSD EOC notification, a real incident, or ordinary-staff expansion.
+
+After installation, any controlled synthetic push is a separate issue #40
+action. It requires verified credentials, an approved synthetic target list, a
+consequence preview, explicit product-owner authorization, and authenticated-
+human confirmation. Use test mode only; never start a real incident or send a
+live staff notification, and prove the real-versus-drill display remains
+unambiguous.
+
+### FINAL ACCEPTANCE
+
+FINAL ACCEPTANCE is a read-only evidence decision, not a provider-write
+authorization. It requires exact physical TestFlight and Play install
+identities/read-backs, the non-engineer guide walkthrough, issue #37's durable
+Play evidence, issue #40's separately authorized controlled physical-push
+evidence, integration truth labels that claim only what is proven, and explicit
+human product-owner acceptance.
+
+Closed issues #23 and #38 establish only their recorded repository-side
+automation; neither substitutes for provider or physical-device evidence.
+FINAL ACCEPTANCE does not authorize a production deployment, ordinary-staff
+expansion, a real incident, a real notification, an all-clear, or closing a real
+event.
 
 An old approval, a credential, a passing mock, or a successful upload is not
 approval for distribution. A partial or indeterminate provider response is a
@@ -132,16 +211,24 @@ cannot replace the exact recorded build ID.
 
 ## 3. Consequence preview and approval
 
-Before each provider mutation, record a fresh consequence preview containing:
+Before each provider mutation, record the gate-specific fresh consequence
+preview. A BUILD preview uses the pre-build identities: exact Git SHA, EAS
+project, platform, profile, application identifier, app/runtime version, public
+API origin, cost, and remote-number increment. SUBMIT and TESTER EXPOSURE also
+use the immutable EAS/provider identifiers created by earlier gates. Record:
 
-- the exact EAS and provider build identifiers and version values;
+- every immutable EAS and provider build identifier and version value that
+  exists for the current gate; identifiers created by this gate remain
+  `PENDING — not created yet` until read-back;
 - the fixed application and destination: `net.psd401.eoc` in TestFlight
   internal `District Technology`, TestFlight external `Staff` with its Beta App
   Review consequences, or Play `alpha` closed testing;
-- the approved tester-list digest and count;
+- for TESTER EXPOSURE, the approved tester-list digest and count;
 - whether the action uploads only, can send an invitation, makes a build
   installable, changes rollout exposure, or submits anything for review;
-- the current known-good rollback target and any unresolved provider state.
+- the current known-good rollback target and any unresolved provider state. For
+  the first release, record `no prior known-good build` plus a withdrawal and
+  fix-forward plan; that truth does not block artifact creation.
 
 The product owner approves that exact preview. The human operator then confirms
 the same immutable identifiers immediately before the write. Any build,
@@ -186,10 +273,12 @@ Follow the provisioning and reviewed `ascAppId` change described in
 
 ## 5. Android — Play alpha closed testing
 
-Issue #37's human prerequisites must be complete first: verified organization
-account, exact app record, first manual AAB upload, closed tester group, and
-release-scoped Play API service account. The committed submission profile is
-fail-closed:
+BUILD creates the exact AAB needed for issue #37's first-upload bootstrap; #37
+completion is not a BUILD prerequisite. An authorized human then creates and
+verifies the organization/app record and manually uploads the exact AAB digest
+in Play Console. Issue #37's first-upload, closed tester group, and
+release-scoped Play API service-account evidence must be complete before any
+subsequent EAS Submit. The committed submission profile is fail-closed:
 
 ```json
 {
@@ -224,13 +313,17 @@ Membership controls exposure; no stage advances automatically.
 
 1. **Upload, zero exposure.** Keep automatic TestFlight distribution disabled
    and the Play release in draft. Reconcile both provider inventories.
-2. **Technology pilot.** Assign the exact iOS build only to `District
+2. **Technology pilot install.** Assign the exact iOS build only to `District
 Technology`; release the exact Android build only to the smallest approved
    `alpha` pilot group. Complete clean install, upgrade, sign-in, biometric,
-   push-permission, real-versus-drill rendering, and synthetic notification
-   checks on physical devices. A real incident or live staff notification is
-   never part of this release test.
-3. **Approved closed cohort.** Only after the pilot evidence is accepted may a
+   push-permission, and non-send real-versus-drill rendering checks on physical
+   devices.
+3. **Separately authorized synthetic push.** Only after installation, issue #40
+   may perform its controlled test-mode push under verified credentials, an
+   approved synthetic target list, a consequence preview, explicit
+   product-owner authorization, and authenticated-human confirmation. A real
+   incident or live staff notification is never part of this release test.
+4. **Approved closed cohort.** Only after the pilot evidence is accepted may a
    human expand private tester membership. Ordinary staff use only the external
    TestFlight `Staff` group after its separate Beta App Review gates in the App
    Store runbook; never grant ordinary staff an App Store Connect role to make
@@ -387,7 +480,7 @@ then repeat exact-build submission and staged evidence. Record what remains
 installed and communicate the manual update step through approved human
 channels.
 
-## 9. Required human evidence — currently BLOCKED
+## 9. FINAL ACCEPTANCE human evidence — currently BLOCKED
 
 These records deliberately remain blocked until humans perform the external
 steps. Do not replace them with mock, simulator, build-success, upload, or
@@ -431,4 +524,6 @@ provider-processing evidence.
 
 Only the responsible human may replace a `BLOCKED` value with contemporaneous,
 non-sensitive evidence. Product-owner sign-off is never inferred or supplied by
-automation.
+automation. This human-only FINAL ACCEPTANCE record does not itself authorize
+go-live, production deployment, provider configuration, a real incident, a real
+notification, an all-clear, or closing a real event.
