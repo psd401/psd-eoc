@@ -6,6 +6,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
+import { NotificationOutboxMessageSchema } from '@psd-eoc/contracts';
 import { sql } from 'drizzle-orm';
 
 import {
@@ -13,6 +14,11 @@ import {
   type PostgresDatabaseConnection,
 } from '../db/client';
 import { seedDatabase, type SeedSummary } from '../db/seed';
+import {
+  notificationIntentChannels,
+  notificationIntents,
+  outbox,
+} from '../db/schema';
 import { migrateDatabase } from './migrate';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -34,6 +40,45 @@ const ISSUE_14_PRE_LIFECYCLE_MIGRATIONS = [
   '0006_media_record_immutability.sql',
 ] as const;
 const ISSUE_14_LIFECYCLE_MIGRATION = '0007_pretty_puppet_master.sql';
+const ISSUE_23_PRE_OUTBOX_V2_MIGRATIONS = [
+  ...ISSUE_14_PRE_LIFECYCLE_MIGRATIONS,
+  ISSUE_14_LIFECYCLE_MIGRATION,
+] as const;
+const ISSUE_23_OUTBOX_V2_MIGRATION = '0008_yummy_living_tribunal.sql';
+
+const ISSUE_23_OUTBOX_IDS = Object.freeze({
+  event: '00000000-0000-4000-8000-000000009980',
+  activationPreview: '00000000-0000-4000-8000-000000009979',
+  intent: '00000000-0000-4000-8000-000000023001',
+  outbox: '00000000-0000-4000-8000-000000023002',
+  request: '00000000-0000-4000-8000-000000009982',
+  facility: '00000000-0000-4000-8000-000000000001',
+  eventTypeVersion: '00000000-0000-4000-8000-000000000201',
+  roster: '00000000-0000-4000-8000-000000000041',
+  audience: '00000000-0000-4000-8000-000000000020',
+  pushIntegrationStatus: '00000000-0000-4000-8000-000000000301',
+  emailIntegrationStatus: '00000000-0000-4000-8000-000000000302',
+});
+
+const ISSUE_23_PUSH_UPGRADE_IDS = Object.freeze({
+  user: '00000000-0000-4000-8000-000000023101',
+  membershipSnapshot: '00000000-0000-4000-8000-000000023102',
+  revokedDevice: '00000000-0000-4000-8000-000000023103',
+  unrelatedDevice: '00000000-0000-4000-8000-000000023104',
+  appRoleDevice: '00000000-0000-4000-8000-000000023105',
+  revokedSession: '00000000-0000-4000-8000-000000023106',
+  unrelatedSession: '00000000-0000-4000-8000-000000023107',
+  appRoleSession: '00000000-0000-4000-8000-000000023108',
+  retainedRevocation: '00000000-0000-4000-8000-000000023109',
+  alreadyUnregisteredRegistration: '00000000-0000-4000-8000-000000023110',
+  preRevocationRegistration: '00000000-0000-4000-8000-000000023111',
+  postRevocationRegistration: '00000000-0000-4000-8000-000000023112',
+  unrelatedRegistration: '00000000-0000-4000-8000-000000023113',
+  retainedUnregistration: '00000000-0000-4000-8000-000000023114',
+  appRoleRegistration: '00000000-0000-4000-8000-000000023115',
+  appRoleRevocation: '00000000-0000-4000-8000-000000023116',
+  appRoleUnregistration: '00000000-0000-4000-8000-000000023117',
+});
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -1417,6 +1462,1016 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       });
       expect(latestAfterOptIn?.sequence).toBeGreaterThan(
         lifecycleRows[1]?.sequence ?? 0,
+      );
+    } finally {
+      await migrationProofConnection?.close();
+      if (createdMigrationProofDatabase) {
+        await adminDatabase.execute(
+          sql.raw(
+            `drop database ${quotedMigrationProofDatabaseName} with (force)`,
+          ),
+        );
+      }
+    }
+  });
+
+  test('preserves issue 23 retained history and enforces canonical outbox and push truth', async () => {
+    if (testDatabaseUrl === undefined) {
+      throw new Error(
+        'TEST_DATABASE_URL is required for database integration tests.',
+      );
+    }
+    const adminDatabase = databaseConnection().db;
+    const migrationProofDatabaseName = `psd_eoc_issue23_upgrade_${process.pid}_${Date.now()}`;
+    if (!/^[a-z0-9_]{1,63}$/u.test(migrationProofDatabaseName)) {
+      throw new Error('The outbox migration-proof database name is unsafe.');
+    }
+    const quotedMigrationProofDatabaseName = `"${migrationProofDatabaseName}"`;
+    let migrationProofConnection: PostgresDatabaseConnection | undefined;
+    let createdMigrationProofDatabase = false;
+
+    try {
+      await adminDatabase.execute(
+        sql.raw(`create database ${quotedMigrationProofDatabaseName}`),
+      );
+      createdMigrationProofDatabase = true;
+      const migrationProofUrl = new URL(testDatabaseUrl);
+      migrationProofUrl.pathname = `/${migrationProofDatabaseName}`;
+      const createdConnection = createDatabaseClient({
+        driver: 'postgres',
+        url: migrationProofUrl.toString(),
+        maxConnections: 1,
+      });
+      if (createdConnection.driver !== 'postgres') {
+        throw new Error(
+          'Outbox migration proof requires the direct PostgreSQL driver.',
+        );
+      }
+      migrationProofConnection = createdConnection;
+
+      for (const migration of ISSUE_23_PRE_OUTBOX_V2_MIGRATIONS) {
+        await applySqlMigrationFile(createdConnection.db, migration);
+      }
+      await seedDatabase(createdConnection.db);
+
+      await createdConnection.db.transaction(async (transaction) => {
+        await transaction.execute(sql`
+          insert into users (
+            id,
+            google_subject,
+            email,
+            display_name,
+            facility_scope_kind,
+            created_at
+          ) values (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            'synthetic-issue-23-upgrade-proof',
+            'synthetic-issue-23-upgrade-proof@psd401.net',
+            'Synthetic Issue 23 Upgrade Proof',
+            'district'::facility_scope_kind,
+            '2026-08-12T16:00:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into access_membership_snapshots (
+            id,
+            version,
+            complete,
+            sync_started_at,
+            captured_at
+          ) values (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.membershipSnapshot}::uuid,
+            230023,
+            true,
+            '2026-08-12T15:58:00.000Z'::timestamptz,
+            '2026-08-12T15:59:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into access_membership_members (
+            snapshot_id,
+            user_id,
+            google_subject,
+            facility_scope_kind
+          ) values (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.membershipSnapshot}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            'synthetic-issue-23-upgrade-proof',
+            'district'::facility_scope_kind
+          )
+        `);
+        await transaction.execute(sql`
+          insert into device_enrollments (
+            id,
+            user_id,
+            platform,
+            unlock_method,
+            installation_id,
+            enrolled_at,
+            last_seen_at
+          ) values
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedDevice}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            'ios'::device_platform,
+            'biometric'::device_unlock_method,
+            'synthetic-issue-23-revoked-device',
+            '2026-08-12T16:00:00.000Z'::timestamptz,
+            '2026-08-12T16:15:00.000Z'::timestamptz
+          ),
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedDevice}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            'android'::device_platform,
+            'biometric'::device_unlock_method,
+            'synthetic-issue-23-unrelated-device',
+            '2026-08-12T16:00:00.000Z'::timestamptz,
+            '2026-08-12T16:15:00.000Z'::timestamptz
+          ),
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleDevice}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            'ios'::device_platform,
+            'biometric'::device_unlock_method,
+            'synthetic-issue-23-app-role-device',
+            '2026-08-12T16:00:00.000Z'::timestamptz,
+            '2026-08-12T16:15:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into sessions (
+            id,
+            user_id,
+            device_enrollment_id,
+            membership_snapshot_id,
+            membership_valid_until,
+            membership_grace_until,
+            created_at,
+            expires_at,
+            revoked_at
+          ) values
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedSession}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedDevice}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.membershipSnapshot}::uuid,
+            '2026-08-12T18:00:00.000Z'::timestamptz,
+            '2026-08-12T19:00:00.000Z'::timestamptz,
+            '2026-08-12T16:00:00.000Z'::timestamptz,
+            '2026-08-12T20:00:00.000Z'::timestamptz,
+            '2026-08-12T16:10:00.000Z'::timestamptz
+          ),
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedSession}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedDevice}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.membershipSnapshot}::uuid,
+            '2026-08-12T18:00:00.000Z'::timestamptz,
+            '2026-08-12T19:00:00.000Z'::timestamptz,
+            '2026-08-12T16:00:00.000Z'::timestamptz,
+            '2026-08-12T20:00:00.000Z'::timestamptz,
+            null
+          ),
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleSession}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleDevice}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.membershipSnapshot}::uuid,
+            '2026-08-12T18:00:00.000Z'::timestamptz,
+            '2026-08-12T19:00:00.000Z'::timestamptz,
+            '2026-08-12T16:00:00.000Z'::timestamptz,
+            '2026-08-12T20:00:00.000Z'::timestamptz,
+            null
+          )
+        `);
+        await transaction.execute(sql`
+          insert into device_push_token_registrations (
+            id,
+            device_enrollment_id,
+            platform,
+            token,
+            registered_at
+          ) values
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.alreadyUnregisteredRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedDevice}::uuid,
+            'ios'::device_platform,
+            'synthetic-unroutable-issue-23-already-unregistered',
+            '2026-08-12T16:01:00.000Z'::timestamptz
+          ),
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedDevice}::uuid,
+            'ios'::device_platform,
+            'synthetic-unroutable-issue-23-before-revocation',
+            '2026-08-12T16:05:00.000Z'::timestamptz
+          ),
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.postRevocationRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedDevice}::uuid,
+            'ios'::device_platform,
+            'synthetic-unroutable-issue-23-after-revocation',
+            '2026-08-12T16:15:00.000Z'::timestamptz
+          ),
+          (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedDevice}::uuid,
+            'android'::device_platform,
+            'synthetic-unroutable-issue-23-unrelated-device',
+            '2026-08-12T16:05:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into device_push_token_unregistrations (
+            id,
+            registration_id,
+            device_enrollment_id,
+            unregistered_at
+          ) values (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.retainedUnregistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.alreadyUnregisteredRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedDevice}::uuid,
+            '2026-08-12T16:06:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into session_revocations (
+            id,
+            session_id,
+            revoked_by,
+            reason_code,
+            revoked_at
+          ) values (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.retainedRevocation}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.revokedSession}::uuid,
+            '{"kind":"system","serviceId":"issue-23-upgrade-proof"}'::jsonb,
+            'SYNTHETIC_ISSUE_23_UPGRADE'::text,
+            '2026-08-12T16:10:00.000Z'::timestamptz
+          )
+        `);
+      });
+
+      const retainedRegistrationsBefore = await createdConnection.db.execute<{
+        device_enrollment_id: string;
+        id: string;
+        platform: string;
+        registered_at: string;
+        row_version: string;
+      }>(sql`
+          select
+            id::text as id,
+            device_enrollment_id::text as device_enrollment_id,
+            platform::text as platform,
+            registered_at::text as registered_at,
+            xmin::text as row_version
+          from device_push_token_registrations
+          where id in (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.alreadyUnregisteredRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.postRevocationRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedRegistration}::uuid
+          )
+          order by id
+        `);
+      const [retainedUnregistrationBefore] = await createdConnection.db
+        .execute<{
+        device_enrollment_id: string;
+        id: string;
+        registration_id: string;
+        row_version: string;
+        unregistered_at: string;
+      }>(sql`
+          select
+            id::text as id,
+            registration_id::text as registration_id,
+            device_enrollment_id::text as device_enrollment_id,
+            unregistered_at::text as unregistered_at,
+            xmin::text as row_version
+          from device_push_token_unregistrations
+          where id = ${ISSUE_23_PUSH_UPGRADE_IDS.retainedUnregistration}::uuid
+        `);
+      const [retainedRevocationBefore] = await createdConnection.db.execute<{
+        id: string;
+        reason_code: string;
+        revoked_at: string;
+        revoked_by: unknown;
+        row_version: string;
+        session_id: string;
+      }>(sql`
+          select
+            id::text as id,
+            session_id::text as session_id,
+            revoked_by,
+            reason_code,
+            revoked_at::text as revoked_at,
+            xmin::text as row_version
+          from session_revocations
+          where id = ${ISSUE_23_PUSH_UPGRADE_IDS.retainedRevocation}::uuid
+        `);
+      const legacyUpdatePrivileges = await createdConnection.db.execute<{
+        can_update: boolean;
+        table_name: string;
+      }>(sql`
+        select
+          target.table_name,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'UPDATE'
+          ) as can_update
+        from unnest(array[
+          'device_push_token_registrations',
+          'device_push_token_unregistrations',
+          'session_revocations'
+        ]::text[]) as target(table_name)
+        order by target.table_name
+      `);
+      expect([...legacyUpdatePrivileges]).toEqual([
+        {
+          table_name: 'device_push_token_registrations',
+          can_update: true,
+        },
+        {
+          table_name: 'device_push_token_unregistrations',
+          can_update: true,
+        },
+        { table_name: 'session_revocations', can_update: true },
+      ]);
+
+      const createdAt = new Date('2026-08-12T16:00:00.000Z');
+      const authorization = Object.freeze({
+        kind: 'synthetic-training' as const,
+        activationPreviewId: ISSUE_23_OUTBOX_IDS.activationPreview,
+        consequenceDigest: 'd'.repeat(64),
+        requestId: ISSUE_23_OUTBOX_IDS.request,
+      });
+      const channels = Object.freeze([
+        Object.freeze({
+          channel: 'push' as const,
+          endpointCount: 1,
+          renderedMessage: Object.freeze({
+            eventKind: 'test' as const,
+            templateMode: 'drill' as const,
+            purpose: 'activation' as const,
+            classificationMarker: 'DRILL' as const,
+            channel: 'push' as const,
+            title: '[DRILL] Retained outbox v1 proof',
+            body: '[DRILL] Synthetic and unroutable test only.',
+          }),
+          integrationStatus: Object.freeze({
+            integrationId: 'expo-push',
+            label: 'mocked' as const,
+            verifiedAt: null,
+            verifiedByUserId: null,
+            authorizationReference: null,
+            reasonCode: null,
+            observedAt: '2026-08-06T12:00:00.000Z',
+          }),
+        }),
+        Object.freeze({
+          channel: 'email' as const,
+          endpointCount: 1,
+          renderedMessage: Object.freeze({
+            eventKind: 'test' as const,
+            templateMode: 'drill' as const,
+            purpose: 'activation' as const,
+            classificationMarker: 'DRILL' as const,
+            channel: 'email' as const,
+            subject: '[DRILL] Retained outbox v1 proof',
+            textBody: '[DRILL] Synthetic and unroutable test only.',
+          }),
+          integrationStatus: Object.freeze({
+            integrationId: 'ses-email',
+            label: 'mocked' as const,
+            verifiedAt: null,
+            verifiedByUserId: null,
+            authorizationReference: null,
+            reasonCode: null,
+            observedAt: '2026-08-06T12:00:00.000Z',
+          }),
+        }),
+      ]);
+      const legacyMessage = NotificationOutboxMessageSchema.parse({
+        version: 1,
+        outboxId: ISSUE_23_OUTBOX_IDS.outbox,
+        intentId: ISSUE_23_OUTBOX_IDS.intent,
+        eventId: ISSUE_23_OUTBOX_IDS.event,
+        eventKind: 'test',
+        templateMode: 'drill',
+        purpose: 'activation',
+        eventTypeVersion: {
+          id: ISSUE_23_OUTBOX_IDS.eventTypeVersion,
+          templateMode: 'drill',
+        },
+        rosterSnapshotId: ISSUE_23_OUTBOX_IDS.roster,
+        rosterPopulation: 'synthetic',
+        audienceConfig: { id: ISSUE_23_OUTBOX_IDS.audience, version: 1 },
+        requestId: ISSUE_23_OUTBOX_IDS.request,
+        authorization,
+        channels,
+        createdAt: createdAt.toISOString(),
+      });
+
+      await createdConnection.db.transaction(async (transaction) => {
+        await transaction.execute(insertSyntheticTestEvent);
+        await transaction.insert(notificationIntents).values({
+          id: ISSUE_23_OUTBOX_IDS.intent,
+          eventId: ISSUE_23_OUTBOX_IDS.event,
+          eventKind: 'test',
+          templateMode: 'drill',
+          purpose: 'activation',
+          eventTypeVersionId: ISSUE_23_OUTBOX_IDS.eventTypeVersion,
+          rosterSnapshotId: ISSUE_23_OUTBOX_IDS.roster,
+          rosterPopulation: 'synthetic',
+          audienceConfigId: ISSUE_23_OUTBOX_IDS.audience,
+          audienceConfigVersion: 1,
+          createdBy: {
+            kind: 'system',
+            serviceId: 'outbox-v1-migration-proof',
+          },
+          source: 'scheduled-job',
+          requestId: ISSUE_23_OUTBOX_IDS.request,
+          authorization,
+          createdAt,
+        });
+        await transaction.insert(notificationIntentChannels).values(
+          legacyMessage.channels.map((channel, index) => ({
+            intentId: ISSUE_23_OUTBOX_IDS.intent,
+            sequence: index + 1,
+            channel: channel.channel,
+            eventKind: 'test' as const,
+            templateMode: 'drill' as const,
+            purpose: 'activation' as const,
+            rosterPopulation: 'synthetic' as const,
+            classificationMarker: 'DRILL' as const,
+            endpointCount: channel.endpointCount,
+            renderedMessage: channel.renderedMessage,
+            integrationStatusId:
+              channel.channel === 'push'
+                ? ISSUE_23_OUTBOX_IDS.pushIntegrationStatus
+                : ISSUE_23_OUTBOX_IDS.emailIntegrationStatus,
+            integrationId: channel.integrationStatus.integrationId,
+            integrationLabel: channel.integrationStatus.label,
+          })),
+        );
+        await transaction.insert(outbox).values({
+          id: ISSUE_23_OUTBOX_IDS.outbox,
+          messageVersion: 1,
+          intentId: ISSUE_23_OUTBOX_IDS.intent,
+          eventId: ISSUE_23_OUTBOX_IDS.event,
+          eventKind: 'test',
+          templateMode: 'drill',
+          purpose: 'activation',
+          eventTypeVersionId: ISSUE_23_OUTBOX_IDS.eventTypeVersion,
+          rosterSnapshotId: ISSUE_23_OUTBOX_IDS.roster,
+          rosterPopulation: 'synthetic',
+          audienceConfigId: ISSUE_23_OUTBOX_IDS.audience,
+          audienceConfigVersion: 1,
+          requestId: ISSUE_23_OUTBOX_IDS.request,
+          authorization,
+          channels: legacyMessage.channels,
+          message: legacyMessage,
+          status: 'pending',
+          attempts: 0,
+          availableAt: createdAt,
+          lockedUntil: null,
+          publishedAt: null,
+          failedAt: null,
+          lastErrorCode: null,
+          createdAt,
+        });
+      });
+      const [beforeMigration] = await createdConnection.db.execute<{
+        message: unknown;
+        row_version: string;
+      }>(sql`
+        select message, xmin::text as row_version
+        from outbox
+        where id = ${ISSUE_23_OUTBOX_IDS.outbox}::uuid
+      `);
+
+      await applySqlMigrationFile(
+        createdConnection.db,
+        ISSUE_23_OUTBOX_V2_MIGRATION,
+      );
+
+      const retainedRegistrationsAfter = await createdConnection.db.execute<{
+        device_enrollment_id: string;
+        id: string;
+        platform: string;
+        registered_at: string;
+        row_version: string;
+      }>(sql`
+          select
+            id::text as id,
+            device_enrollment_id::text as device_enrollment_id,
+            platform::text as platform,
+            registered_at::text as registered_at,
+            xmin::text as row_version
+          from device_push_token_registrations
+          where id in (
+            ${ISSUE_23_PUSH_UPGRADE_IDS.alreadyUnregisteredRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.postRevocationRegistration}::uuid,
+            ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedRegistration}::uuid
+          )
+          order by id
+        `);
+      expect([...retainedRegistrationsAfter]).toEqual([
+        ...retainedRegistrationsBefore,
+      ]);
+
+      const [retainedUnregistrationAfter] = await createdConnection.db.execute<{
+        device_enrollment_id: string;
+        id: string;
+        registration_id: string;
+        row_version: string;
+        unregistered_at: string;
+      }>(sql`
+          select
+            id::text as id,
+            registration_id::text as registration_id,
+            device_enrollment_id::text as device_enrollment_id,
+            unregistered_at::text as unregistered_at,
+            xmin::text as row_version
+          from device_push_token_unregistrations
+          where id = ${ISSUE_23_PUSH_UPGRADE_IDS.retainedUnregistration}::uuid
+        `);
+      expect(retainedUnregistrationAfter).toEqual(retainedUnregistrationBefore);
+
+      const [retainedRevocationAfter] = await createdConnection.db.execute<{
+        id: string;
+        reason_code: string;
+        revoked_at: string;
+        revoked_by: unknown;
+        row_version: string;
+        session_id: string;
+      }>(sql`
+          select
+            id::text as id,
+            session_id::text as session_id,
+            revoked_by,
+            reason_code,
+            revoked_at::text as revoked_at,
+            xmin::text as row_version
+          from session_revocations
+          where id = ${ISSUE_23_PUSH_UPGRADE_IDS.retainedRevocation}::uuid
+        `);
+      expect(retainedRevocationAfter).toEqual(retainedRevocationBefore);
+
+      const backfilledPushState = await createdConnection.db.execute<{
+        device_matches: boolean;
+        registration_id: string;
+        unregistered: boolean;
+        unregistered_at_matches_expected: boolean;
+      }>(sql`
+        select
+          registration.id::text as registration_id,
+          unregistration.id is not null as unregistered,
+          unregistration.device_enrollment_id is not distinct from
+            case
+              when unregistration.id is null then null
+              else registration.device_enrollment_id
+            end as device_matches,
+          unregistration.unregistered_at is not distinct from
+            case registration.id
+              when ${ISSUE_23_PUSH_UPGRADE_IDS.alreadyUnregisteredRegistration}::uuid
+                then '2026-08-12T16:06:00.000Z'::timestamptz
+              when ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid
+                then '2026-08-12T16:10:00.000Z'::timestamptz
+              else null
+            end as unregistered_at_matches_expected
+        from device_push_token_registrations as registration
+        left join device_push_token_unregistrations as unregistration
+          on unregistration.registration_id = registration.id
+        where registration.id in (
+          ${ISSUE_23_PUSH_UPGRADE_IDS.alreadyUnregisteredRegistration}::uuid,
+          ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid,
+          ${ISSUE_23_PUSH_UPGRADE_IDS.postRevocationRegistration}::uuid,
+          ${ISSUE_23_PUSH_UPGRADE_IDS.unrelatedRegistration}::uuid
+        )
+        order by registration.id
+      `);
+      expect([...backfilledPushState]).toEqual([
+        {
+          registration_id:
+            ISSUE_23_PUSH_UPGRADE_IDS.alreadyUnregisteredRegistration,
+          unregistered: true,
+          device_matches: true,
+          unregistered_at_matches_expected: true,
+        },
+        {
+          registration_id: ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration,
+          unregistered: true,
+          device_matches: true,
+          unregistered_at_matches_expected: true,
+        },
+        {
+          registration_id: ISSUE_23_PUSH_UPGRADE_IDS.postRevocationRegistration,
+          unregistered: false,
+          device_matches: true,
+          unregistered_at_matches_expected: true,
+        },
+        {
+          registration_id: ISSUE_23_PUSH_UPGRADE_IDS.unrelatedRegistration,
+          unregistered: false,
+          device_matches: true,
+          unregistered_at_matches_expected: true,
+        },
+      ]);
+
+      const pushTruthPrivileges = await createdConnection.db.execute<{
+        can_delete: boolean;
+        can_insert: boolean;
+        can_lock_identity: boolean;
+        can_references: boolean;
+        can_select: boolean;
+        can_trigger: boolean;
+        can_truncate: boolean;
+        can_update: boolean;
+        public_has_any_privilege: boolean;
+        table_name: string;
+      }>(sql`
+        select
+          target.table_name,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'SELECT'
+          ) as can_select,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'INSERT'
+          ) as can_insert,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'UPDATE'
+          ) as can_update,
+          has_column_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'id',
+            'UPDATE'
+          ) as can_lock_identity,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'DELETE'
+          ) as can_delete,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'TRUNCATE'
+          ) as can_truncate,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'REFERENCES'
+          ) as can_references,
+          has_table_privilege(
+            'psd_eoc_app',
+            'public.' || target.table_name,
+            'TRIGGER'
+          ) as can_trigger,
+          exists (
+            select 1
+            from pg_catalog.pg_class as public_table
+            join pg_catalog.pg_namespace as public_namespace
+              on public_namespace.oid = public_table.relnamespace
+            cross join lateral aclexplode(
+              coalesce(
+                public_table.relacl,
+                acldefault('r', public_table.relowner)
+              )
+            ) as public_privilege
+            where public_namespace.nspname = 'public'
+              and public_table.relname = target.table_name
+              and public_privilege.grantee = 0
+          ) as public_has_any_privilege
+        from unnest(array[
+          'device_push_token_registrations',
+          'device_push_token_unregistrations',
+          'session_revocations'
+        ]::text[]) as target(table_name)
+        order by target.table_name
+      `);
+      expect([...pushTruthPrivileges]).toEqual(
+        [
+          'device_push_token_registrations',
+          'device_push_token_unregistrations',
+          'session_revocations',
+        ].map((tableName) => ({
+          table_name: tableName,
+          can_select: true,
+          can_insert: true,
+          can_update: false,
+          can_lock_identity: tableName === 'device_push_token_registrations',
+          can_delete: false,
+          can_truncate: false,
+          can_references: false,
+          can_trigger: false,
+          public_has_any_privilege: false,
+        })),
+      );
+
+      const pushTruthTriggers = await createdConnection.db.execute<{
+        action_orientation: string;
+        action_statement: string;
+        action_timing: string;
+        event_manipulation: string;
+        event_object_table: string;
+        trigger_name: string;
+      }>(sql`
+        select
+          event_object_table,
+          trigger_name,
+          action_timing,
+          action_orientation,
+          event_manipulation,
+          action_statement
+        from information_schema.triggers
+        where trigger_schema = 'public'
+          and trigger_name in (
+            'device_push_token_registrations_immutable_guard',
+            'device_push_token_unregistrations_immutable_guard',
+            'session_revocations_immutable_guard'
+          )
+        order by event_object_table
+      `);
+      expect([...pushTruthTriggers]).toEqual(
+        [
+          'device_push_token_registrations',
+          'device_push_token_unregistrations',
+          'session_revocations',
+        ].map((tableName) => ({
+          event_object_table: tableName,
+          trigger_name: `${tableName}_immutable_guard`,
+          action_timing: 'BEFORE',
+          action_orientation: 'ROW',
+          event_manipulation: 'UPDATE',
+          action_statement:
+            'EXECUTE FUNCTION psd_eoc_reject_immutable_mutation()',
+        })),
+      );
+
+      const appRoleWriteProof = await createdConnection.db.transaction(
+        async (transaction) => {
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
+          await transaction.execute(sql`
+            update sessions
+            set revoked_at = '2026-08-12T16:21:00.000Z'::timestamptz
+            where id = ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleSession}::uuid
+          `);
+          await transaction.execute(sql`
+            insert into device_push_token_registrations (
+              id,
+              device_enrollment_id,
+              platform,
+              token,
+              registered_at
+            ) values (
+              ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleRegistration}::uuid,
+              ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleDevice}::uuid,
+              'ios'::device_platform,
+              'synthetic-unroutable-issue-23-app-role-proof',
+              '2026-08-12T16:20:00.000Z'::timestamptz
+            )
+          `);
+          await transaction.execute(sql`
+            insert into session_revocations (
+              id,
+              session_id,
+              revoked_by,
+              reason_code,
+              revoked_at
+            ) values (
+              ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleRevocation}::uuid,
+              ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleSession}::uuid,
+              '{"kind":"system","serviceId":"issue-23-app-role-proof"}'::jsonb,
+              'SYNTHETIC_ISSUE_23_APP_ROLE'::text,
+              '2026-08-12T16:21:00.000Z'::timestamptz
+            )
+          `);
+          await transaction.execute(sql`
+            insert into device_push_token_unregistrations (
+              id,
+              registration_id,
+              device_enrollment_id,
+              unregistered_at
+            ) values (
+              ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleUnregistration}::uuid,
+              ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleRegistration}::uuid,
+              ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleDevice}::uuid,
+              '2026-08-12T16:21:00.000Z'::timestamptz
+            )
+          `);
+
+          const [proof] = await transaction.execute<{
+            registration_visible: boolean;
+            registration_lock_visible: boolean;
+            revocation_visible: boolean;
+            unregistration_visible: boolean;
+          }>(sql`
+            select
+              exists (
+                select 1
+                from device_push_token_registrations
+                where id = ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleRegistration}::uuid
+              ) as registration_visible,
+              exists (
+                select id
+                from device_push_token_registrations
+                where id = ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleRegistration}::uuid
+                for update
+              ) as registration_lock_visible,
+              exists (
+                select 1
+                from session_revocations
+                where id = ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleRevocation}::uuid
+              ) as revocation_visible,
+              exists (
+                select 1
+                from device_push_token_unregistrations
+                where id = ${ISSUE_23_PUSH_UPGRADE_IDS.appRoleUnregistration}::uuid
+              ) as unregistration_visible
+          `);
+          return proof;
+        },
+      );
+      expect(appRoleWriteProof).toEqual({
+        registration_visible: true,
+        registration_lock_visible: true,
+        revocation_visible: true,
+        unregistration_visible: true,
+      });
+
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.transaction(async (transaction) => {
+            await transaction.execute(sql`set local role "psd_eoc_app"`);
+            await transaction.execute(sql`
+              update session_revocations
+              set reason_code = reason_code
+              where id = ${ISSUE_23_PUSH_UPGRADE_IDS.retainedRevocation}::uuid
+            `);
+          }),
+        /permission denied for table session_revocations/iu,
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.transaction(async (transaction) => {
+            await transaction.execute(sql`set local role "psd_eoc_app"`);
+            await transaction.execute(sql`
+              update device_push_token_registrations
+              set registered_at = registered_at
+              where id = ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid
+            `);
+          }),
+        /permission denied for table device_push_token_registrations/iu,
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.transaction(async (transaction) => {
+            await transaction.execute(sql`set local role "psd_eoc_app"`);
+            await transaction.execute(sql`
+              update device_push_token_registrations
+              set id = id
+              where id = ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid
+            `);
+          }),
+        /PSD EOC immutable truth cannot be changed on device_push_token_registrations/iu,
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.transaction(async (transaction) => {
+            await transaction.execute(sql`set local role "psd_eoc_app"`);
+            await transaction.execute(sql`
+              update device_push_token_unregistrations
+              set unregistered_at = unregistered_at
+              where registration_id = ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid
+            `);
+          }),
+        /permission denied for table device_push_token_unregistrations/iu,
+      );
+
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.execute(sql`
+            update session_revocations
+            set reason_code = reason_code
+            where id = ${ISSUE_23_PUSH_UPGRADE_IDS.retainedRevocation}::uuid
+          `),
+        /PSD EOC immutable truth cannot be changed on session_revocations/iu,
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.execute(sql`
+            update device_push_token_registrations
+            set registered_at = registered_at
+            where id = ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid
+          `),
+        /PSD EOC immutable truth cannot be changed on device_push_token_registrations/iu,
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.execute(sql`
+            update device_push_token_unregistrations
+            set unregistered_at = unregistered_at
+            where registration_id = ${ISSUE_23_PUSH_UPGRADE_IDS.preRevocationRegistration}::uuid
+          `),
+        /PSD EOC immutable truth cannot be changed on device_push_token_unregistrations/iu,
+      );
+
+      const [afterMigration] = await createdConnection.db.execute<{
+        message: unknown;
+        row_version: string;
+      }>(sql`
+        select message, xmin::text as row_version
+        from outbox
+        where id = ${ISSUE_23_OUTBOX_IDS.outbox}::uuid
+      `);
+      expect(afterMigration).toEqual(beforeMigration);
+      expect(
+        NotificationOutboxMessageSchema.parse(afterMigration?.message),
+      ).toEqual(legacyMessage);
+
+      const constraints = await createdConnection.db.execute<{
+        constraint_name: string;
+        validated: boolean;
+      }>(sql`
+        select conname as constraint_name, convalidated as validated
+        from pg_catalog.pg_constraint
+        where conrelid = 'public.outbox'::regclass
+          and conname in ('outbox_message_truth', 'outbox_message_version')
+        order by conname
+      `);
+      expect([...constraints]).toEqual([
+        { constraint_name: 'outbox_message_truth', validated: true },
+        { constraint_name: 'outbox_message_version', validated: true },
+      ]);
+
+      await createdConnection.db.execute(sql`
+        create temporary table outbox_version_probe
+        (like outbox including defaults including constraints)
+      `);
+      await createdConnection.db.execute(sql`
+        insert into outbox_version_probe
+        select * from outbox where id = ${ISSUE_23_OUTBOX_IDS.outbox}::uuid
+      `);
+      await createdConnection.db.execute(sql`
+        update outbox_version_probe
+        set
+          message_version = 2,
+          message = jsonb_set(
+            jsonb_set(message, '{version}', '2'::jsonb),
+            '{facilityId}',
+            to_jsonb(${ISSUE_23_OUTBOX_IDS.facility}::text)
+          )
+      `);
+      const [version2Probe] = await createdConnection.db.execute<{
+        message: unknown;
+        message_version: number;
+      }>(sql`
+        select message_version, message from outbox_version_probe
+      `);
+      expect(version2Probe?.message_version).toBe(2);
+      expect(
+        NotificationOutboxMessageSchema.parse(version2Probe?.message),
+      ).toEqual(
+        expect.objectContaining({
+          version: 2,
+          facilityId: ISSUE_23_OUTBOX_IDS.facility,
+        }),
+      );
+
+      await expectConstraintViolation(
+        () =>
+          createdConnection.db.execute(sql`
+            update outbox_version_probe set message = message - 'facilityId'
+          `),
+        'outbox_message_truth',
+      );
+      await expectConstraintViolation(
+        () =>
+          createdConnection.db.execute(sql`
+            update outbox_version_probe
+            set
+              message_version = 1,
+              message = jsonb_set(message, '{version}', '1'::jsonb)
+          `),
+        'outbox_message_truth',
+      );
+      await expectPostgresRejection(
+        () =>
+          createdConnection.db.execute(sql`
+            update outbox_version_probe
+            set
+              message_version = 3,
+              message = jsonb_set(message, '{version}', '3'::jsonb)
+          `),
+        /outbox_message_(?:truth|version)/iu,
       );
     } finally {
       await migrationProofConnection?.close();

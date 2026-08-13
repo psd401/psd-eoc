@@ -5,10 +5,11 @@ import {
   InvocationSourceSchema,
   isActorSourceCompatible,
 } from './capability';
-import { AudienceConfigRefSchema } from './facility';
+import { AudienceConfigRefSchema, FacilityIdSchema } from './facility';
 import { IntegrationStatusSchema } from './integration';
 import {
   ActivationAuthorizationSchema,
+  EventClassificationSchema,
   EventIdSchema,
   EventKindSchema,
   EventTargetingSchema,
@@ -18,6 +19,7 @@ import {
 import {
   ChannelConsequencePreviewSchema,
   EventTypeVersionRefSchema,
+  EventTypeVersionIdSchema,
   NotificationChannelSchema,
   NotificationPurposeSchema,
   RenderedMessageSchema,
@@ -27,6 +29,7 @@ import {
 } from './event-type';
 import {
   EndpointIdSchema,
+  PushPlatformSchema,
   RecipientIdSchema,
   RosterPopulationSchema,
   RosterSnapshotIdSchema,
@@ -111,6 +114,80 @@ export const NotificationAuthorizationSchema = z
 /** Immutable notification authorization inferred from its schema. */
 export type NotificationAuthorization = z.infer<
   typeof NotificationAuthorizationSchema
+>;
+
+/**
+ * Owns the complete, destination-free data payload received by native mobile
+ * clients. Structured identities are authoritative; visible notification copy
+ * is never parsed to recover routing or real-versus-drill classification.
+ */
+export const MobilePushReceivePayloadSchema = z
+  .object({
+    version: z.literal(1),
+    eventId: EventIdSchema,
+    eventKind: EventKindSchema,
+    templateMode: TemplateModeSchema,
+    facilityId: FacilityIdSchema,
+    eventTypeVersionId: EventTypeVersionIdSchema,
+    purpose: NotificationPurposeSchema,
+  })
+  .strict()
+  .superRefine((payload, context) => {
+    if (
+      !EventClassificationSchema.safeParse({
+        kind: payload.eventKind,
+        templateMode: payload.templateMode,
+      }).success
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Mobile push event kind and template mode are incompatible.',
+        path: ['templateMode'],
+      });
+    }
+  })
+  .readonly();
+
+/** Canonical native mobile push data inferred from its schema. */
+export type MobilePushReceivePayload = z.infer<
+  typeof MobilePushReceivePayloadSchema
+>;
+
+/**
+ * Token-free proof used by the Expo worker to re-check one exact endpoint
+ * immediately before provider I/O. The digest binds the retained token
+ * without transmitting the destination back to the server.
+ */
+export const PushEndpointSendEligibilityInputSchema = z
+  .object({
+    version: z.literal(1),
+    rosterSnapshotId: RosterSnapshotIdSchema,
+    rosterPopulation: RosterPopulationSchema,
+    recipientId: RecipientIdSchema,
+    endpointId: EndpointIdSchema,
+    platform: PushPlatformSchema,
+    tokenDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  })
+  .strict()
+  .readonly();
+
+/** Exact send-time endpoint eligibility query inferred from its schema. */
+export type PushEndpointSendEligibilityInput = z.infer<
+  typeof PushEndpointSendEligibilityInputSchema
+>;
+
+/**
+ * Minimal response for the worker-only eligibility route. It deliberately
+ * returns neither a push token nor a stable token digest.
+ */
+export const PushEndpointSendEligibilityResultSchema = z
+  .object({ version: z.literal(1), eligible: z.boolean() })
+  .strict()
+  .readonly();
+
+/** Send-time eligibility result inferred from its schema. */
+export type PushEndpointSendEligibilityResult = z.infer<
+  typeof PushEndpointSendEligibilityResultSchema
 >;
 
 function addNotificationTargetingIssues(
@@ -321,6 +398,7 @@ export const DispatchBatchSchema = z
     id: DispatchBatchIdSchema,
     intentId: NotificationIntentIdSchema,
     eventId: EventIdSchema,
+    facilityId: FacilityIdSchema,
     eventKind: EventKindSchema,
     templateMode: TemplateModeSchema,
     purpose: NotificationPurposeSchema,
@@ -717,25 +795,43 @@ export type OutboxStatus = z.infer<typeof OutboxStatusSchema>;
  * Workers resolve recipients only through the pinned immutable intent and
  * roster snapshot; no contact destination appears in this message.
  */
-export const NotificationOutboxMessageSchema = z
+const NotificationOutboxMessageCommonShape = {
+  outboxId: OutboxIdSchema,
+  intentId: NotificationIntentIdSchema,
+  eventId: EventIdSchema,
+  eventKind: EventKindSchema,
+  templateMode: TemplateModeSchema,
+  purpose: NotificationPurposeSchema,
+  eventTypeVersion: EventTypeVersionRefSchema,
+  rosterSnapshotId: RosterSnapshotIdSchema,
+  rosterPopulation: RosterPopulationSchema,
+  audienceConfig: AudienceConfigRefSchema,
+  requestId: UuidSchema,
+  authorization: NotificationAuthorizationSchema,
+  channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
+  createdAt: TimestampSchema,
+} as const;
+
+const NotificationOutboxMessageV1Schema = z
   .object({
     version: z.literal(1),
-    outboxId: OutboxIdSchema,
-    intentId: NotificationIntentIdSchema,
-    eventId: EventIdSchema,
-    eventKind: EventKindSchema,
-    templateMode: TemplateModeSchema,
-    purpose: NotificationPurposeSchema,
-    eventTypeVersion: EventTypeVersionRefSchema,
-    rosterSnapshotId: RosterSnapshotIdSchema,
-    rosterPopulation: RosterPopulationSchema,
-    audienceConfig: AudienceConfigRefSchema,
-    requestId: UuidSchema,
-    authorization: NotificationAuthorizationSchema,
-    channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
-    createdAt: TimestampSchema,
+    ...NotificationOutboxMessageCommonShape,
   })
-  .strict()
+  .strict();
+
+const NotificationOutboxMessageV2Schema = z
+  .object({
+    version: z.literal(2),
+    facilityId: FacilityIdSchema,
+    ...NotificationOutboxMessageCommonShape,
+  })
+  .strict();
+
+export const NotificationOutboxMessageSchema = z
+  .discriminatedUnion('version', [
+    NotificationOutboxMessageV1Schema,
+    NotificationOutboxMessageV2Schema,
+  ])
   .superRefine((message, context) => {
     addNotificationTargetingIssues(message, context);
     addChannelPlanIssues(message, context);
@@ -859,12 +955,21 @@ export type DispatchOutboxInput = z.infer<typeof DispatchOutboxInputSchema>;
  */
 export const DispatchOutboxResultSchema = z
   .object({
+    facilityId: FacilityIdSchema,
     outboxRecord: OutboxRecordSchema,
     batches: z.array(DispatchBatchSchema).min(2).max(3).readonly(),
   })
   .strict()
   .superRefine((result, context) => {
     const message = result.outboxRecord.message;
+    if (message.version === 2 && message.facilityId !== result.facilityId) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Resolved dispatch facility must match the version 2 outbox facility.',
+        path: ['facilityId'],
+      });
+    }
     const channels = result.batches.map((batch) => batch.channel);
     const plannedChannels = message.channels.map((channel) => channel.channel);
     if (
@@ -896,6 +1001,7 @@ export const DispatchOutboxResultSchema = z
       if (
         batch.intentId !== message.intentId ||
         batch.eventId !== message.eventId ||
+        batch.facilityId !== result.facilityId ||
         batch.eventKind !== message.eventKind ||
         batch.templateMode !== message.templateMode ||
         batch.purpose !== message.purpose ||

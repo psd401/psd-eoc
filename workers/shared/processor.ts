@@ -157,6 +157,11 @@ export type LiveProviderAuthorizer = (
   workItem: WorkerAttemptWorkItem,
 ) => boolean | Promise<boolean>;
 
+/** Optional channel-specific policy gate immediately before a new send. */
+export type ProviderSendAuthorizer = (
+  workItem: WorkerAttemptWorkItem,
+) => boolean | Promise<boolean>;
+
 export interface WorkerAttemptProcessorOptions {
   readonly adapter: AttemptIdempotentProviderAdapter;
   readonly executionStore: AttemptExecutionStore;
@@ -166,12 +171,14 @@ export interface WorkerAttemptProcessorOptions {
   readonly random?: () => number;
   /** Omission disables live-verified providers. */
   readonly authorizeLiveProvider?: LiveProviderAuthorizer;
+  readonly authorizeProviderSend?: ProviderSendAuthorizer;
 }
 
 export type WorkerProcessingErrorCode =
   | 'INVALID_ADAPTER'
   | 'ADAPTER_MISMATCH'
   | 'LIVE_PROVIDER_DISABLED'
+  | 'PROVIDER_SEND_DISABLED'
   | 'RETRY_BUDGET_EXCEEDED'
   | 'INVALID_IDEMPOTENCY_CLAIM'
   | 'IDEMPOTENCY_STORE_FAILED'
@@ -407,6 +414,7 @@ export class WorkerAttemptProcessor {
   readonly #leaseMilliseconds: number;
   readonly #random: () => number;
   readonly #authorizeLive: LiveProviderAuthorizer | undefined;
+  readonly #authorizeSend: ProviderSendAuthorizer | undefined;
 
   public constructor(options: WorkerAttemptProcessorOptions) {
     validateAdapter(options.adapter);
@@ -419,6 +427,7 @@ export class WorkerAttemptProcessor {
     this.#leaseMilliseconds = parseLease(options.leaseMilliseconds);
     this.#random = options.random ?? Math.random;
     this.#authorizeLive = options.authorizeLiveProvider;
+    this.#authorizeSend = options.authorizeProviderSend;
   }
 
   public async process(
@@ -565,6 +574,9 @@ export class WorkerAttemptProcessor {
       fingerprint,
       leaseToken: claim.leaseToken,
     });
+    if (!(await this.#providerSendIsAuthorized(workItem))) {
+      await this.#releaseProviderSendDenied(lease);
+    }
     let attemptedEvidence: DeliveryEvidence;
     try {
       attemptedEvidence = await this.#writer.recordAttemptEvidence({
@@ -580,11 +592,21 @@ export class WorkerAttemptProcessor {
       throw error;
     }
 
+    const providerRequest = Object.freeze({
+      workItem,
+      idempotencyKey: attempt.id,
+    });
+    // The initial check avoids creating attempted evidence for an endpoint
+    // already known to be ineligible. This final check closes the asynchronous
+    // evidence-write window. On success, adapter invocation is synchronous in
+    // this continuation: no await can admit a revocation between the current
+    // policy decision and entry into the provider adapter.
+    if (!(await this.#providerSendIsAuthorized(workItem))) {
+      await this.#releaseProviderSendDenied(lease);
+    }
     let rawOutcome: ProviderSendOutcome | unknown;
     try {
-      rawOutcome = await this.#adapter.send(
-        Object.freeze({ workItem, idempotencyKey: attempt.id }),
-      );
+      rawOutcome = await this.#adapter.send(providerRequest);
     } catch (error) {
       const decision = decideProviderRetry(
         error,
@@ -736,6 +758,28 @@ export class WorkerAttemptProcessor {
       );
     }
     return Object.freeze({ kind: 'final', outcome });
+  }
+
+  async #providerSendIsAuthorized(
+    workItem: WorkerAttemptWorkItem,
+  ): Promise<boolean> {
+    if (this.#authorizeSend === undefined) return true;
+    try {
+      return (await this.#authorizeSend(workItem)) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async #releaseProviderSendDenied(
+    lease: ReleaseAttemptExecutionRequest,
+  ): Promise<never> {
+    try {
+      await this.#store.release(lease);
+    } catch {
+      throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
+    }
+    throw new WorkerProcessingError('PROVIDER_SEND_DISABLED');
   }
 
   async #claimRecoveredAdapterCompletion(

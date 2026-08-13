@@ -40,12 +40,10 @@ export default function UnlockScreen() {
     setIsConfirmingRemoval(false);
     setIsRemoving(true);
     try {
-      // The locked controller holds no bearer in memory, so this clears only
-      // device-local enrollment and never queues a remote revocation.
       await signOut();
     } catch {
       setLocalError(
-        'PSD EOC could not clear the enrolled session from this device. Try again or contact district technology support.',
+        'Sign-out was not completed. PSD EOC kept the enrolled session because device authentication or online server and push cleanup could not be confirmed. Reconnect and try again.',
       );
     } finally {
       setIsRemoving(false);
@@ -142,18 +140,18 @@ export default function UnlockScreen() {
                   accessibilityRole="header"
                   style={styles.confirmationTitle}
                 >
-                  Remove this device session?
+                  Sign out and stop push alerts?
                 </Text>
                 <Text style={styles.confirmationBody}>
-                  This permanently removes the only local credential without
-                  reading it. If PSD EOC or Google is unavailable, re-enrollment
-                  may be unavailable during the outage. Because this local-only
-                  action does not read the locked bearer or contact the server,
-                  an administrator may still need to revoke its retained server
-                  session.
+                  PSD EOC will first ask for device security so it can read the
+                  protected credential. It must then contact the server to
+                  revoke this session and stop this device&apos;s push alerts
+                  before removing the local credential. If cleanup cannot be
+                  confirmed, nothing is removed and no offline cleanup is
+                  queued.
                 </Text>
                 <Pressable
-                  accessibilityLabel="Cancel local session removal"
+                  accessibilityLabel="Cancel sign-out"
                   accessibilityRole="button"
                   accessibilityState={{ disabled: busy }}
                   disabled={busy}
@@ -169,8 +167,8 @@ export default function UnlockScreen() {
                   <Text style={styles.secondaryButtonText}>Cancel</Text>
                 </Pressable>
                 <Pressable
-                  accessibilityHint="Permanently clears the encrypted session from only this device"
-                  accessibilityLabel="Confirm removal of local device session"
+                  accessibilityHint="Requires device security and online server and push cleanup before the encrypted local session is removed"
+                  accessibilityLabel="Confirm sign-out and push cleanup"
                   accessibilityRole="button"
                   accessibilityState={{ busy: isRemoving, disabled: busy }}
                   disabled={busy}
@@ -188,8 +186,8 @@ export default function UnlockScreen() {
                   ) : null}
                   <Text style={styles.destructiveButtonText}>
                     {isRemoving
-                      ? 'Removing local session'
-                      : 'Remove local session'}
+                      ? 'Confirming secure sign-out'
+                      : 'Sign out and stop push alerts'}
                   </Text>
                 </Pressable>
               </View>

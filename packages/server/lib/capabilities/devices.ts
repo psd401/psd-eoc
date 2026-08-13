@@ -8,6 +8,7 @@ import {
   EndpointStatusRecordSchema,
   PushTokenRegistrationReceiptSchema,
   PushTokenUnregistrationReceiptSchema,
+  PushEndpointSendEligibilityInputSchema,
   SecurityAuditEntrySchema,
   type Actor,
   type CapabilityInput,
@@ -17,6 +18,7 @@ import {
   type EndpointStatus,
   type EndpointStatusRecord,
   type PushEndpoint,
+  type PushEndpointSendEligibilityInput,
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
@@ -138,6 +140,102 @@ export interface ResolvedPushEndpoint {
   readonly rosterPopulation: 'staff' | 'synthetic';
   readonly recipientId: string;
   readonly endpoint: PushEndpoint;
+}
+
+interface PushEndpointSendEligibilityEvidence {
+  readonly rosterSnapshotId: string;
+  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly recipientId: string;
+  readonly endpointId: string;
+  readonly platform: 'ios' | 'android';
+  readonly tokenDigest: string;
+  readonly endpointStatus: EndpointStatus;
+  readonly effectiveStatus: EndpointStatus;
+}
+
+/** Narrow testable read boundary used by the worker-only eligibility route. */
+export interface PushEndpointSendEligibilityStore {
+  loadPushEndpointSendEligibility(
+    input: PushEndpointSendEligibilityInput,
+  ): Promise<unknown>;
+}
+
+function parsePushEndpointSendEligibilityEvidence(
+  value: unknown,
+): PushEndpointSendEligibilityEvidence | null {
+  if (value === null) return null;
+  const record = exactDataRecord(value, [
+    'rosterSnapshotId',
+    'rosterPopulation',
+    'recipientId',
+    'endpointId',
+    'platform',
+    'tokenDigest',
+    'endpointStatus',
+    'effectiveStatus',
+  ]);
+  const endpointStatus = EndpointStatusSchema.safeParse(record?.endpointStatus);
+  const effectiveStatus = EndpointStatusSchema.safeParse(
+    record?.effectiveStatus,
+  );
+  if (
+    record === null ||
+    typeof record.rosterSnapshotId !== 'string' ||
+    (record.rosterPopulation !== 'staff' &&
+      record.rosterPopulation !== 'synthetic') ||
+    typeof record.recipientId !== 'string' ||
+    typeof record.endpointId !== 'string' ||
+    (record.platform !== 'ios' && record.platform !== 'android') ||
+    typeof record.tokenDigest !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(record.tokenDigest) ||
+    !endpointStatus.success ||
+    !effectiveStatus.success
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  return Object.freeze({
+    rosterSnapshotId: record.rosterSnapshotId,
+    rosterPopulation: record.rosterPopulation,
+    recipientId: record.recipientId,
+    endpointId: record.endpointId,
+    platform: record.platform,
+    tokenDigest: record.tokenDigest,
+    endpointStatus: endpointStatus.data,
+    effectiveStatus: effectiveStatus.data,
+  });
+}
+
+/**
+ * Revalidates the full immutable endpoint identity against current append-only
+ * lifecycle truth. A well-formed absent or revoked endpoint is ineligible;
+ * malformed/store failures throw so callers can fail closed.
+ */
+export async function checkPushEndpointSendEligibility(
+  inputValue: unknown,
+  store: PushEndpointSendEligibilityStore,
+): Promise<boolean> {
+  const parsed = PushEndpointSendEligibilityInputSchema.safeParse(inputValue);
+  if (!parsed.success) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  let rawEvidence: unknown;
+  try {
+    rawEvidence = await store.loadPushEndpointSendEligibility(parsed.data);
+  } catch {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const evidence = parsePushEndpointSendEligibilityEvidence(rawEvidence);
+  return (
+    evidence !== null &&
+    evidence.rosterSnapshotId === parsed.data.rosterSnapshotId &&
+    evidence.rosterPopulation === parsed.data.rosterPopulation &&
+    evidence.recipientId === parsed.data.recipientId &&
+    evidence.endpointId === parsed.data.endpointId &&
+    evidence.platform === parsed.data.platform &&
+    evidence.tokenDigest === parsed.data.tokenDigest &&
+    evidence.endpointStatus === 'active' &&
+    evidence.effectiveStatus === 'active'
+  );
 }
 
 function pushCandidateKey(candidate: PushEndpointPolicyCandidate): string {
@@ -344,8 +442,36 @@ async function loadDrizzlePushEndpointPolicy(
       endpointId: rosterEndpoints.id,
       recipientId: rosterEndpoints.recipientId,
       status: rosterEndpoints.status,
+      registrationId: devicePushTokenRegistrations.id,
+      registrationDeviceEnrollmentId:
+        devicePushTokenRegistrations.deviceEnrollmentId,
+      registrationMatchesEndpoint: sql<boolean | null>`case
+        when ${devicePushTokenRegistrations.id} is null then null
+        else ${devicePushTokenRegistrations.platform}::text = ${rosterEndpoints.platform}::text
+          and ${devicePushTokenRegistrations.token} = ${rosterEndpoints.token}
+      end`,
+      unregisteredRegistrationId: devicePushTokenUnregistrations.registrationId,
+      unregisteredDeviceEnrollmentId:
+        devicePushTokenUnregistrations.deviceEnrollmentId,
     })
     .from(rosterEndpoints)
+    .leftJoin(
+      devicePushTokenRegistrations,
+      eq(devicePushTokenRegistrations.id, rosterEndpoints.id),
+    )
+    .leftJoin(
+      devicePushTokenUnregistrations,
+      and(
+        eq(
+          devicePushTokenUnregistrations.registrationId,
+          devicePushTokenRegistrations.id,
+        ),
+        eq(
+          devicePushTokenUnregistrations.deviceEnrollmentId,
+          devicePushTokenRegistrations.deviceEnrollmentId,
+        ),
+      ),
+    )
     .where(
       and(
         eq(rosterEndpoints.rosterSnapshotId, query.rosterSnapshotId),
@@ -380,12 +506,32 @@ async function loadDrizzlePushEndpointPolicy(
       desc(endpointStatusRecords.sequence),
     );
   const effectiveStatuses = new Map<string, EndpointStatus>();
-  endpointRows.forEach((endpoint) =>
+  endpointRows.forEach((endpoint) => {
+    const hasRegistration = endpoint.registrationId !== null;
+    const hasUnregistration =
+      endpoint.unregisteredRegistrationId !== null ||
+      endpoint.unregisteredDeviceEnrollmentId !== null;
+    if (
+      (query.rosterPopulation === 'staff' && !hasRegistration) ||
+      (hasRegistration && endpoint.registrationMatchesEndpoint !== true) ||
+      (!hasRegistration &&
+        (endpoint.registrationDeviceEnrollmentId !== null ||
+          endpoint.registrationMatchesEndpoint !== null ||
+          hasUnregistration)) ||
+      (hasUnregistration &&
+        (endpoint.unregisteredRegistrationId !== endpoint.registrationId ||
+          endpoint.unregisteredDeviceEnrollmentId !==
+            endpoint.registrationDeviceEnrollmentId))
+    ) {
+      throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+    }
     effectiveStatuses.set(
       pushCandidateKey(endpoint),
-      EndpointStatusSchema.parse(endpoint.status),
-    ),
-  );
+      hasUnregistration
+        ? 'disabled'
+        : EndpointStatusSchema.parse(endpoint.status),
+    );
+  });
   statusRows.forEach((status) => {
     if (
       status.status !== 'invalid' ||
@@ -424,6 +570,78 @@ export function createDrizzlePushEndpointPolicyStore(
   return Object.freeze({
     loadEndpointPolicy: (query: PushEndpointPolicyQuery) =>
       loadDrizzlePushEndpointPolicy(deviceQueryDatabase(database), query),
+  });
+}
+
+async function loadDrizzlePushEndpointSendEligibility(
+  database: DeviceQueryDatabase,
+  input: PushEndpointSendEligibilityInput,
+): Promise<PushEndpointSendEligibilityEvidence | null> {
+  const rows = await database
+    .select({
+      rosterSnapshotId: rosterEndpoints.rosterSnapshotId,
+      rosterPopulation: rosterEndpoints.population,
+      recipientId: rosterEndpoints.recipientId,
+      endpointId: rosterEndpoints.id,
+      endpointStatus: rosterEndpoints.status,
+      platform: rosterEndpoints.platform,
+      token: rosterEndpoints.token,
+    })
+    .from(rosterEndpoints)
+    .where(
+      and(
+        eq(rosterEndpoints.rosterSnapshotId, input.rosterSnapshotId),
+        eq(rosterEndpoints.population, input.rosterPopulation),
+        eq(rosterEndpoints.recipientId, input.recipientId),
+        eq(rosterEndpoints.id, input.endpointId),
+        eq(rosterEndpoints.channel, 'push'),
+      ),
+    );
+  if (rows.length === 0) return null;
+  if (rows.length !== 1) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const row = rows[0]!;
+  if (
+    (row.platform !== 'ios' && row.platform !== 'android') ||
+    typeof row.token !== 'string'
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const policy = await loadDrizzlePushEndpointPolicy(database, {
+    rosterSnapshotId: input.rosterSnapshotId,
+    rosterPopulation: input.rosterPopulation,
+    candidates: [
+      { recipientId: input.recipientId, endpointId: input.endpointId },
+    ],
+  });
+  if (policy.length !== 1) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  return Object.freeze({
+    rosterSnapshotId: row.rosterSnapshotId,
+    rosterPopulation: row.rosterPopulation,
+    recipientId: row.recipientId,
+    endpointId: row.endpointId,
+    platform: row.platform,
+    tokenDigest: createHash('sha256').update(row.token, 'utf8').digest('hex'),
+    endpointStatus: EndpointStatusSchema.parse(row.endpointStatus),
+    effectiveStatus: policy[0]!.status,
+  });
+}
+
+/** Production send-time eligibility store backed by current database truth. */
+export function createDrizzlePushEndpointSendEligibilityStore(
+  database: Database,
+): PushEndpointSendEligibilityStore {
+  return Object.freeze({
+    loadPushEndpointSendEligibility: (
+      input: PushEndpointSendEligibilityInput,
+    ) =>
+      loadDrizzlePushEndpointSendEligibility(
+        deviceQueryDatabase(database),
+        input,
+      ),
   });
 }
 
@@ -1773,6 +1991,7 @@ export interface DeviceCapabilityRuntime {
     input: unknown,
     invocation: TrustedCapabilityInvocation,
   ): Promise<CapabilityOutput<Id>>;
+  checkPushEndpointSendEligibility(input: unknown): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -1781,10 +2000,15 @@ export function createDeviceCapabilityRuntime(
   connection: DatabaseConnection,
 ): DeviceCapabilityRuntime {
   const store = createDrizzleDeviceCapabilityStore(connection.db);
+  const eligibilityStore = createDrizzlePushEndpointSendEligibilityStore(
+    connection.db,
+  );
   return {
     store,
     execute: (capabilityId, input, invocation) =>
       executeDeviceCapability(capabilityId, input, invocation, store),
+    checkPushEndpointSendEligibility: (input) =>
+      checkPushEndpointSendEligibility(input, eligibilityStore),
     close: () => connection.close(),
   };
 }
