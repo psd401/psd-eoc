@@ -104,6 +104,7 @@ export interface MobileRuntimePaths {
 
 export interface OwnedManifest {
   readonly path: string;
+  readonly guardPath: string;
   readonly device: number;
   readonly inode: number;
 }
@@ -335,7 +336,11 @@ async function requireSafeManifestPath(value: string): Promise<string> {
   return path;
 }
 
-/** Atomically publishes one previously absent, mode-0600 ready manifest. */
+/**
+ * Atomically publishes one previously absent, mode-0600 ready manifest.
+ * The retained staging hard link keeps its inode allocated until cleanup so
+ * an unlink/recreate ABA cannot make an unrelated replacement look owned.
+ */
 export async function publishMobileRuntimeManifest(
   pathValue: string,
   manifestValue: unknown,
@@ -345,6 +350,7 @@ export async function publishMobileRuntimeManifest(
   const stagingPath = `${path}.publishing-${manifest.runId}`;
   const serialized = `${JSON.stringify(manifest)}\n`;
   let linked = false;
+  let retainGuard = false;
   await writeFile(stagingPath, serialized, {
     encoding: 'utf8',
     flag: 'wx',
@@ -367,8 +373,10 @@ export async function publishMobileRuntimeManifest(
     ) {
       throw new Error('The published mobile runtime manifest is invalid.');
     }
+    retainGuard = true;
     return Object.freeze({
       path,
+      guardPath: stagingPath,
       device: metadata.dev,
       inode: metadata.ino,
     });
@@ -387,19 +395,36 @@ export async function publishMobileRuntimeManifest(
     }
     throw error;
   } finally {
-    await unlink(stagingPath).catch(() => undefined);
+    if (!retainGuard) {
+      await unlink(stagingPath).catch(() => undefined);
+    }
   }
 }
 
-/** Removes only the exact file identity returned by atomic publication. */
+/** Removes only the exact guarded file identity returned by publication. */
 export async function removeOwnedMobileRuntimeManifest(
   owned: OwnedManifest,
 ): Promise<void> {
+  const guardMetadata = await lstat(owned.guardPath).catch(() => null);
+  if (
+    guardMetadata === null ||
+    !guardMetadata.isFile() ||
+    guardMetadata.isSymbolicLink() ||
+    guardMetadata.dev !== owned.device ||
+    guardMetadata.ino !== owned.inode
+  ) {
+    throw new Error(
+      'Refusing to remove a mobile runtime manifest whose ownership guard changed.',
+    );
+  }
   let metadata;
   try {
     metadata = await lstat(owned.path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      await unlink(owned.guardPath);
+      return;
+    }
     throw error;
   }
   if (
@@ -408,11 +433,13 @@ export async function removeOwnedMobileRuntimeManifest(
     metadata.dev !== owned.device ||
     metadata.ino !== owned.inode
   ) {
+    await unlink(owned.guardPath);
     throw new Error(
       'Refusing to remove a mobile runtime manifest whose identity changed.',
     );
   }
   await unlink(owned.path);
+  await unlink(owned.guardPath);
 }
 
 /** Runs every cleanup task even when an earlier task fails. */

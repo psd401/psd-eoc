@@ -202,12 +202,16 @@ describe('issue #32 mobile runtime manifest', () => {
     const owned = await publishMobileRuntimeManifest(path, manifest());
     try {
       const metadata = await lstat(path);
+      const guardMetadata = await lstat(owned.guardPath);
       expect(metadata.mode & 0o777).toBe(0o600);
+      expect(guardMetadata.dev).toBe(metadata.dev);
+      expect(guardMetadata.ino).toBe(metadata.ino);
       expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(manifest());
     } finally {
       await removeOwnedMobileRuntimeManifest(owned);
     }
     expect(await lstat(path).catch(() => null)).toBeNull();
+    expect(await lstat(owned.guardPath).catch(() => null)).toBeNull();
   });
 
   test('never adopts or removes a pre-existing manifest', async () => {
@@ -241,8 +245,10 @@ describe('issue #32 mobile runtime manifest', () => {
         'identity changed',
       );
       expect(await readFile(path, 'utf8')).toBe('replacement-owner\n');
+      expect(await lstat(owned.guardPath).catch(() => null)).toBeNull();
     } finally {
-      await unlink(path);
+      await rm(path, { force: true });
+      await unlink(owned.guardPath).catch(() => undefined);
     }
   });
 });
