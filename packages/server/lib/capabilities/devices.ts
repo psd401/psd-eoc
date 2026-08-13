@@ -1587,7 +1587,6 @@ async function recordEndpointStatusWithDatabase(
         eq(rosterEndpoints.id, input.endpointId),
       ),
     )
-    .for('update')
     .limit(1);
   if (endpoint === undefined) {
     throw deviceNotFound('The snapshotted endpoint was not found.');

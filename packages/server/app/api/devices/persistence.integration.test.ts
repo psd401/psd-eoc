@@ -287,6 +287,13 @@ function databaseConnection(): PostgresDatabaseConnection {
   return connection;
 }
 
+function disposableDatabaseContext(): DisposableDatabaseContext {
+  if (disposableContext === undefined) {
+    throw new Error('The disposable device database context is unavailable.');
+  }
+  return disposableContext;
+}
+
 function humanInvocation(
   label: string,
   sessionId = fixture.sessionId,
@@ -1293,6 +1300,41 @@ describeWithDatabase('device push-token persistence', () => {
       active.id,
       'mock-expo-push',
     );
+    const applicationRoleConnection = openPostgresConnection(
+      disposableDatabaseContext().databaseUrl,
+      1,
+    );
+    await executeOperationWithCleanup({
+      operation: async () => {
+        await applicationRoleConnection.db.execute(sql`set role psd_eoc_app`);
+        await expect(
+          applicationRoleConnection.db.transaction(async (transaction) => {
+            const applicationRoleStore =
+              createDrizzleDeviceCapabilityStore(transaction);
+            return executeDeviceCapability(
+              'record-endpoint-status',
+              invalidationInput,
+              workerInvocation('application-role-dnr'),
+              applicationRoleStore,
+            );
+          }),
+        ).resolves.toMatchObject({
+          endpointId: active.id,
+          status: 'invalid',
+          reasonCode: EXPO_DEVICE_NOT_REGISTERED_REASON,
+        });
+      },
+      cleanup: () => applicationRoleConnection.close(),
+      failureMessage:
+        'Application-role invalidation and connection cleanup both failed.',
+    });
+    expect(
+      await database
+        .select()
+        .from(devicePushTokenUnregistrations)
+        .where(eq(devicePushTokenUnregistrations.registrationId, active.id)),
+    ).toHaveLength(1);
+
     const sameDeviceRace = await Promise.allSettled([
       executeDeviceCapability(
         'register-push-token',
