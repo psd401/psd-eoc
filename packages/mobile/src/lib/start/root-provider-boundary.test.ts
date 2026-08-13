@@ -234,6 +234,26 @@ describe('root layout provider placement', () => {
     }
   });
 
+  test('keeps unresolved refresh errors truthful and exposes refreshed events read-only', async () => {
+    for (const path of OUTCOME_CHECK_SCREEN_PATHS) {
+      const source = await Bun.file(path).text();
+
+      expect(source).toContain('unresolvedOutcomeRefreshError()');
+      expect(source).toContain(
+        'This refresh did not determine the earlier request outcome.',
+      );
+      expect(source).toContain('activeEvents:');
+      expect(source).toContain('outcomeActiveEvents.map((choice) => ({');
+      expect(source).toContain('setOutcomeActiveEvents(nextData.activeEvents)');
+      expect(source).toContain('setOutcomeActiveEvents(null)');
+      expect(source).toContain(
+        "return 'PSD EOC could not load fresh active events.",
+      );
+      expect(source).not.toContain('unresolvedOutcomeRefreshError(error)');
+      expect(source).not.toContain('return `${detail} This refresh');
+    }
+  });
+
   test('keeps pending joins and result navigation bound to the exact event ID', async () => {
     const screens = [
       { path: OUTCOME_CHECK_SCREEN_PATHS[0], navigation: 'router.push' },

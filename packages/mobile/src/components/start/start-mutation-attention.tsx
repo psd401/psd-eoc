@@ -12,6 +12,14 @@ import { getEventTheme } from '../../theme/event-theme';
 import { ClassificationBanner } from '../classification-banner';
 import { Call911Affordance } from './call-911-affordance';
 
+export interface StartMutationActiveEventSummary {
+  readonly eventId: string;
+  readonly eventTypeName: string;
+  readonly facilityName: string;
+  readonly mode: TemplateMode;
+  readonly startedLabel: string;
+}
+
 export type StartMutationOperation = 'activate' | 'join';
 export type StartMutationAttentionStatus = 'failed' | 'pending' | 'unresolved';
 
@@ -44,6 +52,7 @@ export interface FailedStartMutationAttentionProps
 export interface UnresolvedStartMutationAttentionProps
   extends StartMutationAttentionIdentity {
   readonly status: 'unresolved';
+  readonly activeEvents?: readonly StartMutationActiveEventSummary[];
   readonly outcomeMessage: string;
   readonly checking?: boolean;
   readonly online?: boolean;
@@ -113,7 +122,7 @@ export function startMutationAttentionCopy({
     status: `PSD EOC could not determine the server outcome of your ${operationName} request for ${classification}: ${eventTypeName}. Nothing will retry automatically.`,
     consequence:
       operation === 'activate'
-        ? 'Load fresh active events to check for exact activation evidence. Absence is not proof of failure and will not clear this outcome. Checking does not retry the start request.'
+        ? 'Load fresh active events for situational awareness. The list cannot prove which request created an event or clear this outcome. Checking does not retry the start request.'
         : 'Load fresh active events for situational awareness. The list cannot prove join membership or clear this outcome. Checking does not retry the join request.',
   });
 }
@@ -207,6 +216,74 @@ export function StartMutationAttentionContent(
         </Text>
       </View>
 
+      {unresolved && props.activeEvents !== undefined ? (
+        <View style={styles.activeEventSummarySection}>
+          <Text
+            accessibilityRole="header"
+            style={[styles.summaryHeading, { color: theme.colors.textPrimary }]}
+          >
+            Fresh active events
+          </Text>
+          {props.activeEvents.length === 0 ? (
+            <Text
+              style={[styles.summaryText, { color: theme.colors.textMuted }]}
+            >
+              No active events appeared in the refreshed authorized list.
+              Absence is not proof that the earlier request failed.
+            </Text>
+          ) : (
+            props.activeEvents.map((event) => {
+              const eventTheme = getEventTheme(event.mode);
+              return (
+                <View
+                  accessible
+                  accessibilityLabel={`${eventTheme.classificationWord}. ${event.eventTypeName} at ${event.facilityName}. Started ${event.startedLabel}. Event ID ${event.eventId}. Read only; this does not resolve the earlier request.`}
+                  accessibilityRole="summary"
+                  key={event.eventId}
+                  style={[
+                    styles.activeEventSummary,
+                    {
+                      backgroundColor: eventTheme.colors.surface,
+                      borderColor: eventTheme.colors.border,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.summaryClassification,
+                      { color: eventTheme.colors.textPrimary },
+                    ]}
+                  >
+                    {eventTheme.classificationWord}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.summaryHeading,
+                      { color: eventTheme.colors.textPrimary },
+                    ]}
+                  >
+                    {event.eventTypeName}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.summaryText,
+                      { color: eventTheme.colors.textMuted },
+                    ]}
+                  >
+                    {event.facilityName} · Started {event.startedLabel} · Event
+                    ID {event.eventId}
+                  </Text>
+                </View>
+              );
+            })
+          )}
+          <Text style={[styles.summaryText, { color: theme.colors.textMuted }]}>
+            This read-only list cannot prove which request created an event and
+            does not clear the unresolved outcome.
+          </Text>
+        </View>
+      ) : null}
+
       {unresolved ? (
         <View style={styles.actions}>
           {props.checkError === undefined ||
@@ -258,7 +335,7 @@ export function StartMutationAttentionContent(
           <Pressable
             accessibilityHint={
               operation === 'activate'
-                ? 'Loads fresh active events and checks for exact activation evidence. Absence is not proof of failure and does not clear this outcome. It never retries the start request.'
+                ? 'Loads fresh active events for situational awareness. The list cannot prove which request created an event or clear this outcome, and it never retries the start request.'
                 : 'Loads fresh active events for situational awareness. The list cannot prove join membership or clear this outcome, and it never retries the join request.'
             }
             accessibilityLabel={
@@ -494,7 +571,7 @@ export function OtherSessionStartMutationAttention({
         </Text>
         <Text style={[styles.consequence, styles.neutralHeading]}>
           {unresolved
-            ? 'New start and join actions are blocked. Sign back into the session that made the request to check exact activation evidence or contact district technology support.'
+            ? 'New start and join actions are blocked. Sign back into the session that made the request to review fresh active events or contact district technology support.'
             : 'Do not make a new start or join decision while it resolves. Sign back into the session that made the request to see its classified event details.'}
         </Text>
         <Text style={[styles.truth, styles.neutralText]}>
@@ -508,6 +585,15 @@ export function OtherSessionStartMutationAttention({
 }
 
 const styles = StyleSheet.create({
+  activeEventSummary: {
+    borderRadius: 16,
+    borderWidth: 2,
+    gap: 4,
+    padding: 14,
+  },
+  activeEventSummarySection: {
+    gap: 10,
+  },
   actions: {
     gap: 14,
     marginTop: 'auto',
@@ -601,6 +687,21 @@ const styles = StyleSheet.create({
   status: {
     fontSize: 18,
     lineHeight: 26,
+  },
+  summaryClassification: {
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+    lineHeight: 18,
+  },
+  summaryHeading: {
+    fontSize: 18,
+    fontWeight: '900',
+    lineHeight: 24,
+  },
+  summaryText: {
+    fontSize: 15,
+    lineHeight: 22,
   },
   statusCard: {
     borderRadius: 18,

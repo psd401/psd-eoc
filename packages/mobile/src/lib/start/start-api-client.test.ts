@@ -9,6 +9,7 @@ import {
   JoinEventResultSchema,
   StartEventResultSchema,
   type ActivationPreview,
+  type ApiErrorCode,
   type CreateActivationPreviewInput,
   type Event,
   type EventTypeVersion,
@@ -76,13 +77,21 @@ function parseResponse<Output>(
   return input.schema.parse(payload);
 }
 
-function syntheticApiError(status: number): AuthenticatedApiError {
+function syntheticApiError(
+  status: number,
+  input: Readonly<{
+    code?: ApiErrorCode;
+    message?: string;
+    retryable?: boolean;
+  }> = {},
+): AuthenticatedApiError {
   return new AuthenticatedApiError(
     ApiErrorSchema.parse({
-      code: 'INTERNAL_ERROR',
-      message: 'Synthetic server acknowledgement was interrupted.',
+      code: input.code ?? 'INTERNAL_ERROR',
+      message:
+        input.message ?? 'Synthetic server acknowledgement was interrupted.',
       requestId: IDS.request,
-      retryable: true,
+      retryable: input.retryable ?? true,
       fieldErrors: [],
     }),
     status,
@@ -782,6 +791,149 @@ describe('mobile start API client', () => {
         name: 'StartClientError',
         retryable: false,
         outcomeUnknown: true,
+      });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    }
+  });
+
+  test('keeps retryable idempotency-in-progress 409 mutations outcome-unknown', async () => {
+    const preview = previewFixture(selectionFixture());
+    const selectedEvent = activeEventFixture(selectionFixture());
+    const mutations = [
+      (request: StartAuthenticatedRequest) =>
+        activate(request, preview, IDEMPOTENCY_KEY),
+      (request: StartAuthenticatedRequest) =>
+        join(request, selectedEvent, IDEMPOTENCY_KEY),
+    ];
+
+    for (const mutate of mutations) {
+      let calls = 0;
+      const request: StartAuthenticatedRequest = async () => {
+        calls += 1;
+        throw syntheticApiError(409, {
+          code: 'CONFLICT',
+          message: 'The original request is still in progress.',
+          retryable: true,
+        });
+      };
+
+      await expect(mutate(request)).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+        code: 'CONFLICT',
+      });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    }
+  });
+
+  test('keeps malformed mutation 4xx responses outcome-unknown', async () => {
+    const preview = previewFixture(selectionFixture());
+
+    for (const status of [400, 408, 409, 429]) {
+      let calls = 0;
+      const request: StartAuthenticatedRequest = async () => {
+        calls += 1;
+        throw new AuthenticatedRequestFailure(
+          'invalid-response',
+          'Synthetic proxy response did not match the API contract.',
+          status,
+        );
+      };
+
+      await expect(
+        activate(request, preview, IDEMPOTENCY_KEY),
+      ).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+      });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    }
+  });
+
+  test('keeps unsupported or mismatched non-retryable API rejections outcome-unknown', async () => {
+    const preview = previewFixture(selectionFixture());
+    const ambiguousResponses: readonly Readonly<{
+      code: ApiErrorCode;
+      status: number;
+    }>[] = [
+      { status: 408, code: 'INTERNAL_ERROR' },
+      { status: 425, code: 'CONFLICT' },
+      { status: 499, code: 'VALIDATION_ERROR' },
+      { status: 400, code: 'INTERNAL_ERROR' },
+      { status: 408, code: 'VALIDATION_ERROR' },
+    ];
+
+    for (const response of ambiguousResponses) {
+      let calls = 0;
+      const request: StartAuthenticatedRequest = async () => {
+        calls += 1;
+        throw syntheticApiError(response.status, {
+          code: response.code,
+          retryable: false,
+        });
+      };
+
+      await expect(
+        activate(request, preview, IDEMPOTENCY_KEY),
+      ).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: true,
+        code: response.code,
+      });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+    }
+  });
+
+  test('keeps an explicit terminal application rejection known', async () => {
+    const selectedEvent = activeEventFixture(selectionFixture());
+    let calls = 0;
+    const request: StartAuthenticatedRequest = async () => {
+      calls += 1;
+      throw syntheticApiError(409, {
+        code: 'CONFLICT',
+        message: 'The selected event is no longer active.',
+        retryable: false,
+      });
+    };
+
+    await expect(
+      join(request, selectedEvent, IDEMPOTENCY_KEY),
+    ).rejects.toMatchObject({
+      name: 'StartClientError',
+      retryable: false,
+      outcomeUnknown: false,
+      code: 'CONFLICT',
+    });
+    await Promise.resolve();
+    expect(calls).toBe(1);
+  });
+
+  test('keeps failures proven to occur before send known', async () => {
+    const preview = previewFixture(selectionFixture());
+
+    for (const kind of ['configuration', 'invalid-request'] as const) {
+      let calls = 0;
+      const request: StartAuthenticatedRequest = async () => {
+        calls += 1;
+        throw new AuthenticatedRequestFailure(
+          kind,
+          'Synthetic request was blocked before send.',
+        );
+      };
+
+      await expect(
+        activate(request, preview, IDEMPOTENCY_KEY),
+      ).rejects.toMatchObject({
+        name: 'StartClientError',
+        retryable: false,
+        outcomeUnknown: false,
       });
       await Promise.resolve();
       expect(calls).toBe(1);

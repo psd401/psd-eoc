@@ -1,6 +1,5 @@
 import type {
   ActivationPreview,
-  Event,
   JoinEventResult,
   StartEventResult,
 } from '@psd-eoc/contracts';
@@ -49,9 +48,6 @@ export interface StartMutationContextValue {
   ) => StartMutationAdmission;
   readonly submitJoin: (input: SubmitStartJoinInput) => StartMutationAdmission;
   readonly acknowledge: () => boolean;
-  readonly resolveActivationFromFreshEvents: (
-    events: readonly Event[],
-  ) => boolean;
   readonly claimSuccessFeedback: () => StartMutationCompletion | null;
 }
 
@@ -292,15 +288,6 @@ export class StartMutationProviderController {
     return owner === null ? false : this.coordinator.acknowledge(owner);
   };
 
-  public resolveActivationFromFreshEvents = (
-    events: readonly Event[],
-  ): boolean => {
-    const owner = this.exactLiveOwner();
-    return owner === null
-      ? false
-      : this.coordinator.resolveActivationFromFreshEvents(owner, events);
-  };
-
   public claimSuccessFeedback = (): StartMutationCompletion | null => {
     const owner = this.exactLiveOwner();
     return owner === null ? null : this.coordinator.claimSuccessFeedback(owner);
@@ -360,9 +347,6 @@ export function StartMutationProvider({ children }: PropsWithChildren) {
           : controller.submitJoin(input),
       acknowledge: () =>
         snapshot.phase !== 'checking-recovery' && controller.acknowledge(),
-      resolveActivationFromFreshEvents: (events) =>
-        snapshot.phase !== 'checking-recovery' &&
-        controller.resolveActivationFromFreshEvents(events),
       claimSuccessFeedback: () =>
         snapshot.phase === 'checking-recovery'
           ? null

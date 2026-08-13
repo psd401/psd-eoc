@@ -102,6 +102,34 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+function isExplicitTerminalApiRejection(error: AuthenticatedApiError): boolean {
+  if (error.apiError.retryable) {
+    return false;
+  }
+
+  switch (error.status) {
+    case 400:
+      return error.apiError.code === 'VALIDATION_ERROR';
+    case 401:
+      return error.apiError.code === 'UNAUTHENTICATED';
+    case 403:
+      return error.apiError.code === 'FORBIDDEN';
+    case 404:
+      return error.apiError.code === 'NOT_FOUND';
+    case 409:
+      return (
+        error.apiError.code === 'CONFLICT' ||
+        error.apiError.code === 'IDEMPOTENCY_CONFLICT'
+      );
+    default:
+      return false;
+  }
+}
+
+function isKnownPreSendFailure(error: AuthenticatedRequestFailure): boolean {
+  return error.kind === 'configuration' || error.kind === 'invalid-request';
+}
+
 async function executeJsonRequest<Output>(
   request: StartAuthenticatedRequest,
   input: AuthenticatedRequestOptions<Output>,
@@ -114,7 +142,8 @@ async function executeJsonRequest<Output>(
       throw error;
     }
     if (error instanceof AuthenticatedApiError) {
-      const outcomeUnknown = kind === 'mutation' && error.status >= 500;
+      const outcomeUnknown =
+        kind === 'mutation' && !isExplicitTerminalApiRejection(error);
       throw new StartClientError(
         error.apiError.message,
         !outcomeUnknown && error.apiError.retryable,
@@ -124,11 +153,8 @@ async function executeJsonRequest<Output>(
       );
     }
     if (error instanceof AuthenticatedRequestFailure) {
-      const knownClientFailure =
-        error.kind === 'configuration' ||
-        error.kind === 'invalid-request' ||
-        (error.status !== null && error.status >= 400 && error.status < 500);
-      const outcomeUnknown = kind === 'mutation' && !knownClientFailure;
+      const outcomeUnknown =
+        kind === 'mutation' && !isKnownPreSendFailure(error);
       throw new StartClientError(
         outcomeUnknown
           ? 'PSD EOC did not return a trustworthy acknowledgement. Treat the outcome as unresolved; no automatic retry will occur.'

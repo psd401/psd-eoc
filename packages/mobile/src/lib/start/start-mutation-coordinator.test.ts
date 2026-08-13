@@ -1,11 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import type {
-  Event,
   JoinEventResult,
   StartEventResult,
   TemplateMode,
 } from '@psd-eoc/contracts';
-import { EventSchema, EventTypeVersionRefSchema } from '@psd-eoc/contracts';
+import { EventTypeVersionRefSchema } from '@psd-eoc/contracts';
 
 import { OfflineMutationDeniedError } from '../auth/auth-errors';
 import { StartClientError } from './start-api-client';
@@ -35,8 +34,6 @@ const ACTIVATION_PREVIEW_ID = '00000000-0000-4000-8000-000000000301';
 const FACILITY_ID = '00000000-0000-4000-8000-000000000302';
 const EVENT_TYPE_VERSION_ID = '00000000-0000-4000-8000-000000000303';
 const ROSTER_SNAPSHOT_ID = '00000000-0000-4000-8000-000000000304';
-const MATCHING_EVENT_ID = '00000000-0000-4000-8000-000000000305';
-const ACTIVATION_REQUEST_ID = '00000000-0000-4000-8000-000000000306';
 const ACTIVATED_EVENT_ID = '00000000-0000-4000-8000-000000000101';
 const JOIN_EVENT_ID = '00000000-0000-4000-8000-000000000201';
 const ACTIVATION_DIGEST = 'a'.repeat(64);
@@ -53,42 +50,6 @@ const ACTIVATION_EVIDENCE: StartMutationActivationEvidence = Object.freeze({
   rosterPopulation: 'synthetic',
   consequenceDigest: ACTIVATION_DIGEST,
 });
-
-function matchingActivationEvent(overrides: Partial<Event> = {}): Event {
-  return EventSchema.parse({
-    id: MATCHING_EVENT_ID,
-    facilityId: FACILITY_ID,
-    kind: 'drill',
-    templateMode: 'drill',
-    eventTypeVersion: {
-      id: EVENT_TYPE_VERSION_ID,
-      templateMode: 'drill',
-    },
-    status: 'active',
-    rosterSnapshotId: ROSTER_SNAPSHOT_ID,
-    rosterPopulation: 'synthetic',
-    createdBy: {
-      kind: 'human',
-      userId: OWNER.userId,
-      sessionId: OWNER.sessionId,
-    },
-    createdAt: '2026-08-12T12:00:00.000Z',
-    activatedAt: '2026-08-12T12:00:00.000Z',
-    allClearAt: null,
-    reactivatedAt: null,
-    closedAt: null,
-    correctionOfEventId: null,
-    correctionReason: null,
-    activationAuthorization: {
-      kind: 'synthetic-training',
-      activationPreviewId: ACTIVATION_PREVIEW_ID,
-      consequenceDigest: ACTIVATION_DIGEST,
-      requestId: ACTIVATION_REQUEST_ID,
-    },
-    ...overrides,
-  });
-}
-
 class MemoryPersistence implements StartMutationPersistence {
   public record: StartMutationRecoveryRecord | null = null;
   public readonly actions: string[] = [];
@@ -555,7 +516,7 @@ describe('StartMutationCoordinator durable recovery', () => {
     expect(calls).toBe(1);
   });
 
-  test('absence and near matches never clear unknown activation; exact valid evidence promotes it', async () => {
+  test('retains the exact activation request fence after an uncertain transport outcome', async () => {
     const persistence = new MemoryPersistence();
     const coordinator = new StartMutationCoordinator(persistence);
     online(coordinator);
@@ -566,68 +527,11 @@ describe('StartMutationCoordinator durable recovery', () => {
     );
     if (admission.accepted) await admission.completion;
     expect(coordinator.getSnapshot().phase).toBe('unresolved');
-
-    expect(
-      coordinator.resolveActivationFromFreshEvents(OTHER_OWNER, [
-        matchingActivationEvent(),
-      ]),
-    ).toBe(false);
-    expect(coordinator.resolveActivationFromFreshEvents(OWNER, [])).toBe(false);
-    expect(
-      coordinator.resolveActivationFromFreshEvents(OWNER, [
-        matchingActivationEvent({
-          facilityId: '00000000-0000-4000-8000-000000000399',
-        }),
-      ]),
-    ).toBe(false);
-    expect(coordinator.getSnapshot().phase).toBe('unresolved');
-
-    expect(
-      coordinator.resolveActivationFromFreshEvents(OWNER, [
-        matchingActivationEvent(),
-      ]),
-    ).toBe(true);
-    expect(coordinator.getSnapshot()).toEqual({
-      phase: 'succeeded',
-      completion: {
-        kind: 'activated',
-        eventId: MATCHING_EVENT_ID,
-        eventTypeName: 'Practice Lockdown',
-        mode: 'drill',
-      },
-    });
-    expect(persistence.record).toMatchObject({
-      phase: 'succeeded',
-      feedbackClaimed: false,
-    });
-  });
-
-  test('never treats an active-event query as proof of an unknown join', async () => {
-    const persistence = new MemoryPersistence();
-    const coordinator = new StartMutationCoordinator(persistence);
-    online(coordinator);
-    const admission = coordinator.submit(
-      joinSubmission(() =>
-        Promise.reject(new Error('private uncertain transport state')),
-      ),
-    );
-    if (admission.accepted) await admission.completion;
-
-    expect(coordinator.getSnapshot()).toMatchObject({
-      phase: 'unresolved',
-      operation: 'join',
-      error: { outcomeUnknown: true },
-    });
-    expect(
-      coordinator.resolveActivationFromFreshEvents(OWNER, [
-        matchingActivationEvent(),
-      ]),
-    ).toBe(false);
-    expect(coordinator.getSnapshot().phase).toBe('unresolved');
     expect(persistence.record).toMatchObject({
       phase: 'unresolved',
-      operation: 'join',
-      activationEvidence: null,
+      operation: 'activate',
+      idempotencyKey: ACTIVATION_KEY,
+      activationEvidence: ACTIVATION_EVIDENCE,
     });
   });
 
@@ -820,9 +724,6 @@ describe('StartMutationCoordinator terminal handling', () => {
       error: { outcomeUnknown: true },
     });
     expect(wrongOperationCoordinator.acknowledge(OWNER)).toBe(false);
-    expect(
-      wrongOperationCoordinator.resolveActivationFromFreshEvents(OWNER, []),
-    ).toBe(false);
     expect(wrongOperationCoordinator.getSnapshot().phase).toBe('unresolved');
 
     const wrongModeCoordinator = new StartMutationCoordinator();
