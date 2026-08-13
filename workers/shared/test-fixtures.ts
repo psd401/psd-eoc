@@ -131,6 +131,7 @@ export function deliveryTestBatch(): DispatchBatch {
     id: IDS.batch,
     intentId: IDS.intent,
     eventId: IDS.event,
+    facilityId: IDS.facility,
     eventKind: 'drill',
     templateMode: 'drill',
     purpose: 'activation',
