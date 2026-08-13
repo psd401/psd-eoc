@@ -138,7 +138,11 @@ judgment is insufficient.
    and web/mobile/provider boundaries are ready.
 2. Obtain a **fresh explicit product-owner authorization reference** for the
    exact environment and re-enable consequence. Record approver, UTC time,
-   evidence package, old epoch, and expected new epoch.
+   evidence package, old epoch, and expected new epoch. The application rejects
+   a reference already retained on any prior enable entry, including a
+   case-only variant. An exact retry with the original idempotency key may only
+   replay that original immutable result; use a new approval and key for a new
+   re-enable decision.
 3. The authenticated human district administrator opens `/emergency` in
    a fresh CSRF-protected session. Confirm the disabled revision and complete
    consequence preview match the approval.

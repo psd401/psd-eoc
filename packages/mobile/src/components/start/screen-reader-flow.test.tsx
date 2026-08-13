@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 
 import {
-  FanoutControlEffectiveStateSchema,
+  FanoutStatusSchema,
   HUMAN_ONLY_ACTION_IDS,
   type ActivationPreview,
 } from '@psd-eoc/contracts';
@@ -224,38 +224,8 @@ const REAL_TEST_CHANNELS = [
 describe('VoiceOver and TalkBack start-flow contract', () => {
   test('announces fail-closed fanout status without exposing an action', () => {
     const failClosedStates = [
-      FanoutControlEffectiveStateSchema.parse({
-        kind: 'current',
-        effectiveMode: 'emergency-disabled',
-        currentEpochId: null,
-        currentRecord: {
-          id: '62000000-0000-4000-8000-000000000001',
-          revision: 1,
-          previousRecordId: null,
-          mode: 'emergency-disabled',
-          enableEpochId: null,
-          reason: 'Synthetic emergency disable fixture.',
-          productOwnerApprovalReference: null,
-          changedByUserId: '62000000-0000-4000-8000-000000000002',
-          changedWithSessionId: '62000000-0000-4000-8000-000000000003',
-          changedAt: '2026-08-12T18:00:00.000Z',
-          requestId: '62000000-0000-4000-8000-000000000004',
-        },
-      }),
-      FanoutControlEffectiveStateSchema.parse({
-        kind: 'missing',
-        effectiveMode: 'emergency-disabled',
-        currentEpochId: null,
-        currentRecord: null,
-        reasonCode: 'CONTROL_STATE_MISSING',
-      }),
-      FanoutControlEffectiveStateSchema.parse({
-        kind: 'unavailable',
-        effectiveMode: 'emergency-disabled',
-        currentEpochId: null,
-        currentRecord: null,
-        reasonCode: 'CONTROL_STATE_UNREADABLE',
-      }),
+      FanoutStatusSchema.parse({ status: 'emergency-disabled' }),
+      FanoutStatusSchema.parse({ status: 'unavailable' }),
     ] as const;
 
     for (const state of failClosedStates) {
@@ -287,25 +257,7 @@ describe('VoiceOver and TalkBack start-flow contract', () => {
   });
 
   test('hides status only for an explicit current enabled epoch', () => {
-    const currentRecord = {
-      id: '62000000-0000-4000-8000-000000000011',
-      revision: 1,
-      previousRecordId: null,
-      mode: 'enabled',
-      enableEpochId: '62000000-0000-4000-8000-000000000012',
-      reason: 'Synthetic product-owner-approved enable fixture.',
-      productOwnerApprovalReference: 'synthetic-approval-reference',
-      changedByUserId: '62000000-0000-4000-8000-000000000013',
-      changedWithSessionId: '62000000-0000-4000-8000-000000000014',
-      changedAt: '2026-08-12T18:00:00.000Z',
-      requestId: '62000000-0000-4000-8000-000000000015',
-    } as const;
-    const enabled = FanoutControlEffectiveStateSchema.parse({
-      kind: 'current',
-      effectiveMode: 'enabled',
-      currentEpochId: currentRecord.enableEpochId,
-      currentRecord,
-    });
+    const enabled = FanoutStatusSchema.parse({ status: 'enabled' });
 
     expect(isFanoutActivationEnabled(enabled)).toBe(true);
     expect(FanoutControlBanner({ state: enabled })).toBeNull();

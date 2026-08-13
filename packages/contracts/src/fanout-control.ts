@@ -173,6 +173,33 @@ export type FanoutControlEffectiveState = z.infer<
   typeof FanoutControlEffectiveStateSchema
 >;
 
+/**
+ * Minimal staff-facing fanout status. Administrative rationale, approval,
+ * actor/session provenance, request identity, revision, and enablement epoch
+ * never cross this boundary.
+ */
+export const FanoutStatusSchema = z
+  .object({
+    status: z.enum(['enabled', 'emergency-disabled', 'unavailable']),
+  })
+  .strict()
+  .readonly();
+
+/** Minimal staff-facing fanout status inferred from its schema. */
+export type FanoutStatus = z.infer<typeof FanoutStatusSchema>;
+
+/** Owns the exact input of the human staff status query. */
+export const GetFanoutStatusInputSchema = z.object({}).strict().readonly();
+
+/** Human staff fanout-status query input inferred from its schema. */
+export type GetFanoutStatusInput = z.infer<typeof GetFanoutStatusInputSchema>;
+
+/** Owns the minimized output of the human staff status query. */
+export const GetFanoutStatusResultSchema = FanoutStatusSchema;
+
+/** Human staff fanout-status query result inferred from its schema. */
+export type GetFanoutStatusResult = z.infer<typeof GetFanoutStatusResultSchema>;
+
 /** Owns the exact input of the human web administration query. */
 export const GetFanoutControlInputSchema = z.object({}).strict().readonly();
 

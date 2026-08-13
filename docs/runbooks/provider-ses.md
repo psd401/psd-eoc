@@ -8,6 +8,19 @@ deployable infrastructure defines an identity and configuration set, but no
 live send/runtime is verified. The setup and read-only verification boundary
 is documented in [email-setup.md](email-setup.md).
 
+**Source-defined monitoring alarms:**
+
+- `psd-eoc-email-outbox-to-provider-p95` fires when completed email handoff p95
+  reaches 15 seconds; and
+- `psd-eoc-email-outbox-to-provider-incomplete` fires when at least one email
+  endpoint has not reached provider acceptance by the deterministic one-minute
+  cutoff.
+
+Issue #29 source landed in pull request #96, but no approved deployment,
+CloudWatch read-back, alarm-action exercise, or console deep link is recorded.
+Treat both alarms as **live-unverified**. Their source definition does not
+change the `mocked` SES integration truth or authorize provider I/O.
+
 ## Safety posture
 
 - Never send from the SES console as a workaround.

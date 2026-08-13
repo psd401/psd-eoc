@@ -41,6 +41,7 @@ import {
   FanoutAuthorizationDecisionSchema,
   FanoutControlEffectiveStateSchema,
   FanoutControlRecordSchema,
+  FanoutStatusSchema,
   GroupSourceSchema,
   HUMAN_ONLY_ACTION_IDS,
   HttpsUrlSchema,
@@ -4299,6 +4300,38 @@ describe('district fanout emergency control', () => {
     ).toBe(false);
   });
 
+  test('minimizes staff status to one honest non-provenance field', () => {
+    for (const status of [
+      'enabled',
+      'emergency-disabled',
+      'unavailable',
+    ] as const) {
+      expect(FanoutStatusSchema.parse({ status })).toEqual({ status });
+    }
+    for (const extraField of [
+      'currentRecord',
+      'currentEpochId',
+      'reasonCode',
+      'reason',
+      'productOwnerApprovalReference',
+      'changedByUserId',
+      'changedWithSessionId',
+      'requestId',
+      'changedAt',
+      'id',
+      'previousRecordId',
+      'revision',
+      'enableEpochId',
+    ] as const) {
+      expect(
+        FanoutStatusSchema.safeParse({
+          status: 'unavailable',
+          [extraField]: 'forbidden',
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   test('keeps enable epochs server-owned and requires approval only to enable', () => {
     const disableInput = {
       expectedCurrentRecordId: ids.fanoutRecord,
@@ -4413,8 +4446,14 @@ describe('district fanout emergency control', () => {
       agentGrantable: false,
     });
     expect(defineCapability('get-fanout-control').operation).toBe('query');
+    expect(defineCapability('get-fanout-status').operation).toBe('query');
     expect(defineCapability('set-fanout-control').operation).toBe('mutation');
     expect(getCapabilityInvocationPolicy('get-fanout-control')).toEqual({
+      principalKinds: ['human'],
+      sources: ['web'],
+      agentGrantable: false,
+    });
+    expect(getCapabilityInvocationPolicy('get-fanout-status')).toEqual({
       principalKinds: ['human'],
       sources: ['web', 'mobile'],
       agentGrantable: false,
@@ -4426,6 +4465,9 @@ describe('district fanout emergency control', () => {
     });
     expect(
       AgentCapabilityGrantSchema.safeParse('get-fanout-control').success,
+    ).toBe(false);
+    expect(
+      AgentCapabilityGrantSchema.safeParse('get-fanout-status').success,
     ).toBe(false);
     expect(
       AgentCapabilityGrantSchema.safeParse('set-fanout-control').success,

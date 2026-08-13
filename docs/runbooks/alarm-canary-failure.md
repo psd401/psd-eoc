@@ -1,15 +1,21 @@
 # Alarm runbook: shallow canary failure
 
-**Alarm ID / CloudWatch deep link: BLOCKED BY #29.** The one-minute canary and
-alarm are not deployed.
+**Source-defined CloudWatch alarm name:**
+`psd-eoc-one-minute-canary-failure`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat the alarm as **live-unverified** and the
+deep link as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-Issue #29 plans a synthetic health transaction against a synthetic roster with
-no provider sends. The canary must be unmistakably test-only and excluded from
-real dashboards and records. #29 is currently blocked because that exclusion
-cannot be proved with its original model/scope. Do not enable a canary that
-pollutes retained drill records or can route to a provider.
+The source-defined one-minute canary runs the canonical lifecycle only as
+`TEST` / drill / synthetic / mocked inside a server-controlled transaction that
+is always rolled back. Its role has no database, queue, or provider-send
+permission. The alarm fires when canary success is below `1` for 2 consecutive
+minutes; missing data is breaching. Source tests and synthesized IAM are not
+proof that the deployed canary preserves those boundaries.
 
 ## Safety posture
 
@@ -23,18 +29,19 @@ pollutes retained drill records or can route to a provider.
 
 ## Respond
 
-1. Confirm account `338414773271`, region `us-west-2`, canary identity,
-   scheduled time, last success, and alarm transition. Final identifiers are
-   **BLOCKED BY #29**.
+1. Confirm account `338414773271`, region `us-west-2`, exact alarm name,
+   source-defined function name `psd-eoc-one-minute-canary`, scheduled time,
+   last success, and alarm transition against deployed read-back evidence.
 2. Check App Runner `/api/health` read-only and compare App Runner, Aurora, SQS,
-   and Secrets reachability evidence planned by #29. The health route itself
+   and Secrets reachability evidence. The health route itself
    must remain side-effect-free.
 3. Review canary logs for a bounded stage/reason code. Verify the transaction
    was classified `test`, used a synthetic roster, selected only mocked and
    provably unroutable endpoints, and made zero provider calls.
-4. Verify any retained canary evidence is excluded exactly as #29 specifies.
-   Absence from a dashboard is not enough; query/projection tests and deployed
-   evidence must agree.
+4. Verify the outer transaction rolled back and no event, journal, outbox,
+   queue, provider, or real-dashboard record persisted. Absence from one
+   dashboard is not enough; database, logs, metrics, and deployed permissions
+   must agree.
 5. If user paths and dependencies are healthy and only scheduler/monitoring
    failed, classify **SEV-3**. If the canary exposes a real dependency outage,
    follow that alarm runbook at its higher severity.
@@ -44,7 +51,7 @@ pollutes retained drill records or can route to a provider.
 Fix or roll back the proven monitoring/runtime defect. Do not relax synthetic
 guards, change classification, add a live provider credential, or use real
 recipients to make the canary pass. Confirm the next scheduled run succeeds,
-the final #29 alarm returns to normal within its required window, no provider
-call occurred, and excluded test evidence remains excluded. Record both the
+the exact alarm returns to normal for its 2-minute evaluation window, no
+provider call occurred, and no test transaction persisted. Record both the
 canary result and the independent user-path evidence; neither substitutes for
 the other.

@@ -1,14 +1,22 @@
 # Alarm runbook: stale staff roster
 
-**Alarm ID / dashboard deep link: BLOCKED BY #29.** The roster-sync failure-age
-alarm is not deployed.
+**Source-defined CloudWatch alarm names:**
+
+- `psd-eoc-roster-sync-failure-age`; and
+- `psd-eoc-roster-sync-success-age`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat both alarms as **live-unverified** and
+their deep links as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-The planned alarm reports that a complete Google Groups staff roster snapshot
-has not been captured within the final #29 freshness threshold, or recent sync
-attempts are failing. Activation resolves recipients from an immutable,
-complete snapshot; it must never make a live Google call in the critical path.
+The source defines two staff-only conditions: the latest sync remains failed or
+partial-rejected for at least 15 minutes, or no complete sync has been retained
+within 25 hours. Both treat missing metric data as breaching. Activation
+resolves recipients from an immutable, complete snapshot; it must never make a
+live Google call in the critical path.
 
 ## Safety posture
 
@@ -43,7 +51,7 @@ complete snapshot; it must never make a live Google call in the critical path.
 
 Confirm a new immutable complete snapshot exists, its capture time and source
 configuration are current, previous failed/partial evidence remains retained,
-and the stale report returns to the final #29 normal state. Compare only
-aggregate counts and approved source IDs; no membership list belongs in the
-operations record. Never start a real event or send a notification to test the
-roster.
+and both source-defined freshness conditions return to normal with current
+metric timestamps. Compare only aggregate counts and approved source IDs; no
+membership list belongs in the operations record. Never start a real event or
+send a notification to test the roster.

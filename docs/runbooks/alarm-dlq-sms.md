@@ -1,7 +1,12 @@
 # Alarm runbook: SMS DLQ
 
-**Alarm ID / CloudWatch deep link: BLOCKED BY #29.** The planned alarm targets
-`psd-eoc-sms-dlq`, paired only with source queue `psd-eoc-sms`.
+**Source-defined CloudWatch alarm name:** `psd-eoc-sms-dlq-depth`, targeting
+`psd-eoc-sms-dlq` paired only with source queue `psd-eoc-sms`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat the alarm as **live-unverified** and the
+deep link as unavailable until #91 supplies that evidence.
 
 ## Meaning and severity
 

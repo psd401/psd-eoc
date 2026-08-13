@@ -1,14 +1,20 @@
 # Alarm runbook: transactional outbox stuck rows
 
-**Alarm ID / dashboard deep link: BLOCKED BY #29.** The alarm and its read-only
-diagnostic view are not deployed.
+**Source-defined CloudWatch alarm name:**
+`psd-eoc-stuck-production-outbox`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat the alarm as **live-unverified** and the
+deep link as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-The planned alarm detects notification batches that committed with an event
-but have not been durably published from the transactional outbox to the
-central fan-out queue within the final #29 threshold. The event may exist even
-when fan-out has not started.
+The source-defined alarm fires when at least one staff outbox row remains
+neither published nor terminally failed for one minute. Missing metric data is
+breaching. The event may exist even when fan-out has not started. The collector
+excludes test data; source code is not proof that the deployed query, metric,
+or alarm is current.
 
 ## Safety posture
 
@@ -23,9 +29,10 @@ when fan-out has not started.
 
 1. Classify **SEV-1** when real activation fan-out is delayed. Confirm account
    `338414773271`, region `us-west-2`, alarm time, and current control epoch.
-2. Use the #29 read-only outbox diagnostic after it exists. Record only row
-   count, oldest age, status/reason counts, and sanitized outbox/batch IDs.
-   Direct production SQL is not an approved procedure in this runbook.
+2. Use the approved read-only operational metric and application evidence.
+   Record only row count, oldest age, status/reason counts, and sanitized
+   outbox/batch IDs. Direct production SQL is not an approved procedure in this
+   runbook.
 3. Compare App Runner health, `/psd-eoc/dispatcher` logs, central
    `psd-eoc-fanout` queue age/count, and Aurora events over the same UTC window.
 4. Separate rows that are leased, retry-scheduled, permanently failed,

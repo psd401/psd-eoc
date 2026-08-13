@@ -4,12 +4,14 @@ import {
   FanoutAuthorizationDecisionSchema,
   FanoutControlEffectiveStateSchema,
   FanoutControlRecordSchema,
+  FanoutStatusSchema,
   type FanoutAuthorizationDecision,
   type FanoutControlEffectiveState,
   type FanoutControlRecord,
+  type FanoutStatus,
   type NotificationIntent,
 } from '@psd-eoc/contracts';
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 
 import { databaseExecuteRows, type PostgresDatabase } from '../../db/client';
 import {
@@ -25,7 +27,7 @@ import {
  * check denies. Network transport cannot be part of the database transaction,
  * so disable never claims to recall a handoff admitted under the earlier order.
  */
-export const FANOUT_CONTROL_ADVISORY_LOCK_SQL = sql`select pg_advisory_xact_lock(hashtextextended('psd-eoc:fanout-control:v1', 0))`;
+export const FANOUT_CONTROL_ADVISORY_LOCK_SQL = sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('psd-eoc:fanout-control:v1', 0))`;
 
 export class FanoutControlUnavailableError extends Error {
   public constructor() {
@@ -41,6 +43,7 @@ export class FanoutControlDeniedError extends Error {
       | 'CONTROL_STATE_UNREADABLE'
       | 'EMERGENCY_DISABLED'
       | 'ENABLE_EPOCH_MISMATCH'
+      | 'APPROVAL_REFERENCE_REUSED'
       | 'STALE_CONSEQUENCE_PREVIEW',
   ) {
     super(
@@ -155,6 +158,24 @@ export async function appendFanoutControlRecord(input: {
   if ((current?.id ?? null) !== input.expectedCurrentRecordId) {
     throw new FanoutControlDeniedError('ENABLE_EPOCH_MISMATCH');
   }
+  if (
+    input.desiredMode === 'enabled' &&
+    input.productOwnerApprovalReference !== null
+  ) {
+    const [existingReference] = await database
+      .select({ id: fanoutControlRecords.id })
+      .from(fanoutControlRecords)
+      .where(
+        and(
+          sql`${fanoutControlRecords.productOwnerApprovalReference} is not null`,
+          sql`lower(${fanoutControlRecords.productOwnerApprovalReference}) = lower(${input.productOwnerApprovalReference})`,
+        ),
+      )
+      .limit(1);
+    if (existingReference !== undefined) {
+      throw new FanoutControlDeniedError('APPROVAL_REFERENCE_REUSED');
+    }
+  }
   const enableEpochId =
     input.desiredMode === 'enabled' ? createFanoutEnableEpochId() : null;
   const [row] = await database
@@ -212,6 +233,31 @@ export async function readFanoutControlEffectiveState(
       reasonCode: 'CONTROL_STATE_UNREADABLE',
     });
   }
+}
+
+/**
+ * Projects full control truth to the only fields staff surfaces require.
+ * Missing and unreadable state remain unavailable rather than being presented
+ * as an explicit administrator disable transition.
+ */
+export function projectFanoutStatus(
+  state: FanoutControlEffectiveState,
+): FanoutStatus {
+  return FanoutStatusSchema.parse({
+    status:
+      state.kind !== 'current'
+        ? 'unavailable'
+        : state.effectiveMode === 'enabled'
+          ? 'enabled'
+          : 'emergency-disabled',
+  });
+}
+
+/** Reads full truth internally and returns only its minimized staff status. */
+export async function readFanoutStatus(
+  database: FanoutControlDatabase,
+): Promise<FanoutStatus> {
+  return projectFanoutStatus(await readFanoutControlEffectiveState(database));
 }
 
 /** Loads one immutable historical record for exact idempotent replay. */

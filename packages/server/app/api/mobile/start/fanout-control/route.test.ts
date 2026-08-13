@@ -1,9 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import {
-  FanoutControlEffectiveStateSchema,
-  HUMAN_ONLY_ACTION_IDS,
-} from '@psd-eoc/contracts';
+import { FanoutStatusSchema, HUMAN_ONLY_ACTION_IDS } from '@psd-eoc/contracts';
 
 import {
   SessionAccessError,
@@ -35,25 +32,7 @@ function authenticated(): AuthenticatedSession {
 }
 
 function currentEnabledState() {
-  const currentRecord = {
-    id: IDS.record,
-    revision: 1,
-    previousRecordId: null,
-    mode: 'enabled',
-    enableEpochId: IDS.epoch,
-    reason: 'Synthetic enabled state for route contract testing.',
-    productOwnerApprovalReference: 'synthetic-product-owner-approval',
-    changedByUserId: IDS.user,
-    changedWithSessionId: IDS.session,
-    changedAt: NOW.toISOString(),
-    requestId: IDS.request,
-  } as const;
-  return FanoutControlEffectiveStateSchema.parse({
-    kind: 'current',
-    effectiveMode: 'enabled',
-    currentEpochId: IDS.epoch,
-    currentRecord,
-  });
+  return FanoutStatusSchema.parse({ status: 'enabled' });
 }
 
 function testRuntime(input: {
@@ -109,28 +88,59 @@ describe('mobile fanout-control status route', () => {
     expect(calls).toEqual(['authenticate', 'execute']);
 
     const serialized = JSON.stringify(state);
+    for (const forbiddenField of [
+      'currentRecord',
+      'currentEpochId',
+      'reason',
+      'reasonCode',
+      'productOwnerApprovalReference',
+      'changedByUserId',
+      'changedWithSessionId',
+      'requestId',
+      'changedAt',
+      'previousRecordId',
+      'revision',
+      'enableEpochId',
+      IDS.record,
+      IDS.epoch,
+    ]) {
+      expect(serialized).not.toContain(forbiddenField);
+    }
     expect(serialized).not.toContain('capabilityId');
     for (const actionId of HUMAN_ONLY_ACTION_IDS) {
       expect(serialized).not.toContain(actionId);
     }
   });
 
-  test('turns unreadable or malformed state into canonical disabled status', async () => {
+  test('turns unreadable or malformed state into canonical unavailable fail-closed status', async () => {
+    const privateMarker = 'private-admin-provenance-must-not-cross';
     for (const input of [
       { executionError: new Error('Synthetic database failure.') },
       { state: { kind: 'current', effectiveMode: 'enabled' } },
+      {
+        state: {
+          status: 'enabled',
+          currentRecord: {
+            id: IDS.record,
+            reason: privateMarker,
+            productOwnerApprovalReference: privateMarker,
+            changedByUserId: IDS.user,
+            changedWithSessionId: IDS.session,
+            requestId: IDS.request,
+            changedAt: NOW.toISOString(),
+          },
+        },
+      },
     ]) {
       const { runtime } = testRuntime(input);
       const response = await handleGetMobileFanoutControl(request(), runtime);
 
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({
-        kind: 'unavailable',
-        effectiveMode: 'emergency-disabled',
-        currentEpochId: null,
-        currentRecord: null,
-        reasonCode: 'CONTROL_STATE_UNREADABLE',
+      const payload = await response.json();
+      expect(payload).toEqual({
+        status: 'unavailable',
       });
+      expect(JSON.stringify(payload)).not.toContain(privateMarker);
     }
   });
 

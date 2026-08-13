@@ -96,6 +96,8 @@ import {
   FanoutAuthorizationDecisionSchema,
   GetFanoutControlInputSchema,
   GetFanoutControlResultSchema,
+  GetFanoutStatusInputSchema,
+  GetFanoutStatusResultSchema,
   SetFanoutControlInputSchema,
   SetFanoutControlResultSchema,
 } from './fanout-control';
@@ -1369,6 +1371,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: FanoutAuthorizationCheckInputSchema,
     outputSchema: FanoutAuthorizationDecisionSchema,
   }),
+  'get-fanout-status': canonicalCapability({
+    id: 'get-fanout-status',
+    operation: 'query',
+    safetyEffect: 'none',
+    inputSchema: GetFanoutStatusInputSchema,
+    outputSchema: GetFanoutStatusResultSchema,
+  }),
   'get-fanout-control': canonicalCapability({
     id: 'get-fanout-control',
     operation: 'query',
@@ -1608,7 +1617,8 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'run-delivery-report': humanAgentInvocationPolicy,
   'get-integration-health': humanAgentScheduledInvocationPolicy,
   'authorize-notification-fanout': systemWorkerInvocationPolicy,
-  'get-fanout-control': humanWebMobileReadInvocationPolicy,
+  'get-fanout-status': humanWebMobileReadInvocationPolicy,
+  'get-fanout-control': humanWebAdministrationInvocationPolicy,
   'list-my-devices': humanInteractiveInvocationPolicy,
   'list-facilities': humanAgentInvocationPolicy,
   'get-facility': humanAgentInvocationPolicy,

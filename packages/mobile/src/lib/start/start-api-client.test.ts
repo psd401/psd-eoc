@@ -6,7 +6,7 @@ import {
   CreateActivationPreviewInputSchema,
   EventSchema,
   EventTypeVersionSchema,
-  FanoutControlEffectiveStateSchema,
+  FanoutStatusSchema,
   JoinEventResultSchema,
   StartEventResultSchema,
   type ActivationPreview,
@@ -422,13 +422,7 @@ function oneResponseRequest(
 
 describe('mobile start API client', () => {
   test('loads canonical fanout status using only an authenticated GET', async () => {
-    const state = FanoutControlEffectiveStateSchema.parse({
-      kind: 'missing',
-      effectiveMode: 'emergency-disabled',
-      currentEpochId: null,
-      currentRecord: null,
-      reasonCode: 'CONTROL_STATE_MISSING',
-    });
+    const state = FanoutStatusSchema.parse({ status: 'unavailable' });
     const calls: RecordedAuthenticatedRequest[] = [];
 
     await expect(
@@ -460,6 +454,18 @@ describe('mobile start API client', () => {
     await expect(
       loadFanoutControlState(
         oneResponseRequest({ kind: 'current', effectiveMode: 'enabled' }),
+      ),
+    ).resolves.toEqual(FANOUT_CONTROL_UNAVAILABLE_STATE);
+    await expect(
+      loadFanoutControlState(
+        oneResponseRequest({
+          status: 'enabled',
+          currentRecord: {
+            reason: 'private-admin-provenance-must-not-cross',
+            productOwnerApprovalReference:
+              'private-admin-provenance-must-not-cross',
+          },
+        }),
       ),
     ).resolves.toEqual(FANOUT_CONTROL_UNAVAILABLE_STATE);
   });

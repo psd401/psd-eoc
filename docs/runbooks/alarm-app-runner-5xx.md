@@ -1,15 +1,19 @@
 # Alarm runbook: App Runner HTTP 5xx
 
-**Alarm ID / CloudWatch deep link: BLOCKED BY #29.** The alarm is not deployed.
-This file is the stable runbook target that issue #29 must place in the alarm
-description.
+**Source-defined CloudWatch alarm name:** `psd-eoc-apprunner-5xx`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat the alarm as **live-unverified** and the
+deep link as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-The planned alarm detects an elevated rate of server-side HTTP 5xx responses
-from the `psd-eoc` App Runner service. It may affect sign-in, activation,
-timeline reads, or admin operations. It does not prove that an event was lost
-or a notification was sent.
+The source-defined alarm fires when at least one server-side HTTP 5xx response
+occurs in a one-minute period for the `psd-eoc` App Runner service. Missing data
+is non-breaching. It may affect sign-in, activation, timeline reads, or admin
+operations. It does not prove that an event was lost or a notification was
+sent.
 
 ## Safety posture
 
@@ -49,8 +53,9 @@ or a notification was sent.
 ## Verify recovery
 
 1. Confirm the service is running the intended immutable image digest.
-2. Confirm the side-effect-free `/api/health` route is returning `200` and the
-   5xx rate and latency have returned below the final #29 thresholds.
+2. Confirm the side-effect-free `/api/health` route is returning `200`, the
+   exact 5xx alarm has a complete healthy evaluation period, and related
+   latency evidence is current.
 3. Verify the emergency-disable state is readable and honestly rendered. Do
    not re-enable it as part of a health check.
 4. Review append-only event/outbox evidence for requests reported ambiguous by
@@ -64,5 +69,6 @@ unknown, multiple dependencies fail, or recovery needs a production change.
 Use [escalation.md](escalation.md).
 
 Append the recovery time, image digest, remaining unknowns, and follow-up issue
-links. Do not close the record until the #29 alarm returns to its documented
-normal state and a second responder reviews the evidence.
+links. After monitoring is deployed and read back, do not close the record
+until the exact alarm returns to its documented normal state and a second
+responder reviews the evidence.

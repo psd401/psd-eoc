@@ -1,13 +1,18 @@
 # Alarm runbook: Aurora capacity
 
-**Alarm ID / CloudWatch deep link: BLOCKED BY #29.** The alarm is not deployed.
+**Source-defined CloudWatch alarm name:** `psd-eoc-aurora-acu-utilization`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat the alarm as **live-unverified** and the
+deep link as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-The planned alarm reports sustained Aurora capacity pressure. The deployable
-stack sets Serverless v2 minimum capacity to `0.5` ACU and maximum capacity to
-`4` ACUs with no auto-pause. Final #29 metrics, threshold, and evaluation
-window are not yet defined.
+The source-defined alarm reports Aurora Serverless v2 ACU utilization at or
+above 80% in 3 of 5 one-minute periods; missing data is breaching. The
+deployable stack sets minimum capacity to `0.5` ACU and maximum capacity to `4`
+ACUs with no auto-pause. Source configuration is not deployment evidence.
 
 ## Safety posture
 
@@ -40,9 +45,9 @@ history and treat failed reads as unknown, not absent.
   availability impact, rollback values, product-owner approval, and the
   operator. Apply through reviewed infrastructure, never an undocumented
   console drift.
-- Confirm capacity, connections, query latency, activation-accept p95,
-  App Runner errors, outbox age, and all queue ages return to the final #29
-  normal ranges.
+- Confirm ACU utilization stays below 80% for the source-defined 3-of-5 window
+  and capacity, connections, query latency, activation-accept p95, App Runner
+  errors, outbox age, and all queue ages agree.
 - Confirm no ambiguous activation was retried and no event/journal/outbox row
   was modified or removed to clear the condition.
 - If saturation causes writer unavailability, continue with

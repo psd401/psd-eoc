@@ -1,15 +1,24 @@
 # Alarm runbook: SQS oldest-message age
 
-**Alarm IDs / CloudWatch deep links: BLOCKED BY #29.** Four planned alarm
-instances cover `psd-eoc-fanout`, `psd-eoc-push`, `psd-eoc-email`, and
-`psd-eoc-sms`. None is deployed today.
+**Source-defined CloudWatch alarm names:**
+
+- `psd-eoc-fanout-queue-age`;
+- `psd-eoc-push-queue-age`;
+- `psd-eoc-email-queue-age`; and
+- `psd-eoc-sms-queue-age`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat all four alarms as **live-unverified** and
+their deep links as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-An oldest-message-age alarm means work is not leaving a queue within its
-planned time. It does not reveal whether a provider was called or a person
-received anything. PSD EOC queues are at-least-once boundaries; replay can
-duplicate provider side effects unless the exact attempt is safely fenced.
+Each source-defined alarm fires when its queue's oldest visible message reaches
+60 seconds in one one-minute evaluation period; missing data is non-breaching.
+It does not reveal whether a provider was called or a person received anything.
+PSD EOC queues are at-least-once boundaries; replay can duplicate provider
+side effects unless the exact attempt is safely fenced.
 
 ## Safety posture
 
@@ -70,5 +79,5 @@ duplicate provider side effects unless the exact attempt is safely fenced.
   monthly test in #30 remains human-confirmed and currently blocked.
 
 Close only after all four queue metrics have been reviewed for collateral
-backlog, the final #29 evaluation window is healthy, and a second responder
-reviews the evidence.
+backlog, each exact alarm has a complete healthy evaluation period, and a
+second responder reviews the evidence.

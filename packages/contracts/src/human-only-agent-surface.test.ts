@@ -40,6 +40,7 @@ describe('human-only agent-surface manifest guard', () => {
 
   test('keeps district fanout control human-only and agent-free', () => {
     for (const capabilityId of [
+      'get-fanout-status',
       'get-fanout-control',
       'set-fanout-control',
     ] as const) {
@@ -48,7 +49,7 @@ describe('human-only agent-surface manifest guard', () => {
       expect(CAPABILITY_INVOCATION_POLICY[capabilityId]).toEqual({
         principalKinds: ['human'],
         sources:
-          capabilityId === 'get-fanout-control' ? ['web', 'mobile'] : ['web'],
+          capabilityId === 'get-fanout-status' ? ['web', 'mobile'] : ['web'],
         agentGrantable: false,
       });
     }

@@ -1,12 +1,20 @@
 # Alarm runbook: App Runner latency
 
-**Alarm ID / CloudWatch deep link: BLOCKED BY #29.** The alarm is not deployed.
+**Source-defined CloudWatch alarm name:**
+`psd-eoc-apprunner-request-latency-average`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat the alarm as **live-unverified** and the
+deep link as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-The planned alarm detects elevated App Runner response latency for `psd-eoc`.
-The adopted activation-accept target is p95 under 500 ms. The final alarm
-window and threshold must come from #29; do not invent them from this runbook.
+The source-defined alarm detects all-route average App Runner response latency
+of at least 500 ms in 3 of 5 one-minute periods for `psd-eoc`; missing data is
+non-breaching. This metric is not the adopted activation-accept p95. Use
+[alarm-activation-latency.md](alarm-activation-latency.md) for that distinct
+confirmation-to-commit alarm.
 
 ## Safety posture
 
@@ -41,8 +49,9 @@ be queued for automatic execution.
   approval and a consequence review.
 - If users cannot obtain a fresh consequence preview, instruct them that no
   activation should be assumed. Never cache or reuse an expired preview.
-- Confirm p50/p95/p99 request and activation-accept metrics return to the final
-  #29 normal range for its documented evaluation window.
+- Confirm all-route average latency stays below 500 ms for the source-defined
+  3-of-5 evaluation window. Review activation-accept p50/p95/p99 separately;
+  one metric cannot clear the other.
 - Confirm no rise in duplicate events, stale previews, stuck outbox rows, or
   queue age. Record `unknown` where evidence cannot resolve an outcome.
 - Do not send a notification to measure recovery. Use approved non-production

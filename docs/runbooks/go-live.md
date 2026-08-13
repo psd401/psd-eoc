@@ -51,10 +51,15 @@ Release candidate:
 
 ## 2. Dependencies and change gate
 
-- [ ] Issue [#29](https://github.com/psd401/psd-eoc/issues/29) is complete and
-      every deployed alarm embeds its matching runbook link.
-- [ ] Exact alarm IDs and CloudWatch deep links replace every **BLOCKED BY #29**
-      field in [README.md](README.md#p51-alarm-to-runbook-inventory).
+- [ ] The exact release includes monitoring source from issue
+      [#29](https://github.com/psd401/psd-eoc/issues/29) / pull request
+      [#96](https://github.com/psd401/psd-eoc/pull/96), with all 26 exact alarm
+      names and stable runbook anchors matching
+      [README.md](README.md#p51-alarm-to-runbook-inventory).
+- [ ] All 26 alarms, metric conditions, alarm/OK actions, and runbook links were
+      read back from the approved CloudWatch account/region; exact console links
+      are retained in the access-controlled release evidence. Synthesized
+      source is not accepted as deployment proof.
 - [ ] Issue [#91](https://github.com/psd401/psd-eoc/issues/91) provides an
       isolated deployed non-production stack with no path to real recipients or
       write-capable live providers.
@@ -88,9 +93,11 @@ Release candidate:
       for approved channels.
 - [ ] CloudWatch dashboard shows p50/p95/p99 activation-accept and outbox-to-
       provider handoff plus delivery-state distribution and all DLQ depths.
-- [ ] App Runner, Aurora, all four queue-age alarms, all four DLQ alarms,
-      stuck-outbox, stale-roster, and canary alarms page the approved on-call
-      routes and their alarm math was exercised.
+- [ ] All 26 exact alarms in the
+      [alarm inventory](README.md#p51-alarm-to-runbook-inventory), including
+      activation-accept, metrics-collector, both roster-age conditions, and all
+      six provider-handoff conditions, page the approved on-call routes and
+      their alarm math was exercised.
 - [ ] The one-minute canary is test-only, synthetic/unroutable, makes zero
       provider calls, cannot invoke a human-only action, and is excluded from real
       dashboards/records.

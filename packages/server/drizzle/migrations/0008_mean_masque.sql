@@ -45,17 +45,21 @@ ALTER TABLE "fanout_intent_authorizations" ADD CONSTRAINT "fanout_intent_authori
 CREATE UNIQUE INDEX "fanout_control_records_revision_uq" ON "fanout_control_records" USING btree ("revision");--> statement-breakpoint
 CREATE UNIQUE INDEX "fanout_control_records_previous_uq" ON "fanout_control_records" USING btree ("previous_record_id") WHERE "fanout_control_records"."previous_record_id" is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX "fanout_control_records_enable_epoch_uq" ON "fanout_control_records" USING btree ("enable_epoch_id") WHERE "fanout_control_records"."enable_epoch_id" is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "fanout_control_records_approval_reference_uq" ON "fanout_control_records" USING btree (lower("product_owner_approval_reference")) WHERE "fanout_control_records"."product_owner_approval_reference" is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX "fanout_control_records_request_uq" ON "fanout_control_records" USING btree ("request_id");--> statement-breakpoint
 CREATE INDEX "fanout_control_records_latest_idx" ON "fanout_control_records" USING btree ("revision" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "fanout_intent_authorizations_epoch_idx" ON "fanout_intent_authorizations" USING btree ("enable_epoch_id");--> statement-breakpoint
 CREATE OR REPLACE FUNCTION public."psd_eoc_guard_fanout_control_insert"()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog
 AS $$
 DECLARE
   current_record record;
 BEGIN
-  PERFORM pg_advisory_xact_lock(hashtextextended('psd-eoc:fanout-control:v1', 0));
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('psd-eoc:fanout-control:v1', 0)
+  );
   SELECT "id", "revision"
   INTO current_record
   FROM public."fanout_control_records"

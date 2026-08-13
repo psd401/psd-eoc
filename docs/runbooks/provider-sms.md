@@ -8,6 +8,19 @@ allows go-live with push and email while SMS remains dark. Carrier registration
 and number allocation do not authorize sending. See
 [sms-registration.md](sms-registration.md).
 
+**Source-defined monitoring alarms:**
+
+- `psd-eoc-sms-outbox-to-provider-p95` fires when completed SMS handoff p95
+  reaches 15 seconds; and
+- `psd-eoc-sms-outbox-to-provider-incomplete` fires when at least one SMS
+  endpoint has not reached provider acceptance by the deterministic one-minute
+  cutoff.
+
+Issue #29 source landed in pull request #96, but no approved deployment,
+CloudWatch read-back, alarm-action exercise, or console deep link is recorded.
+Treat both alarms as **live-unverified**. Their source definition does not
+change the `blocked` SMS integration truth or authorize provider I/O.
+
 ## Safety posture
 
 - Keep SMS dark while its truth label is `blocked` or

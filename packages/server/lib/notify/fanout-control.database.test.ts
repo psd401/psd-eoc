@@ -55,6 +55,16 @@ interface MarkerRow extends Record<string, unknown> {
   readonly marker: string | null;
 }
 
+interface TriggerSecurityRow extends Record<string, unknown> {
+  readonly appExecute: boolean;
+  readonly enabled: string;
+  readonly publicExecute: boolean;
+  readonly relationName: string;
+  readonly securityDefiner: boolean;
+  readonly settings: readonly string[] | null;
+  readonly triggerDefinition: string;
+}
+
 const DATABASE_NAME_PATTERN = /^psd_eoc_i34_fanout_[a-f0-9]{32}_test$/u;
 
 let connection: PostgresDatabaseConnection | undefined;
@@ -96,6 +106,40 @@ function openPostgresConnection(
 
 function quotedLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+function findPostgresConstraintName(error: unknown): string | undefined {
+  const visited = new Set<unknown>();
+  let current = error;
+
+  while (
+    typeof current === 'object' &&
+    current !== null &&
+    !visited.has(current)
+  ) {
+    visited.add(current);
+    const constraintName = Reflect.get(current, 'constraint_name');
+    if (typeof constraintName === 'string') return constraintName;
+    current = Reflect.get(current, 'cause');
+  }
+
+  return undefined;
+}
+
+async function expectConstraintViolation(
+  operation: () => Promise<unknown>,
+  expectedConstraintName: string,
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    expect(findPostgresConstraintName(error)).toBe(expectedConstraintName);
+    return;
+  }
+
+  throw new Error(
+    `Expected PostgreSQL constraint ${expectedConstraintName} to reject the operation.`,
+  );
 }
 
 async function readDatabaseMarker(
@@ -525,7 +569,7 @@ describeWithDatabase('fan-out control database invariants', () => {
     await cleanupResources();
   });
 
-  test('starts fail-closed and appends disable/enable with fresh epochs', async () => {
+  test('starts fail-closed and requires a fresh approval reference for each enable epoch', async () => {
     const database = databaseConnection().db;
     expect(await readFanoutControlEffectiveState(database)).toMatchObject({
       kind: 'missing',
@@ -576,6 +620,35 @@ describeWithDatabase('fan-out control database invariants', () => {
         changedAt: new Date(CONTROL_BASE_AT.getTime() + 3 * 60_000),
       }),
     );
+
+    const stateBeforeReusedApproval =
+      await readFanoutControlEffectiveState(database);
+    expect(stateBeforeReusedApproval).toMatchObject({
+      kind: 'current',
+      effectiveMode: 'emergency-disabled',
+      currentRecord: {
+        id: secondDisabled.id,
+        revision: secondDisabled.revision,
+      },
+    });
+    await expect(
+      database.transaction((transaction) =>
+        appendFanoutControlRecord({
+          database: transaction,
+          actor: { userId: USER_ID, sessionId: SESSION_ID },
+          requestId: randomUUID(),
+          expectedCurrentRecordId: secondDisabled.id,
+          desiredMode: 'enabled',
+          reason: 'Synthetic invalid reused approval.',
+          productOwnerApprovalReference: 'SYNTHETIC-PO-APPROVAL-ONE',
+          changedAt: new Date(CONTROL_BASE_AT.getTime() + 3.25 * 60_000),
+        }),
+      ),
+    ).rejects.toMatchObject({ reasonCode: 'APPROVAL_REFERENCE_REUSED' });
+    expect(await readFanoutControlEffectiveState(database)).toEqual(
+      stateBeforeReusedApproval,
+    );
+
     const secondEnabled = await database.transaction((transaction) =>
       appendFanoutControlRecord({
         database: transaction,
@@ -589,6 +662,105 @@ describeWithDatabase('fan-out control database invariants', () => {
       }),
     );
     expect(secondEnabled.enableEpochId).not.toBe(firstEnabled.enableEpochId);
+  });
+
+  test('database uniqueness rejects case-insensitive approval reuse through direct SQL', async () => {
+    const database = databaseConnection().db;
+    const stateBeforeDirectReuse =
+      await readFanoutControlEffectiveState(database);
+    if (stateBeforeDirectReuse.kind !== 'current') {
+      throw new Error(
+        'The direct uniqueness test requires a current enabled control record.',
+      );
+    }
+    const current = stateBeforeDirectReuse.currentRecord;
+    const approvalReference = current.productOwnerApprovalReference;
+    if (approvalReference === null) {
+      throw new Error(
+        'The direct uniqueness test requires a current enabled control record.',
+      );
+    }
+
+    await expectConstraintViolation(
+      () =>
+        Promise.resolve(
+          database.execute(sql`
+            insert into fanout_control_records (
+              revision, previous_record_id, mode, enable_epoch_id, reason,
+              product_owner_approval_reference, changed_by_user_id,
+              changed_with_session_id, request_id, changed_at
+            ) values (
+              ${current.revision + 1},
+              ${current.id}::uuid,
+              'enabled'::fanout_control_mode,
+              ${randomUUID()}::uuid,
+              'Synthetic direct approval-reuse attempt.',
+              ${approvalReference.toUpperCase()},
+              ${USER_ID}::uuid,
+              ${SESSION_ID}::uuid,
+              ${randomUUID()}::uuid,
+              '2026-08-12T18:06:00.000Z'::timestamptz
+            )
+          `),
+        ),
+      'fanout_control_records_approval_reference_uq',
+    );
+    expect(await readFanoutControlEffectiveState(database)).toEqual(
+      stateBeforeDirectReuse,
+    );
+  });
+
+  test('fan-out insert trigger is locked to pg_catalog and unavailable as an app side door', async () => {
+    const database = databaseConnection().db;
+    const rows = databaseExecuteRows<TriggerSecurityRow>(
+      await database.execute(sql`
+        select
+          routine.prosecdef as "securityDefiner",
+          routine.proconfig as settings,
+          has_function_privilege(
+            'psd_eoc_app',
+            routine.oid,
+            'EXECUTE'
+          ) as "appExecute",
+          exists (
+            select 1
+            from aclexplode(
+              coalesce(
+                routine.proacl,
+                acldefault('f', routine.proowner)
+              )
+            ) as privilege
+            where privilege.grantee = 0
+              and privilege.privilege_type = 'EXECUTE'
+          ) as "publicExecute",
+          trigger.tgenabled as enabled,
+          relation.relname as "relationName",
+          pg_get_triggerdef(trigger.oid) as "triggerDefinition"
+        from pg_proc as routine
+        join pg_namespace as namespace
+          on namespace.oid = routine.pronamespace
+        join pg_trigger as trigger
+          on trigger.tgfoid = routine.oid
+          and not trigger.tgisinternal
+        join pg_class as relation
+          on relation.oid = trigger.tgrelid
+        where namespace.nspname = 'public'
+          and routine.proname = 'psd_eoc_guard_fanout_control_insert'
+      `),
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      securityDefiner: false,
+      settings: ['search_path=pg_catalog'],
+      appExecute: false,
+      publicExecute: false,
+      enabled: 'O',
+      relationName: 'fanout_control_records',
+    });
+    expect(rows[0]?.triggerDefinition).toMatch(
+      /BEFORE INSERT ON public\.fanout_control_records FOR EACH ROW EXECUTE FUNCTION psd_eoc_guard_fanout_control_insert\(\)/u,
+    );
   });
 
   test('atomically inserts one top-level intent and authorization through the app-role function', async () => {

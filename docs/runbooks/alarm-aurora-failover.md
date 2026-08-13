@@ -1,14 +1,25 @@
 # Alarm runbook: Aurora failover
 
-**Alarm ID / CloudWatch deep link: BLOCKED BY #29.** The alarm is not deployed.
+**Source-defined CloudWatch alarm names:**
+
+- `psd-eoc-aurora-failover-bridge-errors`;
+- `psd-eoc-aurora-replica-lag`; and
+- `psd-eoc-aurora-failover-event`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat all three alarms as **live-unverified**
+and their deep links as unavailable until #91 supplies that evidence.
 
 ## Meaning
 
-The planned alarm reports an Aurora writer failover or prolonged writer
-unavailability. The deployable design has one writer and one reader in
-different Availability Zones, Data API access, deletion protection, and a
-positive Serverless v2 capacity floor. These code facts do not prove a cluster
-is deployed or failover has been tested.
+The source defines three related conditions: at least one failover bridge error
+in one minute, maximum replica lag of at least 1,000 ms in 3 of 5 minutes, and
+at least one Aurora failover event in one minute. Missing data breaches the
+replica-lag alarm but not the two event-count alarms. The deployable design has
+one writer and one reader in different Availability Zones, Data API access,
+deletion protection, and a positive Serverless v2 capacity floor. These source
+facts do not prove a cluster is deployed or failover has been tested.
 
 ## Safety posture
 

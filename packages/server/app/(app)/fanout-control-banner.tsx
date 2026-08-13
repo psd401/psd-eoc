@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import {
-  FanoutControlEffectiveStateSchema,
+  FanoutStatusSchema,
   type CapabilityInput,
-  type FanoutControlEffectiveState,
+  type FanoutStatus,
 } from '@psd-eoc/contracts';
 import type { CSSProperties } from 'react';
 
@@ -19,7 +19,7 @@ import type {
   CapabilityHandlerContext,
   ServerCapabilityRegistration,
 } from '../../lib/capabilities/engine';
-import { readFanoutControlEffectiveState } from '../../lib/notify/fanout-control';
+import { readFanoutStatus } from '../../lib/notify/fanout-control';
 
 const BANNER_STYLE: CSSProperties = Object.freeze({
   backgroundColor: '#7f1d1d',
@@ -41,23 +41,17 @@ const PARAGRAPH_STYLE: CSSProperties = Object.freeze({
   margin: '0.25rem 0',
 });
 
-const UNAVAILABLE_STATE = FanoutControlEffectiveStateSchema.parse({
-  kind: 'unavailable',
-  effectiveMode: 'emergency-disabled',
-  currentEpochId: null,
-  currentRecord: null,
-  reasonCode: 'CONTROL_STATE_UNREADABLE',
-});
+const UNAVAILABLE_STATE = FanoutStatusSchema.parse({ status: 'unavailable' });
 
 export type FanoutControlStateReader = () => Promise<unknown>;
 
 const getWebFanoutControlRegistration: ServerCapabilityRegistration<
-  'get-fanout-control',
+  'get-fanout-status',
   AdminCapabilityTransaction
 > = Object.freeze({
-  id: 'get-fanout-control',
+  id: 'get-fanout-status',
   resolveFacilityId(
-    _input: CapabilityInput<'get-fanout-control'>,
+    _input: CapabilityInput<'get-fanout-status'>,
     context: CapabilityHandlerContext<AdminCapabilityTransaction>,
   ) {
     const actor = context.invocation.actor;
@@ -73,10 +67,10 @@ const getWebFanoutControlRegistration: ServerCapabilityRegistration<
     return null;
   },
   handler(
-    _input: CapabilityInput<'get-fanout-control'>,
+    _input: CapabilityInput<'get-fanout-status'>,
     context: CapabilityHandlerContext<AdminCapabilityTransaction>,
   ) {
-    return readFanoutControlEffectiveState(context.transaction.database);
+    return readFanoutStatus(context.transaction.database);
   },
 });
 
@@ -112,9 +106,9 @@ export function executeGetWebFanoutControl(
  */
 export async function loadFanoutControlBannerState(
   readState: FanoutControlStateReader,
-): Promise<FanoutControlEffectiveState> {
+): Promise<FanoutStatus> {
   try {
-    return FanoutControlEffectiveStateSchema.parse(await readState());
+    return FanoutStatusSchema.parse(await readState());
   } catch {
     return UNAVAILABLE_STATE;
   }
@@ -123,10 +117,10 @@ export async function loadFanoutControlBannerState(
 /** Prominent status shared by every authenticated operational route. */
 export function FanoutControlBanner({
   state,
-}: Readonly<{ state: FanoutControlEffectiveState }>) {
-  if (state.effectiveMode === 'enabled') return null;
+}: Readonly<{ state: FanoutStatus }>) {
+  if (state.status === 'enabled') return null;
 
-  const unavailable = state.kind !== 'current';
+  const unavailable = state.status === 'unavailable';
   const heading = unavailable
     ? 'Notification status unavailable — sending is blocked'
     : 'Emergency notification sending is disabled';
@@ -152,11 +146,6 @@ export function FanoutControlBanner({
         Real incidents remain real and drills remain drills; this control never
         changes their classification.
       </p>
-      {unavailable ? (
-        <p style={PARAGRAPH_STYLE}>
-          Safe reason: <code>{state.reasonCode}</code>
-        </p>
-      ) : null}
     </aside>
   );
 }

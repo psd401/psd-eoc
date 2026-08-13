@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import { cookies } from 'next/headers';
 import { Suspense, type ReactNode } from 'react';
 
-import type { FanoutControlEffectiveState } from '@psd-eoc/contracts';
+import type { FanoutStatus } from '@psd-eoc/contracts';
 
 import {
   WEB_SESSION_COOKIE_NAME,
@@ -22,12 +22,8 @@ export const metadata: Metadata = {
   },
 };
 
-const FAIL_CLOSED_FALLBACK_STATE: FanoutControlEffectiveState = Object.freeze({
-  kind: 'unavailable',
-  effectiveMode: 'emergency-disabled',
-  currentEpochId: null,
-  currentRecord: null,
-  reasonCode: 'CONTROL_STATE_UNREADABLE',
+const FAIL_CLOSED_FALLBACK_STATE: FanoutStatus = Object.freeze({
+  status: 'unavailable',
 });
 
 function OperationalDocument({
@@ -55,7 +51,7 @@ export function OperationalLayoutFrame({
   fanoutControlState,
 }: Readonly<{
   children: ReactNode;
-  fanoutControlState: FanoutControlEffectiveState;
+  fanoutControlState: FanoutStatus;
 }>) {
   return (
     <OperationalDocument
@@ -86,7 +82,7 @@ const DEFAULT_FANOUT_CONTROL_DEPENDENCIES: OperationalFanoutControlDependencies 
 /** Authenticates first, then performs only the canonical human web query. */
 export function loadOperationalFanoutControlState(
   dependencies: OperationalFanoutControlDependencies = DEFAULT_FANOUT_CONTROL_DEPENDENCIES,
-): Promise<FanoutControlEffectiveState> {
+): Promise<FanoutStatus> {
   return loadFanoutControlBannerState(async () => {
     const sessionToken = await dependencies.readSessionToken();
     if (sessionToken === undefined) {

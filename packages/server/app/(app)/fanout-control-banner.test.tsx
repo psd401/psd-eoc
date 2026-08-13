@@ -1,10 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import {
-  FanoutControlEffectiveStateSchema,
-  type FanoutControlEffectiveState,
-} from '@psd-eoc/contracts';
+import { FanoutStatusSchema, type FanoutStatus } from '@psd-eoc/contracts';
 
 import type { AuthenticatedSession } from '../../lib/auth/sessions';
 import {
@@ -26,42 +23,12 @@ const IDS = {
   request: '00000000-0000-4000-8000-000000003485',
 } as const;
 
-function currentState(
-  mode: 'enabled' | 'emergency-disabled',
-): FanoutControlEffectiveState {
-  const enabled = mode === 'enabled';
-  return FanoutControlEffectiveStateSchema.parse({
-    kind: 'current',
-    effectiveMode: mode,
-    currentEpochId: enabled ? IDS.epoch : null,
-    currentRecord: {
-      id: IDS.record,
-      revision: 2,
-      previousRecordId: IDS.previousRecord,
-      mode,
-      enableEpochId: enabled ? IDS.epoch : null,
-      reason: enabled
-        ? 'Synthetic recovery verification completed.'
-        : 'Synthetic provider outcome is uncertain.',
-      productOwnerApprovalReference: enabled
-        ? 'synthetic-product-owner-reference'
-        : null,
-      changedByUserId: IDS.user,
-      changedWithSessionId: IDS.session,
-      changedAt: '2026-08-12T21:00:00.000Z',
-      requestId: IDS.request,
-    },
-  });
+function currentState(mode: 'enabled' | 'emergency-disabled'): FanoutStatus {
+  return FanoutStatusSchema.parse({ status: mode });
 }
 
-function missingState(): FanoutControlEffectiveState {
-  return FanoutControlEffectiveStateSchema.parse({
-    kind: 'missing',
-    effectiveMode: 'emergency-disabled',
-    currentEpochId: null,
-    currentRecord: null,
-    reasonCode: 'CONTROL_STATE_MISSING',
-  });
+function unavailableState(): FanoutStatus {
+  return FanoutStatusSchema.parse({ status: 'unavailable' });
 }
 
 function authenticated(
@@ -105,7 +72,7 @@ describe('FanoutControlBanner', () => {
 
   test('makes missing control truth honestly unavailable and fail-closed', () => {
     const html = renderToStaticMarkup(
-      <FanoutControlBanner state={missingState()} />,
+      <FanoutControlBanner state={unavailableState()} />,
     );
 
     expect(html).toContain('data-fanout-control-state="unavailable"');
@@ -115,13 +82,13 @@ describe('FanoutControlBanner', () => {
     expect(html).toContain(
       'cannot prove the current notification fan-out state',
     );
-    expect(html).toContain('CONTROL_STATE_MISSING');
+    expect(html).not.toContain('reasonCode');
     expect(html).not.toContain('Notification fan-out is enabled');
   });
 
   test('places the alert before every authenticated route child', () => {
     const html = renderToStaticMarkup(
-      <OperationalLayoutFrame fanoutControlState={missingState()}>
+      <OperationalLayoutFrame fanoutControlState={unavailableState()}>
         <main id="main-content">Synthetic operational route</main>
       </OperationalLayoutFrame>,
     );
@@ -150,25 +117,18 @@ describe('loadFanoutControlBannerState', () => {
     });
 
     expect(state).toEqual({
-      kind: 'unavailable',
-      effectiveMode: 'emergency-disabled',
-      currentEpochId: null,
-      currentRecord: null,
-      reasonCode: 'CONTROL_STATE_UNREADABLE',
+      status: 'unavailable',
     });
     expect(JSON.stringify(state)).not.toContain(secretErrorText);
   });
 
   test('fails closed on malformed or permissive noncanonical state', async () => {
     const state = await loadFanoutControlBannerState(async () => ({
-      kind: 'current',
-      effectiveMode: 'enabled',
-      currentEpochId: null,
-      currentRecord: null,
+      status: 'enabled',
+      currentRecord: { forbidden: true },
     }));
 
-    expect(state.effectiveMode).toBe('emergency-disabled');
-    expect(state.kind).toBe('unavailable');
+    expect(state.status).toBe('unavailable');
   });
 });
 
@@ -223,8 +183,7 @@ describe('loadOperationalFanoutControlState', () => {
     const fixture = dependencies({ state: currentState('enabled') });
 
     const state = await loadOperationalFanoutControlState(fixture.value);
-    expect(state.effectiveMode).toBe('emergency-disabled');
-    expect(state.kind).toBe('unavailable');
+    expect(state.status).toBe('unavailable');
     expect(fixture.calls).toEqual(['read-session-token']);
   });
 
@@ -236,8 +195,7 @@ describe('loadOperationalFanoutControlState', () => {
     });
 
     const state = await loadOperationalFanoutControlState(fixture.value);
-    expect(state.effectiveMode).toBe('emergency-disabled');
-    expect(state.kind).toBe('unavailable');
+    expect(state.status).toBe('unavailable');
     expect(fixture.calls).toEqual([
       'read-session-token',
       'authenticate:synthetic-session-token',

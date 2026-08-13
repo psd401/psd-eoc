@@ -1,19 +1,13 @@
-import type { FanoutControlEffectiveState } from '@psd-eoc/contracts';
+import type { FanoutStatus } from '@psd-eoc/contracts';
 import { StyleSheet, Text, View } from 'react-native';
 
 export interface FanoutControlBannerProps {
-  readonly state: FanoutControlEffectiveState | null;
+  readonly state: FanoutStatus | null;
 }
 
 /** True only when a verified current record explicitly enables fanout. */
-export function isFanoutActivationEnabled(
-  state: FanoutControlEffectiveState | null,
-): boolean {
-  return (
-    state?.kind === 'current' &&
-    state.effectiveMode === 'enabled' &&
-    state.currentEpochId !== null
-  );
+export function isFanoutActivationEnabled(state: FanoutStatus | null): boolean {
+  return state?.status === 'enabled';
 }
 
 /**
@@ -24,8 +18,7 @@ export function FanoutControlBanner({ state }: FanoutControlBannerProps) {
   if (isFanoutActivationEnabled(state)) return null;
 
   const checking = state === null;
-  const explicitlyDisabled =
-    state?.kind === 'current' && state.effectiveMode === 'emergency-disabled';
+  const explicitlyDisabled = state?.status === 'emergency-disabled';
   const title = checking
     ? 'Checking notification controls'
     : explicitlyDisabled

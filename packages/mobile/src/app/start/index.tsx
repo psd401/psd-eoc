@@ -3,7 +3,7 @@ import {
   FacilityIdSchema,
   type ActivationPreview,
   type EventTypeListItem,
-  type FanoutControlEffectiveState,
+  type FanoutStatus,
   type TemplateMode,
 } from '@psd-eoc/contracts';
 import * as Crypto from 'expo-crypto';
@@ -121,9 +121,7 @@ export default function StartEventScreen() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [fanoutControlState, setFanoutControlState] =
-    useState<FanoutControlEffectiveState | null>(
-      FANOUT_CONTROL_UNAVAILABLE_STATE,
-    );
+    useState<FanoutStatus | null>(FANOUT_CONTROL_UNAVAILABLE_STATE);
   const [selectedType, setSelectedType] = useState<EventTypeListItem | null>(
     null,
   );

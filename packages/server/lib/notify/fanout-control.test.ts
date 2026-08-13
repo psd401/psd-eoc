@@ -10,6 +10,7 @@ import {
   createFanoutEnableEpochId,
   insertAuthorizedNotificationIntentForFanout,
   isNotificationIntentAuthorizedForCurrentFanout,
+  projectFanoutStatus,
   readFanoutControlEffectiveState,
 } from './fanout-control';
 
@@ -205,6 +206,35 @@ describe('fan-out control fail-closed reader', () => {
       effectiveMode: 'emergency-disabled',
       reasonCode: 'CONTROL_STATE_UNREADABLE',
     });
+  });
+
+  test('projects only honest minimized staff status without provenance', async () => {
+    const enabled = await readFanoutControlEffectiveState(
+      databaseWithRows([record()]),
+    );
+    const disabled = await readFanoutControlEffectiveState(
+      databaseWithRows([
+        record({
+          mode: 'emergency-disabled',
+          enableEpochId: null,
+          productOwnerApprovalReference: null,
+        }),
+      ]),
+    );
+    const missing = await readFanoutControlEffectiveState(databaseWithRows([]));
+    const unreadable = await readFanoutControlEffectiveState(
+      databaseWithRows([], new Error('synthetic read failure')),
+    );
+
+    expect(projectFanoutStatus(enabled)).toEqual({ status: 'enabled' });
+    expect(projectFanoutStatus(disabled)).toEqual({
+      status: 'emergency-disabled',
+    });
+    expect(projectFanoutStatus(missing)).toEqual({ status: 'unavailable' });
+    expect(projectFanoutStatus(unreadable)).toEqual({ status: 'unavailable' });
+    expect(JSON.stringify(projectFanoutStatus(enabled))).not.toContain(
+      'synthetic-po-reference',
+    );
   });
 
   test('rejects gaps or forks in the retained chain', async () => {

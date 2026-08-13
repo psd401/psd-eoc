@@ -1,7 +1,18 @@
 # Alarm runbook: SQS dead-letter queue depth
 
-**Alarm IDs / CloudWatch deep links: BLOCKED BY #29.** Four planned DLQ alarms
-cover the exact resources below. No alarm is deployed today.
+**Source-defined CloudWatch alarm names:**
+
+- `psd-eoc-fanout-dlq-depth`;
+- `psd-eoc-push-dlq-depth`;
+- `psd-eoc-email-dlq-depth`; and
+- `psd-eoc-sms-dlq-depth`.
+
+**Deployment/read-back truth:** issue #29 source landed in pull request #96,
+but no approved deployment, CloudWatch read-back, alarm-action exercise, or
+console deep link is recorded. Treat all four alarms as **live-unverified** and
+their deep links as unavailable until #91 supplies that evidence. Each source
+alarm fires when at least one message is visible in its retained DLQ; missing
+data is non-breaching.
 
 Any DLQ message is retained evidence of work that could not complete safely.
 It is not a redrive to-do list. Automatic or bulk replay is forbidden.

@@ -6,6 +6,19 @@ delayed/unknown, or Expo reports an outage.
 **Current truth:** Expo Push is `mocked` in `docs/INTEGRATIONS.md`. There is no
 verified live push handoff. This runbook does not authorize connecting one.
 
+**Source-defined monitoring alarms:**
+
+- `psd-eoc-push-outbox-to-provider-p95` fires when completed push handoff p95
+  reaches 5 seconds; and
+- `psd-eoc-push-outbox-to-provider-incomplete` fires when at least one push
+  endpoint has not reached provider acceptance by the deterministic one-minute
+  cutoff.
+
+Issue #29 source landed in pull request #96, but no approved deployment,
+CloudWatch read-back, alarm-action exercise, or console deep link is recorded.
+Treat both alarms as **live-unverified**. Their source definition does not
+change the `mocked` Expo integration truth or authorize provider I/O.
+
 ## Safety posture
 
 - Never paste an Expo access token, device token, receipt payload, or recipient

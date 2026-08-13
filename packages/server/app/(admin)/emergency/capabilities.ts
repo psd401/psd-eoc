@@ -13,6 +13,7 @@ import {
 } from '../../../lib/capabilities/engine';
 import {
   appendFanoutControlRecord,
+  FanoutControlDeniedError,
   loadFanoutControlRecordById,
   readFanoutControlEffectiveState,
 } from '../../../lib/notify/fanout-control';
@@ -28,6 +29,19 @@ import {
   type AdminMutationMetadata,
   type AdminQueryMetadata,
 } from '../facilities/admin-core';
+
+interface FanoutControlCapabilityPersistence {
+  readonly appendRecord: typeof appendFanoutControlRecord;
+  readonly loadRecordById: typeof loadFanoutControlRecordById;
+  readonly readEffectiveState: typeof readFanoutControlEffectiveState;
+}
+
+const defaultFanoutControlCapabilityPersistence: FanoutControlCapabilityPersistence =
+  Object.freeze({
+    appendRecord: appendFanoutControlRecord,
+    loadRecordById: loadFanoutControlRecordById,
+    readEffectiveState: readFanoutControlEffectiveState,
+  });
 
 function resultReference(record: FanoutControlRecord): string {
   return Buffer.from(
@@ -67,113 +81,145 @@ function parseResultReference(value: string): Readonly<{
   }
 }
 
-export const getFanoutControlRegistration: ServerCapabilityRegistration<
+export function createGetFanoutControlRegistration(
+  persistence: Pick<
+    FanoutControlCapabilityPersistence,
+    'readEffectiveState'
+  > = defaultFanoutControlCapabilityPersistence,
+): ServerCapabilityRegistration<
   'get-fanout-control',
   AdminCapabilityTransaction
-> = {
-  id: 'get-fanout-control',
-  resolveFacilityId(_input, context) {
-    if (context.invocation.actor.kind !== 'human') {
-      throw new AdminCapabilityError(
-        'FORBIDDEN',
-        'An authenticated staff session is required.',
-        403,
+> {
+  return {
+    id: 'get-fanout-control',
+    resolveFacilityId(_input, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
       );
-    }
-    return null;
-  },
-  handler(_input, context) {
-    return readFanoutControlEffectiveState(context.transaction.database);
-  },
-};
+      return null;
+    },
+    handler(_input, context) {
+      return persistence.readEffectiveState(context.transaction.database);
+    },
+  };
+}
 
-export const setFanoutControlRegistration: ServerCapabilityRegistration<
+export const getFanoutControlRegistration =
+  createGetFanoutControlRegistration();
+
+export function createSetFanoutControlRegistration(
+  persistence: Pick<
+    FanoutControlCapabilityPersistence,
+    'appendRecord' | 'loadRecordById'
+  > = defaultFanoutControlCapabilityPersistence,
+): ServerCapabilityRegistration<
   'set-fanout-control',
   AdminCapabilityTransaction
-> = {
-  id: 'set-fanout-control',
-  resolveFacilityId(_input, context) {
-    requireAdminCapabilityAuthorization(
-      context.invocation.actor,
-      context.transaction,
-    );
-    return null;
-  },
-  async handler(inputValue, context) {
-    const input = SetFanoutControlInputSchema.parse(inputValue);
-    const actor = context.invocation.actor;
-    if (actor.kind !== 'human') {
-      throw new AdminCapabilityError(
-        'FORBIDDEN',
-        'A human district administrator must make this change.',
-        403,
+> {
+  return {
+    id: 'set-fanout-control',
+    resolveFacilityId(_input, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
       );
-    }
-    const changedAt = await readCapabilityTime(context);
-    const appendedRecord = await appendFanoutControlRecord({
-      database: context.transaction.database,
-      actor,
-      requestId: context.invocation.requestId,
-      expectedCurrentRecordId: input.expectedCurrentRecordId,
-      desiredMode: input.desiredMode,
-      reason: input.reason,
-      productOwnerApprovalReference:
-        input.desiredMode === 'enabled'
-          ? input.productOwnerApprovalReference
-          : null,
-      changedAt,
-    });
-    context.transaction.setAuditTarget({
-      kind: 'configuration',
-      id: appendedRecord.id,
-    });
-    return SetFanoutControlResultSchema.parse({
-      appendedRecord,
-      effectiveState: {
-        kind: 'current',
-        effectiveMode: appendedRecord.mode,
-        currentEpochId: appendedRecord.enableEpochId,
-        currentRecord: appendedRecord,
-      },
-    });
-  },
-  resultReference: (output) => resultReference(output.appendedRecord),
-  async loadReplay(reference, context) {
-    const parsed = parseResultReference(reference);
-    const record = await loadFanoutControlRecordById(
-      context.transaction.database,
-      parsed.recordId,
-    );
-    if (
-      record === null ||
-      digestCapabilityValue(record) !== parsed.outputDigest
-    ) {
-      throw new AdminCapabilityError(
-        'CONFLICT',
-        'The original fan-out control result is unavailable; replay was refused rather than returning changed data.',
-        409,
+      return null;
+    },
+    async handler(inputValue, context) {
+      const input = SetFanoutControlInputSchema.parse(inputValue);
+      const actor = context.invocation.actor;
+      if (actor.kind !== 'human') {
+        throw new AdminCapabilityError(
+          'FORBIDDEN',
+          'A human district administrator must make this change.',
+          403,
+        );
+      }
+      const changedAt = await readCapabilityTime(context);
+      let appendedRecord;
+      try {
+        appendedRecord = await persistence.appendRecord({
+          database: context.transaction.database,
+          actor,
+          requestId: context.invocation.requestId,
+          expectedCurrentRecordId: input.expectedCurrentRecordId,
+          desiredMode: input.desiredMode,
+          reason: input.reason,
+          productOwnerApprovalReference:
+            input.desiredMode === 'enabled'
+              ? input.productOwnerApprovalReference
+              : null,
+          changedAt,
+        });
+      } catch (error) {
+        if (
+          error instanceof FanoutControlDeniedError &&
+          error.reasonCode === 'APPROVAL_REFERENCE_REUSED'
+        ) {
+          throw new AdminCapabilityError(
+            'CONFLICT',
+            'A fresh product-owner authorization reference is required.',
+            409,
+          );
+        }
+        throw error;
+      }
+      context.transaction.setAuditTarget({
+        kind: 'configuration',
+        id: appendedRecord.id,
+      });
+      return SetFanoutControlResultSchema.parse({
+        appendedRecord,
+        effectiveState: {
+          kind: 'current',
+          effectiveMode: appendedRecord.mode,
+          currentEpochId: appendedRecord.enableEpochId,
+          currentRecord: appendedRecord,
+        },
+      });
+    },
+    resultReference: (output) => resultReference(output.appendedRecord),
+    async loadReplay(reference, context) {
+      const parsed = parseResultReference(reference);
+      const record = await persistence.loadRecordById(
+        context.transaction.database,
+        parsed.recordId,
       );
-    }
-    return SetFanoutControlResultSchema.parse({
-      appendedRecord: record,
-      effectiveState: {
-        kind: 'current',
-        effectiveMode: record.mode,
-        currentEpochId: record.enableEpochId,
-        currentRecord: record,
-      },
-    });
-  },
-  resolveReplayFacilityId(reference, context) {
-    requireAdminCapabilityAuthorization(
-      context.invocation.actor,
-      context.transaction,
-    );
-    parseResultReference(reference);
-    return null;
-  },
-  replayFacilityId: () => null,
-};
+      if (
+        record === null ||
+        digestCapabilityValue(record) !== parsed.outputDigest
+      ) {
+        throw new AdminCapabilityError(
+          'CONFLICT',
+          'The original fan-out control result is unavailable; replay was refused rather than returning changed data.',
+          409,
+        );
+      }
+      return SetFanoutControlResultSchema.parse({
+        appendedRecord: record,
+        effectiveState: {
+          kind: 'current',
+          effectiveMode: record.mode,
+          currentEpochId: record.enableEpochId,
+          currentRecord: record,
+        },
+      });
+    },
+    resolveReplayFacilityId(reference, context) {
+      requireAdminCapabilityAuthorization(
+        context.invocation.actor,
+        context.transaction,
+      );
+      parseResultReference(reference);
+      return null;
+    },
+    replayFacilityId: () => null,
+  };
+}
+
+export const setFanoutControlRegistration =
+  createSetFanoutControlRegistration();
 
 function store(
   authenticated: AuthenticatedSession,

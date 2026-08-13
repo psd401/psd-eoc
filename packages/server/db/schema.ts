@@ -743,6 +743,9 @@ export const fanoutControlRecords = pgTable(
     uniqueIndex('fanout_control_records_enable_epoch_uq')
       .on(table.enableEpochId)
       .where(sql`${table.enableEpochId} is not null`),
+    uniqueIndex('fanout_control_records_approval_reference_uq')
+      .on(sql`lower(${table.productOwnerApprovalReference})`)
+      .where(sql`${table.productOwnerApprovalReference} is not null`),
     uniqueIndex('fanout_control_records_request_uq').on(table.requestId),
     unique('fanout_control_records_enabled_anchor_uq').on(
       table.id,

@@ -48,31 +48,57 @@ Use [escalation.md](escalation.md) to assign severity and contact roles.
 
 ## P5.1 alarm-to-runbook inventory
 
-Issue [#29](https://github.com/psd401/psd-eoc/issues/29) has not landed. No
-P5.1 alarm is deployed, and final alarm IDs and CloudWatch deep links do not
-exist. Every `Alarm ID / deep link` below is therefore **BLOCKED BY #29**.
-These are planned alarm categories, not evidence that monitoring is active.
+Issue [#29](https://github.com/psd401/psd-eoc/issues/29) landed on `main` in
+pull request [#96](https://github.com/psd401/psd-eoc/pull/96). The source now
+defines the 26 exact CloudWatch alarm names below and gives every synthesized
+alarm a stable runbook anchor. This proves source definition only. It does
+**not** prove that the stack, metrics, alarm actions, or recipients are deployed
+or that an alarm was read back from CloudWatch.
 
-| Planned alarm                   | Resource instances                                               | Runbook                                           | Alarm ID / deep link                |
-| ------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------- | ----------------------------------- |
-| App Runner HTTP 5xx             | `psd-eoc`                                                        | [App Runner 5xx](alarm-app-runner-5xx.md)         | **BLOCKED BY #29**                  |
-| App Runner latency              | `psd-eoc`                                                        | [App Runner latency](alarm-app-runner-latency.md) | **BLOCKED BY #29**                  |
-| Aurora failover                 | PSD EOC Aurora cluster                                           | [Aurora failover](alarm-aurora-failover.md)       | **BLOCKED BY #29**                  |
-| Aurora capacity                 | PSD EOC Aurora cluster                                           | [Aurora capacity](alarm-aurora-capacity.md)       | **BLOCKED BY #29**                  |
-| SQS oldest-message age          | `psd-eoc-fanout`, `psd-eoc-push`, `psd-eoc-email`, `psd-eoc-sms` | [Queue age](alarm-sqs-age.md)                     | **BLOCKED BY #29 (four IDs/links)** |
-| SQS DLQ depth                   | `psd-eoc-fanout-dlq`                                             | [DLQ: central fan-out](alarm-dlq-fanout.md)       | **BLOCKED BY #29**                  |
-| SQS DLQ depth                   | `psd-eoc-push-dlq`                                               | [DLQ: push](alarm-dlq-push.md)                    | **BLOCKED BY #29**                  |
-| SQS DLQ depth                   | `psd-eoc-email-dlq`                                              | [DLQ: email](alarm-dlq-email.md)                  | **BLOCKED BY #29**                  |
-| SQS DLQ depth                   | `psd-eoc-sms-dlq`                                                | [DLQ: SMS](alarm-dlq-sms.md)                      | **BLOCKED BY #29**                  |
-| Transactional outbox stuck rows | PSD EOC database                                                 | [Stuck outbox](alarm-outbox-stuck.md)             | **BLOCKED BY #29**                  |
-| Roster-sync failure age         | staff roster snapshots                                           | [Stale roster](alarm-roster-stale.md)             | **BLOCKED BY #29**                  |
-| Shallow canary failure          | synthetic health transaction                                     | [Canary failure](alarm-canary-failure.md)         | **BLOCKED BY #29**                  |
+Every row is currently **source-defined / live-unverified**. No approved
+deployment/read-back evidence or CloudWatch console deep link is recorded in
+the repository; those fields remain blocked by
+[#91](https://github.com/psd401/psd-eoc/issues/91). An operator must match the
+exact source-defined name against the approved account and region after a
+deployment, then store the console link in the access-controlled evidence
+package. Never substitute a synthesized template, source name, or dashboard
+widget for that read-back.
 
-The queue names above are the deployable names in `infra/src/psd-eoc-stack.ts`.
-They are not proof that a stack or queue is deployed. When #29 lands, its alarm
-descriptions must link to the corresponding stable file on `main`, and this
-table must be updated with the exact alarm ID and console deep link in the same
-reviewed change.
+| Exact source-defined CloudWatch alarm name    | Source condition                                                                              | Operator runbook                                         | Truth                            |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------- |
+| `psd-eoc-apprunner-5xx`                       | At least one App Runner 5xx response in one minute                                            | [App Runner 5xx](alarm-app-runner-5xx.md)                | source-defined / live-unverified |
+| `psd-eoc-apprunner-request-latency-average`   | All-route average latency at least 500 ms in 3 of 5 minutes                                   | [App Runner latency](alarm-app-runner-latency.md)        | source-defined / live-unverified |
+| `psd-eoc-activation-accept-latency-p95`       | Staff incident/drill activation-accept p95 at least 500 ms in 3 of 5 closed minutes           | [Activation-accept latency](alarm-activation-latency.md) | source-defined / live-unverified |
+| `psd-eoc-aurora-failover-bridge-errors`       | At least one failover EventBridge target or metric-Lambda error in one minute                 | [Aurora failover](alarm-aurora-failover.md)              | source-defined / live-unverified |
+| `psd-eoc-aurora-acu-utilization`              | Aurora ACU utilization at least 80% in 3 of 5 minutes                                         | [Aurora capacity](alarm-aurora-capacity.md)              | source-defined / live-unverified |
+| `psd-eoc-metrics-collector-failure`           | Collector success below 1 for 2 consecutive minutes, including missing data                   | [Metrics collector](alarm-metrics-collector.md)          | source-defined / live-unverified |
+| `psd-eoc-aurora-replica-lag`                  | Maximum replica lag at least 1,000 ms in 3 of 5 minutes                                       | [Aurora failover](alarm-aurora-failover.md)              | source-defined / live-unverified |
+| `psd-eoc-aurora-failover-event`               | At least one Aurora cluster failover event in one minute                                      | [Aurora failover](alarm-aurora-failover.md)              | source-defined / live-unverified |
+| `psd-eoc-one-minute-canary-failure`           | Canary success below 1 for 2 consecutive minutes, including missing data                      | [Canary failure](alarm-canary-failure.md)                | source-defined / live-unverified |
+| `psd-eoc-stuck-production-outbox`             | At least one staff outbox row remains unpublished and nonterminal for one minute              | [Stuck outbox](alarm-outbox-stuck.md)                    | source-defined / live-unverified |
+| `psd-eoc-roster-sync-failure-age`             | Latest staff sync remains failed or partial-rejected for at least 15 minutes                  | [Stale roster](alarm-roster-stale.md)                    | source-defined / live-unverified |
+| `psd-eoc-roster-sync-success-age`             | No complete staff sync is retained within 25 hours                                            | [Stale roster](alarm-roster-stale.md)                    | source-defined / live-unverified |
+| `psd-eoc-fanout-queue-age`                    | Oldest central fan-out message reaches 60 seconds                                             | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
+| `psd-eoc-push-queue-age`                      | Oldest push message reaches 60 seconds                                                        | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
+| `psd-eoc-email-queue-age`                     | Oldest email message reaches 60 seconds                                                       | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
+| `psd-eoc-sms-queue-age`                       | Oldest SMS message reaches 60 seconds                                                         | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
+| `psd-eoc-fanout-dlq-depth`                    | At least one visible central fan-out DLQ message                                              | [DLQ: central fan-out](alarm-dlq-fanout.md)              | source-defined / live-unverified |
+| `psd-eoc-push-dlq-depth`                      | At least one visible push DLQ message                                                         | [DLQ: push](alarm-dlq-push.md)                           | source-defined / live-unverified |
+| `psd-eoc-email-dlq-depth`                     | At least one visible email DLQ message                                                        | [DLQ: email](alarm-dlq-email.md)                         | source-defined / live-unverified |
+| `psd-eoc-sms-dlq-depth`                       | At least one visible SMS DLQ message                                                          | [DLQ: SMS](alarm-dlq-sms.md)                             | source-defined / live-unverified |
+| `psd-eoc-push-outbox-to-provider-p95`         | Push outbox-to-provider p95 reaches 5 seconds                                                 | [Expo Push](provider-expo.md)                            | source-defined / live-unverified |
+| `psd-eoc-push-outbox-to-provider-incomplete`  | At least one push endpoint misses provider acceptance by the deterministic one-minute cutoff  | [Expo Push](provider-expo.md)                            | source-defined / live-unverified |
+| `psd-eoc-email-outbox-to-provider-p95`        | Email outbox-to-provider p95 reaches 15 seconds                                               | [Amazon SES](provider-ses.md)                            | source-defined / live-unverified |
+| `psd-eoc-email-outbox-to-provider-incomplete` | At least one email endpoint misses provider acceptance by the deterministic one-minute cutoff | [Amazon SES](provider-ses.md)                            | source-defined / live-unverified |
+| `psd-eoc-sms-outbox-to-provider-p95`          | SMS outbox-to-provider p95 reaches 15 seconds                                                 | [AWS End User Messaging SMS](provider-sms.md)            | source-defined / live-unverified |
+| `psd-eoc-sms-outbox-to-provider-incomplete`   | At least one SMS endpoint misses provider acceptance by the deterministic one-minute cutoff   | [AWS End User Messaging SMS](provider-sms.md)            | source-defined / live-unverified |
+
+The source alarm descriptions link stable anchors in `infra/README.md`; this
+table maps the same exact names to the detailed operator procedures in this
+directory. Queue and function names in source remain deployable definitions,
+not proof that a resource exists. After an approved deployment, read back all
+26 names, conditions, actions, and runbook links from CloudWatch before checking
+any go-live monitoring item.
 
 ## Provider and roster incidents
 
@@ -100,13 +126,16 @@ reviewed change.
 | Roll back application, workers, configuration, or mobile release | [Rollback](rollback.md)                   |
 | Decide whether production traffic may begin                      | [Go-live checklist](go-live.md)           |
 
-## Current readiness truth (2026-08-12)
+## Current readiness truth (2026-08-13)
 
 - There is no verified deployed PSD EOC non-production stack. Issue
   [#91](https://github.com/psd401/psd-eoc/issues/91) is open.
-- P5.1 monitoring is open in
-  [#29](https://github.com/psd401/psd-eoc/issues/29); the alarm identifiers and
-  deep links above are blocked.
+- P5.1 monitoring source landed through
+  [#29](https://github.com/psd401/psd-eoc/issues/29) and pull request
+  [#96](https://github.com/psd401/psd-eoc/pull/96). Its 26 alarm names are
+  source-defined, but deployment, alarm-action exercise, CloudWatch read-back,
+  recipient verification, and console links are not recorded and remain
+  blocked by [#91](https://github.com/psd401/psd-eoc/issues/91).
 - The eight deployed failure drills and their evidence are open in
   [#31](https://github.com/psd401/psd-eoc/issues/31).
 - The monthly human-confirmed delivery test and stored SLO evidence are open in

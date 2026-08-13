@@ -3886,6 +3886,22 @@
           "method": "btree",
           "with": {}
         },
+        "fanout_control_records_approval_reference_uq": {
+          "name": "fanout_control_records_approval_reference_uq",
+          "columns": [
+            {
+              "expression": "lower(\"product_owner_approval_reference\")",
+              "isExpression": true,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"fanout_control_records\".\"product_owner_approval_reference\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "fanout_control_records_request_uq": {
           "name": "fanout_control_records_request_uq",
           "columns": [
