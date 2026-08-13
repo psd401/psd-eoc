@@ -755,6 +755,8 @@ describe('App Runner high availability', () => {
     expect([...environmentByName.keys()].sort()).toEqual(
       [
         'AWS_REGION',
+        'CANARY_EVENT_TYPE_VERSION_ID',
+        'CANARY_FACILITY_ID',
         'DATABASE_DRIVER',
         'DATABASE_NAME',
         'DATABASE_RESOURCE_ARN',
@@ -826,12 +828,13 @@ describe('App Runner high availability', () => {
 describe('fail-closed integration placeholders', () => {
   it('creates generated secrets without plaintext credential properties', () => {
     const secrets = resourceEntries('AWS::SecretsManager::Secret');
-    expect(secrets).toHaveLength(5);
+    expect(secrets).toHaveLength(6);
 
     const expectedNames = new Set([
       '/psd-eoc/api-salt',
       '/psd-eoc/database/admin',
       '/psd-eoc/database/application',
+      '/psd-eoc/database/monitoring',
       '/psd-eoc/expo-access-token',
       '/psd-eoc/google-oauth',
     ]);
@@ -1082,17 +1085,24 @@ describe('fail-closed integration placeholders', () => {
     expect(asRecord(outputs.SesEmailEventsTopicArn).Value).toEqual({
       Ref: eventTopicLogicalId,
     });
-    template.resourceCountIs('AWS::SNS::Subscription', 0);
+    const eventTopicSubscriptions = resourceEntries(
+      'AWS::SNS::Subscription',
+    ).filter(([, subscription]) =>
+      JSON.stringify(resourceProperties(subscription).TopicArn).includes(
+        eventTopicLogicalId,
+      ),
+    );
+    expect(eventTopicSubscriptions).toHaveLength(0);
     expect(collectAllowedActions(synthesizedTemplate).join('\n')).not.toMatch(
       /^(?:s3:DeleteObject(?:Version)?|ses:(?:\*|Send.*)|sms-voice:Send.*|mobiletargeting:Send.*)$/imu,
     );
   });
 });
 
-describe('observability skeleton', () => {
-  it('retains non-expiring encrypted logs and unwired alarm topics', () => {
+describe('operational observability', () => {
+  it('retains non-expiring encrypted logs and alarm topics', () => {
     const logGroups = resourceEntries('AWS::Logs::LogGroup');
-    expect(logGroups).toHaveLength(5);
+    expect(logGroups).toHaveLength(8);
     for (const [, logGroup] of logGroups) {
       const properties = resourceProperties(logGroup);
       expect(properties.KmsKeyId).toBeDefined();
@@ -1113,8 +1123,10 @@ describe('observability skeleton', () => {
       expect(policy.DeletionPolicy).toBe('Retain');
       expect(policy.UpdateReplacePolicy).toBe('Retain');
     }
-    template.resourceCountIs('AWS::SNS::Subscription', 0);
-    template.resourceCountIs('AWS::CloudWatch::Alarm', 0);
+    template.resourceCountIs('AWS::SNS::Subscription', 4);
+    expect(
+      resourceEntries('AWS::CloudWatch::Alarm').length,
+    ).toBeGreaterThanOrEqual(20);
   });
 
   it('scopes CloudWatch Logs service access to regional PSD EOC groups', () => {
@@ -1241,11 +1253,29 @@ describe('GitHub OIDC deployment boundary', () => {
 });
 
 describe('no automated critical-action path', () => {
-  it('has no event trigger, schedule, provider sender, or alarm subscription', () => {
+  it('limits automation to monitoring and has no provider sender', () => {
     template.resourceCountIs('AWS::Lambda::EventSourceMapping', 0);
-    template.resourceCountIs('AWS::Events::Rule', 0);
-    template.resourceCountIs('AWS::SNS::Subscription', 0);
-    template.resourceCountIs('AWS::CloudWatch::Alarm', 0);
+    const rules = resourceEntries('AWS::Events::Rule').map(([, resource]) =>
+      resourceProperties(resource),
+    );
+    expect(rules).toHaveLength(3);
+    expect(
+      rules.filter((rule) => rule.ScheduleExpression === 'rate(1 minute)'),
+    ).toHaveLength(2);
+    expect(
+      rules.filter((rule) =>
+        JSON.stringify(rule.EventPattern ?? {}).includes(
+          'RDS DB Cluster Event',
+        ),
+      ),
+    ).toHaveLength(1);
+    const subscriptions = resourceEntries('AWS::SNS::Subscription').map(
+      ([, resource]) => resourceProperties(resource),
+    );
+    expect(subscriptions).toHaveLength(4);
+    expect(
+      subscriptions.map((subscription) => subscription.Protocol).sort(),
+    ).toEqual(['email', 'email', 'sms', 'sms']);
     expect(JSON.stringify(synthesizedTemplate)).not.toMatch(
       /ses:(?:\*|Send)|sms-voice:Send|mobiletargeting:Send/i,
     );
