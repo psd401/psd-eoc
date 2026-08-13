@@ -13,7 +13,8 @@
     "test": "bun run test:bun && bun run test:native",
     "test:bun": "bun test && bun run native-config:check",
     "test:native": "jest --config jest.config.cjs --runInBand",
-    "native-config:check": "bun scripts/verify-event-room-native-config.ts",
+    "native-config:check": "bun scripts/verify-event-room-native-config.ts && bun scripts/verify-push-native-config.ts",
+    "native-config:push:check": "bun scripts/verify-push-native-config.ts",
     "expo:check": "expo install --check",
     "react:check": "bun scripts/verify-react-runtime.ts",
     "prebuild:check": "expo prebuild --no-install && prettier --write --ignore-path .prettier-native-ignore \"ios/**/*.json\""

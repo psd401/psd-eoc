@@ -3,6 +3,10 @@ import { describe, expect, test } from 'bun:test';
 import { ProviderDispatchError } from '../shared/retry';
 import { realBatch, workItem } from '../shared/test-fixtures';
 import {
+  PushEndpointEligibilityError,
+  type PushEndpointEligibilityChecker,
+} from './eligibility';
+import {
   EXPO_EMERGENCY_TTL_SECONDS,
   EXPO_RECEIPTS_URL,
   EXPO_SEND_URL,
@@ -11,6 +15,10 @@ import {
 import { ExpoPushHttpTransport, type ExpoPushFetch } from './transport';
 
 const ACCESS_TOKEN = 'synthetic-expo-access-token-0000001';
+const ALLOWING_ENDPOINT_ELIGIBILITY: PushEndpointEligibilityChecker =
+  Object.freeze({
+    isEligible: () => Promise.resolve(true),
+  });
 
 function ticketResponse(count: number, sequence: number): Response {
   return Response.json({
@@ -21,8 +29,59 @@ function ticketResponse(count: number, sequence: number): Response {
   });
 }
 
+function deferred<T>() {
+  let resolve: (value: T | PromiseLike<T>) => void = () => {
+    throw new Error('Deferred promise was not initialized.');
+  };
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return Object.freeze({ promise, resolve });
+}
+
 describe('Expo native-fetch transport', () => {
-  test('sends provider chunks of at most 100 with canonical bodies', async () => {
+  test('requires endpoint eligibility and proves exact checker identity', () => {
+    const checker: PushEndpointEligibilityChecker = {
+      isEligible: () => Promise.resolve(true),
+    };
+    const transport = new ExpoPushHttpTransport({
+      accessToken: ACCESS_TOKEN,
+      authorizeLiveTransport: () => true,
+      endpointEligibility: checker,
+    });
+
+    expect(
+      ExpoPushHttpTransport.usesEndpointEligibility(transport, checker),
+    ).toBe(true);
+    expect(
+      ExpoPushHttpTransport.usesEndpointEligibility(transport, {
+        isEligible: checker.isEligible,
+      }),
+    ).toBe(false);
+    expect(
+      ExpoPushHttpTransport.usesEndpointEligibility(
+        new Proxy(transport, {}),
+        checker,
+      ),
+    ).toBe(false);
+    expect(
+      () =>
+        new ExpoPushHttpTransport({
+          accessToken: ACCESS_TOKEN,
+          authorizeLiveTransport: () => true,
+        } as never),
+    ).toThrow('Expo endpoint eligibility checker is invalid.');
+    expect(
+      () =>
+        new ExpoPushHttpTransport({
+          accessToken: ACCESS_TOKEN,
+          authorizeLiveTransport: () => true,
+          endpointEligibility: { isEligible: true },
+        } as never),
+    ).toThrow('Expo endpoint eligibility checker is invalid.');
+  });
+
+  test('sends only singleton provider requests with canonical bodies', async () => {
     const calls: Array<{
       url: string;
       messages: readonly ExpoPushMessage[];
@@ -41,13 +100,15 @@ describe('Expo native-fetch transport', () => {
       accessToken: ACCESS_TOKEN,
       fetch,
       authorizeLiveTransport: () => true,
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       clock: () => realBatch().createdAt,
     });
     const outcomes = await transport.sendAll(
       Array.from({ length: 201 }, () => workItem(realBatch())),
     );
 
-    expect(calls.map((call) => call.messages.length)).toEqual([100, 100, 1]);
+    expect(calls).toHaveLength(201);
+    expect(calls.every((call) => call.messages.length === 1)).toBe(true);
     expect(calls.every((call) => call.url === EXPO_SEND_URL)).toBe(true);
     expect(
       calls.every((call) => call.authorization === `Bearer ${ACCESS_TOKEN}`),
@@ -70,6 +131,7 @@ describe('Expo native-fetch transport', () => {
     const transport = new ExpoPushHttpTransport({
       accessToken: ACCESS_TOKEN,
       authorizeLiveTransport: () => true,
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       clock: () => freshBatch.createdAt,
       fetch: (_input, init) => {
         const messages = JSON.parse(String(init?.body)) as ExpoPushMessage[];
@@ -78,7 +140,7 @@ describe('Expo native-fetch transport', () => {
       },
     });
 
-    const outcomes = await transport.sendChunk([
+    const outcomes = await transport.sendAll([
       workItem(staleBatch),
       workItem(freshBatch),
     ]);
@@ -103,6 +165,7 @@ describe('Expo native-fetch transport', () => {
     let calls = 0;
     const transport = new ExpoPushHttpTransport({
       accessToken: ACCESS_TOKEN,
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       fetch: () => {
         calls += 1;
         return Promise.resolve(ticketResponse(1, 1));
@@ -115,6 +178,206 @@ describe('Expo native-fetch transport', () => {
     expect(calls).toBe(0);
   });
 
+  test('rejects multi-item send chunks before authorization, eligibility, or network access', async () => {
+    let authorizationCalls = 0;
+    let eligibilityCalls = 0;
+    let fetchCalls = 0;
+    const transport = new ExpoPushHttpTransport({
+      accessToken: ACCESS_TOKEN,
+      authorizeLiveTransport: () => {
+        authorizationCalls += 1;
+        return true;
+      },
+      endpointEligibility: {
+        isEligible: () => {
+          eligibilityCalls += 1;
+          return Promise.resolve(true);
+        },
+      },
+      fetch: () => {
+        fetchCalls += 1;
+        return Promise.resolve(ticketResponse(1, 1));
+      },
+      clock: () => realBatch().createdAt,
+    });
+
+    await expect(
+      transport.sendChunk([workItem(realBatch()), workItem(realBatch())]),
+    ).rejects.toMatchObject({
+      code: 'EXPO_LIVE_TRANSPORT_DISABLED',
+      disposition: 'terminal-failure',
+    });
+    expect(authorizationCalls).toBe(0);
+    expect(eligibilityCalls).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test('checks endpoint eligibility after deferred live authorization and blocks a newly revoked endpoint', async () => {
+    const authorizationGate = deferred<boolean>();
+    const authorizationEntered = deferred<void>();
+    let eligible = true;
+    let eligibilityCalls = 0;
+    let fetchCalls = 0;
+    const transport = new ExpoPushHttpTransport({
+      accessToken: ACCESS_TOKEN,
+      authorizeLiveTransport: () => {
+        authorizationEntered.resolve();
+        return authorizationGate.promise;
+      },
+      endpointEligibility: {
+        isEligible: () => {
+          eligibilityCalls += 1;
+          return Promise.resolve(eligible);
+        },
+      },
+      fetch: () => {
+        fetchCalls += 1;
+        return Promise.resolve(ticketResponse(1, 1));
+      },
+      clock: () => realBatch().createdAt,
+    });
+
+    const pending = transport.sendChunk([workItem(realBatch())]);
+    await authorizationEntered.promise;
+    eligible = false;
+    authorizationGate.resolve(true);
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'EXPO_ENDPOINT_INELIGIBLE',
+      disposition: 'terminal-failure',
+      diagnosticDigest: null,
+    });
+    expect(eligibilityCalls).toBe(1);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test('fails closed for unavailable, hostile, and malformed eligibility without leaking endpoint data', async () => {
+    const item = workItem(realBatch());
+    if (item.endpoint.channel !== 'push') throw new Error('Fixture mismatch.');
+    const hostileDetail = `raw policy failure for ${item.endpoint.token}`;
+    const cases = [
+      {
+        name: 'retryable eligibility outage',
+        expectedCode: 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE',
+        expectedDisposition: 'safe-to-retry',
+        isEligible: () =>
+          Promise.reject(
+            new PushEndpointEligibilityError('REQUEST_FAILED', true),
+          ),
+      },
+      {
+        name: 'hostile unbranded rejection',
+        expectedCode: 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+        expectedDisposition: 'terminal-failure',
+        isEligible: () => Promise.reject(new Error(hostileDetail)),
+      },
+      {
+        name: 'non-boolean response',
+        expectedCode: 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+        expectedDisposition: 'terminal-failure',
+        isEligible: () => Promise.resolve('eligible' as never),
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      let fetchCalls = 0;
+      const transport = new ExpoPushHttpTransport({
+        accessToken: ACCESS_TOKEN,
+        authorizeLiveTransport: () => true,
+        endpointEligibility: { isEligible: testCase.isEligible },
+        fetch: () => {
+          fetchCalls += 1;
+          return Promise.resolve(ticketResponse(1, 1));
+        },
+        clock: () => realBatch().createdAt,
+      });
+
+      const error = await transport
+        .sendChunk([item])
+        .catch((caught: unknown) => caught);
+      expect(error, testCase.name).toMatchObject({
+        code: testCase.expectedCode,
+        disposition: testCase.expectedDisposition,
+        diagnosticDigest: null,
+      });
+      const safeError = `${String(error)} ${JSON.stringify(error)}`;
+      expect(safeError, testCase.name).not.toContain(item.endpoint.token);
+      expect(safeError, testCase.name).not.toContain(hostileDetail);
+      expect(fetchCalls, testCase.name).toBe(0);
+    }
+  });
+
+  test('calls authorization then eligibility then fetch with no asynchronous eligibility gap', async () => {
+    const order: string[] = [];
+    let eligible = true;
+    const item = workItem(realBatch());
+    const transport = new ExpoPushHttpTransport({
+      accessToken: ACCESS_TOKEN,
+      authorizeLiveTransport: () => {
+        order.push('authorize');
+        return true;
+      },
+      endpointEligibility: {
+        isEligible: () => {
+          order.push('eligibility');
+          return Promise.resolve(eligible);
+        },
+      },
+      fetch: (_input, init) => {
+        order.push('fetch');
+        const messages = JSON.parse(String(init?.body)) as ExpoPushMessage[];
+        expect(messages).toHaveLength(1);
+        eligible = false;
+        return Promise.resolve(ticketResponse(1, 1));
+      },
+      clock: () => item.batch.createdAt,
+    });
+
+    await expect(transport.sendChunk([item])).resolves.toEqual([
+      expect.objectContaining({ state: 'provider-accepted' }),
+    ]);
+    expect(order).toEqual(['authorize', 'eligibility', 'fetch']);
+    expect(eligible).toBe(false);
+  });
+
+  test('rechecks expiration after delayed eligibility and skips provider fetch', async () => {
+    const item = workItem(realBatch());
+    const expiresAt =
+      Date.parse(item.batch.createdAt) + EXPO_EMERGENCY_TTL_SECONDS * 1_000;
+    const eligibilityGate = deferred<boolean>();
+    const eligibilityEntered = deferred<void>();
+    let now = expiresAt - 1;
+    let fetchCalls = 0;
+    const transport = new ExpoPushHttpTransport({
+      accessToken: ACCESS_TOKEN,
+      authorizeLiveTransport: () => true,
+      endpointEligibility: {
+        isEligible: () => {
+          eligibilityEntered.resolve();
+          return eligibilityGate.promise;
+        },
+      },
+      fetch: () => {
+        fetchCalls += 1;
+        return Promise.resolve(ticketResponse(1, 1));
+      },
+      clock: () => now,
+    });
+
+    const pending = transport.sendChunk([item]);
+    await eligibilityEntered.promise;
+    now = expiresAt;
+    eligibilityGate.resolve(true);
+
+    await expect(pending).resolves.toEqual([
+      expect.objectContaining({
+        state: 'expired',
+        reasonCode: 'EXPO_NOTIFICATION_EXPIRED',
+      }),
+    ]);
+    expect(fetchCalls).toBe(0);
+  });
+
   test('maps HTTP 429 and 5xx to explicitly retryable provider errors', async () => {
     for (const [status, code] of [
       [429, 'EXPO_HTTP_RATE_LIMITED'],
@@ -124,6 +387,7 @@ describe('Expo native-fetch transport', () => {
         accessToken: ACCESS_TOKEN,
         fetch: () => Promise.resolve(new Response('', { status })),
         authorizeLiveTransport: () => true,
+        endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
         clock: () => realBatch().createdAt,
       });
       try {
@@ -149,6 +413,7 @@ describe('Expo native-fetch transport', () => {
         accessToken: ACCESS_TOKEN,
         fetch: () => Promise.resolve(new Response('', { status })),
         authorizeLiveTransport: () => true,
+        endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
         clock: () => realBatch().createdAt,
       });
       await expect(
@@ -159,6 +424,7 @@ describe('Expo native-fetch transport', () => {
 
   test('validates receipt IDs before I/O and chunks valid queries at 1000', async () => {
     const calls: string[][] = [];
+    let eligibilityCalls = 0;
     const transport = new ExpoPushHttpTransport({
       accessToken: ACCESS_TOKEN,
       fetch: (input, init) => {
@@ -174,6 +440,12 @@ describe('Expo native-fetch transport', () => {
         );
       },
       authorizeLiveTransport: () => true,
+      endpointEligibility: {
+        isEligible: () => {
+          eligibilityCalls += 1;
+          return Promise.resolve(false);
+        },
+      },
     });
 
     await expect(
@@ -188,6 +460,7 @@ describe('Expo native-fetch transport', () => {
     const outcomes = await transport.queryAllReceipts(ids);
     expect(calls.map((call) => call.length)).toEqual([1_000, 1]);
     expect(outcomes).toHaveLength(1_001);
+    expect(eligibilityCalls).toBe(0);
   });
 
   test('cancels oversized streamed responses without buffering beyond the cap', async () => {
@@ -205,6 +478,7 @@ describe('Expo native-fetch transport', () => {
       accessToken: ACCESS_TOKEN,
       fetch: () => Promise.resolve(new Response(stream, { status: 200 })),
       authorizeLiveTransport: () => true,
+      endpointEligibility: ALLOWING_ENDPOINT_ELIGIBILITY,
       clock: () => realBatch().createdAt,
     });
 

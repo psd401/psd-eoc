@@ -334,7 +334,12 @@ describeWithDatabase('SES callback PostgreSQL integration', () => {
       };
       const generatedAt = new Date(fixture.capturedAt.getTime() + 3_000);
       const before = await staleReport(database, generatedAt);
-      expect(before.staleRecipients).toEqual([]);
+      expect(before.staleRecipients).toEqual([
+        {
+          recipientId: fixture.recipientId,
+          reason: 'no-active-push-endpoint',
+        },
+      ]);
 
       const handler = createSesWebhookRouteHandler({
         readExpectedTopicArn: () => TOPIC_ARN,

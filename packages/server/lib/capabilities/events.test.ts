@@ -1024,11 +1024,16 @@ describe('event lifecycle capabilities', () => {
       attempts: 0,
       message: {
         eventId: result.event.id,
+        facilityId: IDS.facility,
         intentId: result.notificationIntent?.id,
         eventKind: 'test',
         templateMode: 'drill',
         purpose: 'activation',
         rosterPopulation: 'synthetic',
+        eventTypeVersion: {
+          id: IDS.eventTypeVersion,
+          templateMode: 'drill',
+        },
       },
     });
     expect(store.auditEvents).toEqual([

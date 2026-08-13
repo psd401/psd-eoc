@@ -35,7 +35,7 @@ import {
   type SessionRevocation,
   type VerifiedCurrentRefreshCredential,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -52,6 +52,8 @@ import {
   connectivityEpochInvalidations,
   connectivityEpochs,
   deviceEnrollments,
+  devicePushTokenRegistrations,
+  devicePushTokenUnregistrations,
   idempotencyRecords,
   sessionRevocations,
   sessions,
@@ -284,6 +286,8 @@ export interface IssuedDeviceSession {
 export interface AuthenticatedSession {
   readonly actor: Extract<Actor, { readonly kind: 'human' }>;
   readonly source: Extract<InvocationSource, 'web' | 'mobile'>;
+  /** Digest of the bearer verified for this request; never the bearer itself. */
+  readonly presentedTokenDigest?: string;
   readonly roles: readonly Role[];
   readonly scope: CapabilityScope;
   readonly membershipState: 'fresh' | 'grace';
@@ -362,6 +366,54 @@ export interface RevokeStoredSessionInput {
   readonly revokedAt: Date;
 }
 
+export interface CompletedSelfRevocationRetryInput {
+  readonly presentedTokenDigest: string;
+  readonly sessionId: string;
+  readonly idempotencyKey: IdempotencyKey;
+  readonly requestDigest: string;
+}
+
+type SessionMutationDatabase = Pick<Database, 'insert' | 'select'>;
+
+async function appendDevicePushTokenUnregistrations(
+  database: SessionMutationDatabase,
+  deviceEnrollmentId: string,
+  unregisteredAt: Date,
+): Promise<void> {
+  const activePushRegistrations = await database
+    .select({
+      registrationId: devicePushTokenRegistrations.id,
+      deviceEnrollmentId: devicePushTokenRegistrations.deviceEnrollmentId,
+    })
+    .from(devicePushTokenRegistrations)
+    .leftJoin(
+      devicePushTokenUnregistrations,
+      eq(
+        devicePushTokenUnregistrations.registrationId,
+        devicePushTokenRegistrations.id,
+      ),
+    )
+    .where(
+      and(
+        eq(devicePushTokenRegistrations.deviceEnrollmentId, deviceEnrollmentId),
+        isNull(devicePushTokenUnregistrations.id),
+      ),
+    );
+  if (activePushRegistrations.length === 0) return;
+  await database
+    .insert(devicePushTokenUnregistrations)
+    .values(
+      activePushRegistrations.map((registration) => ({
+        registrationId: registration.registrationId,
+        deviceEnrollmentId: registration.deviceEnrollmentId,
+        unregisteredAt,
+      })),
+    )
+    .onConflictDoNothing({
+      target: devicePushTokenUnregistrations.registrationId,
+    });
+}
+
 /** Storage contract keeps all authentication decisions independently testable. */
 export interface SessionStore {
   getMembershipSnapshotCapturedAt(snapshotId: string): Promise<Date | null>;
@@ -386,6 +438,10 @@ export interface SessionStore {
   ): Promise<StoredSessionContext | null>;
   recordReplayAndRevoke(input: RecordReplayInput): Promise<void>;
   revoke(input: RevokeStoredSessionInput): Promise<SessionRevocation>;
+  /** Optional stores fail closed when they cannot prove a completed retry. */
+  completedSelfRevocationRetry?(
+    input: CompletedSelfRevocationRetryInput,
+  ): Promise<SessionRevocation | null>;
   getSession(sessionId: string): Promise<StoredSessionContext | null>;
   listDeviceSessions(): Promise<readonly StoredSessionContext[]>;
 }
@@ -444,6 +500,7 @@ function authorizeStoredSession(
   now: Date,
   source: Extract<InvocationSource, 'web' | 'mobile'>,
   policy: SessionPolicy,
+  presentedTokenDigest?: string,
 ): AuthenticatedSession {
   const { result, revocation } = context;
   if (result.user.disabledAt !== null) {
@@ -521,6 +578,7 @@ function authorizeStoredSession(
       sessionId: result.session.id,
     }),
     source,
+    ...(presentedTokenDigest === undefined ? {} : { presentedTokenDigest }),
     roles: result.user.roles,
     scope: CapabilityScopeSchema.parse({ facilityScope: effectiveScope }),
     membershipState,
@@ -543,8 +601,14 @@ function refreshRequestDigest(
 function revokeRequestDigest(
   source: Extract<InvocationSource, 'web' | 'mobile'>,
   input: Readonly<{ sessionId: string; reasonCode: string }>,
+  presentedTokenDigest: string,
 ): string {
-  return digestJson({ capabilityId: 'revoke-session', input, source });
+  return digestJson({
+    capabilityId: 'revoke-session',
+    input,
+    source,
+    presentedTokenDigest,
+  });
 }
 
 export class SessionService {
@@ -624,7 +688,13 @@ export class SessionService {
         'The session credential is invalid.',
       );
     }
-    return authorizeStoredSession(credential.context, now, source, this.policy);
+    return authorizeStoredSession(
+      credential.context,
+      now,
+      source,
+      this.policy,
+      credential.tokenDigest,
+    );
   }
 
   public async prepareRefresh(
@@ -755,6 +825,16 @@ export class SessionService {
     idempotencyKey: string,
     now = new Date(),
   ): Promise<SessionRevocation> {
+    const presentedTokenDigest = authenticated.presentedTokenDigest;
+    if (
+      presentedTokenDigest === undefined ||
+      !/^[a-f0-9]{64}$/u.test(presentedTokenDigest)
+    ) {
+      throw new SessionAccessError(
+        'INVALID_CREDENTIAL',
+        'Session revocation requires the verified request credential.',
+      );
+    }
     const target = await this.store.getSession(input.sessionId);
     if (target === null) {
       throw new SessionAccessError('FORBIDDEN', 'Session revocation denied.');
@@ -777,8 +857,35 @@ export class SessionService {
       sessionId: input.sessionId,
       reasonCode: input.reasonCode,
       idempotencyKey: IdempotencyKeySchema.parse(idempotencyKey),
-      requestDigest: revokeRequestDigest(authenticated.source, input),
+      requestDigest: revokeRequestDigest(
+        authenticated.source,
+        input,
+        presentedTokenDigest,
+      ),
       revokedAt: now,
+    });
+  }
+
+  /**
+   * Recovers only the receipt for an already-completed self-revocation.
+   * This is deliberately not a mutation or authorization fallback: the store
+   * must bind the still-current presented credential to the exact completed
+   * idempotency record and its canonical revocation row.
+   */
+  public async recoverCompletedSelfRevocation(
+    token: string,
+    source: Extract<InvocationSource, 'web' | 'mobile'>,
+    input: Readonly<{ sessionId: string; reasonCode: string }>,
+    idempotencyKey: string,
+  ): Promise<SessionRevocation | null> {
+    const recover = this.store.completedSelfRevocationRetry;
+    if (recover === undefined) return null;
+    const presentedTokenDigest = hashRefreshToken(token);
+    return recover.call(this.store, {
+      presentedTokenDigest,
+      sessionId: input.sessionId,
+      idempotencyKey: IdempotencyKeySchema.parse(idempotencyKey),
+      requestDigest: revokeRequestDigest(source, input, presentedTokenDigest),
     });
   }
 
@@ -981,10 +1088,14 @@ function parseRefreshResultReference(reference: string): Readonly<{
 }
 
 function parseRevocationResultReference(reference: string): string | null {
-  const [prefix, revocationId] = reference.split(':');
-  return prefix === REVOCATION_RESULT_PREFIX &&
+  const parts = reference.split(':');
+  const [prefix, revocationId] = parts;
+  return parts.length === 2 &&
+    prefix === REVOCATION_RESULT_PREFIX &&
     revocationId !== undefined &&
-    /^[0-9a-f-]{36}$/u.test(revocationId)
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      revocationId,
+    )
     ? revocationId
     : null;
 }
@@ -1864,6 +1975,11 @@ export class DrizzleSessionStore implements SessionStore {
               })),
             );
           }
+          await appendDevicePushTokenUnregistrations(
+            transaction,
+            lockedSession.deviceEnrollmentId,
+            input.rotatedAt,
+          );
           return Object.freeze({ kind: 'replay' as const });
         }
 
@@ -2078,8 +2194,15 @@ export class DrizzleSessionStore implements SessionStore {
   public async recordReplayAndRevoke(input: RecordReplayInput): Promise<void> {
     await this.database.transaction(async (transaction) => {
       const [lockedSession] = await transaction
-        .select({ id: sessions.id })
+        .select({
+          id: sessions.id,
+          deviceEnrollmentId: sessions.deviceEnrollmentId,
+        })
         .from(sessions)
+        .innerJoin(
+          deviceEnrollments,
+          eq(deviceEnrollments.id, sessions.deviceEnrollmentId),
+        )
         .where(eq(sessions.id, input.retired.sessionId))
         .for('update')
         .limit(1);
@@ -2105,6 +2228,11 @@ export class DrizzleSessionStore implements SessionStore {
           reasonCode: 'REFRESH_TOKEN_REPLAY',
           revokedAt: input.detectedAt,
         });
+        await appendDevicePushTokenUnregistrations(
+          transaction,
+          lockedSession.deviceEnrollmentId,
+          input.detectedAt,
+        );
       }
       const epochRows = await transaction
         .select({ id: connectivityEpochs.id })
@@ -2155,8 +2283,15 @@ export class DrizzleSessionStore implements SessionStore {
           sql`select pg_advisory_xact_lock(hashtextextended(${`${principalDigest}:${input.idempotencyKey}`}, 4018))`,
         );
         const [lockedSession] = await transaction
-          .select({ id: sessions.id })
+          .select({
+            id: sessions.id,
+            deviceEnrollmentId: sessions.deviceEnrollmentId,
+          })
           .from(sessions)
+          .innerJoin(
+            deviceEnrollments,
+            eq(deviceEnrollments.id, sessions.deviceEnrollmentId),
+          )
           .where(eq(sessions.id, input.sessionId))
           .for('update')
           .limit(1);
@@ -2228,6 +2363,11 @@ export class DrizzleSessionStore implements SessionStore {
             reasonCode: input.reasonCode,
             revokedAt: input.revokedAt,
           });
+          await appendDevicePushTokenUnregistrations(
+            transaction,
+            lockedSession.deviceEnrollmentId,
+            input.revokedAt,
+          );
         }
 
         const epochRows = await transaction
@@ -2265,6 +2405,7 @@ export class DrizzleSessionStore implements SessionStore {
             })),
           );
         }
+
         await transaction
           .update(idempotencyRecords)
           .set({
@@ -2286,6 +2427,87 @@ export class DrizzleSessionStore implements SessionStore {
         'INVALID_CREDENTIAL',
         'Session revocation could not be reconstructed.',
       );
+    }
+    return SessionRevocationSchema.parse({
+      id: row.id,
+      sessionId: row.sessionId,
+      revokedBy: row.revokedBy,
+      reasonCode: row.reasonCode,
+      revokedAt: timestamp(row.revokedAt),
+    });
+  }
+
+  public async completedSelfRevocationRetry(
+    input: CompletedSelfRevocationRetryInput,
+  ): Promise<SessionRevocation | null> {
+    const credential = await this.inspectCredential(input.presentedTokenDigest);
+    if (
+      credential.kind !== 'current' ||
+      credential.context.result.session.id !== input.sessionId ||
+      credential.context.revocation === null ||
+      credential.context.result.session.revokedAt === null
+    ) {
+      return null;
+    }
+
+    const expectedPrincipal = Object.freeze({
+      kind: 'human' as const,
+      userId: credential.context.result.user.id,
+      sessionId: credential.context.result.session.id,
+    });
+    const principalDigest = digestJson(
+      IdempotencyPrincipalSchema.parse(expectedPrincipal),
+    );
+    const [idempotency] = await this.database
+      .select()
+      .from(idempotencyRecords)
+      .where(
+        and(
+          eq(idempotencyRecords.capabilityId, 'revoke-session'),
+          eq(idempotencyRecords.principalDigest, principalDigest),
+          eq(idempotencyRecords.key, input.idempotencyKey),
+        ),
+      )
+      .limit(1);
+    if (idempotency === undefined) return null;
+
+    const storedPrincipal = IdempotencyPrincipalSchema.safeParse(
+      idempotency.principal,
+    );
+    const revocationId =
+      idempotency.resultReference === null
+        ? null
+        : parseRevocationResultReference(idempotency.resultReference);
+    if (
+      !storedPrincipal.success ||
+      storedPrincipal.data.kind !== 'human' ||
+      storedPrincipal.data.userId !== expectedPrincipal.userId ||
+      storedPrincipal.data.sessionId !== expectedPrincipal.sessionId ||
+      idempotency.requestDigest !== input.requestDigest ||
+      idempotency.status !== 'completed' ||
+      idempotency.completedAt === null ||
+      revocationId === null ||
+      credential.context.revocation.id !== revocationId
+    ) {
+      return null;
+    }
+
+    const [row] = await this.database
+      .select()
+      .from(sessionRevocations)
+      .where(eq(sessionRevocations.id, revocationId))
+      .limit(1);
+    if (row === undefined || row.sessionId !== input.sessionId) return null;
+
+    const stillCurrent = await this.inspectCredential(
+      input.presentedTokenDigest,
+    );
+    if (
+      stillCurrent.kind !== 'current' ||
+      stillCurrent.context.result.session.id !== input.sessionId ||
+      stillCurrent.context.revocation?.id !== revocationId
+    ) {
+      return null;
     }
     return SessionRevocationSchema.parse({
       id: row.id,
