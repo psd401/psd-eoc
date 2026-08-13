@@ -1,0 +1,25 @@
+appId: net.psd401.eoc
+name: Issue 21 - join an existing synthetic drill
+tags:
+  - issue-21
+  - synthetic-only
+---
+# Preconditions: the retained authenticated session is already unlocked and
+# the synthetic fixture exposes one active drill. The assertion prevents this
+# flow from operating outside explicit synthetic test mode.
+- launchApp:
+    clearState: false
+    stopApp: false
+- assertVisible:
+    id: 'issue-21-synthetic-mode'
+- assertVisible: '.*DRILL — PRACTICE.*'
+- assertVisible:
+    id: 'issue-21-join-existing'
+- assertVisible: 'Join existing DRILL — PRACTICE: Synthetic earthquake drill at Synthetic Test School.*'
+- tapOn: 'Join existing DRILL — PRACTICE: Synthetic earthquake drill at Synthetic Test School.*'
+- extendedWaitUntil:
+    visible:
+      id: 'issue-21-joined-result'
+    timeout: 15000
+- assertVisible: 'Event joined'
+- assertVisible: '.*Joining did not create another event or notification.*'

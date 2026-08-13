@@ -293,9 +293,12 @@ describe('mobile auth controller', () => {
     ]);
     expect(storage.vault?.refreshToken).toBe(TEST_NEXT_TOKEN);
     expect(storage.vault?.pendingRefreshIdempotencyKey).toBeNull();
-    expect(auth.assertMutationAllowed().connectivityEpochId).toBe(
-      '00000000-0000-4000-8000-000000000006',
-    );
+    expect(auth.assertMutationAllowed()).toEqual({
+      connectivityEpochId: '00000000-0000-4000-8000-000000000006',
+      userId: sessionFixture().user.id,
+      sessionId: sessionFixture().session.id,
+      deviceEnrollmentId: sessionFixture().deviceEnrollment.id,
+    });
   });
 
   test('clears a server-revoked device when the next foreground refresh is rejected as 401 or 403', async () => {
