@@ -1128,11 +1128,16 @@ export function mobileE2EIosNotificationActionLogEvidence(
   const removals = [
     ...log.matchAll(
       new RegExp(
-        String.raw`removing notification request (${requestPattern})`,
+        String.raw`removing notification request (${requestPattern})([^\r\n]*)`,
         'gu',
       ),
     ),
-  ].map((match) => match[1] as string);
+  ]
+    .filter(
+      (match) =>
+        !/\bon long look dismissal\b/iu.test((match[2] as string) ?? ''),
+    )
+    .map((match) => match[1] as string);
   if (executions.length !== 1) {
     return Object.freeze({ valid: false, requestId: null });
   }
@@ -1144,7 +1149,7 @@ export function mobileE2EIosNotificationActionLogEvidence(
     (candidate) => candidate !== requestId,
   );
   const refusalAfterExecution = new RegExp(
-    String.raw`(?:Action completion for ${requestId} didExecute\? NO|Hinting side swipe instead of executing action for ${requestId})`,
+    String.raw`(?:Action completion for ${requestId} didExecute\? NO|Completion of action execution for ${requestId}\. didExecute: NO|Hinting side swipe instead of executing action for ${requestId})`,
     'u',
   ).test(log.slice(log.indexOf('requests executing action')));
   if (otherExecution || refusalAfterExecution) {

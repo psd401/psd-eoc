@@ -1128,6 +1128,28 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toEqual({ valid: false, requestId: null });
     expect(
       mobileE2EIosNotificationActionLogEvidence(
+        [
+          'Notification List requests executing action com.apple.UNNotificationDefaultActionIdentifier for notification request 71D9-8111',
+          'Notification List Completion of action execution for 71D9-8111. didExecute: NO',
+          'Notification List removing notification request 71D9-8111 on long look dismissal',
+        ].join('\n'),
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        validLog.replace(
+          'removing notification request 71D9-8111',
+          'removing notification request 71D9-8111 on long look dismissal',
+        ),
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
+        `${validLog}\nCompletion of action execution for 71D9-8111. didExecute: NO`,
+      ),
+    ).toEqual({ valid: false, requestId: null });
+    expect(
+      mobileE2EIosNotificationActionLogEvidence(
         `${validLog}\nHinting side swipe instead of executing action for 71D9-8111`,
       ),
     ).toEqual({ valid: false, requestId: null });

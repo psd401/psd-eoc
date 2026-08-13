@@ -10,6 +10,12 @@ tags: [issue-32, synthetic-only, ios, notification, tap-open]
 - assertTrue:
     condition: ${IOS_NOTIFICATION_OPEN_POINT != null}
     label: Require the runner-measured Open point
+- extendedWaitUntil:
+    visible:
+      id: 'NotificationShortLookView'
+      text: '^PSD EOC, .*, \[DRILL\] Synthetic lockdown drill, \[DRILL\] Synthetic exercise only\. Open the synthetic event room\.(?:, TIME SENSITIVE)?$'
+    timeout: 15000
+- assertNotVisible: '.*\[INCIDENT\].*'
 - tapOn:
     point: '${IOS_NOTIFICATION_OPEN_POINT}'
     retryTapIfNoChange: false
