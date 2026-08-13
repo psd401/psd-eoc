@@ -4,9 +4,13 @@ import { requireSyntheticTestDatabaseUrl } from './test-database';
 
 describe('event-type test database guard', () => {
   test('accepts an explicitly named loopback PostgreSQL test database', () => {
-    const value =
-      'postgresql://synthetic:synthetic@127.0.0.1:5432/psd_eoc_test';
-    expect(requireSyntheticTestDatabaseUrl(value, false)).toBe(value);
+    for (const value of [
+      'postgresql://synthetic:synthetic@127.0.0.1:5432/psd_eoc_test',
+      'postgresql://synthetic:synthetic@localhost:5432/psd-eoc-test',
+      'postgresql://synthetic:synthetic@[::1]:5432/psd_eoc_test',
+    ]) {
+      expect(requireSyntheticTestDatabaseUrl(value, false)).toBe(value);
+    }
   });
 
   test('rejects production-shaped, remote, and non-PostgreSQL targets', () => {
