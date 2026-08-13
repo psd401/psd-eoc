@@ -16,14 +16,33 @@
       "bun": "1.2.23",
       "credentialsSource": "remote",
       "distribution": "internal",
-      "environment": "preview"
+      "environment": "preview",
+      "channel": "preview"
+    },
+    "ota-preview": {
+      "bun": "1.2.23",
+      "credentialsSource": "remote",
+      "distribution": "internal",
+      "environment": "production",
+      "channel": "preview"
     },
     "production": {
       "bun": "1.2.23",
       "credentialsSource": "remote",
       "distribution": "store",
       "environment": "production",
+      "channel": "production",
       "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {
+      "android": {
+        "track": "alpha",
+        "releaseStatus": "draft",
+        "changesNotSentForReview": true
+      },
+      "ios": {}
     }
   }
 }
