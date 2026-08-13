@@ -74,9 +74,10 @@ authenticated-human confirmation immediately before that write.
 ### BUILD
 
 The BUILD preview binds the exact clean Git SHA, platform, `production` profile,
-application identifier, app version/runtime, public API origin, expected cost,
-EAS remote build-number increment, and the complete pre-build update-routing
-state. Before an authorized human starts it:
+application identifier, app version/runtime, public API origin, compiled push-
+registration switch, expected cost, exact remote build-number transition, and
+the complete pre-build update-routing state. Before an authorized human starts
+it:
 
 - [ ] Read-only EAS production-environment evidence shows exactly one
       `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` set to the public, non-secret origin
@@ -84,6 +85,15 @@ state. Before an authorized human starts it:
       profiles contain that exact value; absence, another origin, a
       credential/query/path fragment, or a conflicting account-level value
       blocks the build.
+- [ ] Read-only EAS production-environment evidence also shows exactly one
+      plaintext string `EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED` at
+      project scope with the exact value `true`, no account-scope variable of
+      the same name, and that exact effective value in both resolved production
+      profiles. This compiled opt-in is required for the release candidate and
+      makes the installed binary capable of registration. BUILD approval alone
+      does not authorize installation, sign-in, registration, a provider test,
+      or a notification. Missing, malformed, conflicting, or disabled state
+      blocks BUILD.
 - [ ] The signing and EAS configuration required for that platform is verified
       without placing credentials in the repository. Required remote signing
       credentials and provisioning are pre-provisioned and read back; BUILD
@@ -95,9 +105,12 @@ state. Before an authorized human starts it:
       indeterminate.
 - [ ] A complete, paginated inventory binds the exact `production`
       channel-to-branch mapping and every update compatible with the platform
-      and runtime. An absent channel or branch, an unexpected mapping, an
-      unreviewed compatible update, an indeterminate rollout, or incomplete
-      pagination is recorded explicitly and fails closed.
+      and runtime. An entirely absent expected pair—neither a `production`
+      channel nor a `production` branch exists—may proceed only through the
+      separately previewed same-name creation/link consequence below. Partial
+      absence, any unexpected mapping, an orphan existing branch, an unreviewed
+      compatible update, an indeterminate rollout, or incomplete pagination is
+      recorded explicitly and fails closed.
 - [ ] The preview states that BUILD creates the exact EAS artifact and, only
       when the inventory proves them absent, may create and link the exact
       same-name `production` channel and branch. It does not submit, assign a
@@ -157,6 +170,15 @@ consequences, and the withdrawal or fix-forward target.
       selection blocks exposure evidence and final acceptance.
 - [ ] Tester exposure authorizes installation only. It does not authorize a
       PSD EOC notification, a real incident, or ordinary-staff expansion.
+- [ ] Before installation or sign-in, the preview binds the exact approved
+      synthetic staff-context account and verifier device and states that an
+      authenticated online session with already granted notification permission
+      automatically acquires a native token, contacts Expo for an Expo token,
+      and registers that token with PSD EOC. Verified provider credentials, the
+      approved synthetic target, an exact registration consequence preview,
+      explicit product-owner approval, and fresh authenticated-human
+      confirmation must be current. Keep push registration disabled on any
+      device outside that bounded run.
 
 After installation, any controlled synthetic push is a separate issue #40
 action. It requires verified credentials, an approved synthetic target list, a
@@ -164,6 +186,14 @@ consequence preview, explicit product-owner authorization, and authenticated-
 human confirmation. Use test mode only; never start a real incident or send a
 live staff notification, and prove the real-versus-drill display remains
 unambiguous.
+
+At the current repository state, issue #40 cannot yet perform that first send
+through the canonical app path: the Expo transport requires a `live-verified`
+integration before provider I/O, while issue #40 correctly retains `mocked`
+until both physical runs are proven. This runbook does not weaken that gate or
+permit a dashboard/CLI shortcut. Issue #40 needs its own owned, reviewed ordering
+or narrowly scoped app-confirmed verification-path decision; until then its
+physical-send evidence and this runbook's FINAL ACCEPTANCE remain blocked.
 
 ### FINAL ACCEPTANCE
 
@@ -189,24 +219,65 @@ stop condition: inspect provider state read-only and create a fresh plan; never
 blindly retry.
 
 Inspect both production variable scopes without requesting sensitive values,
-then prove the effective public API origin and resolve both production profiles.
-The project scope must contain exactly one plaintext string variable with the
-expected value and the account scope must contain no variable of the same name.
-`env:exec` proves the value produced by EAS precedence without printing it;
-`config` alone does not prove the variable's source or value. Do not use
-`--include-sensitive` or a file variable, and do not copy the full output into
-a public record:
+then prove the effective public API origin and push-registration switch and
+resolve both production profiles. For each named variable, project scope must
+contain exactly one plaintext string with the expected value and account scope
+must contain no variable of the same name. `env:exec` proves the values produced
+by EAS precedence without printing them; `config` alone does not prove a
+variable's source or value. Do not use `--include-sensitive` or a file variable,
+and do not copy the full output into a public record:
 
 ```sh
 cd packages/mobile
 bunx eas-cli@21.7.0 env:list production --scope project --format long
 bunx eas-cli@21.7.0 env:list production --scope account --format long
-env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL bunx eas-cli@21.7.0 env:exec production \
-  'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net"' \
+env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL \
+  -u EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED \
+  bunx eas-cli@21.7.0 env:exec production \
+  'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net" && test "$EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED" = "true"' \
   --non-interactive
 bunx eas-cli@21.7.0 config --platform ios --profile production --json
 bunx eas-cli@21.7.0 config --platform android --profile production --json
 ```
+
+Record the two public effective values, scope/name/type inventory digest, and
+resolved-profile digest in the private append-only release record. Setting or
+changing either EAS variable is a separate provider mutation with its own exact
+preview and approval; these read-only commands do not authorize it.
+
+### INTERNAL BUILD ACCESS (`development`, `preview`, and `ota-preview`)
+
+Every internal-distribution profile is private infrastructure. Before creating,
+sharing, opening an install page for, or installing a `development`, `preview`,
+or `ota-preview` artifact, an authorized human must read back that
+**Unauthenticated access to internal builds** is disabled for the exact
+`peninsula-school-district/psd-eoc` project. Reconcile project membership and
+artifact access to one product-owner-approved, named, bounded staff-only
+technical audience. Record only the audience digest and count, approval
+reference, access expiry, planned removal time, and post-removal read-back.
+
+An unknown member, student or guardian, public/unauthenticated access, stale
+audience, missing expiry/removal proof, or inability to read back the setting
+blocks the build and every install. An internal-build URL is a bearer-like
+distribution pointer: never place one in a repository, issue, PR, public chat,
+or screenshot. A URL alone is never privacy, audience, install, or launched-
+bundle evidence. Immediately before each share or install and after audience
+removal, repeat the access-setting and digest/count read-back. These controls
+apply independently to all three internal profiles; satisfying them for one
+artifact or profile never satisfies another.
+
+Do not sign in to an internal build until the exact synthetic staff-context
+account and verifier device, automatic push-registration consequence, verified
+credentials, product-owner approval, and fresh authenticated-human confirmation
+required by TESTER EXPOSURE are current. Build creation can precede issue #40's
+physical send evidence; registration and any later DRILL send remain separately
+controlled actions.
+
+Access expiry or revocation cannot recall an installed artifact, and downloaded
+Android bytes can be redistributed after the original URL stops working. The
+iOS provisioning device allowlist must exactly match the approved bounded
+device audience. Record removal and device cleanup explicitly; do not infer
+either from a disabled link.
 
 ## 2. Version and immutable-build policy
 
@@ -222,18 +293,28 @@ safety boundaries.
 
 `packages/mobile/eas.json` uses `cli.appVersionSource: "remote"` and
 `build.production.autoIncrement: true`. EAS therefore assigns monotonically
-increasing iOS build numbers and Android version codes. Never edit a number to
-reuse an already uploaded store identity. Record EAS's resolved values after
-each build; the Git repository does not contain those remote counters.
+increasing iOS build numbers and Android version codes. EAS CLI 21.7.0 reports
+an uninitialized remote counter as `{}` with exit status zero; that means no
+remote counter exists yet, not that the read failed. From that exact state, the first
+production iOS BUILD is previewed as `{}` to `1`; the first production Android
+BUILD is previewed as `{}` to `2` because its implicit local default `1` is
+auto-incremented, with no separately stored remote `1` transition. If an
+`ota-preview` build already initialized either counter to `1`, the next
+production BUILD is `1` to `2`. From any existing numeric `N`, a production
+BUILD is previewed as `N` to `N + 1`. Never edit a number to reuse an already
+uploaded store identity. Record EAS's resolved values after each build; the Git
+repository does not contain those remote counters.
 
 Before a build, enumerate every page of channels and branches, then bind the
 exact channel, its linked branch, and every compatible update for the target
 platform and runtime. Replace each `OFFSET` with successive offsets until the
 returned page is empty; retain a non-sensitive digest of the complete
 inventory. An absent `production` channel/branch means EAS Build may create and
-link that same-name routing as part of the separately approved BUILD
-consequence. Existing unexpected routing or any compatible update whose source,
-rollout, and expected launch identity are not proven blocks the build:
+inventory. When neither the `production` channel nor same-name branch exists,
+EAS Build may create and link that routing as part of the separately approved
+BUILD consequence. An existing channel without its exact expected mapping, an
+orphan same-name branch, other partial state, or any compatible update whose
+source, rollout, and expected launch identity are not proven blocks the build:
 
 ```sh
 cd packages/mobile
@@ -279,9 +360,11 @@ bunx eas-cli@21.7.0 build --platform android --profile production \
 ```
 
 Rerun both `build:version:get` commands after success, refusal, or partial
-failure and append the result. The only allowed change is the exact increment
-in the approved preview; an unexpected value or indeterminate read-back blocks
-all later gates.
+failure and append the result. The only allowed change is the exact
+platform-specific initialization or increment named in the approved preview;
+an unexpected value, an Android `{}` to `1` production result, a consumed value
+not appended to the record, or an indeterminate read-back blocks all later
+gates.
 
 List finished builds read-only, then inspect each exact candidate:
 
@@ -458,16 +541,24 @@ the `ota-preview` and production verification configuration is proven
 identical and recorded.
 
 An `ota-preview` artifact is an internal-distribution build, not a harmless
-local preview. By default, possession of an EAS internal-build URL can be
-enough to open its installation page and Android artifacts are directly
-installable. Before creating or sharing one, an authorized human must use the
-exact `peninsula-school-district/psd-eoc` project settings to read back that
-**Unauthenticated access to internal builds** is disabled. Reconcile the
-project-member inventory and roles to one product-owner-approved, bounded,
-staff-only technical-verifier audience; record only its digest and count. Any
-unknown member, student or guardian, overly broad role, inability to prove the
-setting, or stale audience blocks the build and install. Never put an internal
-build URL in the repository, issue, PR, or other public evidence.
+local preview. Apply the INTERNAL BUILD ACCESS gate above in full. Because it
+uses the production application name, identifier, API origin, and compiled
+push-registration setting, install it only on product-owner-approved dedicated
+non-operational verifier devices that are never carried or relied upon during a
+real operation. It must never replace the store build on an operational device.
+Before replacing an existing app, place the device out of operational reliance,
+sign out while online, and obtain exact token-free session-revocation and push-
+unregistration evidence. Missing or indeterminate cleanup keeps the device
+quarantined; do not uninstall merely to hide the uncertainty. Before a verifier
+device returns to an operational or ordinary test cohort, sign out online and
+confirm cleanup again, remove `ota-preview` and temporary artifact access,
+reinstall the exact approved TestFlight or Play build through that store (not
+from an internal URL or backup), and read back the store build identity,
+`production` update routing, and launched update identity after the second
+online cold launch. Prove the old internal endpoint is inactive and the current
+store endpoint is the only expected active endpoint. Removal alone does not
+prove a store reinstall; missing or ambiguous re-entry evidence keeps the device
+out of service.
 
 Before each `ota-preview` build, perform the same complete channel, branch, and
 platform/runtime update inventory described in section 2, substituting
@@ -497,11 +588,31 @@ bunx eas-cli@21.7.0 build --platform android --profile ota-preview \
 After success, refusal, or partial failure, rerun both `build:version:get`
 commands and reread the exact credential, routing, compatible-update, build,
 source-upload, and quota/cost inventory. Stop on any change beyond an approved
-version initialization and same-name creation/link. Immediately before opening
+`{}` to `1` initialization or same-name creation/link; an existing numeric
+counter must not change because `ota-preview` has no auto-increment. Immediately
+before opening
 an install page, installing the artifact, or launching it for verification,
 reread the access setting, approved audience digest, channel mapping, and
 compatible updates. A URL alone is never privacy, audience, install, or
 launched-bundle evidence.
+
+Immediately before an OTA preview or publication, repeat both production EAS
+scope inventories and the two-variable `env:exec` proof above. The effective
+API origin and push-registration switch must exactly match the immutable values
+recorded for the installed production and `ota-preview` binaries. A change to
+either compiled value is an environment-contract change and therefore requires
+a new app version and store build; it is never eligible for OTA. Environment
+drift, even with no Git diff, blocks publication.
+
+Resolve both `ota-preview` platforms against that same production environment
+before its BUILD; do not infer their compiled values from the production
+profiles:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 config --platform ios --profile ota-preview --json
+bunx eas-cli@21.7.0 config --platform android --profile ota-preview --json
+```
 
 For an eligible patch:
 
@@ -510,8 +621,14 @@ For an eligible patch:
    preflight above. Build and install an exact `ota-preview` binary for that
    runtime; verify its resolved profile, Git commit, application identifier,
    update channel, production environment, and launched embedded/update
-   identity. If device diagnostics cannot prove that identity, retain
-   `unknown` and do not advance.
+   identity. In the authenticated app, open **Release diagnostics** and record
+   only its launch source, update ID, runtime version, channel, and emergency-
+   launch status. The screen is read-only: it never checks, fetches, downloads,
+   reloads, selects, or publishes an update and exposes no manifest, log, API
+   URL, session, device, user, or recipient data. Bind its exact update ID to the
+   matching platform update returned by `update:view`; if it reports `Unknown`,
+   has no exact match, or cannot otherwise prove identity, retain `unknown` and
+   do not advance.
 2. After human approval, publish to `ota-verification` using the production
    environment explicitly. Record the returned immutable verification
    update-group ID:
@@ -520,6 +637,7 @@ For an eligible patch:
    cd packages/mobile
    bunx eas-cli@21.7.0 update \
      --channel ota-verification \
+     --platform 'APPROVED_PLATFORM' \
      --environment production \
      --message 'APPROVED_VERIFICATION_REFERENCE' \
      --non-interactive
@@ -551,8 +669,10 @@ For an eligible patch:
    bunx eas-cli@21.7.0 update:republish \
      --group 'EXACT_VERIFICATION_UPDATE_GROUP_ID' \
      --destination-channel production \
+     --platform 'APPROVED_PLATFORM' \
      --rollout-percentage 10 \
-     --message 'APPROVED_RELEASE_REFERENCE'
+     --message 'APPROVED_RELEASE_REFERENCE' \
+     --non-interactive
    ```
 
 5. Record the new production update-group ID. After each PO-defined observation
@@ -570,6 +690,38 @@ For an eligible patch:
 
    Each increase needs a fresh preview, approval, confirmation, and read-back.
    Do not start another rollout while one is active.
+
+`APPROVED_PLATFORM` is a deliberately non-runnable placeholder. Replace it with
+exactly `ios` or `android` only after the preview binds that one platform; never
+use or approve `all`. Publish and republish separately for the other platform,
+with a separate consequence preview, approval, confirmation, resulting group,
+and read-back. `update:edit` has no platform flag, so its exact group must first
+be proven by `update:view` to contain only the one approved platform; a mixed or
+indeterminate group blocks the edit.
+
+Immediately before every OTA write, capture a fresh complete paginated channel,
+branch, destination-channel/branch, and both-platform exact-runtime update
+inventory, then `update:view` every relevant group. Execute exactly one mutation
+per approval. Treat command output only as provisional provider acceptance,
+never current-state proof. Success requires these exact independent read-backs:
+
+- `update`: exactly one new verification group with the approved one platform,
+  runtime, Git commit/digest, and message;
+- `update:republish`: exactly one new production group matching the approved
+  source, one platform, runtime, and rollout percentage;
+- `update:edit`: no new group and only the approved percentage changed on the
+  exact single-platform group.
+
+After every OTA mutation in this section—including `update`,
+`update:republish`, and `update:edit`—and after success, error, interruption, or
+timeout, perform an independent complete paginated read-back of channels,
+branches, the exact destination channel and branch, and platform/runtime update
+inventory. Run `update:view` for every resulting or compatible group, not only
+the expected group. Append every immutable update ID, group ID, runtime, source
+commit/digest, platform, rollout state, and any partial or `unknown` result to
+the release record. Command completion is never sufficient. Any unapproved
+group, routing change, second-platform mutation, missing page, or indeterminate
+state blocks device testing, exposure, another mutation, and final acceptance.
 
 ## 8. Rollback
 
@@ -594,17 +746,22 @@ publish a rollback directive to the embedded bundle for the exact runtime:
 cd packages/mobile
 bunx eas-cli@21.7.0 update:revert-update-rollout \
   --group 'EXACT_BAD_PRODUCTION_UPDATE_GROUP_ID' \
-  --message 'APPROVED_ROLLBACK_REFERENCE'
+  --message 'APPROVED_ROLLBACK_REFERENCE' \
+  --non-interactive
 
 bunx eas-cli@21.7.0 update:republish \
   --group 'EXACT_KNOWN_GOOD_UPDATE_GROUP_ID' \
   --destination-channel production \
-  --message 'APPROVED_ROLLBACK_REFERENCE'
+  --platform 'APPROVED_PLATFORM' \
+  --message 'APPROVED_ROLLBACK_REFERENCE' \
+  --non-interactive
 
 bunx eas-cli@21.7.0 update:roll-back-to-embedded \
   --channel production \
+  --platform 'APPROVED_PLATFORM' \
   --runtime-version 'EXACT_RUNTIME_VERSION' \
-  --message 'APPROVED_ROLLBACK_REFERENCE'
+  --message 'APPROVED_ROLLBACK_REFERENCE' \
+  --non-interactive
 ```
 
 Use only the one command matching the reviewed incident. `useEmbeddedUpdate`
@@ -613,6 +770,28 @@ requires connected clients to check for an update. Expect an offline long tail.
 Never republish across runtimes. If an update made persisted state
 backward-incompatible, do not roll back blindly; fix forward with reviewed
 compatibility handling.
+
+Replace `APPROVED_PLATFORM` with exactly `ios` or `android`; never use `all`.
+Rollback each platform through a separately previewed, approved, confirmed, and
+read-back mutation. `update:revert-update-rollout` has no platform flag, so
+before invoking it, `update:view` must prove the exact bad group contains only
+the approved platform. A group ID is not inherently single-platform. This EAS
+CLI 21.7.0 operation is non-atomic: it deletes the entire rollout group first,
+then publishes replacement controls or embedded directives for every platform
+that group contained. A mixed or indeterminate group blocks that command.
+
+After any rollback command succeeds, errors, times out, or is interrupted,
+perform the same independent complete paginated channel, branch,
+platform/runtime update inventory and `update:view` reconciliation required in
+section 7 for every compatible or resulting group. Append partial and `unknown`
+truth; never blindly retry. For `update:revert-update-rollout`, prove the old
+rollout is no longer active and bind the exact replacement control group and
+all resulting update IDs. For republish or embedded rollback, bind the exact
+new group/directive and prove no other platform or runtime changed. Any missing,
+extra, mixed-platform, partially applied, or indeterminate result blocks device
+verification and every later mutation. Then verify the exact launched identity
+through the authenticated read-only **Release diagnostics** screen after the
+second online cold launch; provider read-back alone is not device adoption.
 
 For a bad store build, stop new membership or Play draft completion, detach the
 bad TestFlight build when safe, and restore the known-good closed-test build.

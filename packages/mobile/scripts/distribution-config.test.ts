@@ -181,6 +181,21 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net"',
     );
+    expect(release).toContain(
+      'test "$EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED" = "true"',
+    );
+    expect(compactRelease).toContain(
+      'exactly one plaintext string `EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED` at project scope with the exact value `true`',
+    );
+    expect(compactRelease).toContain(
+      'no account-scope variable of the same name',
+    );
+    expect(compactRelease).toContain(
+      'makes the installed binary capable of registration',
+    );
+    expect(compactRelease).toContain(
+      'BUILD approval alone does not authorize installation, sign-in, registration, a provider test, or a notification',
+    );
     for (const command of [
       'channel:list --limit 25',
       'branch:list --limit 50',
@@ -194,6 +209,15 @@ describe('mobile distribution configuration', () => {
     }
     expect(release).toContain('complete, paginated inventory');
     expect(release).toMatch(/only\s+when the inventory proves them absent/u);
+    expect(compactRelease).toContain(
+      'An entirely absent expected pair—neither a `production` channel nor a `production` branch exists—may proceed only through the separately previewed same-name creation/link consequence',
+    );
+    expect(compactRelease).toContain(
+      'Partial absence, any unexpected mapping, an orphan existing branch',
+    );
+    expect(compactRelease).toContain(
+      'When neither the `production` channel nor same-name branch exists, EAS Build may create and link that routing',
+    );
     expect(release).toContain('After BUILD, even after a refusal or partial');
 
     expect(releaseBuildCommands).toHaveLength(4);
@@ -208,8 +232,19 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain('Unauthenticated access to internal builds');
     expect(release).toContain('is disabled');
     expect(compactRelease).toContain(
-      'bounded, staff-only technical-verifier audience',
+      'named, bounded staff-only technical audience',
     );
+    for (const profile of ['`development`', '`preview`', '`ota-preview`']) {
+      expect(compactRelease).toContain(profile);
+    }
+    for (const evidence of [
+      'audience digest and count',
+      'access expiry',
+      'planned removal time',
+      'post-removal read-back',
+    ]) {
+      expect(compactRelease).toContain(evidence);
+    }
     expect(compactRelease).toContain('A URL alone is never privacy');
     expect(compactRelease).toContain('launched embedded/update identity');
     expect(compactRelease).toContain(
@@ -227,8 +262,8 @@ describe('mobile distribution configuration', () => {
     expect(readme).toContain(
       '`expo-updates` is required at runtime for runtime-bound staged OTA verification',
     );
-    expect(normalizedRelease).toContain(
-      'env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL bunx eas-cli@21.7.0 env:exec production',
+    expect(normalizedRelease).toMatch(
+      /env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL\s+-u EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED\s+bunx eas-cli@21\.7\.0 env:exec production/u,
     );
     expect(release).toContain('does not reliably apply `--freeze-credentials`');
     expect(release).toContain(
@@ -243,8 +278,113 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       'build:version:get --platform android --profile ota-preview --json',
     );
+    expect(release).toContain(
+      'config --platform ios --profile ota-preview --json',
+    );
+    expect(release).toContain(
+      'config --platform android --profile ota-preview --json',
+    );
     expect(compactRelease).toContain(
       '`update:list` is only a group-level summary',
+    );
+    for (const transition of [
+      'first production iOS BUILD is previewed as `{}` to `1`',
+      'first production Android BUILD is previewed as `{}` to `2`',
+      'with no separately stored remote `1` transition',
+      '`ota-preview` build already initialized either counter to `1`',
+      'existing numeric `N`, a production BUILD is previewed as `N` to `N + 1`',
+    ]) {
+      expect(compactRelease).toContain(transition);
+    }
+    expect(compactRelease).toContain(
+      'existing numeric counter must not change because `ota-preview` has no auto-increment',
+    );
+    expect(normalizedReadme).toContain(
+      'any `development`, `preview`, or `ota-preview` internal build',
+    );
+    expect(compactRelease).toContain(
+      'dedicated non-operational verifier devices',
+    );
+    expect(compactRelease).toContain(
+      'Removal alone does not prove a store reinstall',
+    );
+    expect(compactRelease).toContain(
+      'sign out while online, and obtain exact token-free session-revocation and push- unregistration evidence',
+    );
+    expect(compactRelease).toContain(
+      'old internal endpoint is inactive and the current store endpoint is the only expected active endpoint',
+    );
+    expect(compactRelease).toContain(
+      'Access expiry or revocation cannot recall an installed artifact',
+    );
+    expect(compactRelease).toContain(
+      'downloaded Android bytes can be redistributed',
+    );
+    expect(compactRelease).toContain(
+      'iOS provisioning device allowlist must exactly match',
+    );
+  });
+
+  test('binds every OTA write to one platform and reconciles partial provider state', () => {
+    const release = repositoryText('docs/runbooks/release.md');
+    const normalizedRelease = release.replace(/\\\n\s*/gu, ' ');
+    const compactRelease = release.replace(/\s+/gu, ' ');
+    const platformAwareMutations = normalizedRelease
+      .split('\n')
+      .filter((line) =>
+        /bunx eas-cli@21\.7\.0 (?:update|update:republish|update:roll-back-to-embedded)\s/u.test(
+          line,
+        ),
+      );
+
+    expect(platformAwareMutations).toHaveLength(4);
+    for (const command of platformAwareMutations) {
+      expect(command).toContain("--platform 'APPROVED_PLATFORM'");
+      expect(command).toContain('--non-interactive');
+      expect(command).not.toMatch(/--platform\s+(?:all|'all'|"all")\b/u);
+    }
+    expect(compactRelease).toContain(
+      'Replace it with exactly `ios` or `android` only after the preview binds that one platform; never use or approve `all`',
+    );
+    expect(compactRelease).toContain(
+      '`update:edit` has no platform flag, so its exact group must first be proven by `update:view` to contain only the one approved platform',
+    );
+    expect(compactRelease).toContain(
+      '`update:revert-update-rollout` has no platform flag',
+    );
+    expect(compactRelease).toContain(
+      'A group ID is not inherently single-platform',
+    );
+    expect(compactRelease).toContain(
+      'operation is non-atomic: it deletes the entire rollout group first',
+    );
+    expect(compactRelease).toContain(
+      'after success, error, interruption, or timeout, perform an independent complete paginated read-back',
+    );
+    expect(compactRelease).toContain(
+      'Run `update:view` for every resulting or compatible group',
+    );
+    expect(compactRelease).toContain(
+      'prove the old rollout is no longer active and bind the exact replacement control group',
+    );
+    expect(compactRelease).toContain(
+      'Append partial and `unknown` truth; never blindly retry',
+    );
+    expect(compactRelease).toContain(
+      'A change to either compiled value is an environment-contract change and therefore requires a new app version and store build; it is never eligible for OTA',
+    );
+    expect(compactRelease).toContain(
+      'Immediately before every OTA write, capture a fresh complete paginated channel, branch, destination-channel/branch, and both-platform exact-runtime update inventory',
+    );
+    for (const success of [
+      '`update`: exactly one new verification group',
+      '`update:republish`: exactly one new production group',
+      '`update:edit`: no new group and only the approved percentage changed',
+    ]) {
+      expect(compactRelease).toContain(success);
+    }
+    expect(compactRelease).toContain(
+      'Bind its exact update ID to the matching platform update returned by `update:view`',
     );
   });
 
@@ -277,6 +417,12 @@ describe('mobile distribution configuration', () => {
     );
     expect(release).toMatch(
       /Tester exposure authorizes installation only\. It does not authorize a\s+PSD EOC notification/u,
+    );
+    expect(release.replace(/\s+/gu, ' ')).toContain(
+      'authenticated online session with already granted notification permission automatically acquires a native token, contacts Expo for an Expo token, and registers that token with PSD EOC',
+    );
+    expect(release.replace(/\s+/gu, ' ')).toContain(
+      'issue #40 cannot yet perform that first send through the canonical app path',
     );
     for (const prerequisite of [
       'verified credentials',
@@ -330,11 +476,19 @@ describe('mobile distribution configuration', () => {
     ];
 
     for (const guide of guides) {
+      const compactGuide = guide.replace(/\s+/gu, ' ');
       expect(guide).toContain('Do not start an incident or drill just to test');
       expect(guide).toContain('Scheduling the window does not');
       expect(guide).toContain('authenticated human must freshly');
       expect(guide).toContain('not provider screenshots or install proof');
       expect(guide).toMatch(/Deleting\s+the app alone does not prove/u);
+      expect(compactGuide).toContain('canonical **`[DRILL]`** marker');
+      expect(compactGuide).toContain('**DRILL — PRACTICE**');
+      expect(compactGuide).toContain('**`[INCIDENT]`**');
+      expect(compactGuide).toContain('omits **`[DRILL]`**');
+      expect(compactGuide).toContain('conflicting markers');
+      expect(compactGuide).toContain('uses real-incident wording');
+      expect(compactGuide).toContain('generic wording such as **TEST ONLY**');
     }
     expect(guides[0]).toContain('Time Sensitive Notifications');
     expect(guides[0]).toContain('does **not** have');
