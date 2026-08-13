@@ -1,5 +1,6 @@
 import type { AgentGrantableCapabilityId } from '@psd-eoc/contracts';
 
+import type { DeliveryTestReportRuntime } from '../../app/(app)/delivery-tests/capabilities';
 import type { StartFlowCapabilityRuntime } from '../../app/(app)/start/_lib/capabilities';
 import {
   executeQuerySecurityAuditCapability,
@@ -35,6 +36,11 @@ import {
 } from './prepared-activation';
 import type { AgentRosterReportRuntime } from './roster-report';
 
+export type AgentDeliveryTestReportRuntime = Pick<
+  DeliveryTestReportRuntime,
+  'execute'
+>;
+
 export interface DefaultAgentCapabilityDispatcherDependencies {
   readonly events: EventCapabilityRuntime;
   readonly journal: JournalCapabilityRuntime;
@@ -43,6 +49,7 @@ export interface DefaultAgentCapabilityDispatcherDependencies {
   readonly administration: AgentApiKeyAdministration;
   readonly administrationFacilities: AgentAdministrationFacilityCapabilities;
   readonly eventTypes: EventTypeStore;
+  readonly deliveryTestReports: AgentDeliveryTestReportRuntime;
   readonly preparedActivations: PreparedActivationCapabilityStore;
   readonly rosterReport: AgentRosterReportRuntime;
   readonly securityAudit: SecurityAuditService;
@@ -89,6 +96,7 @@ const canonicallyAuditedCapabilityIds = new Set<AgentGrantableCapabilityId>([
   'list-drill-records',
   'export-drill-records',
   'export-event-summary',
+  'list-delivery-test-reports',
 ]);
 
 function eventTypeAgent(
@@ -197,6 +205,13 @@ export function createDefaultAgentCapabilityDispatcher(
         case 'export-drill-records':
         case 'export-event-summary':
           return dependencies.records.execute(capabilityId, input, invocation);
+
+        case 'list-delivery-test-reports':
+          return dependencies.deliveryTestReports.execute(
+            input,
+            invocation,
+            authenticated,
+          );
 
         case 'list-agent-api-keys':
           return dependencies.administration.list({

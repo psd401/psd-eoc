@@ -66,6 +66,7 @@ export const AGENT_GRANTABLE_CAPABILITY_IDS = [
   'preview-event-type-rendering',
   'get-notification-status',
   'run-delivery-report',
+  'list-delivery-test-reports',
   'get-integration-health',
   'list-facilities',
   'get-facility',

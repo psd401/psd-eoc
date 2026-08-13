@@ -550,6 +550,20 @@ export class PsdEocStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       secretName: '/psd-eoc/api-salt',
     });
+    const deliveryStateWorkerTokenSecret = new secretsmanager.Secret(
+      this,
+      'DeliveryStateWorkerTokenSecret',
+      {
+        description:
+          'Generated bearer used only by notification workers for append-only delivery-state writeback.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: '/psd-eoc/delivery-state-worker-token',
+      },
+    );
 
     const logGroupDefinitions = [
       ['ApplicationLogGroup', '/psd-eoc/application'],
@@ -591,6 +605,42 @@ export class PsdEocStack extends Stack {
         'Approved PSD EOC server image URI pinned by sha256 digest; required only for a manually approved deployment.',
       type: 'String',
     });
+    const productOwnerUserId = new CfnParameter(
+      this,
+      'DeliveryTestProductOwnerUserId',
+      {
+        allowedPattern:
+          '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+        constraintDescription:
+          'Use the authenticated product-owner UUID authorized to manage canary eligibility and target versions.',
+        description:
+          'Product-owner user UUID for monthly delivery-test target administration.',
+        type: 'String',
+      },
+    );
+    const credentialVerificationReferenceParameters = Object.freeze({
+      push: new CfnParameter(this, 'ExpoCredentialVerificationReference', {
+        allowedPattern: '^(?:UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$',
+        default: 'UNVERIFIED',
+        description:
+          'Non-secret reference that must exactly match the current Expo live-verification evidence; UNVERIFIED fails closed.',
+        type: 'String',
+      }),
+      email: new CfnParameter(this, 'SesCredentialVerificationReference', {
+        allowedPattern: '^(?:UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$',
+        default: 'UNVERIFIED',
+        description:
+          'Non-secret reference that must exactly match the current SES live-verification evidence; UNVERIFIED fails closed.',
+        type: 'String',
+      }),
+      sms: new CfnParameter(this, 'SmsCredentialVerificationReference', {
+        allowedPattern: '^(?:UNVERIFIED|[A-Za-z0-9][A-Za-z0-9._:-]{15,254})$',
+        default: 'UNVERIFIED',
+        description:
+          'Non-secret reference that must exactly match the current SMS live-verification evidence; UNVERIFIED fails closed.',
+        type: 'String',
+      }),
+    });
 
     const appRunnerImageRole = new iam.Role(this, 'AppRunnerImageRole', {
       assumedBy: new iam.ServicePrincipal('build.apprunner.amazonaws.com'),
@@ -625,6 +675,7 @@ export class PsdEocStack extends Stack {
       databaseApplicationSecret.grantRead(appRunnerInstanceRole),
       googleOauthSecret.grantRead(appRunnerInstanceRole),
       apiSaltSecret.grantRead(appRunnerInstanceRole),
+      deliveryStateWorkerTokenSecret.grantRead(appRunnerInstanceRole),
       iam.Grant.addToPrincipal({
         actions: ['s3:GetObject', 's3:PutObject'],
         grantee: appRunnerInstanceRole,
@@ -699,6 +750,22 @@ export class PsdEocStack extends Stack {
           name: 'FANOUT_QUEUE_URL',
           value: fanout.queue.queueUrl,
         },
+        {
+          name: 'PSD_EOC_PRODUCT_OWNER_USER_ID',
+          value: productOwnerUserId.valueAsString,
+        },
+        {
+          name: 'PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE',
+          value: credentialVerificationReferenceParameters.push.valueAsString,
+        },
+        {
+          name: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
+          value: credentialVerificationReferenceParameters.email.valueAsString,
+        },
+        {
+          name: 'PSD_EOC_SMS_CREDENTIAL_VERIFICATION_REFERENCE',
+          value: credentialVerificationReferenceParameters.sms.valueAsString,
+        },
       ];
     const appRunnerService = new apprunner.CfnService(
       this,
@@ -736,6 +803,10 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'API_SALT',
                   value: apiSaltSecret.secretArn,
+                },
+                {
+                  name: 'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+                  value: deliveryStateWorkerTokenSecret.secretArn,
                 },
               ],
               runtimeEnvironmentVariables,

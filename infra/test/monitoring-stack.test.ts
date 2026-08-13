@@ -1,12 +1,57 @@
 import { describe, expect, it } from 'bun:test';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
+import { fileURLToPath } from 'node:url';
 
 import { DEPLOYMENT_ACCOUNT, DEPLOYMENT_REGION } from '../src/config';
 import { MONITORING_RUNBOOK_BASE_URL } from '../src/monitoring';
 import { PsdEocStack } from '../src/psd-eoc-stack';
 
 type JsonRecord = Record<string, unknown>;
+
+const SLO_CHILD_ENV = 'PSD_EOC_ISSUE30_SLO_CHILD';
+const SLO_SUCCESS_PREFIX = '[issue-30 synthetic SLO success]';
+const SLO_GATE_RESULT_KEY = Symbol.for('psd-eoc.issue30.slo-gate-result');
+const sloTestFile = fileURLToPath(
+  new URL(
+    '../../workers/shared/e2e-delivery-performance.test.ts',
+    import.meta.url,
+  ),
+);
+const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url));
+const testWithDatabase =
+  process.env.TEST_DATABASE_URL === undefined ? it.skip : it;
+
+function syntheticTestDatabaseUrl(): string {
+  const value = process.env.TEST_DATABASE_URL;
+  if (value === undefined) {
+    throw new Error('TEST_DATABASE_URL is required for the SLO gate.');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('TEST_DATABASE_URL must be a valid PostgreSQL URL.');
+  }
+  const databaseName = decodeURIComponent(parsed.pathname.slice(1));
+  if (
+    !['postgres:', 'postgresql:'].includes(parsed.protocol) ||
+    !['127.0.0.1', '::1', 'localhost'].includes(parsed.hostname) ||
+    !/^[a-z0-9_]+_test$/u.test(databaseName)
+  ) {
+    throw new Error(
+      'The SLO gate requires a loopback PostgreSQL database ending in _test.',
+    );
+  }
+  return parsed.toString();
+}
+
+function recordedSloGateResult(): string | null {
+  const value = Reflect.get(globalThis, SLO_GATE_RESULT_KEY) as unknown;
+  return typeof value === 'string' && value.startsWith(SLO_SUCCESS_PREFIX)
+    ? value
+    : null;
+}
 
 function record(value: unknown): JsonRecord {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -44,6 +89,51 @@ const template = Template.fromStack(stack);
 const synthesized = record(template.toJSON());
 
 describe('synthesized monitoring stack', () => {
+  testWithDatabase(
+    'runs the issue 30 SLO gate before later suites can bias wall-clock evidence',
+    () => {
+      const existingResult = recordedSloGateResult();
+      if (existingResult !== null) {
+        console.info(existingResult);
+        return;
+      }
+      const databaseUrl = syntheticTestDatabaseUrl();
+      // This must be synchronous: awaiting an async child lets Bun schedule
+      // unrelated test files that bias a wall-clock performance regression.
+      const child = Bun.spawnSync({
+        cmd: [process.execPath, 'test', '--timeout=180000', sloTestFile],
+        cwd: workspaceRoot,
+        env: {
+          DATABASE_URL: databaseUrl,
+          NODE_ENV: 'test',
+          TEST_DATABASE_URL: databaseUrl,
+          [SLO_CHILD_ENV]: 'true',
+        },
+        timeout: 210_000,
+        stdout: 'pipe',
+        stderr: 'inherit',
+      });
+      if (child.exitedDueToTimeout === true) {
+        throw new Error('The early synthetic SLO process timed out.');
+      }
+      if (!child.success || child.exitCode !== 0) {
+        throw new Error('The early synthetic SLO process failed.');
+      }
+      const successLines = child.stdout
+        .toString()
+        .split('\n')
+        .filter((line) => line.startsWith(SLO_SUCCESS_PREFIX));
+      expect(successLines).toHaveLength(1);
+      const successLine = successLines[0];
+      if (successLine === undefined) {
+        throw new Error('The early synthetic SLO result is unavailable.');
+      }
+      Reflect.set(globalThis, SLO_GATE_RESULT_KEY, successLine);
+      console.info(successLine);
+    },
+    240_000,
+  );
+
   it('routes parameterized alarm recipients without repository endpoint data', () => {
     const parameters = record(synthesized.Parameters);
     for (const name of [
@@ -69,7 +159,7 @@ describe('synthesized monitoring stack', () => {
 
   it('synthesizes every alarm with actions and a real runbook URL', () => {
     const alarms = resources(template, 'AWS::CloudWatch::Alarm');
-    expect(alarms.length).toBeGreaterThanOrEqual(20);
+    expect(alarms.length).toBeGreaterThanOrEqual(23);
     for (const alarm of alarms) {
       const properties = record(alarm.Properties);
       expect(typeof properties.AlarmDescription).toBe('string');
@@ -114,6 +204,65 @@ describe('synthesized monitoring stack', () => {
       Number(canaryFunction?.Timeout);
     expect(conservativeDetectionBudgetSeconds).toBe(210);
     expect(conservativeDetectionBudgetSeconds).toBeLessThan(300);
+  });
+
+  it('keeps the monthly due schedule targetless and alarms only on destination-free metrics', () => {
+    const monthlyRuleEntries = resourceEntries(template, 'AWS::Events::Rule')
+      .map(([id, resource]) => [id, record(resource.Properties)] as const)
+      .filter(
+        ([, properties]) =>
+          properties.Name === 'psd-eoc-monthly-live-delivery-test-due-reminder',
+      );
+    expect(monthlyRuleEntries).toHaveLength(1);
+    const monthlyRuleEntry = monthlyRuleEntries[0];
+    if (monthlyRuleEntry === undefined) {
+      throw new Error('Missing monthly delivery-test due reminder.');
+    }
+    const [monthlyRuleId, monthlyRule] = monthlyRuleEntry;
+    expect(monthlyRule.ScheduleExpression).toBe('cron(0 17 1 * ? *)');
+    expect(monthlyRule.State).toBe('ENABLED');
+    expect(monthlyRule).not.toHaveProperty('Targets');
+
+    const topicEntries = resourceEntries(template, 'AWS::SNS::Topic');
+    const topicRef = (name: string) => {
+      const entry = topicEntries.find(
+        ([, resource]) => record(resource.Properties).TopicName === name,
+      );
+      if (entry === undefined) throw new Error(`Missing topic ${name}`);
+      return { Ref: entry[0] };
+    };
+    const alarmProperties = resources(template, 'AWS::CloudWatch::Alarm').map(
+      (resource) => record(resource.Properties),
+    );
+    const alarm = (name: string) => {
+      const properties = alarmProperties.find(
+        (candidate) => candidate.AlarmName === name,
+      );
+      if (properties === undefined) throw new Error(`Missing alarm ${name}`);
+      return properties;
+    };
+    const due = alarm('psd-eoc-monthly-live-delivery-test-due');
+    const failed = alarm('psd-eoc-monthly-live-delivery-test-failed');
+    const missed = alarm('psd-eoc-monthly-live-delivery-test-missed');
+
+    expect(due.Namespace).toBe('AWS/Events');
+    expect(due.MetricName).toBe('TriggeredRules');
+    expect(due.Dimensions).toEqual([
+      { Name: 'RuleName', Value: { Ref: monthlyRuleId } },
+    ]);
+    expect(due.AlarmActions).toEqual([topicRef('psd-eoc-operations-alarms')]);
+    expect(failed.Namespace).toBe('PSD/EOC');
+    expect(failed.MetricName).toBe('MonthlyLiveDeliveryTestFailedRunCount');
+    expect(missed.Namespace).toBe('PSD/EOC');
+    expect(missed.MetricName).toBe('MonthlyLiveDeliveryTestMissed');
+    for (const critical of [failed, missed]) {
+      expect(critical.EvaluationPeriods).toBe(1);
+      expect(critical.Threshold).toBe(1);
+      expect(critical.TreatMissingData).toBe('notBreaching');
+      expect(critical.AlarmActions).toEqual([
+        topicRef('psd-eoc-critical-alarms'),
+      ]);
+    }
   });
 
   it('keeps canary, collector, and failover IAM roles disjoint and fail closed', () => {

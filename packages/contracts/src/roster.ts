@@ -474,7 +474,10 @@ export const RosterSnapshotSchema = z
               case 'email':
                 return endpoint.email.toLowerCase().endsWith('.invalid');
               case 'sms':
-                return /^\+120255501\d{2}$/u.test(endpoint.phoneNumber);
+                return (
+                  /^\+120255501\d{2}$/u.test(endpoint.phoneNumber) ||
+                  /^\+999\d{12}$/u.test(endpoint.phoneNumber)
+                );
               case 'push':
                 return endpoint.token.startsWith('synthetic-unroutable:');
             }
