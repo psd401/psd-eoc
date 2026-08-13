@@ -38,6 +38,8 @@ export, student data, or raw provider response. Record:
 - `expo.version` and resulting EAS runtime version;
 - exact iOS and Android EAS build IDs, platform, profile, artifact identity,
   resolved iOS build number, and resolved Android version code;
+- the complete pre- and post-gate EAS channel-to-branch mapping and compatible
+  update inventory for the exact platform and runtime;
 - exact App Store Connect build ID and Play release/version-code identity;
 - fixed TestFlight group or Play track and the approved tester-list digest and
   count, never the tester identities;
@@ -73,7 +75,8 @@ authenticated-human confirmation immediately before that write.
 
 The BUILD preview binds the exact clean Git SHA, platform, `production` profile,
 application identifier, app version/runtime, public API origin, expected cost,
-and EAS remote build-number increment. Before an authorized human starts it:
+EAS remote build-number increment, and the complete pre-build update-routing
+state. Before an authorized human starts it:
 
 - [ ] Read-only EAS production-environment evidence shows exactly one
       `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` set to the public, non-secret origin
@@ -82,15 +85,36 @@ and EAS remote build-number increment. Before an authorized human starts it:
       credential/query/path fragment, or a conflicting account-level value
       blocks the build.
 - [ ] The signing and EAS configuration required for that platform is verified
-      without placing credentials in the repository.
-- [ ] The preview states that BUILD creates only an EAS artifact. It does not
-      submit, assign a group, invite a tester, publish an OTA, expose a build,
-      or authorize any PSD EOC notification.
+      without placing credentials in the repository. Required remote signing
+      credentials and provisioning are pre-provisioned and read back; BUILD
+      runs non-interactively with frozen credentials and stops instead of
+      creating, repairing, selecting, or refreshing credentials. For Android,
+      EAS CLI 21.7.0 does not reliably apply `--freeze-credentials` while
+      setting up a missing remote keystore: separately read back the exact
+      default remote keystore first and never invoke BUILD if it is absent or
+      indeterminate.
+- [ ] A complete, paginated inventory binds the exact `production`
+      channel-to-branch mapping and every update compatible with the platform
+      and runtime. An absent channel or branch, an unexpected mapping, an
+      unreviewed compatible update, an indeterminate rollout, or incomplete
+      pagination is recorded explicitly and fails closed.
+- [ ] The preview states that BUILD creates the exact EAS artifact and, only
+      when the inventory proves them absent, may create and link the exact
+      same-name `production` channel and branch. It does not submit, assign a
+      group, invite a tester, publish an OTA, expose a build, or authorize any
+      PSD EOC notification.
 
-After BUILD, append the immutable EAS build ID, resolved native build number,
-artifact digest, status, and provider-independent read-back. Issue #37's first
-manual AAB upload and issue #40's physical-device delivery consume these BUILD
-artifacts; completion of #37 or #40 is not a BUILD prerequisite.
+After BUILD, even after a refusal or partial failure, reread the exact remote
+native-version counter, credential identity, channel, branch, compatible-update
+state, build records, and quota/cost state. Append that read-back plus the
+immutable EAS build ID, resolved native build number, source-upload/build-job
+status, artifact digest, and status. EAS may increment a remote build number or
+create an orphan same-name branch before credentials, channel creation, source
+upload, or the build itself succeeds; retain that consumed number and partial
+state, and never decrement, reuse, or blindly retry. Any unpreviewed credential
+or routing change blocks every later gate. Issue #37's first manual AAB upload
+and issue #40's physical-device delivery consume these BUILD artifacts;
+completion of #37 or #40 is not a BUILD prerequisite.
 
 ### SUBMIT
 
@@ -123,6 +147,14 @@ consequences, and the withdrawal or fix-forward target.
 - [ ] Apple build/group association or invitation and Play draft
       completion/release are separately previewed, approved, freshly confirmed,
       and read back; one never authorizes the other.
+- [ ] Immediately before each exposure or install, and again immediately after
+      provider processing and the device's second online cold launch, reread
+      the complete `production` channel-to-branch and platform/runtime update
+      inventory. Bind the expected launched identity to the reviewed embedded
+      build when no compatible update exists, or to one separately reviewed
+      update group, source commit/digest, and determinate rollout. Any drift,
+      unknown device identity, compatible unreviewed update, or indeterminate
+      selection blocks exposure evidence and final acceptance.
 - [ ] Tester exposure authorizes installation only. It does not authorize a
       PSD EOC notification, a real incident, or ordinary-staff expansion.
 
@@ -137,10 +169,13 @@ unambiguous.
 
 FINAL ACCEPTANCE is a read-only evidence decision, not a provider-write
 authorization. It requires exact physical TestFlight and Play install
-identities/read-backs, the non-engineer guide walkthrough, issue #37's durable
-Play evidence, issue #40's separately authorized controlled physical-push
-evidence, integration truth labels that claim only what is proven, and explicit
-human product-owner acceptance.
+identities/read-backs, the launched embedded-build or OTA-group identity after
+the second online cold launch, the non-engineer guide walkthrough, issue #37's
+durable Play evidence, issue #40's separately authorized controlled
+physical-push evidence, integration truth labels that claim only what is
+proven, and explicit human product-owner acceptance. If an installed app cannot
+expose its launched update identity through approved device diagnostics, retain
+`unknown`; a provider inventory alone is not device-adoption proof.
 
 Closed issues #23 and #38 establish only their recorded repository-side
 automation; neither substitutes for provider or physical-device evidence.
@@ -153,14 +188,22 @@ approval for distribution. A partial or indeterminate provider response is a
 stop condition: inspect provider state read-only and create a fresh plan; never
 blindly retry.
 
-Inspect the production environment without requesting sensitive values, then
-resolve both production profiles and verify the exact public API origin above.
-Do not use `--include-sensitive`, and do not copy the full output into a public
-record:
+Inspect both production variable scopes without requesting sensitive values,
+then prove the effective public API origin and resolve both production profiles.
+The project scope must contain exactly one plaintext string variable with the
+expected value and the account scope must contain no variable of the same name.
+`env:exec` proves the value produced by EAS precedence without printing it;
+`config` alone does not prove the variable's source or value. Do not use
+`--include-sensitive` or a file variable, and do not copy the full output into
+a public record:
 
 ```sh
 cd packages/mobile
-bunx eas-cli@21.7.0 env:list production --format long
+bunx eas-cli@21.7.0 env:list production --scope project --format long
+bunx eas-cli@21.7.0 env:list production --scope account --format long
+env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL bunx eas-cli@21.7.0 env:exec production \
+  'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net"' \
+  --non-interactive
 bunx eas-cli@21.7.0 config --platform ios --profile production --json
 bunx eas-cli@21.7.0 config --platform android --profile production --json
 ```
@@ -183,13 +226,62 @@ increasing iOS build numbers and Android version codes. Never edit a number to
 reuse an already uploaded store identity. Record EAS's resolved values after
 each build; the Git repository does not contain those remote counters.
 
-Build only a clean, reviewed commit and never combine building with submission:
+Before a build, enumerate every page of channels and branches, then bind the
+exact channel, its linked branch, and every compatible update for the target
+platform and runtime. Replace each `OFFSET` with successive offsets until the
+returned page is empty; retain a non-sensitive digest of the complete
+inventory. An absent `production` channel/branch means EAS Build may create and
+link that same-name routing as part of the separately approved BUILD
+consequence. Existing unexpected routing or any compatible update whose source,
+rollout, and expected launch identity are not proven blocks the build:
 
 ```sh
 cd packages/mobile
-bunx eas-cli@21.7.0 build --platform ios --profile production
-bunx eas-cli@21.7.0 build --platform android --profile production
+bunx eas-cli@21.7.0 channel:list --limit 25 --offset 'OFFSET' --json
+bunx eas-cli@21.7.0 branch:list --limit 50 --offset 'OFFSET' --json
+bunx eas-cli@21.7.0 channel:view production --limit 50 --offset 'OFFSET' --json
+bunx eas-cli@21.7.0 branch:view production --limit 50 --offset 'OFFSET' --json
+bunx eas-cli@21.7.0 update:list --branch production --platform ios \
+  --runtime-version 'EXACT_RUNTIME_VERSION' --limit 50 --offset 'OFFSET' --json
+bunx eas-cli@21.7.0 update:list --branch production --platform android \
+  --runtime-version 'EXACT_RUNTIME_VERSION' --limit 50 --offset 'OFFSET' --json
+bunx eas-cli@21.7.0 update:view 'EACH_COMPATIBLE_UPDATE_GROUP_ID' --json
 ```
+
+`update:list` is only a group-level summary. Run `update:view` for every
+compatible group and bind every platform update ID, runtime, source
+`gitCommitHash`, rollout state, and message; an unreadable or incomplete group
+blocks BUILD and exposure.
+
+Read back and record each remote native-version counter before BUILD. Also use
+the provider credential inventory or approved EAS credentials dashboard to
+bind the exact iOS distribution certificate/provisioning profile or Android
+default remote keystore. Treat a missing Android keystore as a hard stop; do
+not rely on `--freeze-credentials` to prevent EAS CLI 21.7.0 from creating one:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 build:version:get --platform ios --profile production --json
+bunx eas-cli@21.7.0 build:version:get --platform android --profile production --json
+```
+
+Build only a clean, reviewed commit, with those exact already provisioned
+remote credentials, and never combine building with submission. Keep both
+flags as defense in depth, and as a hard freeze for supported iOS credential
+actions; do not retry interactively or without them:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 build --platform ios --profile production \
+  --non-interactive --freeze-credentials
+bunx eas-cli@21.7.0 build --platform android --profile production \
+  --non-interactive --freeze-credentials
+```
+
+Rerun both `build:version:get` commands after success, refusal, or partial
+failure and append the result. The only allowed change is the exact increment
+in the approved preview; an unexpected value or indeterminate read-back blocks
+all later gates.
 
 List finished builds read-only, then inspect each exact candidate:
 
@@ -365,12 +457,61 @@ Do not promote a bundle created with the ordinary `preview` profile or
 the `ota-preview` and production verification configuration is proven
 identical and recorded.
 
+An `ota-preview` artifact is an internal-distribution build, not a harmless
+local preview. By default, possession of an EAS internal-build URL can be
+enough to open its installation page and Android artifacts are directly
+installable. Before creating or sharing one, an authorized human must use the
+exact `peninsula-school-district/psd-eoc` project settings to read back that
+**Unauthenticated access to internal builds** is disabled. Reconcile the
+project-member inventory and roles to one product-owner-approved, bounded,
+staff-only technical-verifier audience; record only its digest and count. Any
+unknown member, student or guardian, overly broad role, inability to prove the
+setting, or stale audience blocks the build and install. Never put an internal
+build URL in the repository, issue, PR, or other public evidence.
+
+Before each `ota-preview` build, perform the same complete channel, branch, and
+platform/runtime update inventory described in section 2, substituting
+`ota-verification` for `production`. The fresh BUILD preview must state whether
+EAS will create and link that exact same-name channel and branch. Existing
+unexpected routing or a compatible update that is not already bound to the
+reviewed verification plan blocks the build. Required signing credentials,
+including every iOS device and provisioning profile, must already exist.
+Because the first build for a platform can initialize its remote native-version
+counter even though `ota-preview` does not auto-increment, read back the counter
+with `build:version:get --profile ota-preview` before and after the attempt and
+include a possible initialization in the exact preview. For iOS internal
+distribution, also prove the selected ad hoc or enterprise provisioning mode is
+unambiguous before invocation; a noninteractive selection failure can occur
+only after version/routing mutation:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 build:version:get --platform ios --profile ota-preview --json
+bunx eas-cli@21.7.0 build:version:get --platform android --profile ota-preview --json
+bunx eas-cli@21.7.0 build --platform ios --profile ota-preview \
+  --non-interactive --freeze-credentials
+bunx eas-cli@21.7.0 build --platform android --profile ota-preview \
+  --non-interactive --freeze-credentials
+```
+
+After success, refusal, or partial failure, rerun both `build:version:get`
+commands and reread the exact credential, routing, compatible-update, build,
+source-upload, and quota/cost inventory. Stop on any change beyond an approved
+version initialization and same-name creation/link. Immediately before opening
+an install page, installing the artifact, or launching it for verification,
+reread the access setting, approved audience digest, channel mapping, and
+compatible updates. A URL alone is never privacy, audience, install, or
+launched-bundle evidence.
+
 For an eligible patch:
 
 1. Record the exact clean commit, current runtime, known-good update group, and
-   rollback compatibility. Run the full gate. Build and install an exact
-   `ota-preview` binary for that runtime; verify its resolved profile, Git
-   commit, application identifier, update channel, and production environment.
+   rollback compatibility. Run the full gate and the private-access/routing
+   preflight above. Build and install an exact `ota-preview` binary for that
+   runtime; verify its resolved profile, Git commit, application identifier,
+   update channel, production environment, and launched embedded/update
+   identity. If device diagnostics cannot prove that identity, retain
+   `unknown` and do not advance.
 2. After human approval, publish to `ota-verification` using the production
    environment explicitly. Record the returned immutable verification
    update-group ID:
@@ -386,7 +527,9 @@ For an eligible patch:
      'EXACT_VERIFICATION_UPDATE_GROUP_ID' --json
    ```
 
-   Test that exact group on physical `ota-preview` builds. With
+   Before and after the device test, reread the complete `ota-verification`
+   mapping and compatible-update inventory and require it to bind the same
+   exact group. Test that group on physical `ota-preview` builds. With
    `checkAutomatically: ON_LOAD` and `fallbackToCacheTimeout: 0`, the first
    online cold launch normally starts the check and download without delaying
    the cached or embedded launch; fully quit and cold-launch again to adopt the
@@ -493,6 +636,8 @@ provider-processing evidence.
 - Exact EAS build ID: `BLOCKED`
 - Exact App Store Connect build ID/version/build number: `BLOCKED`
 - `District Technology` group read-back: `BLOCKED`
+- Post-second-cold-launch embedded/update identity and matching routing
+  read-back: `BLOCKED`
 - Physical device/OS and fresh-install timestamp: `BLOCKED`
 - Human verifier role and non-sensitive evidence link: `BLOCKED`
 
@@ -503,6 +648,8 @@ provider-processing evidence.
 - Exact EAS build ID and AAB digest: `BLOCKED`
 - Play `alpha` release/version code and active closed-test status: `BLOCKED`
 - Approved tester-group digest/count read-back: `BLOCKED`
+- Post-second-cold-launch embedded/update identity and matching routing
+  read-back: `BLOCKED`
 - Physical device/OS and Play-install timestamp: `BLOCKED`
 - Human verifier role and non-sensitive evidence link: `BLOCKED`
 

@@ -117,13 +117,21 @@ Run EAS commands from this directory because it is the Expo app root:
 
 ```sh
 cd packages/mobile
-bunx eas-cli@21.7.0 build --platform all --profile preview
+bunx eas-cli@21.7.0 build --platform ios --profile preview \
+  --non-interactive --freeze-credentials
 ```
+
+The command is syntax, not authorization. Preview and approve one exact
+platform build at a time; never replace `ios` with `all`. A separate Android
+build needs its own preview, approval, credential read-back, and confirmation.
 
 The profiles in `eas.json` are:
 
 - `development`: internal development-client builds.
 - `preview`: internal iOS and Android distribution builds.
+- `ota-preview`: private internal verification builds that use the production
+  environment but only the isolated `ota-verification` update channel. This is
+  not an ordinary preview profile.
 - `production`: store-signed artifacts for TestFlight and Google Play.
 
 All profiles pin Bun 1.2.23 and use credentials managed remotely by EAS.
@@ -132,6 +140,14 @@ Never add certificates, provisioning profiles, API keys, push keys,
 repository. EAS project linking and credential creation require an authorized
 human account. Store submission and live push configuration are separate
 production changes and require explicit product-owner approval.
+
+Before any remote build, pre-provision and read back the exact signing
+credentials; keep `--non-interactive --freeze-credentials` as a fail-closed
+control, but do not rely on it to prevent EAS CLI 21.7.0 from creating a missing
+Android keystore. Before an `ota-preview` build, follow the release runbook to
+prove **Unauthenticated access to internal builds** is disabled and to reconcile
+a bounded, approved staff-only technical-verifier audience. Never publish an
+internal-build URL in repository evidence.
 
 The app config declares the development APNs entitlement emitted by prebuild.
 Xcode signing replaces it with the provisioning profile's production value for
@@ -148,6 +164,9 @@ profile, `expo-splash-screen` supplies the generated launch screen, and
 Android channel API, permission state, token rotation events, and notification
 response events through side-effect-free module entry points. None of these
 dependencies enables a live send by itself.
+`expo-updates` is required at runtime for runtime-bound staged OTA verification,
+launched-update identity, embedded fallback, and human-controlled rollback; it
+does not publish an update or send a notification automatically.
 
 `expo-auth-session` owns the native browser authorization-code + PKCE flow,
 and its required `expo-crypto` peer generates the PKCE material without a
