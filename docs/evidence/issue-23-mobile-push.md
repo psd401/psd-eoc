@@ -81,5 +81,8 @@ current commit. E6 / issue #40 remains open with both human-input boxes and all
 three completion boxes unchecked, including EAS push credentials and both
 physical deliveries. No live send was attempted, the integration truth label
 was not advanced, emulator evidence is not represented as physical evidence,
-and the physical acceptance checkbox must remain open until both controlled
-runs above are completed.
+and issue #40's physical-delivery acceptance checkbox must remain open until
+both controlled runs above are completed. By product-owner amendment on
+2026-08-13, that external validation is not a merge gate for issue #23's
+fail-closed test-mode and server implementation; merging #23 does not claim
+provider connectivity, operating-system presentation, or human receipt.
