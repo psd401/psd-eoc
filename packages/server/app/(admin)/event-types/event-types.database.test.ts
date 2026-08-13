@@ -41,19 +41,22 @@ import {
   measureSmsLength,
   renderTemplateSet,
 } from '../../../lib/notify/render';
-import { requireSyntheticTestDatabaseUrl } from './test-database';
+import {
+  prepareOwnedEventTypeDatabaseTestDatabase,
+  resolveEventTypeDatabaseTestContext,
+  type OwnedEventTypeDatabaseTestDatabase,
+} from './database-test-database';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
-const testDatabaseUrl =
-  configuredTestDatabaseUrl === undefined
-    ? undefined
-    : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
-  testDatabaseUrl === undefined ? describe.skip : describe;
+  configuredTestDatabaseUrl === undefined ? describe.skip : describe;
 
 setDefaultTimeout(30_000);
 
 let connection: PostgresDatabaseConnection | undefined;
+let ownedDatabase:
+  | OwnedEventTypeDatabaseTestDatabase<PostgresDatabaseConnection>
+  | undefined;
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -227,24 +230,38 @@ async function startInIdentityLockOrder<TFirst, TSecond>(
 
 describeWithDatabase('event-type database versioning', () => {
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) {
+    if (configuredTestDatabaseUrl === undefined) {
       throw new Error('TEST_DATABASE_URL is required for integration tests.');
     }
-    const created = createDatabaseClient({
-      driver: 'postgres',
-      url: testDatabaseUrl,
-      maxConnections: 4,
+    const context = resolveEventTypeDatabaseTestContext(
+      configuredTestDatabaseUrl,
+    );
+    ownedDatabase = await prepareOwnedEventTypeDatabaseTestDatabase(context, {
+      open(databaseUrl) {
+        const created = createDatabaseClient({
+          driver: 'postgres',
+          url: databaseUrl,
+          maxConnections: 4,
+        });
+        if (created.driver !== 'postgres') {
+          throw new Error('Event-type integration tests require PostgreSQL.');
+        }
+        return created;
+      },
+      async prepare(created) {
+        await migrateDatabase(created);
+        await seedDatabase(created.db);
+      },
+      close: (created) => created.close(),
     });
-    if (created.driver !== 'postgres') {
-      throw new Error('Event-type integration tests require PostgreSQL.');
-    }
-    connection = created;
-    await migrateDatabase(created);
-    await seedDatabase(created.db);
+    connection = ownedDatabase.resource;
   });
 
   afterAll(async () => {
-    await connection?.close();
+    const database = ownedDatabase;
+    connection = undefined;
+    ownedDatabase = undefined;
+    await database?.cleanup();
   });
 
   test('publishes a linear version chain while an event remains pinned to exact historical wording', async () => {
