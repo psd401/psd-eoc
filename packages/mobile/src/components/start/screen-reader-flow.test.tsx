@@ -1,6 +1,10 @@
 import { describe, expect, mock, test } from 'bun:test';
 
-import type { ActivationPreview } from '@psd-eoc/contracts';
+import {
+  FanoutStatusSchema,
+  HUMAN_ONLY_ACTION_IDS,
+  type ActivationPreview,
+} from '@psd-eoc/contracts';
 import type { ReactElement, ReactNode } from 'react';
 
 const announcements: string[] = [];
@@ -38,6 +42,9 @@ const { ActiveEventJoinAction } = await import('./active-event-join-action');
 const { Call911Action, open911Dialer } = await import('./call-911-affordance');
 const { ClassifiedActionButton } = await import('./classified-action-button');
 const { EventTypeChoice } = await import('./event-type-choice');
+const { FanoutControlBanner, isFanoutActivationEnabled } = await import(
+  './fanout-control-banner'
+);
 const { StartModeAction } = await import('./start-mode-action');
 
 type Element = ReactElement<Record<string, unknown>>;
@@ -215,6 +222,47 @@ const REAL_TEST_CHANNELS = [
 ] as const satisfies ActivationPreview['channels'];
 
 describe('VoiceOver and TalkBack start-flow contract', () => {
+  test('announces fail-closed fanout status without exposing an action', () => {
+    const failClosedStates = [
+      FanoutStatusSchema.parse({ status: 'emergency-disabled' }),
+      FanoutStatusSchema.parse({ status: 'unavailable' }),
+    ] as const;
+
+    for (const state of failClosedStates) {
+      const banner = FanoutControlBanner({ state }) as Element;
+      const nodes = renderedElements(banner);
+      const accessibleBanner = nodes.find(
+        (node) => node.props.testID === 'fanout-control-status',
+      );
+      expect(accessibleBanner?.props.accessibilityRole).toBe('alert');
+      expect(accessibleBanner?.props.accessibilityLiveRegion).toBe('assertive');
+      expect(accessibleBanner?.props.accessibilityLabel).toContain(
+        'activation is blocked',
+      );
+      expect(accessibleBanner?.props.accessibilityLabel).toContain(
+        'Nothing will be queued',
+      );
+      expect(nodes.some((node) => node.type === 'Pressable')).toBe(false);
+      const serialized = JSON.stringify(accessibleBanner?.props);
+      for (const actionId of HUMAN_ONLY_ACTION_IDS) {
+        expect(serialized).not.toContain(actionId);
+      }
+      expect(isFanoutActivationEnabled(state)).toBe(false);
+    }
+
+    const checking = FanoutControlBanner({ state: null }) as Element;
+    expect(checking.props.accessibilityRole).toBe('progressbar');
+    expect(checking.props.accessibilityLiveRegion).toBe('polite');
+    expect(isFanoutActivationEnabled(null)).toBe(false);
+  });
+
+  test('hides status only for an explicit current enabled epoch', () => {
+    const enabled = FanoutStatusSchema.parse({ status: 'enabled' });
+
+    expect(isFanoutActivationEnabled(enabled)).toBe(true);
+    expect(FanoutControlBanner({ state: enabled })).toBeNull();
+  });
+
   test('exposes the three-tap path as classified buttons with large targets', () => {
     for (const mode of ['real', 'drill'] as const) {
       const modeChoice = StartModeAction({
