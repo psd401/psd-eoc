@@ -431,7 +431,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
         id: snapshotId,
-        version: 2_125_000_000 + Number.parseInt(suffix.slice(0, 5), 16),
+        version: 2_116_800_000 + Number.parseInt(suffix.slice(0, 3), 16),
         complete: true,
         syncStartedAt: now,
         capturedAt: now,
