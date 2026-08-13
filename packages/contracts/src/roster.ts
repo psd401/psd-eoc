@@ -706,7 +706,11 @@ export type RosterHealthStatus = z.infer<typeof RosterHealthStatusSchema>;
 export const StaleRosterRecipientSchema = z
   .object({
     recipientId: RecipientIdSchema,
-    reason: z.enum(['no-endpoint', 'no-active-endpoint']),
+    reason: z.enum([
+      'no-endpoint',
+      'no-active-endpoint',
+      'no-active-push-endpoint',
+    ]),
   })
   .strict()
   .readonly();

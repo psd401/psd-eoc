@@ -5,6 +5,7 @@ import {
   MobileOidcStartResponseSchema,
   MobileSessionResponseSchema,
   RevokeSessionInputSchema,
+  SessionRevocationSchema,
   type MobileOidcExchangeRequest,
   type MobileOidcStartRequest,
   type MobileOidcStartResponse,
@@ -207,14 +208,20 @@ export class AuthApiClient implements SessionApi {
     sessionId: string,
     idempotencyKey: string,
   ): Promise<void> {
-    await this.post(
+    const revocation = await this.post(
       '/api/auth/revoke',
       RevokeSessionInputSchema.parse({
         sessionId,
         reasonCode: 'USER_SIGN_OUT',
       }),
-      { parse: () => undefined },
+      SessionRevocationSchema,
       { bearer: refreshToken, idempotencyKey },
     );
+    if (revocation.sessionId !== sessionId) {
+      throw new MobileAuthError(
+        'invalid-response',
+        'PSD EOC received an invalid authentication response.',
+      );
+    }
   }
 }

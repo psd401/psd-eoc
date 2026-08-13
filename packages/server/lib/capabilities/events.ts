@@ -504,10 +504,11 @@ function buildNotification(
   });
   const outboxId = randomUUID();
   const message: NotificationOutboxMessage = {
-    version: 1,
+    version: 2,
     outboxId,
     intentId: intent.id,
     eventId: intent.eventId,
+    facilityId: input.event.facilityId,
     eventKind: intent.eventKind,
     templateMode: intent.templateMode,
     purpose: intent.purpose,

@@ -1,4 +1,8 @@
-import type { ChannelAttempt } from '@psd-eoc/contracts';
+import {
+  MobilePushReceivePayloadSchema,
+  type ChannelAttempt,
+  type MobilePushReceivePayload,
+} from '@psd-eoc/contracts';
 
 import {
   parseWorkerAttemptWorkItem,
@@ -30,16 +34,12 @@ export interface ExpoPushMessage {
   readonly body: string;
   readonly sound: 'default';
   readonly priority: 'high';
+  readonly interruptionLevel: 'time-sensitive';
   readonly ttl: number;
   readonly expiration: number;
   readonly categoryId: ExpoCategoryId;
   readonly channelId: typeof EXPO_ANDROID_CHANNEL_ID;
-  readonly data: Readonly<{
-    eventId: string;
-    eventKind: WorkerAttemptWorkItem['batch']['eventKind'];
-    templateMode: WorkerAttemptWorkItem['batch']['templateMode'];
-    purpose: WorkerAttemptWorkItem['batch']['purpose'];
-  }>;
+  readonly data: MobilePushReceivePayload;
 }
 
 export type ExpoSafeReasonCode =
@@ -664,13 +664,17 @@ export function createExpoPushMessage(
     body: rendered.body,
     sound: 'default',
     priority: 'high',
+    interruptionLevel: 'time-sensitive',
     ttl,
     expiration: Math.floor(expiresAt / 1_000),
     ...categoryFor(workItem.batch.templateMode),
-    data: Object.freeze({
+    data: MobilePushReceivePayloadSchema.parse({
+      version: 1,
       eventId: workItem.batch.eventId,
       eventKind: workItem.batch.eventKind,
       templateMode: workItem.batch.templateMode,
+      facilityId: workItem.batch.facilityId,
+      eventTypeVersionId: workItem.batch.eventTypeVersion.id,
       purpose: workItem.batch.purpose,
     }),
   });

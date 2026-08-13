@@ -53,6 +53,7 @@ const IDS = Object.freeze({
   outbox: '00000000-0000-4000-8000-000000001001',
   intent: '00000000-0000-4000-8000-000000001002',
   event: '00000000-0000-4000-8000-000000001003',
+  facility: '00000000-0000-4000-8000-000000001013',
   eventTypeVersion: '00000000-0000-4000-8000-000000001004',
   roster: '00000000-0000-4000-8000-000000001005',
   audience: '00000000-0000-4000-8000-000000001006',
@@ -135,10 +136,11 @@ function channelPlans(endpointCount = 1_200) {
 
 function outboxMessage(endpointCount = 1_200) {
   return NotificationOutboxMessageSchema.parse({
-    version: 1,
+    version: 2,
     outboxId: IDS.outbox,
     intentId: IDS.intent,
     eventId: IDS.event,
+    facilityId: IDS.facility,
     eventKind: 'test',
     templateMode: 'drill',
     purpose: 'activation',
@@ -164,6 +166,7 @@ function dispatchBatches(endpointCount = 1_200): readonly DispatchBatch[] {
         id: ids[index],
         intentId: IDS.intent,
         eventId: IDS.event,
+        facilityId: IDS.facility,
         eventKind: 'test',
         templateMode: 'drill',
         purpose: 'activation',
@@ -303,6 +306,7 @@ class DeterministicOutboxStore implements OutboxDispatcherStore {
   private claim(): OutboxDispatchClaim {
     return Object.freeze({
       outboxId: IDS.outbox,
+      facilityId: IDS.facility,
       attempt: this.attempts,
       lockedUntil: TIMES.locked,
       processingRecord: this.record(),
@@ -312,6 +316,7 @@ class DeterministicOutboxStore implements OutboxDispatcherStore {
 
   private result(): DispatchOutboxResult {
     return DispatchOutboxResultSchema.parse({
+      facilityId: IDS.facility,
       outboxRecord: this.record(),
       batches: this.batches,
     });
@@ -714,7 +719,7 @@ describe('production SQS protocol', () => {
     expect(signed.endpoint).toBe('https://sqs.us-west-2.amazonaws.com/');
     expect(signed.headers['x-amz-date']).toBe('20260810T123456Z');
     expect(signed.headers.authorization).toBe(
-      'AWS4-HMAC-SHA256 Credential=ASIAEXAMPLEKEY0000/20260810/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=b4cb3e6abb6b1ee7e58088a9fb24c46ea420bac220d2258969e6e989cafebf82',
+      'AWS4-HMAC-SHA256 Credential=ASIAEXAMPLEKEY0000/20260810/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=cd2181f5a9c9ebcb8d434fdf0cd719f3342c4bbdfe490efc76547bc2e6671806',
     );
     const body = JSON.parse(signed.body) as {
       QueueUrl: string;
