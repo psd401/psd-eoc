@@ -33,6 +33,8 @@ describe('Expo canonical payload', () => {
     expect(real.categoryId).not.toBe(drill.categoryId);
     expect(real.channelId).toBe(EXPO_ANDROID_CHANNEL_ID);
     expect(drill.channelId).toBe(EXPO_ANDROID_CHANNEL_ID);
+    expect(real.interruptionLevel).toBe('time-sensitive');
+    expect(drill.interruptionLevel).toBe('time-sensitive');
     expect(real.ttl).toBe(EXPO_EMERGENCY_TTL_SECONDS);
     expect(drill.ttl).toBe(EXPO_EMERGENCY_TTL_SECONDS);
     expect(real.expiration).toBe(
@@ -40,14 +42,26 @@ describe('Expo canonical payload', () => {
     );
     expect(EXPO_EMERGENCY_TTL_SECONDS).toBeGreaterThan(0);
     expect(EXPO_EMERGENCY_TTL_SECONDS).toBeLessThanOrEqual(60 * 60);
-    expect(real.data).toMatchObject({
+    expect(real.data).toEqual({
+      version: 1,
+      eventId: realBatch().eventId,
       eventKind: 'incident',
       templateMode: 'real',
+      facilityId: realBatch().facilityId,
+      eventTypeVersionId: realBatch().eventTypeVersion.id,
+      purpose: 'activation',
     });
-    expect(drill.data).toMatchObject({
+    expect(drill.data).toEqual({
+      version: 1,
+      eventId: syntheticBatch().eventId,
       eventKind: 'test',
       templateMode: 'drill',
+      facilityId: syntheticBatch().facilityId,
+      eventTypeVersionId: syntheticBatch().eventTypeVersion.id,
+      purpose: 'activation',
     });
+    expect(Object.isFrozen(real.data)).toBe(true);
+    expect(Object.isFrozen(drill.data)).toBe(true);
   });
 
   test('derives a shrinking TTL and immutable expiration from batch creation', () => {

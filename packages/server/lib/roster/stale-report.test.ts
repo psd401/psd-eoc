@@ -24,6 +24,16 @@ const RECIPIENT_ONE = '30000000-0000-4000-8000-000000000001';
 const RECIPIENT_TWO = '30000000-0000-4000-8000-000000000002';
 const ENDPOINT_ID = '40000000-0000-4000-8000-000000000001';
 
+type RecipientHealth = Omit<
+  NonNullable<
+    ScopedStaleRosterEvidence['latestCompleteSnapshot']
+  >['recipientHealth'][number],
+  'pushEndpointStatuses'
+> &
+  Readonly<{
+    pushEndpointStatuses?: readonly ('active' | 'invalid' | 'disabled')[];
+  }>;
+
 interface TestContext {
   readonly population: 'staff';
   readonly allowedFacilityIds: ReadonlySet<string>;
@@ -42,11 +52,7 @@ function secondsBefore(seconds: number): string {
 
 function snapshot(
   capturedSecondsAgo: number,
-  recipientHealth: ScopedStaleRosterEvidence['latestCompleteSnapshot'] extends infer Snapshot
-    ? Snapshot extends { readonly recipientHealth: infer Recipients }
-      ? Recipients
-      : never
-    : never,
+  recipientHealth: readonly RecipientHealth[],
   hasUnreportedStaleRecipients = false,
   staleEndpoints: NonNullable<
     ScopedStaleRosterEvidence['latestCompleteSnapshot']
@@ -56,7 +62,13 @@ function snapshot(
   return {
     id: SNAPSHOT_ID,
     capturedAt: secondsBefore(capturedSecondsAgo),
-    recipientHealth,
+    recipientHealth: recipientHealth.map((recipient) => ({
+      ...recipient,
+      // Existing fixtures model push endpoints unless a test explicitly
+      // distinguishes another active channel from push availability.
+      pushEndpointStatuses:
+        recipient.pushEndpointStatuses ?? recipient.endpointStatuses,
+    })),
     hasUnreportedStaleRecipients,
     staleEndpoints,
     hasUnreportedStaleEndpoints,
@@ -165,7 +177,7 @@ describe('stale roster report', () => {
     });
   });
 
-  test('reports a fresh snapshot with an active endpoint as current', async () => {
+  test('reports a fresh snapshot with an active push endpoint as current', async () => {
     const report = await executeReport({
       latestCompleteSnapshot: snapshot(60, [
         { recipientId: RECIPIENT_ONE, endpointStatuses: ['active'] },
@@ -176,6 +188,70 @@ describe('stale roster report', () => {
     expect(report.status).toBe('current');
     expect(report.latestCompleteAgeSeconds).toBe(60);
     expect(report.staleRecipients).toEqual([]);
+  });
+
+  test('reports a fresh recipient with no push endpoint even when email is active', async () => {
+    const report = await executeReport({
+      latestCompleteSnapshot: snapshot(60, [
+        {
+          recipientId: RECIPIENT_ONE,
+          endpointStatuses: ['active'],
+          pushEndpointStatuses: [],
+        },
+      ]),
+      latestFailedSync: null,
+    });
+
+    expect(report.status).toBe('stale');
+    expect(report.staleRecipients).toEqual([
+      {
+        recipientId: RECIPIENT_ONE,
+        reason: 'no-active-push-endpoint',
+      },
+    ]);
+  });
+
+  test('reports an append-only unregistered push endpoint beside an active channel', async () => {
+    const report = await executeReport({
+      latestCompleteSnapshot: snapshot(
+        60,
+        [
+          {
+            recipientId: RECIPIENT_ONE,
+            endpointStatuses: ['active', 'disabled'],
+            pushEndpointStatuses: ['disabled'],
+          },
+        ],
+        false,
+        [
+          {
+            recipientId: RECIPIENT_ONE,
+            endpointId: ENDPOINT_ID,
+            channel: 'push',
+            status: 'disabled',
+            reasonCode: 'PUSH_TOKEN_UNREGISTERED',
+          },
+        ],
+      ),
+      latestFailedSync: null,
+    });
+
+    expect(report.status).toBe('stale');
+    expect(report.staleRecipients).toEqual([
+      {
+        recipientId: RECIPIENT_ONE,
+        reason: 'no-active-push-endpoint',
+      },
+    ]);
+    expect(report.staleEndpoints).toEqual([
+      {
+        recipientId: RECIPIENT_ONE,
+        endpointId: ENDPOINT_ID,
+        channel: 'push',
+        reason: 'disabled',
+      },
+    ]);
+    expect(JSON.stringify(report)).not.toMatch(/token|email|phone/iu);
   });
 
   test('reports an old otherwise healthy snapshot as stale', async () => {

@@ -36,6 +36,7 @@ import { z } from 'zod';
 
 import type { Database, DatabaseQuery } from '../../db/client';
 import {
+  devicePushTokenUnregistrations,
   endpointStatusRecords,
   groupSources,
   rosterEndpoints,
@@ -54,6 +55,7 @@ const ScopedRecipientHealthSchema = z
   .object({
     recipientId: RecipientIdSchema,
     endpointStatuses: z.array(EndpointStatusSchema).max(10).readonly(),
+    pushEndpointStatuses: z.array(EndpointStatusSchema).max(10).readonly(),
   })
   .strict()
   .readonly();
@@ -229,6 +231,12 @@ function staleRecipientFor(
     return Object.freeze({
       recipientId: recipient.recipientId,
       reason: 'no-active-endpoint',
+    });
+  }
+  if (!recipient.pushEndpointStatuses.includes('active')) {
+    return Object.freeze({
+      recipientId: recipient.recipientId,
+      reason: 'no-active-push-endpoint',
     });
   }
   return null;
@@ -659,6 +667,49 @@ async function loadPreparedScopedStaleRosterEvidence(
           }),
         ),
       );
+      // A roster snapshot remains immutable, so a later sign-out, explicit
+      // unregistration, or administrator revocation is projected from its
+      // append-only registration fact. Select only opaque IDs: token and
+      // contact values never cross the stale-report persistence boundary.
+      const pushEndpointIds = endpointRows.flatMap((endpoint) =>
+        endpoint.channel === 'push' ? [endpoint.id] : [],
+      );
+      const pushUnregistrationRows =
+        pushEndpointIds.length === 0
+          ? []
+          : await database
+              .select({
+                registrationId: devicePushTokenUnregistrations.registrationId,
+              })
+              .from(devicePushTokenUnregistrations)
+              .where(
+                inArray(
+                  devicePushTokenUnregistrations.registrationId,
+                  pushEndpointIds,
+                ),
+              );
+      const unregisteredPushEndpointIds = new Set(
+        pushUnregistrationRows.map(({ registrationId }) => registrationId),
+      );
+      endpointRows.forEach((endpoint) => {
+        if (
+          endpoint.channel !== 'push' ||
+          !unregisteredPushEndpointIds.has(endpoint.id)
+        ) {
+          return;
+        }
+        const recipientStatuses = statusesByRecipient.get(endpoint.recipientId);
+        const current = recipientStatuses?.get(endpoint.id);
+        if (recipientStatuses === undefined || current === undefined) return;
+        recipientStatuses.set(
+          endpoint.id,
+          Object.freeze({
+            ...current,
+            status: 'disabled',
+            reasonCode: 'PUSH_TOKEN_UNREGISTERED',
+          }),
+        );
+      });
       // Provider STOP/START is consent state, not endpoint health. Project
       // only independent invalid/disabled facts onto the snapshotted base;
       // the phone lifecycle overlay below must never revive this state.
@@ -850,10 +901,15 @@ async function loadPreparedScopedStaleRosterEvidence(
       .map(([recipientId, statuses]) => ({
         recipientId,
         endpointStatuses: [...statuses.values()].map(({ status }) => status),
+        pushEndpointStatuses: [...statuses.values()]
+          .filter(({ channel }) => channel === 'push')
+          .map(({ status }) => status),
       }))
       .filter(
-        ({ endpointStatuses }) =>
-          endpointStatuses.length === 0 || !endpointStatuses.includes('active'),
+        ({ endpointStatuses, pushEndpointStatuses }) =>
+          endpointStatuses.length === 0 ||
+          !endpointStatuses.includes('active') ||
+          !pushEndpointStatuses.includes('active'),
       )
       .sort((left, right) => left.recipientId.localeCompare(right.recipientId));
     const staleEndpointRows = [...statusesByRecipient.entries()]

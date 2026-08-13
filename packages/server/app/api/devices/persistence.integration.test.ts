@@ -15,7 +15,7 @@ import {
   NotificationOutboxMessageSchema,
   RosterSnapshotSchema,
 } from '@psd-eoc/contracts';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import {
   executeOperationWithCleanup,
@@ -108,6 +108,7 @@ const firstToken = `ExponentPushToken[synthetic-${fixtureSuffix}-first]`;
 const replacementToken = `synthetic-unroutable:device-${fixtureSuffix}-replacement`;
 const contendedToken = `ExponentPushToken[synthetic-${fixtureSuffix}-contended]`;
 const revokedSessionToken = `ExponentPushToken[synthetic-${fixtureSuffix}-revoked]`;
+const unrelatedToken = `synthetic-unroutable:device-${fixtureSuffix}-unrelated`;
 const facilityId = '00000000-0000-4000-8000-000000000001';
 const SEEDED = Object.freeze({
   audienceId: '00000000-0000-4000-8000-000000000020',
@@ -449,13 +450,22 @@ async function installFixture(database: PostgresDatabase): Promise<void> {
 async function publishRosterEndpointFixture(
   database: PostgresDatabase,
   registration: Readonly<{ id: string; token: string }>,
+  identity: Readonly<{
+    rosterSnapshotId: string;
+    rosterVersion: number;
+    recipientId: string;
+  }> = {
+    rosterSnapshotId: fixture.rosterSnapshotId,
+    rosterVersion: fixture.rosterVersion,
+    recipientId: fixture.recipientId,
+  },
 ): Promise<void> {
   const capturedAt = new Date();
   const syncStartedAt = new Date(capturedAt.getTime() - 60_000);
   await database.transaction(async (transaction) => {
     await transaction.insert(rosterSnapshots).values({
-      id: fixture.rosterSnapshotId,
-      version: fixture.rosterVersion,
+      id: identity.rosterSnapshotId,
+      version: identity.rosterVersion,
       population: 'staff',
       complete: true,
       sourceConfigurationId: fixture.rosterConfigurationId,
@@ -464,12 +474,12 @@ async function publishRosterEndpointFixture(
       capturedAt,
     });
     await transaction.insert(rosterSnapshotFacilities).values({
-      rosterSnapshotId: fixture.rosterSnapshotId,
+      rosterSnapshotId: identity.rosterSnapshotId,
       facilityId,
     });
     await transaction.insert(rosterSnapshotSources).values([
       {
-        rosterSnapshotId: fixture.rosterSnapshotId,
+        rosterSnapshotId: identity.rosterSnapshotId,
         population: 'staff',
         groupSourceId: fixture.groupSourceId,
         groupSourceKind: 'google-group',
@@ -477,7 +487,7 @@ async function publishRosterEndpointFixture(
         completionKind: 'expected',
       },
       {
-        rosterSnapshotId: fixture.rosterSnapshotId,
+        rosterSnapshotId: identity.rosterSnapshotId,
         population: 'staff',
         groupSourceId: fixture.groupSourceId,
         groupSourceKind: 'google-group',
@@ -486,15 +496,15 @@ async function publishRosterEndpointFixture(
       },
     ]);
     await transaction.insert(rosterRecipients).values({
-      id: fixture.recipientId,
-      rosterSnapshotId: fixture.rosterSnapshotId,
+      id: identity.recipientId,
+      rosterSnapshotId: identity.rosterSnapshotId,
       population: 'staff',
       googleSubject,
       displayName: 'Synthetic Device Integration Recipient',
     });
     await transaction.insert(rosterRecipientGroupSources).values({
-      rosterSnapshotId: fixture.rosterSnapshotId,
-      recipientId: fixture.recipientId,
+      rosterSnapshotId: identity.rosterSnapshotId,
+      recipientId: identity.recipientId,
       population: 'staff',
       groupSourceId: fixture.groupSourceId,
       groupSourceKind: 'google-group',
@@ -502,8 +512,8 @@ async function publishRosterEndpointFixture(
     });
     await transaction.insert(rosterEndpoints).values({
       id: registration.id,
-      rosterSnapshotId: fixture.rosterSnapshotId,
-      recipientId: fixture.recipientId,
+      rosterSnapshotId: identity.rosterSnapshotId,
+      recipientId: identity.recipientId,
       population: 'staff',
       channel: 'push',
       status: 'active',
@@ -518,14 +528,23 @@ async function publishRosterEndpointFixture(
 
 async function publishSyntheticRosterEndpointFixture(
   database: PostgresDatabase,
-  registration: Readonly<{ id: string; token: string }>,
+  registrations: readonly Readonly<{ id: string; token: string }>[],
+  identity: Readonly<{
+    rosterSnapshotId: string;
+    rosterVersion: number;
+    recipientId: string;
+  }> = {
+    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterVersion: fixture.syntheticRosterVersion,
+    recipientId: fixture.syntheticRecipientId,
+  },
 ): Promise<void> {
   const capturedAt = new Date();
   const syncStartedAt = new Date(capturedAt.getTime() - 60_000);
   await database.transaction(async (transaction) => {
     await transaction.insert(rosterSnapshots).values({
-      id: fixture.syntheticRosterSnapshotId,
-      version: fixture.syntheticRosterVersion,
+      id: identity.rosterSnapshotId,
+      version: identity.rosterVersion,
       population: 'synthetic',
       complete: true,
       sourceConfigurationId: SEEDED.rosterConfigurationId,
@@ -534,9 +553,9 @@ async function publishSyntheticRosterEndpointFixture(
       capturedAt,
     });
     await transaction.insert(rosterSnapshotFacilities).values([
-      { rosterSnapshotId: fixture.syntheticRosterSnapshotId, facilityId },
+      { rosterSnapshotId: identity.rosterSnapshotId, facilityId },
       {
-        rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+        rosterSnapshotId: identity.rosterSnapshotId,
         facilityId: SEEDED.facilitySouthId,
       },
     ]);
@@ -547,7 +566,7 @@ async function publishSyntheticRosterEndpointFixture(
         { id: SEEDED.groupOthersId, purpose: 'others' as const },
       ].flatMap((source) => [
         {
-          rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+          rosterSnapshotId: identity.rosterSnapshotId,
           population: 'synthetic' as const,
           groupSourceId: source.id,
           groupSourceKind: 'synthetic' as const,
@@ -555,7 +574,7 @@ async function publishSyntheticRosterEndpointFixture(
           completionKind: 'expected' as const,
         },
         {
-          rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+          rosterSnapshotId: identity.rosterSnapshotId,
           population: 'synthetic' as const,
           groupSourceId: source.id,
           groupSourceKind: 'synthetic' as const,
@@ -565,33 +584,35 @@ async function publishSyntheticRosterEndpointFixture(
       ]),
     );
     await transaction.insert(rosterRecipients).values({
-      id: fixture.syntheticRecipientId,
-      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+      id: identity.recipientId,
+      rosterSnapshotId: identity.rosterSnapshotId,
       population: 'synthetic',
       googleSubject: null,
       displayName: 'Synthetic Device Invalidation Recipient',
     });
     await transaction.insert(rosterRecipientGroupSources).values({
-      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
-      recipientId: fixture.syntheticRecipientId,
+      rosterSnapshotId: identity.rosterSnapshotId,
+      recipientId: identity.recipientId,
       population: 'synthetic',
       groupSourceId: SEEDED.groupNorthId,
       groupSourceKind: 'synthetic',
       groupPurpose: 'building',
     });
-    await transaction.insert(rosterEndpoints).values({
-      id: registration.id,
-      rosterSnapshotId: fixture.syntheticRosterSnapshotId,
-      recipientId: fixture.syntheticRecipientId,
-      population: 'synthetic',
-      channel: 'push',
-      status: 'active',
-      capturedAt,
-      platform: 'ios',
-      token: registration.token,
-      email: null,
-      phoneNumber: null,
-    });
+    await transaction.insert(rosterEndpoints).values(
+      registrations.map((registration) => ({
+        id: registration.id,
+        rosterSnapshotId: identity.rosterSnapshotId,
+        recipientId: identity.recipientId,
+        population: 'synthetic' as const,
+        channel: 'push' as const,
+        status: 'active' as const,
+        capturedAt,
+        platform: 'ios' as const,
+        token: registration.token,
+        email: null,
+        phoneNumber: null,
+      })),
+    );
   });
 }
 
@@ -608,7 +629,16 @@ function mockedIntegrationStatus(integrationId: 'expo-push' | 'ses-email') {
 }
 
 function pushResolutionFixture(
-  registration: Readonly<{ id: string; token: string }>,
+  registrations: readonly Readonly<{ id: string; token: string }>[],
+  identity: Readonly<{
+    rosterSnapshotId: string;
+    rosterVersion: number;
+    recipientId: string;
+  }> = {
+    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterVersion: fixture.syntheticRosterVersion,
+    recipientId: fixture.syntheticRecipientId,
+  },
 ) {
   const group = Object.freeze({
     id: SEEDED.groupNorthId,
@@ -624,8 +654,8 @@ function pushResolutionFixture(
     createdAt: SEEDED.integrationObservedAt,
   });
   const rosterSnapshot = RosterSnapshotSchema.parse({
-    id: fixture.syntheticRosterSnapshotId,
-    version: fixture.syntheticRosterVersion,
+    id: identity.rosterSnapshotId,
+    version: identity.rosterVersion,
     population: 'synthetic',
     complete: true,
     sourceConfiguration: { id: SEEDED.rosterConfigurationId, version: 1 },
@@ -634,21 +664,19 @@ function pushResolutionFixture(
     sourceGroupRefs: [group],
     recipients: [
       {
-        id: fixture.syntheticRecipientId,
+        id: identity.recipientId,
         population: 'synthetic',
         googleSubject: null,
         displayName: 'Synthetic Device Invalidation Recipient',
         groupSourceRefs: [group],
-        endpoints: [
-          {
-            id: registration.id,
-            channel: 'push',
-            status: 'active',
-            capturedAt: SEEDED.integrationObservedAt,
-            platform: 'ios',
-            token: registration.token,
-          },
-        ],
+        endpoints: registrations.map((registration) => ({
+          id: registration.id,
+          channel: 'push',
+          status: 'active',
+          capturedAt: SEEDED.integrationObservedAt,
+          platform: 'ios',
+          token: registration.token,
+        })),
       },
     ],
     syncStartedAt: SEEDED.integrationObservedAt,
@@ -659,6 +687,7 @@ function pushResolutionFixture(
     id: randomUUID(),
     intentId: randomUUID(),
     eventId: randomUUID(),
+    facilityId,
     eventKind: 'test',
     templateMode: 'drill',
     purpose: 'activation',
@@ -666,7 +695,7 @@ function pushResolutionFixture(
       id: SEEDED.eventTypeVersionId,
       templateMode: 'drill',
     },
-    rosterSnapshotId: fixture.syntheticRosterSnapshotId,
+    rosterSnapshotId: identity.rosterSnapshotId,
     rosterPopulation: 'synthetic',
     audienceConfig: { id: SEEDED.audienceId, version: 1 },
     requestId,
@@ -688,7 +717,7 @@ function pushResolutionFixture(
     },
     integrationStatus: mockedIntegrationStatus('expo-push'),
     sequence: 1,
-    endpointCount: 1,
+    endpointCount: registrations.length,
     createdAt: SEEDED.integrationObservedAt,
   });
   return Object.freeze({
@@ -756,10 +785,11 @@ async function installDeviceNotRegisteredAttemptFixture(
     }),
   ]);
   const message = NotificationOutboxMessageSchema.parse({
-    version: 1,
+    version: 2,
     outboxId: ids.outbox,
     intentId: ids.intent,
     eventId: ids.event,
+    facilityId,
     eventKind: 'test',
     templateMode: 'drill',
     purpose: 'activation',
@@ -853,7 +883,7 @@ async function installDeviceNotRegisteredAttemptFixture(
     ]);
     await transaction.insert(outbox).values({
       id: ids.outbox,
-      messageVersion: 1,
+      messageVersion: 2,
       intentId: ids.intent,
       eventId: ids.event,
       eventKind: 'test',
@@ -1193,8 +1223,8 @@ describeWithDatabase('device push-token persistence', () => {
       throw new Error('The replacement registration was not retained.');
     }
     await publishRosterEndpointFixture(database, active);
-    await publishSyntheticRosterEndpointFixture(database, active);
-    const pushResolution = pushResolutionFixture(active);
+    await publishSyntheticRosterEndpointFixture(database, [active]);
+    const pushResolution = pushResolutionFixture([active]);
     const pushPolicyStore = createDrizzlePushEndpointPolicyStore(database);
     await expect(
       resolvePushEndpoints(pushResolution, pushPolicyStore),
@@ -1528,6 +1558,173 @@ describeWithDatabase('device push-token persistence', () => {
           ),
         ),
     ).toHaveLength(1);
+
+    const recoveredRegistration = recovered[0];
+    if (recoveredRegistration === undefined) {
+      throw new Error('The recovered registration was not retained.');
+    }
+    await executeDeviceCapability(
+      'register-push-token',
+      {
+        deviceEnrollmentId: fixture.otherDeviceId,
+        platform: 'ios',
+        token: unrelatedToken,
+      },
+      humanInvocation(
+        'send-time-policy-unrelated',
+        fixture.otherSessionId,
+        fixture.otherConnectivityEpochId,
+      ),
+      store,
+    );
+    const [unrelatedRegistration] = await activeRegistrationsForToken(
+      database,
+      unrelatedToken,
+    );
+    if (unrelatedRegistration === undefined) {
+      throw new Error('The unrelated registration was not retained.');
+    }
+
+    const crossBoundIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.rosterVersion + 1,
+      recipientId: randomUUID(),
+    });
+    await publishRosterEndpointFixture(
+      database,
+      {
+        id: recoveredRegistration.id,
+        token: 'synthetic-unroutable:cross-bound-registration',
+      },
+      crossBoundIdentity,
+    );
+    await expect(
+      pushPolicyStore.loadEndpointPolicy({
+        rosterSnapshotId: crossBoundIdentity.rosterSnapshotId,
+        rosterPopulation: 'staff',
+        candidates: [
+          {
+            recipientId: crossBoundIdentity.recipientId,
+            endpointId: recoveredRegistration.id,
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PUSH_ENDPOINT_POLICY' });
+
+    const sendTimeIdentity = Object.freeze({
+      rosterSnapshotId: randomUUID(),
+      rosterVersion: fixture.syntheticRosterVersion + 1,
+      recipientId: randomUUID(),
+    });
+    const sendTimeRegistrations = Object.freeze([
+      recoveredRegistration,
+      { id: unrelatedRegistration.id, token: unrelatedToken },
+    ]);
+    await publishSyntheticRosterEndpointFixture(
+      database,
+      sendTimeRegistrations,
+      sendTimeIdentity,
+    );
+    const sendTimeResolution = pushResolutionFixture(
+      sendTimeRegistrations,
+      sendTimeIdentity,
+    );
+    const sendTimePolicyQuery = Object.freeze({
+      rosterSnapshotId: sendTimeIdentity.rosterSnapshotId,
+      rosterPopulation: 'synthetic' as const,
+      candidates: Object.freeze([
+        Object.freeze({
+          recipientId: sendTimeIdentity.recipientId,
+          endpointId: recoveredRegistration.id,
+        }),
+        Object.freeze({
+          recipientId: sendTimeIdentity.recipientId,
+          endpointId: unrelatedRegistration.id,
+        }),
+      ]),
+    });
+    const beforeUnregistrationPolicy =
+      await pushPolicyStore.loadEndpointPolicy(sendTimePolicyQuery);
+    expect(beforeUnregistrationPolicy).toEqual(
+      expect.arrayContaining([
+        {
+          recipientId: sendTimeIdentity.recipientId,
+          endpointId: recoveredRegistration.id,
+          status: 'active',
+        },
+        {
+          recipientId: sendTimeIdentity.recipientId,
+          endpointId: unrelatedRegistration.id,
+          status: 'active',
+        },
+      ]),
+    );
+    expect(JSON.stringify(beforeUnregistrationPolicy)).not.toContain(
+      recoveredRegistration.token,
+    );
+    expect(JSON.stringify(beforeUnregistrationPolicy)).not.toContain(
+      unrelatedToken,
+    );
+    await expect(
+      resolvePushEndpoints(sendTimeResolution, pushPolicyStore),
+    ).resolves.toHaveLength(2);
+
+    await executeDeviceCapability(
+      'unregister-push-token',
+      { deviceEnrollmentId: fixture.deviceId },
+      humanInvocation('send-time-policy-unregister'),
+      store,
+    );
+
+    const afterUnregistrationPolicy =
+      await pushPolicyStore.loadEndpointPolicy(sendTimePolicyQuery);
+    expect(afterUnregistrationPolicy).toEqual(
+      expect.arrayContaining([
+        {
+          recipientId: sendTimeIdentity.recipientId,
+          endpointId: recoveredRegistration.id,
+          status: 'disabled',
+        },
+        {
+          recipientId: sendTimeIdentity.recipientId,
+          endpointId: unrelatedRegistration.id,
+          status: 'active',
+        },
+      ]),
+    );
+    expect(JSON.stringify(afterUnregistrationPolicy)).not.toContain(
+      recoveredRegistration.token,
+    );
+    expect(JSON.stringify(afterUnregistrationPolicy)).not.toContain(
+      unrelatedToken,
+    );
+    await expect(
+      resolvePushEndpoints(sendTimeResolution, pushPolicyStore),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        endpoint: expect.objectContaining({ id: unrelatedRegistration.id }),
+      }),
+    ]);
+    expect(
+      await database
+        .select({
+          registrationId: devicePushTokenUnregistrations.registrationId,
+          deviceEnrollmentId: devicePushTokenUnregistrations.deviceEnrollmentId,
+        })
+        .from(devicePushTokenUnregistrations)
+        .where(
+          inArray(devicePushTokenUnregistrations.registrationId, [
+            recoveredRegistration.id,
+            unrelatedRegistration.id,
+          ]),
+        )
+        .orderBy(asc(devicePushTokenUnregistrations.registrationId)),
+    ).toEqual([
+      {
+        registrationId: recoveredRegistration.id,
+        deviceEnrollmentId: fixture.deviceId,
+      },
+    ]);
   });
 
   test('denies push-token mutation from an append-only revoked session', async () => {

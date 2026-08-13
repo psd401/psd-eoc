@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
 import {
@@ -27,9 +27,14 @@ import {
   accessMembershipSnapshots,
   connectivityEpochs,
   deviceEnrollments,
+  devicePushTokenRegistrations,
+  devicePushTokenUnregistrations,
   groupSources,
+  idempotencyRecords,
+  sessionRevocations,
   sessions,
   sessionTokenIssuances,
+  sessionTokenRotations,
   userRoleChanges,
   userRoles,
   users,
@@ -40,7 +45,13 @@ import {
   createDrizzleInitialWebSessionStore,
   type PersistInitialWebSessionRequest,
 } from './session-cookie';
-import { DrizzleSessionStore } from './sessions';
+import {
+  DrizzleSessionStore,
+  SessionService,
+  executeRefreshSessionCapability,
+  executeRevokeSessionCapability,
+  hashRefreshToken,
+} from './sessions';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -391,6 +402,223 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       sessionId,
     );
     expect(context?.result.user.roles).toEqual(['admin']);
+  });
+
+  test('revocation append-unregisters only the target device push registrations idempotently', async () => {
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const userId = randomUUID();
+    const snapshotId = randomUUID();
+    const targetDeviceId = randomUUID();
+    const otherDeviceId = randomUUID();
+    const targetSessionId = randomUUID();
+    const otherSessionId = randomUUID();
+    const targetRegistrationIds = [randomUUID(), randomUUID()] as const;
+    const otherRegistrationId = randomUUID();
+    const laterRegistrationId = randomUUID();
+    const now = new Date();
+    const revokedAt = new Date(now.getTime() + 1_000);
+    const googleSubject = `issue-23-push-revoke-${suffix}`;
+
+    await database.insert(users).values({
+      id: userId,
+      googleSubject,
+      email: `issue-23-push-revoke-${suffix}@psd401.net`,
+      displayName: `Issue 23 push revoke ${suffix.slice(0, 8)}`,
+      facilityScopeKind: 'district',
+      createdAt: now,
+    });
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: 2_125_000_000 + Number.parseInt(suffix.slice(0, 5), 16),
+        complete: true,
+        syncStartedAt: now,
+        capturedAt: now,
+      });
+      await transaction.insert(accessMembershipMembers).values({
+        snapshotId,
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
+      });
+    });
+    await database.insert(deviceEnrollments).values([
+      {
+        id: targetDeviceId,
+        userId,
+        platform: 'ios',
+        unlockMethod: 'biometric',
+        installationId: `issue-23-target-${suffix}`,
+        enrolledAt: now,
+        lastSeenAt: now,
+      },
+      {
+        id: otherDeviceId,
+        userId,
+        platform: 'android',
+        unlockMethod: 'biometric',
+        installationId: `issue-23-other-${suffix}`,
+        enrolledAt: now,
+        lastSeenAt: now,
+      },
+    ]);
+    await database.insert(sessions).values([
+      {
+        id: targetSessionId,
+        userId,
+        deviceEnrollmentId: targetDeviceId,
+        membershipSnapshotId: snapshotId,
+        membershipValidUntil: new Date(now.getTime() + 60 * 60 * 1_000),
+        membershipGraceUntil: new Date(now.getTime() + 2 * 60 * 60 * 1_000),
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + 3 * 60 * 60 * 1_000),
+      },
+      {
+        id: otherSessionId,
+        userId,
+        deviceEnrollmentId: otherDeviceId,
+        membershipSnapshotId: snapshotId,
+        membershipValidUntil: new Date(now.getTime() + 60 * 60 * 1_000),
+        membershipGraceUntil: new Date(now.getTime() + 2 * 60 * 60 * 1_000),
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + 3 * 60 * 60 * 1_000),
+      },
+    ]);
+    await database.insert(connectivityEpochs).values([
+      {
+        id: randomUUID(),
+        sessionId: targetSessionId,
+        establishedAt: now,
+      },
+      {
+        id: randomUUID(),
+        sessionId: otherSessionId,
+        establishedAt: now,
+      },
+    ]);
+    await database.insert(devicePushTokenRegistrations).values([
+      {
+        id: targetRegistrationIds[0],
+        deviceEnrollmentId: targetDeviceId,
+        platform: 'ios',
+        token: `ExponentPushToken[issue-23-target-a-${suffix}]`,
+        registeredAt: now,
+      },
+      {
+        id: targetRegistrationIds[1],
+        deviceEnrollmentId: targetDeviceId,
+        platform: 'ios',
+        token: `ExponentPushToken[issue-23-target-b-${suffix}]`,
+        registeredAt: now,
+      },
+      {
+        id: otherRegistrationId,
+        deviceEnrollmentId: otherDeviceId,
+        platform: 'android',
+        token: `ExponentPushToken[issue-23-other-${suffix}]`,
+        registeredAt: now,
+      },
+    ]);
+
+    const store = new DrizzleSessionStore(database);
+    const revocationInput = {
+      actor: { kind: 'human' as const, userId, sessionId: targetSessionId },
+      sessionId: targetSessionId,
+      reasonCode: 'USER_REQUESTED_REVOCATION',
+      idempotencyKey: `issue-23-push-revoke-${suffix}`,
+      requestDigest: digest(`issue-23-push-revoke-request-${suffix}`),
+      revokedAt,
+    };
+    const first = await store.revoke(revocationInput);
+    const replay = await store.revoke(revocationInput);
+
+    expect(replay).toEqual(first);
+    const laterRegisteredAt = new Date(revokedAt.getTime() + 1_000);
+    await database.insert(devicePushTokenRegistrations).values({
+      id: laterRegistrationId,
+      deviceEnrollmentId: targetDeviceId,
+      platform: 'ios',
+      token: `ExponentPushToken[issue-23-target-later-${suffix}]`,
+      registeredAt: laterRegisteredAt,
+    });
+    await expect(
+      store.revoke({
+        ...revocationInput,
+        idempotencyKey: `issue-23-push-revoke-second-${suffix}`,
+        requestDigest: digest(`issue-23-push-revoke-second-${suffix}`),
+        revokedAt: new Date(laterRegisteredAt.getTime() + 1_000),
+      }),
+    ).resolves.toEqual(first);
+
+    const rotationId = randomUUID();
+    const retiredDigest = digest(`issue-23-retired-${suffix}`);
+    await database.insert(sessionTokenRotations).values({
+      id: rotationId,
+      sessionId: targetSessionId,
+      previousTokenDigest: retiredDigest,
+      nextTokenDigest: digest(`issue-23-successor-${suffix}`),
+      rotatedAt: revokedAt,
+    });
+    await store.recordReplayAndRevoke({
+      retired: {
+        kind: 'retired',
+        sessionId: targetSessionId,
+        deviceEnrollmentId: targetDeviceId,
+        rotationId,
+        tokenDigest: retiredDigest,
+      },
+      detectedAt: new Date(laterRegisteredAt.getTime() + 2_000),
+    });
+
+    const unregistrations = await database
+      .select({
+        registrationId: devicePushTokenUnregistrations.registrationId,
+        deviceEnrollmentId: devicePushTokenUnregistrations.deviceEnrollmentId,
+        unregisteredAt: devicePushTokenUnregistrations.unregisteredAt,
+      })
+      .from(devicePushTokenUnregistrations)
+      .where(
+        inArray(devicePushTokenUnregistrations.registrationId, [
+          ...targetRegistrationIds,
+          otherRegistrationId,
+          laterRegistrationId,
+        ]),
+      );
+    expect(
+      unregistrations
+        .map(({ registrationId }) => registrationId)
+        .sort((left, right) => left.localeCompare(right)),
+    ).toEqual(
+      [...targetRegistrationIds].sort((left, right) =>
+        left.localeCompare(right),
+      ),
+    );
+    expect(
+      unregistrations.every(
+        ({ deviceEnrollmentId, unregisteredAt }) =>
+          deviceEnrollmentId === targetDeviceId &&
+          unregisteredAt.getTime() === revokedAt.getTime(),
+      ),
+    ).toBe(true);
+    expect(
+      await database
+        .select({ id: devicePushTokenRegistrations.id })
+        .from(devicePushTokenRegistrations)
+        .where(
+          inArray(devicePushTokenRegistrations.id, [
+            ...targetRegistrationIds,
+            otherRegistrationId,
+            laterRegistrationId,
+          ]),
+        ),
+    ).toHaveLength(4);
+    expect(
+      await database
+        .select({ id: sessionRevocations.id })
+        .from(sessionRevocations)
+        .where(eq(sessionRevocations.sessionId, targetSessionId)),
+    ).toHaveLength(1);
   });
 
   test('issues a session as the production role with only immutable snapshot lock-column privileges', async () => {
@@ -878,5 +1106,510 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       throw issuanceOutcome.reason;
     }
     expect(issuanceOutcome.value.user.roles).toContain('admin');
+  });
+
+  test('a refresh that loses the rotation race unregisters the revoked device push token', async () => {
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const userId = randomUUID();
+    const groupSourceId = randomUUID();
+    const snapshotId = randomUUID();
+    const deviceEnrollmentId = randomUUID();
+    const sessionId = randomUUID();
+    const issuanceId = randomUUID();
+    const winningRotationId = randomUUID();
+    const registrationId = randomUUID();
+    const snapshotAt = new Date();
+    const verifiedAt = new Date(snapshotAt.getTime() + 1_000);
+    const rotatedAt = new Date(snapshotAt.getTime() + 2_000);
+    const expiresAt = new Date(snapshotAt.getTime() + 3 * 60 * 60 * 1_000);
+    const presentedTokenDigest = digest(
+      `issue-23-concurrent-refresh-presented-${suffix}`,
+    );
+    const googleSubject = `issue-23-concurrent-refresh-${suffix}`;
+
+    await database.insert(groupSources).values({
+      id: groupSourceId,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+      displayName: `Issue 23 concurrent refresh ${suffix.slice(0, 8)}`,
+      active: true,
+      googleGroupId: `issue-23-concurrent-refresh-${suffix}`,
+      email: `issue-23-concurrent-refresh-${suffix}@example.invalid`,
+      fixtureKey: null,
+      createdAt: snapshotAt,
+    });
+    await database.insert(users).values({
+      id: userId,
+      googleSubject,
+      email: `issue-23-concurrent-refresh-${suffix}@psd401.net`,
+      displayName: `Issue 23 concurrent refresh ${suffix.slice(0, 8)}`,
+      facilityScopeKind: 'district',
+      createdAt: snapshotAt,
+    });
+    const activeAccessGroups = await database
+      .select({
+        id: groupSources.id,
+        kind: groupSources.kind,
+        purpose: groupSources.purpose,
+      })
+      .from(groupSources)
+      .where(
+        and(
+          eq(groupSources.active, true),
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+        ),
+      );
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: snapshotId,
+        version: 2_146_000_000 + Number.parseInt(suffix.slice(0, 3), 16),
+        complete: true,
+        syncStartedAt: snapshotAt,
+        capturedAt: snapshotAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values(
+        activeAccessGroups.flatMap((source) => [
+          {
+            snapshotId,
+            groupSourceId: source.id,
+            groupSourceKind: source.kind,
+            groupPurpose: source.purpose,
+            completionKind: 'expected' as const,
+          },
+          {
+            snapshotId,
+            groupSourceId: source.id,
+            groupSourceKind: source.kind,
+            groupPurpose: source.purpose,
+            completionKind: 'completed' as const,
+          },
+        ]),
+      );
+      await transaction.insert(accessMembershipMembers).values({
+        snapshotId,
+        userId,
+        googleSubject,
+        facilityScopeKind: 'district',
+      });
+      await transaction.insert(accessMembershipMemberGroups).values({
+        snapshotId,
+        userId,
+        groupSourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      });
+    });
+    await database.insert(deviceEnrollments).values({
+      id: deviceEnrollmentId,
+      userId,
+      platform: 'ios',
+      unlockMethod: 'biometric',
+      installationId: `issue-23-concurrent-refresh-${suffix}`,
+      enrolledAt: snapshotAt,
+      lastSeenAt: snapshotAt,
+    });
+    await database.insert(sessions).values({
+      id: sessionId,
+      userId,
+      deviceEnrollmentId,
+      membershipSnapshotId: snapshotId,
+      membershipValidUntil: new Date(snapshotAt.getTime() + 60 * 60 * 1_000),
+      membershipGraceUntil: new Date(
+        snapshotAt.getTime() + 2 * 60 * 60 * 1_000,
+      ),
+      createdAt: snapshotAt,
+      expiresAt,
+    });
+    await database.insert(sessionTokenIssuances).values({
+      id: issuanceId,
+      sessionId,
+      tokenDigest: presentedTokenDigest,
+      issuedAt: snapshotAt,
+    });
+    await database.insert(connectivityEpochs).values({
+      id: randomUUID(),
+      sessionId,
+      establishedAt: snapshotAt,
+    });
+    await database.insert(sessionTokenRotations).values({
+      id: winningRotationId,
+      sessionId,
+      previousTokenDigest: presentedTokenDigest,
+      nextTokenDigest: digest(`issue-23-concurrent-refresh-winner-${suffix}`),
+      rotatedAt: verifiedAt,
+    });
+    await database.insert(devicePushTokenRegistrations).values({
+      id: registrationId,
+      deviceEnrollmentId,
+      platform: 'ios',
+      token: `ExponentPushToken[issue-23-concurrent-refresh-${suffix}]`,
+      registeredAt: snapshotAt,
+    });
+
+    const store = new DrizzleSessionStore(database);
+    await expect(
+      store.rotateCredential({
+        principal: {
+          kind: 'verified-current-refresh-credential',
+          verificationId: randomUUID(),
+          userId,
+          sessionId,
+          deviceEnrollmentId,
+          recordRef: { kind: 'initial-issuance', issuanceId },
+          presentedTokenDigest,
+          credentialGeneration: 1,
+          credentialState: 'current',
+          sessionState: 'active',
+          deviceState: 'active',
+          sessionExpiresAt: expiresAt.toISOString(),
+          verifiedAt: verifiedAt.toISOString(),
+        },
+        nextTokenDigest: digest(`issue-23-concurrent-refresh-loser-${suffix}`),
+        idempotencyKey: `issue-23-concurrent-refresh-${suffix}`,
+        requestDigest: digest(`issue-23-concurrent-refresh-request-${suffix}`),
+        rotatedAt,
+        rotationId: randomUUID(),
+        connectivityEpochId: randomUUID(),
+        membershipTtlSeconds: 60 * 60,
+        membershipGraceSeconds: 60 * 60,
+      }),
+    ).rejects.toMatchObject({ code: 'TOKEN_REPLAY' });
+
+    expect(
+      await database
+        .select({
+          registrationId: devicePushTokenUnregistrations.registrationId,
+          deviceEnrollmentId: devicePushTokenUnregistrations.deviceEnrollmentId,
+          unregisteredAt: devicePushTokenUnregistrations.unregisteredAt,
+        })
+        .from(devicePushTokenUnregistrations)
+        .where(
+          eq(devicePushTokenUnregistrations.registrationId, registrationId),
+        ),
+    ).toEqual([
+      {
+        registrationId,
+        deviceEnrollmentId,
+        unregisteredAt: rotatedAt,
+      },
+    ]);
+    expect(
+      await database
+        .select({ id: devicePushTokenRegistrations.id })
+        .from(devicePushTokenRegistrations)
+        .where(eq(devicePushTokenRegistrations.id, registrationId)),
+    ).toHaveLength(1);
+    expect(
+      await database
+        .select({ id: sessionRevocations.id })
+        .from(sessionRevocations)
+        .where(eq(sessionRevocations.sessionId, sessionId)),
+    ).toHaveLength(1);
+  });
+
+  test('recovers only the exact completed self-revocation receipt after a service restart', async () => {
+    const sharedContext = context;
+    if (sharedContext === undefined) {
+      throw new Error('The session integration test context is unavailable.');
+    }
+    const recoveryContext = buildContext(sharedContext.baseDatabaseUrl);
+    await createOwnedDatabase(recoveryContext);
+    const recoveryConnection = openPostgresConnection(
+      recoveryContext.databaseUrl,
+      2,
+    );
+    try {
+      await migrateDatabase(recoveryConnection);
+      const database = recoveryConnection.db;
+      const suffix = randomUUID();
+      const userId = randomUUID();
+      const groupSourceId = randomUUID();
+      const snapshotId = randomUUID();
+      const snapshotAt = new Date();
+      const issuedAt = new Date(snapshotAt.getTime() + 1_000);
+      const googleSubject = `issue-23-revoke-recovery-${suffix}`;
+
+      await database.insert(groupSources).values({
+        id: groupSourceId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Issue 23 revoke recovery ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-23-revoke-recovery-${suffix}`,
+        email: `issue-23-revoke-recovery-${suffix}@example.invalid`,
+        fixtureKey: null,
+        createdAt: snapshotAt,
+      });
+      await database.insert(users).values({
+        id: userId,
+        googleSubject,
+        email: `issue-23-revoke-recovery-${suffix}@psd401.net`,
+        displayName: `Issue 23 revoke recovery ${suffix.slice(0, 8)}`,
+        facilityScopeKind: 'district',
+        createdAt: snapshotAt,
+      });
+      await database.insert(userRoles).values({ userId, role: 'staff' });
+      const activeAccessGroups = await database
+        .select({
+          id: groupSources.id,
+          kind: groupSources.kind,
+          purpose: groupSources.purpose,
+        })
+        .from(groupSources)
+        .where(
+          and(
+            eq(groupSources.active, true),
+            eq(groupSources.kind, 'google-group'),
+            eq(groupSources.purpose, 'access'),
+          ),
+        );
+      await database.transaction(async (transaction) => {
+        await transaction.insert(accessMembershipSnapshots).values({
+          id: snapshotId,
+          version: 2_130_000_000 + Number.parseInt(suffix.slice(0, 6), 16),
+          complete: true,
+          syncStartedAt: snapshotAt,
+          capturedAt: snapshotAt,
+        });
+        await transaction.insert(accessMembershipSnapshotGroups).values(
+          activeAccessGroups.flatMap((source) => [
+            {
+              snapshotId,
+              groupSourceId: source.id,
+              groupSourceKind: source.kind,
+              groupPurpose: source.purpose,
+              completionKind: 'expected' as const,
+            },
+            {
+              snapshotId,
+              groupSourceId: source.id,
+              groupSourceKind: source.kind,
+              groupPurpose: source.purpose,
+              completionKind: 'completed' as const,
+            },
+          ]),
+        );
+        await transaction.insert(accessMembershipMembers).values({
+          snapshotId,
+          userId,
+          googleSubject,
+          facilityScopeKind: 'district',
+        });
+        await transaction.insert(accessMembershipMemberGroups).values({
+          snapshotId,
+          userId,
+          groupSourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        });
+      });
+
+      const firstService = new SessionService(
+        new DrizzleSessionStore(database),
+      );
+      const issued = await firstService.establish(
+        {
+          userId,
+          membershipSnapshotId: snapshotId,
+          device: {
+            platform: 'ios',
+            unlockMethod: 'biometric',
+            installationId: `issue-23-revoke-recovery-${suffix}`,
+          },
+        },
+        issuedAt,
+      );
+      const authenticated = await firstService.authenticate(
+        issued.refreshToken,
+        'mobile',
+        new Date(issuedAt.getTime() + 1_000),
+      );
+      const revokeInput = {
+        sessionId: issued.result.session.id,
+        reasonCode: 'USER_REQUESTED_REVOCATION',
+      } as const;
+      const idempotencyKey = `issue-23-revoke-recovery-${suffix}`;
+      const canonical = await executeRevokeSessionCapability({
+        service: firstService,
+        authenticated,
+        ...revokeInput,
+        idempotencyKey,
+        csrfVerified: false,
+        now: new Date(issuedAt.getTime() + 2_000),
+      });
+      await expect(
+        firstService.authenticate(
+          issued.refreshToken,
+          'mobile',
+          new Date(issuedAt.getTime() + 3_000),
+        ),
+      ).rejects.toMatchObject({ code: 'SESSION_REVOKED' });
+
+      const restartedService = new SessionService(
+        new DrizzleSessionStore(database),
+      );
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          issued.refreshToken,
+          'mobile',
+          revokeInput,
+          idempotencyKey,
+        ),
+      ).resolves.toEqual(canonical);
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          issued.refreshToken,
+          'web',
+          revokeInput,
+          idempotencyKey,
+        ),
+      ).resolves.toBeNull();
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          issued.refreshToken,
+          'mobile',
+          { ...revokeInput, sessionId: randomUUID() },
+          idempotencyKey,
+        ),
+      ).resolves.toBeNull();
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          issued.refreshToken,
+          'mobile',
+          { ...revokeInput, reasonCode: 'DIFFERENT_REASON' },
+          idempotencyKey,
+        ),
+      ).resolves.toBeNull();
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          issued.refreshToken,
+          'mobile',
+          revokeInput,
+          `issue-23-wrong-revoke-key-${suffix}`,
+        ),
+      ).resolves.toBeNull();
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          'Z'.repeat(43),
+          'mobile',
+          revokeInput,
+          idempotencyKey,
+        ),
+      ).resolves.toBeNull();
+
+      const rotatedIssued = await firstService.establish(
+        {
+          userId,
+          membershipSnapshotId: snapshotId,
+          device: {
+            platform: 'android',
+            unlockMethod: 'biometric',
+            installationId: `issue-23-revoke-retired-${suffix}`,
+          },
+        },
+        new Date(issuedAt.getTime() + 4_000),
+      );
+      const refreshed = await executeRefreshSessionCapability({
+        service: firstService,
+        token: rotatedIssued.refreshToken,
+        source: 'mobile',
+        idempotencyKey: `issue-23-revoke-rotate-${suffix}`,
+        csrfVerified: false,
+        now: new Date(issuedAt.getTime() + 5_000),
+      });
+      const refreshedAuthentication = await firstService.authenticate(
+        refreshed.refreshToken,
+        'mobile',
+        new Date(issuedAt.getTime() + 6_000),
+      );
+      const rotatedRevokeInput = {
+        sessionId: refreshed.result.session.id,
+        reasonCode: 'USER_REQUESTED_REVOCATION',
+      } as const;
+      const rotatedRevokeKey = `issue-23-revoke-retired-key-${suffix}`;
+      await executeRevokeSessionCapability({
+        service: firstService,
+        authenticated: refreshedAuthentication,
+        ...rotatedRevokeInput,
+        idempotencyKey: rotatedRevokeKey,
+        csrfVerified: false,
+        now: new Date(issuedAt.getTime() + 7_000),
+      });
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          rotatedIssued.refreshToken,
+          'mobile',
+          rotatedRevokeInput,
+          rotatedRevokeKey,
+        ),
+      ).resolves.toBeNull();
+
+      const incompleteIssued = await firstService.establish(
+        {
+          userId,
+          membershipSnapshotId: snapshotId,
+          device: {
+            platform: 'ios',
+            unlockMethod: 'biometric',
+            installationId: `issue-23-revoke-incomplete-${suffix}`,
+          },
+        },
+        new Date(issuedAt.getTime() + 8_000),
+      );
+      const incompleteInput = {
+        sessionId: incompleteIssued.result.session.id,
+        reasonCode: 'USER_REQUESTED_REVOCATION',
+      } as const;
+      const incompletePrincipal = {
+        kind: 'human' as const,
+        userId,
+        sessionId: incompleteIssued.result.session.id,
+      };
+      const incompleteKey = `issue-23-revoke-incomplete-${suffix}`;
+      const incompleteAt = new Date(issuedAt.getTime() + 9_000);
+      await database.insert(sessionRevocations).values({
+        id: randomUUID(),
+        sessionId: incompleteInput.sessionId,
+        revokedBy: incompletePrincipal,
+        reasonCode: incompleteInput.reasonCode,
+        revokedAt: incompleteAt,
+      });
+      await database.insert(idempotencyRecords).values({
+        id: randomUUID(),
+        key: incompleteKey,
+        capabilityId: 'revoke-session',
+        principal: incompletePrincipal,
+        principalDigest: digest(JSON.stringify(incompletePrincipal)),
+        requestDigest: digest(
+          JSON.stringify({
+            capabilityId: 'revoke-session',
+            input: incompleteInput,
+            source: 'mobile',
+            presentedTokenDigest: hashRefreshToken(
+              incompleteIssued.refreshToken,
+            ),
+          }),
+        ),
+        status: 'in-progress',
+        createdAt: incompleteAt,
+        completedAt: null,
+        resultReference: null,
+      });
+      await expect(
+        restartedService.recoverCompletedSelfRevocation(
+          incompleteIssued.refreshToken,
+          'mobile',
+          incompleteInput,
+          incompleteKey,
+        ),
+      ).resolves.toBeNull();
+    } finally {
+      await recoveryConnection.close();
+      await dropOwnedDatabase(recoveryContext);
+    }
   });
 });

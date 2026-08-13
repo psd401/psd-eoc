@@ -54,6 +54,7 @@ setDefaultTimeout(30_000);
 
 const SEEDED = Object.freeze({
   facility: '00000000-0000-4000-8000-000000000001',
+  otherFacility: '00000000-0000-4000-8000-000000000002',
   audience: '00000000-0000-4000-8000-000000000020',
   roster: '00000000-0000-4000-8000-000000000041',
   recipient: '00000000-0000-4000-8000-000000000050',
@@ -170,10 +171,11 @@ async function installAtomicEventOutboxFixture(): Promise<void> {
     }),
   ]);
   const message = NotificationOutboxMessageSchema.parse({
-    version: 1,
+    version: 2,
     outboxId: ids.outbox,
     intentId: ids.intent,
     eventId: ids.event,
+    facilityId: SEEDED.facility,
     eventKind: 'test',
     templateMode: 'drill',
     purpose: 'activation',
@@ -261,7 +263,7 @@ async function installAtomicEventOutboxFixture(): Promise<void> {
     ]);
     await transaction.insert(outbox).values({
       id: ids.outbox,
-      messageVersion: 1,
+      messageVersion: 2,
       intentId: ids.intent,
       eventId: ids.event,
       eventKind: 'test',
@@ -319,7 +321,10 @@ function renderedMessageFor(
   }
 }
 
-async function installSyntheticSloOutboxFixture(): Promise<string> {
+async function installSyntheticSloOutboxFixture(
+  messageVersion: 1 | 2 = 2,
+  messageFacilityId: string = SEEDED.facility,
+): Promise<string> {
   const database = databaseConnection().db;
   const eventId = randomUUID();
   const intentId = randomUUID();
@@ -345,10 +350,11 @@ async function installSyntheticSloOutboxFixture(): Promise<string> {
     ),
   }));
   const message = NotificationOutboxMessageSchema.parse({
-    version: 1,
+    version: messageVersion,
     outboxId,
     intentId,
     eventId,
+    ...(messageVersion === 2 ? { facilityId: messageFacilityId } : {}),
     eventKind: 'test',
     templateMode: 'drill',
     purpose: 'activation',
@@ -425,7 +431,7 @@ async function installSyntheticSloOutboxFixture(): Promise<string> {
     );
     await transaction.insert(outbox).values({
       id: outboxId,
-      messageVersion: 1,
+      messageVersion,
       intentId,
       eventId,
       eventKind: 'test',
@@ -534,10 +540,21 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       .from(events)
       .where(eq(events.id, ids.event));
     const [outboxRow] = await database
-      .select({ id: outbox.id })
+      .select({
+        id: outbox.id,
+        messageVersion: outbox.messageVersion,
+        message: outbox.message,
+      })
       .from(outbox)
       .where(eq(outbox.id, ids.outbox));
     expect([eventRow?.id, outboxRow?.id]).toEqual([ids.event, ids.outbox]);
+    expect(outboxRow?.messageVersion).toBe(2);
+    expect(NotificationOutboxMessageSchema.parse(outboxRow?.message)).toEqual(
+      expect.objectContaining({
+        version: 2,
+        facilityId: SEEDED.facility,
+      }),
+    );
 
     const locked = deferred();
     const release = deferred();
@@ -560,6 +577,56 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     });
     release.resolve();
     await holdingTransaction;
+  });
+
+  test('dispatches a retained strict v1 message without rewriting it', async () => {
+    const database = databaseConnection().db;
+    const outboxId = await installSyntheticSloOutboxFixture(1);
+    const [before] = await database
+      .select({ message: outbox.message })
+      .from(outbox)
+      .where(eq(outbox.id, outboxId));
+    const retained = NotificationOutboxMessageSchema.parse(before?.message);
+    expect(retained.version).toBe(1);
+    expect(Object.hasOwn(retained, 'facilityId')).toBe(false);
+
+    const queue = new RecordingQueue();
+    const result = await dispatchOutbox(outboxId, {
+      store: createDrizzleOutboxDispatcherStore(database),
+      queue,
+    });
+
+    expect(result.facilityId).toBe(SEEDED.facility);
+    expect(result.outboxRecord.message).toEqual(retained);
+    expect(
+      result.batches.every((batch) => batch.facilityId === SEEDED.facility),
+    ).toBe(true);
+    expect(queue.calls).toHaveLength(1);
+    const [after] = await database
+      .select({ message: outbox.message })
+      .from(outbox)
+      .where(eq(outbox.id, outboxId));
+    expect(after?.message).toEqual(before?.message);
+  });
+
+  test('rejects a v2 facility that disagrees with immutable event truth', async () => {
+    const database = databaseConnection().db;
+    const outboxId = await installSyntheticSloOutboxFixture(
+      2,
+      SEEDED.otherFacility,
+    );
+    const queue = new RecordingQueue();
+
+    await expect(
+      dispatchOutbox(outboxId, {
+        store: createDrizzleOutboxDispatcherStore(database),
+        queue,
+      }),
+    ).rejects.toMatchObject({
+      code: 'OUTBOX_PERSISTENCE_FAILED',
+      retryable: false,
+    });
+    expect(queue.calls).toHaveLength(0);
   });
 
   test('replays stable batches after a post-SQS crash without losing work', async () => {
