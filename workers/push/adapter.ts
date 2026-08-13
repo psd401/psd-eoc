@@ -17,6 +17,10 @@ import {
   type ProviderFailure,
 } from '../shared/retry';
 import {
+  PushEndpointEligibilityError,
+  type PushEndpointEligibilityChecker,
+} from './eligibility';
+import {
   EXPO_PUSH_PROVIDER,
   EXPO_EMERGENCY_TTL_SECONDS,
   EXPO_SEND_CHUNK_SIZE,
@@ -45,6 +49,9 @@ const CANONICAL_SEND_OUTCOME_UNKNOWN_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 const EXPO_PROVIDER_FAILURE_DISPOSITIONS = Object.freeze({
+  EXPO_ENDPOINT_ELIGIBILITY_BLOCKED: 'terminal-failure',
+  EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE: 'safe-to-retry',
+  EXPO_ENDPOINT_INELIGIBLE: 'terminal-failure',
   EXPO_HTTP_RATE_LIMITED: 'safe-to-retry',
   EXPO_HTTP_SERVER_ERROR: 'safe-to-retry',
   EXPO_MESSAGE_RATE_EXCEEDED: 'safe-to-retry',
@@ -145,6 +152,8 @@ export class LedgeredExpoPushAdapterError extends ProviderDispatchError {
 export interface LedgeredExpoPushAdapterOptions {
   readonly transport: ExpoPushTransport;
   readonly sendLedger: DurableExpoSendLedger;
+  /** Final authoritative endpoint check at the provider-I/O boundary. */
+  readonly endpointEligibility: PushEndpointEligibilityChecker;
   /** Small bounded coalescing window after irreversible per-attempt claims. */
   readonly batchWindowMilliseconds?: number;
   /** Authoritative clock checked immediately before provider I/O. */
@@ -154,6 +163,12 @@ export interface LedgeredExpoPushAdapterOptions {
 interface PendingExpoProviderIo {
   readonly workItem: WorkerAttemptWorkItem;
   readonly resolve: (completion: ExpoSendLedgerCompletion) => void;
+}
+
+interface FreshPendingExpoProviderIo {
+  readonly entry: PendingExpoProviderIo;
+  readonly expiresAt: number;
+  readonly pendingIndex: number;
 }
 
 function exactDataProperties(
@@ -482,6 +497,26 @@ function throwFailure(failure: ProviderFailure): never {
   );
 }
 
+function endpointEligibilityFailure(
+  code:
+    | 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED'
+    | 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE'
+    | 'EXPO_ENDPOINT_INELIGIBLE',
+): ExpoSendLedgerCompletion {
+  const disposition = expoProviderFailureDisposition(code);
+  if (disposition === undefined) {
+    throw new TypeError('Expo endpoint eligibility disposition is missing.');
+  }
+  return Object.freeze({
+    kind: 'failure',
+    failure: Object.freeze({
+      code,
+      disposition,
+      diagnosticDigest: null,
+    }),
+  });
+}
+
 /**
  * Live-capable Expo adapter whose idempotency is supplied by the injected
  * irreversible ledger, not by Expo. It has no default store or runtime wiring.
@@ -497,14 +532,44 @@ export class LedgeredExpoPushAdapter
 
   readonly #transport: ExpoPushTransport;
   readonly #ledger: DurableExpoSendLedger;
+  readonly #endpointEligibility: PushEndpointEligibilityChecker;
   readonly #batchWindowMilliseconds: number;
   readonly #clock: () => Date | string | number;
   readonly #pendingProviderIo: PendingExpoProviderIo[] = [];
   #flushTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Proves a live adapter owns the exact checker used by its worker. */
+  public static usesEndpointEligibility(
+    adapter: unknown,
+    checker: PushEndpointEligibilityChecker,
+  ): adapter is LedgeredExpoPushAdapter {
+    try {
+      return (
+        adapter instanceof LedgeredExpoPushAdapter &&
+        adapter.#endpointEligibility === checker
+      );
+    } catch {
+      return false;
+    }
+  }
+
   public constructor(options: LedgeredExpoPushAdapterOptions) {
+    let endpointEligibility: PushEndpointEligibilityChecker;
+    try {
+      endpointEligibility = options.endpointEligibility;
+      if (
+        endpointEligibility === null ||
+        typeof endpointEligibility !== 'object' ||
+        typeof endpointEligibility.isEligible !== 'function'
+      ) {
+        throw new TypeError();
+      }
+    } catch {
+      throw new TypeError('Expo endpoint eligibility checker is invalid.');
+    }
     this.#transport = options.transport;
     this.#ledger = options.sendLedger;
+    this.#endpointEligibility = endpointEligibility;
     this.#batchWindowMilliseconds = batchWindowMilliseconds(
       options.batchWindowMilliseconds,
     );
@@ -670,9 +735,9 @@ export class LedgeredExpoPushAdapter
     pending: readonly PendingExpoProviderIo[],
   ): Promise<void> {
     const now = new Date(this.#clock()).getTime();
-    const fresh: PendingExpoProviderIo[] = [];
+    const fresh: FreshPendingExpoProviderIo[] = [];
     const completions: Array<ExpoSendLedgerCompletion | undefined> =
-      pending.map((entry) => {
+      pending.map((entry, pendingIndex) => {
         const expiresAt =
           Date.parse(entry.workItem.batch.createdAt) +
           EXPO_EMERGENCY_TTL_SECONDS * 1_000;
@@ -683,114 +748,101 @@ export class LedgeredExpoPushAdapter
           });
         }
         if (now < expiresAt) {
-          fresh.push(entry);
+          fresh.push({ entry, expiresAt, pendingIndex });
           return undefined;
         }
         return completionFromExpoOutcome(expired());
       });
     if (fresh.length > 0) {
-      let freshCompletions: readonly ExpoSendLedgerCompletion[] = fresh.map(
-        () =>
-          Object.freeze({
-            kind: 'outcome' as const,
-            outcome: unknownSendOutcome(),
-          }),
-      );
-      let rawOutcomes: unknown;
-      try {
-        rawOutcomes = await this.#transport.sendChunk(
-          fresh.map((entry) => entry.workItem),
-        );
-      } catch (error) {
-        const failure = failureFromError(error);
-        freshCompletions = fresh.map(() =>
-          Object.freeze({ kind: 'failure' as const, failure }),
-        );
-        rawOutcomes = null;
-      }
-      if (rawOutcomes !== null) {
-        try {
-          if (
-            !Array.isArray(rawOutcomes) ||
-            Object.getOwnPropertyDescriptor(rawOutcomes, 'length')?.value !==
-              fresh.length
-          ) {
-            throw new TypeError('Expo send outcomes are invalid.');
-          }
-          freshCompletions = Array.from(
-            { length: fresh.length },
-            (_unused, index) => {
-              try {
-                const descriptor = Object.getOwnPropertyDescriptor(
-                  rawOutcomes,
-                  String(index),
-                );
-                if (
-                  descriptor === undefined ||
-                  descriptor.enumerable !== true ||
-                  !Object.hasOwn(descriptor, 'value')
-                ) {
-                  throw new TypeError('Expo send outcome slot is invalid.');
-                }
-                return safeCompletionFromExpoOutcome(descriptor.value);
-              } catch {
-                return Object.freeze({
-                  kind: 'outcome' as const,
-                  outcome: unknownSendOutcome(),
-                });
-              }
-            },
-          );
-          const acceptedReferences = new Map<string, number[]>();
-          freshCompletions.forEach((completion, index) => {
-            if (
-              completion.kind === 'outcome' &&
-              completion.outcome.state === 'provider-accepted' &&
-              completion.outcome.providerReference !== null
-            ) {
-              const indexes =
-                acceptedReferences.get(completion.outcome.providerReference) ??
-                [];
-              indexes.push(index);
-              acceptedReferences.set(
-                completion.outcome.providerReference,
-                indexes,
-              );
+      const eligibility = await Promise.all(
+        fresh.map(async ({ entry }) => {
+          try {
+            const eligible = await this.#endpointEligibility.isEligible(
+              entry.workItem,
+            );
+            if (eligible === true) return true;
+            if (eligible === false) {
+              return endpointEligibilityFailure('EXPO_ENDPOINT_INELIGIBLE');
             }
-          });
-          const duplicateIndexes = new Set(
-            Array.from(acceptedReferences.values())
-              .filter((indexes) => indexes.length > 1)
-              .flat(),
-          );
-          if (duplicateIndexes.size > 0) {
-            freshCompletions = freshCompletions.map((completion, index) =>
-              duplicateIndexes.has(index)
-                ? Object.freeze({
-                    kind: 'outcome' as const,
-                    outcome: unknownSendOutcome(),
-                  })
-                : completion,
+            return endpointEligibilityFailure(
+              'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+            );
+          } catch (error) {
+            return endpointEligibilityFailure(
+              error instanceof PushEndpointEligibilityError && error.retryable
+                ? 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE'
+                : 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
             );
           }
-        } catch {
-          // Provider I/O returned successfully, so failures while validating
-          // the untrusted result container are ambiguous and never retryable.
-          freshCompletions = fresh.map(() =>
-            Object.freeze({
-              kind: 'outcome' as const,
-              outcome: unknownSendOutcome(),
-            }),
-          );
+        }),
+      );
+
+      const afterEligibility = new Date(this.#clock()).getTime();
+      const sendable: FreshPendingExpoProviderIo[] = [];
+      eligibility.forEach((decision, freshIndex) => {
+        const candidate = fresh[freshIndex];
+        if (candidate === undefined) return;
+        if (decision !== true) {
+          completions[candidate.pendingIndex] = decision;
+          return;
         }
-      }
-      let freshIndex = 0;
-      for (let index = 0; index < pending.length; index += 1) {
-        if (completions[index] === undefined) {
-          completions[index] = freshCompletions[freshIndex];
-          freshIndex += 1;
+        if (!Number.isFinite(afterEligibility)) {
+          completions[candidate.pendingIndex] = Object.freeze({
+            kind: 'outcome',
+            outcome: unknownSendOutcome(),
+          });
+          return;
         }
-      }
+        if (afterEligibility >= candidate.expiresAt) {
+          completions[candidate.pendingIndex] =
+            completionFromExpoOutcome(expired());
+          return;
+        }
+        sendable.push(candidate);
+      });
+
+      const sendableCompletions = await Promise.all(
+        sendable.map(async ({ entry }) => {
+          try {
+            const rawOutcomes: unknown = await this.#transport.sendChunk([
+              entry.workItem,
+            ]);
+            if (
+              !Array.isArray(rawOutcomes) ||
+              Object.getOwnPropertyDescriptor(rawOutcomes, 'length')?.value !==
+                1
+            ) {
+              return Object.freeze({
+                kind: 'outcome' as const,
+                outcome: unknownSendOutcome(),
+              });
+            }
+            const descriptor = Object.getOwnPropertyDescriptor(
+              rawOutcomes,
+              '0',
+            );
+            if (
+              descriptor === undefined ||
+              descriptor.enumerable !== true ||
+              !Object.hasOwn(descriptor, 'value')
+            ) {
+              return Object.freeze({
+                kind: 'outcome' as const,
+                outcome: unknownSendOutcome(),
+              });
+            }
+            return safeCompletionFromExpoOutcome(descriptor.value);
+          } catch (error) {
+            return Object.freeze({
+              kind: 'failure' as const,
+              failure: failureFromError(error),
+            });
+          }
+        }),
+      );
+      sendable.forEach((candidate, index) => {
+        completions[candidate.pendingIndex] = sendableCompletions[index];
+      });
     }
     pending.forEach((entry, index) => {
       const completion = completions[index];

@@ -1,9 +1,15 @@
-import { type WorkerAttemptWorkItem } from '../shared/attempt';
+import {
+  parseWorkerAttemptWorkItem,
+  type WorkerAttemptWorkItem,
+} from '../shared/attempt';
 import { ProviderDispatchError } from '../shared/retry';
+import {
+  PushEndpointEligibilityError,
+  type PushEndpointEligibilityChecker,
+} from './eligibility';
 import {
   EXPO_RECEIPTS_URL,
   EXPO_RECEIPT_CHUNK_SIZE,
-  EXPO_SEND_CHUNK_SIZE,
   EXPO_SEND_URL,
   chunkExpoValues,
   createExpoPushMessage,
@@ -36,6 +42,8 @@ export interface ExpoPushTransport {
 
 export interface ExpoPushHttpTransportOptions {
   readonly accessToken: string;
+  /** Final authoritative endpoint check immediately before Expo HTTP I/O. */
+  readonly endpointEligibility: PushEndpointEligibilityChecker;
   readonly fetch?: ExpoPushFetch;
   /** Omission keeps all provider network I/O disabled. */
   readonly authorizeLiveTransport?: ExpoLiveTransportAuthorizer;
@@ -120,23 +128,54 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   }
 }
 
-function assertCanonicalLiveWork(
+function canonicalSingletonLiveWork(
   workItems: readonly WorkerAttemptWorkItem[],
-): void {
-  if (
-    workItems.length < 1 ||
-    workItems.length > EXPO_SEND_CHUNK_SIZE ||
-    workItems.some(
-      (item) =>
-        item.batch.integrationStatus.integrationId !== 'expo-push' ||
-        item.batch.integrationStatus.label !== 'live-verified' ||
-        item.batch.rosterPopulation !== 'staff',
-    )
-  ) {
+): WorkerAttemptWorkItem {
+  try {
+    if (workItems.length !== 1) throw new TypeError();
+    const item = parseWorkerAttemptWorkItem(workItems[0]);
+    if (
+      item.batch.integrationStatus.integrationId !== 'expo-push' ||
+      item.batch.integrationStatus.label !== 'live-verified' ||
+      item.batch.rosterPopulation !== 'staff' ||
+      item.batch.channel !== 'push' ||
+      item.attempt.channel !== 'push' ||
+      item.endpoint.channel !== 'push'
+    ) {
+      throw new TypeError();
+    }
+    return item;
+  } catch {
     throw new ProviderDispatchError(
       'EXPO_LIVE_TRANSPORT_DISABLED',
       'terminal-failure',
+      null,
     );
+  }
+}
+
+function endpointEligibilityDispatchError(
+  code:
+    | 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED'
+    | 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE'
+    | 'EXPO_ENDPOINT_INELIGIBLE',
+): ProviderDispatchError {
+  return new ProviderDispatchError(
+    code,
+    code === 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE'
+      ? 'safe-to-retry'
+      : 'terminal-failure',
+    null,
+  );
+}
+
+function retryableEligibilityError(error: unknown): boolean {
+  try {
+    return (
+      error instanceof PushEndpointEligibilityError && error.retryable === true
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -148,13 +187,52 @@ export class ExpoPushHttpTransport implements ExpoPushTransport {
   readonly #accessToken: string;
   readonly #fetch: ExpoPushFetch;
   readonly #authorize: ExpoLiveTransportAuthorizer | undefined;
+  readonly #endpointEligibility: PushEndpointEligibilityChecker;
+  readonly #checkEndpointEligibility: (
+    workItem: WorkerAttemptWorkItem,
+  ) => Promise<boolean>;
   readonly #timeoutMilliseconds: number;
   readonly #clock: () => Date | string | number;
 
+  /** Proves the HTTP boundary owns the exact checker used by its worker. */
+  public static usesEndpointEligibility(
+    transport: unknown,
+    checker: PushEndpointEligibilityChecker,
+  ): transport is ExpoPushHttpTransport {
+    try {
+      return (
+        transport instanceof ExpoPushHttpTransport &&
+        transport.#endpointEligibility === checker
+      );
+    } catch {
+      return false;
+    }
+  }
+
   public constructor(options: ExpoPushHttpTransportOptions) {
+    let endpointEligibility: PushEndpointEligibilityChecker;
+    let checkEndpointEligibility: (
+      workItem: WorkerAttemptWorkItem,
+    ) => Promise<boolean>;
+    try {
+      endpointEligibility = options.endpointEligibility;
+      if (
+        endpointEligibility === null ||
+        typeof endpointEligibility !== 'object' ||
+        typeof endpointEligibility.isEligible !== 'function'
+      ) {
+        throw new TypeError();
+      }
+      checkEndpointEligibility =
+        endpointEligibility.isEligible.bind(endpointEligibility);
+    } catch {
+      throw new TypeError('Expo endpoint eligibility checker is invalid.');
+    }
     this.#accessToken = parseAccessToken(options.accessToken);
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#authorize = options.authorizeLiveTransport;
+    this.#endpointEligibility = endpointEligibility;
+    this.#checkEndpointEligibility = checkEndpointEligibility;
     this.#timeoutMilliseconds = parseTimeout(options.timeoutMilliseconds);
     this.#clock = options.clock ?? Date.now;
   }
@@ -162,30 +240,19 @@ export class ExpoPushHttpTransport implements ExpoPushTransport {
   public async sendChunk(
     workItems: readonly WorkerAttemptWorkItem[],
   ): Promise<readonly ExpoProviderOutcome[]> {
-    assertCanonicalLiveWork(workItems);
+    const workItem = canonicalSingletonLiveWork(workItems);
     await this.#assertAuthorized();
+    await this.#assertEndpointEligible(workItem);
     const now = this.#clock();
-    const messages = workItems.map((item) => createExpoPushMessage(item, now));
-    const liveIndexes = messages.flatMap((message, index) =>
-      message.ttl < 1 ? [] : [index],
-    );
-    if (liveIndexes.length === 0) {
-      return Object.freeze(messages.map(() => expired()));
+    const message = createExpoPushMessage(workItem, now);
+    if (message.ttl < 1) {
+      return Object.freeze([expired()]);
     }
-    const response = await this.#post(
-      EXPO_SEND_URL,
-      liveIndexes.map((index) => messages[index]!),
-    );
-    const providerOutcomes = parseExpoTicketResponse(
-      response,
-      liveIndexes.length,
-    );
-    let providerIndex = 0;
-    return Object.freeze(
-      messages.map((message) =>
-        message.ttl < 1 ? expired() : providerOutcomes[providerIndex++]!,
-      ),
-    );
+    // Enter #post synchronously after the final check. Its first await invokes
+    // fetch, leaving no asynchronous revocation window before provider I/O.
+    const responsePromise = this.#post(EXPO_SEND_URL, [message]);
+    const response = await responsePromise;
+    return parseExpoTicketResponse(response, 1);
   }
 
   public async queryReceiptChunk(
@@ -210,8 +277,8 @@ export class ExpoPushHttpTransport implements ExpoPushTransport {
     workItems: readonly WorkerAttemptWorkItem[],
   ): Promise<readonly ExpoProviderOutcome[]> {
     const outcomes: ExpoProviderOutcome[] = [];
-    for (const chunk of chunkExpoValues(workItems, EXPO_SEND_CHUNK_SIZE)) {
-      outcomes.push(...(await this.sendChunk(chunk)));
+    for (const workItem of workItems) {
+      outcomes.push(...(await this.sendChunk([workItem])));
     }
     return Object.freeze(outcomes);
   }
@@ -240,6 +307,27 @@ export class ExpoPushHttpTransport implements ExpoPushTransport {
         'terminal-failure',
       );
     }
+  }
+
+  async #assertEndpointEligible(
+    workItem: WorkerAttemptWorkItem,
+  ): Promise<void> {
+    let eligible: unknown;
+    try {
+      eligible = await this.#checkEndpointEligibility(workItem);
+    } catch (error) {
+      throw endpointEligibilityDispatchError(
+        retryableEligibilityError(error)
+          ? 'EXPO_ENDPOINT_ELIGIBILITY_UNAVAILABLE'
+          : 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+      );
+    }
+    if (eligible === true) return;
+    throw endpointEligibilityDispatchError(
+      eligible === false
+        ? 'EXPO_ENDPOINT_INELIGIBLE'
+        : 'EXPO_ENDPOINT_ELIGIBILITY_BLOCKED',
+    );
   }
 
   async #post(url: string, body: unknown): Promise<unknown> {

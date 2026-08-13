@@ -8,6 +8,7 @@ import {
   EndpointStatusRecordSchema,
   PushTokenRegistrationReceiptSchema,
   PushTokenUnregistrationReceiptSchema,
+  PushEndpointSendEligibilityInputSchema,
   SecurityAuditEntrySchema,
   type Actor,
   type CapabilityInput,
@@ -18,6 +19,7 @@ import {
   type EndpointStatus,
   type EndpointStatusRecord,
   type PushEndpoint,
+  type PushEndpointSendEligibilityInput,
   type PushTokenRegistrationReceipt,
   type PushTokenUnregistrationReceipt,
   type RegisteredCapabilityId,
@@ -124,13 +126,25 @@ export interface PushEndpointPolicyCandidate {
 export interface PushEndpointPolicyQuery {
   readonly rosterSnapshotId: string;
   readonly rosterPopulation: 'staff' | 'synthetic';
+  /** Required when delivery-test target evidence must be checked. */
+  readonly endpointCount?: number;
+  /** Omitted for ordinary push-policy reads that have no canary authority. */
+  readonly deliveryTest?: DeliveryTestNotificationMetadata | null;
+  readonly candidates: readonly PushEndpointPolicyCandidate[];
+}
+
+interface NormalizedPushEndpointPolicyQuery extends PushEndpointPolicyQuery {
   readonly endpointCount: number;
   readonly deliveryTest: DeliveryTestNotificationMetadata | null;
-  readonly candidates: readonly PushEndpointPolicyCandidate[];
 }
 
 export interface PushEndpointPolicyEvidence
   extends PushEndpointPolicyCandidate {
+  readonly status: EndpointStatus;
+  readonly approvedForDeliveryTest?: boolean;
+}
+
+interface ParsedPushEndpointPolicyEvidence extends PushEndpointPolicyCandidate {
   readonly status: EndpointStatus;
   readonly approvedForDeliveryTest: boolean;
 }
@@ -150,6 +164,102 @@ export interface ResolvedPushEndpoint {
   readonly rosterPopulation: 'staff' | 'synthetic';
   readonly recipientId: string;
   readonly endpoint: PushEndpoint;
+}
+
+interface PushEndpointSendEligibilityEvidence {
+  readonly rosterSnapshotId: string;
+  readonly rosterPopulation: 'staff' | 'synthetic';
+  readonly recipientId: string;
+  readonly endpointId: string;
+  readonly platform: 'ios' | 'android';
+  readonly tokenDigest: string;
+  readonly endpointStatus: EndpointStatus;
+  readonly effectiveStatus: EndpointStatus;
+}
+
+/** Narrow testable read boundary used by the worker-only eligibility route. */
+export interface PushEndpointSendEligibilityStore {
+  loadPushEndpointSendEligibility(
+    input: PushEndpointSendEligibilityInput,
+  ): Promise<unknown>;
+}
+
+function parsePushEndpointSendEligibilityEvidence(
+  value: unknown,
+): PushEndpointSendEligibilityEvidence | null {
+  if (value === null) return null;
+  const record = exactDataRecord(value, [
+    'rosterSnapshotId',
+    'rosterPopulation',
+    'recipientId',
+    'endpointId',
+    'platform',
+    'tokenDigest',
+    'endpointStatus',
+    'effectiveStatus',
+  ]);
+  const endpointStatus = EndpointStatusSchema.safeParse(record?.endpointStatus);
+  const effectiveStatus = EndpointStatusSchema.safeParse(
+    record?.effectiveStatus,
+  );
+  if (
+    record === null ||
+    typeof record.rosterSnapshotId !== 'string' ||
+    (record.rosterPopulation !== 'staff' &&
+      record.rosterPopulation !== 'synthetic') ||
+    typeof record.recipientId !== 'string' ||
+    typeof record.endpointId !== 'string' ||
+    (record.platform !== 'ios' && record.platform !== 'android') ||
+    typeof record.tokenDigest !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(record.tokenDigest) ||
+    !endpointStatus.success ||
+    !effectiveStatus.success
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  return Object.freeze({
+    rosterSnapshotId: record.rosterSnapshotId,
+    rosterPopulation: record.rosterPopulation,
+    recipientId: record.recipientId,
+    endpointId: record.endpointId,
+    platform: record.platform,
+    tokenDigest: record.tokenDigest,
+    endpointStatus: endpointStatus.data,
+    effectiveStatus: effectiveStatus.data,
+  });
+}
+
+/**
+ * Revalidates the full immutable endpoint identity against current append-only
+ * lifecycle truth. A well-formed absent or revoked endpoint is ineligible;
+ * malformed/store failures throw so callers can fail closed.
+ */
+export async function checkPushEndpointSendEligibility(
+  inputValue: unknown,
+  store: PushEndpointSendEligibilityStore,
+): Promise<boolean> {
+  const parsed = PushEndpointSendEligibilityInputSchema.safeParse(inputValue);
+  if (!parsed.success) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  let rawEvidence: unknown;
+  try {
+    rawEvidence = await store.loadPushEndpointSendEligibility(parsed.data);
+  } catch {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const evidence = parsePushEndpointSendEligibilityEvidence(rawEvidence);
+  return (
+    evidence !== null &&
+    evidence.rosterSnapshotId === parsed.data.rosterSnapshotId &&
+    evidence.rosterPopulation === parsed.data.rosterPopulation &&
+    evidence.recipientId === parsed.data.recipientId &&
+    evidence.endpointId === parsed.data.endpointId &&
+    evidence.platform === parsed.data.platform &&
+    evidence.tokenDigest === parsed.data.tokenDigest &&
+    evidence.endpointStatus === 'active' &&
+    evidence.effectiveStatus === 'active'
+  );
 }
 
 function pushCandidateKey(candidate: PushEndpointPolicyCandidate): string {
@@ -198,7 +308,7 @@ function exactDataRecord(
 function parsePushEndpointPolicyEvidence(
   value: unknown,
   query: PushEndpointPolicyQuery,
-): ReadonlyMap<string, PushEndpointPolicyEvidence> {
+): ReadonlyMap<string, ParsedPushEndpointPolicyEvidence> {
   try {
     if (!Array.isArray(value)) throw new TypeError();
     const length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
@@ -211,10 +321,10 @@ function parsePushEndpointPolicyEvidence(
     }
     const expected = new Set(query.candidates.map(pushCandidateKey));
     if (expected.size !== query.candidates.length) throw new TypeError();
-    const evidence = new Map<string, PushEndpointPolicyEvidence>();
+    const evidence = new Map<string, ParsedPushEndpointPolicyEvidence>();
     for (let index = 0; index < Number(length); index += 1) {
       const slot = Object.getOwnPropertyDescriptor(value, String(index));
-      const properties =
+      const propertiesWithApproval =
         slot !== undefined &&
         slot.enumerable === true &&
         Object.hasOwn(slot, 'value')
@@ -225,12 +335,23 @@ function parsePushEndpointPolicyEvidence(
               'approvedForDeliveryTest',
             ])
           : null;
+      const ordinaryProperties =
+        propertiesWithApproval === null &&
+        query.deliveryTest == null &&
+        slot !== undefined &&
+        slot.enumerable === true &&
+        Object.hasOwn(slot, 'value')
+          ? exactDataRecord(slot.value, ['recipientId', 'endpointId', 'status'])
+          : null;
+      const properties = propertiesWithApproval ?? ordinaryProperties;
       const status = EndpointStatusSchema.safeParse(properties?.status);
       if (
         properties === null ||
         typeof properties.recipientId !== 'string' ||
         typeof properties.endpointId !== 'string' ||
-        typeof properties.approvedForDeliveryTest !== 'boolean' ||
+        (propertiesWithApproval !== null &&
+          typeof properties.approvedForDeliveryTest !== 'boolean') ||
+        (query.deliveryTest != null && propertiesWithApproval === null) ||
         !status.success
       ) {
         throw new TypeError();
@@ -239,7 +360,10 @@ function parsePushEndpointPolicyEvidence(
         recipientId: properties.recipientId,
         endpointId: properties.endpointId,
         status: status.data,
-        approvedForDeliveryTest: properties.approvedForDeliveryTest,
+        approvedForDeliveryTest:
+          query.deliveryTest == null
+            ? true
+            : (properties.approvedForDeliveryTest as boolean),
       });
       const key = pushCandidateKey(item);
       if (!expected.has(key) || evidence.has(key)) throw new TypeError();
@@ -354,7 +478,7 @@ export async function resolvePushEndpoints(
 
 async function loadPushDeliveryTestTargets(
   database: DeviceQueryDatabase,
-  query: PushEndpointPolicyQuery,
+  query: NormalizedPushEndpointPolicyQuery,
 ): Promise<ReadonlySet<string> | null> {
   if (query.deliveryTest === null) return null;
   if (query.rosterPopulation !== 'staff') {
@@ -514,12 +638,38 @@ async function loadPushDeliveryTestTargets(
   return new Set(pushTargets.map(pushCandidateKey));
 }
 
+function normalizePushEndpointPolicyQuery(
+  query: PushEndpointPolicyQuery,
+): NormalizedPushEndpointPolicyQuery {
+  if (!Array.isArray(query.candidates)) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const deliveryTest = query.deliveryTest ?? null;
+  const endpointCount = query.endpointCount ?? query.candidates.length;
+  if (
+    !Number.isSafeInteger(endpointCount) ||
+    endpointCount < 0 ||
+    endpointCount > MAX_PUSH_ENDPOINTS ||
+    (deliveryTest !== null && query.endpointCount === undefined) ||
+    (deliveryTest === null && endpointCount !== query.candidates.length)
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  return Object.freeze({
+    rosterSnapshotId: query.rosterSnapshotId,
+    rosterPopulation: query.rosterPopulation,
+    endpointCount,
+    deliveryTest,
+    candidates: query.candidates,
+  });
+}
+
 async function loadDrizzlePushEndpointPolicy(
   database: DeviceQueryDatabase,
-  query: PushEndpointPolicyQuery,
+  input: PushEndpointPolicyQuery,
 ): Promise<readonly PushEndpointPolicyEvidence[]> {
+  const query = normalizePushEndpointPolicyQuery(input);
   if (
-    !Array.isArray(query.candidates) ||
     query.candidates.length > MAX_PUSH_ENDPOINTS ||
     new Set(query.candidates.map(pushCandidateKey)).size !==
       query.candidates.length
@@ -534,8 +684,36 @@ async function loadDrizzlePushEndpointPolicy(
       endpointId: rosterEndpoints.id,
       recipientId: rosterEndpoints.recipientId,
       status: rosterEndpoints.status,
+      registrationId: devicePushTokenRegistrations.id,
+      registrationDeviceEnrollmentId:
+        devicePushTokenRegistrations.deviceEnrollmentId,
+      registrationMatchesEndpoint: sql<boolean | null>`case
+        when ${devicePushTokenRegistrations.id} is null then null
+        else ${devicePushTokenRegistrations.platform}::text = ${rosterEndpoints.platform}::text
+          and ${devicePushTokenRegistrations.token} = ${rosterEndpoints.token}
+      end`,
+      unregisteredRegistrationId: devicePushTokenUnregistrations.registrationId,
+      unregisteredDeviceEnrollmentId:
+        devicePushTokenUnregistrations.deviceEnrollmentId,
     })
     .from(rosterEndpoints)
+    .leftJoin(
+      devicePushTokenRegistrations,
+      eq(devicePushTokenRegistrations.id, rosterEndpoints.id),
+    )
+    .leftJoin(
+      devicePushTokenUnregistrations,
+      and(
+        eq(
+          devicePushTokenUnregistrations.registrationId,
+          devicePushTokenRegistrations.id,
+        ),
+        eq(
+          devicePushTokenUnregistrations.deviceEnrollmentId,
+          devicePushTokenRegistrations.deviceEnrollmentId,
+        ),
+      ),
+    )
     .where(
       and(
         eq(rosterEndpoints.rosterSnapshotId, query.rosterSnapshotId),
@@ -570,12 +748,32 @@ async function loadDrizzlePushEndpointPolicy(
       desc(endpointStatusRecords.sequence),
     );
   const effectiveStatuses = new Map<string, EndpointStatus>();
-  endpointRows.forEach((endpoint) =>
+  endpointRows.forEach((endpoint) => {
+    const hasRegistration = endpoint.registrationId !== null;
+    const hasUnregistration =
+      endpoint.unregisteredRegistrationId !== null ||
+      endpoint.unregisteredDeviceEnrollmentId !== null;
+    if (
+      (query.rosterPopulation === 'staff' && !hasRegistration) ||
+      (hasRegistration && endpoint.registrationMatchesEndpoint !== true) ||
+      (!hasRegistration &&
+        (endpoint.registrationDeviceEnrollmentId !== null ||
+          endpoint.registrationMatchesEndpoint !== null ||
+          hasUnregistration)) ||
+      (hasUnregistration &&
+        (endpoint.unregisteredRegistrationId !== endpoint.registrationId ||
+          endpoint.unregisteredDeviceEnrollmentId !==
+            endpoint.registrationDeviceEnrollmentId))
+    ) {
+      throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+    }
     effectiveStatuses.set(
       pushCandidateKey(endpoint),
-      EndpointStatusSchema.parse(endpoint.status),
-    ),
-  );
+      hasUnregistration
+        ? 'disabled'
+        : EndpointStatusSchema.parse(endpoint.status),
+    );
+  });
   statusRows.forEach((status) => {
     if (
       status.status !== 'invalid' ||
@@ -597,9 +795,13 @@ async function loadDrizzlePushEndpointPolicy(
           status:
             effectiveStatuses.get(pushCandidateKey(endpoint)) ??
             EndpointStatusSchema.parse(endpoint.status),
-          approvedForDeliveryTest:
-            approvedTargets === null ||
-            approvedTargets.has(pushCandidateKey(endpoint)),
+          ...(approvedTargets === null
+            ? {}
+            : {
+                approvedForDeliveryTest: approvedTargets.has(
+                  pushCandidateKey(endpoint),
+                ),
+              }),
         }),
       )
       .sort(
@@ -618,6 +820,78 @@ export function createDrizzlePushEndpointPolicyStore(
     loadEndpointPolicy: (query: PushEndpointPolicyQuery) =>
       database.transaction((transaction) =>
         loadDrizzlePushEndpointPolicy(deviceQueryDatabase(transaction), query),
+      ),
+  });
+}
+
+async function loadDrizzlePushEndpointSendEligibility(
+  database: DeviceQueryDatabase,
+  input: PushEndpointSendEligibilityInput,
+): Promise<PushEndpointSendEligibilityEvidence | null> {
+  const rows = await database
+    .select({
+      rosterSnapshotId: rosterEndpoints.rosterSnapshotId,
+      rosterPopulation: rosterEndpoints.population,
+      recipientId: rosterEndpoints.recipientId,
+      endpointId: rosterEndpoints.id,
+      endpointStatus: rosterEndpoints.status,
+      platform: rosterEndpoints.platform,
+      token: rosterEndpoints.token,
+    })
+    .from(rosterEndpoints)
+    .where(
+      and(
+        eq(rosterEndpoints.rosterSnapshotId, input.rosterSnapshotId),
+        eq(rosterEndpoints.population, input.rosterPopulation),
+        eq(rosterEndpoints.recipientId, input.recipientId),
+        eq(rosterEndpoints.id, input.endpointId),
+        eq(rosterEndpoints.channel, 'push'),
+      ),
+    );
+  if (rows.length === 0) return null;
+  if (rows.length !== 1) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const row = rows[0]!;
+  if (
+    (row.platform !== 'ios' && row.platform !== 'android') ||
+    typeof row.token !== 'string'
+  ) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  const policy = await loadDrizzlePushEndpointPolicy(database, {
+    rosterSnapshotId: input.rosterSnapshotId,
+    rosterPopulation: input.rosterPopulation,
+    candidates: [
+      { recipientId: input.recipientId, endpointId: input.endpointId },
+    ],
+  });
+  if (policy.length !== 1) {
+    throw new PushEndpointResolutionError('INVALID_PUSH_ENDPOINT_POLICY');
+  }
+  return Object.freeze({
+    rosterSnapshotId: row.rosterSnapshotId,
+    rosterPopulation: row.rosterPopulation,
+    recipientId: row.recipientId,
+    endpointId: row.endpointId,
+    platform: row.platform,
+    tokenDigest: createHash('sha256').update(row.token, 'utf8').digest('hex'),
+    endpointStatus: EndpointStatusSchema.parse(row.endpointStatus),
+    effectiveStatus: policy[0]!.status,
+  });
+}
+
+/** Production send-time eligibility store backed by current database truth. */
+export function createDrizzlePushEndpointSendEligibilityStore(
+  database: Database,
+): PushEndpointSendEligibilityStore {
+  return Object.freeze({
+    loadPushEndpointSendEligibility: (
+      input: PushEndpointSendEligibilityInput,
+    ) =>
+      loadDrizzlePushEndpointSendEligibility(
+        deviceQueryDatabase(database),
+        input,
       ),
   });
 }
@@ -1564,7 +1838,6 @@ async function recordEndpointStatusWithDatabase(
         eq(rosterEndpoints.id, input.endpointId),
       ),
     )
-    .for('update')
     .limit(1);
   if (endpoint === undefined) {
     throw deviceNotFound('The snapshotted endpoint was not found.');
@@ -1968,6 +2241,7 @@ export interface DeviceCapabilityRuntime {
     input: unknown,
     invocation: TrustedCapabilityInvocation,
   ): Promise<CapabilityOutput<Id>>;
+  checkPushEndpointSendEligibility(input: unknown): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -1976,10 +2250,15 @@ export function createDeviceCapabilityRuntime(
   connection: DatabaseConnection,
 ): DeviceCapabilityRuntime {
   const store = createDrizzleDeviceCapabilityStore(connection.db);
+  const eligibilityStore = createDrizzlePushEndpointSendEligibilityStore(
+    connection.db,
+  );
   return {
     store,
     execute: (capabilityId, input, invocation) =>
       executeDeviceCapability(capabilityId, input, invocation, store),
+    checkPushEndpointSendEligibility: (input) =>
+      checkPushEndpointSendEligibility(input, eligibilityStore),
     close: () => connection.close(),
   };
 }

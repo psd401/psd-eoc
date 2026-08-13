@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 
 import { IdempotencyPrincipalSchema } from '@psd-eoc/contracts';
+import type { FullConfig } from '@playwright/test';
 import { and, desc, eq } from 'drizzle-orm';
 
 import {
@@ -25,16 +25,17 @@ import {
   createDrizzleInitialWebSessionStore,
   digestWebSessionCredential,
 } from '../../../lib/auth/session-cookie';
+import { createOwnedEventTypePlaywrightDatabase } from './playwright-database';
 import {
-  EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH,
-  requireSyntheticTestDatabaseUrl,
-} from './test-database';
+  requireEventTypePlaywrightRunContext,
+  type EventTypePlaywrightRunContext,
+} from './playwright-run';
+import { executeOperationWithCleanup } from '../facilities/owned-database-lifecycle';
 
 const ACCESS_GROUP_ID = '10000000-0000-4000-8000-000000000110';
 const MEMBER_USER_ID = '10000000-0000-4000-8000-000000000120';
 const MEMBER_SUBJECT = 'mock-google-subject-member';
 const runFile = promisify(execFile);
-const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
 interface AccessFixture {
   readonly snapshotId: string;
@@ -48,18 +49,20 @@ function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-async function prepareDatabase(databaseUrl: string): Promise<void> {
+async function prepareDatabase(
+  context: EventTypePlaywrightRunContext,
+): Promise<void> {
   const environment = {
     ...process.env,
     DATABASE_DRIVER: 'postgres',
-    DATABASE_URL: databaseUrl,
+    DATABASE_URL: context.databaseUrl,
   };
   await runFile('bun', ['drizzle/migrate.ts'], {
-    cwd: serverRoot,
+    cwd: context.serverDirectory,
     env: environment,
   });
   await runFile('bun', ['db/seed.ts'], {
-    cwd: serverRoot,
+    cwd: context.serverDirectory,
     env: environment,
   });
 }
@@ -190,6 +193,7 @@ async function prepareAccessEvidence(
 async function issueSyntheticAdministratorSession(
   connection: PostgresDatabaseConnection,
   fixture: AccessFixture,
+  storageStatePath: string,
 ): Promise<void> {
   const now = new Date(
     Math.max(Date.now(), fixture.capturedAt.getTime() + 1_000),
@@ -265,8 +269,9 @@ async function issueSyntheticAdministratorSession(
   const expires = Math.floor(
     new Date(result.session.expiresAt).getTime() / 1_000,
   );
+  await mkdir(dirname(storageStatePath), { mode: 0o700, recursive: true });
   await writeFile(
-    EVENT_TYPE_PLAYWRIGHT_STORAGE_STATE_PATH,
+    storageStatePath,
     JSON.stringify({
       cookies: [
         {
@@ -296,23 +301,38 @@ async function issueSyntheticAdministratorSession(
   );
 }
 
-export default async function globalSetup(): Promise<void> {
-  const databaseUrl = requireSyntheticTestDatabaseUrl(
-    process.env.TEST_DATABASE_URL,
-  );
-  await prepareDatabase(databaseUrl);
+export default async function globalSetup(config: FullConfig): Promise<void> {
+  const metadata = config.metadata as Readonly<Record<string, unknown>>;
+  const context = requireEventTypePlaywrightRunContext(metadata.eventTypeRun);
+  await createOwnedEventTypePlaywrightDatabase(context);
+  if (
+    process.env.PSD_EOC_EVENT_TYPE_PLAYWRIGHT_SETUP_FAILURE_RUN_ID ===
+    context.runId
+  ) {
+    throw new Error(
+      'Synthetic event-type Playwright setup failure after database creation.',
+    );
+  }
+  await prepareDatabase(context);
   const created = createDatabaseClient({
     driver: 'postgres',
-    url: databaseUrl,
+    url: context.databaseUrl,
     maxConnections: 2,
   });
   if (created.driver !== 'postgres') {
     throw new Error('Event-type Playwright requires PostgreSQL.');
   }
-  try {
-    const fixture = await prepareAccessEvidence(created);
-    await issueSyntheticAdministratorSession(created, fixture);
-  } finally {
-    await created.close();
-  }
+  await executeOperationWithCleanup({
+    operation: async () => {
+      const fixture = await prepareAccessEvidence(created);
+      await issueSyntheticAdministratorSession(
+        created,
+        fixture,
+        context.storageStatePath,
+      );
+    },
+    cleanup: () => created.close(),
+    failureMessage:
+      'Event-type Playwright fixture setup and connection close both failed.',
+  });
 }

@@ -194,6 +194,44 @@ class MemoryEvidenceWriter implements AttemptEvidenceWriter {
   }
 }
 
+class DeferredAttemptEvidenceWriter extends MemoryEvidenceWriter {
+  readonly #writeStarted: Promise<void>;
+  readonly #releaseWrite: Promise<void>;
+  #markWriteStarted: (() => void) | undefined;
+  #resumeWrite: (() => void) | undefined;
+  #deferred = false;
+
+  public constructor() {
+    super();
+    this.#writeStarted = new Promise((resolve) => {
+      this.#markWriteStarted = resolve;
+    });
+    this.#releaseWrite = new Promise((resolve) => {
+      this.#resumeWrite = resolve;
+    });
+  }
+
+  public override async recordAttemptEvidence(
+    value: DeliveryStateWriteRequest | unknown,
+  ): Promise<DeliveryEvidence> {
+    const request = parseDeliveryStateWriteRequest(value);
+    if (request.evidence.state === 'attempted' && !this.#deferred) {
+      this.#deferred = true;
+      this.#markWriteStarted?.();
+      await this.#releaseWrite;
+    }
+    return super.recordAttemptEvidence(request);
+  }
+
+  public waitForAttemptedWrite(): Promise<void> {
+    return this.#writeStarted;
+  }
+
+  public releaseAttemptedWrite(): void {
+    this.#resumeWrite?.();
+  }
+}
+
 class MockAdapter implements AttemptIdempotentProviderAdapter {
   public readonly channel = 'push' as const;
   public readonly integrationId = 'expo-push';
@@ -237,7 +275,11 @@ function runtime(
   adapter: AttemptIdempotentProviderAdapter,
   store = new MemoryExecutionStore(),
   writer = new MemoryEvidenceWriter(),
-  options: Readonly<{ maxAttempts?: number; authorizeLive?: boolean }> = {},
+  options: Readonly<{
+    maxAttempts?: number;
+    authorizeLive?: boolean;
+    authorizeSend?: () => boolean | Promise<boolean>;
+  }> = {},
 ) {
   return {
     store,
@@ -257,6 +299,9 @@ function runtime(
       ...(options.authorizeLive === undefined
         ? {}
         : { authorizeLiveProvider: () => options.authorizeLive === true }),
+      ...(options.authorizeSend === undefined
+        ? {}
+        : { authorizeProviderSend: options.authorizeSend }),
     }),
   };
 }
@@ -289,6 +334,76 @@ describe('attempt-ID idempotent processing', () => {
       'attempted',
       'provider-accepted',
     ]);
+  });
+
+  test('fails closed before evidence or provider I/O when current send policy denies', async () => {
+    const adapter = new MockAdapter('mocked');
+    const app = runtime(adapter, new MemoryExecutionStore(), undefined, {
+      authorizeSend: () => false,
+    });
+
+    await expect(app.processor.process(workItem())).rejects.toEqual(
+      expect.objectContaining({ code: 'PROVIDER_SEND_DISABLED' }),
+    );
+    expect(adapter.requests).toHaveLength(0);
+    expect(app.writer.evidence).toHaveLength(0);
+    expect(app.store.claimCalls).toBe(1);
+    expect(app.store.releaseCalls).toBe(1);
+    expect(app.store.executions).toHaveLength(0);
+  });
+
+  test('revalidates after attempted evidence and blocks revocation during its async write', async () => {
+    const adapter = new MockAdapter('mocked');
+    const store = new MemoryExecutionStore();
+    const writer = new DeferredAttemptEvidenceWriter();
+    let eligible = true;
+    let policyChecks = 0;
+    const app = runtime(adapter, store, writer, {
+      authorizeSend: () => {
+        policyChecks += 1;
+        return eligible;
+      },
+    });
+
+    const processing = app.processor.process(workItem());
+    await writer.waitForAttemptedWrite();
+    expect(policyChecks).toBe(1);
+    eligible = false;
+    writer.releaseAttemptedWrite();
+
+    await expect(processing).rejects.toEqual(
+      expect.objectContaining({ code: 'PROVIDER_SEND_DISABLED' }),
+    );
+    expect(policyChecks).toBe(2);
+    expect(adapter.requests).toHaveLength(0);
+    expect(writer.evidence.map(({ state }) => state)).toEqual(['attempted']);
+    expect(store.releaseCalls).toBe(1);
+    expect(store.executions).toHaveLength(0);
+  });
+
+  test('completed provider truth replays without consulting current send policy', async () => {
+    const adapter = new MockAdapter('mocked');
+    const store = new MemoryExecutionStore();
+    const writer = new MemoryEvidenceWriter();
+    await runtime(adapter, store, writer, {
+      authorizeSend: () => true,
+    }).processor.process(workItem());
+    let policyCalls = 0;
+    const replay = runtime(adapter, store, writer, {
+      authorizeSend: () => {
+        policyCalls += 1;
+        throw new Error(
+          'Recovered truth must not require current eligibility.',
+        );
+      },
+    });
+
+    await expect(replay.processor.process(workItem())).resolves.toMatchObject({
+      kind: 'completed',
+      replayed: true,
+    });
+    expect(policyCalls).toBe(0);
+    expect(adapter.requests).toHaveLength(1);
   });
 
   test('crash after durable completion resumes writeback without re-sending', async () => {

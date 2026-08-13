@@ -838,6 +838,10 @@ describeWithDatabase('PostgreSQL stale-roster report capability', () => {
         reason: 'no-active-endpoint',
       },
       {
+        recipientId: ids.recipientNorthActive,
+        reason: 'no-active-push-endpoint',
+      },
+      {
         recipientId: ids.recipientSouthNoEndpoint,
         reason: 'no-endpoint',
       },
@@ -850,6 +854,10 @@ describeWithDatabase('PostgreSQL stale-roster report capability', () => {
       {
         recipientId: ids.recipientNorthStale,
         reason: 'no-active-endpoint',
+      },
+      {
+        recipientId: ids.recipientNorthActive,
+        reason: 'no-active-push-endpoint',
       },
     ]);
     expect(north.staleRecipients).not.toContainEqual({
@@ -1123,6 +1131,10 @@ describeWithDatabase('PostgreSQL stale-roster report capability', () => {
       {
         recipientId: ids.recipientNorthStale,
         reason: 'no-active-endpoint',
+      },
+      {
+        recipientId: ids.recipientNorthActive,
+        reason: 'no-active-push-endpoint',
       },
     ]);
     expect(north.staleRecipients).not.toContainEqual({

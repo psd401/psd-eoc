@@ -1,11 +1,10 @@
 import { Stack } from 'expo-router';
-import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { AuthProvider, ConnectivityBanner, useMobileAuth } from '../lib/auth';
+import { PushNotificationLifecycle } from '../lib/push';
 import { StartMutationProvider } from '../lib/start';
-import { configureAlertChannel } from '../notifications/alert-channel';
 
 export function AuthenticatedStack() {
   const { hasCachedShell, state } = useMobileAuth();
@@ -18,6 +17,7 @@ export function AuthenticatedStack() {
   return (
     <View style={styles.shell}>
       <ConnectivityBanner />
+      <PushNotificationLifecycle />
       <Stack
         screenOptions={{
           headerBackTitle: 'Home',
@@ -83,12 +83,6 @@ export function RootLayoutContent() {
 }
 
 export default function RootLayout() {
-  useEffect(() => {
-    void configureAlertChannel().catch(() => {
-      console.error('Failed to configure the Android alert channel.');
-    });
-  }, []);
-
   return <RootLayoutContent />;
 }
 

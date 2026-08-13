@@ -154,6 +154,7 @@ function controller(
   }),
   overrides: Readonly<{
     authenticatedApi?: AuthenticatedRequestTransport;
+    createIdempotencyKey?: () => string;
     now?: () => Date;
     timer?: AuthTimer;
   }> = {},
@@ -165,7 +166,9 @@ function controller(
       ? {}
       : { authenticatedApi: overrides.authenticatedApi }),
     localAuthenticator: { authenticate },
-    createIdempotencyKey: () => 'mobile-refresh-idempotency-0001',
+    createIdempotencyKey:
+      overrides.createIdempotencyKey ??
+      (() => 'mobile-refresh-idempotency-0001'),
     now: overrides.now ?? (() => TEST_NOW),
     timer: overrides.timer ?? inertTimer,
   });
@@ -320,7 +323,7 @@ describe('mobile auth controller', () => {
     expect(storage.vault).toBeNull();
   });
 
-  test('sign-out clears locally before a bounded remote revoke finishes', async () => {
+  test('sign-out blocks app access but preserves the credential until cleanup finishes', async () => {
     const storage = new FakeStorage(null);
     const revoke = deferred<void>();
     const auth = controller(storage, {
@@ -335,10 +338,192 @@ describe('mobile auth controller', () => {
 
     const signingOut = auth.signOut();
     await flush();
-    expect(auth.getSnapshot().phase).toBe('signed-out');
-    expect(storage.vault).toBeNull();
+    expect(auth.getSnapshot()).toMatchObject({
+      phase: 'locked',
+      session: null,
+      connectivityEpochId: null,
+    });
+    expect(() => auth.assertMutationAllowed()).toThrow(
+      OfflineMutationDeniedError,
+    );
+    expect(storage.vault?.refreshToken).toBe(TEST_TOKEN);
     revoke.resolve();
     await signingOut;
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+    expect(storage.vault).toBeNull();
+  });
+
+  test('failed server cleanup leaves the online credential and push lifecycle intact', async () => {
+    const storage = new FakeStorage(null);
+    const auth = controller(storage, {
+      refresh: async () => successfulPayload(),
+      revoke: async () => {
+        throw new MobileAuthError('offline', 'unreachable');
+      },
+    });
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+
+    await expect(auth.signOut()).rejects.toBeInstanceOf(MobileAuthError);
+    expect(auth.getSnapshot().phase).toBe('online');
+    expect(auth.getSnapshot().message).toContain('not completed');
+    expect(storage.vault?.refreshToken).toBe(TEST_TOKEN);
+    expect(storage.clearCount).toBe(0);
+  });
+
+  test('reuses the exact revocation key after a lost response', async () => {
+    const storage = new FakeStorage(null);
+    const revocations: Array<{
+      token: string;
+      sessionId: string;
+      idempotencyKey: string;
+    }> = [];
+    let keyCount = 0;
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => successfulPayload(),
+        async revoke(token, sessionId, idempotencyKey) {
+          revocations.push({ token, sessionId, idempotencyKey });
+          if (revocations.length === 1) {
+            throw new MobileAuthError('offline', 'response lost');
+          }
+        },
+      },
+      undefined,
+      {
+        createIdempotencyKey: () => {
+          keyCount += 1;
+          return `mobile-revocation-idempotency-${String(keyCount).padStart(4, '0')}`;
+        },
+      },
+    );
+    await auth.enroll({
+      refreshToken: TEST_TOKEN,
+      tokenType: 'Bearer',
+      session: sessionFixture(),
+    });
+
+    await expect(auth.signOut()).rejects.toBeInstanceOf(MobileAuthError);
+    expect(storage.vault?.refreshToken).toBe(TEST_TOKEN);
+    await auth.signOut();
+
+    expect(keyCount).toBe(1);
+    expect(revocations).toEqual([
+      {
+        token: TEST_TOKEN,
+        sessionId: sessionFixture().session.id,
+        idempotencyKey: 'mobile-revocation-idempotency-0001',
+      },
+      {
+        token: TEST_TOKEN,
+        sessionId: sessionFixture().session.id,
+        idempotencyKey: 'mobile-revocation-idempotency-0001',
+      },
+    ]);
+    expect(storage.vault).toBeNull();
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+  });
+
+  test('failed cleanup during refresh stays locked until a fresh authenticated recovery', async () => {
+    const storage = new FakeStorage(storedVault());
+    const refreshStarted = deferred<void>();
+    const refresh = deferred<MobileSessionResponse>();
+    let refreshSignal: AbortSignal | null = null;
+    const capturedRefreshSignal = (): AbortSignal => {
+      if (refreshSignal === null) throw new Error('Refresh did not start.');
+      return refreshSignal;
+    };
+    const auth = controller(storage, {
+      refresh: (_token, _key, signal) => {
+        refreshSignal = signal;
+        refreshStarted.resolve();
+        return refresh.promise;
+      },
+      revoke: async () => {
+        throw new MobileAuthError('offline', 'unreachable');
+      },
+    });
+    await auth.bootstrap();
+    const foreground = auth.foreground();
+    await refreshStarted.promise;
+
+    await expect(auth.signOut()).rejects.toBeInstanceOf(MobileAuthError);
+    expect(capturedRefreshSignal().aborted).toBe(true);
+    expect(auth.getSnapshot()).toMatchObject({
+      phase: 'locked',
+      session: null,
+      connectivityEpochId: null,
+    });
+    expect(storage.vault?.refreshToken).toBe(TEST_TOKEN);
+    expect(storage.clearCount).toBe(0);
+
+    refresh.resolve(successfulPayload());
+    await foreground;
+    expect(auth.getSnapshot().phase).toBe('locked');
+    expect(
+      storage.writes.some((vault) => vault.refreshToken === TEST_NEXT_TOKEN),
+    ).toBe(false);
+  });
+
+  test('locked sign-out authenticates before reading, revoking, and clearing', async () => {
+    const storage = new FakeStorage(storedVault());
+    const calls: Array<{ token: string; sessionId: string }> = [];
+    let authenticationCount = 0;
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => successfulPayload(),
+        async revoke(token, sessionId) {
+          calls.push({ token, sessionId });
+        },
+      },
+      async () => {
+        authenticationCount += 1;
+        return { success: true };
+      },
+    );
+    await auth.bootstrap();
+
+    await auth.signOut();
+
+    expect(authenticationCount).toBe(1);
+    expect(storage.readCount).toBe(1);
+    expect(calls).toEqual([
+      { token: TEST_TOKEN, sessionId: sessionFixture().session.id },
+    ]);
+    expect(storage.vault).toBeNull();
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+  });
+
+  test('locked sign-out denial preserves enrollment without server cleanup', async () => {
+    const storage = new FakeStorage(storedVault());
+    let revokeCount = 0;
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => successfulPayload(),
+        revoke: async () => {
+          revokeCount += 1;
+        },
+      },
+      async () => ({
+        success: false,
+        message: 'Device security was cancelled.',
+      }),
+    );
+    await auth.bootstrap();
+
+    await expect(auth.signOut()).rejects.toBeInstanceOf(MobileAuthError);
+
+    expect(revokeCount).toBe(0);
+    expect(storage.readCount).toBe(0);
+    expect(storage.clearCount).toBe(0);
+    expect(storage.vault?.refreshToken).toBe(TEST_TOKEN);
+    expect(auth.getSnapshot().phase).toBe('locked');
   });
 
   test('a pending SecureStore write cannot resurrect credentials after sign-out', async () => {
@@ -378,18 +563,31 @@ describe('mobile auth controller', () => {
     const storage = new FakeStorage(storedVault());
     const refreshStarted = deferred<void>();
     const refresh = deferred<MobileSessionResponse>();
+    const revoke = deferred<void>();
+    let refreshSignal: AbortSignal | null = null;
+    const capturedRefreshSignal = (): AbortSignal => {
+      if (refreshSignal === null) throw new Error('Refresh did not start.');
+      return refreshSignal;
+    };
     const auth = controller(storage, {
-      refresh: () => {
+      refresh: (_token, _key, signal) => {
+        refreshSignal = signal;
         refreshStarted.resolve();
         return refresh.promise;
       },
-      revoke: async () => {},
+      revoke: () => revoke.promise,
     });
     await auth.bootstrap();
     const foreground = auth.foreground();
     await refreshStarted.promise;
 
-    await auth.signOut();
+    const signingOut = auth.signOut();
+    await flush();
+    expect(capturedRefreshSignal().aborted).toBe(true);
+    expect(auth.getSnapshot().phase).toBe('locked');
+    expect(storage.vault).not.toBeNull();
+    revoke.resolve();
+    await signingOut;
     expect(storage.vault).toBeNull();
     refresh.resolve(successfulPayload());
     await foreground;
@@ -561,11 +759,14 @@ describe('mobile auth controller', () => {
     expect(auth.getSnapshot().phase).toBe('blocked');
   });
 
-  test('blocks access when secure storage cannot be cleared', async () => {
+  test('retries only local clearing after server cleanup was already confirmed', async () => {
     const storage = new FakeStorage(null);
+    let revokeCount = 0;
     const auth = controller(storage, {
       refresh: async () => successfulPayload(),
-      revoke: async () => {},
+      revoke: async () => {
+        revokeCount += 1;
+      },
     });
     await auth.enroll({
       refreshToken: TEST_TOKEN,
@@ -576,6 +777,82 @@ describe('mobile auth controller', () => {
     await auth.signOut();
     expect(auth.getSnapshot().phase).toBe('blocked');
     expect(auth.getSnapshot().connectivityEpochId).toBeNull();
+    expect(storage.vault?.refreshToken).toBe(TEST_TOKEN);
+    expect(revokeCount).toBe(1);
+
+    storage.failClear = false;
+    await auth.signOut();
+
+    expect(revokeCount).toBe(1);
+    expect(storage.clearCount).toBe(2);
+    expect(storage.vault).toBeNull();
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+  });
+
+  test('blocked recovery authenticates and revokes a retained unrevoked vault before clearing', async () => {
+    const storage = new FakeStorage(storedVault());
+    storage.failWrite = true;
+    const revocations: Array<{
+      token: string;
+      sessionId: string;
+      key: string;
+    }> = [];
+    let authenticationCount = 0;
+    const auth = controller(
+      storage,
+      {
+        refresh: async () => successfulPayload(),
+        revoke: async (token, sessionId, key) => {
+          expect(storage.clearCount).toBe(0);
+          revocations.push({ token, sessionId, key });
+        },
+      },
+      async () => {
+        authenticationCount += 1;
+        return { success: true };
+      },
+    );
+    await auth.bootstrap();
+    await auth.foreground();
+    expect(auth.getSnapshot().phase).toBe('blocked');
+
+    await auth.signOut();
+
+    expect(authenticationCount).toBe(2);
+    expect(storage.readCount).toBe(2);
+    expect(revocations).toEqual([
+      {
+        token: TEST_TOKEN,
+        sessionId: sessionFixture().session.id,
+        key: 'mobile-refresh-idempotency-0001',
+      },
+    ]);
+    expect(storage.clearCount).toBe(1);
+    expect(storage.vault).toBeNull();
+    expect(auth.getSnapshot().phase).toBe('signed-out');
+  });
+
+  test('blocked recovery never clears an unrevoked retained vault when cleanup fails', async () => {
+    const storage = new FakeStorage(storedVault());
+    storage.failWrite = true;
+    let revokeCount = 0;
+    const auth = controller(storage, {
+      refresh: async () => successfulPayload(),
+      revoke: async () => {
+        revokeCount += 1;
+        throw new MobileAuthError('offline', 'unreachable');
+      },
+    });
+    await auth.bootstrap();
+    await auth.foreground();
+    expect(auth.getSnapshot().phase).toBe('blocked');
+
+    await expect(auth.signOut()).rejects.toBeInstanceOf(MobileAuthError);
+
+    expect(revokeCount).toBe(1);
+    expect(storage.clearCount).toBe(0);
+    expect(storage.vault?.refreshToken).toBe(TEST_TOKEN);
+    expect(auth.getSnapshot().phase).toBe('locked');
   });
 
   test('keeps the device locked when local authentication rejects unexpectedly', async () => {
@@ -770,9 +1047,13 @@ describe('mobile auth controller', () => {
   test('aborts in-flight feature requests on sign-out', async () => {
     const pending = pendingAuthenticatedRequest();
     const storage = new FakeStorage(null);
+    const revoke = deferred<void>();
     const auth = controller(
       storage,
-      { refresh: async () => successfulPayload(), revoke: async () => {} },
+      {
+        refresh: async () => successfulPayload(),
+        revoke: () => revoke.promise,
+      },
       undefined,
       { authenticatedApi: pending.api },
     );
@@ -784,8 +1065,15 @@ describe('mobile auth controller', () => {
     const requesting = auth.requestAuthenticated(authenticatedGet);
     await pending.started;
 
-    await auth.signOut();
+    const signingOut = auth.signOut();
+    await flush();
     expect(pending.signal().aborted).toBe(true);
+    expect(auth.getSnapshot().phase).toBe('locked');
+    await expect(
+      auth.requestAuthenticated(authenticatedGet),
+    ).rejects.toBeInstanceOf(OfflineMutationDeniedError);
+    revoke.resolve();
+    await signingOut;
     pending.resolve('late response');
     await expect(requesting).rejects.toMatchObject({ name: 'AbortError' });
     expect(storage.vault).toBeNull();

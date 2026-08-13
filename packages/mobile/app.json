@@ -11,7 +11,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "net.psd401.eoc",
       "entitlements": {
-        "aps-environment": "development"
+        "aps-environment": "development",
+        "com.apple.developer.usernotifications.time-sensitive": true
       },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false

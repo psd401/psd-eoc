@@ -1749,7 +1749,7 @@ export const rosterEndpoints = pgTable(
       'roster_endpoints_synthetic_unroutable',
       sql`(
         ${table.population} = 'staff'
-        and not (${table.channel} = 'sms' and ${table.phoneNumber} ~ '^\+999')
+        and not (${table.channel} = 'sms' and ${table.phoneNumber} ~ '^\\+999')
       ) or (
         ${table.population} = 'synthetic'
         and (
@@ -3832,7 +3832,7 @@ export const outbox = pgTable(
       name: 'outbox_audience_fk',
     }).onDelete('restrict'),
     index('outbox_claim_idx').on(table.status, table.availableAt),
-    check('outbox_message_version', sql`${table.messageVersion} = 1`),
+    check('outbox_message_version', sql`${table.messageVersion} in (1, 2)`),
     check('outbox_attempts', sql`${table.attempts} between 0 and 100`),
     check(
       'outbox_classification',
@@ -3863,6 +3863,16 @@ export const outbox = pgTable(
         and (${table.message} -> 'audienceConfig' ->> 'version')::integer is not distinct from ${table.audienceConfigVersion}
         and ${table.message} ->> 'requestId' is not distinct from ${table.requestId}::text
         and (${table.message} ->> 'version')::integer is not distinct from ${table.messageVersion}
+        and (
+          (
+            ${table.messageVersion} = 1
+            and not (${table.message} ? 'facilityId')
+          ) or (
+            ${table.messageVersion} = 2
+            and jsonb_typeof(${table.message} -> 'facilityId') is not distinct from 'string'
+            and ${table.message} ->> 'facilityId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          )
+        )
         and (${table.message} ->> 'createdAt')::timestamptz is not distinct from ${table.createdAt}
         and ${table.message} -> 'authorization' is not distinct from ${table.authorization}
         and ${table.message} -> 'channels' is not distinct from ${table.channels}`,
