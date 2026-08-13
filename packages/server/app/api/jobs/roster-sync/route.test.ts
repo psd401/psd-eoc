@@ -21,7 +21,7 @@ import {
   type RosterSyncCleanupFailure,
   type RosterSyncRouteDependencies,
   type RosterSyncRouteRuntime,
-} from './route';
+} from './runtime';
 
 const JOB_TOKEN = 'synthetic-roster-job-token-32-bytes-minimum';
 const NOW = new Date('2026-08-08T12:00:00.000Z');

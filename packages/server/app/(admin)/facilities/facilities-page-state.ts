@@ -1,4 +1,5 @@
 import { CapabilityEngineError } from '../../../lib/capabilities/engine';
+import { redirect } from 'next/navigation';
 
 import { AdminCapabilityError } from './admin-core';
 
@@ -79,4 +80,12 @@ export function facilitiesAdminQueryRecoveryPath(
   error: unknown,
 ): '/facilities' | null {
   return isInvalidFacilitiesAdminQueryError(error) ? '/facilities' : null;
+}
+
+/** Performs the bounded server-page redirect for invalid pagination input. */
+export function redirectInvalidFacilitiesAdminQuery(error: unknown): void {
+  const recoveryPath = facilitiesAdminQueryRecoveryPath(error);
+  if (recoveryPath !== null) {
+    redirect(recoveryPath);
+  }
 }
