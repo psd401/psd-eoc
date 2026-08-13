@@ -236,6 +236,16 @@ jobs:
           test -r /dev/kvm
           test -w /dev/kvm
 
+      - name: Reclaim unused hosted-runner SDK space
+        run: |
+          set -euo pipefail
+          test ! -L /usr/share/dotnet
+          if test -d /usr/share/dotnet; then
+            sudo rm -rf --one-file-system -- /usr/share/dotnet
+          fi
+          test ! -e /usr/share/dotnet
+          df -h /
+
       - name: Run the synthetic Android Maestro suite
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
@@ -243,7 +253,6 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7
-          disk-size: 4096M
           disable-animations: true
           enable-hw-keyboard: true
           emulator-boot-timeout: 900

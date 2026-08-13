@@ -610,6 +610,9 @@ describe('issue #32 exact synthetic drill data', () => {
 
   test('counts an iOS handoff only after its alert is gone and the app is ready', () => {
     expect(
+      isMobileE2EIosApplicationReadyAfterHandoff('', 'Unlock PSD EOC'),
+    ).toBe(false);
+    expect(
       isMobileE2EIosApplicationReadyAfterHandoff(
         'Open in “PSD EOC”? Unlock PSD EOC',
         'Unlock PSD EOC',
@@ -659,6 +662,46 @@ describe('issue #32 exact synthetic drill data', () => {
         'Unlock PSD EOC',
       ),
     ).toBe(false);
+  });
+
+  test('keeps the iOS development-client handoff synthetic, exact, and bounded', async () => {
+    const [flow, runner] = await Promise.all([
+      readFile(
+        new URL(
+          'flows/shared/accept-dev-client-handoff-ios.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
+    ]);
+
+    for (const exactBoundary of [
+      'appId: com.apple.springboard',
+      "condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}",
+      "- assertVisible: 'Open in “PSD EOC”?'",
+      "text: '^Open$'",
+    ]) {
+      expect(flow).toContain(exactBoundary);
+    }
+    for (const unsafeSelector of [
+      'point:',
+      'index:',
+      'longPressOn:',
+      'swipe:',
+    ]) {
+      expect(flow).not.toContain(unsafeSelector);
+    }
+
+    expect(runner).toContain('if (handoffAttempts >= 8) return false;');
+    expect(runner).toContain('if (quietPolls >= 5 && urlAttempts < 4)');
+    expect(runner).toContain('timeoutMilliseconds: 30_000');
+    expect(runner).toMatch(
+      /await openIosBundle\(device, metroPort\);[\s\S]+await attemptExactSystemHandoff\(\);[\s\S]+while \(Date\.now\(\) < deadline\)/u,
+    );
+    expect(runner).toMatch(
+      /urlAttempts \+= 1;\s+await openIosBundle\(device, metroPort\);\s+if \(!\(await attemptExactSystemHandoff\(\)\)\) break;/u,
+    );
   });
 
   test('recognizes only the synthetic drill notification behind the iOS system lock', () => {

@@ -798,6 +798,39 @@ async function openIosBundleThroughSystemHandoff(
   let quietPolls = 0;
   let urlAttempts = 1;
   let lastHierarchy = '';
+  const attemptExactSystemHandoff = async (): Promise<boolean> => {
+    if (handoffAttempts >= 8) return false;
+    handoffAttempts += 1;
+    await runCommand(
+      [
+        'maestro',
+        '--udid',
+        device.udid,
+        'test',
+        '--no-ansi',
+        '--env',
+        'PSD_EOC_E2E_SYNTHETIC_ONLY=true',
+        resolve(flowRoot, 'shared/accept-dev-client-handoff-ios.yaml'),
+      ],
+      {
+        allowFailure: true,
+        timeoutMilliseconds: 30_000,
+        logPath: resolve(
+          artifactRoot,
+          `ios-handoff-${metroPort}-open-attempt-${handoffAttempts}.log`,
+        ),
+      },
+    );
+    await Bun.sleep(RETRY_INTERVAL_MS);
+    return true;
+  };
+
+  // iOS 26 can omit this SpringBoard alert from Maestro's standalone
+  // hierarchy even while it is visibly blocking the app. The synthetic-only
+  // flow asserts the exact alert and exact Open label, so trying it after each
+  // bounded openurl attempt is safe; a missing alert simply fails the flow and
+  // readiness remains unproven.
+  await attemptExactSystemHandoff();
   while (Date.now() < deadline) {
     const hierarchy = await platformHierarchy('ios', device.udid);
     lastHierarchy = hierarchy;
@@ -807,27 +840,16 @@ async function openIosBundleThroughSystemHandoff(
         expectedApplicationText,
       )
     ) {
+      await writeFile(
+        resolve(artifactRoot, `ios-handoff-${metroPort}-ready-hierarchy.txt`),
+        hierarchy,
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+      );
       return;
     }
     if (hierarchy.includes('Open in “PSD EOC”?')) {
       quietPolls = 0;
-      handoffAttempts += 1;
-      if (handoffAttempts > 3) {
-        throw new Error(
-          'The iOS development-client handoff alert remained after three Open taps.',
-        );
-      }
-      await runCommand([
-        'maestro',
-        '--udid',
-        device.udid,
-        'test',
-        '--no-ansi',
-        '--env',
-        'PSD_EOC_E2E_SYNTHETIC_ONLY=true',
-        resolve(flowRoot, 'shared/accept-dev-client-handoff-ios.yaml'),
-      ]);
-      await Bun.sleep(RETRY_INTERVAL_MS);
+      if (!(await attemptExactSystemHandoff())) break;
       continue;
     }
     quietPolls += 1;
@@ -835,6 +857,7 @@ async function openIosBundleThroughSystemHandoff(
       quietPolls = 0;
       urlAttempts += 1;
       await openIosBundle(device, metroPort);
+      if (!(await attemptExactSystemHandoff())) break;
     }
     await Bun.sleep(RETRY_INTERVAL_MS);
   }
