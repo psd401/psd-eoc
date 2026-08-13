@@ -36,6 +36,18 @@ Push registration uses one non-secret public build switch:
   allows permission checks and Expo token acquisition. Missing, malformed, or
   any other value fails closed.
 
+For a production release candidate, the release runbook requires the exact
+effective value `true` at EAS project scope, no conflicting account-scope value,
+and matching resolved iOS and Android profiles. The compiled opt-in does not
+authorize installation, sign-in, registration, a provider test, or notification
+by itself. It makes an installed binary capable of automatic registration after
+an authenticated online sign-in when notification permission is already
+granted, so the release runbook requires an exact synthetic device/account,
+consequence preview, credentials, product-owner approval, and fresh human
+confirmation before that exposure. Changing this value or the public API origin
+is an environment-contract change that requires a new store build; it is never
+delivered by OTA.
+
 The EAS project UUID is pinned in `app.json`. Both values are public application
 configuration and must never contain a token or credential. On every launch the
 app writes Expo's persisted automatic server-registration state to the explicit
@@ -144,10 +156,19 @@ production changes and require explicit product-owner approval.
 Before any remote build, pre-provision and read back the exact signing
 credentials; keep `--non-interactive --freeze-credentials` as a fail-closed
 control, but do not rely on it to prevent EAS CLI 21.7.0 from creating a missing
-Android keystore. Before an `ota-preview` build, follow the release runbook to
-prove **Unauthenticated access to internal builds** is disabled and to reconcile
-a bounded, approved staff-only technical-verifier audience. Never publish an
-internal-build URL in repository evidence.
+Android keystore. Before creating, sharing, opening an install page for, or
+installing any `development`, `preview`, or `ota-preview` internal build, follow
+the release runbook to prove **Unauthenticated access to internal builds** is
+disabled and to reconcile a named, bounded, approved staff-only technical
+audience. Record its digest/count, expiry, removal time, and removal read-back;
+approval for one artifact or profile never covers another. Never publish an
+internal-build URL or downloaded artifact in repository evidence.
+
+Install `ota-preview` only on dedicated non-operational verifier devices. Those
+devices cannot return to operational or ordinary testing use until the internal
+build is removed, the exact approved TestFlight or Play build is reinstalled
+from the store, and its store identity, production routing, and launched update
+identity are read back. Removing the internal app alone is not re-entry proof.
 
 The app config declares the development APNs entitlement emitted by prebuild.
 Xcode signing replaces it with the provisioning profile's production value for

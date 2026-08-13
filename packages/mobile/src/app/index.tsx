@@ -562,6 +562,38 @@ export default function HomeScreen() {
             </View>
           </>
         )}
+
+        <View style={styles.releaseTools}>
+          <Text style={styles.releaseToolsText}>
+            District Technology can verify the exact update launched on this
+            device without changing update or provider state.
+          </Text>
+          <Pressable
+            accessibilityHint="Shows read-only build and launched-update identity"
+            accessibilityLabel="Open release diagnostics"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: mutationPending }}
+            disabled={mutationPending}
+            onPress={() => {
+              requestStartRouteNavigation(
+                startMutation.isPendingNow(),
+                () => {
+                  router.push('/release-diagnostic' as Href);
+                },
+                announcePendingMutation,
+              );
+            }}
+            style={({ pressed }) => [
+              styles.releaseToolsButton,
+              pressed && !mutationPending && styles.pressed,
+              mutationPending && styles.releaseToolsButtonDisabled,
+            ]}
+          >
+            <Text style={styles.releaseToolsButtonText}>
+              Release diagnostics
+            </Text>
+          </Pressable>
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -685,6 +717,37 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '900',
     lineHeight: 22,
+  },
+  releaseTools: {
+    borderTopColor: '#BCCCDC',
+    borderTopWidth: 1,
+    gap: 10,
+    paddingTop: 18,
+  },
+  releaseToolsButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    borderColor: '#175A8E',
+    borderRadius: 12,
+    borderWidth: 2,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  releaseToolsButtonDisabled: {
+    opacity: 0.55,
+  },
+  releaseToolsButtonText: {
+    color: '#175A8E',
+    fontSize: 15,
+    fontWeight: '900',
+    lineHeight: 21,
+  },
+  releaseToolsText: {
+    color: '#486581',
+    fontSize: 14,
+    lineHeight: 21,
   },
   section: {
     gap: 13,

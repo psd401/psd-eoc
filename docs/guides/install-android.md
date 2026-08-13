@@ -73,9 +73,16 @@ product-owner authorization, confirm the action, and launch the synthetic test:
 
 - Open PSD EOC and confirm your expected staff name and authorized site list.
 - Lock the device before the scheduled test.
-- After the test, report whether the alert appeared, made a sound, and opened
-  the correct **TEST ONLY** event. Provider acceptance or a visible push is not
-  proof that every person received it.
+- After the test, confirm the visible lock-screen notification title **and**
+  body each carry the canonical **`[DRILL]`** marker. Open it and confirm the
+  event screen visibly says **DRILL — PRACTICE** and continues to show
+  **`[DRILL]`** on the opened event content. Report whether the alert appeared,
+  made a sound, and opened that exact drill. Provider acceptance or a visible
+  push is not proof that every person received it.
+- Stop immediately and contact District Technology if the notification or
+  opened event shows **`[INCIDENT]`**, omits **`[DRILL]`**, has conflicting
+  markers, uses real-incident wording, or uses only generic wording such as
+  **TEST ONLY**. Do not continue testing an ambiguous real-versus-drill display.
 - If no alert appears, leave the app installed and contact District Technology.
   Include the Android version, phone model, and PSD EOC version shown in App
   info. Do not send screenshots containing message content, staff identities,
