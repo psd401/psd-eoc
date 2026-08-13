@@ -7,10 +7,11 @@ import {
   type FanoutAuthorizationDecision,
   type FanoutControlEffectiveState,
   type FanoutControlRecord,
+  type NotificationIntent,
 } from '@psd-eoc/contracts';
 import { desc, eq, sql } from 'drizzle-orm';
 
-import type { PostgresDatabase } from '../../db/client';
+import { databaseExecuteRows, type PostgresDatabase } from '../../db/client';
 import {
   fanoutControlRecords,
   fanoutIntentAuthorizations,
@@ -226,16 +227,21 @@ export async function loadFanoutControlRecordById(
   return row === undefined ? null : recordFromRow(row);
 }
 
+interface InsertAuthorizedIntentRow extends Record<string, unknown> {
+  readonly controlRecordId: string;
+  readonly enableEpochId: string;
+}
+
 /**
- * Admits a newly persisted intent only under the current enabled epoch.
- * This is called inside the lifecycle transaction after the intent insert;
- * its immutable association is the epoch workers later verify.
+ * Atomically inserts one intent and its immutable enabled-epoch association.
+ * The security-definer database function is the app role's only INSERT path
+ * for notification intents, so no tuple-xmin inference or retroactive
+ * authorization path exists, even across savepoints or XID wraparound.
  */
-export async function authorizeCurrentNotificationIntentForFanout(input: {
+export async function insertAuthorizedNotificationIntentForFanout(input: {
   readonly database: FanoutControlDatabase;
-  readonly intentId: string;
+  readonly intent: NotificationIntent;
   readonly previewCreatedAt: Date;
-  readonly authorizedAt: Date;
 }): Promise<Readonly<{ controlRecordId: string; enableEpochId: string }>> {
   const database = asFanoutDatabase(input.database);
   let current: FanoutControlRecord | null;
@@ -253,24 +259,45 @@ export async function authorizeCurrentNotificationIntentForFanout(input: {
   if (input.previewCreatedAt.getTime() <= Date.parse(current.changedAt)) {
     throw new FanoutControlDeniedError('STALE_CONSEQUENCE_PREVIEW');
   }
-  const [inserted] = await database
-    .insert(fanoutIntentAuthorizations)
-    .values({
-      intentId: input.intentId,
-      controlRecordId: current.id,
-      enableEpochId: current.enableEpochId,
-      controlMode: 'enabled',
-      authorizedAt: input.authorizedAt,
-    })
-    .onConflictDoNothing({ target: fanoutIntentAuthorizations.intentId })
-    .returning({
-      controlRecordId: fanoutIntentAuthorizations.controlRecordId,
-      enableEpochId: fanoutIntentAuthorizations.enableEpochId,
-    });
-  if (inserted === undefined) {
+  const intent = input.intent;
+  const rows = databaseExecuteRows<InsertAuthorizedIntentRow>(
+    await database.execute<InsertAuthorizedIntentRow>(sql`
+      select
+        "control_record_id" as "controlRecordId",
+        "enable_epoch_id" as "enableEpochId"
+      from public."psd_eoc_insert_authorized_notification_intent"(
+        ${intent.id}::uuid,
+        ${intent.eventId}::uuid,
+        ${intent.eventKind}::event_kind,
+        ${intent.templateMode}::template_mode,
+        ${intent.purpose}::notification_purpose,
+        ${intent.eventTypeVersion.id}::uuid,
+        ${intent.rosterSnapshotId}::uuid,
+        ${intent.rosterPopulation}::roster_population,
+        ${intent.audienceConfig.id}::uuid,
+        ${intent.audienceConfig.version}::integer,
+        ${JSON.stringify(intent.createdBy)}::jsonb,
+        ${intent.source}::invocation_source,
+        ${intent.requestId}::uuid,
+        ${JSON.stringify(intent.authorization)}::jsonb,
+        ${new Date(intent.createdAt).toISOString()}::timestamptz,
+        ${input.previewCreatedAt.toISOString()}::timestamptz
+      )
+    `),
+  );
+  const inserted = rows[0];
+  if (
+    rows.length !== 1 ||
+    inserted === undefined ||
+    inserted.controlRecordId !== current.id ||
+    inserted.enableEpochId !== current.enableEpochId
+  ) {
     throw new FanoutControlDeniedError('ENABLE_EPOCH_MISMATCH');
   }
-  return Object.freeze(inserted);
+  return Object.freeze({
+    controlRecordId: inserted.controlRecordId,
+    enableEpochId: inserted.enableEpochId,
+  });
 }
 
 function denied(

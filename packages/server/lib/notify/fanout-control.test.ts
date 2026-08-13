@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 
+import type { NotificationIntent } from '@psd-eoc/contracts';
+
 import type { PostgresDatabase } from '../../db/client';
 import {
   FANOUT_CONTROL_ADVISORY_LOCK_SQL,
   FanoutControlDeniedError,
-  authorizeCurrentNotificationIntentForFanout,
   assertCurrentNotificationFanoutEnabled,
   createFanoutEnableEpochId,
+  insertAuthorizedNotificationIntentForFanout,
   isNotificationIntentAuthorizedForCurrentFanout,
   readFanoutControlEffectiveState,
 } from './fanout-control';
@@ -20,7 +22,37 @@ const IDS = {
   intent: '00000000-0000-4000-8000-000000003406',
   secondRecord: '00000000-0000-4000-8000-000000003407',
   secondEpoch: '00000000-0000-4000-8000-000000003408',
+  event: '00000000-0000-4000-8000-000000003409',
+  eventTypeVersion: '00000000-0000-4000-8000-000000003410',
+  rosterSnapshot: '00000000-0000-4000-8000-000000003411',
+  audience: '00000000-0000-4000-8000-000000003412',
+  preview: '00000000-0000-4000-8000-000000003413',
 } as const;
+
+function intent(createdAt = '2026-08-12T18:01:00.000Z'): NotificationIntent {
+  return {
+    id: IDS.intent,
+    eventId: IDS.event,
+    eventKind: 'test',
+    templateMode: 'drill',
+    purpose: 'activation',
+    eventTypeVersion: { id: IDS.eventTypeVersion, templateMode: 'drill' },
+    rosterSnapshotId: IDS.rosterSnapshot,
+    rosterPopulation: 'synthetic',
+    audienceConfig: { id: IDS.audience, version: 1 },
+    createdBy: { kind: 'system', serviceId: 'synthetic-fanout-unit-test' },
+    source: 'worker',
+    requestId: IDS.request,
+    authorization: {
+      kind: 'synthetic-training',
+      activationPreviewId: IDS.preview,
+      consequenceDigest: 'd'.repeat(64),
+      requestId: IDS.request,
+    },
+    channels: [],
+    createdAt,
+  };
+}
 
 function databaseWithRows(
   rows: readonly Record<string, unknown>[],
@@ -74,12 +106,22 @@ function mutableFanoutDatabase() {
       Readonly<{ controlRecordId: string; enableEpochId: string }>
     >(),
     authorizationInsertCount: 0,
+    functionMayFollow: false,
   };
   const database = {
     execute() {
-      return Promise.resolve([]);
+      if (!state.functionMayFollow) return Promise.resolve([]);
+      state.functionMayFollow = false;
+      state.authorizationInsertCount += 1;
+      const inserted = Object.freeze({
+        controlRecordId: IDS.record,
+        enableEpochId: IDS.epoch,
+      });
+      state.authorizations.set(IDS.intent, inserted);
+      return Promise.resolve([inserted]);
     },
     select(selection?: unknown) {
+      if (selection !== undefined) state.functionMayFollow = false;
       return {
         from() {
           return selection === undefined
@@ -87,6 +129,7 @@ function mutableFanoutDatabase() {
                 orderBy() {
                   return {
                     limit() {
+                      state.functionMayFollow = true;
                       return Promise.resolve(state.controlRows);
                     },
                   };
@@ -112,34 +155,6 @@ function mutableFanoutDatabase() {
                   };
                 },
               };
-        },
-      };
-    },
-    insert() {
-      return {
-        values(value: {
-          intentId: string;
-          controlRecordId: string;
-          enableEpochId: string;
-        }) {
-          return {
-            onConflictDoNothing() {
-              return {
-                returning() {
-                  if (state.authorizations.has(value.intentId)) {
-                    return Promise.resolve([]);
-                  }
-                  state.authorizationInsertCount += 1;
-                  const inserted = Object.freeze({
-                    controlRecordId: value.controlRecordId,
-                    enableEpochId: value.enableEpochId,
-                  });
-                  state.authorizations.set(value.intentId, inserted);
-                  return Promise.resolve([inserted]);
-                },
-              };
-            },
-          };
         },
       };
     },
@@ -244,11 +259,10 @@ describe('fan-out control invariants', () => {
     ]) {
       const fixture = mutableFanoutDatabase();
       await expect(
-        authorizeCurrentNotificationIntentForFanout({
+        insertAuthorizedNotificationIntentForFanout({
           database: fixture.database,
-          intentId: IDS.intent,
+          intent: intent(),
           previewCreatedAt: new Date(previewCreatedAt),
-          authorizedAt: new Date('2026-08-12T18:01:00.000Z'),
         }),
       ).rejects.toMatchObject({ reasonCode: 'STALE_CONSEQUENCE_PREVIEW' });
       expect(fixture.state.authorizationInsertCount).toBe(0);
@@ -258,11 +272,10 @@ describe('fan-out control invariants', () => {
   test('pins intent authorization to one epoch and never releases it after re-enable', async () => {
     const fixture = mutableFanoutDatabase();
     await expect(
-      authorizeCurrentNotificationIntentForFanout({
+      insertAuthorizedNotificationIntentForFanout({
         database: fixture.database,
-        intentId: IDS.intent,
+        intent: intent(),
         previewCreatedAt: new Date('2026-08-12T18:00:00.001Z'),
-        authorizedAt: new Date('2026-08-12T18:01:00.000Z'),
       }),
     ).resolves.toEqual({
       controlRecordId: IDS.record,

@@ -102,7 +102,7 @@ import {
 import { transitionEventStatus } from '../events/state-machine';
 import {
   FanoutControlDeniedError,
-  authorizeCurrentNotificationIntentForFanout,
+  insertAuthorizedNotificationIntentForFanout,
 } from '../notify/fanout-control';
 
 /** Preview plus server-only persistence references required for one send. */
@@ -2182,29 +2182,11 @@ async function persistNotification(
   integrationStatusIds: Readonly<Record<string, string>>,
   previewCreatedAtValue: string,
 ): Promise<void> {
-  await database.insert(notificationIntents).values({
-    id: intent.id,
-    eventId: intent.eventId,
-    eventKind: intent.eventKind,
-    templateMode: intent.templateMode,
-    purpose: intent.purpose,
-    eventTypeVersionId: intent.eventTypeVersion.id,
-    rosterSnapshotId: intent.rosterSnapshotId,
-    rosterPopulation: intent.rosterPopulation,
-    audienceConfigId: intent.audienceConfig.id,
-    audienceConfigVersion: intent.audienceConfig.version,
-    createdBy: intent.createdBy,
-    source: intent.source,
-    requestId: intent.requestId,
-    authorization: intent.authorization,
-    createdAt: new Date(intent.createdAt),
-  });
   try {
-    await authorizeCurrentNotificationIntentForFanout({
+    await insertAuthorizedNotificationIntentForFanout({
       database,
-      intentId: intent.id,
+      intent,
       previewCreatedAt: new Date(previewCreatedAtValue),
-      authorizedAt: new Date(intent.createdAt),
     });
   } catch (error) {
     if (error instanceof FanoutControlDeniedError) {
