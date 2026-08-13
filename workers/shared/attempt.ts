@@ -67,8 +67,24 @@ function syntheticEndpointIsUnroutable(endpoint: Endpoint): boolean {
       );
     }
     case 'sms':
-      return /^\+120255501\d{2}$/u.test(endpoint.phoneNumber);
+      return (
+        /^\+120255501\d{2}$/u.test(endpoint.phoneNumber) ||
+        /^\+999\d{12}$/u.test(endpoint.phoneNumber)
+      );
   }
+}
+
+function sameDeliveryTestMetadata(
+  left: ChannelAttempt['deliveryTest'],
+  right: DispatchBatch['deliveryTest'],
+): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  return (
+    left.purpose === right.purpose &&
+    left.targetSet.id === right.targetSet.id &&
+    left.targetSet.version === right.targetSet.version &&
+    left.endpointReferenceDigest === right.endpointReferenceDigest
+  );
 }
 
 function attemptMatchesBatch(
@@ -87,6 +103,7 @@ function attemptMatchesBatch(
       batch.eventTypeVersion.templateMode &&
     attempt.rosterSnapshotId === batch.rosterSnapshotId &&
     attempt.rosterPopulation === batch.rosterPopulation &&
+    sameDeliveryTestMetadata(attempt.deliveryTest, batch.deliveryTest) &&
     attempt.channel === batch.channel &&
     Date.parse(attempt.attemptedAt) >= Date.parse(batch.createdAt)
   );

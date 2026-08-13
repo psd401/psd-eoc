@@ -7,6 +7,16 @@ export interface MetricBucket {
   readonly scheduleTimestamp: Date;
 }
 
+export const MONITORING_QUERIES: Readonly<{
+  readonly commitTimestampReady: string;
+  readonly activationAccept: string;
+  readonly deliveryStates: string;
+  readonly deliveryTestHealth: string;
+  readonly outboxToProvider: string;
+  readonly rosterAge: string;
+  readonly stuckOutbox: string;
+}>;
+
 export function metricBucket(event: unknown): MetricBucket;
 
 export function buildMetrics(

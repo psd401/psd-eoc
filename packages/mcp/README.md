@@ -7,11 +7,12 @@ clients; neither transport has a direct database or notification-provider path.
 
 The server exposes event reads, append-only journal search, drill-record
 evidence, private short-lived records exports, roster-staleness reads,
-unpublished event-type template drafts, and activation preparation. It does not
-expose any tool that can start a real incident, send a real notification, issue
-an all-clear, or close a real event. Creating an activation consequence preview
-and preparing its intent still requires an authenticated human to review and
-confirm in the PSD EOC app.
+destination-free monthly live delivery-test report reads, unpublished event-type
+template drafts, and activation preparation. It does not expose any tool that
+can start a real incident, start a live delivery test, send a real notification,
+issue an all-clear, or close a real event. Creating an activation consequence
+preview and preparing its intent still requires an authenticated human to review
+and confirm in the PSD EOC app.
 
 Drill-record results include site, date/time, and event type. They are retained
 records evidence, not a legal or district-policy compliance determination.
@@ -21,6 +22,14 @@ provenance, photo checksum references, and exact delivery truth states without
 recipient contact data. Both return private download grants that expire within
 15 minutes. Export artifacts remain records evidence, not a legal or
 district-policy compliance determination.
+
+`list-delivery-test-reports` is a direct read-only proxy to the canonical
+capability of the same name. It returns only destination-free, append-only report
+snapshots in the configured facility scope. Provider acceptance, delivery,
+failure, and `unknown` remain distinct; the report does not reveal recipient
+destinations and never proves human receipt. The tool cannot create a target
+set, prepare or start a delivery test, send a notification, finalize a report,
+or rewrite prior evidence.
 
 ## Required configuration
 
@@ -36,9 +45,11 @@ requested facility. Do not use a production-capable recipient/provider setup
 for development.
 
 For records access, grant only the needed IDs from `list-drill-records`,
-`export-drill-records`, and `export-event-summary`. Export URLs are temporary
-bearer grants to private artifacts: do not log, persist, or forward them, and do
-not treat provider acceptance in an event summary as delivery or human receipt.
+`export-drill-records`, `export-event-summary`, and
+`list-delivery-test-reports`. Export URLs are temporary bearer grants to private
+artifacts: do not log, persist, or forward them, and do not treat provider
+acceptance in an event summary or delivery-test report as delivery or human
+receipt.
 
 The `draft-message-template-revision` facade requires four underlying scoped
 capability grants: `get-event-type-version`, `get-event-type-draft`,

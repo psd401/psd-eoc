@@ -14,9 +14,51 @@ const IDS = Object.freeze({
   draft: '20000000-0000-4000-8000-000000000006',
   agent: '20000000-0000-4000-8000-000000000007',
   apiKey: '20000000-0000-4000-8000-000000000008',
+  deliveryTestReport: '20000000-0000-4000-8000-000000000009',
+  deliveryTestRun: '20000000-0000-4000-8000-000000000010',
 });
 const PAGE = Object.freeze({
   items: Object.freeze([]),
+  pageInfo: Object.freeze({ nextCursor: null, hasMore: false }),
+});
+
+const DELIVERY_TEST_REPORT_PAGE = Object.freeze({
+  items: Object.freeze([
+    Object.freeze({
+      id: IDS.deliveryTestReport,
+      runId: IDS.deliveryTestRun,
+      sequence: 1,
+      supersedesReportId: null,
+      status: 'incomplete',
+      channels: Object.freeze([
+        Object.freeze({
+          channel: 'push',
+          endpointCount: 1,
+          activationToProviderAcceptMs: 125,
+          latestStateCounts: Object.freeze([
+            Object.freeze({ state: 'provider-accepted', count: 1 }),
+          ]),
+          completedAt: '2026-08-12T17:00:01.000Z',
+        }),
+        Object.freeze({
+          channel: 'email',
+          endpointCount: 1,
+          activationToProviderAcceptMs: null,
+          latestStateCounts: Object.freeze([
+            Object.freeze({ state: 'unknown', count: 1 }),
+          ]),
+          completedAt: null,
+        }),
+      ]),
+      generatedAt: '2026-08-12T17:00:03.000Z',
+      finalizedBy: Object.freeze({
+        kind: 'system',
+        serviceId: 'delivery-test-reporter',
+      }),
+      source: 'worker',
+      reasonCode: 'EVIDENCE_INCOMPLETE',
+    }),
+  ]),
   pageInfo: Object.freeze({ nextCursor: null, hasMore: false }),
 });
 
@@ -310,6 +352,15 @@ describe('MCP tools', () => {
     for (const actionId of HUMAN_ONLY_ACTION_IDS) {
       expect(serialized).not.toContain(actionId);
     }
+    for (const protectedWorkflowId of [
+      'create-delivery-test-target-set-version',
+      'create-delivery-test-preview',
+      'finalize-delivery-test-report',
+    ]) {
+      expect(MCP_TOOLS.map(({ name }) => name)).not.toContain(
+        protectedWorkflowId,
+      );
+    }
     expect(
       MCP_TOOLS.find((tool) => tool.name === 'create-activation-preview')
         ?.annotations.readOnlyHint,
@@ -323,8 +374,20 @@ describe('MCP tools', () => {
         'get-event-type-version',
         'export-drill-records',
         'export-event-summary',
+        'list-delivery-test-reports',
       ]),
     );
+    const deliveryTestReports = MCP_TOOLS.find(
+      (tool) => tool.name === 'list-delivery-test-reports',
+    );
+    expect(deliveryTestReports?.description).toContain('destination-free');
+    expect(deliveryTestReports?.description).toContain('unknown');
+    expect(deliveryTestReports?.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
     for (const capabilityId of [
       'export-drill-records',
       'export-event-summary',
@@ -391,6 +454,54 @@ describe('MCP tools', () => {
         },
       },
     });
+  });
+
+  test('routes destination-free delivery-test report reads through the canonical capability', async () => {
+    let captured:
+      | Readonly<{ url: string; headers: Headers; body: unknown }>
+      | undefined;
+    const protocol = protocolWithFetch(async (input, init = {}) => {
+      captured = Object.freeze({
+        url: String(input),
+        headers: new Headers(init.headers),
+        body: JSON.parse(String(init.body)) as unknown,
+      });
+      return Response.json(DELIVERY_TEST_REPORT_PAGE);
+    });
+    const input = {
+      facilityId: IDS.facility,
+      status: 'incomplete',
+      generatedFrom: null,
+      generatedThrough: null,
+      cursor: null,
+      limit: 20,
+    } as const;
+
+    const result = await protocol.handle(
+      request('tools/call', {
+        name: 'list-delivery-test-reports',
+        arguments: input,
+      }),
+    );
+
+    expect(result).toMatchObject({
+      result: {
+        isError: false,
+        structuredContent: DELIVERY_TEST_REPORT_PAGE,
+      },
+    });
+    expect(captured).toMatchObject({
+      url: 'https://eoc.example.test/api/agent/v1/capabilities/list-delivery-test-reports',
+      body: input,
+    });
+    expect(captured?.headers.has('idempotency-key')).toBe(false);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toMatch(
+      /recipientId|endpointId|phoneNumber|emailAddress|token|destination/u,
+    );
+    for (const actionId of HUMAN_ONLY_ACTION_IDS) {
+      expect(serialized).not.toContain(actionId);
+    }
   });
 
   test('routes both private export tools through their canonical agent API capabilities', async () => {

@@ -84,7 +84,7 @@ describe('monitoring infrastructure source invariants', () => {
     expect(collectorSource).not.toContain("coalesce(state::text, 'attempted')");
     expect(collectorSource).toContain('evidence_gap_count');
     expect(collectorSource).toContain('state IS NULL');
-    expect(collectorSource).toContain('METRIC_LIMIT_PER_INVOCATION = 29');
+    expect(collectorSource).toContain('METRIC_LIMIT_PER_INVOCATION = 31');
     expect(collectorSource).toContain('ActivationAcceptLatency${percentile}Ms');
     expect(collectorSource).toContain('OutboxToProviderLatency${percentile}Ms');
     expect(collectorSource).toContain('DeliveryStateCount');
@@ -92,6 +92,58 @@ describe('monitoring infrastructure source invariants', () => {
     expect(collectorSource).toContain('OutboxToProviderIncompleteCount');
     expect(collectorSource).toContain('StuckOutboxCount');
     expect(collectorSource).toContain('MetricsCollectorSuccess');
+  });
+
+  it('derives monthly delivery-test alarms only from append-only destination-free report truth', () => {
+    const match = collectorSource.match(
+      /deliveryTestHealth: `([\s\S]*?)`,\n {2}outboxToProvider:/u,
+    );
+    if (match?.[1] === undefined) {
+      throw new Error('Missing delivery-test health query.');
+    }
+    const query = match[1];
+    expect(query).toContain('public.delivery_test_runs');
+    expect(query).toContain('public.delivery_test_reports');
+    expect(query).toContain('report_heads_at_bucket_end AS MATERIALIZED');
+    expect(query).toContain('report_heads_at_observation AS MATERIALIZED');
+    expect(query).toContain('SELECT DISTINCT ON (report.run_id)');
+    expect(query).toContain(
+      'ORDER BY report.run_id, report.sequence DESC, report.generated_at DESC, report.id DESC',
+    );
+    expect(query).toContain('count(DISTINCT head.run_id)');
+    expect(query).toContain('run.started_at');
+    expect(query).toContain("head.status = 'failed'");
+    expect(query).toContain("head.status = 'succeeded'");
+    expect(query).toContain(
+      'head.generated_at >= CAST(:bucket_start AS timestamptz)',
+    );
+    expect(query).toContain(
+      'head.generated_at < CAST(:bucket_end AS timestamptz)',
+    );
+    expect(query).toContain('FROM report_heads_at_bucket_end AS head');
+    expect(query).toContain('FROM report_heads_at_observation AS head');
+    expect(query).toContain(
+      "(CAST(:bucket_end AS timestamptz) + interval '1 minute')",
+    );
+    expect(query).toContain("AT TIME ZONE 'America/Los_Angeles'");
+    expect(query).not.toContain('is_first_month_observation');
+    expect(query).toContain('CASE WHEN EXISTS');
+    expect(query).toContain("current_month_start_local - interval '1 month'");
+    expect(query).toContain(
+      'head.started_at >= month_bounds.previous_month_start',
+    );
+    expect(query).toContain(
+      'head.started_at < month_bounds.current_month_start',
+    );
+    expect(query).not.toMatch(
+      /endpoint|recipient|target_set|digest|destination/iu,
+    );
+    expect(collectorSource).toContain(
+      "metric('MonthlyLiveDeliveryTestMissed', missedCount, 'Count')",
+    );
+    expect(collectorSource).toContain(
+      "'MonthlyLiveDeliveryTestFailedRunCount'",
+    );
   });
 
   it('defines all required alarms, percentile widgets, and real runbook anchors', () => {
@@ -107,6 +159,9 @@ describe('monitoring infrastructure source invariants', () => {
       'AuroraFailoverEvent',
       'CanarySuccess',
       'MetricsCollectorSuccess',
+      'TriggeredRules',
+      'MonthlyLiveDeliveryTestFailedRunCount',
+      'MonthlyLiveDeliveryTestMissed',
     ]) {
       expect(monitoringSource).toContain(name);
     }
@@ -131,6 +186,8 @@ describe('monitoring infrastructure source invariants', () => {
       'runbook-outbox-to-provider-latency':
         '### Runbook: Outbox to provider latency',
       'runbook-metrics-collector': '### Runbook: Metrics collector',
+      'runbook-monthly-live-delivery-test':
+        '### Runbook: Monthly live delivery test',
       'runbook-queue-age-and-dead-letter-queues':
         '### Runbook: Queue age and dead-letter queues',
       'runbook-roster-sync-failure-age': '### Runbook: Roster sync failure age',
