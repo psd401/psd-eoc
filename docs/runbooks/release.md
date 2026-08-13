@@ -165,11 +165,12 @@ consequences, and the withdrawal or fix-forward target.
 - [ ] Immediately before each exposure or install, and again immediately after
       provider processing and the device's second online cold launch, reread
       the complete `production` channel-to-branch and platform/runtime update
-      inventory. Bind the expected launched identity to the reviewed embedded
-      build when no compatible update exists, or to one separately reviewed
-      update group, source commit/digest, and determinate rollout. Any drift,
-      unknown device identity, compatible unreviewed update, or indeterminate
-      selection blocks exposure evidence and final acceptance.
+      inventory. In that same uninterrupted authenticated physical-device
+      session, perform **LAUNCHED IDENTITY READ-BACK** with
+      `APPROVED_CHANNEL` set to `production`. Any drift, unknown device or
+      embedded-artifact identity, compatible unreviewed update, emergency
+      launch, or indeterminate selection blocks exposure evidence and final
+      acceptance.
 - [ ] Tester exposure authorizes installation only. It does not authorize a
       PSD EOC notification, a real incident, or ordinary-staff expansion.
 - [ ] Before installation or sign-in, the preview binds the exact approved
@@ -206,8 +207,9 @@ the second online cold launch, the non-engineer guide walkthrough, issue #37's
 durable Play evidence, issue #40's separately authorized controlled
 physical-push evidence, integration truth labels that claim only what is
 proven, and explicit human product-owner acceptance. If an installed app cannot
-expose its launched update identity through approved device diagnostics, retain
-`unknown`; a provider inventory alone is not device-adoption proof.
+complete **LAUNCHED IDENTITY READ-BACK** with `APPROVED_CHANNEL` set to
+`production`, retain `unknown`; a provider inventory alone is not
+device-adoption proof.
 
 Closed issues #23 and #38 establish only their recorded repository-side
 automation; neither substitutes for provider or physical-device evidence.
@@ -246,6 +248,86 @@ Record the two public effective values, scope/name/type inventory digest, and
 resolved-profile digest in the private append-only release record. Setting or
 changing either EAS variable is a separate provider mutation with its own exact
 preview and approval; these read-only commands do not authorize it.
+
+### LAUNCHED IDENTITY READ-BACK (`production` and `ota-verification`)
+
+Use this same procedure for every physical store install, internal OTA verifier,
+FINAL ACCEPTANCE decision, and post-rollback verification. Set
+`APPROVED_CHANNEL` to exactly `production` or `ota-verification` for the
+reviewed build; never infer or substitute it. In one uninterrupted authenticated
+device-verification session after the required online cold launch, **Release
+diagnostics** must report:
+
+- `Identity available`, application ID `net.psd401.eoc`, and the exact
+  provider/EAS app version and native build number;
+- the exact expected runtime and `APPROVED_CHANNEL`;
+- `Emergency launch: No`; and
+- one canonical lowercase update UUID plus exactly one launch source.
+
+An emergency launch, `Unknown`, field mismatch, changed session, screenshot
+without live read-back, or inability to prove the exact physical installation
+blocks exposure, rollback evidence, and acceptance. Bind the diagnostic's native
+identity independently to the exact EAS build ID, profile, clean Git SHA,
+application identifier, resolved app/runtime/native versions, artifact SHA-256,
+and—when store-installed—the exact App Store Connect/TestFlight or Play build
+and install record. Provider processing is not physical-device adoption.
+
+Then branch on the diagnostic's launch source:
+
+- **Embedded in this installed binary.** Hash the exact downloaded IPA, AAB, or
+  APK before inspection. Enumerate archive metadata without extraction and
+  reject encryption, links, absolute or traversal paths, duplicate names,
+  multiple app bundles, or multiple recognized embedded manifests. The current
+  managed build must contain exactly one runtime-consumed manifest at
+  `Payload/<single-app>.app/EXUpdates.bundle/app.manifest` for iOS,
+  `base/assets/app.manifest` for an Android AAB, or
+  `assets/app.manifest` for an Android APK. The iOS native loader's legacy
+  main-bundle fallback is not an allowed release-artifact shape; any other or
+  ambiguous layout blocks.
+
+  Stream only that one entry to a local JSON parser without printing or copying
+  the manifest or its asset list. Require a JSON object whose top-level `id` is
+  one canonical lowercase UUID exactly equal to the diagnostic update ID. The
+  manifest UUID binds the embedded bundle to the already hashed artifact; it
+  does not contain or prove runtime, channel, EAS/store build ID, Git SHA,
+  device identity, launch time, or receipt, which remain independently bound by
+  the diagnostic and build/provider records above.
+
+  Do not require `update:embedded:list` or `update:embedded:view`. Ordinary
+  builds are not registered there: Expo's embedded-bundle upload is experimental
+  and opt-in through
+  `EAS_UPDATE_EXPERIMENTAL_UPLOAD_EMBEDDED_BUNDLE=1`, which this project does
+  not enable. Enabling it or manually uploading a bundle would be a separate
+  reviewed BUILD/provider consequence, never an evidence shortcut.
+- **Downloaded over-the-air update.** Pass the exact diagnostic update ID—not
+  merely a group ID—to:
+
+  ```sh
+  cd packages/mobile
+  bunx eas-cli@21.7.0 update:view \
+    'EXACT_DIAGNOSTIC_UPDATE_ID' --json
+  ```
+
+  Require the returned JSON array to contain exactly one update total. Its
+  `id`, platform, runtime, branch, `gitCommitHash`, and group must equal the
+  approved physical platform, diagnostic runtime, same-name branch for
+  `APPROVED_CHANNEL`, reviewed clean commit, and exact approved group. An
+  exact group match with an extra platform update is a block, not adoption
+  evidence. The separately inventoried canonical channel mapping must still
+  bind that branch.
+
+  EAS CLI 21.7.0 `update:view --json` omits rollout percentage and
+  `rolloutControlUpdate`. Use the complete paginated `update:list` inventory
+  for group rollout summaries and raw `channel:view APPROVED_CHANNEL --json`
+  for the mapped branch's latest overall group's percentage and control-update
+  references. Immediately after creating a rollout, append those immutable
+  references. Bind all three read-backs to a determinate current selection; a
+  missing page, stale latest group, unreviewed or changed control reference,
+  mixed platform/runtime, or indeterminate rollout retains `unknown`.
+
+Record only the minimized identities and non-sensitive digests in the private
+append-only release record. Never record a manifest, asset list, internal-build
+URL, user/device identifier, credential, token, or recipient data.
 
 ### INTERNAL BUILD ACCESS (`development`, `preview`, and `ota-preview`)
 
@@ -334,10 +416,14 @@ bunx eas-cli@21.7.0 update:list --branch production --platform android \
 bunx eas-cli@21.7.0 update:view 'EACH_COMPATIBLE_UPDATE_GROUP_ID' --json
 ```
 
-`update:list` is only a group-level summary. Run `update:view` for every
-compatible group and bind every platform update ID, runtime, source
-`gitCommitHash`, rollout state, and message; an unreadable or incomplete group
-blocks BUILD and exposure.
+`update:list` is only a group-level summary, but its complete paginated JSON
+supplies each group's rollout percentage. Run `update:view` for every compatible
+group and bind every platform update ID, runtime, branch, source
+`gitCommitHash`, and message. That JSON omits rollout percentage and
+`rolloutControlUpdate`; use raw `channel:view --json` for the mapped branch's
+latest group's exact percentage and control-update ID/group references. An
+unreadable group, incomplete page, stale latest group, or disagreement among
+these read-backs blocks BUILD and exposure.
 
 Read back and record each remote native-version counter before BUILD. Also use
 the provider credential inventory or approved EAS credentials dashboard to
@@ -559,11 +645,12 @@ device returns to an operational or ordinary test cohort, sign out online and
 confirm cleanup again, remove `ota-preview` and temporary artifact access,
 reinstall the exact approved TestFlight or Play build through that store (not
 from an internal URL or backup), and read back the store build identity,
-`production` update routing, and launched update identity after the second
-online cold launch. Prove the old internal endpoint is inactive and the current
-store endpoint is the only expected active endpoint. Removal alone does not
-prove a store reinstall; missing or ambiguous re-entry evidence keeps the device
-out of service.
+`production` update routing, and perform **LAUNCHED IDENTITY READ-BACK** with
+`APPROVED_CHANNEL` set to `production` after the second online cold launch.
+Prove the old internal endpoint is inactive and the current store endpoint is
+the only expected active endpoint. Removal alone does not prove a store
+reinstall; missing or ambiguous re-entry evidence keeps the device out of
+service.
 
 Before each `ota-preview` build, perform the same complete channel, branch, and
 platform/runtime update inventory described in section 2, substituting
@@ -649,14 +736,13 @@ For an eligible patch:
    preflight above. Build and install an exact `ota-preview` binary for that
    runtime; verify its resolved profile, Git commit, application identifier,
    update channel, production environment, and launched embedded/update
-   identity. In the authenticated app, open **Release diagnostics** and record
-   only its launch source, update ID, runtime version, channel, and emergency-
-   launch status. The screen is read-only: it never checks, fetches, downloads,
-   reloads, selects, or publishes an update and exposes no manifest, log, API
-   URL, session, device, user, or recipient data. Bind its exact update ID to the
-   matching platform update returned by `update:view`; if it reports `Unknown`,
-   has no exact match, or cannot otherwise prove identity, retain `unknown` and
-   do not advance.
+   identity. In the same uninterrupted authenticated physical-device session,
+   perform **LAUNCHED IDENTITY READ-BACK** with `APPROVED_CHANNEL` set to
+   `ota-verification`. The screen is read-only: it never checks, fetches,
+   downloads, reloads, selects, or publishes an update and exposes no manifest,
+   log, API URL, session, device, user, or recipient data. Any stop condition in
+   that source-aware procedure blocks publication.
+
 2. After human approval, publish to `ota-verification` using the production
    environment explicitly. Record the returned immutable verification
    update-group ID:
@@ -686,9 +772,24 @@ For an eligible patch:
    action and every live-provider prerequisite; publishing an update never
    authorizes a send.
 
-3. Preview production consequences, including exact source update group,
-   runtime, initial exposure, and rollback target. Obtain fresh product-owner
-   approval.
+3. Before previewing the 10% production rollout, use the complete production
+   inventory to identify the exact latest update ID that EAS CLI 21.7.0 will
+   select as the control for the approved platform/runtime. Run `update:view`
+   on that update's full group and require exactly one update total matching the
+   approved platform/runtime, `production` branch, and reviewed known-good
+   source. Authoritative raw channel/dashboard state must additionally prove
+   every proposed control member is an ended non-rollout with
+   `rolloutControlUpdate` absent, and that proof must agree with immutable
+   post-completion evidence. A mixed-platform, still-rollout-linked, nested-
+   control, or indeterminate control group blocks rollout creation because a
+   later revert republishes the full control group and can reject a nested
+   control only after deleting the bad rollout. If no latest compatible control
+   exists, bind the exact one-platform installed embedded artifact and its
+   LAUNCHED IDENTITY READ-BACK as the reviewed fallback.
+
+   Preview production consequences, including exact source update group,
+   runtime, initial exposure, and that exact control update/group or embedded
+   fallback. Obtain fresh product-owner approval.
 4. Republish that exact tested group to `production` at 10%; do not rebuild from
    a branch or mutable working tree:
 
@@ -703,9 +804,15 @@ For an eligible patch:
      --non-interactive
    ```
 
-5. Record the new production update-group ID. After each PO-defined observation
-   window and evidence review, a human may advance that exact immutable group to
-   25%, 50%, then 100%:
+5. Record the new production update-group ID. The immediate raw
+   `channel:view production --json` read-back must prove each new member's
+   `rolloutControlUpdate` ID/group exactly equals the preapproved control, or
+   that the control is uniformly absent for the preapproved embedded fallback.
+   Any mismatch blocks exposure and expansion and invokes the already reviewed
+   safe rollback or fix-forward plan.
+
+   After each PO-defined observation window and evidence review, a human may
+   advance that exact immutable group to 25%, 50%, then 100%:
 
    ```sh
    bunx eas-cli@21.7.0 update:edit \
@@ -729,9 +836,12 @@ indeterminate group blocks the edit.
 
 Immediately before every OTA write, capture a fresh complete paginated channel,
 branch, destination-channel/branch, and both-platform exact-runtime update
-inventory, then `update:view` every relevant group. Execute exactly one mutation
-per approval. Treat command output only as provisional provider acceptance,
-never current-state proof. Success requires these exact independent read-backs:
+inventory. Retain the complete `update:list` rollout summaries, the raw
+`channel:view --json` latest-group percentage/control references, and
+`update:view` every relevant group's exact members and source. Execute exactly
+one mutation per approval. Treat command output only as provisional provider
+acceptance, never current-state proof. Success requires these exact independent
+read-backs:
 
 - `update`: exactly one new verification group with the approved one platform,
   runtime, Git commit/digest, and message;
@@ -739,6 +849,10 @@ never current-state proof. Success requires these exact independent read-backs:
   source, one platform, runtime, and rollout percentage;
 - `update:edit`: no new group and only the approved percentage changed on the
   exact single-platform group.
+
+The `update:edit` percentage claim comes from the repeated complete
+`update:list` and raw `channel:view --json` read-backs; `update:view --json`
+cannot prove it.
 
 For all three write families, success also requires zero routing drift: the
 pre-existing destination channel must retain its exact reviewed pause status
@@ -752,12 +866,14 @@ After every OTA mutation in this section—including `update`,
 `update:republish`, and `update:edit`—and after success, error, interruption, or
 timeout, perform an independent complete paginated read-back of channels,
 branches, the exact destination channel and branch, and platform/runtime update
-inventory. Run `update:view` for every resulting or compatible group, not only
-the expected group. Append every immutable update ID, group ID, runtime, source
-commit/digest, platform, rollout state, and any partial or `unknown` result to
-the release record. Command completion is never sufficient. Any unapproved
-group, routing change, second-platform mutation, missing page, or indeterminate
-state blocks device testing, exposure, another mutation, and final acceptance.
+inventory. Repeat raw `channel:view --json` and complete paginated
+`update:list`, then run `update:view` for every resulting or compatible group,
+not only the expected group. Append every immutable update ID, group ID, runtime,
+source commit/digest, platform, rollout percentage/control linkage, and any
+partial or `unknown` result to the release record. Command completion is never
+sufficient. Any unapproved group, routing change, second-platform mutation,
+missing page, stale latest group, or indeterminate state blocks device testing,
+exposure, another mutation, and final acceptance.
 
 ## 8. Rollback
 
@@ -824,24 +940,54 @@ approval, fresh authenticated-human confirmation, and complete read-back.
 Replace `APPROVED_PLATFORM` with exactly `ios` or `android`; never use `all`.
 Rollback each platform through a separately previewed, approved, confirmed, and
 read-back mutation. `update:revert-update-rollout` has no platform flag, so
-before invoking it, `update:view` must prove the exact bad group contains only
-the approved platform. A group ID is not inherently single-platform. This EAS
-CLI 21.7.0 operation is non-atomic: it deletes the entire rollout group first,
-then publishes replacement controls or embedded directives for every platform
-that group contained. A mixed or indeterminate group blocks that command.
+before invoking it, the raw `channel:view production --json` latest-group
+record must prove the exact bad group is the current active rollout on the
+canonical `production` branch, with the exact percentage, one approved
+platform/runtime, and a determinate `rolloutControlUpdate` state for every
+member. The linkage must equal the immutable link recorded immediately after
+rollout creation. `update:view` must independently return exactly one update
+total for that bad group. Raw channel view returns only the latest group overall
+per branch, not the latest group per platform. If it no longer exposes the bad
+group, use an approved read-only EAS dashboard/provider inventory that exposes
+that exact active group's percentage and control references; if neither source
+does, block rather than infer from `update:view` or `update:list`.
+
+If a control reference exists, collect every distinct
+`rolloutControlUpdate.group` from that exact authoritative rollout record,
+then run `update:view` on every referenced full control group. Each must contain
+exactly one update total and match the same approved platform, runtime,
+`production` branch, and reviewed known-good source. The same authoritative
+raw/dashboard evidence, corroborated by immutable post-completion evidence,
+must prove every referenced control member is an ended non-rollout with
+`rolloutControlUpdate` absent. A mixed/extra, still-rollout-linked, nested-
+control, or indeterminate control group blocks: EAS CLI 21.7.0 republishes every
+platform in each full control group, even when the bad rollout group itself is
+single-platform, and otherwise can delete the bad group before rejecting a
+nested control. If no control reference exists, require it to be absent for
+every bad-group member; the command's fallback embedded directives must then be
+limited to the one platform in the proven bad group. Mixed, missing, stale, or
+indeterminate control linkage blocks.
+
+A group ID is not inherently single-platform. This operation is non-atomic: it
+deletes the entire rollout group first, then republishes the full referenced
+control groups or publishes embedded directives for the bad group's platforms.
+Every fan-out identity and consequence must be included in the exact preview.
 
 After any rollback command succeeds, errors, times out, or is interrupted,
-perform the same independent complete paginated channel, branch,
-platform/runtime update inventory and `update:view` reconciliation required in
-section 7 for every compatible or resulting group. Append partial and `unknown`
-truth; never blindly retry. For `update:revert-update-rollout`, prove the old
-rollout is no longer active and bind the exact replacement control group and
-all resulting update IDs. For republish or embedded rollback, bind the exact
-new group/directive and prove no other platform or runtime changed. Any missing,
+repeat the raw channel view, complete paginated update list, branch inventory,
+and `update:view` reconciliation required in section 7 for every compatible or
+resulting group. Append partial and `unknown` truth; never blindly retry. For
+`update:revert-update-rollout`, prove the old rollout is no longer active and
+bind every exact replacement control or embedded-directive group and all
+resulting update IDs. For republish or embedded rollback, bind the exact new
+group/directive and prove no other platform or runtime changed. Any missing,
 extra, mixed-platform, partially applied, or indeterminate result blocks device
 verification and every later mutation. Then verify the exact launched identity
-through the authenticated read-only **Release diagnostics** screen after the
-second online cold launch; provider read-back alone is not device adoption.
+after the second online cold launch by performing **LAUNCHED IDENTITY
+READ-BACK** with `APPROVED_CHANNEL` set to `production` in the same
+uninterrupted authenticated physical-device session. This applies whether the
+result is a downloaded control/republished update or the installed binary's
+embedded bundle. Provider read-back alone is not device adoption.
 
 For a bad store build, stop new membership or Play draft completion, detach the
 bad TestFlight build when safe, and restore the known-good closed-test build.

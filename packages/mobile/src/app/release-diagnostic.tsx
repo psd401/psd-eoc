@@ -125,6 +125,21 @@ export default function ReleaseDiagnosticScreen() {
             value={statusLabel(diagnostic)}
           />
           <DiagnosticRow
+            label="Application ID"
+            selectable
+            value={diagnostic.applicationId ?? 'Unknown'}
+          />
+          <DiagnosticRow
+            label="Application version"
+            selectable
+            value={diagnostic.applicationVersion ?? 'Unknown'}
+          />
+          <DiagnosticRow
+            label="Native build version"
+            selectable
+            value={diagnostic.nativeBuildVersion ?? 'Unknown'}
+          />
+          <DiagnosticRow
             label="Launch source"
             value={launchSourceLabel(diagnostic)}
           />

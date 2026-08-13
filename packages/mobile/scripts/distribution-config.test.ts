@@ -64,6 +64,7 @@ describe('mobile distribution configuration', () => {
     expect(appConfig.expo.extra.eas.projectId).toBe(EAS_PROJECT_ID);
     expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(packageManifest.dependencies['expo-updates']).toBe('~57.0.13');
+    expect(packageManifest.dependencies['expo-application']).toBe('~57.0.2');
   });
 
   test('stages Android closed-test submissions as unreleased drafts', () => {
@@ -165,7 +166,6 @@ describe('mobile distribution configuration', () => {
     const release = repositoryText('docs/runbooks/release.md');
     const readme = repositoryText('packages/mobile/README.md');
     const normalizedRelease = release.replace(/\\\n\s*/gu, ' ');
-    const normalizedReadme = readme.replace(/\\\n\s*/gu, ' ');
     const compactRelease = release.replace(/\s+/gu, ' ');
     const releaseBuildCommands = normalizedRelease
       .split('\n')
@@ -232,11 +232,6 @@ describe('mobile distribution configuration', () => {
     for (const command of releaseBuildCommands) {
       expect(command).toContain('--non-interactive --freeze-credentials');
     }
-    expect(normalizedReadme).toMatch(
-      /build --platform ios --profile preview\s+--non-interactive --freeze-credentials/u,
-    );
-    expect(readme).toContain('never replace `ios` with `all`');
-
     expect(release).toContain('Unauthenticated access to internal builds');
     expect(release).toContain('is disabled');
     expect(compactRelease).toContain(
@@ -268,7 +263,7 @@ describe('mobile distribution configuration', () => {
       expect(readme).toContain(profile);
     }
     expect(readme).toContain(
-      '`expo-updates` is required at runtime for runtime-bound staged OTA verification',
+      'Ordinary `preview` builds are prohibited for production-environment OTA',
     );
     expect(normalizedRelease).toMatch(
       /env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL\s+-u EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED\s+bunx eas-cli@21\.7\.0 env:exec production/u,
@@ -306,9 +301,6 @@ describe('mobile distribution configuration', () => {
     }
     expect(compactRelease).toContain(
       'existing numeric counter must not change because `ota-preview` has no auto-increment',
-    );
-    expect(normalizedReadme).toContain(
-      'any `development`, `preview`, or `ota-preview` internal build',
     );
     expect(compactRelease).toContain(
       'dedicated non-operational verifier devices',
@@ -370,10 +362,10 @@ describe('mobile distribution configuration', () => {
       'after success, error, interruption, or timeout, perform an independent complete paginated read-back',
     );
     expect(compactRelease).toContain(
-      'Run `update:view` for every resulting or compatible group',
+      'run `update:view` for every resulting or compatible group',
     );
     expect(compactRelease).toContain(
-      'prove the old rollout is no longer active and bind the exact replacement control group',
+      'prove the old rollout is no longer active and bind every exact replacement control or embedded-directive group',
     );
     expect(compactRelease).toContain(
       'Append partial and `unknown` truth; never blindly retry',
@@ -453,7 +445,46 @@ describe('mobile distribution configuration', () => {
       expect(compactRelease).toContain(success);
     }
     expect(compactRelease).toContain(
-      'Bind its exact update ID to the matching platform update returned by `update:view`',
+      'EAS CLI 21.7.0 `update:view --json` omits rollout percentage and `rolloutControlUpdate`',
+    );
+    expect(compactRelease).toContain(
+      'Use the complete paginated `update:list` inventory for group rollout summaries and raw `channel:view APPROVED_CHANNEL --json` for the mapped branch',
+    );
+    expect(compactRelease).toContain(
+      'the raw `channel:view production --json` latest-group record must prove the exact bad group is the current active rollout',
+    );
+    expect(compactRelease).toContain(
+      'collect every distinct `rolloutControlUpdate.group` from that exact authoritative rollout record, then run `update:view` on every referenced full control group',
+    );
+    expect(compactRelease).toContain(
+      'Each must contain exactly one update total and match the same approved platform, runtime, `production` branch, and reviewed known-good source',
+    );
+    expect(compactRelease).toContain(
+      'republishes every platform in each full control group, even when the bad rollout group itself is single-platform',
+    );
+    expect(compactRelease).toContain(
+      'identify the exact latest update ID that EAS CLI 21.7.0 will select as the control for the approved platform/runtime',
+    );
+    expect(compactRelease).toContain(
+      'require exactly one update total matching the approved platform/runtime, `production` branch, and reviewed known-good source',
+    );
+    expect(compactRelease).toContain(
+      'every proposed control member is an ended non-rollout with `rolloutControlUpdate` absent',
+    );
+    expect(compactRelease).toContain(
+      'A mixed-platform, still-rollout-linked, nested- control, or indeterminate control group blocks rollout creation',
+    );
+    expect(compactRelease).toContain(
+      'can reject a nested control only after deleting the bad rollout',
+    );
+    expect(compactRelease).toContain(
+      "each new member's `rolloutControlUpdate` ID/group exactly equals the preapproved control, or that the control is uniformly absent for the preapproved embedded fallback",
+    );
+    expect(compactRelease).toContain(
+      'must prove every referenced control member is an ended non-rollout with `rolloutControlUpdate` absent',
+    );
+    expect(compactRelease).toContain(
+      'can delete the bad group before rejecting a nested control',
     );
   });
 

@@ -10,6 +10,9 @@ const mockUpdateConstants: {
   updateId: unknown;
   runtimeVersion: unknown;
   channel: unknown;
+  applicationId: unknown;
+  applicationVersion: unknown;
+  nativeBuildVersion: unknown;
 } = {
   isEnabled: true,
   isEmbeddedLaunch: true,
@@ -17,7 +20,22 @@ const mockUpdateConstants: {
   updateId: '10000000-0000-4000-8000-000000000001',
   runtimeVersion: '1.0.0',
   channel: 'production',
+  applicationId: 'net.psd401.eoc',
+  applicationVersion: '1.0.0',
+  nativeBuildVersion: '1',
 };
+
+jest.mock('expo-application', () => ({
+  get applicationId() {
+    return mockUpdateConstants.applicationId;
+  },
+  get nativeApplicationVersion() {
+    return mockUpdateConstants.applicationVersion;
+  },
+  get nativeBuildVersion() {
+    return mockUpdateConstants.nativeBuildVersion;
+  },
+}));
 
 const mockCheckForUpdateAsync = jest.fn();
 const mockFetchUpdateAsync = jest.fn();
@@ -87,6 +105,9 @@ describe('authenticated release diagnostic', () => {
       updateId: EMBEDDED_UPDATE_ID,
       runtimeVersion: '1.0.0',
       channel: 'production',
+      applicationId: 'net.psd401.eoc',
+      applicationVersion: '1.0.0',
+      nativeBuildVersion: '1',
     });
   });
 
@@ -100,6 +121,11 @@ describe('authenticated release diagnostic', () => {
       screen.getByLabelText('Evidence status: Identity available'),
     ).toBeTruthy();
     expect(
+      screen.getByLabelText('Application ID: net.psd401.eoc'),
+    ).toBeTruthy();
+    expect(screen.getByLabelText('Application version: 1.0.0')).toBeTruthy();
+    expect(screen.getByLabelText('Native build version: 1')).toBeTruthy();
+    expect(
       screen.getByLabelText('Launch source: Embedded in this installed binary'),
     ).toBeTruthy();
     expect(
@@ -112,7 +138,10 @@ describe('authenticated release diagnostic', () => {
     expect(screen.getByLabelText('Update channel: production')).toBeTruthy();
     expect(screen.getByLabelText('Emergency launch: No')).toBeTruthy();
     expect(screen.getByText(EMBEDDED_UPDATE_ID).props.selectable).toBe(true);
-    expect(screen.getByText('1.0.0').props.selectable).toBe(true);
+    expect(screen.getAllByText('1.0.0')).toHaveLength(2);
+    for (const version of screen.getAllByText('1.0.0')) {
+      expect(version.props.selectable).toBe(true);
+    }
     expect(screen.getByText('production').props.selectable).toBe(true);
     expect(
       screen.getByText(/cannot check for, download, apply, or publish/iu),
@@ -150,6 +179,9 @@ describe('authenticated release diagnostic', () => {
       updateId: 'Bearer secret-provider-token',
       runtimeVersion: '1.0.0\nstaff@example.org',
       channel: null,
+      applicationId: 'wrong.example.app',
+      applicationVersion: 'Bearer-secret',
+      nativeBuildVersion: 'staff@example.org',
     });
 
     const diagnostic = createLaunchedUpdateDiagnostic(mockUpdateConstants);
@@ -160,6 +192,9 @@ describe('authenticated release diagnostic', () => {
       runtimeVersion: null,
       channel: null,
       isEmergencyLaunch: null,
+      applicationId: null,
+      applicationVersion: null,
+      nativeBuildVersion: null,
     });
     expect(Object.isFrozen(diagnostic)).toBe(true);
 
@@ -177,6 +212,7 @@ describe('authenticated release diagnostic', () => {
     const rendered = JSON.stringify(screen.toJSON());
     expect(rendered).not.toContain('secret-provider-token');
     expect(rendered).not.toContain('staff@example.org');
+    expect(rendered).not.toContain('wrong.example.app');
     expectNoUpdateSideEffects();
   });
 
@@ -188,6 +224,9 @@ describe('authenticated release diagnostic', () => {
       updateId: DOWNLOADED_UPDATE_ID,
       runtimeVersion: '1.0.0',
       channel: 'production channel',
+      applicationId: 'net.psd401.eoc',
+      applicationVersion: '1.0.0',
+      nativeBuildVersion: '2',
     });
 
     expect(diagnostic).toEqual({
@@ -197,7 +236,43 @@ describe('authenticated release diagnostic', () => {
       runtimeVersion: '1.0.0',
       channel: null,
       isEmergencyLaunch: true,
+      applicationId: 'net.psd401.eoc',
+      applicationVersion: '1.0.0',
+      nativeBuildVersion: '2',
     });
+  });
+
+  test('rejects malicious installed-application identity while updates stay enabled', () => {
+    Object.assign(mockUpdateConstants, {
+      applicationId: 'wrong.example.app',
+      applicationVersion: '1.0.0\nstaff@example.org',
+      nativeBuildVersion: 'Bearer-secret',
+    });
+
+    const diagnostic = createLaunchedUpdateDiagnostic(mockUpdateConstants);
+    expect(diagnostic).toEqual({
+      status: 'unknown',
+      launchSource: 'embedded',
+      updateId: EMBEDDED_UPDATE_ID,
+      runtimeVersion: '1.0.0',
+      channel: 'production',
+      isEmergencyLaunch: false,
+      applicationId: null,
+      applicationVersion: null,
+      nativeBuildVersion: null,
+    });
+
+    render(<ReleaseDiagnosticScreen />);
+    const rendered = JSON.stringify(screen.toJSON());
+    expect(rendered).not.toContain('wrong.example.app');
+    expect(rendered).not.toContain('staff@example.org');
+    expect(rendered).not.toContain('Bearer-secret');
+    expect(
+      screen.getByLabelText(
+        'Evidence status: Unknown — do not use as release evidence',
+      ),
+    ).toBeTruthy();
+    expectNoUpdateSideEffects();
   });
 
   test('keeps the route authenticated and source free of update or provider operations', () => {
@@ -246,6 +321,9 @@ describe('authenticated release diagnostic', () => {
     const executableSource = `${diagnosticSource}\n${screenSource}`;
     expect(executableSource).toContain(
       "import * as Updates from 'expo-updates';",
+    );
+    expect(executableSource).toContain(
+      "import * as Application from 'expo-application';",
     );
     expect(executableSource).not.toMatch(
       /checkForUpdateAsync|fetchUpdateAsync|reloadAsync|readLogEntriesAsync|setExtraParamAsync|setUpdateRequestHeadersOverride|setUpdateURLAndRequestHeadersOverride|requestAuthenticated|executeCapability|\bfetch\s*\(|Linking\.openURL/iu,
