@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 
 import {
   ActivationPreviewSchema,
@@ -47,6 +47,10 @@ import {
   quarantineStorageKey,
   readyStorageKey,
 } from '../../../../lib/media/model';
+import {
+  appendFanoutControlRecord,
+  readFanoutControlEffectiveState,
+} from '../../../../lib/notify/fanout-control';
 import { createOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import { requireEventRoomPlaywrightRunContext } from './test-database';
 
@@ -407,6 +411,39 @@ async function issueSyntheticOperatorSession(
     userId: MEMBER_USER_ID,
     sessionId: result.session.id,
   };
+}
+
+async function enableSyntheticNotificationFanout(
+  connection: PostgresDatabaseConnection,
+  actor: Extract<Actor, { kind: 'human' }>,
+): Promise<void> {
+  await connection.db.transaction(async (transaction) => {
+    const appendedRecord = await appendFanoutControlRecord({
+      database: transaction,
+      actor,
+      requestId: randomUUID(),
+      expectedCurrentRecordId: null,
+      desiredMode: 'enabled',
+      reason: 'Synthetic event-room Playwright fixture only.',
+      productOwnerApprovalReference: `synthetic-test-only-po-approval-playwright-${randomUUID()}`,
+      changedAt: new Date(),
+    });
+    const readback = await readFanoutControlEffectiveState(transaction);
+    const expectedReadback = {
+      kind: 'current' as const,
+      effectiveMode: 'enabled' as const,
+      currentEpochId: appendedRecord.enableEpochId,
+      currentRecord: appendedRecord,
+    };
+    if (
+      appendedRecord.enableEpochId === null ||
+      !isDeepStrictEqual(readback, expectedReadback)
+    ) {
+      throw new Error(
+        'The synthetic event-room fan-out epoch did not read back exactly.',
+      );
+    }
+  });
 }
 
 function journalInsert(
@@ -1023,6 +1060,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
         access,
         context.storageStatePath,
       );
+      await enableSyntheticNotificationFanout(created, actor);
       const fixture = await prepareEventFixtures(created, actor);
       await writeFile(context.fixturePath, JSON.stringify(fixture), {
         encoding: 'utf8',

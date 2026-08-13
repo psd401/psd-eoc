@@ -56,6 +56,7 @@ import {
   rosterSourceConfigurations,
   securityAuditEntries,
   sessions,
+  userRoles,
   users,
 } from '../../../../db/schema';
 import { seedDatabase } from '../../../../db/seed';
@@ -80,6 +81,11 @@ import {
   readyStorageKey,
 } from '../../../../lib/media/model';
 import { buildPhotoChecksumExportQuery } from '../../../../lib/media/repository';
+import {
+  appendFanoutControlRecord,
+  lockAndReadCurrentFanoutControl,
+  readFanoutControlEffectiveState,
+} from '../../../../lib/notify/fanout-control';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
 import { requireSyntheticEventRoomTestDatabaseUrl } from './test-database';
 
@@ -99,6 +105,11 @@ const HUMAN_ACTOR = Object.freeze({
   sessionId: randomUUID(),
 });
 const CONNECTIVITY_EPOCH_ID = randomUUID();
+const FANOUT_ADMIN_ACTOR = Object.freeze({
+  kind: 'human' as const,
+  userId: randomUUID(),
+  sessionId: randomUUID(),
+});
 const DISTRICT_SCOPE = Object.freeze({
   facilityScope: { kind: 'district' as const },
 });
@@ -137,6 +148,91 @@ function syntheticFixtureIds(): SyntheticFixtureIds {
 
 function store(): JournalCapabilityStore {
   return createDrizzleJournalCapabilityStore(databaseConnection().db);
+}
+
+async function insertSyntheticFanoutAdminSession(
+  database: Database,
+  fixtureTime: Date,
+): Promise<void> {
+  const identityCreatedAt = new Date(fixtureTime.getTime() - 60_000);
+  const membershipSnapshotId = randomUUID();
+  const deviceEnrollmentId = randomUUID();
+  const suffix = randomUUID().replaceAll('-', '');
+  const membershipSnapshotVersion = Number.parseInt(suffix.slice(0, 7), 16) + 1;
+
+  await database.insert(users).values({
+    id: FANOUT_ADMIN_ACTOR.userId,
+    googleSubject: `synthetic-fanout-admin-${suffix}`,
+    email: `synthetic.fanout.admin.${suffix}@psd401.net`,
+    displayName: 'Synthetic Fanout Control Administrator',
+    facilityScopeKind: 'district',
+    createdAt: identityCreatedAt,
+    disabledAt: null,
+  });
+  await database.insert(userRoles).values({
+    userId: FANOUT_ADMIN_ACTOR.userId,
+    role: 'admin',
+  });
+  await database.insert(accessMembershipSnapshots).values({
+    id: membershipSnapshotId,
+    version: membershipSnapshotVersion,
+    complete: true,
+    syncStartedAt: identityCreatedAt,
+    capturedAt: identityCreatedAt,
+  });
+  await database.insert(accessMembershipMembers).values({
+    snapshotId: membershipSnapshotId,
+    userId: FANOUT_ADMIN_ACTOR.userId,
+    googleSubject: `synthetic-fanout-admin-${suffix}`,
+    facilityScopeKind: 'district',
+  });
+  await database.insert(deviceEnrollments).values({
+    id: deviceEnrollmentId,
+    userId: FANOUT_ADMIN_ACTOR.userId,
+    platform: 'web',
+    unlockMethod: 'secure-session-cookie',
+    installationId: `synthetic-fanout-admin-${suffix}`,
+    enrolledAt: identityCreatedAt,
+    lastSeenAt: fixtureTime,
+    revokedAt: null,
+  });
+  await database.insert(sessions).values({
+    id: FANOUT_ADMIN_ACTOR.sessionId,
+    userId: FANOUT_ADMIN_ACTOR.userId,
+    deviceEnrollmentId,
+    membershipSnapshotId,
+    membershipValidUntil: new Date(fixtureTime.getTime() + 60 * 60_000),
+    membershipGraceUntil: new Date(fixtureTime.getTime() + 2 * 60 * 60_000),
+    createdAt: identityCreatedAt,
+    expiresAt: new Date(fixtureTime.getTime() + 24 * 60 * 60_000),
+    revokedAt: null,
+  });
+}
+
+async function appendSyntheticEnabledFanoutEpoch(input: {
+  readonly database: Database;
+  readonly changedAt: Date;
+  readonly fixtureName: string;
+}): Promise<void> {
+  const current = await lockAndReadCurrentFanoutControl(input.database);
+  expect(current).toBeNull();
+  const appendedRecord = await appendFanoutControlRecord({
+    database: input.database,
+    actor: FANOUT_ADMIN_ACTOR,
+    requestId: randomUUID(),
+    expectedCurrentRecordId: null,
+    desiredMode: 'enabled',
+    reason: `Synthetic ${input.fixtureName} fixture only.`,
+    productOwnerApprovalReference: `synthetic-test-only-po-approval-${input.fixtureName}-${randomUUID()}`,
+    changedAt: input.changedAt,
+  });
+  expect(await readFanoutControlEffectiveState(input.database)).toEqual({
+    kind: 'current',
+    effectiveMode: 'enabled',
+    currentEpochId: appendedRecord.enableEpochId,
+    currentRecord: appendedRecord,
+  });
+  expect(appendedRecord.enableEpochId).not.toBeNull();
 }
 
 function humanMutationInvocation(
@@ -1220,7 +1316,11 @@ describeWithDatabase('event journal database guarantees', () => {
 
   test('records synthetic all-clear fan-out and close as distinct append-only lifecycle facts', async () => {
     const ids = syntheticFixtureIds();
-    await databaseConnection().db.transaction(async (transaction) => {
+    const rollbackFixture = new Error(
+      'Rollback the isolated drill/synthetic lifecycle fixture.',
+    );
+    const database = databaseConnection().db;
+    const transactionResult = database.transaction(async (transaction) => {
       const transactionalDatabase = transaction as unknown as Database;
       const journalStore = createDrizzleJournalCapabilityStore(
         transactionalDatabase,
@@ -1228,6 +1328,16 @@ describeWithDatabase('event journal database guarantees', () => {
       const eventStore = createDrizzleEventCapabilityStore(
         transactionalDatabase,
       );
+      const fixtureTime = new Date();
+      await insertSyntheticFanoutAdminSession(
+        transactionalDatabase,
+        fixtureTime,
+      );
+      await appendSyntheticEnabledFanoutEpoch({
+        database: transactionalDatabase,
+        changedAt: new Date(fixtureTime.getTime() - 30_000),
+        fixtureName: 'journal-drill-synthetic',
+      });
       const integrationIds = ['expo-push', 'ses-email'] as const;
       const originalConfigurations = await transaction
         .select()
@@ -1744,6 +1854,12 @@ describeWithDatabase('event journal database guarantees', () => {
             );
         }
       }
+      throw rollbackFixture;
+    });
+    await transactionResult.catch((error: unknown) => {
+      if (error !== rollbackFixture) {
+        throw error;
+      }
     });
   });
 
@@ -1881,6 +1997,15 @@ describeWithDatabase('event journal database guarantees', () => {
           id: CONNECTIVITY_EPOCH_ID,
           sessionId: HUMAN_ACTOR.sessionId,
           establishedAt: fixtureTime,
+        });
+        await insertSyntheticFanoutAdminSession(
+          transactionalDatabase,
+          fixtureTime,
+        );
+        await appendSyntheticEnabledFanoutEpoch({
+          database: transactionalDatabase,
+          changedAt: new Date(fixtureTime.getTime() - 30_000),
+          fixtureName: 'journal-real-staff',
         });
 
         const sessionResult = SessionEstablishmentResultSchema.parse({

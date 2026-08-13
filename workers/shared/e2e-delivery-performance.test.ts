@@ -29,8 +29,11 @@ import {
 } from '../../packages/server/db/client';
 import { seedDatabase } from '../../packages/server/db/seed';
 import {
+  accessMembershipMembers,
+  accessMembershipSnapshots,
   agents,
   channelConfigurations,
+  deviceEnrollments,
   integrationStatuses,
   outbox,
   rosterEndpoints,
@@ -39,6 +42,9 @@ import {
   rosterSnapshotFacilities,
   rosterSnapshots,
   rosterSnapshotSources,
+  sessions,
+  userRoles,
+  users,
 } from '../../packages/server/db/schema';
 import { migrateDatabase } from '../../packages/server/drizzle/migrate';
 import {
@@ -51,6 +57,10 @@ import {
   createSqsDispatchBatchQueue,
   dispatchOutboxAfterCommit,
 } from '../../packages/server/lib/notify/dispatcher';
+import {
+  appendFanoutControlRecord,
+  lockAndReadCurrentFanoutControl,
+} from '../../packages/server/lib/notify/fanout-control';
 import { resolveAudience } from '../../packages/server/lib/roster/resolve';
 import {
   parseWorkerAttemptWorkItem,
@@ -91,6 +101,10 @@ const SEEDED = Object.freeze({
 const SYNTHETIC_ROSTER_ID = randomUUID();
 const SYNTHETIC_PREVIEW_AGENT_ID = randomUUID();
 const SYNTHETIC_PREVIEW_API_KEY_ID = randomUUID();
+const SYNTHETIC_FANOUT_ADMIN = Object.freeze({
+  userId: randomUUID(),
+  sessionId: randomUUID(),
+});
 const FIXTURE_CAPTURED_AT = new Date();
 const FIXTURE_SYNC_STARTED_AT = new Date(FIXTURE_CAPTURED_AT.getTime() - 1_000);
 const QUEUE_URL =
@@ -271,6 +285,84 @@ async function configureSyntheticChannels(): Promise<void> {
         .where(eq(channelConfigurations.integrationId, integrationId(channel)));
     }
   });
+}
+
+async function enableSyntheticFanout(): Promise<void> {
+  const database = databaseConnection().db;
+  if ((await lockAndReadCurrentFanoutControl(database)) !== null) {
+    throw new Error(
+      'The isolated SLO database has unexpected fan-out history.',
+    );
+  }
+  const changedAt = new Date(Date.now() - 1_000);
+  const identityCreatedAt = new Date(changedAt.getTime() - 60_000);
+  const membershipSnapshotId = randomUUID();
+  const deviceEnrollmentId = randomUUID();
+  const suffix = randomUUID().replaceAll('-', '');
+  const membershipSnapshotVersion = Number.parseInt(suffix.slice(0, 7), 16) + 1;
+
+  const enabled = await database.transaction(async (transaction) => {
+    await transaction.insert(users).values({
+      id: SYNTHETIC_FANOUT_ADMIN.userId,
+      googleSubject: `synthetic-slo-fanout-admin-${suffix}`,
+      email: `synthetic.slo.fanout.admin.${suffix}@psd401.net`,
+      displayName: 'Synthetic SLO Fanout Administrator',
+      facilityScopeKind: 'district',
+      createdAt: identityCreatedAt,
+      disabledAt: null,
+    });
+    await transaction.insert(userRoles).values({
+      userId: SYNTHETIC_FANOUT_ADMIN.userId,
+      role: 'admin',
+    });
+    await transaction.insert(accessMembershipSnapshots).values({
+      id: membershipSnapshotId,
+      version: membershipSnapshotVersion,
+      complete: true,
+      syncStartedAt: identityCreatedAt,
+      capturedAt: identityCreatedAt,
+    });
+    await transaction.insert(accessMembershipMembers).values({
+      snapshotId: membershipSnapshotId,
+      userId: SYNTHETIC_FANOUT_ADMIN.userId,
+      googleSubject: `synthetic-slo-fanout-admin-${suffix}`,
+      facilityScopeKind: 'district',
+    });
+    await transaction.insert(deviceEnrollments).values({
+      id: deviceEnrollmentId,
+      userId: SYNTHETIC_FANOUT_ADMIN.userId,
+      platform: 'web',
+      unlockMethod: 'secure-session-cookie',
+      installationId: `synthetic-slo-fanout-admin-${suffix}`,
+      enrolledAt: identityCreatedAt,
+      lastSeenAt: changedAt,
+      revokedAt: null,
+    });
+    await transaction.insert(sessions).values({
+      id: SYNTHETIC_FANOUT_ADMIN.sessionId,
+      userId: SYNTHETIC_FANOUT_ADMIN.userId,
+      deviceEnrollmentId,
+      membershipSnapshotId,
+      membershipValidUntil: new Date(changedAt.getTime() + 60 * 60_000),
+      membershipGraceUntil: new Date(changedAt.getTime() + 2 * 60 * 60_000),
+      createdAt: identityCreatedAt,
+      expiresAt: new Date(changedAt.getTime() + 24 * 60 * 60_000),
+      revokedAt: null,
+    });
+    return appendFanoutControlRecord({
+      database: transaction,
+      actor: SYNTHETIC_FANOUT_ADMIN,
+      requestId: randomUUID(),
+      expectedCurrentRecordId: null,
+      desiredMode: 'enabled',
+      reason: 'Synthetic issue-104 SLO fixture only.',
+      productOwnerApprovalReference: `synthetic-issue-104-slo-${suffix}`,
+      changedAt,
+    });
+  });
+  if (enabled.enableEpochId === null) {
+    throw new Error('The synthetic SLO fan-out fixture omitted its epoch.');
+  }
 }
 
 /**
@@ -512,6 +604,7 @@ if (isSloChild) {
         connection = isolatedConnection;
         await migrateDatabase(isolatedConnection);
         await seedDatabase(isolatedConnection.db);
+        await enableSyntheticFanout();
         await configureSyntheticChannels();
         await installLargeSyntheticRoster();
       });
@@ -735,6 +828,7 @@ if (isSloChild) {
             {
               store: dispatcherStore,
               queue,
+              authorizeFanout: () => true,
             },
             dispatchRequestId,
           );

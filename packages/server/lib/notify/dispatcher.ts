@@ -33,6 +33,7 @@ import {
   type Database,
   type DatabaseQuery,
 } from '../../db/client';
+import { isNotificationIntentAuthorizedForCurrentFanout } from './fanout-control';
 import {
   deliveryTestCanaryEligibilityFacts,
   deliveryTestTargetEndpoints,
@@ -86,6 +87,7 @@ export type OutboxDispatcherErrorCode =
   | 'OUTBOX_CLAIM_LOST'
   | 'OUTBOX_CONFIGURATION_INVALID'
   | 'OUTBOX_DISPATCH_RETRY_EXHAUSTED'
+  | 'FANOUT_EMERGENCY_DISABLED'
   | 'OUTBOX_NOT_FOUND'
   | 'OUTBOX_PERSISTENCE_FAILED'
   | 'SQS_AUTHENTICATION_FAILED'
@@ -516,6 +518,40 @@ export interface OutboxDispatcherStore {
 export interface OutboxDispatcherDependencies {
   readonly store: OutboxDispatcherStore;
   readonly queue: DispatchBatchQueue;
+  /** Fresh current-epoch authorization; omission is impossible by type. */
+  readonly authorizeFanout: (
+    claim: OutboxDispatchClaim,
+  ) => boolean | Promise<boolean>;
+}
+
+/**
+ * Creates the production current-epoch check used immediately before SQS.
+ * The check runs in its own short transaction under the shared control lock
+ * and is the handoff's linearization point. Missing state, a disabled state,
+ * an old epoch, and every read error deny.
+ */
+export function createDrizzleOutboxFanoutAuthorizer(
+  database: Database,
+): OutboxDispatcherDependencies['authorizeFanout'] {
+  return async (claimValue): Promise<boolean> => {
+    let claim: OutboxDispatchClaim;
+    try {
+      claim = parseDispatchClaim(claimValue);
+    } catch {
+      return false;
+    }
+    try {
+      const decision = await database.transaction((transaction) =>
+        isNotificationIntentAuthorizedForCurrentFanout(
+          transaction,
+          claim.processingRecord.message.intentId,
+        ),
+      );
+      return decision.authorized;
+    } catch {
+      return false;
+    }
+  };
 }
 
 /** Trusted provenance supplied by the poller or post-commit server hook. */
@@ -2662,6 +2698,43 @@ export async function dispatchOutbox(
   }
 
   const claim = parseDispatchClaim(claimed.claim);
+  let fanoutAuthorized = false;
+  try {
+    fanoutAuthorized = (await dependencies.authorizeFanout(claim)) === true;
+  } catch {
+    fanoutAuthorized = false;
+  }
+  if (!fanoutAuthorized) {
+    let disposition: OutboxFailureDisposition;
+    try {
+      disposition = await dependencies.store.recordFailure(
+        claim,
+        'FANOUT_EMERGENCY_DISABLED',
+        false,
+      );
+    } catch {
+      throw new OutboxDispatcherError(
+        'OUTBOX_PERSISTENCE_FAILED',
+        'Fan-out was denied and the terminal suppression could not be persisted.',
+        true,
+      );
+    }
+    if (disposition === 'stale-claim') {
+      throw new OutboxDispatcherError(
+        'OUTBOX_CLAIM_LOST',
+        'The outbox lease changed while emergency suppression was recorded.',
+        true,
+      );
+    }
+    throw new OutboxDispatcherError(
+      'FANOUT_EMERGENCY_DISABLED',
+      'Fan-out is emergency-disabled or its authorization is unavailable.',
+      false,
+    );
+  }
+  // No awaited application operation may sit between this successful locked
+  // check and queue.send. Once the check linearizes before a later disable,
+  // the SQS handoff is classified as already admitted/in flight.
   try {
     const acknowledgements = await dependencies.queue.send(claim.batches);
     assertCompleteQueueAcknowledgement(claim.batches, acknowledgements);
