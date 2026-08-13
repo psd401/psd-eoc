@@ -12,6 +12,9 @@ export function AdminNavigation() {
           <a href="/integrations">Integrations and test mode</a>
         </li>
         <li>
+          <a href="/emergency">Emergency notification control</a>
+        </li>
+        <li>
           <a href="/audit">Security audit</a>
         </li>
       </ul>
