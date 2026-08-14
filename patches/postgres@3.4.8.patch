@@ -1,39 +1,229 @@
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 07f6716702ac888215c86ad6e0071aaf55ae519c..d9463ccd6828da5b1e0ec922d22793088532f944 100644
+index 07f6716..6eaf223 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
-@@ -95,6 +95,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-     , rows = 0
-     , serverSignature = null
+@@ -74,2 +74,4 @@
+       , backend = { pid: null, secret: null }
++      , closedTransports = new WeakSet()
++      , observedTransports = new WeakSet()
+       , idleTimer = timer(end, options.idle_timeout)
+@@ -79,3 +81,5 @@
+   let socket = null
+-    , cancelMessage
++    , socketPromise = null
++    , cancelMessage
++    , cancelCompletion = null
+     , errorResponse = null
+@@ -97,2 +101,3 @@
      , nextWriteTimer = null
 +    , reconnectTimer = null
      , terminated = false
-     , incomings = null
-     , results = null
-@@ -333,10 +334,19 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -113,2 +118,5 @@
+     connect(query) {
++      if (terminated)
++        return queryError(query, Errors.connection('CONNECTION_DESTROYED', options))
++
+       initial = query
+@@ -127,3 +135,14 @@
+   return connection
+-
++
++  function observeTransportClose(transport) {
++    if (!transport || observedTransports.has(transport))
++      return
++
++    observedTransports.add(transport)
++    if (transport.closed === true)
++      return closedTransports.add(transport)
++
++    transport.prependOnceListener('close', () => closedTransports.add(transport))
++  }
++
+   async function createSocket() {
+@@ -136,2 +155,3 @@
+       error(e)
++      cancelCompletion && failCancelTransport(e)
+       return
+@@ -138,2 +158,3 @@
+     }
++    observeTransportClose(x)
+     x.on('error', error)
+@@ -143,4 +164,4 @@
    }
- 
+-
+-  async function cancel({ pid, secret }, resolve, reject) {
++
++  async function cancel({ pid, secret }, resolve, reject, waitForClose = false) {
+     try {
+@@ -147,7 +168,20 @@
+       cancelMessage = b().i32(16).i32(80877102).i32(pid).i32(secret).end(16)
+-      await connect()
+-      socket.once('error', reject)
+-      socket.once('close', resolve)
+-    } catch (error) {
+-      reject(error)
++      waitForClose && (cancelCompletion = {
++        closed: false,
++        error: null,
++        onclose: null,
++        onerror: null,
++        reject,
++        resolve,
++        transport: null
++      })
++      await connect()
++      if (!waitForClose) {
++        socket.once('error', reject)
++        socket.once('close', resolve)
++      } else if (!socket && !socketPromise) {
++        failCancelTransport(Errors.connection('CONNECTION_CLOSED', options, socket))
++      }
++    } catch (error) {
++      waitForClose ? failCancelTransport(error) : reject(error)
+     }
+@@ -154,3 +188,59 @@
+   }
+-
++
++  function trackCancelTransport(transport, finalTransport) {
++    if (!cancelCompletion || !transport)
++      return
++
++    observeTransportClose(transport)
++    untrackCancelTransport()
++    const onerror = error => cancelCompletion && cancelCompletion.transport === transport && failCancelTransport(error)
++        , onclose = () => {
++          if (!cancelCompletion || cancelCompletion.transport !== transport)
++            return
++
++          cancelCompletion.closed = true
++          closedTransports.add(transport)
++          if (!finalTransport && cancelCompletion && !cancelCompletion.error)
++            cancelCompletion.error = Errors.connection('CONNECTION_CLOSED', options, transport)
++          settleCancelTransport(transport)
++        }
++    cancelCompletion.transport = transport
++    cancelCompletion.closed = false
++    cancelCompletion.onerror = onerror
++    cancelCompletion.onclose = onclose
++    transport.prependOnceListener('error', onerror)
++    transport.prependOnceListener('close', onclose)
++    closedTransports.has(transport) && onclose()
++  }
++
++  function untrackCancelTransport() {
++    if (!cancelCompletion || !cancelCompletion.transport)
++      return
++
++    cancelCompletion.transport.removeListener('error', cancelCompletion.onerror)
++    cancelCompletion.transport.removeListener('close', cancelCompletion.onclose)
++  }
++
++  function failCancelTransport(error) {
++    if (!cancelCompletion)
++      return
++
++    cancelCompletion.error || (cancelCompletion.error = error)
++    const transport = cancelCompletion.transport
++    if (!transport || cancelCompletion.closed || closedTransports.has(transport))
++      return settleCancelTransport(transport)
++
++    transport.destroyed || transport.destroy()
++  }
++
++  function settleCancelTransport(transport = null) {
++    if (!cancelCompletion || (transport && cancelCompletion.transport !== transport))
++      return
++
++    untrackCancelTransport()
++    const { error, reject, resolve } = cancelCompletion
++    cancelCompletion = null
++    error ? reject(error) : resolve()
++  }
++
+   function execute(q) {
+@@ -261,3 +351,5 @@
+   function connectTimedOut() {
+-    errored(Errors.connection('CONNECT_TIMEOUT', options, socket))
++    const error = Errors.connection('CONNECT_TIMEOUT', options, socket)
++    errored(error)
++    cancelCompletion && (cancelCompletion.error || (cancelCompletion.error = error))
+     socket.destroy()
+@@ -266,2 +358,6 @@
+   async function secure() {
++    return secureSocket().catch(secureError)
++  }
++
++  async function secureSocket() {
+     if (sslnegotiation !== 'direct') {
+@@ -269,5 +365,7 @@
+       const canSSL = await new Promise(r => socket.once('data', x => r(x[0] === 83))) // S
+-
+-      if (!canSSL && ssl === 'prefer')
+-        return connected()
++
++      if (!canSSL && ssl === 'prefer') {
++        cancelCompletion && trackCancelTransport(socket, true)
++        return connected()
++      }
+     }
+@@ -286,5 +384,9 @@
+       Object.assign(options, ssl)
+-
+-    socket.removeAllListeners()
+-    socket = tls.connect(options)
++
++    cancelCompletion && untrackCancelTransport()
++    socket.removeAllListeners()
++    cancelCompletion && trackCancelTransport(socket, false)
++    socket = tls.connect(options)
++    observeTransportClose(socket)
++    cancelCompletion && trackCancelTransport(socket, true)
+     socket.on('secureConnect', connected)
+@@ -294,3 +396,12 @@
+   }
+-
++
++  function secureError(err) {
++    if (cancelCompletion)
++      failCancelTransport(err)
++    else {
++      error(err)
++      socket && socket.readyState !== 'closed' && socket.destroy()
++    }
++  }
++
+   /* c8 ignore next 3 */
+@@ -335,6 +446,17 @@
    async function connect() {
 -    terminated = false
+-    backendParameters = {}
+-    socket || (socket = await createSocket())
+-
 +    reconnectTimer !== null && clearTimeout(reconnectTimer)
 +    reconnectTimer = null
 +    if (terminated)
 +      return
 +
-     backendParameters = {}
-     socket || (socket = await createSocket())
- 
-+    if (terminated) {
-+      socket && socket.destroy()
-+      return
++    backendParameters = {}
++    if (!socket) {
++      const openingSocket = socketPromise = createSocket().then(x => socket = x)
++      socket = await openingSocket
++      socketPromise === openingSocket && (socketPromise = null)
 +    }
 +
++    if (terminated)
++      return
++
      if (!socket)
+@@ -341,3 +463,5 @@
        return
- 
-@@ -359,7 +369,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-   }
- 
+-
++
++    cancelCompletion && trackCancelTransport(socket, !ssl)
++
+     connectTimer.start()
+@@ -361,3 +485,7 @@
    function reconnect() {
 -    setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
 +    if (terminated)
@@ -42,15 +232,14 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..d9463ccd6828da5b1e0ec922d2279308
 +    reconnectTimer !== null && clearTimeout(reconnectTimer)
 +    reconnectTimer = setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
    }
- 
-   function connected() {
-@@ -419,8 +433,29 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-     )
+@@ -420,5 +548,21 @@
    }
- 
+-
 -  function terminate() {
+-    terminated = true
++
 +  function terminate(force = false, cancelActive = false) {
-+    const terminatingSocket = socket
++    const openingSocket = socketPromise
 +        , activeBackend = cancelActive &&
 +          query &&
 +          query.active &&
@@ -59,52 +248,68 @@ index 07f6716702ac888215c86ad6e0071aaf55ae519c..d9463ccd6828da5b1e0ec922d2279308
 +          Number.isInteger(backend.secret)
 +            ? { pid: backend.pid, secret: backend.secret }
 +            : null
-+        , socketClosed = new Promise(resolve =>
-+          terminatingSocket && terminatingSocket.readyState !== 'closed'
-+            ? terminatingSocket.once('close', resolve)
-+            : resolve()
-+        )
-     terminated = true
++    terminated = true
 +    reconnectTimer !== null && clearTimeout(reconnectTimer)
 +    reconnectTimer = null
 +    const cancellation = activeBackend
 +      ? new Promise((resolve, reject) =>
-+        Connection(options).cancel(activeBackend, resolve, reject)
++        Connection(options).cancel(activeBackend, resolve, reject, true)
 +      )
 +      : Promise.resolve()
      if (stream || query || initial || sent.length)
-       error(Errors.connection('CONNECTION_DESTROYED', options))
- 
-@@ -428,9 +463,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-     if (socket) {
-       socket.removeListener('data', data)
-       socket.removeListener('connect', connected)
+@@ -427,8 +571,28 @@
+     clearImmediate(nextWriteTimer)
+-    if (socket) {
+-      socket.removeListener('data', data)
+-      socket.removeListener('connect', connected)
 -      socket.readyState === 'open' && socket.end(b().X().end())
-+      force && activeBackend && socket.readyState === 'open'
-+        ? socket.end(b().X().end())
-+        : force && socket.readyState !== 'closed'
-+          ? socket.destroy()
-+          : socket.readyState === 'open' && socket.end(b().X().end())
-     }
-     ended && (ended(), ending = ended = null)
-+    return Promise.all([cancellation, socketClosed]).then(noop)
+-    }
+-    ended && (ended(), ending = ended = null)
++    const socketClosed = openingSocket
++      ? openingSocket.then(terminatingSocket => terminateSocket(terminatingSocket, force, activeBackend))
++      : terminateSocket(socket, force, activeBackend)
++    ended && (ended(), ending = ended = null)
++    return Promise.allSettled([cancellation, socketClosed]).then(results => {
++      const failed = results.find(result => result.status === 'rejected')
++      if (failed)
++        throw failed.reason
++    })
++  }
++
++  function terminateSocket(terminatingSocket, force, activeBackend) {
++    return new Promise(resolve => {
++      observeTransportClose(terminatingSocket)
++      if (!terminatingSocket || closedTransports.has(terminatingSocket))
++        return resolve()
++
++      terminatingSocket.prependOnceListener('close', resolve)
++      terminatingSocket.removeListener('data', data)
++      terminatingSocket.removeListener('connect', connected)
++      force && activeBackend && terminatingSocket.readyState === 'open'
++        ? terminatingSocket.write(b().X().end())
++        : force || terminatingSocket.readyState !== 'open'
++          ? terminatingSocket.destroy()
++          : terminatingSocket.end(b().X().end())
++    })
    }
- 
-   async function closed(hadError) {
 diff --git a/cjs/src/index.js b/cjs/src/index.js
-index f09c61c7e998f411560b95c9a8e1ed6a97972c11..79bacf2d482b1a7ea3802bd10ba5942d584edbb0 100644
+index f09c61c..846ed94 100644
 --- a/cjs/src/index.js
 +++ b/cjs/src/index.js
-@@ -362,27 +362,42 @@ function Postgres(a, b) {
-     })
+@@ -363,4 +363,4 @@
    }
- 
+-
 -  async function end({ timeout = null } = {}) {
++
 +  function end({ timeout = null } = {}) {
      if (ending)
+@@ -367,6 +367,23 @@
        return ending
- 
+-
 -    await 1
+-    let timer
+-    return ending = Promise.race([
++
 +    if (timeout === 0) {
 +      let resolveEnding
 +        , rejectEnding
@@ -112,73 +317,265 @@ index f09c61c7e998f411560b95c9a8e1ed6a97972c11..79bacf2d482b1a7ea3802bd10ba5942d
 +        resolveEnding = resolve
 +        rejectEnding = reject
 +      })
-+      Promise.all([
++      Promise.allSettled([
 +        destroy(() => {}, true),
 +        listen.sql ? listen.sql.end({ timeout: 0 }) : Promise.resolve(),
 +        subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : Promise.resolve()
-+      ]).then(resolveEnding, rejectEnding)
++      ]).then(results => {
++        const failed = results.find(result => result.status === 'rejected')
++        failed ? rejectEnding(failed.reason) : resolveEnding()
++      })
 +      return ending
 +    }
 +
-     let timer
--    return ending = Promise.race([
++    let timer
 +    ending = Promise.race([
        new Promise(r => timeout !== null && (timer = setTimeout(destroy, timeout * 1000, r))),
-       Promise.all(connections.map(c => c.end()).concat(
-         listen.sql ? listen.sql.end({ timeout: 0 }) : [],
-         subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : []
-       ))
+@@ -377,2 +394,3 @@
      ]).then(() => clearTimeout(timer))
 +    return ending
    }
- 
-   async function close() {
-     await Promise.all(connections.map(c => c.end()))
+@@ -382,5 +400,5 @@
    }
- 
+-
 -  async function destroy(resolve) {
 -    await Promise.all(connections.map(c => c.terminate()))
++
 +  async function destroy(resolve, cancelActive = false) {
-+    await Promise.all(connections.map(c => c.terminate(true, cancelActive)))
++    const results = await Promise.allSettled(connections.map(c => c.terminate(true, cancelActive)))
      while (queries.length)
+@@ -387,2 +405,5 @@
        queries.shift().reject(Errors.connection('CONNECTION_DESTROYED', options))
++    const failed = results.find(result => result.status === 'rejected')
++    if (failed)
++      throw failed.reason
      resolve()
 diff --git a/src/connection.js b/src/connection.js
-index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..8ffa84a55ae3cb0c42953222a98217e63db921fe 100644
+index 1b1cccd..0496b80 100644
 --- a/src/connection.js
 +++ b/src/connection.js
-@@ -95,6 +95,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-     , rows = 0
-     , serverSignature = null
+@@ -74,2 +74,4 @@
+       , backend = { pid: null, secret: null }
++      , closedTransports = new WeakSet()
++      , observedTransports = new WeakSet()
+       , idleTimer = timer(end, options.idle_timeout)
+@@ -79,3 +81,5 @@
+   let socket = null
+-    , cancelMessage
++    , socketPromise = null
++    , cancelMessage
++    , cancelCompletion = null
+     , errorResponse = null
+@@ -97,2 +101,3 @@
      , nextWriteTimer = null
 +    , reconnectTimer = null
      , terminated = false
-     , incomings = null
-     , results = null
-@@ -333,10 +334,19 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -113,2 +118,5 @@
+     connect(query) {
++      if (terminated)
++        return queryError(query, Errors.connection('CONNECTION_DESTROYED', options))
++
+       initial = query
+@@ -127,3 +135,14 @@
+   return connection
+-
++
++  function observeTransportClose(transport) {
++    if (!transport || observedTransports.has(transport))
++      return
++
++    observedTransports.add(transport)
++    if (transport.closed === true)
++      return closedTransports.add(transport)
++
++    transport.prependOnceListener('close', () => closedTransports.add(transport))
++  }
++
+   async function createSocket() {
+@@ -136,2 +155,3 @@
+       error(e)
++      cancelCompletion && failCancelTransport(e)
+       return
+@@ -138,2 +158,3 @@
+     }
++    observeTransportClose(x)
+     x.on('error', error)
+@@ -143,4 +164,4 @@
    }
- 
+-
+-  async function cancel({ pid, secret }, resolve, reject) {
++
++  async function cancel({ pid, secret }, resolve, reject, waitForClose = false) {
+     try {
+@@ -147,7 +168,20 @@
+       cancelMessage = b().i32(16).i32(80877102).i32(pid).i32(secret).end(16)
+-      await connect()
+-      socket.once('error', reject)
+-      socket.once('close', resolve)
+-    } catch (error) {
+-      reject(error)
++      waitForClose && (cancelCompletion = {
++        closed: false,
++        error: null,
++        onclose: null,
++        onerror: null,
++        reject,
++        resolve,
++        transport: null
++      })
++      await connect()
++      if (!waitForClose) {
++        socket.once('error', reject)
++        socket.once('close', resolve)
++      } else if (!socket && !socketPromise) {
++        failCancelTransport(Errors.connection('CONNECTION_CLOSED', options, socket))
++      }
++    } catch (error) {
++      waitForClose ? failCancelTransport(error) : reject(error)
+     }
+@@ -154,3 +188,59 @@
+   }
+-
++
++  function trackCancelTransport(transport, finalTransport) {
++    if (!cancelCompletion || !transport)
++      return
++
++    observeTransportClose(transport)
++    untrackCancelTransport()
++    const onerror = error => cancelCompletion && cancelCompletion.transport === transport && failCancelTransport(error)
++        , onclose = () => {
++          if (!cancelCompletion || cancelCompletion.transport !== transport)
++            return
++
++          cancelCompletion.closed = true
++          closedTransports.add(transport)
++          if (!finalTransport && cancelCompletion && !cancelCompletion.error)
++            cancelCompletion.error = Errors.connection('CONNECTION_CLOSED', options, transport)
++          settleCancelTransport(transport)
++        }
++    cancelCompletion.transport = transport
++    cancelCompletion.closed = false
++    cancelCompletion.onerror = onerror
++    cancelCompletion.onclose = onclose
++    transport.prependOnceListener('error', onerror)
++    transport.prependOnceListener('close', onclose)
++    closedTransports.has(transport) && onclose()
++  }
++
++  function untrackCancelTransport() {
++    if (!cancelCompletion || !cancelCompletion.transport)
++      return
++
++    cancelCompletion.transport.removeListener('error', cancelCompletion.onerror)
++    cancelCompletion.transport.removeListener('close', cancelCompletion.onclose)
++  }
++
++  function failCancelTransport(error) {
++    if (!cancelCompletion)
++      return
++
++    cancelCompletion.error || (cancelCompletion.error = error)
++    const transport = cancelCompletion.transport
++    if (!transport || cancelCompletion.closed || closedTransports.has(transport))
++      return settleCancelTransport(transport)
++
++    transport.destroyed || transport.destroy()
++  }
++
++  function settleCancelTransport(transport = null) {
++    if (!cancelCompletion || (transport && cancelCompletion.transport !== transport))
++      return
++
++    untrackCancelTransport()
++    const { error, reject, resolve } = cancelCompletion
++    cancelCompletion = null
++    error ? reject(error) : resolve()
++  }
++
+   function execute(q) {
+@@ -261,3 +351,5 @@
+   function connectTimedOut() {
+-    errored(Errors.connection('CONNECT_TIMEOUT', options, socket))
++    const error = Errors.connection('CONNECT_TIMEOUT', options, socket)
++    errored(error)
++    cancelCompletion && (cancelCompletion.error || (cancelCompletion.error = error))
+     socket.destroy()
+@@ -266,2 +358,6 @@
+   async function secure() {
++    return secureSocket().catch(secureError)
++  }
++
++  async function secureSocket() {
+     if (sslnegotiation !== 'direct') {
+@@ -269,5 +365,7 @@
+       const canSSL = await new Promise(r => socket.once('data', x => r(x[0] === 83))) // S
+-
+-      if (!canSSL && ssl === 'prefer')
+-        return connected()
++
++      if (!canSSL && ssl === 'prefer') {
++        cancelCompletion && trackCancelTransport(socket, true)
++        return connected()
++      }
+     }
+@@ -286,5 +384,9 @@
+       Object.assign(options, ssl)
+-
+-    socket.removeAllListeners()
+-    socket = tls.connect(options)
++
++    cancelCompletion && untrackCancelTransport()
++    socket.removeAllListeners()
++    cancelCompletion && trackCancelTransport(socket, false)
++    socket = tls.connect(options)
++    observeTransportClose(socket)
++    cancelCompletion && trackCancelTransport(socket, true)
+     socket.on('secureConnect', connected)
+@@ -294,3 +396,12 @@
+   }
+-
++
++  function secureError(err) {
++    if (cancelCompletion)
++      failCancelTransport(err)
++    else {
++      error(err)
++      socket && socket.readyState !== 'closed' && socket.destroy()
++    }
++  }
++
+   /* c8 ignore next 3 */
+@@ -335,6 +446,17 @@
    async function connect() {
 -    terminated = false
+-    backendParameters = {}
+-    socket || (socket = await createSocket())
+-
 +    reconnectTimer !== null && clearTimeout(reconnectTimer)
 +    reconnectTimer = null
 +    if (terminated)
 +      return
 +
-     backendParameters = {}
-     socket || (socket = await createSocket())
- 
-+    if (terminated) {
-+      socket && socket.destroy()
-+      return
++    backendParameters = {}
++    if (!socket) {
++      const openingSocket = socketPromise = createSocket().then(x => socket = x)
++      socket = await openingSocket
++      socketPromise === openingSocket && (socketPromise = null)
 +    }
 +
++    if (terminated)
++      return
++
      if (!socket)
+@@ -341,3 +463,5 @@
        return
- 
-@@ -359,7 +369,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-   }
- 
+-
++
++    cancelCompletion && trackCancelTransport(socket, !ssl)
++
+     connectTimer.start()
+@@ -361,3 +485,7 @@
    function reconnect() {
 -    setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
 +    if (terminated)
@@ -187,15 +584,14 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..8ffa84a55ae3cb0c42953222a98217e6
 +    reconnectTimer !== null && clearTimeout(reconnectTimer)
 +    reconnectTimer = setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
    }
- 
-   function connected() {
-@@ -419,8 +433,29 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-     )
+@@ -420,5 +548,21 @@
    }
- 
+-
 -  function terminate() {
+-    terminated = true
++
 +  function terminate(force = false, cancelActive = false) {
-+    const terminatingSocket = socket
++    const openingSocket = socketPromise
 +        , activeBackend = cancelActive &&
 +          query &&
 +          query.active &&
@@ -204,52 +600,68 @@ index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..8ffa84a55ae3cb0c42953222a98217e6
 +          Number.isInteger(backend.secret)
 +            ? { pid: backend.pid, secret: backend.secret }
 +            : null
-+        , socketClosed = new Promise(resolve =>
-+          terminatingSocket && terminatingSocket.readyState !== 'closed'
-+            ? terminatingSocket.once('close', resolve)
-+            : resolve()
-+        )
-     terminated = true
++    terminated = true
 +    reconnectTimer !== null && clearTimeout(reconnectTimer)
 +    reconnectTimer = null
 +    const cancellation = activeBackend
 +      ? new Promise((resolve, reject) =>
-+        Connection(options).cancel(activeBackend, resolve, reject)
++        Connection(options).cancel(activeBackend, resolve, reject, true)
 +      )
 +      : Promise.resolve()
      if (stream || query || initial || sent.length)
-       error(Errors.connection('CONNECTION_DESTROYED', options))
- 
-@@ -428,9 +463,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
-     if (socket) {
-       socket.removeListener('data', data)
-       socket.removeListener('connect', connected)
+@@ -427,8 +571,28 @@
+     clearImmediate(nextWriteTimer)
+-    if (socket) {
+-      socket.removeListener('data', data)
+-      socket.removeListener('connect', connected)
 -      socket.readyState === 'open' && socket.end(b().X().end())
-+      force && activeBackend && socket.readyState === 'open'
-+        ? socket.end(b().X().end())
-+        : force && socket.readyState !== 'closed'
-+          ? socket.destroy()
-+          : socket.readyState === 'open' && socket.end(b().X().end())
-     }
-     ended && (ended(), ending = ended = null)
-+    return Promise.all([cancellation, socketClosed]).then(noop)
+-    }
+-    ended && (ended(), ending = ended = null)
++    const socketClosed = openingSocket
++      ? openingSocket.then(terminatingSocket => terminateSocket(terminatingSocket, force, activeBackend))
++      : terminateSocket(socket, force, activeBackend)
++    ended && (ended(), ending = ended = null)
++    return Promise.allSettled([cancellation, socketClosed]).then(results => {
++      const failed = results.find(result => result.status === 'rejected')
++      if (failed)
++        throw failed.reason
++    })
++  }
++
++  function terminateSocket(terminatingSocket, force, activeBackend) {
++    return new Promise(resolve => {
++      observeTransportClose(terminatingSocket)
++      if (!terminatingSocket || closedTransports.has(terminatingSocket))
++        return resolve()
++
++      terminatingSocket.prependOnceListener('close', resolve)
++      terminatingSocket.removeListener('data', data)
++      terminatingSocket.removeListener('connect', connected)
++      force && activeBackend && terminatingSocket.readyState === 'open'
++        ? terminatingSocket.write(b().X().end())
++        : force || terminatingSocket.readyState !== 'open'
++          ? terminatingSocket.destroy()
++          : terminatingSocket.end(b().X().end())
++    })
    }
- 
-   async function closed(hadError) {
 diff --git a/src/index.js b/src/index.js
-index c7fba3dace20173f4cb13f3f138bb6d213b43683..5e48304de193d8002167eec1d935e91c066f4759 100644
+index c7fba3d..40e831e 100644
 --- a/src/index.js
 +++ b/src/index.js
-@@ -362,27 +362,42 @@ function Postgres(a, b) {
-     })
+@@ -363,4 +363,4 @@
    }
- 
+-
 -  async function end({ timeout = null } = {}) {
++
 +  function end({ timeout = null } = {}) {
      if (ending)
+@@ -367,6 +367,23 @@
        return ending
- 
+-
 -    await 1
+-    let timer
+-    return ending = Promise.race([
++
 +    if (timeout === 0) {
 +      let resolveEnding
 +        , rejectEnding
@@ -257,34 +669,36 @@ index c7fba3dace20173f4cb13f3f138bb6d213b43683..5e48304de193d8002167eec1d935e91c
 +        resolveEnding = resolve
 +        rejectEnding = reject
 +      })
-+      Promise.all([
++      Promise.allSettled([
 +        destroy(() => {}, true),
 +        listen.sql ? listen.sql.end({ timeout: 0 }) : Promise.resolve(),
 +        subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : Promise.resolve()
-+      ]).then(resolveEnding, rejectEnding)
++      ]).then(results => {
++        const failed = results.find(result => result.status === 'rejected')
++        failed ? rejectEnding(failed.reason) : resolveEnding()
++      })
 +      return ending
 +    }
 +
-     let timer
--    return ending = Promise.race([
++    let timer
 +    ending = Promise.race([
        new Promise(r => timeout !== null && (timer = setTimeout(destroy, timeout * 1000, r))),
-       Promise.all(connections.map(c => c.end()).concat(
-         listen.sql ? listen.sql.end({ timeout: 0 }) : [],
-         subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : []
-       ))
+@@ -377,2 +394,3 @@
      ]).then(() => clearTimeout(timer))
 +    return ending
    }
- 
-   async function close() {
-     await Promise.all(connections.map(c => c.end()))
+@@ -382,5 +400,5 @@
    }
- 
+-
 -  async function destroy(resolve) {
 -    await Promise.all(connections.map(c => c.terminate()))
++
 +  async function destroy(resolve, cancelActive = false) {
-+    await Promise.all(connections.map(c => c.terminate(true, cancelActive)))
++    const results = await Promise.allSettled(connections.map(c => c.terminate(true, cancelActive)))
      while (queries.length)
+@@ -387,2 +405,5 @@
        queries.shift().reject(Errors.connection('CONNECTION_DESTROYED', options))
++    const failed = results.find(result => result.status === 'rejected')
++    if (failed)
++      throw failed.reason
      resolve()
