@@ -217,7 +217,8 @@ read back on 2026-08-14:
 - downloaded AAB size: `75,885,084` bytes
 - AAB SHA-256:
   `915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246`
-- build-credential configuration: `V0WhYOyuIx` (default), JKS SHA-256
+- build-credential configuration: `V0WhYOyuIx` (default); signing-certificate
+  SHA-256 fingerprint
   `6F:BE:1D:D8:4C:85:B1:FB:AC:DD:39:92:57:D4:8C:4C:05:29:61:67:16:BF:24:85:5D:42:97:16:02:98:C4:C9`
 - EAS usage changed from 4/30 total and 3/15 Android before the sole build to
   5/30 total and 4/15 Android afterward; current estimated total cost is `$0`
@@ -574,6 +575,13 @@ cannot replace them.
 
 ### Non-engineer guide walkthrough
 
+- Provider/device screenshots: **BLOCKED — current SVGs are illustrated advance
+  references, not provider screenshots**. After the exact TestFlight and Play
+  builds are installable, capture sanitized screenshots from those exact
+  provider/device flows, remove account names, tester identities, device IDs,
+  messages, tokens, and unrelated apps, replace or supplement the illustrations,
+  and review the sanitized result before committing it. Do not fabricate or
+  relabel an illustration as provider evidence.
 - Status: **BLOCKED — walkthrough not recorded**
 - Verifier role, platform, guide commit, and date: `BLOCKED`
 - Steps completed without author assistance: `BLOCKED`

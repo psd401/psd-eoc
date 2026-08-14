@@ -12,6 +12,15 @@ drill, or notify anyone.
 > **Before you begin:** You need an approved TestFlight invitation from
 > District Technology, your district staff sign-in, a device passcode, and
 > internet access. Do not forward the invitation.
+>
+> An invitation authorizes installation only. Before you open PSD EOC, grant
+> notification permission, or sign in, District Technology must separately
+> confirm that this installation is included in the approved bounded synthetic
+> staff-context push-registration verification. If it has not, stop after
+> **Install** and do not open or sign in. Once separately authorized, opening
+> and signing in with notification permission may obtain a push token, contact
+> Expo, and register the device with PSD EOC. Registration does not send a
+> notification, but it does change provider and server registration state.
 
 ## Install the app
 
@@ -66,25 +75,42 @@ Repeat these steps for every Focus you use, including Do Not Disturb and Sleep:
 
 ## Verify the installation safely
 
-Do not start an incident or drill just to test installation. Use only a
-district-approved synthetic test window. Scheduling the window does not
-authorize or trigger a send. At test time, an authenticated human must freshly
-review the synthetic targets and consequence preview, obtain explicit
-product-owner authorization, confirm the action, and launch the synthetic test:
+Do not start an incident or drill just to test installation. A push is **not
+required** to prove installation. After the separate registration authorization
+above, complete these no-notification-send checks:
 
-- Open PSD EOC, confirm district sign-in succeeds, and confirm the visible
-  authorized site list is correct.
+1. Open PSD EOC, confirm district sign-in succeeds, and confirm the visible
+   authorized site list is correct.
+2. Close PSD EOC, lock the device, unlock it normally, and reopen the app.
+   Confirm the app requires the expected Face ID, Touch ID, or device-secure
+   unlock instead of asking for a PSD EOC PIN.
+3. In TestFlight, record the PSD EOC version and build number. Compare them with
+   the exact version and build announced by District Technology. Stop if they
+   differ or no approved identity was announced.
+4. Recheck the notification and Focus settings above. Record pass/fail for the
+   install, sign-in, authorized-site list, secure unlock, and settings. Do not
+   include staff identities, message content, or device identifiers.
+
+## Optional separately authorized synthetic push check
+
+Skip this section unless District Technology announces a separately approved
+synthetic test window. Scheduling the window does not authorize or trigger a
+send. At test time, an authenticated human must freshly review the synthetic
+targets and consequence preview, obtain explicit product-owner authorization,
+confirm the action, and launch the synthetic test:
+
 - Lock the device before the scheduled test.
-- After the test, confirm the visible lock-screen notification title **and**
-  body each carry the canonical **`[DRILL]`** marker. Open it and confirm the
-  event screen visibly says **DRILL — PRACTICE** and continues to show
-  **`[DRILL]`** on the opened event content. Report whether the alert appeared,
-  made a sound, and opened that exact drill. Provider acceptance or a visible
-  push is not proof that every person received it.
-- Stop immediately and contact District Technology if the notification or
-  opened event shows **`[INCIDENT]`**, omits **`[DRILL]`**, has conflicting
-  markers, uses real-incident wording, or uses only generic wording such as
-  **TEST ONLY**. Do not continue testing an ambiguous real-versus-drill display.
+- Confirm the visible lock-screen notification title **and** body each carry the
+  canonical **`[DRILL]`** marker. Open it and confirm the event screen visibly
+  says **DRILL — PRACTICE**. Report whether the alert appeared, made a sound,
+  and opened that exact drill. Provider acceptance or a visible push is not
+  proof that every person received it.
+- Stop immediately and contact District Technology if the notification shows
+  **`[INCIDENT]`**, omits **`[DRILL]`**, has conflicting markers, uses
+  real-incident wording, or uses only generic wording such as **TEST ONLY**.
+  Also stop if the opened event does not visibly say **DRILL — PRACTICE**, says
+  **REAL INCIDENT**, or otherwise conflicts with the drill notification. Do not
+  continue testing an ambiguous real-versus-drill display.
 - If no alert appears, leave the app installed and contact District Technology.
   Include your iOS version and PSD EOC build number from TestFlight. Do not send
   screenshots containing message content, staff identities, device tokens, or
