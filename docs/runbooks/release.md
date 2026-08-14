@@ -261,8 +261,9 @@ values:
 cd packages/mobile
 env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL \
   -u EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED \
-  bunx eas-cli@21.7.0 env:exec production --non-interactive -- \
-  sh -c 'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net" && test "$EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED" = "true"'
+  bunx eas-cli@21.7.0 env:exec production \
+  'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net" && test "$EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED" = "true"' \
+  --non-interactive
 ```
 
 Resolve each profile and verify the security boundary in section 2:

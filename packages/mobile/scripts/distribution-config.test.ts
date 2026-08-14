@@ -154,7 +154,7 @@ describe('mobile distribution configuration', () => {
   test('documents exact build preflight and keeps every external gate blocked', () => {
     const release = repositoryText('docs/runbooks/release.md');
     const normalizedRelease = release.replace(/\\\n\s*/gu, ' ');
-    const compactRelease = release.replace(/\s+/gu, ' ');
+    const compactRelease = normalizedRelease.replace(/\s+/gu, ' ');
     const releaseBuildCommands = normalizedRelease
       .split('\n')
       .filter((line) => line.includes('build --platform'));
@@ -165,7 +165,11 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       'env:list production --scope account --format long',
     );
-    expect(release).toContain('env:exec production');
+    expect(compactRelease).toContain(
+      'bunx eas-cli@21.7.0 env:exec production \'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net" && test "$EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED" = "true"\' --non-interactive',
+    );
+    expect(release).not.toContain('env:exec production --non-interactive --');
+    expect(release).not.toContain("sh -c 'test");
     expect(release).toContain(
       'test "$EXPO_PUBLIC_PSD_EOC_API_BASE_URL" = "https://eoc.psd401.net"',
     );
