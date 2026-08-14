@@ -14,7 +14,6 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath } from 'node:url';
 
 import {
   createDrizzleStartFlowCapabilityStore,
@@ -71,11 +70,9 @@ const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
   testDatabaseUrl === undefined ? describe.skip : describe;
 const SLO_CHILD_ENV = 'PSD_EOC_ISSUE30_SLO_CHILD';
+const SLO_PRECHECKED_ENV = 'PSD_EOC_ISSUE30_SLO_PRECHECKED';
 const SLO_SUCCESS_PREFIX = '[issue-30 synthetic SLO success]';
-const SLO_GATE_RESULT_KEY = Symbol.for('psd-eoc.issue30.slo-gate-result');
 const isSloChild = process.env[SLO_CHILD_ENV] === 'true';
-const testFilePath = fileURLToPath(import.meta.url);
-const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 setDefaultTimeout(180_000);
 
@@ -149,29 +146,6 @@ function validatedSyntheticTestDatabaseUrl(value: string | undefined): string {
     );
   }
   return parsed.toString();
-}
-
-function sloChildEnvironment(databaseUrl: string): NodeJS.ProcessEnv {
-  return {
-    DATABASE_URL: databaseUrl,
-    NODE_ENV: 'test',
-    TEST_DATABASE_URL: databaseUrl,
-    [SLO_CHILD_ENV]: 'true',
-  };
-}
-
-function recordedSloGateResult(): string | null {
-  const value = Reflect.get(globalThis, SLO_GATE_RESULT_KEY) as unknown;
-  return typeof value === 'string' && value.startsWith(SLO_SUCCESS_PREFIX)
-    ? value
-    : null;
-}
-
-function recordSloGateResult(value: string): void {
-  if (!value.startsWith(SLO_SUCCESS_PREFIX)) {
-    throw new Error('The synthetic SLO success marker is invalid.');
-  }
-  Reflect.set(globalThis, SLO_GATE_RESULT_KEY, value);
 }
 
 function isolatedTestDatabaseUrl(baseUrl: string): string {
@@ -252,6 +226,52 @@ function nearestRankP95(samples: readonly number[]): number {
     throw new Error('The SLO gate produced an invalid latency sample.');
   }
   return value;
+}
+
+interface SyntheticSloP95 {
+  readonly activation: number;
+  readonly outboxToEnqueue: number;
+  readonly combined: number;
+}
+
+function expectSyntheticSloBudgets(input: {
+  readonly activationSamples: readonly number[];
+  readonly outboxToEnqueueSamples: readonly number[];
+  readonly combinedSamples: readonly number[];
+}): SyntheticSloP95 {
+  const result = {
+    activation: nearestRankP95(input.activationSamples),
+    outboxToEnqueue: nearestRankP95(input.outboxToEnqueueSamples),
+    combined: nearestRankP95(input.combinedSamples),
+  };
+  expect(result.activation).toBeLessThan(ACTIVATION_P95_LIMIT_MILLISECONDS);
+  expect(result.outboxToEnqueue).toBeLessThan(
+    OUTBOX_TO_ENQUEUE_P95_LIMIT_MILLISECONDS,
+  );
+  expect(result.combined).toBeLessThan(COMBINED_P95_LIMIT_MILLISECONDS);
+  return Object.freeze(result);
+}
+
+async function completeEveryCleanupStep(
+  steps: readonly (() => Promise<void>)[],
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      'Multiple synthetic SLO cleanup steps failed.',
+    );
+  }
 }
 
 function attemptId(sample: number, ordinal: number): string {
@@ -592,6 +612,8 @@ if (isSloChild) {
         await createdControlConnection.db.execute(
           databaseIdentifierStatement('create'),
         );
+        await createdControlConnection.close();
+        controlConnection = undefined;
 
         const isolatedConnection = createDatabaseClient({
           driver: 'postgres',
@@ -610,15 +632,40 @@ if (isSloChild) {
       });
 
       afterAll(async () => {
-        await connection?.close();
+        const dataConnection = connection;
         connection = undefined;
-        if (controlConnection !== undefined) {
-          await controlConnection.db.execute(
-            databaseIdentifierStatement('drop'),
-          );
-          await controlConnection.close();
-          controlConnection = undefined;
-        }
+        const setupControlConnection = controlConnection;
+        controlConnection = undefined;
+        await completeEveryCleanupStep([
+          async () => {
+            await dataConnection?.close();
+          },
+          async () => {
+            await setupControlConnection?.close();
+          },
+          async () => {
+            const databaseUrl =
+              validatedSyntheticTestDatabaseUrl(testDatabaseUrl);
+            const cleanupConnection = createDatabaseClient({
+              driver: 'postgres',
+              url: databaseUrl,
+              maxConnections: 1,
+            });
+            if (cleanupConnection.driver !== 'postgres') {
+              throw new Error('The SLO cleanup requires direct PostgreSQL.');
+            }
+            await completeEveryCleanupStep([
+              async () => {
+                await cleanupConnection.db.execute(
+                  databaseIdentifierStatement('drop'),
+                );
+              },
+              async () => {
+                await cleanupConnection.close();
+              },
+            ]);
+          },
+        ]);
       });
 
       test('keeps 40 unique 1,200-recipient x 3-channel samples inside every p95 budget', async () => {
@@ -926,72 +973,97 @@ if (isSloChild) {
 
         // Nearest-rank p95 uses every recorded sample: no retry, warm-up, or
         // outlier is removed before enforcing any of the three budgets.
-        const activationP95 = nearestRankP95(activationSamples);
-        const outboxToEnqueueP95 = nearestRankP95(outboxToEnqueueSamples);
-        const combinedP95 = nearestRankP95(combinedSamples);
+        const measured = expectSyntheticSloBudgets({
+          activationSamples,
+          outboxToEnqueueSamples,
+          combinedSamples,
+        });
         console.info(
-          `[issue-30 synthetic SLO] samples=${SAMPLE_COUNT} recipients=${RECIPIENT_COUNT} channels=${CHANNEL_COUNT} work_items_per_sample=${WORK_ITEMS_PER_SAMPLE} activation_p95_ms=${activationP95.toFixed(2)} outbox_to_enqueue_p95_ms=${outboxToEnqueueP95.toFixed(2)} combined_p95_ms=${combinedP95.toFixed(2)}`,
+          `[issue-30 synthetic SLO] samples=${SAMPLE_COUNT} recipients=${RECIPIENT_COUNT} channels=${CHANNEL_COUNT} work_items_per_sample=${WORK_ITEMS_PER_SAMPLE} activation_p95_ms=${measured.activation.toFixed(2)} outbox_to_enqueue_p95_ms=${measured.outboxToEnqueue.toFixed(2)} combined_p95_ms=${measured.combined.toFixed(2)}`,
         );
-        expect(activationP95).toBeLessThan(ACTIVATION_P95_LIMIT_MILLISECONDS);
-        expect(outboxToEnqueueP95).toBeLessThan(
-          OUTBOX_TO_ENQUEUE_P95_LIMIT_MILLISECONDS,
-        );
-        expect(combinedP95).toBeLessThan(COMBINED_P95_LIMIT_MILLISECONDS);
         console.info(
-          `${SLO_SUCCESS_PREFIX} samples=${SAMPLE_COUNT} work_items_per_sample=${WORK_ITEMS_PER_SAMPLE} activation_p95_ms=${activationP95.toFixed(2)} outbox_to_enqueue_p95_ms=${outboxToEnqueueP95.toFixed(2)} combined_p95_ms=${combinedP95.toFixed(2)}`,
+          `${SLO_SUCCESS_PREFIX} samples=${SAMPLE_COUNT} work_items_per_sample=${WORK_ITEMS_PER_SAMPLE} activation_p95_ms=${measured.activation.toFixed(2)} outbox_to_enqueue_p95_ms=${measured.outboxToEnqueue.toFixed(2)} combined_p95_ms=${measured.combined.toFixed(2)}`,
         );
       });
     },
   );
 } else {
-  const testWithDatabase = testDatabaseUrl === undefined ? test.skip : test;
-
   describe('synthetic activation-to-enqueue SLO process gate', () => {
     test('CI cannot silently skip the 40-sample SLO path', () => {
       if (process.env.CI === 'true') {
         expect(testDatabaseUrl).toBeTruthy();
+        expect(process.env[SLO_PRECHECKED_ENV]).toBe('true');
       }
     });
 
-    testWithDatabase(
-      'runs the 40-sample measurement once in a fresh Bun process',
-      () => {
-        const existingResult = recordedSloGateResult();
-        if (existingResult !== null) {
-          console.info(existingResult);
-          return;
-        }
-        const databaseUrl = validatedSyntheticTestDatabaseUrl(testDatabaseUrl);
-        // Block this Bun test process while the one measured child runs. An
-        // async wait permits unrelated files to consume CPU during wall-clock
-        // samples and would make the regression gate measure the test runner.
-        const child = Bun.spawnSync({
-          cmd: [process.execPath, 'test', '--timeout=180000', testFilePath],
-          cwd: workspaceRoot,
-          env: sloChildEnvironment(databaseUrl),
-          timeout: 210_000,
-          stdout: 'pipe',
-          stderr: 'inherit',
+    test('does not launch a duplicate measurement in the repository test phase', () => {
+      expect(isSloChild).toBe(false);
+    });
+
+    test('fails an exact over-budget nearest-rank sample set with the original evidence', () => {
+      const withinBudget = Array.from({ length: SAMPLE_COUNT }, () => 1);
+      const overBudget = [
+        ...Array.from({ length: SAMPLE_COUNT - 3 }, () => 1),
+        ACTIVATION_P95_LIMIT_MILLISECONDS,
+        ACTIVATION_P95_LIMIT_MILLISECONDS + 1,
+        ACTIVATION_P95_LIMIT_MILLISECONDS + 2,
+      ];
+      expect(overBudget).toHaveLength(SAMPLE_COUNT);
+      expect(nearestRankP95(overBudget)).toBe(
+        ACTIVATION_P95_LIMIT_MILLISECONDS,
+      );
+
+      let failure: unknown;
+      try {
+        expectSyntheticSloBudgets({
+          activationSamples: overBudget,
+          outboxToEnqueueSamples: withinBudget,
+          combinedSamples: withinBudget,
         });
-        if (child.exitedDueToTimeout === true) {
-          throw new Error('The isolated synthetic SLO process timed out.');
-        }
-        if (!child.success || child.exitCode !== 0) {
-          throw new Error('The isolated synthetic SLO process failed.');
-        }
-        const successLines = child.stdout
-          .toString()
-          .split('\n')
-          .filter((line) => line.startsWith(SLO_SUCCESS_PREFIX));
-        expect(successLines).toHaveLength(1);
-        const successLine = successLines[0];
-        if (successLine === undefined) {
-          throw new Error('The isolated synthetic SLO result is unavailable.');
-        }
-        recordSloGateResult(successLine);
-        console.info(successLine);
-      },
-      240_000,
-    );
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(String(failure)).toContain(
+        'expect(received).toBeLessThan(expected)',
+      );
+      expect(String(failure)).toContain('Expected: < 500');
+      expect(String(failure)).toContain('Received: 500');
+    });
+
+    test('attempts every cleanup step and preserves every failure', async () => {
+      const attempted: string[] = [];
+      const closeFailure = new Error('synthetic close failure');
+      const dropFailure = new Error('synthetic drop failure');
+      let failure: unknown;
+      try {
+        await completeEveryCleanupStep([
+          async () => {
+            attempted.push('close-data');
+            throw closeFailure;
+          },
+          async () => {
+            attempted.push('close-control');
+          },
+          async () => {
+            attempted.push('drop-database');
+            throw dropFailure;
+          },
+        ]);
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(attempted).toEqual([
+        'close-data',
+        'close-control',
+        'drop-database',
+      ]);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors).toEqual([
+        closeFailure,
+        dropFailure,
+      ]);
+    });
   });
 }
