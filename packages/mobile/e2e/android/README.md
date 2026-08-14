@@ -5,12 +5,15 @@ FCM/Expo send. It builds an Android instrumentation test into Expo's generated
 app and runs inside `net.psd401.eoc`. It constructs one canonical version-1
 synthetic `drill`/`drill`/`activation` data payload, then calls the installed
 `expo-notifications` `FirebaseMessagingDelegate` directly to present two
-distinct notifications for that same synthetic event:
+distinct DRILL-marked notifications:
 
-- `[DRILL] Unlock PSD EOC for synthetic drill` is tapped first and solely
-  establishes the protected-route unlock boundary.
+- `[DRILL] Unlock PSD EOC for synthetic drill` intentionally contains no
+  canonical routing envelope. It is tapped first to launch the app and
+  establish the protected-route unlock boundary, but the production response
+  parser must reject it for navigation.
 - `[DRILL] Synthetic lockdown drill` remains in the notification shade until
-  authentication finishes, then is tapped to prove the exact event route.
+  authentication finishes. It alone carries the canonical synthetic event
+  payload and is then tapped to prove the exact event route.
 
 The harness never requests a token and contains no provider or network client.
 It fails closed unless the runner supplies a fresh synthetic run proof and the
@@ -56,12 +59,14 @@ The runner must reject a manifest that is not synthetic before invoking Gradle.
 
 On success, the system tray contains both app-owned notifications on
 `eoc-alerts`, tagged `issue-32-<runId>-unlock` and
-`issue-32-<runId>-route`. Their message IDs and tags are distinct, while their
-embedded canonical data (including the exact event, facility, event-type
-version, `drill` classification, and `activation` purpose) is identical.
-Instrumentation proves both notifications' `contentIntent` values are owned by
-the installed PSD EOC application UID and launch an activity. Maestro taps the
-newest unlock-check notification, completes Android device authentication,
+`issue-32-<runId>-route`. Their message IDs and tags are distinct. The unlock
+card contains no event, facility, event-type version, or purpose fields; static
+evidence exercises the production parser and proves that exact data fails
+closed for routing. The route card preserves the canonical event, facility,
+event-type version, `drill` classification, and `activation` purpose.
+Instrumentation proves both notifications' `contentIntent` values are owned
+by the installed PSD EOC application UID and launch an activity. Maestro taps
+the newest unlock-check notification, completes Android device authentication,
 reopens the shade, and taps the retained route notification before asserting
 the exact synthetic drill room.
 

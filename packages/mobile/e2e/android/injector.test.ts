@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
+import { parseMobilePushNotification } from '../../src/lib/push/notification-content';
+
 const directory = new URL('.', import.meta.url);
 
 async function source(name: string): Promise<string> {
@@ -76,7 +78,7 @@ describe('issue #32 Android provider-free notification injector', () => {
     }
   });
 
-  test('presents distinct unlock and route notifications with identical canonical drill data', async () => {
+  test('keeps unlock unrouteable while the retained route alone carries canonical drill data', async () => {
     const kotlin = await source(
       'src/androidTest/kotlin/net/psd401/eoc/e2e/SyntheticDrillRemoteMessageTest.kt',
     );
@@ -85,8 +87,11 @@ describe('issue #32 Android provider-free notification injector', () => {
       'val unlockResponseId = "$responseId-unlock"',
       'val routeResponseId = "$responseId-route"',
       'assertFalse(unlockResponseId == routeResponseId)',
-      'unlockResponseId,\n      UNLOCK_TITLE,\n      UNLOCK_BODY,\n      canonicalData,',
       'routeResponseId,\n      VISIBLE_TITLE,\n      VISIBLE_BODY,\n      canonicalData,',
+      'unlockResponseId,\n      UNLOCK_TITLE,\n      UNLOCK_BODY,\n      null,',
+      'canonicalData: JSONObject?',
+      'remoteMessageBuilder.addData("body", canonicalData.toString())',
+      'notification.extras.containsKey(EXPO_DATA_BODY_EXTRA)',
       '.setMessageId(responseId)',
       '.addData("tag", responseId)',
       'activeAppTags.contains(unlockResponseId)',
@@ -97,6 +102,25 @@ describe('issue #32 Android provider-free notification injector', () => {
 
     expect(kotlin.match(/presentNotification\(/gu)).toHaveLength(3);
     expect(kotlin.match(/assertPresentedNotification\(/gu)).toHaveLength(3);
+  });
+
+  test('production response parsing rejects the exact unlock-only message data', () => {
+    expect(
+      parseMobilePushNotification({
+        title: '[DRILL] Unlock PSD EOC for synthetic drill',
+        body: '[DRILL] Synthetic exercise only. Unlock the app before opening the retained drill route.',
+        data: {
+          title: '[DRILL] Unlock PSD EOC for synthetic drill',
+          message:
+            '[DRILL] Synthetic exercise only. Unlock the app before opening the retained drill route.',
+          channelId: 'eoc-alerts',
+          categoryId: 'PSD_EOC_DRILL',
+          tag: 'issue-32-0123456789abcdef0123456789abcdef-unlock',
+          sound: 'default',
+          vibrate: 'true',
+        },
+      }),
+    ).toBeNull();
   });
 
   test('drives unlock and retained route through separate exact notification taps', async () => {

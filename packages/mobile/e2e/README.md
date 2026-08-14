@@ -36,8 +36,10 @@ bundle. Both notification injectors are local transport substitutes only:
   exposed as `notification.request.content.data` by Expo on iOS.
 - Android instrumentation calls the installed Expo Notifications
   `FirebaseMessagingDelegate` with an in-memory, data-only `RemoteMessage` and
-  then verifies the resulting app-owned system notification. It never obtains
-  an FCM or Expo token.
+  then verifies the resulting app-owned system notifications. Its DRILL-marked
+  unlock card deliberately omits the canonical routing envelope and is rejected
+  by the production response parser; only the retained route card carries the
+  valid synthetic drill payload. It never obtains an FCM or Expo token.
 
 ## Run locally
 

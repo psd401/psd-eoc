@@ -127,7 +127,7 @@ class SyntheticDrillRemoteMessageTest {
       unlockResponseId,
       UNLOCK_TITLE,
       UNLOCK_BODY,
-      canonicalData,
+      null,
     )
 
     val presentedUnlock =
@@ -138,7 +138,7 @@ class SyntheticDrillRemoteMessageTest {
       unlockResponseId,
       UNLOCK_TITLE,
       UNLOCK_BODY,
-      canonicalData,
+      null,
     )
     val presentedRoute =
       awaitExactNotification(systemNotificationManager, routeResponseId)
@@ -165,21 +165,23 @@ class SyntheticDrillRemoteMessageTest {
     responseId: String,
     title: String,
     message: String,
-    canonicalData: JSONObject,
+    canonicalData: JSONObject?,
   ) {
-    val remoteMessage =
+    val remoteMessageBuilder =
       RemoteMessage.Builder(LOCAL_ONLY_DESTINATION)
         .setMessageId(responseId)
         .setTtl(LOCAL_TTL_SECONDS)
         .addData("title", title)
         .addData("message", message)
-        .addData("body", canonicalData.toString())
         .addData("channelId", ALERT_CHANNEL_ID)
         .addData("categoryId", DRILL_CATEGORY_ID)
         .addData("tag", responseId)
         .addData("sound", "default")
         .addData("vibrate", "true")
-        .build()
+    if (canonicalData != null) {
+      remoteMessageBuilder.addData("body", canonicalData.toString())
+    }
+    val remoteMessage = remoteMessageBuilder.build()
 
     // This is the installed Expo native receive path. No FirebaseMessaging
     // client, Expo API, token, provider credential, or network transport exists
@@ -193,7 +195,7 @@ class SyntheticDrillRemoteMessageTest {
     expectedTag: String,
     expectedTitle: String,
     expectedBody: String,
-    expectedData: JSONObject,
+    expectedData: JSONObject?,
   ) {
     assertEquals(TARGET_APPLICATION_ID, presented.packageName)
     assertEquals(TARGET_APPLICATION_ID, presented.opPkg)
@@ -210,14 +212,22 @@ class SyntheticDrillRemoteMessageTest {
       expectedBody,
       notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
     )
-    val embeddedData =
-      requireNotNull(notification.extras.getString(EXPO_DATA_BODY_EXTRA)) {
+    val embeddedData = notification.extras.getString(EXPO_DATA_BODY_EXTRA)
+    if (expectedData == null) {
+      assertFalse(
+        "The unlock-only notification must not carry a canonical route envelope.",
+        notification.extras.containsKey(EXPO_DATA_BODY_EXTRA),
+      )
+      assertEquals(null, embeddedData)
+    } else {
+      requireNotNull(embeddedData) {
         "Expo must preserve the canonical push data JSON in notification extras."
       }
-    val actualData = JSONObject(embeddedData)
-    assertEquals(expectedData.length(), actualData.length())
-    expectedData.keys().forEach { key ->
-      assertEquals("Canonical data mismatch at $key.", expectedData.get(key), actualData.get(key))
+      val actualData = JSONObject(embeddedData)
+      assertEquals(expectedData.length(), actualData.length())
+      expectedData.keys().forEach { key ->
+        assertEquals("Canonical data mismatch at $key.", expectedData.get(key), actualData.get(key))
+      }
     }
 
     val contentIntent =
