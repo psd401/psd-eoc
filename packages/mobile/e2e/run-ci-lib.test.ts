@@ -27,7 +27,6 @@ import {
   decideMobileE2EIosNotificationResponse,
   mobileE2EAndroidArchitectureArguments,
   mobileE2EAndroidBuildArguments,
-  mobileE2EAndroidEmulatorControlArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EArtifactPaths,
   mobileE2EDevClientUrl,
@@ -47,6 +46,7 @@ import {
   mobileE2ELoopbackMetroEnvironment,
   mobileE2EMaestroDriverPortArguments,
   mobileE2EMaestroDriverReuseArguments,
+  mobileE2EOwnedIosMaestroDriverPids,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
   mobileE2EPostAuthenticationWarmupRequests,
@@ -69,7 +69,6 @@ import {
   requireMatchingMobileE2ERunIds,
   selectMobileE2EIosRuntimeAndDeviceType,
   shouldCopyMobileE2EWorkspaceSource,
-  withMobileE2EAndroidEmulatorPaused,
 } from './run-ci-lib';
 
 const RUN_ID = 'a'.repeat(32);
@@ -1605,7 +1604,31 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toThrow('Android must not receive');
   });
 
-  test('builds only the hosted Android emulator ABI', async () => {
+  test('selects only exact suite-owned iOS Maestro xcodebuild owners', () => {
+    const deviceId = 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE';
+    const otherDeviceId = '11111111-2222-4333-8444-555555555555';
+    const target = `/usr/bin/xcodebuild test-without-building -xctestrun /tmp/maestro-driver-ios-config.xctestrun -destination id=${deviceId}`;
+    const snapshot = [
+      `  742 ${target}`,
+      `81 ${target} -only-testing dev.mobile.maestro-driver-iosUITests`,
+      `90 /usr/bin/xcodebuild test-without-building -xctestrun /tmp/maestro-driver-ios-config.xctestrun -destination id=${otherDeviceId}`,
+      `91 /usr/bin/xcodebuild build -destination id=${deviceId}`,
+      `92 maestro test --udid ${deviceId}`,
+      `not-a-pid ${target}`,
+      '',
+    ].join('\n');
+    expect(mobileE2EOwnedIosMaestroDriverPids(snapshot, deviceId)).toEqual([
+      81, 742,
+    ]);
+    expect(mobileE2EOwnedIosMaestroDriverPids(snapshot, otherDeviceId)).toEqual(
+      [90],
+    );
+    expect(() =>
+      mobileE2EOwnedIosMaestroDriverPids(snapshot, 'not-a-udid'),
+    ).toThrow('iOS simulator UDID');
+  });
+
+  test('bounds the cold Android build without pausing its emulator', async () => {
     expect(mobileE2EAndroidArchitectureArguments()).toEqual([
       '-PreactNativeArchitectures=x86_64',
     ]);
@@ -1615,112 +1638,72 @@ describe('issue #32 exact synthetic drill data', () => {
       '-PreactNativeArchitectures=x86_64',
       'app:assembleDebug',
     ]);
-    const runner = await readFile(
-      new URL('run-ci.ts', import.meta.url),
-      'utf8',
-    );
+    const [runner, library, workflow] = await Promise.all([
+      readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
+      readFile(new URL('run-ci-lib.ts', import.meta.url), 'utf8'),
+      readFile(
+        new URL('../../../.github/workflows/mobile-e2e.yml', import.meta.url),
+        'utf8',
+      ),
+    ]);
     expect(runner).toMatch(
       /async function buildAndroidApp[\s\S]+\.\.\.mobileE2EAndroidBuildArguments\(\)/u,
     );
-    expect(runner).toMatch(
-      /async function injectAndroidNotification[\s\S]+\.\.\.mobileE2EAndroidArchitectureArguments\(\)[\s\S]+app:connectedDebugAndroidTest/u,
+    const androidBuild = runner.match(
+      /async function buildAndroidApp[\s\S]+?(?=function startMetro)/u,
+    )?.[0];
+    expect(androidBuild).toBeDefined();
+    expect(androidBuild).toContain(
+      'timeoutMilliseconds: ANDROID_APP_BUILD_TIMEOUT_MS',
     );
-    expect(runner).toMatch(
-      /ensureAndroidDevice\(suiteAndroidSerial\)[\s\S]+buildAndroidAppWithPausedEmulator\([\s\S]+androidCredentialConfigured = true[\s\S]+configureAndroidCredential\(suiteAndroidSerial\)/u,
-    );
+    expect(androidBuild).toContain('killLinuxProcessTreeOnCompletion: true');
     expect(runner).toContain(
-      'const ANDROID_EMULATOR_CONTROL_TIMEOUT_MS = 30_000;',
+      'const ANDROID_APP_BUILD_TIMEOUT_MS = 60 * 60_000;',
     );
-  });
-
-  test('pauses only the exact Android emulator and always resumes it', async () => {
-    expect(
-      mobileE2EAndroidEmulatorControlArguments('emulator-5554', 'pause'),
-    ).toEqual(['adb', '-s', 'emulator-5554', 'emu', 'avd', 'pause']);
-    expect(
-      mobileE2EAndroidEmulatorControlArguments('emulator-5554', 'resume'),
-    ).toEqual(['adb', '-s', 'emulator-5554', 'emu', 'avd', 'resume']);
-    for (const invalidSerial of [
-      '',
-      'device',
-      '127.0.0.1:5555',
-      'emulator-*',
+    expect(runner).toContain('const NATIVE_BUILD_TIMEOUT_MS = 45 * 60_000;');
+    const commandRunner = runner.match(
+      /async function runCommand[\s\S]+?(?=function startManagedProcess)/u,
+    )?.[0];
+    expect(commandRunner).toBeDefined();
+    expect(commandRunner).toMatch(
+      /killLinuxProcessTreeOnCompletion === true &&\s+process\.platform === 'linux'/u,
+    );
+    expect(commandRunner).toMatch(
+      /detachedLinuxProcessGroup \? \{ detached: true \} : \{\}/u,
+    );
+    expect(commandRunner).toMatch(
+      /await terminateLinuxProcessGroup\(linuxProcessGroupId\);[\s\S]+Promise\.all\(\[stdoutPromise, stderrPromise\]\)/u,
+    );
+    const processGroupRetirement = runner.match(
+      /async function terminateLinuxProcessGroup[\s\S]+?(?=function commandText)/u,
+    )?.[0];
+    expect(processGroupRetirement).toBeDefined();
+    expect(processGroupRetirement).toContain("'SIGTERM'");
+    expect(processGroupRetirement).toContain("'SIGKILL'");
+    expect(runner).toContain('process.kill(-processGroupId, signal)');
+    expect(runner).toMatch(
+      /async function injectAndroidNotification[\s\S]+\.\.\.mobileE2EAndroidArchitectureArguments\(\)[\s\S]+app:connectedDebugAndroidTest[\s\S]+killLinuxProcessTreeOnCompletion: true/u,
+    );
+    expect(runner).toMatch(
+      /ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+const apkPath = await buildAndroidApp\(paths, artifacts\.root\);[\s\S]+androidCredentialConfigured = true[\s\S]+configureAndroidCredential\(suiteAndroidSerial\)/u,
+    );
+    for (const forbidden of [
+      'buildAndroidAppWithPausedEmulator',
+      'ANDROID_EMULATOR_CONTROL_TIMEOUT_MS',
+      "'emu', 'avd', 'pause'",
+      'mobileE2EAndroidEmulatorControlArguments',
+      'withMobileE2EAndroidEmulatorPaused',
     ]) {
-      expect(() =>
-        mobileE2EAndroidEmulatorControlArguments(invalidSerial, 'pause'),
-      ).toThrow('exact local emulator serial');
+      expect(`${runner}\n${library}`).not.toContain(forbidden);
     }
-
-    const successOrder: string[] = [];
-    await expect(
-      withMobileE2EAndroidEmulatorPaused(
-        'emulator-5554',
-        async () => {
-          successOrder.push('build');
-          return 'synthetic-apk';
-        },
-        async (command) => {
-          successOrder.push(command.at(-1) ?? 'missing');
-        },
-      ),
-    ).resolves.toBe('synthetic-apk');
-    expect(successOrder).toEqual(['pause', 'build', 'resume']);
-
-    const buildFailure = new Error('synthetic build failure');
-    const resumeFailure = new Error('synthetic resume failure');
-    const failureOrder: string[] = [];
-    const failure = withMobileE2EAndroidEmulatorPaused(
-      'emulator-5554',
-      async () => {
-        failureOrder.push('build');
-        throw buildFailure;
-      },
-      async (command) => {
-        const action = command.at(-1) ?? 'missing';
-        failureOrder.push(action);
-        if (action === 'resume') throw resumeFailure;
-      },
+    const iosJob = workflow.match(/ {2}ios:\n[\s\S]+?(?=\n {2}android:)/u)?.[0];
+    const androidJob = workflow.match(/ {2}android:\n[\s\S]+/u)?.[0];
+    expect(iosJob).toContain('timeout-minutes: 90');
+    expect(androidJob).toContain('timeout-minutes: 150');
+    expect(androidJob).toMatch(
+      /- name: Run the synthetic Android Maestro suite\n {8}timeout-minutes: 140\n {8}uses:/u,
     );
-    await expect(failure).rejects.toMatchObject({
-      message:
-        'The Android native operation failed and its emulator could not resume.',
-      errors: [buildFailure, resumeFailure],
-    });
-    expect(failureOrder).toEqual(['pause', 'build', 'resume']);
-
-    const uncertainPause = new Error('synthetic lost pause response');
-    const pauseRecoveryOrder: string[] = [];
-    const pauseRecovery = withMobileE2EAndroidEmulatorPaused(
-      'emulator-5554',
-      async () => {
-        pauseRecoveryOrder.push('build');
-      },
-      async (command) => {
-        const action = command.at(-1) ?? 'missing';
-        pauseRecoveryOrder.push(action);
-        if (action === 'pause') throw uncertainPause;
-      },
-    );
-    await expect(pauseRecovery).rejects.toBe(uncertainPause);
-    expect(pauseRecoveryOrder).toEqual(['pause', 'resume']);
-
-    const lostResume = new Error('synthetic lost recovery response');
-    await expect(
-      withMobileE2EAndroidEmulatorPaused(
-        'emulator-5554',
-        async () => {
-          throw new Error('operation must not run after an uncertain pause');
-        },
-        async (command) => {
-          if (command.at(-1) === 'pause') throw uncertainPause;
-          throw lostResume;
-        },
-      ),
-    ).rejects.toMatchObject({
-      message:
-        'The Android emulator pause was uncertain and its recovery resume failed.',
-      errors: [uncertainPause, lostResume],
-    });
+    expect(androidJob).toContain('cores: 1');
   });
 
   test('starts Expo on loopback without incompatible offline mode', () => {
@@ -1979,7 +1962,7 @@ describe('issue #32 exact synthetic drill data', () => {
       '`ios-direct-launch-${metroPort}-failure-hierarchy.txt`',
     );
     expect(runner).toMatch(
-      /const appPath = await buildIosApp[\s\S]+const iosDriverSession = await warmIosMaestroDriver\([\s\S]+const fixtureLaunchHierarchy = await installAndOpenIosBundle/u,
+      /const appPath = await buildIosApp[\s\S]+iosDriverSession = await warmIosMaestroDriver\([\s\S]+const fixtureLaunchHierarchy = await installAndOpenIosBundle/u,
     );
     expect(runner).toMatch(
       /async function warmIosMaestroDriver[\s\S]+timeoutMilliseconds: RUNTIME_TIMEOUT_MS/u,
@@ -2006,6 +1989,26 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(runner).toMatch(
       /iosDriverPort = await reserveLoopbackPort\(\);\s+iosDriverSession\.currentPort = iosDriverPort/u,
     );
+    const flowStarter = runner.match(
+      /async function startMaestroFlow[\s\S]+?(?=async function awaitMaestroFlow)/u,
+    )?.[0];
+    expect(flowStarter).toBeDefined();
+    expect(flowStarter).toMatch(
+      /await retireIosMaestroDriverOwners\([\s\S]+iosDriverPort = await reserveLoopbackPort\(\);\s+iosDriverSession\.currentPort = iosDriverPort/u,
+    );
+    const driverRetirement = runner.match(
+      /async function retireIosMaestroDriverOwners[\s\S]+?(?=async function runCommand)/u,
+    )?.[0];
+    expect(driverRetirement).toBeDefined();
+    expect(driverRetirement).toContain(
+      "['ps', '-ww', '-axo', 'pid=,command=']",
+    );
+    expect(driverRetirement).toContain('mobileE2EOwnedIosMaestroDriverPids');
+    expect(driverRetirement).toContain(
+      "'dev.mobile.maestro-driver-iosUITests.xctrunner'",
+    );
+    expect(driverRetirement).toContain('loopbackPortIsAvailable(previousPort)');
+    expect(driverRetirement).not.toMatch(/\bpkill\b|\bkillall\b/u);
     expect(runner).not.toContain('22087');
     expect(runner).toContain("flowName === 'start-synthetic-drill-ios'");
     const retryResponder = runner.match(

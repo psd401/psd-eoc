@@ -960,79 +960,6 @@ export function mobileE2EAndroidBuildArguments(): readonly string[] {
   ]);
 }
 
-export function mobileE2EAndroidEmulatorControlArguments(
-  serial: string,
-  action: 'pause' | 'resume',
-): readonly string[] {
-  if (!/^emulator-\d+$/u.test(serial)) {
-    throw new Error(
-      'Android emulator control requires one exact local emulator serial.',
-    );
-  }
-  return Object.freeze(['adb', '-s', serial, 'emu', 'avd', action]);
-}
-
-/**
- * Frees the constrained hosted runner's CPUs for a cold native build while
- * guaranteeing that cleanup can still reach the exact validated emulator.
- */
-export async function withMobileE2EAndroidEmulatorPaused<T>(
-  serial: string,
-  operation: () => Promise<T>,
-  control: (command: readonly string[]) => Promise<void>,
-): Promise<T> {
-  const pauseCommand = mobileE2EAndroidEmulatorControlArguments(
-    serial,
-    'pause',
-  );
-  const resumeCommand = mobileE2EAndroidEmulatorControlArguments(
-    serial,
-    'resume',
-  );
-  let pauseFailure: Readonly<{ error: unknown }> | undefined;
-  try {
-    await control(pauseCommand);
-  } catch (error) {
-    pauseFailure = { error };
-  }
-  if (pauseFailure !== undefined) {
-    try {
-      await control(resumeCommand);
-    } catch (resumeError) {
-      throw new AggregateError(
-        [pauseFailure.error, resumeError],
-        'The Android emulator pause was uncertain and its recovery resume failed.',
-      );
-    }
-    throw pauseFailure.error;
-  }
-
-  let result: T | undefined;
-  let operationFailure: Readonly<{ error: unknown }> | undefined;
-  try {
-    result = await operation();
-  } catch (error) {
-    operationFailure = { error };
-  }
-
-  let resumeFailure: Readonly<{ error: unknown }> | undefined;
-  try {
-    await control(resumeCommand);
-  } catch (error) {
-    resumeFailure = { error };
-  }
-
-  if (operationFailure !== undefined && resumeFailure !== undefined) {
-    throw new AggregateError(
-      [operationFailure.error, resumeFailure.error],
-      'The Android native operation failed and its emulator could not resume.',
-    );
-  }
-  if (operationFailure !== undefined) throw operationFailure.error;
-  if (resumeFailure !== undefined) throw resumeFailure.error;
-  return result as T;
-}
-
 export function mobileE2EDevClientUrl(port: number): string {
   const metroOrigin = mobileE2ELoopbackMetroOrigin(port);
   return `psdeoc://expo-development-client/?url=${encodeURIComponent(metroOrigin)}`;
@@ -1101,6 +1028,44 @@ export function mobileE2EMaestroDriverPortArguments(
     );
   }
   return Object.freeze(['--driver-host-port', String(port)]);
+}
+
+/**
+ * Selects only Maestro xcodebuild owners for one issue-owned simulator.
+ *
+ * Maestro's CLI can exit while its xcodebuild owner remains alive. A later
+ * owner then competes for the singleton XCTest runner and can relaunch it on
+ * a stale port. The simulator UDID and exact Maestro xctestrun file keep this
+ * retirement boundary from matching unrelated builds on a shared host.
+ */
+export function mobileE2EOwnedIosMaestroDriverPids(
+  processSnapshot: string,
+  deviceId: string,
+): readonly number[] {
+  if (!IOS_SIMULATOR_UDID_PATTERN.test(deviceId)) {
+    throw new Error('The iOS simulator UDID is invalid.');
+  }
+  const destination = `id=${deviceId}`;
+  const processIds = new Set<number>();
+  for (const line of processSnapshot.split(/\r?\n/u)) {
+    const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
+    if (match === null) continue;
+    const processId = Number(match[1]);
+    const command = match[2] ?? '';
+    if (
+      !Number.isSafeInteger(processId) ||
+      processId <= 1 ||
+      !command.includes('xcodebuild') ||
+      !command.includes('test-without-building') ||
+      !command.includes('/maestro-driver-ios-config.xctestrun') ||
+      !command.includes('-destination') ||
+      !command.includes(destination)
+    ) {
+      continue;
+    }
+    processIds.add(processId);
+  }
+  return Object.freeze([...processIds].sort((left, right) => left - right));
 }
 
 /** Keeps Metro loopback-only without combining Expo's incompatible flags. */

@@ -157,7 +157,7 @@ jobs:
   android:
     name: Maestro Android (synthetic only)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     services:
       postgres:
         image: postgres:16-alpine
@@ -247,6 +247,7 @@ jobs:
           df -h /
 
       - name: Run the synthetic Android Maestro suite
+        timeout-minutes: 140
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: 36

@@ -39,6 +39,7 @@ import {
   mobileE2ELoopbackMetroEnvironment,
   mobileE2EMaestroDriverPortArguments,
   mobileE2EMaestroDriverReuseArguments,
+  mobileE2EOwnedIosMaestroDriverPids,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
   isMobileE2EAndroidApplicationForeground,
@@ -54,7 +55,6 @@ import {
   requireMatchingMobileE2ERunIds,
   selectMobileE2EIosRuntimeAndDeviceType,
   shouldCopyMobileE2EWorkspaceSource,
-  withMobileE2EAndroidEmulatorPaused,
   type MobileE2EArtifactPaths,
   type MobileE2EPlatform,
   type MobileE2ERunnerPaths,
@@ -75,9 +75,11 @@ const androidInitScriptRelativePath =
   'e2e/android/issue-32.init.gradle' as const;
 const COMMAND_TIMEOUT_MS = 30 * 60_000;
 const NATIVE_BUILD_TIMEOUT_MS = 45 * 60_000;
+const ANDROID_APP_BUILD_TIMEOUT_MS = 60 * 60_000;
 const RUNTIME_TIMEOUT_MS = 4 * 60_000;
 const METRO_TIMEOUT_MS = 4 * 60_000;
 const PROCESS_TERMINATION_GRACE_MS = 15_000;
+const IOS_DRIVER_RETIREMENT_TIMEOUT_MS = 30_000;
 const RETRY_INTERVAL_MS = 500;
 const IOS_NOTIFICATION_SWIPE_ACTION_TIMEOUT_MS = 5_000;
 const IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS = 30_000;
@@ -86,7 +88,6 @@ const IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000;
 const IOS_AUTH_RETRY_VISION_TIMEOUT_MS = 60_000;
 const IOS_AUTH_RETRY_VISION_INTERVAL_MS = 250;
 const MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS = 30_000;
-const ANDROID_EMULATOR_CONTROL_TIMEOUT_MS = 30_000;
 const IOS_BUNDLE_RELATIVE_PATH =
   'ios/build/Build/Products/Debug-iphonesimulator/PSDEOC.app';
 const ANDROID_APK_RELATIVE_PATH =
@@ -97,7 +98,16 @@ const METRO_STATUS = 'packager-status:running';
 
 type BunChild = ReturnType<typeof Bun.spawn>;
 const activeChildren = new Set<BunChild>();
+const activeLinuxProcessGroups = new Set<number>();
 let androidHierarchySequence = 0;
+
+type MobileE2ESpawnOptions = Bun.SpawnOptions.OptionsObject<
+  undefined,
+  'pipe',
+  'pipe'
+> & {
+  readonly detached?: boolean;
+};
 
 interface CommandOptions {
   readonly cwd?: string;
@@ -106,6 +116,7 @@ interface CommandOptions {
   readonly logPath?: string;
   readonly allowFailure?: boolean;
   readonly quiet?: boolean;
+  readonly killLinuxProcessTreeOnCompletion?: boolean;
 }
 
 interface CommandResult {
@@ -166,6 +177,9 @@ class MobileE2ECancellation {
         if (this.signal === undefined) {
           this.signal = signal;
         }
+        for (const processGroupId of activeLinuxProcessGroups) {
+          signalLinuxProcessGroup(processGroupId, 'SIGTERM');
+        }
         for (const child of activeChildren) {
           if (child.exitCode === null) child.kill('SIGTERM');
         }
@@ -192,6 +206,63 @@ function trackChild(child: BunChild): BunChild {
   activeChildren.add(child);
   void child.exited.then(() => activeChildren.delete(child));
   return child;
+}
+
+function isMissingProcess(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'ESRCH'
+  );
+}
+
+function signalLinuxProcessGroup(
+  processGroupId: number,
+  signal: NodeJS.Signals | 0,
+): boolean {
+  try {
+    process.kill(-processGroupId, signal);
+    return true;
+  } catch (error) {
+    if (isMissingProcess(error)) return false;
+    throw error;
+  }
+}
+
+async function waitForLinuxProcessGroupExit(
+  processGroupId: number,
+  timeoutMilliseconds: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (Date.now() < deadline) {
+    if (!signalLinuxProcessGroup(processGroupId, 0)) return true;
+    await Bun.sleep(RETRY_INTERVAL_MS);
+  }
+  return !signalLinuxProcessGroup(processGroupId, 0);
+}
+
+async function terminateLinuxProcessGroup(
+  processGroupId: number,
+): Promise<void> {
+  if (!signalLinuxProcessGroup(processGroupId, 'SIGTERM')) return;
+  if (
+    await waitForLinuxProcessGroupExit(
+      processGroupId,
+      PROCESS_TERMINATION_GRACE_MS,
+    )
+  ) {
+    return;
+  }
+  signalLinuxProcessGroup(processGroupId, 'SIGKILL');
+  if (
+    !(await waitForLinuxProcessGroupExit(
+      processGroupId,
+      PROCESS_TERMINATION_GRACE_MS,
+    ))
+  ) {
+    throw new Error('The owned Linux process group did not terminate.');
+  }
 }
 
 function commandText(command: readonly string[]): string {
@@ -295,19 +366,145 @@ async function terminateProcess(child: BunChild): Promise<void> {
   }
 }
 
+function signalOwnedProcess(
+  processId: number,
+  signal: NodeJS.Signals | 0,
+): boolean {
+  try {
+    process.kill(processId, signal);
+    return true;
+  } catch (error) {
+    if (isMissingProcess(error)) return false;
+    throw error;
+  }
+}
+
+async function waitForOwnedProcesses(
+  processIds: readonly number[],
+  timeoutMilliseconds: number,
+): Promise<readonly number[]> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let remaining = processIds.filter((processId) =>
+    signalOwnedProcess(processId, 0),
+  );
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await Bun.sleep(RETRY_INTERVAL_MS);
+    remaining = remaining.filter((processId) =>
+      signalOwnedProcess(processId, 0),
+    );
+  }
+  return Object.freeze(remaining);
+}
+
+async function loopbackPortIsAvailable(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolveAvailability, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      server.close();
+      if (error.code === 'EADDRINUSE') resolveAvailability(false);
+      else reject(error);
+    });
+    server.listen(port, '127.0.0.1', () => {
+      server.close((error) => {
+        if (error !== undefined) reject(error);
+        else resolveAvailability(true);
+      });
+    });
+  });
+}
+
+async function retireIosMaestroDriverOwners(
+  deviceId: string,
+  driverSession: IosMaestroDriverSession,
+  artifactRoot: string,
+  artifactName: string,
+): Promise<void> {
+  const previousPort = driverSession.currentPort;
+  // Maestro can leave xcodebuild alive after its CLI exits. Target only the
+  // exact xctestrun owners bound to this suite-created simulator; a broad kill
+  // could interfere with unrelated Xcode work on a shared host.
+  const snapshot = await runCommand(['ps', '-ww', '-axo', 'pid=,command='], {
+    quiet: true,
+    timeoutMilliseconds: 20_000,
+  });
+  const processIds = mobileE2EOwnedIosMaestroDriverPids(
+    snapshot.stdout,
+    deviceId,
+  );
+  for (const processId of processIds) {
+    signalOwnedProcess(processId, 'SIGTERM');
+  }
+  let remaining = await waitForOwnedProcesses(
+    processIds,
+    PROCESS_TERMINATION_GRACE_MS,
+  );
+  if (remaining.length > 0) {
+    for (const processId of remaining) {
+      signalOwnedProcess(processId, 'SIGKILL');
+    }
+    remaining = await waitForOwnedProcesses(
+      remaining,
+      PROCESS_TERMINATION_GRACE_MS,
+    );
+  }
+  if (remaining.length > 0) {
+    throw new Error('An owned iOS Maestro driver process did not terminate.');
+  }
+
+  const runnerTermination = await runCommand(
+    [
+      'xcrun',
+      'simctl',
+      'terminate',
+      deviceId,
+      'dev.mobile.maestro-driver-iosUITests.xctrunner',
+    ],
+    { allowFailure: true, quiet: true, timeoutMilliseconds: 20_000 },
+  );
+  if (
+    runnerTermination.exitCode !== 0 &&
+    !/(?:no such process|not running|found nothing)/iu.test(
+      `${runnerTermination.stdout}\n${runnerTermination.stderr}`,
+    )
+  ) {
+    throw new Error('The owned iOS Maestro XCTest runner could not terminate.');
+  }
+
+  const deadline = Date.now() + IOS_DRIVER_RETIREMENT_TIMEOUT_MS;
+  while (!(await loopbackPortIsAvailable(previousPort))) {
+    if (Date.now() >= deadline) {
+      throw new Error('The retired iOS Maestro driver port remained occupied.');
+    }
+    await Bun.sleep(RETRY_INTERVAL_MS);
+  }
+  await writeFile(
+    resolve(artifactRoot, `ios-maestro-driver-retirement-${artifactName}.txt`),
+    `issue=32\nplatform=ios\nclassification=drill\nroster=synthetic\nproviders=mocked\npreviousPort=${previousPort}\nownerCount=${processIds.length}\nstatus=retired\n`,
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+}
+
 async function runCommand(
   command: readonly string[],
   options: CommandOptions = {},
 ): Promise<CommandResult> {
   const environment = options.environment ?? definedProcessEnvironment();
-  const child = trackChild(
-    Bun.spawn([...command], {
-      cwd: options.cwd ?? repositoryRoot,
-      env: environment,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    }),
-  );
+  const detachedLinuxProcessGroup =
+    options.killLinuxProcessTreeOnCompletion === true &&
+    process.platform === 'linux';
+  const spawnOptions: MobileE2ESpawnOptions = {
+    cwd: options.cwd ?? repositoryRoot,
+    env: environment,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    ...(detachedLinuxProcessGroup ? { detached: true } : {}),
+  };
+  const child = trackChild(Bun.spawn([...command], spawnOptions));
+  const linuxProcessGroupId = detachedLinuxProcessGroup ? child.pid : undefined;
+  if (linuxProcessGroupId !== undefined) {
+    activeLinuxProcessGroups.add(linuxProcessGroupId);
+  }
   if (
     !(child.stdout instanceof ReadableStream) ||
     !(child.stderr instanceof ReadableStream)
@@ -327,8 +524,19 @@ async function runCommand(
     }),
   ]);
   if (timer !== undefined) clearTimeout(timer);
-  if (outcome.kind === 'timeout') {
-    await terminateProcess(child);
+  try {
+    if (linuxProcessGroupId !== undefined) {
+      // A Gradle wrapper may exit or time out while descendants still own the
+      // captured pipes. Retire the exact detached group before collecting the
+      // transcript so cleanup and artifact upload remain bounded.
+      await terminateLinuxProcessGroup(linuxProcessGroupId);
+    } else if (outcome.kind === 'timeout') {
+      await terminateProcess(child);
+    }
+  } finally {
+    if (linuxProcessGroupId !== undefined) {
+      activeLinuxProcessGroups.delete(linuxProcessGroupId);
+    }
   }
   const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
   const exitCode = outcome.kind === 'exit' ? outcome.exitCode : 124;
@@ -859,8 +1067,9 @@ async function buildAndroidApp(
       environment: mobileE2EFixtureMetroEnvironment(
         definedProcessEnvironment(),
       ),
-      timeoutMilliseconds: NATIVE_BUILD_TIMEOUT_MS,
+      timeoutMilliseconds: ANDROID_APP_BUILD_TIMEOUT_MS,
       logPath: resolve(artifactRoot, 'android-build.log'),
+      killLinuxProcessTreeOnCompletion: true,
     },
   );
   const apkPath = resolve(paths.copiedMobile, ANDROID_APK_RELATIVE_PATH);
@@ -868,32 +1077,6 @@ async function buildAndroidApp(
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error('The Android build did not produce the expected APK.');
   }
-  return apkPath;
-}
-
-async function buildAndroidAppWithPausedEmulator(
-  serial: string,
-  paths: MobileE2ERunnerPaths,
-  artifactRoot: string,
-): Promise<string> {
-  const apkPath = await withMobileE2EAndroidEmulatorPaused(
-    serial,
-    () => buildAndroidApp(paths, artifactRoot),
-    async (command) => {
-      const action = command.at(-1);
-      if (action !== 'pause' && action !== 'resume') {
-        throw new Error('The Android emulator control action is invalid.');
-      }
-      await runCommand(command, {
-        timeoutMilliseconds: ANDROID_EMULATOR_CONTROL_TIMEOUT_MS,
-        logPath: resolve(
-          artifactRoot,
-          `android-emulator-${action}-for-build.log`,
-        ),
-      });
-    },
-  );
-  await ensureAndroidDevice(serial);
   return apkPath;
 }
 
@@ -1621,6 +1804,12 @@ async function startMaestroFlow(
     if (iosDriverSession === undefined) {
       throw new Error('The tracked iOS Maestro driver session is missing.');
     }
+    await retireIosMaestroDriverOwners(
+      deviceId,
+      iosDriverSession,
+      artifactRoot,
+      artifactName,
+    );
     // Maestro 2.7 refuses to start `test` on an occupied explicit port. Give
     // each flow a fresh port, then retain that exact runner for any hierarchy
     // observation that follows the flow (especially secure-sheet evidence).
@@ -2402,6 +2591,7 @@ async function injectAndroidNotification(
       },
       timeoutMilliseconds: NATIVE_BUILD_TIMEOUT_MS,
       logPath: resolve(artifactRoot, 'android-provider-free-injection.log'),
+      killLinuxProcessTreeOnCompletion: true,
     },
   );
   const activityState = await runCommand(
@@ -2481,6 +2671,7 @@ async function runPlatformSuite(
   let fixtureMetro: ManagedProcess | undefined;
   let normalMetro: ManagedProcess | undefined;
   let iosDevice: IosDevice | undefined;
+  let iosDriverSession: IosMaestroDriverSession | undefined;
   let applesimutils: string | undefined;
   let androidSerial: string | undefined;
   let androidCredentialConfigured = false;
@@ -2504,7 +2695,7 @@ async function runPlatformSuite(
         'YES',
       ]);
       const appPath = await buildIosApp(paths, artifacts.root, iosDevice);
-      const iosDriverSession = await warmIosMaestroDriver(
+      iosDriverSession = await warmIosMaestroDriver(
         iosDevice.udid,
         artifacts.root,
       );
@@ -2665,11 +2856,7 @@ async function runPlatformSuite(
       androidSerial = suiteAndroidSerial;
       await ensureAndroidDevice(suiteAndroidSerial);
       androidPackagesWereAbsent = true;
-      const apkPath = await buildAndroidAppWithPausedEmulator(
-        suiteAndroidSerial,
-        paths,
-        artifacts.root,
-      );
+      const apkPath = await buildAndroidApp(paths, artifacts.root);
       // Claim cleanup before the mutating command so a lost adb response
       // cannot leave the suite's synthetic PIN behind on the emulator.
       androidCredentialConfigured = true;
@@ -2777,6 +2964,14 @@ async function runPlatformSuite(
         cleanupFailures.push(cleanupError),
       );
     }
+    if (iosDevice !== undefined && iosDriverSession !== undefined) {
+      await retireIosMaestroDriverOwners(
+        iosDevice.udid,
+        iosDriverSession,
+        artifacts.root,
+        'suite-failure-cleanup',
+      ).catch((cleanupError: unknown) => cleanupFailures.push(cleanupError));
+    }
     if (iosDevice !== undefined) {
       await deleteIosDevice(iosDevice).catch((cleanupError: unknown) =>
         cleanupFailures.push(cleanupError),
@@ -2810,6 +3005,14 @@ async function runPlatformSuite(
       await stopManagedProcess(normalMetro).catch((error: unknown) =>
         failures.push(error),
       );
+    }
+    if (iosDevice !== undefined && iosDriverSession !== undefined) {
+      await retireIosMaestroDriverOwners(
+        iosDevice.udid,
+        iosDriverSession,
+        artifacts.root,
+        'suite-cleanup',
+      ).catch((error: unknown) => failures.push(error));
     }
     if (iosDevice !== undefined) {
       await deleteIosDevice(iosDevice).catch((error: unknown) =>
