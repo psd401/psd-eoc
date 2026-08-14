@@ -218,6 +218,12 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain('Never use `--latest`, `--auto-submit`');
 
     expect(release).toContain('walkthrough not recorded');
+    expect(compactRelease).toContain(
+      'current SVGs are illustrated advance references, not provider screenshots',
+    );
+    expect(compactRelease).toContain(
+      'Do not fabricate or relabel an illustration as provider evidence',
+    );
     expect(release).toContain('product-owner sign-off not recorded');
     expect(release).toContain('Google identity review is pending');
     expect(release).toContain(
@@ -399,8 +405,31 @@ describe('mobile distribution configuration', () => {
     ];
 
     for (const guide of guides) {
-      const compactGuide = guide.replace(/\s+/gu, ' ');
+      const compactGuide = guide.replace(/^>\s?/gmu, '').replace(/\s+/gu, ' ');
       expect(guide).toContain('Do not start an incident or drill just to test');
+      expect(compactGuide).toContain(
+        'A push is **not required** to prove installation',
+      );
+      expect(compactGuide).toContain('authorizes installation only');
+      expect(compactGuide).toContain(
+        'approved bounded synthetic staff-context push-registration verification',
+      );
+      expect(compactGuide).toContain(
+        'stop after **Install** and do not open or sign in',
+      );
+      expect(compactGuide).toContain(
+        'may obtain a push token, contact Expo, and register the device with PSD EOC',
+      );
+      expect(compactGuide).toContain(
+        'Registration does not send a notification, but it does change provider and server registration state',
+      );
+      expect(compactGuide).toContain(
+        'complete these no-notification-send checks',
+      );
+      expect(guide).toContain(
+        '## Optional separately authorized synthetic push check',
+      );
+      expect(guide).toContain('Skip this section unless District Technology');
       expect(guide).toContain('Scheduling the window does not');
       expect(guide).toContain('authenticated human must freshly');
       expect(guide).toContain('not provider screenshots or install proof');
@@ -416,6 +445,15 @@ describe('mobile distribution configuration', () => {
       expect(compactGuide).toContain('conflicting markers');
       expect(compactGuide).toContain('uses real-incident wording');
       expect(compactGuide).toContain('generic wording such as **TEST ONLY**');
+      expect(compactGuide).toContain(
+        'opened event does not visibly say **DRILL — PRACTICE**',
+      );
+      expect(compactGuide).not.toContain(
+        'continues to show **`[DRILL]`** on the opened event content',
+      );
+      expect(guide.indexOf('## Verify the installation safely')).toBeLessThan(
+        guide.indexOf('## Optional separately authorized synthetic push check'),
+      );
     }
     expect(guides[0]).toContain('Time Sensitive Notifications');
     expect(guides[0]).toContain('does **not** have');
@@ -435,5 +473,12 @@ describe('mobile distribution configuration', () => {
       expect(svg).toContain('<desc');
       expect(guides.some((guide) => guide.includes(asset))).toBe(true);
     }
+
+    const iosInstallAsset = repositoryText(
+      'docs/guides/assets/issue-33/ios-testflight-install.svg',
+    );
+    expect(iosInstallAsset).toContain(
+      `>Version ${appConfig.expo.version}</text>`,
+    );
   });
 });
