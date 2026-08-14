@@ -107,6 +107,7 @@ import {
   SessionTokenIssuanceSchema,
   SessionTokenReplaySchema,
   SessionTokenRotationSchema,
+  StaffRosterEmailSchema,
   StaleRosterReportSchema,
   StartEventInputSchema,
   UpdateEventTypeDraftInputSchema,
@@ -3626,6 +3627,12 @@ describe('notification and outbox classification continuity', () => {
 });
 
 describe('roster, facility, and identity boundaries', () => {
+  const staffBuildingGroupRef = {
+    id: ids.group,
+    kind: 'google-group',
+    purpose: 'building',
+    facilityId: ids.facility,
+  } as const;
   const syntheticBuildingGroupRef = {
     id: ids.group,
     kind: 'synthetic',
@@ -3683,6 +3690,163 @@ describe('roster, facility, and identity boundaries', () => {
     syncStartedAt: times.created,
     capturedAt: times.activated,
   } as const;
+  const staffSnapshot = {
+    id: ids.roster,
+    version: 1,
+    population: 'staff',
+    complete: true,
+    sourceConfiguration: { id: ids.rosterConfiguration, version: 1 },
+    facilityIds: [ids.facility],
+    expectedSourceGroupRefs: [staffBuildingGroupRef],
+    sourceGroupRefs: [staffBuildingGroupRef],
+    recipients: [
+      {
+        id: ids.recipient,
+        population: 'staff',
+        googleSubject: 'verified-google-subject-one',
+        displayName: 'Staff One',
+        groupSourceRefs: [staffBuildingGroupRef],
+        endpoints: [],
+      },
+    ],
+    syncStartedAt: times.created,
+    capturedAt: times.activated,
+  } as const;
+
+  test('represents canonical staff email keys without inventing Google subjects', () => {
+    expect(RosterSnapshotSchema.safeParse(staffSnapshot).success).toBe(true);
+
+    const emailOnly = RosterSnapshotSchema.safeParse({
+      ...staffSnapshot,
+      recipients: [
+        {
+          ...staffSnapshot.recipients[0],
+          googleSubject: null,
+          staffEmail: '  STAFF.ONE@PSD401.NET  ',
+        },
+      ],
+    });
+    expect(emailOnly.success).toBe(true);
+    if (emailOnly.success) {
+      expect(emailOnly.data.recipients[0]?.googleSubject).toBeNull();
+      expect(emailOnly.data.recipients[0]?.staffEmail).toBe(
+        'staff.one@psd401.net',
+      );
+    }
+
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...staffSnapshot,
+        recipients: [
+          {
+            ...staffSnapshot.recipients[0],
+            staffEmail: 'staff.one@psd401.net',
+          },
+        ],
+      }).success,
+    ).toBe(true);
+  });
+
+  test('rejects missing, malformed, and cross-population staff identity keys', () => {
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...staffSnapshot,
+        recipients: [
+          {
+            ...staffSnapshot.recipients[0],
+            googleSubject: null,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...syntheticSnapshot,
+        recipients: [
+          {
+            ...syntheticSnapshot.recipients[0],
+            staffEmail: 'staff.one@psd401.net',
+          },
+        ],
+      }).success,
+    ).toBe(false);
+
+    for (const staffEmail of [
+      'not-an-email',
+      'staff.one@example.com',
+      'staff.one@evilpsd401.net',
+      'staff.one@psd401.net.example.com',
+      `${'a'.repeat(310)}@psd401.net`,
+    ]) {
+      expect(StaffRosterEmailSchema.safeParse(staffEmail).success).toBe(false);
+    }
+  });
+
+  test('rejects duplicate and ambiguous staff identity bindings', () => {
+    const firstRecipient = {
+      ...staffSnapshot.recipients[0],
+      staffEmail: 'staff.one@psd401.net',
+    } as const;
+    const secondRecipient = {
+      ...firstRecipient,
+      id: ids.secondRecipient,
+      googleSubject: 'verified-google-subject-two',
+      staffEmail: 'staff.two@psd401.net',
+      displayName: 'Staff Two',
+    } as const;
+
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...staffSnapshot,
+        recipients: [firstRecipient, secondRecipient],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...staffSnapshot,
+        recipients: [
+          firstRecipient,
+          {
+            ...secondRecipient,
+            googleSubject: firstRecipient.googleSubject,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+
+    expect(
+      RosterSnapshotSchema.safeParse({
+        ...staffSnapshot,
+        recipients: [
+          firstRecipient,
+          {
+            ...secondRecipient,
+            staffEmail: '  STAFF.ONE@PSD401.NET  ',
+          },
+        ],
+      }).success,
+    ).toBe(false);
+
+    for (const ambiguousSecondRecipient of [
+      {
+        ...secondRecipient,
+        googleSubject: firstRecipient.googleSubject,
+      },
+      {
+        ...secondRecipient,
+        staffEmail: firstRecipient.staffEmail,
+      },
+    ]) {
+      expect(
+        RosterSnapshotSchema.safeParse({
+          ...staffSnapshot,
+          recipients: [firstRecipient, ambiguousSecondRecipient],
+        }).success,
+      ).toBe(false);
+    }
+  });
 
   test('pins neighborhood versions and rejects another building', () => {
     const valid = {
