@@ -206,13 +206,32 @@ FOR PLAY UPLOAD, TESTER EXPOSURE, OR INSTALLATION**:
 No Play upload, OTA publication, or physical installation of that artifact is
 verified. Superseding it is preventive, not evidence of a live incident.
 
-The replacement Android build is expected to advance remote version code
-`2` to `3` only if a fresh EAS read-back immediately before BUILD still proves
-`2`. Until the post-build read-back exists, record version code `3` as
-`EXPECTED — NOT PROVEN`, never as an artifact identity. The iOS build number is
-likewise whatever a fresh remote read-back and approved transition establish.
-Prior approval for source `577cd741...`, version 1.0.0, or code 2 does not
-authorize the replacement.
+The one approved replacement Android BUILD completed and was independently
+read back on 2026-08-14:
+
+- EAS build: `3742b81d-3942-4fea-b760-53c809d8733f`
+- source: `71e08fa8358f6890e5419289b163aaa0fb0af081`
+- EAS status/profile: `FINISHED` / `production` store distribution
+- application/runtime version: `1.0.1` / `1.0.1`
+- version code: `3`; the remote counter read back `2` before and `3` after
+- downloaded AAB size: `75,885,084` bytes
+- AAB SHA-256:
+  `915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246`
+- build-credential configuration: `V0WhYOyuIx` (default), JKS SHA-256
+  `6F:BE:1D:D8:4C:85:B1:FB:AC:DD:39:92:57:D4:8C:4C:05:29:61:67:16:BF:24:85:5D:42:97:16:02:98:C4:C9`
+- EAS usage changed from 4/30 total and 3/15 Android before the sole build to
+  5/30 total and 4/15 Android afterward; current estimated total cost is `$0`
+
+The private downloaded copy passed ZIP integrity verification. Its signing
+block verified and its certificate matched the reviewed default-keystore
+fingerprint above. Embedded `app.config` proves package `net.psd401.eoc`,
+app/runtime 1.0.1, disabled/`NEVER` updates, the embedded-update fallback, and
+no update URL; the embedded bundle contains the approved
+`https://eoc.psd401.net` API origin. This is BUILD evidence only. The AAB has
+not been uploaded to Play, made installable, exposed to a tester, or installed
+on a physical device. Its first Play upload remains a separate issue #37 write
+with a fresh consequence preview and approval. The iOS build number is likewise
+whatever a fresh remote read-back and approved transition establish.
 
 ## 3. Version/build automation and commands
 
@@ -363,13 +382,20 @@ consequences.
 
 ## 6. iOS — TestFlight internal distribution
 
-The committed `submit.production.ios` object is intentionally empty and blocks
-non-interactive submission. It does not prove credentials, an app record, or a
-finished iOS build. No `.p8` path, tester group, Apple ID, or secret belongs in
-`eas.json`.
+The committed `submit.production.ios` object pins only verified App Store
+Connect app ID `6801607849`. It does not prove credentials, an App Store
+provisioning profile, a finished iOS build, or submission authority. No `.p8`
+path, tester group, Apple login, issuer, key, or secret belongs in `eas.json`.
 
-1. Follow [the App Store runbook](appstore-setup.md) to human-create and verify
-   the `net.psd401.eoc` record and review the numeric `ascAppId` into config.
+The App Store Connect record was read back on 2026-08-14 in provider `372148`:
+name `PSD EOC`, bundle ID `net.psd401.eoc`, SKU `PSD-EOC-IOS`, primary language
+English (U.S.) / `en-US`, and initial iOS version scaffold `1.0`. User Access is
+Limited Access with zero new app-specific grants. TestFlight is empty. No API
+credential, App Store provisioning profile, iOS production build, group,
+tester, invitation, upload, or installation was created by that operation.
+
+1. Follow [the App Store runbook](appstore-setup.md) to read back the existing
+   record and the numeric `ascAppId` immediately before any later write.
 2. Confirm automatic distribution is disabled for every PSD EOC group.
 3. After a separate SUBMIT preview and approval, upload only the exact build:
 
@@ -388,9 +414,11 @@ finished iOS build. No `.p8` path, tester group, Apple ID, or secret belongs in
 
 ## 7. Android — Play alpha closed testing
 
-The prior v1.0.0/code-2 AAB is prohibited by section 2. Only a reviewed v1.0.1
-replacement artifact that passes the full gate and exact BUILD read-back may be
-used for Play bootstrap.
+The prior v1.0.0/code-2 AAB is prohibited by section 2. The exact reviewed
+v1.0.1/code-3 replacement in section 2 is the only current candidate for Play
+bootstrap. Its finished EAS state, digest, embedded-only policy, and upload-key
+fingerprint must be re-read immediately before any separately authorized
+provider write.
 
 The first eligible AAB is uploaded manually in Play Console under issue #37.
 After first-upload, app-signing, closed tester group, and release-scoped service
@@ -510,8 +538,12 @@ cannot replace them.
 
 ### iOS internal TestFlight install
 
-- Status: **BLOCKED — no verified App Store Connect record, finished iOS
-  v1.0.1 production build, group assignment, or human install evidence**
+- Status: **BLOCKED — no finished iOS v1.0.1 production build, group
+  assignment, or human install evidence**
+- App record read-back: provider `372148`, Apple ID `6801607849`, name
+  `PSD EOC`, bundle ID `net.psd401.eoc`, SKU `PSD-EOC-IOS`, `en-US`, initial
+  version `1.0`, Limited Access with zero new app-specific grants; TestFlight
+  contains no build, group assignment, tester, or invitation
 - Exact EAS build ID and artifact digest: `BLOCKED`
 - Exact App Store Connect build ID/version/build number: `BLOCKED`
 - `District Technology` group read-back: `BLOCKED`
@@ -521,16 +553,20 @@ cannot replace them.
 
 ### Android Play alpha install
 
-- Status: **BLOCKED — Google identity review is pending; app creation, eligible
-  v1.0.1 upload, release, and human install evidence do not exist**
+- Status: **BLOCKED — Google identity review is pending; app creation, AAB
+  upload, release, and human install evidence do not exist**
 - Play account read-back: organization and representative documents submitted
   2026-08-14; phone verification and app creation locked pending Google review
 - Superseded v1.0.0 build evidence: EAS
   `856e54b5-9abd-45a5-b0db-809a295da5ef`, source `577cd741...`, code `2`, AAB
   SHA-256 `015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463`;
   **not eligible for upload or install**
-- Eligible v1.0.1 replacement EAS build ID/version code/digest: `BLOCKED`
-  (`3` is expected only if the fresh pre-build counter still proves `2`)
+- Eligible v1.0.1 replacement BUILD evidence: EAS
+  `3742b81d-3942-4fea-b760-53c809d8733f`, source
+  `71e08fa8358f6890e5419289b163aaa0fb0af081`, version code `3`, AAB SHA-256
+  `915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246`;
+  no Play upload, release, tester exposure, or installation is authorized or
+  verified
 - Play `alpha` release and tester-group digest/count read-back: `BLOCKED`
 - Section 4 embedded-only diagnostic read-back: `BLOCKED`
 - Physical device/OS and Play-install timestamp: `BLOCKED`
