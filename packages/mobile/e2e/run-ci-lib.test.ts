@@ -1763,6 +1763,21 @@ describe('issue #32 exact synthetic drill data', () => {
     );
     expect(androidCiRunner).toContain("readonly emulator_port='5554'");
     expect(androidCiRunner).toContain("readonly suite_timeout='120m'");
+    expect(androidCiRunner).toContain(
+      'sdkmanager_bin="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"',
+    );
+    expect(androidCiRunner).toContain(
+      'avdmanager_bin="${ANDROID_HOME}/cmdline-tools/latest/bin/avdmanager"',
+    );
+    expect(androidCiRunner).toContain(
+      'adb_bin="${ANDROID_HOME}/platform-tools/adb"',
+    );
+    expect(androidCiRunner).not.toMatch(
+      /command -v (?:sdkmanager|avdmanager|adb)/u,
+    );
+    expect(androidCiRunner).toContain('command -v timeout || true');
+    expect(androidCiRunner).toContain('command -v setsid || true');
+    expect(androidCiRunner).toContain('command -v bun || true');
     expect(androidCiRunner).toContain('hw.cpu.ncore=1');
     expect(androidCiRunner).toContain('hw.keyboard=yes');
     expect(androidCiRunner).toContain('export ANDROID_USER_HOME=');

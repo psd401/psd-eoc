@@ -26,12 +26,12 @@ artifact_dir="${PSD_EOC_MOBILE_E2E_ARTIFACT_DIR:-}"
 [[ "$artifact_dir" = "${RUNNER_TEMP}/"* ]] || fail 'the artifact directory must be inside RUNNER_TEMP.'
 [[ -d "$artifact_dir" && ! -L "$artifact_dir" ]] || fail 'the artifact directory must be a regular directory.'
 
-sdkmanager_bin="$(command -v sdkmanager)"
-avdmanager_bin="$(command -v avdmanager)"
-adb_bin="$(command -v adb)"
-timeout_bin="$(command -v timeout)"
-setsid_bin="$(command -v setsid)"
-bun_bin="$(command -v bun)"
+sdkmanager_bin="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+avdmanager_bin="${ANDROID_HOME}/cmdline-tools/latest/bin/avdmanager"
+adb_bin="${ANDROID_HOME}/platform-tools/adb"
+timeout_bin="$(command -v timeout || true)"
+setsid_bin="$(command -v setsid || true)"
+bun_bin="$(command -v bun || true)"
 for required_bin in \
   "$sdkmanager_bin" \
   "$avdmanager_bin" \
