@@ -22,6 +22,7 @@ import {
   createMobileE2ERunId,
   mobileE2EAndroidArchitectureArguments,
   mobileE2EAndroidBuildArguments,
+  mobileE2ECompletionMarkerFilename,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EDevClientUrl,
   mobileE2EEnrollmentWarmupRequest,
@@ -3146,9 +3147,17 @@ async function main(): Promise<void> {
         'Issue #32 mobile E2E failed and cleaned up fail-closed.',
       );
     }
+    const completionMarkerFilename = mobileE2ECompletionMarkerFilename(
+      platform,
+      process.env.PSD_EOC_ANDROID_EMULATOR_COMPLETION_DEFERRED,
+    );
+    const completionStatus =
+      completionMarkerFilename === 'complete.txt'
+        ? 'passed'
+        : 'suite-passed-awaiting-emulator-cleanup';
     await writeFile(
-      resolve(artifacts.root, 'complete.txt'),
-      `issue=32\nplatform=${platform}\nclassification=drill\nroster=synthetic\nproviders=mocked\nstatus=passed\n`,
+      resolve(artifacts.root, completionMarkerFilename),
+      `issue=32\nplatform=${platform}\nclassification=drill\nroster=synthetic\nproviders=mocked\nstatus=${completionStatus}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
   } finally {

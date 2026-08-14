@@ -228,6 +228,17 @@ failure. Pull-request execution makes the native evidence available before an
 issue is merged; the push trigger keeps the required `main` branch regression
 evidence current.
 
+The Android job deliberately uses no third-party emulator action. Its
+repository-owned Bash launcher installs the official API 36 Google x86_64
+system image with the hosted Android SDK, creates one run-named AVD under
+`RUNNER_TEMP`, boots it in an exact owned process group, and performs bounded
+TERM-to-KILL cleanup. This keeps the suite compatible with the organization's
+selected-actions policy without adding an authorization exception.
+The harness writes a provisional Android suite marker first; the launcher
+promotes it to `complete.txt` only after the owned emulator group and device
+have both retired successfully. The provisional marker reports
+`status=suite-passed-awaiting-emulator-cleanup`, never `status=passed`.
+
 Each successful platform artifact includes:
 
 - a redacted, `planned` safety manifest binding the run to `drill`,

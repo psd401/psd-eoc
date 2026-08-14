@@ -29,6 +29,7 @@ import {
   mobileE2EAndroidBuildArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EArtifactPaths,
+  mobileE2ECompletionMarkerFilename,
   mobileE2EDevClientUrl,
   mobileE2EEnrollmentWarmupRequest,
   mobileE2EExpoStartArguments,
@@ -125,6 +126,24 @@ describe('issue #32 mobile E2E process boundary', () => {
         'Usage: run-ci.ts <ios|android>',
       );
     }
+  });
+
+  test('defers only the Android CI completion marker until emulator cleanup', () => {
+    expect(mobileE2ECompletionMarkerFilename('ios', undefined)).toBe(
+      'complete.txt',
+    );
+    expect(mobileE2ECompletionMarkerFilename('android', undefined)).toBe(
+      'complete.txt',
+    );
+    expect(mobileE2ECompletionMarkerFilename('android', 'true')).toBe(
+      'suite-complete-awaiting-emulator-cleanup.txt',
+    );
+    expect(() => mobileE2ECompletionMarkerFilename('ios', 'true')).toThrow(
+      'allowed only for the issue #32 Android CI emulator cleanup',
+    );
+    expect(() => mobileE2ECompletionMarkerFilename('android', 'false')).toThrow(
+      'allowed only for the issue #32 Android CI emulator cleanup',
+    );
   });
 
   test('requires the explicit synthetic-only flag and loopback *_test database', () => {
@@ -1638,9 +1657,10 @@ describe('issue #32 exact synthetic drill data', () => {
       '-PreactNativeArchitectures=x86_64',
       'app:assembleDebug',
     ]);
-    const [runner, library, workflow] = await Promise.all([
+    const [runner, library, androidCiRunner, workflow] = await Promise.all([
       readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
       readFile(new URL('run-ci-lib.ts', import.meta.url), 'utf8'),
+      readFile(new URL('run-android-emulator-ci.sh', import.meta.url), 'utf8'),
       readFile(
         new URL('../../../.github/workflows/mobile-e2e.yml', import.meta.url),
         'utf8',
@@ -1699,12 +1719,142 @@ describe('issue #32 exact synthetic drill data', () => {
     const iosJob = workflow.match(/ {2}ios:\n[\s\S]+?(?=\n {2}android:)/u)?.[0];
     const androidJob = workflow.match(/ {2}android:\n[\s\S]+/u)?.[0];
     expect(iosJob).toContain('timeout-minutes: 90');
-    expect(androidJob).toContain('timeout-minutes: 90');
-    expect(androidJob).not.toContain('timeout-minutes: 140');
-    expect(androidJob).toContain(
-      'script: timeout --signal=TERM --kill-after=30s 80m env ANDROID_SERIAL="emulator-$EMULATOR_PORT" bun packages/mobile/e2e/run-ci.ts android',
+    expect(androidJob).toMatch(
+      /^ {2}android:\n[\s\S]*?^ {4}timeout-minutes: 250$/mu,
     );
-    expect(androidJob).toContain('cores: 1');
+    expect(androidJob).toMatch(
+      /- name: Run the synthetic Android Maestro suite\n {8}timeout-minutes: 180\n {8}run: bash packages\/mobile\/e2e\/run-android-emulator-ci\.sh/u,
+    );
+    expect(androidJob).toMatch(
+      /- name: Upload Android E2E evidence\n {8}if: always\(\)\n {8}timeout-minutes: 10\n {8}uses: actions\/upload-artifact@v4/u,
+    );
+    expect(androidJob).not.toContain('reactivecircus/android-emulator-runner');
+    const actionReferences = [
+      ...workflow.matchAll(/^\s+uses:\s+(\S+)$/gmu),
+    ].map((match) => match[1]);
+    expect(actionReferences).toEqual([
+      'actions/checkout@v5',
+      'oven-sh/setup-bun@v2',
+      'actions/setup-java@v5',
+      'actions/upload-artifact@v4',
+      'actions/checkout@v5',
+      'oven-sh/setup-bun@v2',
+      'actions/setup-java@v5',
+      'actions/upload-artifact@v4',
+    ]);
+    const androidJobTimeout = Number(
+      androidJob?.match(/^ {4}timeout-minutes: (\d+)$/mu)?.[1],
+    );
+    const androidStepTimeouts = [
+      ...(androidJob?.matchAll(/^ {8}timeout-minutes: (\d+)$/gmu) ?? []),
+    ].map((match) => Number(match[1]));
+    const androidStepTimeoutTotal = androidStepTimeouts.reduce(
+      (total, timeout) => total + timeout,
+      0,
+    );
+    expect(androidJobTimeout).toBe(250);
+    expect(androidStepTimeouts).toEqual([2, 5, 5, 5, 10, 5, 5, 2, 10, 180, 10]);
+    expect(androidStepTimeoutTotal).toBe(239);
+    expect(androidJobTimeout - androidStepTimeoutTotal).toBeGreaterThanOrEqual(
+      10,
+    );
+    expect(androidCiRunner).toContain(
+      "readonly system_image='system-images;android-36;google_apis;x86_64'",
+    );
+    expect(androidCiRunner).toContain("readonly emulator_port='5554'");
+    expect(androidCiRunner).toContain("readonly suite_timeout='120m'");
+    expect(androidCiRunner).toContain('hw.cpu.ncore=1');
+    expect(androidCiRunner).toContain('hw.keyboard=yes');
+    expect(androidCiRunner).toContain('export ANDROID_USER_HOME=');
+    expect(androidCiRunner).toContain('export ANDROID_EMULATOR_HOME=');
+    expect(androidCiRunner).toContain('"$emulator_bin" -accel-check');
+    expect(androidCiRunner).toContain('-accel on');
+    expect(androidCiRunner).toContain('-no-snapshot-save');
+    expect(androidCiRunner).toContain(
+      'initial_process_group_id="$(ps -o pgid= -p "$emulator_pid" | tr -d \'[:space:]\')"',
+    );
+    expect(androidCiRunner).toContain('boot_deadline=$((SECONDS + 900))');
+    expect(androidCiRunner).toContain(
+      "test \"$api_level\" = '36' || fail 'the booted Android emulator is not API 36.'",
+    );
+    expect(androidCiRunner).toContain("trap 'on_signal 143' TERM");
+    expect(androidCiRunner).toContain('env ANDROID_SERIAL="$emulator_serial"');
+    expect(androidCiRunner).toContain(
+      '"$bun_bin" packages/mobile/e2e/run-ci.ts android',
+    );
+    expect(androidCiRunner).toContain(
+      'command_line="$(tr \'\\0\' \' \' <"/proc/${emulator_pid}/cmdline")"',
+    );
+    expect(androidCiRunner).toContain(
+      'test "$initial_process_group_id" = "$emulator_pgid"',
+    );
+    expect(androidCiRunner).toContain(
+      'while read -r candidate_pgid member_state; do',
+    );
+    expect(androidCiRunner).toContain(
+      'while read -r member_pid candidate_pgid; do',
+    );
+    expect(androidCiRunner).toContain(
+      'process_table="$(ps -eo pgid=,stat=)" || return 0',
+    );
+    expect(androidCiRunner).toMatch(
+      /emulator_pid=\$!\nemulator_pgid="\$emulator_pid"/u,
+    );
+    expect(androidCiRunner).toContain('kill "-$signal" -- "-${emulator_pgid}"');
+    expect(androidCiRunner).toMatch(
+      /"\$adb_bin" -s "\$emulator_serial" emu kill[\s\S]+signal_owned_emulator_group TERM[\s\S]+signal_owned_emulator_group KILL/u,
+    );
+    expect(androidCiRunner).not.toMatch(/^\s*wait(?:\s|$)/mu);
+    expect(androidCiRunner).toContain(
+      'suite-complete-awaiting-emulator-cleanup.txt',
+    );
+    expect(androidCiRunner).toContain(
+      'status=suite-passed-awaiting-emulator-cleanup',
+    );
+    expect(androidCiRunner).toContain(
+      "PSD_EOC_ANDROID_EMULATOR_COMPLETION_DEFERRED='true'",
+    );
+    expect(androidCiRunner).toMatch(
+      /if test "\$cleanup_status" -ne 0; then[\s\S]+promote_completion_marker/u,
+    );
+    expect(runner).toMatch(
+      /const completionMarkerFilename = mobileE2ECompletionMarkerFilename\([\s\S]+completionMarkerFilename === 'complete\.txt'[\s\S]+suite-passed-awaiting-emulator-cleanup/u,
+    );
+    for (const boundedOperation of [
+      '--kill-after=10s 5m',
+      '--kill-after=30s 25m',
+      '--kill-after=5s 30s',
+      '--kill-after=10s 2m',
+      '--kill-after=5s 15s',
+      '--kill-after=5s 10s',
+      '--kill-after=1s 2s',
+      '--kill-after=30s "$suite_timeout"',
+    ]) {
+      expect(androidCiRunner).toContain(boundedOperation);
+    }
+    const androidHelperWorstCaseSeconds =
+      5 * 60 +
+      10 +
+      (25 * 60 + 30) +
+      (30 + 5) +
+      (2 * 60 + 10) +
+      900 +
+      (120 * 60 + 30) +
+      2 * (15 + 5) +
+      (10 + 5) +
+      20 +
+      10 +
+      5 +
+      10 +
+      11 * (2 + 1);
+    expect(180 * 60 - androidHelperWorstCaseSeconds).toBeGreaterThanOrEqual(
+      8 * 60,
+    );
+    expect(androidCiRunner).toContain('emulator_device_is_present_or_unknown');
+    expect(androidCiRunner).toContain(
+      'device_snapshot="$(\n    "$timeout_bin" --signal=TERM --kill-after=1s 2s',
+    );
+    expect(androidCiRunner).not.toMatch(/\b(?:pkill|killall)\b/u);
   });
 
   test('starts Expo on loopback without incompatible offline mode', () => {

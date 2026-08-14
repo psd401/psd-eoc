@@ -157,7 +157,7 @@ jobs:
   android:
     name: Maestro Android (synthetic only)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 250
     services:
       postgres:
         image: postgres:16-alpine
@@ -177,6 +177,7 @@ jobs:
       TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@127.0.0.1:54329/psd_eoc_mobile_android_test
     steps:
       - name: Initialize the synthetic artifact directory
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           artifact_dir="$RUNNER_TEMP/psd-eoc-mobile-e2e-artifacts"
@@ -191,26 +192,32 @@ jobs:
             > "$artifact_dir/workflow-safety-context.txt"
 
       - name: Check out repository
+        timeout-minutes: 5
         uses: actions/checkout@v5
 
       - name: Set up Bun
+        timeout-minutes: 5
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.23
 
       - name: Set up Java for Maestro and Gradle
+        timeout-minutes: 5
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Install dependencies from the lockfile
+        timeout-minutes: 10
         run: bun install --frozen-lockfile
 
       - name: Strict-typecheck the issue-owned mobile harness
+        timeout-minutes: 5
         run: bun x tsc --project packages/mobile/e2e/tsconfig.json
 
       - name: Install the pinned Maestro CLI
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           maestro_archive="$RUNNER_TEMP/maestro-${MAESTRO_VERSION}.zip"
@@ -227,6 +234,7 @@ jobs:
           echo "$(dirname "$maestro_bin")" >> "$GITHUB_PATH"
 
       - name: Enable and verify Android hardware acceleration
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -237,6 +245,7 @@ jobs:
           test -w /dev/kvm
 
       - name: Reclaim unused hosted-runner SDK space
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           test ! -L /usr/share/dotnet
@@ -247,23 +256,12 @@ jobs:
           df -h /
 
       - name: Run the synthetic Android Maestro suite
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
-        with:
-          api-level: 36
-          target: google_apis
-          arch: x86_64
-          profile: pixel_7
-          cores: 1
-          disable-animations: true
-          enable-hw-keyboard: true
-          emulator-boot-timeout: 900
-          emulator-options: >-
-            -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio
-            -no-boot-anim -camera-back none
-          script: timeout --signal=TERM --kill-after=30s 80m env ANDROID_SERIAL="emulator-$EMULATOR_PORT" bun packages/mobile/e2e/run-ci.ts android
+        timeout-minutes: 180
+        run: bash packages/mobile/e2e/run-android-emulator-ci.sh
 
       - name: Upload Android E2E evidence
         if: always()
+        timeout-minutes: 10
         uses: actions/upload-artifact@v4
         with:
           name: mobile-e2e-android-${{ github.run_id }}-${{ github.run_attempt }}

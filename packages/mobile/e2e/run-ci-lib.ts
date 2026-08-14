@@ -245,6 +245,20 @@ function requirePlatform(value: string | undefined): MobileE2EPlatform {
   return value;
 }
 
+export function mobileE2ECompletionMarkerFilename(
+  platformValue: string | undefined,
+  deferredAndroidCleanupValue: string | undefined,
+): 'complete.txt' | 'suite-complete-awaiting-emulator-cleanup.txt' {
+  const platform = requirePlatform(platformValue);
+  if (deferredAndroidCleanupValue === undefined) return 'complete.txt';
+  if (platform !== 'android' || deferredAndroidCleanupValue !== 'true') {
+    throw new Error(
+      'Deferred completion is allowed only for the issue #32 Android CI emulator cleanup.',
+    );
+  }
+  return 'suite-complete-awaiting-emulator-cleanup.txt';
+}
+
 function isStrictDescendant(parent: string, candidate: string): boolean {
   const fromParent = relative(parent, candidate);
   return (
