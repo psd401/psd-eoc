@@ -124,14 +124,14 @@ The profiles in `eas.json` are:
 
 - `development`: internal development-client builds.
 - `preview`: internal iOS and Android distribution builds.
-- `ota-preview`: private internal verification builds that use the production
-  environment but only the isolated `ota-verification` update channel. This is
-  not an ordinary preview profile.
 - `production`: store-signed artifacts for TestFlight and Google Play.
 
-Ordinary `preview` builds are prohibited for production-environment OTA
-verification; use the isolated `ota-preview` profile and `ota-verification`
-channel.
+Remote updates are disabled for app/runtime 1.0.1. No profile may check,
+download, publish, or route an OTA update. JavaScript changes use a new app
+version and store build until a separately scoped change provisions district-
+held update signing, embeds its public certificate in a new runtime, and adds a
+reviewed rollout and rollback procedure. Ordinary `preview` must never be used
+for production-environment OTA verification.
 
 All profiles pin Bun 1.2.23 and use credentials managed remotely by EAS.
 Never add certificates, provisioning profiles, API keys, push keys,

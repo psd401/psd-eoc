@@ -47,11 +47,21 @@ function launchSourceLabel(diagnostic: LaunchedUpdateDiagnostic): string {
   switch (diagnostic.launchSource) {
     case 'embedded':
       return 'Embedded in this installed binary';
-    case 'downloaded':
-      return 'Downloaded over-the-air update';
     case 'unknown':
       return 'Unknown';
   }
+}
+
+function remoteUpdatesLabel(diagnostic: LaunchedUpdateDiagnostic): string {
+  return diagnostic.mode === 'embedded-only'
+    ? 'Disabled — embedded store bundle only'
+    : 'Unknown — stop release verification';
+}
+
+function remoteIdentityLabel(diagnostic: LaunchedUpdateDiagnostic): string {
+  return diagnostic.mode === 'embedded-only'
+    ? 'Not applicable — remote updates disabled'
+    : 'Unknown';
 }
 
 function emergencyLaunchLabel(diagnostic: LaunchedUpdateDiagnostic): string {
@@ -75,9 +85,9 @@ export default function ReleaseDiagnosticScreen() {
             Release diagnostics
           </Text>
           <Text style={styles.subtitle}>
-            Use this read-only identity after the second online cold launch of a
-            physical installation approved for release verification, including
-            TestFlight, Play, or the private OTA verifier build.
+            Use this read-only identity after a cold launch of a physical
+            TestFlight or Google Play installation approved for release
+            verification.
           </Text>
         </View>
 
@@ -118,7 +128,7 @@ export default function ReleaseDiagnosticScreen() {
 
         <View style={styles.card}>
           <Text accessibilityRole="header" style={styles.cardTitle}>
-            Launched update identity
+            Installed release identity
           </Text>
           <DiagnosticRow
             label="Evidence status"
@@ -140,23 +150,30 @@ export default function ReleaseDiagnosticScreen() {
             value={diagnostic.nativeBuildVersion ?? 'Unknown'}
           />
           <DiagnosticRow
+            label="Remote updates"
+            value={remoteUpdatesLabel(diagnostic)}
+          />
+          <DiagnosticRow
             label="Launch source"
             value={launchSourceLabel(diagnostic)}
           />
           <DiagnosticRow
-            label="Update ID"
+            label="Remote update ID"
             selectable
-            value={diagnostic.updateId ?? 'Unknown'}
+            value={diagnostic.updateId ?? remoteIdentityLabel(diagnostic)}
           />
           <DiagnosticRow
-            label="Runtime version"
+            label="Configured runtime version"
             selectable
-            value={diagnostic.runtimeVersion ?? 'Unknown'}
+            value={
+              diagnostic.configuredRuntimeVersion ??
+              remoteIdentityLabel(diagnostic)
+            }
           />
           <DiagnosticRow
-            label="Update channel"
+            label="Remote update channel"
             selectable
-            value={diagnostic.channel ?? 'Unknown'}
+            value={diagnostic.channel ?? remoteIdentityLabel(diagnostic)}
           />
           <DiagnosticRow
             label="Emergency launch"

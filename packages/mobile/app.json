@@ -2,7 +2,7 @@
   "expo": {
     "name": "PSD EOC",
     "slug": "psd-eoc",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "psdeoc",
@@ -11,9 +11,8 @@
       "policy": "appVersion"
     },
     "updates": {
-      "url": "https://u.expo.dev/24753a23-d863-41e6-8511-5e44c99fa6c2",
-      "checkAutomatically": "ON_LOAD",
-      "fallbackToCacheTimeout": 0,
+      "enabled": false,
+      "checkAutomatically": "NEVER",
       "useEmbeddedUpdate": true,
       "disableAntiBrickingMeasures": false
     },
