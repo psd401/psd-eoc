@@ -72,13 +72,17 @@ describe('database client configuration', () => {
       url: 'postgresql://synthetic:synthetic@localhost/psd_eoc_test',
     });
     expect(postgresClient.driver).toBe('postgres');
-    await Promise.all([postgresClient.close(), postgresClient.close()]);
+    const postgresClose = postgresClient.close();
+    expect(postgresClient.close()).toBe(postgresClose);
+    await postgresClose;
 
     const dataApiClient = createDatabaseClient(
       readDatabaseConfig(DATA_API_ENVIRONMENT),
     );
     expect(dataApiClient.driver).toBe('aws-data-api');
-    await Promise.all([dataApiClient.close(), dataApiClient.close()]);
+    const dataApiClose = dataApiClient.close();
+    expect(dataApiClient.close()).toBe(dataApiClose);
+    await dataApiClose;
   });
 });
 
