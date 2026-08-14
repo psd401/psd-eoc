@@ -1778,6 +1778,9 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(androidCiRunner).toContain('command -v timeout || true');
     expect(androidCiRunner).toContain('command -v setsid || true');
     expect(androidCiRunner).toContain('command -v bun || true');
+    expect(androidCiRunner).toMatch(
+      /\[\[ "\$required_bin" = \/\*[\s\S]+export PATH="\$\{ANDROID_HOME\}\/platform-tools:\$\{PATH\}"[\s\S]+"\$bun_bin" packages\/mobile\/e2e\/run-ci\.ts android/u,
+    );
     expect(androidCiRunner).toContain('hw.cpu.ncore=1');
     expect(androidCiRunner).toContain('hw.keyboard=yes');
     expect(androidCiRunner).toContain('export ANDROID_USER_HOME=');

@@ -41,6 +41,7 @@ for required_bin in \
   "$bun_bin"; do
   [[ "$required_bin" = /* && -x "$required_bin" ]] || fail 'a required hosted-runner tool is unavailable.'
 done
+export PATH="${ANDROID_HOME}/platform-tools:${PATH}"
 
 if "$adb_bin" -s "$emulator_serial" get-state >/dev/null 2>&1; then
   fail "refusing to adopt a pre-existing ${emulator_serial} device."
