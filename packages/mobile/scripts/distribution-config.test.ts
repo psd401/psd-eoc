@@ -114,12 +114,34 @@ describe('mobile distribution configuration', () => {
     });
   });
 
+  test('pins only the verified non-secret App Store record identity', () => {
+    expect(easConfig.submit.production.ios).toEqual({
+      ascAppId: '6801607849',
+    });
+
+    const appStoreRunbook = repositoryText('docs/runbooks/appstore-setup.md');
+    for (const evidence of [
+      'App Store Connect provider: `372148`',
+      'Numeric Apple ID / EAS `ascAppId`: `6801607849`',
+      'Primary language: English (U.S.) / `en-US`',
+      'Initial iOS version scaffold: `1.0`',
+      'User access: Limited Access, with zero new app-specific user grants',
+      'TestFlight inventory: empty',
+      'Do not run the app-creation lane again',
+      'The presence of `ascAppId` is routing configuration only, never',
+    ]) {
+      expect(appStoreRunbook).toContain(evidence);
+    }
+  });
+
   test('never auto-submits, auto-exposes, or publishes a remote update', () => {
     const keys = collectObjectKeys(easConfig);
 
     expect(keys.has('autoSubmit')).toBe(false);
     expect(keys.has('groups')).toBe(false);
-    expect(easConfig.submit.production.ios).toEqual({});
+    expect(easConfig.submit.production.ios).toEqual({
+      ascAppId: '6801607849',
+    });
 
     const rootManifest = JSON.parse(
       repositoryText('package.json'),
@@ -204,7 +226,13 @@ describe('mobile distribution configuration', () => {
     expect(compactRelease).toContain(
       'SUPERSEDED — NOT ELIGIBLE FOR PLAY UPLOAD, TESTER EXPOSURE, OR INSTALLATION',
     );
-    expect(release).toContain('EXPECTED — NOT PROVEN');
+    expect(release).toContain('3742b81d-3942-4fea-b760-53c809d8733f');
+    expect(release).toContain(
+      '915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246',
+    );
+    expect(release).toContain('71e08fa8358f6890e5419289b163aaa0fb0af081');
+    expect(release).toContain('version code: `3`');
+    expect(release).not.toContain('EXPECTED — NOT PROVEN');
     expect(release).toContain('856e54b5-9abd-45a5-b0db-809a295da5ef');
     expect(release).toContain(
       '015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463',
@@ -325,6 +353,10 @@ describe('mobile distribution configuration', () => {
 
     expect(build).toContain('| `configured-unverified`');
     expect(build).toContain('superseded and not eligible for Play upload');
+    expect(build).toContain('3742b81d-3942-4fea-b760-53c809d8733f');
+    expect(build).toContain(
+      '915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246',
+    );
     expect(update).toContain('| `blocked`');
     expect(update).toContain(
       'Remote updates are disabled in app/runtime 1.0.1',
@@ -339,6 +371,19 @@ describe('mobile distribution configuration', () => {
       const row = rows.find((line) => line.includes(`| ${integration}`));
       expect(row).toContain('| `blocked`');
     }
+
+    const submit = rows.find((line) =>
+      line.includes('| Expo Application Services (Submit)'),
+    );
+    const apple = rows.find((line) =>
+      line.includes('| Apple App Store Connect / TestFlight'),
+    );
+    const play = rows.find((line) =>
+      line.includes('| Google Play closed testing'),
+    );
+    expect(submit).toContain('6801607849');
+    expect(apple).toContain('6801607849');
+    expect(play).toContain('eligible embedded-only AAB');
   });
 
   test('ships accessible screen references and safe staff guidance', () => {
