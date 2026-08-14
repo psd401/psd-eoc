@@ -1,6 +1,6 @@
 appId: net.psd401.eoc
-name: Issue 32 - retry only the exact failed iOS session authentication
-tags: [issue-32, synthetic-only, ios, authentication, pre-auth]
+name: Issue 32 - retry only the exact failed Android session authentication
+tags: [issue-32, synthetic-only, android, authentication, pre-auth]
 ---
 - runFlow:
     file: shared/assert-synthetic-context.yaml
@@ -12,5 +12,5 @@ tags: [issue-32, synthetic-only, ios, authentication, pre-auth]
     enabled: true
     retryTapIfNoChange: false
     waitToSettleTimeoutMs: 500
-# Stop with the native sheet pending so the runner can observe the exact secure
-# token and answer only this same authentication request.
+# Stop with the exact SystemUI sheet pending. The runner still requires its
+# app-specific title before entering the synthetic emulator credential.

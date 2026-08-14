@@ -35,6 +35,7 @@ import {
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
+  mobileE2EIosDeviceAuthenticationScreenshotEvidence,
   mobileE2EIosDirectLaunchArguments,
   mobileE2EIsolatedExpoConfig,
   mobileE2EIssue21FixtureCompatibilitySource,
@@ -57,7 +58,7 @@ import {
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
   isMobileE2EIosSyntheticNotificationVisible,
-  isMobileE2EIosUnlockRetryReady,
+  isMobileE2EUnlockRetryReady,
   parseMobileE2EManifest,
   parseMobileE2EManifestText,
   parseMobileE2EPlatformCli,
@@ -926,9 +927,26 @@ describe('issue #32 exact synthetic drill data', () => {
       ),
       'utf8',
     );
-    expect(activationFlow).toMatch(
-      /scrollUntilVisible:\n {4}element: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'\n {4}direction: DOWN\n- assertVisible: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'\n- tapOn: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'/u,
+    const activationCommands = activationFlow.split(/\n(?=- )/u);
+    const scrollCommands = activationCommands.filter((command) =>
+      command.startsWith('- scrollUntilVisible:'),
     );
+    const tapCommands = activationCommands
+      .filter((command) => command.startsWith('- tapOn:'))
+      .map((command) => command.trim());
+
+    expect(activationFlow).toMatch(
+      /scrollUntilVisible:\n {4}element: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'\n {4}direction: DOWN\n {4}waitToSettleTimeoutMs: 500\n- assertVisible: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'\n- tapOn: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'/u,
+    );
+    expect(scrollCommands).toHaveLength(9);
+    for (const scrollCommand of scrollCommands) {
+      expect(scrollCommand).toContain('    waitToSettleTimeoutMs: 500');
+    }
+    expect(tapCommands).toEqual([
+      "- tapOn: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'",
+      "- tapOn: 'DRILL — PRACTICE. Choose Synthetic earthquake drill'",
+      "- tapOn: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'",
+    ]);
     expect(activationFlow).not.toContain("id: 'issue-21-start-drill'");
   });
 
@@ -963,6 +981,71 @@ describe('issue #32 exact synthetic drill data', () => {
         classification: 'incident',
       }),
     ).toThrow();
+  });
+
+  test('admits biometric response only from exact central Face ID Vision evidence', () => {
+    const analysis = {
+      pixelWidth: 1206,
+      pixelHeight: 2622,
+      observations: [
+        {
+          text: 'Unlock PSD EOC',
+          confidence: 1,
+          minX: 0.054054058108108004,
+          minY: 0.6498855828809562,
+          width: 0.6666666666666666,
+          height: 0.04195270785659799,
+        },
+        {
+          text: 'Face ID',
+          confidence: 1,
+          minX: 0.42525445441083376,
+          minY: 0.4333249403897961,
+          width: 0.14633651910531975,
+          height: 0.018524538006698843,
+        },
+      ],
+    };
+    expect(
+      mobileE2EIosDeviceAuthenticationScreenshotEvidence(analysis),
+    ).toEqual({
+      status: 'proven',
+      applicationText: 'Unlock PSD EOC',
+      promptText: 'Face ID',
+    });
+    expect(
+      mobileE2EIosDeviceAuthenticationScreenshotEvidence({
+        ...analysis,
+        observations: analysis.observations.slice(0, 1),
+      }),
+    ).toEqual({ status: 'not-ready' });
+
+    for (const observations of [
+      [...analysis.observations, analysis.observations[1]],
+      [
+        analysis.observations[0],
+        { ...analysis.observations[1], confidence: 0.89 },
+      ],
+      [analysis.observations[0], { ...analysis.observations[1], minX: 0.1 }],
+      [
+        { ...analysis.observations[0], text: 'Unlock with device security' },
+        analysis.observations[1],
+      ],
+      [
+        ...analysis.observations,
+        {
+          ...analysis.observations[0],
+          text: '[INCIDENT] Unlock PSD EOC',
+        },
+      ],
+    ]) {
+      expect(() =>
+        mobileE2EIosDeviceAuthenticationScreenshotEvidence({
+          ...analysis,
+          observations,
+        }),
+      ).toThrow();
+    }
   });
 
   test('admits iOS screenshot taps only from exact Vision DRILL evidence', () => {
@@ -1747,6 +1830,11 @@ describe('issue #32 exact synthetic drill data', () => {
         '<node package="net.psd401.eoc" text="Unlock PSD EOC" />',
       ),
     ).toBe(false);
+    expect(
+      isMobileE2EAndroidDeviceAuthenticationPrompt(
+        '<node package="net.psd401.eoc" text="Unlock PSD EOC" /><node package="com.android.systemui" text="Unrelated system UI" />',
+      ),
+    ).toBe(false);
   });
 
   test('recognizes only a resumed PSD EOC Android activity as foreground', () => {
@@ -1849,17 +1937,17 @@ describe('issue #32 exact synthetic drill data', () => {
     );
   });
 
-  test('admits an iOS auth retry only from the exact app-owned failure state', () => {
+  test('admits a native auth retry only from the exact app-owned failure state', () => {
     const exactFailure = [
       'Unlock PSD EOC',
       'PSD EOC remains locked',
       'PSD EOC could not verify device authentication. Try again or contact district technology support.',
       'Try device unlock again',
     ].join('\n');
-    expect(isMobileE2EIosUnlockRetryReady(exactFailure)).toBe(true);
+    expect(isMobileE2EUnlockRetryReady(exactFailure)).toBe(true);
     for (const requiredText of exactFailure.split('\n')) {
       expect(
-        isMobileE2EIosUnlockRetryReady(
+        isMobileE2EUnlockRetryReady(
           exactFailure.replace(requiredText, 'Unexpected state'),
         ),
       ).toBe(false);
@@ -1920,13 +2008,54 @@ describe('issue #32 exact synthetic drill data', () => {
     );
     expect(runner).not.toContain('22087');
     expect(runner).toContain("flowName === 'start-synthetic-drill-ios'");
+    const retryResponder = runner.match(
+      /async function respondToRetriedIosDeviceAuthentication[\s\S]+?(?=async function respondToDeviceAuthentication)/u,
+    )?.[0];
+    expect(retryResponder).toBeDefined();
+    expect(retryResponder).toMatch(
+      /startMaestroFlow\([\s\S]+analyzeIosNotificationScreenshot\([\s\S]+mobileE2EIosDeviceAuthenticationScreenshotEvidence\(analysis\)[\s\S]+retryFlow\.process\.child\.exitCode[\s\S]+--biometricMatch[\s\S]+awaitMaestroFlow\(retryFlow,\s+evidenceDeadline\)/u,
+    );
+    expect(retryResponder).toContain("evidence.status === 'not-ready'");
+    expect(retryResponder).toContain('evidenceDeadline');
+    expect(retryResponder).toContain(
+      'The proven iOS Face ID evidence expired before response.',
+    );
+    expect(retryResponder).toContain(
+      'The exact iOS authentication retry ended after its proven Face ID evidence.',
+    );
+    expect(retryResponder).toContain('attempt=${attempt}');
+    expect(retryResponder).toContain('screenshot=${label}.png');
+    expect(retryResponder).toContain('vision=${label}-vision.json');
+    expect(retryResponder).toMatch(
+      /const responseTimeout = evidenceDeadline - Date\.now\(\)[\s\S]+responseTimeout <= 0[\s\S]+--biometricMatch[\s\S]+timeoutMilliseconds: responseTimeout/u,
+    );
+    expect(retryResponder).toContain(
+      'await awaitMaestroFlow(retryFlow, evidenceDeadline)',
+    );
+    expect(retryResponder).toContain(
+      'await terminateProcess(retryFlow.process.child)',
+    );
+    const screenshotAnalyzer = runner.match(
+      /async function analyzeIosNotificationScreenshot[\s\S]+?(?=async function writeIosNotificationRevealFlow)/u,
+    )?.[0];
+    expect(screenshotAnalyzer).toBeDefined();
+    expect(screenshotAnalyzer).toContain('deadline - Date.now()');
+    expect(screenshotAnalyzer).toContain(
+      'timeoutMilliseconds: screenshotTimeout',
+    );
+    expect(screenshotAnalyzer).toContain(
+      'timeoutMilliseconds: analysisTimeout',
+    );
     for (const exactBoundary of [
       "- assertVisible: '^Unlock PSD EOC$'",
       "- assertVisible: '^PSD EOC remains locked$'",
       "text: '^Try device unlock again$'",
+      'retryTapIfNoChange: false',
+      'waitToSettleTimeoutMs: 500',
     ]) {
       expect(retryFlow).toContain(exactBoundary);
     }
+    expect(retryFlow.match(/tapOn:/gu)).toHaveLength(1);
     for (const unsafeSelector of [
       'point:',
       'index:',
@@ -1935,6 +2064,52 @@ describe('issue #32 exact synthetic drill data', () => {
     ]) {
       expect(retryFlow).not.toContain(unsafeSelector);
     }
+  });
+
+  test('retries Android launch auth once and preserves terminal evidence', async () => {
+    const [runner, retryFlow] = await Promise.all([
+      readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
+      readFile(
+        new URL(
+          'flows/retry-locked-session-android-pre-auth.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ]);
+    for (const exactBoundary of [
+      "- assertVisible: '^Unlock PSD EOC$'",
+      "- assertVisible: '^PSD EOC remains locked$'",
+      "- assertVisible: '^PSD EOC could not verify device authentication\\. Try again or contact district technology support\\.$'",
+      "text: '^Try device unlock again$'",
+      'retryTapIfNoChange: false',
+      'waitToSettleTimeoutMs: 500',
+    ]) {
+      expect(retryFlow).toContain(exactBoundary);
+    }
+    expect(retryFlow.match(/tapOn:/gu)).toHaveLength(1);
+    for (const unsafeSelector of [
+      'point:',
+      'index:',
+      'longPressOn:',
+      'swipe:',
+    ]) {
+      expect(retryFlow).not.toContain(unsafeSelector);
+    }
+    expect(runner).toMatch(
+      /flowName === 'start-synthetic-drill-android'[\s\S]+!retryAttempted[\s\S]+isMobileE2EUnlockRetryReady\(hierarchy\)[\s\S]+retryAttempted = true[\s\S]+retry-locked-session-android-pre-auth/u,
+    );
+    expect(runner).toMatch(
+      /const retryFlow = await startMaestroFlow\([\s\S]+retry-locked-session-android-pre-auth[\s\S]+await awaitMaestroFlow\(retryFlow, deadline\)/u,
+    );
+    expect(runner).toMatch(
+      /androidHierarchySequence \+= 1[\s\S]+psd-eoc-issue32-window-\$\{androidHierarchySequence\}\.xml[\s\S]+if \(dump\.exitCode !== 0\) return ''[\s\S]+result\.exitCode === 0 \? result\.stdout : ''/u,
+    );
+    expect(runner).toMatch(
+      /const capture = await runCommand\([\s\S]+if \(capture\.exitCode === 0\)[\s\S]+if \(pull\.exitCode === 0\)[\s\S]+lstat\(localScreenshot\)[\s\S]+unlink\(localScreenshot\)[\s\S]+remoteScreenshot/u,
+    );
+    expect(runner).toContain('`device-auth-${flowName}-failure-hierarchy.txt`');
+    expect(runner).toContain('`device-auth-${flowName}-failure-prompt.png`');
   });
 
   test('recognizes only the synthetic drill notification behind the iOS system lock', () => {

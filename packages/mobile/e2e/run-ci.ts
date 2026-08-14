@@ -6,6 +6,7 @@ import {
   readFile,
   readlink,
   symlink,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -28,6 +29,7 @@ import {
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
+  mobileE2EIosDeviceAuthenticationScreenshotEvidence,
   mobileE2EIosDirectLaunchArguments,
   mobileE2EIsolatedExpoConfig,
   mobileE2EIosSimulatorPushPayload,
@@ -43,7 +45,7 @@ import {
   isMobileE2EAndroidDeviceAuthenticationPrompt,
   isMobileE2EIosApplicationReady,
   isMobileE2EIosAuthenticationSheetReady,
-  isMobileE2EIosUnlockRetryReady,
+  isMobileE2EUnlockRetryReady,
   patchMobileE2EIsolatedIssue21Fixture,
   parseMobileE2EManifestText,
   parseMobileE2EPlatformCli,
@@ -81,6 +83,8 @@ const IOS_NOTIFICATION_SWIPE_ACTION_TIMEOUT_MS = 5_000;
 const IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS = 30_000;
 const IOS_NOTIFICATION_FOREGROUND_BANNER_SETTLE_MS = 8_000;
 const IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000;
+const IOS_AUTH_RETRY_VISION_TIMEOUT_MS = 60_000;
+const IOS_AUTH_RETRY_VISION_INTERVAL_MS = 250;
 const MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS = 30_000;
 const ANDROID_EMULATOR_CONTROL_TIMEOUT_MS = 30_000;
 const IOS_BUNDLE_RELATIVE_PATH =
@@ -93,6 +97,7 @@ const METRO_STATUS = 'packager-status:running';
 
 type BunChild = ReturnType<typeof Bun.spawn>;
 const activeChildren = new Set<BunChild>();
+let androidHierarchySequence = 0;
 
 interface CommandOptions {
   readonly cwd?: string;
@@ -112,6 +117,12 @@ interface CommandResult {
 interface ManagedProcess {
   readonly child: BunChild;
   readonly completion: Promise<number>;
+}
+
+interface RunningMaestroFlow {
+  readonly process: ManagedProcess;
+  readonly flowName: string;
+  readonly deadline: number;
 }
 
 interface IosDevice {
@@ -1190,16 +1201,21 @@ async function platformHierarchy(
     );
     return `${result.stdout}\n${result.stderr}`;
   }
-  const remotePath = '/sdcard/psd-eoc-issue32-window.xml';
-  await runCommand(
+  androidHierarchySequence += 1;
+  if (!Number.isSafeInteger(androidHierarchySequence)) {
+    throw new Error('The Android hierarchy sequence is exhausted.');
+  }
+  const remotePath = `/sdcard/psd-eoc-issue32-window-${androidHierarchySequence}.xml`;
+  const dump = await runCommand(
     ['adb', '-s', deviceId, 'shell', 'uiautomator', 'dump', remotePath],
     { allowFailure: true, quiet: true, timeoutMilliseconds: 20_000 },
   );
+  if (dump.exitCode !== 0) return '';
   const result = await runCommand(
     ['adb', '-s', deviceId, 'shell', 'cat', remotePath],
     { allowFailure: true, quiet: true, timeoutMilliseconds: 20_000 },
   );
-  return `${result.stdout}\n${result.stderr}`;
+  return result.exitCode === 0 ? result.stdout : '';
 }
 
 async function iosNotificationActionLogsSince(
@@ -1228,6 +1244,101 @@ async function iosNotificationActionLogsSince(
     { allowFailure: true, quiet: true, timeoutMilliseconds: 20_000 },
   );
   return `${result.stdout}\n${result.stderr}`;
+}
+
+async function respondToRetriedIosDeviceAuthentication(
+  deviceId: string,
+  artifactRoot: string,
+  flowName: string,
+  environment: Readonly<Record<string, string>>,
+  applesimutils: string,
+  iosDriverSession: IosMaestroDriverSession,
+): Promise<void> {
+  const retryFlow = await startMaestroFlow(
+    'ios',
+    deviceId,
+    'retry-locked-session-ios-pre-auth',
+    artifactRoot,
+    environment,
+    iosDriverSession,
+  );
+  const evidenceDeadline = Math.min(
+    retryFlow.deadline,
+    Date.now() + IOS_AUTH_RETRY_VISION_TIMEOUT_MS,
+  );
+  let attempt = 0;
+  try {
+    while (Date.now() < evidenceDeadline) {
+      if (retryFlow.process.child.exitCode !== null) {
+        await awaitMaestroFlow(retryFlow);
+        throw new Error(
+          'The exact iOS authentication retry ended before Face ID evidence.',
+        );
+      }
+      await Bun.sleep(IOS_AUTH_RETRY_VISION_INTERVAL_MS);
+      if (Date.now() >= evidenceDeadline) break;
+      attempt += 1;
+      const label = `device-auth-${flowName}-retry-${String(attempt).padStart(2, '0')}`;
+      const analysis = await analyzeIosNotificationScreenshot(
+        deviceId,
+        artifactRoot,
+        label,
+        evidenceDeadline,
+      );
+      const evidence =
+        mobileE2EIosDeviceAuthenticationScreenshotEvidence(analysis);
+      if (evidence.status === 'not-ready') continue;
+      if (Date.now() >= evidenceDeadline) {
+        throw new Error(
+          'The proven iOS Face ID evidence expired before response.',
+        );
+      }
+      if (retryFlow.process.child.exitCode !== null) {
+        await awaitMaestroFlow(retryFlow);
+        throw new Error(
+          'The exact iOS authentication retry ended before its proven Face ID response.',
+        );
+      }
+      await writeFile(
+        resolve(artifactRoot, `device-auth-${flowName}-retry-evidence.txt`),
+        `issue=32\nplatform=ios\nclassification=drill\nroster=synthetic\nproviders=mocked\nstate=face-id-prompt-observed\nsource=apple-vision\nattempt=${attempt}\nscreenshot=${label}.png\nvision=${label}-vision.json\n`,
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+      );
+      if (retryFlow.process.child.exitCode !== null) {
+        await awaitMaestroFlow(retryFlow);
+        throw new Error(
+          'The exact iOS authentication retry ended after its proven Face ID evidence.',
+        );
+      }
+      const responseTimeout = evidenceDeadline - Date.now();
+      if (responseTimeout <= 0) {
+        throw new Error(
+          'The proven iOS Face ID evidence expired before response.',
+        );
+      }
+      await runCommand(
+        [applesimutils, '--byId', deviceId, '--biometricMatch'],
+        {
+          logPath: resolve(
+            artifactRoot,
+            `device-auth-${flowName}-retry-response.log`,
+          ),
+          timeoutMilliseconds: responseTimeout,
+        },
+      );
+      await awaitMaestroFlow(retryFlow, evidenceDeadline);
+      return;
+    }
+    throw new Error(
+      'The exact iOS authentication retry did not expose proven Face ID evidence.',
+    );
+  } catch (error) {
+    if (retryFlow.process.child.exitCode === null) {
+      await terminateProcess(retryFlow.process.child);
+    }
+    await retryFlow.process.completion;
+    throw error;
+  }
 }
 
 async function respondToDeviceAuthentication(
@@ -1277,18 +1388,18 @@ async function respondToDeviceAuthentication(
       if (
         flowName === 'start-synthetic-drill-ios' &&
         !retryAttempted &&
-        isMobileE2EIosUnlockRetryReady(hierarchy)
+        isMobileE2EUnlockRetryReady(hierarchy)
       ) {
         retryAttempted = true;
-        await runMaestroFlow(
-          'ios',
+        await respondToRetriedIosDeviceAuthentication(
           deviceId,
-          'retry-locked-session-ios-pre-auth',
           artifactRoot,
+          flowName,
           environment,
+          applesimutils,
           iosDriverSession,
         );
-        continue;
+        return;
       }
       await Bun.sleep(RETRY_INTERVAL_MS);
     }
@@ -1351,8 +1462,11 @@ async function respondToDeviceAuthentication(
     return;
   }
   const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
+  let lastHierarchy = '';
+  let retryAttempted = false;
   while (Date.now() < deadline) {
     const hierarchy = await platformHierarchy(platform, deviceId);
+    if (hierarchy.trim().length > 0) lastHierarchy = hierarchy;
     if (isMobileE2EAndroidDeviceAuthenticationPrompt(hierarchy)) {
       await writeFile(
         resolve(artifactRoot, `device-auth-${flowName}-hierarchy.txt`),
@@ -1379,8 +1493,76 @@ async function respondToDeviceAuthentication(
       ]);
       return;
     }
+    if (
+      flowName === 'start-synthetic-drill-android' &&
+      !retryAttempted &&
+      isMobileE2EUnlockRetryReady(hierarchy)
+    ) {
+      retryAttempted = true;
+      const retryFlow = await startMaestroFlow(
+        'android',
+        deviceId,
+        'retry-locked-session-android-pre-auth',
+        artifactRoot,
+        environment,
+      );
+      await awaitMaestroFlow(retryFlow, deadline);
+      continue;
+    }
     await Bun.sleep(RETRY_INTERVAL_MS);
   }
+  await writeFile(
+    resolve(artifactRoot, `device-auth-${flowName}-failure-hierarchy.txt`),
+    lastHierarchy.length > 0
+      ? lastHierarchy
+      : 'No non-empty Android hierarchy was observed.\n',
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  );
+  const remoteScreenshot = `/sdcard/psd-eoc-issue32-auth-failure-${Date.now()}.png`;
+  const localScreenshot = resolve(
+    artifactRoot,
+    `device-auth-${flowName}-failure-prompt.png`,
+  );
+  const capture = await runCommand(
+    ['adb', '-s', deviceId, 'shell', 'screencap', '-p', remoteScreenshot],
+    {
+      allowFailure: true,
+      quiet: true,
+      logPath: resolve(
+        artifactRoot,
+        `device-auth-${flowName}-failure-screenshot-capture.log`,
+      ),
+    },
+  );
+  let screenshotIsValid = false;
+  if (capture.exitCode === 0) {
+    const pull = await runCommand(
+      ['adb', '-s', deviceId, 'pull', remoteScreenshot, localScreenshot],
+      {
+        allowFailure: true,
+        quiet: true,
+        logPath: resolve(
+          artifactRoot,
+          `device-auth-${flowName}-failure-screenshot-pull.log`,
+        ),
+      },
+    );
+    if (pull.exitCode === 0) {
+      const screenshot = await lstat(localScreenshot).catch(() => undefined);
+      screenshotIsValid =
+        screenshot !== undefined &&
+        screenshot.isFile() &&
+        !screenshot.isSymbolicLink() &&
+        screenshot.size > 0;
+    }
+  }
+  if (!screenshotIsValid) {
+    await unlink(localScreenshot).catch(() => undefined);
+  }
+  await runCommand(
+    ['adb', '-s', deviceId, 'shell', 'rm', '-f', remoteScreenshot],
+    { allowFailure: true, quiet: true, timeoutMilliseconds: 20_000 },
+  );
   throw new Error(
     'The exact PSD EOC device-authentication prompt was not observed.',
   );
@@ -1421,7 +1603,7 @@ function maestroArguments(
   return Object.freeze(arguments_);
 }
 
-async function runMaestroFlow(
+async function startMaestroFlow(
   platform: MobileE2EPlatform,
   deviceId: string,
   flowName: string,
@@ -1430,7 +1612,7 @@ async function runMaestroFlow(
   iosDriverSession?: IosMaestroDriverSession,
   artifactName: string = flowName,
   explicitFlowPath?: string,
-): Promise<void> {
+): Promise<RunningMaestroFlow> {
   if (!/^[a-z0-9-]+$/u.test(artifactName)) {
     throw new Error('The Maestro artifact name is invalid.');
   }
@@ -1465,29 +1647,70 @@ async function runMaestroFlow(
     },
     logPath: resolve(artifactDirectory, 'maestro.log'),
   });
+  return Object.freeze({
+    process: process_,
+    flowName,
+    deadline: Date.now() + COMMAND_TIMEOUT_MS,
+  });
+}
+
+async function awaitMaestroFlow(
+  flow: RunningMaestroFlow,
+  upperDeadline: number = flow.deadline,
+): Promise<void> {
+  if (!Number.isSafeInteger(upperDeadline)) {
+    throw new Error('The Maestro flow deadline is invalid.');
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const remainingMilliseconds = Math.max(
+    0,
+    Math.min(flow.deadline, upperDeadline) - Date.now(),
+  );
   const outcome = await Promise.race([
-    process_.completion.then((exitCode) => ({
+    flow.process.completion.then((exitCode) => ({
       kind: 'exit' as const,
       exitCode,
     })),
     new Promise<Readonly<{ kind: 'timeout' }>>((resolveTimeout) => {
       timer = setTimeout(
         () => resolveTimeout({ kind: 'timeout' }),
-        COMMAND_TIMEOUT_MS,
+        remainingMilliseconds,
       );
     }),
   ]);
   if (timer !== undefined) clearTimeout(timer);
-  if (outcome.kind !== 'exit') await terminateProcess(process_.child);
-  const exitCode = await process_.completion;
+  if (outcome.kind !== 'exit') await terminateProcess(flow.process.child);
+  const exitCode = await flow.process.completion;
   if (outcome.kind === 'timeout' || exitCode !== 0) {
     throw new Error(
       outcome.kind === 'timeout'
-        ? `Maestro flow timed out: ${flowName}`
-        : `Maestro flow failed (${exitCode}): ${flowName}`,
+        ? `Maestro flow timed out: ${flow.flowName}`
+        : `Maestro flow failed (${exitCode}): ${flow.flowName}`,
     );
   }
+}
+
+async function runMaestroFlow(
+  platform: MobileE2EPlatform,
+  deviceId: string,
+  flowName: string,
+  artifactRoot: string,
+  environment: Readonly<Record<string, string>>,
+  iosDriverSession?: IosMaestroDriverSession,
+  artifactName: string = flowName,
+  explicitFlowPath?: string,
+): Promise<void> {
+  const flow = await startMaestroFlow(
+    platform,
+    deviceId,
+    flowName,
+    artifactRoot,
+    environment,
+    iosDriverSession,
+    artifactName,
+    explicitFlowPath,
+  );
+  await awaitMaestroFlow(flow);
 }
 
 async function runAuthenticationSplit(
@@ -1799,14 +2022,32 @@ async function analyzeIosNotificationScreenshot(
   deviceId: string,
   artifactRoot: string,
   label: string,
+  deadline?: number,
 ): Promise<unknown> {
   if (!/^[a-z0-9-]+$/u.test(label)) {
     throw new Error('The iOS notification screenshot label is invalid.');
   }
+  const remainingTimeout = (): number | undefined => {
+    if (deadline === undefined) return undefined;
+    if (!Number.isSafeInteger(deadline)) {
+      throw new Error('The iOS screenshot analysis deadline is invalid.');
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('The iOS screenshot analysis deadline expired.');
+    }
+    return remaining;
+  };
   const screenshotPath = resolve(artifactRoot, `${label}.png`);
+  const screenshotTimeout = remainingTimeout();
   await runCommand(
     ['xcrun', 'simctl', 'io', deviceId, 'screenshot', screenshotPath],
-    { logPath: resolve(artifactRoot, `${label}-screenshot.log`) },
+    {
+      logPath: resolve(artifactRoot, `${label}-screenshot.log`),
+      ...(screenshotTimeout === undefined
+        ? {}
+        : { timeoutMilliseconds: screenshotTimeout }),
+    },
   );
   const screenshot = await lstat(screenshotPath);
   if (
@@ -1816,6 +2057,7 @@ async function analyzeIosNotificationScreenshot(
   ) {
     throw new Error('The iOS notification screenshot is invalid.');
   }
+  const analysisTimeout = remainingTimeout();
   const analysis = await runCommand(
     [
       'xcrun',
@@ -1826,6 +2068,9 @@ async function analyzeIosNotificationScreenshot(
     {
       quiet: true,
       logPath: resolve(artifactRoot, `${label}-vision.log`),
+      ...(analysisTimeout === undefined
+        ? {}
+        : { timeoutMilliseconds: analysisTimeout }),
     },
   );
   const analysisText = analysis.stdout.trim();

@@ -1160,10 +1160,11 @@ export function mobileE2ELoopbackMetroEnvironment(
 export function isMobileE2EAndroidDeviceAuthenticationPrompt(
   hierarchy: string,
 ): boolean {
-  return (
-    hierarchy.includes('Unlock PSD EOC') &&
-    (hierarchy.includes('package="com.android.systemui"') ||
-      hierarchy.includes('package: com.android.systemui'))
+  const nodes = hierarchy.match(/<node\b[^>]*>/gu) ?? [];
+  return nodes.some(
+    (node) =>
+      node.includes('Unlock PSD EOC') &&
+      node.includes('package="com.android.systemui"'),
   );
 }
 
@@ -1222,8 +1223,8 @@ export function isMobileE2EIosApplicationReady(
   );
 }
 
-/** Admits an authentication retry only from PSD EOC's exact locked UI. */
-export function isMobileE2EIosUnlockRetryReady(hierarchy: string): boolean {
+/** Admits one native authentication retry only from PSD EOC's exact locked UI. */
+export function isMobileE2EUnlockRetryReady(hierarchy: string): boolean {
   return (
     hierarchy.includes('Unlock PSD EOC') &&
     hierarchy.includes('PSD EOC remains locked') &&
@@ -1283,6 +1284,16 @@ interface MobileE2EIosOcrObservation {
   readonly minY: number;
   readonly width: number;
   readonly height: number;
+}
+
+export interface MobileE2EIosDeviceAuthenticationScreenshotEvidence {
+  readonly status: 'proven';
+  readonly applicationText: 'Unlock PSD EOC';
+  readonly promptText: 'Face ID';
+}
+
+export interface MobileE2EIosDeviceAuthenticationScreenshotNotReady {
+  readonly status: 'not-ready';
 }
 
 function mobileE2EIosOcrObservations(
@@ -1386,6 +1397,75 @@ function mobileE2EIosExactOcrObservation(
     throw new Error(`The iOS screenshot did not prove exactly one ${text}.`);
   }
   return matches[0] as MobileE2EIosOcrObservation;
+}
+
+/**
+ * Proves the simulator's Face ID sheet over PSD EOC without relying on the
+ * XCTest hierarchy that is blocked by the same in-flight semantic tap.
+ */
+export function mobileE2EIosDeviceAuthenticationScreenshotEvidence(
+  value: unknown,
+):
+  | MobileE2EIosDeviceAuthenticationScreenshotEvidence
+  | MobileE2EIosDeviceAuthenticationScreenshotNotReady {
+  const observations = mobileE2EIosOcrObservations(value);
+  if (
+    observations.some((observation) =>
+      observation.text.toUpperCase().includes('INCIDENT'),
+    )
+  ) {
+    throw new Error(
+      'The iOS device-authentication screenshot contained INCIDENT text.',
+    );
+  }
+  const application = mobileE2EIosExactOcrObservation(
+    observations,
+    'Unlock PSD EOC',
+  );
+  const applicationCenter = mobileE2EIosOcrCenter(application);
+  if (
+    application.width < 0.3 ||
+    applicationCenter.x < 20 ||
+    applicationCenter.x > 80 ||
+    applicationCenter.y < 20 ||
+    applicationCenter.y > 45
+  ) {
+    throw new Error(
+      "The iOS screenshot did not prove PSD EOC's unlock screen.",
+    );
+  }
+  const promptCandidates = observations.filter(
+    (observation) => observation.text === 'Face ID',
+  );
+  if (promptCandidates.length === 0) {
+    return Object.freeze({ status: 'not-ready' });
+  }
+  if (
+    promptCandidates.length !== 1 ||
+    (promptCandidates[0] as MobileE2EIosOcrObservation).confidence < 0.9
+  ) {
+    throw new Error(
+      'The iOS screenshot contained invalid Face ID prompt evidence.',
+    );
+  }
+  const prompt = promptCandidates[0] as MobileE2EIosOcrObservation;
+  const promptCenter = mobileE2EIosOcrCenter(prompt);
+  if (
+    promptCenter.x < 35 ||
+    promptCenter.x > 65 ||
+    promptCenter.y < 45 ||
+    promptCenter.y > 70 ||
+    applicationCenter.y >= promptCenter.y
+  ) {
+    throw new Error(
+      "The iOS screenshot did not prove PSD EOC's central Face ID sheet.",
+    );
+  }
+  return Object.freeze({
+    status: 'proven',
+    applicationText: 'Unlock PSD EOC',
+    promptText: 'Face ID',
+  });
 }
 
 function requireMobileE2EIosDrillOnlyOcr(

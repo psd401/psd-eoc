@@ -8,12 +8,14 @@ appId: net.psd401.eoc
     element:
       id: 'issue-21-synthetic-mode'
     direction: UP
+    waitToSettleTimeoutMs: 500
 - assertVisible:
     id: 'issue-21-synthetic-mode'
 - assertVisible: 'Synthetic test mode. Synthetic recipients only. No live provider sends.'
 - scrollUntilVisible:
     element: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
 - tapOn: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
 - assertVisible: 'DRILL — PRACTICE. This visual state is for a drill or synthetic test only.'
@@ -26,28 +28,34 @@ appId: net.psd401.eoc
 - scrollUntilVisible:
     element: 'DRILL — PRACTICE, Push notifications consequence'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible: 'DRILL — PRACTICE, Push notifications consequence'
 - scrollUntilVisible:
     element: 'Title: \[DRILL\] Synthetic earthquake drill'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible: 'Title: \[DRILL\] Synthetic earthquake drill'
 - scrollUntilVisible:
     element: 'Message: \[DRILL\] Synthetic recipients only\.'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible: 'Message: \[DRILL\] Synthetic recipients only\.'
 - assertNotVisible: 'Title: \[INCIDENT\] Synthetic earthquake drill'
 - scrollUntilVisible:
     element: 'DRILL — PRACTICE, Email consequence'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible: 'DRILL — PRACTICE, Email consequence'
 - scrollUntilVisible:
     element: 'Integration: Mocked — training data only'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible: 'Integration: Mocked — training data only'
 - scrollUntilVisible:
     element:
       id: 'issue-21-confirm-drill'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible:
     id: 'issue-21-confirm-drill'
 - assertVisible: 'Start a separate DRILL — PRACTICE and record notification intents for 2 synthetic recipients'
@@ -63,4 +71,5 @@ appId: net.psd401.eoc
 - scrollUntilVisible:
     element: '.*does not claim either one.*'
     direction: DOWN
+    waitToSettleTimeoutMs: 500
 - assertVisible: '.*does not claim either one.*'
