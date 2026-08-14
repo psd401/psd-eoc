@@ -32,10 +32,12 @@ drill, or notify anyone.
    District Technology.
 4. Tap **View in TestFlight**, **Accept**, then **Install**. Apple's wording can
    vary slightly.
-5. Open **PSD EOC** and sign in with your approved `@psd401.net` staff account.
-6. Follow the app's prompt to enroll this device and enable Face ID, Touch ID,
-   or the device's secure unlock. PSD EOC does not create or store a separate
-   PIN.
+5. Only after District Technology gives the separate registration confirmation
+   above, open **PSD EOC** and sign in with your approved `@psd401.net` staff
+   account. Otherwise stop after **Install**.
+6. After that confirmation, follow the app's prompt to enroll this device and
+   enable Face ID, Touch ID, or the device's secure unlock. PSD EOC does not
+   create or store a separate PIN.
 
 ![Three screen references showing the approved invitation, TestFlight acceptance, and PSD EOC installation](assets/issue-33/ios-testflight-install.svg)
 
@@ -45,8 +47,8 @@ Contact District Technology for the approved current build.
 
 ## Allow notifications
 
-When PSD EOC asks to send notifications, tap **Allow**. If you previously chose
-Don't Allow:
+Only after the separate registration confirmation above, when PSD EOC asks to
+send notifications, tap **Allow**. If you previously chose Don't Allow:
 
 1. Open **Settings → Notifications → PSD EOC**.
 2. Turn on **Allow Notifications**.

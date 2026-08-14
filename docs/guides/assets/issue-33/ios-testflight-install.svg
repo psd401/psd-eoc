@@ -35,16 +35,16 @@
     <g transform="translate(662 112)">
       <rect width="250" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
       <rect x="80" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
-      <text x="20" y="66" font-size="15" font-weight="700" fill="#17324d">3  Install and open</text>
+      <text x="20" y="66" font-size="15" font-weight="700" fill="#17324d">3  Install only</text>
       <circle cx="65" cy="127" r="34" fill="#17324d"/>
       <text x="44" y="137" font-size="26" font-weight="700" fill="#fff">EOC</text>
       <text x="112" y="120" font-size="18" font-weight="700" fill="#17324d">PSD EOC</text>
       <text x="112" y="145" font-size="13" fill="#4c6275">Version 1.0.1</text>
       <rect x="20" y="184" width="210" height="42" rx="21" fill="#175a8e"/>
       <text x="96" y="211" font-size="14" font-weight="700" fill="#fff">Install</text>
-      <text x="20" y="262" font-size="13" fill="#334e62">After installation, tap Open</text>
-      <text x="20" y="282" font-size="13" fill="#334e62">and sign in with your district</text>
-      <text x="20" y="302" font-size="13" fill="#334e62">staff account.</text>
+      <text x="20" y="262" font-size="13" fill="#334e62">Stop after Install unless</text>
+      <text x="20" y="282" font-size="13" fill="#334e62">registration is separately</text>
+      <text x="20" y="302" font-size="13" fill="#334e62">approved by District Technology.</text>
     </g>
   </g>
 </svg>
