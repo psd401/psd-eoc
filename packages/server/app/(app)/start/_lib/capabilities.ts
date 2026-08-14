@@ -801,6 +801,7 @@ export async function loadRosterSnapshot(
       id: row.id,
       population: row.population,
       googleSubject: row.googleSubject,
+      ...(row.staffEmail === null ? {} : { staffEmail: row.staffEmail }),
       displayName: row.displayName,
       groupSourceRefs: groupRefsForRecipient.get(row.id) ?? [],
       endpoints: endpointsForRecipient.get(row.id) ?? [],
