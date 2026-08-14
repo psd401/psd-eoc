@@ -49,6 +49,7 @@ const ProbeEvidenceSchema = z
     queuedPendingFulfillmentsAtInvocation: z.number().int().nonnegative(),
     queuedPendingOutcome: QueryOutcomeSchema,
     queuedPostCloseOutcome: QueryOutcomeSchema,
+    queuedReconnectTimerClearedAtInvocation: z.boolean(),
     queuedReconnectDurations: z.array(z.number().finite()).min(1),
   })
   .strict();
@@ -458,6 +459,7 @@ async function queuedReconnectProbe(
     | 'queuedPendingFulfillmentsAtInvocation'
     | 'queuedPendingOutcome'
     | 'queuedPostCloseOutcome'
+    | 'queuedReconnectTimerClearedAtInvocation'
     | 'queuedReconnectDurations'
   >
 > {
@@ -468,9 +470,12 @@ async function queuedReconnectProbe(
   );
   const subject = openSubject(databaseUrl, subjectName);
   const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
   const reconnectDurations: number[] = [];
   let connectCallbacks = 0;
   let pendingFulfillments = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectTimerCleared = false;
   let timerInstrumented = false;
   let evidence:
     | Pick<
@@ -483,6 +488,7 @@ async function queuedReconnectProbe(
         | 'queuedPendingFulfillmentsAtInvocation'
         | 'queuedPendingOutcome'
         | 'queuedPostCloseOutcome'
+        | 'queuedReconnectTimerClearedAtInvocation'
         | 'queuedReconnectDurations'
       >
     | undefined;
@@ -516,7 +522,7 @@ async function queuedReconnectProbe(
         typeof timeout === 'number'
       ) {
         reconnectDurations.push(timeout);
-        return originalSetTimeout(
+        reconnectTimer = originalSetTimeout(
           (...callbackArguments: unknown[]) => {
             connectCallbacks += 1;
             Reflect.apply(handler, undefined, callbackArguments);
@@ -524,9 +530,14 @@ async function queuedReconnectProbe(
           RECONNECT_DELAY_MS,
           ...arguments_,
         );
+        return reconnectTimer;
       }
       return originalSetTimeout(handler, timeout, ...arguments_);
     }) as typeof setTimeout;
+    globalThis.clearTimeout = ((timer) => {
+      if (timer === reconnectTimer) reconnectTimerCleared = true;
+      Reflect.apply(originalClearTimeout, globalThis, [timer]);
+    }) as typeof clearTimeout;
     timerInstrumented = true;
 
     const pendingOutcomePromise = queryOutcome(
@@ -547,6 +558,7 @@ async function queuedReconnectProbe(
     }
 
     const firstClose = subject.close();
+    const queuedReconnectTimerClearedAtInvocation = reconnectTimerCleared;
     const queuedConnectCallbacksAtInvocation = connectCallbacks;
     const queuedPendingFulfillmentsAtInvocation = pendingFulfillments;
     const secondClose = subject.close();
@@ -577,12 +589,16 @@ async function queuedReconnectProbe(
       queuedPendingFulfillmentsAtInvocation,
       queuedPendingOutcome,
       queuedPostCloseOutcome,
+      queuedReconnectTimerClearedAtInvocation,
       queuedReconnectDurations: [...reconnectDurations],
     };
   } catch (error) {
     primaryError = error;
   } finally {
-    if (timerInstrumented) globalThis.setTimeout = originalSetTimeout;
+    if (timerInstrumented) {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   }
 
   await checkedSubjectCleanup(
@@ -982,6 +998,7 @@ if (isIsolatedProbe) {
       expect(evidence.queuedConnectCallbacksAtInvocation).toBe(0);
       expect(evidence.queuedPendingFulfillmentsAtInvocation).toBe(0);
       expect(evidence.queuedClosePromiseReused).toBe(true);
+      expect(evidence.queuedReconnectTimerClearedAtInvocation).toBe(true);
       expect(evidence.queuedConnectCallbacksAfterObservation).toBe(0);
       expect(evidence.queuedPendingFulfillmentsAfterObservation).toBe(0);
       expect(['CONNECTION_DESTROYED', 'CONNECTION_ENDED']).toContain(

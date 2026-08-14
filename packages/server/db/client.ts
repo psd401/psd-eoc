@@ -376,6 +376,22 @@ function createIdempotentClose(
   };
 }
 
+function createSynchronousIdempotentClose(
+  close: () => void | Promise<void>,
+): () => Promise<void> {
+  let closePromise: Promise<void> | undefined;
+
+  return () => {
+    if (closePromise !== undefined) return closePromise;
+    try {
+      closePromise = Promise.resolve(close());
+    } catch (error) {
+      closePromise = Promise.reject(error);
+    }
+    return closePromise;
+  };
+}
+
 function createPostgresDatabaseConnection(
   config: z.output<typeof PostgresDatabaseConfigSchema>,
 ): PostgresDatabaseConnection {
@@ -388,7 +404,7 @@ function createPostgresDatabaseConnection(
   return {
     driver: POSTGRES_DRIVER,
     db: drizzlePostgres(client, { schema: databaseSchema }),
-    close: createIdempotentClose(() => client.end({ timeout: 5 })),
+    close: createSynchronousIdempotentClose(() => client.end({ timeout: 0 })),
   };
 }
 

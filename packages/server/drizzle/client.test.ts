@@ -74,6 +74,12 @@ describe('database client configuration', () => {
     expect(postgresClient.driver).toBe('postgres');
     const postgresClose = postgresClient.close();
     expect(postgresClient.close()).toBe(postgresClose);
+    const postCloseQuery = postgresClient.db.execute(
+      sql`select 130::integer as value`,
+    );
+    await expect(Promise.resolve(postCloseQuery)).rejects.toMatchObject({
+      cause: { code: 'CONNECTION_ENDED' },
+    });
     await postgresClose;
 
     const dataApiClient = createDatabaseClient(
