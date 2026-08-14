@@ -21,7 +21,7 @@ import {
   type StoredCredential,
   type StoredSessionContext,
 } from '../../../../lib/auth/sessions';
-import { createRevokeSessionRouteHandler } from './route';
+import { createRevokeSessionRouteHandler } from './runtime';
 
 const IDS = {
   user: '10000000-0000-4000-8000-000000000001',

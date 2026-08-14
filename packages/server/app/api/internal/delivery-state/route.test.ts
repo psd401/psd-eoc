@@ -23,7 +23,7 @@ import {
   type AttemptEvidenceInput,
   type DeliveryStateRouteRuntime,
   type DeliveryStateWriteRequest,
-} from './route';
+} from './runtime';
 import type { TrustedCapabilityInvocation } from '../../../../lib/capabilities/engine';
 
 const IDS = Object.freeze({

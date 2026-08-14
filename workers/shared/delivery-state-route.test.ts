@@ -19,7 +19,7 @@ import {
   type DeliveryStateRouteDependencies,
   type DeliveryStateRouteRuntime,
   type DeliveryStateWriteRequest,
-} from '../../packages/server/app/api/internal/delivery-state/route';
+} from '../../packages/server/app/api/internal/delivery-state/runtime';
 import { attemptFor, syntheticBatch } from './test-fixtures';
 
 const WORKER_TOKEN = 'synthetic-delivery-state-worker-token-0001';
