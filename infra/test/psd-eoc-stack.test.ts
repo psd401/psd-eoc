@@ -805,9 +805,14 @@ describe('App Runner high availability', () => {
         'API_SALT',
         'GOOGLE_OAUTH_CONFIG',
         'GOOGLE_OIDC_COOKIE_SECRET',
+        'GOOGLE_ROSTER_CONFIG',
         'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
       ].sort(),
     );
+    expect(environmentSecrets).toContainEqual({
+      Name: 'GOOGLE_ROSTER_CONFIG',
+      Value: { Ref: 'GoogleGroupsSecretArn' },
+    });
     expect(environmentSecrets).toContainEqual({
       Name: 'GOOGLE_OAUTH_CONFIG',
       Value: { Ref: 'GoogleOauthSecretArn' },
@@ -863,6 +868,7 @@ describe('App Runner high availability', () => {
         applicationSecretLogicalId,
         deliveryStateWorkerTokenSecretLogicalId,
         googleOidcCookieSecretLogicalId,
+        'GoogleGroupsSecretArn',
         'GoogleOauthSecretArn',
       ].sort(),
     );
@@ -899,6 +905,27 @@ describe('App Runner high availability', () => {
     const outputs = JSON.stringify(synthesizedTemplate.Outputs);
     expect(outputs).not.toContain('GoogleOauthSecretArn');
     expect(outputs).not.toContain(googleOidcCookieSecretLogicalId);
+    expect(outputs).not.toContain('GoogleGroupsSecretArn');
+
+    const groupsPolicies = resourceEntries('AWS::IAM::Policy').filter(
+      ([, policy]) => JSON.stringify(policy).includes('GoogleGroupsSecretArn'),
+    );
+    expect(groupsPolicies).toHaveLength(1);
+    expect(groupsPolicies[0]?.[0]).toBe(runtimePolicyLogicalId);
+    expect(resourceProperties(groupsPolicies[0]?.[1] ?? {}).Roles).toEqual([
+      { Ref: instanceRoleLogicalId },
+    ]);
+    const groupsStatements = runtimeStatements.filter((statement) =>
+      JSON.stringify(statement.Resource).includes('GoogleGroupsSecretArn'),
+    );
+    expect(groupsStatements).toHaveLength(1);
+    expect(asStringArray(groupsStatements[0]?.Action).sort()).toEqual([
+      'secretsmanager:DescribeSecret',
+      'secretsmanager:GetSecretValue',
+    ]);
+    expect(groupsStatements[0]?.Resource).toEqual({
+      Ref: 'GoogleGroupsSecretArn',
+    });
 
     const dependencies = Array.isArray(service.DependsOn)
       ? service.DependsOn
@@ -961,6 +988,31 @@ describe('fail-closed integration placeholders', () => {
       `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/other-Ab12Cd`,
     ]) {
       expect(googleOauthArnPattern.test(invalid)).toBe(false);
+    }
+
+    const googleGroupsArn = asRecord(parameters.GoogleGroupsSecretArn);
+    expect(googleGroupsArn).not.toHaveProperty('Default');
+    expect(googleGroupsArn.NoEcho).toBe(true);
+    expect(googleGroupsArn.AllowedPattern).toBe(
+      `^arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
+    );
+    const googleGroupsArnPattern = new RegExp(
+      String(googleGroupsArn.AllowedPattern),
+      'u',
+    );
+    expect(
+      googleGroupsArnPattern.test(
+        `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-groups-a1B2c3`,
+      ),
+    ).toBe(true);
+    for (const invalid of [
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:000000000000:secret:/psd-eoc/google-groups-a1B2c3`,
+      `arn:aws:secretsmanager:us-east-1:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-groups-a1B2c3`,
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-groups`,
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-groups-*`,
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/other-a1B2c3`,
+    ]) {
+      expect(googleGroupsArnPattern.test(invalid)).toBe(false);
     }
 
     for (const name of [
