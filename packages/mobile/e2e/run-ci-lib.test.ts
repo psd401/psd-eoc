@@ -26,9 +26,11 @@ import {
   decideMobileE2EIosNotificationResponse,
   mobileE2EAndroidArchitectureArguments,
   mobileE2EAndroidBuildArguments,
+  mobileE2EAndroidEmulatorControlArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EArtifactPaths,
   mobileE2EDevClientUrl,
+  mobileE2EEnrollmentWarmupRequest,
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
@@ -64,6 +66,7 @@ import {
   requireMatchingMobileE2ERunIds,
   selectMobileE2EIosRuntimeAndDeviceType,
   shouldCopyMobileE2EWorkspaceSource,
+  withMobileE2EAndroidEmulatorPaused,
 } from './run-ci-lib';
 
 const RUN_ID = 'a'.repeat(32);
@@ -552,6 +555,48 @@ describe('issue #32 exact synthetic drill data', () => {
         templateMode: 'real',
       }),
     ).toThrow();
+  });
+
+  test('warms only the exact synthetic OIDC start route before enrollment', async () => {
+    expect(mobileE2EEnrollmentWarmupRequest(manifest())).toEqual({
+      url: `${manifest().appOrigin}/api/auth/mobile/oidc/start`,
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+      expectedStatus: 400,
+    });
+    expect(() =>
+      mobileE2EEnrollmentWarmupRequest({
+        ...manifest(),
+        classification: 'incident',
+      }),
+    ).toThrow();
+
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
+    );
+    const warmup = runner.match(
+      /async function warmMobileEnrollmentStartRoute[\s\S]+?(?=async function copyMobileWorkspace)/u,
+    )?.[0];
+    expect(warmup).toBeDefined();
+    expect(warmup).toContain('mobileE2EEnrollmentWarmupRequest(manifest)');
+    expect(warmup).toContain('response.body?.cancel()');
+    expect(warmup).toContain('status !== warmup.expectedStatus');
+    expect(warmup).toContain('status=validation-rejected');
+    expect(
+      runner.match(/await warmMobileEnrollmentStartRoute\(/gu),
+    ).toHaveLength(2);
+    expect(runner).toMatch(
+      /awaitIosFreshEnrollmentReady[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+enroll-loopback-oidc-ios/u,
+    );
+    expect(runner).toMatch(
+      /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+enroll-loopback-oidc-android/u,
+    );
   });
 
   test('retries a cold loopback server only through the visible reconnect control', async () => {
@@ -1209,6 +1254,102 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(runner).toMatch(
       /async function injectAndroidNotification[\s\S]+\.\.\.mobileE2EAndroidArchitectureArguments\(\)[\s\S]+app:connectedDebugAndroidTest/u,
     );
+    expect(runner).toMatch(
+      /ensureAndroidDevice\(suiteAndroidSerial\)[\s\S]+buildAndroidAppWithPausedEmulator\([\s\S]+androidCredentialConfigured = true[\s\S]+configureAndroidCredential\(suiteAndroidSerial\)/u,
+    );
+    expect(runner).toContain(
+      'const ANDROID_EMULATOR_CONTROL_TIMEOUT_MS = 30_000;',
+    );
+  });
+
+  test('pauses only the exact Android emulator and always resumes it', async () => {
+    expect(
+      mobileE2EAndroidEmulatorControlArguments('emulator-5554', 'pause'),
+    ).toEqual(['adb', '-s', 'emulator-5554', 'emu', 'avd', 'pause']);
+    expect(
+      mobileE2EAndroidEmulatorControlArguments('emulator-5554', 'resume'),
+    ).toEqual(['adb', '-s', 'emulator-5554', 'emu', 'avd', 'resume']);
+    for (const invalidSerial of [
+      '',
+      'device',
+      '127.0.0.1:5555',
+      'emulator-*',
+    ]) {
+      expect(() =>
+        mobileE2EAndroidEmulatorControlArguments(invalidSerial, 'pause'),
+      ).toThrow('exact local emulator serial');
+    }
+
+    const successOrder: string[] = [];
+    await expect(
+      withMobileE2EAndroidEmulatorPaused(
+        'emulator-5554',
+        async () => {
+          successOrder.push('build');
+          return 'synthetic-apk';
+        },
+        async (command) => {
+          successOrder.push(command.at(-1) ?? 'missing');
+        },
+      ),
+    ).resolves.toBe('synthetic-apk');
+    expect(successOrder).toEqual(['pause', 'build', 'resume']);
+
+    const buildFailure = new Error('synthetic build failure');
+    const resumeFailure = new Error('synthetic resume failure');
+    const failureOrder: string[] = [];
+    const failure = withMobileE2EAndroidEmulatorPaused(
+      'emulator-5554',
+      async () => {
+        failureOrder.push('build');
+        throw buildFailure;
+      },
+      async (command) => {
+        const action = command.at(-1) ?? 'missing';
+        failureOrder.push(action);
+        if (action === 'resume') throw resumeFailure;
+      },
+    );
+    await expect(failure).rejects.toMatchObject({
+      message:
+        'The Android native operation failed and its emulator could not resume.',
+      errors: [buildFailure, resumeFailure],
+    });
+    expect(failureOrder).toEqual(['pause', 'build', 'resume']);
+
+    const uncertainPause = new Error('synthetic lost pause response');
+    const pauseRecoveryOrder: string[] = [];
+    const pauseRecovery = withMobileE2EAndroidEmulatorPaused(
+      'emulator-5554',
+      async () => {
+        pauseRecoveryOrder.push('build');
+      },
+      async (command) => {
+        const action = command.at(-1) ?? 'missing';
+        pauseRecoveryOrder.push(action);
+        if (action === 'pause') throw uncertainPause;
+      },
+    );
+    await expect(pauseRecovery).rejects.toBe(uncertainPause);
+    expect(pauseRecoveryOrder).toEqual(['pause', 'resume']);
+
+    const lostResume = new Error('synthetic lost recovery response');
+    await expect(
+      withMobileE2EAndroidEmulatorPaused(
+        'emulator-5554',
+        async () => {
+          throw new Error('operation must not run after an uncertain pause');
+        },
+        async (command) => {
+          if (command.at(-1) === 'pause') throw uncertainPause;
+          throw lostResume;
+        },
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'The Android emulator pause was uncertain and its recovery resume failed.',
+      errors: [uncertainPause, lostResume],
+    });
   });
 
   test('starts Expo on loopback without incompatible offline mode', () => {

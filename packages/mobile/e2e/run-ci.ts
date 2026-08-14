@@ -22,6 +22,7 @@ import {
   mobileE2EAndroidBuildArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EDevClientUrl,
+  mobileE2EEnrollmentWarmupRequest,
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
@@ -49,6 +50,7 @@ import {
   requireMatchingMobileE2ERunIds,
   selectMobileE2EIosRuntimeAndDeviceType,
   shouldCopyMobileE2EWorkspaceSource,
+  withMobileE2EAndroidEmulatorPaused,
   type MobileE2EArtifactPaths,
   type MobileE2EPlatform,
   type MobileE2ERunnerPaths,
@@ -77,6 +79,8 @@ const IOS_NOTIFICATION_SWIPE_ACTION_TIMEOUT_MS = 5_000;
 const IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS = 30_000;
 const IOS_NOTIFICATION_FOREGROUND_BANNER_SETTLE_MS = 8_000;
 const IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000;
+const MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS = 30_000;
+const ANDROID_EMULATOR_CONTROL_TIMEOUT_MS = 30_000;
 const IOS_BUNDLE_RELATIVE_PATH =
   'ios/build/Build/Products/Debug-iphonesimulator/PSDEOC.app';
 const ANDROID_APK_RELATIVE_PATH =
@@ -477,6 +481,43 @@ async function awaitMetro(
   throw new Error(`Metro on loopback port ${port} was not ready in time.`);
 }
 
+async function warmMobileEnrollmentStartRoute(
+  platform: MobileE2EPlatform,
+  manifest: MobileRuntimeManifest,
+  artifactRoot: string,
+  cancellation: MobileE2ECancellation,
+): Promise<void> {
+  cancellation.throwIfRequested();
+  const warmup = mobileE2EEnrollmentWarmupRequest(manifest);
+  let response: Response;
+  try {
+    response = await fetch(warmup.url, {
+      method: warmup.method,
+      headers: warmup.headers,
+      body: warmup.body,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS),
+    });
+  } catch {
+    throw new Error(
+      'The synthetic mobile OIDC start route did not respond before enrollment.',
+    );
+  }
+  const status = response.status;
+  await response.body?.cancel();
+  if (status !== warmup.expectedStatus) {
+    throw new Error(
+      'The synthetic mobile OIDC warmup was not rejected before state creation.',
+    );
+  }
+  cancellation.throwIfRequested();
+  await writeFile(
+    resolve(artifactRoot, `${platform}-oidc-start-warmup.txt`),
+    `issue=32\nplatform=${platform}\nclassification=drill\nroster=synthetic\nproviders=mocked\nroute=mobile-oidc-start\nstatus=validation-rejected\n`,
+    { encoding: 'utf8', mode: 0o600 },
+  );
+}
+
 async function copyMobileWorkspace(
   paths: MobileE2ERunnerPaths,
   runId: string,
@@ -756,6 +797,32 @@ async function buildAndroidApp(
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error('The Android build did not produce the expected APK.');
   }
+  return apkPath;
+}
+
+async function buildAndroidAppWithPausedEmulator(
+  serial: string,
+  paths: MobileE2ERunnerPaths,
+  artifactRoot: string,
+): Promise<string> {
+  const apkPath = await withMobileE2EAndroidEmulatorPaused(
+    serial,
+    () => buildAndroidApp(paths, artifactRoot),
+    async (command) => {
+      const action = command.at(-1);
+      if (action !== 'pause' && action !== 'resume') {
+        throw new Error('The Android emulator control action is invalid.');
+      }
+      await runCommand(command, {
+        timeoutMilliseconds: ANDROID_EMULATOR_CONTROL_TIMEOUT_MS,
+        logPath: resolve(
+          artifactRoot,
+          `android-emulator-${action}-for-build.log`,
+        ),
+      });
+    },
+  );
+  await ensureAndroidDevice(serial);
   return apkPath;
 }
 
@@ -2191,6 +2258,12 @@ async function runPlatformSuite(
         maestroEnvironment,
         iosDriverSession,
       );
+      await warmMobileEnrollmentStartRoute(
+        platform,
+        manifest,
+        artifacts.root,
+        cancellation,
+      );
       await runAuthenticationSplit(
         platform,
         iosDevice.udid,
@@ -2281,11 +2354,15 @@ async function runPlatformSuite(
       androidSerial = suiteAndroidSerial;
       await ensureAndroidDevice(suiteAndroidSerial);
       androidPackagesWereAbsent = true;
+      const apkPath = await buildAndroidAppWithPausedEmulator(
+        suiteAndroidSerial,
+        paths,
+        artifacts.root,
+      );
       // Claim cleanup before the mutating command so a lost adb response
       // cannot leave the suite's synthetic PIN behind on the emulator.
       androidCredentialConfigured = true;
       await configureAndroidCredential(suiteAndroidSerial);
-      const apkPath = await buildAndroidApp(paths, artifacts.root);
       cancellation.throwIfRequested();
 
       fixtureMetro = startMetro(
@@ -2333,6 +2410,12 @@ async function runPlatformSuite(
         platform,
         suiteAndroidSerial,
         'Sign in to PSD EOC',
+      );
+      await warmMobileEnrollmentStartRoute(
+        platform,
+        manifest,
+        artifacts.root,
+        cancellation,
       );
       await runAuthenticationSplit(
         platform,

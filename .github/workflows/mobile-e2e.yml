@@ -253,6 +253,7 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7
+          cores: 1
           disable-animations: true
           enable-hw-keyboard: true
           emulator-boot-timeout: 900
