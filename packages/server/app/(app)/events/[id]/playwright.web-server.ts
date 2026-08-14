@@ -3,6 +3,7 @@ import {
   createHash,
   createHmac,
   randomBytes,
+  randomInt,
   timingSafeEqual,
 } from 'node:crypto';
 import { mkdirSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
@@ -16,6 +17,7 @@ import { dropOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import {
   cleanupEventRoomPlaywrightRunAfterChildExit,
   cleanupInterruptedEventRoomPlaywrightCoordinator,
+  EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT,
   EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT_ENV,
   finalizeEventRoomPlaywrightWebServer,
   hasEventRoomPlaywrightSupervisorStoppingMarker,
@@ -40,6 +42,7 @@ const PROCESS_EXIT_TIMEOUT_MS = 10_000;
 const WEB_SERVER_CHALLENGE_TIMEOUT_MS = 750;
 const WEB_SERVER_CHALLENGE_BYTES = 32;
 const WEB_SERVER_CHALLENGE_LINE_LENGTH = WEB_SERVER_CHALLENGE_BYTES * 2 + 1;
+const WEB_SERVER_CHALLENGE_PORT_ATTEMPTS = 20;
 const scriptPath = fileURLToPath(import.meta.url);
 export const EVENT_ROOM_PLAYWRIGHT_SUPERVISOR_MODE_ENV =
   'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SUPERVISOR_MODE';
@@ -113,8 +116,12 @@ async function startWebServerRunChallenge(
   context: EventRoomPlaywrightRunContext,
   identity: Omit<WebServerChallengeIdentity, 'challengePort'>,
   supervisorNonce: string,
+  portSelectionAttempt = 1,
 ): Promise<number> {
-  let challengePort = 0;
+  const challengePort = randomInt(
+    EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT,
+    65_536,
+  );
   const server = createServer((socket) => {
     let request = '';
     let handled = false;
@@ -148,26 +155,30 @@ async function startWebServerRunChallenge(
       socket.end(`${response}\n`);
     });
   });
-  await new Promise<void>((resolveListen, rejectListen) => {
-    const rejectStartup = (error: Error) => rejectListen(error);
-    server.once('error', rejectStartup);
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', rejectStartup);
-      server.on('error', () => undefined);
-      const address = server.address();
-      if (address === null || typeof address === 'string') {
-        rejectListen(
-          new Error('The web-server run challenge address was invalid.'),
-        );
-        return;
-      }
-      challengePort = address.port;
-      server.unref();
-      resolveListen();
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      const rejectStartup = (error: Error) => rejectListen(error);
+      server.once('error', rejectStartup);
+      server.listen(challengePort, '127.0.0.1', () => {
+        server.off('error', rejectStartup);
+        server.on('error', () => undefined);
+        server.unref();
+        resolveListen();
+      });
     });
-  });
-  if (!Number.isSafeInteger(challengePort) || challengePort <= 0) {
-    throw new Error('The web-server run challenge port was invalid.');
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === 'EADDRINUSE' &&
+      portSelectionAttempt < WEB_SERVER_CHALLENGE_PORT_ATTEMPTS
+    ) {
+      return startWebServerRunChallenge(
+        context,
+        identity,
+        supervisorNonce,
+        portSelectionAttempt + 1,
+      );
+    }
+    throw error;
   }
   return challengePort;
 }

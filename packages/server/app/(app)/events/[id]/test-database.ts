@@ -26,6 +26,8 @@ const RUN_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const MINIMUM_APP_PORT = 20_000;
 const APP_PORT_COUNT = 30_000;
+export const EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT =
+  MINIMUM_APP_PORT + APP_PORT_COUNT;
 const PORT_CLOSE_TIMEOUT_MS = 10_000;
 const PORT_LEASE_DIRECTORY = join(tmpdir(), 'psd-eoc-event-room-port-leases');
 const RUN_DIRECTORY_PREFIX = 'psd-eoc-event-room-';
@@ -1014,8 +1016,9 @@ export function writeEventRoomPlaywrightWebServerIdentity(
     identity.processStartedAt.length === 0 ||
     !/^[0-9a-f]{64}$/u.test(identity.commandHash) ||
     !Number.isSafeInteger(identity.challengePort) ||
-    identity.challengePort <= 0 ||
+    identity.challengePort < EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT ||
     identity.challengePort > 65_535 ||
+    identity.challengePort === context.appPort ||
     supervisorNonce.length < 32
   ) {
     throw new Error(
@@ -1096,8 +1099,9 @@ export function readEventRoomPlaywrightWebServerIdentity(
   if (
     parsed.processGroupId !== parsed.webServerPid ||
     !Number.isSafeInteger(parsed.challengePort) ||
-    parsed.challengePort <= 0 ||
+    parsed.challengePort < EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT ||
     parsed.challengePort > 65_535 ||
+    parsed.challengePort === context.appPort ||
     !exactStringEqual(serialized, canonical)
   ) {
     throw new Error(
