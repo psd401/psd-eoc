@@ -34,6 +34,7 @@ import {
   createAgentRestRuntime,
   type AgentRestRuntime,
 } from '../../../lib/agents/runtime';
+import { readGoogleOidcConfiguration } from '../../../lib/auth/oidc';
 
 const DEFAULT_HEALTH_TIMEOUT_MILLISECONDS = 1_500;
 const MAX_HEALTH_TIMEOUT_MILLISECONDS = 5_000;
@@ -412,31 +413,12 @@ function readSecretConfiguration(
 
 function assertInjectedRuntimeSecrets(environment: HealthEnvironment): void {
   const apiSalt = requiredEnvironmentValue(environment, 'API_SALT', 65_536);
-  const oauthConfiguration = requiredEnvironmentValue(
-    environment,
-    'GOOGLE_OAUTH_CONFIG',
-    65_536,
-  );
   if (apiSalt.length < 32 || apiSalt.startsWith('arn:')) {
     throw new Error('Health dependency configuration is unavailable.');
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(oauthConfiguration) as unknown;
+    readGoogleOidcConfiguration(environment);
   } catch {
-    throw new Error('Health dependency configuration is unavailable.');
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('Health dependency configuration is unavailable.');
-  }
-  const record = parsed as Readonly<Record<string, unknown>>;
-  if (
-    oauthConfiguration.startsWith('arn:') ||
-    typeof record.clientId !== 'string' ||
-    record.clientId.trim().length === 0 ||
-    typeof record.clientSecret !== 'string' ||
-    record.clientSecret.trim().length === 0
-  ) {
     throw new Error('Health dependency configuration is unavailable.');
   }
 }

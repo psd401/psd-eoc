@@ -47,6 +47,11 @@ const CANARY_ISSUER_ID = '00000000-0000-4000-8000-000000000008';
 const OTHER_FACILITY_ID = '00000000-0000-4000-8000-000000000009';
 const OTHER_KEY_ID = '00000000-0000-4000-8000-000000000010';
 const CANARY_CREDENTIAL = `psd_eoc_agent_v1_ABCDEFGHIJKL.${'a'.repeat(43)}`;
+const OAUTH_PROJECT_NUMBER = '<aws-account-id>';
+const OAUTH_WEB_CLIENT_ID = `${OAUTH_PROJECT_NUMBER}-webclient.apps.googleusercontent.com`;
+const OAUTH_IOS_CLIENT_ID = `${OAUTH_PROJECT_NUMBER}-iosclient.apps.googleusercontent.com`;
+const OAUTH_CLIENT_SECRET = `GOCSPX-${'a'.repeat(32)}`;
+const OIDC_COOKIE_SECRET = Buffer.alloc(32, 31).toString('base64url');
 const CANARY_CAPABILITIES = [
   'create-activation-preview',
   'start-event',
@@ -65,9 +70,14 @@ function runtimeEnvironment(): Readonly<Record<string, string>> {
     DATABASE_SECRET_ARN,
     FANOUT_QUEUE_URL: QUEUE_URL,
     GOOGLE_OAUTH_CONFIG: JSON.stringify({
-      clientId: 'synthetic-client-id',
-      clientSecret: 'synthetic-client-secret',
+      clientId: OAUTH_WEB_CLIENT_ID,
+      clientSecret: OAUTH_CLIENT_SECRET,
+      iosBundleId: 'net.psd401.eoc',
+      iosClientId: OAUTH_IOS_CLIENT_ID,
+      webClientId: OAUTH_WEB_CLIENT_ID,
     }),
+    GOOGLE_OIDC_COOKIE_SECRET: OIDC_COOKIE_SECRET,
+    NODE_ENV: 'production',
   });
 }
 
@@ -885,6 +895,8 @@ describe('production deep health reads', () => {
     expect(serializedRequests).not.toContain(
       runtimeEnvironment().GOOGLE_OAUTH_CONFIG,
     );
+    expect(serializedRequests).not.toContain(OAUTH_CLIENT_SECRET);
+    expect(serializedRequests).not.toContain(OIDC_COOKIE_SECRET);
     expect(serializedRequests).not.toContain(runtimeEnvironment().API_SALT);
     expect(serializedRequests).not.toContain(SYNTHETIC_SECRET_ACCESS_KEY);
   });
@@ -910,6 +922,38 @@ describe('production deep health reads', () => {
     await expect(
       dependencies.checkRuntimeSecrets(new AbortController().signal),
     ).rejects.toThrow();
+    expect(fetchCalled).toBe(false);
+  });
+
+  it('rejects a runtime OAuth contract that auth would reject', async () => {
+    const environment = {
+      ...runtimeEnvironment(),
+      GOOGLE_OAUTH_CONFIG: JSON.stringify({
+        clientId: OAUTH_WEB_CLIENT_ID,
+        clientSecret: OAUTH_CLIENT_SECRET,
+        iosBundleId: 'net.psd401.eoc',
+        iosClientId: OAUTH_IOS_CLIENT_ID,
+        webClientId: OAUTH_WEB_CLIENT_ID,
+        issuer: 'https://accounts.google.com',
+      }),
+    };
+    let fetchCalled = false;
+    const dependencies = createRuntimeDeepHealthDependencies(environment, {
+      fetch: async () => {
+        fetchCalled = true;
+        return new Response('{}');
+      },
+      now: () => FIXED_TIME,
+      resolveAwsCredentials: async () => ({
+        accessKeyId: SYNTHETIC_ACCESS_KEY_ID,
+        secretAccessKey: SYNTHETIC_SECRET_ACCESS_KEY,
+        sessionToken: SYNTHETIC_SESSION_TOKEN,
+      }),
+    });
+
+    await expect(
+      dependencies.checkRuntimeSecrets(new AbortController().signal),
+    ).rejects.toThrow('Health dependency configuration is unavailable.');
     expect(fetchCalled).toBe(false);
   });
 
