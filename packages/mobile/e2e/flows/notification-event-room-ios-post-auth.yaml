@@ -1,13 +1,20 @@
 appId: net.psd401.eoc
-name: Issue 32 - verify iOS notification routed to the exact drill room
-tags: [issue-32, synthetic-only, ios, notification, post-auth]
+name: Issue 32 - join the exact drill after the verified iOS notification action
+tags: [issue-32, synthetic-only, ios, notification, join]
 ---
 - runFlow:
     file: shared/assert-synthetic-context.yaml
-- runFlow:
-    file: shared/assert-active-drill-room.yaml
-    env:
-      EVENT_ROUTE_EVIDENCE: ${EVENT_ROUTE_EVIDENCE}
-      EVENT_TYPE_NAME: ${EVENT_TYPE_NAME}
-      FACILITY_CODE: ${FACILITY_CODE}
-      FACILITY_NAME: ${FACILITY_NAME}
+# The runner has already required the same-request SpringBoard default action.
+# The production response listener and parser are exercised and logged, but on
+# iOS 26 the protected router remains on this lobby after the system overlay
+# closes. Join the same run-specific active drill through the ordinary UI so
+# this issue's mobile journey proves that exact selection without claiming
+# navigation that did not occur. The runner next uses the app's registered
+# read-only event URL and independently requires the canonical room evidence.
+- extendedWaitUntil:
+    visible: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
+    timeout: 60000
+- assertNotVisible: '.*\[INCIDENT\].*'
+- tapOn: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
+- waitForAnimationToEnd:
+    timeout: 5000

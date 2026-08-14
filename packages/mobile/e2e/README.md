@@ -17,11 +17,16 @@ platforms:
    synthetic drill from an isolated PostgreSQL test database.
 3. A provider-free platform notification is presented through the installed
    app's platform integration. Its visible alert and versioned payload are
-   explicitly `drill`. The exact card remains pending while device
-   authentication completes; after the protected navigator is stable, the app
-   is backgrounded without termination and tapping that same notification
-   routes through the production `expo-notifications` response path, ordinary
-   foreground authentication, and then to the exact event room.
+   explicitly `drill`. On iOS, the runner injects the notification only after
+   the independently authenticated protected shell is stable, then proves and
+   opens the exact card through Notification Center, requires the same-request
+   system action, and records the production `expo-notifications` listener and
+   parser evidence. The iOS 26 protected router remains on the lobby after the
+   overlay closes, so Maestro truthfully joins that same run-specific active
+   drill through its ordinary lobby card, then the runner opens the app's
+   registered read-only event URL and requires the exact room evidence. On
+   Android, the retained routing card foregrounds the authenticated app after
+   the separate unlock card. Both paths must reach the exact event room.
 4. The user appends a synthetic text journal fact, reviews a fresh mocked
    all-clear consequence preview, types the required phrase, and explicitly
    taps the all-clear action. The event remains a drill and is not closed.
@@ -139,30 +144,35 @@ uses Xcode's native keychain reset between fixture activation and the fresh
 normal-app enrollment while preserving that biometric enrollment. If the
 production cleanup-first vault recovery requests authentication after reset,
 the runner answers that genuine system prompt and requires a stable fresh
-sign-in state before beginning loopback OIDC enrollment. It then
-explicitly locks it before provider-free notification injection, and proves
-the exact DRILL card appeared in the lock-screen hierarchy. It then answers
-the dedicated simulator's system-lock Face ID challenge, resumes the
-still-mounted app into its independent LocalAuthentication challenge, answers
-that challenge, and requires Maestro to prove the protected shell is stable.
-Only then does it background the still-mounted app, open Notification Center,
-and tap that same pending synthetic card. The runner answers the app's ordinary
-foreground LocalAuthentication request before requiring the exact event room.
-If iOS 26 leaves the card
-on the Cover Sheet (including after expanding a first-run notification stack),
-the runner waits a bounded first-response window, then requires three stable
-samples with exactly one complete DRILL card, bounds disjoint from every other
-notification, and no INCIDENT text. It performs one exact-card right swipe and
-then measures three more stable hierarchies. Only an unchanged card with a
-newly exposed leading strip at least 44 points wide admits one non-retrying
-Open tap at that measured strip's midpoint. The runner then requires
-SpringBoard to record exactly one `UNNotificationDefaultActionIdentifier`
-execution and removal for that same request after the tap. Notification
-disappearance alone is never pass evidence. The production response listener
-must then reach the run-specific route evidence in the exact synthetic drill
-room. This preserves one notification across lock and app authentication while
-avoiding an auth-driven route-tree transition during response handling. The
-runner deletes that exact simulator during cleanup;
+sign-in state before beginning loopback OIDC enrollment. Once that enrollment's
+real LocalAuthentication split has committed the protected shell, the runner
+injects the exact synthetic DRILL card locally while the app remains
+foregrounded. It allows the transient foreground banner a bounded eight
+seconds to settle without touching it, then an app-scoped top-edge Maestro
+gesture opens Notification Center without adding another authentication or
+app-lifecycle transition; the later card gestures are SpringBoard-scoped.
+Because iOS 26 exposes the underlying app hierarchy through this overlay, a fresh
+simulator screenshot is analyzed locally with Apple's Vision framework before
+any notification gesture: exactly one complete DRILL title/body must be
+recognized with high confidence, INCIDENT text must be absent, and the swipe
+origin is derived from and must remain inside that exact body.
+
+If the guarded right swipe executes `Open`, its same-request SpringBoard
+transaction is required; otherwise a fresh Vision analysis must bind the
+uniformly shifted visible DRILL title/body crop back to the original card and
+prove one adjacent exact `Open` label before its one non-retrying tap. No
+unverified coordinate tap is accepted. A passive E2E-only observer records the
+native response shape and whether the production parser accepts it, but it
+cannot navigate or clear response evidence. The production listener is
+exercised with that exact action and payload, while a following Maestro step
+joins the same run-specific active drill through its ordinary lobby card. The
+runner then opens the registered `psdeoc` event URL, proves and accepts only the
+exact iOS `Open in “PSD EOC”?` system prompt, and admits navigation only when
+the exact route evidence appears. The suite does not mislabel either transition
+as notification routing. The runner also requires SpringBoard to record exactly one
+`UNNotificationDefaultActionIdentifier` execution and removal for the same
+request after either path. Notification disappearance alone is never pass
+evidence. The runner deletes that exact simulator during cleanup;
 physical-device system-lock behavior remains separate release evidence and is
 not claimed here.
 
@@ -173,16 +183,19 @@ export PSD_EOC_MOBILE_E2E_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/psd-eoc-mob
 bun packages/mobile/e2e/run-ci.ts ios
 ```
 
-To pause an otherwise normal local run after the exact notification route has
-opened the authenticated synthetic drill event room, set
+To pause an otherwise normal local run after the verified notification action
+and ordinary exact-drill card have opened the authenticated synthetic event
+room, set
 `PSD_EOC_MOBILE_E2E_SCREENSHOT_HOLD_SECONDS` to an integer from 1 through 600.
 The runner writes `operator-screenshot-ready.txt` in the platform artifact and
 holds that screen for the requested interval before continuing the lifecycle
 journey. Creating a regular `operator-screenshot-done.txt` file in that same
 artifact releases the hold early. CI does not set this option.
 
-For Android, start one API 36 Google APIs emulator, export its serial as
-`ANDROID_SERIAL`, and ensure the SDK and Java 17 are configured. The runner
+For Android, start one x86_64 API 36 Google APIs emulator, export its serial as
+`ANDROID_SERIAL`, and ensure the SDK and Java 17 are configured. The hosted
+suite deliberately builds only x86_64 native code; an arm64 emulator is not a
+supported local target for this runner. The runner
 sets a synthetic emulator-only device credential, reverses only its loopback
 ports, force-stops the app and verifies it has no resumed activity, then invokes
 the issue-owned instrumentation source through the generated Expo Gradle

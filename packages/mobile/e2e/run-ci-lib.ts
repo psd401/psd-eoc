@@ -1033,6 +1033,345 @@ export interface MobileE2EIosBounds {
   readonly bottom: number;
 }
 
+export interface MobileE2EIosNotificationScreenshotEvidence {
+  readonly revealStartPoint: string;
+  readonly revealEndPoint: string;
+}
+
+interface MobileE2EIosOcrObservation {
+  readonly text: string;
+  readonly confidence: number;
+  readonly minX: number;
+  readonly minY: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+function mobileE2EIosOcrObservations(
+  value: unknown,
+): readonly MobileE2EIosOcrObservation[] {
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value.pixelWidth) ||
+    !Number.isSafeInteger(value.pixelHeight) ||
+    (value.pixelWidth as number) < 320 ||
+    (value.pixelHeight as number) <= (value.pixelWidth as number) ||
+    (value.pixelHeight as number) > 10_000 ||
+    !Array.isArray(value.observations) ||
+    value.observations.length === 0 ||
+    value.observations.length > 100
+  ) {
+    throw new Error('The iOS notification OCR analysis is malformed.');
+  }
+  return Object.freeze(
+    value.observations.map((candidate) => {
+      if (!isRecord(candidate)) {
+        throw new Error('The iOS notification OCR observation is malformed.');
+      }
+      const { text, confidence, minX, minY, width, height } = candidate;
+      if (
+        typeof text !== 'string' ||
+        text.length === 0 ||
+        text.length > 500 ||
+        typeof confidence !== 'number' ||
+        !Number.isFinite(confidence) ||
+        confidence < 0 ||
+        confidence > 1 ||
+        typeof minX !== 'number' ||
+        !Number.isFinite(minX) ||
+        typeof minY !== 'number' ||
+        !Number.isFinite(minY) ||
+        typeof width !== 'number' ||
+        !Number.isFinite(width) ||
+        typeof height !== 'number' ||
+        !Number.isFinite(height) ||
+        minX < 0 ||
+        minY < 0 ||
+        width <= 0 ||
+        height <= 0 ||
+        minX + width > 1.001 ||
+        minY + height > 1.001
+      ) {
+        throw new Error('The iOS notification OCR observation is invalid.');
+      }
+      return Object.freeze({ text, confidence, minX, minY, width, height });
+    }),
+  );
+}
+
+function mobileE2EIosOcrCenter(
+  observation: MobileE2EIosOcrObservation,
+): Readonly<{ x: number; y: number }> {
+  return Object.freeze({
+    x: (observation.minX + observation.width / 2) * 100,
+    y: (1 - (observation.minY + observation.height / 2)) * 100,
+  });
+}
+
+function mobileE2EIosOcrContainsScreenPoint(
+  observation: MobileE2EIosOcrObservation,
+  x: number,
+  y: number,
+): boolean {
+  const normalizedX = x / 100;
+  const normalizedY = 1 - y / 100;
+  return (
+    normalizedX > observation.minX &&
+    normalizedX < observation.minX + observation.width &&
+    normalizedY > observation.minY &&
+    normalizedY < observation.minY + observation.height
+  );
+}
+
+function mobileE2EIosPercentPoint(x: number, y: number): string {
+  if (
+    !Number.isFinite(x) ||
+    !Number.isFinite(y) ||
+    x <= 0 ||
+    x >= 100 ||
+    y <= 0 ||
+    y >= 100
+  ) {
+    throw new Error('The iOS notification OCR point is outside the screen.');
+  }
+  return `${Math.round(x)}%, ${Math.round(y)}%`;
+}
+
+function mobileE2EIosExactOcrObservation(
+  observations: readonly MobileE2EIosOcrObservation[],
+  text: string,
+): MobileE2EIosOcrObservation {
+  const matches = observations.filter(
+    (observation) => observation.text === text && observation.confidence >= 0.9,
+  );
+  if (matches.length !== 1) {
+    throw new Error(`The iOS screenshot did not prove exactly one ${text}.`);
+  }
+  return matches[0] as MobileE2EIosOcrObservation;
+}
+
+function requireMobileE2EIosDrillOnlyOcr(
+  observations: readonly MobileE2EIosOcrObservation[],
+): void {
+  if (
+    observations.some((observation) =>
+      observation.text.toUpperCase().includes('INCIDENT'),
+    )
+  ) {
+    throw new Error('The iOS notification screenshot contained INCIDENT text.');
+  }
+}
+
+function mobileE2EIosNotificationFullCard(
+  observations: readonly MobileE2EIosOcrObservation[],
+): Readonly<{
+  title: MobileE2EIosOcrObservation;
+  body: readonly MobileE2EIosOcrObservation[];
+}> {
+  const title = mobileE2EIosExactOcrObservation(
+    observations,
+    MOBILE_E2E_NOTIFICATION_TITLE,
+  );
+  const isHighConfidenceBodyFragmentBoundToTitle = (
+    observation: MobileE2EIosOcrObservation,
+  ): boolean =>
+    observation.confidence >= 0.9 &&
+    MOBILE_E2E_NOTIFICATION_BODY.includes(observation.text) &&
+    Math.abs(observation.minX - title.minX) <= 0.08 &&
+    observation.minX + observation.width <= title.minX + title.width + 0.25 &&
+    observation.minY + observation.height <= title.minY + 0.01 &&
+    observation.minY >= title.minY - 0.12;
+  const body = observations
+    .filter(isHighConfidenceBodyFragmentBoundToTitle)
+    .sort((left, right) => right.minY - left.minY);
+  if (body.length === 0 || body.length > 4) {
+    throw new Error(
+      'The iOS screenshot did not prove the exact complete DRILL notification.',
+    );
+  }
+  const leadingBodyLine = body[0] as MobileE2EIosOcrObservation;
+  if (
+    !leadingBodyLine.text.startsWith('[DRILL]') ||
+    leadingBodyLine.width < 0.3
+  ) {
+    throw new Error(
+      'The iOS screenshot did not prove plausible DRILL body geometry.',
+    );
+  }
+  let precedingBottom = title.minY;
+  for (const line of body) {
+    const gap = precedingBottom - (line.minY + line.height);
+    if (gap < -0.01 || gap > 0.04) {
+      throw new Error(
+        'The iOS screenshot did not prove adjacent DRILL notification text.',
+      );
+    }
+    precedingBottom = line.minY;
+  }
+  const recognizedBody = body
+    .map((observation) => observation.text)
+    .join(' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  if (recognizedBody !== MOBILE_E2E_NOTIFICATION_BODY) {
+    throw new Error(
+      'The iOS screenshot did not prove the exact complete DRILL notification.',
+    );
+  }
+  return Object.freeze({ title, body: Object.freeze(body) });
+}
+
+/**
+ * Converts exact Apple Vision DRILL title/body evidence into guarded
+ * right-swipe geometry. Percent geometry stays resolution-independent.
+ */
+export function mobileE2EIosNotificationScreenshotEvidence(
+  value: unknown,
+): MobileE2EIosNotificationScreenshotEvidence {
+  const observations = mobileE2EIosOcrObservations(value);
+  requireMobileE2EIosDrillOnlyOcr(observations);
+  const { title, body } = mobileE2EIosNotificationFullCard(observations);
+  if (title.width < 0.2 || title.height < 0.01) {
+    throw new Error(
+      'The iOS screenshot did not prove the exact complete DRILL notification.',
+    );
+  }
+  const center = mobileE2EIosOcrCenter(title);
+  if (center.x < 10 || center.x > 90 || center.y < 40 || center.y > 95) {
+    throw new Error('The exact iOS DRILL title has unsafe screen geometry.');
+  }
+  if (
+    !mobileE2EIosOcrContainsScreenPoint(
+      title,
+      Math.round(center.x),
+      Math.round(center.y),
+    )
+  ) {
+    throw new Error(
+      'The rounded iOS notification title center escaped its exact OCR box.',
+    );
+  }
+  // Bind Maestro's swipe origin to the widest high-confidence body line from
+  // this exact screenshot. A benign system card can move the DRILL card, so a
+  // fixed percentage would either become flaky or escape the proven bounds.
+  const swipeLine = body.reduce((widest, observation) =>
+    observation.width > widest.width ? observation : widest,
+  );
+  const swipeCenter = mobileE2EIosOcrCenter(swipeLine);
+  const swipeX = Math.round(swipeCenter.x);
+  const swipeY = Math.round(swipeCenter.y);
+  if (
+    swipeLine.width < 0.3 ||
+    swipeX < 15 ||
+    swipeX > 80 ||
+    swipeY < 40 ||
+    swipeY > 95 ||
+    !mobileE2EIosOcrContainsScreenPoint(swipeLine, swipeX, swipeY)
+  ) {
+    throw new Error(
+      'The exact iOS DRILL body does not admit a guarded swipe origin.',
+    );
+  }
+  return Object.freeze({
+    revealStartPoint: mobileE2EIosPercentPoint(swipeX, swipeY),
+    revealEndPoint: mobileE2EIosPercentPoint(95, swipeY),
+  });
+}
+
+/**
+ * Requires one exact Open label beside a uniformly shifted, still-identifiable
+ * crop of the exact DRILL card proven immediately before the right swipe.
+ */
+export function mobileE2EIosNotificationOpenScreenshotTapPoint(
+  beforeValue: unknown,
+  revealedValue: unknown,
+): string {
+  const beforeObservations = mobileE2EIosOcrObservations(beforeValue);
+  requireMobileE2EIosDrillOnlyOcr(beforeObservations);
+  const { title, body } = mobileE2EIosNotificationFullCard(beforeObservations);
+  const revealedObservations = mobileE2EIosOcrObservations(revealedValue);
+  requireMobileE2EIosDrillOnlyOcr(revealedObservations);
+  const titlePrefix = MOBILE_E2E_NOTIFICATION_TITLE.split(' ')
+    .slice(0, -1)
+    .join(' ');
+  const bodyPrefix = '[DRILL] Synthetic exercise only.';
+  const bodySuffix = 'synthetic event room.';
+  const uniquePrefix = (
+    prefix: string,
+    description: string,
+  ): MobileE2EIosOcrObservation => {
+    const matches = revealedObservations.filter(
+      (observation) =>
+        observation.confidence >= 0.9 && observation.text.startsWith(prefix),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        `The revealed iOS screenshot did not prove one ${description}.`,
+      );
+    }
+    return matches[0] as MobileE2EIosOcrObservation;
+  };
+  const revealedTitle = uniquePrefix(titlePrefix, 'exact DRILL title prefix');
+  const revealedBodyPrefix = uniquePrefix(
+    bodyPrefix,
+    'exact DRILL body prefix',
+  );
+  const beforeBodyPrefix = body[0] as MobileE2EIosOcrObservation;
+  const beforeBodySuffix = body.find(
+    (observation) => observation.text === bodySuffix,
+  );
+  if (beforeBodySuffix === undefined) {
+    throw new Error(
+      'The pre-swipe iOS screenshot did not isolate the exact DRILL body suffix.',
+    );
+  }
+  const revealedBodySuffix = mobileE2EIosExactOcrObservation(
+    revealedObservations,
+    bodySuffix,
+  );
+  const titleShift = revealedTitle.minX - title.minX;
+  const bodyPrefixShift = revealedBodyPrefix.minX - beforeBodyPrefix.minX;
+  const bodySuffixShift = revealedBodySuffix.minX - beforeBodySuffix.minX;
+  if (
+    titleShift < 0.15 ||
+    titleShift > 0.35 ||
+    Math.abs(titleShift - bodyPrefixShift) > 0.03 ||
+    Math.abs(titleShift - bodySuffixShift) > 0.03 ||
+    Math.abs(revealedTitle.minY - title.minY) > 0.01 ||
+    Math.abs(revealedBodyPrefix.minY - beforeBodyPrefix.minY) > 0.01 ||
+    Math.abs(revealedBodySuffix.minY - beforeBodySuffix.minY) > 0.01 ||
+    revealedTitle.width < 0.3 ||
+    revealedBodyPrefix.width < 0.3 ||
+    revealedBodySuffix.width < 0.1
+  ) {
+    throw new Error(
+      'The revealed iOS DRILL card did not preserve the verified pre-swipe geometry.',
+    );
+  }
+  const open = mobileE2EIosExactOcrObservation(revealedObservations, 'Open');
+  const titleCenter = mobileE2EIosOcrCenter(revealedTitle);
+  const openCenter = mobileE2EIosOcrCenter(open);
+  const horizontalGap = revealedTitle.minX - (open.minX + open.width);
+  if (
+    openCenter.x >= title.minX * 100 ||
+    horizontalGap < 0.15 ||
+    horizontalGap > 0.35 ||
+    Math.abs(openCenter.y - titleCenter.y) > 8 ||
+    open.width < 0.03 ||
+    open.height < 0.01 ||
+    !mobileE2EIosOcrContainsScreenPoint(
+      open,
+      Math.round(openCenter.x),
+      Math.round(openCenter.y),
+    )
+  ) {
+    throw new Error(
+      'The exact iOS Open action is not beside the exact DRILL notification.',
+    );
+  }
+  return mobileE2EIosPercentPoint(openCenter.x, openCenter.y);
+}
+
 function mobileE2EIosBounds(value: unknown): MobileE2EIosBounds | null {
   if (typeof value !== 'string') return null;
   const match = /^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/u.exec(value);

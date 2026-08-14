@@ -1,0 +1,14 @@
+appId: com.apple.springboard
+name: Issue 32 - accept the exact registered PSD EOC event URL
+tags: [issue-32, synthetic-only, ios, event-room, deep-link]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse the app-open confirmation outside synthetic E2E
+- assertTrue:
+    condition: ${EVENT_ID != null && EVENT_ID.length == 36 && FACILITY_ID != null && FACILITY_ID.length == 36 && EVENT_TYPE_VERSION_ID != null && EVENT_TYPE_VERSION_ID.length == 36}
+    label: Require canonical synthetic drill identifiers
+- assertVisible: '^Open in “PSD EOC”\?$'
+- tapOn:
+    text: '^Open$'
+    retryTapIfNoChange: false

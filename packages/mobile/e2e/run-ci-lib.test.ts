@@ -36,6 +36,8 @@ import {
   mobileE2EIsolatedExpoConfig,
   mobileE2EIssue21FixtureCompatibilitySource,
   mobileE2EIosNotificationActionLogEvidence,
+  mobileE2EIosNotificationOpenScreenshotTapPoint,
+  mobileE2EIosNotificationScreenshotEvidence,
   mobileE2EIosSimulatorPushPayload,
   mobileE2EIosSyntheticNotificationState,
   mobileE2ELoopbackMetroEnvironment,
@@ -175,6 +177,26 @@ describe('issue #32 mobile E2E process boundary', () => {
     expect(() =>
       shouldCopyMobileE2EWorkspaceSource(root, '/tmp/outside-mobile/.env'),
     ).toThrow('escaped the mobile root');
+  });
+
+  test('observes native response shape without navigating or consuming evidence', async () => {
+    const [entry, observer] = await Promise.all([
+      readFile(new URL('metro-entry.js', import.meta.url), 'utf8'),
+      readFile(
+        new URL('notification-response-observer.ts', import.meta.url),
+        'utf8',
+      ),
+    ]);
+    expect(entry).toMatch(
+      /import '\.\/notification-response-observer';[\s\S]+import 'expo-router\/entry';/u,
+    );
+    expect(observer).toContain('addNotificationResponseReceivedListener');
+    expect(observer).toContain('getLastNotificationResponseAsync');
+    expect(observer).toContain('parseMobilePushNotification');
+    expect(observer).toContain('productionParserAccepted');
+    expect(observer).not.toContain('clearLastNotificationResponse');
+    expect(observer).not.toContain('router.');
+    expect(observer).not.toContain('navigate(');
   });
 });
 
@@ -596,47 +618,447 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toThrow();
   });
 
-  test('backgrounds and taps the pending iOS notification only after the protected shell is stable', async () => {
-    const [runner, backgroundOpenFlow, systemResumeFlow] = await Promise.all([
+  test('admits iOS screenshot taps only from exact Vision DRILL evidence', () => {
+    const analysis = {
+      pixelWidth: 1206,
+      pixelHeight: 2622,
+      observations: [
+        {
+          text: MOBILE_E2E_NOTIFICATION_TITLE,
+          confidence: 1,
+          minX: 0.19242902111544422,
+          minY: 0.202034883992255,
+          width: 0.5709779147880389,
+          height: 0.01889534782217628,
+        },
+        {
+          text: '[DRILL] Synthetic exercise only. Open the',
+          confidence: 1,
+          minX: 0.19242903098425915,
+          minY: 0.1815408085021155,
+          width: 0.7066246020062449,
+          height: 0.019069412662089946,
+        },
+        {
+          text: 'synthetic event room.',
+          confidence: 1,
+          minX: 0.19242903651368104,
+          minY: 0.16279069819760106,
+          width: 0.37223972807673866,
+          height: 0.016080392216290318,
+        },
+      ],
+    };
+    expect(mobileE2EIosNotificationScreenshotEvidence(analysis)).toEqual({
+      revealStartPoint: '55%, 81%',
+      revealEndPoint: '95%, 81%',
+    });
+    const revealedAnalysis = {
+      pixelWidth: 1206,
+      pixelHeight: 2622,
+      observations: [
+        {
+          text: 'Open',
+          confidence: 1,
+          minX: 0.09748811414375509,
+          minY: 0.18129897671827,
+          width: 0.09524458953199498,
+          height: 0.016762511590161844,
+        },
+        {
+          text: '[DRILL] Synthetic lockdown dril',
+          confidence: 1,
+          minX: 0.435331237657695,
+          minY: 0.202034883992255,
+          width: 0.5615141759464396,
+          height: 0.01889534782217628,
+        },
+        {
+          text: '[DRILL] Synthetic exercise only. (',
+          confidence: 1,
+          minX: 0.4353312365930262,
+          minY: 0.1815408083949207,
+          width: 0.5615141759464397,
+          height: 0.019069412662089946,
+        },
+        {
+          text: 'synthetic event room.',
+          confidence: 1,
+          minX: 0.43217665850841047,
+          minY: 0.16132723079985434,
+          width: 0.37539432456046595,
+          height: 0.01754385964912286,
+        },
+      ],
+    };
+    expect(
+      mobileE2EIosNotificationOpenScreenshotTapPoint(
+        analysis,
+        revealedAnalysis,
+      ),
+    ).toBe('15%, 81%');
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: [
+          ...analysis.observations,
+          {
+            ...analysis.observations[0],
+            text: '[INCIDENT] Synthetic lockdown incident',
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: [...analysis.observations, analysis.observations[0]],
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: analysis.observations.slice(0, 2),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: [
+          { ...analysis.observations[0], confidence: 0.89 },
+          ...analysis.observations.slice(1),
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: [
+          {
+            ...analysis.observations[0],
+            minX: 0.1,
+            width: 0.25,
+          },
+          ...analysis.observations.slice(1),
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: analysis.observations.map((observation, index) =>
+          index === 1 ? { ...observation, confidence: 0.89 } : observation,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: analysis.observations.map((observation, index) =>
+          index === 1
+            ? { ...observation, minX: 0.12, width: 0.25 }
+            : observation,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        observations: analysis.observations.map((observation, index) =>
+          index === 1 ? { ...observation, minX: 0.5 } : observation,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationOpenScreenshotTapPoint(analysis, {
+        ...revealedAnalysis,
+        observations: revealedAnalysis.observations.slice(1),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationOpenScreenshotTapPoint(
+        {
+          ...analysis,
+          observations: analysis.observations.map((observation, index) =>
+            index === 1 ? { ...observation, confidence: 0.89 } : observation,
+          ),
+        },
+        revealedAnalysis,
+      ),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationOpenScreenshotTapPoint(analysis, {
+        ...revealedAnalysis,
+        observations: revealedAnalysis.observations.map((observation) =>
+          observation.text === 'Open'
+            ? { ...observation, minX: 0.005, width: 0.04 }
+            : observation,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationOpenScreenshotTapPoint(analysis, {
+        ...revealedAnalysis,
+        observations: revealedAnalysis.observations.map((observation) =>
+          observation.text === 'Open'
+            ? { ...observation, minX: 0.7, width: 0.08 }
+            : observation,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationOpenScreenshotTapPoint(analysis, {
+        ...revealedAnalysis,
+        observations: revealedAnalysis.observations.map((observation) =>
+          observation.text.startsWith('[DRILL] Synthetic exercise only.')
+            ? { ...observation, confidence: 0.89 }
+            : observation,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationOpenScreenshotTapPoint(analysis, {
+        ...revealedAnalysis,
+        observations: revealedAnalysis.observations.map((observation) =>
+          observation.text === 'Open'
+            ? observation
+            : { ...observation, minX: observation.minX - 0.2 },
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationOpenScreenshotTapPoint(analysis, {
+        ...revealedAnalysis,
+        observations: [
+          ...revealedAnalysis.observations,
+          {
+            ...revealedAnalysis.observations[0],
+            text: '[INCIDENT] Synthetic lockdown incident',
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        ...analysis,
+        pixelHeight: 100,
+      }),
+    ).toThrow();
+  });
+
+  test('rejects a complete iOS notification body from low-confidence OCR', () => {
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        pixelWidth: 1206,
+        pixelHeight: 2622,
+        observations: [
+          {
+            text: MOBILE_E2E_NOTIFICATION_TITLE,
+            confidence: 1,
+            minX: 0.19,
+            minY: 0.21,
+            width: 0.58,
+            height: 0.02,
+          },
+          {
+            text: MOBILE_E2E_NOTIFICATION_BODY,
+            confidence: 0.89,
+            minX: 0.19,
+            minY: 0.18,
+            width: 0.7,
+            height: 0.025,
+          },
+        ],
+      }),
+    ).toThrow(
+      'The iOS screenshot did not prove the exact complete DRILL notification.',
+    );
+  });
+
+  test('rejects a complete iOS notification body spatially unrelated to its title', () => {
+    expect(() =>
+      mobileE2EIosNotificationScreenshotEvidence({
+        pixelWidth: 1206,
+        pixelHeight: 2622,
+        observations: [
+          {
+            text: MOBILE_E2E_NOTIFICATION_TITLE,
+            confidence: 1,
+            minX: 0.19,
+            minY: 0.42,
+            width: 0.58,
+            height: 0.02,
+          },
+          {
+            text: MOBILE_E2E_NOTIFICATION_BODY,
+            confidence: 1,
+            minX: 0.19,
+            minY: 0.18,
+            width: 0.7,
+            height: 0.025,
+          },
+        ],
+      }),
+    ).toThrow(
+      'The iOS screenshot did not prove the exact complete DRILL notification.',
+    );
+  });
+
+  test('proves the foreground iOS response before opening the exact drill through ordinary UI', async () => {
+    const [
+      runner,
+      notificationCenterFlow,
+      postResponseFlow,
+      eventRoomFlow,
+      acceptRouteFlow,
+      lifecycleFlow,
+      openTapFlow,
+      ocrSource,
+    ] = await Promise.all([
       readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
       readFile(
         new URL(
-          'flows/notification-event-room-ios-background-open.yaml',
+          'flows/notification-event-room-ios-notification-center-open.yaml',
           import.meta.url,
         ),
         'utf8',
       ),
       readFile(
         new URL(
-          'flows/notification-unlock-ios-system-resume.yaml',
+          'flows/notification-event-room-ios-post-auth.yaml',
           import.meta.url,
         ),
         'utf8',
       ),
+      readFile(
+        new URL(
+          'flows/notification-event-room-ios-event-room.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(
+        new URL('flows/accept-event-route-ios.yaml', import.meta.url),
+        'utf8',
+      ),
+      readFile(
+        new URL('flows/event-room-lifecycle.yaml', import.meta.url),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          'flows/notification-event-room-ios-system-tap-open.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(new URL('ios/notification-ocr.swift', import.meta.url), 'utf8'),
     ]);
     const injection = runner.match(
-      /async function injectIosNotification[\s\S]+?(?=async function awaitIosNotificationOnLockedScreen)/u,
+      /async function injectIosNotification[\s\S]+?(?=async function analyzeIosNotificationScreenshot)/u,
     )?.[0];
     expect(injection).toBeDefined();
     expect(injection).toContain("'push'");
     expect(injection).not.toContain("'terminate'");
     expect(runner.match(/await injectIosNotification\(/gu)).toHaveLength(1);
     expect(runner).toMatch(
-      /notification-event-room-ios-system-lock[\s\S]+await injectIosNotification[\s\S]+awaitIosNotificationOnLockedScreen[\s\S]+satisfyIosSystemLockAuthentication[\s\S]+notification-unlock-ios-system-resume[\s\S]+respondToDeviceAuthentication[\s\S]+notification-unlock-ios-post-auth[\s\S]+notification-event-room-ios-background-open[\s\S]+openExplicitIosNotificationIfNeeded[\s\S]+await respondToDeviceAuthentication\([\s\S]+notification-event-room-ios'[\s\S]+notification-event-room-ios-post-auth/u,
+      /enroll-loopback-oidc-ios[\s\S]+await injectIosNotification[\s\S]+Bun\.sleep\(IOS_NOTIFICATION_FOREGROUND_BANNER_SETTLE_MS\)[\s\S]+notification-event-room-ios-notification-center-open[\s\S]+analyzeIosNotificationScreenshot[\s\S]+mobileE2EIosNotificationScreenshotEvidence[\s\S]+executeIosNotificationAction[\s\S]+notification-event-room-ios-post-auth/u,
     );
-    expect(runner).not.toContain("'notification-event-room-ios-system-open'");
-    expect(backgroundOpenFlow).toContain(
-      "text: '^\\[DRILL\\] Synthetic lockdown drill$'",
+    expect(runner).toContain(
+      'const IOS_NOTIFICATION_FOREGROUND_BANNER_SETTLE_MS = 8_000;',
     );
-    expect(backgroundOpenFlow).toContain('pressKey: home');
-    expect(backgroundOpenFlow).not.toContain('pressKey: lock');
-    expect(backgroundOpenFlow).toMatch(
-      /pressKey: home[\s\S]+start: 50%, 0%[\s\S]+visible: '\\\[DRILL\\\] Synthetic lockdown drill'[\s\S]+id: 'NotificationTitle'[\s\S]+text: '\^\\\[DRILL\\\] Synthetic lockdown drill\$'/u,
+    expect(runner).toMatch(
+      /mobileE2EIosNotificationOpenScreenshotTapPoint\(\s*verifiedNotificationAnalysis,\s*await analyzeIosNotificationScreenshot/u,
     );
-    expect(systemResumeFlow).toContain('- swipe:');
-    expect(systemResumeFlow).not.toContain('tapOn:');
-    expect(systemResumeFlow).not.toContain('NotificationTitle');
-    expect(systemResumeFlow).not.toContain('pressKey:');
+    const notificationRouteSequence = runner.match(
+      /await injectIosNotification[\s\S]+?notification-event-room-ios-post-auth/u,
+    )?.[0];
+    expect(notificationRouteSequence).toBeDefined();
+    expect(notificationRouteSequence).not.toContain(
+      'respondToDeviceAuthentication',
+    );
+    expect(notificationRouteSequence).not.toContain('terminate');
+    for (const systemFlow of [openTapFlow]) {
+      expect(systemFlow).toContain('appId: com.apple.springboard');
+      expect(systemFlow).toContain("PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'");
+      expect(systemFlow).toContain('EVENT_ID.length == 36');
+      expect(systemFlow).not.toContain('shared/assert-synthetic-context.yaml');
+    }
+    expect(notificationCenterFlow).toContain('appId: net.psd401.eoc');
+    expect(notificationCenterFlow).toContain(
+      "PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'",
+    );
+    expect(notificationCenterFlow).toContain('EVENT_ID.length == 36');
+    expect(notificationCenterFlow).not.toContain(
+      'shared/assert-synthetic-context.yaml',
+    );
+    expect(notificationCenterFlow).not.toContain('pressKey:');
+    expect(notificationCenterFlow).toMatch(
+      /start: 50%, 1%[\s\S]+end: 50%, 80%[\s\S]+duration: 800[\s\S]+waitForAnimationToEnd/u,
+    );
+    expect(notificationCenterFlow).not.toContain('start: 50%, 0%');
+    expect(notificationCenterFlow).not.toContain('tapOn:');
+    expect(postResponseFlow).toMatch(
+      /Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}[\s\S]+tapOn: 'Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}'[\s\S]+waitForAnimationToEnd/u,
+    );
+    expect(postResponseFlow).toContain(
+      'production response listener and parser are exercised and logged',
+    );
+    expect(postResponseFlow).not.toContain('routed to the exact drill room');
+    expect(eventRoomFlow).toContain(
+      'registered iOS event URL opened the exact drill room',
+    );
+    expect(eventRoomFlow).toContain('shared/assert-active-drill-room.yaml');
+    expect(acceptRouteFlow).toContain('appId: com.apple.springboard');
+    expect(acceptRouteFlow).toContain("PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'");
+    expect(acceptRouteFlow).toContain('EVENT_ID.length == 36');
+    expect(acceptRouteFlow).toContain('^Open in “PSD EOC”\\?$');
+    expect(acceptRouteFlow).toMatch(
+      /tapOn:[\s\S]+text: '\^Open\$'[\s\S]+retryTapIfNoChange: false/u,
+    );
+    expect(lifecycleFlow).toMatch(
+      /text: '\.\*Timeline text update\.\*'[\s\S]+enabled: true[\s\S]+inputText: '\$\{TIMELINE_TEXT\}'/u,
+    );
+    expect(lifecycleFlow).toMatch(
+      /tapOn:[\s\S]+text: 'Post'[\s\S]+scrollUntilVisible:[\s\S]+element: '\.\*\$\{TIMELINE_TEXT\}\.\*'[\s\S]+direction: DOWN[\s\S]+assertVisible: '\.\*\$\{TIMELINE_TEXT\}\.\*'/u,
+    );
+    expect(lifecycleFlow).toContain(
+      'push\\. [0-9]+ endpoints\\. Integration mocked\\. Message preview: DRILL:',
+    );
+    expect(lifecycleFlow).toContain(
+      'email\\. [0-9]+ endpoints\\. Integration mocked\\. Message preview: DRILL:',
+    );
+    expect(lifecycleFlow).toContain("element: 'Status: all clear'");
+    expect(runner).toMatch(
+      /notification-event-room-ios-post-auth[\s\S]+openIosSyntheticEventRoute\([\s\S]+notification-event-room-ios-event-room/u,
+    );
+    expect(runner).toMatch(
+      /async function openIosSyntheticEventRoute[\s\S]+manifest\.classification !== 'drill'[\s\S]+manifest\.rosterPopulation !== 'synthetic'[\s\S]+psdeoc:\/\/\/events\/\$\{eventId\}[\s\S]+psdeoc:\/\/events\/\$\{eventId\}[\s\S]+'openurl'[\s\S]+Open in “PSD EOC”\?[\s\S]+accept-event-route-ios[\s\S]+lastHierarchy\.includes\(routeEvidence\)[\s\S]+ios-event-route-open-hierarchy\.txt/u,
+    );
+    expect(runner).toMatch(
+      /async function writeIosNotificationRevealFlow[\s\S]+pointPattern[\s\S]+startX < 15[\s\S]+startX > 80[\s\S]+endX !== 95[\s\S]+endY !== startY[\s\S]+resolve\(\s*artifactRoot,[\s\S]+notification-\$\{purpose\}-ios-system-reveal-open\.yaml[\s\S]+appId: com\.apple\.springboard[\s\S]+start: \$\{startX\}%, \$\{startY\}%[\s\S]+end: \$\{endX\}%, \$\{endY\}%[\s\S]+duration: 350[\s\S]+flag: 'wx',[\s\S]+mode: 0o600/u,
+    );
+    expect(runner).toMatch(
+      /mobileE2EIosNotificationScreenshotEvidence\(\s*verifiedNotificationAnalysis[\s\S]+writeIosNotificationRevealFlow\([\s\S]+notificationGesture[\s\S]+notification-event-room-ios-system-reveal-open[\s\S]+revealFlowPath/u,
+    );
+    expect(openTapFlow).toMatch(
+      /IOS_NOTIFICATION_OPEN_POINT[\s\S]+point: '\$\{IOS_NOTIFICATION_OPEN_POINT\}'[\s\S]+retryTapIfNoChange: false/u,
+    );
+    expect(runner).toMatch(
+      /swipeActionStartedAt[\s\S]+notification-event-room-ios-system-reveal-open[\s\S]+mobileE2EIosNotificationActionLogEvidence\(swipeActionLog\)[\s\S]+mobileE2EIosNotificationOpenScreenshotTapPoint/u,
+    );
+    expect(ocrSource).toContain('import Vision');
+    expect(ocrSource).toContain('request.recognitionLevel = .accurate');
+    expect(ocrSource).toContain('request.usesLanguageCorrection = false');
+    expect(ocrSource).toContain('candidate.confidence');
+    expect(ocrSource).toContain('observation.boundingBox');
+    expect(runner).toMatch(
+      /'simctl', 'io', deviceId, 'screenshot'[\s\S]+'xcrun',[\s\S]+'swift',[\s\S]+notification-ocr\.swift/u,
+    );
+    expect(runner).toContain('`notification-${purpose}-swipe-action-ios.log`');
+    expect(runner).not.toContain('IOS_NOTIFICATION_TITLE_POINT');
+    expect(runner).not.toContain('IOS_NOTIFICATION_REVEAL_END_POINT');
+    expect(runner).toContain('IOS_NOTIFICATION_OPEN_POINT');
   });
 
   test('creates exact provider-free Android instrumentation properties', () => {
@@ -1012,10 +1434,14 @@ describe('issue #32 exact synthetic drill data', () => {
         'utf8',
       ),
     ]);
-    expect(runner).toMatch(
+    const directLaunch = runner.match(
+      /async function launchIosBundleDirectly[\s\S]+?(?=async function awaitIosApplicationReady)/u,
+    )?.[0];
+    expect(directLaunch).toBeDefined();
+    expect(directLaunch).toMatch(
       /\['xcrun',\s+\.\.\.mobileE2EIosDirectLaunchArguments\(device\.udid, metroPort\)\]/u,
     );
-    expect(runner).not.toMatch(/['"]openurl['"]/u);
+    expect(directLaunch).not.toMatch(/['"]openurl['"]/u);
     expect(runner).not.toContain('accept-dev-client-handoff-ios.yaml');
     expect(runner).toContain('IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000');
     expect(runner).toContain(

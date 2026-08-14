@@ -1,0 +1,25 @@
+appId: net.psd401.eoc
+name: Issue 32 - open iOS Notification Center over the foreground app
+tags: [issue-32, synthetic-only, ios, notification, route]
+---
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse system notification gestures outside the synthetic environment
+- assertTrue:
+    condition: ${EVENT_ID != null && EVENT_ID.length == 36 && FACILITY_ID != null && FACILITY_ID.length == 36 && EVENT_TYPE_VERSION_ID != null && EVENT_TYPE_VERSION_ID.length == 36}
+    label: Require canonical synthetic drill identifiers
+- assertTrue:
+    condition: ${NOTIFICATION_TITLE == '[DRILL] Synthetic lockdown drill'}
+    label: Require the exact synthetic drill notification title
+# Attach the gesture to the currently foregrounded authenticated app so iOS
+# recognizes this as a real top-edge system gesture. The 1% origin is inside
+# the touchable display; iOS 26 silently ignores a literal 0% edge coordinate.
+# The runner next captures the resulting Notification Center screenshot and
+# Apple Vision must prove the exact DRILL title/body, no INCIDENT text, and
+# body-scoped swipe geometry before any notification-card gesture occurs.
+- swipe:
+    start: 50%, 1%
+    end: 50%, 80%
+    duration: 800
+- waitForAnimationToEnd:
+    timeout: 5000

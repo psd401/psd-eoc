@@ -1,24 +1,21 @@
-appId: net.psd401.eoc
-name: Issue 32 - tap the measured synthetic iOS notification Open action
-tags: [issue-32, synthetic-only, ios, notification, tap-open]
+appId: com.apple.springboard
+name: Issue 32 - tap the Vision-verified iOS notification Open action
+tags: [issue-32, synthetic-only, ios, notification, verified-open]
 ---
-- runFlow:
-    file: shared/assert-synthetic-context.yaml
+- assertTrue:
+    condition: ${PSD_EOC_E2E_SYNTHETIC_ONLY == 'true'}
+    label: Refuse system notification gestures outside the synthetic environment
+- assertTrue:
+    condition: ${EVENT_ID != null && EVENT_ID.length == 36 && FACILITY_ID != null && FACILITY_ID.length == 36 && EVENT_TYPE_VERSION_ID != null && EVENT_TYPE_VERSION_ID.length == 36}
+    label: Require canonical synthetic drill identifiers
 - assertTrue:
     condition: ${NOTIFICATION_TITLE == '[DRILL] Synthetic lockdown drill'}
     label: Require the exact synthetic drill notification title
 - assertTrue:
     condition: ${IOS_NOTIFICATION_OPEN_POINT != null}
-    label: Require the runner-measured Open point
-- extendedWaitUntil:
-    visible:
-      id: 'NotificationShortLookView'
-      text: '^PSD EOC, .*, \[DRILL\] Synthetic lockdown drill, \[DRILL\] Synthetic exercise only\. Open the synthetic event room\.(?:, TIME SENSITIVE)?$'
-    timeout: 15000
-- assertNotVisible: '.*\[INCIDENT\].*'
+    label: Require the runner-verified exact Open point
 - tapOn:
     point: '${IOS_NOTIFICATION_OPEN_POINT}'
     retryTapIfNoChange: false
-# The runner never retries this measured fallback tap. It next requires
-# same-request default-action evidence, genuine foreground re-authentication,
-# and then the exact event-room evidence.
+# The runner never retries this action and next requires a same-request
+# UNNotificationDefaultActionIdentifier execution and removal.
