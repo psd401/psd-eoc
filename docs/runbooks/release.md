@@ -299,6 +299,7 @@ Then branch on the diagnostic's launch source:
   `EAS_UPDATE_EXPERIMENTAL_UPLOAD_EMBEDDED_BUNDLE=1`, which this project does
   not enable. Enabling it or manually uploading a bundle would be a separate
   reviewed BUILD/provider consequence, never an evidence shortcut.
+
 - **Downloaded over-the-air update.** Pass the exact diagnostic update ID—not
   merely a group ID—to:
 
@@ -790,6 +791,7 @@ For an eligible patch:
    Preview production consequences, including exact source update group,
    runtime, initial exposure, and that exact control update/group or embedded
    fallback. Obtain fresh product-owner approval.
+
 4. Republish that exact tested group to `production` at 10%; do not rebuild from
    a branch or mutable working tree:
 
