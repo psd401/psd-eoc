@@ -1699,9 +1699,10 @@ describe('issue #32 exact synthetic drill data', () => {
     const iosJob = workflow.match(/ {2}ios:\n[\s\S]+?(?=\n {2}android:)/u)?.[0];
     const androidJob = workflow.match(/ {2}android:\n[\s\S]+/u)?.[0];
     expect(iosJob).toContain('timeout-minutes: 90');
-    expect(androidJob).toContain('timeout-minutes: 150');
-    expect(androidJob).toMatch(
-      /- name: Run the synthetic Android Maestro suite\n {8}timeout-minutes: 140\n {8}uses:/u,
+    expect(androidJob).toContain('timeout-minutes: 90');
+    expect(androidJob).not.toContain('timeout-minutes: 140');
+    expect(androidJob).toContain(
+      'script: timeout --signal=TERM --kill-after=30s 80m env ANDROID_SERIAL="emulator-$EMULATOR_PORT" bun packages/mobile/e2e/run-ci.ts android',
     );
     expect(androidJob).toContain('cores: 1');
   });

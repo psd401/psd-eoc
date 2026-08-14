@@ -157,7 +157,7 @@ jobs:
   android:
     name: Maestro Android (synthetic only)
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:16-alpine
@@ -247,7 +247,6 @@ jobs:
           df -h /
 
       - name: Run the synthetic Android Maestro suite
-        timeout-minutes: 140
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: 36
@@ -261,7 +260,7 @@ jobs:
           emulator-options: >-
             -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio
             -no-boot-anim -camera-back none
-          script: ANDROID_SERIAL="emulator-$EMULATOR_PORT" bun packages/mobile/e2e/run-ci.ts android
+          script: timeout --signal=TERM --kill-after=30s 80m env ANDROID_SERIAL="emulator-$EMULATOR_PORT" bun packages/mobile/e2e/run-ci.ts android
 
       - name: Upload Android E2E evidence
         if: always()
