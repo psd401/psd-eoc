@@ -17,7 +17,7 @@
     "@aws-sdk/client-s3": "3.1106.0",
     "@aws-sdk/s3-request-presigner": "3.1106.0",
     "@psd-eoc/contracts": "workspace:*",
-    "drizzle-orm": "0.44.5",
+    "drizzle-orm": "0.45.2",
     "fontkit": "2.0.4",
     "jose": "6.1.0",
     "maplibre-gl": "6.3.0",
