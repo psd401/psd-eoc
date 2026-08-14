@@ -122,17 +122,12 @@ function spawnSupervisedPlaywrightChild(
   if (options.synthetic === true) {
     environment.PSD_EOC_EVENT_ROOM_SYNTHETIC_COMMAND = 'true';
   }
-  let child: ReturnType<typeof Bun.spawn>;
-  try {
-    child = Bun.spawn([process.execPath, supervisorScript], {
-      cwd: workspaceRoot,
-      env: environment,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-  } catch (error) {
-    throw error;
-  }
+  const child = Bun.spawn([process.execPath, supervisorScript], {
+    cwd: workspaceRoot,
+    env: environment,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
   const heartbeat = setInterval(() => {
     if (
       hasEventRoomPlaywrightSupervisorStoppingMarker(context, child.pid, nonce)
