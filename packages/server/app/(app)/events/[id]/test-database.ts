@@ -11,6 +11,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  type Dirent,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,6 +28,7 @@ const MINIMUM_APP_PORT = 20_000;
 const APP_PORT_COUNT = 30_000;
 const PORT_CLOSE_TIMEOUT_MS = 10_000;
 const PORT_LEASE_DIRECTORY = join(tmpdir(), 'psd-eoc-event-room-port-leases');
+const RUN_DIRECTORY_PREFIX = 'psd-eoc-event-room-';
 const SUPERVISION_DIRECTORY_PREFIX = 'psd-eoc-event-room-supervision-';
 export const EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT_ENV =
   'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT';
@@ -216,7 +218,9 @@ function gateHeartbeatMarker(
 
 export type EventRoomPlaywrightPriorResidueReason =
   | 'altered-heartbeat'
+  | 'legacy-run-marker'
   | 'marker-without-heartbeat'
+  | 'orphaned-port-lease'
   | 'stale-heartbeat';
 
 export interface EventRoomPlaywrightPriorResidue {
@@ -344,10 +348,193 @@ function priorSupervisorStoppingIsCurrent(
   );
 }
 
+function priorLegacySupervisorMarkerIsCanonical(
+  serialized: string,
+  runId: string,
+): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return false;
+  }
+  return (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    'kind' in parsed &&
+    parsed.kind === 'psd-eoc-event-room-playwright-supervisor' &&
+    'version' in parsed &&
+    parsed.version === 1 &&
+    'runId' in parsed &&
+    parsed.runId === runId &&
+    'contextSha256' in parsed &&
+    typeof parsed.contextSha256 === 'string' &&
+    /^[0-9a-f]{64}$/u.test(parsed.contextSha256) &&
+    'ownerPid' in parsed &&
+    typeof parsed.ownerPid === 'number' &&
+    Number.isSafeInteger(parsed.ownerPid) &&
+    parsed.ownerPid > 0 &&
+    'coordinatorNonce' in parsed &&
+    typeof parsed.coordinatorNonce === 'string' &&
+    RUN_ID_PATTERN.test(parsed.coordinatorNonce) &&
+    serialized ===
+      JSON.stringify({
+        kind: parsed.kind,
+        version: parsed.version,
+        runId: parsed.runId,
+        contextSha256: parsed.contextSha256,
+        ownerPid: parsed.ownerPid,
+        coordinatorNonce: parsed.coordinatorNonce,
+      })
+  );
+}
+
+function priorLegacyCoordinatorHeartbeatIsCanonical(
+  serialized: string,
+  runId: string,
+): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return false;
+  }
+  return (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    'kind' in parsed &&
+    parsed.kind === 'psd-eoc-event-room-playwright-coordinator-heartbeat' &&
+    'version' in parsed &&
+    parsed.version === 1 &&
+    'runId' in parsed &&
+    parsed.runId === runId &&
+    'leaseOwnerPid' in parsed &&
+    typeof parsed.leaseOwnerPid === 'number' &&
+    Number.isSafeInteger(parsed.leaseOwnerPid) &&
+    parsed.leaseOwnerPid > 0 &&
+    'coordinatorPid' in parsed &&
+    typeof parsed.coordinatorPid === 'number' &&
+    Number.isSafeInteger(parsed.coordinatorPid) &&
+    parsed.coordinatorPid > 0 &&
+    'observedAt' in parsed &&
+    typeof parsed.observedAt === 'number' &&
+    Number.isSafeInteger(parsed.observedAt) &&
+    parsed.observedAt > 0 &&
+    serialized ===
+      JSON.stringify({
+        kind: parsed.kind,
+        version: parsed.version,
+        runId: parsed.runId,
+        leaseOwnerPid: parsed.leaseOwnerPid,
+        coordinatorPid: parsed.coordinatorPid,
+        observedAt: parsed.observedAt,
+      })
+  );
+}
+
+function hasCanonicalPriorLegacyRunMarker(
+  directory: string,
+  runId: string,
+): boolean {
+  const markers = [
+    {
+      name: 'process-supervisor.json',
+      validate: priorLegacySupervisorMarkerIsCanonical,
+    },
+    {
+      name: 'coordinator-heartbeat.json',
+      validate: priorLegacyCoordinatorHeartbeatIsCanonical,
+    },
+  ] as const;
+  for (const marker of markers) {
+    const path = join(directory, marker.name);
+    try {
+      const entry = lstatSync(path);
+      if (
+        entry.isFile() &&
+        !entry.isSymbolicLink() &&
+        entry.size <= MAXIMUM_SUPERVISION_MARKER_BYTES &&
+        marker.validate(readFileSync(path, 'utf8'), runId)
+      ) {
+        return true;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return false;
+}
+
+function readCanonicalPriorPortLease(
+  name: string,
+  now: number,
+): Readonly<{ runId: string; isFresh: boolean }> | null {
+  const match = name.match(/^(\d{5})\.json$/u);
+  if (match === null) return null;
+  const appPort = Number.parseInt(match[1]!, 10);
+  if (
+    appPort < MINIMUM_APP_PORT ||
+    appPort >= MINIMUM_APP_PORT + APP_PORT_COUNT
+  ) {
+    return null;
+  }
+  const path = join(PORT_LEASE_DIRECTORY, name);
+  let entry: ReturnType<typeof lstatSync>;
+  let serialized: string;
+  try {
+    entry = lstatSync(path);
+    if (
+      !entry.isFile() ||
+      entry.isSymbolicLink() ||
+      entry.size > MAXIMUM_SUPERVISION_MARKER_BYTES
+    ) {
+      return null;
+    }
+    serialized = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('runId' in parsed) ||
+    typeof parsed.runId !== 'string' ||
+    !RUN_ID_PATTERN.test(parsed.runId) ||
+    !('appPort' in parsed) ||
+    parsed.appPort !== appPort ||
+    !('leaseOwnerPid' in parsed) ||
+    typeof parsed.leaseOwnerPid !== 'number' ||
+    !Number.isSafeInteger(parsed.leaseOwnerPid) ||
+    parsed.leaseOwnerPid <= 0 ||
+    serialized !==
+      serializedPortLease({
+        runId: parsed.runId,
+        appPort: parsed.appPort,
+        leaseOwnerPid: parsed.leaseOwnerPid,
+      })
+  ) {
+    return null;
+  }
+  return {
+    runId: parsed.runId,
+    isFresh:
+      now >= entry.mtimeMs && now - entry.mtimeMs <= GATE_HEARTBEAT_MAX_AGE_MS,
+  };
+}
+
 /**
- * Reports prior run-bound supervision evidence without treating a directory
- * name, PID, port, or path as cleanup authority. Active runs with a current,
- * canonical heartbeat are left alone. This detector never signals a process,
+ * Reports current supervision evidence and strict canonical marker/lease
+ * residue from earlier harness revisions without treating a directory name,
+ * PID, port, or path as cleanup authority. Active runs with a current,
+ * canonical heartbeat are left alone, as are fresh leases that may not have
+ * published their heartbeat yet. This detector never signals a process,
  * removes a file, releases a lease, or drops a database; the exact supervisor
  * nonce and immutable process markers remain mandatory for those operations.
  */
@@ -360,6 +547,16 @@ export function detectPriorEventRoomPlaywrightResidue(
     throw new Error('The event-room Playwright residue check time is invalid.');
   }
   const results: EventRoomPlaywrightPriorResidue[] = [];
+  const activeRunIds = new Set<string>();
+  const residueRunIds = new Set<string>();
+  const addResidue = (
+    runId: string,
+    reason: EventRoomPlaywrightPriorResidueReason,
+  ): void => {
+    if (residueRunIds.has(runId)) return;
+    residueRunIds.add(runId);
+    results.push({ runId, reason });
+  };
   for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
     const runId = entry.name.startsWith(SUPERVISION_DIRECTORY_PREFIX)
       ? entry.name.slice(SUPERVISION_DIRECTORY_PREFIX.length)
@@ -374,7 +571,10 @@ export function detectPriorEventRoomPlaywrightResidue(
       continue;
     }
     const directory = join(tmpdir(), entry.name);
-    if (priorSupervisorStoppingIsCurrent(directory, runId, now)) continue;
+    if (priorSupervisorStoppingIsCurrent(directory, runId, now)) {
+      activeRunIds.add(runId);
+      continue;
+    }
     const heartbeatPath = join(directory, 'gate-heartbeat.json');
     let heartbeatBytes: number | null = null;
     try {
@@ -382,7 +582,7 @@ export function detectPriorEventRoomPlaywrightResidue(
       if (heartbeatEntry.isFile() && !heartbeatEntry.isSymbolicLink()) {
         heartbeatBytes = heartbeatEntry.size;
       } else {
-        results.push({ runId, reason: 'altered-heartbeat' });
+        addResidue(runId, 'altered-heartbeat');
         continue;
       }
     } catch (error) {
@@ -400,12 +600,12 @@ export function detectPriorEventRoomPlaywrightResidue(
         }
       });
       if (hasRunBoundMarker) {
-        results.push({ runId, reason: 'marker-without-heartbeat' });
+        addResidue(runId, 'marker-without-heartbeat');
       }
       continue;
     }
     if (heartbeatBytes > MAXIMUM_SUPERVISION_MARKER_BYTES) {
-      results.push({ runId, reason: 'altered-heartbeat' });
+      addResidue(runId, 'altered-heartbeat');
       continue;
     }
     const heartbeat = parsePriorGateHeartbeat(
@@ -413,12 +613,62 @@ export function detectPriorEventRoomPlaywrightResidue(
       runId,
     );
     if (heartbeat === null || now < heartbeat.observedAt) {
-      results.push({ runId, reason: 'altered-heartbeat' });
+      addResidue(runId, 'altered-heartbeat');
     } else if (now - heartbeat.observedAt > GATE_HEARTBEAT_MAX_AGE_MS) {
-      results.push({ runId, reason: 'stale-heartbeat' });
+      addResidue(runId, 'stale-heartbeat');
+    } else {
+      activeRunIds.add(runId);
     }
   }
-  return results;
+
+  for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+    const runId = entry.name.startsWith(RUN_DIRECTORY_PREFIX)
+      ? entry.name.slice(RUN_DIRECTORY_PREFIX.length)
+      : undefined;
+    if (
+      runId === undefined ||
+      !RUN_ID_PATTERN.test(runId) ||
+      runId === current.runId ||
+      activeRunIds.has(runId) ||
+      residueRunIds.has(runId) ||
+      !entry.isDirectory() ||
+      entry.isSymbolicLink()
+    ) {
+      continue;
+    }
+    if (hasCanonicalPriorLegacyRunMarker(join(tmpdir(), entry.name), runId)) {
+      addResidue(runId, 'legacy-run-marker');
+    }
+  }
+
+  let leaseEntries: Dirent<string>[];
+  try {
+    leaseEntries = readdirSync(PORT_LEASE_DIRECTORY, {
+      withFileTypes: true,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return results.sort((left, right) =>
+        left.runId.localeCompare(right.runId),
+      );
+    }
+    throw error;
+  }
+  for (const entry of leaseEntries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    const lease = readCanonicalPriorPortLease(entry.name, now);
+    if (
+      lease === null ||
+      lease.isFresh ||
+      lease.runId === current.runId ||
+      activeRunIds.has(lease.runId) ||
+      residueRunIds.has(lease.runId)
+    ) {
+      continue;
+    }
+    addResidue(lease.runId, 'orphaned-port-lease');
+  }
+  return results.sort((left, right) => left.runId.localeCompare(right.runId));
 }
 
 export function writeEventRoomPlaywrightGateHeartbeat(

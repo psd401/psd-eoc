@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -245,7 +246,7 @@ describe('event-room synthetic database guard', () => {
     }
   });
 
-  test('a later run detects prior marked residue without adopting name-only cleanup authority', () => {
+  test('a later run detects current and legacy marked residue without adopting name-only cleanup authority', () => {
     const nonce = 'a'.repeat(64);
     const current = claimEventRoomPlaywrightRunContext(
       BASE_DATABASE_URL,
@@ -267,6 +268,22 @@ describe('event-room synthetic database guard', () => {
       BASE_DATABASE_URL,
       randomUUID(),
     );
+    const legacy = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const leaseOnly = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const pendingHeartbeat = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const alteredLegacy = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
     try {
       const now = Date.now();
       writeEventRoomPlaywrightGateHeartbeat(
@@ -276,6 +293,18 @@ describe('event-room synthetic database guard', () => {
         now - 2_001,
       );
       writeEventRoomPlaywrightGateHeartbeat(active, process.pid, nonce, now);
+      mkdirSync(active.runDirectory, { recursive: true });
+      writeFileSync(
+        join(active.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: active.runId,
+          contextSha256: 'c'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
       writeEventRoomPlaywrightGateHeartbeat(
         stopping,
         process.pid,
@@ -289,6 +318,38 @@ describe('event-room synthetic database guard', () => {
         now,
       );
       mkdirSync(unmarked.supervisionDirectory, { recursive: true });
+      releaseEventRoomPlaywrightPortLease(unmarked);
+
+      mkdirSync(legacy.runDirectory, { recursive: true });
+      writeFileSync(
+        join(legacy.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: legacy.runId,
+          contextSha256: 'd'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      releaseEventRoomPlaywrightPortLease(legacy);
+
+      const staleLeaseTime = new Date(now - 2_001);
+      utimesSync(leaseOnly.portLeasePath, staleLeaseTime, staleLeaseTime);
+
+      mkdirSync(alteredLegacy.runDirectory, { recursive: true });
+      writeFileSync(
+        join(alteredLegacy.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: randomUUID(),
+          contextSha256: 'e'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      releaseEventRoomPlaywrightPortLease(alteredLegacy);
 
       expect(
         detectPriorEventRoomPlaywrightResidue(current, now),
@@ -296,6 +357,11 @@ describe('event-room synthetic database guard', () => {
       expect(
         detectPriorEventRoomPlaywrightResidue(current, now),
       ).not.toContainEqual({ runId: active.runId, reason: 'stale-heartbeat' });
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, now).some(
+          ({ runId }) => runId === active.runId,
+        ),
+      ).toBe(false);
       expect(
         detectPriorEventRoomPlaywrightResidue(current, now).some(
           ({ runId }) => runId === unmarked.runId,
@@ -307,12 +373,46 @@ describe('event-room synthetic database guard', () => {
         ),
       ).toBe(false);
       expect(
+        detectPriorEventRoomPlaywrightResidue(current, now),
+      ).toContainEqual({ runId: legacy.runId, reason: 'legacy-run-marker' });
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, now),
+      ).toContainEqual({
+        runId: leaseOnly.runId,
+        reason: 'orphaned-port-lease',
+      });
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, now).some(
+          ({ runId }) => runId === alteredLegacy.runId,
+        ),
+      ).toBe(false);
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, now).some(
+          ({ runId }) => runId === pendingHeartbeat.runId,
+        ),
+      ).toBe(false);
+      expect(
         detectPriorEventRoomPlaywrightResidue(current, now + 35_001),
       ).toContainEqual({ runId: stopping.runId, reason: 'stale-heartbeat' });
       expect(existsSync(stale.gateHeartbeatPath)).toBe(true);
       expect(inspectEventRoomPlaywrightPortLease(stale)).toBe('owned');
+      expect(
+        existsSync(join(legacy.runDirectory, 'process-supervisor.json')),
+      ).toBe(true);
+      expect(inspectEventRoomPlaywrightPortLease(leaseOnly)).toBe('owned');
     } finally {
-      for (const context of [current, stale, active, stopping, unmarked]) {
+      for (const context of [
+        current,
+        stale,
+        active,
+        stopping,
+        unmarked,
+        legacy,
+        leaseOnly,
+        pendingHeartbeat,
+        alteredLegacy,
+      ]) {
+        rmSync(context.runDirectory, { force: true, recursive: true });
         rmSync(context.supervisionDirectory, { force: true, recursive: true });
         releaseEventRoomPlaywrightPortLeaseIfOwned(context);
       }
