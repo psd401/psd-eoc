@@ -1,5 +1,5 @@
 appId: net.psd401.eoc
-name: Issue 32 - open the route-proof iOS drill notification from the authenticated app
+name: Issue 32 - open the route-proof iOS drill notification from system Home
 tags: [issue-32, synthetic-only, ios, notification, route]
 ---
 - runFlow:
@@ -7,6 +7,10 @@ tags: [issue-32, synthetic-only, ios, notification, route]
 - assertTrue:
     condition: ${NOTIFICATION_TITLE == '[DRILL] Synthetic lockdown drill'}
     label: Require the exact synthetic drill notification title
+# Background the already-authenticated app without terminating its mounted
+# production response listener. XCTest can then inspect SpringBoard rather than
+# returning the underlying app hierarchy through the Notification Center layer.
+- pressKey: home
 - swipe:
     start: 50%, 0%
     end: 50%, 80%
@@ -18,6 +22,6 @@ tags: [issue-32, synthetic-only, ios, notification, route]
 - tapOn:
     id: 'NotificationTitle'
     text: '^\[DRILL\] Synthetic lockdown drill$'
-# The production response listener and protected navigator are already stable.
-# The runner still requires same-request SpringBoard action evidence and the
-# exact event-room post-state; no test-only route or event-card tap is used.
+# Stop while the ordinary foreground lifecycle requests device authentication.
+# The runner next proves same-request SpringBoard action evidence, answers that
+# genuine prompt, and requires the exact event-room post-state.

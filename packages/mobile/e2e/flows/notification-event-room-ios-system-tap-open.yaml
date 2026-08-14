@@ -19,5 +19,6 @@ tags: [issue-32, synthetic-only, ios, notification, tap-open]
 - tapOn:
     point: '${IOS_NOTIFICATION_OPEN_POINT}'
     retryTapIfNoChange: false
-# The protected app is already authenticated. The runner never retries this
-# tap and next requires same-request default-action plus exact-room evidence.
+# The runner never retries this measured fallback tap. It next requires
+# same-request default-action evidence, genuine foreground re-authentication,
+# and then the exact event-room evidence.

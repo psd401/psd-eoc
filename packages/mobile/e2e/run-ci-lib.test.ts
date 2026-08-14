@@ -596,12 +596,12 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toThrow();
   });
 
-  test('taps the locked iOS notification only after the protected shell is stable', async () => {
-    const [runner, foregroundOpenFlow, systemResumeFlow] = await Promise.all([
+  test('backgrounds and taps the pending iOS notification only after the protected shell is stable', async () => {
+    const [runner, backgroundOpenFlow, systemResumeFlow] = await Promise.all([
       readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
       readFile(
         new URL(
-          'flows/notification-event-room-ios-foreground-open.yaml',
+          'flows/notification-event-room-ios-background-open.yaml',
           import.meta.url,
         ),
         'utf8',
@@ -622,14 +622,17 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(injection).not.toContain("'terminate'");
     expect(runner.match(/await injectIosNotification\(/gu)).toHaveLength(1);
     expect(runner).toMatch(
-      /notification-event-room-ios-system-lock[\s\S]+await injectIosNotification[\s\S]+awaitIosNotificationOnLockedScreen[\s\S]+satisfyIosSystemLockAuthentication[\s\S]+notification-unlock-ios-system-resume[\s\S]+respondToDeviceAuthentication[\s\S]+notification-unlock-ios-post-auth[\s\S]+notification-event-room-ios-foreground-open[\s\S]+notification-event-room-ios-post-auth/u,
+      /notification-event-room-ios-system-lock[\s\S]+await injectIosNotification[\s\S]+awaitIosNotificationOnLockedScreen[\s\S]+satisfyIosSystemLockAuthentication[\s\S]+notification-unlock-ios-system-resume[\s\S]+respondToDeviceAuthentication[\s\S]+notification-unlock-ios-post-auth[\s\S]+notification-event-room-ios-background-open[\s\S]+openExplicitIosNotificationIfNeeded[\s\S]+await respondToDeviceAuthentication\([\s\S]+notification-event-room-ios'[\s\S]+notification-event-room-ios-post-auth/u,
     );
     expect(runner).not.toContain("'notification-event-room-ios-system-open'");
-    expect(foregroundOpenFlow).toContain(
+    expect(backgroundOpenFlow).toContain(
       "text: '^\\[DRILL\\] Synthetic lockdown drill$'",
     );
-    expect(foregroundOpenFlow).not.toContain('pressKey: home');
-    expect(foregroundOpenFlow).not.toContain('pressKey: lock');
+    expect(backgroundOpenFlow).toContain('pressKey: home');
+    expect(backgroundOpenFlow).not.toContain('pressKey: lock');
+    expect(backgroundOpenFlow).toMatch(
+      /pressKey: home[\s\S]+start: 50%, 0%[\s\S]+visible: '\\\[DRILL\\\] Synthetic lockdown drill'[\s\S]+id: 'NotificationTitle'[\s\S]+text: '\^\\\[DRILL\\\] Synthetic lockdown drill\$'/u,
+    );
     expect(systemResumeFlow).toContain('- swipe:');
     expect(systemResumeFlow).not.toContain('tapOn:');
     expect(systemResumeFlow).not.toContain('NotificationTitle');

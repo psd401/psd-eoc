@@ -2205,14 +2205,16 @@ async function runPlatformSuite(
         maestroEnvironment,
         iosDriverSession,
       );
-      // The protected navigator is now committed. Open the same exact
-      // notification already proven behind the system lock and require its
-      // production response to reach the exact event room.
+      // The protected navigator is now committed. Background without
+      // terminating the mounted listener, open the same exact notification
+      // already proven behind the system lock, then require its queued
+      // production response to survive foreground re-authentication and reach
+      // the exact event room.
       const routeNotificationActionStartedAt = Date.now();
       await runMaestroFlow(
         platform,
         iosDevice.udid,
-        'notification-event-room-ios-foreground-open',
+        'notification-event-room-ios-background-open',
         artifacts.root,
         maestroEnvironment,
         iosDriverSession,
@@ -2224,6 +2226,15 @@ async function runPlatformSuite(
         iosDriverSession,
         'route',
         routeNotificationActionStartedAt,
+      );
+      await respondToDeviceAuthentication(
+        platform,
+        iosDevice.udid,
+        artifacts.root,
+        'notification-event-room-ios',
+        maestroEnvironment,
+        applesimutils,
+        iosDriverSession,
       );
       await runMaestroFlow(
         platform,

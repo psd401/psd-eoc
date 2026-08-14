@@ -18,9 +18,10 @@ platforms:
 3. A provider-free platform notification is presented through the installed
    app's platform integration. Its visible alert and versioned payload are
    explicitly `drill`. The exact card remains pending while device
-   authentication completes; after the protected navigator is stable, tapping
-   that same notification routes through the production `expo-notifications`
-   response path to the exact event room.
+   authentication completes; after the protected navigator is stable, the app
+   is backgrounded without termination and tapping that same notification
+   routes through the production `expo-notifications` response path, ordinary
+   foreground authentication, and then to the exact event room.
 4. The user appends a synthetic text journal fact, reviews a fresh mocked
    all-clear consequence preview, types the required phrase, and explicitly
    taps the all-clear action. The event remains a drill and is not closed.
@@ -144,8 +145,10 @@ the exact DRILL card appeared in the lock-screen hierarchy. It then answers
 the dedicated simulator's system-lock Face ID challenge, resumes the
 still-mounted app into its independent LocalAuthentication challenge, answers
 that challenge, and requires Maestro to prove the protected shell is stable.
-Only then does it open Notification Center and tap that same pending synthetic
-card. If iOS 26 leaves the card
+Only then does it background the still-mounted app, open Notification Center,
+and tap that same pending synthetic card. The runner answers the app's ordinary
+foreground LocalAuthentication request before requiring the exact event room.
+If iOS 26 leaves the card
 on the Cover Sheet (including after expanding a first-run notification stack),
 the runner waits a bounded first-response window, then requires three stable
 samples with exactly one complete DRILL card, bounds disjoint from every other
