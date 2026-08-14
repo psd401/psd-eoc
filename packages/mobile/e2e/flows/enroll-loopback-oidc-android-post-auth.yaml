@@ -5,6 +5,8 @@ tags: [issue-32, synthetic-only, android, oidc, post-auth]
 - runFlow:
     file: shared/assert-synthetic-context.yaml
 - runFlow:
+    file: shared/retry-loopback-if-offline.yaml
+- runFlow:
     file: shared/assert-loopback-enrollment.yaml
     env:
       EVENT_ID: ${EVENT_ID}

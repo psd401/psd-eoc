@@ -1,0 +1,13 @@
+appId: net.psd401.eoc
+---
+- runFlow:
+    when:
+      visible: '^Offline — cached view only$'
+    commands:
+      - tapOn: '^Retry secure connection$'
+      - extendedWaitUntil:
+          notVisible: '^Offline — cached view only$'
+          timeout: 60000
+# The reconnect is deliberately visible, user-initiated, and attempted once.
+# A remaining offline state still fails the following enrollment assertions;
+# no mutation is queued while disconnected.

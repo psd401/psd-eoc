@@ -4,6 +4,12 @@ tags: [issue-32, synthetic-only, android, notification, post-auth]
 ---
 - runFlow:
     file: shared/assert-synthetic-context.yaml
+- assertTrue:
+    condition: ${NOTIFICATION_TITLE == '[DRILL] Synthetic lockdown drill'}
+    label: Require the exact retained synthetic drill route title
+- assertVisible: '\[DRILL\] Synthetic lockdown drill'
+- assertNotVisible: '.*\[INCIDENT\].*'
+- tapOn: '\[DRILL\] Synthetic lockdown drill'
 - runFlow:
     file: shared/assert-active-drill-room.yaml
     env:

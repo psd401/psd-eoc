@@ -16,9 +16,11 @@ platforms:
    establishes an enrolled local session, and loads the canonical active
    synthetic drill from an isolated PostgreSQL test database.
 3. A provider-free platform notification is presented through the installed
-   app's platform integration. The visible alert and versioned data are both
-   explicitly `drill`; tapping the system notification routes through the
-   production `expo-notifications` response path to the exact event room.
+   app's platform integration. Its visible alert and versioned payload are
+   explicitly `drill`. The exact card remains pending while device
+   authentication completes; after the protected navigator is stable, tapping
+   that same notification routes through the production `expo-notifications`
+   response path to the exact event room.
 4. The user appends a synthetic text journal fact, reviews a fresh mocked
    all-clear consequence preview, types the required phrase, and explicitly
    taps the all-clear action. The event remains a drill and is not closed.
@@ -131,9 +133,11 @@ the runner answers that genuine system prompt and requires a stable fresh
 sign-in state before beginning loopback OIDC enrollment. It then
 explicitly locks it before provider-free notification injection, and proves
 the exact DRILL card appeared in the lock-screen hierarchy. It then answers
-the dedicated simulator's system-lock Face ID challenge and requires Maestro
-to prove that iOS reached `Home screen icons` before opening Notification
-Center and tapping that same exact synthetic card. If iOS 26 leaves the card
+the dedicated simulator's system-lock Face ID challenge, resumes the
+still-mounted app into its independent LocalAuthentication challenge, answers
+that challenge, and requires Maestro to prove the protected shell is stable.
+Only then does it open Notification Center and tap that same pending synthetic
+card. If iOS 26 leaves the card
 on the Cover Sheet (including after expanding a first-run notification stack),
 the runner waits a bounded first-response window, then requires three stable
 samples with exactly one complete DRILL card, bounds disjoint from every other
@@ -142,12 +146,12 @@ then measures three more stable hierarchies. Only an unchanged card with a
 newly exposed leading strip at least 44 points wide admits one non-retrying
 Open tap at that measured strip's midpoint. The runner then requires
 SpringBoard to record exactly one `UNNotificationDefaultActionIdentifier`
-execution and removal for the same request after that tap.
-Notification disappearance alone is never pass evidence. A second,
-independent simulated biometric must answer the app's genuine
-LocalAuthentication request, after which Maestro requires the run-specific
-route evidence in the exact synthetic drill room. The runner deletes that
-exact simulator during cleanup;
+execution and removal for that same request after the tap. Notification
+disappearance alone is never pass evidence. The production response listener
+must then reach the run-specific route evidence in the exact synthetic drill
+room. This preserves one notification across lock and app authentication while
+avoiding an auth-driven route-tree transition during response handling. The
+runner deletes that exact simulator during cleanup;
 physical-device system-lock behavior remains separate release evidence and is
 not claimed here.
 

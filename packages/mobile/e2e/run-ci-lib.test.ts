@@ -24,6 +24,8 @@ import {
   createMobileE2ERunId,
   decideMobileE2EIosRevealedOpenAction,
   decideMobileE2EIosNotificationResponse,
+  mobileE2EAndroidArchitectureArguments,
+  mobileE2EAndroidBuildArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EArtifactPaths,
   mobileE2EDevClientUrl,
@@ -36,6 +38,8 @@ import {
   mobileE2EIosSimulatorPushPayload,
   mobileE2EIosSyntheticNotificationState,
   mobileE2ELoopbackMetroEnvironment,
+  mobileE2EMaestroDriverPortArguments,
+  mobileE2EMaestroDriverReuseArguments,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
   mobileE2ERunnerPaths,
@@ -46,6 +50,7 @@ import {
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
   isMobileE2EIosSyntheticNotificationVisible,
+  isMobileE2EIosUnlockRetryReady,
   parseMobileE2EManifest,
   parseMobileE2EManifestText,
   parseMobileE2EPlatformCli,
@@ -395,6 +400,37 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toThrow();
   });
 
+  test('retries a cold loopback server only through the visible reconnect control', async () => {
+    const [retryFlow, iosEnrollment, androidEnrollment] = await Promise.all([
+      readFile(
+        new URL('flows/shared/retry-loopback-if-offline.yaml', import.meta.url),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          'flows/enroll-loopback-oidc-ios-post-auth.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          'flows/enroll-loopback-oidc-android-post-auth.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ]);
+    expect(retryFlow).toContain("visible: '^Offline — cached view only$'");
+    expect(retryFlow).toContain("tapOn: '^Retry secure connection$'");
+    expect(retryFlow.match(/tapOn:/gu)).toHaveLength(1);
+    for (const enrollment of [iosEnrollment, androidEnrollment]) {
+      expect(enrollment).toContain(
+        'file: shared/retry-loopback-if-offline.yaml',
+      );
+    }
+  });
+
   test('creates an exact provider-free iOS simulator APNs drill payload', () => {
     const payload = mobileE2EIosSimulatorPushPayload(manifest());
     expect(payload).toEqual({
@@ -428,6 +464,46 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toThrow();
   });
 
+  test('taps the locked iOS notification only after the protected shell is stable', async () => {
+    const [runner, foregroundOpenFlow, systemResumeFlow] = await Promise.all([
+      readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
+      readFile(
+        new URL(
+          'flows/notification-event-room-ios-foreground-open.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          'flows/notification-unlock-ios-system-resume.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ]);
+    const injection = runner.match(
+      /async function injectIosNotification[\s\S]+?(?=async function awaitIosNotificationOnLockedScreen)/u,
+    )?.[0];
+    expect(injection).toBeDefined();
+    expect(injection).toContain("'push'");
+    expect(injection).not.toContain("'terminate'");
+    expect(runner.match(/await injectIosNotification\(/gu)).toHaveLength(1);
+    expect(runner).toMatch(
+      /notification-event-room-ios-system-lock[\s\S]+await injectIosNotification[\s\S]+awaitIosNotificationOnLockedScreen[\s\S]+satisfyIosSystemLockAuthentication[\s\S]+notification-unlock-ios-system-resume[\s\S]+respondToDeviceAuthentication[\s\S]+notification-unlock-ios-post-auth[\s\S]+notification-event-room-ios-foreground-open[\s\S]+notification-event-room-ios-post-auth/u,
+    );
+    expect(runner).not.toContain("'notification-event-room-ios-system-open'");
+    expect(foregroundOpenFlow).toContain(
+      "text: '^\\[DRILL\\] Synthetic lockdown drill$'",
+    );
+    expect(foregroundOpenFlow).not.toContain('pressKey: home');
+    expect(foregroundOpenFlow).not.toContain('pressKey: lock');
+    expect(systemResumeFlow).toContain('- swipe:');
+    expect(systemResumeFlow).not.toContain('tapOn:');
+    expect(systemResumeFlow).not.toContain('NotificationTitle');
+    expect(systemResumeFlow).not.toContain('pressKey:');
+  });
+
   test('creates exact provider-free Android instrumentation properties', () => {
     expect(mobileE2EAndroidInstrumentationArguments(manifest())).toEqual([
       `-Pandroid.testInstrumentationRunnerArguments.runId=${RUN_ID}`,
@@ -445,6 +521,39 @@ describe('issue #32 exact synthetic drill data', () => {
         rosterPopulation: 'staff',
       }),
     ).toThrow();
+  });
+
+  test('reopens Android SystemUI only between notification unlock and route proof', async () => {
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
+    );
+    const authenticationSplit = runner.match(
+      /async function runAuthenticationSplit[\s\S]+?(?=async function runLaunchAuthentication)/u,
+    )?.[0];
+    expect(authenticationSplit).toBeDefined();
+    expect(authenticationSplit).toContain("platform === 'android'");
+    expect(authenticationSplit).toContain(
+      "flowName === 'notification-event-room-android'",
+    );
+    expect(authenticationSplit).toContain("'expand-notifications'");
+
+    const authentication = authenticationSplit?.indexOf(
+      'await respondToDeviceAuthentication(',
+    );
+    const exactGuard = authenticationSplit?.indexOf(
+      "flowName === 'notification-event-room-android'",
+    );
+    const shadeExpansion = authenticationSplit?.indexOf(
+      "'expand-notifications'",
+    );
+    const postAuthFlow = authenticationSplit?.lastIndexOf(
+      'await runMaestroFlow(',
+    );
+    expect(authentication).toBeGreaterThanOrEqual(0);
+    expect(exactGuard).toBeGreaterThan(authentication ?? -1);
+    expect(shadeExpansion).toBeGreaterThan(exactGuard ?? -1);
+    expect(postAuthFlow).toBeGreaterThan(shadeExpansion ?? -1);
   });
 
   test('creates only the exact loopback Expo development-client URL', () => {
@@ -475,6 +584,60 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(() =>
       mobileE2EIosDirectLaunchArguments('not-a-device', 19_000),
     ).toThrow('simulator UDID');
+  });
+
+  test('reuses only the iOS Maestro XCTest driver after warmup', () => {
+    expect(mobileE2EMaestroDriverReuseArguments('ios')).toEqual([
+      '--no-reinstall-driver',
+    ]);
+    expect(mobileE2EMaestroDriverReuseArguments('android')).toEqual([]);
+  });
+
+  test('pins iOS Maestro commands to one explicitly tracked XCTest port', () => {
+    expect(mobileE2EMaestroDriverPortArguments('ios', 22_087)).toEqual([
+      '--driver-host-port',
+      '22087',
+    ]);
+    expect(mobileE2EMaestroDriverPortArguments('android', undefined)).toEqual(
+      [],
+    );
+    for (const invalidPort of [
+      undefined,
+      0,
+      80,
+      65_536,
+      Number.NaN,
+      22_087.5,
+    ]) {
+      expect(() =>
+        mobileE2EMaestroDriverPortArguments('ios', invalidPort),
+      ).toThrow('iOS Maestro driver port');
+    }
+    expect(() =>
+      mobileE2EMaestroDriverPortArguments('android', 22_087),
+    ).toThrow('Android must not receive');
+  });
+
+  test('builds only the hosted Android emulator ABI', async () => {
+    expect(mobileE2EAndroidArchitectureArguments()).toEqual([
+      '-PreactNativeArchitectures=x86_64',
+    ]);
+    expect(mobileE2EAndroidBuildArguments()).toEqual([
+      '--no-daemon',
+      '--stacktrace',
+      '-PreactNativeArchitectures=x86_64',
+      'app:assembleDebug',
+    ]);
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
+    );
+    expect(runner).toMatch(
+      /async function buildAndroidApp[\s\S]+\.\.\.mobileE2EAndroidBuildArguments\(\)/u,
+    );
+    expect(runner).toMatch(
+      /async function injectAndroidNotification[\s\S]+\.\.\.mobileE2EAndroidArchitectureArguments\(\)[\s\S]+app:connectedDebugAndroidTest/u,
+    );
   });
 
   test('starts Expo on loopback without incompatible offline mode', () => {
@@ -686,11 +849,34 @@ describe('issue #32 exact synthetic drill data', () => {
     );
   });
 
+  test('admits an iOS auth retry only from the exact app-owned failure state', () => {
+    const exactFailure = [
+      'Unlock PSD EOC',
+      'PSD EOC remains locked',
+      'PSD EOC could not verify device authentication. Try again or contact district technology support.',
+      'Try device unlock again',
+    ].join('\n');
+    expect(isMobileE2EIosUnlockRetryReady(exactFailure)).toBe(true);
+    for (const requiredText of exactFailure.split('\n')) {
+      expect(
+        isMobileE2EIosUnlockRetryReady(
+          exactFailure.replace(requiredText, 'Unexpected state'),
+        ),
+      ).toBe(false);
+    }
+  });
+
   test('uses direct iOS launch without an external URL handoff', async () => {
-    const runner = await readFile(
-      new URL('run-ci.ts', import.meta.url),
-      'utf8',
-    );
+    const [runner, retryFlow] = await Promise.all([
+      readFile(new URL('run-ci.ts', import.meta.url), 'utf8'),
+      readFile(
+        new URL(
+          'flows/retry-locked-session-ios-pre-auth.yaml',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ]);
     expect(runner).toMatch(
       /\['xcrun',\s+\.\.\.mobileE2EIosDirectLaunchArguments\(device\.udid, metroPort\)\]/u,
     );
@@ -700,6 +886,51 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(runner).toContain(
       '`ios-direct-launch-${metroPort}-failure-hierarchy.txt`',
     );
+    expect(runner).toMatch(
+      /const appPath = await buildIosApp[\s\S]+const iosDriverSession = await warmIosMaestroDriver\([\s\S]+const fixtureLaunchHierarchy = await installAndOpenIosBundle/u,
+    );
+    expect(runner).toMatch(
+      /async function warmIosMaestroDriver[\s\S]+timeoutMilliseconds: RUNTIME_TIMEOUT_MS/u,
+    );
+    expect(runner).toContain(
+      'MAESTRO_DRIVER_STARTUP_TIMEOUT: String(RUNTIME_TIMEOUT_MS)',
+    );
+    expect(
+      runner.match(
+        /'hierarchy',\s+\.\.\.mobileE2EMaestroDriverReuseArguments\('ios'\)/gu,
+      ),
+    ).toHaveLength(3);
+    expect(runner).toMatch(
+      /'maestro',\s+'test',\s+\.\.\.mobileE2EMaestroDriverReuseArguments\(platform\)/u,
+    );
+    expect(runner).toMatch(
+      /'maestro',\s+'test',[\s\S]+mobileE2EMaestroDriverPortArguments\(platform, iosDriverPort\)/u,
+    );
+    expect(
+      runner.match(
+        /mobileE2EMaestroDriverPortArguments\(\s*'ios',\s+(?:driverSession|iosDriverSession)\.currentPort,?\s*\)/gu,
+      ),
+    ).toHaveLength(3);
+    expect(runner).toMatch(
+      /iosDriverPort = await reserveLoopbackPort\(\);\s+iosDriverSession\.currentPort = iosDriverPort/u,
+    );
+    expect(runner).not.toContain('22087');
+    expect(runner).toContain("flowName === 'start-synthetic-drill-ios'");
+    for (const exactBoundary of [
+      "- assertVisible: '^Unlock PSD EOC$'",
+      "- assertVisible: '^PSD EOC remains locked$'",
+      "text: '^Try device unlock again$'",
+    ]) {
+      expect(retryFlow).toContain(exactBoundary);
+    }
+    for (const unsafeSelector of [
+      'point:',
+      'index:',
+      'longPressOn:',
+      'swipe:',
+    ]) {
+      expect(retryFlow).not.toContain(unsafeSelector);
+    }
   });
 
   test('recognizes only the synthetic drill notification behind the iOS system lock', () => {

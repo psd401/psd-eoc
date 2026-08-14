@@ -620,6 +620,21 @@ export function mobileE2EAndroidInstrumentationArguments(
   ]);
 }
 
+/** Restricts native work to the exact ABI used by the hosted emulator. */
+export function mobileE2EAndroidArchitectureArguments(): readonly string[] {
+  return Object.freeze(['-PreactNativeArchitectures=x86_64']);
+}
+
+/** Builds only the ABI used by the issue #32 hosted Android emulator. */
+export function mobileE2EAndroidBuildArguments(): readonly string[] {
+  return Object.freeze([
+    '--no-daemon',
+    '--stacktrace',
+    ...mobileE2EAndroidArchitectureArguments(),
+    'app:assembleDebug',
+  ]);
+}
+
 export function mobileE2EDevClientUrl(port: number): string {
   const metroOrigin = mobileE2ELoopbackMetroOrigin(port);
   return `psdeoc://expo-development-client/?url=${encodeURIComponent(metroOrigin)}`;
@@ -655,6 +670,39 @@ export function mobileE2EIosDirectLaunchArguments(
     '--initialUrl',
     mobileE2ELoopbackMetroOrigin(port),
   ]);
+}
+
+/** Keeps the warmed iOS XCTest runner alive; Android owns no XCTest process. */
+export function mobileE2EMaestroDriverReuseArguments(
+  platform: MobileE2EPlatform,
+): readonly string[] {
+  return platform === 'ios'
+    ? Object.freeze(['--no-reinstall-driver'])
+    : Object.freeze([]);
+}
+
+/** Pins every iOS Maestro process to its explicitly tracked XCTest session. */
+export function mobileE2EMaestroDriverPortArguments(
+  platform: MobileE2EPlatform,
+  port: number | undefined,
+): readonly string[] {
+  if (platform === 'android') {
+    if (port !== undefined) {
+      throw new Error('Android must not receive an iOS XCTest driver port.');
+    }
+    return Object.freeze([]);
+  }
+  if (
+    !Number.isSafeInteger(port) ||
+    port === undefined ||
+    port < USER_PORT_MINIMUM ||
+    port > USER_PORT_MAXIMUM
+  ) {
+    throw new Error(
+      `The iOS Maestro driver port must be from ${USER_PORT_MINIMUM} through ${USER_PORT_MAXIMUM}.`,
+    );
+  }
+  return Object.freeze(['--driver-host-port', String(port)]);
 }
 
 /** Keeps Metro loopback-only without combining Expo's incompatible flags. */
@@ -773,6 +821,18 @@ export function isMobileE2EIosApplicationReady(
     (hierarchy.includes(expectedApplicationText) ||
       isMobileE2EIosAuthenticationSheetReady(hierarchy) ||
       isMobileE2EIosApplicationForeground(hierarchy))
+  );
+}
+
+/** Admits an authentication retry only from PSD EOC's exact locked UI. */
+export function isMobileE2EIosUnlockRetryReady(hierarchy: string): boolean {
+  return (
+    hierarchy.includes('Unlock PSD EOC') &&
+    hierarchy.includes('PSD EOC remains locked') &&
+    hierarchy.includes(
+      'PSD EOC could not verify device authentication. Try again or contact district technology support.',
+    ) &&
+    hierarchy.includes('Try device unlock again')
   );
 }
 

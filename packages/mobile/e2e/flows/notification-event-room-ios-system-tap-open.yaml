@@ -19,5 +19,5 @@ tags: [issue-32, synthetic-only, ios, notification, tap-open]
 - tapOn:
     point: '${IOS_NOTIFICATION_OPEN_POINT}'
     retryTapIfNoChange: false
-# Stop while the app's independent LocalAuthentication sheet is awaiting its
-# enrolled simulator biometric. The runner never retries this tap.
+# The protected app is already authenticated. The runner never retries this
+# tap and next requires same-request default-action plus exact-room evidence.

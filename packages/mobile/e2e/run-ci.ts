@@ -20,6 +20,8 @@ import {
   createMobileE2ERunId,
   decideMobileE2EIosRevealedOpenAction,
   decideMobileE2EIosNotificationResponse,
+  mobileE2EAndroidArchitectureArguments,
+  mobileE2EAndroidBuildArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EDevClientUrl,
   mobileE2EExpoStartArguments,
@@ -30,6 +32,8 @@ import {
   mobileE2EIosSimulatorPushPayload,
   mobileE2EIosNotificationActionLogEvidence,
   mobileE2ELoopbackMetroEnvironment,
+  mobileE2EMaestroDriverPortArguments,
+  mobileE2EMaestroDriverReuseArguments,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
   isMobileE2EAndroidApplicationForeground,
@@ -37,6 +41,7 @@ import {
   isMobileE2EIosApplicationReady,
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
+  isMobileE2EIosUnlockRetryReady,
   parseMobileE2EManifestText,
   parseMobileE2EPlatformCli,
   removeMobileE2ERunnerRoot,
@@ -107,6 +112,12 @@ interface IosDevice {
   readonly udid: string;
   readonly name: string;
 }
+
+interface IosMaestroDriverSession {
+  currentPort: number;
+}
+
+type IosNotificationPurpose = 'route';
 
 interface RunnerEvidence {
   readonly issue: 32;
@@ -722,9 +733,7 @@ async function buildAndroidApp(
   await runCommand(
     [
       resolve(paths.copiedMobile, 'android/gradlew'),
-      '--no-daemon',
-      '--stacktrace',
-      'app:assembleDebug',
+      ...mobileE2EAndroidBuildArguments(),
     ],
     {
       cwd: resolve(paths.copiedMobile, 'android'),
@@ -766,7 +775,8 @@ async function installAndOpenIosBundle(
   metroPort: number,
   expectedApplicationText: string,
   artifactRoot: string,
-): Promise<void> {
+  driverSession: IosMaestroDriverSession,
+): Promise<string> {
   await runCommand(
     ['xcrun', 'simctl', 'terminate', device.udid, MOBILE_E2E_APPLICATION_ID],
     {
@@ -780,11 +790,12 @@ async function installAndOpenIosBundle(
     },
   );
   await runCommand(['xcrun', 'simctl', 'install', device.udid, appPath]);
-  await launchIosBundleDirectly(
+  return launchIosBundleDirectly(
     device,
     metroPort,
     expectedApplicationText,
     artifactRoot,
+    driverSession,
   );
 }
 
@@ -793,7 +804,8 @@ async function launchIosBundleDirectly(
   metroPort: number,
   expectedApplicationText: string,
   artifactRoot: string,
-): Promise<void> {
+  driverSession: IosMaestroDriverSession,
+): Promise<string> {
   // Expo Dev Launcher consumes this process argument inside the installed app.
   // Supplying the validated loopback URL directly avoids iOS's external-URL
   // confirmation alert, which XCTest/Maestro cannot inspect on iOS 26.
@@ -803,11 +815,12 @@ async function launchIosBundleDirectly(
       logPath: resolve(artifactRoot, `ios-direct-launch-${metroPort}.log`),
     },
   );
-  await awaitIosApplicationReady(
+  return awaitIosApplicationReady(
     device.udid,
     expectedApplicationText,
     artifactRoot,
     metroPort,
+    driverSession,
   );
 }
 
@@ -816,7 +829,8 @@ async function awaitIosApplicationReady(
   expectedText: string,
   artifactRoot: string,
   metroPort: number,
-): Promise<void> {
+  driverSession: IosMaestroDriverSession,
+): Promise<string> {
   const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
   let firstPoll = true;
   let lastHierarchy = '';
@@ -829,7 +843,17 @@ async function awaitIosApplicationReady(
     );
     firstPoll = false;
     const result = await runCommand(
-      ['maestro', '--udid', deviceId, 'hierarchy'],
+      [
+        'maestro',
+        '--udid',
+        deviceId,
+        ...mobileE2EMaestroDriverPortArguments(
+          'ios',
+          driverSession.currentPort,
+        ),
+        'hierarchy',
+        ...mobileE2EMaestroDriverReuseArguments('ios'),
+      ],
       {
         allowFailure: true,
         quiet: true,
@@ -844,7 +868,7 @@ async function awaitIosApplicationReady(
       result.exitCode === 0 &&
       isMobileE2EIosApplicationReady(lastHierarchy, expectedText)
     ) {
-      return;
+      return lastHierarchy;
     }
     await Bun.sleep(RETRY_INTERVAL_MS);
   }
@@ -877,6 +901,44 @@ async function awaitIosApplicationReady(
     },
   );
   throw new Error(`ios app did not expose ${expectedText} in time.`);
+}
+
+async function warmIosMaestroDriver(
+  deviceId: string,
+  artifactRoot: string,
+): Promise<IosMaestroDriverSession> {
+  // Starting XCTest while LocalAuthentication is already presented can cancel
+  // the transient secure sheet. Warm the pinned driver against SpringBoard
+  // before launching PSD EOC so the launch-auth observation is immediate.
+  const driverSession: IosMaestroDriverSession = {
+    currentPort: await reserveLoopbackPort(),
+  };
+  const hierarchy = await runCommand(
+    [
+      'maestro',
+      '--udid',
+      deviceId,
+      ...mobileE2EMaestroDriverPortArguments('ios', driverSession.currentPort),
+      'hierarchy',
+      ...mobileE2EMaestroDriverReuseArguments('ios'),
+    ],
+    {
+      environment: {
+        ...definedProcessEnvironment(),
+        MAESTRO_DRIVER_STARTUP_TIMEOUT: String(RUNTIME_TIMEOUT_MS),
+      },
+      quiet: true,
+      // Hosted XCTest bootstrap has taken longer than 90 seconds. Keep one
+      // uninterrupted process for the full bounded runtime window; repeatedly
+      // terminating a cold driver prevents it from ever becoming reusable.
+      timeoutMilliseconds: RUNTIME_TIMEOUT_MS,
+      logPath: resolve(artifactRoot, 'ios-maestro-warmup.log'),
+    },
+  );
+  if (hierarchy.stdout.trim().length === 0) {
+    throw new Error('The warmed iOS Maestro hierarchy was empty.');
+  }
+  return driverSession;
 }
 
 async function installAndOpenAndroidBundle(
@@ -972,10 +1034,24 @@ async function awaitApplicationReady(
 async function platformHierarchy(
   platform: MobileE2EPlatform,
   deviceId: string,
+  iosDriverSession?: IosMaestroDriverSession,
 ): Promise<string> {
   if (platform === 'ios') {
+    if (iosDriverSession === undefined) {
+      throw new Error('The tracked iOS Maestro driver session is missing.');
+    }
     const result = await runCommand(
-      ['maestro', '--udid', deviceId, 'hierarchy'],
+      [
+        'maestro',
+        '--udid',
+        deviceId,
+        ...mobileE2EMaestroDriverPortArguments(
+          'ios',
+          iosDriverSession.currentPort,
+        ),
+        'hierarchy',
+        ...mobileE2EMaestroDriverReuseArguments('ios'),
+      ],
       { allowFailure: true, quiet: true, timeoutMilliseconds: 20_000 },
     );
     return `${result.stdout}\n${result.stderr}`;
@@ -1025,7 +1101,10 @@ async function respondToDeviceAuthentication(
   deviceId: string,
   artifactRoot: string,
   flowName: string,
+  environment: Readonly<Record<string, string>>,
   applesimutils: string | undefined,
+  iosDriverSession?: IosMaestroDriverSession,
+  initialIosHierarchy?: string,
 ): Promise<void> {
   // The pre-auth Maestro flow has completed immediately after the foreground
   // app tap or callback that requests device authentication. Android exposes
@@ -1036,25 +1115,55 @@ async function respondToDeviceAuthentication(
     if (applesimutils === undefined) {
       throw new Error('The pinned Apple simulator helper is missing.');
     }
+    if (iosDriverSession === undefined) {
+      throw new Error('The tracked iOS Maestro driver session is missing.');
+    }
     // Metro can still be compiling after the direct development-client launch.
     // Wait for the exact secure-sheet accessibility token retained by pinned
-    // Maestro 2.7. This token is synchronization only: the following
-    // authenticated post-state remains the executable pass gate.
+    // Maestro 2.7. A hierarchy returned by that same launch readiness probe is
+    // current evidence, not a cached response. If XCTest cold-start canceled
+    // the first prompt, one exact app-owned retry is allowed; the retry flow
+    // cannot act on a generic error or coordinates. The following authenticated
+    // post-state remains the executable pass gate.
     const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
     let readyHierarchy: string | undefined;
+    let pendingHierarchy = initialIosHierarchy;
+    let lastHierarchy = initialIosHierarchy ?? '';
+    let retryAttempted = false;
     while (Date.now() < deadline) {
-      const hierarchy = await platformHierarchy('ios', deviceId);
+      const hierarchy =
+        pendingHierarchy ??
+        (await platformHierarchy('ios', deviceId, iosDriverSession));
+      pendingHierarchy = undefined;
+      if (hierarchy.trim().length > 0) lastHierarchy = hierarchy;
       if (isMobileE2EIosAuthenticationSheetReady(hierarchy)) {
         readyHierarchy = hierarchy;
         break;
       }
+      if (
+        flowName === 'start-synthetic-drill-ios' &&
+        !retryAttempted &&
+        isMobileE2EIosUnlockRetryReady(hierarchy)
+      ) {
+        retryAttempted = true;
+        await runMaestroFlow(
+          'ios',
+          deviceId,
+          'retry-locked-session-ios-pre-auth',
+          artifactRoot,
+          environment,
+          iosDriverSession,
+        );
+        continue;
+      }
       await Bun.sleep(RETRY_INTERVAL_MS);
     }
     if (readyHierarchy === undefined) {
-      const failureHierarchy = await platformHierarchy('ios', deviceId);
       await writeFile(
         resolve(artifactRoot, `device-auth-${flowName}-failure-hierarchy.txt`),
-        failureHierarchy,
+        lastHierarchy.length > 0
+          ? lastHierarchy
+          : 'No non-empty iOS hierarchy was observed.\n',
         { encoding: 'utf8', flag: 'wx', mode: 0o600 },
       );
       await runCommand(
@@ -1144,14 +1253,18 @@ async function respondToDeviceAuthentication(
 }
 
 function maestroArguments(
+  platform: MobileE2EPlatform,
   deviceId: string,
   flowPath: string,
   artifactDirectory: string,
   environment: Readonly<Record<string, string>>,
+  iosDriverPort?: number,
 ): readonly string[] {
   const arguments_: string[] = [
     'maestro',
     'test',
+    ...mobileE2EMaestroDriverReuseArguments(platform),
+    ...mobileE2EMaestroDriverPortArguments(platform, iosDriverPort),
     '--udid',
     deviceId,
     '--no-ansi',
@@ -1175,25 +1288,45 @@ function maestroArguments(
 }
 
 async function runMaestroFlow(
+  platform: MobileE2EPlatform,
   deviceId: string,
   flowName: string,
   artifactRoot: string,
   environment: Readonly<Record<string, string>>,
+  iosDriverSession?: IosMaestroDriverSession,
+  artifactName: string = flowName,
 ): Promise<void> {
-  const artifactDirectory = resolve(artifactRoot, `maestro-${flowName}`);
+  if (!/^[a-z0-9-]+$/u.test(artifactName)) {
+    throw new Error('The Maestro artifact name is invalid.');
+  }
+  let iosDriverPort: number | undefined;
+  if (platform === 'ios') {
+    if (iosDriverSession === undefined) {
+      throw new Error('The tracked iOS Maestro driver session is missing.');
+    }
+    // Maestro 2.7 refuses to start `test` on an occupied explicit port. Give
+    // each flow a fresh port, then retain that exact runner for any hierarchy
+    // observation that follows the flow (especially secure-sheet evidence).
+    iosDriverPort = await reserveLoopbackPort();
+    iosDriverSession.currentPort = iosDriverPort;
+  }
+  const artifactDirectory = resolve(artifactRoot, `maestro-${artifactName}`);
   await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
   const flowPath = resolve(flowRoot, `${flowName}.yaml`);
   const command = maestroArguments(
+    platform,
     deviceId,
     flowPath,
     artifactDirectory,
     environment,
+    iosDriverPort,
   );
   const process_ = startManagedProcess(command, {
     cwd: flowRoot,
     environment: {
       ...definedProcessEnvironment(),
       MAESTRO_CLI_NO_ANALYTICS: '1',
+      MAESTRO_DRIVER_STARTUP_TIMEOUT: String(RUNTIME_TIMEOUT_MS),
     },
     logPath: resolve(artifactDirectory, 'maestro.log'),
   });
@@ -1229,25 +1362,49 @@ async function runAuthenticationSplit(
   artifactRoot: string,
   environment: Readonly<Record<string, string>>,
   applesimutils?: string,
+  iosDriverSession?: IosMaestroDriverSession,
 ): Promise<void> {
   await runMaestroFlow(
+    platform,
     deviceId,
     `${flowName}-pre-auth`,
     artifactRoot,
     environment,
+    iosDriverSession,
   );
   await respondToDeviceAuthentication(
     platform,
     deviceId,
     artifactRoot,
     flowName,
+    environment,
     applesimutils,
+    iosDriverSession,
   );
+  if (
+    platform === 'android' &&
+    flowName === 'notification-event-room-android'
+  ) {
+    // The first exact DRILL notification exists only to cross the protected
+    // unlock boundary. Reopen SystemUI after that authentication so the
+    // post-auth flow can tap the independently retained route notification.
+    await runCommand([
+      'adb',
+      '-s',
+      deviceId,
+      'shell',
+      'cmd',
+      'statusbar',
+      'expand-notifications',
+    ]);
+  }
   await runMaestroFlow(
+    platform,
     deviceId,
     `${flowName}-post-auth`,
     artifactRoot,
     environment,
+    iosDriverSession,
   );
 }
 
@@ -1258,6 +1415,8 @@ async function runLaunchAuthentication(
   artifactRoot: string,
   environment: Readonly<Record<string, string>>,
   applesimutils?: string,
+  iosDriverSession?: IosMaestroDriverSession,
+  initialIosHierarchy?: string,
 ): Promise<void> {
   // An enrolled session invokes device authentication automatically as its
   // foreground bootstrap completes. Starting XCTest before answering that
@@ -1268,13 +1427,18 @@ async function runLaunchAuthentication(
     deviceId,
     artifactRoot,
     flowName,
+    environment,
     applesimutils,
+    iosDriverSession,
+    initialIosHierarchy,
   );
   await runMaestroFlow(
+    platform,
     deviceId,
     `${flowName}-post-auth`,
     artifactRoot,
     environment,
+    iosDriverSession,
   );
 }
 
@@ -1325,6 +1489,7 @@ async function resetIosForNormalApp(
   normalMetroPort: number,
   applesimutils: string,
   artifactRoot: string,
+  driverSession: IosMaestroDriverSession,
 ): Promise<void> {
   // The activation fixture exercises the real protected credential store.
   // Xcode's native reset removes access-controlled vault items that uninstall
@@ -1339,6 +1504,7 @@ async function resetIosForNormalApp(
     normalMetroPort,
     'Sign in to PSD EOC',
     artifactRoot,
+    driverSession,
   );
   await runCommand([
     applesimutils,
@@ -1361,6 +1527,7 @@ async function resetIosForNormalApp(
     normalMetroPort,
     'Sign in to PSD EOC',
     artifactRoot,
+    driverSession,
   );
 }
 
@@ -1368,12 +1535,14 @@ async function awaitIosFreshEnrollmentReady(
   deviceId: string,
   artifactRoot: string,
   applesimutils: string,
+  environment: Readonly<Record<string, string>>,
+  driverSession: IosMaestroDriverSession,
 ): Promise<void> {
   const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
   let stableSignInSamples = 0;
   let recoveredFixtureVault = false;
   while (Date.now() < deadline) {
-    const hierarchy = await platformHierarchy('ios', deviceId);
+    const hierarchy = await platformHierarchy('ios', deviceId, driverSession);
     if (isMobileE2EIosAuthenticationSheetReady(hierarchy)) {
       if (recoveredFixtureVault) {
         throw new Error(
@@ -1387,7 +1556,9 @@ async function awaitIosFreshEnrollmentReady(
         deviceId,
         artifactRoot,
         'reset-fixture-vault-ios',
+        environment,
         applesimutils,
+        driverSession,
       );
       continue;
     }
@@ -1475,13 +1646,12 @@ async function injectIosNotification(
     `${JSON.stringify(mobileE2EIosSimulatorPushPayload(manifest))}\n`,
     { encoding: 'utf8', mode: 0o600 },
   );
-  await runCommand([
-    'xcrun',
-    'simctl',
-    'terminate',
-    device.udid,
-    MOBILE_E2E_APPLICATION_ID,
-  ]);
+  // Keep the mounted production response listener alive. The exact card is
+  // proven behind the system lock, remains pending while both real auth layers
+  // complete, and is tapped only after the protected route tree is stable. A
+  // cold Expo dev-client boot can consume an iOS scene action before this
+  // project's JS runtime loads, so it is not accepted as deterministic issue
+  // #32 route evidence.
   await runCommand([
     'xcrun',
     'simctl',
@@ -1495,11 +1665,12 @@ async function injectIosNotification(
 async function awaitIosNotificationOnLockedScreen(
   deviceId: string,
   artifactRoot: string,
+  driverSession: IosMaestroDriverSession,
 ): Promise<void> {
   const deadline = Date.now() + RUNTIME_TIMEOUT_MS;
   let hierarchy = '';
   while (Date.now() < deadline) {
-    hierarchy = await platformHierarchy('ios', deviceId);
+    hierarchy = await platformHierarchy('ios', deviceId, driverSession);
     if (isMobileE2EIosNotificationOnLockedScreen(hierarchy)) break;
     await Bun.sleep(RETRY_INTERVAL_MS);
   }
@@ -1561,8 +1732,9 @@ async function satisfyIosSystemLockAuthentication(
   artifactRoot: string,
 ): Promise<void> {
   // This biometric response clears only the dedicated simulator's operating-
-  // system lock. The notification tap must still launch PSD EOC and produce a
-  // separate LocalAuthentication sheet before the event room can be read.
+  // system lock. It resumes the still-mounted app into its independent
+  // LocalAuthentication challenge while the exact notification remains
+  // pending for a post-auth tap.
   await runCommand([applesimutils, '--byId', deviceId, '--biometricMatch'], {
     logPath: resolve(
       artifactRoot,
@@ -1575,6 +1747,9 @@ async function openExplicitIosNotificationIfNeeded(
   deviceId: string,
   artifactRoot: string,
   environment: Readonly<Record<string, string>>,
+  driverSession: IosMaestroDriverSession,
+  purpose: IosNotificationPurpose,
+  originalActionStartedAt: number,
 ): Promise<void> {
   // Give the original tap a fixed opportunity to launch PSD EOC before any
   // explicit-state decision. Each pinned-Maestro hierarchy starts a fresh JVM
@@ -1586,11 +1761,19 @@ async function openExplicitIosNotificationIfNeeded(
   const responseHierarchies: string[] = [];
   let beforeRevealHierarchy = '';
   while (Date.now() < samplingDeadline) {
-    hierarchy = await platformHierarchy('ios', deviceId);
+    hierarchy = await platformHierarchy('ios', deviceId, driverSession);
     responseHierarchies.push(hierarchy);
     const decision =
       decideMobileE2EIosNotificationResponse(responseHierarchies);
-    if (decision === 'response-started') return;
+    if (decision === 'response-started') {
+      await requireIosNotificationActionEvidence(
+        deviceId,
+        artifactRoot,
+        purpose,
+        originalActionStartedAt,
+      );
+      return;
+    }
     if (decision === 'refuse-explicit-open') break;
     if (decision === 'open-explicit-notification') {
       beforeRevealHierarchy = hierarchy;
@@ -1600,7 +1783,10 @@ async function openExplicitIosNotificationIfNeeded(
   }
   if (beforeRevealHierarchy.length === 0) {
     await writeFile(
-      resolve(artifactRoot, 'notification-explicit-ios-unsafe-hierarchy.txt'),
+      resolve(
+        artifactRoot,
+        `notification-${purpose}-explicit-ios-unsafe-hierarchy.txt`,
+      ),
       hierarchy,
       { encoding: 'utf8', flag: 'wx', mode: 0o600 },
     );
@@ -1617,28 +1803,42 @@ async function openExplicitIosNotificationIfNeeded(
   // measuring a >=44-point revealed strip can admit one Open tap. No tap is
   // retried.
   await writeFile(
-    resolve(artifactRoot, 'notification-before-reveal-ios-hierarchy.txt'),
+    resolve(
+      artifactRoot,
+      `notification-${purpose}-before-reveal-ios-hierarchy.txt`,
+    ),
     beforeRevealHierarchy,
     { encoding: 'utf8', flag: 'wx', mode: 0o600 },
   );
   await runMaestroFlow(
+    'ios',
     deviceId,
     'notification-event-room-ios-system-reveal-open',
     artifactRoot,
     environment,
+    driverSession,
+    `notification-${purpose}-ios-system-reveal-open`,
   );
 
   const revealedDeadline = Date.now() + IOS_NOTIFICATION_RESPONSE_TIMEOUT_MS;
   const revealedHierarchies: string[] = [];
   let openActionTapPoint: string | null = null;
   while (Date.now() < revealedDeadline) {
-    hierarchy = await platformHierarchy('ios', deviceId);
+    hierarchy = await platformHierarchy('ios', deviceId, driverSession);
     revealedHierarchies.push(hierarchy);
     const result = decideMobileE2EIosRevealedOpenAction(
       beforeRevealHierarchy,
       revealedHierarchies,
     );
-    if (result.decision === 'response-started') return;
+    if (result.decision === 'response-started') {
+      await requireIosNotificationActionEvidence(
+        deviceId,
+        artifactRoot,
+        purpose,
+        originalActionStartedAt,
+      );
+      return;
+    }
     if (result.decision === 'refuse-revealed-open') break;
     if (result.decision === 'tap-revealed-open') {
       openActionTapPoint = result.tapPoint;
@@ -1648,7 +1848,10 @@ async function openExplicitIosNotificationIfNeeded(
   }
   if (openActionTapPoint === null) {
     await writeFile(
-      resolve(artifactRoot, 'notification-revealed-ios-unsafe-hierarchy.txt'),
+      resolve(
+        artifactRoot,
+        `notification-${purpose}-revealed-ios-unsafe-hierarchy.txt`,
+      ),
       hierarchy,
       { encoding: 'utf8', flag: 'wx', mode: 0o600 },
     );
@@ -1657,12 +1860,13 @@ async function openExplicitIosNotificationIfNeeded(
     );
   }
   await writeFile(
-    resolve(artifactRoot, 'notification-revealed-ios-hierarchy.txt'),
+    resolve(artifactRoot, `notification-${purpose}-revealed-ios-hierarchy.txt`),
     hierarchy,
     { encoding: 'utf8', flag: 'wx', mode: 0o600 },
   );
   const actionTapStartedAt = Date.now();
   await runMaestroFlow(
+    'ios',
     deviceId,
     'notification-event-room-ios-system-tap-open',
     artifactRoot,
@@ -1670,8 +1874,24 @@ async function openExplicitIosNotificationIfNeeded(
       ...environment,
       IOS_NOTIFICATION_OPEN_POINT: openActionTapPoint,
     }),
+    driverSession,
+    `notification-${purpose}-ios-system-tap-open`,
   );
 
+  await requireIosNotificationActionEvidence(
+    deviceId,
+    artifactRoot,
+    purpose,
+    actionTapStartedAt,
+  );
+}
+
+async function requireIosNotificationActionEvidence(
+  deviceId: string,
+  artifactRoot: string,
+  purpose: IosNotificationPurpose,
+  actionTapStartedAt: number,
+): Promise<void> {
   const actionLogDeadline = Date.now() + IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS;
   let actionLog = '';
   while (Date.now() < actionLogDeadline) {
@@ -1688,8 +1908,8 @@ async function openExplicitIosNotificationIfNeeded(
     resolve(
       artifactRoot,
       actionEvidence.valid
-        ? 'notification-default-action-ios.log'
-        : 'notification-default-action-ios-failure.log',
+        ? `notification-${purpose}-default-action-ios.log`
+        : `notification-${purpose}-default-action-ios-failure.log`,
     ),
     actionLog,
     { encoding: 'utf8', flag: 'wx', mode: 0o600 },
@@ -1749,6 +1969,7 @@ async function injectAndroidNotification(
       '--stacktrace',
       '--init-script',
       resolve(paths.copiedMobile, androidInitScriptRelativePath),
+      ...mobileE2EAndroidArchitectureArguments(),
       ...mobileE2EAndroidInstrumentationArguments(manifest),
       'app:connectedDebugAndroidTest',
     ],
@@ -1863,6 +2084,10 @@ async function runPlatformSuite(
         'YES',
       ]);
       const appPath = await buildIosApp(paths, artifacts.root, iosDevice);
+      const iosDriverSession = await warmIosMaestroDriver(
+        iosDevice.udid,
+        artifacts.root,
+      );
       cancellation.throwIfRequested();
 
       fixtureMetro = startMetro(
@@ -1873,12 +2098,13 @@ async function runPlatformSuite(
         mobileE2EFixtureMetroEnvironment(definedProcessEnvironment()),
       );
       await awaitMetro(ports.fixtureMetro, fixtureMetro);
-      await installAndOpenIosBundle(
+      const fixtureLaunchHierarchy = await installAndOpenIosBundle(
         iosDevice,
         appPath,
         ports.fixtureMetro,
         'Unlock PSD EOC',
         artifacts.root,
+        iosDriverSession,
       );
       await runLaunchAuthentication(
         platform,
@@ -1887,6 +2113,8 @@ async function runPlatformSuite(
         artifacts.root,
         maestroEnvironment,
         applesimutils,
+        iosDriverSession,
+        fixtureLaunchHierarchy,
       );
       cancellation.throwIfRequested();
       await stopManagedProcess(fixtureMetro);
@@ -1906,11 +2134,14 @@ async function runPlatformSuite(
         ports.normalMetro,
         applesimutils,
         artifacts.root,
+        iosDriverSession,
       );
       await awaitIosFreshEnrollmentReady(
         iosDevice.udid,
         artifacts.root,
         applesimutils,
+        maestroEnvironment,
+        iosDriverSession,
       );
       await runAuthenticationSplit(
         platform,
@@ -1919,47 +2150,90 @@ async function runPlatformSuite(
         artifacts.root,
         maestroEnvironment,
         applesimutils,
+        iosDriverSession,
       );
       cancellation.throwIfRequested();
       await runMaestroFlow(
+        platform,
         iosDevice.udid,
         'notification-event-room-ios-system-lock',
         artifacts.root,
         maestroEnvironment,
+        iosDriverSession,
       );
       await injectIosNotification(iosDevice, paths, manifest);
-      await awaitIosNotificationOnLockedScreen(iosDevice.udid, artifacts.root);
+      await awaitIosNotificationOnLockedScreen(
+        iosDevice.udid,
+        artifacts.root,
+        iosDriverSession,
+      );
       await satisfyIosSystemLockAuthentication(
         iosDevice.udid,
         applesimutils,
         artifacts.root,
       );
       await runMaestroFlow(
+        platform,
         iosDevice.udid,
-        'notification-event-room-ios-system-open',
+        'notification-unlock-ios-system-resume',
         artifacts.root,
         maestroEnvironment,
+        iosDriverSession,
+      );
+      await respondToDeviceAuthentication(
+        platform,
+        iosDevice.udid,
+        artifacts.root,
+        'notification-unlock-ios',
+        maestroEnvironment,
+        applesimutils,
+        iosDriverSession,
+      );
+      await runMaestroFlow(
+        platform,
+        iosDevice.udid,
+        'notification-unlock-ios-post-auth',
+        artifacts.root,
+        maestroEnvironment,
+        iosDriverSession,
+      );
+      // The protected navigator is now committed. Open the same exact
+      // notification already proven behind the system lock and require its
+      // production response to reach the exact event room.
+      const routeNotificationActionStartedAt = Date.now();
+      await runMaestroFlow(
+        platform,
+        iosDevice.udid,
+        'notification-event-room-ios-foreground-open',
+        artifacts.root,
+        maestroEnvironment,
+        iosDriverSession,
       );
       await openExplicitIosNotificationIfNeeded(
         iosDevice.udid,
         artifacts.root,
         maestroEnvironment,
+        iosDriverSession,
+        'route',
+        routeNotificationActionStartedAt,
       );
-      await runLaunchAuthentication(
+      await runMaestroFlow(
         platform,
         iosDevice.udid,
-        'notification-event-room-ios',
+        'notification-event-room-ios-post-auth',
         artifacts.root,
         maestroEnvironment,
-        applesimutils,
+        iosDriverSession,
       );
       cancellation.throwIfRequested();
       await holdEventRoomForOperatorScreenshot(artifacts.root);
       await runMaestroFlow(
+        platform,
         iosDevice.udid,
         'event-room-lifecycle',
         artifacts.root,
         maestroEnvironment,
+        iosDriverSession,
       );
     } else {
       androidSerial = process.env.ANDROID_SERIAL ?? '';
@@ -2042,6 +2316,7 @@ async function runPlatformSuite(
       cancellation.throwIfRequested();
       await holdEventRoomForOperatorScreenshot(artifacts.root);
       await runMaestroFlow(
+        platform,
         androidSerial,
         'event-room-lifecycle',
         artifacts.root,

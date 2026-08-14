@@ -1,0 +1,12 @@
+appId: net.psd401.eoc
+name: Issue 32 - verify iOS notification unlock reached a protected synthetic surface
+tags: [issue-32, synthetic-only, ios, notification, unlock, post-auth]
+---
+- runFlow:
+    file: shared/assert-synthetic-context.yaml
+- extendedWaitUntil:
+    visible: '(Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}|.*${EVENT_ROUTE_EVIDENCE}.*)'
+    timeout: 60000
+- assertNotVisible: '^Unlock PSD EOC$'
+- assertNotVisible: 'Sign in with Google'
+- assertNotVisible: '.*\[INCIDENT\].*'

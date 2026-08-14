@@ -50,6 +50,9 @@ class SyntheticDrillRemoteMessageTest {
     require(responseId == "issue-32-$runId") {
       "$ARG_RESPONSE_ID must be issue-32- followed by the exact $ARG_RUN_ID."
     }
+    val unlockResponseId = "$responseId-unlock"
+    val routeResponseId = "$responseId-route"
+    assertFalse(unlockResponseId == routeResponseId)
 
     val eventId = requiredUuidArgument(arguments.getString(ARG_EVENT_ID), ARG_EVENT_ID)
     val facilityId =
@@ -69,8 +72,12 @@ class SyntheticDrillRemoteMessageTest {
 
     assertTrue(VISIBLE_TITLE.startsWith(DRILL_MARKER))
     assertTrue(VISIBLE_BODY.startsWith(DRILL_MARKER))
+    assertTrue(UNLOCK_TITLE.startsWith(DRILL_MARKER))
+    assertTrue(UNLOCK_BODY.startsWith(DRILL_MARKER))
     assertFalse(VISIBLE_TITLE.contains(INCIDENT_MARKER))
     assertFalse(VISIBLE_BODY.contains(INCIDENT_MARKER))
+    assertFalse(UNLOCK_TITLE.contains(INCIDENT_MARKER))
+    assertFalse(UNLOCK_BODY.contains(INCIDENT_MARKER))
 
     val systemNotificationManager =
       targetContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -89,8 +96,12 @@ class SyntheticDrillRemoteMessageTest {
     )
 
     assertTrue(
-      "Use a fresh issue #32 runId; an exact-tag notification already exists.",
-      notificationsWithTag(systemNotificationManager, responseId).isEmpty(),
+      "Use a fresh issue #32 runId; the unlock-check notification already exists.",
+      notificationsWithTag(systemNotificationManager, unlockResponseId).isEmpty(),
+    )
+    assertTrue(
+      "Use a fresh issue #32 runId; the route notification already exists.",
+      notificationsWithTag(systemNotificationManager, routeResponseId).isEmpty(),
     )
 
     val canonicalData =
@@ -103,12 +114,65 @@ class SyntheticDrillRemoteMessageTest {
         .put("eventTypeVersionId", eventTypeVersionId)
         .put("purpose", PURPOSE)
 
+    val installedDelegate = FirebaseMessagingDelegate(targetContext)
+    presentNotification(
+      installedDelegate,
+      routeResponseId,
+      VISIBLE_TITLE,
+      VISIBLE_BODY,
+      canonicalData,
+    )
+    presentNotification(
+      installedDelegate,
+      unlockResponseId,
+      UNLOCK_TITLE,
+      UNLOCK_BODY,
+      canonicalData,
+    )
+
+    val presentedUnlock =
+      awaitExactNotification(systemNotificationManager, unlockResponseId)
+    assertPresentedNotification(
+      targetContext,
+      presentedUnlock,
+      unlockResponseId,
+      UNLOCK_TITLE,
+      UNLOCK_BODY,
+      canonicalData,
+    )
+    val presentedRoute =
+      awaitExactNotification(systemNotificationManager, routeResponseId)
+    assertPresentedNotification(
+      targetContext,
+      presentedRoute,
+      routeResponseId,
+      VISIBLE_TITLE,
+      VISIBLE_BODY,
+      canonicalData,
+    )
+
+    val activeAppTags =
+      systemNotificationManager.activeNotifications
+        .filter { notification -> notification.packageName == TARGET_APPLICATION_ID }
+        .mapNotNull { notification -> notification.tag }
+        .toSet()
+    assertTrue(activeAppTags.contains(unlockResponseId))
+    assertTrue(activeAppTags.contains(routeResponseId))
+  }
+
+  private fun presentNotification(
+    delegate: FirebaseMessagingDelegate,
+    responseId: String,
+    title: String,
+    message: String,
+    canonicalData: JSONObject,
+  ) {
     val remoteMessage =
       RemoteMessage.Builder(LOCAL_ONLY_DESTINATION)
         .setMessageId(responseId)
         .setTtl(LOCAL_TTL_SECONDS)
-        .addData("title", VISIBLE_TITLE)
-        .addData("message", VISIBLE_BODY)
+        .addData("title", title)
+        .addData("message", message)
         .addData("body", canonicalData.toString())
         .addData("channelId", ALERT_CHANNEL_ID)
         .addData("categoryId", DRILL_CATEGORY_ID)
@@ -120,22 +184,15 @@ class SyntheticDrillRemoteMessageTest {
     // This is the installed Expo native receive path. No FirebaseMessaging
     // client, Expo API, token, provider credential, or network transport exists
     // in this harness.
-    FirebaseMessagingDelegate(targetContext).onMessageReceived(remoteMessage)
-
-    val presented =
-      awaitExactNotification(systemNotificationManager, responseId)
-    assertPresentedNotification(
-      targetContext,
-      presented,
-      responseId,
-      canonicalData,
-    )
+    delegate.onMessageReceived(remoteMessage)
   }
 
   private fun assertPresentedNotification(
     context: Context,
     presented: StatusBarNotification,
     expectedTag: String,
+    expectedTitle: String,
+    expectedBody: String,
     expectedData: JSONObject,
   ) {
     assertEquals(TARGET_APPLICATION_ID, presented.packageName)
@@ -146,11 +203,11 @@ class SyntheticDrillRemoteMessageTest {
     val notification = presented.notification
     assertEquals(ALERT_CHANNEL_ID, notification.channelId)
     assertEquals(
-      VISIBLE_TITLE,
+      expectedTitle,
       notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
     )
     assertEquals(
-      VISIBLE_BODY,
+      expectedBody,
       notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
     )
     val embeddedData =
@@ -234,6 +291,9 @@ class SyntheticDrillRemoteMessageTest {
     const val PURPOSE = "activation"
     const val DRILL_MARKER = "[DRILL]"
     const val INCIDENT_MARKER = "[INCIDENT]"
+    const val UNLOCK_TITLE = "[DRILL] Unlock PSD EOC for synthetic drill"
+    const val UNLOCK_BODY =
+      "[DRILL] Synthetic exercise only. Unlock the app before opening the retained drill route."
     const val VISIBLE_TITLE = "[DRILL] Synthetic lockdown drill"
     const val VISIBLE_BODY =
       "[DRILL] Synthetic exercise only. Open the synthetic event room."

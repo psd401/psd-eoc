@@ -6,9 +6,11 @@ tags: [issue-32, synthetic-only, android, notification, pre-auth]
     file: shared/assert-synthetic-context.yaml
 - assertTrue:
     condition: ${NOTIFICATION_TITLE == '[DRILL] Synthetic lockdown drill'}
-    label: Require the exact synthetic drill notification title
+    label: Require the exact retained synthetic drill route title
+- assertVisible: '\[DRILL\] Unlock PSD EOC for synthetic drill'
 - assertVisible: '\[DRILL\] Synthetic lockdown drill'
 - assertNotVisible: '.*\[INCIDENT\].*'
-- tapOn: '\[DRILL\] Synthetic lockdown drill'
+- tapOn: '\[DRILL\] Unlock PSD EOC for synthetic drill'
 # The production foreground bootstrap now requests LocalAuthentication itself.
-# Stop here so the runner can prove and answer that exact SystemUI request.
+# Stop here so the runner can prove and answer that exact SystemUI request. The
+# distinct route notification remains in the shade for an authenticated tap.
