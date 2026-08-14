@@ -1098,6 +1098,12 @@ export function readEventRoomPlaywrightWebServerIdentity(
   );
   if (
     parsed.processGroupId !== parsed.webServerPid ||
+    !Number.isSafeInteger(parsed.webServerPid) ||
+    parsed.webServerPid <= 0 ||
+    !Number.isSafeInteger(parsed.processGroupId) ||
+    parsed.processGroupId <= 0 ||
+    parsed.processStartedAt.length === 0 ||
+    !/^[0-9a-f]{64}$/u.test(parsed.commandHash) ||
     !Number.isSafeInteger(parsed.challengePort) ||
     parsed.challengePort < EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT ||
     parsed.challengePort > 65_535 ||
