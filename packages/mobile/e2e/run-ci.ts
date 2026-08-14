@@ -42,6 +42,7 @@ import {
   isMobileE2EIosAuthenticationSheetReady,
   isMobileE2EIosNotificationOnLockedScreen,
   isMobileE2EIosUnlockRetryReady,
+  patchMobileE2EIsolatedIssue21Fixture,
   parseMobileE2EManifestText,
   parseMobileE2EPlatformCli,
   removeMobileE2ERunnerRoot,
@@ -477,7 +478,10 @@ async function awaitMetro(
   throw new Error(`Metro on loopback port ${port} was not ready in time.`);
 }
 
-async function copyMobileWorkspace(paths: MobileE2ERunnerPaths): Promise<void> {
+async function copyMobileWorkspace(
+  paths: MobileE2ERunnerPaths,
+  runId: string,
+): Promise<void> {
   await mkdir(resolve(paths.repository, 'packages'), {
     recursive: true,
     mode: 0o700,
@@ -488,6 +492,10 @@ async function copyMobileWorkspace(paths: MobileE2ERunnerPaths): Promise<void> {
       return shouldCopyMobileE2EWorkspaceSource(mobileRoot, source);
     },
   });
+  // The current issue-21 development fixture predates two read/cleanup calls
+  // now made by the production UI. Add their fail-closed synthetic responses
+  // only inside this marker-owned copy; the checkout remains untouched.
+  await patchMobileE2EIsolatedIssue21Fixture(runId);
   await cp(
     resolve(repositoryRoot, 'tsconfig.base.json'),
     resolve(paths.repository, 'tsconfig.base.json'),
@@ -2431,7 +2439,7 @@ async function main(): Promise<void> {
       ) {
         throw new Error('Could not reserve the required loopback ports.');
       }
-      await copyMobileWorkspace(paths);
+      await copyMobileWorkspace(paths, runId);
       serverRuntime = startManagedProcess(
         [
           process.execPath,

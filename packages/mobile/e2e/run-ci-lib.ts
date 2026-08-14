@@ -44,6 +44,76 @@ const MOBILE_WORKSPACE_EXCLUDED_ROOT_ENTRIES = new Set([
 ]);
 const IOS_SIMULATOR_UDID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const ISSUE_21_FIXTURE_RELATIVE_PATH =
+  'src/lib/start/issue-21-synthetic-fixture.ts';
+const ISSUE_21_FIXTURE_IMPORT_SENTINEL = `  EventTypeVersionSchema,
+  FacilityPageSchema,
+  IdempotencyKeySchema,
+  JoinEventResultSchema,
+  MobileSessionResponseSchema,
+  NativeDevicePlatformSchema,
+  OpaqueSessionBearerSchema,
+  SessionEstablishmentResultSchema,
+  StartEventInputSchema,
+  StartEventResultSchema,`;
+const ISSUE_21_FIXTURE_IMPORT_REPLACEMENT = `  EventTypeVersionSchema,
+  FanoutStatusSchema,
+  FacilityPageSchema,
+  IdempotencyKeySchema,
+  JoinEventResultSchema,
+  MobileSessionResponseSchema,
+  NativeDevicePlatformSchema,
+  OpaqueSessionBearerSchema,
+  PushTokenUnregistrationReceiptSchema,
+  SessionEstablishmentResultSchema,
+  StartEventInputSchema,
+  StartEventResultSchema,
+  UnregisterPushTokenInputSchema,`;
+const ISSUE_21_FIXTURE_REQUEST_SENTINEL = `      let payload: unknown;
+
+      if (
+        input.method === 'GET' &&
+        input.path === '/api/mobile/start/facilities'
+      ) {`;
+const ISSUE_21_FIXTURE_REQUEST_REPLACEMENT = `      let payload: unknown;
+      const issue32CompatibilityEnabled =
+        isIssue21SyntheticFixtureEnabled() &&
+        process.env.EXPO_PUBLIC_PSD_EOC_E2E_SYNTHETIC_ONLY === 'true';
+
+      if (
+        issue32CompatibilityEnabled &&
+        input.method === 'GET' &&
+        input.path === '/api/mobile/start/fanout-control'
+      ) {
+        payload = FanoutStatusSchema.parse({ status: 'enabled' });
+        return input.schema.parse(payload);
+      }
+
+      if (
+        issue32CompatibilityEnabled &&
+        input.method === 'POST' &&
+        input.path === '/api/devices/push-token/unregister'
+      ) {
+        IdempotencyKeySchema.parse(input.idempotencyKey);
+        const unregisterInput = UnregisterPushTokenInputSchema.parse(
+          requireBody(input),
+        );
+        if (unregisterInput.deviceEnrollmentId !== IDS.deviceEnrollment) {
+          throw new TypeError(
+            'The issue-32 compatibility seam rejected an unexpected device enrollment.',
+          );
+        }
+        payload = PushTokenUnregistrationReceiptSchema.parse({
+          deviceEnrollmentId: unregisterInput.deviceEnrollmentId,
+          status: 'unregistered',
+        });
+        return input.schema.parse(payload);
+      }
+
+      if (
+        input.method === 'GET' &&
+        input.path === '/api/mobile/start/facilities'
+      ) {`;
 
 export const MOBILE_E2E_APPLICATION_ID = 'net.psd401.eoc' as const;
 export const MOBILE_E2E_NOTIFICATION_TITLE =
@@ -180,6 +250,42 @@ export function shouldCopyMobileE2EWorkspaceSource(
     !MOBILE_WORKSPACE_EXCLUDED_ROOT_ENTRIES.has(topLevelEntry ?? '') &&
     name !== '.env' &&
     !name.startsWith('.env.')
+  );
+}
+
+function replaceExactFixtureSentinel(
+  source: string,
+  sentinel: string,
+  replacement: string,
+  label: string,
+): string {
+  const cardinality = source.split(sentinel).length - 1;
+  if (cardinality !== 1) {
+    throw new Error(
+      `The issue-21 fixture ${label} source drifted; expected exactly one sentinel but found ${cardinality}.`,
+    );
+  }
+  return source.replace(sentinel, replacement);
+}
+
+/**
+ * Adds only the issue #32 compatibility reads to an isolated issue-21 fixture.
+ * Exact, single-occurrence sentinels make upstream source drift fail closed.
+ */
+export function mobileE2EIssue21FixtureCompatibilitySource(
+  source: string,
+): string {
+  const withContracts = replaceExactFixtureSentinel(
+    source,
+    ISSUE_21_FIXTURE_IMPORT_SENTINEL,
+    ISSUE_21_FIXTURE_IMPORT_REPLACEMENT,
+    'contract import',
+  );
+  return replaceExactFixtureSentinel(
+    withContracts,
+    ISSUE_21_FIXTURE_REQUEST_SENTINEL,
+    ISSUE_21_FIXTURE_REQUEST_REPLACEMENT,
+    'request dispatch',
   );
 }
 
@@ -369,6 +475,59 @@ export async function assertMobileE2ERunnerRootOwned(
   if ((await readFile(paths.owner, 'utf8')) !== `${runId}\n`) {
     throw new Error('The mobile E2E ownership marker does not match.');
   }
+}
+
+/** Patches only the marker-owned, isolated mobile source copied for this run. */
+export async function patchMobileE2EIsolatedIssue21Fixture(
+  runIdValue: string,
+): Promise<void> {
+  const runId = requireRunId(runIdValue);
+  const paths = mobileE2ERunnerPaths(runId);
+  await assertMobileE2ERunnerRootOwned(runId);
+
+  const canonicalRoot = await realpath(paths.root);
+  const canonicalMobile = await realpath(paths.copiedMobile);
+  const expectedMobile = resolve(
+    canonicalRoot,
+    'repository',
+    'packages',
+    'mobile',
+  );
+  if (
+    canonicalMobile !== expectedMobile ||
+    !isStrictDescendant(canonicalRoot, canonicalMobile)
+  ) {
+    throw new Error(
+      'The isolated issue-21 fixture source escaped the marker-owned copy.',
+    );
+  }
+
+  const fixturePath = resolve(
+    paths.copiedMobile,
+    ISSUE_21_FIXTURE_RELATIVE_PATH,
+  );
+  const fixtureMetadata = await lstat(fixturePath);
+  if (!fixtureMetadata.isFile() || fixtureMetadata.isSymbolicLink()) {
+    throw new Error(
+      'The isolated issue-21 fixture source must be a regular file.',
+    );
+  }
+  if (
+    (await realpath(fixturePath)) !==
+    resolve(canonicalMobile, ISSUE_21_FIXTURE_RELATIVE_PATH)
+  ) {
+    throw new Error(
+      'The isolated issue-21 fixture source cannot traverse a symlink.',
+    );
+  }
+
+  const source = await readFile(fixturePath, 'utf8');
+  const compatibleSource = mobileE2EIssue21FixtureCompatibilitySource(source);
+  await writeFile(fixturePath, compatibleSource, {
+    encoding: 'utf8',
+    flag: 'w',
+    mode: 0o600,
+  });
 }
 
 export async function removeMobileE2ERunnerRoot(
@@ -573,6 +732,7 @@ export function mobileE2EFixtureMetroEnvironment(
   return Object.freeze({
     ...definedEnvironment(environment),
     PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
+    EXPO_PUBLIC_PSD_EOC_E2E_SYNTHETIC_ONLY: 'true',
     EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'false',
     EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: 'issue-21',
   });

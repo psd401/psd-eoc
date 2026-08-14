@@ -34,6 +34,7 @@ import {
   mobileE2EIosBuildArguments,
   mobileE2EIosDirectLaunchArguments,
   mobileE2EIsolatedExpoConfig,
+  mobileE2EIssue21FixtureCompatibilitySource,
   mobileE2EIosNotificationActionLogEvidence,
   mobileE2EIosSimulatorPushPayload,
   mobileE2EIosSyntheticNotificationState,
@@ -54,6 +55,7 @@ import {
   parseMobileE2EManifest,
   parseMobileE2EManifestText,
   parseMobileE2EPlatformCli,
+  patchMobileE2EIsolatedIssue21Fixture,
   removeMobileE2EArtifactDirectory,
   removeMobileE2ERunnerRoot,
   requireMobileE2EEnvironment,
@@ -242,6 +244,133 @@ describe('issue #32 marker-owned runner paths', () => {
   });
 });
 
+describe('issue #32 isolated issue-21 compatibility seam', () => {
+  test('adds only exact synthetic fanout and unregister responses', async () => {
+    const source = await readFile(
+      new URL(
+        '../src/lib/start/issue-21-synthetic-fixture.ts',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    const compatible = mobileE2EIssue21FixtureCompatibilitySource(source);
+
+    expect(
+      compatible.match(/\/api\/mobile\/start\/fanout-control/gu),
+    ).toHaveLength(1);
+    expect(compatible).toContain(
+      "input.method === 'GET' &&\n        input.path === '/api/mobile/start/fanout-control'",
+    );
+    expect(compatible).toContain(
+      "payload = FanoutStatusSchema.parse({ status: 'enabled' });",
+    );
+    expect(
+      compatible.match(/\/api\/devices\/push-token\/unregister/gu),
+    ).toHaveLength(1);
+    expect(compatible).toContain(
+      "input.method === 'POST' &&\n        input.path === '/api/devices/push-token/unregister'",
+    );
+    expect(compatible).toContain(
+      'const unregisterInput = UnregisterPushTokenInputSchema.parse(',
+    );
+    expect(compatible).toContain(
+      'unregisterInput.deviceEnrollmentId !== IDS.deviceEnrollment',
+    );
+    expect(compatible).toContain(
+      'deviceEnrollmentId: unregisterInput.deviceEnrollmentId,',
+    );
+    expect(compatible).toMatch(
+      /const issue32CompatibilityEnabled =\s+isIssue21SyntheticFixtureEnabled\(\) &&\s+process\.env\.EXPO_PUBLIC_PSD_EOC_E2E_SYNTHETIC_ONLY === 'true';/u,
+    );
+    expect(compatible).toMatch(
+      /if \(\s+issue32CompatibilityEnabled &&\s+input\.method === 'GET' &&\s+input\.path === '\/api\/mobile\/start\/fanout-control'[\s\S]+?status: 'enabled'/u,
+    );
+    expect(compatible).not.toContain(
+      "input.method === 'POST' &&\n        input.path === '/api/mobile/start/fanout-control'",
+    );
+    expect(compatible).not.toContain(
+      "input.method === 'GET' &&\n        input.path === '/api/devices/push-token/unregister'",
+    );
+  });
+
+  test('refuses missing and duplicate source sentinels', async () => {
+    const source = await readFile(
+      new URL(
+        '../src/lib/start/issue-21-synthetic-fixture.ts',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    expect(() =>
+      mobileE2EIssue21FixtureCompatibilitySource(
+        source.replace(
+          '      let payload: unknown;\n',
+          '      let payload: unknown = undefined;\n',
+        ),
+      ),
+    ).toThrow('request dispatch source drifted');
+    expect(() =>
+      mobileE2EIssue21FixtureCompatibilitySource(`${source}\n${source}`),
+    ).toThrow('expected exactly one sentinel but found 2');
+  });
+
+  test('patches only a marker-owned copied fixture and leaves checkout unchanged', async () => {
+    const checkoutPath = new URL(
+      '../src/lib/start/issue-21-synthetic-fixture.ts',
+      import.meta.url,
+    );
+    const checkoutSource = await readFile(checkoutPath, 'utf8');
+    const runId = createMobileE2ERunId();
+    const paths = await acquireMobileE2ERunnerRoot(runId);
+    const copiedFixturePath = resolve(
+      paths.copiedMobile,
+      'src/lib/start/issue-21-synthetic-fixture.ts',
+    );
+    try {
+      await mkdir(resolve(paths.copiedMobile, 'src/lib/start'), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(copiedFixturePath, checkoutSource, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+
+      const wrongRunId = runId === RUN_ID ? 'b'.repeat(32) : RUN_ID;
+      await writeFile(paths.owner, `${wrongRunId}\n`, 'utf8');
+      try {
+        await expect(
+          patchMobileE2EIsolatedIssue21Fixture(runId),
+        ).rejects.toThrow('marker does not match');
+      } finally {
+        await writeFile(paths.owner, `${runId}\n`, 'utf8');
+      }
+
+      await patchMobileE2EIsolatedIssue21Fixture(runId);
+      const copiedSource = await readFile(copiedFixturePath, 'utf8');
+      expect(copiedSource).not.toBe(checkoutSource);
+      expect(copiedSource).toContain('/api/mobile/start/fanout-control');
+      expect(copiedSource).toContain('/api/devices/push-token/unregister');
+      expect(await readFile(checkoutPath, 'utf8')).toBe(checkoutSource);
+    } finally {
+      await removeMobileE2ERunnerRoot(runId);
+    }
+  });
+
+  test('applies the copied-source compatibility patch before platform Metro', async () => {
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
+    );
+    expect(runner).toMatch(
+      /async function copyMobileWorkspace[\s\S]+await cp\(mobileRoot, paths\.copiedMobile[\s\S]+await patchMobileE2EIsolatedIssue21Fixture\(runId\)/u,
+    );
+    expect(runner).toMatch(
+      /await copyMobileWorkspace\(paths, runId\);[\s\S]+await runPlatformSuite\(/u,
+    );
+  });
+});
+
 describe('issue #32 marker-owned artifact paths', () => {
   test('preserves the caller base while acquiring and removing only issue-32/platform', async () => {
     const base = uniqueTemporaryPath('artifact-base');
@@ -370,6 +499,7 @@ describe('issue #32 exact synthetic drill data', () => {
       ...syntheticEnvironment(),
       PATH: '/synthetic/bin',
       EXPO_PUBLIC_PSD_EOC_API_BASE_URL: 'https://live.invalid',
+      EXPO_PUBLIC_PSD_EOC_E2E_SYNTHETIC_ONLY: 'false',
       EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED: 'true',
       EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE: 'unsafe-fixture',
       EXPO_PUBLIC_PSD_EOC_UNREVIEWED: 'unsafe',
@@ -380,10 +510,12 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(normal.PATH).toBe('/synthetic/bin');
     expect(normal.EXPO_PUBLIC_PSD_EOC_API_BASE_URL).toBe(manifest().appOrigin);
     expect(normal.EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED).toBe('false');
+    expect(normal).not.toHaveProperty('EXPO_PUBLIC_PSD_EOC_E2E_SYNTHETIC_ONLY');
     expect(normal).not.toHaveProperty('EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE');
     expect(normal).not.toHaveProperty('EXPO_PUBLIC_PSD_EOC_UNREVIEWED');
 
     expect(fixture.PATH).toBe('/synthetic/bin');
+    expect(fixture.EXPO_PUBLIC_PSD_EOC_E2E_SYNTHETIC_ONLY).toBe('true');
     expect(fixture.EXPO_PUBLIC_PSD_EOC_SYNTHETIC_FIXTURE).toBe('issue-21');
     expect(fixture.EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED).toBe('false');
     expect(fixture).not.toHaveProperty('EXPO_PUBLIC_PSD_EOC_API_BASE_URL');

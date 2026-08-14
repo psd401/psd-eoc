@@ -25,6 +25,12 @@ platforms:
    all-clear consequence preview, types the required phrase, and explicitly
    taps the all-clear action. The event remains a drill and is not closed.
 
+For the development-only synthetic activation journey, the runner patches only
+its marker-owned copied issue-21 fixture with exact fanout-status and token-free
+push-unregister responses. That compatibility seam proves the ordinary mobile
+UI, authentication, and human confirmation flow; it does not prove production
+server fanout or unregister behavior, provider acceptance, or delivery.
+
 No flow starts a real incident, sends a real notification, closes an event,
 contacts Google, or uses a provider token. The server runtime refuses anything
 except `PSD_EOC_E2E_SYNTHETIC_ONLY=true` and a loopback PostgreSQL database
