@@ -509,22 +509,36 @@ export class PsdEocStack extends Stack {
       QueueWithDeadLetterQueue
     >;
 
-    const googleOauthSecret = new secretsmanager.Secret(
+    const googleOauthSecretArn = new CfnParameter(
+      this,
+      'GoogleOauthSecretArn',
+      {
+        allowedPattern: `^arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
+        constraintDescription:
+          'Use the complete ARN of the retained /psd-eoc/google-oauth secret in the approved account and region.',
+        description:
+          'Complete ARN of the independently retained Google OAuth credential; required only for a manually approved deployment.',
+        noEcho: true,
+        type: 'String',
+      },
+    );
+    const googleOauthSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this,
       'GoogleOauthSecret',
+      googleOauthSecretArn.valueAsString,
+    );
+    const googleOidcCookieSecret = new secretsmanager.Secret(
+      this,
+      'GoogleOidcCookieSecret',
       {
         description:
-          'BLOCKED placeholder for approved Google OAuth configuration.',
+          'Generated application-only key for Google OIDC transient and return-state cookies.',
         generateSecretString: {
           excludePunctuation: true,
-          generateStringKey: 'clientSecret',
           passwordLength: 64,
-          secretStringTemplate: JSON.stringify({
-            clientId: 'BLOCKED_UNTIL_GOOGLE_OAUTH_IS_APPROVED',
-          }),
         },
         removalPolicy: RemovalPolicy.RETAIN,
-        secretName: '/psd-eoc/google-oauth',
+        secretName: '/psd-eoc/google-oidc-cookie-secret',
       },
     );
     const expoAccessTokenSecret = new secretsmanager.Secret(
@@ -674,6 +688,7 @@ export class PsdEocStack extends Stack {
       }),
       databaseApplicationSecret.grantRead(appRunnerInstanceRole),
       googleOauthSecret.grantRead(appRunnerInstanceRole),
+      googleOidcCookieSecret.grantRead(appRunnerInstanceRole),
       apiSaltSecret.grantRead(appRunnerInstanceRole),
       deliveryStateWorkerTokenSecret.grantRead(appRunnerInstanceRole),
       iam.Grant.addToPrincipal({
@@ -747,6 +762,10 @@ export class PsdEocStack extends Stack {
           value: mediaBucket.bucketName,
         },
         {
+          name: 'NODE_ENV',
+          value: 'production',
+        },
+        {
           name: 'FANOUT_QUEUE_URL',
           value: fanout.queue.queueUrl,
         },
@@ -799,6 +818,10 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'GOOGLE_OAUTH_CONFIG',
                   value: googleOauthSecret.secretArn,
+                },
+                {
+                  name: 'GOOGLE_OIDC_COOKIE_SECRET',
+                  value: googleOidcCookieSecret.secretArn,
                 },
                 {
                   name: 'API_SALT',
