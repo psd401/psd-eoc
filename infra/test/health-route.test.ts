@@ -22,7 +22,7 @@ import {
   type DeepHealthDependencies,
   type RuntimeHealthAdapters,
   type TransactionalCanaryRuntime,
-} from '../../packages/server/app/api/health/route';
+} from '../../packages/server/app/api/health/runtime';
 import { AgentApiKeyError } from '../../packages/server/lib/agents/keys';
 
 const REGION = 'us-west-2';

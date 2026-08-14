@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 
 import {
   JournalEntryReadProjectionSchema,
@@ -114,9 +115,33 @@ export class EventSummaryPdfError extends Error {
 const FONT_NAME = 'NotoSans';
 const FONT_SHA256 =
   'b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5';
-const FONT_BYTES = readFileSync(
-  new URL('./assets/NotoSans-Regular.ttf', import.meta.url),
-);
+
+function readFontBytes(): Uint8Array {
+  const fontAssetUrl = new URL(
+    './assets/NotoSans-Regular.ttf',
+    import.meta.url,
+  );
+  if (fontAssetUrl.protocol === 'file:') {
+    return readFileSync(fontAssetUrl);
+  }
+
+  // Next's server compiler emits a URL-compatible asset object whose path is
+  // rooted at /_next/. Convert that narrowly validated path to the colocated
+  // server chunk asset; Node's fs API intentionally rejects the foreign URL.
+  const bundledAssetPrefix = '/_next/static/media/';
+  if (
+    fontAssetUrl.protocol !== '' ||
+    !fontAssetUrl.pathname.startsWith(bundledAssetPrefix) ||
+    fontAssetUrl.pathname.includes('..')
+  ) {
+    throw new Error('The embedded Noto Sans PDF font path is invalid.');
+  }
+  return readFileSync(
+    join(__dirname, fontAssetUrl.pathname.slice('/_next/'.length)),
+  );
+}
+
+const FONT_BYTES = readFontBytes();
 
 interface FontGlyphCoverage {
   hasGlyphForCodePoint(codePoint: number): boolean;
