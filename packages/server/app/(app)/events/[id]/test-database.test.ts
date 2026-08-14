@@ -610,7 +610,7 @@ describe('event-room synthetic database guard', () => {
           processGroupId: webServerPid,
           processStartedAt: 'Thu Aug 13 17:30:00 2026',
           commandHash: createHash('sha256').update(command).digest('hex'),
-          challengePort: 43_434,
+          challengePort: 53_434,
         },
         nonce,
       );
