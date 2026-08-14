@@ -24,13 +24,52 @@ The app record was created once and read back on 2026-08-14:
 - TestFlight inventory: empty; no build, group assignment, tester, or
   invitation was created
 
-The bundle identifier already existed in the Apple Developer account, so this
-operation did not create or change a bundle ID or capability. App creation used
-the authenticated App Store Connect interface because Apple's official API
-does not create app records. Everything after app creation uses the official
-App Store Connect API. The numeric app identity above is non-secret; staff
-identities and Apple session data are not release evidence and must never be
-copied here.
+Before BUILD, a separate provider-configuration gate was previewed, explicitly
+approved by the product owner for one exact write, confirmed by the
+authenticated human operator, and independently read back on 2026-08-14. It
+was bound to Apple Team `87DL7L9GU6`, bundle ID `net.psd401.eoc`, only the Time
+Sensitive Notifications entitlement, the two existing profiles below, and the
+one existing distribution certificate:
+
+- Existing distribution certificate serial:
+  `6C578391C0F8BD2C1E2E570FED205DED`
+- App Store provisioning profile: `U8P2YKU4T8`; SHA-256
+  `c13a2847c944d0b0f25ba007ca06142c8218d87232ad9d36d1c86726355c1fde`
+- Time Sensitive Notifications is enabled for `net.psd401.eoc`; the App Store
+  profile above and existing Ad Hoc profile `525SSPSUMQ` were regenerated in
+  place and stored in their corresponding EAS credential configurations without
+  changing the Ad Hoc device set
+
+That gate did not create, delete, revoke, renew, or replace a certificate;
+create or delete a profile; register a device; change another capability; or
+authorize a build, upload, submission, tester exposure, or installation. The
+repository records only this bounded, non-secret read-back; the approval
+transcript, credential material, and Apple session data remain outside the
+repository and are not reusable authorization. BUILD began only after that gate
+completed and a later exact one-build preview received its own product-owner
+approval.
+
+That separately approved EAS iOS production BUILD then finished:
+
+- Build:
+  `e68d07aa-98e5-4c87-8595-52175975291f`, source
+  `bef4d64b40508dd3ef60e4de190a53b23effce40`, app/runtime `1.0.1`, build `2`,
+  IPA SHA-256
+  `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`
+
+The iOS BUILD did not upload anything to App Store Connect. TestFlight still
+says “Submit a build to start testing”; no processed build, group assignment,
+tester, invitation, or physical installation exists.
+
+The bundle identifier already existed in the Apple Developer account, so the
+app-record operation did not create or change a bundle ID or capability. App
+creation used the authenticated App Store Connect interface because Apple's
+official API does not create app records. Later group, tester, review, and
+App Store Connect inventory automation uses the official App Store Connect
+API; Apple Developer capability/profile management and EAS BUILD use their
+corresponding provider services. The numeric app identity above is non-secret;
+staff identities and Apple session data are not release evidence and must never
+be copied here.
 
 ## 1. Human prerequisites
 
@@ -224,8 +263,9 @@ target list, and this runbook does not authorize using one for a live apply.
 The example CSV filenames below do not change that boundary. If any
 prerequisite is absent or stale, stop after preview.
 
-Preview group creation, tester additions, and beta metadata. A new app has no
-build yet. Preview mode performs only authenticated `GET` requests:
+Preview group creation, tester additions, and beta metadata. App Store Connect
+currently has no uploaded or processed PSD EOC build. Preview mode performs
+only authenticated `GET` requests:
 
 ```sh
 bun run scripts/ops/appstore/asc.ts sync \
@@ -362,13 +402,13 @@ credentials and distribution side effects. The complete submit profile is:
 ```
 
 The iOS profile pins only the verified non-secret numeric `ascAppId`. It does
-not prove an API credential, App Store provisioning profile, finished iOS
-production build, upload, TestFlight group, tester, invitation, or physical
-installation. The 2026-08-14 read-only inventory found an active Apple
-distribution certificate and only an Ad Hoc provisioning configuration; no
-App Store provisioning profile or finished iOS production build was verified.
-Credential setup and BUILD are separately previewed provider writes and remain
-blocked until explicitly authorized.
+not prove an App Store Connect API credential, upload, TestFlight group,
+tester, invitation, or physical installation. The 2026-08-14 read-only
+inventory now verifies the exact App Store provisioning profile and finished
+iOS production BUILD recorded above. Those facts are BUILD evidence only, not
+submission authority or provider acceptance. API-key creation and SUBMIT are
+separately previewed provider writes and remain blocked until explicitly
+authorized.
 
 Keep credentials in the approved EAS credential store. Never add a `.p8` path,
 Apple ID, issuer, key, tester group, or other credential or recipient value to

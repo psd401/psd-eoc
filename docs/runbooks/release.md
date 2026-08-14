@@ -223,16 +223,58 @@ read back on 2026-08-14:
 - EAS usage changed from 4/30 total and 3/15 Android before the sole build to
   5/30 total and 4/15 Android afterward; current estimated total cost is `$0`
 
-The private downloaded copy passed ZIP integrity verification. Its signing
-block verified and its certificate matched the reviewed default-keystore
-fingerprint above. Embedded `app.config` proves package `net.psd401.eoc`,
-app/runtime 1.0.1, disabled/`NEVER` updates, the embedded-update fallback, and
-no update URL; the embedded bundle contains the approved
+The private downloaded Android copy passed ZIP integrity verification. Its
+signing block verified and its certificate matched the reviewed
+default-keystore fingerprint above. Embedded `app.config` proves package
+`net.psd401.eoc`, app/runtime 1.0.1, disabled/`NEVER` updates, the
+embedded-update fallback, and no update URL; the embedded bundle contains the approved
 `https://eoc.psd401.net` API origin. This is BUILD evidence only. The AAB has
 not been uploaded to Play, made installable, exposed to a tester, or installed
 on a physical device. Its first Play upload remains a separate issue #37 write
-with a fresh consequence preview and approval. The iOS build number is likewise
-whatever a fresh remote read-back and approved transition establish.
+with a fresh consequence preview and approval.
+
+Before the iOS BUILD, a separate provider-configuration gate was previewed,
+explicitly approved by the product owner for one exact write, confirmed by the
+authenticated human operator, and independently read back. It enabled only
+Time Sensitive Notifications for Apple Team `87DL7L9GU6` and bundle
+`net.psd401.eoc`, then regenerated in place existing App Store profile
+`U8P2YKU4T8` and existing Ad Hoc profile `525SSPSUMQ` with unchanged profile
+types, existing certificate serial `6C578391C0F8BD2C1E2E570FED205DED`, and an
+unchanged Ad Hoc device set. It created no certificate, profile, key, or device
+and authorized no BUILD, upload, submission, exposure, or installation. This
+repository records only the bounded, non-secret read-back; the approval
+transcript, credential material, and Apple session data remain outside the
+repository and are not reusable authorization. BUILD began only after its
+read-back matched and a later exact one-build preview received its own
+product-owner approval.
+
+The one approved iOS BUILD then completed and was independently read back on
+2026-08-14:
+
+- EAS build: `e68d07aa-98e5-4c87-8595-52175975291f`
+- source: `bef4d64b40508dd3ef60e4de190a53b23effce40`
+- EAS status/profile/distribution: `FINISHED` / `production` / `STORE`
+- bundle ID: `net.psd401.eoc`
+- application/runtime version: `1.0.1` / `1.0.1`
+- build number: `2`; the remote counter read back `1` before and `2` after
+- IPA SHA-256:
+  `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`
+- existing distribution certificate serial:
+  `6C578391C0F8BD2C1E2E570FED205DED`
+- App Store provisioning profile: `U8P2YKU4T8`; SHA-256
+  `c13a2847c944d0b0f25ba007ca06142c8218d87232ad9d36d1c86726355c1fde`
+- EAS usage changed from 5/30 total and 1/15 iOS before the sole build to 6/30
+  total and 2/15 iOS afterward; current estimated total cost is `$0`
+
+The private downloaded IPA passed ZIP integrity verification. Its embedded
+configuration proves app/runtime 1.0.1, disabled/`NEVER` updates, no update URL
+or channel, the approved `https://eoc.psd401.net` API origin, and push
+registration enabled. Its signed entitlements include the reviewed Time
+Sensitive Notifications entitlement; no other capability change was authorized.
+The embedded provisioning profile matches the exact profile and certificate
+above. This is BUILD evidence only. The IPA has not been uploaded to App Store
+Connect, processed by TestFlight, exposed to a tester, or installed on a
+physical device.
 
 ## 3. Version/build automation and commands
 
@@ -384,16 +426,19 @@ consequences.
 ## 6. iOS — TestFlight internal distribution
 
 The committed `submit.production.ios` object pins only verified App Store
-Connect app ID `6801607849`. It does not prove credentials, an App Store
-provisioning profile, a finished iOS build, or submission authority. No `.p8`
-path, tester group, Apple login, issuer, key, or secret belongs in `eas.json`.
+Connect app ID `6801607849`. That routing value does not prove an App Store
+Connect API credential, provider upload, processing, TestFlight exposure, or
+submission authority. No `.p8` path, tester group, Apple login, issuer, key, or
+secret belongs in `eas.json`.
 
 The App Store Connect record was read back on 2026-08-14 in provider `372148`:
 name `PSD EOC`, bundle ID `net.psd401.eoc`, SKU `PSD-EOC-IOS`, primary language
 English (U.S.) / `en-US`, and initial iOS version scaffold `1.0`. User Access is
-Limited Access with zero new app-specific grants. TestFlight is empty. No API
-credential, App Store provisioning profile, iOS production build, group,
-tester, invitation, upload, or installation was created by that operation.
+Limited Access with zero new app-specific grants. The exact App Store profile
+and finished iOS production BUILD recorded in section 2 now exist, but no App
+Store Connect API credential or upload was created. Read-only App Store Connect
+evidence still says “Submit a build to start testing”; no processed build,
+group, tester, invitation, or installation exists.
 
 1. Follow [the App Store runbook](appstore-setup.md) to read back the existing
    record and the numeric `ascAppId` immediately before any later write.
@@ -539,13 +584,17 @@ cannot replace them.
 
 ### iOS internal TestFlight install
 
-- Status: **BLOCKED — no finished iOS v1.0.1 production build, group
-  assignment, or human install evidence**
+- Status: **BLOCKED — the finished iOS v1.0.1 production build has not been
+  uploaded to App Store Connect; no TestFlight group assignment or human install
+  evidence exists**
 - App record read-back: provider `372148`, Apple ID `6801607849`, name
   `PSD EOC`, bundle ID `net.psd401.eoc`, SKU `PSD-EOC-IOS`, `en-US`, initial
   version `1.0`, Limited Access with zero new app-specific grants; TestFlight
-  contains no build, group assignment, tester, or invitation
-- Exact EAS build ID and artifact digest: `BLOCKED`
+  says “Submit a build to start testing” and contains no processed build, group
+  assignment, tester, or invitation
+- Exact EAS build ID and artifact digest:
+  `e68d07aa-98e5-4c87-8595-52175975291f` / build `2` /
+  `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`
 - Exact App Store Connect build ID/version/build number: `BLOCKED`
 - `District Technology` group read-back: `BLOCKED`
 - Section 4 embedded-only diagnostic read-back: `BLOCKED`
