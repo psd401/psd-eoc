@@ -12,11 +12,8 @@ appId: net.psd401.eoc
     id: 'issue-21-synthetic-mode'
 - assertVisible: 'Synthetic test mode. Synthetic recipients only. No live provider sends.'
 - scrollUntilVisible:
-    element:
-      id: 'issue-21-start-drill'
+    element: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
     direction: DOWN
-- assertVisible:
-    id: 'issue-21-start-drill'
 - assertVisible: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
 - tapOn: 'DRILL — PRACTICE. Run practice drill at Synthetic Test School'
 - assertVisible: 'DRILL — PRACTICE. This visual state is for a drill or synthetic test only.'

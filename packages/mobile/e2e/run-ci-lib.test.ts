@@ -585,6 +585,20 @@ describe('issue #32 exact synthetic drill data', () => {
     }
   });
 
+  test('selects the synthetic drill start control by its exact safety label', async () => {
+    const activationFlow = await readFile(
+      new URL(
+        'flows/shared/start-synthetic-drill-after-auth.yaml',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    expect(activationFlow).toMatch(
+      /scrollUntilVisible:\n {4}element: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'\n {4}direction: DOWN\n- assertVisible: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'\n- tapOn: 'DRILL — PRACTICE\. Run practice drill at Synthetic Test School'/u,
+    );
+    expect(activationFlow).not.toContain("id: 'issue-21-start-drill'");
+  });
+
   test('creates an exact provider-free iOS simulator APNs drill payload', () => {
     const payload = mobileE2EIosSimulatorPushPayload(manifest());
     expect(payload).toEqual({
