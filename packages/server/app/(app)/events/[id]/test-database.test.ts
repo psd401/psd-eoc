@@ -352,47 +352,47 @@ describe('event-room synthetic database guard', () => {
       releaseEventRoomPlaywrightPortLease(alteredLegacy);
 
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now),
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
       ).toContainEqual({ runId: stale.runId, reason: 'stale-heartbeat' });
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now),
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
       ).not.toContainEqual({ runId: active.runId, reason: 'stale-heartbeat' });
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now).some(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
           ({ runId }) => runId === active.runId,
         ),
       ).toBe(false);
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now).some(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
           ({ runId }) => runId === unmarked.runId,
         ),
       ).toBe(false);
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now).some(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
           ({ runId }) => runId === stopping.runId,
         ),
       ).toBe(false);
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now),
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
       ).toContainEqual({ runId: legacy.runId, reason: 'legacy-run-marker' });
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now),
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
       ).toContainEqual({
         runId: leaseOnly.runId,
         reason: 'orphaned-port-lease',
       });
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now).some(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
           ({ runId }) => runId === alteredLegacy.runId,
         ),
       ).toBe(false);
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now).some(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
           ({ runId }) => runId === pendingHeartbeat.runId,
         ),
       ).toBe(false);
       expect(
-        detectPriorEventRoomPlaywrightResidue(current, now + 35_001),
+        detectPriorEventRoomPlaywrightResidue(current, () => now + 35_001),
       ).toContainEqual({ runId: stopping.runId, reason: 'stale-heartbeat' });
       expect(existsSync(stale.gateHeartbeatPath)).toBe(true);
       expect(inspectEventRoomPlaywrightPortLease(stale)).toBe('owned');
@@ -414,6 +414,61 @@ describe('event-room synthetic database guard', () => {
       ]) {
         rmSync(context.runDirectory, { force: true, recursive: true });
         rmSync(context.supervisionDirectory, { force: true, recursive: true });
+        releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+      }
+    }
+  });
+
+  test('residue freshness uses time read after advancing heartbeat and lease evidence', () => {
+    const nonce = 'b'.repeat(64);
+    const current = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const heartbeatAdvanced = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const leaseAdvanced = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    try {
+      const scanStartedAt = Date.now();
+      const evidenceAdvancedAt = scanStartedAt + 1_000;
+      writeEventRoomPlaywrightGateHeartbeat(
+        heartbeatAdvanced,
+        process.pid,
+        nonce,
+        evidenceAdvancedAt,
+      );
+      const advancedLeaseTime = new Date(evidenceAdvancedAt);
+      utimesSync(
+        leaseAdvanced.portLeasePath,
+        advancedLeaseTime,
+        advancedLeaseTime,
+      );
+
+      let clockReads = 0;
+      const residue = detectPriorEventRoomPlaywrightResidue(current, () => {
+        clockReads += 1;
+        return clockReads === 1 ? scanStartedAt : evidenceAdvancedAt;
+      });
+
+      expect(clockReads).toBeGreaterThan(1);
+      expect(
+        residue.some(({ runId }) => runId === heartbeatAdvanced.runId),
+      ).toBe(false);
+      expect(residue.some(({ runId }) => runId === leaseAdvanced.runId)).toBe(
+        false,
+      );
+    } finally {
+      for (const context of [current, heartbeatAdvanced, leaseAdvanced]) {
+        rmSync(context.runDirectory, { force: true, recursive: true });
+        rmSync(context.supervisionDirectory, {
+          force: true,
+          recursive: true,
+        });
         releaseEventRoomPlaywrightPortLeaseIfOwned(context);
       }
     }
@@ -459,6 +514,10 @@ describe('event-room synthetic database guard', () => {
       async processGroupMembers() {
         authorized = true;
         return [];
+      },
+      async proveWebServerRunIdentity() {
+        authorized = true;
+        return false;
       },
       async waitForPortClose() {
         authorized = true;
@@ -531,7 +590,7 @@ describe('event-room synthetic database guard', () => {
     }
   });
 
-  test('web-server cleanup also requires exact nonce, start, and command identity', async () => {
+  test('web-server cleanup requires exact process identity and a live run challenge', async () => {
     const context = claimEventRoomPlaywrightRunContext(
       BASE_DATABASE_URL,
       randomUUID(),
@@ -540,6 +599,9 @@ describe('event-room synthetic database guard', () => {
     const webServerPid = 434_343;
     const command = `${process.execPath} app/(app)/events/[id]/playwright.web-server.ts`;
     let authorized = false;
+    let challengeProven = false;
+    let observedStart = 'Thu Aug 13 17:29:59 2026';
+    let challengeAttempts = 0;
     try {
       const identity = writeEventRoomPlaywrightWebServerIdentity(
         context,
@@ -548,6 +610,7 @@ describe('event-room synthetic database guard', () => {
           processGroupId: webServerPid,
           processStartedAt: 'Thu Aug 13 17:30:00 2026',
           commandHash: createHash('sha256').update(command).digest('hex'),
+          challengePort: 43_434,
         },
         nonce,
       );
@@ -566,7 +629,7 @@ describe('event-room synthetic database guard', () => {
             async inspectProcess() {
               return {
                 processGroupId: webServerPid,
-                startedAt: 'Thu Aug 13 17:29:59 2026',
+                startedAt: observedStart,
                 command,
               };
             },
@@ -580,6 +643,10 @@ describe('event-room synthetic database guard', () => {
               authorized = true;
               return [];
             },
+            async proveWebServerRunIdentity() {
+              challengeAttempts += 1;
+              return challengeProven;
+            },
             async waitForPortClose() {
               authorized = true;
             },
@@ -590,6 +657,87 @@ describe('event-room synthetic database guard', () => {
         ),
       ).rejects.toThrow('ambiguous or reused before termination');
       expect(authorized).toBe(false);
+      expect(challengeAttempts).toBe(0);
+
+      // A PID/PGID reused within ps(1)'s one-second start-time precision can
+      // retain the same wrapper command. Only the nonce-bound live challenge
+      // distinguishes that replacement from this exact run.
+      observedStart = 'Thu Aug 13 17:30:00 2026';
+      await expect(
+        terminateInterruptedEventRoomPlaywrightWebServer(
+          context,
+          identity,
+          nonce,
+          {
+            async inspectProcess() {
+              return {
+                processGroupId: webServerPid,
+                startedAt: observedStart,
+                command,
+              };
+            },
+            signalProcessGroup() {
+              authorized = true;
+            },
+            signalProcess() {
+              authorized = true;
+            },
+            async processGroupMembers() {
+              authorized = true;
+              return [];
+            },
+            async proveWebServerRunIdentity() {
+              challengeAttempts += 1;
+              return challengeProven;
+            },
+            async waitForPortClose() {
+              authorized = true;
+            },
+            async dropOwnedDatabase() {
+              authorized = true;
+            },
+          },
+        ),
+      ).rejects.toThrow('run challenge failed before termination');
+      expect(authorized).toBe(false);
+      expect(challengeAttempts).toBe(1);
+
+      challengeProven = true;
+      await terminateInterruptedEventRoomPlaywrightWebServer(
+        context,
+        identity,
+        nonce,
+        {
+          async inspectProcess() {
+            return {
+              processGroupId: webServerPid,
+              startedAt: observedStart,
+              command,
+            };
+          },
+          signalProcessGroup() {
+            authorized = true;
+          },
+          signalProcess() {
+            authorized = true;
+          },
+          async processGroupMembers() {
+            return [];
+          },
+          async proveWebServerRunIdentity() {
+            challengeAttempts += 1;
+            return challengeProven;
+          },
+          async waitForPortClose() {
+            authorized = true;
+          },
+          async dropOwnedDatabase() {
+            authorized = true;
+          },
+        },
+      );
+      expect(authorized).toBe(true);
+      expect(challengeAttempts).toBe(2);
     } finally {
       rmSync(context.supervisionDirectory, { force: true, recursive: true });
       releaseEventRoomPlaywrightPortLeaseIfOwned(context);

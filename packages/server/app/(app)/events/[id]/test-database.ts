@@ -281,7 +281,7 @@ function parsePriorGateHeartbeat(
 function priorSupervisorStoppingIsCurrent(
   directory: string,
   runId: string,
-  now: number,
+  currentTime: () => number,
 ): boolean {
   const stoppingPath = join(directory, 'supervisor-stopping.json');
   let serialized: string;
@@ -342,6 +342,7 @@ function priorSupervisorStoppingIsCurrent(
   ) {
     return false;
   }
+  const now = requireResidueCheckTime(currentTime());
   return (
     now >= parsed.observedAt &&
     now - parsed.observedAt <= SUPERVISOR_STOPPING_MAX_AGE_MS
@@ -467,7 +468,7 @@ function hasCanonicalPriorLegacyRunMarker(
 
 function readCanonicalPriorPortLease(
   name: string,
-  now: number,
+  currentTime: () => number,
 ): Readonly<{ runId: string; isFresh: boolean }> | null {
   const match = name.match(/^(\d{5})\.json$/u);
   if (match === null) return null;
@@ -522,11 +523,19 @@ function readCanonicalPriorPortLease(
   ) {
     return null;
   }
+  const now = requireResidueCheckTime(currentTime());
   return {
     runId: parsed.runId,
     isFresh:
       now >= entry.mtimeMs && now - entry.mtimeMs <= GATE_HEARTBEAT_MAX_AGE_MS,
   };
+}
+
+function requireResidueCheckTime(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('The event-room Playwright residue check time is invalid.');
+  }
+  return value;
 }
 
 /**
@@ -540,12 +549,10 @@ function readCanonicalPriorPortLease(
  */
 export function detectPriorEventRoomPlaywrightResidue(
   value: unknown,
-  now: number = Date.now(),
+  currentTime: () => number = Date.now,
 ): readonly EventRoomPlaywrightPriorResidue[] {
   const current = requireEventRoomPlaywrightRunContext(value);
-  if (!Number.isSafeInteger(now) || now <= 0) {
-    throw new Error('The event-room Playwright residue check time is invalid.');
-  }
+  requireResidueCheckTime(currentTime());
   const results: EventRoomPlaywrightPriorResidue[] = [];
   const activeRunIds = new Set<string>();
   const residueRunIds = new Set<string>();
@@ -571,7 +578,7 @@ export function detectPriorEventRoomPlaywrightResidue(
       continue;
     }
     const directory = join(tmpdir(), entry.name);
-    if (priorSupervisorStoppingIsCurrent(directory, runId, now)) {
+    if (priorSupervisorStoppingIsCurrent(directory, runId, currentTime)) {
       activeRunIds.add(runId);
       continue;
     }
@@ -612,6 +619,7 @@ export function detectPriorEventRoomPlaywrightResidue(
       readFileSync(heartbeatPath, 'utf8'),
       runId,
     );
+    const now = requireResidueCheckTime(currentTime());
     if (heartbeat === null || now < heartbeat.observedAt) {
       addResidue(runId, 'altered-heartbeat');
     } else if (now - heartbeat.observedAt > GATE_HEARTBEAT_MAX_AGE_MS) {
@@ -656,7 +664,7 @@ export function detectPriorEventRoomPlaywrightResidue(
   }
   for (const entry of leaseEntries) {
     if (!entry.isFile() || entry.isSymbolicLink()) continue;
-    const lease = readCanonicalPriorPortLease(entry.name, now);
+    const lease = readCanonicalPriorPortLease(entry.name, currentTime);
     if (
       lease === null ||
       lease.isFresh ||
@@ -965,6 +973,7 @@ export interface EventRoomPlaywrightWebServerIdentity {
   readonly processGroupId: number;
   readonly processStartedAt: string;
   readonly commandHash: string;
+  readonly challengePort: number;
   readonly supervisorNonceHash: string;
 }
 
@@ -980,7 +989,12 @@ function webServerIdentityMarker(
     version: 1,
     runId: context.runId,
     leaseOwnerPid: context.leaseOwnerPid,
-    ...identity,
+    webServerPid: identity.webServerPid,
+    processGroupId: identity.processGroupId,
+    processStartedAt: identity.processStartedAt,
+    commandHash: identity.commandHash,
+    challengePort: identity.challengePort,
+    supervisorNonceHash: identity.supervisorNonceHash,
   };
 }
 
@@ -999,6 +1013,9 @@ export function writeEventRoomPlaywrightWebServerIdentity(
     identity.processGroupId !== identity.webServerPid ||
     identity.processStartedAt.length === 0 ||
     !/^[0-9a-f]{64}$/u.test(identity.commandHash) ||
+    !Number.isSafeInteger(identity.challengePort) ||
+    identity.challengePort <= 0 ||
+    identity.challengePort > 65_535 ||
     supervisorNonce.length < 32
   ) {
     throw new Error(
@@ -1058,7 +1075,9 @@ export function readEventRoomPlaywrightWebServerIdentity(
     !('processStartedAt' in parsed) ||
     typeof parsed.processStartedAt !== 'string' ||
     !('commandHash' in parsed) ||
-    typeof parsed.commandHash !== 'string'
+    typeof parsed.commandHash !== 'string' ||
+    !('challengePort' in parsed) ||
+    typeof parsed.challengePort !== 'number'
   ) {
     throw new Error(
       'The event-room Playwright web-server identity is invalid.',
@@ -1070,11 +1089,15 @@ export function readEventRoomPlaywrightWebServerIdentity(
       processGroupId: parsed.processGroupId,
       processStartedAt: parsed.processStartedAt,
       commandHash: parsed.commandHash,
+      challengePort: parsed.challengePort,
       supervisorNonceHash: sha256(supervisorNonce),
     }),
   );
   if (
     parsed.processGroupId !== parsed.webServerPid ||
+    !Number.isSafeInteger(parsed.challengePort) ||
+    parsed.challengePort <= 0 ||
+    parsed.challengePort > 65_535 ||
     !exactStringEqual(serialized, canonical)
   ) {
     throw new Error(
@@ -1710,6 +1733,11 @@ export interface EventRoomPlaywrightOrphanCleanupOperations {
   signalProcessGroup(processGroupId: number, signal: NodeJS.Signals): void;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   processGroupMembers(processGroupId: number): Promise<readonly number[]>;
+  proveWebServerRunIdentity(
+    context: EventRoomPlaywrightRunContext,
+    identity: EventRoomPlaywrightWebServerIdentity,
+    supervisorNonce: string,
+  ): Promise<boolean>;
   waitForPortClose(appPort: number): Promise<void>;
   dropOwnedDatabase(context: EventRoomPlaywrightRunContext): Promise<unknown>;
 }
@@ -1756,13 +1784,41 @@ async function terminateExactPlaywrightProcessGroup(
   supervisorNonce: string,
   operations: EventRoomPlaywrightOrphanCleanupOperations,
   releaseAnchor: boolean,
+  proveRunIdentity?: () => Promise<boolean>,
 ): Promise<void> {
-  requireExactProcessIdentity(
-    await operations.inspectProcess(identity.pid),
-    identity,
-    supervisorNonce,
-    'before termination',
-  );
+  const requireCurrentIdentity = async (stage: string): Promise<void> => {
+    requireExactProcessIdentity(
+      await operations.inspectProcess(identity.pid),
+      identity,
+      supervisorNonce,
+      stage,
+    );
+    if (proveRunIdentity === undefined) return;
+    let proven = false;
+    try {
+      proven = await proveRunIdentity();
+    } catch (error) {
+      throw new Error(
+        `The event-room Playwright ${identity.label} run challenge failed ${stage}.`,
+        { cause: error },
+      );
+    }
+    if (!proven) {
+      throw new Error(
+        `The event-room Playwright ${identity.label} run challenge failed ${stage}.`,
+      );
+    }
+    // Challenge verification is asynchronous. Re-check the immutable process
+    // facts after it returns so a leader that exited during the proof cannot
+    // authorize a signal with its earlier identity snapshot.
+    requireExactProcessIdentity(
+      await operations.inspectProcess(identity.pid),
+      identity,
+      supervisorNonce,
+      `after run challenge ${stage}`,
+    );
+  };
+  await requireCurrentIdentity('before termination');
   operations.signalProcessGroup(identity.processGroupId, 'SIGTERM');
   const deadline = Date.now() + 5_000;
   let members = await operations.processGroupMembers(identity.processGroupId);
@@ -1779,12 +1835,7 @@ async function terminateExactPlaywrightProcessGroup(
     ? members.some((pid) => pid !== identity.pid)
     : members.length > 0;
   if (descendantsRemain) {
-    requireExactProcessIdentity(
-      await operations.inspectProcess(identity.pid),
-      identity,
-      supervisorNonce,
-      'before forced termination',
-    );
+    await requireCurrentIdentity('before forced termination');
     operations.signalProcessGroup(identity.processGroupId, 'SIGKILL');
     const forcedDeadline = Date.now() + 5_000;
     while (
@@ -1795,12 +1846,7 @@ async function terminateExactPlaywrightProcessGroup(
       await delay(25);
     }
   } else if (releaseAnchor) {
-    requireExactProcessIdentity(
-      await operations.inspectProcess(identity.pid),
-      identity,
-      supervisorNonce,
-      'before anchor exit',
-    );
+    await requireCurrentIdentity('before anchor exit');
     operations.signalProcess(identity.pid, 'SIGUSR1');
     const anchorDeadline = Date.now() + 5_000;
     while (
@@ -1854,6 +1900,12 @@ export async function terminateInterruptedEventRoomPlaywrightWebServer(
     supervisorNonce,
     operations,
     false,
+    () =>
+      operations.proveWebServerRunIdentity(
+        context,
+        expectedIdentity,
+        supervisorNonce,
+      ),
   );
 }
 

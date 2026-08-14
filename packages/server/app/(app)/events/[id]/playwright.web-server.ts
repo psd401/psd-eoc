@@ -1,7 +1,12 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 import { mkdirSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -26,11 +31,15 @@ import {
   writeEventRoomPlaywrightWebServerIdentity,
   type EventRoomPlaywrightCoordinatorIdentity,
   type EventRoomPlaywrightRunContext,
+  type EventRoomPlaywrightWebServerIdentity,
 } from './test-database';
 
 const NEXT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const SUPERVISOR_POLL_MS = 100;
 const PROCESS_EXIT_TIMEOUT_MS = 10_000;
+const WEB_SERVER_CHALLENGE_TIMEOUT_MS = 750;
+const WEB_SERVER_CHALLENGE_BYTES = 32;
+const WEB_SERVER_CHALLENGE_LINE_LENGTH = WEB_SERVER_CHALLENGE_BYTES * 2 + 1;
 const scriptPath = fileURLToPath(import.meta.url);
 export const EVENT_ROOM_PLAYWRIGHT_SUPERVISOR_MODE_ENV =
   'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SUPERVISOR_MODE';
@@ -55,6 +64,153 @@ interface DarwinProcessIdentity {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+interface WebServerChallengeIdentity {
+  readonly webServerPid: number;
+  readonly processGroupId: number;
+  readonly processStartedAt: string;
+  readonly commandHash: string;
+  readonly challengePort: number;
+}
+
+function webServerChallengeResponse(
+  context: EventRoomPlaywrightRunContext,
+  identity: WebServerChallengeIdentity,
+  supervisorNonce: string,
+  challenge: string,
+): string {
+  return createHmac('sha256', supervisorNonce)
+    .update(
+      JSON.stringify({
+        kind: 'psd-eoc-event-room-playwright-web-server-challenge',
+        version: 1,
+        runId: context.runId,
+        leaseOwnerPid: context.leaseOwnerPid,
+        webServerPid: identity.webServerPid,
+        processGroupId: identity.processGroupId,
+        processStartedAt: identity.processStartedAt,
+        commandHash: identity.commandHash,
+        challengePort: identity.challengePort,
+        supervisorNonceHash: sha256(supervisorNonce),
+        challenge,
+      }),
+      'utf8',
+    )
+    .digest('hex');
+}
+
+function exactTextEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return (
+    leftBytes.length === rightBytes.length &&
+    timingSafeEqual(leftBytes, rightBytes)
+  );
+}
+
+async function startWebServerRunChallenge(
+  context: EventRoomPlaywrightRunContext,
+  identity: Omit<WebServerChallengeIdentity, 'challengePort'>,
+  supervisorNonce: string,
+): Promise<number> {
+  let challengePort = 0;
+  const server = createServer((socket) => {
+    let request = '';
+    let handled = false;
+    const failClosed = () => {
+      handled = true;
+      socket.destroy();
+    };
+    socket.setEncoding('utf8');
+    socket.setTimeout(WEB_SERVER_CHALLENGE_TIMEOUT_MS, failClosed);
+    socket.on('error', () => undefined);
+    socket.on('data', (chunk: string) => {
+      if (handled) return;
+      request += chunk;
+      if (request.length > WEB_SERVER_CHALLENGE_LINE_LENGTH) {
+        failClosed();
+        return;
+      }
+      if (!request.endsWith('\n')) return;
+      if (!/^[0-9a-f]{64}\n$/u.test(request)) {
+        failClosed();
+        return;
+      }
+      handled = true;
+      const challenge = request.slice(0, -1);
+      const response = webServerChallengeResponse(
+        context,
+        { ...identity, challengePort },
+        supervisorNonce,
+        challenge,
+      );
+      socket.end(`${response}\n`);
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    const rejectStartup = (error: Error) => rejectListen(error);
+    server.once('error', rejectStartup);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', rejectStartup);
+      server.on('error', () => undefined);
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        rejectListen(
+          new Error('The web-server run challenge address was invalid.'),
+        );
+        return;
+      }
+      challengePort = address.port;
+      server.unref();
+      resolveListen();
+    });
+  });
+  if (!Number.isSafeInteger(challengePort) || challengePort <= 0) {
+    throw new Error('The web-server run challenge port was invalid.');
+  }
+  return challengePort;
+}
+
+function proveWebServerRunIdentity(
+  context: EventRoomPlaywrightRunContext,
+  identity: EventRoomPlaywrightWebServerIdentity,
+  supervisorNonce: string,
+): Promise<boolean> {
+  const challenge = randomBytes(WEB_SERVER_CHALLENGE_BYTES).toString('hex');
+  const expected = `${webServerChallengeResponse(
+    context,
+    identity,
+    supervisorNonce,
+    challenge,
+  )}\n`;
+  return new Promise((resolveProof) => {
+    const socket = createConnection({
+      host: '127.0.0.1',
+      port: identity.challengePort,
+    });
+    let response = '';
+    let settled = false;
+    const settle = (proven: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolveProof(proven);
+    };
+    socket.setEncoding('utf8');
+    socket.once('connect', () => socket.write(`${challenge}\n`));
+    socket.on('data', (chunk: string) => {
+      response += chunk;
+      if (response.length > WEB_SERVER_CHALLENGE_LINE_LENGTH) {
+        settle(false);
+        return;
+      }
+      if (response.endsWith('\n')) settle(exactTextEqual(response, expected));
+    });
+    socket.once('end', () => settle(false));
+    socket.once('error', () => settle(false));
+    socket.setTimeout(WEB_SERVER_CHALLENGE_TIMEOUT_MS, () => settle(false));
+  });
 }
 
 function parsePositiveInteger(
@@ -476,6 +632,7 @@ async function superviseCoordinator(): Promise<void> {
       signalProcessGroup,
       signalProcess,
       processGroupMembers,
+      proveWebServerRunIdentity,
       waitForPortClose: waitForEventRoomPlaywrightPortToClose,
       dropOwnedDatabase: dropOwnedEventRoomPlaywrightDatabase,
     };
@@ -667,13 +824,26 @@ async function syntheticWebServer(nonce: string): Promise<void> {
     );
   }
   requireCurrentEventRoomPlaywrightGateHeartbeat(context, gatePid, nonce);
+  const commandHash = sha256(identity.command);
+  const challengePort = await startWebServerRunChallenge(
+    context,
+    {
+      webServerPid: process.pid,
+      processGroupId: identity.processGroupId,
+      processStartedAt: identity.startedAt,
+      commandHash,
+    },
+    nonce,
+  );
+  requireCurrentEventRoomPlaywrightGateHeartbeat(context, gatePid, nonce);
   writeEventRoomPlaywrightWebServerIdentity(
     context,
     {
       webServerPid: process.pid,
       processGroupId: identity.processGroupId,
       processStartedAt: identity.startedAt,
-      commandHash: sha256(identity.command),
+      commandHash,
+      challengePort,
     },
     nonce,
   );
@@ -752,13 +922,26 @@ async function runNextWebServer(): Promise<void> {
     );
   }
   requireCurrentEventRoomPlaywrightGateHeartbeat(context, gatePid, nonce);
+  const commandHash = sha256(webServerProcessIdentity.command);
+  const challengePort = await startWebServerRunChallenge(
+    context,
+    {
+      webServerPid: process.pid,
+      processGroupId: webServerProcessIdentity.processGroupId,
+      processStartedAt: webServerProcessIdentity.startedAt,
+      commandHash,
+    },
+    nonce,
+  );
+  requireCurrentEventRoomPlaywrightGateHeartbeat(context, gatePid, nonce);
   writeEventRoomPlaywrightWebServerIdentity(
     context,
     {
       webServerPid: process.pid,
       processGroupId: webServerProcessIdentity.processGroupId,
       processStartedAt: webServerProcessIdentity.startedAt,
-      commandHash: sha256(webServerProcessIdentity.command),
+      commandHash,
+      challengePort,
     },
     nonce,
   );
