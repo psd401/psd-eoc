@@ -27,6 +27,30 @@ const GOOGLE_AUTHORIZATION_ENDPOINT =
   'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_JWKS_URI = 'https://www.googleapis.com/oauth2/v3/certs';
+const PRODUCTION_APPLICATION_ORIGIN = 'https://eoc.psd401.net' as const;
+const PRODUCTION_REDIRECT_URI =
+  `${PRODUCTION_APPLICATION_ORIGIN}/auth/callback` as const;
+const IOS_BUNDLE_ID = 'net.psd401.eoc' as const;
+const GOOGLE_OAUTH_CONFIG_KEYS = Object.freeze([
+  'clientId',
+  'clientSecret',
+  'iosBundleId',
+  'iosClientId',
+  'webClientId',
+] as const);
+const PRODUCTION_OVERRIDE_ENVIRONMENT_NAMES = Object.freeze([
+  'GOOGLE_OIDC_CLIENT_ID',
+  'GOOGLE_OIDC_CLIENT_SECRET',
+  'GOOGLE_OIDC_REDIRECT_URI',
+  'GOOGLE_OIDC_AUTHORIZATION_ENDPOINT',
+  'GOOGLE_OIDC_TOKEN_ENDPOINT',
+  'GOOGLE_OIDC_JWKS_URI',
+  'GOOGLE_OIDC_ISSUER',
+  'GOOGLE_OIDC_APPLICATION_ORIGIN',
+  'GOOGLE_OIDC_ORIGIN',
+  'GOOGLE_OIDC_HOSTED_DOMAIN',
+  'GOOGLE_OIDC_DOMAIN',
+] as const);
 
 const TRANSIENT_COOKIE_LIFETIME_SECONDS = 10 * 60;
 const CLOCK_TOLERANCE_SECONDS = 60;
@@ -48,6 +72,14 @@ type Environment = Readonly<Record<string, string | undefined>>;
 interface PrivateGoogleOidcConfiguration {
   readonly clientSecret: string;
   readonly cookieKeyMaterial: Uint8Array;
+}
+
+interface GoogleOauthSecretConfiguration {
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly iosBundleId: typeof IOS_BUNDLE_ID;
+  readonly iosClientId: string;
+  readonly webClientId: string;
 }
 
 /**
@@ -285,6 +317,87 @@ function parseBase64UrlSecret(value: string): Uint8Array {
   return decoded;
 }
 
+function oauthClientProjectNumber(value: string): string {
+  return value.slice(0, value.indexOf('-'));
+}
+
+function parseGoogleOauthConfig(value: string): GoogleOauthSecretConfiguration {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return configurationError(
+      'GOOGLE_OAUTH_CONFIG must contain the exact Google OAuth credential contract.',
+    );
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return configurationError(
+      'GOOGLE_OAUTH_CONFIG must contain the exact Google OAuth credential contract.',
+    );
+  }
+
+  const record = parsed as Readonly<Record<string, unknown>>;
+  const actualKeys = Object.keys(record).sort();
+  const expectedKeys = [...GOOGLE_OAUTH_CONFIG_KEYS].sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    return configurationError(
+      'GOOGLE_OAUTH_CONFIG must contain exactly the approved five fields.',
+    );
+  }
+
+  const clientId = record.clientId;
+  const clientSecret = record.clientSecret;
+  const iosBundleId = record.iosBundleId;
+  const iosClientId = record.iosClientId;
+  const webClientId = record.webClientId;
+  const oauthClientIdPattern =
+    /^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/u;
+  if (
+    typeof clientId !== 'string' ||
+    typeof webClientId !== 'string' ||
+    typeof iosClientId !== 'string' ||
+    !oauthClientIdPattern.test(clientId) ||
+    !oauthClientIdPattern.test(webClientId) ||
+    !oauthClientIdPattern.test(iosClientId) ||
+    clientId !== webClientId ||
+    iosClientId === webClientId ||
+    oauthClientProjectNumber(iosClientId) !==
+      oauthClientProjectNumber(webClientId)
+  ) {
+    return configurationError(
+      'GOOGLE_OAUTH_CONFIG contains invalid or mismatched OAuth client IDs.',
+    );
+  }
+  if (iosBundleId !== IOS_BUNDLE_ID) {
+    return configurationError(
+      'GOOGLE_OAUTH_CONFIG contains the wrong iOS application identifier.',
+    );
+  }
+  if (
+    typeof clientSecret !== 'string' ||
+    clientSecret.length === 0 ||
+    clientSecret.length > 2_048 ||
+    clientSecret !== clientSecret.trim() ||
+    /[\r\n\0]/u.test(clientSecret) ||
+    /blocked|placeholder|replace|unverified/iu.test(clientSecret)
+  ) {
+    return configurationError(
+      'GOOGLE_OAUTH_CONFIG contains an invalid or placeholder client secret.',
+    );
+  }
+
+  return Object.freeze({
+    clientId,
+    clientSecret,
+    iosBundleId,
+    iosClientId,
+    webClientId,
+  });
+}
+
 function parseHttpTimeout(environment: Environment): number {
   const value = optionalEnvironmentValue(
     environment,
@@ -409,6 +522,47 @@ export function readGoogleOidcConfiguration(
   environment: Environment = process.env,
 ): GoogleOidcConfiguration {
   const mode = readRuntimeMode(environment);
+  const cookieSecretValue = requiredEnvironmentValue(
+    environment,
+    'GOOGLE_OIDC_COOKIE_SECRET',
+    128,
+  );
+  if (mode === 'production') {
+    if (
+      PRODUCTION_OVERRIDE_ENVIRONMENT_NAMES.some(
+        (name) => environment[name] !== undefined,
+      )
+    ) {
+      return configurationError(
+        'Production Google OIDC configuration cannot use legacy or override variables.',
+      );
+    }
+    const oauth = parseGoogleOauthConfig(
+      requiredEnvironmentValue(environment, 'GOOGLE_OAUTH_CONFIG', 65_536),
+    );
+    const configuration: GoogleOidcConfiguration = Object.freeze({
+      mode,
+      clientId: oauth.clientId,
+      redirectUri: PRODUCTION_REDIRECT_URI,
+      authorizationEndpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
+      tokenEndpoint: GOOGLE_TOKEN_ENDPOINT,
+      jwksUri: GOOGLE_JWKS_URI,
+      transientCookieName: '__Host-psd-eoc-oidc',
+      secureCookies: true,
+      httpTimeoutMilliseconds: parseHttpTimeout(environment),
+    });
+    privateConfigurations.set(configuration, {
+      clientSecret: oauth.clientSecret,
+      cookieKeyMaterial: parseBase64UrlSecret(cookieSecretValue),
+    });
+    return configuration;
+  }
+
+  if (environment.GOOGLE_OAUTH_CONFIG !== undefined) {
+    return configurationError(
+      'GOOGLE_OAUTH_CONFIG is reserved for the fixed production contract.',
+    );
+  }
   const clientId = requiredEnvironmentValue(
     environment,
     'GOOGLE_OIDC_CLIENT_ID',
@@ -424,11 +578,6 @@ export function readGoogleOidcConfiguration(
     'GOOGLE_OIDC_REDIRECT_URI',
     2_048,
   );
-  const cookieSecretValue = requiredEnvironmentValue(
-    environment,
-    'GOOGLE_OIDC_COOKIE_SECRET',
-    128,
-  );
 
   const redirectUri = parseAbsoluteUrl(
     'GOOGLE_OIDC_REDIRECT_URI',
@@ -440,7 +589,7 @@ export function readGoogleOidcConfiguration(
       'GOOGLE_OIDC_REDIRECT_URI cannot contain a query or fragment.',
     );
   }
-  const productionLikeRedirect = mode === 'production' || !loopbackRedirect;
+  const productionLikeRedirect = !loopbackRedirect;
   if (
     productionLikeRedirect &&
     !/^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/u.test(clientId)

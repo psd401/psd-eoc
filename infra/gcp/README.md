@@ -594,14 +594,18 @@ wiring is present and read back. Only an approved staff-only read through the
 deployed roster job supports `live-verified`; the standalone verifier is
 supporting credential evidence, not an end-to-end runtime test. The recorded
 no-domain-wide-delegation and ancestor/group-mediated IAM checks remain required.
-The current P0.4 CDK injects the whole OAuth secret as `GOOGLE_OAUTH_CONFIG`,
-while the server requires separate `GOOGLE_OIDC_*` variables. If the
-console-created clients are validated and stored before
-[issue #69](https://github.com/psd401/psd-eoc/issues/69) fixes that runtime
-wiring, Google OIDC is `blocked`, not `configured-unverified`. After #69 is
-deployed, exact wiring and readback support `configured-unverified`; only an
-approved exercised deployed sign-in supports `live-verified`. Neither label
-authorizes a notification or provider write.
+The reviewed source contract imports the complete ARN of the independently
+retained five-field OAuth secret and injects its value only as
+`GOOGLE_OAUTH_CONFIG`; the shared server parser and deep health check now reject
+different or partial shapes. A separate retained application-only secret backs
+OIDC transient and return-state cookies. Source synthesis and mock tests do not
+resolve the current runtime blocker. Until a separately approved deployment and
+exact readback land [issue #69](https://github.com/psd401/psd-eoc/issues/69),
+Google OIDC is `blocked`, not `configured-unverified`. After an approved #69
+deployment, exact wiring and readback support
+`configured-unverified`; only an approved exercised deployed district sign-in
+supports `live-verified`. Neither label authorizes a notification or provider
+write.
 
 ## Destroy and decommission
 
