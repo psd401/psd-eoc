@@ -1020,8 +1020,12 @@ provider-processing evidence.
 
 ### Android Play alpha install
 
-- Status: **BLOCKED — the Android production build finished, but no Play upload
-  or human install evidence is recorded**
+- Status: **BLOCKED — the Android production build finished, but Google identity
+  review still locks app creation, so no Play upload or human install evidence
+  is recorded**
+- Play account bootstrap read-back (2026-08-14): organization website verified;
+  organization and authorized-representative documents submitted for review;
+  phone verification and app creation remain locked
 - Exact EAS build ID and AAB digest:
   `856e54b5-9abd-45a5-b0db-809a295da5ef`;
   `sha256:015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463`;
