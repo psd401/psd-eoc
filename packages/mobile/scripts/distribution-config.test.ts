@@ -581,6 +581,10 @@ describe('mobile distribution configuration', () => {
       expect(guide).toContain('Scheduling the window does not');
       expect(guide).toContain('authenticated human must freshly');
       expect(guide).toContain('not provider screenshots or install proof');
+      expect(compactGuide).toContain(
+        'confirm district sign-in succeeds, and confirm the visible authorized site list is correct',
+      );
+      expect(compactGuide).not.toContain('expected staff name');
       expect(guide).toMatch(/Deleting\s+the app alone does not prove/u);
       expect(compactGuide).toContain('canonical **`[DRILL]`** marker');
       expect(compactGuide).toContain('**DRILL — PRACTICE**');

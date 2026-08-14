@@ -71,7 +71,8 @@ authorize or trigger a send. At test time, an authenticated human must freshly
 review the synthetic targets and consequence preview, obtain explicit
 product-owner authorization, confirm the action, and launch the synthetic test:
 
-- Open PSD EOC and confirm your expected staff name and authorized site list.
+- Open PSD EOC, confirm district sign-in succeeds, and confirm the visible
+  authorized site list is correct.
 - Lock the device before the scheduled test.
 - After the test, confirm the visible lock-screen notification title **and**
   body each carry the canonical **`[DRILL]`** marker. Open it and confirm the
