@@ -76,6 +76,10 @@ jobs:
 
       - name: Check Expo dependency compatibility
         working-directory: packages/mobile
+        # Validate against the installed SDK manifest so a registry-side patch
+        # release cannot change the verdict for an unchanged frozen lockfile.
+        env:
+          EXPO_OFFLINE: '1'
         run: bun run expo:check
 
       - name: Verify the shared React runtime resolution
