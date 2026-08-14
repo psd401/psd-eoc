@@ -20,6 +20,7 @@ import {
   acquireMobileE2EArtifactDirectory,
   acquireMobileE2ERunnerRoot,
   assertMobileE2EArtifactDirectoryOwned,
+  assertMobileE2EPostAuthenticationWarmupRejection,
   assertMobileE2ERunnerRootOwned,
   createMobileE2ERunId,
   decideMobileE2EIosRevealedOpenAction,
@@ -47,6 +48,7 @@ import {
   mobileE2EMaestroDriverReuseArguments,
   mobileE2EMaestroEnvironment,
   mobileE2ENormalMetroEnvironment,
+  mobileE2EPostAuthenticationWarmupRequests,
   mobileE2ERunnerPaths,
   isMobileE2EAndroidApplicationForeground,
   isMobileE2EAndroidDeviceAuthenticationPrompt,
@@ -596,6 +598,292 @@ describe('issue #32 exact synthetic drill data', () => {
     );
     expect(runner).toMatch(
       /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+enroll-loopback-oidc-android/u,
+    );
+  });
+
+  test('precompiles every native post-auth route through canonical credential-free rejection', async () => {
+    const requests = mobileE2EPostAuthenticationWarmupRequests(manifest());
+    expect(requests).toEqual([
+      {
+        evidenceRoute: 'mobile-start-facilities',
+        url: `${manifest().appOrigin}/api/mobile/start/facilities`,
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+        },
+        expectedStatus: 401,
+        expectedCode: 'UNAUTHENTICATED',
+      },
+      {
+        evidenceRoute: 'event-type-list',
+        url: `${manifest().appOrigin}/event-types/api?operation=list&enabled=true`,
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+        },
+        expectedStatus: 401,
+        expectedCode: 'UNAUTHENTICATED',
+      },
+      {
+        evidenceRoute: 'active-events',
+        url: `${manifest().appOrigin}/api/events`,
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+        },
+        expectedStatus: 401,
+        expectedCode: 'UNAUTHENTICATED',
+      },
+      {
+        evidenceRoute: 'push-token-unregister',
+        url: `${manifest().appOrigin}/api/devices/push-token/unregister`,
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+        expectedStatus: 400,
+        expectedCode: 'VALIDATION_ERROR',
+      },
+      {
+        evidenceRoute: 'session-refresh',
+        url: `${manifest().appOrigin}/api/auth/refresh`,
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+        expectedStatus: 401,
+        expectedCode: 'UNAUTHENTICATED',
+      },
+      {
+        evidenceRoute: 'join-event',
+        url: `${manifest().appOrigin}/api/events/${EVENT_ID}/join`,
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+        expectedStatus: 400,
+        expectedCode: 'VALIDATION_ERROR',
+      },
+      {
+        evidenceRoute: 'event-room',
+        url: `${manifest().appOrigin}/events/${EVENT_ID}/api`,
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+        },
+        expectedStatus: 401,
+        expectedCode: 'UNAUTHENTICATED',
+      },
+    ]);
+    for (const request of requests) {
+      expect(new URL(request.url).origin).toBe(manifest().appOrigin);
+      const names = Object.keys(request.headers).map((name) =>
+        name.toLowerCase(),
+      );
+      expect(names).not.toContain('authorization');
+      expect(names).not.toContain('cookie');
+      expect(names).not.toContain('idempotency-key');
+      expect(names).not.toContain('human-confirmation-id');
+      if (request.method === 'GET') expect(request.body).toBeUndefined();
+    }
+    expect(() =>
+      mobileE2EPostAuthenticationWarmupRequests({
+        ...manifest(),
+        classification: 'incident',
+      }),
+    ).toThrow();
+
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
+    );
+    const warmup = runner.match(
+      /async function warmMobilePostAuthenticationRoutes[\s\S]+?(?=async function copyMobileWorkspace)/u,
+    )?.[0];
+    expect(warmup).toBeDefined();
+    expect(warmup).toContain('for (const warmup of');
+    expect(warmup).toContain("credentials: 'omit'");
+    expect(warmup).toContain("redirect: 'manual'");
+    expect(warmup).toContain("cache: 'no-store'");
+    expect(warmup).toContain('payload = await response.json()');
+    expect(warmup).toContain(
+      'assertMobileE2EPostAuthenticationWarmupRejection(',
+    );
+    expect(warmup).toContain('status=fail-closed-rejections-verified');
+    expect(
+      runner.match(/await warmMobilePostAuthenticationRoutes\(/gu),
+    ).toHaveLength(2);
+    expect(runner).toMatch(
+      /awaitIosFreshEnrollmentReady[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+enroll-loopback-oidc-ios/u,
+    );
+    expect(runner).toMatch(
+      /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+enroll-loopback-oidc-android/u,
+    );
+  });
+
+  test('rejects any warmup response that is not the exact non-retryable API error', () => {
+    const request = mobileE2EPostAuthenticationWarmupRequests(manifest())[0];
+    expect(request).toBeDefined();
+    const canonical = {
+      code: 'UNAUTHENTICATED',
+      message: 'A current synthetic session is required.',
+      requestId: '15000000-0000-4000-8000-000000000032',
+      retryable: false,
+      fieldErrors: [],
+    };
+    expect(() =>
+      assertMobileE2EPostAuthenticationWarmupRejection(
+        request!,
+        401,
+        canonical,
+      ),
+    ).not.toThrow();
+    for (const [status, payload] of [
+      [200, canonical],
+      [400, canonical],
+      [401, { ...canonical, code: 'FORBIDDEN' }],
+      [401, { ...canonical, retryable: true }],
+      [401, { ...canonical, fieldErrors: [{ path: [], message: 'drift' }] }],
+      [401, { code: 'UNAUTHENTICATED' }],
+    ] as const) {
+      expect(() =>
+        assertMobileE2EPostAuthenticationWarmupRejection(
+          request!,
+          status,
+          payload,
+        ),
+      ).toThrow();
+    }
+  });
+
+  test('pins every credential-free rejection before session or capability execution', async () => {
+    const [
+      oidcStart,
+      devices,
+      refresh,
+      mobileStart,
+      eventTypes,
+      events,
+      eventRoom,
+    ] = await Promise.all([
+      readFile(
+        new URL(
+          '../../server/app/api/auth/mobile/oidc/start/route.ts',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(
+        new URL('../../server/app/api/devices/_lib/http.ts', import.meta.url),
+        'utf8',
+      ),
+      readFile(
+        new URL('../../server/app/api/auth/refresh/route.ts', import.meta.url),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          '../../server/app/api/mobile/start/_lib/http.ts',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          '../../server/app/(admin)/event-types/api/route.ts',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(
+        new URL('../../server/app/api/events/_lib/http.ts', import.meta.url),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          '../../server/app/(app)/events/[id]/api/route.ts',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ]);
+    const expectInOrder = (
+      source: string,
+      sentinels: readonly string[],
+    ): void => {
+      let previous = -1;
+      for (const sentinel of sentinels) {
+        const index = source.indexOf(sentinel, previous + 1);
+        expect(index).toBeGreaterThan(previous);
+        previous = index;
+      }
+    };
+
+    expectInOrder(
+      oidcStart.match(/export async function POST[\s\S]+$/u)?.[0] ?? '',
+      ['MobileOidcStartRequestSchema.parse', 'beginGoogleMobileOidcSignIn'],
+    );
+    expectInOrder(
+      devices.match(
+        /async function executeHumanDeviceRoute[\s\S]+?(?=export function handleListMyDevices)/u,
+      )?.[0] ?? '',
+      [
+        'resolvedRuntime.resolveInvocation',
+        'parseMutationMetadata(request)',
+        'resolvedRuntime.capabilities.execute',
+      ],
+    );
+    expectInOrder(
+      refresh.match(/export async function POST[\s\S]+$/u)?.[0] ?? '',
+      [
+        'await parseEmptyInput(request)',
+        'readPresentedSessionCredential',
+        'executeRefreshSessionCapability',
+      ],
+    );
+    expectInOrder(
+      mobileStart.match(
+        /export async function handleListMobileStartFacilities[\s\S]+?(?=\/\*\* Creates)/u,
+      )?.[0] ?? '',
+      ['runtime.authenticateQuery', 'runtime.executeFacilities'],
+    );
+    expectInOrder(
+      eventTypes.match(
+        /export async function GET[\s\S]+?(?=export async function POST)/u,
+      )?.[0] ?? '',
+      ['authenticateSessionRequest', 'executeListEventTypesCapability'],
+    );
+    expectInOrder(
+      events.match(
+        /async function executeEventRoute[\s\S]+?(?=export async function handleListEvents)/u,
+      )?.[0] ?? '',
+      [
+        'parseMutationHeaders(request)',
+        'resolvedRuntime.resolveInvocation',
+        'resolvedRuntime.capabilities.execute',
+      ],
+    );
+    expectInOrder(
+      eventRoom.match(
+        /async function handleTimelineQuery[\s\S]+?(?=async function handleMutation)/u,
+      )?.[0] ?? '',
+      [
+        'authenticateSessionRequest',
+        'getDefaultEventRoomCapabilityRuntime().execute',
+      ],
     );
   });
 

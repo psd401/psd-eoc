@@ -18,6 +18,8 @@ import {
   sep,
 } from 'node:path';
 
+import { ApiErrorSchema, type ApiErrorCode } from '@psd-eoc/contracts';
+
 import {
   MobileRuntimeManifestSchema,
   requireMobileRuntimeEnvironment,
@@ -149,6 +151,19 @@ export interface MobileE2EEnrollmentWarmupRequest {
   readonly headers: Readonly<Record<string, string>>;
   readonly body: '{}';
   readonly expectedStatus: 400;
+}
+
+export interface MobileE2EPostAuthenticationWarmupRequest {
+  readonly evidenceRoute: string;
+  readonly url: string;
+  readonly method: 'GET' | 'POST';
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body?: '{}';
+  readonly expectedStatus: 400 | 401;
+  readonly expectedCode: Extract<
+    ApiErrorCode,
+    'VALIDATION_ERROR' | 'UNAUTHENTICATED'
+  >;
 }
 
 export interface MobileE2EIosRuntimeSelection {
@@ -692,6 +707,127 @@ export function mobileE2EEnrollmentWarmupRequest(
     body: '{}',
     expectedStatus: 400,
   });
+}
+
+function mobileE2EWarmupHeaders(
+  method: 'GET' | 'POST',
+): Readonly<Record<string, string>> {
+  return Object.freeze({
+    Accept: 'application/json',
+    'Cache-Control': 'no-store',
+    ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+  });
+}
+
+/**
+ * Lists the exact post-enrollment route modules used by the native journeys.
+ * Every request is credential-free and must be rejected before a capability,
+ * session refresh, or mutation can execute.
+ */
+export function mobileE2EPostAuthenticationWarmupRequests(
+  manifestValue: unknown,
+): readonly MobileE2EPostAuthenticationWarmupRequest[] {
+  const manifest = parseMobileE2EManifest(manifestValue);
+  const request = (
+    input: Omit<MobileE2EPostAuthenticationWarmupRequest, 'headers'>,
+  ): MobileE2EPostAuthenticationWarmupRequest =>
+    Object.freeze({
+      ...input,
+      headers: mobileE2EWarmupHeaders(input.method),
+    });
+  return Object.freeze([
+    request({
+      evidenceRoute: 'mobile-start-facilities',
+      url: new URL(
+        '/api/mobile/start/facilities',
+        manifest.appOrigin,
+      ).toString(),
+      method: 'GET',
+      expectedStatus: 401,
+      expectedCode: 'UNAUTHENTICATED',
+    }),
+    request({
+      evidenceRoute: 'event-type-list',
+      url: new URL(
+        '/event-types/api?operation=list&enabled=true',
+        manifest.appOrigin,
+      ).toString(),
+      method: 'GET',
+      expectedStatus: 401,
+      expectedCode: 'UNAUTHENTICATED',
+    }),
+    request({
+      evidenceRoute: 'active-events',
+      url: new URL('/api/events', manifest.appOrigin).toString(),
+      method: 'GET',
+      expectedStatus: 401,
+      expectedCode: 'UNAUTHENTICATED',
+    }),
+    request({
+      evidenceRoute: 'push-token-unregister',
+      url: new URL(
+        '/api/devices/push-token/unregister',
+        manifest.appOrigin,
+      ).toString(),
+      method: 'POST',
+      body: '{}',
+      expectedStatus: 400,
+      expectedCode: 'VALIDATION_ERROR',
+    }),
+    request({
+      evidenceRoute: 'session-refresh',
+      url: new URL('/api/auth/refresh', manifest.appOrigin).toString(),
+      method: 'POST',
+      body: '{}',
+      expectedStatus: 401,
+      expectedCode: 'UNAUTHENTICATED',
+    }),
+    request({
+      evidenceRoute: 'join-event',
+      url: new URL(
+        `/api/events/${manifest.event.id}/join`,
+        manifest.appOrigin,
+      ).toString(),
+      method: 'POST',
+      body: '{}',
+      expectedStatus: 400,
+      expectedCode: 'VALIDATION_ERROR',
+    }),
+    request({
+      evidenceRoute: 'event-room',
+      url: new URL(
+        `/events/${manifest.event.id}/api`,
+        manifest.appOrigin,
+      ).toString(),
+      method: 'GET',
+      expectedStatus: 401,
+      expectedCode: 'UNAUTHENTICATED',
+    }),
+  ]);
+}
+
+/** Requires one canonical, non-retryable rejection from a warmup request. */
+export function assertMobileE2EPostAuthenticationWarmupRejection(
+  request: MobileE2EPostAuthenticationWarmupRequest,
+  status: number,
+  payload: unknown,
+): void {
+  if (status !== request.expectedStatus) {
+    throw new Error(
+      `The ${request.evidenceRoute} warmup returned an unexpected status.`,
+    );
+  }
+  const parsed = ApiErrorSchema.safeParse(payload);
+  if (
+    !parsed.success ||
+    parsed.data.code !== request.expectedCode ||
+    parsed.data.retryable ||
+    parsed.data.fieldErrors.length !== 0
+  ) {
+    throw new Error(
+      `The ${request.evidenceRoute} warmup did not return its canonical fail-closed rejection.`,
+    );
+  }
 }
 
 export function requireMatchingMobileE2ERunIds(

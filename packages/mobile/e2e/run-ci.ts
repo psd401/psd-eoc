@@ -17,12 +17,14 @@ import {
   MOBILE_E2E_APPLICATION_ID,
   acquireMobileE2EArtifactDirectory,
   acquireMobileE2ERunnerRoot,
+  assertMobileE2EPostAuthenticationWarmupRejection,
   createMobileE2ERunId,
   mobileE2EAndroidArchitectureArguments,
   mobileE2EAndroidBuildArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EDevClientUrl,
   mobileE2EEnrollmentWarmupRequest,
+  mobileE2EPostAuthenticationWarmupRequests,
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
@@ -514,6 +516,64 @@ async function warmMobileEnrollmentStartRoute(
   await writeFile(
     resolve(artifactRoot, `${platform}-oidc-start-warmup.txt`),
     `issue=32\nplatform=${platform}\nclassification=drill\nroster=synthetic\nproviders=mocked\nroute=mobile-oidc-start\nstatus=validation-rejected\n`,
+    { encoding: 'utf8', mode: 0o600 },
+  );
+}
+
+async function warmMobilePostAuthenticationRoutes(
+  platform: MobileE2EPlatform,
+  manifest: MobileRuntimeManifest,
+  artifactRoot: string,
+  cancellation: MobileE2ECancellation,
+): Promise<void> {
+  const completedRoutes: string[] = [];
+  for (const warmup of mobileE2EPostAuthenticationWarmupRequests(manifest)) {
+    cancellation.throwIfRequested();
+    let response: Response;
+    try {
+      response = await fetch(warmup.url, {
+        method: warmup.method,
+        headers: warmup.headers,
+        ...(warmup.body === undefined ? {} : { body: warmup.body }),
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS),
+      });
+    } catch {
+      throw new Error(
+        `The ${warmup.evidenceRoute} route did not respond during credential-free warmup.`,
+      );
+    }
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error(
+        `The ${warmup.evidenceRoute} route returned a malformed warmup response.`,
+      );
+    }
+    assertMobileE2EPostAuthenticationWarmupRejection(
+      warmup,
+      response.status,
+      payload,
+    );
+    completedRoutes.push(warmup.evidenceRoute);
+  }
+  cancellation.throwIfRequested();
+  await writeFile(
+    resolve(artifactRoot, `${platform}-post-auth-route-warmup.txt`),
+    [
+      'issue=32',
+      `platform=${platform}`,
+      'classification=drill',
+      'roster=synthetic',
+      'providers=mocked',
+      'credentials=omitted',
+      ...completedRoutes.map((route) => `route=${route}`),
+      'status=fail-closed-rejections-verified',
+      '',
+    ].join('\n'),
     { encoding: 'utf8', mode: 0o600 },
   );
 }
@@ -2264,6 +2324,12 @@ async function runPlatformSuite(
         artifacts.root,
         cancellation,
       );
+      await warmMobilePostAuthenticationRoutes(
+        platform,
+        manifest,
+        artifacts.root,
+        cancellation,
+      );
       await runAuthenticationSplit(
         platform,
         iosDevice.udid,
@@ -2412,6 +2478,12 @@ async function runPlatformSuite(
         'Sign in to PSD EOC',
       );
       await warmMobileEnrollmentStartRoute(
+        platform,
+        manifest,
+        artifacts.root,
+        cancellation,
+      );
+      await warmMobilePostAuthenticationRoutes(
         platform,
         manifest,
         artifacts.root,
