@@ -1018,9 +1018,12 @@ provider-processing evidence.
 
 ### Android Play alpha install
 
-- Status: **BLOCKED — no finished Android production build and no human install
-  evidence recorded**
-- Exact EAS build ID and AAB digest: `BLOCKED`
+- Status: **BLOCKED — the Android production build finished, but no Play upload
+  or human install evidence is recorded**
+- Exact EAS build ID and AAB digest:
+  `856e54b5-9abd-45a5-b0db-809a295da5ef`;
+  `sha256:015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463`;
+  source `577cd741f90c553043374f6df9b7a3cac64f1336`; version code `2`
 - Play `alpha` release/version code and active closed-test status: `BLOCKED`
 - Approved tester-group digest/count read-back: `BLOCKED`
 - Post-second-cold-launch embedded/update identity and matching routing
