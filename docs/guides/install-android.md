@@ -33,10 +33,12 @@ Installing the app does not start an incident, run a drill, or notify anyone.
    District. If it does not, stop and contact District Technology.
 4. Tap **Become a tester**, then open the Google Play link and tap **Install**.
    Enrollment can take a few minutes to appear.
-5. Open **PSD EOC** and sign in with your approved `@psd401.net` staff account.
-6. Follow the app's prompt to enroll this device and enable fingerprint, face,
-   or the device's secure unlock. PSD EOC does not create or store a separate
-   PIN.
+5. Only after District Technology gives the separate registration confirmation
+   above, open **PSD EOC** and sign in with your approved `@psd401.net` staff
+   account. Otherwise stop after **Install**.
+6. After that confirmation, follow the app's prompt to enroll this device and
+   enable fingerprint, face, or the device's secure unlock. PSD EOC does not
+   create or store a separate PIN.
 
 ![Three screen references showing the approved Play test link, joining the test, and PSD EOC installation](assets/issue-33/android-play-install.svg)
 
@@ -46,8 +48,9 @@ install an APK from email, chat, or an unofficial website.
 
 ## Allow the alert channel
 
-On Android 13 or later, tap **Allow** when PSD EOC asks to send notifications.
-Phone-maker wording varies. To check the settings manually:
+Only after the separate registration confirmation above, on Android 13 or
+later, tap **Allow** when PSD EOC asks to send notifications. Phone-maker
+wording varies. To check the settings manually:
 
 1. Open **Settings → Apps → PSD EOC → Notifications**.
 2. Turn on **Allow notifications**.

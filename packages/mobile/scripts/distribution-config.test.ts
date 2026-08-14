@@ -424,6 +424,13 @@ describe('mobile distribution configuration', () => {
         'Registration does not send a notification, but it does change provider and server registration state',
       );
       expect(compactGuide).toContain(
+        'Only after District Technology gives the separate registration confirmation above',
+      );
+      expect(compactGuide).toContain('Otherwise stop after **Install**');
+      expect(compactGuide).toContain(
+        'Only after the separate registration confirmation above',
+      );
+      expect(compactGuide).toContain(
         'complete these no-notification-send checks',
       );
       expect(guide).toContain(
@@ -477,8 +484,21 @@ describe('mobile distribution configuration', () => {
     const iosInstallAsset = repositoryText(
       'docs/guides/assets/issue-33/ios-testflight-install.svg',
     );
+    const androidInstallAsset = repositoryText(
+      'docs/guides/assets/issue-33/android-play-install.svg',
+    );
     expect(iosInstallAsset).toContain(
       `>Version ${appConfig.expo.version}</text>`,
     );
+    for (const installAsset of [iosInstallAsset, androidInstallAsset]) {
+      expect(installAsset).toContain('Stop after Install unless');
+      expect(installAsset).toContain('registration is separately');
+      expect(installAsset).toContain('approved by District Technology.');
+    }
+    expect(iosInstallAsset).not.toContain('Install and open');
+    expect(iosInstallAsset).not.toContain('After installation, tap Open');
+    expect(iosInstallAsset).not.toContain('sign in with your district');
+    expect(androidInstallAsset).not.toContain('Open PSD EOC, sign in');
+    expect(androidInstallAsset).not.toContain('allow notifications when asked');
   });
 });
