@@ -14,22 +14,14 @@ import {
   NON_ADMIN_FACILITIES_VIEW,
 } from './facilities-admin-view';
 import {
-  facilitiesAdminQueryRecoveryPath,
   facilitiesAdminStatusMessage,
   normalizeFacilitiesAdminCursorState,
+  redirectInvalidFacilitiesAdminQuery,
   type FacilitiesAdminSearchParameters,
 } from './facilities-page-state';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-/** Performs the bounded server-page redirect for invalid pagination input. */
-export function redirectInvalidFacilitiesAdminQuery(error: unknown): void {
-  const recoveryPath = facilitiesAdminQueryRecoveryPath(error);
-  if (recoveryPath !== null) {
-    redirect(recoveryPath);
-  }
-}
 
 export default async function FacilitiesPage({
   searchParams,

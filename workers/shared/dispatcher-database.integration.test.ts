@@ -32,7 +32,7 @@ import { migrateDatabase } from '../../packages/server/drizzle/migrate';
 import {
   createDrizzleDeliveryEvidenceStore,
   type AttemptEvidenceInput,
-} from '../../packages/server/app/api/internal/delivery-state/route';
+} from '../../packages/server/app/api/internal/delivery-state/runtime';
 import {
   createSqsDispatchBatchQueue,
   createDrizzleOutboxDispatcherStore,
