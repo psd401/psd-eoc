@@ -22,6 +22,7 @@ import {
   createMobileE2ERunId,
   mobileE2EAndroidArchitectureArguments,
   mobileE2EAndroidBuildArguments,
+  mobileE2EAndroidGradleWorkerArguments,
   mobileE2ECompletionMarkerFilename,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EDevClientUrl,
@@ -744,6 +745,7 @@ async function warmMobilePostAuthenticationRoutes(
   manifest: MobileRuntimeManifest,
   artifactRoot: string,
   cancellation: MobileE2ECancellation,
+  evidencePhase: 'initial' | 'event-join',
 ): Promise<void> {
   const completedRoutes: string[] = [];
   for (const warmup of mobileE2EPostAuthenticationWarmupRequests(manifest)) {
@@ -780,8 +782,12 @@ async function warmMobilePostAuthenticationRoutes(
     completedRoutes.push(warmup.evidenceRoute);
   }
   cancellation.throwIfRequested();
+  const evidenceFilename =
+    evidencePhase === 'initial'
+      ? `${platform}-post-auth-route-warmup.txt`
+      : `${platform}-event-join-route-warmup.txt`;
   await writeFile(
-    resolve(artifactRoot, `${platform}-post-auth-route-warmup.txt`),
+    resolve(artifactRoot, evidenceFilename),
     [
       'issue=32',
       `platform=${platform}`,
@@ -793,7 +799,7 @@ async function warmMobilePostAuthenticationRoutes(
       'status=fail-closed-rejections-verified',
       '',
     ].join('\n'),
-    { encoding: 'utf8', mode: 0o600 },
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
   );
 }
 
@@ -2579,6 +2585,7 @@ async function injectAndroidNotification(
       resolve(paths.copiedMobile, 'android/gradlew'),
       '--no-daemon',
       '--stacktrace',
+      ...mobileE2EAndroidGradleWorkerArguments(),
       '--init-script',
       resolve(paths.copiedMobile, androidInitScriptRelativePath),
       ...mobileE2EAndroidArchitectureArguments(),
@@ -2768,6 +2775,7 @@ async function runPlatformSuite(
         manifest,
         artifacts.root,
         cancellation,
+        'initial',
       );
       await runAuthenticationSplit(
         platform,
@@ -2816,6 +2824,17 @@ async function runPlatformSuite(
         'route',
         routeNotificationAnalysis,
       );
+      // The notification action and Vision proof take several minutes on a
+      // hosted simulator. Re-warm the credential-free loopback handlers at
+      // the exact join boundary so a Next dev cold compile cannot make the
+      // authenticated app truthfully fall back to its offline state.
+      await warmMobilePostAuthenticationRoutes(
+        platform,
+        manifest,
+        artifacts.root,
+        cancellation,
+        'event-join',
+      );
       // The same-request system action has now exercised the mounted listener
       // and production parser. iOS 26 leaves this protected shell on its
       // lobby, so join the exact run-specific active drill through the normal
@@ -2860,6 +2879,9 @@ async function runPlatformSuite(
       await ensureAndroidDevice(suiteAndroidSerial);
       androidPackagesWereAbsent = true;
       const apkPath = await buildAndroidApp(paths, artifacts.root);
+      // Native compilation can expose a hosted-emulator crash. Re-prove the
+      // exact local device before claiming or mutating its synthetic PIN.
+      await ensureAndroidDevice(suiteAndroidSerial);
       // Claim cleanup before the mutating command so a lost adb response
       // cannot leave the suite's synthetic PIN behind on the emulator.
       androidCredentialConfigured = true;
@@ -2923,6 +2945,7 @@ async function runPlatformSuite(
         manifest,
         artifacts.root,
         cancellation,
+        'initial',
       );
       await runAuthenticationSplit(
         platform,

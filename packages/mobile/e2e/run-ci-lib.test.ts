@@ -27,6 +27,7 @@ import {
   decideMobileE2EIosNotificationResponse,
   mobileE2EAndroidArchitectureArguments,
   mobileE2EAndroidBuildArguments,
+  mobileE2EAndroidGradleWorkerArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EArtifactPaths,
   mobileE2ECompletionMarkerFilename,
@@ -742,14 +743,21 @@ describe('issue #32 exact synthetic drill data', () => {
       'assertMobileE2EPostAuthenticationWarmupRejection(',
     );
     expect(warmup).toContain('status=fail-closed-rejections-verified');
+    expect(warmup).toContain("evidencePhase: 'initial' | 'event-join'");
+    expect(warmup).toContain('`${platform}-post-auth-route-warmup.txt`');
+    expect(warmup).toContain('`${platform}-event-join-route-warmup.txt`');
+    expect(warmup).toContain("flag: 'wx'");
     expect(
       runner.match(/await warmMobilePostAuthenticationRoutes\(/gu),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(runner).toMatch(
       /awaitIosFreshEnrollmentReady[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+enroll-loopback-oidc-ios/u,
     );
     expect(runner).toMatch(
       /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+enroll-loopback-oidc-android/u,
+    );
+    expect(runner).toMatch(
+      /executeIosNotificationAction\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+notification-event-room-ios-post-auth/u,
     );
   });
 
@@ -1447,7 +1455,7 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(notificationCenterFlow).not.toContain('start: 50%, 0%');
     expect(notificationCenterFlow).not.toContain('tapOn:');
     expect(postResponseFlow).toMatch(
-      /Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}[\s\S]+tapOn: 'Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}'[\s\S]+waitForAnimationToEnd/u,
+      /Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}[\s\S]+tapOn: 'Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}'[\s\S]+waitForAnimationToEnd:[\s\S]+visible: '\^Open event\$'[\s\S]+timeout: 60000/u,
     );
     expect(postResponseFlow).toContain(
       'production response listener and parser are exercised and logged',
@@ -1651,9 +1659,15 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(mobileE2EAndroidArchitectureArguments()).toEqual([
       '-PreactNativeArchitectures=x86_64',
     ]);
+    expect(mobileE2EAndroidGradleWorkerArguments()).toEqual([
+      '--max-workers',
+      '2',
+    ]);
     expect(mobileE2EAndroidBuildArguments()).toEqual([
       '--no-daemon',
       '--stacktrace',
+      '--max-workers',
+      '2',
       '-PreactNativeArchitectures=x86_64',
       'app:assembleDebug',
     ]);
@@ -1702,10 +1716,10 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(processGroupRetirement).toContain("'SIGKILL'");
     expect(runner).toContain('process.kill(-processGroupId, signal)');
     expect(runner).toMatch(
-      /async function injectAndroidNotification[\s\S]+\.\.\.mobileE2EAndroidArchitectureArguments\(\)[\s\S]+app:connectedDebugAndroidTest[\s\S]+killLinuxProcessTreeOnCompletion: true/u,
+      /async function injectAndroidNotification[\s\S]+\.\.\.mobileE2EAndroidGradleWorkerArguments\(\)[\s\S]+\.\.\.mobileE2EAndroidArchitectureArguments\(\)[\s\S]+app:connectedDebugAndroidTest[\s\S]+killLinuxProcessTreeOnCompletion: true/u,
     );
     expect(runner).toMatch(
-      /ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+const apkPath = await buildAndroidApp\(paths, artifacts\.root\);[\s\S]+androidCredentialConfigured = true[\s\S]+configureAndroidCredential\(suiteAndroidSerial\)/u,
+      /ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+const apkPath = await buildAndroidApp\(paths, artifacts\.root\);[\s\S]+ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+androidCredentialConfigured = true[\s\S]+configureAndroidCredential\(suiteAndroidSerial\)/u,
     );
     for (const forbidden of [
       'buildAndroidAppWithPausedEmulator',
@@ -1788,6 +1802,9 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(androidCiRunner).toContain('"$emulator_bin" -accel-check');
     expect(androidCiRunner).toContain('-accel on');
     expect(androidCiRunner).toContain('-no-snapshot-save');
+    expect(androidCiRunner).toContain('-gpu software');
+    expect(androidCiRunner).toContain('-feature -Vulkan');
+    expect(androidCiRunner).not.toContain('swiftshader_indirect');
     expect(androidCiRunner).toContain(
       'initial_process_group_id="$(ps -o pgid= -p "$emulator_pid" | tr -d \'[:space:]\')"',
     );

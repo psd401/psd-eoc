@@ -312,7 +312,8 @@ trap 'on_signal 143' TERM
   -accel on \
   -no-snapshot-save \
   -no-window \
-  -gpu swiftshader_indirect \
+  -gpu software \
+  -feature -Vulkan \
   -noaudio \
   -no-boot-anim \
   -camera-back none \

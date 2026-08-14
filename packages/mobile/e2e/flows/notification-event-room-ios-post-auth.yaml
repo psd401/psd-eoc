@@ -18,3 +18,9 @@ tags: [issue-32, synthetic-only, ios, notification, join]
 - tapOn: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
 - waitForAnimationToEnd:
     timeout: 5000
+# Do not ask the registered URL to open until the exact synthetic join has
+# completed. "Open event" is the app-owned result and cannot be produced by
+# the notification overlay or by an unrelated event.
+- extendedWaitUntil:
+    visible: '^Open event$'
+    timeout: 60000

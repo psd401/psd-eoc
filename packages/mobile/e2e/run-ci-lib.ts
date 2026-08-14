@@ -964,11 +964,17 @@ export function mobileE2EAndroidArchitectureArguments(): readonly string[] {
   return Object.freeze(['-PreactNativeArchitectures=x86_64']);
 }
 
+/** Leaves hosted-runner capacity for the already-booted Android emulator. */
+export function mobileE2EAndroidGradleWorkerArguments(): readonly string[] {
+  return Object.freeze(['--max-workers', '2']);
+}
+
 /** Builds only the ABI used by the issue #32 hosted Android emulator. */
 export function mobileE2EAndroidBuildArguments(): readonly string[] {
   return Object.freeze([
     '--no-daemon',
     '--stacktrace',
+    ...mobileE2EAndroidGradleWorkerArguments(),
     ...mobileE2EAndroidArchitectureArguments(),
     'app:assembleDebug',
   ]);
