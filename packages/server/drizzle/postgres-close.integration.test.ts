@@ -16,6 +16,8 @@ const PROBE_MODE_VALUE = 'isolated-loopback-close-probe';
 const RECONNECT_DELAY_MS = 250;
 const OBSERVATION_MS = 600;
 const CHILD_TIMEOUT_MS = 15_000;
+const AUDIT_OPERATION_TIMEOUT_MS = 4_000;
+const AUDIT_CLOSE_TIMEOUT_MS = 1_000;
 const isIsolatedProbe = process.env[PROBE_MODE_VARIABLE] === PROBE_MODE_VALUE;
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -63,12 +65,15 @@ function syntheticLoopbackDatabaseUrl(value: string | undefined): URL {
   }
 
   const databaseUrl = new URL(value);
-  const loopbackHosts = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
   const databaseName = databaseUrl.pathname.slice(1);
   if (
     !['postgres:', 'postgresql:'].includes(databaseUrl.protocol) ||
-    !loopbackHosts.has(databaseUrl.hostname) ||
-    !/(?:^|_)test(?:_|$)/u.test(databaseName)
+    !['127.0.0.1', '::1', '[::1]'].includes(databaseUrl.hostname) ||
+    databaseName !== 'psd_eoc_test' ||
+    databaseUrl.username !== 'psd_eoc_test' ||
+    databaseUrl.password.length === 0 ||
+    databaseUrl.search.length > 0 ||
+    databaseUrl.hash.length > 0
   ) {
     throw new Error('The close probe requires a loopback synthetic database.');
   }
@@ -689,49 +694,93 @@ async function auditChildSessions(
 ): Promise<void> {
   const audit = postgres(databaseUrl.toString(), {
     connect_timeout: 2,
-    connection: { application_name: `issue-130-parent-audit-${randomUUID()}` },
+    connection: {
+      application_name: `issue-130-${runId}-parent-audit`,
+      statement_timeout: AUDIT_OPERATION_TIMEOUT_MS / 2,
+    },
     max: 1,
   });
+  let closePromise: Promise<void> | undefined;
+  const closeImmediately = (): Promise<void> => {
+    closePromise ??= Promise.resolve(audit.end({ timeout: 0 }));
+    return closePromise;
+  };
+  const withDeadline = async <Result>(
+    operation: Promise<Result>,
+    milliseconds: number,
+    onDeadline: () => void,
+  ): Promise<Result> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            onDeadline();
+            reject(new Error('The isolated child residue audit timed out.'));
+          }, milliseconds);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
   let primaryError: unknown;
   try {
-    const prefix = `issue-130-${runId}-%`;
-    const survivingBackends = await audit<{ pid: number }[]>`
-      select pid::integer as pid
-      from pg_stat_activity
-      where application_name like ${prefix}
-      order by pid
-    `;
-    for (const backend of survivingBackends) {
-      const [termination] = await audit<{ terminated: boolean }[]>`
-        select pg_terminate_backend(${backend.pid}) as terminated
-      `;
-      if (termination?.terminated !== true) {
-        throw new Error(
-          'An exact child backend could not be terminated during audit cleanup.',
-        );
-      }
-    }
-    await waitForCondition(
-      async () => {
-        const [row] = await audit<{ count: number }[]>`
-          select count(*)::integer as count
+    await withDeadline(
+      (async () => {
+        const prefix = `issue-130-${runId}-%`;
+        const survivingBackends = await audit<{ pid: number }[]>`
+          select pid::integer as pid
           from pg_stat_activity
           where application_name like ${prefix}
+            and pid <> pg_backend_pid()
+          order by pid
         `;
-        return row?.count === 0;
+        for (const backend of survivingBackends) {
+          const [termination] = await audit<{ terminated: boolean }[]>`
+            select pg_terminate_backend(${backend.pid}) as terminated
+          `;
+          if (termination?.terminated !== true) {
+            throw new Error(
+              'An exact child backend could not be terminated during audit cleanup.',
+            );
+          }
+        }
+        await waitForCondition(
+          async () => {
+            const [row] = await audit<{ count: number }[]>`
+              select count(*)::integer as count
+              from pg_stat_activity
+              where application_name like ${prefix}
+                and pid <> pg_backend_pid()
+            `;
+            return row?.count === 0;
+          },
+          globalThis.setTimeout,
+          'the isolated child PostgreSQL sessions to close',
+          2_000,
+        );
+      })(),
+      AUDIT_OPERATION_TIMEOUT_MS,
+      () => {
+        void closeImmediately().catch(() => undefined);
       },
-      globalThis.setTimeout,
-      'the isolated child PostgreSQL sessions to close',
-      2_000,
     );
   } catch (error) {
     primaryError = error;
   }
-  const cleanup = await Promise.allSettled([audit.end({ timeout: 1 })]);
-  const cleanupErrors = cleanup.flatMap((result) =>
-    result.status === 'rejected' ? [result.reason] : [],
-  );
-  if (primaryError !== undefined || cleanupErrors.length > 0) {
+  let closeError: unknown;
+  try {
+    await withDeadline(
+      closeImmediately(),
+      AUDIT_CLOSE_TIMEOUT_MS,
+      () => undefined,
+    );
+  } catch (error) {
+    closeError = error;
+  }
+  if (primaryError !== undefined || closeError !== undefined) {
     throw new Error('The isolated child PostgreSQL residue audit failed.');
   }
 }
