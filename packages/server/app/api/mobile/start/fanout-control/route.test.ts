@@ -9,7 +9,7 @@ import {
 import {
   handleGetMobileFanoutControl,
   type MobileFanoutControlRouteRuntime,
-} from './route';
+} from './runtime';
 
 const IDS = {
   user: '52000000-0000-4000-8000-000000000001',

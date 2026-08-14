@@ -13,7 +13,7 @@ import {
   verifyFanoutControlWorkerToken,
   type FanoutAuthorizationCapabilityContext,
   type FanoutControlRouteRuntime,
-} from './route';
+} from './runtime';
 
 const TOKEN = 'synthetic-fanout-worker-token-000001';
 const INTENT = '00000000-0000-4000-8000-000000000009';

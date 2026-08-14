@@ -39,7 +39,7 @@ import {
   createDrizzleSesWebhookStore,
   createSesWebhookRouteHandler,
   type SesWebhookStore,
-} from '../../packages/server/app/api/webhooks/ses/route';
+} from '../../packages/server/app/api/webhooks/ses/runtime';
 import {
   createDrizzleStaleRosterReportStoreFromTransaction,
   createGetStaleRosterReportHandler,

@@ -59,7 +59,7 @@ import { migrateDatabase } from '../../../drizzle/migrate';
 import {
   createDrizzleDeliveryEvidenceStore,
   type AttemptEvidenceInput,
-} from '../internal/delivery-state/route';
+} from '../internal/delivery-state/runtime';
 import type { TrustedCapabilityInvocation } from '../../../lib/capabilities/engine';
 import {
   createDrizzleDeviceCapabilityStore,
