@@ -44,6 +44,7 @@ const BROWSER_GATE_CLEANUP_BACKSTOP_MS = 2 * 60_000;
 const BROWSER_GATE_TIMEOUT_MS =
   PLAYWRIGHT_CHILD_TIMEOUT_MS +
   PLAYWRIGHT_CHILD_TERMINATION_GRACE_MS +
+  PLAYWRIGHT_CHILD_TERMINATION_GRACE_MS +
   PLAYWRIGHT_OUTPUT_DRAIN_TIMEOUT_MS +
   BROWSER_GATE_CLEANUP_BACKSTOP_MS;
 const INTERRUPTED_PARENT_CLEANUP_TIMEOUT_MS = 30_000;
@@ -81,7 +82,7 @@ interface ChildOutputResult {
 
 interface ChildOutputCapture {
   readonly completion: Promise<ChildOutputResult>;
-  cancel(reason: string): Promise<void>;
+  cancel(reason: string): ChildOutputResult;
 }
 
 interface ExactGateCleanupOperations {
@@ -230,9 +231,10 @@ function captureChildOutput(
 ): ChildOutputCapture {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
+  let text = '';
   let cancellationError: string | null = null;
+  let completedResult: ChildOutputResult | undefined;
   const completion = (async (): Promise<ChildOutputResult> => {
-    let text = '';
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -251,12 +253,26 @@ function captureChildOutput(
     } finally {
       reader.releaseLock();
     }
-  })();
+  })().then((result) => {
+    // The resolved snapshot lets a mixed complete/stuck pair report only the
+    // pipe that actually exceeded the drain deadline.
+    completedResult = result;
+    return result;
+  });
   return {
     completion,
-    async cancel(reason) {
+    cancel(reason) {
+      if (completedResult !== undefined) return completedResult;
       cancellationError = `${label} capture canceled: ${reason}`;
-      await reader.cancel(reason);
+      // A hostile or descendant-held stream may never settle cancellation.
+      // Request it for resource release, but return the bounded evidence now
+      // so exact run/database cleanup cannot be held behind that promise.
+      try {
+        void reader.cancel(reason).catch(() => undefined);
+      } catch {
+        // The bounded cancellation fact below remains the truthful outcome.
+      }
+      return { text, error: cancellationError };
     },
   };
 }
@@ -280,8 +296,7 @@ async function drainChildOutput(
   if (outcome.kind === 'complete') return outcome.results;
 
   const reason = `pipe remained open ${timeoutMs} ms after child exit`;
-  await Promise.allSettled(captures.map((capture) => capture.cancel(reason)));
-  return completion;
+  return [captures[0].cancel(reason), captures[1].cancel(reason)];
 }
 
 async function waitForPlaywrightChild(
@@ -312,23 +327,63 @@ async function waitForPlaywrightChild(
     childWaitError = error instanceof Error ? error : new Error(String(error));
     if (child.exitCode === null) child.kill('SIGTERM');
     let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+    let forcedTerminationDeadline: ReturnType<typeof setTimeout> | undefined;
+    let forcedTerminationSent = false;
     if (child.exitCode === null) {
       forcedTermination = setTimeout(() => {
-        if (child.exitCode === null) child.kill('SIGKILL');
+        if (child.exitCode === null) {
+          forcedTerminationSent = true;
+          child.kill('SIGKILL');
+        }
       }, limits.terminationGraceMs);
     }
+    let terminationOutcome:
+      | Readonly<{ kind: 'exit'; exitCode: number }>
+      | Readonly<{ kind: 'timeout' }>
+      | undefined;
+    let terminationFailure: unknown;
     try {
-      // Keep forced termination armed until the exact owned child exits. Pipe
-      // capture is deliberately non-rejecting and cannot cancel this wait.
-      exitCode = await child.exited;
+      terminationOutcome = await Promise.race([
+        child.exited.then((code) => ({
+          kind: 'exit' as const,
+          exitCode: code,
+        })),
+        new Promise<Readonly<{ kind: 'timeout' }>>((resolve) => {
+          forcedTerminationDeadline = setTimeout(
+            () => resolve({ kind: 'timeout' }),
+            limits.terminationGraceMs * 2,
+          );
+        }),
+      ]);
     } catch (terminationError) {
-      throw new AggregateError(
-        [childWaitError, terminationError],
-        'Event-room Playwright child failed and could not be cleanly awaited.',
-      );
+      terminationFailure = terminationError;
     } finally {
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+      if (forcedTerminationDeadline !== undefined) {
+        clearTimeout(forcedTerminationDeadline);
+      }
     }
+    if (terminationFailure !== undefined) {
+      throw new AggregateError(
+        [childWaitError, terminationFailure],
+        childWaitError.message,
+      );
+    }
+    if (terminationOutcome?.kind !== 'exit') {
+      if (child.exitCode === null && !forcedTerminationSent) {
+        child.kill('SIGKILL');
+      }
+      throw new AggregateError(
+        [
+          childWaitError,
+          new Error(
+            `Event-room Playwright child exit remained unsettled ${limits.terminationGraceMs} ms after forced termination.`,
+          ),
+        ],
+        childWaitError.message,
+      );
+    }
+    exitCode = terminationOutcome.exitCode;
   } finally {
     if (deadline !== undefined) clearTimeout(deadline);
   }
@@ -555,6 +610,74 @@ describe('event-room Playwright gate', () => {
     expect(signals).toEqual([]);
   });
 
+  test('a never-settling output cancellation cannot block exact cleanup', async () => {
+    const context = resolveEventRoomPlaywrightRunContext(
+      'postgresql://synthetic:synthetic@localhost:5432/psd_eoc_test',
+      { NODE_ENV: 'test' },
+    );
+    let cancellationRequested = false;
+    const signals: NodeJS.Signals[] = [];
+    const child: PlaywrightChildControl = {
+      exitCode: 0,
+      exited: Promise.resolve(0),
+      stdout: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('partial output'));
+        },
+        cancel() {
+          cancellationRequested = true;
+          return new Promise<void>(() => undefined);
+        },
+      }),
+      stderr: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      kill(signal) {
+        signals.push(signal);
+      },
+    };
+    const cleanupOrder: string[] = [];
+
+    try {
+      const result = await Promise.race([
+        waitForPlaywrightChildAndClean(
+          context,
+          () => child,
+          {
+            childTimeoutMs: 1_000,
+            terminationGraceMs: 100,
+            outputDrainTimeoutMs: 20,
+          },
+          {
+            async stopServerAndRemoveRun() {
+              cleanupOrder.push('run-cleaned');
+            },
+            async dropDatabase() {
+              cleanupOrder.push('database-cleaned');
+            },
+          },
+        ),
+        delay(500).then(() => {
+          throw new Error(
+            'Never-settling output cancellation blocked cleanup.',
+          );
+        }),
+      ]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.outputErrors).toEqual([
+        'stdout capture canceled: pipe remained open 20 ms after child exit',
+      ]);
+      expect(cancellationRequested).toBe(true);
+      expect(signals).toEqual([]);
+      expect(cleanupOrder).toEqual(['run-cleaned', 'database-cleaned']);
+    } finally {
+      releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+    }
+  });
+
   test('a descendant-held output pipe is bounded and canceled only after child exit', async () => {
     const context = resolveEventRoomPlaywrightRunContext(
       'postgresql://synthetic:synthetic@localhost:5432/psd_eoc_test',
@@ -619,6 +742,76 @@ describe('event-room Playwright gate', () => {
       );
       expect(exitedBeforeCancel).toBe(true);
       expect(signals).toEqual(['SIGTERM']);
+      expect(cleanupOrder).toEqual(['run-cleaned', 'database-cleaned']);
+    } finally {
+      releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+    }
+  });
+
+  test('a never-settling child exit is bounded after forced termination and still cleans', async () => {
+    const context = resolveEventRoomPlaywrightRunContext(
+      'postgresql://synthetic:synthetic@localhost:5432/psd_eoc_test',
+      { NODE_ENV: 'test' },
+    );
+    const signals: NodeJS.Signals[] = [];
+    const child: PlaywrightChildControl = {
+      exitCode: null,
+      exited: new Promise<number>(() => undefined),
+      stdout: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      stderr: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      kill(signal) {
+        signals.push(signal);
+      },
+    };
+    const cleanupOrder: string[] = [];
+    let received: unknown;
+
+    try {
+      await Promise.race([
+        waitForPlaywrightChildAndClean(
+          context,
+          () => child,
+          {
+            childTimeoutMs: 20,
+            terminationGraceMs: 20,
+            outputDrainTimeoutMs: 20,
+          },
+          {
+            async stopServerAndRemoveRun() {
+              cleanupOrder.push('run-cleaned');
+            },
+            async dropDatabase() {
+              cleanupOrder.push('database-cleaned');
+            },
+          },
+        ).catch((error) => {
+          received = error;
+        }),
+        delay(500).then(() => {
+          throw new Error('Never-settling child exit blocked cleanup.');
+        }),
+      ]);
+
+      expect(received).toBeInstanceOf(AggregateError);
+      const aggregate = received as AggregateError;
+      expect(aggregate.message).toBe(
+        'Event-room Playwright child exceeded 20 ms.',
+      );
+      expect((aggregate.errors[0] as Error).message).toBe(
+        'Event-room Playwright child exceeded 20 ms.',
+      );
+      expect((aggregate.errors[1] as Error).message).toBe(
+        'Event-room Playwright child exit remained unsettled 20 ms after forced termination.',
+      );
+      expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
       expect(cleanupOrder).toEqual(['run-cleaned', 'database-cleaned']);
     } finally {
       releaseEventRoomPlaywrightPortLeaseIfOwned(context);
