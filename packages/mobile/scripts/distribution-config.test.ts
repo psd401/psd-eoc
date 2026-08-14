@@ -36,89 +36,61 @@ describe('mobile distribution configuration', () => {
     expect(easConfig.build.production.autoIncrement).toBe(true);
     expect(easConfig.build.production.distribution).toBe('store');
     expect(easConfig.build.production.credentialsSource).toBe('remote');
+    expect(easConfig.build.production.environment).toBe('production');
   });
 
-  test('isolates ordinary preview, OTA verification, and production updates', () => {
-    expect(easConfig.build.preview.channel).toBe('preview');
-    expect(easConfig.build.preview.environment).toBe('preview');
-    expect(easConfig.build['ota-preview'].channel).toBe('ota-verification');
-    expect(easConfig.build['ota-preview'].environment).toBe('production');
-    expect(easConfig.build['ota-preview'].distribution).toBe('internal');
-    expect(easConfig.build.production.channel).toBe('production');
-    expect(easConfig.build.production.environment).toBe('production');
-    expect(
-      new Set([
-        easConfig.build.preview.channel,
-        easConfig.build['ota-preview'].channel,
-        easConfig.build.production.channel,
-      ]).size,
-    ).toBe(3);
-
+  test('ships app/runtime 1.0.1 as embedded-only with no OTA routing', () => {
+    expect(appConfig.expo.version).toBe('1.0.1');
+    expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(appConfig.expo.updates).toEqual({
-      url: `https://u.expo.dev/${EAS_PROJECT_ID}`,
-      checkAutomatically: 'ON_LOAD',
-      fallbackToCacheTimeout: 0,
+      enabled: false,
+      checkAutomatically: 'NEVER',
       useEmbeddedUpdate: true,
       disableAntiBrickingMeasures: false,
     });
     expect(appConfig.expo.extra.eas.projectId).toBe(EAS_PROJECT_ID);
-    expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
-    expect(packageManifest.dependencies['expo-updates']).toBe('~57.0.13');
-    expect(packageManifest.dependencies['expo-application']).toBe('~57.0.2');
+    expect(JSON.stringify(appConfig.expo.updates)).not.toContain('u.expo.dev');
+
+    expect(Object.keys(easConfig.build).sort()).toEqual([
+      'development',
+      'preview',
+      'production',
+    ]);
+    expect(easConfig.build.preview.environment).toBe('preview');
+    for (const profile of Object.values(easConfig.build)) {
+      expect('channel' in profile).toBe(false);
+    }
+    expect(JSON.stringify(easConfig)).not.toContain('ota-preview');
+    expect(JSON.stringify(easConfig)).not.toContain('ota-verification');
   });
 
-  test('stages Android closed-test submissions as unreleased drafts', () => {
-    expect(easConfig.submit.production.android).toEqual({
-      track: 'alpha',
-      releaseStatus: 'draft',
-      changesNotSentForReview: true,
+  test('pins the complete current Expo SDK 57 compatibility patch set', () => {
+    expect(packageManifest.dependencies).toMatchObject({
+      expo: '~57.0.13',
+      'expo-auth-session': '~57.0.7',
+      'expo-constants': '~57.0.11',
+      'expo-dev-client': '~57.0.12',
+      'expo-file-system': '~57.0.4',
+      'expo-image-picker': '~57.0.10',
+      'expo-linking': '~57.0.6',
+      'expo-location': '~57.0.10',
+      'expo-notifications': '~57.0.11',
+      'expo-router': '~57.0.13',
+      'expo-updates': '~57.0.14',
     });
+    expect(packageManifest.dependencies['expo-application']).toBe('~57.0.2');
+    expect(packageManifest.scripts['expo:check']).toBe('expo install --check');
+    expect(JSON.stringify(packageManifest)).not.toContain('EXPO_OFFLINE');
+    expect(JSON.stringify(packageManifest)).not.toContain('install.exclude');
   });
 
-  test('never auto-submits a build or auto-assigns a TestFlight group', () => {
-    const keys = collectObjectKeys(easConfig);
-
-    expect(keys.has('autoSubmit')).toBe(false);
-    expect(keys.has('groups')).toBe(false);
-    expect(easConfig.submit.production.ios).toEqual({});
-
-    const rootManifest = JSON.parse(
-      repositoryText('package.json'),
-    ) as typeof packageManifest;
-    const commands = [
-      ...Object.values(packageManifest.scripts),
-      ...Object.values(rootManifest.scripts),
-    ];
-    for (const directory of ['.github/workflows', '.eas/workflows']) {
-      const absoluteDirectory = resolve(REPOSITORY_ROOT, directory);
-      if (!existsSync(absoluteDirectory)) continue;
-      for (const entry of readdirSync(absoluteDirectory, {
-        withFileTypes: true,
-      })) {
-        if (entry.isFile()) {
-          commands.push(repositoryText(`${directory}/${entry.name}`));
-        }
-      }
-    }
-
-    for (const command of commands) {
-      expect(command).not.toMatch(
-        /\b(?:eas|eas-cli(?:@[^\s"']+)?)\s+(?:submit|update(?::[a-z-]+)?)\b/u,
-      );
-      expect(command).not.toMatch(/--auto-submit\b/u);
-      expect(command).not.toMatch(
-        /(?:^|\n)\s*(?:-\s*)?type:\s*submit(?:\s|$)/u,
-      );
-    }
-  });
-
-  test('records the human-reviewed OTA and store-build classification policy', () => {
+  test('records fail-closed current and prospective remote-update policy', () => {
     expect(packageManifest.psdEocReleasePolicy).toEqual({
-      otaAllowedChangeKinds: [
-        'copy-layout-style',
-        'javascript-bugfix-existing-contract',
-      ],
+      remoteUpdatesEnabledInCurrentRuntime: false,
+      remoteUpdatesRequireCodeSigning: true,
+      remoteUpdatesReenableRequiresNewAppVersionAndStoreBuild: true,
       storeBuildRequiredChangeKinds: [
+        'all-current-runtime-changes',
         'push',
         'auth',
         'native',
@@ -129,47 +101,63 @@ describe('mobile distribution configuration', () => {
         'real-drill-classification',
         'live-provider-gate',
       ],
-      otaRequiresDedicatedVerificationChannel: true,
-      otaVerificationBuildProfile: 'ota-preview',
-      otaVerificationChannel: 'ota-verification',
-      otaPublishEnvironment: 'production',
       safetyPathStoreBuildRequiresNewAppVersion: true,
       storeSubmissionRequiresHumanApproval: true,
     });
   });
 
-  test('keeps release evidence blocked until humans prove distribution', () => {
-    const release = repositoryText('docs/runbooks/release.md');
-
-    expect(release).toContain('no human install evidence recorded');
-    expect(release).toContain('walkthrough not recorded');
-    expect(release).toContain('product-owner sign-off not recorded');
-    expect(release).toContain('EXPO_PUBLIC_PSD_EOC_API_BASE_URL');
-    expect(release).toContain('https://eoc.psd401.net');
-    expect(release).toContain('a conflicting account-level value');
-    expect(release).toContain('--channel ota-verification');
-    expect(release).toContain('after the second cold launch');
-    expect(release).toContain('adoption remains `unknown`');
-    expect(release).not.toContain('--channel preview');
-    expect(release).toMatch(/blocks\s+non-interactive submission/u);
-    expect(release).toMatch(
-      /do not use interactive submission to create or select an app\s+implicitly/u,
-    );
-    expect(release).toContain('Never use `--latest`, `--auto-submit`');
-    expect(release).toContain('Start-event confirmation');
-    expect(release).toContain(
-      'New store build and app version plus safety-path evidence',
-    );
+  test('stages Android closed-test submissions as unreleased drafts', () => {
+    expect(easConfig.submit.production.android).toEqual({
+      track: 'alpha',
+      releaseStatus: 'draft',
+      changesNotSentForReview: true,
+    });
   });
 
-  test('fails closed on EAS environment, routing, credentials, and internal access', () => {
+  test('never auto-submits, auto-exposes, or publishes a remote update', () => {
+    const keys = collectObjectKeys(easConfig);
+
+    expect(keys.has('autoSubmit')).toBe(false);
+    expect(keys.has('groups')).toBe(false);
+    expect(easConfig.submit.production.ios).toEqual({});
+
+    const rootManifest = JSON.parse(
+      repositoryText('package.json'),
+    ) as typeof packageManifest;
+    const executableText = [
+      ...Object.values(packageManifest.scripts),
+      ...Object.values(rootManifest.scripts),
+    ];
+    for (const directory of ['.github/workflows', '.eas/workflows']) {
+      const absoluteDirectory = resolve(REPOSITORY_ROOT, directory);
+      if (!existsSync(absoluteDirectory)) continue;
+      for (const entry of readdirSync(absoluteDirectory, {
+        withFileTypes: true,
+      })) {
+        if (entry.isFile()) {
+          executableText.push(repositoryText(`${directory}/${entry.name}`));
+        }
+      }
+    }
+
+    for (const command of executableText) {
+      expect(command).not.toMatch(
+        /\b(?:eas|eas-cli(?:@[^\s"']+)?)\s+(?:submit|update(?::[a-z-]+)?)\b/u,
+      );
+      expect(command).not.toMatch(/--auto-submit\b/u);
+      expect(command).not.toMatch(
+        /(?:^|\n)\s*(?:-\s*)?type:\s*submit(?:\s|$)/u,
+      );
+    }
+  });
+
+  test('documents exact build preflight and keeps every external gate blocked', () => {
     const release = repositoryText('docs/runbooks/release.md');
-    const readme = repositoryText('packages/mobile/README.md');
     const normalizedRelease = release.replace(/\\\n\s*/gu, ' ');
     const compactRelease = release.replace(/\s+/gu, ' ');
     const releaseBuildCommands = normalizedRelease
       .split('\n')
-      .filter((line) => line.includes('bunx eas-cli@21.7.0 build --platform'));
+      .filter((line) => line.includes('build --platform'));
 
     expect(release).toContain(
       'env:list production --scope project --format long',
@@ -184,312 +172,104 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       'test "$EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED" = "true"',
     );
+    expect(compactRelease).toContain('no account-scope value with that name');
     expect(compactRelease).toContain(
-      'exactly one plaintext string `EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED` at project scope with the exact value `true`',
+      'BUILD approval alone does not authorize installation, sign-in, registration, provider testing, or any notification',
     );
-    expect(compactRelease).toContain(
-      'no account-scope variable of the same name',
-    );
-    expect(compactRelease).toContain(
-      'makes the installed binary capable of registration',
-    );
-    expect(compactRelease).toContain(
-      'BUILD approval alone does not authorize installation, sign-in, registration, a provider test, or a notification',
-    );
-    for (const command of [
-      'channel:list --limit 25',
-      'branch:list --limit 50',
-      'channel:view production',
-      'branch:view production',
-      'update:list --branch production --platform ios',
-      'update:list --branch production --platform android',
-      "update:view 'EACH_COMPATIBLE_UPDATE_GROUP_ID' --json",
-    ]) {
-      expect(normalizedRelease).toContain(command);
-    }
-    expect(release).toContain('complete, paginated inventory');
-    expect(compactRelease).toContain(
-      'A separately previewed BUILD may create and link the same-name channel and branch only when both are absent',
-    );
-    expect(compactRelease).toContain(
-      "A missing channel with an existing same-name branch is partial state: linking it could expose that branch's updates to already installed clients",
-    );
-    expect(compactRelease).toContain(
-      'If the channel exists, it must already map to exactly one existing same-name branch; BUILD may not repair it',
-    );
-    expect(compactRelease).toContain(
-      'When neither the `production` channel nor same-name branch exists, EAS Build may create and link that pair',
-    );
-    expect(compactRelease).toContain(
-      'A missing channel with an existing same-name branch blocks BUILD',
-    );
-    expect(compactRelease).toContain(
-      "linking it can expose that branch's updates to installed production-channel clients and requires a separate routing/exposure review",
-    );
-    expect(release).toContain('After BUILD, even after a refusal or partial');
-
-    expect(releaseBuildCommands).toHaveLength(4);
-    for (const command of releaseBuildCommands) {
-      expect(command).toContain('--non-interactive --freeze-credentials');
-    }
-    expect(release).toContain('Unauthenticated access to internal builds');
-    expect(release).toContain('is disabled');
-    expect(compactRelease).toContain(
-      'named, bounded staff-only technical audience',
-    );
-    for (const profile of ['`development`', '`preview`', '`ota-preview`']) {
-      expect(compactRelease).toContain(profile);
-    }
-    for (const evidence of [
-      'audience digest and count',
-      'access expiry',
-      'planned removal time',
-      'post-removal read-back',
-    ]) {
-      expect(compactRelease).toContain(evidence);
-    }
-    expect(compactRelease).toContain('A URL alone is never privacy');
-    expect(compactRelease).toContain('launched embedded/update identity');
-    expect(compactRelease).toContain(
-      'provider inventory alone is not device-adoption',
-    );
-
-    for (const profile of [
-      '`development`:',
-      '`preview`:',
-      '`ota-preview`:',
-      '`production`:',
-    ]) {
-      expect(readme).toContain(profile);
-    }
-    expect(readme).toContain(
-      'Ordinary `preview` builds are prohibited for production-environment OTA',
-    );
-    expect(normalizedRelease).toMatch(
-      /env -u EXPO_PUBLIC_PSD_EOC_API_BASE_URL\s+-u EXPO_PUBLIC_PSD_EOC_PUSH_REGISTRATION_ENABLED\s+bunx eas-cli@21\.7\.0 env:exec production/u,
-    );
-    expect(release).toContain('does not reliably apply `--freeze-credentials`');
     expect(release).toContain(
       'build:version:get --platform ios --profile production --json',
     );
     expect(release).toContain(
       'build:version:get --platform android --profile production --json',
     );
-    expect(release).toContain(
-      'build:version:get --platform ios --profile ota-preview --json',
-    );
-    expect(release).toContain(
-      'build:version:get --platform android --profile ota-preview --json',
-    );
-    expect(release).toContain(
-      'config --platform ios --profile ota-preview --json',
-    );
-    expect(release).toContain(
-      'config --platform android --profile ota-preview --json',
-    );
-    expect(compactRelease).toContain(
-      '`update:list` is only a group-level summary',
-    );
-    for (const transition of [
-      'first production iOS BUILD is previewed as `{}` to `1`',
-      'first production Android BUILD is previewed as `{}` to `2`',
-      'with no separately stored remote `1` transition',
-      '`ota-preview` build already initialized either counter to `1`',
-      'existing numeric `N`, a production BUILD is previewed as `N` to `N + 1`',
-    ]) {
-      expect(compactRelease).toContain(transition);
+    expect(releaseBuildCommands).toHaveLength(2);
+    for (const command of releaseBuildCommands) {
+      expect(command).toContain('--non-interactive --freeze-credentials');
     }
-    expect(compactRelease).toContain(
-      'existing numeric counter must not change because `ota-preview` has no auto-increment',
+    expect(release).toContain('does not reliably apply');
+    expect(release).toContain('source-upload/build-job');
+    expect(release).toContain('quota/cost state');
+    expect(release).toContain('Never use `--latest`, `--auto-submit`');
+
+    expect(release).toContain('walkthrough not recorded');
+    expect(release).toContain('product-owner sign-off not recorded');
+    expect(release).toContain('Google identity review is pending');
+    expect(release).toContain(
+      'phone verification and app creation remain locked',
     );
     expect(compactRelease).toContain(
-      'dedicated non-operational verifier devices',
+      'SUPERSEDED — NOT ELIGIBLE FOR PLAY UPLOAD, TESTER EXPOSURE, OR INSTALLATION',
     );
-    expect(compactRelease).toContain(
-      'Removal alone does not prove a store reinstall',
+    expect(release).toContain('EXPECTED — NOT PROVEN');
+    expect(release).toContain('856e54b5-9abd-45a5-b0db-809a295da5ef');
+    expect(release).toContain(
+      '015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463',
     );
+    expect(release).toContain('human install evidence');
     expect(compactRelease).toContain(
-      'sign out while online, and obtain exact token-free session-revocation and push- unregistration evidence',
-    );
-    expect(compactRelease).toContain(
-      'old internal endpoint is inactive and the current store endpoint is the only expected active endpoint',
-    );
-    expect(compactRelease).toContain(
-      'Access expiry or revocation cannot recall an installed artifact',
-    );
-    expect(compactRelease).toContain(
-      'downloaded Android bytes can be redistributed',
-    );
-    expect(compactRelease).toContain(
-      'iOS provisioning device allowlist must exactly match',
+      'Provider inventory alone is not installed-device evidence',
     );
   });
 
-  test('binds every OTA write to one platform and reconciles partial provider state', () => {
+  test('documents embedded-only device evidence and no runnable OTA operation', () => {
     const release = repositoryText('docs/runbooks/release.md');
-    const normalizedRelease = release.replace(/\\\n\s*/gu, ' ');
+    const readme = repositoryText('packages/mobile/README.md');
     const compactRelease = release.replace(/\s+/gu, ' ');
-    const platformAwareMutations = normalizedRelease
-      .split('\n')
-      .filter((line) =>
-        /bunx eas-cli@21\.7\.0 (?:update|update:republish|update:roll-back-to-embedded)\s/u.test(
-          line,
-        ),
-      );
+    const compactReadme = readme.replace(/\s+/gu, ' ');
 
-    expect(platformAwareMutations).toHaveLength(4);
-    for (const command of platformAwareMutations) {
-      expect(command).toContain("--platform 'APPROVED_PLATFORM'");
-      expect(command).toContain('--non-interactive');
-      expect(command).not.toMatch(/--platform\s+(?:all|'all'|"all")\b/u);
-    }
-    expect(compactRelease).toContain(
-      'Replace it with exactly `ios` or `android` only after the preview binds that one platform; never use or approve `all`',
-    );
-    expect(compactRelease).toContain(
-      '`update:edit` has no platform flag, so its exact group must first be proven by `update:view` to contain only the one approved platform',
-    );
-    expect(compactRelease).toContain(
-      '`update:revert-update-rollout` has no platform flag',
-    );
-    expect(compactRelease).toContain(
-      'A group ID is not inherently single-platform',
-    );
-    expect(compactRelease).toContain(
-      'operation is non-atomic: it deletes the entire rollout group first',
-    );
-    expect(compactRelease).toContain(
-      'after success, error, interruption, or timeout, perform an independent complete paginated read-back',
-    );
-    expect(compactRelease).toContain(
-      'run `update:view` for every resulting or compatible group',
-    );
-    expect(compactRelease).toContain(
-      'prove the old rollout is no longer active and bind every exact replacement control or embedded-directive group',
-    );
-    expect(compactRelease).toContain(
-      'Append partial and `unknown` truth; never blindly retry',
-    );
-    expect(compactRelease).toContain(
-      'A change to either compiled value is an environment-contract change and therefore requires a new app version and store build; it is never eligible for OTA',
-    );
-    expect(compactRelease).toContain(
-      'Immediately before every OTA write, capture a fresh complete paginated channel, branch, destination-channel/branch, and both-platform exact-runtime update inventory',
-    );
-    expect(compactRelease).toContain(
-      'Every destination OTA routing pair must already exist before its write',
-    );
-    expect(compactRelease).toContain(
-      'Except for the paused-containment rollback path in section 8, the destination channel must also be active',
-    );
-    expect(compactRelease).toContain(
-      'each of these can create or link routing when its destination is absent: `update --channel ota-verification`, `update:republish --destination-channel production`, and `update:roll-back-to-embedded --channel production`',
-    );
-    expect(compactRelease).toContain(
-      'An OTA approval never authorizes channel or branch creation, linking, rerouting, pausing, or unpausing',
-    );
-    expect(compactRelease).toContain(
-      'Ordinary verification publication, production republish, and rollout increases also require the exact destination channel to report `isPaused: false`',
-    );
-    expect(compactRelease).toContain(
-      'canonical unconditional raw `branchMapping`: version `0`, exactly one data entry',
-    );
-    expect(compactRelease).toContain('`branchMappingLogic` exactly `"true"`');
-    expect(compactRelease).toContain(
-      '`branchId` equal to the exact same-name branch ID',
-    );
-    expect(compactRelease).toContain(
-      'the section 8 rollback exception instead requires a known unchanged pause status',
-    );
-    expect(compactRelease).toContain(
-      'unknown channel state, conditional mapping, zero or multiple mapping entries',
-    );
-    expect(compactRelease).toContain(
-      'A paused channel additionally blocks every non-rollback command',
-    );
-    expect(compactRelease).toContain(
-      'Unpause or remap a channel only through a separate routing mutation with its own exact preview, explicit product-owner approval, fresh authenticated-human confirmation, and complete read-back',
-    );
-    expect(compactRelease).toContain(
-      'The exact `production` channel must have a known pause status and the canonical unconditional raw mapping to the exact same-name branch as reviewed',
-    );
-    expect(compactRelease).toContain(
-      'For all three write families, success also requires zero routing drift',
-    );
-    expect(compactRelease).toContain(
-      'pre-existing destination channel must retain its exact reviewed pause status and the same version-0, one-entry, unconditional-`"true"` mapping to the reviewed branch',
-    );
-    expect(compactRelease).toContain(
-      'no channel or branch may have been created, linked, relinked, repaired, paused, or unpaused',
-    );
-    expect(compactRelease).toContain(
-      'For ordinary verification publication, production republish, and rollout increases, that unchanged status must be active (`isPaused: false`)',
-    );
-    expect(compactRelease).toContain(
-      'keep `isPaused: true` throughout the rollback command and its complete independent read-back; do not unpause first',
-    );
-    expect(compactRelease).toContain(
-      'A paused rollback succeeds only when the repaired update/control state is proven while the channel remains paused',
-    );
-    expect(compactRelease).toContain(
-      'Exposing that repaired state then requires a separate unpause consequence preview, explicit product-owner approval, fresh authenticated-human confirmation, and complete read-back',
-    );
-    expect(release).not.toContain(
-      'An absent `production` channel/branch means EAS Build may create and\ninventory.',
-    );
-    for (const success of [
-      '`update`: exactly one new verification group',
-      '`update:republish`: exactly one new production group',
-      '`update:edit`: no new group and only the approved percentage changed',
+    for (const evidence of [
+      'Remote updates: `Disabled — embedded store bundle only`',
+      'Launch source: `Embedded in this installed binary`',
+      'Remote update ID: `Not applicable — remote updates disabled`',
+      'Configured runtime version: `1.0.1`',
+      'Remote update channel: `Not applicable — remote updates disabled`',
+      'Emergency launch: `No`',
     ]) {
-      expect(compactRelease).toContain(success);
+      expect(release).toContain(evidence);
     }
+
     expect(compactRelease).toContain(
-      'EAS CLI 21.7.0 `update:view --json` omits rollout percentage and `rolloutControlUpdate`',
+      'Remote updates are **blocked for app/runtime 1.0.1**',
     );
     expect(compactRelease).toContain(
-      'Use the complete paginated `update:list` inventory for group rollout summaries and raw `channel:view APPROVED_CHANNEL --json` for the mapped branch',
+      'district-held code-signing public certificate embedded in a new app version/runtime',
     );
     expect(compactRelease).toContain(
-      'the raw `channel:view production --json` latest-group record must prove the exact bad group is the current active rollout',
+      'private-key custody, rotation, recovery, and audit outside every repository',
     );
     expect(compactRelease).toContain(
-      'collect every distinct `rolloutControlUpdate.group` from that exact authoritative rollout record, then run `update:view` on every referenced full control group',
+      'No executable OTA command is provided until the separately scoped signing and routing controls exist',
     );
     expect(compactRelease).toContain(
-      'Each must contain exactly one update total and match the same approved platform, runtime, `production` branch, and reviewed known-good source',
+      'For the first release, record `no prior known-good build` and fix forward',
     );
     expect(compactRelease).toContain(
-      'republishes every platform in each full control group, even when the bad rollout group itself is single-platform',
+      'stores cannot force-remove installed bytes',
     );
-    expect(compactRelease).toContain(
-      'identify the exact latest update ID that EAS CLI 21.7.0 will select as the control for the approved platform/runtime',
+    expect(release).not.toMatch(
+      /bunx\s+eas-cli@21\.7\.0\s+update(?::[a-z-]+)?\b/u,
     );
-    expect(compactRelease).toContain(
-      'require exactly one update total matching the approved platform/runtime, `production` branch, and reviewed known-good source',
+    expect(release).not.toContain('--channel');
+
+    for (const profile of [
+      '`development`: internal development-client builds.',
+      '`preview`: internal iOS and Android distribution builds.',
+      '`production`: store-signed artifacts for TestFlight and Google Play.',
+    ]) {
+      expect(readme).toContain(profile);
+    }
+    expect(readme).not.toContain('`ota-preview`:');
+    expect(readme).toContain(
+      'Remote updates are disabled for app/runtime 1.0.1',
     );
-    expect(compactRelease).toContain(
-      'every proposed control member is an ended non-rollout with `rolloutControlUpdate` absent',
-    );
-    expect(compactRelease).toContain(
-      'A mixed-platform, still-rollout-linked, nested- control, or indeterminate control group blocks rollout creation',
-    );
-    expect(compactRelease).toContain(
-      'can reject a nested control only after deleting the bad rollout',
-    );
-    expect(compactRelease).toContain(
-      "each new member's `rolloutControlUpdate` ID/group exactly equals the preapproved control, or that the control is uniformly absent for the preapproved embedded fallback",
-    );
-    expect(compactRelease).toContain(
-      'must prove every referenced control member is an ended non-rollout with `rolloutControlUpdate` absent',
-    );
-    expect(compactRelease).toContain(
-      'can delete the bad group before rejecting a nested control',
+    expect(compactReadme).toContain(
+      'Ordinary `preview` must never be used for production-environment OTA verification',
     );
   });
 
-  test('uses progressive approvals without circular distribution gates', () => {
+  test('uses progressive approvals and preserves every human-only boundary', () => {
     const release = repositoryText('docs/runbooks/release.md');
+    const compactRelease = release.replace(/\s+/gu, ' ');
     const headings = [
       '### BUILD',
       '### SUBMIT',
@@ -500,29 +280,14 @@ describe('mobile distribution configuration', () => {
 
     expect(headingOffsets.every((offset) => offset >= 0)).toBe(true);
     expect(headingOffsets).toEqual([...headingOffsets].sort((a, b) => a - b));
-    expect(release).not.toContain(
-      'Issues #37 and #40 are complete with their required human and',
-    );
-    expect(release.replace(/\s+/gu, ' ')).toContain(
-      "Issue #37's first manual AAB upload and issue #40's physical-device delivery consume these BUILD artifacts; completion of #37 or #40 is not a BUILD prerequisite.",
-    );
-    expect(release).toContain('orphan same-name branch');
-    expect(release).toContain('source-upload/build-job');
-    expect(release).toContain('quota/cost state');
     expect(release).toContain(
       'Approval for one gate never authorizes another.',
     );
     expect(release).toMatch(
-      /Every provider write requires\s+a fresh exact consequence preview, explicit product-owner approval, and fresh\s+authenticated-human confirmation/u,
+      /Every write requires\s+a fresh exact consequence preview, explicit product-owner approval, and fresh\s+confirmation by the authorized human operator/u,
     );
     expect(release).toMatch(
       /Tester exposure authorizes installation only\. It does not authorize a\s+PSD EOC notification/u,
-    );
-    expect(release.replace(/\s+/gu, ' ')).toContain(
-      'authenticated online session with already granted notification permission automatically acquires a native token, contacts Expo for an Expo token, and registers that token with PSD EOC',
-    );
-    expect(release.replace(/\s+/gu, ' ')).toContain(
-      'issue #40 cannot yet perform that first send through the canonical app path',
     );
     for (const prerequisite of [
       'verified credentials',
@@ -531,34 +296,43 @@ describe('mobile distribution configuration', () => {
       'explicit product-owner authorization',
       'authenticated-human confirmation',
     ]) {
-      expect(release).toContain(prerequisite);
+      expect(compactRelease).toContain(prerequisite);
     }
     expect(release).toMatch(
-      /FINAL ACCEPTANCE is a read-only evidence decision, not a provider-write\s+authorization/u,
+      /FINAL ACCEPTANCE is a read-only human evidence decision, not a provider-write\s+authorization/u,
+    );
+    expect(compactRelease).toContain(
+      'Product-owner sign-off is never inferred or supplied by an agent or automation',
     );
     expect(release).toMatch(
-      /integration truth labels that claim only what is\s+proven/u,
-    );
-    expect(release).toMatch(
-      /This human-only FINAL ACCEPTANCE record does not itself authorize\s+go-live, production deployment, provider configuration, a real incident, a real\s+notification, an all-clear, or closing a real event/u,
+      /FINAL ACCEPTANCE does not itself authorize go-live,\s+production deployment, provider configuration, a real incident, a real\s+notification, an all-clear, or closing a real event/u,
     );
   });
 
-  test('truth-labels every distribution provider without live claims', () => {
+  test('truth-labels Build separately from blocked Update and stores', () => {
     const integrations = repositoryText('docs/INTEGRATIONS.md');
-
-    expect(integrations).toMatch(
-      /Expo Application Services \(Build \/ Update\)\s+\|[^\n]+\| `configured-unverified`/u,
+    const rows = integrations.split('\n');
+    const build = rows.find((line) =>
+      line.includes('| Expo Application Services (Build)'),
     );
+    const update = rows.find((line) =>
+      line.includes('| Expo Application Services (Update)'),
+    );
+
+    expect(build).toContain('| `configured-unverified`');
+    expect(build).toContain('superseded and not eligible for Play upload');
+    expect(update).toContain('| `blocked`');
+    expect(update).toContain(
+      'Remote updates are disabled in app/runtime 1.0.1',
+    );
+
     for (const integration of [
+      'Expo Application Services (Submit)',
       'Apple App Store Connect / TestFlight',
       'Google Play closed testing',
       'Firebase App Distribution',
-      'Expo Application Services (Submit)',
     ]) {
-      const row = integrations
-        .split('\n')
-        .find((line) => line.includes(`| ${integration}`));
+      const row = rows.find((line) => line.includes(`| ${integration}`));
       expect(row).toContain('| `blocked`');
     }
   });
