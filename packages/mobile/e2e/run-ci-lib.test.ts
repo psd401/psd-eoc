@@ -2189,6 +2189,10 @@ describe('issue #32 exact synthetic drill data', () => {
     );
     expect(retryResponder).toContain("evidence.status === 'not-ready'");
     expect(retryResponder).toContain('evidenceDeadline');
+    expect(retryResponder).toMatch(
+      /Math\.min\([\s\S]+retryFlow\.deadline,[\s\S]+Date\.now\(\) \+ RUNTIME_TIMEOUT_MS/u,
+    );
+    expect(runner).not.toContain('IOS_AUTH_RETRY_VISION_TIMEOUT_MS');
     expect(retryResponder).toContain(
       'The proven iOS Face ID evidence expired before response.',
     );

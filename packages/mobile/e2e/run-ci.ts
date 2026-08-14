@@ -86,7 +86,6 @@ const IOS_NOTIFICATION_SWIPE_ACTION_TIMEOUT_MS = 5_000;
 const IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS = 30_000;
 const IOS_NOTIFICATION_FOREGROUND_BANNER_SETTLE_MS = 8_000;
 const IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000;
-const IOS_AUTH_RETRY_VISION_TIMEOUT_MS = 60_000;
 const IOS_AUTH_RETRY_VISION_INTERVAL_MS = 250;
 const MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS = 30_000;
 const IOS_BUNDLE_RELATIVE_PATH =
@@ -1448,7 +1447,10 @@ async function respondToRetriedIosDeviceAuthentication(
   );
   const evidenceDeadline = Math.min(
     retryFlow.deadline,
-    Date.now() + IOS_AUTH_RETRY_VISION_TIMEOUT_MS,
+    // Each iOS flow owns a fresh XCTest runner. Hosted startup has exceeded
+    // one minute, so keep the proof window aligned with the same bounded
+    // runtime budget used to start that runner instead of interrupting it.
+    Date.now() + RUNTIME_TIMEOUT_MS,
   );
   let attempt = 0;
   try {
