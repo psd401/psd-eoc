@@ -120,6 +120,7 @@ describe('mobile distribution configuration', () => {
     });
 
     const appStoreRunbook = repositoryText('docs/runbooks/appstore-setup.md');
+    const compactAppStoreRunbook = appStoreRunbook.replace(/\s+/gu, ' ');
     for (const evidence of [
       'App Store Connect provider: `372148`',
       'Numeric Apple ID / EAS `ascAppId`: `6801607849`',
@@ -127,11 +128,21 @@ describe('mobile distribution configuration', () => {
       'Initial iOS version scaffold: `1.0`',
       'User access: Limited Access, with zero new app-specific user grants',
       'TestFlight inventory: empty',
+      'App Store provisioning profile: `U8P2YKU4T8`',
+      'Ad Hoc profile `525SSPSUMQ`',
+      'c13a2847c944d0b0f25ba007ca06142c8218d87232ad9d36d1c86726355c1fde',
+      'e68d07aa-98e5-4c87-8595-52175975291f',
+      '7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9',
+      'separate provider-configuration gate',
+      'TestFlight still',
       'Do not run the app-creation lane again',
       'The presence of `ascAppId` is routing configuration only, never',
     ]) {
       expect(appStoreRunbook).toContain(evidence);
     }
+    expect(compactAppStoreRunbook).toContain(
+      'BUILD began only after that gate completed and a later exact one-build preview received its own product-owner approval',
+    );
   });
 
   test('never auto-submits, auto-exposes, or publishes a remote update', () => {
@@ -180,6 +191,20 @@ describe('mobile distribution configuration', () => {
     const releaseBuildCommands = normalizedRelease
       .split('\n')
       .filter((line) => line.includes('build --platform'));
+    const iosBuildRecordStart = compactRelease.indexOf(
+      'The one approved iOS BUILD then completed',
+    );
+    const iosBuildRecordEnd = compactRelease.indexOf(
+      '## 3. Version/build automation and commands',
+      iosBuildRecordStart,
+    );
+
+    expect(iosBuildRecordStart).toBeGreaterThanOrEqual(0);
+    expect(iosBuildRecordEnd).toBeGreaterThan(iosBuildRecordStart);
+    const iosBuildRecord = compactRelease.slice(
+      iosBuildRecordStart,
+      iosBuildRecordEnd,
+    );
 
     expect(release).toContain(
       'env:list production --scope project --format long',
@@ -238,6 +263,30 @@ describe('mobile distribution configuration', () => {
     );
     expect(release).toContain('71e08fa8358f6890e5419289b163aaa0fb0af081');
     expect(release).toContain('version code: `3`');
+    for (const evidence of [
+      'EAS build: `e68d07aa-98e5-4c87-8595-52175975291f`',
+      'source: `bef4d64b40508dd3ef60e4de190a53b23effce40`',
+      'EAS status/profile/distribution: `FINISHED` / `production` / `STORE`',
+      'bundle ID: `net.psd401.eoc`',
+      'application/runtime version: `1.0.1` / `1.0.1`',
+      'build number: `2`; the remote counter read back `1` before and `2` after',
+      'IPA SHA-256: `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`',
+      'existing distribution certificate serial: `6C578391C0F8BD2C1E2E570FED205DED`',
+      'App Store provisioning profile: `U8P2YKU4T8`; SHA-256 `c13a2847c944d0b0f25ba007ca06142c8218d87232ad9d36d1c86726355c1fde`',
+      'EAS usage changed from 5/30 total and 1/15 iOS before the sole build to 6/30 total and 2/15 iOS afterward; current estimated total cost is `$0`',
+    ]) {
+      expect(iosBuildRecord).toContain(evidence);
+    }
+    expect(release).toContain('existing Ad Hoc profile `525SSPSUMQ`');
+    expect(iosBuildRecord).toContain(
+      'The IPA has not been uploaded to App Store Connect, processed by TestFlight, exposed to a tester, or installed on a physical device',
+    );
+    expect(compactRelease).toContain(
+      'Before the iOS BUILD, a separate provider-configuration gate was previewed, explicitly approved by the product owner for one exact write, confirmed by the authenticated human operator, and independently read back',
+    );
+    expect(compactRelease).toContain(
+      'BUILD began only after its read-back matched and a later exact one-build preview received its own product-owner approval',
+    );
     expect(release).not.toContain('EXPECTED — NOT PROVEN');
     expect(release).toContain('856e54b5-9abd-45a5-b0db-809a295da5ef');
     expect(release).toContain(
@@ -363,6 +412,10 @@ describe('mobile distribution configuration', () => {
     expect(build).toContain(
       '915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246',
     );
+    expect(build).toContain('e68d07aa-98e5-4c87-8595-52175975291f');
+    expect(build).toContain(
+      '7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9',
+    );
     expect(update).toContain('| `blocked`');
     expect(update).toContain(
       'Remote updates are disabled in app/runtime 1.0.1',
@@ -389,6 +442,9 @@ describe('mobile distribution configuration', () => {
     );
     expect(submit).toContain('6801607849');
     expect(apple).toContain('6801607849');
+    expect(submit).toContain('finished embedded-only iOS build');
+    expect(apple).toContain('e68d07aa-98e5-4c87-8595-52175975291f');
+    expect(apple).toContain('TestFlight remains empty');
     expect(play).toContain('eligible embedded-only AAB');
   });
 
