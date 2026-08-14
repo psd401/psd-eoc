@@ -1681,6 +1681,7 @@ export const rosterRecipients = pgTable(
       .references(() => rosterSnapshots.id, { onDelete: 'restrict' }),
     population: rosterPopulationEnum('population').notNull(),
     googleSubject: varchar('google_subject', { length: 255 }),
+    staffEmail: varchar('staff_email', { length: 320 }),
     displayName: varchar('display_name', { length: 160 }).notNull(),
   },
   (table) => [
@@ -1689,6 +1690,9 @@ export const rosterRecipients = pgTable(
       table.rosterSnapshotId,
       table.googleSubject,
     ),
+    uniqueIndex('roster_recipients_snapshot_staff_email_uq')
+      .on(table.rosterSnapshotId, sql`lower(${table.staffEmail})`)
+      .where(sql`${table.staffEmail} is not null`),
     unique('roster_recipients_snapshot_identity_population_uq').on(
       table.rosterSnapshotId,
       table.id,
@@ -1700,11 +1704,21 @@ export const rosterRecipients = pgTable(
       name: 'roster_recipients_snapshot_population_fk',
     }).onDelete('restrict'),
     check(
-      'roster_recipients_population_subject',
+      'roster_recipients_population_identity',
       sql`(
-        ${table.population} = 'staff' and ${table.googleSubject} is not null
+        ${table.population} = 'staff'
+        and (${table.googleSubject} is not null or ${table.staffEmail} is not null)
       ) or (
-        ${table.population} = 'synthetic' and ${table.googleSubject} is null
+        ${table.population} = 'synthetic'
+        and ${table.googleSubject} is null
+        and ${table.staffEmail} is null
+      )`,
+    ),
+    check(
+      'roster_recipients_staff_email_canonical',
+      sql`${table.staffEmail} is null or (
+        ${table.staffEmail} = lower(${table.staffEmail})
+        and ${table.staffEmail} ~ '^[^@[:space:]]+@psd401[.]net$'
       )`,
     ),
   ],
