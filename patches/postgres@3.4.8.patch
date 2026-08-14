@@ -1,0 +1,290 @@
+diff --git a/cjs/src/connection.js b/cjs/src/connection.js
+index 07f6716702ac888215c86ad6e0071aaf55ae519c..d9463ccd6828da5b1e0ec922d22793088532f944 100644
+--- a/cjs/src/connection.js
++++ b/cjs/src/connection.js
+@@ -95,6 +95,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , rows = 0
+     , serverSignature = null
+     , nextWriteTimer = null
++    , reconnectTimer = null
+     , terminated = false
+     , incomings = null
+     , results = null
+@@ -333,10 +334,19 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   async function connect() {
+-    terminated = false
++    reconnectTimer !== null && clearTimeout(reconnectTimer)
++    reconnectTimer = null
++    if (terminated)
++      return
++
+     backendParameters = {}
+     socket || (socket = await createSocket())
+ 
++    if (terminated) {
++      socket && socket.destroy()
++      return
++    }
++
+     if (!socket)
+       return
+ 
+@@ -359,7 +369,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function reconnect() {
+-    setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
++    if (terminated)
++      return
++
++    reconnectTimer !== null && clearTimeout(reconnectTimer)
++    reconnectTimer = setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
+   }
+ 
+   function connected() {
+@@ -419,8 +433,29 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     )
+   }
+ 
+-  function terminate() {
++  function terminate(force = false, cancelActive = false) {
++    const terminatingSocket = socket
++        , activeBackend = cancelActive &&
++          query &&
++          query.active &&
++          Number.isInteger(backend.pid) &&
++          backend.pid > 0 &&
++          Number.isInteger(backend.secret)
++            ? { pid: backend.pid, secret: backend.secret }
++            : null
++        , socketClosed = new Promise(resolve =>
++          terminatingSocket && terminatingSocket.readyState !== 'closed'
++            ? terminatingSocket.once('close', resolve)
++            : resolve()
++        )
+     terminated = true
++    reconnectTimer !== null && clearTimeout(reconnectTimer)
++    reconnectTimer = null
++    const cancellation = activeBackend
++      ? new Promise((resolve, reject) =>
++        Connection(options).cancel(activeBackend, resolve, reject)
++      )
++      : Promise.resolve()
+     if (stream || query || initial || sent.length)
+       error(Errors.connection('CONNECTION_DESTROYED', options))
+ 
+@@ -428,9 +463,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (socket) {
+       socket.removeListener('data', data)
+       socket.removeListener('connect', connected)
+-      socket.readyState === 'open' && socket.end(b().X().end())
++      force && activeBackend && socket.readyState === 'open'
++        ? socket.end(b().X().end())
++        : force && socket.readyState !== 'closed'
++          ? socket.destroy()
++          : socket.readyState === 'open' && socket.end(b().X().end())
+     }
+     ended && (ended(), ending = ended = null)
++    return Promise.all([cancellation, socketClosed]).then(noop)
+   }
+ 
+   async function closed(hadError) {
+diff --git a/cjs/src/index.js b/cjs/src/index.js
+index f09c61c7e998f411560b95c9a8e1ed6a97972c11..79bacf2d482b1a7ea3802bd10ba5942d584edbb0 100644
+--- a/cjs/src/index.js
++++ b/cjs/src/index.js
+@@ -362,27 +362,42 @@ function Postgres(a, b) {
+     })
+   }
+ 
+-  async function end({ timeout = null } = {}) {
++  function end({ timeout = null } = {}) {
+     if (ending)
+       return ending
+ 
+-    await 1
++    if (timeout === 0) {
++      let resolveEnding
++        , rejectEnding
++      ending = new Promise((resolve, reject) => {
++        resolveEnding = resolve
++        rejectEnding = reject
++      })
++      Promise.all([
++        destroy(() => {}, true),
++        listen.sql ? listen.sql.end({ timeout: 0 }) : Promise.resolve(),
++        subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : Promise.resolve()
++      ]).then(resolveEnding, rejectEnding)
++      return ending
++    }
++
+     let timer
+-    return ending = Promise.race([
++    ending = Promise.race([
+       new Promise(r => timeout !== null && (timer = setTimeout(destroy, timeout * 1000, r))),
+       Promise.all(connections.map(c => c.end()).concat(
+         listen.sql ? listen.sql.end({ timeout: 0 }) : [],
+         subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : []
+       ))
+     ]).then(() => clearTimeout(timer))
++    return ending
+   }
+ 
+   async function close() {
+     await Promise.all(connections.map(c => c.end()))
+   }
+ 
+-  async function destroy(resolve) {
+-    await Promise.all(connections.map(c => c.terminate()))
++  async function destroy(resolve, cancelActive = false) {
++    await Promise.all(connections.map(c => c.terminate(true, cancelActive)))
+     while (queries.length)
+       queries.shift().reject(Errors.connection('CONNECTION_DESTROYED', options))
+     resolve()
+diff --git a/src/connection.js b/src/connection.js
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..8ffa84a55ae3cb0c42953222a98217e63db921fe 100644
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -95,6 +95,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , rows = 0
+     , serverSignature = null
+     , nextWriteTimer = null
++    , reconnectTimer = null
+     , terminated = false
+     , incomings = null
+     , results = null
+@@ -333,10 +334,19 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   async function connect() {
+-    terminated = false
++    reconnectTimer !== null && clearTimeout(reconnectTimer)
++    reconnectTimer = null
++    if (terminated)
++      return
++
+     backendParameters = {}
+     socket || (socket = await createSocket())
+ 
++    if (terminated) {
++      socket && socket.destroy()
++      return
++    }
++
+     if (!socket)
+       return
+ 
+@@ -359,7 +369,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function reconnect() {
+-    setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
++    if (terminated)
++      return
++
++    reconnectTimer !== null && clearTimeout(reconnectTimer)
++    reconnectTimer = setTimeout(connect, closedTime ? Math.max(0, closedTime + delay - performance.now()) : 0)
+   }
+ 
+   function connected() {
+@@ -419,8 +433,29 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     )
+   }
+ 
+-  function terminate() {
++  function terminate(force = false, cancelActive = false) {
++    const terminatingSocket = socket
++        , activeBackend = cancelActive &&
++          query &&
++          query.active &&
++          Number.isInteger(backend.pid) &&
++          backend.pid > 0 &&
++          Number.isInteger(backend.secret)
++            ? { pid: backend.pid, secret: backend.secret }
++            : null
++        , socketClosed = new Promise(resolve =>
++          terminatingSocket && terminatingSocket.readyState !== 'closed'
++            ? terminatingSocket.once('close', resolve)
++            : resolve()
++        )
+     terminated = true
++    reconnectTimer !== null && clearTimeout(reconnectTimer)
++    reconnectTimer = null
++    const cancellation = activeBackend
++      ? new Promise((resolve, reject) =>
++        Connection(options).cancel(activeBackend, resolve, reject)
++      )
++      : Promise.resolve()
+     if (stream || query || initial || sent.length)
+       error(Errors.connection('CONNECTION_DESTROYED', options))
+ 
+@@ -428,9 +463,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (socket) {
+       socket.removeListener('data', data)
+       socket.removeListener('connect', connected)
+-      socket.readyState === 'open' && socket.end(b().X().end())
++      force && activeBackend && socket.readyState === 'open'
++        ? socket.end(b().X().end())
++        : force && socket.readyState !== 'closed'
++          ? socket.destroy()
++          : socket.readyState === 'open' && socket.end(b().X().end())
+     }
+     ended && (ended(), ending = ended = null)
++    return Promise.all([cancellation, socketClosed]).then(noop)
+   }
+ 
+   async function closed(hadError) {
+diff --git a/src/index.js b/src/index.js
+index c7fba3dace20173f4cb13f3f138bb6d213b43683..5e48304de193d8002167eec1d935e91c066f4759 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -362,27 +362,42 @@ function Postgres(a, b) {
+     })
+   }
+ 
+-  async function end({ timeout = null } = {}) {
++  function end({ timeout = null } = {}) {
+     if (ending)
+       return ending
+ 
+-    await 1
++    if (timeout === 0) {
++      let resolveEnding
++        , rejectEnding
++      ending = new Promise((resolve, reject) => {
++        resolveEnding = resolve
++        rejectEnding = reject
++      })
++      Promise.all([
++        destroy(() => {}, true),
++        listen.sql ? listen.sql.end({ timeout: 0 }) : Promise.resolve(),
++        subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : Promise.resolve()
++      ]).then(resolveEnding, rejectEnding)
++      return ending
++    }
++
+     let timer
+-    return ending = Promise.race([
++    ending = Promise.race([
+       new Promise(r => timeout !== null && (timer = setTimeout(destroy, timeout * 1000, r))),
+       Promise.all(connections.map(c => c.end()).concat(
+         listen.sql ? listen.sql.end({ timeout: 0 }) : [],
+         subscribe.sql ? subscribe.sql.end({ timeout: 0 }) : []
+       ))
+     ]).then(() => clearTimeout(timer))
++    return ending
+   }
+ 
+   async function close() {
+     await Promise.all(connections.map(c => c.end()))
+   }
+ 
+-  async function destroy(resolve) {
+-    await Promise.all(connections.map(c => c.terminate()))
++  async function destroy(resolve, cancelActive = false) {
++    await Promise.all(connections.map(c => c.terminate(true, cancelActive)))
+     while (queries.length)
+       queries.shift().reject(Errors.connection('CONNECTION_DESTROYED', options))
+     resolve()
