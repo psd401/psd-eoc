@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { createServer, Socket, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
+import { Duplex } from 'node:stream';
+import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, setDefaultTimeout, test } from 'bun:test';
@@ -18,6 +21,11 @@ const OBSERVATION_MS = 600;
 const CHILD_TIMEOUT_MS = 15_000;
 const AUDIT_OPERATION_TIMEOUT_MS = 4_000;
 const AUDIT_CLOSE_TIMEOUT_MS = 1_000;
+const CANCEL_FAILURE_TIMEOUT_SECONDS = 0.4;
+const CANCEL_FAILURE_OBSERVATION_MS = 550;
+const CANCEL_FAILURE_SUBJECT_SLEEP_SECONDS = 2;
+const DEFERRED_SOCKET_OBSERVATION_MS = 50;
+const TLS_SUBJECT_SLEEP_SECONDS = 1;
 const isIsolatedProbe = process.env[PROBE_MODE_VARIABLE] === PROBE_MODE_VALUE;
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -38,9 +46,20 @@ const ProbeEvidenceSchema = z
     activeClosePromiseReused: z.boolean(),
     activeQueryOutcome: QueryOutcomeSchema,
     activePostCloseOutcome: QueryOutcomeSchema,
+    cancelFailureBackendCountsAfterClose: z.array(z.number().int()).length(2),
+    cancelFailureBackendCountAfterCancelTimeout: z.number().int(),
+    cancelFailureBackendCountAtCloseRejection: z.number().int(),
+    cancelFailureCloseCode: z.enum(['CONNECT_TIMEOUT', 'unexpected']),
+    cancelFailureCloseSettledAfterCancelTimeout: z.boolean(),
+    cancelFailureCloseSettledWhileBackendActive: z.boolean(),
+    cancelFailureQueuedOutcome: QueryOutcomeSchema,
+    cancelFailureQueuedSettledAtCloseRejection: z.boolean(),
     idleBackendCountsAfterClose: z.array(z.number().int()).length(2),
     idleClosePromiseReused: z.boolean(),
     idlePostCloseOutcome: QueryOutcomeSchema,
+    openingCloseSettledBeforeSocketCreation: z.boolean(),
+    openingCloseResolvedAfterSocketClose: z.boolean(),
+    openingQueryOutcome: QueryOutcomeSchema,
     queuedBackendCountsAfterClose: z.array(z.number().int()).length(3),
     queuedClosePromiseReused: z.boolean(),
     queuedConnectCallbacksAfterObservation: z.number().int().nonnegative(),
@@ -51,12 +70,40 @@ const ProbeEvidenceSchema = z
     queuedPostCloseOutcome: QueryOutcomeSchema,
     queuedReconnectTimerClearedAtInvocation: z.boolean(),
     queuedReconnectDurations: z.array(z.number().finite()).min(1),
+    tlsCancelFrameWritten: z.boolean(),
+    tlsActiveQueryOutcome: QueryOutcomeSchema,
+    tlsCloseSettledBeforeFinalTransportClose: z.boolean(),
+    tlsFinalTransportClosed: z.boolean(),
+    tlsPostCloseOutcome: QueryOutcomeSchema,
+    tlsSubjectBackendCountBeforeFinalTransportClose: z.number().int(),
+    tlsTransportErrorActiveQueryOutcome: QueryOutcomeSchema,
+    tlsTransportErrorBackendCountsAfterClose: z
+      .array(z.number().int())
+      .length(2),
+    tlsTransportErrorCloseCode: z.enum([
+      'SYNTHETIC_CANCEL_TRANSPORT_ERROR',
+      'unexpected',
+    ]),
+    tlsTransportErrorCloseSettledBeforeTransportClose: z.boolean(),
+    tlsTransportErrorPostCloseOutcome: QueryOutcomeSchema,
+    tlsTransportErrorSubjectBackendCountBeforeTransportClose: z.number().int(),
+    tlsTransportErrorTransportClosed: z.boolean(),
+    tlsWrapFailureActiveQueryOutcome: QueryOutcomeSchema,
+    tlsWrapFailureBackendCountsAfterClose: z.array(z.number().int()).length(2),
+    tlsWrapFailureCloseCode: z.enum([
+      'SYNTHETIC_TLS_WRAP_FAILURE',
+      'unexpected',
+    ]),
+    tlsWrapFailureCloseSettledBeforeRawTransportClose: z.boolean(),
+    tlsWrapFailurePostCloseOutcome: QueryOutcomeSchema,
+    tlsWrapFailureRawTransportClosed: z.boolean(),
+    tlsWrapFailureSubjectBackendCountBeforeRawTransportClose: z.number().int(),
   })
   .strict();
 
 type ProbeEvidence = z.infer<typeof ProbeEvidenceSchema>;
 type QueryOutcome = z.infer<typeof QueryOutcomeSchema>;
-type ProbePath = 'active' | 'idle' | 'queued';
+type ProbePath = 'active' | 'cancel-failure' | 'idle' | 'queued' | 'tls';
 
 setDefaultTimeout(30_000);
 
@@ -94,7 +141,8 @@ function validatedRunId(value: string | undefined): string {
 }
 
 function applicationName(runId: string, path: ProbePath, role: string): string {
-  return `issue-130-${runId}-${path}-${role}`;
+  const pathLabel = path === 'cancel-failure' ? 'cancel' : path;
+  return `issue-130-${runId}-${pathLabel}-${role}`;
 }
 
 function safeErrorCode(error: unknown): string | undefined {
@@ -150,6 +198,44 @@ async function waitForCondition(
   throw new Error(`Timed out waiting for ${description}.`);
 }
 
+interface LoopbackBlackhole {
+  readonly port: number;
+  readonly server: Server;
+  readonly sockets: Set<Socket>;
+}
+
+async function openLoopbackBlackhole(): Promise<LoopbackBlackhole> {
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('The loopback cancellation endpoint was unavailable.');
+  }
+  return { port: address.port, server, sockets };
+}
+
+async function closeLoopbackBlackhole(
+  blackhole: LoopbackBlackhole,
+): Promise<void> {
+  for (const socket of blackhole.sockets) socket.destroy();
+  await new Promise<void>((resolve, reject) => {
+    blackhole.server.close((error) =>
+      error === undefined ? resolve() : reject(error),
+    );
+  });
+}
+
 async function connectionCount(
   control: Sql,
   subjectApplicationName: string,
@@ -160,6 +246,43 @@ async function connectionCount(
     where application_name = ${subjectApplicationName}
   `;
   return row?.count ?? -1;
+}
+
+async function cleanupDirectSubject(
+  subject: Sql,
+  control: Sql,
+  subjectApplicationName: string,
+): Promise<void> {
+  await Promise.race([
+    Promise.resolve(subject.end({ timeout: 0 })).catch(() => undefined),
+    waitMilliseconds(globalThis.setTimeout, 500),
+  ]);
+  const survivingBackends = await control<{ pid: number }[]>`
+    select pid::integer as pid
+    from pg_stat_activity
+    where application_name = ${subjectApplicationName}
+    order by pid
+  `;
+  for (const backend of survivingBackends) {
+    const [termination] = await control<{ terminated: boolean }[]>`
+      select pg_terminate_backend(${backend.pid}) as terminated
+    `;
+    if (termination?.terminated !== true) {
+      throw new Error(
+        'An exact direct close-probe backend could not be terminated.',
+      );
+    }
+  }
+  await waitForCondition(
+    () =>
+      connectionCount(control, subjectApplicationName).then(
+        (count) => count === 0,
+      ),
+    globalThis.setTimeout,
+    'the direct close-probe PostgreSQL session to leave',
+    2_000,
+  );
+  await control.end({ timeout: 1 });
 }
 
 async function backendPid(
@@ -363,6 +486,85 @@ async function idleCloseProbe(
   return evidence;
 }
 
+async function openingSocketCloseProbe(): Promise<
+  Pick<
+    ProbeEvidence,
+    | 'openingCloseResolvedAfterSocketClose'
+    | 'openingCloseSettledBeforeSocketCreation'
+    | 'openingQueryOutcome'
+  >
+> {
+  let factoryStartedResolve: (() => void) | undefined;
+  const factoryStarted = new Promise<void>((resolve) => {
+    factoryStartedResolve = resolve;
+  });
+  let releaseSocketFactory: (() => void) | undefined;
+  const socketFactoryGate = new Promise<void>((resolve) => {
+    releaseSocketFactory = resolve;
+  });
+  let openedSocket: Socket | undefined;
+  let socketClosed = false;
+  const openingOptions = {
+    connect_timeout: 1,
+    max: 1,
+    socket: async () => {
+      factoryStartedResolve?.();
+      await socketFactoryGate;
+      openedSocket = new Socket();
+      openedSocket.once('close', () => {
+        socketClosed = true;
+      });
+      return openedSocket;
+    },
+  };
+  const subject = postgres(
+    'postgres://psd_eoc_test:synthetic@127.0.0.1:1/psd_eoc_test',
+    openingOptions,
+  );
+  const openingQueryOutcomePromise = queryOutcome(
+    subject`select 130::integer as value`,
+  );
+  let closeSettled = false;
+  let closeResolvedAfterSocketClose = false;
+
+  try {
+    isolatedProbeStage = 'opening-waiting-for-socket-factory';
+    await factoryStarted;
+    isolatedProbeStage = 'opening-closing';
+    const closePromise = Promise.resolve(subject.end({ timeout: 0 })).then(
+      () => {
+        closeResolvedAfterSocketClose = socketClosed;
+        closeSettled = true;
+      },
+    );
+    await waitMilliseconds(
+      globalThis.setTimeout,
+      DEFERRED_SOCKET_OBSERVATION_MS,
+    );
+    const closeSettledBeforeSocketCreation = closeSettled;
+    releaseSocketFactory?.();
+    const [openingQueryOutcome] = await Promise.all([
+      openingQueryOutcomePromise,
+      closePromise,
+    ]);
+    await waitForCondition(
+      () => socketClosed,
+      globalThis.setTimeout,
+      'the deferred synthetic socket to close',
+      1_000,
+    );
+    return {
+      openingCloseResolvedAfterSocketClose: closeResolvedAfterSocketClose,
+      openingCloseSettledBeforeSocketCreation: closeSettledBeforeSocketCreation,
+      openingQueryOutcome,
+    };
+  } finally {
+    releaseSocketFactory?.();
+    openedSocket?.destroy();
+    await Promise.resolve(subject.end({ timeout: 0 })).catch(() => undefined);
+  }
+}
+
 async function activeCloseProbe(
   databaseUrl: URL,
   runId: string,
@@ -443,6 +645,570 @@ async function activeCloseProbe(
     throw new Error('The active close-probe evidence was unavailable.');
   }
   return evidence;
+}
+
+async function cancelFailureCloseProbe(
+  databaseUrl: URL,
+  runId: string,
+): Promise<
+  Pick<
+    ProbeEvidence,
+    | 'cancelFailureBackendCountAfterCancelTimeout'
+    | 'cancelFailureBackendCountAtCloseRejection'
+    | 'cancelFailureBackendCountsAfterClose'
+    | 'cancelFailureCloseCode'
+    | 'cancelFailureCloseSettledAfterCancelTimeout'
+    | 'cancelFailureCloseSettledWhileBackendActive'
+    | 'cancelFailureQueuedOutcome'
+    | 'cancelFailureQueuedSettledAtCloseRejection'
+  >
+> {
+  const subjectName = applicationName(runId, 'cancel-failure', 'subject');
+  const control = openControl(
+    databaseUrl,
+    applicationName(runId, 'cancel-failure', 'control'),
+  );
+  const subjectUrl = new URL(databaseUrl);
+  subjectUrl.searchParams.set('application_name', subjectName);
+  const subject = postgres(subjectUrl.toString(), {
+    connect_timeout: 2,
+    max: 1,
+  });
+  let blackhole: LoopbackBlackhole | undefined;
+
+  try {
+    isolatedProbeStage = 'cancel-failure-starting';
+    await subject`select 1::integer as value`;
+    const cancellationBlackhole = await openLoopbackBlackhole();
+    blackhole = cancellationBlackhole;
+    const activeQueryOutcomePromise = queryOutcome(
+      subject`select pg_sleep(${CANCEL_FAILURE_SUBJECT_SLEEP_SECONDS})`,
+    );
+    await waitForActiveBackend(control, subjectName);
+
+    let queuedSettled = false;
+    const queuedOutcomePromise = queryOutcome(
+      subject`select 130::integer as value`,
+    ).then((outcome) => {
+      queuedSettled = true;
+      return outcome;
+    });
+    await waitMilliseconds(globalThis.setTimeout, 5);
+    Reflect.set(
+      subject.options,
+      'connect_timeout',
+      CANCEL_FAILURE_TIMEOUT_SECONDS,
+    );
+    Reflect.set(subject.options, 'host', ['127.0.0.1']);
+    Reflect.set(subject.options, 'port', [cancellationBlackhole.port]);
+
+    isolatedProbeStage = 'cancel-failure-closing';
+    let closeSettled = false;
+    let queuedSettledAtCloseRejection = false;
+    const closeOutcomePromise = Promise.resolve(
+      subject.end({ timeout: 0 }),
+    ).then(
+      () => {
+        closeSettled = true;
+        return 'unexpected' as const;
+      },
+      (error: unknown) => {
+        queuedSettledAtCloseRejection = queuedSettled;
+        closeSettled = true;
+        return safeErrorCode(error) === 'CONNECT_TIMEOUT'
+          ? ('CONNECT_TIMEOUT' as const)
+          : ('unexpected' as const);
+      },
+    );
+
+    await waitForCondition(
+      () => cancellationBlackhole.sockets.size > 0,
+      globalThis.setTimeout,
+      'the failed-cancel transport to reach the loopback blackhole',
+      1_000,
+    );
+    await waitMilliseconds(
+      globalThis.setTimeout,
+      CANCEL_FAILURE_OBSERVATION_MS,
+    );
+    const cancelFailureBackendCountAfterCancelTimeout = await connectionCount(
+      control,
+      subjectName,
+    );
+    const cancelFailureCloseSettledAfterCancelTimeout = closeSettled;
+
+    await waitForCondition(
+      () => closeSettled,
+      globalThis.setTimeout,
+      'the failed-cancel close promise to reject',
+      3_000,
+    );
+    const cancelFailureBackendCountAtCloseRejection = await connectionCount(
+      control,
+      subjectName,
+    );
+    const cancelFailureCloseSettledWhileBackendActive =
+      closeSettled && cancelFailureBackendCountAtCloseRejection > 0;
+
+    const cancelFailureQueuedOutcome = await queuedOutcomePromise;
+    const cancelFailureCloseCode = await closeOutcomePromise;
+    await activeQueryOutcomePromise;
+    await waitForCondition(
+      () => connectionCount(control, subjectName).then((count) => count === 0),
+      globalThis.setTimeout,
+      'the failed-cancel subject backend to leave',
+      2_000,
+    );
+    const cancelFailureBackendCountsAfterClose = [
+      await connectionCount(control, subjectName),
+    ];
+    await waitMilliseconds(globalThis.setTimeout, 100);
+    cancelFailureBackendCountsAfterClose.push(
+      await connectionCount(control, subjectName),
+    );
+
+    return {
+      cancelFailureBackendCountAfterCancelTimeout,
+      cancelFailureBackendCountAtCloseRejection,
+      cancelFailureBackendCountsAfterClose,
+      cancelFailureCloseCode,
+      cancelFailureCloseSettledAfterCancelTimeout,
+      cancelFailureCloseSettledWhileBackendActive,
+      cancelFailureQueuedOutcome,
+      cancelFailureQueuedSettledAtCloseRejection: queuedSettledAtCloseRejection,
+    };
+  } finally {
+    if (blackhole !== undefined) await closeLoopbackBlackhole(blackhole);
+    await cleanupDirectSubject(subject, control, subjectName);
+  }
+}
+
+async function tlsCancelTransportProbe(
+  databaseUrl: URL,
+  runId: string,
+): Promise<
+  Pick<
+    ProbeEvidence,
+    | 'tlsActiveQueryOutcome'
+    | 'tlsCancelFrameWritten'
+    | 'tlsCloseSettledBeforeFinalTransportClose'
+    | 'tlsFinalTransportClosed'
+    | 'tlsPostCloseOutcome'
+    | 'tlsSubjectBackendCountBeforeFinalTransportClose'
+  >
+> {
+  const subjectName = applicationName(runId, 'tls', 'subject');
+  const control = openControl(
+    databaseUrl,
+    applicationName(runId, 'tls', 'control'),
+  );
+  const subjectUrl = new URL(databaseUrl);
+  subjectUrl.searchParams.set('application_name', subjectName);
+  const subject = postgres(subjectUrl.toString(), {
+    connect_timeout: 2,
+    max: 1,
+  });
+  const originalTlsConnect = tls.connect;
+  let rawResponseSent = false;
+  const rawTransport = new Duplex({
+    read() {},
+    write(_chunk, _encoding, callback) {
+      callback();
+      if (!rawResponseSent) {
+        rawResponseSent = true;
+        setTimeout(() => rawTransport.emit('data', Buffer.from([83])), 0);
+      }
+    },
+  });
+  let cancelFrameWritten = false;
+  let finalTransportClosed = false;
+  const finalTransport = new Duplex({
+    read() {},
+    write(chunk, _encoding, callback) {
+      const bytes = Buffer.from(chunk);
+      cancelFrameWritten =
+        bytes.length === 16 && bytes.readInt32BE(4) === 80_877_102;
+      callback();
+    },
+  });
+  const closeFinalTransport = () => {
+    if (finalTransportClosed) return;
+    finalTransportClosed = true;
+    finalTransport.emit('close', false);
+  };
+
+  try {
+    isolatedProbeStage = 'tls-starting';
+    await subject`select 1::integer as value`;
+    const activeQueryOutcomePromise = queryOutcome(
+      subject`select pg_sleep(${TLS_SUBJECT_SLEEP_SECONDS})`,
+    );
+    await waitForActiveBackend(control, subjectName);
+
+    Reflect.set(subject.options, 'ssl', 'require');
+    Reflect.set(subject.options, 'socket', async () => rawTransport);
+    Reflect.set(tls, 'connect', () => {
+      setTimeout(() => finalTransport.emit('secureConnect'), 0);
+      return finalTransport;
+    });
+
+    isolatedProbeStage = 'tls-closing';
+    let closeSettled = false;
+    const closePromise = Promise.resolve(subject.end({ timeout: 0 })).then(
+      () => {
+        closeSettled = true;
+      },
+      (error: unknown) => {
+        closeSettled = true;
+        throw error;
+      },
+    );
+    const postCloseOutcomePromise = queryOutcome(
+      subject`select 130::integer as value`,
+    );
+    isolatedProbeStage = 'tls-wrap-failure-waiting-raw-destroy';
+    await waitForCondition(
+      () => cancelFrameWritten,
+      globalThis.setTimeout,
+      'the TLS synthetic CancelRequest frame',
+      1_000,
+    );
+    isolatedProbeStage = 'tls-wrap-failure-waiting-subject-close';
+    await waitForCondition(
+      () => connectionCount(control, subjectName).then((count) => count === 0),
+      globalThis.setTimeout,
+      'the TLS close-probe subject backend to leave',
+      2_000,
+    );
+    const tlsSubjectBackendCountBeforeFinalTransportClose =
+      await connectionCount(control, subjectName);
+    const tlsCloseSettledBeforeFinalTransportClose = closeSettled;
+    closeFinalTransport();
+    await waitForCondition(
+      () => closeSettled,
+      globalThis.setTimeout,
+      'the TLS close promise to settle after final transport close',
+      1_000,
+    );
+    const [tlsActiveQueryOutcome, tlsPostCloseOutcome] = await Promise.all([
+      activeQueryOutcomePromise,
+      postCloseOutcomePromise,
+      closePromise,
+    ]);
+
+    return {
+      tlsActiveQueryOutcome,
+      tlsCancelFrameWritten: cancelFrameWritten,
+      tlsCloseSettledBeforeFinalTransportClose,
+      tlsFinalTransportClosed: finalTransportClosed,
+      tlsPostCloseOutcome,
+      tlsSubjectBackendCountBeforeFinalTransportClose,
+    };
+  } finally {
+    closeFinalTransport();
+    Reflect.set(tls, 'connect', originalTlsConnect);
+    await cleanupDirectSubject(subject, control, subjectName);
+  }
+}
+
+async function tlsCancelWrapFailureProbe(
+  databaseUrl: URL,
+  runId: string,
+): Promise<
+  Pick<
+    ProbeEvidence,
+    | 'tlsWrapFailureActiveQueryOutcome'
+    | 'tlsWrapFailureBackendCountsAfterClose'
+    | 'tlsWrapFailureCloseCode'
+    | 'tlsWrapFailureCloseSettledBeforeRawTransportClose'
+    | 'tlsWrapFailurePostCloseOutcome'
+    | 'tlsWrapFailureRawTransportClosed'
+    | 'tlsWrapFailureSubjectBackendCountBeforeRawTransportClose'
+  >
+> {
+  const subjectName = applicationName(runId, 'tls', 'fail-subject');
+  const control = openControl(
+    databaseUrl,
+    applicationName(runId, 'tls', 'fail-control'),
+  );
+  const subjectUrl = new URL(databaseUrl);
+  subjectUrl.searchParams.set('application_name', subjectName);
+  const subject = postgres(subjectUrl.toString(), {
+    connect_timeout: 2,
+    max: 1,
+  });
+  const originalTlsConnect = tls.connect;
+  let finishRawDestroy: (() => void) | undefined;
+  let rawDestroyRequested = false;
+  let rawResponseSent = false;
+  let rawTransportClosed = false;
+  const rawTransport = new Duplex({
+    destroy(_error, callback) {
+      rawDestroyRequested = true;
+      finishRawDestroy = () => {
+        callback();
+        rawTransportClosed = true;
+      };
+    },
+    read() {},
+    write(_chunk, _encoding, callback) {
+      callback();
+      if (!rawResponseSent) {
+        rawResponseSent = true;
+        setTimeout(() => rawTransport.emit('data', Buffer.from([83])), 0);
+      }
+    },
+  });
+  const releaseRawTransport = () => {
+    const finish = finishRawDestroy;
+    if (finish === undefined) return;
+    finishRawDestroy = undefined;
+    finish();
+  };
+
+  try {
+    isolatedProbeStage = 'tls-wrap-failure-starting';
+    await subject`select 1::integer as value`;
+    const activeQueryOutcomePromise = queryOutcome(
+      subject`select pg_sleep(${TLS_SUBJECT_SLEEP_SECONDS})`,
+    );
+    await waitForActiveBackend(control, subjectName);
+
+    Reflect.set(subject.options, 'ssl', 'require');
+    Reflect.set(subject.options, 'socket', async () => rawTransport);
+    Reflect.set(tls, 'connect', () => {
+      const error = new Error('Synthetic TLS wrap failure.');
+      Reflect.set(error, 'code', 'SYNTHETIC_TLS_WRAP_FAILURE');
+      throw error;
+    });
+
+    isolatedProbeStage = 'tls-wrap-failure-closing';
+    let closeSettled = false;
+    const closeOutcomePromise = Promise.resolve(
+      subject.end({ timeout: 0 }),
+    ).then(
+      () => {
+        closeSettled = true;
+        return 'unexpected' as const;
+      },
+      (error: unknown) => {
+        closeSettled = true;
+        return safeErrorCode(error) === 'SYNTHETIC_TLS_WRAP_FAILURE'
+          ? ('SYNTHETIC_TLS_WRAP_FAILURE' as const)
+          : ('unexpected' as const);
+      },
+    );
+    const postCloseOutcomePromise = queryOutcome(
+      subject`select 130::integer as value`,
+    );
+    await waitForCondition(
+      () => rawDestroyRequested,
+      globalThis.setTimeout,
+      'the failed TLS raw transport teardown to start',
+      1_000,
+    );
+    await waitForCondition(
+      () => connectionCount(control, subjectName).then((count) => count === 0),
+      globalThis.setTimeout,
+      'the failed TLS close-probe subject backend to leave',
+      2_500,
+    );
+    const tlsWrapFailureSubjectBackendCountBeforeRawTransportClose =
+      await connectionCount(control, subjectName);
+    const tlsWrapFailureCloseSettledBeforeRawTransportClose = closeSettled;
+    releaseRawTransport();
+    await waitForCondition(
+      () => rawTransportClosed && closeSettled,
+      globalThis.setTimeout,
+      'the failed TLS close promise to settle after raw transport close',
+      1_000,
+    );
+    const [
+      tlsWrapFailureActiveQueryOutcome,
+      tlsWrapFailurePostCloseOutcome,
+      tlsWrapFailureCloseCode,
+    ] = await Promise.all([
+      activeQueryOutcomePromise,
+      postCloseOutcomePromise,
+      closeOutcomePromise,
+    ]);
+    const tlsWrapFailureBackendCountsAfterClose = [
+      await connectionCount(control, subjectName),
+    ];
+    await waitMilliseconds(globalThis.setTimeout, 100);
+    tlsWrapFailureBackendCountsAfterClose.push(
+      await connectionCount(control, subjectName),
+    );
+
+    return {
+      tlsWrapFailureActiveQueryOutcome,
+      tlsWrapFailureBackendCountsAfterClose,
+      tlsWrapFailureCloseCode,
+      tlsWrapFailureCloseSettledBeforeRawTransportClose,
+      tlsWrapFailurePostCloseOutcome,
+      tlsWrapFailureRawTransportClosed: rawTransportClosed,
+      tlsWrapFailureSubjectBackendCountBeforeRawTransportClose,
+    };
+  } finally {
+    if (!rawTransport.destroyed) rawTransport.destroy();
+    releaseRawTransport();
+    Reflect.set(tls, 'connect', originalTlsConnect);
+    await cleanupDirectSubject(subject, control, subjectName);
+  }
+}
+
+async function tlsCancelTransportErrorProbe(
+  databaseUrl: URL,
+  runId: string,
+): Promise<
+  Pick<
+    ProbeEvidence,
+    | 'tlsTransportErrorActiveQueryOutcome'
+    | 'tlsTransportErrorBackendCountsAfterClose'
+    | 'tlsTransportErrorCloseCode'
+    | 'tlsTransportErrorCloseSettledBeforeTransportClose'
+    | 'tlsTransportErrorPostCloseOutcome'
+    | 'tlsTransportErrorSubjectBackendCountBeforeTransportClose'
+    | 'tlsTransportErrorTransportClosed'
+  >
+> {
+  const subjectName = applicationName(runId, 'tls', 'err-subject');
+  const control = openControl(
+    databaseUrl,
+    applicationName(runId, 'tls', 'err-control'),
+  );
+  const subjectUrl = new URL(databaseUrl);
+  subjectUrl.searchParams.set('application_name', subjectName);
+  const subject = postgres(subjectUrl.toString(), {
+    connect_timeout: 2,
+    max: 1,
+  });
+  const originalTlsConnect = tls.connect;
+  let rawResponseSent = false;
+  const rawTransport = new Duplex({
+    read() {},
+    write(_chunk, _encoding, callback) {
+      callback();
+      if (!rawResponseSent) {
+        rawResponseSent = true;
+        setTimeout(() => rawTransport.emit('data', Buffer.from([83])), 0);
+      }
+    },
+  });
+  let transportErrorEmitted = false;
+  let transportClosed = false;
+  const errorTransport = new Duplex({
+    read() {},
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  Reflect.defineProperty(errorTransport, 'destroyed', {
+    configurable: true,
+    get: () => transportErrorEmitted,
+  });
+  Reflect.defineProperty(errorTransport, 'readyState', {
+    configurable: true,
+    get: () => (transportErrorEmitted ? 'closed' : 'open'),
+  });
+  const closeErrorTransport = () => {
+    if (transportClosed) return;
+    transportClosed = true;
+    errorTransport.emit('close', true);
+  };
+
+  try {
+    isolatedProbeStage = 'tls-transport-error-starting';
+    await subject`select 1::integer as value`;
+    const activeQueryOutcomePromise = queryOutcome(
+      subject`select pg_sleep(${TLS_SUBJECT_SLEEP_SECONDS})`,
+    );
+    await waitForActiveBackend(control, subjectName);
+
+    Reflect.set(subject.options, 'ssl', 'require');
+    Reflect.set(subject.options, 'socket', async () => rawTransport);
+    Reflect.set(tls, 'connect', () => {
+      setTimeout(() => {
+        transportErrorEmitted = true;
+        const error = new Error('Synthetic cancellation transport error.');
+        Reflect.set(error, 'code', 'SYNTHETIC_CANCEL_TRANSPORT_ERROR');
+        errorTransport.emit('error', error);
+      }, 0);
+      return errorTransport;
+    });
+
+    isolatedProbeStage = 'tls-transport-error-closing';
+    let closeSettled = false;
+    const closeOutcomePromise = Promise.resolve(
+      subject.end({ timeout: 0 }),
+    ).then(
+      () => {
+        closeSettled = true;
+        return 'unexpected' as const;
+      },
+      (error: unknown) => {
+        closeSettled = true;
+        return safeErrorCode(error) === 'SYNTHETIC_CANCEL_TRANSPORT_ERROR'
+          ? ('SYNTHETIC_CANCEL_TRANSPORT_ERROR' as const)
+          : ('unexpected' as const);
+      },
+    );
+    const postCloseOutcomePromise = queryOutcome(
+      subject`select 130::integer as value`,
+    );
+    await waitForCondition(
+      () => transportErrorEmitted,
+      globalThis.setTimeout,
+      'the synthetic cancellation transport error',
+      1_000,
+    );
+    await waitForCondition(
+      () => connectionCount(control, subjectName).then((count) => count === 0),
+      globalThis.setTimeout,
+      'the errored TLS close-probe subject backend to leave',
+      2_500,
+    );
+    const tlsTransportErrorSubjectBackendCountBeforeTransportClose =
+      await connectionCount(control, subjectName);
+    const tlsTransportErrorCloseSettledBeforeTransportClose = closeSettled;
+    closeErrorTransport();
+    await waitForCondition(
+      () => closeSettled,
+      globalThis.setTimeout,
+      'the errored TLS close promise to settle after transport close',
+      1_000,
+    );
+    const [
+      tlsTransportErrorActiveQueryOutcome,
+      tlsTransportErrorPostCloseOutcome,
+      tlsTransportErrorCloseCode,
+    ] = await Promise.all([
+      activeQueryOutcomePromise,
+      postCloseOutcomePromise,
+      closeOutcomePromise,
+    ]);
+    const tlsTransportErrorBackendCountsAfterClose = [
+      await connectionCount(control, subjectName),
+    ];
+    await waitMilliseconds(globalThis.setTimeout, 100);
+    tlsTransportErrorBackendCountsAfterClose.push(
+      await connectionCount(control, subjectName),
+    );
+
+    return {
+      tlsTransportErrorActiveQueryOutcome,
+      tlsTransportErrorBackendCountsAfterClose,
+      tlsTransportErrorCloseCode,
+      tlsTransportErrorCloseSettledBeforeTransportClose,
+      tlsTransportErrorPostCloseOutcome,
+      tlsTransportErrorSubjectBackendCountBeforeTransportClose,
+      tlsTransportErrorTransportClosed: transportClosed,
+    };
+  } finally {
+    closeErrorTransport();
+    Reflect.set(tls, 'connect', originalTlsConnect);
+    await cleanupDirectSubject(subject, control, subjectName);
+  }
 }
 
 async function queuedReconnectProbe(
@@ -619,14 +1385,39 @@ async function runIsolatedProbe(): Promise<ProbeEvidence> {
     process.env[PROBE_DATABASE_VARIABLE],
   );
   const runId = validatedRunId(process.env[PROBE_RUN_VARIABLE]);
+  isolatedProbeStage = 'opening';
+  const opening = await openingSocketCloseProbe();
   isolatedProbeStage = 'idle';
   const idle = await idleCloseProbe(databaseUrl, runId);
   isolatedProbeStage = 'active';
   const active = await activeCloseProbe(databaseUrl, runId);
+  isolatedProbeStage = 'cancel-failure';
+  const cancelFailure = await cancelFailureCloseProbe(databaseUrl, runId);
+  isolatedProbeStage = 'tls';
+  const tlsEvidence = await tlsCancelTransportProbe(databaseUrl, runId);
+  isolatedProbeStage = 'tls-transport-error';
+  const tlsTransportErrorEvidence = await tlsCancelTransportErrorProbe(
+    databaseUrl,
+    runId,
+  );
+  isolatedProbeStage = 'tls-wrap-failure';
+  const tlsWrapFailureEvidence = await tlsCancelWrapFailureProbe(
+    databaseUrl,
+    runId,
+  );
   isolatedProbeStage = 'queued';
   const queued = await queuedReconnectProbe(databaseUrl, runId);
   isolatedProbeStage = 'complete';
-  return { ...active, ...idle, ...queued };
+  return {
+    ...active,
+    ...cancelFailure,
+    ...idle,
+    ...opening,
+    ...queued,
+    ...tlsEvidence,
+    ...tlsTransportErrorEvidence,
+    ...tlsWrapFailureEvidence,
+  };
 }
 
 interface BoundedDrain {
@@ -985,6 +1776,10 @@ if (isIsolatedProbe) {
       );
       const evidence = await runProbeChild(databaseUrl);
 
+      expect(evidence.openingCloseSettledBeforeSocketCreation).toBe(false);
+      expect(evidence.openingCloseResolvedAfterSocketClose).toBe(true);
+      expect(evidence.openingQueryOutcome).toBe('CONNECTION_DESTROYED');
+
       expect(evidence.idleClosePromiseReused).toBe(true);
       expect(evidence.idlePostCloseOutcome).toBe('CONNECTION_ENDED');
       expect(evidence.idleBackendCountsAfterClose).toEqual([0, 0]);
@@ -1012,6 +1807,56 @@ if (isIsolatedProbe) {
       expect(evidence.activePostCloseOutcome).toBe('CONNECTION_ENDED');
       expect(evidence.activeCloseElapsedMs).toBeLessThan(1_000);
       expect(evidence.activeBackendCountsAfterClose).toEqual([0, 0]);
+
+      expect(evidence.cancelFailureBackendCountAtCloseRejection).toBe(0);
+      expect(evidence.cancelFailureBackendCountAfterCancelTimeout).toBe(1);
+      expect(evidence.cancelFailureCloseSettledAfterCancelTimeout).toBe(false);
+      expect(evidence.cancelFailureCloseSettledWhileBackendActive).toBe(false);
+      expect(evidence.cancelFailureCloseCode).toBe('CONNECT_TIMEOUT');
+      expect(evidence.cancelFailureQueuedOutcome).toBe('CONNECTION_DESTROYED');
+      expect(evidence.cancelFailureQueuedSettledAtCloseRejection).toBe(true);
+      expect(evidence.cancelFailureBackendCountsAfterClose).toEqual([0, 0]);
+
+      expect(evidence.tlsCancelFrameWritten).toBe(true);
+      expect(evidence.tlsActiveQueryOutcome).toBe('CONNECTION_DESTROYED');
+      expect(evidence.tlsPostCloseOutcome).toBe('CONNECTION_ENDED');
+      expect(evidence.tlsSubjectBackendCountBeforeFinalTransportClose).toBe(0);
+      expect(evidence.tlsCloseSettledBeforeFinalTransportClose).toBe(false);
+      expect(evidence.tlsFinalTransportClosed).toBe(true);
+
+      expect(evidence.tlsTransportErrorActiveQueryOutcome).toBe(
+        'CONNECTION_DESTROYED',
+      );
+      expect(evidence.tlsTransportErrorPostCloseOutcome).toBe(
+        'CONNECTION_ENDED',
+      );
+      expect(evidence.tlsTransportErrorCloseCode).toBe(
+        'SYNTHETIC_CANCEL_TRANSPORT_ERROR',
+      );
+      expect(
+        evidence.tlsTransportErrorSubjectBackendCountBeforeTransportClose,
+      ).toBe(0);
+      expect(evidence.tlsTransportErrorCloseSettledBeforeTransportClose).toBe(
+        false,
+      );
+      expect(evidence.tlsTransportErrorTransportClosed).toBe(true);
+      expect(evidence.tlsTransportErrorBackendCountsAfterClose).toEqual([0, 0]);
+
+      expect(evidence.tlsWrapFailureActiveQueryOutcome).toBe(
+        'CONNECTION_DESTROYED',
+      );
+      expect(evidence.tlsWrapFailurePostCloseOutcome).toBe('CONNECTION_ENDED');
+      expect(evidence.tlsWrapFailureCloseCode).toBe(
+        'SYNTHETIC_TLS_WRAP_FAILURE',
+      );
+      expect(
+        evidence.tlsWrapFailureSubjectBackendCountBeforeRawTransportClose,
+      ).toBe(0);
+      expect(evidence.tlsWrapFailureCloseSettledBeforeRawTransportClose).toBe(
+        false,
+      );
+      expect(evidence.tlsWrapFailureRawTransportClosed).toBe(true);
+      expect(evidence.tlsWrapFailureBackendCountsAfterClose).toEqual([0, 0]);
     });
   });
 }
