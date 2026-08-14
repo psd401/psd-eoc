@@ -503,6 +503,18 @@ describe('failure-drill runtime contracts', () => {
       }).success,
     ).toBe(false);
     expect(
+      FailureDrillRetryableFailureSchema.safeParse({
+        ...retryable,
+        failedEvidence: failedEvidence({ channel: 'email' }),
+      }).success,
+    ).toBe(false);
+    expect(
+      FailureDrillRetryableFailureSchema.safeParse({
+        ...retryable,
+        obligation: retryObligation({ intentId: ids.batch2 }),
+      }).success,
+    ).toBe(false);
+    expect(
       FailureDrillRetryObligationSetSchema.safeParse([
         retryObligation(),
         retryObligation(),

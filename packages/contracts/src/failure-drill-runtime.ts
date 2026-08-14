@@ -1006,10 +1006,10 @@ export const FailureDrillRetryableFailureSchema = z
     const evidence = failure.failedEvidence;
     const obligation = failure.obligation;
     if (
-      attempt.attemptId !== evidence.attemptId ||
-      attempt.attemptId !== obligation.attemptId ||
-      workKey(attempt) !== workKey(evidence) ||
-      workKey(attempt) !== workKey(obligation)
+      attemptReferenceIdentityKey(attempt) !==
+        attemptReferenceIdentityKey(evidence) ||
+      attemptReferenceIdentityKey(attempt) !==
+        attemptReferenceIdentityKey(obligation)
     ) {
       context.addIssue({
         code: 'custom',
