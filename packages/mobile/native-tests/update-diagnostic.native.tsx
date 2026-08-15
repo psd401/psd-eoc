@@ -25,12 +25,12 @@ const mockUpdateConstants: {
   runtimeVersion: '',
   channel: '',
   applicationId: 'net.psd401.eoc',
-  applicationVersion: '1.0.1',
+  applicationVersion: '1.0.2',
   nativeBuildVersion: '3',
 };
 
 let mockExpoConfig: unknown = {
-  version: '1.0.1',
+  version: '1.0.2',
   runtimeVersion: { policy: 'appVersion' },
   updates: {
     enabled: false,
@@ -130,7 +130,7 @@ function validEmbeddedOnlyConstants(): ReadOnlyUpdateConstants {
     configuredUpdatesEnabled: false,
     configuredCheckAutomatically: 'NEVER',
     configuredUpdateUrl: undefined,
-    configuredApplicationVersion: '1.0.1',
+    configuredApplicationVersion: '1.0.2',
     configuredRuntimeVersion: { policy: 'appVersion' },
   };
 }
@@ -148,11 +148,11 @@ describe('authenticated release diagnostic', () => {
       runtimeVersion: '',
       channel: '',
       applicationId: 'net.psd401.eoc',
-      applicationVersion: '1.0.1',
+      applicationVersion: '1.0.2',
       nativeBuildVersion: '3',
     });
     mockExpoConfig = {
-      version: '1.0.1',
+      version: '1.0.2',
       runtimeVersion: { policy: 'appVersion' },
       updates: {
         enabled: false,
@@ -173,7 +173,7 @@ describe('authenticated release diagnostic', () => {
     expect(
       screen.getByLabelText('Application ID: net.psd401.eoc'),
     ).toBeTruthy();
-    expect(screen.getByLabelText('Application version: 1.0.1')).toBeTruthy();
+    expect(screen.getByLabelText('Application version: 1.0.2')).toBeTruthy();
     expect(screen.getByLabelText('Native build version: 3')).toBeTruthy();
     expect(
       screen.getByLabelText(
@@ -192,7 +192,7 @@ describe('authenticated release diagnostic', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByLabelText('Configured runtime version: 1.0.1'),
+      screen.getByLabelText('Configured runtime version: 1.0.2'),
     ).toBeTruthy();
     expect(
       screen.getByLabelText(
@@ -200,8 +200,8 @@ describe('authenticated release diagnostic', () => {
       ),
     ).toBeTruthy();
     expect(screen.getByLabelText('Emergency launch: No')).toBeTruthy();
-    expect(screen.getAllByText('1.0.1')).toHaveLength(2);
-    for (const version of screen.getAllByText('1.0.1')) {
+    expect(screen.getAllByText('1.0.2')).toHaveLength(2);
+    for (const version of screen.getAllByText('1.0.2')) {
       expect(version.props.selectable).toBe(true);
     }
     expect(

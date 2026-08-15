@@ -39,8 +39,8 @@ describe('mobile distribution configuration', () => {
     expect(easConfig.build.production.environment).toBe('production');
   });
 
-  test('ships app/runtime 1.0.1 as embedded-only with no OTA routing', () => {
-    expect(appConfig.expo.version).toBe('1.0.1');
+  test('ships app/runtime 1.0.2 as embedded-only with no OTA routing', () => {
+    expect(appConfig.expo.version).toBe('1.0.2');
     expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(appConfig.expo.updates).toEqual({
       enabled: false,
@@ -127,14 +127,16 @@ describe('mobile distribution configuration', () => {
       'Primary language: English (U.S.) / `en-US`',
       'Initial iOS version scaffold: `1.0`',
       'User access: Limited Access, with zero new app-specific user grants',
-      'TestFlight inventory: empty',
+      'TestFlight inventory: no processed build',
       'App Store provisioning profile: `U8P2YKU4T8`',
       'Ad Hoc profile `525SSPSUMQ`',
       'c13a2847c944d0b0f25ba007ca06142c8218d87232ad9d36d1c86726355c1fde',
       'e68d07aa-98e5-4c87-8595-52175975291f',
       '7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9',
       'separate provider-configuration gate',
-      'TestFlight still',
+      'dcd24fd9-16ef-455d-92a8-c3852b4cfcd3',
+      'Failed',
+      '90683',
       'Do not run the app-creation lane again',
       'The presence of `ascAppId` is routing configuration only, never',
     ]) {
@@ -259,9 +261,9 @@ describe('mobile distribution configuration', () => {
       'Do not fabricate or relabel an illustration as provider evidence',
     );
     expect(release).toContain('product-owner sign-off not recorded');
-    expect(release).toContain('Google identity review is complete');
-    expect(release).toContain('phone verification is complete');
-    expect(compactRelease).toContain('app creation is unlocked');
+    expect(release).toContain('Play app `4972493736740021045` exists');
+    expect(release).toContain('Internal draft release 1');
+    expect(release).toContain('4860219896995172827');
     expect(compactRelease).toContain(
       'SUPERSEDED — NOT ELIGIBLE FOR PLAY UPLOAD, TESTER EXPOSURE, OR INSTALLATION',
     );
@@ -287,7 +289,10 @@ describe('mobile distribution configuration', () => {
     }
     expect(release).toContain('existing Ad Hoc profile `525SSPSUMQ`');
     expect(iosBuildRecord).toContain(
-      'The IPA has not been uploaded to App Store Connect, processed by TestFlight, exposed to a tester, or installed on a physical device',
+      'marked version 1.0.1/build 2 **Failed** with error 90683',
+    );
+    expect(iosBuildRecord).toContain(
+      'A 1.0.2 replacement BUILD and later upload remain pending separate fresh approvals',
     );
     expect(compactRelease).toContain(
       'Before the iOS BUILD, a separate provider-configuration gate was previewed, explicitly approved by the product owner for one exact write, confirmed by the authenticated human operator, and independently read back',
@@ -316,7 +321,7 @@ describe('mobile distribution configuration', () => {
       'Remote updates: `Disabled — embedded store bundle only`',
       'Launch source: `Embedded in this installed binary`',
       'Remote update ID: `Not applicable — remote updates disabled`',
-      'Configured runtime version: `1.0.1`',
+      'Configured runtime version: the same exact installed application version',
       'Remote update channel: `Not applicable — remote updates disabled`',
       'Emergency launch: `No`',
     ]) {
@@ -324,7 +329,7 @@ describe('mobile distribution configuration', () => {
     }
 
     expect(compactRelease).toContain(
-      'Remote updates are **blocked for app/runtime 1.0.1**',
+      'Remote updates are **blocked for current app/runtime 1.0.2**',
     );
     expect(compactRelease).toContain(
       'district-held code-signing public certificate embedded in a new app version/runtime',
@@ -355,7 +360,7 @@ describe('mobile distribution configuration', () => {
     }
     expect(readme).not.toContain('`ota-preview`:');
     expect(readme).toContain(
-      'Remote updates are disabled for app/runtime 1.0.1',
+      'Remote updates are disabled for app/runtime 1.0.2',
     );
     expect(compactReadme).toContain(
       'Ordinary `preview` must never be used for production-environment OTA verification',
@@ -415,7 +420,9 @@ describe('mobile distribution configuration', () => {
     );
 
     expect(build).toContain('| `configured-unverified`');
-    expect(build).toContain('superseded and not eligible for Play upload');
+    expect(build).toContain(
+      'superseded evidence and are not eligible for Play',
+    );
     expect(build).toContain('3742b81d-3942-4fea-b760-53c809d8733f');
     expect(build).toContain(
       '915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246',
@@ -426,7 +433,7 @@ describe('mobile distribution configuration', () => {
     );
     expect(update).toContain('| `blocked`');
     expect(update).toContain(
-      'Remote updates are disabled in app/runtime 1.0.1',
+      'Remote updates are disabled in current app/runtime 1.0.2',
     );
 
     for (const integration of [
@@ -450,10 +457,11 @@ describe('mobile distribution configuration', () => {
     );
     expect(submit).toContain('6801607849');
     expect(apple).toContain('6801607849');
-    expect(submit).toContain('finished embedded-only iOS build');
-    expect(apple).toContain('e68d07aa-98e5-4c87-8595-52175975291f');
-    expect(apple).toContain('TestFlight remains empty');
-    expect(play).toContain('eligible embedded-only AAB');
+    expect(submit).toContain('dcd24fd9-16ef-455d-92a8-c3852b4cfcd3');
+    expect(apple).toContain('90683');
+    expect(apple).toContain('No processed TestFlight build');
+    expect(play).toContain('4860219896995172827');
+    expect(play).toContain('Internal testing');
   });
 
   test('ships accessible screen references and safe staff guidance', () => {
@@ -503,7 +511,9 @@ describe('mobile distribution configuration', () => {
       expect(guide).toContain('Skip this section unless District Technology');
       expect(guide).toContain('Scheduling the window does not');
       expect(guide).toContain('authenticated human must freshly');
-      expect(guide).toContain('not provider screenshots or install proof');
+      expect(compactGuide).toContain(
+        'not provider screenshots or install proof',
+      );
       expect(compactGuide).toContain(
         'confirm district sign-in succeeds, and confirm the visible authorized site list is correct',
       );

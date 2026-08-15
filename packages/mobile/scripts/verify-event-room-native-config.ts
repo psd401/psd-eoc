@@ -36,6 +36,8 @@ assert(
 );
 
 const location = configuredPlugin('expo-location');
+const IOS_MOTION_USAGE_DESCRIPTION =
+  "PSD EOC does not request or use Motion & Fitness data. This entry is present only because the foreground-location library links Apple's motion framework.";
 assert(
   location.isIosBackgroundLocationEnabled === false &&
     location.isAndroidBackgroundLocationEnabled === false,
@@ -43,9 +45,12 @@ assert(
 );
 assert(
   location.locationAlwaysAndWhenInUsePermission === false &&
-    location.locationAlwaysPermission === false &&
-    location.motionUsagePermission === false,
-  'iOS always-location and motion usage descriptions must be omitted.',
+    location.locationAlwaysPermission === false,
+  'iOS always-location usage descriptions must be omitted.',
+);
+assert(
+  location.motionUsagePermission === IOS_MOTION_USAGE_DESCRIPTION,
+  'iOS motion usage must have the exact truthful linked-library description.',
 );
 assert(
   location.isAndroidForegroundServiceEnabled === false &&

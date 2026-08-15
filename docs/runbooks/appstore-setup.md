@@ -21,8 +21,8 @@ The app record was created once and read back on 2026-08-14:
 - Primary language: English (U.S.) / `en-US`
 - Initial iOS version scaffold: `1.0`
 - User access: Limited Access, with zero new app-specific user grants
-- TestFlight inventory: empty; no build, group assignment, tester, or
-  invitation was created
+- TestFlight inventory: no processed build, group assignment, tester, or
+  invitation exists; Build Uploads records 1.0.1/build 2 as Failed
 
 Before BUILD, a separate provider-configuration gate was previewed, explicitly
 approved by the product owner for one exact write, confirmed by the
@@ -57,9 +57,15 @@ That separately approved EAS iOS production BUILD then finished:
   IPA SHA-256
   `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`
 
-The iOS BUILD did not upload anything to App Store Connect. TestFlight still
-says “Submit a build to start testing”; no processed build, group assignment,
-tester, invitation, or physical installation exists.
+A separately approved upload-only EAS submission
+`dcd24fd9-16ef-455d-92a8-c3852b4cfcd3` finished transport for that exact build
+and App Store Connect app `6801607849`. App Store Connect Build Uploads marked
+version 1.0.1/build 2 **Failed** with error 90683 because its Info.plist lacks
+`NSMotionUsageDescription`. That immutable binary is not eligible for retry or
+TestFlight. No processed build, group assignment, tester, invitation, or
+physical installation exists. The repository correction advances the next
+candidate to app/runtime 1.0.2; its replacement build and later upload require
+fresh separate approvals and remain pending.
 
 The bundle identifier already existed in the Apple Developer account, so the
 app-record operation did not create or change a bundle ID or capability. App
