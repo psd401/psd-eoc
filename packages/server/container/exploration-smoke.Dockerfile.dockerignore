@@ -1,0 +1,13 @@
+.git
+.github
+.agents
+.codex
+**/.DS_Store
+**/.next
+**/coverage
+**/node_modules
+docs
+infra
+packages/mcp
+packages/mobile
+scripts
