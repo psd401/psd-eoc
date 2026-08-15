@@ -1,16 +1,19 @@
 # Install PSD EOC on Android
 
-> **Distribution status: BLOCKED.** No installable PSD EOC Play closed-test or
-> Firebase build has been verified yet. These illustrated screen references are
-> advance guidance, not provider screenshots or install proof. Do not try to
-> install until District Technology announces availability.
+> **Distribution status: BLOCKED.** The exact PSD EOC AAB is saved in a Play
+> Internal-testing draft, but no tester link or installable release is verified.
+> These illustrated screen references are advance guidance, not provider
+> screenshots or install proof. Do not try to install until District Technology
+> announces availability.
 
 PSD EOC is distributed privately to approved Peninsula School District staff
-through a Google Play closed test. Firebase App Distribution is an interim
-fallback only when District Technology explicitly directs you to it.
+through an approved Google Play test. The first bounded pilot uses Internal
+testing; the later durable staff path uses closed testing. Firebase App
+Distribution is a fallback only when District Technology explicitly directs
+you to it.
 Installing the app does not start an incident, run a drill, or notify anyone.
 
-> **Before you begin:** You need the approved closed-test link, the Google
+> **Before you begin:** You need the approved Play-test link, the Google
 > account that belongs to the district tester group, a secure screen lock, and
 > internet access. Do not forward the link or use a personal Google account.
 >
@@ -27,7 +30,7 @@ Installing the app does not start an incident, run a drill, or notify anyone.
 
 1. Check the account shown in Google Play. Switch to the approved district
    Google account if needed.
-2. Open the PSD EOC closed-test link sent through the approved district
+2. Open the PSD EOC Play-test link sent through the approved district
    channel.
 3. Confirm that the page says **PSD EOC** and identifies Peninsula School
    District. If it does not, stop and contact District Technology.
@@ -122,11 +125,11 @@ confirm the action, and launch the synthetic test:
 ## Interim Firebase installation
 
 Use Firebase App Distribution only when District Technology sends an approved
-invitation and explicitly says the Play closed test is unavailable. Confirm
+invitation and explicitly says the approved Play test is unavailable. Confirm
 the app name and package are `PSD EOC` and `net.psd401.eoc`. Android may warn
 about installing a test build; never disable device security globally and
-never install an APK received directly as an attachment. Return to the Play
-closed test when District Technology announces that it is ready.
+never install an APK received directly as an attachment. Return to the approved
+Play test when District Technology announces that it is ready.
 
 ## Get help or remove access
 

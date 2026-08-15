@@ -14,10 +14,11 @@ Release 1 targets are fixed:
 - iOS: `net.psd401.eoc`. The first install proof uses the private TestFlight
   internal group `District Technology`. Any later ordinary-staff cohort uses
   only the external group `Staff` after its separate Beta App Review gates.
-- Android: `net.psd401.eoc`, Play **Closed testing — Alpha** (`alpha`) track.
-  The first AAB is uploaded manually; later EAS submissions remain unreleased
-  drafts until a human separately reviews and releases them.
-- App/runtime 1.0.1 uses only code and assets embedded in its store binary.
+- Android: `net.psd401.eoc`. The bounded first-install path is Play **Internal
+  testing** with at most 100 approved testers. Play **Closed testing — Alpha**
+  (`alpha`) remains the durable staff path; later EAS submissions target that
+  track and remain unreleased drafts until a human separately reviews them.
+- Current app/runtime 1.0.2 uses only code and assets embedded in its store binary.
   Remote updates are disabled and no EAS update channel is attached.
 - No build is promoted to an App Store public release or Play `beta` or
   `production` track by this runbook.
@@ -77,7 +78,7 @@ PSD EOC notification. Its preview binds:
 
 - exact clean Git SHA and reviewed diff;
 - platform and `production` profile;
-- `net.psd401.eoc`, app/runtime 1.0.1, and embedded-only update policy;
+- `net.psd401.eoc`, app/runtime 1.0.2, and embedded-only update policy;
 - the exact public API origin and compiled push-registration switch;
 - existing remote signing-credential identity;
 - current remote native-version counter and exact predicted transition;
@@ -95,7 +96,7 @@ Before BUILD:
       not authorize installation, sign-in, registration, provider testing, or
       any notification.
 - [ ] Resolved production config for both platforms contains those values,
-      app/runtime 1.0.1, remote updates disabled, automatic checks set to
+      app/runtime 1.0.2, remote updates disabled, automatic checks set to
       `NEVER`, no update URL, and no EAS channel.
 - [ ] Required remote signing credentials already exist and are read back.
       BUILD must stop instead of creating, selecting, repairing, or refreshing
@@ -180,8 +181,11 @@ of the four human-only critical actions.
 
 ## 2. Current release security boundary
 
-App/runtime 1.0.1 supersedes the prior Android artifact before store exposure.
-Its committed configuration must remain exactly:
+The current repository candidate is app/runtime 1.0.2. It preserves the
+embedded-only boundary while adding the truthful Apple motion-framework purpose
+string required to replace the failed iOS 1.0.1/build-2 upload. The already
+built Android 1.0.1/code-3 artifact remains the exact eligible saved Play
+Internal-testing draft. The committed 1.0.2 configuration must remain exactly:
 
 - `updates.enabled: false`;
 - `updates.checkAutomatically: "NEVER"`;
@@ -228,10 +232,11 @@ signing block verified and its certificate matched the reviewed
 default-keystore fingerprint above. Embedded `app.config` proves package
 `net.psd401.eoc`, app/runtime 1.0.1, disabled/`NEVER` updates, the
 embedded-update fallback, and no update URL; the embedded bundle contains the approved
-`https://eoc.psd401.net` API origin. This is BUILD evidence only. The AAB has
-not been uploaded to Play, made installable, exposed to a tester, or installed
-on a physical device. Its first Play upload remains a separate issue #37 write
-with a fresh consequence preview and approval.
+`https://eoc.psd401.net` API origin. Under a separate approved write, this exact
+AAB was saved as artifact `4860219896995172827` in Play Internal testing draft
+release 1. Play App Signing is active and the upload-key fingerprint matched.
+The operator stopped before **Next**: no tester list, join link, preview,
+confirmation, rollout, exposure, or physical-device installation exists.
 
 Before the iOS BUILD, a separate provider-configuration gate was previewed,
 explicitly approved by the product owner for one exact write, confirmed by the
@@ -272,9 +277,14 @@ or channel, the approved `https://eoc.psd401.net` API origin, and push
 registration enabled. Its signed entitlements include the reviewed Time
 Sensitive Notifications entitlement; no other capability change was authorized.
 The embedded provisioning profile matches the exact profile and certificate
-above. This is BUILD evidence only. The IPA has not been uploaded to App Store
-Connect, processed by TestFlight, exposed to a tester, or installed on a
-physical device.
+above. A separately approved upload-only EAS submission
+`dcd24fd9-16ef-455d-92a8-c3852b4cfcd3` finished transport for this exact build
+and App Store Connect app `6801607849`. App Store Connect Build Uploads then
+marked version 1.0.1/build 2 **Failed** with error 90683 because the binary lacks
+`NSMotionUsageDescription`. That immutable binary is not eligible for retry or
+TestFlight. No processed build, group assignment, tester, invitation, or
+physical-device installation exists. A 1.0.2 replacement BUILD and later
+upload remain pending separate fresh approvals.
 
 ## 3. Version/build automation and commands
 
@@ -376,12 +386,13 @@ installation, it is acceptable evidence only when every row says:
 
 - Evidence status: `Identity available`
 - Application ID: `net.psd401.eoc`
-- Application version: `1.0.1`
+- Application version: exact provider release version (`1.0.1` for the saved
+  Android draft; `1.0.2` for the pending replacement iOS candidate)
 - Native build version: exact provider build number in the release record
 - Remote updates: `Disabled — embedded store bundle only`
 - Launch source: `Embedded in this installed binary`
 - Remote update ID: `Not applicable — remote updates disabled`
-- Configured runtime version: `1.0.1`
+- Configured runtime version: the same exact installed application version
 - Remote update channel: `Not applicable — remote updates disabled`
 - Emergency launch: `No`
 
@@ -435,10 +446,10 @@ The App Store Connect record was read back on 2026-08-14 in provider `372148`:
 name `PSD EOC`, bundle ID `net.psd401.eoc`, SKU `PSD-EOC-IOS`, primary language
 English (U.S.) / `en-US`, and initial iOS version scaffold `1.0`. User Access is
 Limited Access with zero new app-specific grants. The exact App Store profile
-and finished iOS production BUILD recorded in section 2 now exist, but no App
-Store Connect API credential or upload was created. Read-only App Store Connect
-evidence still says “Submit a build to start testing”; no processed build,
-group, tester, invitation, or installation exists.
+and finished iOS production BUILD recorded in section 2 exist. The upload-only
+submission also occurred, but Apple rejected the binary during processing with
+error 90683. No processed build, group, tester, invitation, or installation
+exists.
 
 1. Follow [the App Store runbook](appstore-setup.md) to read back the existing
    record and the numeric `ascAppId` immediately before any later write.
@@ -458,7 +469,7 @@ group, tester, invitation, or installation exists.
 6. Have an authorized internal tester install through TestFlight and complete
    sections 4 and 10. Processing or assignment alone is not install proof.
 
-## 7. Android — Play alpha closed testing
+## 7. Android — Play internal pilot and durable alpha closed testing
 
 The prior v1.0.0/code-2 AAB is prohibited by section 2. The exact reviewed
 v1.0.1/code-3 replacement in section 2 is the only current candidate for Play
@@ -466,9 +477,13 @@ bootstrap. Its finished EAS state, digest, embedded-only policy, and upload-key
 fingerprint must be re-read immediately before any separately authorized
 provider write.
 
-The first eligible AAB is uploaded manually in Play Console under issue #37.
-After first-upload, app-signing, closed tester group, and release-scoped service
-account evidence exist, later EAS Submit uses this fail-closed profile:
+The exact eligible AAB is already saved manually as artifact
+`4860219896995172827` in Internal testing draft release 1. Internal testing is
+the approved bounded interim for no more than 100 testers. It is not the durable
+D-022 path and does not satisfy issue #37's later closed-test bootstrap.
+
+After closed-track app-signing, tester-group, and release-scoped service-account
+evidence exist, later EAS Submit uses this fail-closed profile:
 
 ```json
 {
@@ -486,7 +501,7 @@ bunx eas-cli@21.7.0 submit --platform android --profile production \
   --id 'EXACT_REVIEWED_EAS_BUILD_ID' --non-interactive
 ```
 
-The upload remains an unreleased draft. A human then verifies application ID,
+Any later upload remains an unreleased draft. A human then verifies application ID,
 app-signing identity, version name/code, AAB digest, `alpha` track, approved
 Google Group, release notes, and warnings. Completing the draft, sending it for
 review, and making it installable are a new TESTER EXPOSURE write requiring a
@@ -494,14 +509,12 @@ fresh preview, product-owner approval, human confirmation, and read-back.
 Never promote to another track. An approved tester must install from the
 ordinary Play Store before success is recorded.
 
-Current external state on 2026-08-14: the organization website and account
-identity are verified, the account is classified as government, both required
-account phone roles are provider-verified, and Play enables **Create app**.
-Google identity review is complete; phone verification is complete and app
-creation is unlocked. No Play app record exists. Creating that record and
-making the separately authorized first manual AAB upload remain issue #37
-human-provider writes; this readiness evidence is not evidence that an app or
-release exists.
+Current external state on 2026-08-15: Play app `4972493736740021045` exists for
+`net.psd401.eoc`; organization identity and both required phone roles are
+verified. Internal draft release 1 contains only the exact 1.0.1/code-3 AAB and
+reviewed release notes. No tester list, join link, preview/confirm, rollout,
+exposure, or install exists. Durable Google Groups-based closed testing and its
+release credential remain issue #37 work.
 
 ## 8. Staged private rollout
 
@@ -526,10 +539,11 @@ drift, or incomplete evidence. Removing access does not uninstall a build.
 
 ## 9. Remote-update policy and rollback story
 
-Remote updates are **blocked for app/runtime 1.0.1**. There is no update URL,
-channel, verification build, automatic check, download path, publication path,
-rollout, or OTA rollback command for this runtime. Every current code or asset
-change uses a new app version and store build.
+Remote updates are **blocked for current app/runtime 1.0.2**. The existing
+embedded-only 1.0.1 provider artifacts are also incapable of remote updates.
+There is no update URL, channel, verification build, automatic check, download
+path, publication path, rollout, or OTA rollback command for these runtimes.
+Every current code or asset change uses a new app version and store build.
 
 This is deliberate fail-closed behavior. A safe OTA implementation needs work
 outside issue #33's owned paths and a new native build. Before remote updates
@@ -587,31 +601,32 @@ cannot replace them.
 
 ### iOS internal TestFlight install
 
-- Status: **BLOCKED — the finished iOS v1.0.1 production build has not been
-  uploaded to App Store Connect; no TestFlight group assignment or human install
+- Status: **BLOCKED — Apple processing failed for uploaded iOS v1.0.1/build 2;
+  no eligible 1.0.2 replacement, TestFlight group assignment, or human install
   evidence exists**
 - App record read-back: provider `372148`, Apple ID `6801607849`, name
   `PSD EOC`, bundle ID `net.psd401.eoc`, SKU `PSD-EOC-IOS`, `en-US`, initial
-  version `1.0`, Limited Access with zero new app-specific grants; TestFlight
-  says “Submit a build to start testing” and contains no processed build, group
-  assignment, tester, or invitation
+  version `1.0`, Limited Access with zero new app-specific grants; Build Uploads
+  records 1.0.1/build 2 as Failed with error 90683 and TestFlight contains no
+  processed build, group assignment, tester, or invitation
 - Exact EAS build ID and artifact digest:
   `e68d07aa-98e5-4c87-8595-52175975291f` / build `2` /
   `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`
-- Exact App Store Connect build ID/version/build number: `BLOCKED`
+- EAS submission / App Store processing:
+  `dcd24fd9-16ef-455d-92a8-c3852b4cfcd3` finished transport; Apple processing
+  failed with 90683; replacement 1.0.2 identity is `PENDING — not built yet`
 - `District Technology` group read-back: `BLOCKED`
 - Section 4 embedded-only diagnostic read-back: `BLOCKED`
 - Physical device/OS and TestFlight-install timestamp: `BLOCKED`
 - Human verifier role and non-sensitive evidence link: `BLOCKED`
 
-### Android Play alpha install
+### Android Play internal install
 
-- Status: **BLOCKED — Google account verification is complete and app creation
-  is unlocked, but no Play app record, AAB upload, release, or human install
-  evidence exists**
-- Play account read-back: organization website and identity verified on
-  2026-08-14; both required phone roles are provider-verified; **Create app**
-  is enabled; no Play app record exists
+- Status: **BLOCKED — the exact AAB is saved in an Internal-testing draft, but
+  no tester audience, rollout, installability, or human install evidence exists**
+- Play account/app read-back: app `4972493736740021045`, package
+  `net.psd401.eoc`; organization identity and both required phone roles are
+  verified; Play App Signing is active
 - Superseded v1.0.0 build evidence: EAS
   `856e54b5-9abd-45a5-b0db-809a295da5ef`, source `577cd741...`, code `2`, AAB
   SHA-256 `015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463`;
@@ -620,9 +635,9 @@ cannot replace them.
   `3742b81d-3942-4fea-b760-53c809d8733f`, source
   `71e08fa8358f6890e5419289b163aaa0fb0af081`, version code `3`, AAB SHA-256
   `915247b2a3c4c7eb97d685dd04e8886cf93f6caed24d605ac9991166faa64246`;
-  no Play upload, release, tester exposure, or installation is authorized or
-  verified
-- Play `alpha` release and tester-group digest/count read-back: `BLOCKED`
+  saved as artifact `4860219896995172827` in Internal testing draft release 1
+- Internal tester-list digest/count, join link, preview/confirm, and rollout
+  read-back: `BLOCKED`
 - Section 4 embedded-only diagnostic read-back: `BLOCKED`
 - Physical device/OS and Play-install timestamp: `BLOCKED`
 - Human verifier role and non-sensitive evidence link: `BLOCKED`
