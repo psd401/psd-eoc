@@ -494,11 +494,14 @@ fresh preview, product-owner approval, human confirmation, and read-back.
 Never promote to another track. An approved tester must install from the
 ordinary Play Store before success is recorded.
 
-Current external state on 2026-08-14: the organization website is verified,
-the account is classified as government, and organization and authorized-
-representative identity documents have been submitted. Google identity review
-is pending; phone verification and app creation remain locked. This is an
-external provider wait, not evidence that an app or release exists.
+Current external state on 2026-08-14: the organization website and account
+identity are verified, the account is classified as government, both required
+account phone roles are provider-verified, and Play enables **Create app**.
+Google identity review is complete; phone verification is complete and app
+creation is unlocked. No Play app record exists. Creating that record and
+making the separately authorized first manual AAB upload remain issue #37
+human-provider writes; this readiness evidence is not evidence that an app or
+release exists.
 
 ## 8. Staged private rollout
 
@@ -603,10 +606,12 @@ cannot replace them.
 
 ### Android Play alpha install
 
-- Status: **BLOCKED — Google identity review is pending; app creation, AAB
-  upload, release, and human install evidence do not exist**
-- Play account read-back: organization and representative documents submitted
-  2026-08-14; phone verification and app creation locked pending Google review
+- Status: **BLOCKED — Google account verification is complete and app creation
+  is unlocked, but no Play app record, AAB upload, release, or human install
+  evidence exists**
+- Play account read-back: organization website and identity verified on
+  2026-08-14; both required phone roles are provider-verified; **Create app**
+  is enabled; no Play app record exists
 - Superseded v1.0.0 build evidence: EAS
   `856e54b5-9abd-45a5-b0db-809a295da5ef`, source `577cd741...`, code `2`, AAB
   SHA-256 `015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463`;
