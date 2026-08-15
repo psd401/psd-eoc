@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -20,10 +21,12 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
 const RUN_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const WORKSPACE_NAMESPACE_PATTERN = /^[0-9a-f]{64}$/u;
 const MINIMUM_APP_PORT = 20_000;
 const APP_PORT_COUNT = 30_000;
 export const EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT =
@@ -32,11 +35,18 @@ const PORT_CLOSE_TIMEOUT_MS = 10_000;
 const PORT_LEASE_DIRECTORY = join(tmpdir(), 'psd-eoc-event-room-port-leases');
 const RUN_DIRECTORY_PREFIX = 'psd-eoc-event-room-';
 const SUPERVISION_DIRECTORY_PREFIX = 'psd-eoc-event-room-supervision-';
+const SOURCE_WORKSPACE_DIRECTORY = realpathSync(
+  fileURLToPath(new URL('../../../../../../', import.meta.url)),
+);
+const SOURCE_WORKSPACE_NAMESPACE = createHash('sha256')
+  .update(SOURCE_WORKSPACE_DIRECTORY, 'utf8')
+  .digest('hex');
 export const EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT_ENV =
   'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT';
 
 export interface EventRoomPlaywrightRunContext {
   readonly runId: string;
+  readonly workspaceNamespace: string;
   readonly baseDatabaseUrl: string;
   readonly databaseUrl: string;
   readonly databaseName: string;
@@ -72,6 +82,7 @@ export function eventRoomPlaywrightDatabaseMarker(value: unknown): string {
     kind: 'psd-eoc-event-room-playwright-database',
     version: 1,
     runId: context.runId,
+    workspaceNamespace: context.workspaceNamespace,
     databaseName: context.databaseName,
   });
 }
@@ -471,7 +482,11 @@ function hasCanonicalPriorLegacyRunMarker(
 function readCanonicalPriorPortLease(
   name: string,
   currentTime: () => number,
-): Readonly<{ runId: string; isFresh: boolean }> | null {
+): Readonly<{
+  runId: string;
+  workspaceNamespace: string;
+  isFresh: boolean;
+}> | null {
   const match = name.match(/^(\d{5})\.json$/u);
   if (match === null) return null;
   const appPort = Number.parseInt(match[1]!, 10);
@@ -510,6 +525,9 @@ function readCanonicalPriorPortLease(
     !('runId' in parsed) ||
     typeof parsed.runId !== 'string' ||
     !RUN_ID_PATTERN.test(parsed.runId) ||
+    !('workspaceNamespace' in parsed) ||
+    typeof parsed.workspaceNamespace !== 'string' ||
+    !WORKSPACE_NAMESPACE_PATTERN.test(parsed.workspaceNamespace) ||
     !('appPort' in parsed) ||
     parsed.appPort !== appPort ||
     !('leaseOwnerPid' in parsed) ||
@@ -519,6 +537,7 @@ function readCanonicalPriorPortLease(
     serialized !==
       serializedPortLease({
         runId: parsed.runId,
+        workspaceNamespace: parsed.workspaceNamespace,
         appPort: parsed.appPort,
         leaseOwnerPid: parsed.leaseOwnerPid,
       })
@@ -528,6 +547,7 @@ function readCanonicalPriorPortLease(
   const now = requireResidueCheckTime(currentTime());
   return {
     runId: parsed.runId,
+    workspaceNamespace: parsed.workspaceNamespace,
     isFresh:
       now >= entry.mtimeMs && now - entry.mtimeMs <= GATE_HEARTBEAT_MAX_AGE_MS,
   };
@@ -542,12 +562,14 @@ function requireResidueCheckTime(value: number): number {
 
 /**
  * Reports current supervision evidence and strict canonical marker/lease
- * residue from earlier harness revisions without treating a directory name,
- * PID, port, or path as cleanup authority. Active runs with a current,
- * canonical heartbeat are left alone, as are fresh leases that may not have
- * published their heartbeat yet. This detector never signals a process,
- * removes a file, releases a lease, or drops a database; the exact supervisor
- * nonce and immutable process markers remain mandatory for those operations.
+ * residue from this source checkout without treating a directory name, PID,
+ * port, or path as cleanup authority. Unnamespaced and foreign-checkout
+ * evidence remains untouched because this checkout cannot attribute it.
+ * Active runs with a current, canonical heartbeat are left alone, as are fresh
+ * leases that may not have published their heartbeat yet. This detector never
+ * signals a process, removes a file, releases a lease, or drops a database;
+ * the exact supervisor nonce and immutable process markers remain mandatory
+ * for those operations.
  */
 export function detectPriorEventRoomPlaywrightResidue(
   value: unknown,
@@ -566,9 +588,11 @@ export function detectPriorEventRoomPlaywrightResidue(
     residueRunIds.add(runId);
     results.push({ runId, reason });
   };
+  const supervisionDirectoryPrefix = `${SUPERVISION_DIRECTORY_PREFIX}${current.workspaceNamespace}-`;
+  const runDirectoryPrefix = `${RUN_DIRECTORY_PREFIX}${current.workspaceNamespace}-`;
   for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
-    const runId = entry.name.startsWith(SUPERVISION_DIRECTORY_PREFIX)
-      ? entry.name.slice(SUPERVISION_DIRECTORY_PREFIX.length)
+    const runId = entry.name.startsWith(supervisionDirectoryPrefix)
+      ? entry.name.slice(supervisionDirectoryPrefix.length)
       : undefined;
     if (
       runId === undefined ||
@@ -632,8 +656,8 @@ export function detectPriorEventRoomPlaywrightResidue(
   }
 
   for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
-    const runId = entry.name.startsWith(RUN_DIRECTORY_PREFIX)
-      ? entry.name.slice(RUN_DIRECTORY_PREFIX.length)
+    const runId = entry.name.startsWith(runDirectoryPrefix)
+      ? entry.name.slice(runDirectoryPrefix.length)
       : undefined;
     if (
       runId === undefined ||
@@ -669,6 +693,7 @@ export function detectPriorEventRoomPlaywrightResidue(
     const lease = readCanonicalPriorPortLease(entry.name, currentTime);
     if (
       lease === null ||
+      lease.workspaceNamespace !== current.workspaceNamespace ||
       lease.isFresh ||
       lease.runId === current.runId ||
       activeRunIds.has(lease.runId) ||
@@ -1122,20 +1147,29 @@ function buildEventRoomPlaywrightRunContext(
   runId: string,
   appPort: number,
   leaseOwnerPid: number,
+  workspaceNamespace: string,
 ): EventRoomPlaywrightRunContext {
   const validatedBaseUrl =
     requireSyntheticEventRoomTestDatabaseUrl(baseDatabaseUrl);
   if (!RUN_ID_PATTERN.test(runId)) {
     throw new Error('The event-room Playwright run ID must be a random UUID.');
   }
+  if (!WORKSPACE_NAMESPACE_PATTERN.test(workspaceNamespace)) {
+    throw new Error(
+      'The event-room Playwright workspace namespace is invalid.',
+    );
+  }
   const compactRunId = runId.replaceAll('-', '');
   const databaseName = `psd_eoc_event_room_${compactRunId}_test`;
   const databaseUrl = new URL(validatedBaseUrl);
   databaseUrl.pathname = `/${databaseName}`;
-  const runDirectory = join(tmpdir(), `psd-eoc-event-room-${runId}`);
+  const runDirectory = join(
+    tmpdir(),
+    `${RUN_DIRECTORY_PREFIX}${workspaceNamespace}-${runId}`,
+  );
   const supervisionDirectory = join(
     tmpdir(),
-    `${SUPERVISION_DIRECTORY_PREFIX}${runId}`,
+    `${SUPERVISION_DIRECTORY_PREFIX}${workspaceNamespace}-${runId}`,
   );
   const workspaceDirectory = join(runDirectory, 'workspace');
   const serverDirectory = join(workspaceDirectory, 'packages', 'server');
@@ -1150,6 +1184,7 @@ function buildEventRoomPlaywrightRunContext(
   }
   return Object.freeze({
     runId,
+    workspaceNamespace,
     baseDatabaseUrl: validatedBaseUrl,
     databaseUrl: databaseUrl.toString(),
     databaseName,
@@ -1406,14 +1441,47 @@ function isExistingLease(error: unknown): boolean {
   );
 }
 
+function loopbackAppPortIsAvailable(appPort: number): boolean {
+  for (const hostname of ['::1', '127.0.0.1'] as const) {
+    let listener:
+      | Readonly<{ stop(closeActiveConnections?: boolean): void }>
+      | undefined;
+    try {
+      listener = Bun.listen({
+        hostname,
+        port: appPort,
+        socket: {
+          data() {},
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'EADDRINUSE'
+      ) {
+        return false;
+      }
+      throw new Error(
+        `Could not prove that the event-room Playwright app port is available on ${hostname}.`,
+        { cause: error },
+      );
+    } finally {
+      listener?.stop(true);
+    }
+  }
+  return true;
+}
+
 function serializedPortLease(
   lease: Pick<
     EventRoomPlaywrightRunContext,
-    'runId' | 'appPort' | 'leaseOwnerPid'
+    'runId' | 'workspaceNamespace' | 'appPort' | 'leaseOwnerPid'
   >,
 ): string {
   return JSON.stringify({
     runId: lease.runId,
+    workspaceNamespace: lease.workspaceNamespace,
     appPort: lease.appPort,
     leaseOwnerPid: lease.leaseOwnerPid,
   });
@@ -1437,6 +1505,9 @@ function requireValidReplacementPortLease(
     !('runId' in parsed) ||
     typeof parsed.runId !== 'string' ||
     !RUN_ID_PATTERN.test(parsed.runId) ||
+    !('workspaceNamespace' in parsed) ||
+    typeof parsed.workspaceNamespace !== 'string' ||
+    !WORKSPACE_NAMESPACE_PATTERN.test(parsed.workspaceNamespace) ||
     !('appPort' in parsed) ||
     parsed.appPort !== appPort ||
     !('leaseOwnerPid' in parsed) ||
@@ -1446,6 +1517,7 @@ function requireValidReplacementPortLease(
     serialized !==
       serializedPortLease({
         runId: parsed.runId,
+        workspaceNamespace: parsed.workspaceNamespace,
         appPort: parsed.appPort,
         leaseOwnerPid: parsed.leaseOwnerPid,
       })
@@ -1463,6 +1535,7 @@ export function claimEventRoomPlaywrightRunContext(
   baseDatabaseUrl: string,
   runId: string,
   preferredPort?: number,
+  workspaceNamespace: string = SOURCE_WORKSPACE_NAMESPACE,
 ): EventRoomPlaywrightRunContext {
   const compactRunId = runId.replaceAll('-', '');
   const portSeed = Number.parseInt(compactRunId.slice(0, 8), 16);
@@ -1485,6 +1558,7 @@ export function claimEventRoomPlaywrightRunContext(
       runId,
       appPort,
       process.pid,
+      workspaceNamespace,
     );
     let descriptor: number;
     try {
@@ -1497,6 +1571,24 @@ export function claimEventRoomPlaywrightRunContext(
       writeFileSync(descriptor, serializedPortLease(context), 'utf8');
     } finally {
       closeSync(descriptor);
+    }
+    let portIsAvailable: boolean;
+    try {
+      portIsAvailable = loopbackAppPortIsAvailable(appPort);
+    } catch (error) {
+      try {
+        releaseEventRoomPlaywrightPortLease(context);
+      } catch (releaseError) {
+        throw new AggregateError(
+          [error, releaseError],
+          'Event-room Playwright app-port verification failed and its lease could not be released.',
+        );
+      }
+      throw error;
+    }
+    if (!portIsAvailable) {
+      releaseEventRoomPlaywrightPortLease(context);
+      continue;
     }
     return context;
   }
@@ -1511,6 +1603,8 @@ export function requireEventRoomPlaywrightRunContext(
     value === null ||
     !('runId' in value) ||
     typeof value.runId !== 'string' ||
+    !('workspaceNamespace' in value) ||
+    typeof value.workspaceNamespace !== 'string' ||
     !('baseDatabaseUrl' in value) ||
     typeof value.baseDatabaseUrl !== 'string' ||
     !('appPort' in value) ||
@@ -1525,6 +1619,7 @@ export function requireEventRoomPlaywrightRunContext(
     value.runId,
     value.appPort,
     value.leaseOwnerPid,
+    value.workspaceNamespace,
   );
   if (JSON.stringify(value) !== JSON.stringify(expected)) {
     throw new Error('The event-room Playwright run metadata was altered.');
