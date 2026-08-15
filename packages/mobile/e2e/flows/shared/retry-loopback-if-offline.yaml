@@ -4,7 +4,7 @@ appId: net.psd401.eoc
     when:
       visible: '^Offline — cached view only$'
     commands:
-      - tapOn: '^Retry secure connection$'
+      - tapOn: '^Reconnect and load current operations$'
       - extendedWaitUntil:
           notVisible: '^Offline — cached view only$'
           timeout: 60000

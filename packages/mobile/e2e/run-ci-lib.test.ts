@@ -1165,7 +1165,10 @@ describe('issue #32 exact synthetic drill data', () => {
       ),
     ]);
     expect(retryFlow).toContain("visible: '^Offline — cached view only$'");
-    expect(retryFlow).toContain("tapOn: '^Retry secure connection$'");
+    expect(retryFlow).toContain(
+      "tapOn: '^Reconnect and load current operations$'",
+    );
+    expect(retryFlow).not.toContain("tapOn: '^Retry secure connection$'");
     expect(retryFlow.match(/tapOn:/gu)).toHaveLength(1);
     for (const enrollment of [iosEnrollment, androidEnrollment]) {
       expect(enrollment).toContain(
