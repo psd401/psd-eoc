@@ -10,11 +10,13 @@ const repositoryRoot = resolve(
 );
 const playwrightCommand = [process.execPath, 'x', 'playwright'] as const;
 const COMMAND_TIMEOUT_MS = 12 * 60_000;
+const EVENT_ROOM_GATE_TIMEOUT_MS = 35 * 60_000;
 const TERMINATION_GRACE_MS = 15_000;
 
 interface BrowserCommand {
   readonly label: string;
   readonly arguments: readonly string[];
+  readonly timeoutMs?: number;
 }
 
 const commands: readonly BrowserCommand[] = [
@@ -41,13 +43,13 @@ const commands: readonly BrowserCommand[] = [
   {
     label: 'late join, text, location, photo, and lifecycle journeys',
     arguments: [
-      ...playwrightCommand,
+      process.execPath,
       'test',
-      '--config',
-      'packages/server/app/(app)/events/[id]/playwright.config.ts',
-      '--grep',
-      'late join drains|composer, correction|location maps support|synthetic all-clear requires|photo upload uses canonical',
+      'packages/server/app/(app)/events/[id]/event-room.playwright-gate.test.ts',
+      '--test-name-pattern',
+      'runs the owned browser suite when the synthetic database is configured',
     ],
+    timeoutMs: EVENT_ROOM_GATE_TIMEOUT_MS,
   },
   {
     label: 'event-type configuration happy path and axe proof',
@@ -92,7 +94,7 @@ async function runBrowserCommand(command: BrowserCommand): Promise<void> {
     new Promise<Readonly<{ kind: 'timeout' }>>((resolveTimeout) => {
       timeout = setTimeout(
         () => resolveTimeout({ kind: 'timeout' }),
-        COMMAND_TIMEOUT_MS,
+        command.timeoutMs ?? COMMAND_TIMEOUT_MS,
       );
     }),
   ]);
