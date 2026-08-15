@@ -145,6 +145,11 @@ export interface MobileE2EArtifactPaths {
   readonly owner: string;
 }
 
+export interface MobileE2EIosAuthenticationRetryDeadlines {
+  readonly operationDeadlineMilliseconds: number;
+  readonly driverReadinessDeadlineMilliseconds: number;
+}
+
 export interface MobileE2EEnrollmentWarmupRequest {
   readonly evidenceRoute: 'mobile-oidc-start' | 'mobile-oidc-exchange';
   readonly url: string;
@@ -175,6 +180,128 @@ export interface MobileE2EIosRuntimeSelection {
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireSafeMilliseconds(values: readonly number[]): void {
+  if (values.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    throw new Error('The iOS authentication retry clock is invalid.');
+  }
+}
+
+/**
+ * Binds the iOS retry to one outer deadline while keeping fresh XCTest driver
+ * startup separate from the later Face ID evidence phase.
+ */
+export function mobileE2EIosAuthenticationRetryDeadlines(
+  input: Readonly<{
+    operationStartedAtMilliseconds: number;
+    driverReadinessStartedAtMilliseconds: number;
+    flowDeadlineMilliseconds: number;
+    operationTimeoutMilliseconds: number;
+    driverReadinessTimeoutMilliseconds: number;
+  }>,
+): MobileE2EIosAuthenticationRetryDeadlines {
+  requireSafeMilliseconds(Object.values(input));
+  if (
+    input.flowDeadlineMilliseconds === 0 ||
+    input.operationTimeoutMilliseconds === 0 ||
+    input.driverReadinessTimeoutMilliseconds === 0 ||
+    input.driverReadinessStartedAtMilliseconds <
+      input.operationStartedAtMilliseconds
+  ) {
+    throw new Error('The iOS authentication retry phase ordering is invalid.');
+  }
+  const operationDeadline =
+    input.operationStartedAtMilliseconds + input.operationTimeoutMilliseconds;
+  const driverReadinessPhaseDeadline =
+    input.driverReadinessStartedAtMilliseconds +
+    input.driverReadinessTimeoutMilliseconds;
+  if (
+    !Number.isSafeInteger(operationDeadline) ||
+    !Number.isSafeInteger(driverReadinessPhaseDeadline)
+  ) {
+    throw new Error('The iOS authentication retry deadline overflowed.');
+  }
+  const driverReadinessDeadline = Math.min(
+    input.flowDeadlineMilliseconds,
+    operationDeadline,
+    driverReadinessPhaseDeadline,
+  );
+  if (driverReadinessDeadline <= input.driverReadinessStartedAtMilliseconds) {
+    throw new Error(
+      'The iOS authentication retry has no bounded driver-readiness window.',
+    );
+  }
+  return Object.freeze({
+    operationDeadlineMilliseconds: operationDeadline,
+    driverReadinessDeadlineMilliseconds: driverReadinessDeadline,
+  });
+}
+
+/** Starts the distinct Face ID proof clock only after the fresh driver exists. */
+export function mobileE2EIosAuthenticationEvidenceDeadline(
+  input: Readonly<{
+    driverReadyAtMilliseconds: number;
+    driverReadinessDeadlineMilliseconds: number;
+    operationDeadlineMilliseconds: number;
+    flowDeadlineMilliseconds: number;
+    evidenceTimeoutMilliseconds: number;
+  }>,
+): number {
+  requireSafeMilliseconds(Object.values(input));
+  if (
+    input.driverReadinessDeadlineMilliseconds === 0 ||
+    input.operationDeadlineMilliseconds === 0 ||
+    input.flowDeadlineMilliseconds === 0 ||
+    input.evidenceTimeoutMilliseconds === 0
+  ) {
+    throw new Error('The iOS authentication evidence clock is invalid.');
+  }
+  if (
+    input.driverReadyAtMilliseconds >=
+      input.driverReadinessDeadlineMilliseconds ||
+    input.driverReadyAtMilliseconds >= input.operationDeadlineMilliseconds ||
+    input.driverReadyAtMilliseconds >= input.flowDeadlineMilliseconds
+  ) {
+    throw new Error(
+      'The fresh iOS authentication retry driver was not ready inside its bounded phase.',
+    );
+  }
+  const evidencePhaseDeadline =
+    input.driverReadyAtMilliseconds + input.evidenceTimeoutMilliseconds;
+  if (!Number.isSafeInteger(evidencePhaseDeadline)) {
+    throw new Error('The iOS authentication evidence deadline overflowed.');
+  }
+  const evidenceDeadline = Math.min(
+    evidencePhaseDeadline,
+    input.operationDeadlineMilliseconds,
+    input.flowDeadlineMilliseconds,
+  );
+  if (evidenceDeadline <= input.driverReadyAtMilliseconds) {
+    throw new Error(
+      'The iOS authentication retry has no bounded Face ID evidence window.',
+    );
+  }
+  return evidenceDeadline;
+}
+
+/** Returns no budget rather than admitting a command too near a phase edge. */
+export function mobileE2EIosAuthenticationPhaseBudget(
+  input: Readonly<{
+    nowMilliseconds: number;
+    deadlineMilliseconds: number;
+    minimumRequiredMilliseconds: number;
+  }>,
+): number | null {
+  requireSafeMilliseconds(Object.values(input));
+  if (
+    input.deadlineMilliseconds === 0 ||
+    input.minimumRequiredMilliseconds === 0
+  ) {
+    throw new Error('The iOS authentication phase budget is invalid.');
+  }
+  const remaining = input.deadlineMilliseconds - input.nowMilliseconds;
+  return remaining >= input.minimumRequiredMilliseconds ? remaining : null;
 }
 
 /** Adds test-only Expo dev-client settings to the isolated copied app config. */

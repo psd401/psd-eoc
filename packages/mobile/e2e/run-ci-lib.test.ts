@@ -38,6 +38,9 @@ import {
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
+  mobileE2EIosAuthenticationEvidenceDeadline,
+  mobileE2EIosAuthenticationPhaseBudget,
+  mobileE2EIosAuthenticationRetryDeadlines,
   mobileE2EIosDeviceAuthenticationScreenshotEvidence,
   mobileE2EIosDirectLaunchArguments,
   mobileE2EIsolatedExpoConfig,
@@ -225,6 +228,139 @@ describe('issue #32 mobile E2E process boundary', () => {
     expect(observer).not.toContain('clearLastNotificationResponse');
     expect(observer).not.toContain('router.');
     expect(observer).not.toContain('navigate(');
+  });
+});
+
+describe('issue #32 bounded iOS authentication retry clock', () => {
+  test('starts Face ID evidence only after a 3m50 fresh-driver cold start', () => {
+    const operationStartedAtMilliseconds = 1_000;
+    const driverReadinessStartedAtMilliseconds = 2_000;
+    const driverReadyAtMilliseconds =
+      driverReadinessStartedAtMilliseconds + 3 * 60_000 + 50_000;
+    const flowDeadlineMilliseconds =
+      driverReadinessStartedAtMilliseconds + 30 * 60_000;
+    const deadlines = mobileE2EIosAuthenticationRetryDeadlines({
+      operationStartedAtMilliseconds,
+      driverReadinessStartedAtMilliseconds,
+      flowDeadlineMilliseconds,
+      operationTimeoutMilliseconds: 10 * 60_000,
+      driverReadinessTimeoutMilliseconds: 5 * 60_000,
+    });
+
+    expect(deadlines).toEqual({
+      operationDeadlineMilliseconds:
+        operationStartedAtMilliseconds + 10 * 60_000,
+      driverReadinessDeadlineMilliseconds:
+        driverReadinessStartedAtMilliseconds + 5 * 60_000,
+    });
+    const evidenceDeadline = mobileE2EIosAuthenticationEvidenceDeadline({
+      driverReadyAtMilliseconds,
+      driverReadinessDeadlineMilliseconds:
+        deadlines.driverReadinessDeadlineMilliseconds,
+      operationDeadlineMilliseconds: deadlines.operationDeadlineMilliseconds,
+      flowDeadlineMilliseconds,
+      evidenceTimeoutMilliseconds: 4 * 60_000,
+    });
+    const oldSharedDeadline = driverReadinessStartedAtMilliseconds + 4 * 60_000;
+    expect(oldSharedDeadline - driverReadyAtMilliseconds).toBe(10_000);
+    expect(evidenceDeadline - driverReadyAtMilliseconds).toBe(4 * 60_000);
+    expect(evidenceDeadline).toBeLessThanOrEqual(
+      deadlines.operationDeadlineMilliseconds,
+    );
+  });
+
+  test('preserves the full evidence window after a 4m30 driver cold start', () => {
+    const operationStartedAtMilliseconds = 1_000;
+    const driverReadinessStartedAtMilliseconds = 2_000;
+    const driverReadyAtMilliseconds =
+      driverReadinessStartedAtMilliseconds + 4 * 60_000 + 30_000;
+    const flowDeadlineMilliseconds =
+      driverReadinessStartedAtMilliseconds + 30 * 60_000;
+    const deadlines = mobileE2EIosAuthenticationRetryDeadlines({
+      operationStartedAtMilliseconds,
+      driverReadinessStartedAtMilliseconds,
+      flowDeadlineMilliseconds,
+      operationTimeoutMilliseconds: 10 * 60_000,
+      driverReadinessTimeoutMilliseconds: 5 * 60_000,
+    });
+
+    const evidenceDeadline = mobileE2EIosAuthenticationEvidenceDeadline({
+      driverReadyAtMilliseconds,
+      driverReadinessDeadlineMilliseconds:
+        deadlines.driverReadinessDeadlineMilliseconds,
+      operationDeadlineMilliseconds: deadlines.operationDeadlineMilliseconds,
+      flowDeadlineMilliseconds,
+      evidenceTimeoutMilliseconds: 4 * 60_000,
+    });
+
+    expect(
+      deadlines.driverReadinessDeadlineMilliseconds - driverReadyAtMilliseconds,
+    ).toBe(30_000);
+    expect(evidenceDeadline - driverReadyAtMilliseconds).toBe(4 * 60_000);
+  });
+
+  test('fails closed at the exact five-minute readiness boundary', () => {
+    const deadlines = mobileE2EIosAuthenticationRetryDeadlines({
+      operationStartedAtMilliseconds: 1_000,
+      driverReadinessStartedAtMilliseconds: 2_000,
+      flowDeadlineMilliseconds: 32 * 60_000,
+      operationTimeoutMilliseconds: 10 * 60_000,
+      driverReadinessTimeoutMilliseconds: 5 * 60_000,
+    });
+    expect(() =>
+      mobileE2EIosAuthenticationEvidenceDeadline({
+        driverReadyAtMilliseconds:
+          deadlines.driverReadinessDeadlineMilliseconds,
+        driverReadinessDeadlineMilliseconds:
+          deadlines.driverReadinessDeadlineMilliseconds,
+        operationDeadlineMilliseconds: deadlines.operationDeadlineMilliseconds,
+        flowDeadlineMilliseconds: 32 * 60_000,
+        evidenceTimeoutMilliseconds: 4 * 60_000,
+      }),
+    ).toThrow('was not ready inside its bounded phase');
+  });
+
+  test('clamps evidence to the unchanged ten-minute outer budget', () => {
+    const operationStartedAtMilliseconds = 1_000;
+    const driverReadinessStartedAtMilliseconds = 4 * 60_000 + 1_000;
+    const driverReadyAtMilliseconds =
+      driverReadinessStartedAtMilliseconds + 4 * 60_000 + 30_000;
+    const flowDeadlineMilliseconds = 32 * 60_000;
+    const deadlines = mobileE2EIosAuthenticationRetryDeadlines({
+      operationStartedAtMilliseconds,
+      driverReadinessStartedAtMilliseconds,
+      flowDeadlineMilliseconds,
+      operationTimeoutMilliseconds: 10 * 60_000,
+      driverReadinessTimeoutMilliseconds: 5 * 60_000,
+    });
+    const evidenceDeadline = mobileE2EIosAuthenticationEvidenceDeadline({
+      driverReadyAtMilliseconds,
+      driverReadinessDeadlineMilliseconds:
+        deadlines.driverReadinessDeadlineMilliseconds,
+      operationDeadlineMilliseconds: deadlines.operationDeadlineMilliseconds,
+      flowDeadlineMilliseconds,
+      evidenceTimeoutMilliseconds: 4 * 60_000,
+    });
+
+    expect(evidenceDeadline).toBe(operationStartedAtMilliseconds + 10 * 60_000);
+    expect(evidenceDeadline - driverReadyAtMilliseconds).toBe(90_000);
+  });
+
+  test('fails closed before an under-budget OCR attempt', () => {
+    expect(
+      mobileE2EIosAuthenticationPhaseBudget({
+        nowMilliseconds: 409_999,
+        deadlineMilliseconds: 470_000,
+        minimumRequiredMilliseconds: 60_000,
+      }),
+    ).toBe(60_001);
+    expect(
+      mobileE2EIosAuthenticationPhaseBudget({
+        nowMilliseconds: 410_001,
+        deadlineMilliseconds: 470_000,
+        minimumRequiredMilliseconds: 60_000,
+      }),
+    ).toBeNull();
   });
 });
 
@@ -2372,6 +2508,9 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(flowStarter).toMatch(
       /await retireIosMaestroDriverOwners\([\s\S]+iosDriverPort = await reserveLoopbackPort\(\);\s+iosDriverSession\.currentPort = iosDriverPort/u,
     );
+    expect(flowStarter).toMatch(
+      /return Object\.freeze\(\{\s+process: process_,\s+flowName,\s+deadline: Date\.now\(\) \+ COMMAND_TIMEOUT_MS,\s+iosDriverPort,/u,
+    );
     const driverRetirement = runner.match(
       /async function retireIosMaestroDriverOwners[\s\S]+?(?=async function runCommand)/u,
     )?.[0];
@@ -2387,19 +2526,33 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(driverRetirement).not.toMatch(/\bpkill\b|\bkillall\b/u);
     expect(runner).not.toContain('22087');
     expect(runner).toContain("flowName === 'start-synthetic-drill-ios'");
+    expect(runner).toContain(
+      'IOS_AUTH_RETRY_DRIVER_READINESS_TIMEOUT_MS = 5 * 60_000',
+    );
     const retryResponder = runner.match(
       /async function respondToRetriedIosDeviceAuthentication[\s\S]+?(?=async function respondToDeviceAuthentication)/u,
     )?.[0];
     expect(retryResponder).toBeDefined();
     expect(retryResponder).toMatch(
-      /startMaestroFlow\([\s\S]+analyzeIosNotificationScreenshot\([\s\S]+mobileE2EIosDeviceAuthenticationScreenshotEvidence\(analysis\)[\s\S]+retryFlow\.process\.child\.exitCode[\s\S]+--biometricMatch[\s\S]+awaitMaestroFlow\(retryFlow,\s+evidenceDeadline\)/u,
+      /startMaestroFlow\([\s\S]+awaitRetriedIosMaestroDriverReady\([\s\S]+mobileE2EIosAuthenticationEvidenceDeadline\([\s\S]+analyzeIosNotificationScreenshot\([\s\S]+mobileE2EIosDeviceAuthenticationScreenshotEvidence\(analysis\)[\s\S]+retryFlow\.process\.child\.exitCode[\s\S]+--biometricMatch[\s\S]+awaitMaestroFlow\(retryFlow,\s+evidenceDeadline\)/u,
     );
+    expect(retryResponder).toMatch(
+      /startMaestroFlow\([\s\S]+iosDriverSession,\s+IOS_AUTH_RETRY_DRIVER_READINESS_TIMEOUT_MS[\s\S]+driverReadinessTimeoutMilliseconds:\s+IOS_AUTH_RETRY_DRIVER_READINESS_TIMEOUT_MS/u,
+    );
+    expect(retryResponder).toContain('endpoint=/status');
+    expect(retryResponder).toContain('httpStatus=200');
+    expect(retryResponder).toContain("flag: 'wx'");
+    expect(retryResponder).toContain('mode: 0o600');
     expect(retryResponder).toContain("evidence.status === 'not-ready'");
     expect(retryResponder).toContain('evidenceDeadline');
-    expect(retryResponder).toMatch(
-      /Math\.min\([\s\S]+retryFlow\.deadline,[\s\S]+Date\.now\(\) \+ RUNTIME_TIMEOUT_MS/u,
+    expect(retryResponder).toContain('operationStartedAtMilliseconds');
+    expect(retryResponder).toContain('driverReadinessStartedAtMilliseconds');
+    expect(retryResponder).toContain(
+      'IOS_AUTH_RETRY_FACE_ID_EVIDENCE_TIMEOUT_MS',
     );
-    expect(runner).not.toContain('IOS_AUTH_RETRY_VISION_TIMEOUT_MS');
+    expect(retryResponder).toContain(
+      'IOS_AUTH_RETRY_MIN_EVIDENCE_ATTEMPT_BUDGET_MS',
+    );
     expect(retryResponder).toContain(
       'The proven iOS Face ID evidence expired before response.',
     );
@@ -2410,7 +2563,7 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(retryResponder).toContain('screenshot=${label}.png');
     expect(retryResponder).toContain('vision=${label}-vision.json');
     expect(retryResponder).toMatch(
-      /const responseTimeout = evidenceDeadline - Date\.now\(\)[\s\S]+responseTimeout <= 0[\s\S]+--biometricMatch[\s\S]+timeoutMilliseconds: responseTimeout/u,
+      /const responseBudget = mobileE2EIosAuthenticationPhaseBudget\([\s\S]+responseBudget === null[\s\S]+--biometricMatch[\s\S]+IOS_AUTH_RETRY_BIOMETRIC_RESPONSE_TIMEOUT_MS/u,
     );
     expect(retryResponder).toContain(
       'await awaitMaestroFlow(retryFlow, evidenceDeadline)',
@@ -2418,17 +2571,47 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(retryResponder).toContain(
       'await terminateProcess(retryFlow.process.child)',
     );
+    expect(retryResponder).toMatch(
+      /catch \(error\)[\s\S]+await terminateProcess\(retryFlow\.process\.child\)[\s\S]+await retryFlow\.process\.completion[\s\S]+throw error/u,
+    );
+    const retryDriverReadiness = runner.match(
+      /async function awaitRetriedIosMaestroDriverReady[\s\S]+?(?=async function respondToDeviceAuthentication)/u,
+    )?.[0];
+    expect(retryDriverReadiness).toBeDefined();
+    expect(retryDriverReadiness).toContain(
+      'iosMaestroDriverStatusReady(\n      retryFlow.iosDriverPort',
+    );
+    expect(retryDriverReadiness).toContain(
+      'deadlineMilliseconds: driverReadinessDeadline',
+    );
+    expect(retryDriverReadiness).toContain('state=fresh-maestro-driver-ready');
+    expect(retryDriverReadiness).toContain('`http://127.0.0.1:${port}/status`');
+    expect(retryDriverReadiness).toContain("credentials: 'omit'");
+    expect(retryDriverReadiness).toContain("redirect: 'error'");
+    expect(retryDriverReadiness).toContain("cache: 'no-store'");
+    expect(retryDriverReadiness).toContain('response.status === 200');
+    expect(retryDriverReadiness).toContain('await response.body?.cancel()');
+    expect(retryDriverReadiness).not.toContain(
+      'analyzeIosNotificationScreenshot',
+    );
+    expect(retryDriverReadiness).not.toContain('--biometricMatch');
+    expect(flowStarter).toContain('iosDriverStartupTimeoutMilliseconds');
+    expect(flowStarter).toContain('MAESTRO_DRIVER_STARTUP_TIMEOUT: String(');
     const screenshotAnalyzer = runner.match(
       /async function analyzeIosNotificationScreenshot[\s\S]+?(?=async function writeIosNotificationRevealFlow)/u,
     )?.[0];
     expect(screenshotAnalyzer).toBeDefined();
-    expect(screenshotAnalyzer).toContain('deadline - Date.now()');
+    expect(screenshotAnalyzer).toContain('minimumOcrStartBudgetMilliseconds');
     expect(screenshotAnalyzer).toContain(
-      'timeoutMilliseconds: screenshotTimeout',
+      'mobileE2EIosAuthenticationPhaseBudget',
+    );
+    expect(screenshotAnalyzer).toMatch(
+      /const analysisTimeout = remainingTimeout\(\s*timing\?\.minimumOcrStartBudgetMilliseconds \?\? 1,?\s*\);[\s\S]+?'xcrun',[\s\S]+?'swift'/u,
     );
     expect(screenshotAnalyzer).toContain(
-      'timeoutMilliseconds: analysisTimeout',
+      'maximumScreenshotTimeoutMilliseconds',
     );
+    expect(screenshotAnalyzer).toContain('maximumOcrTimeoutMilliseconds');
     for (const exactBoundary of [
       "- assertVisible: '^Unlock PSD EOC$'",
       "- assertVisible: '^PSD EOC remains locked$'",

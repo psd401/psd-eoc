@@ -32,6 +32,9 @@ import {
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
+  mobileE2EIosAuthenticationEvidenceDeadline,
+  mobileE2EIosAuthenticationPhaseBudget,
+  mobileE2EIosAuthenticationRetryDeadlines,
   mobileE2EIosDeviceAuthenticationScreenshotEvidence,
   mobileE2EIosDirectLaunchArguments,
   mobileE2EIsolatedExpoConfig,
@@ -90,7 +93,21 @@ const IOS_NOTIFICATION_SWIPE_ACTION_TIMEOUT_MS = 5_000;
 const IOS_NOTIFICATION_ACTION_LOG_TIMEOUT_MS = 30_000;
 const IOS_NOTIFICATION_FOREGROUND_BANNER_SETTLE_MS = 8_000;
 const IOS_INITIAL_HIERARCHY_TIMEOUT_MS = 90_000;
+const IOS_AUTH_RETRY_OPERATION_TIMEOUT_MS = 10 * 60_000;
+const IOS_AUTH_RETRY_DRIVER_READINESS_TIMEOUT_MS = 5 * 60_000;
+const IOS_AUTH_RETRY_FACE_ID_EVIDENCE_TIMEOUT_MS = RUNTIME_TIMEOUT_MS;
 const IOS_AUTH_RETRY_VISION_INTERVAL_MS = 250;
+const IOS_AUTH_RETRY_SCREENSHOT_TIMEOUT_MS = 15_000;
+const IOS_AUTH_RETRY_OCR_TIMEOUT_MS = 30_000;
+const IOS_AUTH_RETRY_BIOMETRIC_RESPONSE_TIMEOUT_MS = 15_000;
+const IOS_AUTH_RETRY_FLOW_COMPLETION_TIMEOUT_MS = 15_000;
+const IOS_AUTH_RETRY_MIN_RESPONSE_START_BUDGET_MS =
+  IOS_AUTH_RETRY_BIOMETRIC_RESPONSE_TIMEOUT_MS +
+  IOS_AUTH_RETRY_FLOW_COMPLETION_TIMEOUT_MS;
+const IOS_AUTH_RETRY_MIN_OCR_START_BUDGET_MS =
+  IOS_AUTH_RETRY_OCR_TIMEOUT_MS + IOS_AUTH_RETRY_MIN_RESPONSE_START_BUDGET_MS;
+const IOS_AUTH_RETRY_MIN_EVIDENCE_ATTEMPT_BUDGET_MS =
+  IOS_AUTH_RETRY_SCREENSHOT_TIMEOUT_MS + IOS_AUTH_RETRY_MIN_OCR_START_BUDGET_MS;
 const MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS = 30_000;
 const IOS_BUNDLE_RELATIVE_PATH =
   'ios/build/Build/Products/Debug-iphonesimulator/PSDEOC.app';
@@ -138,6 +155,7 @@ interface RunningMaestroFlow {
   readonly process: ManagedProcess;
   readonly flowName: string;
   readonly deadline: number;
+  readonly iosDriverPort: number | undefined;
 }
 
 interface IosDevice {
@@ -147,6 +165,13 @@ interface IosDevice {
 
 interface IosMaestroDriverSession {
   currentPort: number;
+}
+
+interface IosScreenshotAnalysisTiming {
+  readonly deadline: number;
+  readonly maximumScreenshotTimeoutMilliseconds: number;
+  readonly minimumOcrStartBudgetMilliseconds: number;
+  readonly maximumOcrTimeoutMilliseconds: number;
 }
 
 type IosNotificationPurpose = 'route';
@@ -1510,6 +1535,7 @@ async function respondToRetriedIosDeviceAuthentication(
   applesimutils: string,
   iosDriverSession: IosMaestroDriverSession,
 ): Promise<void> {
+  const operationStartedAt = Date.now();
   const retryFlow = await startMaestroFlow(
     'ios',
     deviceId,
@@ -1517,17 +1543,43 @@ async function respondToRetriedIosDeviceAuthentication(
     artifactRoot,
     environment,
     iosDriverSession,
+    IOS_AUTH_RETRY_DRIVER_READINESS_TIMEOUT_MS,
   );
-  const evidenceDeadline = Math.min(
-    retryFlow.deadline,
-    // Each iOS flow owns a fresh XCTest runner. Hosted startup has exceeded
-    // one minute, so keep the proof window aligned with the same bounded
-    // runtime budget used to start that runner instead of interrupting it.
-    Date.now() + RUNTIME_TIMEOUT_MS,
-  );
-  let attempt = 0;
   try {
-    while (Date.now() < evidenceDeadline) {
+    const driverReadinessStartedAt = Date.now();
+    const deadlines = mobileE2EIosAuthenticationRetryDeadlines({
+      operationStartedAtMilliseconds: operationStartedAt,
+      driverReadinessStartedAtMilliseconds: driverReadinessStartedAt,
+      flowDeadlineMilliseconds: retryFlow.deadline,
+      operationTimeoutMilliseconds: IOS_AUTH_RETRY_OPERATION_TIMEOUT_MS,
+      driverReadinessTimeoutMilliseconds:
+        IOS_AUTH_RETRY_DRIVER_READINESS_TIMEOUT_MS,
+    });
+    const driverReadyAt = await awaitRetriedIosMaestroDriverReady(
+      artifactRoot,
+      flowName,
+      retryFlow,
+      deadlines.driverReadinessDeadlineMilliseconds,
+      driverReadinessStartedAt,
+    );
+    const evidenceDeadline = mobileE2EIosAuthenticationEvidenceDeadline({
+      driverReadyAtMilliseconds: driverReadyAt,
+      driverReadinessDeadlineMilliseconds:
+        deadlines.driverReadinessDeadlineMilliseconds,
+      operationDeadlineMilliseconds: deadlines.operationDeadlineMilliseconds,
+      flowDeadlineMilliseconds: retryFlow.deadline,
+      evidenceTimeoutMilliseconds: IOS_AUTH_RETRY_FACE_ID_EVIDENCE_TIMEOUT_MS,
+    });
+    let attempt = 0;
+    while (
+      mobileE2EIosAuthenticationPhaseBudget({
+        nowMilliseconds: Date.now(),
+        deadlineMilliseconds: evidenceDeadline,
+        minimumRequiredMilliseconds:
+          IOS_AUTH_RETRY_MIN_EVIDENCE_ATTEMPT_BUDGET_MS +
+          IOS_AUTH_RETRY_VISION_INTERVAL_MS,
+      }) !== null
+    ) {
       if (retryFlow.process.child.exitCode !== null) {
         await awaitMaestroFlow(retryFlow);
         throw new Error(
@@ -1535,14 +1587,30 @@ async function respondToRetriedIosDeviceAuthentication(
         );
       }
       await Bun.sleep(IOS_AUTH_RETRY_VISION_INTERVAL_MS);
-      if (Date.now() >= evidenceDeadline) break;
+      if (
+        mobileE2EIosAuthenticationPhaseBudget({
+          nowMilliseconds: Date.now(),
+          deadlineMilliseconds: evidenceDeadline,
+          minimumRequiredMilliseconds:
+            IOS_AUTH_RETRY_MIN_EVIDENCE_ATTEMPT_BUDGET_MS,
+        }) === null
+      ) {
+        break;
+      }
       attempt += 1;
       const label = `device-auth-${flowName}-retry-${String(attempt).padStart(2, '0')}`;
       const analysis = await analyzeIosNotificationScreenshot(
         deviceId,
         artifactRoot,
         label,
-        evidenceDeadline,
+        {
+          deadline: evidenceDeadline,
+          maximumScreenshotTimeoutMilliseconds:
+            IOS_AUTH_RETRY_SCREENSHOT_TIMEOUT_MS,
+          minimumOcrStartBudgetMilliseconds:
+            IOS_AUTH_RETRY_MIN_OCR_START_BUDGET_MS,
+          maximumOcrTimeoutMilliseconds: IOS_AUTH_RETRY_OCR_TIMEOUT_MS,
+        },
       );
       const evidence =
         mobileE2EIosDeviceAuthenticationScreenshotEvidence(analysis);
@@ -1569,10 +1637,15 @@ async function respondToRetriedIosDeviceAuthentication(
           'The exact iOS authentication retry ended after its proven Face ID evidence.',
         );
       }
-      const responseTimeout = evidenceDeadline - Date.now();
-      if (responseTimeout <= 0) {
+      const responseBudget = mobileE2EIosAuthenticationPhaseBudget({
+        nowMilliseconds: Date.now(),
+        deadlineMilliseconds: evidenceDeadline,
+        minimumRequiredMilliseconds:
+          IOS_AUTH_RETRY_MIN_RESPONSE_START_BUDGET_MS,
+      });
+      if (responseBudget === null) {
         throw new Error(
-          'The proven iOS Face ID evidence expired before response.',
+          'The proven iOS Face ID evidence lacked its bounded response budget.',
         );
       }
       await runCommand(
@@ -1582,7 +1655,10 @@ async function respondToRetriedIosDeviceAuthentication(
             artifactRoot,
             `device-auth-${flowName}-retry-response.log`,
           ),
-          timeoutMilliseconds: responseTimeout,
+          timeoutMilliseconds: Math.min(
+            responseBudget - IOS_AUTH_RETRY_FLOW_COMPLETION_TIMEOUT_MS,
+            IOS_AUTH_RETRY_BIOMETRIC_RESPONSE_TIMEOUT_MS,
+          ),
         },
       );
       await awaitMaestroFlow(retryFlow, evidenceDeadline);
@@ -1597,6 +1673,92 @@ async function respondToRetriedIosDeviceAuthentication(
     }
     await retryFlow.process.completion;
     throw error;
+  }
+}
+
+async function awaitRetriedIosMaestroDriverReady(
+  artifactRoot: string,
+  flowName: string,
+  retryFlow: RunningMaestroFlow,
+  driverReadinessDeadline: number,
+  driverReadinessStartedAt: number,
+): Promise<number> {
+  if (retryFlow.iosDriverPort === undefined) {
+    throw new Error('The iOS Maestro retry flow has no tracked driver port.');
+  }
+  while (true) {
+    if (retryFlow.process.child.exitCode !== null) {
+      await awaitMaestroFlow(retryFlow);
+      throw new Error(
+        'The exact iOS authentication retry ended before fresh driver readiness.',
+      );
+    }
+    const probeBudget = mobileE2EIosAuthenticationPhaseBudget({
+      nowMilliseconds: Date.now(),
+      deadlineMilliseconds: driverReadinessDeadline,
+      minimumRequiredMilliseconds: 1,
+    });
+    if (probeBudget === null) break;
+    const driverReady = await iosMaestroDriverStatusReady(
+      retryFlow.iosDriverPort,
+      Math.min(5_000, probeBudget),
+    );
+    const driverReadyAt = Date.now();
+    if (driverReady) {
+      await writeFile(
+        resolve(artifactRoot, `device-auth-${flowName}-retry-driver-ready.txt`),
+        `issue=32\nplatform=ios\nclassification=drill\nroster=synthetic\nproviders=mocked\nstate=fresh-maestro-driver-ready\ndriverPort=${retryFlow.iosDriverPort}\nendpoint=/status\nhttpStatus=200\nreadinessElapsedMilliseconds=${driverReadyAt - driverReadinessStartedAt}\n`,
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+      );
+      return driverReadyAt;
+    }
+    const sleepBudget = mobileE2EIosAuthenticationPhaseBudget({
+      nowMilliseconds: Date.now(),
+      deadlineMilliseconds: driverReadinessDeadline,
+      minimumRequiredMilliseconds: RETRY_INTERVAL_MS,
+    });
+    if (sleepBudget === null) break;
+    await Bun.sleep(Math.min(RETRY_INTERVAL_MS, sleepBudget));
+  }
+  throw new Error(
+    'The exact iOS authentication retry fresh driver was not ready in time.',
+  );
+}
+
+async function iosMaestroDriverStatusReady(
+  port: number,
+  timeoutMilliseconds: number,
+): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(port) ||
+    port < 1_024 ||
+    port > 65_535 ||
+    !Number.isSafeInteger(timeoutMilliseconds) ||
+    timeoutMilliseconds <= 0
+  ) {
+    throw new Error('The iOS Maestro driver status probe is invalid.');
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMilliseconds);
+  try {
+    // This is the same XCUITest /status boundary Maestro waits on internally.
+    // The port was freshly reserved for this exact flow after its predecessor
+    // was retired, so a successful response proves this runner is ready
+    // without issuing a second concurrent hierarchy transaction.
+    const response = await fetch(`http://127.0.0.1:${port}/status`, {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    const ready = response.status === 200;
+    await response.body?.cancel();
+    return ready;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1869,11 +2031,19 @@ async function startMaestroFlow(
   artifactRoot: string,
   environment: Readonly<Record<string, string>>,
   iosDriverSession?: IosMaestroDriverSession,
+  iosDriverStartupTimeoutMilliseconds: number = RUNTIME_TIMEOUT_MS,
   artifactName: string = flowName,
   explicitFlowPath?: string,
 ): Promise<RunningMaestroFlow> {
   if (!/^[a-z0-9-]+$/u.test(artifactName)) {
     throw new Error('The Maestro artifact name is invalid.');
+  }
+  if (
+    !Number.isSafeInteger(iosDriverStartupTimeoutMilliseconds) ||
+    iosDriverStartupTimeoutMilliseconds <= 0 ||
+    iosDriverStartupTimeoutMilliseconds > COMMAND_TIMEOUT_MS
+  ) {
+    throw new Error('The Maestro driver startup timeout is invalid.');
   }
   let iosDriverPort: number | undefined;
   if (platform === 'ios') {
@@ -1908,7 +2078,9 @@ async function startMaestroFlow(
     environment: {
       ...definedProcessEnvironment(),
       MAESTRO_CLI_NO_ANALYTICS: '1',
-      MAESTRO_DRIVER_STARTUP_TIMEOUT: String(RUNTIME_TIMEOUT_MS),
+      MAESTRO_DRIVER_STARTUP_TIMEOUT: String(
+        iosDriverStartupTimeoutMilliseconds,
+      ),
     },
     logPath: resolve(artifactDirectory, 'maestro.log'),
   });
@@ -1916,6 +2088,7 @@ async function startMaestroFlow(
     process: process_,
     flowName,
     deadline: Date.now() + COMMAND_TIMEOUT_MS,
+    iosDriverPort,
   });
 }
 
@@ -1972,6 +2145,7 @@ async function runMaestroFlow(
     artifactRoot,
     environment,
     iosDriverSession,
+    RUNTIME_TIMEOUT_MS,
     artifactName,
     explicitFlowPath,
   );
@@ -2287,31 +2461,44 @@ async function analyzeIosNotificationScreenshot(
   deviceId: string,
   artifactRoot: string,
   label: string,
-  deadline?: number,
+  timing?: IosScreenshotAnalysisTiming,
 ): Promise<unknown> {
   if (!/^[a-z0-9-]+$/u.test(label)) {
     throw new Error('The iOS notification screenshot label is invalid.');
   }
-  const remainingTimeout = (): number | undefined => {
-    if (deadline === undefined) return undefined;
-    if (!Number.isSafeInteger(deadline)) {
+  const remainingTimeout = (
+    minimumRequiredMilliseconds: number,
+  ): number | undefined => {
+    if (timing === undefined) return undefined;
+    if (!Number.isSafeInteger(timing.deadline)) {
       throw new Error('The iOS screenshot analysis deadline is invalid.');
     }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      throw new Error('The iOS screenshot analysis deadline expired.');
+    const remaining = mobileE2EIosAuthenticationPhaseBudget({
+      nowMilliseconds: Date.now(),
+      deadlineMilliseconds: timing.deadline,
+      minimumRequiredMilliseconds,
+    });
+    if (remaining === null) {
+      throw new Error(
+        'The iOS screenshot analysis lacks its required bounded phase budget.',
+      );
     }
     return remaining;
   };
   const screenshotPath = resolve(artifactRoot, `${label}.png`);
-  const screenshotTimeout = remainingTimeout();
+  const screenshotTimeout = remainingTimeout(1);
   await runCommand(
     ['xcrun', 'simctl', 'io', deviceId, 'screenshot', screenshotPath],
     {
       logPath: resolve(artifactRoot, `${label}-screenshot.log`),
       ...(screenshotTimeout === undefined
         ? {}
-        : { timeoutMilliseconds: screenshotTimeout }),
+        : {
+            timeoutMilliseconds: Math.min(
+              screenshotTimeout,
+              timing?.maximumScreenshotTimeoutMilliseconds ?? screenshotTimeout,
+            ),
+          }),
     },
   );
   const screenshot = await lstat(screenshotPath);
@@ -2322,7 +2509,9 @@ async function analyzeIosNotificationScreenshot(
   ) {
     throw new Error('The iOS notification screenshot is invalid.');
   }
-  const analysisTimeout = remainingTimeout();
+  const analysisTimeout = remainingTimeout(
+    timing?.minimumOcrStartBudgetMilliseconds ?? 1,
+  );
   const analysis = await runCommand(
     [
       'xcrun',
@@ -2335,7 +2524,12 @@ async function analyzeIosNotificationScreenshot(
       logPath: resolve(artifactRoot, `${label}-vision.log`),
       ...(analysisTimeout === undefined
         ? {}
-        : { timeoutMilliseconds: analysisTimeout }),
+        : {
+            timeoutMilliseconds: Math.min(
+              analysisTimeout,
+              timing?.maximumOcrTimeoutMilliseconds ?? analysisTimeout,
+            ),
+          }),
     },
   );
   const analysisText = analysis.stdout.trim();
