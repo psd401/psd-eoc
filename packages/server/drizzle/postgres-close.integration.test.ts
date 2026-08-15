@@ -116,7 +116,9 @@ function syntheticLoopbackDatabaseUrl(value: string | undefined): URL {
   const databaseName = databaseUrl.pathname.slice(1);
   if (
     !['postgres:', 'postgresql:'].includes(databaseUrl.protocol) ||
-    !['127.0.0.1', '::1', '[::1]'].includes(databaseUrl.hostname) ||
+    !['127.0.0.1', '::1', '[::1]', 'localhost'].includes(
+      databaseUrl.hostname,
+    ) ||
     databaseName !== 'psd_eoc_test' ||
     databaseUrl.username !== 'psd_eoc_test' ||
     databaseUrl.password.length === 0 ||
@@ -124,6 +126,9 @@ function syntheticLoopbackDatabaseUrl(value: string | undefined): URL {
     databaseUrl.hash.length > 0
   ) {
     throw new Error('The close probe requires a loopback synthetic database.');
+  }
+  if (databaseUrl.hostname === 'localhost') {
+    databaseUrl.hostname = '127.0.0.1';
   }
   return databaseUrl;
 }
@@ -1774,6 +1779,7 @@ if (isIsolatedProbe) {
       const databaseUrl = syntheticLoopbackDatabaseUrl(
         configuredTestDatabaseUrl,
       );
+      expect(databaseUrl.hostname).not.toBe('localhost');
       const evidence = await runProbeChild(databaseUrl);
 
       expect(evidence.openingCloseSettledBeforeSocketCreation).toBe(false);
