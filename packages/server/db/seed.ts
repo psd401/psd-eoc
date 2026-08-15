@@ -16,6 +16,7 @@ import {
   type Recipient,
   type RosterGroupSourceRef,
 } from '@psd-eoc/contracts';
+import { sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -36,7 +37,6 @@ import {
   neighborhoodVersions,
   rosterEndpoints,
   rosterRecipientGroupSources,
-  rosterRecipients,
   rosterSnapshotFacilities,
   rosterSnapshots,
   rosterSnapshotSources,
@@ -791,18 +791,24 @@ export async function seedDatabase(database: Database): Promise<SeedSummary> {
         ]),
       )
       .onConflictDoNothing();
-    await transaction
-      .insert(rosterRecipients)
-      .values(
-        rosterSnapshot.recipients.map((rosterRecipient) => ({
-          id: rosterRecipient.id,
-          rosterSnapshotId: rosterSnapshot.id,
-          population: rosterRecipient.population,
-          googleSubject: rosterRecipient.googleSubject,
-          displayName: rosterRecipient.displayName,
-        })),
-      )
-      .onConflictDoNothing();
+    for (const rosterRecipient of rosterSnapshot.recipients) {
+      await transaction.execute(sql`
+        insert into roster_recipients (
+          id,
+          roster_snapshot_id,
+          population,
+          google_subject,
+          display_name
+        ) values (
+          ${rosterRecipient.id}::uuid,
+          ${rosterSnapshot.id}::uuid,
+          ${rosterRecipient.population}::roster_population,
+          ${rosterRecipient.googleSubject}::varchar(255),
+          ${rosterRecipient.displayName}::varchar(160)
+        )
+        on conflict do nothing
+      `);
+    }
     await transaction
       .insert(rosterRecipientGroupSources)
       .values(
