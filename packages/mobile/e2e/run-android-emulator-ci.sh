@@ -354,6 +354,7 @@ api_level="${api_level//$'\r'/}"
 test "$qemu_state" = '1' || fail 'the booted Android device is not an emulator.'
 test "$api_level" = '36' || fail 'the booted Android emulator is not API 36.'
 
+"$adb_bin" -s "$emulator_serial" shell svc power stayon true
 "$adb_bin" -s "$emulator_serial" shell input keyevent 82
 "$adb_bin" -s "$emulator_serial" shell settings put global window_animation_scale 0.0
 "$adb_bin" -s "$emulator_serial" shell settings put global transition_animation_scale 0.0

@@ -8,6 +8,6 @@ appId: net.psd401.eoc
       - extendedWaitUntil:
           notVisible: '^Offline — cached view only$'
           timeout: 60000
-# The reconnect is deliberately visible, user-initiated, and attempted once.
-# A remaining offline state still fails the following enrollment assertions;
-# no mutation is queued while disconnected.
+# Each invocation permits one visible, user-initiated reconnect tap. The
+# enrollment assertion bounds its caller to one retry, and a remaining offline
+# state still fails closed; no mutation is queued while disconnected.

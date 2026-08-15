@@ -1143,36 +1143,59 @@ describe('issue #32 exact synthetic drill data', () => {
     );
   });
 
-  test('retries a cold loopback server only through the visible reconnect control', async () => {
-    const [retryFlow, iosEnrollment, androidEnrollment] = await Promise.all([
-      readFile(
-        new URL('flows/shared/retry-loopback-if-offline.yaml', import.meta.url),
-        'utf8',
-      ),
-      readFile(
-        new URL(
-          'flows/enroll-loopback-oidc-ios-post-auth.yaml',
-          import.meta.url,
+  test('bounds a cold loopback retry through the visible reconnect control', async () => {
+    const [retryFlow, assertionFlow, iosEnrollment, androidEnrollment] =
+      await Promise.all([
+        readFile(
+          new URL(
+            'flows/shared/retry-loopback-if-offline.yaml',
+            import.meta.url,
+          ),
+          'utf8',
         ),
-        'utf8',
-      ),
-      readFile(
-        new URL(
-          'flows/enroll-loopback-oidc-android-post-auth.yaml',
-          import.meta.url,
+        readFile(
+          new URL(
+            'flows/shared/assert-loopback-enrollment.yaml',
+            import.meta.url,
+          ),
+          'utf8',
         ),
-        'utf8',
-      ),
-    ]);
+        readFile(
+          new URL(
+            'flows/enroll-loopback-oidc-ios-post-auth.yaml',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+        readFile(
+          new URL(
+            'flows/enroll-loopback-oidc-android-post-auth.yaml',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ]);
     expect(retryFlow).toContain("visible: '^Offline — cached view only$'");
     expect(retryFlow).toContain(
       "tapOn: '^Reconnect and load current operations$'",
     );
     expect(retryFlow).not.toContain("tapOn: '^Retry secure connection$'");
     expect(retryFlow.match(/tapOn:/gu)).toHaveLength(1);
+    expect(assertionFlow.match(/- retry:/gu)).toHaveLength(1);
+    expect(assertionFlow).toContain('maxRetries: 1');
+    expect(assertionFlow).toContain('file: retry-loopback-if-offline.yaml');
+    expect(assertionFlow).not.toContain(
+      'file: shared/retry-loopback-if-offline.yaml',
+    );
+    expect(assertionFlow).toMatch(
+      /- retry:\n {4}maxRetries: 1\n {4}commands:\n {6}- runFlow:\n {10}file: retry-loopback-if-offline\.yaml\n {6}- extendedWaitUntil:\n {10}visible: 'Join existing DRILL — PRACTICE:[^\n]+\n {10}timeout: 60000\n- assertVisible: 'PSD EOC'/u,
+    );
     for (const enrollment of [iosEnrollment, androidEnrollment]) {
-      expect(enrollment).toContain(
+      expect(enrollment).not.toContain(
         'file: shared/retry-loopback-if-offline.yaml',
+      );
+      expect(enrollment).toContain(
+        'file: shared/assert-loopback-enrollment.yaml',
       );
     }
   });
@@ -2070,6 +2093,9 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(androidCiRunner).toContain('boot_deadline=$((SECONDS + 900))');
     expect(androidCiRunner).toContain(
       "test \"$api_level\" = '36' || fail 'the booted Android emulator is not API 36.'",
+    );
+    expect(androidCiRunner).toMatch(
+      /shell svc power stayon true[\s\S]+shell input keyevent 82[\s\S]+run-ci\.ts android/u,
     );
     expect(androidCiRunner).toContain("trap 'on_signal 143' TERM");
     expect(androidCiRunner).toContain('env ANDROID_SERIAL="$emulator_serial"');

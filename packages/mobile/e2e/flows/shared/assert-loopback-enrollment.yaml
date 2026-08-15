@@ -1,8 +1,13 @@
 appId: net.psd401.eoc
 ---
-- extendedWaitUntil:
-    visible: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
-    timeout: 60000
+- retry:
+    maxRetries: 1
+    commands:
+      - runFlow:
+          file: retry-loopback-if-offline.yaml
+      - extendedWaitUntil:
+          visible: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
+          timeout: 60000
 - assertVisible: 'PSD EOC'
 - assertVisible: 'Active events'
 - assertVisible: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
