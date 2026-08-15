@@ -13,6 +13,7 @@ import {
 import {
   createEventRoomPlaywrightSupervisorEnvironment,
   EVENT_ROOM_PLAYWRIGHT_CWD_ENV,
+  EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PAUSE_HEARTBEAT_ENV,
   EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_MODE_ENV,
   EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_NONCE_ENV,
 } from './playwright.web-server';
@@ -884,6 +885,8 @@ describe('event-room Playwright gate', () => {
           'true';
         childEnvironment[EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_NONCE_ENV] =
           nonce;
+        childEnvironment[EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PAUSE_HEARTBEAT_ENV] =
+          'true';
         childEnvironment[EVENT_ROOM_PLAYWRIGHT_CWD_ENV] = workspaceRoot;
         parent = Bun.spawn([process.execPath, supervisorScript], {
           cwd: workspaceRoot,
@@ -899,6 +902,7 @@ describe('event-room Playwright gate', () => {
         ).text();
         const artifactPath = `${context.outputDirectory}/synthetic-browser-artifact`;
         const webServerReadyPath = `${context.outputDirectory}/synthetic-web-server-ready.json`;
+        const heartbeatPausedPath = `${context.supervisionDirectory}/synthetic-parent-heartbeat-paused.json`;
         try {
           await waitUntil('the synthetic process tree to launch', async () => {
             return (
@@ -954,6 +958,16 @@ describe('event-room Playwright gate', () => {
           ...groupMembers,
           ...webServerGroupMembers,
         ];
+
+        await waitUntil('the synthetic parent heartbeat to pause', () =>
+          existsSync(heartbeatPausedPath),
+        );
+        await delay(2_500);
+        expect(processExists(parent.pid)).toBe(true);
+        expect(observedProcessIds.every((pid) => processExists(pid))).toBe(
+          true,
+        );
+        expect(await loopbackPortIsOpen(context.appPort)).toBe(true);
 
         parent.kill(signal);
         const parentExit = await Promise.race([
