@@ -10,7 +10,6 @@ import { mkdirSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { dropOwnedEventRoomPlaywrightDatabase } from './playwright-database';
@@ -58,11 +57,32 @@ export const EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_MODE_ENV =
   'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_MODE';
 export const EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_NONCE_ENV =
   'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_NONCE';
+export const EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PAUSE_HEARTBEAT_ENV =
+  'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PAUSE_HEARTBEAT';
 
 interface DarwinProcessIdentity {
   readonly processGroupId: number;
   readonly startedAt: string;
   readonly command: string;
+}
+
+function exactProcessIdentityMatches(
+  actual: DarwinProcessIdentity | null,
+  expected: DarwinProcessIdentity,
+): boolean {
+  return (
+    actual !== null &&
+    actual.processGroupId === expected.processGroupId &&
+    actual.startedAt === expected.startedAt &&
+    sha256(actual.command) === sha256(expected.command)
+  );
+}
+
+function isStaleGateHeartbeatError(error: unknown): error is Error {
+  return (
+    error instanceof Error &&
+    error.message === 'The event-room Playwright gate heartbeat is stale.'
+  );
 }
 
 function sha256(value: string): string {
@@ -365,7 +385,7 @@ async function waitForCoordinatorIdentity(
     ) {
       return identity;
     }
-    await delay(25);
+    await Bun.sleep(25);
   }
   throw new Error('The dedicated Playwright process group was not proven.');
 }
@@ -527,6 +547,16 @@ async function superviseCoordinator(): Promise<void> {
     'The Playwright gate PID',
   );
   requireCurrentEventRoomPlaywrightGateHeartbeat(context, gatePid, nonce);
+  // The fresh nonce-bound heartbeat authenticates the parent PID before this
+  // immutable OS snapshot is accepted as liveness evidence. The snapshot is
+  // never termination authority; coordinator and web-server signals still
+  // require their own exact run markers and process proofs below.
+  const gateProcessIdentity = await inspectDarwinProcess(gatePid);
+  if (gateProcessIdentity === null) {
+    throw new Error(
+      'The Playwright gate process identity is missing at supervisor startup.',
+    );
+  }
 
   const playwrightConfig = process.env[EVENT_ROOM_PLAYWRIGHT_CONFIG_ENV];
   if (
@@ -607,7 +637,7 @@ async function superviseCoordinator(): Promise<void> {
       if (workloadExit !== null) break;
       const outcome = await Promise.race([
         coordinatorExited.then((code) => ({ kind: 'exit' as const, code })),
-        delay(SUPERVISOR_POLL_MS).then(() => ({ kind: 'poll' as const })),
+        Bun.sleep(SUPERVISOR_POLL_MS).then(() => ({ kind: 'poll' as const })),
       ]);
       if (outcome.kind === 'exit') {
         coordinatorAnchorExit = outcome.code;
@@ -619,6 +649,19 @@ async function superviseCoordinator(): Promise<void> {
       try {
         requireCurrentEventRoomPlaywrightGateHeartbeat(context, gatePid, nonce);
       } catch (error) {
+        // Hosted runners can delay both 250 ms heartbeat writes and this poll
+        // beyond the strict two-second freshness window. Only a stale marker
+        // gets this liveness recheck: missing or altered evidence still fails
+        // closed, while an exact live parent cannot be mistaken for death.
+        if (
+          isStaleGateHeartbeatError(error) &&
+          exactProcessIdentityMatches(
+            await inspectDarwinProcess(gatePid),
+            gateProcessIdentity,
+          )
+        ) {
+          continue;
+        }
         parentHeartbeatStopped = true;
         primaryError = new Error(
           'The event-room Playwright gate heartbeat stopped.',
@@ -637,7 +680,7 @@ async function superviseCoordinator(): Promise<void> {
   let cleanupError: Error | null = null;
   try {
     writeEventRoomPlaywrightSupervisorStopping(context, process.pid, nonce);
-    await delay(750);
+    await Bun.sleep(750);
     const operations = {
       inspectProcess: inspectDarwinProcess,
       signalProcessGroup,
@@ -696,7 +739,7 @@ async function superviseCoordinator(): Promise<void> {
   while (coordinatorAnchorExit === null && Date.now() < exitDeadline) {
     const outcome = await Promise.race([
       coordinatorExited.then((code) => ({ done: true as const, code })),
-      delay(25).then(() => ({ done: false as const })),
+      Bun.sleep(25).then(() => ({ done: false as const })),
     ]);
     if (outcome.done) coordinatorAnchorExit = outcome.code;
   }
@@ -788,10 +831,31 @@ async function runSyntheticGateParent(): Promise<void> {
     }
     writeEventRoomPlaywrightGateHeartbeat(context, process.pid, nonce);
   }, 250);
+  const pauseHeartbeat = () => {
+    clearInterval(heartbeat);
+    writeFileSync(
+      join(
+        context.supervisionDirectory,
+        'synthetic-parent-heartbeat-paused.json',
+      ),
+      JSON.stringify({
+        kind: 'psd-eoc-event-room-playwright-synthetic-heartbeat-paused',
+        version: 1,
+        runId: context.runId,
+        gatePid: process.pid,
+      }),
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+    );
+  };
+  const pauseHeartbeatTimer =
+    process.env[EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PAUSE_HEARTBEAT_ENV] === 'true'
+      ? setTimeout(pauseHeartbeat, 500)
+      : undefined;
   try {
     process.exitCode = await supervisor.exited;
   } finally {
     clearInterval(heartbeat);
+    if (pauseHeartbeatTimer !== undefined) clearTimeout(pauseHeartbeatTimer);
   }
 }
 
