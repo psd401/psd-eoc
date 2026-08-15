@@ -1,0 +1,1257 @@
+name: Deploy exploration smoke
+
+run-name: >-
+  exploration-smoke ${{ inputs.source_sha }} at ${{ inputs.image_digest }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed commit on main (40 lowercase hex)
+        required: true
+        type: string
+      image_digest:
+        default: derive-in-preview
+        description: Exact expected digest, or derive-in-preview for protected review
+        required: true
+        type: string
+      previous_image_digest:
+        default: none
+        description: Currently deployed digest, or none for the first deployment
+        required: true
+        type: string
+      google_oauth_secret_arn:
+        description: Complete reviewed exploration-smoke Google OAuth secret ARN
+        required: true
+        type: string
+      deployment_authority:
+        description: Role ARN|policy SHA-256|boundary ARN-or-none
+        required: true
+        type: string
+      approved_identity_sha256:
+        description: Subject,email,display SHA-256 values (3 lowercase hashes, comma-separated)
+        required: true
+        type: string
+      monthly_cost_estimate_usd:
+        description: Reviewed estimated monthly AWS cost in USD
+        required: true
+        type: string
+      pricing_reference:
+        description: Dated AWS pricing-calculator or equivalent evidence reference
+        required: true
+        type: string
+      change_reference:
+        description: Issue/comment containing exact consequences and product-owner approval
+        required: true
+        type: string
+      acknowledge:
+        description: Type DEPLOY SYNTHETIC EXPLORATION SMOKE
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  cancel-in-progress: false
+  group: psd-eoc-exploration-smoke-deploy
+
+env:
+  APP_RUNNER_LOG_RETENTION_DAYS: '14'
+  AWS_ACCOUNT_ID: '<aws-account-id>'
+  AWS_ACCOUNT_ALIAS: psd401
+  AWS_REGION: us-west-2
+  GITHUB_OIDC_PROVIDER_ARN: arn:aws:iam::<aws-account-id>:oidc-provider/token.actions.githubusercontent.com
+  GITHUB_OIDC_SUBJECT: repo:psd401@1902994/psd-eoc@1326178900:environment:exploration-smoke
+  LOCAL_REGISTRY_IMAGE: docker.io/library/registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+  LOCAL_REGISTRY_REPOSITORY: localhost:5000/psd-eoc/exploration-smoke
+  STACK_NAME: PsdEocExplorationSmoke
+  ZERO_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+jobs:
+  preview:
+    name: Build, test, and render consequence preview
+    if: >-
+      github.repository == 'psd401/psd-eoc' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    outputs:
+      artifact_digest: ${{ steps.upload.outputs['artifact-digest'] }}
+      deploy_role_arn: ${{ steps.request.outputs.deploy_role_arn }}
+      deploy_role_boundary_arn: ${{ steps.request.outputs.deploy_role_boundary_arn }}
+      deploy_role_policy_sha256: ${{ steps.request.outputs.deploy_role_policy_sha256 }}
+      image_digest: ${{ steps.image.outputs.image_digest }}
+      template_sha256: ${{ steps.synth.outputs.template_sha256 }}
+    env:
+      ACKNOWLEDGE: ${{ inputs.acknowledge }}
+      APPROVED_IDENTITY_SHA256: ${{ inputs.approved_identity_sha256 }}
+      CHANGE_REFERENCE: ${{ inputs.change_reference }}
+      DEPLOYMENT_AUTHORITY: ${{ inputs.deployment_authority }}
+      GOOGLE_OAUTH_SECRET_ARN: ${{ inputs.google_oauth_secret_arn }}
+      MONTHLY_COST_ESTIMATE_USD: ${{ inputs.monthly_cost_estimate_usd }}
+      PREVIOUS_IMAGE_DIGEST: ${{ inputs.previous_image_digest }}
+      PRICING_REFERENCE: ${{ inputs.pricing_reference }}
+      REQUESTED_IMAGE_DIGEST: ${{ inputs.image_digest }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Check out the exact requested source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Validate the immutable request
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REQUESTED_IMAGE_DIGEST" == "derive-in-preview" || "$REQUESTED_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$REQUESTED_IMAGE_DIGEST" != "$ZERO_IMAGE_DIGEST" ]]
+          [[ "$PREVIOUS_IMAGE_DIGEST" == "none" || "$PREVIOUS_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$GOOGLE_OAUTH_SECRET_ARN" =~ ^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/google-oauth-[A-Za-z0-9]{6}$ ]]
+          test "${#DEPLOYMENT_AUTHORITY}" -le 2048
+          deployment_authority_pattern='^(arn:aws:iam::<aws-account-id>:role/[A-Za-z0-9+=,.@_/-]*exploration-smoke[A-Za-z0-9+=,.@_/-]*)\|([0-9a-f]{64})\|(none|arn:aws:iam::(aws|[0-9]{12}):policy/[A-Za-z0-9+=,.@_/-]+)$'
+          [[ "$DEPLOYMENT_AUTHORITY" =~ $deployment_authority_pattern ]]
+          DEPLOY_ROLE_ARN=${BASH_REMATCH[1]}
+          REQUESTED_DEPLOY_ROLE_POLICY_SHA256=${BASH_REMATCH[2]}
+          REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN=${BASH_REMATCH[3]}
+          test "${#REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN}" -le 1024
+          {
+            printf '%s\n' "DEPLOY_ROLE_ARN=$DEPLOY_ROLE_ARN"
+            printf '%s\n' "REQUESTED_DEPLOY_ROLE_POLICY_SHA256=$REQUESTED_DEPLOY_ROLE_POLICY_SHA256"
+            printf '%s\n' "REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN=$REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN"
+          } >> "$GITHUB_ENV"
+          {
+            printf '%s\n' "deploy_role_arn=$DEPLOY_ROLE_ARN"
+            printf '%s\n' "deploy_role_policy_sha256=$REQUESTED_DEPLOY_ROLE_POLICY_SHA256"
+            printf '%s\n' "deploy_role_boundary_arn=$REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN"
+          } >> "$GITHUB_OUTPUT"
+          [[ "$APPROVED_IDENTITY_SHA256" =~ ^[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64}$ ]]
+          IFS=, read -r \
+            APPROVED_GOOGLE_SUBJECT_SHA256 \
+            APPROVED_STAFF_EMAIL_SHA256 \
+            APPROVED_STAFF_DISPLAY_NAME_SHA256 \
+            <<< "$APPROVED_IDENTITY_SHA256"
+          {
+            printf '%s\n' "APPROVED_GOOGLE_SUBJECT_SHA256=$APPROVED_GOOGLE_SUBJECT_SHA256"
+            printf '%s\n' "APPROVED_STAFF_EMAIL_SHA256=$APPROVED_STAFF_EMAIL_SHA256"
+            printf '%s\n' "APPROVED_STAFF_DISPLAY_NAME_SHA256=$APPROVED_STAFF_DISPLAY_NAME_SHA256"
+          } >> "$GITHUB_ENV"
+          [[ "$MONTHLY_COST_ESTIMATE_USD" =~ ^[0-9]+([.][0-9]{1,2})?$ ]]
+          awk -v cost="$MONTHLY_COST_ESTIMATE_USD" 'BEGIN { exit !(cost > 0) }'
+          reference_pattern='^[A-Za-z0-9][A-Za-z0-9._:/?=&%#@+-]{2,500}$'
+          [[ "$PRICING_REFERENCE" =~ $reference_pattern ]]
+          [[ "$CHANGE_REFERENCE" =~ $reference_pattern ]]
+          [[ "$ACKNOWLEDGE" == "DEPLOY SYNTHETIC EXPLORATION SMOKE" ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.2.23
+
+      - name: Install exact dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run the repository gate
+        run: bun run check
+
+      - name: Run exploration-smoke focused tests
+        run: >-
+          bun test
+          infra/test/exploration-smoke
+          packages/server/scripts/exploration-smoke
+
+      - name: Synthesize and inspect the isolated template
+        id: synth
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../artifacts/cdk.out
+          bunx --bun cdk \
+            --app "bun bin/exploration-smoke.ts" \
+            synth "$STACK_NAME" \
+            --quiet \
+            --no-lookups \
+            --strict \
+            --no-notices \
+            --output ../artifacts/cdk.out
+
+          template=../artifacts/cdk.out/PsdEocExplorationSmoke.template.json
+          test -f "$template"
+          template_sha256=$(sha256sum "$template" | cut -d' ' -f1)
+          echo "template_sha256=$template_sha256" >> "$GITHUB_OUTPUT"
+
+          test "$(jq '[.Resources[] | select(.Type == "AWS::AppRunner::Service")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::AppRunner::AutoScalingConfiguration")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::RDS::DBCluster")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::RDS::DBInstance")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::ECR::Repository")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::SQS::Queue")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::SecretsManager::Secret")] | length' "$template")" -eq 4
+          test "$(jq '[.Resources[] | select(.Type | test("^AWS::(SES|SNS|Lambda|Scheduler|Events|Route53|S3)::"))] | length' "$template")" -eq 0
+
+          jq '[.. | objects | select(has("Effect") and has("Action")) | {Effect, Action, Resource, Condition}]' "$template" \
+            > ../artifacts/iam-statements.json
+          jq -r '.. | objects | select(.Effect == "Allow" and has("Action")) | .Action | if type == "array" then .[] else . end' "$template" \
+            | sort -u > ../artifacts/iam-allow-actions.txt
+          if grep -Eiq '^(sqs:SendMessage|ses:|sns:Publish|lambda:InvokeFunction|scheduler:|events:PutEvents|s3:PutObject|mobiletargeting:)' ../artifacts/iam-allow-actions.txt; then
+            echo "Forbidden provider or send authority was synthesized." >&2
+            exit 1
+          fi
+
+          jq -r '.Resources | to_entries[] | [.key, .value.Type] | @tsv' "$template" \
+            | sort > ../artifacts/resources.tsv
+          jq -r '.Resources | to_entries[] | [.key, .value.Type, (.value.DeletionPolicy // "Delete"), (.value.UpdateReplacePolicy // "Delete")] | @tsv' "$template" \
+            | sort > ../artifacts/retention.tsv
+          jq -r '.Outputs | to_entries[] | .key' "$template" \
+            | sort > ../artifacts/outputs.txt
+
+      - name: Build the exact registry manifest and run the fail-closed local smoke
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_registry_name="psd-eoc-preview-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          copy_registry_name="psd-eoc-preview-copy-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          source_registry_data="$RUNNER_TEMP/exploration-smoke-source-registry"
+          copy_registry_data="$RUNNER_TEMP/exploration-smoke-copy-registry"
+          mkdir "$source_registry_data" "$copy_registry_data"
+          cleanup_registries() {
+            docker rm --force "$source_registry_name" "$copy_registry_name" > /dev/null 2>&1 || true
+          }
+          trap cleanup_registries EXIT
+
+          docker run \
+            --detach \
+            --rm \
+            --name "$source_registry_name" \
+            --publish 127.0.0.1:5000:5000 \
+            --volume "$source_registry_data:/var/lib/registry" \
+            "$LOCAL_REGISTRY_IMAGE" > /dev/null
+          docker run \
+            --detach \
+            --rm \
+            --name "$copy_registry_name" \
+            --publish 127.0.0.1:5001:5000 \
+            --volume "$copy_registry_data:/var/lib/registry" \
+            "$LOCAL_REGISTRY_IMAGE" > /dev/null
+          for registry_port in 5000 5001; do
+            for attempt in {1..20}; do
+              if curl --fail --silent --show-error "http://127.0.0.1:$registry_port/v2/" > /dev/null; then
+                break
+              fi
+              if [[ "$attempt" -eq 20 ]]; then
+                echo "The loopback registry did not start." >&2
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+
+          docker buildx build \
+            --file packages/server/container/exploration-smoke.Dockerfile \
+            --build-arg "SOURCE_SHA=$SOURCE_SHA" \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            --tag "$LOCAL_REGISTRY_REPOSITORY:source-$SOURCE_SHA" \
+            --metadata-file artifacts/image-metadata.json \
+            .
+          built_digest=$(jq -er '."containerimage.digest"' artifacts/image-metadata.json)
+          [[ "$built_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$built_digest" != "$ZERO_IMAGE_DIGEST"
+          if [[ "$REQUESTED_IMAGE_DIGEST" != "derive-in-preview" ]]; then
+            test "$built_digest" = "$REQUESTED_IMAGE_DIGEST"
+          fi
+          echo "IMAGE_DIGEST=$built_digest" >> "$GITHUB_ENV"
+          echo "image_digest=$built_digest" >> "$GITHUB_OUTPUT"
+          docker buildx imagetools inspect \
+            --raw "$LOCAL_REGISTRY_REPOSITORY@$built_digest" \
+            > artifacts/image-manifest.json
+          test "sha256:$(sha256sum artifacts/image-manifest.json | cut -d' ' -f1)" = "$built_digest"
+
+          copy_reference="localhost:5001/psd-eoc/exploration-smoke:copy-$SOURCE_SHA"
+          docker buildx imagetools create \
+            --prefer-index=false \
+            --tag "$copy_reference" \
+            --metadata-file artifacts/copy-test-metadata.json \
+            "$LOCAL_REGISTRY_REPOSITORY@$built_digest"
+          test "$(jq -er '."containerimage.descriptor".digest' artifacts/copy-test-metadata.json)" = "$built_digest"
+          test "$(docker buildx imagetools inspect "$copy_reference" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$built_digest"
+
+          bun packages/server/scripts/exploration-smoke/container-smoke.ts \
+            "$LOCAL_REGISTRY_REPOSITORY@$built_digest"
+          docker rm --force "$source_registry_name" "$copy_registry_name" > /dev/null
+          trap - EXIT
+          tar --create --file artifacts/image-registry.tar --directory "$source_registry_data" .
+          sha256sum artifacts/image-registry.tar > artifacts/image-registry-tar.sha256
+
+      - name: Render the exact consequence preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          template_sha256=$(sha256sum artifacts/cdk.out/PsdEocExplorationSmoke.template.json | cut -d' ' -f1)
+          {
+            echo "# PsdEocExplorationSmoke consequence preview"
+            echo
+            echo "This preview made no AWS, GCP, DNS, store, or provider write. Pinned container/base-image reads and two loopback-only registry writes were permitted."
+            echo
+            printf '%s\n' "- Workflow commit: $GITHUB_SHA"
+            printf '%s\n' "- Source commit: $SOURCE_SHA"
+            printf '%s\n' "- Dispatch digest request: $REQUESTED_IMAGE_DIGEST"
+            printf '%s\n' "- Image digest: $IMAGE_DIGEST"
+            printf '%s\n' "- Previous image digest: $PREVIOUS_IMAGE_DIGEST"
+            printf '%s\n' "- Template SHA-256: $template_sha256"
+            printf '%s\n' "- Target: alias $AWS_ACCOUNT_ALIAS, account $AWS_ACCOUNT_ID, region $AWS_REGION"
+            printf '%s\n' "- Stack: $STACK_NAME"
+            printf '%s\n' "- OIDC deployment role: $DEPLOY_ROLE_ARN"
+            printf '%s\n' "- Deployment-role policy inventory SHA-256: $REQUESTED_DEPLOY_ROLE_POLICY_SHA256"
+            printf '%s\n' "- Deployment-role permissions boundary: $REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN"
+            printf '%s\n' "- Google OAuth secret ARN: $GOOGLE_OAUTH_SECRET_ARN"
+            printf '%s\n' "- Approved Google subject SHA-256: $APPROVED_GOOGLE_SUBJECT_SHA256"
+            printf '%s\n' "- Approved staff email SHA-256: $APPROVED_STAFF_EMAIL_SHA256"
+            printf '%s\n' "- Approved staff display-name SHA-256: $APPROVED_STAFF_DISPLAY_NAME_SHA256"
+            printf '%s\n' "- Estimated monthly AWS cost: USD $MONTHLY_COST_ESTIMATE_USD"
+            printf '%s\n' "- Pricing evidence: $PRICING_REFERENCE"
+            printf '%s\n' "- Change/approval record: $CHANGE_REFERENCE"
+            echo
+            echo "## Consequences"
+            echo
+            echo "AWS charges begin. The stack writes only synthetic application/audit data and one approved staff access fixture. App Runner becomes publicly reachable at its AWS URL. The protected workflow sets 14-day retention on the exact App Runner service and application log groups after service creation. That retention write permanently expires log events older than 14 days; CloudWatch Logs ordinarily deletes marked events within 72 hours. No DNS, certificate, GCP, mobile-store, notification-provider, recipient, or send operation is performed. Google OIDC remains configured-unverified until the separately owned eoc.psd401.net custom domain is live and a human completes an approved district sign-in; web/mobile sign-in remains blocked until then."
+            echo
+            echo "## Resource inventory"
+            echo
+            echo '```text'
+            cat artifacts/resources.tsv
+            echo '```'
+            echo
+            echo "## Provider-managed resource inventory"
+            echo
+            echo '```text'
+            printf '%s\n' "AWS::Logs::LogGroup  /aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/application  retention=$APP_RUNNER_LOG_RETENTION_DAYS-days"
+            printf '%s\n' "AWS::Logs::LogGroup  /aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/service      retention=$APP_RUNNER_LOG_RETENTION_DAYS-days"
+            echo '```'
+            echo
+            echo "## IAM actions"
+            echo
+            echo '```text'
+            cat artifacts/iam-allow-actions.txt
+            echo '```'
+            echo
+            echo "## Retention and replacement behavior"
+            echo
+            echo '```text'
+            cat artifacts/retention.tsv
+            echo '```'
+            echo
+            echo "## Exact write command shape"
+            echo
+            echo "Protected values are represented by their approved SHA-256 fingerprint and remain masked at execution."
+            echo
+            echo '```text'
+            printf '%s\n' "Assume through GitHub OIDC only: $DEPLOY_ROLE_ARN"
+            printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=false' --parameters '$STACK_NAME:AppImageDigest=$ZERO_IMAGE_DIGEST' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>'"
+            printf '%s\n' "docker buildx imagetools create --prefer-index=false --tag '$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server:source-$SOURCE_SHA' 'localhost:5000/psd-eoc/exploration-smoke@$IMAGE_DIGEST'"
+            printf '%s\n' "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID AWS_REGION=$AWS_REGION DATABASE_NAME=<stack-output> DATABASE_RESOURCE_ARN=<stack-output> DATABASE_ADMIN_SECRET_ARN=<stack-output> DATABASE_APPLICATION_SECRET_ARN=<stack-output> APPROVED_GOOGLE_SUBJECT=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256> APPROVED_STAFF_EMAIL=<protected:$APPROVED_STAFF_EMAIL_SHA256> APPROVED_STAFF_DISPLAY_NAME=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256> SOURCE_SHA=$SOURCE_SHA bun packages/server/scripts/exploration-smoke/bootstrap.ts"
+            printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=true' --parameters '$STACK_NAME:AppImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>'"
+            printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/application' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
+            printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/service' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
+            echo '```'
+            echo
+            echo "First deployment uses an explicit repository/data-plane phase with ProvisionApplication=false, publishes only the verified digest, bootstraps the database and application LOGIN, then updates the same stack with ProvisionApplication=true. Existing stacks skip the false phase but still verify/bootstrap the data plane before updating the service. Ordinary rollback requires a fresh dispatch and approval using the previously recorded digest. No destroy, DNS, provider, or store command exists in this workflow. Database migrations and journals are forward-only and append-only."
+          } > artifacts/consequence-preview.md
+          cat artifacts/consequence-preview.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable preview and image
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          compression-level: 0
+          if-no-files-found: error
+          name: exploration-smoke-${{ inputs.source_sha }}
+          overwrite: false
+          path: artifacts
+          retention-days: 1
+
+      - name: Record the immutable artifact digest
+        run: >-
+          printf '%s\n'
+          '- Preview/image artifact digest: ${{ steps.upload.outputs['artifact-digest'] }}'
+          >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Protected OIDC deployment and readback
+    needs: preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment:
+      name: exploration-smoke
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      APPROVED_IDENTITY_SHA256: ${{ inputs.approved_identity_sha256 }}
+      CONFIGURED_DEPLOY_ROLE_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
+      DEPLOY_ROLE_ARN: ${{ needs.preview.outputs.deploy_role_arn }}
+      EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_PERMISSIONS_BOUNDARY_ARN }}
+      EXPECTED_DEPLOY_ROLE_POLICY_SHA256: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_POLICY_SHA256 }}
+      GOOGLE_OAUTH_SECRET_ARN: ${{ inputs.google_oauth_secret_arn }}
+      IMAGE_DIGEST: ${{ needs.preview.outputs.image_digest }}
+      PREVIOUS_IMAGE_DIGEST: ${{ inputs.previous_image_digest }}
+      REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN: ${{ needs.preview.outputs.deploy_role_boundary_arn }}
+      REQUESTED_DEPLOY_ROLE_POLICY_SHA256: ${{ needs.preview.outputs.deploy_role_policy_sha256 }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      TEMPLATE_SHA256: ${{ needs.preview.outputs.template_sha256 }}
+    steps:
+      - name: Check out the exact requested source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.2.23
+
+      - name: Install exact dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download the approved artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: exploration-smoke-${{ inputs.source_sha }}
+          path: artifacts
+
+      - name: Revalidate artifact, source, and protected identity
+        env:
+          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
+          APPROVED_STAFF_DISPLAY_NAME: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_DISPLAY_NAME }}
+          APPROVED_STAFF_EMAIL: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_EMAIL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(sha256sum artifacts/cdk.out/PsdEocExplorationSmoke.template.json | cut -d' ' -f1)" = "$TEMPLATE_SHA256"
+          sha256sum --check artifacts/image-registry-tar.sha256
+          test "$CONFIGURED_DEPLOY_ROLE_ARN" = "$DEPLOY_ROLE_ARN"
+          test "$REQUESTED_DEPLOY_ROLE_POLICY_SHA256" = "$EXPECTED_DEPLOY_ROLE_POLICY_SHA256"
+          test "$REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN" = "$EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"
+          [[ "$EXPECTED_DEPLOY_ROLE_POLICY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "${#EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN}" -le 1024
+          [[ "$EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN" == "none" || "$EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN" =~ ^arn:aws:iam::(aws|[0-9]{12}):policy/[A-Za-z0-9+=,.@_/-]+$ ]]
+          [[ "$APPROVED_IDENTITY_SHA256" =~ ^[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64}$ ]]
+          IFS=, read -r \
+            APPROVED_GOOGLE_SUBJECT_SHA256 \
+            APPROVED_STAFF_EMAIL_SHA256 \
+            APPROVED_STAFF_DISPLAY_NAME_SHA256 \
+            <<< "$APPROVED_IDENTITY_SHA256"
+          test -n "$APPROVED_GOOGLE_SUBJECT"
+          test -n "$APPROVED_STAFF_EMAIL"
+          test -n "$APPROVED_STAFF_DISPLAY_NAME"
+          test "$(printf %s "$APPROVED_GOOGLE_SUBJECT" | sha256sum | cut -d' ' -f1)" = "$APPROVED_GOOGLE_SUBJECT_SHA256"
+          test "$(printf %s "$APPROVED_STAFF_EMAIL" | sha256sum | cut -d' ' -f1)" = "$APPROVED_STAFF_EMAIL_SHA256"
+          test "$(printf %s "$APPROVED_STAFF_DISPLAY_NAME" | sha256sum | cut -d' ' -f1)" = "$APPROVED_STAFF_DISPLAY_NAME_SHA256"
+          [[ "$APPROVED_GOOGLE_SUBJECT" =~ ^[A-Za-z0-9_-]{1,255}$ ]]
+          [[ "$APPROVED_STAFF_EMAIL" =~ ^[a-z0-9._+-]+@psd401[.]net$ ]]
+          [[ "$APPROVED_STAFF_DISPLAY_NAME" != *$'\n'* && "$APPROVED_STAFF_DISPLAY_NAME" != *$'\r'* ]]
+
+          test ! -e artifacts/recheck-cdk.out
+          (
+            cd infra
+            bunx --bun cdk \
+              --app "bun bin/exploration-smoke.ts" \
+              synth "$STACK_NAME" \
+              --quiet \
+              --no-lookups \
+              --strict \
+              --no-notices \
+              --output ../artifacts/recheck-cdk.out
+          )
+          cmp \
+            artifacts/cdk.out/PsdEocExplorationSmoke.template.json \
+            artifacts/recheck-cdk.out/PsdEocExplorationSmoke.template.json
+
+      - name: Configure temporary AWS credentials through GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+        with:
+          allowed-account-ids: '<aws-account-id>'
+          aws-region: us-west-2
+          mask-aws-account-id: false
+          output-credentials: false
+          role-duration-seconds: 3600
+          role-session-name: psd-eoc-smoke-${{ github.run_id }}
+          role-to-assume: ${{ needs.preview.outputs.deploy_role_arn }}
+          unset-current-credentials: true
+
+      - name: Gate the exact AWS identity and OAuth secret metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/readback
+          aws sts get-caller-identity > artifacts/readback/sts-identity.json
+          test "$(jq -r .Account artifacts/readback/sts-identity.json)" = "$AWS_ACCOUNT_ID"
+          aws iam list-account-aliases > artifacts/readback/account-aliases.json
+          test "$(jq -r '.AccountAliases | length' artifacts/readback/account-aliases.json)" -eq 1
+          test "$(jq -r '.AccountAliases[0]' artifacts/readback/account-aliases.json)" = "$AWS_ACCOUNT_ALIAS"
+          aws apprunner list-services \
+            --query '{ServiceSummaryList:ServiceSummaryList[].{ServiceArn:ServiceArn,ServiceName:ServiceName,Status:Status}}' \
+            > artifacts/readback/app-runner-customer-eligibility.json
+          test "$(jq '.ServiceSummaryList | length' artifacts/readback/app-runner-customer-eligibility.json)" -ge 1
+
+          role_name=${DEPLOY_ROLE_ARN##*/}
+          aws iam get-open-id-connect-provider \
+            --open-id-connect-provider-arn "$GITHUB_OIDC_PROVIDER_ARN" \
+            --query '{Url:Url,ClientIDList:ClientIDList,ThumbprintList:ThumbprintList}' \
+            > artifacts/readback/github-oidc-provider.json
+          test "$(jq -r .Url artifacts/readback/github-oidc-provider.json)" = "token.actions.githubusercontent.com"
+          jq -e \
+            '.ClientIDList == ["sts.amazonaws.com"] and
+             (.ThumbprintList | type == "array" and length >= 1 and
+              all(.[]; test("^[0-9a-f]{40}$")))' \
+            artifacts/readback/github-oidc-provider.json > /dev/null
+
+          aws iam get-role --role-name "$role_name" \
+            --query 'Role.{Arn:Arn,RoleId:RoleId,RoleName:RoleName,CreateDate:CreateDate,AssumeRolePolicyDocument:AssumeRolePolicyDocument,MaxSessionDuration:MaxSessionDuration,PermissionsBoundary:PermissionsBoundary}' \
+            > artifacts/readback/deployment-role.json
+          test "$(jq -r .Arn artifacts/readback/deployment-role.json)" = "$DEPLOY_ROLE_ARN"
+          test "$(jq -r .MaxSessionDuration artifacts/readback/deployment-role.json)" -eq 3600
+          jq -e \
+            --arg provider "$GITHUB_OIDC_PROVIDER_ARN" \
+            --arg subject "$GITHUB_OIDC_SUBJECT" '
+              (.AssumeRolePolicyDocument.Statement |
+                if type == "array" then . else [.] end) as $statements |
+              ($statements | length) == 1 and
+              $statements[0].Effect == "Allow" and
+              (($statements[0].Action |
+                if type == "array" then . else [.] end) ==
+                ["sts:AssumeRoleWithWebIdentity"]) and
+              ($statements[0].Principal | keys | sort) == ["Federated"] and
+              (($statements[0].Principal.Federated |
+                if type == "array" then . else [.] end) == [$provider]) and
+              ($statements[0].Condition | keys | sort) == ["StringEquals"] and
+              ($statements[0].Condition.StringEquals | keys | sort) == [
+                "token.actions.githubusercontent.com:aud",
+                "token.actions.githubusercontent.com:sub"
+              ] and
+              $statements[0].Condition.StringEquals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com" and
+              $statements[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == $subject
+            ' artifacts/readback/deployment-role.json > /dev/null
+
+          policy_directory=artifacts/readback/deployment-role-policies
+          mkdir -p "$policy_directory"
+          : > "$policy_directory/inline-policy-inventory.ndjson"
+          : > "$policy_directory/attached-policy-inventory.ndjson"
+
+          aws iam list-role-policies --role-name "$role_name" \
+            > artifacts/readback/deployment-role-inline-policy-list.json
+          while IFS= read -r policy_name; do
+            [[ "$policy_name" =~ ^[A-Za-z0-9+=,.@_-]{1,128}$ ]]
+            policy_file="$policy_directory/inline-$policy_name.json"
+            repeat_file="$RUNNER_TEMP/exploration-smoke-inline-$policy_name.json"
+            aws iam get-role-policy \
+              --role-name "$role_name" \
+              --policy-name "$policy_name" \
+              > "$policy_file"
+            aws iam get-role-policy \
+              --role-name "$role_name" \
+              --policy-name "$policy_name" \
+              > "$repeat_file"
+            test "$(jq -cS '{PolicyName,PolicyDocument}' "$policy_file")" = \
+              "$(jq -cS '{PolicyName,PolicyDocument}' "$repeat_file")"
+            jq -cS '{policyName:.PolicyName,policyDocument:.PolicyDocument}' \
+              "$policy_file" >> "$policy_directory/inline-policy-inventory.ndjson"
+          done < <(jq -r '.PolicyNames[]' artifacts/readback/deployment-role-inline-policy-list.json)
+          jq -s 'sort_by(.policyName)' \
+            "$policy_directory/inline-policy-inventory.ndjson" \
+            > "$policy_directory/inline-policy-inventory.json"
+
+          aws iam list-attached-role-policies --role-name "$role_name" \
+            > artifacts/readback/deployment-role-attached-policy-list.json
+          while IFS=$'\t' read -r policy_name policy_arn; do
+            [[ "$policy_name" =~ ^[A-Za-z0-9+=,.@_-]{1,128}$ ]]
+            test "${#policy_arn}" -le 1024
+            [[ "$policy_arn" =~ ^arn:aws:iam::(aws|[0-9]{12}):policy/[A-Za-z0-9+=,.@_/-]+$ ]]
+            policy_owner=${policy_arn#arn:aws:iam::}
+            policy_owner=${policy_owner%%:*}
+            metadata="$policy_directory/attached-$policy_owner-$policy_name-metadata.json"
+            document="$policy_directory/attached-$policy_owner-$policy_name-document.json"
+            aws iam get-policy --policy-arn "$policy_arn" > "$metadata"
+            policy_version=$(jq -er '.Policy.DefaultVersionId' "$metadata")
+            [[ "$policy_version" =~ ^v[1-9][0-9]*$ ]]
+            aws iam get-policy-version \
+              --policy-arn "$policy_arn" \
+              --version-id "$policy_version" \
+              > "$document"
+            test "$(jq -er '.PolicyVersion.VersionId' "$document")" = "$policy_version"
+            test "$(jq -r '.PolicyVersion.IsDefaultVersion' "$document")" = "true"
+            test "$(aws iam get-policy --policy-arn "$policy_arn" --query Policy.DefaultVersionId --output text)" = "$policy_version"
+            jq -cS \
+              --arg policy_name "$policy_name" \
+              --arg policy_arn "$policy_arn" \
+              --arg policy_version "$policy_version" \
+              '{policyName:$policy_name,policyArn:$policy_arn,versionId:$policy_version,policyDocument:.PolicyVersion.Document}' \
+              "$document" >> "$policy_directory/attached-policy-inventory.ndjson"
+          done < <(jq -r '.AttachedPolicies[] | [.PolicyName, .PolicyArn] | @tsv' artifacts/readback/deployment-role-attached-policy-list.json)
+          jq -s 'sort_by(.policyArn)' \
+            "$policy_directory/attached-policy-inventory.ndjson" \
+            > "$policy_directory/attached-policy-inventory.json"
+
+          boundary_arn=$(jq -r '.PermissionsBoundary.PermissionsBoundaryArn // empty' artifacts/readback/deployment-role.json)
+          actual_boundary_arn=${boundary_arn:-none}
+          printf '%s\n' "$actual_boundary_arn" \
+            > artifacts/readback/deployment-role-permissions-boundary.txt
+          if [[ -n "$boundary_arn" ]]; then
+            test "${#boundary_arn}" -le 1024
+            [[ "$boundary_arn" =~ ^arn:aws:iam::(aws|[0-9]{12}):policy/[A-Za-z0-9+=,.@_/-]+$ ]]
+            aws iam get-policy --policy-arn "$boundary_arn" \
+              > "$policy_directory/permissions-boundary-metadata.json"
+            boundary_version=$(jq -er '.Policy.DefaultVersionId' "$policy_directory/permissions-boundary-metadata.json")
+            [[ "$boundary_version" =~ ^v[1-9][0-9]*$ ]]
+            aws iam get-policy-version \
+              --policy-arn "$boundary_arn" \
+              --version-id "$boundary_version" \
+              > "$policy_directory/permissions-boundary-document.json"
+            test "$(jq -er '.PolicyVersion.VersionId' "$policy_directory/permissions-boundary-document.json")" = "$boundary_version"
+            test "$(jq -r '.PolicyVersion.IsDefaultVersion' "$policy_directory/permissions-boundary-document.json")" = "true"
+            test "$(aws iam get-policy --policy-arn "$boundary_arn" --query Policy.DefaultVersionId --output text)" = "$boundary_version"
+            jq -cS \
+              --arg policy_arn "$boundary_arn" \
+              --arg policy_version "$boundary_version" \
+              '{policyArn:$policy_arn,versionId:$policy_version,policyDocument:.PolicyVersion.Document}' \
+              "$policy_directory/permissions-boundary-document.json" \
+              > "$policy_directory/permissions-boundary-inventory.json"
+          else
+            printf '%s\n' null > "$policy_directory/permissions-boundary-inventory.json"
+          fi
+
+          aws iam list-role-policies --role-name "$role_name" \
+            > "$RUNNER_TEMP/exploration-smoke-inline-policy-list-after.json"
+          test "$(jq -cS '.PolicyNames | sort' artifacts/readback/deployment-role-inline-policy-list.json)" = \
+            "$(jq -cS '.PolicyNames | sort' "$RUNNER_TEMP/exploration-smoke-inline-policy-list-after.json")"
+          aws iam list-attached-role-policies --role-name "$role_name" \
+            > "$RUNNER_TEMP/exploration-smoke-attached-policy-list-after.json"
+          test "$(jq -cS '.AttachedPolicies | sort_by(.PolicyArn)' artifacts/readback/deployment-role-attached-policy-list.json)" = \
+            "$(jq -cS '.AttachedPolicies | sort_by(.PolicyArn)' "$RUNNER_TEMP/exploration-smoke-attached-policy-list-after.json")"
+          aws iam get-role --role-name "$role_name" \
+            --query 'Role.{Arn:Arn,RoleId:RoleId,RoleName:RoleName,CreateDate:CreateDate,AssumeRolePolicyDocument:AssumeRolePolicyDocument,MaxSessionDuration:MaxSessionDuration,PermissionsBoundary:PermissionsBoundary}' \
+            > "$RUNNER_TEMP/exploration-smoke-deployment-role-after.json"
+          test "$(jq -cS . artifacts/readback/deployment-role.json)" = \
+            "$(jq -cS . "$RUNNER_TEMP/exploration-smoke-deployment-role-after.json")"
+
+          policy_inventory=$(jq -cS -n \
+            --slurpfile inline "$policy_directory/inline-policy-inventory.json" \
+            --slurpfile attached "$policy_directory/attached-policy-inventory.json" \
+            --slurpfile boundary "$policy_directory/permissions-boundary-inventory.json" \
+            '{inlinePolicies:$inline[0],attachedPolicies:$attached[0],permissionsBoundary:$boundary[0]}')
+          printf '%s' "$policy_inventory" \
+            > artifacts/readback/deployment-role-policy-inventory.json
+          actual_policy_sha256=$(printf '%s' "$policy_inventory" | sha256sum | cut -d' ' -f1)
+          printf '%s\n' "$actual_policy_sha256" \
+            > artifacts/readback/deployment-role-policy-inventory.sha256
+          {
+            printf '%s\n' "- Observed deployment-role policy inventory SHA-256: $actual_policy_sha256"
+            printf '%s\n' "- Observed deployment-role permissions boundary: $actual_boundary_arn"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$EXPECTED_DEPLOY_ROLE_POLICY_SHA256" =~ ^0{64}$ ]]; then
+            echo "The zero policy hash is read-only discovery and can never authorize deployment." >&2
+            exit 1
+          fi
+          test "$actual_boundary_arn" = "$EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"
+          test "$actual_policy_sha256" = "$EXPECTED_DEPLOY_ROLE_POLICY_SHA256"
+          unset policy_inventory
+
+          representative_service_id=00000000000000000000000000000000
+          representative_log_base="arn:aws:logs:$AWS_REGION:$AWS_ACCOUNT_ID:log-group:/aws/apprunner/psd-eoc-exploration-smoke/$representative_service_id"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names logs:DescribeLogGroups \
+            --resource-arns '*' \
+            > artifacts/readback/deployment-role-describe-logs-simulation.json
+          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deployment-role-describe-logs-simulation.json)" = "allowed"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names logs:PutRetentionPolicy \
+            --resource-arns \
+              "$representative_log_base/application:*" \
+              "$representative_log_base/service:*" \
+            > artifacts/readback/deployment-role-log-retention-simulation.json
+          jq -e \
+            --arg application "$representative_log_base/application:*" \
+            --arg service "$representative_log_base/service:*" '
+              (.EvaluationResults | length) == 1 and
+              .EvaluationResults[0].EvalActionName == "logs:PutRetentionPolicy" and
+              .EvaluationResults[0].EvalDecision == "allowed" and
+              (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
+              ([
+                .EvaluationResults[0].ResourceSpecificResults[] |
+                {resource: .EvalResourceName, decision: .EvalResourceDecision}
+              ] | sort_by(.resource)) ==
+              ([$application, $service] | sort | map({resource: ., decision: "allowed"}))
+            ' artifacts/readback/deployment-role-log-retention-simulation.json \
+            > /dev/null
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names logs:PutRetentionPolicy \
+            --resource-arns \
+              "arn:aws:logs:$AWS_REGION:$AWS_ACCOUNT_ID:log-group:/aws/apprunner/not-exploration-smoke/$representative_service_id/service:*" \
+              "$representative_log_base/not-an-app-runner-log:*" \
+            > artifacts/readback/deployment-role-log-retention-negative-simulation.json
+          jq -e \
+            --arg neighboring "arn:aws:logs:$AWS_REGION:$AWS_ACCOUNT_ID:log-group:/aws/apprunner/not-exploration-smoke/$representative_service_id/service:*" \
+            --arg wrong_child "$representative_log_base/not-an-app-runner-log:*" '
+              (.EvaluationResults | length) == 1 and
+              .EvaluationResults[0].EvalActionName == "logs:PutRetentionPolicy" and
+              .EvaluationResults[0].EvalDecision != "allowed" and
+              (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
+              ([
+                .EvaluationResults[0].ResourceSpecificResults[] |
+                .EvalResourceName
+              ] | sort) == ([$neighboring, $wrong_child] | sort) and
+              all(
+                .EvaluationResults[0].ResourceSpecificResults[];
+                .EvalResourceDecision != "allowed"
+              )
+            ' artifacts/readback/deployment-role-log-retention-negative-simulation.json \
+            > /dev/null
+
+          aws secretsmanager describe-secret \
+            --secret-id "$GOOGLE_OAUTH_SECRET_ARN" \
+            --query '{ARN:ARN,Name:Name,KmsKeyId:KmsKeyId,LastChangedDate:LastChangedDate}' \
+            > artifacts/readback/google-oauth-secret-metadata.json
+          test "$(jq -r .ARN artifacts/readback/google-oauth-secret-metadata.json)" = "$GOOGLE_OAUTH_SECRET_ARN"
+
+          oauth_json=$(aws secretsmanager get-secret-value \
+            --secret-id "$GOOGLE_OAUTH_SECRET_ARN" \
+            --query SecretString \
+            --output text)
+          jq -e '
+            (keys | sort) == ["clientId", "clientSecret", "iosBundleId", "iosClientId", "webClientId"] and
+            .iosBundleId == "net.psd401.eoc" and
+            .clientId == .webClientId and
+            (.clientId | test("^[0-9]+-[a-z0-9]+[.]apps[.]googleusercontent[.]com$")) and
+            (.iosClientId | test("^[0-9]+-[a-z0-9]+[.]apps[.]googleusercontent[.]com$")) and
+            .iosClientId != .webClientId and
+            ((.iosClientId | split("-")[0]) == (.webClientId | split("-")[0])) and
+            (.clientSecret | type == "string" and length > 0 and length <= 2048 and (test("blocked|placeholder|replace|unverified"; "i") | not))
+          ' <<< "$oauth_json" > /dev/null
+          unset oauth_json
+
+      - name: Establish the isolated repository on first deployment only
+        id: stack_state
+        env:
+          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          stack_file=../artifacts/readback/stack-before.json
+          if aws cloudformation describe-stacks --stack-name "$STACK_NAME" > "$stack_file" 2> ../artifacts/readback/stack-before-error.txt; then
+            current_digest=$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "AppImageDigest") | .ParameterValue' "$stack_file")
+            current_provision=$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "ProvisionApplication") | .ParameterValue' "$stack_file")
+            current_status=$(jq -er '.Stacks[0].StackStatus' "$stack_file")
+            case "$current_status" in
+              CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE) ;;
+              *)
+                echo "Stack state $current_status is not safe for an automated retry." >&2
+                exit 1
+                ;;
+            esac
+            test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DeploymentAccount") | .OutputValue' "$stack_file")" = "$AWS_ACCOUNT_ID"
+            test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DeploymentRegion") | .OutputValue' "$stack_file")" = "$AWS_REGION"
+            test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "ExpectedAwsAccountAlias") | .OutputValue' "$stack_file")" = "$AWS_ACCOUNT_ALIAS"
+            test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "EnvironmentName") | .OutputValue' "$stack_file")" = "exploration-smoke"
+            test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DataClassification") | .OutputValue' "$stack_file")" = "synthetic-only"
+            if [[ "$current_provision" == "true" ]]; then
+              test "$PREVIOUS_IMAGE_DIGEST" != "none"
+              test "$current_digest" = "$PREVIOUS_IMAGE_DIGEST"
+              current_service_arn=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "AppRunnerServiceArn") | .OutputValue' "$stack_file")
+              [[ "$current_service_arn" =~ ^arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/[A-Za-z0-9]{32}$ ]]
+              aws apprunner describe-service \
+                --service-arn "$current_service_arn" \
+                --query 'Service.{ServiceArn:ServiceArn,ServiceId:ServiceId,ServiceName:ServiceName,Status:Status,ImageIdentifier:SourceConfiguration.ImageRepository.ImageIdentifier}' \
+                > ../artifacts/readback/app-runner-before.json
+              test "$(jq -r .ServiceArn ../artifacts/readback/app-runner-before.json)" = "$current_service_arn"
+              test "$(jq -r .ServiceName ../artifacts/readback/app-runner-before.json)" = "psd-eoc-exploration-smoke"
+              test "$(jq -r .Status ../artifacts/readback/app-runner-before.json)" = "RUNNING"
+              test "$(jq -r .ImageIdentifier ../artifacts/readback/app-runner-before.json)" = "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server@$current_digest"
+            else
+              test "$current_provision" = "false"
+              test "$current_digest" = "$ZERO_IMAGE_DIGEST"
+              test "$PREVIOUS_IMAGE_DIGEST" = "none"
+              aws cloudformation list-stack-resources --stack-name "$STACK_NAME" \
+                > ../artifacts/readback/phase-one-resources.json
+              test "$(jq '[.StackResourceSummaries[] | select(.ResourceType == "AWS::AppRunner::Service")] | length' ../artifacts/readback/phase-one-resources.json)" -eq 0
+            fi
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            grep -q 'does not exist' ../artifacts/readback/stack-before-error.txt
+            test "$PREVIOUS_IMAGE_DIGEST" = "none"
+            bunx --bun cdk \
+              --app "bun bin/exploration-smoke.ts" \
+              deploy "$STACK_NAME" \
+              --exclusively \
+              --require-approval never \
+              --no-notices \
+              --outputs-file ../artifacts/readback/phase-one-outputs.json \
+              --parameters "$STACK_NAME:ProvisionApplication=false" \
+              --parameters "$STACK_NAME:AppImageDigest=$ZERO_IMAGE_DIGEST" \
+              --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
+              --parameters "$STACK_NAME:ApprovedGoogleSubject=$APPROVED_GOOGLE_SUBJECT"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish and verify only the approved image digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" > artifacts/readback/stack-repository-phase.json
+          repository_uri=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "ImageRepositoryUri") | .OutputValue' artifacts/readback/stack-repository-phase.json)
+          repository_arn=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "ImageRepositoryArn") | .OutputValue' artifacts/readback/stack-repository-phase.json)
+          [[ "$repository_uri" == "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server" ]]
+          [[ "$repository_arn" == "arn:aws:ecr:$AWS_REGION:$AWS_ACCOUNT_ID:repository/psd-eoc/exploration-smoke/server" ]]
+
+          aws ecr describe-repositories \
+            --repository-names psd-eoc/exploration-smoke/server \
+            > artifacts/readback/ecr-repository.json
+          test "$(jq -r '.repositories[0].imageTagMutability' artifacts/readback/ecr-repository.json)" = "IMMUTABLE"
+
+          if aws ecr describe-images \
+            --repository-name psd-eoc/exploration-smoke/server \
+            --image-ids "imageDigest=$IMAGE_DIGEST" \
+            > artifacts/readback/ecr-image.json 2> artifacts/readback/ecr-image-before-error.txt; then
+            echo "The approved digest already exists; publication is idempotently skipped."
+          else
+            grep -q 'ImageNotFoundException' artifacts/readback/ecr-image-before-error.txt
+            registry_name="psd-eoc-deploy-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            registry_data="$RUNNER_TEMP/exploration-smoke-source-registry"
+            mkdir "$registry_data"
+            tar --extract --file artifacts/image-registry.tar --directory "$registry_data"
+            cleanup_registry() {
+              docker rm --force "$registry_name" > /dev/null 2>&1 || true
+            }
+            trap cleanup_registry EXIT
+            docker run \
+              --detach \
+              --rm \
+              --name "$registry_name" \
+              --publish 127.0.0.1:5000:5000 \
+              --volume "$registry_data:/var/lib/registry" \
+              "$LOCAL_REGISTRY_IMAGE" > /dev/null
+            for attempt in {1..20}; do
+              if curl --fail --silent --show-error http://127.0.0.1:5000/v2/ > /dev/null; then
+                break
+              fi
+              if [[ "$attempt" -eq 20 ]]; then
+                echo "The restored loopback registry did not start." >&2
+                exit 1
+              fi
+              sleep 1
+            done
+            source_reference="$LOCAL_REGISTRY_REPOSITORY@$IMAGE_DIGEST"
+            test "$(docker buildx imagetools inspect "$source_reference" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$IMAGE_DIGEST"
+            docker buildx imagetools inspect --raw "$source_reference" \
+              > artifacts/readback/source-image-manifest.json
+            test "sha256:$(sha256sum artifacts/readback/source-image-manifest.json | cut -d' ' -f1)" = "$IMAGE_DIGEST"
+
+            registry=${repository_uri%%/*}
+            aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+            remote_tag="source-$SOURCE_SHA"
+            docker buildx imagetools create \
+              --prefer-index=false \
+              --tag "$repository_uri:$remote_tag" \
+              --metadata-file artifacts/readback/ecr-copy-metadata.json \
+              "$source_reference"
+            test "$(jq -er '."containerimage.descriptor".digest' artifacts/readback/ecr-copy-metadata.json)" = "$IMAGE_DIGEST"
+            docker rm --force "$registry_name" > /dev/null
+            trap - EXIT
+            aws ecr describe-images \
+              --repository-name psd-eoc/exploration-smoke/server \
+              --image-ids "imageDigest=$IMAGE_DIGEST" \
+              > artifacts/readback/ecr-image.json
+          fi
+          test "$(jq -r '.imageDetails[0].imageDigest' artifacts/readback/ecr-image.json)" = "$IMAGE_DIGEST"
+
+      - name: Bootstrap synthetic data before starting App Runner
+        env:
+          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
+          APPROVED_STAFF_DISPLAY_NAME: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_DISPLAY_NAME }}
+          APPROVED_STAFF_EMAIL: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_EMAIL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          stack_file=artifacts/readback/stack-repository-phase.json
+          run_bootstrap() {
+            AWS_ACCOUNT_ID="$AWS_ACCOUNT_ID" \
+            AWS_REGION="$AWS_REGION" \
+            DATABASE_NAME="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DatabaseName") | .OutputValue' "$stack_file")" \
+            DATABASE_RESOURCE_ARN="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DatabaseClusterArn") | .OutputValue' "$stack_file")" \
+            DATABASE_ADMIN_SECRET_ARN="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DatabaseAdminSecretArn") | .OutputValue' "$stack_file")" \
+            DATABASE_APPLICATION_SECRET_ARN="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DatabaseApplicationSecretArn") | .OutputValue' "$stack_file")" \
+            APPROVED_GOOGLE_SUBJECT="$APPROVED_GOOGLE_SUBJECT" \
+            APPROVED_STAFF_EMAIL="$APPROVED_STAFF_EMAIL" \
+            APPROVED_STAFF_DISPLAY_NAME="$APPROVED_STAFF_DISPLAY_NAME" \
+            SOURCE_SHA="$SOURCE_SHA" \
+            bun packages/server/scripts/exploration-smoke/bootstrap.ts
+          }
+          run_bootstrap > artifacts/readback/bootstrap-summary-first.json
+          run_bootstrap > artifacts/readback/bootstrap-summary-second.json
+          cmp \
+            artifacts/readback/bootstrap-summary-first.json \
+            artifacts/readback/bootstrap-summary-second.json
+
+      - name: Deploy the exact digest after bootstrap
+        env:
+          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          bunx --bun cdk \
+            --app "bun bin/exploration-smoke.ts" \
+            deploy "$STACK_NAME" \
+            --exclusively \
+            --require-approval never \
+            --no-notices \
+            --outputs-file ../artifacts/readback/final-outputs.json \
+            --parameters "$STACK_NAME:ProvisionApplication=true" \
+            --parameters "$STACK_NAME:AppImageDigest=$IMAGE_DIGEST" \
+            --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
+            --parameters "$STACK_NAME:ApprovedGoogleSubject=$APPROVED_GOOGLE_SUBJECT"
+
+      - name: Bound logs and read back topology, IAM, and health without a send
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=artifacts/readback/final-outputs.json
+          database_arn=$(jq -er ".${STACK_NAME}.DatabaseClusterArn" "$outputs")
+          database_application_secret_arn=$(jq -er ".${STACK_NAME}.DatabaseApplicationSecretArn" "$outputs")
+          database_id=${database_arn##*:cluster:}
+          queue_arn=$(jq -er ".${STACK_NAME}.HealthQueueArn" "$outputs")
+          queue_url=$(jq -er ".${STACK_NAME}.HealthQueueUrl" "$outputs")
+          runtime_role_arn=$(jq -er ".${STACK_NAME}.RuntimeRoleArn" "$outputs")
+          runtime_role_name=${runtime_role_arn##*/}
+          service_arn=$(jq -er ".${STACK_NAME}.AppRunnerServiceArn" "$outputs")
+          health_url=$(jq -er ".${STACK_NAME}.AppRunnerHealthCheckUrl" "$outputs")
+
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" > artifacts/readback/stack-final.json
+          aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > artifacts/readback/stack-resources.json
+          test "$(jq -r '.Stacks[0].StackStatus' artifacts/readback/stack-final.json)" = "UPDATE_COMPLETE" || \
+            test "$(jq -r '.Stacks[0].StackStatus' artifacts/readback/stack-final.json)" = "CREATE_COMPLETE"
+          test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "ProvisionApplication") | .ParameterValue' artifacts/readback/stack-final.json)" = "true"
+          test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "AppImageDigest") | .ParameterValue' artifacts/readback/stack-final.json)" = "$IMAGE_DIGEST"
+
+          app_runner_service=$(aws apprunner describe-service --service-arn "$service_arn")
+          runtime_secret_map=$(jq -cer '
+            .Service.SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentSecrets as $secrets |
+            if
+              ($secrets | type) == "object" and
+              ($secrets | keys | sort) == [
+                "API_SALT",
+                "GOOGLE_OAUTH_CONFIG",
+                "GOOGLE_OIDC_COOKIE_SECRET"
+              ] and
+              all($secrets[]; type == "string")
+            then $secrets
+            else error("unexpected App Runner runtime-secret contract")
+            end
+          ' <<< "$app_runner_service")
+          api_salt_secret_arn=$(jq -er '.API_SALT' <<< "$runtime_secret_map")
+          google_oidc_cookie_secret_arn=$(jq -er '.GOOGLE_OIDC_COOKIE_SECRET' <<< "$runtime_secret_map")
+          test "$(jq -er '.GOOGLE_OAUTH_CONFIG' <<< "$runtime_secret_map")" = "$GOOGLE_OAUTH_SECRET_ARN"
+          [[ "$api_salt_secret_arn" =~ ^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/api-salt-[A-Za-z0-9]{6}$ ]]
+          [[ "$google_oidc_cookie_secret_arn" =~ ^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/google-oidc-cookie-secret-[A-Za-z0-9]{6}$ ]]
+          jq '{
+            Service: {
+              ServiceArn: .Service.ServiceArn,
+              ServiceId: .Service.ServiceId,
+              ServiceName: .Service.ServiceName,
+              ServiceUrl: .Service.ServiceUrl,
+              Status: .Service.Status,
+              AutoScalingConfigurationSummary: .Service.AutoScalingConfigurationSummary,
+              HealthCheckConfiguration: .Service.HealthCheckConfiguration,
+              InstanceConfiguration: {
+                Cpu: .Service.InstanceConfiguration.Cpu,
+                Memory: .Service.InstanceConfiguration.Memory,
+                InstanceRoleArn: .Service.InstanceConfiguration.InstanceRoleArn
+              },
+              SourceConfiguration: {
+                AutoDeploymentsEnabled: .Service.SourceConfiguration.AutoDeploymentsEnabled,
+                ImageRepository: {
+                  ImageIdentifier: .Service.SourceConfiguration.ImageRepository.ImageIdentifier,
+                  ImageRepositoryType: .Service.SourceConfiguration.ImageRepository.ImageRepositoryType
+                }
+              }
+            }
+          }' <<< "$app_runner_service" > artifacts/readback/app-runner-service.json
+          unset app_runner_service
+          service_id=$(jq -er '.Service.ServiceId' artifacts/readback/app-runner-service.json)
+          service_name=$(jq -er '.Service.ServiceName' artifacts/readback/app-runner-service.json)
+          [[ "$service_id" =~ ^[A-Za-z0-9]{32}$ ]]
+          test "$service_name" = "psd-eoc-exploration-smoke"
+          test "$service_arn" = "arn:aws:apprunner:$AWS_REGION:$AWS_ACCOUNT_ID:service/$service_name/$service_id"
+          test "$(jq -r '.Service.Status' artifacts/readback/app-runner-service.json)" = "RUNNING"
+          test "$(jq -r '.Service.InstanceConfiguration.InstanceRoleArn' artifacts/readback/app-runner-service.json)" = "$runtime_role_arn"
+          test "$(jq -r '.Service.SourceConfiguration.AutoDeploymentsEnabled' artifacts/readback/app-runner-service.json)" = "false"
+          test "$(jq -r '.Service.SourceConfiguration.ImageRepository.ImageIdentifier' artifacts/readback/app-runner-service.json)" = "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server@$IMAGE_DIGEST"
+
+          log_group_base="/aws/apprunner/$service_name/$service_id"
+          application_log_group="$log_group_base/application"
+          service_log_group="$log_group_base/service"
+          log_group_arn_prefix="arn:aws:logs:$AWS_REGION:$AWS_ACCOUNT_ID:log-group:"
+          log_group_candidate="$RUNNER_TEMP/exploration-smoke-log-groups.json"
+          for attempt in {1..30}; do
+            aws logs describe-log-groups \
+              --log-group-name-prefix "$log_group_base/" \
+              --query 'logGroups[].{logGroupName:logGroupName,arn:arn,logGroupArn:logGroupArn,creationTime:creationTime,retentionInDays:retentionInDays,storedBytes:storedBytes}' \
+              --output json \
+              > "$log_group_candidate"
+            if jq -e \
+              --arg application "$application_log_group" \
+              --arg service "$service_log_group" \
+              --arg arn_prefix "$log_group_arn_prefix" '
+                (map(.logGroupName) | sort) == ([$application, $service] | sort) and
+                all(.[]; .arn == ($arn_prefix + .logGroupName + ":*"))
+              ' \
+              "$log_group_candidate" > /dev/null; then
+              break
+            fi
+            if [[ "$attempt" -eq 30 ]]; then
+              echo "The exact App Runner log groups were not discoverable." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          for log_group in "$application_log_group" "$service_log_group"; do
+            aws logs put-retention-policy \
+              --log-group-name "$log_group" \
+              --retention-in-days "$APP_RUNNER_LOG_RETENTION_DAYS"
+          done
+          for attempt in {1..20}; do
+            aws logs describe-log-groups \
+              --log-group-name-prefix "$log_group_base/" \
+              --query 'logGroups[].{logGroupName:logGroupName,arn:arn,logGroupArn:logGroupArn,creationTime:creationTime,retentionInDays:retentionInDays,storedBytes:storedBytes}' \
+              --output json \
+              > artifacts/readback/app-runner-log-groups.json
+            if jq -e \
+              --arg application "$application_log_group" \
+              --arg service "$service_log_group" \
+              --arg arn_prefix "$log_group_arn_prefix" \
+              --arg retention "$APP_RUNNER_LOG_RETENTION_DAYS" '
+                (map(.logGroupName) | sort) == ([$application, $service] | sort) and
+                all(.[];
+                  .arn == ($arn_prefix + .logGroupName + ":*") and
+                  .retentionInDays == ($retention | tonumber))
+              ' artifacts/readback/app-runner-log-groups.json > /dev/null; then
+              break
+            fi
+            if [[ "$attempt" -eq 20 ]]; then
+              echo "The exact App Runner log retention did not become visible." >&2
+              exit 1
+            fi
+            sleep 3
+          done
+
+          scaling_arn=$(jq -er '.Service.AutoScalingConfigurationSummary.AutoScalingConfigurationArn' artifacts/readback/app-runner-service.json)
+          aws apprunner describe-auto-scaling-configuration \
+            --auto-scaling-configuration-arn "$scaling_arn" \
+            > artifacts/readback/app-runner-scaling.json
+          test "$(jq -r '.AutoScalingConfiguration.MinSize' artifacts/readback/app-runner-scaling.json)" -eq 1
+          test "$(jq -r '.AutoScalingConfiguration.MaxSize' artifacts/readback/app-runner-scaling.json)" -eq 1
+
+          aws rds describe-db-clusters --db-cluster-identifier "$database_id" > artifacts/readback/database-cluster.json
+          test "$(jq '[.DBClusters[0].DBClusterMembers[] | select(.IsClusterWriter == true)] | length' artifacts/readback/database-cluster.json)" -eq 1
+          test "$(jq '[.DBClusters[0].DBClusterMembers[] | select(.IsClusterWriter == false)] | length' artifacts/readback/database-cluster.json)" -eq 0
+          test "$(jq -r '.DBClusters[0].HttpEndpointEnabled' artifacts/readback/database-cluster.json)" = "true"
+          test "$(jq -r '.DBClusters[0].StorageEncrypted' artifacts/readback/database-cluster.json)" = "true"
+
+          aws sqs get-queue-attributes --queue-url "$queue_url" --attribute-names All > artifacts/readback/health-queue.json
+          test "$(jq -r '.Attributes.QueueArn' artifacts/readback/health-queue.json)" = "$queue_arn"
+          test "$(jq -r '.Attributes.ApproximateNumberOfMessages' artifacts/readback/health-queue.json)" = "0"
+          test "$(jq -r '.Attributes.ApproximateNumberOfMessagesNotVisible' artifacts/readback/health-queue.json)" = "0"
+
+          runtime_template=artifacts/cdk.out/PsdEocExplorationSmoke.template.json
+          runtime_role_logical_id=$(jq -er '
+            .Outputs.RuntimeRoleArn.Value."Fn::GetAtt" as $attribute |
+            if
+              ($attribute | type) == "array" and
+              ($attribute | length) == 2 and
+              $attribute[1] == "Arn"
+            then $attribute[0]
+            else error("unexpected runtime-role output")
+            end
+          ' "$runtime_template")
+          runtime_policy_name=$(jq -er --arg role "$runtime_role_logical_id" '
+            [
+              .Resources | to_entries[] |
+              select(
+                .value.Type == "AWS::IAM::Policy" and
+                ([.value.Properties.Roles[]? | select(.Ref == $role)] | length) == 1
+              )
+            ] as $policies |
+            if
+              ($policies | length) == 1 and
+              ($policies[0].value.Properties.PolicyName | type) == "string"
+            then $policies[0].value.Properties.PolicyName
+            else error("unexpected runtime-role policy inventory")
+            end
+          ' "$runtime_template")
+          [[ "$runtime_role_logical_id" =~ ^[A-Za-z0-9]+$ ]]
+          [[ "$runtime_policy_name" =~ ^[A-Za-z0-9+=,.@_-]{1,128}$ ]]
+
+          aws iam get-role \
+            --role-name "$runtime_role_name" \
+            --query 'Role.{Arn:Arn,AssumeRolePolicyDocument:AssumeRolePolicyDocument,PermissionsBoundary:PermissionsBoundary}' \
+            > artifacts/readback/runtime-role.json
+          test "$(jq -r '.Arn' artifacts/readback/runtime-role.json)" = "$runtime_role_arn"
+          jq -e '
+            def as_array: if type == "array" then . else [.] end;
+            (.AssumeRolePolicyDocument.Statement | as_array) as $statements |
+            (.PermissionsBoundary // null) == null and
+            (.AssumeRolePolicyDocument | keys | sort) == ["Statement", "Version"] and
+            .AssumeRolePolicyDocument.Version == "2012-10-17" and
+            ($statements | length) == 1 and
+            ($statements[0] | keys | sort) == ["Action", "Effect", "Principal"] and
+            $statements[0].Effect == "Allow" and
+            ($statements[0].Action | as_array) == ["sts:AssumeRole"] and
+            ($statements[0].Principal | keys | sort) == ["Service"] and
+            ($statements[0].Principal.Service | as_array) == ["tasks.apprunner.amazonaws.com"]
+          ' artifacts/readback/runtime-role.json > /dev/null
+
+          aws iam list-role-policies --role-name "$runtime_role_name" > artifacts/readback/runtime-inline-policies.json
+          aws iam list-attached-role-policies --role-name "$runtime_role_name" > artifacts/readback/runtime-attached-policies.json
+          jq -e --arg expected "$runtime_policy_name" \
+            '.PolicyNames == [$expected]' \
+            artifacts/readback/runtime-inline-policies.json > /dev/null
+          jq -e '.AttachedPolicies == []' \
+            artifacts/readback/runtime-attached-policies.json > /dev/null
+
+          aws iam get-role-policy \
+            --role-name "$runtime_role_name" \
+            --policy-name "$runtime_policy_name" \
+            > artifacts/readback/runtime-inline-policy.json
+          expected_secret_resources=$(jq -cn \
+            --arg application "$database_application_secret_arn" \
+            --arg api_salt "$api_salt_secret_arn" \
+            --arg google_oauth "$GOOGLE_OAUTH_SECRET_ARN" \
+            --arg oidc_cookie "$google_oidc_cookie_secret_arn" \
+            '[$application, $api_salt, $google_oauth, $oidc_cookie] | sort')
+          jq -e \
+            --arg role_name "$runtime_role_name" \
+            --arg policy_name "$runtime_policy_name" \
+            --arg database "$database_arn" \
+            --arg queue "$queue_arn" \
+            --argjson secret_resources "$expected_secret_resources" '
+              def as_array: if type == "array" then . else [.] end;
+              def action_set: (.Action | as_array | sort);
+              def resource_set: (.Resource | as_array | sort);
+              (.PolicyDocument.Statement | as_array) as $statements |
+              .RoleName == $role_name and
+              .PolicyName == $policy_name and
+              (.PolicyDocument | keys | sort) == ["Statement", "Version"] and
+              .PolicyDocument.Version == "2012-10-17" and
+              ($statements | length) == 3 and
+              all($statements[];
+                (. | keys | sort) == ["Action", "Effect", "Resource"] and
+                .Effect == "Allow"
+              ) and
+              ([
+                $statements[] |
+                select(
+                  action_set == [
+                    "rds-data:BatchExecuteStatement",
+                    "rds-data:BeginTransaction",
+                    "rds-data:CommitTransaction",
+                    "rds-data:ExecuteStatement",
+                    "rds-data:RollbackTransaction"
+                  ] and
+                  resource_set == [$database]
+                )
+              ] | length) == 1 and
+              ([
+                $statements[] |
+                select(
+                  action_set == [
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:GetSecretValue"
+                  ] and
+                  resource_set == ($secret_resources | sort)
+                )
+              ] | length) == 1 and
+              ([
+                $statements[] |
+                select(
+                  action_set == ["sqs:GetQueueAttributes"] and
+                  resource_set == [$queue]
+                )
+              ] | length) == 1
+            ' artifacts/readback/runtime-inline-policy.json > /dev/null
+
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$runtime_role_arn" \
+            --action-names sqs:SendMessage \
+            --resource-arns "$queue_arn" \
+            > artifacts/readback/health-queue-send-negative-simulation.json
+          jq -e \
+            --arg queue "$queue_arn" '
+              (.EvaluationResults | length) == 1 and
+              .EvaluationResults[0].EvalActionName == "sqs:SendMessage" and
+              .EvaluationResults[0].EvalResourceName == $queue and
+              .EvaluationResults[0].EvalDecision != "allowed"
+            ' artifacts/readback/health-queue-send-negative-simulation.json > /dev/null
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$runtime_role_arn" \
+            --action-names sqs:GetQueueAttributes \
+            --resource-arns "$queue_arn" \
+            > artifacts/readback/health-action-simulation.json
+          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/health-action-simulation.json)" = "allowed"
+
+          curl \
+            --fail \
+            --proto '=https' \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 15 \
+            --show-error \
+            --silent \
+            --tlsv1.2 \
+            --max-time 30 \
+            "$health_url" \
+            > artifacts/readback/health-response.json
+          jq -e '.status == "ok"' artifacts/readback/health-response.json > /dev/null
+
+          {
+            echo "# Exploration-smoke deployment readback"
+            echo
+            printf '%s\n' "- Source commit: $SOURCE_SHA"
+            printf '%s\n' "- Image digest: $IMAGE_DIGEST"
+            printf '%s\n' "- Stack: $STACK_NAME"
+            printf '%s\n' "- AWS: $AWS_ACCOUNT_ALIAS / $AWS_ACCOUNT_ID / $AWS_REGION"
+            echo "- One App Runner instance, one Aurora writer, one ECR repository, and one empty health-only SQS queue were read back."
+            printf '%s\n' "- The exact App Runner service and application log groups were read back with $APP_RUNNER_LOG_RETENTION_DAYS-day retention."
+            printf '%s\n' "- Deployment-role policy inventory SHA-256: $(cat artifacts/readback/deployment-role-policy-inventory.sha256)"
+            printf '%s\n' "- Deployment-role permissions boundary: $EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"
+            echo "- Exact runtime-role trust, absent boundary, empty attached-policy list, and one least-privilege inline policy were read back; exact-queue simulation denied SQS SendMessage and allowed only SQS GetQueueAttributes."
+            echo "- Generated secrets and the OAuth credential value were not printed."
+            echo "- Valid TLS and deep health succeeded at the App Runner provider URL."
+            echo "- Google OIDC remains configured-unverified; web/mobile sign-in stays blocked until the separately owned eoc.psd401.net custom-domain work is live and a human completes an approved district sign-in."
+            echo "- No DNS, GCP, store, notification-provider, recipient, or send operation ran."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload redacted deployment readback
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          if-no-files-found: warn
+          name: exploration-smoke-readback-${{ github.run_id }}
+          overwrite: false
+          path: artifacts/readback
+          retention-days: 14
