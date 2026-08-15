@@ -110,6 +110,11 @@ describe('event-room synthetic database guard', () => {
       expect(new URL(context.databaseUrl).pathname).toBe(
         `/${context.databaseName}`,
       );
+      expect(context.workspaceNamespace).toMatch(/^[0-9a-f]{64}$/u);
+      expect(context.runDirectory).toContain(context.workspaceNamespace);
+      expect(context.supervisionDirectory).toContain(
+        context.workspaceNamespace,
+      );
       expect(context.fixturePath.startsWith(`${context.runDirectory}/`)).toBe(
         true,
       );
@@ -147,6 +152,15 @@ describe('event-room synthetic database guard', () => {
         requireEventRoomPlaywrightRunContext({
           ...context,
           databaseName: 'main',
+        }),
+      ).toThrow('altered');
+      expect(() =>
+        requireEventRoomPlaywrightRunContext({
+          ...context,
+          workspaceNamespace:
+            context.workspaceNamespace === 'f'.repeat(64)
+              ? 'e'.repeat(64)
+              : 'f'.repeat(64),
         }),
       ).toThrow('altered');
     } finally {
@@ -416,6 +430,142 @@ describe('event-room synthetic database guard', () => {
         rmSync(context.supervisionDirectory, { force: true, recursive: true });
         releaseEventRoomPlaywrightPortLeaseIfOwned(context);
       }
+    }
+  });
+
+  test('ignores and preserves unnamespaced and foreign-checkout residue', () => {
+    const current = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const foreignNamespace =
+      current.workspaceNamespace === 'f'.repeat(64)
+        ? 'e'.repeat(64)
+        : 'f'.repeat(64);
+    const foreign = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+      undefined,
+      foreignNamespace,
+    );
+    const unnamespacedLease = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+      undefined,
+      foreignNamespace === 'd'.repeat(64) ? 'c'.repeat(64) : 'd'.repeat(64),
+    );
+    const unnamespacedRunId = randomUUID();
+    const unnamespacedRunDirectory = join(
+      tmpdir(),
+      `psd-eoc-event-room-${unnamespacedRunId}`,
+    );
+    const unnamespacedSupervisionDirectory = join(
+      tmpdir(),
+      `psd-eoc-event-room-supervision-${unnamespacedRunId}`,
+    );
+    const nonce = 'a'.repeat(64);
+    try {
+      const now = Date.now();
+      writeEventRoomPlaywrightGateHeartbeat(
+        foreign,
+        process.pid,
+        nonce,
+        now - 2_001,
+      );
+      mkdirSync(foreign.runDirectory, { recursive: true });
+      writeFileSync(
+        join(foreign.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: foreign.runId,
+          contextSha256: 'c'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      const staleLeaseTime = new Date(now - 2_001);
+      utimesSync(foreign.portLeasePath, staleLeaseTime, staleLeaseTime);
+      mkdirSync(unnamespacedRunDirectory, { recursive: true });
+      writeFileSync(
+        join(unnamespacedRunDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: unnamespacedRunId,
+          contextSha256: 'd'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      mkdirSync(unnamespacedSupervisionDirectory, { recursive: true });
+      writeFileSync(
+        join(unnamespacedSupervisionDirectory, 'gate-heartbeat.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-gate-heartbeat',
+          version: 1,
+          runId: unnamespacedRunId,
+          leaseOwnerPid: process.pid,
+          gatePid: process.pid,
+          supervisorNonceHash: createHash('sha256').update(nonce).digest('hex'),
+          observedAt: now - 2_001,
+        }),
+      );
+      writeFileSync(
+        unnamespacedLease.portLeasePath,
+        JSON.stringify({
+          runId: unnamespacedLease.runId,
+          appPort: unnamespacedLease.appPort,
+          leaseOwnerPid: unnamespacedLease.leaseOwnerPid,
+        }),
+      );
+      utimesSync(
+        unnamespacedLease.portLeasePath,
+        staleLeaseTime,
+        staleLeaseTime,
+      );
+
+      expect(foreign.workspaceNamespace).toBe(foreignNamespace);
+      expect(foreign.appPort).not.toBe(current.appPort);
+      const residue = detectPriorEventRoomPlaywrightResidue(current, () => now);
+      expect(residue.some(({ runId }) => runId === foreign.runId)).toBe(false);
+      expect(residue.some(({ runId }) => runId === unnamespacedRunId)).toBe(
+        false,
+      );
+      expect(
+        residue.some(({ runId }) => runId === unnamespacedLease.runId),
+      ).toBe(false);
+      expect(existsSync(foreign.gateHeartbeatPath)).toBe(true);
+      expect(
+        existsSync(join(foreign.runDirectory, 'process-supervisor.json')),
+      ).toBe(true);
+      expect(inspectEventRoomPlaywrightPortLease(foreign)).toBe('owned');
+      expect(existsSync(unnamespacedRunDirectory)).toBe(true);
+      expect(existsSync(unnamespacedSupervisionDirectory)).toBe(true);
+      expect(existsSync(unnamespacedLease.portLeasePath)).toBe(true);
+    } finally {
+      for (const context of [current, foreign]) {
+        rmSync(context.runDirectory, { force: true, recursive: true });
+        rmSync(context.supervisionDirectory, {
+          force: true,
+          recursive: true,
+        });
+        releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+      }
+      rmSync(unnamespacedRunDirectory, { force: true, recursive: true });
+      rmSync(unnamespacedSupervisionDirectory, {
+        force: true,
+        recursive: true,
+      });
+      rmSync(unnamespacedLease.portLeasePath, { force: true });
+      rmSync(unnamespacedLease.runDirectory, {
+        force: true,
+        recursive: true,
+      });
+      rmSync(unnamespacedLease.supervisionDirectory, {
+        force: true,
+        recursive: true,
+      });
     }
   });
 
@@ -768,6 +918,36 @@ describe('event-room synthetic database guard', () => {
     } finally {
       if (second !== null) releaseEventRoomPlaywrightPortLease(second);
       releaseEventRoomPlaywrightPortLease(first);
+    }
+  });
+
+  test('skips an occupied loopback port without retaining a rejected lease', () => {
+    const candidate = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    releaseEventRoomPlaywrightPortLease(candidate);
+    const listener = Bun.listen({
+      hostname: '127.0.0.1',
+      port: candidate.appPort,
+      socket: {
+        data() {},
+      },
+    });
+    let claimed: ReturnType<typeof claimEventRoomPlaywrightRunContext> | null =
+      null;
+    try {
+      claimed = claimEventRoomPlaywrightRunContext(
+        BASE_DATABASE_URL,
+        randomUUID(),
+        candidate.appPort,
+      );
+      expect(claimed.appPort).not.toBe(candidate.appPort);
+      expect(inspectEventRoomPlaywrightPortLease(candidate)).toBe('absent');
+      expect(inspectEventRoomPlaywrightPortLease(claimed)).toBe('owned');
+    } finally {
+      if (claimed !== null) releaseEventRoomPlaywrightPortLease(claimed);
+      listener.stop(true);
     }
   });
 
