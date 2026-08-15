@@ -2618,9 +2618,15 @@ describe('issue #32 exact synthetic drill data', () => {
       "text: '^Try device unlock again$'",
       'retryTapIfNoChange: false',
       'waitToSettleTimeoutMs: 500',
+      "id: 'issue-21-synthetic-mode'",
+      'timeout: 300000',
     ]) {
       expect(retryFlow).toContain(exactBoundary);
     }
+    expect(retryFlow).toMatch(
+      /tapOn:[\s\S]+text: '\^Try device unlock again\$'[\s\S]+extendedWaitUntil:[\s\S]+visible:[\s\S]+id: 'issue-21-synthetic-mode'[\s\S]+timeout: 300000/u,
+    );
+    expect(retryFlow.match(/extendedWaitUntil:/gu)).toHaveLength(1);
     expect(retryFlow.match(/tapOn:/gu)).toHaveLength(1);
     for (const unsafeSelector of [
       'point:',
