@@ -382,6 +382,7 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     const operatorAccess = read('scripts/operator-access.ts');
 
     expect(provider).toContain('billing_project       = var.project_id');
+    expect(provider).toContain('project               = var.project_id');
     expect(provider).toContain('user_project_override = true');
     expect(bootstrap).not.toContain('billing_project');
     expect(bootstrap).not.toContain('user_project_override');
@@ -399,6 +400,27 @@ describe('PSD EOC GCP Terraform safety boundary', () => {
     );
     expect(groups).toMatch(
       /'get-iam-policy',\s*PROJECT_ID,\s*'--project',\s*PROJECT_ID/gu,
+    );
+  });
+
+  test('inherits the fixed provider project for the imported state bucket', () => {
+    const provider = read('providers.tf');
+    const main = read('main.tf');
+    const bucketStart = main.indexOf(
+      'resource "google_storage_bucket" "terraform_state"',
+    );
+    const bucketEnd = main.indexOf(
+      'data "google_iam_policy" "terraform_state"',
+      bucketStart,
+    );
+    const bucket = main.slice(bucketStart, bucketEnd);
+
+    expect(provider).toContain('project               = var.project_id');
+    expect(bucketStart).toBeGreaterThan(-1);
+    expect(bucketEnd).toBeGreaterThan(bucketStart);
+    expect(bucket).not.toMatch(/^\s*project\s+=/mu);
+    expect(bucket).toContain(
+      'depends_on = [google_project_service.required["storage.googleapis.com"]]',
     );
   });
 
