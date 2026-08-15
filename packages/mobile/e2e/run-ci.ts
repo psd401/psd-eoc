@@ -809,7 +809,7 @@ async function warmMobilePostAuthenticationRoutes(
   manifest: MobileRuntimeManifest,
   artifactRoot: string,
   cancellation: MobileE2ECancellation,
-  evidencePhase: 'initial' | 'event-join',
+  evidencePhase: 'initial' | 'post-enrollment' | 'event-join',
 ): Promise<void> {
   const completedRoutes: string[] = [];
   for (const warmup of mobileE2EPostAuthenticationWarmupRequests(manifest)) {
@@ -849,7 +849,9 @@ async function warmMobilePostAuthenticationRoutes(
   const evidenceFilename =
     evidencePhase === 'initial'
       ? `${platform}-post-auth-route-warmup.txt`
-      : `${platform}-event-join-route-warmup.txt`;
+      : evidencePhase === 'post-enrollment'
+        ? `${platform}-post-enrollment-route-warmup.txt`
+        : `${platform}-event-join-route-warmup.txt`;
   await writeFile(
     resolve(artifactRoot, evidenceFilename),
     [
@@ -2160,6 +2162,7 @@ async function runAuthenticationSplit(
   environment: Readonly<Record<string, string>>,
   applesimutils?: string,
   iosDriverSession?: IosMaestroDriverSession,
+  beforeAuthenticationResponse?: () => Promise<void>,
 ): Promise<void> {
   await runMaestroFlow(
     platform,
@@ -2169,6 +2172,7 @@ async function runAuthenticationSplit(
     environment,
     iosDriverSession,
   );
+  await beforeAuthenticationResponse?.();
   await respondToDeviceAuthentication(
     platform,
     deviceId,
@@ -3049,6 +3053,20 @@ async function runPlatformSuite(
         maestroEnvironment,
         applesimutils,
         iosDriverSession,
+        async () => {
+          // The successful OIDC exchange can evict Next's development-route
+          // compilation immediately before the authenticated shell starts its
+          // fixed eight-second requests. Re-prove the credential-free,
+          // fail-closed routes while Face ID still fences the session so the
+          // test measures production request behavior rather than compilation.
+          await warmMobilePostAuthenticationRoutes(
+            platform,
+            manifest,
+            artifacts.root,
+            cancellation,
+            'post-enrollment',
+          );
+        },
       );
       cancellation.throwIfRequested();
       await injectIosNotification(iosDevice, paths, manifest);

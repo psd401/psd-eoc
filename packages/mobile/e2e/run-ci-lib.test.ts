@@ -908,13 +908,16 @@ describe('issue #32 exact synthetic drill data', () => {
       'assertMobileE2EPostAuthenticationWarmupRejection(',
     );
     expect(warmup).toContain('status=fail-closed-rejections-verified');
-    expect(warmup).toContain("evidencePhase: 'initial' | 'event-join'");
+    expect(warmup).toContain(
+      "evidencePhase: 'initial' | 'post-enrollment' | 'event-join'",
+    );
     expect(warmup).toContain('`${platform}-post-auth-route-warmup.txt`');
+    expect(warmup).toContain('`${platform}-post-enrollment-route-warmup.txt`');
     expect(warmup).toContain('`${platform}-event-join-route-warmup.txt`');
     expect(warmup).toContain("flag: 'wx'");
     expect(
       runner.match(/await warmMobilePostAuthenticationRoutes\(/gu),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(runner).toMatch(
       /awaitIosFreshEnrollmentReady[\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+await warmMobileEnrollmentRoutes\([\s\S]+enroll-loopback-oidc-ios/u,
     );
@@ -923,6 +926,9 @@ describe('issue #32 exact synthetic drill data', () => {
     );
     expect(runner).toMatch(
       /executeIosNotificationAction\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+notification-event-room-ios-post-auth/u,
+    );
+    expect(runner).toMatch(
+      /enroll-loopback-oidc-ios[\s\S]+async \(\) => \{[\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+['"]post-enrollment['"][\s\S]+\}[\s\S]+await injectIosNotification/u,
     );
   });
 
@@ -1790,6 +1796,35 @@ describe('issue #32 exact synthetic drill data', () => {
     expect(exactGuard).toBeGreaterThan(authentication ?? -1);
     expect(shadeExpansion).toBeGreaterThan(exactGuard ?? -1);
     expect(postAuthFlow).toBeGreaterThan(shadeExpansion ?? -1);
+  });
+
+  test('runs an optional post-OIDC warmup before answering device authentication', async () => {
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
+    );
+    const authenticationSplit = runner.match(
+      /async function runAuthenticationSplit[\s\S]+?(?=async function runLaunchAuthentication)/u,
+    )?.[0];
+    expect(authenticationSplit).toBeDefined();
+    expect(authenticationSplit).toContain(
+      'beforeAuthenticationResponse?: () => Promise<void>',
+    );
+
+    const preAuthFlow = authenticationSplit?.indexOf('await runMaestroFlow(');
+    const warmup = authenticationSplit?.indexOf(
+      'await beforeAuthenticationResponse?.()',
+    );
+    const authentication = authenticationSplit?.indexOf(
+      'await respondToDeviceAuthentication(',
+    );
+    const postAuthFlow = authenticationSplit?.lastIndexOf(
+      'await runMaestroFlow(',
+    );
+    expect(preAuthFlow).toBeGreaterThanOrEqual(0);
+    expect(warmup).toBeGreaterThan(preAuthFlow ?? -1);
+    expect(authentication).toBeGreaterThan(warmup ?? -1);
+    expect(postAuthFlow).toBeGreaterThan(authentication ?? -1);
   });
 
   test('creates only the exact loopback Expo development-client URL', () => {
