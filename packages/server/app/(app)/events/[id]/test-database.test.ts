@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   existsSync,
@@ -10,8 +11,10 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT_ENV,
@@ -921,18 +924,80 @@ describe('event-room synthetic database guard', () => {
     }
   });
 
-  test('skips an occupied loopback port without retaining a rejected lease', () => {
+  test("loads and executes the port probe in Playwright's Node configuration runtime", () => {
+    const testDirectory = mkdtempSync(
+      join(tmpdir(), 'psd-eoc-node-port-probe-'),
+    );
+    const configPath = join(testDirectory, 'playwright.config.ts');
+    const markerPath = join(testDirectory, 'node-port-probe-complete');
+    const lifecyclePath = fileURLToPath(
+      new URL('./test-database.ts', import.meta.url),
+    );
+    const playwrightCliPath = fileURLToPath(
+      new URL(
+        '../../../../../../node_modules/@playwright/test/cli.js',
+        import.meta.url,
+      ),
+    );
+    writeFileSync(join(testDirectory, 'package.json'), '{"type":"module"}');
+    writeFileSync(
+      configPath,
+      [
+        "import { randomUUID } from 'node:crypto';",
+        "import { writeFileSync } from 'node:fs';",
+        `import { claimEventRoomPlaywrightRunContext, releaseEventRoomPlaywrightPortLease } from ${JSON.stringify(lifecyclePath)};`,
+        "if ('Bun' in globalThis) throw new Error('Playwright config unexpectedly exposed global Bun');",
+        `const context = claimEventRoomPlaywrightRunContext(${JSON.stringify(BASE_DATABASE_URL)}, randomUUID());`,
+        'try {',
+        `  writeFileSync(${JSON.stringify(markerPath)}, 'node-port-probe-complete');`,
+        '} finally {',
+        '  releaseEventRoomPlaywrightPortLease(context);',
+        '}',
+        `export default { testDir: ${JSON.stringify(testDirectory)}, testMatch: /never-match-event-room-tests/u };`,
+      ].join('\n'),
+    );
+    try {
+      const result = spawnSync(
+        'node',
+        [
+          playwrightCliPath,
+          'test',
+          '--config',
+          configPath,
+          '--list',
+          '--pass-with-no-tests',
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 15_000,
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      if (result.status !== 0) {
+        throw new Error(
+          `Playwright could not load the event-room port probe under Node:\n${result.stderr}`,
+        );
+      }
+      expect(readFileSync(markerPath, 'utf8')).toBe('node-port-probe-complete');
+    } finally {
+      rmSync(testDirectory, { force: true, recursive: true });
+    }
+  });
+
+  test('skips an occupied loopback port without retaining a rejected lease', async () => {
     const candidate = claimEventRoomPlaywrightRunContext(
       BASE_DATABASE_URL,
       randomUUID(),
     );
     releaseEventRoomPlaywrightPortLease(candidate);
-    const listener = Bun.listen({
-      hostname: '127.0.0.1',
-      port: candidate.appPort,
-      socket: {
-        data() {},
-      },
+    const listener = createServer();
+    await new Promise<void>((resolveListening, rejectListening) => {
+      listener.once('error', rejectListening);
+      listener.listen(
+        { host: '127.0.0.1', port: candidate.appPort },
+        resolveListening,
+      );
     });
     let claimed: ReturnType<typeof claimEventRoomPlaywrightRunContext> | null =
       null;
@@ -947,7 +1012,12 @@ describe('event-room synthetic database guard', () => {
       expect(inspectEventRoomPlaywrightPortLease(claimed)).toBe('owned');
     } finally {
       if (claimed !== null) releaseEventRoomPlaywrightPortLease(claimed);
-      listener.stop(true);
+      await new Promise<void>((resolveClose, rejectClose) => {
+        listener.close((error) => {
+          if (error === undefined) resolveClose();
+          else rejectClose(error);
+        });
+      });
     }
   });
 
