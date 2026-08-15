@@ -86,6 +86,20 @@ interface ChildOutputCapture {
   cancel(reason: string): ChildOutputResult;
 }
 
+interface ExactObservedProcessIdentity {
+  readonly pid: number;
+  readonly processGroupId: number;
+  readonly processStartedAt: string;
+  readonly commandHash: string;
+}
+
+interface ObservedProcessState {
+  readonly processGroupId: number;
+  readonly processStartedAt: string;
+  readonly commandHash: string;
+  readonly state: string;
+}
+
 interface ExactGateCleanupOperations {
   stopServerAndRemoveRun(context: EventRoomPlaywrightRunContext): Promise<void>;
   dropDatabase(context: EventRoomPlaywrightRunContext): Promise<unknown>;
@@ -173,13 +187,117 @@ async function waitUntil(
   }
 }
 
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
-    throw error;
+async function inspectProcessState(
+  pid: number,
+): Promise<ObservedProcessState | null> {
+  // `kill(pid, 0)` reports both zombies and reused PIDs as present. Capture
+  // immutable ps(1) facts so exit proof follows only the process we launched.
+  const child = Bun.spawn(
+    [
+      '/bin/ps',
+      '-ww',
+      '-p',
+      String(pid),
+      '-o',
+      'pgid=',
+      '-o',
+      'lstart=',
+      '-o',
+      'stat=',
+      '-o',
+      'command=',
+    ],
+    { stdout: 'pipe', stderr: 'pipe' },
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (exitCode === 1 && stdout.trim().length === 0) return null;
+  if (exitCode !== 0) {
+    throw new Error(`Process identity inspection failed: ${stderr.trim()}`);
+  }
+  const match = stdout.trim().match(/^(\d+)\s+(.{24})\s+(\S+)\s+([\s\S]+)$/u);
+  if (match === null) {
+    throw new Error('Process identity inspection was ambiguous.');
+  }
+  const processGroupId = Number.parseInt(match[1]!, 10);
+  if (!Number.isSafeInteger(processGroupId) || processGroupId <= 0) {
+    throw new Error('Process group identity was invalid.');
+  }
+  return {
+    processGroupId,
+    processStartedAt: match[2]!,
+    state: match[3]!,
+    commandHash: createHash('sha256').update(match[4]!, 'utf8').digest('hex'),
+  };
+}
+
+function exactObservedProcessIsLive(
+  expected: ExactObservedProcessIdentity,
+  actual: ObservedProcessState | null,
+): boolean {
+  return (
+    actual !== null &&
+    !actual.state.startsWith('Z') &&
+    actual.processGroupId === expected.processGroupId &&
+    actual.processStartedAt === expected.processStartedAt &&
+    actual.commandHash === expected.commandHash
+  );
+}
+
+async function captureExactObservedProcessIdentities(
+  processIds: readonly number[],
+): Promise<readonly ExactObservedProcessIdentity[]> {
+  return Promise.all(
+    [...new Set(processIds)].map(async (pid) => {
+      const observed = await inspectProcessState(pid);
+      if (observed === null || observed.state.startsWith('Z')) {
+        throw new Error(
+          `Process ${pid} exited before its exact identity was captured.`,
+        );
+      }
+      return {
+        pid,
+        processGroupId: observed.processGroupId,
+        processStartedAt: observed.processStartedAt,
+        commandHash: observed.commandHash,
+      };
+    }),
+  );
+}
+
+async function allExactObservedProcessesExited(
+  identities: readonly ExactObservedProcessIdentity[],
+): Promise<boolean> {
+  const states = await Promise.all(
+    identities.map(({ pid }) => inspectProcessState(pid)),
+  );
+  return identities.every(
+    (identity, index) =>
+      !exactObservedProcessIsLive(identity, states[index] ?? null),
+  );
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function throwInterruptionErrors(
+  primaryError: Error | null,
+  cleanupErrors: readonly Error[],
+): void {
+  if (primaryError !== null && cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [primaryError, ...cleanupErrors],
+      primaryError.message,
+    );
+  }
+  if (primaryError !== null) throw primaryError;
+  if (cleanupErrors.length === 1) throw cleanupErrors[0];
+  if (cleanupErrors.length > 1) {
+    throw new AggregateError(cleanupErrors, cleanupErrors[0]!.message);
   }
 }
 
@@ -859,6 +977,63 @@ describe('event-room Playwright gate', () => {
     }
   });
 
+  test('exact exit proof rejects live PID reuse and treats zombies as exited', () => {
+    const expected: ExactObservedProcessIdentity = {
+      pid: 424_242,
+      processGroupId: 424_242,
+      processStartedAt: 'Fri Aug 15 03:00:00 2026',
+      commandHash: 'a'.repeat(64),
+    };
+    const live: ObservedProcessState = {
+      processGroupId: expected.processGroupId,
+      processStartedAt: expected.processStartedAt,
+      commandHash: expected.commandHash,
+      state: 'S',
+    };
+
+    expect(exactObservedProcessIsLive(expected, live)).toBe(true);
+    expect(exactObservedProcessIsLive(expected, null)).toBe(false);
+    expect(exactObservedProcessIsLive(expected, { ...live, state: 'Z+' })).toBe(
+      false,
+    );
+    expect(
+      exactObservedProcessIsLive(expected, {
+        ...live,
+        processStartedAt: 'Fri Aug 15 03:00:01 2026',
+      }),
+    ).toBe(false);
+    expect(
+      exactObservedProcessIsLive(expected, {
+        ...live,
+        processGroupId: expected.processGroupId + 1,
+      }),
+    ).toBe(false);
+    expect(
+      exactObservedProcessIsLive(expected, {
+        ...live,
+        commandHash: 'b'.repeat(64),
+      }),
+    ).toBe(false);
+  });
+
+  test('interruption cleanup aggregates after the primary failure without replacing it', () => {
+    const primary = new Error('synthetic interruption proof failed');
+    const treeCleanup = new Error('synthetic exact tree remained');
+    const runCleanup = new Error('synthetic run cleanup failed');
+    let received: unknown;
+
+    try {
+      throwInterruptionErrors(primary, [treeCleanup, runCleanup]);
+    } catch (error) {
+      received = error;
+    }
+
+    expect(received).toBeInstanceOf(AggregateError);
+    const aggregate = received as AggregateError;
+    expect(aggregate.message).toBe(primary.message);
+    expect(aggregate.errors).toEqual([primary, treeCleanup, runCleanup]);
+  });
+
   const interruptedParentGateName =
     'reaps the exact process tree and residue after parent SIGINT, SIGTERM, and SIGKILL';
   const runInterruptedParentGate = async (): Promise<void> => {
@@ -878,7 +1053,10 @@ describe('event-room Playwright gate', () => {
       );
       const nonce = randomBytes(32).toString('hex');
       let parent: ReturnType<typeof Bun.spawn> | undefined;
-      let observedProcessIds: readonly number[] = [];
+      let observedProcessIdentities: readonly ExactObservedProcessIdentity[] =
+        [];
+      let treeExitWaitAttempted = false;
+      let primaryError: Error | null = null;
       try {
         await createOwnedEventRoomPlaywrightDatabase(context);
         childEnvironment[EVENT_ROOM_PLAYWRIGHT_SYNTHETIC_PARENT_MODE_ENV] =
@@ -953,20 +1131,25 @@ describe('event-room Playwright gate', () => {
             webServerReady.nextPid,
           ]),
         );
-        observedProcessIds = [
-          ready.supervisorPid,
-          ...groupMembers,
-          ...webServerGroupMembers,
-        ];
+        observedProcessIdentities = await captureExactObservedProcessIdentities(
+          [ready.supervisorPid, ...groupMembers, ...webServerGroupMembers],
+        );
 
         await waitUntil('the synthetic parent heartbeat to pause', () =>
           existsSync(heartbeatPausedPath),
         );
         await delay(2_500);
-        expect(processExists(parent.pid)).toBe(true);
-        expect(observedProcessIds.every((pid) => processExists(pid))).toBe(
-          true,
-        );
+        expect(parent.exitCode).toBeNull();
+        expect(
+          await Promise.all(
+            observedProcessIdentities.map(async (identity) =>
+              exactObservedProcessIsLive(
+                identity,
+                await inspectProcessState(identity.pid),
+              ),
+            ),
+          ),
+        ).toEqual(observedProcessIdentities.map(() => true));
         expect(await loopbackPortIsOpen(context.appPort)).toBe(true);
 
         parent.kill(signal);
@@ -980,8 +1163,9 @@ describe('event-room Playwright gate', () => {
         ]);
         expect(parentExit).toBe(expectedExitCodes.get(signal)!);
 
+        treeExitWaitAttempted = true;
         await waitUntil('the exact interrupted process tree to exit', () =>
-          observedProcessIds.every((pid) => !processExists(pid)),
+          allExactObservedProcessesExited(observedProcessIdentities),
         );
         await waitUntil(
           'the interrupted loopback port to close',
@@ -996,19 +1180,42 @@ describe('event-room Playwright gate', () => {
         expect(await stderr).toContain(
           'The event-room Playwright gate heartbeat stopped.',
         );
-      } finally {
+      } catch (error) {
+        primaryError = asError(error);
+      }
+
+      const cleanupErrors: Error[] = [];
+      try {
         if (parent !== undefined && parent.exitCode === null) {
           parent.kill('SIGKILL');
-          await Promise.race([parent.exited, delay(5_000)]);
+          await Promise.race([
+            parent.exited,
+            delay(5_000).then(() => {
+              throw new Error(
+                'The interrupted synthetic parent exceeded its cleanup deadline.',
+              );
+            }),
+          ]);
         }
-        if (observedProcessIds.length > 0) {
+      } catch (error) {
+        cleanupErrors.push(asError(error));
+      }
+      if (observedProcessIdentities.length > 0 && !treeExitWaitAttempted) {
+        try {
           await waitUntil(
             'the interrupted test cleanup process tree to exit',
-            () => observedProcessIds.every((pid) => !processExists(pid)),
+            () => allExactObservedProcessesExited(observedProcessIdentities),
           );
+        } catch (error) {
+          cleanupErrors.push(asError(error));
         }
-        await cleanExactGateRun(context);
       }
+      try {
+        await cleanExactGateRun(context);
+      } catch (error) {
+        cleanupErrors.push(asError(error));
+      }
+      throwInterruptionErrors(primaryError, cleanupErrors);
     }
   };
   if (process.env.TEST_DATABASE_URL === undefined) {
