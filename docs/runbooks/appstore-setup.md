@@ -73,18 +73,24 @@ be copied here.
 
 ## 1. Human prerequisites
 
-1. In App Store Connect, open **Users and Access > Integrations > App Store
-   Connect API** and generate a team API key with the least role that can manage
-   TestFlight. Download the `.p8` file once.
-2. Put the key in an approved secrets system. For a local run, materialize it
+1. Before creating an App Store Connect API key, prepare an exact consequence
+   preview that identifies the Apple team, proposed key name, least required
+   role, access scope, key count, and approved custody destination. Obtain fresh
+   explicit product-owner approval for that one key creation. If approval is
+   absent, ambiguous, stale, or differs from the preview, stop before opening
+   the creation flow.
+2. After that approval, an authenticated human opens **Users and Access >
+   Integrations > App Store Connect API**, verifies the previewed values, and
+   generates exactly the approved team API key. Download the `.p8` file once.
+3. Put the key in an approved secrets system. For a local run, materialize it
    as an owner-private regular file in an owner-private directory outside
    **every Git repository**, not merely outside this checkout. Never use a
    symlink, FIFO, device, directory, or other special file. Never copy a `.p8`,
    tester CSV, beta-review contact file, or demo credential into any
    repository.
-3. Record the key ID and issuer ID. They are identifiers, not substitutes for
+4. Record the key ID and issuer ID. They are identifiers, not substitutes for
    protecting the private key.
-4. Run the App Store Connect preview and audit scripts with the repository's
+5. Run the App Store Connect preview and audit scripts with the repository's
    pinned Bun toolchain. Do not substitute npm, npx, or an unpinned global
    executable. The historical creation lane pins Ruby 3.3.12 and Bundler 2.6.9.
    It remains reproducible only for a separately scoped recovery that
@@ -92,11 +98,12 @@ be copied here.
    `bundle _2.6.9_ --version`, then run `bundle _2.6.9_ install` from
    `scripts/ops/appstore`. Fastlane is an operations-only dependency. Do not
    install or run that lane merely to reconcile or retry the verified record.
-5. Obtain explicit product-owner approval for the exact live-provider write
+6. Obtain explicit product-owner approval for the exact live-provider write
    before running Fastlane `produce`, EAS Submit, or any ASC `--apply`.
-   Possessing credentials or having a prior approval is not authorization for
-   a new run. If approval is absent, ambiguous, or stale, stop before the
-   write.
+   Approval to create the API key authorizes neither its use nor any later
+   provider write. Possessing credentials or having a prior approval is not
+   authorization for a new run. If approval is absent, ambiguous, or stale,
+   stop before the write.
 
 Do not try to bypass Apple ID sign-in, two-factor authentication, API-key
 generation, agreements, or Beta App Review. Those are human/Apple gates.
