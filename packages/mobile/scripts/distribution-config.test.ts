@@ -259,10 +259,9 @@ describe('mobile distribution configuration', () => {
       'Do not fabricate or relabel an illustration as provider evidence',
     );
     expect(release).toContain('product-owner sign-off not recorded');
-    expect(release).toContain('Google identity review is pending');
-    expect(release).toContain(
-      'phone verification and app creation remain locked',
-    );
+    expect(release).toContain('Google identity review is complete');
+    expect(release).toContain('phone verification is complete');
+    expect(compactRelease).toContain('app creation is unlocked');
     expect(compactRelease).toContain(
       'SUPERSEDED — NOT ELIGIBLE FOR PLAY UPLOAD, TESTER EXPOSURE, OR INSTALLATION',
     );
@@ -301,7 +300,7 @@ describe('mobile distribution configuration', () => {
     expect(release).toContain(
       '015911fa614ba7b264f71a5f3186ab9c86940f94b98d77861b2864a761506463',
     );
-    expect(release).toContain('human install evidence');
+    expect(compactRelease).toContain('human install evidence');
     expect(compactRelease).toContain(
       'Provider inventory alone is not installed-device evidence',
     );
