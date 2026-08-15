@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -31,6 +32,8 @@ const MINIMUM_APP_PORT = 20_000;
 const APP_PORT_COUNT = 30_000;
 export const EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT =
   MINIMUM_APP_PORT + APP_PORT_COUNT;
+const APP_PORT_OCCUPIED_EXIT_STATUS = 72;
+const APP_PORT_PROBE_TIMEOUT_MS = 2_000;
 const PORT_CLOSE_TIMEOUT_MS = 10_000;
 const PORT_LEASE_DIRECTORY = join(tmpdir(), 'psd-eoc-event-room-port-leases');
 const RUN_DIRECTORY_PREFIX = 'psd-eoc-event-room-';
@@ -1441,33 +1444,64 @@ function isExistingLease(error: unknown): boolean {
   );
 }
 
+const LOOPBACK_APP_PORT_PROBE_SOURCE = String.raw`
+const { createServer } = require('node:net');
+
+const hostname = process.argv[1];
+const port = Number.parseInt(process.argv[2], 10);
+const server = createServer();
+const timeout = setTimeout(() => process.exit(2), 1_000);
+
+server.once('error', (error) => {
+  clearTimeout(timeout);
+  process.exit(
+    error && error.code === 'EADDRINUSE'
+      ? ${APP_PORT_OCCUPIED_EXIT_STATUS}
+      : 2,
+  );
+});
+
+try {
+  server.listen({ exclusive: true, host: hostname, port }, () => {
+    clearTimeout(timeout);
+    try {
+      server.close((error) => process.exit(error === undefined ? 0 : 2));
+    } catch {
+      process.exit(2);
+    }
+  });
+} catch {
+  clearTimeout(timeout);
+  process.exit(2);
+}
+`;
+
 function loopbackAppPortIsAvailable(appPort: number): boolean {
   for (const hostname of ['::1', '127.0.0.1'] as const) {
-    let listener:
-      | Readonly<{ stop(closeActiveConnections?: boolean): void }>
-      | undefined;
-    try {
-      listener = Bun.listen({
-        hostname,
-        port: appPort,
-        socket: {
-          data() {},
-        },
-      });
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        'code' in error &&
-        (error as NodeJS.ErrnoException).code === 'EADDRINUSE'
-      ) {
-        return false;
-      }
+    const result = spawnSync(
+      process.execPath,
+      ['--eval', LOOPBACK_APP_PORT_PROBE_SOURCE, hostname, String(appPort)],
+      {
+        stdio: 'ignore',
+        timeout: APP_PORT_PROBE_TIMEOUT_MS,
+      },
+    );
+    if (result.error !== undefined) {
       throw new Error(
         `Could not prove that the event-room Playwright app port is available on ${hostname}.`,
-        { cause: error },
+        { cause: result.error },
       );
-    } finally {
-      listener?.stop(true);
+    }
+    if (
+      result.status === APP_PORT_OCCUPIED_EXIT_STATUS &&
+      result.signal === null
+    ) {
+      return false;
+    }
+    if (result.status !== 0 || result.signal !== null) {
+      throw new Error(
+        `Could not prove that the event-room Playwright app port is available on ${hostname}.`,
+      );
     }
   }
   return true;
