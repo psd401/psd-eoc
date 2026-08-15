@@ -105,7 +105,6 @@ resource "google_project_iam_member_remove" "google_apis_service_agent_editor" {
 }
 
 resource "google_storage_bucket" "terraform_state" {
-  project                     = google_project.psd_eoc.project_id
   name                        = var.terraform_state_bucket
   location                    = upper(var.region)
   storage_class               = "STANDARD"
