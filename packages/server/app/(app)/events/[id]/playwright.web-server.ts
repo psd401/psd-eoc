@@ -493,17 +493,14 @@ async function coordinateWorkload(nonce: string): Promise<void> {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
   let workloadExited = false;
+  let anchorReleaseRequested = false;
   // The supervisor signals this exact process group, so descendants receive
   // the same signal directly. Keep the identity anchor alive while they exit;
   // never re-signal a child PID that could already have been reused.
   const holdAnchor = () => undefined;
   const releaseAnchor = () => {
-    if (!workloadExited) {
-      throw new Error(
-        'The Playwright coordinator anchor was released before its child exited.',
-      );
-    }
-    process.exit(0);
+    anchorReleaseRequested = true;
+    if (workloadExited) process.exit(0);
   };
   process.on('SIGINT', holdAnchor);
   process.on('SIGTERM', holdAnchor);
@@ -528,6 +525,7 @@ async function coordinateWorkload(nonce: string): Promise<void> {
       coordinatorChildExitMarker(context, process.pid, nonce, exitCode),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' },
     );
+    if (anchorReleaseRequested) process.exit(0);
     await new Promise<void>(() => undefined);
   } finally {
     process.off('SIGINT', holdAnchor);
