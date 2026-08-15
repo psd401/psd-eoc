@@ -1,4 +1,9 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createPrivateKey,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
 
 import {
   ActorSchema,
@@ -14,6 +19,7 @@ import {
   RosterSourceConfigurationSchema,
   SyncRosterInputSchema,
   RosterSyncResultSchema,
+  StaffRosterEmailSchema,
   TimestampSchema,
   UuidSchema,
   type Actor,
@@ -31,7 +37,7 @@ import {
   type RosterSyncResult,
   type SyncRosterInput,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
 
@@ -58,11 +64,14 @@ import {
 } from '../../db/schema';
 
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
-const GOOGLE_DIRECTORY_ENDPOINT =
-  'https://admin.googleapis.com/admin/directory/v1';
+const GOOGLE_CLOUD_IDENTITY_ENDPOINT =
+  'https://cloudidentity.googleapis.com/v1';
 const GOOGLE_GROUP_MEMBER_SCOPE =
-  'https://www.googleapis.com/auth/admin.directory.group.member.readonly';
-const PSD_EMAIL_DOMAIN = 'psd401.net';
+  'https://www.googleapis.com/auth/cloud-identity.groups.readonly';
+const GOOGLE_ROSTER_PROJECT_ID = 'psd401-eoc';
+const GOOGLE_ROSTER_SERVICE_ACCOUNT_EMAIL =
+  'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com';
+const GOOGLE_ROSTER_WORKSPACE_ROLE = '_GROUPS_READER_ROLE';
 const DEFAULT_GOOGLE_TIMEOUT_MILLISECONDS = 10_000;
 const MAX_GOOGLE_RESPONSE_BYTES = 512 * 1024;
 const MAX_GROUP_PAGES = 100;
@@ -130,9 +139,10 @@ export interface RosterLocalPushEndpoint {
   readonly token: string;
 }
 
-/** Optional local enrichment for a Google subject already proven by Groups. */
+/** Local user facts matched only by the canonical staff email from Groups. */
 export interface RosterLocalContact {
   readonly googleSubject: string;
+  readonly staffEmail: string;
   readonly displayName: string;
   readonly pushEndpoints: readonly RosterLocalPushEndpoint[];
 }
@@ -202,7 +212,7 @@ export interface RosterSyncStore {
     reference: RosterSourceConfigurationRef,
   ): Promise<LoadedRosterSourceConfiguration | null>;
   loadLocalContacts(
-    googleSubjects: readonly string[],
+    identityKeys: readonly string[],
   ): Promise<readonly RosterLocalContact[]>;
   loadLatestCompleteBaseline(
     population: RosterPopulation,
@@ -315,14 +325,16 @@ function validateMemberPopulation(
 ): void {
   const normalizedEmail = member.email.toLowerCase();
   if (population === 'staff') {
+    const staffEmail = StaffRosterEmailSchema.safeParse(member.email);
     if (
-      member.googleSubject === null ||
-      member.memberKey !== member.googleSubject ||
-      !normalizedEmail.endsWith(`@${PSD_EMAIL_DOMAIN}`)
+      !staffEmail.success ||
+      staffEmail.data !== member.email ||
+      member.googleSubject !== null ||
+      member.memberKey !== normalizedEmail
     ) {
       throw new RosterSyncError(
         'GROUP_MEMBER_INVALID',
-        'A staff group returned a member outside the approved staff shape.',
+        'A staff group returned a member outside the approved email-only staff shape.',
       );
     }
     return;
@@ -636,7 +648,11 @@ function buildRecipients(
   const accumulated = new Map<string, AccumulatedMember>();
   for (const group of groups) {
     for (const member of group.members) {
-      const existing = accumulated.get(member.memberKey);
+      const identityKey =
+        population === 'staff'
+          ? StaffRosterEmailSchema.parse(member.email)
+          : member.memberKey;
+      const existing = accumulated.get(identityKey);
       if (
         existing !== undefined &&
         (existing.googleSubject !== member.googleSubject ||
@@ -658,7 +674,7 @@ function buildRecipients(
           groupSourceRefs: new Map<string, RosterGroupSourceRef>(),
         } satisfies AccumulatedMember);
       entry.groupSourceRefs.set(sourceRefKey(group.reference), group.reference);
-      accumulated.set(member.memberKey, entry);
+      accumulated.set(identityKey, entry);
     }
   }
   if (accumulated.size > MAX_GROUP_MEMBERS) {
@@ -669,6 +685,7 @@ function buildRecipients(
   }
 
   const contacts = new Map<string, RosterLocalContact>();
+  const contactSubjects = new Set<string>();
   for (const rawContact of localContacts) {
     const googleSubject = z
       .string()
@@ -678,6 +695,7 @@ function buildRecipients(
       .parse(rawContact.googleSubject);
     const contact = Object.freeze({
       googleSubject,
+      staffEmail: StaffRosterEmailSchema.parse(rawContact.staffEmail),
       displayName: z
         .string()
         .trim()
@@ -694,22 +712,38 @@ function buildRecipients(
         ),
       ),
     });
-    if (contacts.has(googleSubject)) {
+    if (
+      contacts.has(contact.staffEmail) ||
+      contactSubjects.has(contact.googleSubject)
+    ) {
       throw new RosterSyncError(
         'LOCAL_CONTACT_DUPLICATE',
-        'Local contact enrichment returned a duplicate subject.',
+        'Local contact enrichment returned an ambiguous identity.',
       );
     }
-    contacts.set(googleSubject, contact);
+    contacts.set(contact.staffEmail, contact);
+    contactSubjects.add(contact.googleSubject);
   }
 
   const recipients = [...accumulated.values()]
-    .sort((left, right) => left.memberKey.localeCompare(right.memberKey))
+    .sort((left, right) => left.email.localeCompare(right.email))
     .map((member) => {
+      const staffEmail =
+        population === 'staff'
+          ? StaffRosterEmailSchema.parse(member.email)
+          : undefined;
       const local =
-        member.googleSubject === null
-          ? undefined
-          : contacts.get(member.googleSubject);
+        staffEmail === undefined ? undefined : contacts.get(staffEmail);
+      if (
+        local !== undefined &&
+        member.googleSubject !== null &&
+        local.googleSubject !== member.googleSubject
+      ) {
+        throw new RosterSyncError(
+          'LOCAL_CONTACT_IDENTITY_CONFLICT',
+          'Local identity evidence conflicted with the roster source.',
+        );
+      }
       const endpoints = [
         EndpointSchema.parse({
           id: trustedUuid(uuid),
@@ -732,7 +766,8 @@ function buildRecipients(
       return RecipientSchema.parse({
         id: trustedUuid(uuid),
         population,
-        googleSubject: member.googleSubject,
+        googleSubject: local?.googleSubject ?? member.googleSubject,
+        ...(staffEmail === undefined ? {} : { staffEmail }),
         displayName: local?.displayName ?? member.displayName,
         groupSourceRefs: [...member.groupSourceRefs.values()].sort(
           (left, right) =>
@@ -998,13 +1033,15 @@ export async function syncRoster(
         completedAt: trustedTimestamp(now),
       });
     } else {
-      const googleSubjects = fetchedGroups.flatMap((group) =>
-        group.members.flatMap((member) =>
-          member.googleSubject === null ? [] : [member.googleSubject],
+      const localIdentityKeys = fetchedGroups.flatMap((group) =>
+        group.members.map((member) =>
+          loaded.configuration.population === 'staff'
+            ? StaffRosterEmailSchema.parse(member.email)
+            : member.memberKey,
         ),
       );
       const localContacts = await dependencies.store.loadLocalContacts(
-        Object.freeze([...new Set(googleSubjects)].sort()),
+        Object.freeze([...new Set(localIdentityKeys)].sort()),
       );
       const capturedAt = trustedTimestamp(now);
       let publication: CompleteRosterSyncPersistenceRequest | null = null;
@@ -1142,33 +1179,104 @@ export function verifyRosterSyncJobToken(
   );
 }
 
-const GoogleMemberSchema = z
+const GoogleCloudIdentityGroupSchema = z
   .object({
-    id: z.string().trim().min(1).max(255),
-    email: z.string().trim().email().max(320),
-    type: z.literal('USER'),
-    status: z.literal('ACTIVE'),
+    name: z.string().regex(/^groups\/[A-Za-z0-9_-]+$/u),
   })
-  .passthrough();
+  .strict()
+  .readonly();
 
-const GoogleMembersResponseSchema = z
+const GoogleCloudIdentityEntityKeySchema = z
+  .object({ id: StaffRosterEmailSchema })
+  .strict()
+  .readonly();
+
+const GoogleCloudIdentityTransitiveRoleSchema = z
   .object({
-    members: z.array(GoogleMemberSchema).max(MAX_GROUP_MEMBERS).optional(),
+    role: z.enum(['OWNER', 'MANAGER', 'MEMBER']),
+  })
+  .strict()
+  .readonly();
+
+const GoogleCloudIdentityMemberRelationSchema = z
+  .object({
+    preferredMemberKey: z
+      .array(GoogleCloudIdentityEntityKeySchema)
+      .length(1)
+      .readonly(),
+    member: z.string().regex(/^(?:groups\/[A-Za-z0-9_-]+|users\/[0-9]+)$/u),
+    roles: z
+      .array(GoogleCloudIdentityTransitiveRoleSchema)
+      .min(1)
+      .max(3)
+      .readonly(),
+    relationType: z.enum(['DIRECT', 'INDIRECT', 'DIRECT_AND_INDIRECT']),
+  })
+  .strict()
+  .superRefine((relation, context) => {
+    const roles = relation.roles.map((role) => role.role);
+    if (new Set(roles).size !== roles.length) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Cloud Identity membership roles must be unique.',
+        path: ['roles'],
+      });
+    }
+  })
+  .readonly();
+
+const GoogleCloudIdentityMembersResponseSchema = z
+  .object({
+    memberships: z
+      .array(GoogleCloudIdentityMemberRelationSchema)
+      .max(MAX_GROUP_MEMBERS)
+      .optional(),
     nextPageToken: z.string().trim().min(1).max(2_048).optional(),
   })
-  .passthrough();
+  .strict()
+  .readonly();
 
 const GoogleTokenResponseSchema = z
   .object({
     access_token: z.string().trim().min(16).max(8_192),
     expires_in: z.number().int().min(60).max(3_600),
     token_type: z.literal('Bearer'),
+    scope: z.literal(GOOGLE_GROUP_MEMBER_SCOPE).optional(),
   })
-  .passthrough();
+  .strict()
+  .readonly();
 
-export interface GoogleAdminRosterConfiguration {
+const GoogleCloudIdentityCredentialSchema = z
+  .object({
+    type: z.literal('service_account'),
+    project_id: z.literal(GOOGLE_ROSTER_PROJECT_ID),
+    private_key_id: z.string().regex(/^[a-f0-9]{40}$/u),
+    private_key: z.string().min(1).max(16_384),
+    client_email: z.literal(GOOGLE_ROSTER_SERVICE_ACCOUNT_EMAIL),
+    client_id: z.string().regex(/^\d+$/u),
+    auth_uri: z.literal('https://accounts.google.com/o/oauth2/auth'),
+    token_uri: z.literal(GOOGLE_TOKEN_ENDPOINT),
+    auth_provider_x509_cert_url: z.literal(
+      'https://www.googleapis.com/oauth2/v1/certs',
+    ),
+    client_x509_cert_url: z.literal(
+      'https://www.googleapis.com/robot/v1/metadata/x509/roster-sync-reader%40psd401-eoc.iam.gserviceaccount.com',
+    ),
+    universe_domain: z.literal('googleapis.com'),
+    // Required retained-secret provenance only. Runtime source authority comes
+    // from the exact versioned database configuration loaded by syncRoster.
+    approved_staff_group_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    credential_created_at: TimestampSchema,
+    domain_wide_delegation: z.literal(false),
+    oauth_scopes: z.tuple([z.literal(GOOGLE_GROUP_MEMBER_SCOPE)]).readonly(),
+    workspace_admin_role: z.literal(GOOGLE_ROSTER_WORKSPACE_ROLE),
+  })
+  .strict()
+  .readonly();
+
+export interface GoogleCloudIdentityRosterConfiguration {
   readonly serviceAccountEmail: string;
-  readonly delegatedSubject: string;
+  readonly privateKeyId: string;
   readonly privateKey: string;
   readonly timeoutMilliseconds: number;
 }
@@ -1195,46 +1303,64 @@ function requiredEnvironmentValue(
   return value;
 }
 
-/** Reads delegated read-only Admin SDK credentials without a mock fallback. */
-export function readGoogleAdminRosterConfiguration(
+/** Reads the exact non-delegated Cloud Identity credential with no fallback. */
+export function readGoogleCloudIdentityRosterConfiguration(
   environment: Environment = process.env,
-): GoogleAdminRosterConfiguration {
-  const serviceAccountEmail = requiredEnvironmentValue(
+): GoogleCloudIdentityRosterConfiguration {
+  const serialized = requiredEnvironmentValue(
     environment,
-    'GOOGLE_ROSTER_SERVICE_ACCOUNT_EMAIL',
-    320,
+    'GOOGLE_ROSTER_CONFIG',
+    32_768,
   );
-  const delegatedSubject = requiredEnvironmentValue(
-    environment,
-    'GOOGLE_ROSTER_DELEGATED_SUBJECT',
-    320,
-  );
-  const privateKey = requiredEnvironmentValue(
-    environment,
-    'GOOGLE_ROSTER_SERVICE_ACCOUNT_PRIVATE_KEY',
-    16_384,
-  ).replaceAll('\\n', '\n');
+  let rawCredential: unknown;
+  try {
+    rawCredential = JSON.parse(serialized) as unknown;
+  } catch {
+    throw new RosterSyncError(
+      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
+      'The Google roster credential is not valid JSON.',
+    );
+  }
+  const parsedCredential =
+    GoogleCloudIdentityCredentialSchema.safeParse(rawCredential);
+  if (!parsedCredential.success) {
+    throw new RosterSyncError(
+      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
+      'The Google roster credential does not match the approved Cloud Identity contract.',
+    );
+  }
   const timeoutRaw =
     environment.GOOGLE_ROSTER_HTTP_TIMEOUT_MS ??
     String(DEFAULT_GOOGLE_TIMEOUT_MILLISECONDS);
   const timeoutMilliseconds = Number(timeoutRaw);
   if (
-    !z.string().email().safeParse(serviceAccountEmail).success ||
-    !delegatedSubject.toLowerCase().endsWith(`@${PSD_EMAIL_DOMAIN}`) ||
     !Number.isSafeInteger(timeoutMilliseconds) ||
     timeoutMilliseconds < 1_000 ||
-    timeoutMilliseconds > 30_000 ||
-    !privateKey.includes('BEGIN PRIVATE KEY')
+    timeoutMilliseconds > 30_000
   ) {
     throw new RosterSyncError(
       'GOOGLE_ROSTER_CONFIGURATION_INVALID',
       'Google roster credentials or timeout are invalid.',
     );
   }
+  try {
+    const signingKey = createPrivateKey(parsedCredential.data.private_key);
+    if (
+      signingKey.type !== 'private' ||
+      signingKey.asymmetricKeyType !== 'rsa'
+    ) {
+      throw new Error('The roster signing key is not an RSA private key.');
+    }
+  } catch {
+    throw new RosterSyncError(
+      'GOOGLE_ROSTER_CONFIGURATION_INVALID',
+      'The Google roster signing key is invalid.',
+    );
+  }
   return Object.freeze({
-    serviceAccountEmail,
-    delegatedSubject,
-    privateKey,
+    serviceAccountEmail: parsedCredential.data.client_email,
+    privateKeyId: parsedCredential.data.private_key_id,
+    privateKey: parsedCredential.data.private_key,
     timeoutMilliseconds,
   });
 }
@@ -1332,9 +1458,9 @@ async function boundedJson(
   }
 }
 
-/** Creates the delegated, read-only Admin SDK adapter. */
-export function createGoogleAdminRosterAdapter(
-  configuration: GoogleAdminRosterConfiguration,
+/** Creates the non-delegated, read-only Cloud Identity Groups adapter. */
+export function createGoogleCloudIdentityRosterAdapter(
+  configuration: GoogleCloudIdentityRosterConfiguration,
   options: Readonly<{
     fetch?: typeof fetch;
     now?: () => Date;
@@ -1345,6 +1471,10 @@ export function createGoogleAdminRosterAdapter(
   let cachedToken:
     | Readonly<{ value: string; refreshAfterMilliseconds: number }>
     | undefined;
+  const resolvedGroupNames = new Map<
+    string,
+    Readonly<{ sourceIdentity: string; groupName: string }>
+  >();
 
   async function fetchWithTimeout<Result>(
     input: string | URL,
@@ -1359,6 +1489,7 @@ export function createGoogleAdminRosterAdapter(
     try {
       const response = await fetchImplementation(input, {
         ...init,
+        redirect: 'error',
         signal: controller.signal,
       });
       return await consume(response, controller.signal);
@@ -1377,6 +1508,12 @@ export function createGoogleAdminRosterAdapter(
 
   async function accessToken(): Promise<string> {
     const nowMilliseconds = now().getTime();
+    if (!Number.isFinite(nowMilliseconds)) {
+      throw new RosterSyncError(
+        'GOOGLE_ROSTER_CONFIGURATION_INVALID',
+        'The Google roster clock is invalid.',
+      );
+    }
     if (
       cachedToken !== undefined &&
       cachedToken.refreshAfterMilliseconds > nowMilliseconds
@@ -1396,9 +1533,12 @@ export function createGoogleAdminRosterAdapter(
     const assertion = await new SignJWT({
       scope: GOOGLE_GROUP_MEMBER_SCOPE,
     })
-      .setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
+      .setProtectedHeader({
+        alg: 'RS256',
+        kid: configuration.privateKeyId,
+        typ: 'JWT',
+      })
       .setIssuer(configuration.serviceAccountEmail)
-      .setSubject(configuration.delegatedSubject)
       .setAudience(GOOGLE_TOKEN_ENDPOINT)
       .setIssuedAt(issuedAt)
       .setExpirationTime(issuedAt + 300)
@@ -1419,7 +1559,7 @@ export function createGoogleAdminRosterAdapter(
           void response.body?.cancel().catch(() => undefined);
           throw new RosterSyncError(
             'GOOGLE_TOKEN_REJECTED',
-            'Google rejected the delegated roster credential.',
+            'Google rejected the Cloud Identity roster credential.',
           );
         }
         return GoogleTokenResponseSchema.safeParse(
@@ -1430,7 +1570,7 @@ export function createGoogleAdminRosterAdapter(
     if (!parsed.success) {
       throw new RosterSyncError(
         'GOOGLE_TOKEN_RESPONSE_INVALID',
-        'Google returned an invalid delegated token response.',
+        'Google returned an invalid Cloud Identity token response.',
       );
     }
     cachedToken = Object.freeze({
@@ -1439,6 +1579,75 @@ export function createGoogleAdminRosterAdapter(
         nowMilliseconds + Math.max(parsed.data.expires_in - 60, 30) * 1_000,
     });
     return cachedToken.value;
+  }
+
+  async function resolveConfiguredGroup(
+    source: Extract<GroupSource, { kind: 'google-group' }>,
+  ): Promise<string> {
+    const groupEmail = StaffRosterEmailSchema.parse(source.email);
+    if (!/^[A-Za-z0-9_-]+$/u.test(source.googleGroupId)) {
+      throw new RosterSyncError(
+        'GOOGLE_GROUP_SOURCE_INVALID',
+        'The configured Google roster group ID is invalid.',
+      );
+    }
+    const sourceIdentity = `${source.googleGroupId}:${groupEmail}`;
+    const cached = resolvedGroupNames.get(source.id);
+    if (cached !== undefined) {
+      if (cached.sourceIdentity !== sourceIdentity) {
+        throw new RosterSyncError(
+          'GOOGLE_GROUP_SOURCE_CHANGED',
+          'A configured Google roster source changed during synchronization.',
+        );
+      }
+      return cached.groupName;
+    }
+
+    const lookupUrl = new URL(
+      `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
+    );
+    lookupUrl.searchParams.set('groupKey.id', groupEmail);
+    lookupUrl.searchParams.set('fields', 'name');
+    const parsed = await fetchWithTimeout(
+      lookupUrl,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${await accessToken()}`,
+          Accept: 'application/json',
+        },
+      },
+      async (response, signal) => {
+        if (!response.ok) {
+          void response.body?.cancel().catch(() => undefined);
+          throw new RosterSyncError(
+            'GOOGLE_GROUP_LOOKUP_REJECTED',
+            'Google rejected a configured roster-group lookup.',
+          );
+        }
+        return GoogleCloudIdentityGroupSchema.safeParse(
+          await boundedJson(response, signal),
+        );
+      },
+    );
+    if (!parsed.success) {
+      throw new RosterSyncError(
+        'GOOGLE_GROUP_LOOKUP_INVALID',
+        'Google returned an invalid configured roster-group lookup.',
+      );
+    }
+    const expectedName = `groups/${source.googleGroupId}`;
+    if (parsed.data.name !== expectedName) {
+      throw new RosterSyncError(
+        'GOOGLE_GROUP_IDENTITY_MISMATCH',
+        'The configured roster-group email and ID did not identify the same Google group.',
+      );
+    }
+    resolvedGroupNames.set(
+      source.id,
+      Object.freeze({ sourceIdentity, groupName: parsed.data.name }),
+    );
+    return parsed.data.name;
   }
 
   return Object.freeze({
@@ -1453,19 +1662,22 @@ export function createGoogleAdminRosterAdapter(
           'The Google roster adapter received a non-roster source.',
         );
       }
-      if (!source.email.toLowerCase().endsWith(`@${PSD_EMAIL_DOMAIN}`)) {
+      const groupEmail = StaffRosterEmailSchema.safeParse(source.email);
+      if (!groupEmail.success) {
         throw new RosterSyncError(
           'GOOGLE_GROUP_DOMAIN_INVALID',
           'The configured roster group is outside the approved domain.',
         );
       }
+      const groupName = await resolveConfiguredGroup(source);
       const url = new URL(
-        `${GOOGLE_DIRECTORY_ENDPOINT}/groups/${encodeURIComponent(
-          source.googleGroupId,
-        )}/members`,
+        `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${groupName}/memberships:searchTransitiveMemberships`,
       );
-      url.searchParams.set('maxResults', '200');
-      url.searchParams.set('includeDerivedMembership', 'true');
+      url.searchParams.set('pageSize', '200');
+      url.searchParams.set(
+        'fields',
+        'memberships(member,preferredMemberKey,relationType,roles),nextPageToken',
+      );
       if (pageToken !== null) {
         url.searchParams.set('pageToken', pageToken);
       }
@@ -1486,7 +1698,7 @@ export function createGoogleAdminRosterAdapter(
               'Google rejected a roster group read.',
             );
           }
-          return GoogleMembersResponseSchema.safeParse(
+          return GoogleCloudIdentityMembersResponseSchema.safeParse(
             await boundedJson(response, signal),
           );
         },
@@ -1498,12 +1710,26 @@ export function createGoogleAdminRosterAdapter(
         );
       }
       return RosterGroupPageSchema.parse({
-        members: (parsed.data.members ?? []).map((member) => ({
-          memberKey: member.id,
-          googleSubject: member.id,
-          displayName: member.email.split('@', 1)[0] ?? 'Staff member',
-          email: member.email.toLowerCase(),
-        })),
+        members: (parsed.data.memberships ?? []).flatMap((member) => {
+          if (!member.member.startsWith('users/')) {
+            return [];
+          }
+          const [preferredMemberKey] = member.preferredMemberKey;
+          if (preferredMemberKey === undefined) {
+            throw new RosterSyncError(
+              'GOOGLE_GROUP_RESPONSE_INVALID',
+              'Google returned a member without a preferred identity key.',
+            );
+          }
+          return [
+            {
+              memberKey: preferredMemberKey.id,
+              googleSubject: null,
+              displayName: 'Staff member',
+              email: preferredMemberKey.id,
+            },
+          ];
+        }),
         nextPageToken: parsed.data.nextPageToken ?? null,
       });
     },
@@ -2238,12 +2464,30 @@ export function createDrizzleRosterSyncStore(
     loadSourceConfiguration: loadConfiguration,
 
     async loadLocalContacts(
-      googleSubjects: readonly string[],
+      identityKeys: readonly string[],
     ): Promise<readonly RosterLocalContact[]> {
-      if (googleSubjects.length === 0) {
+      if (identityKeys.length === 0) {
         return Object.freeze([]);
       }
-      const uniqueSubjects = Object.freeze([...new Set(googleSubjects)].sort());
+      const uniqueIdentityKeys = Object.freeze(
+        [
+          ...new Set(
+            identityKeys.map((identityKey) => {
+              if (identityKey.includes('@')) {
+                const parsed = StaffRosterEmailSchema.safeParse(identityKey);
+                if (!parsed.success) {
+                  throw new RosterSyncError(
+                    'LOCAL_CONTACT_IDENTITY_INVALID',
+                    'A local contact lookup key was not an approved staff identity.',
+                  );
+                }
+                return parsed.data;
+              }
+              return z.string().trim().min(1).max(255).parse(identityKey);
+            }),
+          ),
+        ].sort(),
+      );
       return database.transaction(async (transaction) => {
         await transaction.execute(
           sql`set transaction isolation level repeatable read, read only`,
@@ -2252,22 +2496,56 @@ export function createDrizzleRosterSyncStore(
           string,
           {
             googleSubject: string;
+            staffEmail: string;
             displayName: string;
             pushEndpoints: RosterLocalPushEndpoint[];
           }
         >();
-        for (let offset = 0; offset < uniqueSubjects.length; offset += 500) {
-          const subjectBatch = uniqueSubjects.slice(offset, offset + 500);
+        for (
+          let offset = 0;
+          offset < uniqueIdentityKeys.length;
+          offset += 500
+        ) {
+          const identityBatch = uniqueIdentityKeys.slice(offset, offset + 500);
+          const staffEmailBatch = identityBatch.filter((identityKey) =>
+            identityKey.includes('@'),
+          );
+          const subjectBatch = identityBatch.filter(
+            (identityKey) => !identityKey.includes('@'),
+          );
+          const identityPredicate =
+            staffEmailBatch.length > 0 && subjectBatch.length > 0
+              ? or(
+                  inArray(users.googleSubject, subjectBatch),
+                  inArray(sql<string>`lower(${users.email})`, staffEmailBatch),
+                )
+              : staffEmailBatch.length > 0
+                ? inArray(sql<string>`lower(${users.email})`, staffEmailBatch)
+                : inArray(users.googleSubject, subjectBatch);
           const userRows = await transaction
             .select({
               googleSubject: users.googleSubject,
+              staffEmail: users.email,
               displayName: users.displayName,
             })
             .from(users)
-            .where(inArray(users.googleSubject, subjectBatch));
+            .where(and(identityPredicate, isNull(users.disabledAt)));
           for (const row of userRows) {
+            const staffEmail = StaffRosterEmailSchema.parse(row.staffEmail);
+            const existing = contactMap.get(row.googleSubject);
+            if (
+              existing !== undefined &&
+              (existing.staffEmail !== staffEmail ||
+                existing.displayName !== row.displayName)
+            ) {
+              throw new RosterSyncError(
+                'LOCAL_CONTACT_IDENTITY_CONFLICT',
+                'Local identity keys resolved to conflicting staff records.',
+              );
+            }
             contactMap.set(row.googleSubject, {
               googleSubject: row.googleSubject,
+              staffEmail,
               displayName: row.displayName,
               pushEndpoints: [],
             });
@@ -2297,9 +2575,10 @@ export function createDrizzleRosterSyncStore(
             )
             .where(
               and(
-                inArray(users.googleSubject, subjectBatch),
+                identityPredicate,
                 isNull(deviceEnrollments.revokedAt),
                 isNull(devicePushTokenUnregistrations.id),
+                isNull(users.disabledAt),
               ),
             );
           for (const row of pushRows) {
@@ -2316,7 +2595,7 @@ export function createDrizzleRosterSyncStore(
         return Object.freeze(
           [...contactMap.values()]
             .sort((left, right) =>
-              left.googleSubject.localeCompare(right.googleSubject),
+              left.staffEmail.localeCompare(right.staffEmail),
             )
             .map((contact) =>
               Object.freeze({
@@ -2577,6 +2856,7 @@ export function createDrizzleRosterSyncStore(
               rosterSnapshotId: snapshot.id,
               population: recipient.population,
               googleSubject: recipient.googleSubject,
+              staffEmail: recipient.staffEmail,
               displayName: recipient.displayName,
             })),
           );

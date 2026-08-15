@@ -21,6 +21,14 @@ import {
   groupSources,
   neighborhoodFacilities,
   neighborhoodVersions,
+  rosterRecipientGroupSources,
+  rosterRecipients,
+  rosterSnapshotFacilities,
+  rosterSnapshots,
+  rosterSnapshotSources,
+  rosterSourceConfigurationFacilities,
+  rosterSourceConfigurationGroups,
+  rosterSourceConfigurations,
 } from '../../../../db/schema';
 import { migrateDatabase } from '../../../../drizzle/migrate';
 import {
@@ -31,6 +39,7 @@ import { BoundedDatabaseQueryError } from './bounded-query';
 import {
   loadAudienceConfiguration,
   loadLatestAudienceConfigurationHeader,
+  loadRosterSnapshot,
 } from './capabilities';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -216,6 +225,148 @@ describeWithDatabase('start-flow audience version selection', () => {
       facilityId,
     );
     expect(stillSelected).toMatchObject({ id: audienceId, version: 2 });
+  });
+
+  test('round-trips an email-only staff recipient without inventing a Google subject', async () => {
+    const database = databaseConnection().db;
+    const facilityId = randomUUID();
+    const sourceId = randomUUID();
+    const configurationId = randomUUID();
+    const snapshotId = randomUUID();
+    const recipientId = randomUUID();
+    const capturedAt = new Date('2030-01-04T00:00:00.000Z');
+    const staffEmail = `email-only-${randomBytes(8).toString('hex')}@psd401.net`;
+
+    await database.transaction(async (transaction) => {
+      await transaction.insert(facilities).values({
+        id: facilityId,
+        code: `ER-${randomBytes(4).toString('hex').toUpperCase()}`,
+        name: 'Synthetic email-only roster facility',
+        active: true,
+      });
+      await transaction.insert(groupSources).values({
+        id: sourceId,
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId,
+        displayName: 'Synthetic Cloud Identity staff group',
+        active: true,
+        googleGroupId: `synthetic-${randomBytes(8).toString('hex')}`,
+        email: `synthetic-${randomBytes(8).toString('hex')}@psd401.net`,
+        createdAt: capturedAt,
+      });
+      await transaction.insert(rosterSourceConfigurations).values({
+        id: configurationId,
+        version: 1,
+        population: 'staff',
+        createdAt: capturedAt,
+      });
+      await transaction.insert(rosterSourceConfigurationFacilities).values({
+        configurationId,
+        configurationVersion: 1,
+        facilityId,
+      });
+      await transaction.insert(rosterSourceConfigurationGroups).values({
+        configurationId,
+        configurationVersion: 1,
+        population: 'staff',
+        groupSourceId: sourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'building',
+      });
+      await transaction.insert(rosterSnapshots).values({
+        id: snapshotId,
+        version: 1,
+        population: 'staff',
+        complete: true,
+        sourceConfigurationId: configurationId,
+        sourceConfigurationVersion: 1,
+        syncStartedAt: capturedAt,
+        capturedAt,
+      });
+      await transaction.insert(rosterSnapshotFacilities).values({
+        rosterSnapshotId: snapshotId,
+        facilityId,
+      });
+      await transaction.insert(rosterSnapshotSources).values([
+        {
+          rosterSnapshotId: snapshotId,
+          population: 'staff',
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'building',
+          completionKind: 'expected',
+        },
+        {
+          rosterSnapshotId: snapshotId,
+          population: 'staff',
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'building',
+          completionKind: 'completed',
+        },
+      ]);
+      await transaction.insert(rosterRecipients).values({
+        id: recipientId,
+        rosterSnapshotId: snapshotId,
+        population: 'staff',
+        googleSubject: null,
+        staffEmail,
+        displayName: 'Synthetic Email-Only Staff',
+      });
+      await transaction.insert(rosterRecipientGroupSources).values({
+        rosterSnapshotId: snapshotId,
+        recipientId,
+        population: 'staff',
+        groupSourceId: sourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'building',
+      });
+    });
+
+    for (const nonCanonicalStaffEmail of [
+      'UPPERCASE.STAFF@PSD401.NET',
+      'external.staff@example.com',
+    ]) {
+      await expect(
+        (async () => {
+          await database.insert(rosterRecipients).values({
+            id: randomUUID(),
+            rosterSnapshotId: snapshotId,
+            population: 'staff',
+            googleSubject: null,
+            staffEmail: nonCanonicalStaffEmail,
+            displayName: 'Rejected Noncanonical Staff',
+          });
+        })(),
+      ).rejects.toThrow();
+    }
+
+    const hydrated = await loadRosterSnapshot(
+      database as unknown as DatabaseQuery,
+      'staff',
+      facilityId,
+      snapshotId,
+    );
+
+    expect(hydrated?.recipients).toEqual([
+      {
+        id: recipientId,
+        population: 'staff',
+        googleSubject: null,
+        staffEmail,
+        displayName: 'Synthetic Email-Only Staff',
+        groupSourceRefs: [
+          {
+            id: sourceId,
+            kind: 'google-group',
+            purpose: 'building',
+            facilityId,
+          },
+        ],
+        endpoints: [],
+      },
+    ]);
   });
 
   test('fails closed before materializing more than 500 audience targets', async () => {

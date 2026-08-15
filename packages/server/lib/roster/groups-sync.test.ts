@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
 import {
   executeCapability,
   GroupSourceSchema,
@@ -11,13 +11,14 @@ import {
   type RosterSnapshot,
   type RosterSyncResult,
 } from '@psd-eoc/contracts';
+import { exportPKCS8, generateKeyPair } from 'jose';
 
 import {
   createMockGoogleGroupsAdapter as createRuntimeMockGoogleGroupsAdapter,
   createScheduledRosterSyncAuthorizer,
   createSyncRosterHandler,
   diffRosterGroupCounts,
-  readGoogleAdminRosterConfiguration,
+  readGoogleCloudIdentityRosterConfiguration,
   RosterSyncError,
   syncRoster,
   type CompleteRosterSyncPersistenceRequest,
@@ -40,6 +41,41 @@ import {
 const SYNC_TIME = '2026-08-08T12:00:00.000Z';
 const HISTORICAL_TIME = '2026-08-07T12:00:00.000Z';
 const REVISION_DIGEST = 'a'.repeat(64);
+let syntheticPrivateKey = '';
+
+beforeAll(async () => {
+  const { privateKey } = await generateKeyPair('RS256', {
+    extractable: true,
+  });
+  syntheticPrivateKey = await exportPKCS8(privateKey);
+});
+
+function serializedCloudIdentityCredential(
+  overrides: Readonly<Record<string, unknown>> = {},
+): string {
+  return JSON.stringify({
+    type: 'service_account',
+    project_id: 'psd401-eoc',
+    private_key_id: 'a'.repeat(40),
+    private_key: syntheticPrivateKey,
+    client_email: 'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com',
+    client_id: '123456789012345678901',
+    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+    token_uri: 'https://oauth2.googleapis.com/token',
+    auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
+    client_x509_cert_url:
+      'https://www.googleapis.com/robot/v1/metadata/x509/roster-sync-reader%40psd401-eoc.iam.gserviceaccount.com',
+    universe_domain: 'googleapis.com',
+    approved_staff_group_sha256: 'b'.repeat(64),
+    credential_created_at: HISTORICAL_TIME,
+    domain_wide_delegation: false,
+    oauth_scopes: [
+      'https://www.googleapis.com/auth/cloud-identity.groups.readonly',
+    ],
+    workspace_admin_role: '_GROUPS_READER_ROLE',
+    ...overrides,
+  });
+}
 
 const IDS = Object.freeze({
   facilityNorth: '00000000-0000-4000-8000-000000000001',
@@ -1386,8 +1422,8 @@ describe('adapter, authorization, and configuration boundaries', () => {
   test('never permits a mocked adapter to populate the staff roster', async () => {
     const loaded = staffLoadedConfiguration();
     const source = loaded.sources[0];
-    if (source === undefined) {
-      throw new Error('Staff source fixture was missing.');
+    if (source === undefined || source.kind !== 'google-group') {
+      throw new Error('Google staff source fixture was missing.');
     }
     const store = new MemoryRosterSyncStore(loaded);
     const collector = alertCollector();
@@ -1419,6 +1455,326 @@ describe('adapter, authorization, and configuration boundaries', () => {
     expect(collector.alerts[0]?.errorCodes).toEqual([
       'MOCK_STAFF_ROSTER_FORBIDDEN',
     ]);
+  });
+
+  test('reads only the database-configured group and matches its staff emails to local identities', async () => {
+    const loaded = staffLoadedConfiguration();
+    const source = loaded.sources[0];
+    if (source === undefined || source.kind !== 'google-group') {
+      throw new Error('Google staff source fixture was missing.');
+    }
+    const staffEmail = 'staff.member@psd401.net';
+    const pushEndpointId = '00000000-0000-4000-8000-000000000099';
+    const store = new MemoryRosterSyncStore(
+      loaded,
+      [],
+      [
+        {
+          staffEmail,
+          googleSubject: 'verified-google-subject',
+          displayName: 'Verified Staff Member',
+          pushEndpoints: [
+            {
+              id: pushEndpointId,
+              platform: 'ios',
+              token: 'synthetic-unroutable-push-token',
+            },
+          ],
+        },
+      ],
+    );
+    const providerReads: Array<
+      Readonly<{ id: string; email: string; googleGroupId: string }>
+    > = [];
+    const adapter: RosterGroupsAdapter = Object.freeze({
+      truthLabel: 'configured-unverified' as const,
+      fetchPage(configuredSource: GroupSource): Promise<RosterGroupPage> {
+        if (configuredSource.kind !== 'google-group') {
+          throw new Error('The staff sync read a non-Google source.');
+        }
+        providerReads.push({
+          id: configuredSource.id,
+          email: configuredSource.email,
+          googleGroupId: configuredSource.googleGroupId,
+        });
+        return Promise.resolve({
+          members: [
+            {
+              memberKey: staffEmail,
+              googleSubject: null,
+              displayName: 'Staff member',
+              email: staffEmail,
+            },
+            {
+              memberKey: 'unmatched.staff@psd401.net',
+              googleSubject: null,
+              displayName: 'Staff member',
+              email: 'unmatched.staff@psd401.net',
+            },
+          ],
+          nextPageToken: null,
+        });
+      },
+    });
+
+    const result = await syncRoster(
+      SYNC_INPUT,
+      context('roster-sync-cloud-identity-email-0001'),
+      dependencies(store, adapter, alertCollector().sink),
+    );
+
+    expect(result.outcome).toBe('complete');
+    expect(providerReads).toEqual([
+      {
+        id: source.id,
+        email: source.email,
+        googleGroupId: source.googleGroupId,
+      },
+    ]);
+    expect(store.loadedContactSubjects).toEqual([
+      ['staff.member@psd401.net', 'unmatched.staff@psd401.net'],
+    ]);
+    expect(store.snapshots[0]?.recipients).toEqual([
+      expect.objectContaining({
+        googleSubject: 'verified-google-subject',
+        staffEmail,
+        displayName: 'Verified Staff Member',
+        endpoints: [
+          expect.objectContaining({ channel: 'email', email: staffEmail }),
+          expect.objectContaining({
+            id: pushEndpointId,
+            channel: 'push',
+          }),
+        ],
+      }),
+      expect.objectContaining({
+        googleSubject: null,
+        staffEmail: 'unmatched.staff@psd401.net',
+        displayName: 'Staff member',
+        endpoints: [
+          expect.objectContaining({
+            channel: 'email',
+            email: 'unmatched.staff@psd401.net',
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  test('rejects a provider-supplied subject and preserves the last complete staff snapshot', async () => {
+    const loaded = staffLoadedConfiguration();
+    const previous = RosterSnapshotSchema.parse({
+      id: IDS.historicalSnapshot,
+      version: 1,
+      population: 'staff',
+      complete: true,
+      sourceConfiguration: {
+        id: loaded.configuration.id,
+        version: loaded.configuration.version,
+      },
+      facilityIds: loaded.configuration.facilityIds,
+      expectedSourceGroupRefs: loaded.configuration.groupSourceRefs,
+      sourceGroupRefs: loaded.configuration.groupSourceRefs,
+      recipients: [
+        {
+          id: '00000000-0000-4000-8000-000000000097',
+          population: 'staff',
+          googleSubject: null,
+          staffEmail: 'previous.staff@psd401.net',
+          displayName: 'Previous Staff',
+          groupSourceRefs: loaded.configuration.groupSourceRefs,
+          endpoints: [],
+        },
+      ],
+      syncStartedAt: HISTORICAL_TIME,
+      capturedAt: HISTORICAL_TIME,
+    });
+    const store = new MemoryRosterSyncStore(loaded, [previous]);
+    const adapter: RosterGroupsAdapter = Object.freeze({
+      truthLabel: 'configured-unverified' as const,
+      fetchPage(): Promise<RosterGroupPage> {
+        return Promise.resolve({
+          members: [
+            {
+              memberKey: 'provider-supplied-subject',
+              googleSubject: 'provider-supplied-subject',
+              displayName: 'Unverified Provider Identity',
+              email: 'provider.subject@psd401.net',
+            },
+          ],
+          nextPageToken: null,
+        });
+      },
+    });
+
+    const result = await syncRoster(
+      SYNC_INPUT,
+      context('roster-sync-provider-subject-0001'),
+      dependencies(store, adapter, alertCollector().sink),
+    );
+
+    expect(result.outcome).toBe('failed');
+    expect(result.groupFailures[0]?.errorCode).toBe('GROUP_MEMBER_INVALID');
+    expect(store.snapshots).toEqual([previous]);
+    expect(store.publishCalls).toBe(0);
+  });
+
+  test('rejects a 403 after a partial membership page and preserves the last complete snapshot', async () => {
+    const loaded = staffLoadedConfiguration();
+    const previous = RosterSnapshotSchema.parse({
+      id: IDS.historicalSnapshot,
+      version: 1,
+      population: 'staff',
+      complete: true,
+      sourceConfiguration: {
+        id: loaded.configuration.id,
+        version: loaded.configuration.version,
+      },
+      facilityIds: loaded.configuration.facilityIds,
+      expectedSourceGroupRefs: loaded.configuration.groupSourceRefs,
+      sourceGroupRefs: loaded.configuration.groupSourceRefs,
+      recipients: [
+        {
+          id: '00000000-0000-4000-8000-000000000096',
+          population: 'staff',
+          googleSubject: null,
+          staffEmail: 'previous.staff@psd401.net',
+          displayName: 'Previous Staff',
+          groupSourceRefs: loaded.configuration.groupSourceRefs,
+          endpoints: [],
+        },
+      ],
+      syncStartedAt: HISTORICAL_TIME,
+      capturedAt: HISTORICAL_TIME,
+    });
+    const store = new MemoryRosterSyncStore(loaded, [previous]);
+    const providerPayload = 'provider-403-member-payload-must-not-leak';
+    const adapter: RosterGroupsAdapter = Object.freeze({
+      truthLabel: 'configured-unverified' as const,
+      fetchPage(
+        _source: GroupSource,
+        pageToken: string | null,
+      ): Promise<RosterGroupPage> {
+        if (pageToken === null) {
+          return Promise.resolve({
+            members: [
+              {
+                memberKey: 'partial.staff@psd401.net',
+                googleSubject: null,
+                displayName: 'Staff member',
+                email: 'partial.staff@psd401.net',
+              },
+            ],
+            nextPageToken: 'second-provider-page',
+          });
+        }
+        return Promise.reject(
+          new RosterSyncError('GOOGLE_GROUP_FETCH_REJECTED', providerPayload),
+        );
+      },
+    });
+    const collector = alertCollector();
+
+    const result = await syncRoster(
+      SYNC_INPUT,
+      context('roster-sync-partial-page-403-0001'),
+      dependencies(store, adapter, collector.sink),
+    );
+
+    expect(result.outcome).toBe('failed');
+    expect(result.groupFailures[0]?.errorCode).toBe(
+      'GOOGLE_GROUP_FETCH_REJECTED',
+    );
+    expect(store.localContactLoads).toBe(0);
+    expect(store.snapshots).toEqual([previous]);
+    expect(store.publishCalls).toBe(0);
+    expect(collector.alerts[0]?.errorCodes).toEqual([
+      'GOOGLE_GROUP_FETCH_REJECTED',
+    ]);
+    expect(JSON.stringify({ result, alerts: collector.alerts })).not.toContain(
+      providerPayload,
+    );
+  });
+
+  test('rejects ambiguous local email mappings without replacing the last complete snapshot', async () => {
+    const loaded = staffLoadedConfiguration();
+    const source = loaded.sources[0];
+    if (source === undefined) {
+      throw new Error('Staff source fixture was missing.');
+    }
+    const previous = RosterSnapshotSchema.parse({
+      id: IDS.historicalSnapshot,
+      version: 1,
+      population: 'staff',
+      complete: true,
+      sourceConfiguration: {
+        id: loaded.configuration.id,
+        version: loaded.configuration.version,
+      },
+      facilityIds: loaded.configuration.facilityIds,
+      expectedSourceGroupRefs: loaded.configuration.groupSourceRefs,
+      sourceGroupRefs: loaded.configuration.groupSourceRefs,
+      recipients: [
+        {
+          id: '00000000-0000-4000-8000-000000000098',
+          population: 'staff',
+          googleSubject: null,
+          staffEmail: 'previous.staff@psd401.net',
+          displayName: 'Previous Staff',
+          groupSourceRefs: loaded.configuration.groupSourceRefs,
+          endpoints: [],
+        },
+      ],
+      syncStartedAt: HISTORICAL_TIME,
+      capturedAt: HISTORICAL_TIME,
+    });
+    const duplicateEmail = 'duplicate.staff@psd401.net';
+    const store = new MemoryRosterSyncStore(
+      loaded,
+      [previous],
+      [
+        {
+          staffEmail: duplicateEmail,
+          googleSubject: 'verified-subject-one',
+          displayName: 'First Local Match',
+          pushEndpoints: [],
+        },
+        {
+          staffEmail: duplicateEmail,
+          googleSubject: 'verified-subject-two',
+          displayName: 'Second Local Match',
+          pushEndpoints: [],
+        },
+      ],
+    );
+    const adapter: RosterGroupsAdapter = Object.freeze({
+      truthLabel: 'configured-unverified' as const,
+      fetchPage(): Promise<RosterGroupPage> {
+        return Promise.resolve({
+          members: [
+            {
+              memberKey: duplicateEmail,
+              googleSubject: null,
+              displayName: 'Staff member',
+              email: duplicateEmail,
+            },
+          ],
+          nextPageToken: null,
+        });
+      },
+    });
+
+    const result = await syncRoster(
+      SYNC_INPUT,
+      context('roster-sync-ambiguous-email-0001'),
+      dependencies(store, adapter, alertCollector().sink),
+    );
+
+    expect(result.outcome).toBe('failed');
+    expect(result.groupFailures[0]?.errorCode).toBe('LOCAL_CONTACT_DUPLICATE');
+    expect(result.publishedSnapshotId).toBeNull();
+    expect(store.snapshots).toEqual([previous]);
+    expect(store.publishCalls).toBe(0);
   });
 
   test('keeps mock fixtures isolated, frozen, paged, and network-free', async () => {
@@ -1577,15 +1933,56 @@ describe('adapter, authorization, and configuration boundaries', () => {
     expect(JSON.stringify(collector.alerts)).not.toContain(secret);
   });
 
+  test('accepts only the exact non-delegated Cloud Identity secret contract', () => {
+    const runtimeConfiguration = readGoogleCloudIdentityRosterConfiguration({
+      GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential(),
+      GOOGLE_ROSTER_HTTP_TIMEOUT_MS: '12000',
+    });
+    expect(runtimeConfiguration).toEqual({
+      serviceAccountEmail:
+        'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com',
+      privateKeyId: 'a'.repeat(40),
+      privateKey: syntheticPrivateKey,
+      timeoutMilliseconds: 12_000,
+    });
+    expect(
+      readGoogleCloudIdentityRosterConfiguration({
+        GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential({
+          approved_staff_group_sha256: 'c'.repeat(64),
+        }),
+        GOOGLE_ROSTER_HTTP_TIMEOUT_MS: '12000',
+      }),
+    ).toEqual(runtimeConfiguration);
+
+    for (const override of [
+      { project_id: 'wrong-project' },
+      { client_email: 'other-reader@psd401-eoc.iam.gserviceaccount.com' },
+      {
+        oauth_scopes: [
+          'https://www.googleapis.com/auth/admin.directory.group.member.readonly',
+        ],
+      },
+      { domain_wide_delegation: true },
+      { delegated_subject: 'admin@psd401.net' },
+      { approved_staff_group_sha256: 'not-a-sha256' },
+      { private_key: 'not-a-private-key' },
+    ]) {
+      expect(() =>
+        readGoogleCloudIdentityRosterConfiguration({
+          GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential(override),
+        }),
+      ).toThrow(RosterSyncError);
+    }
+  });
+
   test('does not include supplied secrets in Google configuration errors', () => {
     const secret = 'secret-private-key-body-never-reflect';
     let caught: unknown;
     try {
-      readGoogleAdminRosterConfiguration({
-        GOOGLE_ROSTER_SERVICE_ACCOUNT_EMAIL:
-          'synthetic-service@example.invalid',
-        GOOGLE_ROSTER_DELEGATED_SUBJECT: 'delegate@psd401.net',
-        GOOGLE_ROSTER_SERVICE_ACCOUNT_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${secret}\n-----END PRIVATE KEY-----`,
+      readGoogleCloudIdentityRosterConfiguration({
+        GOOGLE_ROSTER_CONFIG: serializedCloudIdentityCredential({
+          private_key: `-----BEGIN PRIVATE KEY-----\n${secret}\n-----END PRIVATE KEY-----`,
+        }),
         GOOGLE_ROSTER_HTTP_TIMEOUT_MS: '999999',
       });
     } catch (error) {
