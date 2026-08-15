@@ -166,6 +166,20 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain(
       '$representative_log_base/not-an-app-runner-log:*',
     );
+    expect(workflow).toContain('(.EvaluationResults | length) == 1');
+    expect(workflow).toContain(
+      '(.EvaluationResults[0].ResourceSpecificResults | length) == 2',
+    );
+    expect(workflow).toContain(
+      '{resource: .EvalResourceName, decision: .EvalResourceDecision}',
+    );
+    expect(workflow).toContain('.EvalResourceDecision != "allowed"');
+    expect(workflow).not.toContain(
+      `test "$(jq '.EvaluationResults | length' artifacts/readback/deployment-role-log-retention-simulation.json)" -eq 2`,
+    );
+    expect(workflow).not.toContain(
+      `test "$(jq '.EvaluationResults | length' artifacts/readback/deployment-role-log-retention-negative-simulation.json)" -eq 2`,
+    );
     expect(workflow).not.toContain('aws logs get-log-events');
     expect(workflow).not.toContain('aws logs filter-log-events');
   });
