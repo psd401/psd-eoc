@@ -76,6 +76,20 @@ jobs:
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: psd_eoc_test
+          POSTGRES_PASSWORD: synthetic_test_password
+          POSTGRES_USER: psd_eoc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U psd_eoc_test -d psd_eoc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     outputs:
       artifact_digest: ${{ steps.upload.outputs['artifact-digest'] }}
       deploy_role_arn: ${{ steps.request.outputs.deploy_role_arn }}
@@ -87,6 +101,7 @@ jobs:
       ACKNOWLEDGE: ${{ inputs.acknowledge }}
       APPROVED_IDENTITY_SHA256: ${{ inputs.approved_identity_sha256 }}
       CHANGE_REFERENCE: ${{ inputs.change_reference }}
+      DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
       DEPLOYMENT_AUTHORITY: ${{ inputs.deployment_authority }}
       GOOGLE_OAUTH_SECRET_ARN: ${{ inputs.google_oauth_secret_arn }}
       MONTHLY_COST_ESTIMATE_USD: ${{ inputs.monthly_cost_estimate_usd }}
@@ -94,6 +109,7 @@ jobs:
       PRICING_REFERENCE: ${{ inputs.pricing_reference }}
       REQUESTED_IMAGE_DIGEST: ${{ inputs.image_digest }}
       SOURCE_SHA: ${{ inputs.source_sha }}
+      TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test
     steps:
       - name: Check out the exact requested source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
