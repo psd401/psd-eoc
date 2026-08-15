@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,18 +16,28 @@ import { join, sep } from 'node:path';
 import {
   EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT_ENV,
   claimEventRoomPlaywrightRunContext,
+  cleanupInterruptedEventRoomPlaywrightCoordinator,
   cleanupEventRoomPlaywrightRunAfterChildExit,
   cleanupReportedEventRoomPlaywrightRun,
+  detectPriorEventRoomPlaywrightResidue,
   eventRoomPlaywrightDatabaseMarker,
   finalizeEventRoomPlaywrightWebServer,
+  hasEventRoomPlaywrightSupervisorStoppingMarker,
   inspectEventRoomPlaywrightPortLease,
   prepareEventRoomPlaywrightServerWorkspace,
+  readEventRoomPlaywrightWebServerIdentity,
   releaseEventRoomPlaywrightPortLease,
   releaseEventRoomPlaywrightPortLeaseIfOwned,
+  requireCurrentEventRoomPlaywrightGateHeartbeat,
   requireEventRoomPlaywrightDatabaseOwnership,
   requireEventRoomPlaywrightRunContext,
   requireSyntheticEventRoomTestDatabaseUrl,
   resolveEventRoomPlaywrightRunContext,
+  terminateInterruptedEventRoomPlaywrightWebServer,
+  writeEventRoomPlaywrightCoordinatorIdentity,
+  writeEventRoomPlaywrightGateHeartbeat,
+  writeEventRoomPlaywrightSupervisorStopping,
+  writeEventRoomPlaywrightWebServerIdentity,
 } from './test-database';
 
 const BASE_DATABASE_URL = 'postgresql://test:test@localhost:5432/psd_eoc_test';
@@ -99,6 +110,11 @@ describe('event-room synthetic database guard', () => {
       expect(new URL(context.databaseUrl).pathname).toBe(
         `/${context.databaseName}`,
       );
+      expect(context.workspaceNamespace).toMatch(/^[0-9a-f]{64}$/u);
+      expect(context.runDirectory).toContain(context.workspaceNamespace);
+      expect(context.supervisionDirectory).toContain(
+        context.workspaceNamespace,
+      );
       expect(context.fixturePath.startsWith(`${context.runDirectory}/`)).toBe(
         true,
       );
@@ -116,6 +132,19 @@ describe('event-room synthetic database guard', () => {
       ]) {
         expect(path.startsWith(`${context.runDirectory}${sep}`)).toBe(true);
       }
+      for (const path of [
+        context.gateHeartbeatPath,
+        context.coordinatorIdentityPath,
+        context.coordinatorChildExitPath,
+        context.webServerIdentityPath,
+        context.supervisorReadyPath,
+        context.supervisorStoppingPath,
+      ]) {
+        expect(path.startsWith(`${context.supervisionDirectory}${sep}`)).toBe(
+          true,
+        );
+      }
+      expect(context.supervisionDirectory).not.toBe(context.runDirectory);
       expect(context.appPort).toBeGreaterThanOrEqual(20_000);
       expect(context.appPort).toBeLessThan(50_000);
       expect(requireEventRoomPlaywrightRunContext(context)).toEqual(context);
@@ -123,6 +152,15 @@ describe('event-room synthetic database guard', () => {
         requireEventRoomPlaywrightRunContext({
           ...context,
           databaseName: 'main',
+        }),
+      ).toThrow('altered');
+      expect(() =>
+        requireEventRoomPlaywrightRunContext({
+          ...context,
+          workspaceNamespace:
+            context.workspaceNamespace === 'f'.repeat(64)
+              ? 'e'.repeat(64)
+              : 'f'.repeat(64),
         }),
       ).toThrow('altered');
     } finally {
@@ -154,6 +192,708 @@ describe('event-room synthetic database guard', () => {
     }
   });
 
+  test('separates current gate liveness from immutable coordinator identity', () => {
+    const nonce = 'a'.repeat(64);
+    const current = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const missing = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    try {
+      const now = Date.now();
+      writeEventRoomPlaywrightGateHeartbeat(current, process.pid, nonce, now);
+      expect(
+        requireCurrentEventRoomPlaywrightGateHeartbeat(
+          current,
+          process.pid,
+          nonce,
+          now,
+        ),
+      ).toBe(now);
+      expect(() =>
+        requireCurrentEventRoomPlaywrightGateHeartbeat(
+          current,
+          process.pid,
+          'b'.repeat(64),
+          now,
+        ),
+      ).toThrow('altered');
+      expect(() =>
+        requireCurrentEventRoomPlaywrightGateHeartbeat(
+          current,
+          process.pid,
+          nonce,
+          now + 2_001,
+        ),
+      ).toThrow('stale');
+      expect(() =>
+        requireCurrentEventRoomPlaywrightGateHeartbeat(
+          missing,
+          process.pid,
+          nonce,
+          now,
+        ),
+      ).toThrow('missing');
+      writeEventRoomPlaywrightSupervisorStopping(current, process.pid, nonce);
+      expect(
+        hasEventRoomPlaywrightSupervisorStoppingMarker(
+          current,
+          process.pid,
+          nonce,
+        ),
+      ).toBe(true);
+      expect(() =>
+        hasEventRoomPlaywrightSupervisorStoppingMarker(
+          current,
+          process.pid,
+          'b'.repeat(64),
+        ),
+      ).toThrow('altered or replaced');
+    } finally {
+      rmSync(current.runDirectory, { force: true, recursive: true });
+      rmSync(current.supervisionDirectory, { force: true, recursive: true });
+      releaseEventRoomPlaywrightPortLeaseIfOwned(current);
+      releaseEventRoomPlaywrightPortLeaseIfOwned(missing);
+    }
+  });
+
+  test('a later run detects current and legacy marked residue without adopting name-only cleanup authority', () => {
+    const nonce = 'a'.repeat(64);
+    const current = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const stale = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const active = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const stopping = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const unmarked = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const legacy = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const leaseOnly = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const pendingHeartbeat = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const alteredLegacy = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    try {
+      const now = Date.now();
+      writeEventRoomPlaywrightGateHeartbeat(
+        stale,
+        process.pid,
+        nonce,
+        now - 2_001,
+      );
+      writeEventRoomPlaywrightGateHeartbeat(active, process.pid, nonce, now);
+      mkdirSync(active.runDirectory, { recursive: true });
+      writeFileSync(
+        join(active.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: active.runId,
+          contextSha256: 'c'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      writeEventRoomPlaywrightGateHeartbeat(
+        stopping,
+        process.pid,
+        nonce,
+        now - 2_001,
+      );
+      writeEventRoomPlaywrightSupervisorStopping(
+        stopping,
+        process.pid,
+        nonce,
+        now,
+      );
+      mkdirSync(unmarked.supervisionDirectory, { recursive: true });
+      releaseEventRoomPlaywrightPortLease(unmarked);
+
+      mkdirSync(legacy.runDirectory, { recursive: true });
+      writeFileSync(
+        join(legacy.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: legacy.runId,
+          contextSha256: 'd'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      releaseEventRoomPlaywrightPortLease(legacy);
+
+      const staleLeaseTime = new Date(now - 2_001);
+      utimesSync(leaseOnly.portLeasePath, staleLeaseTime, staleLeaseTime);
+
+      mkdirSync(alteredLegacy.runDirectory, { recursive: true });
+      writeFileSync(
+        join(alteredLegacy.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: randomUUID(),
+          contextSha256: 'e'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      releaseEventRoomPlaywrightPortLease(alteredLegacy);
+
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
+      ).toContainEqual({ runId: stale.runId, reason: 'stale-heartbeat' });
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
+      ).not.toContainEqual({ runId: active.runId, reason: 'stale-heartbeat' });
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
+          ({ runId }) => runId === active.runId,
+        ),
+      ).toBe(false);
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
+          ({ runId }) => runId === unmarked.runId,
+        ),
+      ).toBe(false);
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
+          ({ runId }) => runId === stopping.runId,
+        ),
+      ).toBe(false);
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
+      ).toContainEqual({ runId: legacy.runId, reason: 'legacy-run-marker' });
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now),
+      ).toContainEqual({
+        runId: leaseOnly.runId,
+        reason: 'orphaned-port-lease',
+      });
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
+          ({ runId }) => runId === alteredLegacy.runId,
+        ),
+      ).toBe(false);
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now).some(
+          ({ runId }) => runId === pendingHeartbeat.runId,
+        ),
+      ).toBe(false);
+      expect(
+        detectPriorEventRoomPlaywrightResidue(current, () => now + 35_001),
+      ).toContainEqual({ runId: stopping.runId, reason: 'stale-heartbeat' });
+      expect(existsSync(stale.gateHeartbeatPath)).toBe(true);
+      expect(inspectEventRoomPlaywrightPortLease(stale)).toBe('owned');
+      expect(
+        existsSync(join(legacy.runDirectory, 'process-supervisor.json')),
+      ).toBe(true);
+      expect(inspectEventRoomPlaywrightPortLease(leaseOnly)).toBe('owned');
+    } finally {
+      for (const context of [
+        current,
+        stale,
+        active,
+        stopping,
+        unmarked,
+        legacy,
+        leaseOnly,
+        pendingHeartbeat,
+        alteredLegacy,
+      ]) {
+        rmSync(context.runDirectory, { force: true, recursive: true });
+        rmSync(context.supervisionDirectory, { force: true, recursive: true });
+        releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+      }
+    }
+  });
+
+  test('ignores and preserves unnamespaced and foreign-checkout residue', () => {
+    const current = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const foreignNamespace =
+      current.workspaceNamespace === 'f'.repeat(64)
+        ? 'e'.repeat(64)
+        : 'f'.repeat(64);
+    const foreign = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+      undefined,
+      foreignNamespace,
+    );
+    const unnamespacedLease = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+      undefined,
+      foreignNamespace === 'd'.repeat(64) ? 'c'.repeat(64) : 'd'.repeat(64),
+    );
+    const unnamespacedRunId = randomUUID();
+    const unnamespacedRunDirectory = join(
+      tmpdir(),
+      `psd-eoc-event-room-${unnamespacedRunId}`,
+    );
+    const unnamespacedSupervisionDirectory = join(
+      tmpdir(),
+      `psd-eoc-event-room-supervision-${unnamespacedRunId}`,
+    );
+    const nonce = 'a'.repeat(64);
+    try {
+      const now = Date.now();
+      writeEventRoomPlaywrightGateHeartbeat(
+        foreign,
+        process.pid,
+        nonce,
+        now - 2_001,
+      );
+      mkdirSync(foreign.runDirectory, { recursive: true });
+      writeFileSync(
+        join(foreign.runDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: foreign.runId,
+          contextSha256: 'c'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      const staleLeaseTime = new Date(now - 2_001);
+      utimesSync(foreign.portLeasePath, staleLeaseTime, staleLeaseTime);
+      mkdirSync(unnamespacedRunDirectory, { recursive: true });
+      writeFileSync(
+        join(unnamespacedRunDirectory, 'process-supervisor.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-supervisor',
+          version: 1,
+          runId: unnamespacedRunId,
+          contextSha256: 'd'.repeat(64),
+          ownerPid: process.pid,
+          coordinatorNonce: randomUUID(),
+        }),
+      );
+      mkdirSync(unnamespacedSupervisionDirectory, { recursive: true });
+      writeFileSync(
+        join(unnamespacedSupervisionDirectory, 'gate-heartbeat.json'),
+        JSON.stringify({
+          kind: 'psd-eoc-event-room-playwright-gate-heartbeat',
+          version: 1,
+          runId: unnamespacedRunId,
+          leaseOwnerPid: process.pid,
+          gatePid: process.pid,
+          supervisorNonceHash: createHash('sha256').update(nonce).digest('hex'),
+          observedAt: now - 2_001,
+        }),
+      );
+      writeFileSync(
+        unnamespacedLease.portLeasePath,
+        JSON.stringify({
+          runId: unnamespacedLease.runId,
+          appPort: unnamespacedLease.appPort,
+          leaseOwnerPid: unnamespacedLease.leaseOwnerPid,
+        }),
+      );
+      utimesSync(
+        unnamespacedLease.portLeasePath,
+        staleLeaseTime,
+        staleLeaseTime,
+      );
+
+      expect(foreign.workspaceNamespace).toBe(foreignNamespace);
+      expect(foreign.appPort).not.toBe(current.appPort);
+      const residue = detectPriorEventRoomPlaywrightResidue(current, () => now);
+      expect(residue.some(({ runId }) => runId === foreign.runId)).toBe(false);
+      expect(residue.some(({ runId }) => runId === unnamespacedRunId)).toBe(
+        false,
+      );
+      expect(
+        residue.some(({ runId }) => runId === unnamespacedLease.runId),
+      ).toBe(false);
+      expect(existsSync(foreign.gateHeartbeatPath)).toBe(true);
+      expect(
+        existsSync(join(foreign.runDirectory, 'process-supervisor.json')),
+      ).toBe(true);
+      expect(inspectEventRoomPlaywrightPortLease(foreign)).toBe('owned');
+      expect(existsSync(unnamespacedRunDirectory)).toBe(true);
+      expect(existsSync(unnamespacedSupervisionDirectory)).toBe(true);
+      expect(existsSync(unnamespacedLease.portLeasePath)).toBe(true);
+    } finally {
+      for (const context of [current, foreign]) {
+        rmSync(context.runDirectory, { force: true, recursive: true });
+        rmSync(context.supervisionDirectory, {
+          force: true,
+          recursive: true,
+        });
+        releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+      }
+      rmSync(unnamespacedRunDirectory, { force: true, recursive: true });
+      rmSync(unnamespacedSupervisionDirectory, {
+        force: true,
+        recursive: true,
+      });
+      rmSync(unnamespacedLease.portLeasePath, { force: true });
+      rmSync(unnamespacedLease.runDirectory, {
+        force: true,
+        recursive: true,
+      });
+      rmSync(unnamespacedLease.supervisionDirectory, {
+        force: true,
+        recursive: true,
+      });
+    }
+  });
+
+  test('residue freshness uses time read after advancing heartbeat and lease evidence', () => {
+    const nonce = 'b'.repeat(64);
+    const current = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const heartbeatAdvanced = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const leaseAdvanced = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    try {
+      const scanStartedAt = Date.now();
+      const evidenceAdvancedAt = scanStartedAt + 1_000;
+      writeEventRoomPlaywrightGateHeartbeat(
+        heartbeatAdvanced,
+        process.pid,
+        nonce,
+        evidenceAdvancedAt,
+      );
+      const advancedLeaseTime = new Date(evidenceAdvancedAt);
+      utimesSync(
+        leaseAdvanced.portLeasePath,
+        advancedLeaseTime,
+        advancedLeaseTime,
+      );
+
+      let clockReads = 0;
+      const residue = detectPriorEventRoomPlaywrightResidue(current, () => {
+        clockReads += 1;
+        return clockReads === 1 ? scanStartedAt : evidenceAdvancedAt;
+      });
+
+      expect(clockReads).toBeGreaterThan(1);
+      expect(
+        residue.some(({ runId }) => runId === heartbeatAdvanced.runId),
+      ).toBe(false);
+      expect(residue.some(({ runId }) => runId === leaseAdvanced.runId)).toBe(
+        false,
+      );
+    } finally {
+      for (const context of [current, heartbeatAdvanced, leaseAdvanced]) {
+        rmSync(context.runDirectory, { force: true, recursive: true });
+        rmSync(context.supervisionDirectory, {
+          force: true,
+          recursive: true,
+        });
+        releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+      }
+    }
+  });
+
+  test('wrong, missing, or stale coordinator identity never authorizes cleanup', async () => {
+    const nonce = 'c'.repeat(64);
+    const coordinatorPid = 424_242;
+    const command = `${process.execPath} playwright.web-server.ts --coordinate ${nonce}`;
+    const identity = {
+      coordinatorPid,
+      processGroupId: coordinatorPid,
+      processStartedAt: 'Thu Aug 13 17:00:00 2026',
+      commandHash: createHash('sha256').update(command).digest('hex'),
+    } as const;
+    const missing = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const wrong = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const stale = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    let authorized = false;
+    const operations = {
+      async inspectProcess() {
+        return {
+          processGroupId: coordinatorPid,
+          startedAt: 'Thu Aug 13 16:59:59 2026',
+          command,
+        };
+      },
+      signalProcessGroup() {
+        authorized = true;
+      },
+      signalProcess() {
+        authorized = true;
+      },
+      async processGroupMembers() {
+        authorized = true;
+        return [];
+      },
+      async proveWebServerRunIdentity() {
+        authorized = true;
+        return false;
+      },
+      async waitForPortClose() {
+        authorized = true;
+      },
+      async dropOwnedDatabase() {
+        authorized = true;
+      },
+    };
+    try {
+      await expect(
+        cleanupInterruptedEventRoomPlaywrightCoordinator(
+          missing,
+          {
+            kind: 'psd-eoc-event-room-playwright-coordinator',
+            version: 1,
+            runId: missing.runId,
+            leaseOwnerPid: missing.leaseOwnerPid,
+            ...identity,
+            supervisorNonceHash: createHash('sha256')
+              .update(nonce)
+              .digest('hex'),
+          },
+          nonce,
+          operations,
+        ),
+      ).rejects.toThrow('identity is missing');
+      expect(authorized).toBe(false);
+
+      mkdirSync(wrong.runDirectory, { recursive: true });
+      const wrongIdentity = writeEventRoomPlaywrightCoordinatorIdentity(
+        wrong,
+        identity,
+        nonce,
+      );
+      writeFileSync(wrong.coordinatorIdentityPath, 'altered marker');
+      await expect(
+        cleanupInterruptedEventRoomPlaywrightCoordinator(
+          wrong,
+          wrongIdentity,
+          nonce,
+          operations,
+        ),
+      ).rejects.toThrow('altered or replaced');
+      expect(authorized).toBe(false);
+
+      mkdirSync(stale.runDirectory, { recursive: true });
+      const staleIdentity = writeEventRoomPlaywrightCoordinatorIdentity(
+        stale,
+        identity,
+        nonce,
+      );
+      await expect(
+        cleanupInterruptedEventRoomPlaywrightCoordinator(
+          stale,
+          staleIdentity,
+          nonce,
+          operations,
+        ),
+      ).rejects.toThrow('ambiguous or reused');
+      expect(authorized).toBe(false);
+    } finally {
+      for (const context of [missing, wrong, stale]) {
+        rmSync(context.runDirectory, { force: true, recursive: true });
+        rmSync(context.supervisionDirectory, {
+          force: true,
+          recursive: true,
+        });
+        releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+      }
+    }
+  });
+
+  test('web-server cleanup requires exact process identity and a live run challenge', async () => {
+    const context = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const nonce = 'd'.repeat(64);
+    const webServerPid = 434_343;
+    const command = `${process.execPath} app/(app)/events/[id]/playwright.web-server.ts`;
+    let authorized = false;
+    let challengeProven = false;
+    let observedStart = 'Thu Aug 13 17:29:59 2026';
+    let challengeAttempts = 0;
+    try {
+      const identity = writeEventRoomPlaywrightWebServerIdentity(
+        context,
+        {
+          webServerPid,
+          processGroupId: webServerPid,
+          processStartedAt: 'Thu Aug 13 17:30:00 2026',
+          commandHash: createHash('sha256').update(command).digest('hex'),
+          challengePort: 53_434,
+        },
+        nonce,
+      );
+      expect(readEventRoomPlaywrightWebServerIdentity(context, nonce)).toEqual(
+        identity,
+      );
+      expect(() =>
+        readEventRoomPlaywrightWebServerIdentity(context, 'e'.repeat(64)),
+      ).toThrow('altered or replaced');
+      await expect(
+        terminateInterruptedEventRoomPlaywrightWebServer(
+          context,
+          identity,
+          nonce,
+          {
+            async inspectProcess() {
+              return {
+                processGroupId: webServerPid,
+                startedAt: observedStart,
+                command,
+              };
+            },
+            signalProcessGroup() {
+              authorized = true;
+            },
+            signalProcess() {
+              authorized = true;
+            },
+            async processGroupMembers() {
+              authorized = true;
+              return [];
+            },
+            async proveWebServerRunIdentity() {
+              challengeAttempts += 1;
+              return challengeProven;
+            },
+            async waitForPortClose() {
+              authorized = true;
+            },
+            async dropOwnedDatabase() {
+              authorized = true;
+            },
+          },
+        ),
+      ).rejects.toThrow('ambiguous or reused before termination');
+      expect(authorized).toBe(false);
+      expect(challengeAttempts).toBe(0);
+
+      // A PID/PGID reused within ps(1)'s one-second start-time precision can
+      // retain the same wrapper command. Only the nonce-bound live challenge
+      // distinguishes that replacement from this exact run.
+      observedStart = 'Thu Aug 13 17:30:00 2026';
+      await expect(
+        terminateInterruptedEventRoomPlaywrightWebServer(
+          context,
+          identity,
+          nonce,
+          {
+            async inspectProcess() {
+              return {
+                processGroupId: webServerPid,
+                startedAt: observedStart,
+                command,
+              };
+            },
+            signalProcessGroup() {
+              authorized = true;
+            },
+            signalProcess() {
+              authorized = true;
+            },
+            async processGroupMembers() {
+              authorized = true;
+              return [];
+            },
+            async proveWebServerRunIdentity() {
+              challengeAttempts += 1;
+              return challengeProven;
+            },
+            async waitForPortClose() {
+              authorized = true;
+            },
+            async dropOwnedDatabase() {
+              authorized = true;
+            },
+          },
+        ),
+      ).rejects.toThrow('run challenge failed before termination');
+      expect(authorized).toBe(false);
+      expect(challengeAttempts).toBe(1);
+
+      challengeProven = true;
+      await terminateInterruptedEventRoomPlaywrightWebServer(
+        context,
+        identity,
+        nonce,
+        {
+          async inspectProcess() {
+            return {
+              processGroupId: webServerPid,
+              startedAt: observedStart,
+              command,
+            };
+          },
+          signalProcessGroup() {
+            authorized = true;
+          },
+          signalProcess() {
+            authorized = true;
+          },
+          async processGroupMembers() {
+            return [];
+          },
+          async proveWebServerRunIdentity() {
+            challengeAttempts += 1;
+            return challengeProven;
+          },
+          async waitForPortClose() {
+            authorized = true;
+          },
+          async dropOwnedDatabase() {
+            authorized = true;
+          },
+        },
+      );
+      expect(authorized).toBe(true);
+      expect(challengeAttempts).toBe(2);
+    } finally {
+      rmSync(context.supervisionDirectory, { force: true, recursive: true });
+      releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+    }
+  });
+
   test('atomically probes past a concurrent run holding the preferred port', () => {
     const first = claimEventRoomPlaywrightRunContext(
       BASE_DATABASE_URL,
@@ -178,6 +918,36 @@ describe('event-room synthetic database guard', () => {
     } finally {
       if (second !== null) releaseEventRoomPlaywrightPortLease(second);
       releaseEventRoomPlaywrightPortLease(first);
+    }
+  });
+
+  test('skips an occupied loopback port without retaining a rejected lease', () => {
+    const candidate = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    releaseEventRoomPlaywrightPortLease(candidate);
+    const listener = Bun.listen({
+      hostname: '127.0.0.1',
+      port: candidate.appPort,
+      socket: {
+        data() {},
+      },
+    });
+    let claimed: ReturnType<typeof claimEventRoomPlaywrightRunContext> | null =
+      null;
+    try {
+      claimed = claimEventRoomPlaywrightRunContext(
+        BASE_DATABASE_URL,
+        randomUUID(),
+        candidate.appPort,
+      );
+      expect(claimed.appPort).not.toBe(candidate.appPort);
+      expect(inspectEventRoomPlaywrightPortLease(candidate)).toBe('absent');
+      expect(inspectEventRoomPlaywrightPortLease(claimed)).toBe('owned');
+    } finally {
+      if (claimed !== null) releaseEventRoomPlaywrightPortLease(claimed);
+      listener.stop(true);
     }
   });
 
@@ -221,6 +991,7 @@ describe('event-room synthetic database guard', () => {
       );
     } finally {
       rmSync(context.runDirectory, { force: true, recursive: true });
+      rmSync(context.supervisionDirectory, { force: true, recursive: true });
       releaseEventRoomPlaywrightPortLease(context);
       rmSync(source.root, { force: true, recursive: true });
     }
@@ -308,6 +1079,7 @@ describe('event-room synthetic database guard', () => {
       expect(inspectEventRoomPlaywrightPortLease(replacement)).toBe('owned');
     } finally {
       rmSync(context.runDirectory, { force: true, recursive: true });
+      rmSync(context.supervisionDirectory, { force: true, recursive: true });
       if (replacement !== null) {
         releaseEventRoomPlaywrightPortLease(replacement);
       } else {
@@ -341,6 +1113,7 @@ describe('event-room synthetic database guard', () => {
       );
     } finally {
       rmSync(context.runDirectory, { force: true, recursive: true });
+      rmSync(context.supervisionDirectory, { force: true, recursive: true });
       releaseEventRoomPlaywrightPortLeaseIfOwned(context);
     }
   });
@@ -442,6 +1215,43 @@ describe('event-room synthetic database guard', () => {
       expect(inspectEventRoomPlaywrightPortLease(context)).toBe('absent');
     } finally {
       rmSync(context.runDirectory, { force: true, recursive: true });
+      rmSync(context.supervisionDirectory, { force: true, recursive: true });
+      releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+    }
+  });
+
+  test('outer cleanup preserves published process identity for exact supervisor cleanup', async () => {
+    const context = claimEventRoomPlaywrightRunContext(
+      BASE_DATABASE_URL,
+      randomUUID(),
+    );
+    const nonce = 'f'.repeat(64);
+    mkdirSync(context.runDirectory, { recursive: true });
+    try {
+      writeEventRoomPlaywrightCoordinatorIdentity(
+        context,
+        {
+          coordinatorPid: 454_545,
+          processGroupId: 454_545,
+          processStartedAt: 'Thu Aug 13 18:00:00 2026',
+          commandHash: createHash('sha256')
+            .update(`playwright coordinator ${nonce}`)
+            .digest('hex'),
+        },
+        nonce,
+      );
+      await expect(
+        cleanupEventRoomPlaywrightRunAfterChildExit(
+          context,
+          async () => undefined,
+        ),
+      ).rejects.toThrow('exact supervisor cleanup is required');
+      expect(existsSync(context.runDirectory)).toBe(true);
+      expect(existsSync(context.coordinatorIdentityPath)).toBe(true);
+      expect(inspectEventRoomPlaywrightPortLease(context)).toBe('owned');
+    } finally {
+      rmSync(context.runDirectory, { force: true, recursive: true });
+      rmSync(context.supervisionDirectory, { force: true, recursive: true });
       releaseEventRoomPlaywrightPortLeaseIfOwned(context);
     }
   });
