@@ -146,11 +146,13 @@ export interface MobileE2EArtifactPaths {
 }
 
 export interface MobileE2EEnrollmentWarmupRequest {
+  readonly evidenceRoute: 'mobile-oidc-start' | 'mobile-oidc-exchange';
   readonly url: string;
   readonly method: 'POST';
   readonly headers: Readonly<Record<string, string>>;
   readonly body: '{}';
   readonly expectedStatus: 400;
+  readonly expectedCode: 'VALIDATION_ERROR';
 }
 
 export interface MobileE2EPostAuthenticationWarmupRequest {
@@ -703,24 +705,31 @@ export function parseMobileE2EManifest(value: unknown): MobileRuntimeManifest {
 }
 
 /**
- * Builds a deliberately invalid request that reaches the exact OIDC start
- * handler but is rejected by its contract before any transport state exists.
+ * Builds deliberately invalid requests that compile both OIDC enrollment
+ * handlers but are rejected by their contracts before transport state,
+ * provider exchange, access checks, capabilities, or sessions can execute.
  */
-export function mobileE2EEnrollmentWarmupRequest(
+export function mobileE2EEnrollmentWarmupRequests(
   manifestValue: unknown,
-): MobileE2EEnrollmentWarmupRequest {
+): readonly MobileE2EEnrollmentWarmupRequest[] {
   const manifest = parseMobileE2EManifest(manifestValue);
-  return Object.freeze({
-    url: new URL('/api/auth/mobile/oidc/start', manifest.appOrigin).toString(),
-    method: 'POST',
-    headers: Object.freeze({
-      Accept: 'application/json',
-      'Cache-Control': 'no-store',
-      'Content-Type': 'application/json',
-    }),
-    body: '{}',
-    expectedStatus: 400,
-  });
+  const request = (
+    evidenceRoute: MobileE2EEnrollmentWarmupRequest['evidenceRoute'],
+    pathname: string,
+  ): MobileE2EEnrollmentWarmupRequest =>
+    Object.freeze({
+      evidenceRoute,
+      url: new URL(pathname, manifest.appOrigin).toString(),
+      method: 'POST',
+      headers: mobileE2EWarmupHeaders('POST'),
+      body: '{}',
+      expectedStatus: 400,
+      expectedCode: 'VALIDATION_ERROR',
+    });
+  return Object.freeze([
+    request('mobile-oidc-start', '/api/auth/mobile/oidc/start'),
+    request('mobile-oidc-exchange', '/api/auth/mobile/oidc/exchange'),
+  ]);
 }
 
 function mobileE2EWarmupHeaders(
@@ -964,7 +973,7 @@ export function mobileE2EAndroidArchitectureArguments(): readonly string[] {
   return Object.freeze(['-PreactNativeArchitectures=x86_64']);
 }
 
-/** Leaves hosted-runner capacity for the already-booted Android emulator. */
+/** Bounds Gradle concurrency on the constrained hosted Android runner. */
 export function mobileE2EAndroidGradleWorkerArguments(): readonly string[] {
   return Object.freeze(['--max-workers', '2']);
 }
@@ -978,6 +987,89 @@ export function mobileE2EAndroidBuildArguments(): readonly string[] {
     ...mobileE2EAndroidArchitectureArguments(),
     'app:assembleDebug',
   ]);
+}
+
+export function mobileE2EAndroidEmulatorControlArguments(
+  serial: string,
+  action: 'pause' | 'resume',
+): readonly string[] {
+  if (!/^emulator-\d+$/u.test(serial)) {
+    throw new Error(
+      'Android emulator control requires one exact local emulator serial.',
+    );
+  }
+  return Object.freeze(['adb', '-s', serial, 'emu', 'avd', action]);
+}
+
+/** Accepts only the Android emulator console's exact positive acknowledgement. */
+export function assertMobileE2EAndroidEmulatorControlResponse(
+  stdout: string,
+  stderr: string,
+): void {
+  if (stdout.replace(/\r/gu, '').trim() !== 'OK' || stderr.trim() !== '') {
+    throw new Error('The Android emulator control command was not accepted.');
+  }
+}
+
+/**
+ * Quiesces the exact validated emulator during a resource-heavy native build
+ * and always attempts to restore it before reporting build success or failure.
+ */
+export async function withMobileE2EAndroidEmulatorPaused<T>(
+  serial: string,
+  operation: () => Promise<T>,
+  control: (command: readonly string[]) => Promise<void>,
+): Promise<T> {
+  const pauseCommand = mobileE2EAndroidEmulatorControlArguments(
+    serial,
+    'pause',
+  );
+  const resumeCommand = mobileE2EAndroidEmulatorControlArguments(
+    serial,
+    'resume',
+  );
+  let pauseFailure: Readonly<{ error: unknown }> | undefined;
+  try {
+    await control(pauseCommand);
+  } catch (error) {
+    pauseFailure = { error };
+  }
+  if (pauseFailure !== undefined) {
+    try {
+      await control(resumeCommand);
+    } catch (resumeError) {
+      throw new AggregateError(
+        [pauseFailure.error, resumeError],
+        'The Android emulator pause was uncertain and its recovery resume failed.',
+      );
+    }
+    throw pauseFailure.error;
+  }
+
+  let result: T | undefined;
+  let operationFailure: Readonly<{ error: unknown }> | undefined;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationFailure = { error };
+  }
+
+  let resumeFailure: Readonly<{ error: unknown }> | undefined;
+  try {
+    await control(resumeCommand);
+  } catch (error) {
+    resumeFailure = { error };
+  }
+
+  if (operationFailure !== undefined && resumeFailure !== undefined) {
+    throw new AggregateError(
+      [operationFailure.error, resumeFailure.error],
+      'The Android native operation failed and its emulator could not resume.',
+    );
+  }
+  if (operationFailure !== undefined) throw operationFailure.error;
+  if (resumeFailure !== undefined) throw resumeFailure.error;
+  return result as T;
 }
 
 export function mobileE2EDevClientUrl(port: number): string {

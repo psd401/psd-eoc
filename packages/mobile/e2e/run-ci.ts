@@ -18,6 +18,7 @@ import {
   MOBILE_E2E_APPLICATION_ID,
   acquireMobileE2EArtifactDirectory,
   acquireMobileE2ERunnerRoot,
+  assertMobileE2EAndroidEmulatorControlResponse,
   assertMobileE2EPostAuthenticationWarmupRejection,
   createMobileE2ERunId,
   mobileE2EAndroidArchitectureArguments,
@@ -26,7 +27,7 @@ import {
   mobileE2ECompletionMarkerFilename,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EDevClientUrl,
-  mobileE2EEnrollmentWarmupRequest,
+  mobileE2EEnrollmentWarmupRequests,
   mobileE2EPostAuthenticationWarmupRequests,
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
@@ -57,6 +58,7 @@ import {
   requireMatchingMobileE2ERunIds,
   selectMobileE2EIosRuntimeAndDeviceType,
   shouldCopyMobileE2EWorkspaceSource,
+  withMobileE2EAndroidEmulatorPaused,
   type MobileE2EArtifactPaths,
   type MobileE2EPlatform,
   type MobileE2ERunnerPaths,
@@ -78,6 +80,7 @@ const androidInitScriptRelativePath =
 const COMMAND_TIMEOUT_MS = 30 * 60_000;
 const NATIVE_BUILD_TIMEOUT_MS = 45 * 60_000;
 const ANDROID_APP_BUILD_TIMEOUT_MS = 60 * 60_000;
+const ANDROID_EMULATOR_CONTROL_TIMEOUT_MS = 30_000;
 const RUNTIME_TIMEOUT_MS = 4 * 60_000;
 const METRO_TIMEOUT_MS = 4 * 60_000;
 const PROCESS_TERMINATION_GRACE_MS = 15_000;
@@ -703,40 +706,76 @@ async function awaitMetro(
   throw new Error(`Metro on loopback port ${port} was not ready in time.`);
 }
 
-async function warmMobileEnrollmentStartRoute(
+async function warmMobileEnrollmentRoutes(
   platform: MobileE2EPlatform,
   manifest: MobileRuntimeManifest,
   artifactRoot: string,
   cancellation: MobileE2ECancellation,
 ): Promise<void> {
-  cancellation.throwIfRequested();
-  const warmup = mobileE2EEnrollmentWarmupRequest(manifest);
-  let response: Response;
-  try {
-    response = await fetch(warmup.url, {
-      method: warmup.method,
-      headers: warmup.headers,
-      body: warmup.body,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS),
-    });
-  } catch {
-    throw new Error(
-      'The synthetic mobile OIDC start route did not respond before enrollment.',
+  const completedRoutes: string[] = [];
+  for (const warmup of mobileE2EEnrollmentWarmupRequests(manifest)) {
+    cancellation.throwIfRequested();
+    let response: Response;
+    try {
+      response = await fetch(warmup.url, {
+        method: warmup.method,
+        headers: warmup.headers,
+        body: warmup.body,
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(MOBILE_ENROLLMENT_WARMUP_TIMEOUT_MS),
+      });
+    } catch {
+      throw new Error(
+        `The ${warmup.evidenceRoute} route did not respond before enrollment.`,
+      );
+    }
+    const cacheDirectives =
+      response.headers
+        .get('cache-control')
+        ?.toLowerCase()
+        .split(',')
+        .map((directive) => directive.trim()) ?? [];
+    if (
+      !cacheDirectives.includes('no-store') ||
+      response.headers.get('location') !== null ||
+      response.headers.get('set-cookie') !== null
+    ) {
+      throw new Error(
+        `The ${warmup.evidenceRoute} route returned unsafe warmup metadata.`,
+      );
+    }
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error(
+        `The ${warmup.evidenceRoute} route returned a malformed warmup response.`,
+      );
+    }
+    assertMobileE2EPostAuthenticationWarmupRejection(
+      warmup,
+      response.status,
+      payload,
     );
-  }
-  const status = response.status;
-  await response.body?.cancel();
-  if (status !== warmup.expectedStatus) {
-    throw new Error(
-      'The synthetic mobile OIDC warmup was not rejected before state creation.',
-    );
+    completedRoutes.push(warmup.evidenceRoute);
   }
   cancellation.throwIfRequested();
   await writeFile(
-    resolve(artifactRoot, `${platform}-oidc-start-warmup.txt`),
-    `issue=32\nplatform=${platform}\nclassification=drill\nroster=synthetic\nproviders=mocked\nroute=mobile-oidc-start\nstatus=validation-rejected\n`,
-    { encoding: 'utf8', mode: 0o600 },
+    resolve(artifactRoot, `${platform}-oidc-route-warmup.txt`),
+    [
+      'issue=32',
+      `platform=${platform}`,
+      'classification=drill',
+      'roster=synthetic',
+      'providers=mocked',
+      'credentials=omitted',
+      ...completedRoutes.map((route) => `route=${route}`),
+      'status=fail-closed-rejections-verified',
+      '',
+    ].join('\n'),
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
   );
 }
 
@@ -1084,6 +1123,34 @@ async function buildAndroidApp(
     throw new Error('The Android build did not produce the expected APK.');
   }
   return apkPath;
+}
+
+async function buildAndroidAppWithPausedEmulator(
+  serial: string,
+  paths: MobileE2ERunnerPaths,
+  artifactRoot: string,
+): Promise<string> {
+  return withMobileE2EAndroidEmulatorPaused(
+    serial,
+    () => buildAndroidApp(paths, artifactRoot),
+    async (command) => {
+      const action = command.at(-1);
+      if (action !== 'pause' && action !== 'resume') {
+        throw new Error('The Android emulator control action is invalid.');
+      }
+      const response = await runCommand(command, {
+        timeoutMilliseconds: ANDROID_EMULATOR_CONTROL_TIMEOUT_MS,
+        logPath: resolve(
+          artifactRoot,
+          `android-emulator-${action}-for-build.log`,
+        ),
+      });
+      assertMobileE2EAndroidEmulatorControlResponse(
+        response.stdout,
+        response.stderr,
+      );
+    },
+  );
 }
 
 function startMetro(
@@ -2764,18 +2831,21 @@ async function runPlatformSuite(
         maestroEnvironment,
         iosDriverSession,
       );
-      await warmMobileEnrollmentStartRoute(
-        platform,
-        manifest,
-        artifacts.root,
-        cancellation,
-      );
       await warmMobilePostAuthenticationRoutes(
         platform,
         manifest,
         artifacts.root,
         cancellation,
         'initial',
+      );
+      // Keep both OIDC route modules hot at the exact enrollment boundary.
+      // Empty credential-free bodies must fail schema validation before any
+      // provider, access-gate, capability, or session work can execute.
+      await warmMobileEnrollmentRoutes(
+        platform,
+        manifest,
+        artifacts.root,
+        cancellation,
       );
       await runAuthenticationSplit(
         platform,
@@ -2878,9 +2948,13 @@ async function runPlatformSuite(
       androidSerial = suiteAndroidSerial;
       await ensureAndroidDevice(suiteAndroidSerial);
       androidPackagesWereAbsent = true;
-      const apkPath = await buildAndroidApp(paths, artifacts.root);
-      // Native compilation can expose a hosted-emulator crash. Re-prove the
-      // exact local device before claiming or mutating its synthetic PIN.
+      const apkPath = await buildAndroidAppWithPausedEmulator(
+        suiteAndroidSerial,
+        paths,
+        artifacts.root,
+      );
+      // Re-prove the exact resumed local device before claiming or mutating
+      // its synthetic PIN.
       await ensureAndroidDevice(suiteAndroidSerial);
       // Claim cleanup before the mutating command so a lost adb response
       // cannot leave the suite's synthetic PIN behind on the emulator.
@@ -2934,18 +3008,18 @@ async function runPlatformSuite(
         suiteAndroidSerial,
         'Sign in to PSD EOC',
       );
-      await warmMobileEnrollmentStartRoute(
-        platform,
-        manifest,
-        artifacts.root,
-        cancellation,
-      );
       await warmMobilePostAuthenticationRoutes(
         platform,
         manifest,
         artifacts.root,
         cancellation,
         'initial',
+      );
+      await warmMobileEnrollmentRoutes(
+        platform,
+        manifest,
+        artifacts.root,
+        cancellation,
       );
       await runAuthenticationSplit(
         platform,

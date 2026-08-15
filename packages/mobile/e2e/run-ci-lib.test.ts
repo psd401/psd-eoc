@@ -19,6 +19,7 @@ import {
   MOBILE_E2E_NOTIFICATION_TITLE,
   acquireMobileE2EArtifactDirectory,
   acquireMobileE2ERunnerRoot,
+  assertMobileE2EAndroidEmulatorControlResponse,
   assertMobileE2EArtifactDirectoryOwned,
   assertMobileE2EPostAuthenticationWarmupRejection,
   assertMobileE2ERunnerRootOwned,
@@ -27,12 +28,13 @@ import {
   decideMobileE2EIosNotificationResponse,
   mobileE2EAndroidArchitectureArguments,
   mobileE2EAndroidBuildArguments,
+  mobileE2EAndroidEmulatorControlArguments,
   mobileE2EAndroidGradleWorkerArguments,
   mobileE2EAndroidInstrumentationArguments,
   mobileE2EArtifactPaths,
   mobileE2ECompletionMarkerFilename,
   mobileE2EDevClientUrl,
-  mobileE2EEnrollmentWarmupRequest,
+  mobileE2EEnrollmentWarmupRequests,
   mobileE2EExpoStartArguments,
   mobileE2EFixtureMetroEnvironment,
   mobileE2EIosBuildArguments,
@@ -71,6 +73,7 @@ import {
   requireMatchingMobileE2ERunIds,
   selectMobileE2EIosRuntimeAndDeviceType,
   shouldCopyMobileE2EWorkspaceSource,
+  withMobileE2EAndroidEmulatorPaused,
 } from './run-ci-lib';
 
 const RUN_ID = 'a'.repeat(32);
@@ -579,20 +582,37 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toThrow();
   });
 
-  test('warms only the exact synthetic OIDC start route before enrollment', async () => {
-    expect(mobileE2EEnrollmentWarmupRequest(manifest())).toEqual({
-      url: `${manifest().appOrigin}/api/auth/mobile/oidc/start`,
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Cache-Control': 'no-store',
-        'Content-Type': 'application/json',
+  test('warms only the exact synthetic OIDC routes before enrollment', async () => {
+    expect(mobileE2EEnrollmentWarmupRequests(manifest())).toEqual([
+      {
+        evidenceRoute: 'mobile-oidc-start',
+        url: `${manifest().appOrigin}/api/auth/mobile/oidc/start`,
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+        expectedStatus: 400,
+        expectedCode: 'VALIDATION_ERROR',
       },
-      body: '{}',
-      expectedStatus: 400,
-    });
+      {
+        evidenceRoute: 'mobile-oidc-exchange',
+        url: `${manifest().appOrigin}/api/auth/mobile/oidc/exchange`,
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+        expectedStatus: 400,
+        expectedCode: 'VALIDATION_ERROR',
+      },
+    ]);
     expect(() =>
-      mobileE2EEnrollmentWarmupRequest({
+      mobileE2EEnrollmentWarmupRequests({
         ...manifest(),
         classification: 'incident',
       }),
@@ -603,21 +623,30 @@ describe('issue #32 exact synthetic drill data', () => {
       'utf8',
     );
     const warmup = runner.match(
-      /async function warmMobileEnrollmentStartRoute[\s\S]+?(?=async function copyMobileWorkspace)/u,
+      /async function warmMobileEnrollmentRoutes[\s\S]+?(?=async function warmMobilePostAuthenticationRoutes)/u,
     )?.[0];
     expect(warmup).toBeDefined();
-    expect(warmup).toContain('mobileE2EEnrollmentWarmupRequest(manifest)');
-    expect(warmup).toContain('response.body?.cancel()');
-    expect(warmup).toContain('status !== warmup.expectedStatus');
-    expect(warmup).toContain('status=validation-rejected');
-    expect(
-      runner.match(/await warmMobileEnrollmentStartRoute\(/gu),
-    ).toHaveLength(2);
-    expect(runner).toMatch(
-      /awaitIosFreshEnrollmentReady[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+enroll-loopback-oidc-ios/u,
+    expect(warmup).toContain('mobileE2EEnrollmentWarmupRequests(manifest)');
+    expect(warmup).toContain("credentials: 'omit'");
+    expect(warmup).toContain("redirect: 'manual'");
+    expect(warmup).toContain("cache: 'no-store'");
+    expect(warmup).toContain("cacheDirectives.includes('no-store')");
+    expect(warmup).toContain("response.headers.get('location') !== null");
+    expect(warmup).toContain("response.headers.get('set-cookie') !== null");
+    expect(warmup).toContain('payload = await response.json()');
+    expect(warmup).toContain(
+      'assertMobileE2EPostAuthenticationWarmupRejection(',
+    );
+    expect(warmup).toContain('status=fail-closed-rejections-verified');
+    expect(warmup).toContain("flag: 'wx'");
+    expect(runner.match(/await warmMobileEnrollmentRoutes\(/gu)).toHaveLength(
+      2,
     );
     expect(runner).toMatch(
-      /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+enroll-loopback-oidc-android/u,
+      /awaitIosFreshEnrollmentReady[\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+await warmMobileEnrollmentRoutes\([\s\S]+enroll-loopback-oidc-ios/u,
+    );
+    expect(runner).toMatch(
+      /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+await warmMobileEnrollmentRoutes\([\s\S]+enroll-loopback-oidc-android/u,
     );
   });
 
@@ -751,10 +780,10 @@ describe('issue #32 exact synthetic drill data', () => {
       runner.match(/await warmMobilePostAuthenticationRoutes\(/gu),
     ).toHaveLength(3);
     expect(runner).toMatch(
-      /awaitIosFreshEnrollmentReady[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+enroll-loopback-oidc-ios/u,
+      /awaitIosFreshEnrollmentReady[\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+await warmMobileEnrollmentRoutes\([\s\S]+enroll-loopback-oidc-ios/u,
     );
     expect(runner).toMatch(
-      /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobileEnrollmentStartRoute\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+enroll-loopback-oidc-android/u,
+      /awaitApplicationReady\([\s\S]+Sign in to PSD EOC[\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+await warmMobileEnrollmentRoutes\([\s\S]+enroll-loopback-oidc-android/u,
     );
     expect(runner).toMatch(
       /executeIosNotificationAction\([\s\S]+await warmMobilePostAuthenticationRoutes\([\s\S]+notification-event-room-ios-post-auth/u,
@@ -763,7 +792,9 @@ describe('issue #32 exact synthetic drill data', () => {
 
   test('rejects any warmup response that is not the exact non-retryable API error', () => {
     const request = mobileE2EPostAuthenticationWarmupRequests(manifest())[0];
+    const enrollmentRequest = mobileE2EEnrollmentWarmupRequests(manifest())[1];
     expect(request).toBeDefined();
+    expect(enrollmentRequest).toBeDefined();
     const canonical = {
       code: 'UNAUTHENTICATED',
       message: 'A current synthetic session is required.',
@@ -794,11 +825,50 @@ describe('issue #32 exact synthetic drill data', () => {
         ),
       ).toThrow();
     }
+
+    const canonicalValidation = {
+      ...canonical,
+      code: 'VALIDATION_ERROR',
+      message: 'The mobile sign-in exchange is invalid.',
+    };
+    expect(() =>
+      assertMobileE2EPostAuthenticationWarmupRejection(
+        enrollmentRequest!,
+        400,
+        canonicalValidation,
+      ),
+    ).not.toThrow();
+    for (const [status, payload] of [
+      [200, canonicalValidation],
+      [301, canonicalValidation],
+      [401, canonicalValidation],
+      [403, canonicalValidation],
+      [500, canonicalValidation],
+      [400, { ...canonicalValidation, code: 'UNAUTHENTICATED' }],
+      [400, { ...canonicalValidation, retryable: true }],
+      [
+        400,
+        {
+          ...canonicalValidation,
+          fieldErrors: [{ path: [], message: 'drift' }],
+        },
+      ],
+      [400, { code: 'VALIDATION_ERROR' }],
+    ] as const) {
+      expect(() =>
+        assertMobileE2EPostAuthenticationWarmupRejection(
+          enrollmentRequest!,
+          status,
+          payload,
+        ),
+      ).toThrow();
+    }
   });
 
   test('pins every credential-free rejection before session or capability execution', async () => {
     const [
       oidcStart,
+      oidcExchange,
       devices,
       refresh,
       mobileStart,
@@ -809,6 +879,13 @@ describe('issue #32 exact synthetic drill data', () => {
       readFile(
         new URL(
           '../../server/app/api/auth/mobile/oidc/start/route.ts',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+      readFile(
+        new URL(
+          '../../server/app/api/auth/mobile/oidc/exchange/route.ts',
           import.meta.url,
         ),
         'utf8',
@@ -862,6 +939,16 @@ describe('issue #32 exact synthetic drill data', () => {
     expectInOrder(
       oidcStart.match(/export async function POST[\s\S]+$/u)?.[0] ?? '',
       ['MobileOidcStartRequestSchema.parse', 'beginGoogleMobileOidcSignIn'],
+    );
+    expectInOrder(
+      oidcExchange.match(/export async function POST[\s\S]+$/u)?.[0] ?? '',
+      [
+        'MobileOidcExchangeRequestSchema.parse',
+        'readGoogleOidcConfiguration',
+        'completeGoogleMobileOidcExchange',
+        'createDatabaseClient',
+        'executeCapability',
+      ],
     );
     expectInOrder(
       devices.match(
@@ -1655,7 +1742,7 @@ describe('issue #32 exact synthetic drill data', () => {
     ).toThrow('iOS simulator UDID');
   });
 
-  test('bounds the cold Android build without pausing its emulator', async () => {
+  test('bounds the cold Android build while quiescing its exact emulator', async () => {
     expect(mobileE2EAndroidArchitectureArguments()).toEqual([
       '-PreactNativeArchitectures=x86_64',
     ]);
@@ -1719,17 +1806,15 @@ describe('issue #32 exact synthetic drill data', () => {
       /async function injectAndroidNotification[\s\S]+\.\.\.mobileE2EAndroidGradleWorkerArguments\(\)[\s\S]+\.\.\.mobileE2EAndroidArchitectureArguments\(\)[\s\S]+app:connectedDebugAndroidTest[\s\S]+killLinuxProcessTreeOnCompletion: true/u,
     );
     expect(runner).toMatch(
-      /ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+const apkPath = await buildAndroidApp\(paths, artifacts\.root\);[\s\S]+ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+androidCredentialConfigured = true[\s\S]+configureAndroidCredential\(suiteAndroidSerial\)/u,
+      /ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+const apkPath = await buildAndroidAppWithPausedEmulator\([\s\S]+ensureAndroidDevice\(suiteAndroidSerial\);[\s\S]+androidCredentialConfigured = true[\s\S]+configureAndroidCredential\(suiteAndroidSerial\)/u,
     );
-    for (const forbidden of [
-      'buildAndroidAppWithPausedEmulator',
-      'ANDROID_EMULATOR_CONTROL_TIMEOUT_MS',
-      "'emu', 'avd', 'pause'",
-      'mobileE2EAndroidEmulatorControlArguments',
-      'withMobileE2EAndroidEmulatorPaused',
-    ]) {
-      expect(`${runner}\n${library}`).not.toContain(forbidden);
-    }
+    expect(runner).toContain(
+      'const ANDROID_EMULATOR_CONTROL_TIMEOUT_MS = 30_000;',
+    );
+    expect(runner).toMatch(
+      /async function buildAndroidAppWithPausedEmulator[\s\S]+withMobileE2EAndroidEmulatorPaused\([\s\S]+android-emulator-\$\{action\}-for-build\.log/u,
+    );
+    expect(library).toContain('withMobileE2EAndroidEmulatorPaused');
     const iosJob = workflow.match(/ {2}ios:\n[\s\S]+?(?=\n {2}android:)/u)?.[0];
     const androidJob = workflow.match(/ {2}android:\n[\s\S]+/u)?.[0];
     expect(iosJob).toContain('timeout-minutes: 90');
@@ -1890,6 +1975,111 @@ describe('issue #32 exact synthetic drill data', () => {
       'device_snapshot="$(\n    "$timeout_bin" --signal=TERM --kill-after=1s 2s',
     );
     expect(androidCiRunner).not.toMatch(/\b(?:pkill|killall)\b/u);
+  });
+
+  test('always resumes only the exact paused Android emulator', async () => {
+    expect(
+      mobileE2EAndroidEmulatorControlArguments('emulator-5554', 'pause'),
+    ).toEqual(['adb', '-s', 'emulator-5554', 'emu', 'avd', 'pause']);
+    expect(
+      mobileE2EAndroidEmulatorControlArguments('emulator-5554', 'resume'),
+    ).toEqual(['adb', '-s', 'emulator-5554', 'emu', 'avd', 'resume']);
+    expect(() =>
+      assertMobileE2EAndroidEmulatorControlResponse('OK\r\n', ''),
+    ).not.toThrow();
+    for (const [stdout, stderr] of [
+      ['KO: invalid state\r\n', ''],
+      ['unexpected\n', ''],
+      ['', 'console failure\n'],
+      ['OK\r\n', 'console warning\n'],
+    ] as const) {
+      expect(() =>
+        assertMobileE2EAndroidEmulatorControlResponse(stdout, stderr),
+      ).toThrow('control command was not accepted');
+    }
+    for (const invalidSerial of [
+      '',
+      'device',
+      '127.0.0.1:5555',
+      'emulator-*',
+    ]) {
+      expect(() =>
+        mobileE2EAndroidEmulatorControlArguments(invalidSerial, 'pause'),
+      ).toThrow('exact local emulator serial');
+    }
+
+    const successOrder: string[] = [];
+    await expect(
+      withMobileE2EAndroidEmulatorPaused(
+        'emulator-5554',
+        async () => {
+          successOrder.push('build');
+          return 'synthetic-apk';
+        },
+        async (command) => {
+          successOrder.push(command.at(-1) ?? 'missing');
+        },
+      ),
+    ).resolves.toBe('synthetic-apk');
+    expect(successOrder).toEqual(['pause', 'build', 'resume']);
+
+    const buildFailure = new Error('synthetic build failure');
+    const resumeFailure = new Error('synthetic resume failure');
+    const failureOrder: string[] = [];
+    await expect(
+      withMobileE2EAndroidEmulatorPaused(
+        'emulator-5554',
+        async () => {
+          failureOrder.push('build');
+          throw buildFailure;
+        },
+        async (command) => {
+          const action = command.at(-1) ?? 'missing';
+          failureOrder.push(action);
+          if (action === 'resume') throw resumeFailure;
+        },
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'The Android native operation failed and its emulator could not resume.',
+      errors: [buildFailure, resumeFailure],
+    });
+    expect(failureOrder).toEqual(['pause', 'build', 'resume']);
+
+    const uncertainPause = new Error('synthetic lost pause response');
+    const pauseRecoveryOrder: string[] = [];
+    await expect(
+      withMobileE2EAndroidEmulatorPaused(
+        'emulator-5554',
+        async () => {
+          pauseRecoveryOrder.push('build');
+        },
+        async (command) => {
+          const action = command.at(-1) ?? 'missing';
+          pauseRecoveryOrder.push(action);
+          if (action === 'pause') throw uncertainPause;
+        },
+      ),
+    ).rejects.toBe(uncertainPause);
+    expect(pauseRecoveryOrder).toEqual(['pause', 'resume']);
+
+    const lostResume = new Error('synthetic lost recovery response');
+    await expect(
+      withMobileE2EAndroidEmulatorPaused(
+        'emulator-5554',
+        async () => {
+          throw new Error('operation must not run after an uncertain pause');
+        },
+        async (command) => {
+          if (command.at(-1) === 'pause') throw uncertainPause;
+          throw lostResume;
+        },
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'The Android emulator pause was uncertain and its recovery resume failed.',
+      errors: [uncertainPause, lostResume],
+    });
   });
 
   test('starts Expo on loopback without incompatible offline mode', () => {
