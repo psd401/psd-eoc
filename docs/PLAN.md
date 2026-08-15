@@ -184,7 +184,11 @@ E1. A2P 10DLC brand/campaign registration (+ toll-free interim number).
 E2. SES production access + `alerts.psd401.net` DNS.
 E3. Google Play developer account creation + org verification.
 E4. App Store Connect app record + TestFlight group.
-E5. GCP project: OAuth client + Groups read (Admin SDK delegated service account).
+E5. GCP project: OAuth clients + Cloud Identity Groups read via the dedicated
+`roster-sync-reader@psd401-eoc.iam.gserviceaccount.com` service account,
+direct Workspace Groups Reader assignment, and only the singleton
+`cloud-identity.groups.readonly` scope; no delegated subject or domain-wide
+delegation.
 E6. FCM project for Android push (+ APNs key upload if/when direct).
 E7. Confirm designated access Google Groups + per-building group inventory.
 E8. WA Archives retention DAN lookup for incident/drill records (manual download; sos.wa.gov blocks bots).

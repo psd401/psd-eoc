@@ -527,6 +527,24 @@ export class PsdEocStack extends Stack {
       'GoogleOauthSecret',
       googleOauthSecretArn.valueAsString,
     );
+    const googleGroupsSecretArn = new CfnParameter(
+      this,
+      'GoogleGroupsSecretArn',
+      {
+        allowedPattern: `^arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
+        constraintDescription:
+          'Use the complete ARN of the retained /psd-eoc/google-groups secret in the approved account and region.',
+        description:
+          'Complete ARN of the independently retained read-only Cloud Identity roster credential; required only for a manually approved deployment.',
+        noEcho: true,
+        type: 'String',
+      },
+    );
+    const googleGroupsSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'GoogleGroupsSecret',
+      googleGroupsSecretArn.valueAsString,
+    );
     const googleOidcCookieSecret = new secretsmanager.Secret(
       this,
       'GoogleOidcCookieSecret',
@@ -688,6 +706,7 @@ export class PsdEocStack extends Stack {
       }),
       databaseApplicationSecret.grantRead(appRunnerInstanceRole),
       googleOauthSecret.grantRead(appRunnerInstanceRole),
+      googleGroupsSecret.grantRead(appRunnerInstanceRole),
       googleOidcCookieSecret.grantRead(appRunnerInstanceRole),
       apiSaltSecret.grantRead(appRunnerInstanceRole),
       deliveryStateWorkerTokenSecret.grantRead(appRunnerInstanceRole),
@@ -815,6 +834,10 @@ export class PsdEocStack extends Stack {
             imageConfiguration: {
               port: '3000',
               runtimeEnvironmentSecrets: [
+                {
+                  name: 'GOOGLE_ROSTER_CONFIG',
+                  value: googleGroupsSecret.secretArn,
+                },
                 {
                   name: 'GOOGLE_OAUTH_CONFIG',
                   value: googleOauthSecret.secretArn,

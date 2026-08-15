@@ -1019,8 +1019,8 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
         return Promise.resolve({
           members: [
             {
-              memberKey: fixture.googleSubject,
-              googleSubject: fixture.googleSubject,
+              memberKey: staffEmail,
+              googleSubject: null,
               displayName: 'Synthetic Push Race Staff',
               email: staffEmail,
             },
@@ -1217,8 +1217,8 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
           return Promise.resolve({
             members: [
               {
-                memberKey: fixture.googleSubject,
-                googleSubject: fixture.googleSubject,
+                memberKey: staffEmail,
+                googleSubject: null,
                 displayName: 'Synthetic Locked Push Staff',
                 email: staffEmail,
               },
