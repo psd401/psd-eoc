@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+  <title id="title">Android Play test installation screen reference</title>
+  <desc id="desc">Three illustrated Android screens show opening the approved Play-test link, joining the test, and installing PSD EOC from Google Play.</desc>
+  <rect width="960" height="560" fill="#f4f7fa"/>
+  <text x="48" y="52" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#17324d">Install PSD EOC from the approved Play test</text>
+  <text x="48" y="82" font-family="Arial, sans-serif" font-size="16" fill="#4c6275">Screen reference — Google Play wording may vary by Android version</text>
+  <g font-family="Arial, sans-serif">
+    <g transform="translate(48 112)">
+      <rect width="250" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
+      <rect x="80" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
+      <text x="20" y="66" font-size="15" font-weight="700" fill="#17324d">1  Approved test link</text>
+      <rect x="20" y="94" width="210" height="92" rx="12" fill="#e8f0f7"/>
+      <text x="34" y="125" font-size="14" font-weight="700" fill="#17324d">PSD EOC Play test</text>
+      <text x="34" y="151" font-size="13" fill="#334e62">Open with your approved</text>
+      <text x="34" y="171" font-size="13" fill="#334e62">district Google account.</text>
+      <text x="20" y="227" font-size="13" fill="#334e62">The same account must belong</text>
+      <text x="20" y="247" font-size="13" fill="#334e62">to the authorized tester group.</text>
+    </g>
+    <g transform="translate(355 112)">
+      <rect width="250" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
+      <rect x="80" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
+      <text x="20" y="66" font-size="15" font-weight="700" fill="#17324d">2  Join the test</text>
+      <text x="20" y="110" font-size="18" font-weight="700" fill="#17324d">PSD EOC</text>
+      <text x="20" y="140" font-size="13" fill="#4c6275">Private staff test</text>
+      <rect x="20" y="177" width="210" height="42" rx="8" fill="#175a8e"/>
+      <text x="69" y="204" font-size="14" font-weight="700" fill="#fff">Become a tester</text>
+      <text x="20" y="260" font-size="13" fill="#334e62">If Google says you are not</text>
+      <text x="20" y="280" font-size="13" fill="#334e62">eligible, check the signed-in</text>
+      <text x="20" y="300" font-size="13" fill="#334e62">account; do not request access</text>
+      <text x="20" y="320" font-size="13" fill="#334e62">with a personal account.</text>
+    </g>
+    <g transform="translate(662 112)">
+      <rect width="250" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
+      <rect x="80" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
+      <text x="20" y="66" font-size="15" font-weight="700" fill="#17324d">3  Install from Play</text>
+      <circle cx="65" cy="127" r="34" fill="#17324d"/>
+      <text x="44" y="137" font-size="26" font-weight="700" fill="#fff">EOC</text>
+      <text x="112" y="120" font-size="18" font-weight="700" fill="#17324d">PSD EOC</text>
+      <text x="112" y="145" font-size="13" fill="#4c6275">District staff app</text>
+      <rect x="20" y="184" width="210" height="42" rx="8" fill="#175a8e"/>
+      <text x="96" y="211" font-size="14" font-weight="700" fill="#fff">Install</text>
+      <text x="20" y="262" font-size="13" fill="#334e62">Stop after Install unless</text>
+      <text x="20" y="282" font-size="13" fill="#334e62">registration is separately</text>
+      <text x="20" y="302" font-size="13" fill="#334e62">approved by District Technology.</text>
+    </g>
+  </g>
+</svg>

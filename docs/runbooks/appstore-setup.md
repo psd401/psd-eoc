@@ -1,10 +1,10 @@
 # App Store Connect and TestFlight setup
 
-This runbook creates the PSD EOC App Store record and configures private
-TestFlight distribution. The scripts never contain Apple credentials or real
-tester data. Their default mode previews App Store Connect changes; writes need
-an explicit `--apply`, bundle-ID confirmation, and confirmation of the exact
-previewed plan digest.
+This runbook records the verified PSD EOC App Store identity and configures
+private TestFlight distribution. The scripts never contain Apple credentials
+or real tester data. Their default mode previews App Store Connect changes;
+writes need an explicit `--apply`, bundle-ID confirmation, and confirmation of
+the exact previewed plan digest.
 
 The app identity is fixed by issue #38:
 
@@ -14,57 +14,122 @@ The app identity is fixed by issue #38:
 - Internal TestFlight group: `District Technology`
 - External TestFlight group: `Staff`
 
-App creation uses Apple ID authentication because Apple's official App Store
-Connect API does not create app records. Everything after app creation uses the
-official App Store Connect API.
+The app record was created once and read back on 2026-08-14:
+
+- App Store Connect provider: `372148`
+- Numeric Apple ID / EAS `ascAppId`: `6801607849`
+- Primary language: English (U.S.) / `en-US`
+- Initial iOS version scaffold: `1.0`
+- User access: Limited Access, with zero new app-specific user grants
+- TestFlight inventory: no processed build, group assignment, tester, or
+  invitation exists; Build Uploads records 1.0.1/build 2 as Failed
+
+Before BUILD, a separate provider-configuration gate was previewed, explicitly
+approved by the product owner for one exact write, confirmed by the
+authenticated human operator, and independently read back on 2026-08-14. It
+was bound to Apple Team `87DL7L9GU6`, bundle ID `net.psd401.eoc`, only the Time
+Sensitive Notifications entitlement, the two existing profiles below, and the
+one existing distribution certificate:
+
+- Existing distribution certificate serial:
+  `6C578391C0F8BD2C1E2E570FED205DED`
+- App Store provisioning profile: `U8P2YKU4T8`; SHA-256
+  `c13a2847c944d0b0f25ba007ca06142c8218d87232ad9d36d1c86726355c1fde`
+- Time Sensitive Notifications is enabled for `net.psd401.eoc`; the App Store
+  profile above and existing Ad Hoc profile `525SSPSUMQ` were regenerated in
+  place and stored in their corresponding EAS credential configurations without
+  changing the Ad Hoc device set
+
+That gate did not create, delete, revoke, renew, or replace a certificate;
+create or delete a profile; register a device; change another capability; or
+authorize a build, upload, submission, tester exposure, or installation. The
+repository records only this bounded, non-secret read-back; the approval
+transcript, credential material, and Apple session data remain outside the
+repository and are not reusable authorization. BUILD began only after that gate
+completed and a later exact one-build preview received its own product-owner
+approval.
+
+That separately approved EAS iOS production BUILD then finished:
+
+- Build:
+  `e68d07aa-98e5-4c87-8595-52175975291f`, source
+  `bef4d64b40508dd3ef60e4de190a53b23effce40`, app/runtime `1.0.1`, build `2`,
+  IPA SHA-256
+  `7c22776b959bb8f015f077b8fc73247b005b298ae97e18240d50aea77432adb9`
+
+A separately approved upload-only EAS submission
+`dcd24fd9-16ef-455d-92a8-c3852b4cfcd3` finished transport for that exact build
+and App Store Connect app `6801607849`. App Store Connect Build Uploads marked
+version 1.0.1/build 2 **Failed** with error 90683 because its Info.plist lacks
+`NSMotionUsageDescription`. That immutable binary is not eligible for retry or
+TestFlight. No processed build, group assignment, tester, invitation, or
+physical installation exists. The repository correction advances the next
+candidate to app/runtime 1.0.2; its replacement build and later upload require
+fresh separate approvals and remain pending.
+
+The bundle identifier already existed in the Apple Developer account, so the
+app-record operation did not create or change a bundle ID or capability. App
+creation used the authenticated App Store Connect interface because Apple's
+official API does not create app records. Later group, tester, review, and
+App Store Connect inventory automation uses the official App Store Connect
+API; Apple Developer capability/profile management and EAS BUILD use their
+corresponding provider services. The numeric app identity above is non-secret;
+staff identities and Apple session data are not release evidence and must never
+be copied here.
 
 ## 1. Human prerequisites
 
-1. In App Store Connect, open **Users and Access > Integrations > App Store
-   Connect API** and generate a team API key with the least role that can manage
-   TestFlight. Download the `.p8` file once.
-2. Put the key in an approved secrets system. For a local run, materialize it
+1. Before creating an App Store Connect API key, prepare an exact consequence
+   preview that identifies the Apple team, proposed key name, least required
+   role, access scope, key count, and approved custody destination. Obtain fresh
+   explicit product-owner approval for that one key creation. If approval is
+   absent, ambiguous, stale, or differs from the preview, stop before opening
+   the creation flow.
+2. After that approval, an authenticated human opens **Users and Access >
+   Integrations > App Store Connect API**, verifies the previewed values, and
+   generates exactly the approved team API key. Download the `.p8` file once.
+3. Put the key in an approved secrets system. For a local run, materialize it
    as an owner-private regular file in an owner-private directory outside
    **every Git repository**, not merely outside this checkout. Never use a
    symlink, FIFO, device, directory, or other special file. Never copy a `.p8`,
    tester CSV, beta-review contact file, or demo credential into any
    repository.
-3. Record the key ID and issuer ID. They are identifiers, not substitutes for
+4. Record the key ID and issuer ID. They are identifiers, not substitutes for
    protecting the private key.
-4. Install the versions pinned by the operations bundle: Ruby 3.3.12 and
-   Bundler 2.6.9. Verify them with `ruby --version` and
-   `bundle _2.6.9_ --version`; if that Bundler version is absent, install it
-   with `gem install bundler --version 2.6.9`. From `scripts/ops/appstore`, run
-   `bundle _2.6.9_ install`. Fastlane is a build/operations dependency because
-   it supplies the supported Apple-ID-authenticated app creation flow; it is
-   not an application runtime dependency.
-5. Obtain explicit product-owner approval for the exact live-provider write
+5. Run the App Store Connect preview and audit scripts with the repository's
+   pinned Bun toolchain. Do not substitute npm, npx, or an unpinned global
+   executable. The historical creation lane pins Ruby 3.3.12 and Bundler 2.6.9.
+   It remains reproducible only for a separately scoped recovery that
+   explicitly authorizes it: verify them with `ruby --version` and
+   `bundle _2.6.9_ --version`, then run `bundle _2.6.9_ install` from
+   `scripts/ops/appstore`. Fastlane is an operations-only dependency. Do not
+   install or run that lane merely to reconcile or retry the verified record.
+6. Obtain explicit product-owner approval for the exact live-provider write
    before running Fastlane `produce`, EAS Submit, or any ASC `--apply`.
-   Possessing credentials or having a prior approval is not authorization for
-   a new run. If approval is absent, ambiguous, or stale, stop before the
-   write.
+   Approval to create the API key authorizes neither its use nor any later
+   provider write. Possessing credentials or having a prior approval is not
+   authorization for a new run. If approval is absent, ambiguous, or stale,
+   stop before the write.
 
 Do not try to bypass Apple ID sign-in, two-factor authentication, API-key
 generation, agreements, or Beta App Review. Those are human/Apple gates.
 
-## 2. Create the app record (human, interactive)
+## 2. Verify the existing app record (read-only)
 
-Review the identifiers above, then run from `scripts/ops/appstore`:
+Do not run the app-creation lane again. A success, error, timeout, or interrupted
+provider operation never authorizes a retry. Before any later Apple write,
+read **Apps → PSD EOC → App Information** and stop unless the provider, numeric
+Apple ID, name, bundle ID, SKU, primary language, and initial version match the
+verified values above exactly. Also read **User Access** and TestFlight; stop if
+access is broader than Limited Access, an unexpected app-specific user is
+granted, or any build, group, tester, or invitation is present outside the
+freshly approved plan.
 
-```sh
-APPSTORE_APPLE_ID='your-apple-id' \
-CONFIRM_APPSTORE_CREATE='create net.psd401.eoc' \
-bundle exec fastlane ios produce
-```
-
-If the Apple account belongs to more than one team, also set
-`APPLE_DEVELOPER_TEAM_ID` and `APPSTORE_CONNECT_TEAM_ID`. Fastlane may prompt
-for Apple ID sign-in and two-factor authentication. The lane deliberately
-refuses to run without the exact confirmation string.
-
-After the lane finishes, copy the app's numeric Apple ID from
-**Apps → PSD EOC → App Information**. This is the `ascAppId` used by EAS
-Submit.
+The historical creation lane in `scripts/ops/appstore` requires explicit Apple
+ID authentication, exact team selection, and bundle-ID confirmation. It is not
+a reconciliation or retry mechanism. Any apparent conflict now requires a new
+read-only investigation and separately scoped decision, not another create
+attempt.
 
 ## 3. Prepare private input files
 
@@ -211,8 +276,9 @@ target list, and this runbook does not authorize using one for a live apply.
 The example CSV filenames below do not change that boundary. If any
 prerequisite is absent or stale, stop after preview.
 
-Preview group creation, tester additions, and beta metadata. A new app has no
-build yet. Preview mode performs only authenticated `GET` requests:
+Preview group creation, tester additions, and beta metadata. App Store Connect
+currently has no uploaded or processed PSD EOC build. Preview mode performs
+only authenticated `GET` requests:
 
 ```sh
 bun run scripts/ops/appstore/asc.ts sync \
@@ -328,23 +394,46 @@ assignment as success.
 
 ## 5. EAS Submit wiring for P5.5
 
-Issue P5.5 owns the mobile EAS configuration. Add the following fields to its
-`production` iOS submit profile; do not commit the `.p8` file:
+P5.5's committed configuration deliberately keeps iOS submission free of
+credentials and distribution side effects. The complete submit profile is:
 
 ```json
 {
   "submit": {
     "production": {
+      "android": {
+        "track": "alpha",
+        "releaseStatus": "draft",
+        "changesNotSentForReview": true
+      },
       "ios": {
-        "ascAppId": "NUMERIC_APPLE_ID",
-        "ascApiKeyPath": "/secure/temporary/AuthKey_KEY_ID.p8",
-        "ascApiKeyId": "KEY_ID",
-        "ascApiKeyIssuerId": "ISSUER_ID"
+        "ascAppId": "6801607849"
       }
     }
   }
 }
 ```
+
+The iOS profile pins only the verified non-secret numeric `ascAppId`. It does
+not prove an App Store Connect API credential, upload, TestFlight group,
+tester, invitation, or physical installation. The 2026-08-14 read-only
+inventory now verifies the exact App Store provisioning profile and finished
+iOS production BUILD recorded above. Those facts are BUILD evidence only, not
+submission authority or provider acceptance. API-key creation and SUBMIT are
+separately previewed provider writes and remain blocked until explicitly
+authorized.
+
+Keep credentials in the approved EAS credential store. Never add a `.p8` path,
+Apple ID, issuer, key, tester group, or other credential or recipient value to
+`eas.json`. The Android draft policy is governed separately by
+[the mobile release runbook](release.md); it has no effect on this Apple flow.
+
+Do not use interactive submission to create or select an app implicitly. Do
+not run the headless command below until the exact finished iOS build,
+credential inventory, complete TestFlight inventory, consequence preview,
+fresh product-owner approval, and authenticated-human confirmation are all
+recorded. The presence of `ascAppId` is routing configuration only, never
+submission authorization.
 
 For a headless submission, materialize an approved Expo token from the approved
 secrets system only for the exact, freshly human-authorized run. Here,
@@ -372,10 +461,21 @@ on any mismatch. Recheck the same complete group/settings/membership inventory
 immediately after upload and before any distribution or review step; a racing
 change stops the run and requires a fresh authorization and preview.
 
-```sh
+The following legacy form is recorded only so operators can recognize and
+reject it. It relies on an unpinned global executable; **do not run it**:
+
+```text
 cd packages/mobile
 eas build:list --platform ios --build-profile production --status finished
-eas submit --platform ios --profile production \
+```
+
+Use only the pinned Bun commands below:
+
+```sh
+cd packages/mobile
+bunx eas-cli@21.7.0 build:list --platform ios \
+  --build-profile production --status finished
+bunx eas-cli@21.7.0 submit --platform ios --profile production \
   --id 'EXACT_REVIEWED_EAS_BUILD_ID' \
   --non-interactive
 ```
@@ -385,9 +485,10 @@ Alternatively, submit one exact reviewed local artifact with
 a write-capable submission: a newer build can finish between review and upload.
 
 EAS uploads the build to App Store Connect; it does not replace Beta App
-Review or release the app publicly. Do not commit the credential path shown in
-the example when P5.5 adds the real configuration—use its approved secret
-materialization mechanism.
+Review or release the app publicly. Authentication comes only from the
+approved, human-provisioned EAS credential store for the exact run, and the
+reviewed profile selects the already verified record by `ascAppId`; no local
+credential path is committed.
 
 ## 6. Select and distribute the first processed build
 

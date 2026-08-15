@@ -2,11 +2,20 @@
   "expo": {
     "name": "PSD EOC",
     "slug": "psd-eoc",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "psdeoc",
     "userInterfaceStyle": "light",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "enabled": false,
+      "checkAutomatically": "NEVER",
+      "useEmbeddedUpdate": true,
+      "disableAntiBrickingMeasures": false
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "net.psd401.eoc",
@@ -51,7 +60,7 @@
           "locationWhenInUsePermission": "Allow PSD EOC to capture your foreground location for this staff emergency event journal. Accuracy is shown and room-level precision is never claimed.",
           "locationAlwaysAndWhenInUsePermission": false,
           "locationAlwaysPermission": false,
-          "motionUsagePermission": false,
+          "motionUsagePermission": "PSD EOC does not request or use Motion & Fitness data. This entry is present only because the foreground-location library links Apple's motion framework.",
           "isIosBackgroundLocationEnabled": false,
           "isAndroidBackgroundLocationEnabled": false,
           "isAndroidForegroundServiceEnabled": false,

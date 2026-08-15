@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+  <title id="title">iPhone notification and Focus settings screen reference</title>
+  <desc id="desc">Two illustrated iPhone Settings screens show PSD EOC notification settings and allowing PSD EOC in a Focus mode.</desc>
+  <rect width="960" height="560" fill="#f4f7fa"/>
+  <text x="48" y="52" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#17324d">Keep PSD EOC notifications visible</text>
+  <text x="48" y="82" font-family="Arial, sans-serif" font-size="16" fill="#4c6275">Screen reference — available controls depend on iOS and the installed build</text>
+  <g font-family="Arial, sans-serif">
+    <g transform="translate(105 112)">
+      <rect width="310" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
+      <rect x="110" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
+      <text x="20" y="62" font-size="14" fill="#4c6275">Settings › Notifications</text>
+      <text x="20" y="91" font-size="21" font-weight="700" fill="#17324d">PSD EOC</text>
+      <line x1="20" x2="290" y1="112" y2="112" stroke="#d3dde5"/>
+      <text x="20" y="145" font-size="15" fill="#17324d">Allow Notifications</text>
+      <rect x="245" y="128" width="44" height="24" rx="12" fill="#26834a"/>
+      <circle cx="277" cy="140" r="9" fill="#fff"/>
+      <text x="20" y="187" font-size="15" fill="#17324d">Immediate Delivery</text>
+      <rect x="245" y="170" width="44" height="24" rx="12" fill="#26834a"/>
+      <circle cx="277" cy="182" r="9" fill="#fff"/>
+      <text x="20" y="229" font-size="15" fill="#17324d">Time Sensitive Notifications</text>
+      <rect x="245" y="212" width="44" height="24" rx="12" fill="#26834a"/>
+      <circle cx="277" cy="224" r="9" fill="#fff"/>
+      <text x="20" y="266" font-size="12" fill="#4c6275">Turn on only if this row appears.</text>
+      <text x="20" y="302" font-size="15" fill="#17324d">Sounds</text>
+      <rect x="245" y="285" width="44" height="24" rx="12" fill="#26834a"/>
+      <circle cx="277" cy="297" r="9" fill="#fff"/>
+      <text x="20" y="344" font-size="15" fill="#17324d">Lock Screen</text>
+      <text x="254" y="344" font-size="16" font-weight="700" fill="#26834a">✓</text>
+    </g>
+    <g transform="translate(545 112)">
+      <rect width="310" height="390" rx="28" fill="#fff" stroke="#9cadbb" stroke-width="3"/>
+      <rect x="110" y="12" width="90" height="10" rx="5" fill="#9cadbb"/>
+      <text x="20" y="62" font-size="14" fill="#4c6275">Settings › Focus › selected Focus</text>
+      <text x="20" y="91" font-size="21" font-weight="700" fill="#17324d">Allow Notifications</text>
+      <line x1="20" x2="290" y1="112" y2="112" stroke="#d3dde5"/>
+      <text x="20" y="145" font-size="15" font-weight="700" fill="#17324d">Apps</text>
+      <rect x="20" y="168" width="270" height="66" rx="12" fill="#e8f0f7"/>
+      <circle cx="54" cy="201" r="22" fill="#17324d"/>
+      <text x="42" y="207" font-size="14" font-weight="700" fill="#fff">EOC</text>
+      <text x="89" y="207" font-size="16" fill="#17324d">PSD EOC</text>
+      <text x="272" y="207" font-size="18" font-weight="700" fill="#26834a">✓</text>
+      <text x="20" y="274" font-size="15" fill="#17324d">Time Sensitive Notifications</text>
+      <rect x="245" y="257" width="44" height="24" rx="12" fill="#26834a"/>
+      <circle cx="277" cy="269" r="9" fill="#fff"/>
+      <text x="20" y="315" font-size="12" fill="#4c6275">This does not grant Critical Alerts.</text>
+      <text x="20" y="335" font-size="12" fill="#4c6275">Silent mode and device policy can still</text>
+      <text x="20" y="355" font-size="12" fill="#4c6275">affect sound.</text>
+    </g>
+  </g>
+</svg>

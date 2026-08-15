@@ -29,6 +29,10 @@ export function AuthenticatedStack() {
       >
         <Stack.Protected guard={hasCachedShell}>
           <Stack.Screen name="index" options={{ title: 'PSD EOC' }} />
+          <Stack.Screen
+            name="release-diagnostic"
+            options={{ title: 'Release diagnostics' }}
+          />
           <Stack.Screen name="(app)" options={{ headerShown: false }} />
           <Stack.Screen
             name="start/index"
