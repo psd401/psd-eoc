@@ -114,7 +114,7 @@ describe('mobile distribution configuration', () => {
     });
   });
 
-  test('pins only the verified non-secret App Store record identity', () => {
+  test('pins the verified App Store identity and separate write approvals', () => {
     expect(easConfig.submit.production.ios).toEqual({
       ascAppId: '6801607849',
     });
@@ -142,6 +142,15 @@ describe('mobile distribution configuration', () => {
     }
     expect(compactAppStoreRunbook).toContain(
       'BUILD began only after that gate completed and a later exact one-build preview received its own product-owner approval',
+    );
+    expect(compactAppStoreRunbook).toContain(
+      'Before creating an App Store Connect API key, prepare an exact consequence preview that identifies the Apple team, proposed key name, least required role, access scope, key count, and approved custody destination. Obtain fresh explicit product-owner approval for that one key creation. If approval is absent, ambiguous, stale, or differs from the preview, stop before opening the creation flow.',
+    );
+    expect(compactAppStoreRunbook).toContain(
+      'After that approval, an authenticated human opens **Users and Access > Integrations > App Store Connect API**, verifies the previewed values, and generates exactly the approved team API key.',
+    );
+    expect(compactAppStoreRunbook).toContain(
+      'Approval to create the API key authorizes neither its use nor any later provider write.',
     );
   });
 
