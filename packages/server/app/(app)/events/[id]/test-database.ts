@@ -3,33 +3,50 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
+  type Dirent,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
 const RUN_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const WORKSPACE_NAMESPACE_PATTERN = /^[0-9a-f]{64}$/u;
 const MINIMUM_APP_PORT = 20_000;
 const APP_PORT_COUNT = 30_000;
+export const EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT =
+  MINIMUM_APP_PORT + APP_PORT_COUNT;
 const PORT_CLOSE_TIMEOUT_MS = 10_000;
 const PORT_LEASE_DIRECTORY = join(tmpdir(), 'psd-eoc-event-room-port-leases');
+const RUN_DIRECTORY_PREFIX = 'psd-eoc-event-room-';
+const SUPERVISION_DIRECTORY_PREFIX = 'psd-eoc-event-room-supervision-';
+const SOURCE_WORKSPACE_DIRECTORY = realpathSync(
+  fileURLToPath(new URL('../../../../../../', import.meta.url)),
+);
+const SOURCE_WORKSPACE_NAMESPACE = createHash('sha256')
+  .update(SOURCE_WORKSPACE_DIRECTORY, 'utf8')
+  .digest('hex');
 export const EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT_ENV =
   'PSD_EOC_EVENT_ROOM_PLAYWRIGHT_RUN_CONTEXT';
 
 export interface EventRoomPlaywrightRunContext {
   readonly runId: string;
+  readonly workspaceNamespace: string;
   readonly baseDatabaseUrl: string;
   readonly databaseUrl: string;
   readonly databaseName: string;
@@ -46,6 +63,13 @@ export interface EventRoomPlaywrightRunContext {
   readonly serverWorkspaceReadyPath: string;
   readonly serverWorkspacePreparationLeasePath: string;
   readonly serverStoppedPath: string;
+  readonly supervisionDirectory: string;
+  readonly gateHeartbeatPath: string;
+  readonly coordinatorIdentityPath: string;
+  readonly coordinatorChildExitPath: string;
+  readonly webServerIdentityPath: string;
+  readonly supervisorReadyPath: string;
+  readonly supervisorStoppingPath: string;
   readonly appPort: number;
   readonly portLeasePath: string;
   readonly leaseOwnerPid: number;
@@ -58,6 +82,7 @@ export function eventRoomPlaywrightDatabaseMarker(value: unknown): string {
     kind: 'psd-eoc-event-room-playwright-database',
     version: 1,
     runId: context.runId,
+    workspaceNamespace: context.workspaceNamespace,
     databaseName: context.databaseName,
   });
 }
@@ -163,22 +188,989 @@ export async function waitForEventRoomPlaywrightPortToClose(
   }
 }
 
+const GATE_HEARTBEAT_MAX_AGE_MS = 2_000;
+const SUPERVISOR_STOPPING_MAX_AGE_MS = 35_000;
+const MAXIMUM_SUPERVISION_MARKER_BYTES = 4_096;
+const SUPERVISION_MARKER_NAMES = Object.freeze([
+  'coordinator-identity.json',
+  'coordinator-child-exit.json',
+  'web-server-identity.json',
+  'supervisor-ready.json',
+  'supervisor-stopping.json',
+]);
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function exactStringEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return (
+    leftBytes.length === rightBytes.length &&
+    timingSafeEqual(leftBytes, rightBytes)
+  );
+}
+
+function gateHeartbeatMarker(
+  context: EventRoomPlaywrightRunContext,
+  gatePid: number,
+  supervisorNonceHash: string,
+  observedAt: number,
+): string {
+  return JSON.stringify({
+    kind: 'psd-eoc-event-room-playwright-gate-heartbeat',
+    version: 1,
+    runId: context.runId,
+    leaseOwnerPid: context.leaseOwnerPid,
+    gatePid,
+    supervisorNonceHash,
+    observedAt,
+  });
+}
+
+export type EventRoomPlaywrightPriorResidueReason =
+  | 'altered-heartbeat'
+  | 'legacy-run-marker'
+  | 'marker-without-heartbeat'
+  | 'orphaned-port-lease'
+  | 'stale-heartbeat';
+
+export interface EventRoomPlaywrightPriorResidue {
+  readonly runId: string;
+  readonly reason: EventRoomPlaywrightPriorResidueReason;
+}
+
+function parsePriorGateHeartbeat(
+  serialized: string,
+  runId: string,
+): Readonly<{ observedAt: number }> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('kind' in parsed) ||
+    parsed.kind !== 'psd-eoc-event-room-playwright-gate-heartbeat' ||
+    !('version' in parsed) ||
+    parsed.version !== 1 ||
+    !('runId' in parsed) ||
+    parsed.runId !== runId ||
+    !('leaseOwnerPid' in parsed) ||
+    typeof parsed.leaseOwnerPid !== 'number' ||
+    !Number.isSafeInteger(parsed.leaseOwnerPid) ||
+    parsed.leaseOwnerPid <= 0 ||
+    !('gatePid' in parsed) ||
+    typeof parsed.gatePid !== 'number' ||
+    !Number.isSafeInteger(parsed.gatePid) ||
+    parsed.gatePid <= 0 ||
+    !('supervisorNonceHash' in parsed) ||
+    typeof parsed.supervisorNonceHash !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(parsed.supervisorNonceHash) ||
+    !('observedAt' in parsed) ||
+    typeof parsed.observedAt !== 'number' ||
+    !Number.isSafeInteger(parsed.observedAt) ||
+    parsed.observedAt <= 0 ||
+    serialized !==
+      JSON.stringify({
+        kind: parsed.kind,
+        version: parsed.version,
+        runId: parsed.runId,
+        leaseOwnerPid: parsed.leaseOwnerPid,
+        gatePid: parsed.gatePid,
+        supervisorNonceHash: parsed.supervisorNonceHash,
+        observedAt: parsed.observedAt,
+      })
+  ) {
+    return null;
+  }
+  return { observedAt: parsed.observedAt };
+}
+
+function priorSupervisorStoppingIsCurrent(
+  directory: string,
+  runId: string,
+  currentTime: () => number,
+): boolean {
+  const stoppingPath = join(directory, 'supervisor-stopping.json');
+  let serialized: string;
+  try {
+    const markerEntry = lstatSync(stoppingPath);
+    if (
+      !markerEntry.isFile() ||
+      markerEntry.isSymbolicLink() ||
+      markerEntry.size > MAXIMUM_SUPERVISION_MARKER_BYTES
+    ) {
+      return false;
+    }
+    serialized = readFileSync(stoppingPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return false;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('kind' in parsed) ||
+    parsed.kind !== 'psd-eoc-event-room-playwright-supervisor-stopping' ||
+    !('version' in parsed) ||
+    parsed.version !== 1 ||
+    !('runId' in parsed) ||
+    parsed.runId !== runId ||
+    !('leaseOwnerPid' in parsed) ||
+    typeof parsed.leaseOwnerPid !== 'number' ||
+    !Number.isSafeInteger(parsed.leaseOwnerPid) ||
+    parsed.leaseOwnerPid <= 0 ||
+    !('supervisorPid' in parsed) ||
+    typeof parsed.supervisorPid !== 'number' ||
+    !Number.isSafeInteger(parsed.supervisorPid) ||
+    parsed.supervisorPid <= 0 ||
+    !('supervisorNonceHash' in parsed) ||
+    typeof parsed.supervisorNonceHash !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(parsed.supervisorNonceHash) ||
+    !('observedAt' in parsed) ||
+    typeof parsed.observedAt !== 'number' ||
+    !Number.isSafeInteger(parsed.observedAt) ||
+    parsed.observedAt <= 0 ||
+    serialized !==
+      JSON.stringify({
+        kind: parsed.kind,
+        version: parsed.version,
+        runId: parsed.runId,
+        leaseOwnerPid: parsed.leaseOwnerPid,
+        supervisorPid: parsed.supervisorPid,
+        supervisorNonceHash: parsed.supervisorNonceHash,
+        observedAt: parsed.observedAt,
+      })
+  ) {
+    return false;
+  }
+  const now = requireResidueCheckTime(currentTime());
+  return (
+    now >= parsed.observedAt &&
+    now - parsed.observedAt <= SUPERVISOR_STOPPING_MAX_AGE_MS
+  );
+}
+
+function priorLegacySupervisorMarkerIsCanonical(
+  serialized: string,
+  runId: string,
+): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return false;
+  }
+  return (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    'kind' in parsed &&
+    parsed.kind === 'psd-eoc-event-room-playwright-supervisor' &&
+    'version' in parsed &&
+    parsed.version === 1 &&
+    'runId' in parsed &&
+    parsed.runId === runId &&
+    'contextSha256' in parsed &&
+    typeof parsed.contextSha256 === 'string' &&
+    /^[0-9a-f]{64}$/u.test(parsed.contextSha256) &&
+    'ownerPid' in parsed &&
+    typeof parsed.ownerPid === 'number' &&
+    Number.isSafeInteger(parsed.ownerPid) &&
+    parsed.ownerPid > 0 &&
+    'coordinatorNonce' in parsed &&
+    typeof parsed.coordinatorNonce === 'string' &&
+    RUN_ID_PATTERN.test(parsed.coordinatorNonce) &&
+    serialized ===
+      JSON.stringify({
+        kind: parsed.kind,
+        version: parsed.version,
+        runId: parsed.runId,
+        contextSha256: parsed.contextSha256,
+        ownerPid: parsed.ownerPid,
+        coordinatorNonce: parsed.coordinatorNonce,
+      })
+  );
+}
+
+function priorLegacyCoordinatorHeartbeatIsCanonical(
+  serialized: string,
+  runId: string,
+): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return false;
+  }
+  return (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    'kind' in parsed &&
+    parsed.kind === 'psd-eoc-event-room-playwright-coordinator-heartbeat' &&
+    'version' in parsed &&
+    parsed.version === 1 &&
+    'runId' in parsed &&
+    parsed.runId === runId &&
+    'leaseOwnerPid' in parsed &&
+    typeof parsed.leaseOwnerPid === 'number' &&
+    Number.isSafeInteger(parsed.leaseOwnerPid) &&
+    parsed.leaseOwnerPid > 0 &&
+    'coordinatorPid' in parsed &&
+    typeof parsed.coordinatorPid === 'number' &&
+    Number.isSafeInteger(parsed.coordinatorPid) &&
+    parsed.coordinatorPid > 0 &&
+    'observedAt' in parsed &&
+    typeof parsed.observedAt === 'number' &&
+    Number.isSafeInteger(parsed.observedAt) &&
+    parsed.observedAt > 0 &&
+    serialized ===
+      JSON.stringify({
+        kind: parsed.kind,
+        version: parsed.version,
+        runId: parsed.runId,
+        leaseOwnerPid: parsed.leaseOwnerPid,
+        coordinatorPid: parsed.coordinatorPid,
+        observedAt: parsed.observedAt,
+      })
+  );
+}
+
+function hasCanonicalPriorLegacyRunMarker(
+  directory: string,
+  runId: string,
+): boolean {
+  const markers = [
+    {
+      name: 'process-supervisor.json',
+      validate: priorLegacySupervisorMarkerIsCanonical,
+    },
+    {
+      name: 'coordinator-heartbeat.json',
+      validate: priorLegacyCoordinatorHeartbeatIsCanonical,
+    },
+  ] as const;
+  for (const marker of markers) {
+    const path = join(directory, marker.name);
+    try {
+      const entry = lstatSync(path);
+      if (
+        entry.isFile() &&
+        !entry.isSymbolicLink() &&
+        entry.size <= MAXIMUM_SUPERVISION_MARKER_BYTES &&
+        marker.validate(readFileSync(path, 'utf8'), runId)
+      ) {
+        return true;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return false;
+}
+
+function readCanonicalPriorPortLease(
+  name: string,
+  currentTime: () => number,
+): Readonly<{
+  runId: string;
+  workspaceNamespace: string;
+  isFresh: boolean;
+}> | null {
+  const match = name.match(/^(\d{5})\.json$/u);
+  if (match === null) return null;
+  const appPort = Number.parseInt(match[1]!, 10);
+  if (
+    appPort < MINIMUM_APP_PORT ||
+    appPort >= MINIMUM_APP_PORT + APP_PORT_COUNT
+  ) {
+    return null;
+  }
+  const path = join(PORT_LEASE_DIRECTORY, name);
+  let entry: ReturnType<typeof lstatSync>;
+  let serialized: string;
+  try {
+    entry = lstatSync(path);
+    if (
+      !entry.isFile() ||
+      entry.isSymbolicLink() ||
+      entry.size > MAXIMUM_SUPERVISION_MARKER_BYTES
+    ) {
+      return null;
+    }
+    serialized = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('runId' in parsed) ||
+    typeof parsed.runId !== 'string' ||
+    !RUN_ID_PATTERN.test(parsed.runId) ||
+    !('workspaceNamespace' in parsed) ||
+    typeof parsed.workspaceNamespace !== 'string' ||
+    !WORKSPACE_NAMESPACE_PATTERN.test(parsed.workspaceNamespace) ||
+    !('appPort' in parsed) ||
+    parsed.appPort !== appPort ||
+    !('leaseOwnerPid' in parsed) ||
+    typeof parsed.leaseOwnerPid !== 'number' ||
+    !Number.isSafeInteger(parsed.leaseOwnerPid) ||
+    parsed.leaseOwnerPid <= 0 ||
+    serialized !==
+      serializedPortLease({
+        runId: parsed.runId,
+        workspaceNamespace: parsed.workspaceNamespace,
+        appPort: parsed.appPort,
+        leaseOwnerPid: parsed.leaseOwnerPid,
+      })
+  ) {
+    return null;
+  }
+  const now = requireResidueCheckTime(currentTime());
+  return {
+    runId: parsed.runId,
+    workspaceNamespace: parsed.workspaceNamespace,
+    isFresh:
+      now >= entry.mtimeMs && now - entry.mtimeMs <= GATE_HEARTBEAT_MAX_AGE_MS,
+  };
+}
+
+function requireResidueCheckTime(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('The event-room Playwright residue check time is invalid.');
+  }
+  return value;
+}
+
+/**
+ * Reports current supervision evidence and strict canonical marker/lease
+ * residue from this source checkout without treating a directory name, PID,
+ * port, or path as cleanup authority. Unnamespaced and foreign-checkout
+ * evidence remains untouched because this checkout cannot attribute it.
+ * Active runs with a current, canonical heartbeat are left alone, as are fresh
+ * leases that may not have published their heartbeat yet. This detector never
+ * signals a process, removes a file, releases a lease, or drops a database;
+ * the exact supervisor nonce and immutable process markers remain mandatory
+ * for those operations.
+ */
+export function detectPriorEventRoomPlaywrightResidue(
+  value: unknown,
+  currentTime: () => number = Date.now,
+): readonly EventRoomPlaywrightPriorResidue[] {
+  const current = requireEventRoomPlaywrightRunContext(value);
+  requireResidueCheckTime(currentTime());
+  const results: EventRoomPlaywrightPriorResidue[] = [];
+  const activeRunIds = new Set<string>();
+  const residueRunIds = new Set<string>();
+  const addResidue = (
+    runId: string,
+    reason: EventRoomPlaywrightPriorResidueReason,
+  ): void => {
+    if (residueRunIds.has(runId)) return;
+    residueRunIds.add(runId);
+    results.push({ runId, reason });
+  };
+  const supervisionDirectoryPrefix = `${SUPERVISION_DIRECTORY_PREFIX}${current.workspaceNamespace}-`;
+  const runDirectoryPrefix = `${RUN_DIRECTORY_PREFIX}${current.workspaceNamespace}-`;
+  for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+    const runId = entry.name.startsWith(supervisionDirectoryPrefix)
+      ? entry.name.slice(supervisionDirectoryPrefix.length)
+      : undefined;
+    if (
+      runId === undefined ||
+      !RUN_ID_PATTERN.test(runId) ||
+      runId === current.runId ||
+      !entry.isDirectory() ||
+      entry.isSymbolicLink()
+    ) {
+      continue;
+    }
+    const directory = join(tmpdir(), entry.name);
+    if (priorSupervisorStoppingIsCurrent(directory, runId, currentTime)) {
+      activeRunIds.add(runId);
+      continue;
+    }
+    const heartbeatPath = join(directory, 'gate-heartbeat.json');
+    let heartbeatBytes: number | null = null;
+    try {
+      const heartbeatEntry = lstatSync(heartbeatPath);
+      if (heartbeatEntry.isFile() && !heartbeatEntry.isSymbolicLink()) {
+        heartbeatBytes = heartbeatEntry.size;
+      } else {
+        addResidue(runId, 'altered-heartbeat');
+        continue;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
+    if (heartbeatBytes === null) {
+      const hasRunBoundMarker = SUPERVISION_MARKER_NAMES.some((name) => {
+        try {
+          const markerEntry = lstatSync(join(directory, name));
+          return markerEntry.isFile() && !markerEntry.isSymbolicLink();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+          throw error;
+        }
+      });
+      if (hasRunBoundMarker) {
+        addResidue(runId, 'marker-without-heartbeat');
+      }
+      continue;
+    }
+    if (heartbeatBytes > MAXIMUM_SUPERVISION_MARKER_BYTES) {
+      addResidue(runId, 'altered-heartbeat');
+      continue;
+    }
+    const heartbeat = parsePriorGateHeartbeat(
+      readFileSync(heartbeatPath, 'utf8'),
+      runId,
+    );
+    const now = requireResidueCheckTime(currentTime());
+    if (heartbeat === null || now < heartbeat.observedAt) {
+      addResidue(runId, 'altered-heartbeat');
+    } else if (now - heartbeat.observedAt > GATE_HEARTBEAT_MAX_AGE_MS) {
+      addResidue(runId, 'stale-heartbeat');
+    } else {
+      activeRunIds.add(runId);
+    }
+  }
+
+  for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+    const runId = entry.name.startsWith(runDirectoryPrefix)
+      ? entry.name.slice(runDirectoryPrefix.length)
+      : undefined;
+    if (
+      runId === undefined ||
+      !RUN_ID_PATTERN.test(runId) ||
+      runId === current.runId ||
+      activeRunIds.has(runId) ||
+      residueRunIds.has(runId) ||
+      !entry.isDirectory() ||
+      entry.isSymbolicLink()
+    ) {
+      continue;
+    }
+    if (hasCanonicalPriorLegacyRunMarker(join(tmpdir(), entry.name), runId)) {
+      addResidue(runId, 'legacy-run-marker');
+    }
+  }
+
+  let leaseEntries: Dirent<string>[];
+  try {
+    leaseEntries = readdirSync(PORT_LEASE_DIRECTORY, {
+      withFileTypes: true,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return results.sort((left, right) =>
+        left.runId.localeCompare(right.runId),
+      );
+    }
+    throw error;
+  }
+  for (const entry of leaseEntries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    const lease = readCanonicalPriorPortLease(entry.name, currentTime);
+    if (
+      lease === null ||
+      lease.workspaceNamespace !== current.workspaceNamespace ||
+      lease.isFresh ||
+      lease.runId === current.runId ||
+      activeRunIds.has(lease.runId) ||
+      residueRunIds.has(lease.runId)
+    ) {
+      continue;
+    }
+    addResidue(lease.runId, 'orphaned-port-lease');
+  }
+  return results.sort((left, right) => left.runId.localeCompare(right.runId));
+}
+
+export function writeEventRoomPlaywrightGateHeartbeat(
+  value: unknown,
+  gatePid: number,
+  supervisorNonce: string,
+  observedAt: number = Date.now(),
+): void {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  if (
+    !Number.isSafeInteger(gatePid) ||
+    gatePid <= 0 ||
+    supervisorNonce.length < 32 ||
+    !Number.isSafeInteger(observedAt) ||
+    observedAt <= 0
+  ) {
+    throw new Error('The event-room Playwright gate heartbeat is invalid.');
+  }
+  mkdirSync(context.supervisionDirectory, { mode: 0o700, recursive: true });
+  const stagingPath = `${context.gateHeartbeatPath}.${gatePid}.tmp`;
+  writeFileSync(
+    stagingPath,
+    gateHeartbeatMarker(context, gatePid, sha256(supervisorNonce), observedAt),
+    { encoding: 'utf8', mode: 0o600 },
+  );
+  renameSync(stagingPath, context.gateHeartbeatPath);
+}
+
+export function requireCurrentEventRoomPlaywrightGateHeartbeat(
+  value: unknown,
+  gatePid: number,
+  supervisorNonce: string,
+  now: number = Date.now(),
+): number {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  let serialized: string;
+  try {
+    serialized = readFileSync(context.gateHeartbeatPath, 'utf8');
+  } catch (error) {
+    throw new Error('The event-room Playwright gate heartbeat is missing.', {
+      cause: error,
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(
+      'The event-room Playwright gate heartbeat is invalid JSON.',
+      {
+        cause: error,
+      },
+    );
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('observedAt' in parsed) ||
+    typeof parsed.observedAt !== 'number' ||
+    serialized !==
+      gateHeartbeatMarker(
+        context,
+        gatePid,
+        sha256(supervisorNonce),
+        parsed.observedAt,
+      )
+  ) {
+    throw new Error('The event-room Playwright gate heartbeat was altered.');
+  }
+  if (
+    !Number.isSafeInteger(parsed.observedAt) ||
+    parsed.observedAt <= 0 ||
+    now < parsed.observedAt ||
+    now - parsed.observedAt > GATE_HEARTBEAT_MAX_AGE_MS
+  ) {
+    throw new Error('The event-room Playwright gate heartbeat is stale.');
+  }
+  return parsed.observedAt;
+}
+
+function supervisorStoppingMarker(
+  context: EventRoomPlaywrightRunContext,
+  supervisorPid: number,
+  supervisorNonce: string,
+  observedAt: number,
+): string {
+  return JSON.stringify({
+    kind: 'psd-eoc-event-room-playwright-supervisor-stopping',
+    version: 1,
+    runId: context.runId,
+    leaseOwnerPid: context.leaseOwnerPid,
+    supervisorPid,
+    supervisorNonceHash: sha256(supervisorNonce),
+    observedAt,
+  });
+}
+
+export function writeEventRoomPlaywrightSupervisorStopping(
+  value: unknown,
+  supervisorPid: number,
+  supervisorNonce: string,
+  observedAt: number = Date.now(),
+): void {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  if (
+    !Number.isSafeInteger(supervisorPid) ||
+    supervisorPid <= 0 ||
+    supervisorNonce.length < 32 ||
+    !Number.isSafeInteger(observedAt) ||
+    observedAt <= 0
+  ) {
+    throw new Error('The Playwright supervisor stopping identity is invalid.');
+  }
+  let descriptor: number;
+  try {
+    descriptor = openSync(context.supervisorStoppingPath, 'wx', 0o600);
+  } catch (error) {
+    throw new Error(
+      'The Playwright supervisor stopping identity already exists.',
+      { cause: error },
+    );
+  }
+  try {
+    writeFileSync(
+      descriptor,
+      supervisorStoppingMarker(
+        context,
+        supervisorPid,
+        supervisorNonce,
+        observedAt,
+      ),
+      'utf8',
+    );
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+export function hasEventRoomPlaywrightSupervisorStoppingMarker(
+  value: unknown,
+  supervisorPid: number,
+  supervisorNonce: string,
+): boolean {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  let serialized: string;
+  try {
+    serialized = readFileSync(context.supervisorStoppingPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(
+      'The Playwright supervisor stopping identity is invalid JSON.',
+      { cause: error },
+    );
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('observedAt' in parsed) ||
+    typeof parsed.observedAt !== 'number' ||
+    !Number.isSafeInteger(parsed.observedAt) ||
+    parsed.observedAt <= 0 ||
+    !exactStringEqual(
+      serialized,
+      supervisorStoppingMarker(
+        context,
+        supervisorPid,
+        supervisorNonce,
+        parsed.observedAt,
+      ),
+    )
+  ) {
+    throw new Error(
+      'The Playwright supervisor stopping identity was altered or replaced.',
+    );
+  }
+  return true;
+}
+
+export interface EventRoomPlaywrightCoordinatorIdentity {
+  readonly kind: 'psd-eoc-event-room-playwright-coordinator';
+  readonly version: 1;
+  readonly runId: string;
+  readonly leaseOwnerPid: number;
+  readonly coordinatorPid: number;
+  readonly processGroupId: number;
+  readonly processStartedAt: string;
+  readonly commandHash: string;
+  readonly supervisorNonceHash: string;
+}
+
+function coordinatorIdentityMarker(
+  context: EventRoomPlaywrightRunContext,
+  identity: Omit<
+    EventRoomPlaywrightCoordinatorIdentity,
+    'kind' | 'version' | 'runId' | 'leaseOwnerPid'
+  >,
+): EventRoomPlaywrightCoordinatorIdentity {
+  return {
+    kind: 'psd-eoc-event-room-playwright-coordinator',
+    version: 1,
+    runId: context.runId,
+    leaseOwnerPid: context.leaseOwnerPid,
+    ...identity,
+  };
+}
+
+export function writeEventRoomPlaywrightCoordinatorIdentity(
+  value: unknown,
+  identity: Omit<
+    EventRoomPlaywrightCoordinatorIdentity,
+    'kind' | 'version' | 'runId' | 'leaseOwnerPid' | 'supervisorNonceHash'
+  >,
+  supervisorNonce: string,
+): EventRoomPlaywrightCoordinatorIdentity {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  if (
+    !Number.isSafeInteger(identity.coordinatorPid) ||
+    identity.coordinatorPid <= 0 ||
+    identity.processGroupId !== identity.coordinatorPid ||
+    identity.processStartedAt.length === 0 ||
+    !/^[0-9a-f]{64}$/u.test(identity.commandHash) ||
+    supervisorNonce.length < 32
+  ) {
+    throw new Error(
+      'The event-room Playwright coordinator identity is invalid.',
+    );
+  }
+  const marker = coordinatorIdentityMarker(context, {
+    ...identity,
+    supervisorNonceHash: sha256(supervisorNonce),
+  });
+  mkdirSync(context.supervisionDirectory, { mode: 0o700, recursive: true });
+  let descriptor: number;
+  try {
+    descriptor = openSync(context.coordinatorIdentityPath, 'wx', 0o600);
+  } catch (error) {
+    throw new Error(
+      'The event-room Playwright coordinator identity already exists.',
+      { cause: error },
+    );
+  }
+  try {
+    writeFileSync(descriptor, JSON.stringify(marker), 'utf8');
+  } finally {
+    closeSync(descriptor);
+  }
+  return marker;
+}
+
+export function requireEventRoomPlaywrightCoordinatorIdentity(
+  value: unknown,
+  expected: EventRoomPlaywrightCoordinatorIdentity,
+  supervisorNonce: string,
+): EventRoomPlaywrightCoordinatorIdentity {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  let serialized: string;
+  try {
+    serialized = readFileSync(context.coordinatorIdentityPath, 'utf8');
+  } catch (error) {
+    throw new Error(
+      'The event-room Playwright coordinator identity is missing.',
+      { cause: error },
+    );
+  }
+  const canonical = JSON.stringify(
+    coordinatorIdentityMarker(context, {
+      coordinatorPid: expected.coordinatorPid,
+      processGroupId: expected.processGroupId,
+      processStartedAt: expected.processStartedAt,
+      commandHash: expected.commandHash,
+      supervisorNonceHash: sha256(supervisorNonce),
+    }),
+  );
+  if (!exactStringEqual(serialized, canonical)) {
+    throw new Error(
+      'The event-room Playwright coordinator identity was altered or replaced.',
+    );
+  }
+  return expected;
+}
+
+export interface EventRoomPlaywrightWebServerIdentity {
+  readonly kind: 'psd-eoc-event-room-playwright-web-server';
+  readonly version: 1;
+  readonly runId: string;
+  readonly leaseOwnerPid: number;
+  readonly webServerPid: number;
+  readonly processGroupId: number;
+  readonly processStartedAt: string;
+  readonly commandHash: string;
+  readonly challengePort: number;
+  readonly supervisorNonceHash: string;
+}
+
+function webServerIdentityMarker(
+  context: EventRoomPlaywrightRunContext,
+  identity: Omit<
+    EventRoomPlaywrightWebServerIdentity,
+    'kind' | 'version' | 'runId' | 'leaseOwnerPid'
+  >,
+): EventRoomPlaywrightWebServerIdentity {
+  return {
+    kind: 'psd-eoc-event-room-playwright-web-server',
+    version: 1,
+    runId: context.runId,
+    leaseOwnerPid: context.leaseOwnerPid,
+    webServerPid: identity.webServerPid,
+    processGroupId: identity.processGroupId,
+    processStartedAt: identity.processStartedAt,
+    commandHash: identity.commandHash,
+    challengePort: identity.challengePort,
+    supervisorNonceHash: identity.supervisorNonceHash,
+  };
+}
+
+export function writeEventRoomPlaywrightWebServerIdentity(
+  value: unknown,
+  identity: Omit<
+    EventRoomPlaywrightWebServerIdentity,
+    'kind' | 'version' | 'runId' | 'leaseOwnerPid' | 'supervisorNonceHash'
+  >,
+  supervisorNonce: string,
+): EventRoomPlaywrightWebServerIdentity {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  if (
+    !Number.isSafeInteger(identity.webServerPid) ||
+    identity.webServerPid <= 0 ||
+    identity.processGroupId !== identity.webServerPid ||
+    identity.processStartedAt.length === 0 ||
+    !/^[0-9a-f]{64}$/u.test(identity.commandHash) ||
+    !Number.isSafeInteger(identity.challengePort) ||
+    identity.challengePort < EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT ||
+    identity.challengePort > 65_535 ||
+    identity.challengePort === context.appPort ||
+    supervisorNonce.length < 32
+  ) {
+    throw new Error(
+      'The event-room Playwright web-server identity is invalid.',
+    );
+  }
+  const marker = webServerIdentityMarker(context, {
+    ...identity,
+    supervisorNonceHash: sha256(supervisorNonce),
+  });
+  mkdirSync(context.supervisionDirectory, { mode: 0o700, recursive: true });
+  let descriptor: number;
+  try {
+    descriptor = openSync(context.webServerIdentityPath, 'wx', 0o600);
+  } catch (error) {
+    throw new Error(
+      'The event-room Playwright web-server identity already exists.',
+      { cause: error },
+    );
+  }
+  try {
+    writeFileSync(descriptor, JSON.stringify(marker), 'utf8');
+  } finally {
+    closeSync(descriptor);
+  }
+  return marker;
+}
+
+export function readEventRoomPlaywrightWebServerIdentity(
+  value: unknown,
+  supervisorNonce: string,
+): EventRoomPlaywrightWebServerIdentity | null {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  let serialized: string;
+  try {
+    serialized = readFileSync(context.webServerIdentityPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(
+      'The event-room Playwright web-server identity is invalid JSON.',
+      { cause: error },
+    );
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('webServerPid' in parsed) ||
+    typeof parsed.webServerPid !== 'number' ||
+    !('processGroupId' in parsed) ||
+    typeof parsed.processGroupId !== 'number' ||
+    !('processStartedAt' in parsed) ||
+    typeof parsed.processStartedAt !== 'string' ||
+    !('commandHash' in parsed) ||
+    typeof parsed.commandHash !== 'string' ||
+    !('challengePort' in parsed) ||
+    typeof parsed.challengePort !== 'number'
+  ) {
+    throw new Error(
+      'The event-room Playwright web-server identity is invalid.',
+    );
+  }
+  const canonical = JSON.stringify(
+    webServerIdentityMarker(context, {
+      webServerPid: parsed.webServerPid,
+      processGroupId: parsed.processGroupId,
+      processStartedAt: parsed.processStartedAt,
+      commandHash: parsed.commandHash,
+      challengePort: parsed.challengePort,
+      supervisorNonceHash: sha256(supervisorNonce),
+    }),
+  );
+  if (
+    parsed.processGroupId !== parsed.webServerPid ||
+    !Number.isSafeInteger(parsed.webServerPid) ||
+    parsed.webServerPid <= 0 ||
+    !Number.isSafeInteger(parsed.processGroupId) ||
+    parsed.processGroupId <= 0 ||
+    parsed.processStartedAt.length === 0 ||
+    !/^[0-9a-f]{64}$/u.test(parsed.commandHash) ||
+    !Number.isSafeInteger(parsed.challengePort) ||
+    parsed.challengePort < EVENT_ROOM_PLAYWRIGHT_MINIMUM_CHALLENGE_PORT ||
+    parsed.challengePort > 65_535 ||
+    parsed.challengePort === context.appPort ||
+    !exactStringEqual(serialized, canonical)
+  ) {
+    throw new Error(
+      'The event-room Playwright web-server identity was altered or replaced.',
+    );
+  }
+  return parsed as EventRoomPlaywrightWebServerIdentity;
+}
+
 function buildEventRoomPlaywrightRunContext(
   baseDatabaseUrl: string,
   runId: string,
   appPort: number,
   leaseOwnerPid: number,
+  workspaceNamespace: string,
 ): EventRoomPlaywrightRunContext {
   const validatedBaseUrl =
     requireSyntheticEventRoomTestDatabaseUrl(baseDatabaseUrl);
   if (!RUN_ID_PATTERN.test(runId)) {
     throw new Error('The event-room Playwright run ID must be a random UUID.');
   }
+  if (!WORKSPACE_NAMESPACE_PATTERN.test(workspaceNamespace)) {
+    throw new Error(
+      'The event-room Playwright workspace namespace is invalid.',
+    );
+  }
   const compactRunId = runId.replaceAll('-', '');
   const databaseName = `psd_eoc_event_room_${compactRunId}_test`;
   const databaseUrl = new URL(validatedBaseUrl);
   databaseUrl.pathname = `/${databaseName}`;
-  const runDirectory = join(tmpdir(), `psd-eoc-event-room-${runId}`);
+  const runDirectory = join(
+    tmpdir(),
+    `${RUN_DIRECTORY_PREFIX}${workspaceNamespace}-${runId}`,
+  );
+  const supervisionDirectory = join(
+    tmpdir(),
+    `${SUPERVISION_DIRECTORY_PREFIX}${workspaceNamespace}-${runId}`,
+  );
   const workspaceDirectory = join(runDirectory, 'workspace');
   const serverDirectory = join(workspaceDirectory, 'packages', 'server');
   if (
@@ -192,6 +1184,7 @@ function buildEventRoomPlaywrightRunContext(
   }
   return Object.freeze({
     runId,
+    workspaceNamespace,
     baseDatabaseUrl: validatedBaseUrl,
     databaseUrl: databaseUrl.toString(),
     databaseName,
@@ -214,6 +1207,25 @@ function buildEventRoomPlaywrightRunContext(
       'server-workspace-preparation.json',
     ),
     serverStoppedPath: join(runDirectory, 'server-stopped.json'),
+    supervisionDirectory,
+    gateHeartbeatPath: join(supervisionDirectory, 'gate-heartbeat.json'),
+    coordinatorIdentityPath: join(
+      supervisionDirectory,
+      'coordinator-identity.json',
+    ),
+    coordinatorChildExitPath: join(
+      supervisionDirectory,
+      'coordinator-child-exit.json',
+    ),
+    webServerIdentityPath: join(
+      supervisionDirectory,
+      'web-server-identity.json',
+    ),
+    supervisorReadyPath: join(supervisionDirectory, 'supervisor-ready.json'),
+    supervisorStoppingPath: join(
+      supervisionDirectory,
+      'supervisor-stopping.json',
+    ),
     appPort,
     portLeasePath: join(PORT_LEASE_DIRECTORY, `${appPort}.json`),
     leaseOwnerPid,
@@ -429,14 +1441,47 @@ function isExistingLease(error: unknown): boolean {
   );
 }
 
+function loopbackAppPortIsAvailable(appPort: number): boolean {
+  for (const hostname of ['::1', '127.0.0.1'] as const) {
+    let listener:
+      | Readonly<{ stop(closeActiveConnections?: boolean): void }>
+      | undefined;
+    try {
+      listener = Bun.listen({
+        hostname,
+        port: appPort,
+        socket: {
+          data() {},
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'EADDRINUSE'
+      ) {
+        return false;
+      }
+      throw new Error(
+        `Could not prove that the event-room Playwright app port is available on ${hostname}.`,
+        { cause: error },
+      );
+    } finally {
+      listener?.stop(true);
+    }
+  }
+  return true;
+}
+
 function serializedPortLease(
   lease: Pick<
     EventRoomPlaywrightRunContext,
-    'runId' | 'appPort' | 'leaseOwnerPid'
+    'runId' | 'workspaceNamespace' | 'appPort' | 'leaseOwnerPid'
   >,
 ): string {
   return JSON.stringify({
     runId: lease.runId,
+    workspaceNamespace: lease.workspaceNamespace,
     appPort: lease.appPort,
     leaseOwnerPid: lease.leaseOwnerPid,
   });
@@ -460,6 +1505,9 @@ function requireValidReplacementPortLease(
     !('runId' in parsed) ||
     typeof parsed.runId !== 'string' ||
     !RUN_ID_PATTERN.test(parsed.runId) ||
+    !('workspaceNamespace' in parsed) ||
+    typeof parsed.workspaceNamespace !== 'string' ||
+    !WORKSPACE_NAMESPACE_PATTERN.test(parsed.workspaceNamespace) ||
     !('appPort' in parsed) ||
     parsed.appPort !== appPort ||
     !('leaseOwnerPid' in parsed) ||
@@ -469,6 +1517,7 @@ function requireValidReplacementPortLease(
     serialized !==
       serializedPortLease({
         runId: parsed.runId,
+        workspaceNamespace: parsed.workspaceNamespace,
         appPort: parsed.appPort,
         leaseOwnerPid: parsed.leaseOwnerPid,
       })
@@ -486,6 +1535,7 @@ export function claimEventRoomPlaywrightRunContext(
   baseDatabaseUrl: string,
   runId: string,
   preferredPort?: number,
+  workspaceNamespace: string = SOURCE_WORKSPACE_NAMESPACE,
 ): EventRoomPlaywrightRunContext {
   const compactRunId = runId.replaceAll('-', '');
   const portSeed = Number.parseInt(compactRunId.slice(0, 8), 16);
@@ -508,6 +1558,7 @@ export function claimEventRoomPlaywrightRunContext(
       runId,
       appPort,
       process.pid,
+      workspaceNamespace,
     );
     let descriptor: number;
     try {
@@ -520,6 +1571,24 @@ export function claimEventRoomPlaywrightRunContext(
       writeFileSync(descriptor, serializedPortLease(context), 'utf8');
     } finally {
       closeSync(descriptor);
+    }
+    let portIsAvailable: boolean;
+    try {
+      portIsAvailable = loopbackAppPortIsAvailable(appPort);
+    } catch (error) {
+      try {
+        releaseEventRoomPlaywrightPortLease(context);
+      } catch (releaseError) {
+        throw new AggregateError(
+          [error, releaseError],
+          'Event-room Playwright app-port verification failed and its lease could not be released.',
+        );
+      }
+      throw error;
+    }
+    if (!portIsAvailable) {
+      releaseEventRoomPlaywrightPortLease(context);
+      continue;
     }
     return context;
   }
@@ -534,6 +1603,8 @@ export function requireEventRoomPlaywrightRunContext(
     value === null ||
     !('runId' in value) ||
     typeof value.runId !== 'string' ||
+    !('workspaceNamespace' in value) ||
+    typeof value.workspaceNamespace !== 'string' ||
     !('baseDatabaseUrl' in value) ||
     typeof value.baseDatabaseUrl !== 'string' ||
     !('appPort' in value) ||
@@ -548,6 +1619,7 @@ export function requireEventRoomPlaywrightRunContext(
     value.runId,
     value.appPort,
     value.leaseOwnerPid,
+    value.workspaceNamespace,
   );
   if (JSON.stringify(value) !== JSON.stringify(expected)) {
     throw new Error('The event-room Playwright run metadata was altered.');
@@ -734,6 +1806,19 @@ export async function cleanupEventRoomPlaywrightRunAfterChildExit(
   ) => Promise<void> = waitForEventRoomPlaywrightPortToClose,
 ): Promise<void> {
   const context = requireEventRoomPlaywrightRunContext(value);
+  for (const identityPath of [
+    context.coordinatorIdentityPath,
+    context.webServerIdentityPath,
+  ]) {
+    try {
+      lstatSync(identityPath);
+      throw new Error(
+        'The event-room Playwright outer cleanup refused to erase immutable process identity; exact supervisor cleanup is required.',
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
   const leaseOwnership = inspectEventRoomPlaywrightPortLease(context);
   if (!existsSync(context.runDirectory) && leaseOwnership !== 'owned') return;
   if (!hasStoppedServerEvidence(context)) {
@@ -741,6 +1826,229 @@ export async function cleanupEventRoomPlaywrightRunAfterChildExit(
   }
   rmSync(context.runDirectory, { force: true, recursive: true });
   releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+  rmSync(context.supervisionDirectory, { force: true, recursive: true });
+}
+
+export interface EventRoomPlaywrightOrphanCleanupOperations {
+  inspectProcess(pid: number): Promise<Readonly<{
+    processGroupId: number;
+    startedAt: string;
+    command: string;
+  }> | null>;
+  signalProcessGroup(processGroupId: number, signal: NodeJS.Signals): void;
+  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  processGroupMembers(processGroupId: number): Promise<readonly number[]>;
+  proveWebServerRunIdentity(
+    context: EventRoomPlaywrightRunContext,
+    identity: EventRoomPlaywrightWebServerIdentity,
+    supervisorNonce: string,
+  ): Promise<boolean>;
+  waitForPortClose(appPort: number): Promise<void>;
+  dropOwnedDatabase(context: EventRoomPlaywrightRunContext): Promise<unknown>;
+}
+
+interface ExactPlaywrightProcessIdentity {
+  readonly pid: number;
+  readonly processGroupId: number;
+  readonly processStartedAt: string;
+  readonly commandHash: string;
+  readonly label: 'coordinator' | 'web-server';
+  readonly nonceMustAppearInCommand: boolean;
+}
+
+function requireExactProcessIdentity(
+  actual: Readonly<{
+    processGroupId: number;
+    startedAt: string;
+    command: string;
+  }> | null,
+  expected: ExactPlaywrightProcessIdentity,
+  supervisorNonce: string,
+  stage: string,
+): void {
+  if (actual === null) {
+    throw new Error(
+      `The event-room Playwright ${expected.label} process identity is missing ${stage}.`,
+    );
+  }
+  if (
+    actual.processGroupId !== expected.processGroupId ||
+    actual.startedAt !== expected.processStartedAt ||
+    sha256(actual.command) !== expected.commandHash ||
+    (expected.nonceMustAppearInCommand &&
+      !actual.command.includes(supervisorNonce))
+  ) {
+    throw new Error(
+      `The event-room Playwright ${expected.label} process identity is ambiguous or reused ${stage}.`,
+    );
+  }
+}
+
+async function terminateExactPlaywrightProcessGroup(
+  identity: ExactPlaywrightProcessIdentity,
+  supervisorNonce: string,
+  operations: EventRoomPlaywrightOrphanCleanupOperations,
+  releaseAnchor: boolean,
+  proveRunIdentity?: () => Promise<boolean>,
+): Promise<void> {
+  const requireCurrentIdentity = async (stage: string): Promise<void> => {
+    requireExactProcessIdentity(
+      await operations.inspectProcess(identity.pid),
+      identity,
+      supervisorNonce,
+      stage,
+    );
+    if (proveRunIdentity === undefined) return;
+    let proven = false;
+    try {
+      proven = await proveRunIdentity();
+    } catch (error) {
+      throw new Error(
+        `The event-room Playwright ${identity.label} run challenge failed ${stage}.`,
+        { cause: error },
+      );
+    }
+    if (!proven) {
+      throw new Error(
+        `The event-room Playwright ${identity.label} run challenge failed ${stage}.`,
+      );
+    }
+    // Challenge verification is asynchronous. Re-check the immutable process
+    // facts after it returns so a leader that exited during the proof cannot
+    // authorize a signal with its earlier identity snapshot.
+    requireExactProcessIdentity(
+      await operations.inspectProcess(identity.pid),
+      identity,
+      supervisorNonce,
+      `after run challenge ${stage}`,
+    );
+  };
+  await requireCurrentIdentity('before termination');
+  operations.signalProcessGroup(identity.processGroupId, 'SIGTERM');
+  const deadline = Date.now() + 5_000;
+  let members = await operations.processGroupMembers(identity.processGroupId);
+  while (
+    (releaseAnchor
+      ? members.some((pid) => pid !== identity.pid)
+      : members.length > 0) &&
+    Date.now() < deadline
+  ) {
+    await delay(25);
+    members = await operations.processGroupMembers(identity.processGroupId);
+  }
+  const descendantsRemain = releaseAnchor
+    ? members.some((pid) => pid !== identity.pid)
+    : members.length > 0;
+  if (descendantsRemain) {
+    await requireCurrentIdentity('before forced termination');
+    operations.signalProcessGroup(identity.processGroupId, 'SIGKILL');
+    const forcedDeadline = Date.now() + 5_000;
+    while (
+      (await operations.processGroupMembers(identity.processGroupId)).length >
+        0 &&
+      Date.now() < forcedDeadline
+    ) {
+      await delay(25);
+    }
+  } else if (releaseAnchor) {
+    await requireCurrentIdentity('before anchor exit');
+    operations.signalProcess(identity.pid, 'SIGUSR1');
+    const anchorDeadline = Date.now() + 5_000;
+    while (
+      (await operations.processGroupMembers(identity.processGroupId)).length >
+        0 &&
+      Date.now() < anchorDeadline
+    ) {
+      await delay(25);
+    }
+  }
+  if (
+    (await operations.processGroupMembers(identity.processGroupId)).length > 0
+  ) {
+    throw new Error(
+      `The exact event-room Playwright ${identity.label} process group remained after termination.`,
+    );
+  }
+}
+
+export async function terminateInterruptedEventRoomPlaywrightWebServer(
+  value: unknown,
+  expectedIdentity: EventRoomPlaywrightWebServerIdentity,
+  supervisorNonce: string,
+  operations: EventRoomPlaywrightOrphanCleanupOperations,
+): Promise<void> {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  const actualMarker = readEventRoomPlaywrightWebServerIdentity(
+    context,
+    supervisorNonce,
+  );
+  if (
+    actualMarker === null ||
+    !exactStringEqual(
+      JSON.stringify(actualMarker),
+      JSON.stringify(expectedIdentity),
+    )
+  ) {
+    throw new Error(
+      'The event-room Playwright web-server identity was altered or replaced.',
+    );
+  }
+  await terminateExactPlaywrightProcessGroup(
+    {
+      pid: expectedIdentity.webServerPid,
+      processGroupId: expectedIdentity.processGroupId,
+      processStartedAt: expectedIdentity.processStartedAt,
+      commandHash: expectedIdentity.commandHash,
+      label: 'web-server',
+      nonceMustAppearInCommand: false,
+    },
+    supervisorNonce,
+    operations,
+    false,
+    () =>
+      operations.proveWebServerRunIdentity(
+        context,
+        expectedIdentity,
+        supervisorNonce,
+      ),
+  );
+}
+
+/**
+ * Reaps only a coordinator whose immutable run-bound identity is current.
+ * Missing, stale, altered, or mismatched identity never authorizes a signal or
+ * deletion. Database deletion follows exact tree exit and loopback port close.
+ */
+export async function cleanupInterruptedEventRoomPlaywrightCoordinator(
+  value: unknown,
+  expectedIdentity: EventRoomPlaywrightCoordinatorIdentity,
+  supervisorNonce: string,
+  operations: EventRoomPlaywrightOrphanCleanupOperations,
+): Promise<void> {
+  const context = requireEventRoomPlaywrightRunContext(value);
+  const identity = requireEventRoomPlaywrightCoordinatorIdentity(
+    context,
+    expectedIdentity,
+    supervisorNonce,
+  );
+  await terminateExactPlaywrightProcessGroup(
+    {
+      pid: identity.coordinatorPid,
+      processGroupId: identity.processGroupId,
+      processStartedAt: identity.processStartedAt,
+      commandHash: identity.commandHash,
+      label: 'coordinator',
+      nonceMustAppearInCommand: true,
+    },
+    supervisorNonce,
+    operations,
+    true,
+  );
+  await operations.waitForPortClose(context.appPort);
+  await operations.dropOwnedDatabase(context);
+  rmSync(context.runDirectory, { force: true, recursive: true });
+  releaseEventRoomPlaywrightPortLeaseIfOwned(context);
+  rmSync(context.supervisionDirectory, { force: true, recursive: true });
 }
 
 /**

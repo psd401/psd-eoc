@@ -10,8 +10,8 @@ import { PsdEocStack } from '../src/psd-eoc-stack';
 type JsonRecord = Record<string, unknown>;
 
 const SLO_CHILD_ENV = 'PSD_EOC_ISSUE30_SLO_CHILD';
+const SLO_PRECHECKED_ENV = 'PSD_EOC_ISSUE30_SLO_PRECHECKED';
 const SLO_SUCCESS_PREFIX = '[issue-30 synthetic SLO success]';
-const SLO_GATE_RESULT_KEY = Symbol.for('psd-eoc.issue30.slo-gate-result');
 const sloTestFile = fileURLToPath(
   new URL(
     '../../workers/shared/e2e-delivery-performance.test.ts',
@@ -44,13 +44,6 @@ function syntheticTestDatabaseUrl(): string {
     );
   }
   return parsed.toString();
-}
-
-function recordedSloGateResult(): string | null {
-  const value = Reflect.get(globalThis, SLO_GATE_RESULT_KEY) as unknown;
-  return typeof value === 'string' && value.startsWith(SLO_SUCCESS_PREFIX)
-    ? value
-    : null;
 }
 
 function record(value: unknown): JsonRecord {
@@ -92,9 +85,8 @@ describe('synthesized monitoring stack', () => {
   testWithDatabase(
     'runs the issue 30 SLO gate before later suites can bias wall-clock evidence',
     () => {
-      const existingResult = recordedSloGateResult();
-      if (existingResult !== null) {
-        console.info(existingResult);
+      if (process.env[SLO_PRECHECKED_ENV] === 'true') {
+        expect(process.env[SLO_CHILD_ENV]).not.toBe('true');
         return;
       }
       const databaseUrl = syntheticTestDatabaseUrl();
@@ -128,11 +120,28 @@ describe('synthesized monitoring stack', () => {
       if (successLine === undefined) {
         throw new Error('The early synthetic SLO result is unavailable.');
       }
-      Reflect.set(globalThis, SLO_GATE_RESULT_KEY, successLine);
       console.info(successLine);
     },
     240_000,
   );
+
+  it('serializes one authoritative SLO precheck before the repository test phase', async () => {
+    const rootPackage = record(
+      JSON.parse(
+        await Bun.file(new URL('../../package.json', import.meta.url)).text(),
+      ),
+    );
+    const scripts = record(rootPackage.scripts);
+    expect(scripts['test:slo']).toBe(
+      "PSD_EOC_ISSUE30_SLO_PRECHECKED=false bun test infra/test/monitoring-stack.test.ts --test-name-pattern 'runs the issue 30 SLO gate before later suites can bias wall-clock evidence'",
+    );
+    expect(scripts['test:prechecked']).toBe(
+      'PSD_EOC_ISSUE30_SLO_PRECHECKED=true bun run test',
+    );
+    expect(scripts.check).toBe(
+      'bun run format:check && bun run lint && bun run typecheck && bun run test:slo && bun run test:prechecked',
+    );
+  });
 
   it('routes parameterized alarm recipients without repository endpoint data', () => {
     const parameters = record(synthesized.Parameters);
