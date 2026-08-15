@@ -1,4 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useMobileAuth } from './auth-provider';
 
@@ -16,9 +17,10 @@ export function ConnectivityBanner() {
     : 'Starting an incident and other changes are unavailable. Reconnect, review the consequences, and confirm again.';
 
   return (
-    <View
+    <SafeAreaView
       accessibilityLiveRegion="assertive"
       accessibilityRole="alert"
+      edges={['top', 'left', 'right']}
       style={styles.banner}
     >
       <View style={styles.copy}>
@@ -41,7 +43,7 @@ export function ConnectivityBanner() {
           <Text style={styles.retryText}>Retry</Text>
         </Pressable>
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 

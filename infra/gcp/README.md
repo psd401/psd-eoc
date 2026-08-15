@@ -135,7 +135,11 @@ refreshes to `psd401-eoc`; enabling them in the main root would create a fresh-
 project quota cycle. The helper then initializes the main GCS backend, imports
 those six resources plus the authoritative bucket policy, applies the remaining
 APIs/IAM/service account remotely, proves zero drift, and removes the duplicate
-resource addresses from bootstrap state. Google initially creates its four
+resource addresses from bootstrap state. The main provider is pinned to the
+fixed project, and the imported bucket inherits that provider project instead
+of declaring a resource-level `project`: Google exposes only the numeric bucket
+project during import, so repeating the string project ID on the resource would
+incorrectly plan a replacement. Google initially creates its four
 legacy project convenience bindings with a bucket. The same saved bootstrap
 plan replaces them with the single administrator Object Admin binding before
 the main backend is initialized. An interrupted run can adopt only that exact
