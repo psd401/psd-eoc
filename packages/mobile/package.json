@@ -4,6 +4,25 @@
   "private": true,
   "type": "module",
   "main": "expo-router/entry",
+  "psdEocReleasePolicy": {
+    "remoteUpdatesEnabledInCurrentRuntime": false,
+    "remoteUpdatesRequireCodeSigning": true,
+    "remoteUpdatesReenableRequiresNewAppVersionAndStoreBuild": true,
+    "storeBuildRequiredChangeKinds": [
+      "all-current-runtime-changes",
+      "push",
+      "auth",
+      "native",
+      "runtime",
+      "persistent-data-shape",
+      "start-event",
+      "human-only-action",
+      "real-drill-classification",
+      "live-provider-gate"
+    ],
+    "safetyPathStoreBuildRequiresNewAppVersion": true,
+    "storeSubmissionRequiresHumanApproval": true
+  },
   "scripts": {
     "start": "expo start",
     "ios": "bun run prebuild:check && expo run:ios",
@@ -22,6 +41,7 @@
   "dependencies": {
     "@psd-eoc/contracts": "workspace:*",
     "expo": "~57.0.13",
+    "expo-application": "~57.0.2",
     "expo-auth-session": "~57.0.7",
     "expo-constants": "~57.0.11",
     "expo-crypto": "~57.0.1",
@@ -38,6 +58,7 @@
     "expo-splash-screen": "~57.0.6",
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.2",
+    "expo-updates": "~57.0.14",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.2",

@@ -2,6 +2,7 @@
   "cli": {
     "version": ">= 21.7.0",
     "appVersionSource": "remote",
+    "requireCommit": true,
     "promptToConfigurePushNotifications": false
   },
   "build": {
@@ -24,6 +25,18 @@
       "distribution": "store",
       "environment": "production",
       "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {
+      "android": {
+        "track": "alpha",
+        "releaseStatus": "draft",
+        "changesNotSentForReview": true
+      },
+      "ios": {
+        "ascAppId": "6801607849"
+      }
     }
   }
 }
