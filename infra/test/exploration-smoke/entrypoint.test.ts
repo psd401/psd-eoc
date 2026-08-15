@@ -32,6 +32,30 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(JSON.stringify(configuration)).not.toContain('PsdEocStack');
   });
 
+  it('runs the preview gate with the canonical synthetic PostgreSQL service', async () => {
+    const workflow = await readWorkflow();
+    const previewJobHeader = workflow.match(
+      /\n {2}preview:\n([\s\S]*?)\n {4}steps:/,
+    )?.[1];
+    const deployJobHeader = workflow.match(
+      /\n {2}deploy:\n([\s\S]*?)\n {4}steps:/,
+    )?.[1];
+
+    expect(previewJobHeader).toBeDefined();
+    expect(previewJobHeader).toContain('image: postgres:16-alpine');
+    expect(previewJobHeader).toContain('POSTGRES_DB: psd_eoc_test');
+    expect(previewJobHeader).toContain('POSTGRES_USER: psd_eoc_test');
+    expect(previewJobHeader).toContain(
+      'DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test',
+    );
+    expect(previewJobHeader).toContain(
+      'TEST_DATABASE_URL: postgresql://psd_eoc_test:synthetic_test_password@localhost:5432/psd_eoc_test',
+    );
+    expect(deployJobHeader).toBeDefined();
+    expect(deployJobHeader).not.toContain('DATABASE_URL:');
+    expect(deployJobHeader).not.toContain('TEST_DATABASE_URL:');
+  });
+
   it('keeps workflow publication, bootstrap order, and readback redaction aligned', async () => {
     const workflow = await readWorkflow();
     const bootstrapStep = workflow.indexOf(
