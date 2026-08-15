@@ -51,6 +51,10 @@ const CLIENT_ID = 'synthetic-unit.apps.googleusercontent.com';
 const CLIENT_SECRET = 'synthetic-unit-client-secret';
 const HOSTED_DOMAIN = 'psd401.net';
 const COOKIE_SECRET = Buffer.alloc(32, 11).toString('base64url');
+const PRODUCTION_PROJECT_NUMBER = '<aws-account-id>';
+const PRODUCTION_WEB_CLIENT_ID = `${PRODUCTION_PROJECT_NUMBER}-webclient.apps.googleusercontent.com`;
+const PRODUCTION_IOS_CLIENT_ID = `${PRODUCTION_PROJECT_NUMBER}-iosclient.apps.googleusercontent.com`;
+const PRODUCTION_CLIENT_SECRET = `GOCSPX-${'a'.repeat(32)}`;
 const SESSION_POLICY: Readonly<WebSessionPolicy> = Object.freeze({
   sessionLifetimeSeconds: 90 * 24 * 60 * 60,
   membershipTtlSeconds: 24 * 60 * 60,
@@ -201,6 +205,24 @@ function oidcEnvironment(
     GOOGLE_OIDC_AUTHORIZATION_ENDPOINT: `${mockProviderOrigin}/authorize`,
     GOOGLE_OIDC_TOKEN_ENDPOINT: `${mockProviderOrigin}/token`,
     GOOGLE_OIDC_JWKS_URI: `${mockProviderOrigin}/jwks`,
+    ...overrides,
+  };
+}
+
+function productionOidcEnvironment(
+  oauthConfig: Readonly<Record<string, unknown>> = {
+    clientId: PRODUCTION_WEB_CLIENT_ID,
+    clientSecret: PRODUCTION_CLIENT_SECRET,
+    iosBundleId: 'net.psd401.eoc',
+    iosClientId: PRODUCTION_IOS_CLIENT_ID,
+    webClientId: PRODUCTION_WEB_CLIENT_ID,
+  },
+  overrides: Readonly<Record<string, string | undefined>> = {},
+): Readonly<Record<string, string | undefined>> {
+  return {
+    NODE_ENV: 'production',
+    GOOGLE_OAUTH_CONFIG: JSON.stringify(oauthConfig),
+    GOOGLE_OIDC_COOKIE_SECRET: COOKIE_SECRET,
     ...overrides,
   };
 }
@@ -424,6 +446,138 @@ describe('protected web return destination', () => {
 });
 
 describe('Google OIDC adapter', () => {
+  test('parses the retained five-field production contract with fixed boundaries', () => {
+    const configuration = readGoogleOidcConfiguration(
+      productionOidcEnvironment(),
+    );
+
+    expect(configuration).toEqual({
+      mode: 'production',
+      clientId: PRODUCTION_WEB_CLIENT_ID,
+      redirectUri: 'https://eoc.psd401.net/auth/callback',
+      authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+      tokenEndpoint: 'https://oauth2.googleapis.com/token',
+      jwksUri: 'https://www.googleapis.com/oauth2/v3/certs',
+      transientCookieName: '__Host-psd-eoc-oidc',
+      secureCookies: true,
+      httpTimeoutMilliseconds: 10_000,
+    });
+    expect(JSON.stringify(configuration)).not.toContain(
+      PRODUCTION_CLIENT_SECRET,
+    );
+    expect(JSON.stringify(configuration)).not.toContain(COOKIE_SECRET);
+  });
+
+  test('fails closed on every malformed retained-secret shape', () => {
+    const valid = {
+      clientId: PRODUCTION_WEB_CLIENT_ID,
+      clientSecret: PRODUCTION_CLIENT_SECRET,
+      iosBundleId: 'net.psd401.eoc',
+      iosClientId: PRODUCTION_IOS_CLIENT_ID,
+      webClientId: PRODUCTION_WEB_CLIENT_ID,
+    } as const;
+    const missingFieldCases = Object.keys(valid).map(
+      (missingField) =>
+        [
+          `missing ${missingField}`,
+          Object.fromEntries(
+            Object.entries(valid).filter(([name]) => name !== missingField),
+          ),
+        ] as const,
+    );
+    const cases: ReadonlyArray<
+      readonly [string, Readonly<Record<string, unknown>>]
+    > = [
+      ...missingFieldCases,
+      ['unknown field', { ...valid, issuer: GOOGLE_ISSUER }],
+      ['malformed client ID', { ...valid, clientId: 'not-google' }],
+      ['malformed web client ID', { ...valid, webClientId: 'not-google' }],
+      ['malformed iOS client ID', { ...valid, iosClientId: 'not-google' }],
+      [
+        'mismatched duplicated web client ID',
+        {
+          ...valid,
+          clientId: `${PRODUCTION_PROJECT_NUMBER}-other.apps.googleusercontent.com`,
+        },
+      ],
+      [
+        'mismatched client project',
+        {
+          ...valid,
+          iosClientId: '999999999999-iosclient.apps.googleusercontent.com',
+        },
+      ],
+      [
+        'reused web client as iOS client',
+        { ...valid, iosClientId: PRODUCTION_WEB_CLIENT_ID },
+      ],
+      ['wrong iOS bundle', { ...valid, iosBundleId: 'net.psd401.other' }],
+      ['empty client secret', { ...valid, clientSecret: '' }],
+      ['untrimmed client secret', { ...valid, clientSecret: ' secret' }],
+      ['line-bearing client secret', { ...valid, clientSecret: 'secret\n' }],
+      [
+        'oversized client secret',
+        { ...valid, clientSecret: 's'.repeat(2_049) },
+      ],
+      [
+        'placeholder client secret',
+        { ...valid, clientSecret: 'BLOCKED_UNTIL_APPROVED' },
+      ],
+    ];
+
+    for (const [, contract] of cases) {
+      expect(() =>
+        readGoogleOidcConfiguration(productionOidcEnvironment(contract)),
+      ).toThrow(GoogleOidcConfigurationError);
+    }
+
+    for (const serialized of ['{', 'null', '[]']) {
+      expect(() =>
+        readGoogleOidcConfiguration({
+          ...productionOidcEnvironment(),
+          GOOGLE_OAUTH_CONFIG: serialized,
+        }),
+      ).toThrow(GoogleOidcConfigurationError);
+    }
+
+    expect(() =>
+      readGoogleOidcConfiguration(
+        productionOidcEnvironment({ ...valid, clientSecret: 's' }),
+      ),
+    ).not.toThrow();
+  });
+
+  test('rejects production legacy, mixed, origin, redirect, issuer, and domain overrides', () => {
+    for (const name of [
+      'GOOGLE_OIDC_CLIENT_ID',
+      'GOOGLE_OIDC_CLIENT_SECRET',
+      'GOOGLE_OIDC_REDIRECT_URI',
+      'GOOGLE_OIDC_AUTHORIZATION_ENDPOINT',
+      'GOOGLE_OIDC_TOKEN_ENDPOINT',
+      'GOOGLE_OIDC_JWKS_URI',
+      'GOOGLE_OIDC_ISSUER',
+      'GOOGLE_OIDC_APPLICATION_ORIGIN',
+      'GOOGLE_OIDC_ORIGIN',
+      'GOOGLE_OIDC_HOSTED_DOMAIN',
+      'GOOGLE_OIDC_DOMAIN',
+    ] as const) {
+      expect(() =>
+        readGoogleOidcConfiguration(
+          productionOidcEnvironment(undefined, { [name]: 'override' }),
+        ),
+      ).toThrow(GoogleOidcConfigurationError);
+    }
+  });
+
+  test('rejects retained production configuration in a mock-provider runtime', () => {
+    expect(() =>
+      readGoogleOidcConfiguration({
+        ...oidcEnvironment(),
+        GOOGLE_OAUTH_CONFIG: productionOidcEnvironment().GOOGLE_OAUTH_CONFIG,
+      }),
+    ).toThrow(GoogleOidcConfigurationError);
+  });
+
   test('starts exact hosted-domain code+S256 PKCE without a network call', async () => {
     const configuration = readGoogleOidcConfiguration(oidcEnvironment());
     const started = await beginGoogleOidcSignIn(configuration);

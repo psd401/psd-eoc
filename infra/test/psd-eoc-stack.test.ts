@@ -753,7 +753,9 @@ describe('App Runner high availability', () => {
     const deliveryStateWorkerTokenSecretLogicalId = secretLogicalId(
       '/psd-eoc/delivery-state-worker-token',
     );
-    const googleOauthSecretLogicalId = secretLogicalId('/psd-eoc/google-oauth');
+    const googleOidcCookieSecretLogicalId = secretLogicalId(
+      '/psd-eoc/google-oidc-cookie-secret',
+    );
 
     expect([...environmentByName.keys()].sort()).toEqual(
       [
@@ -766,6 +768,7 @@ describe('App Runner high availability', () => {
         'DATABASE_SECRET_ARN',
         'FANOUT_QUEUE_URL',
         'MEDIA_BUCKET_NAME',
+        'NODE_ENV',
         'PSD_EOC_EXPO_CREDENTIAL_VERIFICATION_REFERENCE',
         'PSD_EOC_PRODUCT_OWNER_USER_ID',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
@@ -779,6 +782,7 @@ describe('App Runner high availability', () => {
     expect(environmentByName.get('DATABASE_SECRET_ARN')).toEqual({
       Ref: applicationSecretLogicalId,
     });
+    expect(environmentByName.get('NODE_ENV')).toBe('production');
     expect(environmentByName.has('DATABASE_CLUSTER_ARN')).toBe(false);
     expect(environmentByName.get('PSD_EOC_PRODUCT_OWNER_USER_ID')).toEqual({
       Ref: 'DeliveryTestProductOwnerUserId',
@@ -796,6 +800,22 @@ describe('App Runner high availability', () => {
     const environmentSecrets = asArray(
       imageConfiguration.RuntimeEnvironmentSecrets,
     ).map(asRecord);
+    expect(environmentSecrets.map((entry) => entry.Name).sort()).toEqual(
+      [
+        'API_SALT',
+        'GOOGLE_OAUTH_CONFIG',
+        'GOOGLE_OIDC_COOKIE_SECRET',
+        'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+      ].sort(),
+    );
+    expect(environmentSecrets).toContainEqual({
+      Name: 'GOOGLE_OAUTH_CONFIG',
+      Value: { Ref: 'GoogleOauthSecretArn' },
+    });
+    expect(environmentSecrets).toContainEqual({
+      Name: 'GOOGLE_OIDC_COOKIE_SECRET',
+      Value: { Ref: googleOidcCookieSecretLogicalId },
+    });
     expect(environmentSecrets).toContainEqual({
       Name: 'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
       Value: { Ref: deliveryStateWorkerTokenSecretLogicalId },
@@ -842,9 +862,43 @@ describe('App Runner high availability', () => {
         apiSaltSecretLogicalId,
         applicationSecretLogicalId,
         deliveryStateWorkerTokenSecretLogicalId,
-        googleOauthSecretLogicalId,
+        googleOidcCookieSecretLogicalId,
+        'GoogleOauthSecretArn',
       ].sort(),
     );
+
+    const oidcSecretReferenceNames = [
+      'GoogleOauthSecretArn',
+      googleOidcCookieSecretLogicalId,
+    ];
+    const oidcPolicies = resourceEntries('AWS::IAM::Policy').filter(
+      ([, policy]) =>
+        oidcSecretReferenceNames.some((reference) =>
+          JSON.stringify(policy).includes(reference),
+        ),
+    );
+    expect(oidcPolicies).toHaveLength(1);
+    expect(oidcPolicies[0]?.[0]).toBe(runtimePolicyLogicalId);
+    expect(resourceProperties(oidcPolicies[0]?.[1] ?? {}).Roles).toEqual([
+      { Ref: instanceRoleLogicalId },
+    ]);
+    const oidcStatements = runtimeStatements.filter((statement) =>
+      oidcSecretReferenceNames.some((reference) =>
+        JSON.stringify(statement.Resource).includes(reference),
+      ),
+    );
+    expect(oidcStatements.length).toBeGreaterThan(0);
+    for (const statement of oidcStatements) {
+      expect(asStringArray(statement.Action).sort()).toEqual([
+        'secretsmanager:DescribeSecret',
+        'secretsmanager:GetSecretValue',
+      ]);
+      expect(JSON.stringify(statement.Resource)).not.toContain('*');
+    }
+
+    const outputs = JSON.stringify(synthesizedTemplate.Outputs);
+    expect(outputs).not.toContain('GoogleOauthSecretArn');
+    expect(outputs).not.toContain(googleOidcCookieSecretLogicalId);
 
     const dependencies = Array.isArray(service.DependsOn)
       ? service.DependsOn
@@ -865,7 +919,7 @@ describe('fail-closed integration placeholders', () => {
       '/psd-eoc/delivery-state-worker-token',
       '/psd-eoc/database/monitoring',
       '/psd-eoc/expo-access-token',
-      '/psd-eoc/google-oauth',
+      '/psd-eoc/google-oidc-cookie-secret',
     ]);
     for (const [, secret] of secrets) {
       const properties = resourceProperties(secret);
@@ -873,6 +927,7 @@ describe('fail-closed integration placeholders', () => {
       expect(properties.GenerateSecretString).toBeDefined();
       expect(properties).not.toHaveProperty('SecretString');
       expect(secret.DeletionPolicy).toBe('Retain');
+      expect(secret.UpdateReplacePolicy).toBe('Retain');
     }
     expect(expectedNames.size).toBe(0);
   });
@@ -882,6 +937,31 @@ describe('fail-closed integration placeholders', () => {
     const owner = asRecord(parameters.DeliveryTestProductOwnerUserId);
     expect(owner).not.toHaveProperty('Default');
     expect(owner.AllowedPattern).toContain('4[0-9a-f]');
+
+    const googleOauthArn = asRecord(parameters.GoogleOauthSecretArn);
+    expect(googleOauthArn).not.toHaveProperty('Default');
+    expect(googleOauthArn.NoEcho).toBe(true);
+    expect(googleOauthArn.AllowedPattern).toBe(
+      `^arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
+    );
+    const googleOauthArnPattern = new RegExp(
+      String(googleOauthArn.AllowedPattern),
+      'u',
+    );
+    expect(
+      googleOauthArnPattern.test(
+        `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-oauth-Ab12Cd`,
+      ),
+    ).toBe(true);
+    for (const invalid of [
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:000000000000:secret:/psd-eoc/google-oauth-Ab12Cd`,
+      `arn:aws:secretsmanager:us-east-1:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-oauth-Ab12Cd`,
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-oauth`,
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/google-oauth-*`,
+      `arn:aws:secretsmanager:${DEPLOYMENT_REGION}:${DEPLOYMENT_ACCOUNT}:secret:/psd-eoc/other-Ab12Cd`,
+    ]) {
+      expect(googleOauthArnPattern.test(invalid)).toBe(false);
+    }
 
     for (const name of [
       'ExpoCredentialVerificationReference',

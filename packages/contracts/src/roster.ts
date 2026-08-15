@@ -166,6 +166,25 @@ export const RecipientIdSchema = UuidSchema;
 export type RecipientId = z.infer<typeof RecipientIdSchema>;
 
 /**
+ * Owns the canonical staff email identity key supplied by approved roster
+ * sources. This key identifies staff roster membership; it does not prove a
+ * Google OIDC subject or authorize notification delivery.
+ */
+export const StaffRosterEmailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(320)
+  .email()
+  .refine(
+    (email) => email.slice(email.lastIndexOf('@') + 1) === 'psd401.net',
+    'Staff roster emails must use the psd401.net hosted domain.',
+  );
+
+/** Canonical approved staff roster email inferred from its schema. */
+export type StaffRosterEmail = z.infer<typeof StaffRosterEmailSchema>;
+
+/**
  * Owns a minimized immutable recipient snapshot with group provenance and
  * zero or more endpoint snapshots. Missing valid endpoints remain
  * representable for stale-roster reporting.
@@ -175,6 +194,7 @@ export const RecipientSchema = z
     id: RecipientIdSchema,
     population: RosterPopulationSchema,
     googleSubject: z.string().trim().min(1).max(255).nullable(),
+    staffEmail: StaffRosterEmailSchema.optional(),
     displayName: z.string().trim().min(1).max(160),
     groupSourceRefs: z
       .array(RosterGroupSourceRefSchema)
@@ -203,14 +223,27 @@ export const RecipientSchema = z
       }
     });
     if (
-      (recipient.population === 'synthetic') !==
-      (recipient.googleSubject === null)
+      recipient.population === 'staff' &&
+      recipient.googleSubject === null &&
+      recipient.staffEmail === undefined
     ) {
       context.addIssue({
         code: 'custom',
         message:
-          'Staff recipients require a Google subject; synthetic recipients cannot carry one.',
-        path: ['googleSubject'],
+          'Staff recipients require a verified Google subject or canonical staff email.',
+        path: ['staffEmail'],
+      });
+    }
+    if (
+      recipient.population === 'synthetic' &&
+      (recipient.googleSubject !== null || recipient.staffEmail !== undefined)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Synthetic recipients cannot carry Google subjects or staff emails.',
+        path:
+          recipient.googleSubject !== null ? ['googleSubject'] : ['staffEmail'],
       });
     }
     const endpointIds = recipient.endpoints.map((endpoint) => endpoint.id);
@@ -456,13 +489,28 @@ export const RosterSnapshotSchema = z
         path: ['recipients'],
       });
     }
+    const staffEmails = snapshot.recipients.flatMap((recipient) =>
+      recipient.staffEmail === undefined ? [] : [recipient.staffEmail],
+    );
+    if (!hasUniqueStrings(staffEmails)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Staff emails must be deduplicated across a snapshot.',
+        path: ['recipients'],
+      });
+    }
     if (
       snapshot.population === 'synthetic' &&
-      snapshot.recipients.some((recipient) => recipient.googleSubject !== null)
+      snapshot.recipients.some(
+        (recipient) =>
+          recipient.googleSubject !== null ||
+          recipient.staffEmail !== undefined,
+      )
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'Synthetic recipients cannot carry Google subjects.',
+        message:
+          'Synthetic recipients cannot carry Google subjects or staff emails.',
         path: ['recipients'],
       });
     }
