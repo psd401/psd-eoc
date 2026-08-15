@@ -172,6 +172,23 @@ function databaseConnection(): PostgresDatabaseConnection {
   return connection;
 }
 
+async function checkpointSyntheticDatabaseCluster(): Promise<void> {
+  // The SLO process owns an isolated database, but PostgreSQL checkpoints are
+  // cluster-wide. Drain setup and any earlier synthetic test writes before the
+  // first wall-clock sample so a scheduled checkpoint cannot bias the proof.
+  // CHECKPOINT requires the synthetic test role to own this proof boundary;
+  // permission or execution failures deliberately fail the gate closed.
+  await databaseConnection().db.execute(sql.raw('checkpoint'));
+}
+
+async function readTimeAfterRequiredCheckpoint(input: {
+  readonly checkpoint: () => Promise<void>;
+  readonly readMonotonicTime: () => number;
+}): Promise<number> {
+  await input.checkpoint();
+  return input.readMonotonicTime();
+}
+
 function integrationId(channel: NotificationChannel) {
   return INTEGRATION_IDS[channel];
 }
@@ -804,7 +821,13 @@ if (isSloChild) {
           // The monotonic clock starts immediately before the canonical preview;
           // setup, fixture checks, and invocation construction are not hidden in
           // the measured path.
-          const activationStartedAt = performance.now();
+          const activationStartedAt =
+            sample === 0
+              ? await readTimeAfterRequiredCheckpoint({
+                  checkpoint: checkpointSyntheticDatabaseCluster,
+                  readMonotonicTime: () => performance.now(),
+                })
+              : performance.now();
           const preview = await executeStartFlowCapability(
             'create-activation-preview',
             {
@@ -1029,6 +1052,45 @@ if (isSloChild) {
       );
       expect(String(failure)).toContain('Expected: < 500');
       expect(String(failure)).toContain('Received: 500');
+    });
+
+    test('completes the required checkpoint before the first measured timestamp', async () => {
+      const order: string[] = [];
+      const measuredAt = await readTimeAfterRequiredCheckpoint({
+        async checkpoint() {
+          order.push('checkpoint-started');
+          await Promise.resolve();
+          order.push('checkpoint-completed');
+        },
+        readMonotonicTime() {
+          order.push('measurement-started');
+          return 12_345;
+        },
+      });
+
+      expect(measuredAt).toBe(12_345);
+      expect(order).toEqual([
+        'checkpoint-started',
+        'checkpoint-completed',
+        'measurement-started',
+      ]);
+
+      const checkpointFailure = new Error('synthetic checkpoint failure');
+      let clockRead = false;
+      let failure: unknown;
+      try {
+        await readTimeAfterRequiredCheckpoint({
+          checkpoint: () => Promise.reject(checkpointFailure),
+          readMonotonicTime() {
+            clockRead = true;
+            return 0;
+          },
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBe(checkpointFailure);
+      expect(clockRead).toBe(false);
     });
 
     test('attempts every cleanup step and preserves every failure', async () => {
