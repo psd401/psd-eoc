@@ -11,16 +11,27 @@ tags: [issue-32, synthetic-only, ios, notification, join]
 # this issue's mobile journey proves that exact selection without claiming
 # navigation that did not occur. The runner next uses the app's registered
 # read-only event URL and independently requires the canonical room evidence.
-- extendedWaitUntil:
-    visible: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
-    timeout: 60000
-- assertNotVisible: '.*\[INCIDENT\].*'
-- tapOn: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
-- waitForAnimationToEnd:
-    timeout: 5000
-# Do not ask the registered URL to open until the exact synthetic join has
-# completed. "Open event" is the app-owned result and cannot be produced by
-# the notification overlay or by an unrelated event.
-- extendedWaitUntil:
-    visible: '^Open event$'
-    timeout: 60000
+- retry:
+    maxRetries: 1
+    commands:
+      - runFlow:
+          when:
+            visible:
+              text: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
+              enabled: true
+          commands:
+            - assertNotVisible: '.*\[INCIDENT\].*'
+            - tapOn:
+                text: 'Join existing DRILL — PRACTICE: ${EVENT_TYPE_NAME} at ${FACILITY_NAME}.*Event ID ${EVENT_ID}'
+                enabled: true
+                retryTapIfNoChange: false
+            - waitForAnimationToEnd:
+                timeout: 5000
+      # Do not ask the registered URL to open until the exact synthetic join
+      # has completed. "Open event" is the app-owned result and cannot be
+      # produced by the notification overlay or by an unrelated event. A
+      # successful first tap synchronously removes or disables the join card;
+      # only a dropped tap can remain eligible for the bounded second attempt.
+      - extendedWaitUntil:
+          visible: '^Open event$'
+          timeout: 60000

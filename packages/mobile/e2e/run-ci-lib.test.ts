@@ -63,6 +63,7 @@ import {
   isMobileE2EIosApplicationForeground,
   isMobileE2EIosApplicationReady,
   isMobileE2EIosAuthenticationSheetReady,
+  isMobileE2EIosEnrollmentRetryReady,
   isMobileE2EIosNotificationOnLockedScreen,
   isMobileE2EIosSyntheticNotificationVisible,
   isMobileE2EUnlockRetryReady,
@@ -1709,9 +1710,11 @@ describe('issue #32 exact synthetic drill data', () => {
     );
     expect(notificationCenterFlow).not.toContain('start: 50%, 0%');
     expect(notificationCenterFlow).not.toContain('tapOn:');
+    expect(postResponseFlow.match(/- retry:/gu)).toHaveLength(1);
     expect(postResponseFlow).toMatch(
-      /Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}[\s\S]+tapOn: 'Join existing DRILL — PRACTICE:[\s\S]+Event ID \$\{EVENT_ID\}'[\s\S]+waitForAnimationToEnd:[\s\S]+visible: '\^Open event\$'[\s\S]+timeout: 60000/u,
+      /- retry:\n {4}maxRetries: 1\n {4}commands:[\s\S]+visible:\n {14}text: 'Join existing DRILL — PRACTICE:[^\n]+Event ID \$\{EVENT_ID\}'\n {14}enabled: true[\s\S]+assertNotVisible: '\.\*\\\[INCIDENT\\\]\.\*'[\s\S]+tapOn:\n {16}text: 'Join existing DRILL — PRACTICE:[^\n]+Event ID \$\{EVENT_ID\}'\n {16}enabled: true\n {16}retryTapIfNoChange: false[\s\S]+visible: '\^Open event\$'\n {10}timeout: 60000/u,
     );
+    expect(postResponseFlow.match(/tapOn:/gu)).toHaveLength(1);
     expect(postResponseFlow).toContain(
       'production response listener and parser are exercised and logged',
     );
@@ -1945,13 +1948,13 @@ describe('issue #32 exact synthetic drill data', () => {
     ]);
     expect(mobileE2EAndroidGradleWorkerArguments()).toEqual([
       '--max-workers',
-      '2',
+      '1',
     ]);
     expect(mobileE2EAndroidBuildArguments()).toEqual([
       '--no-daemon',
       '--stacktrace',
       '--max-workers',
-      '2',
+      '1',
       '-PreactNativeArchitectures=x86_64',
       'app:assembleDebug',
     ]);
@@ -2511,6 +2514,39 @@ describe('issue #32 exact synthetic drill data', () => {
         ),
       ).toBe(false);
     }
+  });
+
+  test('admits one iOS enrollment replay only from the exact signed-out transport failure', () => {
+    const exactFailure = [
+      'Sign in to PSD EOC',
+      'Sign-in needs attention',
+      'PSD EOC cannot reach the server. Cached view only.',
+      'Sign in with Google',
+    ].join('\n');
+    expect(isMobileE2EIosEnrollmentRetryReady(exactFailure)).toBe(true);
+    for (const requiredText of exactFailure.split('\n')) {
+      expect(
+        isMobileE2EIosEnrollmentRetryReady(
+          exactFailure.replace(requiredText, 'Unexpected state'),
+        ),
+      ).toBe(false);
+    }
+    expect(
+      isMobileE2EIosEnrollmentRetryReady(
+        `${exactFailure}\nissue-21-synthetic-mode`,
+      ),
+    ).toBe(false);
+  });
+
+  test('bounds the iOS enrollment replay to the existing synthetic pre-auth flow', async () => {
+    const runner = await readFile(
+      new URL('run-ci.ts', import.meta.url),
+      'utf8',
+    );
+    expect(runner).toMatch(
+      /flowName === 'enroll-loopback-oidc-ios'[\s\S]+!retryAttempted[\s\S]+isMobileE2EIosEnrollmentRetryReady\(hierarchy\)[\s\S]+retryAttempted = true;[\s\S]+`\$\{flowName\}-pre-auth`[\s\S]+`\$\{flowName\}-pre-auth-retry`[\s\S]+await awaitMaestroFlow\(retryFlow, deadline\)[\s\S]+continue;/u,
+    );
+    expect(runner.match(/`\$\{flowName\}-pre-auth-retry`/gu)).toHaveLength(1);
   });
 
   test('uses direct iOS launch without an external URL handoff', async () => {

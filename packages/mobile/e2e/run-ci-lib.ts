@@ -1102,7 +1102,7 @@ export function mobileE2EAndroidArchitectureArguments(): readonly string[] {
 
 /** Bounds Gradle concurrency on the constrained hosted Android runner. */
 export function mobileE2EAndroidGradleWorkerArguments(): readonly string[] {
-  return Object.freeze(['--max-workers', '2']);
+  return Object.freeze(['--max-workers', '1']);
 }
 
 /** Builds only the ABI used by the issue #32 hosted Android emulator. */
@@ -1396,6 +1396,20 @@ export function isMobileE2EIosAuthenticationSheetReady(
   return (
     /"accessibilityText"\s*:\s*"Face ID"/u.test(hierarchy) ||
     hierarchy.includes('Enter iPhone Passcode for “PSD EOC”')
+  );
+}
+
+/**
+ * Admits one enrollment replay only from the exact signed-out loopback
+ * transport failure. An authenticated synthetic shell never qualifies.
+ */
+export function isMobileE2EIosEnrollmentRetryReady(hierarchy: string): boolean {
+  return (
+    hierarchy.includes('Sign in to PSD EOC') &&
+    hierarchy.includes('Sign-in needs attention') &&
+    hierarchy.includes('PSD EOC cannot reach the server. Cached view only.') &&
+    hierarchy.includes('Sign in with Google') &&
+    !hierarchy.includes('issue-21-synthetic-mode')
   );
 }
 

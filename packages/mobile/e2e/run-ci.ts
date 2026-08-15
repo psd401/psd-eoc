@@ -52,6 +52,7 @@ import {
   isMobileE2EAndroidDeviceAuthenticationPrompt,
   isMobileE2EIosApplicationReady,
   isMobileE2EIosAuthenticationSheetReady,
+  isMobileE2EIosEnrollmentRetryReady,
   isMobileE2EUnlockRetryReady,
   patchMobileE2EIsolatedIssue21Fixture,
   parseMobileE2EManifestText,
@@ -1823,6 +1824,25 @@ async function respondToDeviceAuthentication(
           iosDriverSession,
         );
         return;
+      }
+      if (
+        flowName === 'enroll-loopback-oidc-ios' &&
+        !retryAttempted &&
+        isMobileE2EIosEnrollmentRetryReady(hierarchy)
+      ) {
+        retryAttempted = true;
+        const retryFlow = await startMaestroFlow(
+          platform,
+          deviceId,
+          `${flowName}-pre-auth`,
+          artifactRoot,
+          environment,
+          iosDriverSession,
+          RUNTIME_TIMEOUT_MS,
+          `${flowName}-pre-auth-retry`,
+        );
+        await awaitMaestroFlow(retryFlow, deadline);
+        continue;
       }
       await Bun.sleep(RETRY_INTERVAL_MS);
     }
