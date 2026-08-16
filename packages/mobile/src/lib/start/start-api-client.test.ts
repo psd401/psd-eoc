@@ -577,9 +577,13 @@ describe('mobile start API client', () => {
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
 
-  test('uses an explicit classification fallback for unavailable historical names', async () => {
+  test('uses a controlled-test fallback for an unavailable historical name', async () => {
+    const drillSelection = selectionFixture('drill', IDS.historicalVersion);
     const activeEvent = activeEventFixture(
-      selectionFixture('drill', IDS.historicalVersion),
+      CreateActivationPreviewInputSchema.parse({
+        ...drillSelection,
+        kind: 'test',
+      }),
     );
     const request: StartAuthenticatedRequest = async <Output>(
       input: AuthenticatedRequestOptions<Output>,
@@ -605,7 +609,7 @@ describe('mobile start API client', () => {
       throw new AuthenticatedApiError(
         ApiErrorSchema.parse({
           code: 'NOT_FOUND',
-          message: 'Synthetic historical version is unavailable.',
+          message: 'Historical version is unavailable.',
           requestId: IDS.request,
           retryable: false,
           fieldErrors: [],
@@ -618,7 +622,7 @@ describe('mobile start API client', () => {
 
     expect(result.activeEvents[0]).toMatchObject({
       facilityName: 'Authorized facility',
-      eventTypeName: 'Practice drill',
+      eventTypeName: 'Controlled test',
     });
   });
 

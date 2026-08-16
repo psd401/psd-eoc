@@ -9,7 +9,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   IntegrationsAdminView,
-  TEST_MODE_BANNER,
   type IntegrationsAdminViewProps,
 } from './integrations-admin-view';
 
@@ -120,21 +119,20 @@ function render(props: IntegrationsAdminViewProps = PROPS): string {
 }
 
 describe('integrations admin view', () => {
-  test('renders an immutable literal TEST boundary with semantic landmarks', () => {
+  test('renders a compact summary of observed integration state', () => {
     const markup = render();
 
     expect(markup).toContain(
       `<main aria-labelledby="integrations-admin-heading" id="main-content" tabindex="-1">`,
     );
     expect(markup).toContain(
-      '<aside aria-labelledby="test-mode-heading" class="test-boundary">',
+      '<strong>Current integration state:</strong> 1 of 4 observed integrations are live-verified; 1 of 3 notification channels are enabled.',
     );
-    expect(markup).toContain(TEST_MODE_BANNER);
-    expect(markup).toContain('<dt>Event kind</dt><dd>TEST</dd>');
-    expect(markup).toContain('<dt>Template mode</dt><dd>DRILL</dd>');
-    expect(markup).toContain('<dt>Roster population</dt><dd>SYNTHETIC</dd>');
-    expect(markup.match(/SYNTHETIC RECIPIENTS ONLY/gu)).toHaveLength(1);
-    expect(markup).not.toContain('contenteditable');
+    expect(markup).toContain(
+      'Channel enablement is configuration state, not proof that a notification was sent or received.',
+    );
+    expect(markup).not.toContain('TEST — SYNTHETIC RECIPIENTS ONLY');
+    expect(markup).not.toContain('class="test-boundary"');
     expect(markup).toContain('aria-label="Administration"');
   });
 

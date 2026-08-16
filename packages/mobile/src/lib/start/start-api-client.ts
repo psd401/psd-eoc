@@ -268,7 +268,7 @@ function fallbackEventTypeName(event: Event): string {
   if (event.templateMode === 'real') {
     return 'Real incident';
   }
-  return event.kind === 'test' ? 'Synthetic test' : 'Practice drill';
+  return event.kind === 'test' ? 'Controlled test' : 'Practice drill';
 }
 
 async function historicalEventTypeName(
