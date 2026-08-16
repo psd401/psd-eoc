@@ -389,7 +389,7 @@ jobs:
             echo
             echo "## Consequences"
             echo
-            echo "AWS charges begin. The stack writes only synthetic application/audit data and one approved staff access fixture. App Runner becomes publicly reachable at its AWS URL and reaches the private Aurora writer through a VPC connector. One NAT gateway provides bounded public HTTPS egress for Google OIDC; the database stays private, requires TLS, and has its cluster HTTP endpoint disabled. A protected one-off Fargate task runs the exact reviewed image digest inside the database VPC before the App Runner update. The protected workflow sets 14-day retention on the exact App Runner service and application log groups after service creation. That retention write permanently expires log events older than 14 days; CloudWatch Logs ordinarily deletes marked events within 72 hours. No DNS, certificate, GCP, mobile-store, notification-provider, recipient, or send operation is performed. Google OIDC remains configured-unverified until the separately owned eoc.psd401.net custom domain is live and a human completes an approved district sign-in; web/mobile sign-in remains blocked until then."
+            echo "AWS charges continue. The protected bootstrap physically removes only the exact reviewed 57-row canonical synthetic facility fixture, preserves its immutable audit and idempotency truth behind opaque facility anchors, loads only reference catalogs, and maintains one approved staff access fixture. App Runner remains publicly reachable at its AWS URL and reaches the private Aurora writer through a VPC connector. One NAT gateway provides bounded public HTTPS egress for Google OIDC; the database stays private, requires TLS, and has its cluster HTTP endpoint disabled. A protected one-off Fargate task runs the exact reviewed image digest inside the database VPC before the App Runner update. The protected workflow sets 14-day retention on the exact App Runner service and application log groups after service creation. That retention write permanently expires log events older than 14 days; CloudWatch Logs ordinarily deletes marked events within 72 hours. No DNS, certificate, GCP, mobile-store, notification-provider, recipient, or send operation is performed. Google OIDC remains configured-unverified until the separately owned eoc.psd401.net custom domain is live and a human completes an approved district sign-in; web/mobile sign-in remains blocked until then."
             echo
             echo "## Resource inventory"
             echo
@@ -1252,17 +1252,7 @@ jobs:
               directMembershipCount: 1,
               privilegedFlags: false
             } and
-            .syntheticSeed == {
-              facilities: 2,
-              neighborhoods: 1,
-              neighborhoodFacilities: 2,
-              audienceConfigurations: 2,
-              audienceTargets: 6,
-              groupSources: 3,
-              rosterSourceConfigurations: 1,
-              rosterSnapshots: 1,
-              rosterRecipients: 4,
-              rosterEndpoints: 12,
+            .referenceSeed == {
               eventTypes: 8,
               eventTypeVersions: 8,
               eventTypeTemplates: 72,
@@ -1270,6 +1260,31 @@ jobs:
               channelConfigurations: 3,
               events: 0,
               outboxMessages: 0
+            } and
+            .canonicalSyntheticRemoval == {
+              operationalRows: {
+                facilities: 0,
+                neighborhoodVersions: 0,
+                neighborhoodFacilities: 0,
+                groupSources: 0,
+                audienceConfigurations: 0,
+                audienceTargets: 0,
+                rosterSourceConfigurations: 0,
+                rosterSourceConfigurationFacilities: 0,
+                rosterSourceConfigurationGroups: 0,
+                rosterSnapshots: 0,
+                rosterSnapshotFacilities: 0,
+                rosterSnapshotSources: 0,
+                rosterRecipients: 0,
+                rosterRecipientGroupSources: 0,
+                rosterEndpoints: 0,
+                total: 0
+              },
+              retainedTruth: {
+                facilityAnchors: 2,
+                securityAuditEntries: 2,
+                idempotencyRecords: 1
+              }
             } and
             .approvedAccess == {
               accessGroups: 1,
@@ -1688,7 +1703,7 @@ jobs:
             printf '%s\n' "- Stack: $STACK_NAME"
             printf '%s\n' "- AWS: $AWS_ACCOUNT_ALIAS / $AWS_ACCOUNT_ID / $AWS_REGION"
             echo "- One App Runner instance, its exact VPC connector, one private Aurora writer with the cluster HTTP endpoint disabled, one ECR repository, and one empty health-only SQS queue were read back."
-            echo "- The exact candidate Fargate task ran without overrides in private subnets, stopped at exit zero on the expected image digest, and emitted one native-PostgreSQL summary proving verified TLS and two equivalent bootstrap passes."
+            echo "- The exact candidate Fargate task ran without overrides in private subnets, stopped at exit zero on the expected image digest, and emitted one native-PostgreSQL summary proving verified TLS, two equivalent bootstrap passes, zero canonical synthetic operational rows, and preserved immutable truth anchors."
             printf '%s\n' "- The exact App Runner service and application log groups were read back with $APP_RUNNER_LOG_RETENTION_DAYS-day retention."
             printf '%s\n' "- Deployment-role policy inventory SHA-256: $(cat artifacts/readback/deployment-role-policy-inventory.sha256)"
             printf '%s\n' "- Deployment-role permissions boundary: $EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"

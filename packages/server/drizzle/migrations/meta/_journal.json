@@ -85,6 +85,13 @@
       "when": 1786747517396,
       "tag": "0011_cloud_identity_roster_email",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786916033866,
+      "tag": "0012_remove_canonical_synthetic_facilities",
+      "breakpoints": true
     }
   ]
 }
