@@ -173,6 +173,16 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('adminOption: true');
     expect(workflow).toContain('inheritOption: false');
     expect(workflow).toContain('setOption: false');
+    expect(workflow).toContain(
+      '`ALTER ROLE "psd_eoc_application" WITH PASSWORD ${passwordLiteral}`',
+    );
+    expect(workflow).toContain(
+      'buildApplicationRoleStatements(\n                    password,\n                  ).slice(2)',
+    );
+    expect(workflow).not.toContain('application-login-authority-probe.json');
+    expect(workflow).not.toContain(
+      'ALTER ROLE "psd_eoc_application" WITH LOGIN INHERIT NOSUPERUSER',
+    );
     expect(workflow).not.toContain(
       'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT TRUE',
     );
