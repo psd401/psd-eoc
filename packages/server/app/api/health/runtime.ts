@@ -14,6 +14,7 @@ import { z } from 'zod';
 
 import {
   createDatabaseClient,
+  databaseExecuteRows,
   readDatabaseConfig,
   type DatabaseConnection,
   type PostgresDatabaseConfig,
@@ -30,8 +31,13 @@ import {
   type AgentRestRuntime,
 } from '../../../lib/agents/runtime';
 import { readGoogleOidcConfiguration } from '../../../lib/auth/oidc';
+import {
+  getDefaultSessionService,
+  SessionAccessError,
+} from '../../../lib/auth/sessions';
+import { getDefaultAdminDatabase } from '../../(admin)/facilities/admin-core';
 
-const DEFAULT_HEALTH_TIMEOUT_MILLISECONDS = 1_500;
+const DEFAULT_HEALTH_TIMEOUT_MILLISECONDS = 4_000;
 const MAX_HEALTH_TIMEOUT_MILLISECONDS = 5_000;
 const MAX_AWS_RESPONSE_BYTES = 64 * 1_024;
 const AWS_REQUEST_TERMINATOR = 'aws4_request';
@@ -151,11 +157,8 @@ export interface HealthAwsCredentials {
 
 /** Injectable read-only boundaries for the production health dependencies. */
 export interface RuntimeHealthAdapters {
-  readonly createDatabaseConnection?: typeof createDatabaseClient;
-  readonly queryNativeDatabase?: (
-    config: PostgresDatabaseConfig,
-    signal: AbortSignal,
-  ) => Promise<NativeDatabaseHealthResult>;
+  readonly authenticateSharedSession?: (credential: string) => Promise<void>;
+  readonly querySharedAdminDatabase?: () => Promise<NativeDatabaseHealthResult>;
   readonly resolveAwsCredentials?: (
     region: string,
     signal: AbortSignal,
@@ -397,6 +400,42 @@ function assertNotAborted(signal: AbortSignal): void {
   }
 }
 
+/** Waits for shared work without cancelling or closing its owning resource. */
+function awaitWithoutCancellation<Result>(
+  operation: Promise<Result>,
+  signal: AbortSignal,
+): Promise<Result> {
+  assertNotAborted(signal);
+  return new Promise<Result>((resolve, reject) => {
+    let completed = false;
+    const removeAbortListener = () => {
+      signal.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      if (completed) return;
+      completed = true;
+      removeAbortListener();
+      reject(new Error('Health dependency check was cancelled.'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    void operation.then(
+      (result) => {
+        if (completed) return;
+        completed = true;
+        removeAbortListener();
+        resolve(result);
+      },
+      (error: unknown) => {
+        if (completed) return;
+        completed = true;
+        removeAbortListener();
+        reject(error);
+      },
+    );
+  });
+}
+
 function validateCredentials(
   value: HealthAwsCredentials,
   now: Date,
@@ -590,76 +629,93 @@ async function sendAwsReadProbe(
 }
 
 /**
- * Creates the production deep checks with injectable native-database and
- * network seams. Every operation is a read: SELECT 1 plus TLS state,
- * GetQueueAttributes, and DescribeSecret. Runtime secret values are checked
- * only in memory.
+ * Creates the production deep checks with injectable shared-route-pool and
+ * network seams. Every operation is a read: an unknown session credential,
+ * SELECT 1 plus TLS state, GetQueueAttributes, and DescribeSecret. Runtime
+ * secret values are checked only in memory.
  */
 export function createRuntimeDeepHealthDependencies(
   environment: HealthEnvironment = process.env,
   adapters: RuntimeHealthAdapters = {},
 ): DeepHealthDependencies {
-  const createDatabaseConnection =
-    adapters.createDatabaseConnection ?? createDatabaseClient;
   const fetchImplementation = adapters.fetch ?? globalThis.fetch;
   const now = adapters.now ?? (() => new Date());
+  const sessionProbeCredential = `health-${randomUUID()}-${randomUUID()}`;
   let credentialsClient: S3Client | undefined;
+  let sharedDatabaseProbe: Promise<NativeDatabaseHealthResult> | undefined;
 
   function credentialProvider(region: string): S3Client {
     credentialsClient ??= new S3Client({ maxAttempts: 1, region });
     return credentialsClient;
   }
 
-  const queryNativeDatabase =
-    adapters.queryNativeDatabase ??
-    (async (
-      config: PostgresDatabaseConfig,
-      signal: AbortSignal,
-    ): Promise<NativeDatabaseHealthResult> => {
-      assertNotAborted(signal);
-      const connection = createDatabaseConnection(config);
-      if (connection.driver !== 'postgres') {
-        throw new Error('Health dependency configuration is unavailable.');
-      }
-      try {
-        if (connection.nativeClient === undefined) {
-          throw new Error('Health database cancellation is unavailable.');
-        }
-        const pending = connection.nativeClient.unsafe<
-          NativeDatabaseHealthResult[]
-        >(NATIVE_DATABASE_HEALTH_SQL);
-        const close = () => {
-          // postgres-js discards the Promise created by Query.cancel(). The
-          // idempotent close hook owns and observes bounded active teardown.
-          void connection.close().catch(() => undefined);
-        };
-        signal.addEventListener('abort', close, { once: true });
-        if (signal.aborted) close();
-        let rows: readonly NativeDatabaseHealthResult[];
-        try {
-          rows = await pending;
-        } finally {
-          signal.removeEventListener('abort', close);
-        }
-        assertNotAborted(signal);
-        const row = rows[0];
-        if (
-          rows.length !== 1 ||
-          typeof row?.value !== 'number' ||
-          typeof row.ssl !== 'boolean' ||
-          typeof row.tlsVersion !== 'string'
-        ) {
-          throw new Error('Database health query returned an invalid result.');
-        }
-        return Object.freeze({
-          value: row.value,
-          ssl: row.ssl,
-          tlsVersion: row.tlsVersion,
-        });
-      } finally {
-        await connection.close();
-      }
+  const authenticateSharedSession =
+    adapters.authenticateSharedSession ??
+    (async (credential: string): Promise<void> => {
+      await getDefaultSessionService().authenticate(credential, 'web');
     });
+  const querySharedAdminDatabase =
+    adapters.querySharedAdminDatabase ??
+    (async (): Promise<NativeDatabaseHealthResult> => {
+      const rows = databaseExecuteRows<
+        NativeDatabaseHealthResult & Record<string, unknown>
+      >(
+        await getDefaultAdminDatabase().execute<
+          NativeDatabaseHealthResult & Record<string, unknown>
+        >(sql.raw(NATIVE_DATABASE_HEALTH_SQL)),
+      );
+      const row = rows[0];
+      if (
+        rows.length !== 1 ||
+        typeof row?.value !== 'number' ||
+        typeof row.ssl !== 'boolean' ||
+        typeof row.tlsVersion !== 'string'
+      ) {
+        throw new Error('Database health query returned an invalid result.');
+      }
+      return Object.freeze({
+        value: row.value,
+        ssl: row.ssl,
+        tlsVersion: row.tlsVersion,
+      });
+    });
+
+  async function probeSharedSessionDatabase(): Promise<void> {
+    try {
+      await authenticateSharedSession(sessionProbeCredential);
+    } catch (error) {
+      if (
+        error instanceof SessionAccessError &&
+        error.code === 'INVALID_CREDENTIAL'
+      ) {
+        return;
+      }
+      throw error;
+    }
+    throw new Error('Session health credential was unexpectedly accepted.');
+  }
+
+  function sharedRouteDatabaseProbe(): Promise<NativeDatabaseHealthResult> {
+    if (sharedDatabaseProbe === undefined) {
+      readNativeDatabaseConfiguration(environment);
+      const current = Promise.allSettled([
+        probeSharedSessionDatabase(),
+        querySharedAdminDatabase(),
+      ]).then(([sessionResult, adminResult]) => {
+        if (sessionResult?.status === 'rejected') throw sessionResult.reason;
+        if (adminResult?.status === 'rejected') throw adminResult.reason;
+        if (adminResult === undefined) {
+          throw new Error('Admin database health result was unavailable.');
+        }
+        return adminResult.value;
+      });
+      const shared = current.finally(() => {
+        if (sharedDatabaseProbe === shared) sharedDatabaseProbe = undefined;
+      });
+      sharedDatabaseProbe = shared;
+    }
+    return sharedDatabaseProbe;
+  }
   const resolveAwsCredentials =
     adapters.resolveAwsCredentials ??
     (async (region: string, signal: AbortSignal) => {
@@ -685,8 +741,10 @@ export function createRuntimeDeepHealthDependencies(
   return Object.freeze({
     async checkDatabase(signal: AbortSignal): Promise<void> {
       assertNotAborted(signal);
-      const config = readNativeDatabaseConfiguration(environment);
-      const result = await queryNativeDatabase(config, signal);
+      const result = await awaitWithoutCancellation(
+        sharedRouteDatabaseProbe(),
+        signal,
+      );
       assertNotAborted(signal);
       if (
         result.value !== 1 ||
