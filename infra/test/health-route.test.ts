@@ -13,6 +13,7 @@ import {
   type TransactionalCanaryRuntime,
 } from '../../packages/server/app/api/health/runtime';
 import { AgentApiKeyError } from '../../packages/server/lib/agents/keys';
+import { SessionAccessError } from '../../packages/server/lib/auth/sessions';
 
 const REGION = 'us-west-2';
 const ACCOUNT_ID = '123456789012';
@@ -765,11 +766,9 @@ describe('authenticated rollback canary POST', () => {
 });
 
 describe('production deep health reads', () => {
-  it('proves DB, fan-out queue, and secret reachability using reads only', async () => {
-    type DatabaseConfig = Parameters<
-      NonNullable<RuntimeHealthAdapters['queryNativeDatabase']>
-    >[0];
-    const databaseConfigs: DatabaseConfig[] = [];
+  it('proves both shared route pools, fan-out queue, and secret reachability using reads only', async () => {
+    const sharedDatabaseCalls: string[] = [];
+    const sessionProbeCredentials: string[] = [];
     const requestedSignals: AbortSignal[] = [];
     const requests: Array<
       Readonly<{ endpoint: string; init: RequestInit; target: string }>
@@ -805,9 +804,16 @@ describe('production deep health reads', () => {
     const dependencies = createRuntimeDeepHealthDependencies(
       runtimeEnvironment(),
       {
-        queryNativeDatabase: async (config, signal) => {
-          databaseConfigs.push(config);
-          requestedSignals.push(signal);
+        authenticateSharedSession: async (credential) => {
+          sharedDatabaseCalls.push('session');
+          sessionProbeCredentials.push(credential);
+          throw new SessionAccessError(
+            'INVALID_CREDENTIAL',
+            'Synthetic unknown health credential.',
+          );
+        },
+        querySharedAdminDatabase: async () => {
+          sharedDatabaseCalls.push('admin');
           return { value: 1, ssl: true, tlsVersion: 'TLSv1.3' };
         },
         fetch: fetchImplementation,
@@ -831,20 +837,11 @@ describe('production deep health reads', () => {
       dependencies.checkRuntimeSecrets(controller.signal),
     ]);
 
-    expect(databaseConfigs).toEqual([
-      {
-        driver: 'postgres',
-        host: DATABASE_HOST,
-        port: 5432,
-        database: 'psd_eoc',
-        username: 'psd_eoc_application',
-        password: DATABASE_PASSWORD,
-        sslRootCertificatePath: DATABASE_SSL_ROOT_CERT,
-        maxConnections: 1,
-        connectTimeoutSeconds: 10,
-        idleTimeoutSeconds: 0,
-      },
-    ]);
+    expect(sharedDatabaseCalls.sort()).toEqual(['admin', 'session']);
+    expect(sessionProbeCredentials).toHaveLength(1);
+    expect(sessionProbeCredentials[0]).toMatch(
+      /^health-[0-9a-f-]{36}-[0-9a-f-]{36}$/u,
+    );
     expect(
       requestedSignals.every((signal) => signal === controller.signal),
     ).toBe(true);
@@ -906,87 +903,156 @@ describe('production deep health reads', () => {
     expect(serializedRequests).not.toContain(SYNTHETIC_SECRET_ACCESS_KEY);
   });
 
-  it('closes an aborted native query without starting detached cancellation work', async () => {
-    type CreateDatabaseConnection = NonNullable<
-      RuntimeHealthAdapters['createDatabaseConnection']
-    >;
-    type DatabaseConnection = ReturnType<CreateDatabaseConnection>;
-    const connectionDestroyed = Object.assign(
-      new Error('synthetic private connection detail'),
-      { code: 'CONNECTION_DESTROYED' },
-    );
-    const closeStarts: number[] = [];
-    const unhandledRejections: unknown[] = [];
-    let cancellationCalls = 0;
-    let connectionCount = 0;
-    const createDatabaseConnection: CreateDatabaseConnection = () => {
-      const connectionIndex = connectionCount;
-      connectionCount += 1;
-      closeStarts[connectionIndex] = 0;
-      let rejectPending: ((reason: unknown) => void) | undefined;
-      const pending =
-        connectionIndex === 0
-          ? new Promise<
-              ReadonlyArray<{
-                value: number;
-                ssl: boolean;
-                tlsVersion: string;
-              }>
-            >((_resolve, reject) => {
-              rejectPending = reject;
-            })
-          : Promise.resolve([{ value: 1, ssl: true, tlsVersion: 'TLSv1.3' }]);
-      const cancellablePending = Object.assign(pending, {
-        cancel(): void {
-          cancellationCalls += 1;
-          void Promise.reject(connectionDestroyed);
-        },
-      });
-      let closePromise: Promise<void> | undefined;
-
-      return {
-        driver: 'postgres',
-        db: {},
-        nativeClient: {
-          unsafe: () => cancellablePending,
-        },
-        close(): Promise<void> {
-          closePromise ??= Promise.resolve().then(() => {
-            closeStarts[connectionIndex] =
-              (closeStarts[connectionIndex] ?? 0) + 1;
-            rejectPending?.(connectionDestroyed);
-          });
-          return closePromise;
-        },
-      } as unknown as DatabaseConnection;
-    };
-    const dependencies = createRuntimeDeepHealthDependencies(
+  it('times out one queued shared probe, coalesces it, and becomes healthy after the queue drains', async () => {
+    const healthyResult = { value: 1, ssl: true, tlsVersion: 'TLSv1.3' };
+    let adminAttempts = 0;
+    let sessionAttempts = 0;
+    let releaseQueuedAdmin:
+      | ((result: typeof healthyResult) => void)
+      | undefined;
+    const runtimeDependencies = createRuntimeDeepHealthDependencies(
       runtimeEnvironment(),
-      { createDatabaseConnection },
+      {
+        authenticateSharedSession: async () => {
+          sessionAttempts += 1;
+          throw new SessionAccessError(
+            'INVALID_CREDENTIAL',
+            'Synthetic unknown health credential.',
+          );
+        },
+        querySharedAdminDatabase: async () => {
+          adminAttempts += 1;
+          if (adminAttempts === 1) {
+            return new Promise<typeof healthyResult>((resolve) => {
+              releaseQueuedAdmin = resolve;
+            });
+          }
+          return healthyResult;
+        },
+      },
     );
-    const controller = new AbortController();
-    const observeUnhandledRejection = (reason: unknown): void => {
-      unhandledRejections.push(reason);
-    };
-    process.on('unhandledRejection', observeUnhandledRejection);
+    const handler = createHealthRouteHandler(
+      {
+        checkDatabase: runtimeDependencies.checkDatabase,
+        async checkFanoutQueue(): Promise<void> {},
+        async checkRuntimeSecrets(): Promise<void> {},
+      },
+      { timeoutMilliseconds: 10 },
+    );
 
-    try {
-      const firstProbe = dependencies.checkDatabase(controller.signal);
-      controller.abort();
-      await expect(firstProbe).rejects.toMatchObject({
-        code: 'CONNECTION_DESTROYED',
-      });
+    const firstResponse = await handler();
+    expect(firstResponse.status).toBe(503);
+    expect(adminAttempts).toBe(1);
+    expect(sessionAttempts).toBe(1);
 
-      await dependencies.checkDatabase(new AbortController().signal);
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    } finally {
-      process.off('unhandledRejection', observeUnhandledRejection);
+    const secondProbe = handler();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(adminAttempts).toBe(1);
+    expect(sessionAttempts).toBe(1);
+    if (releaseQueuedAdmin === undefined) {
+      throw new Error('The synthetic queued admin probe did not start.');
     }
+    releaseQueuedAdmin(healthyResult);
+    expect((await secondProbe).status).toBe(200);
 
-    expect(connectionCount).toBe(2);
-    expect(closeStarts).toEqual([1, 1]);
-    expect(cancellationCalls).toBe(0);
-    expect(unhandledRejections).toEqual([]);
+    await Promise.resolve();
+    expect((await handler()).status).toBe(200);
+    expect(adminAttempts).toBe(2);
+    expect(sessionAttempts).toBe(2);
+  });
+
+  it('keeps a poisoned generation coalesced until queued sibling work settles, then proves recovery', async () => {
+    const healthyResult = { value: 1, ssl: true, tlsVersion: 'TLSv1.3' };
+    let adminAttempts = 0;
+    let sessionAttempts = 0;
+    let releaseQueuedAdmin:
+      | ((result: typeof healthyResult) => void)
+      | undefined;
+    const runtimeDependencies = createRuntimeDeepHealthDependencies(
+      runtimeEnvironment(),
+      {
+        authenticateSharedSession: async () => {
+          sessionAttempts += 1;
+          if (sessionAttempts === 1) {
+            throw Object.assign(
+              new Error('Synthetic private session-pool failure.'),
+              { code: 'CONNECTION_DESTROYED' },
+            );
+          }
+          throw new SessionAccessError(
+            'INVALID_CREDENTIAL',
+            'Synthetic unknown health credential.',
+          );
+        },
+        querySharedAdminDatabase: async () => {
+          adminAttempts += 1;
+          if (adminAttempts === 1) {
+            return new Promise<typeof healthyResult>((resolve) => {
+              releaseQueuedAdmin = resolve;
+            });
+          }
+          return healthyResult;
+        },
+      },
+    );
+    const handler = createHealthRouteHandler(
+      {
+        checkDatabase: runtimeDependencies.checkDatabase,
+        async checkFanoutQueue(): Promise<void> {},
+        async checkRuntimeSecrets(): Promise<void> {},
+      },
+      { timeoutMilliseconds: 10 },
+    );
+
+    expect((await handler()).status).toBe(503);
+    const secondProbe = handler();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(adminAttempts).toBe(1);
+    expect(sessionAttempts).toBe(1);
+    if (releaseQueuedAdmin === undefined) {
+      throw new Error('The synthetic queued admin probe did not start.');
+    }
+    releaseQueuedAdmin(healthyResult);
+    expect((await secondProbe).status).toBe(503);
+
+    expect((await handler()).status).toBe(200);
+    expect(adminAttempts).toBe(2);
+    expect(sessionAttempts).toBe(2);
+  });
+
+  it('accepts only exact unknown-credential evidence from the shared session path', async () => {
+    const invalidSessionOutcomes: Array<() => Promise<void>> = [
+      async () => {},
+      async () => {
+        throw new SessionAccessError(
+          'SESSION_EXPIRED',
+          'Synthetic wrong session outcome.',
+        );
+      },
+      async () => {
+        throw new Error('Synthetic private session failure.');
+      },
+    ];
+
+    for (const authenticateSharedSession of invalidSessionOutcomes) {
+      const dependencies = createRuntimeDeepHealthDependencies(
+        runtimeEnvironment(),
+        {
+          authenticateSharedSession,
+          querySharedAdminDatabase: async () => ({
+            value: 1,
+            ssl: true,
+            tlsVersion: 'TLSv1.3',
+          }),
+        },
+      );
+
+      await expect(
+        dependencies.checkDatabase(new AbortController().signal),
+      ).rejects.toThrow();
+    }
   });
 
   it('rejects absent runtime secret injection without contacting AWS', async () => {
@@ -1047,7 +1113,13 @@ describe('production deep health reads', () => {
 
   it('rejects invalid or untrusted dependency evidence', async () => {
     const baseAdapters: RuntimeHealthAdapters = {
-      queryNativeDatabase: async () => ({
+      authenticateSharedSession: async () => {
+        throw new SessionAccessError(
+          'INVALID_CREDENTIAL',
+          'Synthetic unknown health credential.',
+        );
+      },
+      querySharedAdminDatabase: async () => ({
         value: 0,
         ssl: false,
         tlsVersion: 'TLSv1.3',
