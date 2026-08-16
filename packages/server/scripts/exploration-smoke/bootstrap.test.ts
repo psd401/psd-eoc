@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, test } from 'bun:test';
 
 import type { SeedSummary } from '../../db/seed';
@@ -529,6 +531,9 @@ describe('immutable server image contract', () => {
     const caBundle = await Bun.file(imageInputs[2]!).text();
     expect(caBundle.match(/-----BEGIN CERTIFICATE-----/gu)).toHaveLength(108);
     expect(caBundle).not.toContain('PRIVATE KEY');
+    expect(createHash('sha256').update(caBundle).digest('hex')).toBe(
+      '53af412739e58556da2f3d6343d6f4d73530839ab589b9e9e600e17f96984d49',
+    );
     expect(dockerfile).not.toMatch(/(?:npm|npx|:latest)/u);
   });
 
