@@ -35,7 +35,7 @@ import {
   type SessionRevocation,
   type VerifiedCurrentRefreshCredential,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -73,6 +73,8 @@ const SESSION_LIST_READ_CONCURRENCY = 8;
 const SESSIONS_PER_DEVICE_SUMMARY = 100;
 const REFRESH_RESULT_PREFIX = 'refresh-v1';
 const REVOCATION_RESULT_PREFIX = 'session-revocation-v1';
+const DEFAULT_SESSION_AUTHENTICATION_TIMEOUT_MILLISECONDS = 5_000;
+const CONNECTION_DESTROYED_CODE = 'CONNECTION_DESTROYED';
 
 /**
  * Default session policy.
@@ -611,10 +613,87 @@ function revokeRequestDigest(
   });
 }
 
+type SessionAuthenticationRecoveryReason = 'connection-destroyed' | 'timeout';
+
+interface SessionAuthenticationGuard {
+  scheduleTimeout(onTimeout: () => void): () => void;
+  recover(
+    reason: SessionAuthenticationRecoveryReason,
+    pendingAuthentication: Promise<void>,
+  ): Promise<void>;
+}
+
+class SessionAuthenticationTimeoutError extends Error {
+  public constructor() {
+    super('Session authentication exceeded its database deadline.');
+    this.name = 'SessionAuthenticationTimeoutError';
+  }
+}
+
+function isConnectionDestroyedError(error: unknown): boolean {
+  let candidate = error;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    if (seen.has(candidate)) return false;
+    seen.add(candidate);
+    if ('code' in candidate && candidate.code === CONNECTION_DESTROYED_CODE) {
+      return true;
+    }
+    candidate = 'cause' in candidate ? candidate.cause : undefined;
+  }
+  return false;
+}
+
+function unavailableSessionAuthentication(): SessionAccessError {
+  return new SessionAccessError(
+    'CONFIGURATION_ERROR',
+    'Session authentication is temporarily unavailable.',
+  );
+}
+
+async function inspectCredentialWithGuard(
+  store: SessionStore,
+  tokenDigest: string,
+  guard: SessionAuthenticationGuard,
+): Promise<StoredCredential> {
+  const inspection = store.inspectCredential(tokenDigest);
+  const pendingAuthentication = inspection.then(
+    () => undefined,
+    () => undefined,
+  );
+  let cancelTimeout = (): void => undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    cancelTimeout = guard.scheduleTimeout(() =>
+      reject(new SessionAuthenticationTimeoutError()),
+    );
+  });
+  try {
+    return await Promise.race([inspection, deadline]);
+  } catch (error) {
+    const reason =
+      error instanceof SessionAuthenticationTimeoutError
+        ? 'timeout'
+        : isConnectionDestroyedError(error)
+          ? 'connection-destroyed'
+          : null;
+    if (reason === null) throw error;
+    try {
+      await guard.recover(reason, pendingAuthentication);
+    } catch {
+      throw unavailableSessionAuthentication();
+    }
+    throw unavailableSessionAuthentication();
+  } finally {
+    cancelTimeout();
+  }
+}
+
 export class SessionService {
   public constructor(
     private readonly store: SessionStore,
     private readonly policy: SessionPolicy = DEFAULT_SESSION_POLICY,
+    private readonly authenticationGuard?: SessionAuthenticationGuard,
   ) {}
 
   public async establish(
@@ -673,9 +752,15 @@ export class SessionService {
     source: Extract<InvocationSource, 'web' | 'mobile'>,
     now = new Date(),
   ): Promise<AuthenticatedSession> {
-    const credential = await this.store.inspectCredential(
-      hashRefreshToken(token),
-    );
+    const tokenDigest = hashRefreshToken(token);
+    const credential =
+      this.authenticationGuard === undefined
+        ? await this.store.inspectCredential(tokenDigest)
+        : await inspectCredentialWithGuard(
+            this.store,
+            tokenDigest,
+            this.authenticationGuard,
+          );
     if (credential.kind === 'retired') {
       throw new SessionAccessError(
         'TOKEN_REPLAY',
@@ -1293,25 +1378,56 @@ export class DrizzleSessionStore implements SessionStore {
     sessionId: string,
     expectedConnectivityEpochId?: string,
   ): Promise<StoredSessionContext | null> {
-    const [sessionRow] = await database
-      .select()
+    const [identityRow] = await database
+      .select({
+        session: {
+          id: sessions.id,
+          userId: sessions.userId,
+          deviceEnrollmentId: sessions.deviceEnrollmentId,
+          membershipSnapshotId: sessions.membershipSnapshotId,
+          membershipValidUntil: sessions.membershipValidUntil,
+          membershipGraceUntil: sessions.membershipGraceUntil,
+          createdAt: sessions.createdAt,
+          expiresAt: sessions.expiresAt,
+          revokedAt: sessions.revokedAt,
+        },
+        user: {
+          id: users.id,
+          googleSubject: users.googleSubject,
+          email: users.email,
+          displayName: users.displayName,
+          facilityScopeKind: users.facilityScopeKind,
+          createdAt: users.createdAt,
+          disabledAt: users.disabledAt,
+        },
+        device: {
+          id: deviceEnrollments.id,
+          userId: deviceEnrollments.userId,
+          platform: deviceEnrollments.platform,
+          unlockMethod: deviceEnrollments.unlockMethod,
+          installationId: deviceEnrollments.installationId,
+          enrolledAt: deviceEnrollments.enrolledAt,
+          lastSeenAt: deviceEnrollments.lastSeenAt,
+          revokedAt: deviceEnrollments.revokedAt,
+        },
+      })
       .from(sessions)
+      .leftJoin(users, eq(users.id, sessions.userId))
+      .leftJoin(
+        deviceEnrollments,
+        eq(deviceEnrollments.id, sessions.deviceEnrollmentId),
+      )
       .where(eq(sessions.id, sessionId))
       .limit(1);
-    if (sessionRow === undefined) {
+    if (identityRow === undefined) {
       return null;
     }
-    const [userRow] = await database
-      .select()
-      .from(users)
-      .where(eq(users.id, sessionRow.userId))
-      .limit(1);
-    const [deviceRow] = await database
-      .select()
-      .from(deviceEnrollments)
-      .where(eq(deviceEnrollments.id, sessionRow.deviceEnrollmentId))
-      .limit(1);
-    if (userRow === undefined || deviceRow === undefined) {
+    const {
+      session: sessionRow,
+      user: userRow,
+      device: deviceRow,
+    } = identityRow;
+    if (userRow === null || deviceRow === null) {
       throw new SessionAccessError(
         'INVALID_CREDENTIAL',
         'The session identity graph is incomplete.',
@@ -1612,24 +1728,23 @@ export class DrizzleSessionStore implements SessionStore {
   public async inspectCredential(
     tokenDigest: string,
   ): Promise<StoredCredential> {
-    const [issuanceMatches, previousMatches, nextMatches] = await Promise.all([
-      this.database
-        .select({ sessionId: sessionTokenIssuances.sessionId })
-        .from(sessionTokenIssuances)
-        .where(eq(sessionTokenIssuances.tokenDigest, tokenDigest)),
-      this.database
-        .select({ sessionId: sessionTokenRotations.sessionId })
-        .from(sessionTokenRotations)
-        .where(eq(sessionTokenRotations.previousTokenDigest, tokenDigest)),
-      this.database
-        .select({ sessionId: sessionTokenRotations.sessionId })
-        .from(sessionTokenRotations)
-        .where(eq(sessionTokenRotations.nextTokenDigest, tokenDigest)),
-    ]);
+    const credentialMatches = await this.database
+      .select({ sessionId: sessionTokenIssuances.sessionId })
+      .from(sessionTokenIssuances)
+      .where(eq(sessionTokenIssuances.tokenDigest, tokenDigest))
+      .unionAll(
+        this.database
+          .select({ sessionId: sessionTokenRotations.sessionId })
+          .from(sessionTokenRotations)
+          .where(
+            or(
+              eq(sessionTokenRotations.previousTokenDigest, tokenDigest),
+              eq(sessionTokenRotations.nextTokenDigest, tokenDigest),
+            ),
+          ),
+      );
     const candidateSessionIds = new Set(
-      [...issuanceMatches, ...previousMatches, ...nextMatches].map(
-        (row) => row.sessionId,
-      ),
+      credentialMatches.map((row) => row.sessionId),
     );
     if (candidateSessionIds.size === 0) {
       return Object.freeze({ kind: 'unknown', tokenDigest });
@@ -1644,26 +1759,38 @@ export class DrizzleSessionStore implements SessionStore {
     if (sessionId === undefined) {
       return Object.freeze({ kind: 'unknown', tokenDigest });
     }
-    const [issuance] = await this.database
-      .select()
+    const credentialHistoryRows = await this.database
+      .select({
+        issuance: {
+          id: sessionTokenIssuances.id,
+          tokenDigest: sessionTokenIssuances.tokenDigest,
+        },
+        deviceEnrollmentId: sessions.deviceEnrollmentId,
+        rotation: {
+          id: sessionTokenRotations.id,
+          previousTokenDigest: sessionTokenRotations.previousTokenDigest,
+          nextTokenDigest: sessionTokenRotations.nextTokenDigest,
+        },
+      })
       .from(sessionTokenIssuances)
+      .innerJoin(sessions, eq(sessions.id, sessionTokenIssuances.sessionId))
+      .leftJoin(
+        sessionTokenRotations,
+        eq(sessionTokenRotations.sessionId, sessionTokenIssuances.sessionId),
+      )
       .where(eq(sessionTokenIssuances.sessionId, sessionId))
-      .limit(1);
-    const rotationRows = await this.database
-      .select()
-      .from(sessionTokenRotations)
-      .where(eq(sessionTokenRotations.sessionId, sessionId));
-    const [sessionRow] = await this.database
-      .select({ deviceEnrollmentId: sessions.deviceEnrollmentId })
-      .from(sessions)
-      .where(eq(sessions.id, sessionId))
-      .limit(1);
-    if (issuance === undefined || sessionRow === undefined) {
+      .orderBy(asc(sessionTokenRotations.rotatedAt));
+    const issuanceAndSession = credentialHistoryRows[0];
+    if (issuanceAndSession === undefined) {
       throw new SessionAccessError(
         'INVALID_CREDENTIAL',
         'Credential history is incomplete.',
       );
     }
+    const { issuance, deviceEnrollmentId } = issuanceAndSession;
+    const rotationRows = credentialHistoryRows.flatMap(({ rotation }) =>
+      rotation === null ? [] : [rotation],
+    );
     const byPrevious = new Map(
       rotationRows.map((rotation) => [rotation.previousTokenDigest, rotation]),
     );
@@ -1698,7 +1825,7 @@ export class DrizzleSessionStore implements SessionStore {
       return Object.freeze({
         kind: 'retired' as const,
         sessionId,
-        deviceEnrollmentId: sessionRow.deviceEnrollmentId,
+        deviceEnrollmentId,
         rotationId: retiringRotation.id,
         tokenDigest,
       });
@@ -1730,7 +1857,7 @@ export class DrizzleSessionStore implements SessionStore {
       return Object.freeze({
         kind: 'retired' as const,
         sessionId,
-        deviceEnrollmentId: sessionRow.deviceEnrollmentId,
+        deviceEnrollmentId,
         rotationId: retiredAfterContextLoad.id,
         tokenDigest,
       });
@@ -2840,26 +2967,106 @@ export async function executeListDeviceSessionsCapability(
   });
 }
 
-let defaultConnection: DatabaseConnection | undefined;
-let defaultSessionService: SessionService | undefined;
+export interface DefaultSessionServiceRuntimeDependencies {
+  readonly createConnection: () => DatabaseConnection;
+  readonly createStore?: (connection: DatabaseConnection) => SessionStore;
+  readonly readPolicy?: () => SessionPolicy;
+  readonly authenticationTimeoutMilliseconds?: number;
+  readonly scheduleAuthenticationTimeout?: (
+    timeoutMilliseconds: number,
+    onTimeout: () => void,
+  ) => () => void;
+}
+
+/**
+ * Owns one cached database-backed service generation and fences recovery so an
+ * older failed generation can never clear or close its replacement.
+ */
+export class DefaultSessionServiceRuntime {
+  private readonly authenticationTimeoutMilliseconds: number;
+  private connection: DatabaseConnection | undefined;
+  private service: SessionService | undefined;
+
+  public constructor(
+    private readonly dependencies: DefaultSessionServiceRuntimeDependencies,
+  ) {
+    const timeout =
+      dependencies.authenticationTimeoutMilliseconds ??
+      DEFAULT_SESSION_AUTHENTICATION_TIMEOUT_MILLISECONDS;
+    if (!Number.isSafeInteger(timeout) || timeout < 1) {
+      throw new SessionConfigurationError(
+        'The session authentication timeout must be a positive integer.',
+      );
+    }
+    this.authenticationTimeoutMilliseconds = timeout;
+  }
+
+  /** Lazily returns the current service, creating exactly one generation. */
+  public get(): SessionService {
+    if (this.service !== undefined) return this.service;
+
+    const policy = this.dependencies.readPolicy?.() ?? readSessionPolicy();
+    const connection = this.dependencies.createConnection();
+    const store =
+      this.dependencies.createStore?.(connection) ??
+      new DrizzleSessionStore(connection.db);
+    const service = new SessionService(
+      store,
+      policy,
+      Object.freeze({
+        scheduleTimeout: (onTimeout: () => void) => {
+          if (this.dependencies.scheduleAuthenticationTimeout !== undefined) {
+            return this.dependencies.scheduleAuthenticationTimeout(
+              this.authenticationTimeoutMilliseconds,
+              onTimeout,
+            );
+          }
+          const timeout = setTimeout(
+            onTimeout,
+            this.authenticationTimeoutMilliseconds,
+          );
+          return () => clearTimeout(timeout);
+        },
+        recover: async (
+          _reason: SessionAuthenticationRecoveryReason,
+          pendingAuthentication: Promise<void>,
+        ) => {
+          if (this.connection === connection && this.service === service) {
+            this.connection = undefined;
+            this.service = undefined;
+          }
+          // Start forced teardown immediately, then drain both edges even when
+          // teardown itself reports an error. Returning before the captured
+          // inspection settles would leave the timed-out operation running in
+          // the background and could surface an unhandled driver rejection.
+          await Promise.allSettled([connection.close(), pendingAuthentication]);
+        },
+      }),
+    );
+    this.connection = connection;
+    this.service = service;
+    return service;
+  }
+
+  /** Clears and closes only the current generation. */
+  public async close(): Promise<void> {
+    const connection = this.connection;
+    this.connection = undefined;
+    this.service = undefined;
+    await connection?.close();
+  }
+}
+
+const defaultSessionServiceRuntime = new DefaultSessionServiceRuntime({
+  createConnection: () => createDatabaseClient(readDatabaseConfig()),
+});
 
 /** Lazily creates the role-authenticated database-backed session service. */
 export function getDefaultSessionService(): SessionService {
-  if (defaultSessionService === undefined) {
-    const policy = readSessionPolicy();
-    defaultConnection = createDatabaseClient(readDatabaseConfig());
-    defaultSessionService = new SessionService(
-      new DrizzleSessionStore(defaultConnection.db),
-      policy,
-    );
-  }
-  return defaultSessionService;
+  return defaultSessionServiceRuntime.get();
 }
 
 /** Lifecycle hook for tests/scripts; normal Next.js processes retain the pool. */
 export async function closeDefaultSessionService(): Promise<void> {
-  const connection = defaultConnection;
-  defaultConnection = undefined;
-  defaultSessionService = undefined;
-  await connection?.close();
+  await defaultSessionServiceRuntime.close();
 }
