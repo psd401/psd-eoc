@@ -37,9 +37,15 @@ function openPersistentRoutePool(
     connectTimeoutSeconds: 2,
     idleTimeoutSeconds: 0,
   });
-  if (connection.driver !== 'postgres') {
+  if (
+    connection.driver !== 'postgres' ||
+    connection.nativeClient === undefined
+  ) {
     throw new Error('Persistent route-pool evidence requires PostgreSQL.');
   }
+  expect(connection.nativeClient.options.idle_timeout).toBe(0);
+  expect(connection.nativeClient.options.max_lifetime).toBe(0);
+  expect(connection.nativeClient.options.max).toBe(1);
   return connection;
 }
 
