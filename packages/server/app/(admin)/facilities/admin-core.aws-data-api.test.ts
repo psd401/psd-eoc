@@ -1800,15 +1800,15 @@ describe('admin Aurora Data API transport regression', () => {
       authenticated,
       store,
       queries: {
-        facilities: { includeInactive: true, cursor: null, limit: 10 },
-        neighborhoods: { cursor: null, limit: 10 },
+        facilities: { includeInactive: true, cursor: null, limit: 200 },
+        neighborhoods: { cursor: null, limit: 200 },
         buildingGroups: {
           kind: null,
           purpose: 'building',
           facilityId: null,
           active: null,
           cursor: null,
-          limit: 10,
+          limit: 500,
         },
         othersGroups: {
           kind: null,
@@ -1816,7 +1816,7 @@ describe('admin Aurora Data API transport regression', () => {
           facilityId: null,
           active: null,
           cursor: null,
-          limit: 10,
+          limit: 500,
         },
       },
       metadata: {
@@ -1824,7 +1824,6 @@ describe('admin Aurora Data API transport regression', () => {
         now: new Date(CLOCK_VALUE),
       },
     });
-    client.disableProjectionBatchFixtures();
     expect(facilitiesProjection.facilityOptions.map(({ id }) => id)).toEqual([
       ...PROJECTION_FACILITY_IDS,
     ]);
@@ -1838,37 +1837,46 @@ describe('admin Aurora Data API transport regression', () => {
     const projectionStatements = client.statements.slice(
       projectionStatementStart,
     );
-    expect(projectionStatements.length).toBeLessThan(40);
+    // The signed-in route uses these exact limits. Its visible pages and form
+    // option catalogs are therefore one query apiece, not duplicate reads.
+    expect(projectionStatements).toHaveLength(23);
     expect(
       new Set(projectionStatements.map(({ transactionId }) => transactionId))
         .size,
     ).toBe(1);
+    const facilityCatalogStatements = projectionStatements.filter(
+      ({ sql, parameterLongs }) =>
+        sql.includes('from "facilities"') && parameterLongs.includes(201),
+    );
+    expect(facilityCatalogStatements).toHaveLength(1);
+    const neighborhoodCatalogStatements = projectionStatements.filter(
+      ({ sql, parameterLongs }) =>
+        sql.includes('from "neighborhood_versions"') &&
+        parameterLongs.includes(201),
+    );
+    expect(neighborhoodCatalogStatements).toHaveLength(1);
+    const groupCatalogStatements = projectionStatements.filter(
+      ({ sql, parameterLongs }) =>
+        sql.includes('from "group_sources"') && parameterLongs.includes(501),
+    );
+    expect(groupCatalogStatements).toHaveLength(2);
     expect(
-      projectionStatements.some(
-        ({ sql, parameterLongs }) =>
-          sql.includes('from "facilities"') && parameterLongs.includes(201),
+      groupCatalogStatements.filter(({ parameterStrings }) =>
+        parameterStrings.includes('building'),
       ),
-    ).toBe(true);
+    ).toHaveLength(1);
     expect(
-      projectionStatements.some(
-        ({ sql, parameterLongs }) =>
-          sql.includes('from "neighborhood_versions"') &&
-          parameterLongs.includes(201),
+      groupCatalogStatements.filter(({ parameterStrings }) =>
+        parameterStrings.includes('others'),
       ),
-    ).toBe(true);
-    expect(
-      projectionStatements.some(
-        ({ sql, parameterLongs }) =>
-          sql.includes('from "group_sources"') && parameterLongs.includes(501),
-      ),
-    ).toBe(true);
+    ).toHaveLength(1);
     const neighborhoodMemberStatements = projectionStatements.filter(
       ({ sql }) =>
         sql.startsWith(
           'select "facility_id", "neighborhood_id", "neighborhood_version"',
         ),
     );
-    expect(neighborhoodMemberStatements.length).toBeGreaterThan(1);
+    expect(neighborhoodMemberStatements).toHaveLength(2);
     expect(
       neighborhoodMemberStatements.every(
         ({ sql }) => (sql.match(/:\d+/gu) ?? []).length <= 40,
@@ -1888,6 +1896,66 @@ describe('admin Aurora Data API transport regression', () => {
         ({ sql }) => (sql.match(/:\d+/gu) ?? []).length <= 4,
       ),
     ).toBe(true);
+
+    const independentCatalogStatementStart = client.statements.length;
+    const independentlyLoadedProjection =
+      await executeFacilitiesAdminProjection({
+        authenticated,
+        store,
+        queries: {
+          facilities: { includeInactive: true, cursor: null, limit: 199 },
+          neighborhoods: { cursor: null, limit: 199 },
+          buildingGroups: {
+            kind: null,
+            purpose: 'building',
+            facilityId: null,
+            active: null,
+            cursor: null,
+            limit: 499,
+          },
+          othersGroups: {
+            kind: null,
+            purpose: 'others',
+            facilityId: null,
+            active: null,
+            cursor: null,
+            limit: 499,
+          },
+        },
+        metadata: {
+          requestId: '00000000-0000-4000-8000-000000009119',
+          now: new Date(CLOCK_VALUE),
+        },
+      });
+    client.disableProjectionBatchFixtures();
+    expect(JSON.stringify(facilitiesProjection)).toBe(
+      JSON.stringify(independentlyLoadedProjection),
+    );
+    const independentCatalogStatements = client.statements.slice(
+      independentCatalogStatementStart,
+    );
+    expect(independentCatalogStatements).toHaveLength(30);
+    expect(
+      independentCatalogStatements.filter(
+        ({ sql, parameterLongs }) =>
+          sql.includes('from "facilities"') &&
+          (parameterLongs.includes(200) || parameterLongs.includes(201)),
+      ),
+    ).toHaveLength(2);
+    expect(
+      independentCatalogStatements.filter(
+        ({ sql, parameterLongs }) =>
+          sql.includes('from "neighborhood_versions"') &&
+          (parameterLongs.includes(200) || parameterLongs.includes(201)),
+      ),
+    ).toHaveLength(2);
+    expect(
+      independentCatalogStatements.filter(
+        ({ sql, parameterLongs }) =>
+          sql.includes('from "group_sources"') &&
+          (parameterLongs.includes(500) || parameterLongs.includes(501)),
+      ),
+    ).toHaveLength(4);
 
     const listStatementStart = client.statements.length;
     const users = await executeListUsersCapability({
