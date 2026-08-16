@@ -166,6 +166,9 @@ describe('exploration-smoke deployment boundary', () => {
     const provision = asRecord(parameters.ProvisionApplication);
     const appDigest = asRecord(parameters.AppImageDigest);
     const bootstrapDigest = asRecord(parameters.BootstrapImageDigest);
+    const runtimeIdleTimeout = asRecord(
+      parameters.RuntimeDatabaseIdleTimeoutSeconds,
+    );
     const sourceSha = asRecord(parameters.SourceSha);
     const bootstrapSourceSha = asRecord(parameters.BootstrapSourceSha);
     const oauthArn = asRecord(parameters.GoogleOauthSecretArn);
@@ -179,6 +182,12 @@ describe('exploration-smoke deployment boundary', () => {
     expect(appDigest.AllowedPattern).toBe('^sha256:[0-9a-f]{64}$');
     expect(bootstrapDigest.AllowedPattern).toBe('^sha256:[0-9a-f]{64}$');
     expect(bootstrapDigest).not.toHaveProperty('Default');
+    expect(runtimeIdleTimeout).toMatchObject({
+      Default: 0,
+      MaxValue: 600,
+      MinValue: 0,
+      Type: 'Number',
+    });
     expect(sourceSha.AllowedPattern).toBe('^[0-9a-f]{40}$');
     expect(sourceSha).not.toHaveProperty('Default');
     expect(bootstrapSourceSha.AllowedPattern).toBe('^[0-9a-f]{40}$');
@@ -566,7 +575,9 @@ describe('App Runner runtime safety boundary', () => {
     );
     expect(variables.get('DATABASE_MAX_CONNECTIONS')).toBe('1');
     expect(variables.get('DATABASE_CONNECT_TIMEOUT_SECONDS')).toBe('10');
-    expect(variables.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toBe('0');
+    expect(variables.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toEqual({
+      Ref: 'RuntimeDatabaseIdleTimeoutSeconds',
+    });
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
     expect(variables.get('RUNTIME_SECRET_ARN')).toEqual({
       Ref: expect.stringContaining('ApiSaltSecret'),

@@ -448,9 +448,26 @@ describe('approved access fixture', () => {
     );
   });
 
-  test('accepts one exact identity graph and rejects any enabled provider', () => {
+  test('scopes fixture identity proof while rejecting any enabled provider', () => {
     const evidence = fixtureEvidence(fixture);
-    expect(assertExplorationAccessFixtureEvidence(fixture, evidence)).toEqual({
+    expect(
+      assertExplorationAccessFixtureEvidence(fixture, {
+        ...evidence,
+        activeAccessGroups: [
+          ...evidence.activeAccessGroups,
+          {
+            id: '00000000-0000-4000-8000-000000000197',
+            kind: 'google-group',
+            purpose: 'access',
+            active: true,
+            googleGroupId: 'real-approved-group',
+            email: 'approved-group@psd401.net',
+            fixtureKey: null,
+          },
+        ],
+        roles: [...evidence.roles, { role: 'admin' }],
+      }),
+    ).toEqual({
       accessGroups: 1,
       users: 1,
       staffRoles: 1,
