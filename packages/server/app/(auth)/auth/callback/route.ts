@@ -1,18 +1,17 @@
 import { randomUUID } from 'node:crypto';
 
-import { RDSDataClient } from '@aws-sdk/client-rds-data';
 import {
   executeCapability,
   parseCapabilityEnvelopeFor,
   type AccessGroupSourceRef,
 } from '@psd-eoc/contracts';
-import { drizzle as drizzleAwsDataApi } from 'drizzle-orm/aws-data-api/pg';
-import { drizzle as drizzlePostgres } from 'drizzle-orm/postgres-js';
 import { NextResponse } from 'next/server';
-import postgres from 'postgres';
 
-import type { Database } from '../../../../db/client';
-import * as databaseSchema from '../../../../db/schema';
+import {
+  createDatabaseClient,
+  readDatabaseConfig,
+  type DatabaseConnection,
+} from '../../../../db/client';
 import {
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
@@ -62,11 +61,6 @@ interface AuthRuntime {
   close(): Promise<void>;
 }
 
-interface AuthDatabaseConnection {
-  readonly db: Database;
-  close(): Promise<void>;
-}
-
 interface PostGateAuditContext {
   readonly requestId: string;
   readonly subjectDigest: string;
@@ -85,12 +79,6 @@ const SESSION_DENIAL_PAGE_REASONS: Readonly<
   SESSION_PERSISTENCE_REJECTED: 'configuration',
 });
 
-/**
- * Mirrors db/client.ts configuration and lifecycle semantics inside the route
- * bundle. The shared module's NodeNext `.js` source specifiers are not
- * resolvable by the Next production bundler, and it is outside issue #6
- * ownership.
- */
 function configuredEnvironmentValue(name: string): string | undefined {
   const value = process.env[name]?.trim();
   return value === undefined || value.length === 0 ? undefined : value;
@@ -146,117 +134,12 @@ function assertPlaywrightAuthTestRuntime(): void {
   ].forEach(assertLoopbackHttpEnvironmentUrl);
 }
 
-function optionalPositiveInteger(
-  name: string,
-  fallback: number,
-  maximum: number,
-): number {
-  const value = configuredEnvironmentValue(name);
-  if (value === undefined) {
-    return fallback;
+function createAuthDatabaseConnection(): DatabaseConnection {
+  const config = readDatabaseConfig();
+  if (config.driver !== 'postgres') {
+    throw new Error('Authentication requires native PostgreSQL.');
   }
-  if (!/^\d+$/u.test(value)) {
-    throw new Error(`${name} must be a bounded positive integer.`);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
-    throw new Error(`${name} must be a bounded positive integer.`);
-  }
-  return parsed;
-}
-
-function createIdempotentClose(
-  close: () => unknown | Promise<unknown>,
-): () => Promise<void> {
-  let closePromise: Promise<void> | undefined;
-  return () => {
-    closePromise ??= Promise.resolve()
-      .then(close)
-      .then(() => undefined);
-    return closePromise;
-  };
-}
-
-function createAuthDatabaseConnection(): AuthDatabaseConnection {
-  const driver = requiredEnvironmentValue('DATABASE_DRIVER');
-  if (driver === 'postgres') {
-    if (
-      configuredEnvironmentValue('DATABASE_RESOURCE_ARN') !== undefined ||
-      configuredEnvironmentValue('DATABASE_SECRET_ARN') !== undefined ||
-      configuredEnvironmentValue('DATABASE_NAME') !== undefined
-    ) {
-      throw new Error('PostgreSQL auth configuration mixes database drivers.');
-    }
-    const urlValue = requiredEnvironmentValue('DATABASE_URL');
-    const url = new URL(urlValue);
-    if (
-      (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') ||
-      url.hostname.length === 0 ||
-      url.pathname.length <= 1
-    ) {
-      throw new Error('DATABASE_URL must be a PostgreSQL database URL.');
-    }
-    const client = postgres(urlValue, {
-      max: optionalPositiveInteger('DATABASE_MAX_CONNECTIONS', 10, 50),
-      connect_timeout: optionalPositiveInteger(
-        'DATABASE_CONNECT_TIMEOUT_SECONDS',
-        10,
-        60,
-      ),
-      idle_timeout: optionalPositiveInteger(
-        'DATABASE_IDLE_TIMEOUT_SECONDS',
-        20,
-        600,
-      ),
-    });
-    const db = drizzlePostgres(client, { schema: databaseSchema });
-    return {
-      db: db as unknown as Database,
-      close: createIdempotentClose(() => client.end({ timeout: 5 })),
-    };
-  }
-
-  if (driver === 'aws-data-api') {
-    if (
-      configuredEnvironmentValue('DATABASE_URL') !== undefined ||
-      configuredEnvironmentValue('DATABASE_MAX_CONNECTIONS') !== undefined ||
-      configuredEnvironmentValue('DATABASE_CONNECT_TIMEOUT_SECONDS') !==
-        undefined ||
-      configuredEnvironmentValue('DATABASE_IDLE_TIMEOUT_SECONDS') !== undefined
-    ) {
-      throw new Error('Data API auth configuration mixes database drivers.');
-    }
-    const region = requiredEnvironmentValue('AWS_REGION');
-    const database = requiredEnvironmentValue('DATABASE_NAME');
-    const resourceArn = requiredEnvironmentValue('DATABASE_RESOURCE_ARN');
-    const secretArn = requiredEnvironmentValue('DATABASE_SECRET_ARN');
-    if (
-      !/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/u.test(region) ||
-      !/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/u.test(database) ||
-      !/^arn:(?:aws|aws-cn|aws-us-gov):rds:[a-z0-9-]+:\d{12}:cluster:[A-Za-z0-9-]+$/u.test(
-        resourceArn,
-      ) ||
-      !/^arn:(?:aws|aws-cn|aws-us-gov):secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/u.test(
-        secretArn,
-      )
-    ) {
-      throw new Error('The Data API database configuration is invalid.');
-    }
-    const client = new RDSDataClient({ region, maxAttempts: 3 });
-    const db = drizzleAwsDataApi(client, {
-      database,
-      resourceArn,
-      schema: databaseSchema,
-      secretArn,
-    });
-    return {
-      db: db as unknown as Database,
-      close: createIdempotentClose(() => {
-        client.destroy();
-      }),
-    };
-  }
-  throw new Error('DATABASE_DRIVER must be postgres or aws-data-api.');
+  return createDatabaseClient(config);
 }
 
 function parsePolicySeconds(

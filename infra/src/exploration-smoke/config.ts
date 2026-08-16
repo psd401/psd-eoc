@@ -8,9 +8,14 @@ export const EXPLORATION_SMOKE_DATA_CLASSIFICATION = 'synthetic-only';
 export const EXPLORATION_SMOKE_DATABASE_NAME = 'psd_eoc';
 export const EXPLORATION_SMOKE_DATABASE_IDENTIFIER =
   'psd-eoc-exploration-smoke';
+export const EXPLORATION_SMOKE_DATABASE_PORT = 5_432;
 export const EXPLORATION_SMOKE_HEALTH_PATH = '/api/health';
 export const EXPLORATION_SMOKE_REPOSITORY_NAME =
   'psd-eoc/exploration-smoke/server';
 export const EXPLORATION_SMOKE_QUEUE_NAME = 'psd-eoc-exploration-smoke-health';
+export const EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME =
+  '/psd-eoc/exploration-smoke/bootstrap';
+export const EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT =
+  '/app/packages/server/certs/aws-rds-global-bundle.pem';
 
 export const EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL = `sha256:${'0'.repeat(64)}`;

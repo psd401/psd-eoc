@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
@@ -255,7 +255,9 @@ export function createDrizzleExplorationAccessFixtureStore(
           .where(
             eq(accessMembershipSnapshotGroups.snapshotId, fixture.snapshot.id),
           )
-          .orderBy(asc(accessMembershipSnapshotGroups.completionKind)),
+          // PostgreSQL enum order is expected before completed, while the
+          // evidence contract deliberately presents completed proof first.
+          .orderBy(desc(accessMembershipSnapshotGroups.completionKind)),
         database
           .select()
           .from(accessMembershipMembers)

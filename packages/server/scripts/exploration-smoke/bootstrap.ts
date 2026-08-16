@@ -1,10 +1,11 @@
-import {
-  ExecuteStatementCommand,
-  RDSDataClient,
-  type ExecuteStatementCommandOutput,
-} from '@aws-sdk/client-rds-data';
+import { isDeepStrictEqual } from 'node:util';
 
-import { createDatabaseClient } from '../../db/client';
+import { sql } from 'drizzle-orm';
+
+import {
+  createDatabaseClient,
+  type PostgresDatabaseConnection,
+} from '../../db/client';
 import { seedDatabase, type SeedSummary } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
@@ -16,39 +17,37 @@ import {
 import {
   configureAndVerifyApplicationRole,
   verifyApplicationLogin,
+  verifyDatabaseTls,
   type ApplicationRoleVerification,
   type RoleStatementExecutor,
 } from './application-role';
-import {
-  getApplicationDatabaseSecret,
-  type ApplicationDatabaseSecret,
-  type TemporaryAwsCredentials,
-} from './application-secret';
 import {
   readExplorationBootstrapConfig,
   type ExplorationBootstrapConfig,
 } from './config';
 
-const MAX_FORMATTED_RECORDS_BYTES = 64 * 1_024;
+const MAX_STATEMENT_ROWS = 32;
+const MAX_STATEMENT_RESULT_BYTES = 64 * 1_024;
+const ADVISORY_LOCK_SQL = 'SELECT pg_advisory_lock(178401)';
+const ADVISORY_UNLOCK_SQL = 'SELECT pg_advisory_unlock(178401) AS "unlocked"';
 
 export interface ExplorationBootstrapDependencies {
-  readApplicationSecret(
-    config: ExplorationBootstrapConfig,
-  ): Promise<ApplicationDatabaseSecret>;
+  acquireAdvisoryLock(): Promise<void>;
+  releaseAdvisoryLock(): Promise<void>;
+  verifyAdministratorTls(): Promise<void>;
   migrate(config: ExplorationBootstrapConfig): Promise<void>;
   configureApplicationRole(
     config: ExplorationBootstrapConfig,
-    password: string,
   ): Promise<ApplicationRoleVerification>;
   seedSynthetic(config: ExplorationBootstrapConfig): Promise<SeedSummary>;
   seedApprovedAccess(
     config: ExplorationBootstrapConfig,
   ): Promise<ExplorationAccessFixtureSummary>;
   verifyApplicationLogin(config: ExplorationBootstrapConfig): Promise<void>;
+  verifyApplicationTls(): Promise<void>;
 }
 
-export interface ExplorationBootstrapSummary {
-  readonly sourceSha: string;
+interface ExplorationBootstrapRunSummary {
   readonly database: Readonly<{
     migrationsApplied: true;
     applicationRole: ApplicationRoleVerification;
@@ -62,23 +61,36 @@ export interface ExplorationBootstrapSummary {
   }>;
 }
 
-/** Ordered bootstrap coordinator with injectable, test-only effect seams. */
-export async function runExplorationBootstrap(
+export interface ExplorationBootstrapSummary {
+  readonly sourceSha: string;
+  readonly database: Readonly<{
+    transport: 'native-postgres';
+    migrationsApplied: true;
+    tlsVerified: true;
+    applicationRole: ApplicationRoleVerification;
+  }>;
+  readonly idempotence: Readonly<{
+    runs: 2;
+    equivalent: true;
+  }>;
+  readonly syntheticSeed: SeedSummary;
+  readonly approvedAccess: ExplorationAccessFixtureSummary;
+  readonly integrations: ExplorationBootstrapRunSummary['integrations'];
+}
+
+async function runOneBootstrap(
   config: ExplorationBootstrapConfig,
   dependencies: ExplorationBootstrapDependencies,
-): Promise<ExplorationBootstrapSummary> {
-  const applicationSecret = await dependencies.readApplicationSecret(config);
+): Promise<ExplorationBootstrapRunSummary> {
+  await dependencies.verifyAdministratorTls();
   await dependencies.migrate(config);
-  const applicationRole = await dependencies.configureApplicationRole(
-    config,
-    applicationSecret.password,
-  );
+  const applicationRole = await dependencies.configureApplicationRole(config);
   const syntheticSeed = await dependencies.seedSynthetic(config);
   const approvedAccess = await dependencies.seedApprovedAccess(config);
   await dependencies.verifyApplicationLogin(config);
+  await dependencies.verifyApplicationTls();
 
   return Object.freeze({
-    sourceSha: config.sourceSha,
     database: Object.freeze({
       migrationsApplied: true as const,
       applicationRole,
@@ -93,74 +105,95 @@ export async function runExplorationBootstrap(
   });
 }
 
-function formattedRows(
-  output: ExecuteStatementCommandOutput,
-): readonly Readonly<Record<string, unknown>>[] {
-  if (output.formattedRecords === undefined) return Object.freeze([]);
-  if (
-    Buffer.byteLength(output.formattedRecords, 'utf8') >
-    MAX_FORMATTED_RECORDS_BYTES
-  ) {
-    throw new Error('The database verification response was too large.');
-  }
-  let parsed: unknown;
+/**
+ * Runs the complete native bootstrap twice under one PostgreSQL advisory lock.
+ * Equality of the bounded summaries proves the migration and fixtures are
+ * idempotent before App Runner can be updated to the candidate image.
+ */
+export async function runExplorationBootstrap(
+  config: ExplorationBootstrapConfig,
+  dependencies: ExplorationBootstrapDependencies,
+): Promise<ExplorationBootstrapSummary> {
+  await dependencies.acquireAdvisoryLock();
   try {
-    parsed = JSON.parse(output.formattedRecords) as unknown;
-  } catch {
-    throw new Error('The database verification response was invalid.');
+    const first = await runOneBootstrap(config, dependencies);
+    const second = await runOneBootstrap(config, dependencies);
+    if (!isDeepStrictEqual(first, second)) {
+      throw new Error('The native bootstrap was not idempotent.');
+    }
+
+    return Object.freeze({
+      sourceSha: config.sourceSha,
+      database: Object.freeze({
+        transport: 'native-postgres' as const,
+        migrationsApplied: true as const,
+        tlsVerified: true as const,
+        applicationRole: second.database.applicationRole,
+      }),
+      idempotence: Object.freeze({
+        runs: 2 as const,
+        equivalent: true as const,
+      }),
+      syntheticSeed: second.syntheticSeed,
+      approvedAccess: second.approvedAccess,
+      integrations: second.integrations,
+    });
+  } finally {
+    await dependencies.releaseAdvisoryLock();
   }
-  if (
-    !Array.isArray(parsed) ||
-    parsed.some(
-      (row) => typeof row !== 'object' || row === null || Array.isArray(row),
-    )
-  ) {
-    throw new Error('The database verification response was invalid.');
-  }
-  return Object.freeze(
-    parsed.map((row) => Object.freeze(row as Record<string, unknown>)),
-  );
 }
 
-function temporaryCredentials(
-  value: Awaited<ReturnType<RDSDataClient['config']['credentials']>>,
-): TemporaryAwsCredentials {
-  if (value.sessionToken === undefined) {
-    throw new Error('Bootstrap requires temporary AWS credentials.');
-  }
-  return Object.freeze({
-    accessKeyId: value.accessKeyId,
-    secretAccessKey: value.secretAccessKey,
-    sessionToken: value.sessionToken,
-    ...(value.expiration === undefined ? {} : { expiration: value.expiration }),
+function createNativeConnection(
+  config: ExplorationBootstrapConfig,
+  username: string,
+  password: string,
+): PostgresDatabaseConnection {
+  const connection = createDatabaseClient({
+    driver: 'postgres',
+    host: config.databaseHost,
+    port: config.databasePort,
+    database: config.databaseName,
+    username,
+    password,
+    sslRootCertificatePath: config.databaseSslRootCertificate,
+    maxConnections: config.databaseMaxConnections,
+    connectTimeoutSeconds: config.databaseConnectTimeoutSeconds,
+    idleTimeoutSeconds: config.databaseIdleTimeoutSeconds,
   });
+  if (connection.driver !== 'postgres') {
+    throw new Error('Exploration bootstrap requires native PostgreSQL.');
+  }
+  return connection;
 }
 
 function createRoleStatementExecutor(
-  client: RDSDataClient,
-  config: ExplorationBootstrapConfig,
+  connection: PostgresDatabaseConnection,
 ): RoleStatementExecutor {
   return Object.freeze({
     async execute(
-      secretArn: string,
-      sql: string,
+      statement: string,
     ): Promise<readonly Readonly<Record<string, unknown>>[]> {
       try {
-        return formattedRows(
-          await client.send(
-            new ExecuteStatementCommand({
-              continueAfterTimeout: false,
-              database: config.databaseName,
-              formatRecordsAs: 'JSON',
-              includeResultMetadata: false,
-              resourceArn: config.databaseResourceArn,
-              secretArn,
-              sql,
-            }),
+        const result = await connection.db.execute(sql.raw(statement));
+        if (
+          !Array.isArray(result) ||
+          result.length > MAX_STATEMENT_ROWS ||
+          result.some(
+            (row) =>
+              typeof row !== 'object' || row === null || Array.isArray(row),
+          ) ||
+          Buffer.byteLength(JSON.stringify(result), 'utf8') >
+            MAX_STATEMENT_RESULT_BYTES
+        ) {
+          throw new Error('invalid result');
+        }
+        return Object.freeze(
+          result.map((row) =>
+            Object.freeze(row as Readonly<Record<string, unknown>>),
           ),
         );
       } catch {
-        throw new Error('A database bootstrap statement failed.');
+        throw new Error('A native database bootstrap statement failed.');
       }
     },
   });
@@ -168,20 +201,24 @@ function createRoleStatementExecutor(
 
 async function runFromCommandLine(): Promise<void> {
   const config = readExplorationBootstrapConfig();
-  const adminConnection = createDatabaseClient({
-    driver: 'aws-data-api',
-    region: config.region,
-    database: config.databaseName,
-    resourceArn: config.databaseResourceArn,
-    secretArn: config.databaseAdminSecretArn,
-  });
-  if (adminConnection.driver !== 'aws-data-api') {
-    throw new Error('Exploration bootstrap requires the AWS Data API.');
-  }
-  const dataApi = new RDSDataClient({ maxAttempts: 3, region: config.region });
-  const roleExecutor = createRoleStatementExecutor(dataApi, config);
+  const administratorConnection = createNativeConnection(
+    config,
+    config.databaseAdminUsername,
+    config.databaseAdminPassword,
+  );
+  const applicationConnection = createNativeConnection(
+    config,
+    config.databaseApplicationUsername,
+    config.databaseApplicationPassword,
+  );
+  const administratorExecutor = createRoleStatementExecutor(
+    administratorConnection,
+  );
+  const applicationExecutor = createRoleStatementExecutor(
+    applicationConnection,
+  );
   const accessStore = createDrizzleExplorationAccessFixtureStore(
-    adminConnection.db,
+    administratorConnection.db,
   );
   const fixture = createExplorationAccessFixture({
     googleSubject: config.approvedGoogleSubject,
@@ -191,40 +228,46 @@ async function runFromCommandLine(): Promise<void> {
 
   try {
     const summary = await runExplorationBootstrap(config, {
-      async readApplicationSecret(): Promise<ApplicationDatabaseSecret> {
-        return getApplicationDatabaseSecret({
-          credentials: temporaryCredentials(await dataApi.config.credentials()),
-          region: config.region,
-          secretArn: config.databaseApplicationSecretArn,
-        });
+      async acquireAdvisoryLock(): Promise<void> {
+        await administratorExecutor.execute(ADVISORY_LOCK_SQL);
+      },
+      async releaseAdvisoryLock(): Promise<void> {
+        const rows = await administratorExecutor.execute(ADVISORY_UNLOCK_SQL);
+        if (rows.length !== 1 || rows[0]?.unlocked !== true) {
+          throw new Error('The native bootstrap advisory lock was not held.');
+        }
+      },
+      async verifyAdministratorTls(): Promise<void> {
+        await verifyDatabaseTls({ executor: administratorExecutor });
       },
       async migrate(): Promise<void> {
-        await migrateDatabase(adminConnection);
+        await migrateDatabase(administratorConnection);
       },
-      async configureApplicationRole(_config, password) {
+      async configureApplicationRole() {
         return configureAndVerifyApplicationRole({
-          administratorSecretArn: config.databaseAdminSecretArn,
-          executor: roleExecutor,
-          password,
+          executor: administratorExecutor,
+          password: config.databaseApplicationPassword,
         });
       },
       async seedSynthetic() {
-        return seedDatabase(adminConnection.db);
+        return seedDatabase(administratorConnection.db);
       },
       async seedApprovedAccess() {
         return seedExplorationAccessFixture({ fixture, store: accessStore });
       },
       async verifyApplicationLogin(): Promise<void> {
-        await verifyApplicationLogin({
-          applicationSecretArn: config.databaseApplicationSecretArn,
-          executor: roleExecutor,
-        });
+        await verifyApplicationLogin({ executor: applicationExecutor });
+      },
+      async verifyApplicationTls(): Promise<void> {
+        await verifyDatabaseTls({ executor: applicationExecutor });
       },
     });
     console.info(JSON.stringify(summary));
   } finally {
-    dataApi.destroy();
-    await adminConnection.close();
+    await Promise.all([
+      applicationConnection.close(),
+      administratorConnection.close(),
+    ]);
   }
 }
 
@@ -232,7 +275,7 @@ if (import.meta.main) {
   try {
     await runFromCommandLine();
   } catch {
-    console.error('Exploration-smoke database bootstrap failed closed.');
+    console.error('Exploration-smoke native database bootstrap failed closed.');
     process.exitCode = 1;
   }
 }

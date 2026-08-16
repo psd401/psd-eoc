@@ -8,20 +8,15 @@ import {
   type EventLifecycleMutationResult,
   type LifecycleConsequencePreview,
 } from '@psd-eoc/contracts';
-import {
-  ExecuteStatementCommand,
-  RDSDataClient,
-  type ExecuteStatementCommandInput,
-  type ExecuteStatementCommandOutput,
-} from '@aws-sdk/client-rds-data';
+import { S3Client } from '@aws-sdk/client-s3';
 import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 
 import {
   createDatabaseClient,
   readDatabaseConfig,
-  type AwsDataApiDatabaseConnection,
   type DatabaseConnection,
+  type PostgresDatabaseConfig,
   type PostgresDatabaseConnection,
 } from '../../../db/client';
 import {
@@ -135,8 +130,10 @@ const UNAVAILABLE_BODY = JSON.stringify({ status: 'unavailable' });
 
 type HealthEnvironment = Readonly<Record<string, string | undefined>>;
 
-interface DatabaseHealthResult {
-  readonly records?: ExecuteStatementCommandOutput['records'];
+interface NativeDatabaseHealthResult {
+  readonly value: number;
+  readonly ssl: boolean;
+  readonly tlsVersion: string;
 }
 
 type HealthFetch = (
@@ -154,11 +151,10 @@ export interface HealthAwsCredentials {
 
 /** Injectable read-only boundaries for the production health dependencies. */
 export interface RuntimeHealthAdapters {
-  readonly executeDatabaseStatement?: (
-    region: string,
-    input: ExecuteStatementCommandInput,
+  readonly queryNativeDatabase?: (
+    config: PostgresDatabaseConfig,
     signal: AbortSignal,
-  ) => Promise<DatabaseHealthResult>;
+  ) => Promise<NativeDatabaseHealthResult>;
   readonly resolveAwsCredentials?: (
     region: string,
     signal: AbortSignal,
@@ -298,50 +294,21 @@ function dnsSuffixForRegion(region: string): string {
   return region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com';
 }
 
-function readDatabaseStatementInput(
+export const NATIVE_DATABASE_HEALTH_SQL = `SELECT
+  1::integer AS "value",
+  ssl AS "ssl",
+  version AS "tlsVersion"
+FROM pg_catalog.pg_stat_ssl
+WHERE pid = pg_backend_pid()`;
+
+function readNativeDatabaseConfiguration(
   environment: HealthEnvironment,
-): Readonly<{ region: string; input: ExecuteStatementCommandInput }> {
-  if (environment.DATABASE_DRIVER !== 'aws-data-api') {
+): PostgresDatabaseConfig {
+  const config = readDatabaseConfig(environment);
+  if (config.driver !== 'postgres') {
     throw new Error('Health dependency configuration is unavailable.');
   }
-  const region = readRegion(environment);
-  const database = requiredEnvironmentValue(environment, 'DATABASE_NAME', 63);
-  if (!/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(database)) {
-    throw new Error('Health dependency configuration is unavailable.');
-  }
-  const resourceArn = requiredEnvironmentValue(
-    environment,
-    'DATABASE_RESOURCE_ARN',
-    2_048,
-  );
-  const secretArn = requiredEnvironmentValue(
-    environment,
-    'DATABASE_SECRET_ARN',
-    2_048,
-  );
-  const partition = partitionForRegion(region);
-  const clusterPattern = new RegExp(
-    `^arn:${partition}:rds:${region}:\\d{12}:cluster:[A-Za-z0-9-]+$`,
-    'u',
-  );
-  const secretPattern = new RegExp(
-    `^arn:${partition}:secretsmanager:${region}:\\d{12}:secret:[A-Za-z0-9/_+=.@-]+$`,
-    'u',
-  );
-  if (!clusterPattern.test(resourceArn) || !secretPattern.test(secretArn)) {
-    throw new Error('Health dependency configuration is unavailable.');
-  }
-  return Object.freeze({
-    region,
-    input: Object.freeze({
-      continueAfterTimeout: false,
-      database,
-      includeResultMetadata: false,
-      resourceArn,
-      secretArn,
-      sql: 'SELECT 1',
-    }),
-  });
+  return config;
 }
 
 function readQueueConfiguration(
@@ -394,7 +361,7 @@ function readSecretConfiguration(
   const region = readRegion(environment);
   const secretArn = requiredEnvironmentValue(
     environment,
-    'DATABASE_SECRET_ARN',
+    'RUNTIME_SECRET_ARN',
     2_048,
   );
   const pattern = new RegExp(
@@ -622,9 +589,10 @@ async function sendAwsReadProbe(
 }
 
 /**
- * Creates the production deep checks with injectable network and Data API
- * seams. Every operation is a read: SELECT 1, GetQueueAttributes, and
- * DescribeSecret. Runtime secret values are checked only in memory.
+ * Creates the production deep checks with injectable native-database and
+ * network seams. Every operation is a read: SELECT 1 plus TLS state,
+ * GetQueueAttributes, and DescribeSecret. Runtime secret values are checked
+ * only in memory.
  */
 export function createRuntimeDeepHealthDependencies(
   environment: HealthEnvironment = process.env,
@@ -632,24 +600,70 @@ export function createRuntimeDeepHealthDependencies(
 ): DeepHealthDependencies {
   const fetchImplementation = adapters.fetch ?? globalThis.fetch;
   const now = adapters.now ?? (() => new Date());
-  let rdsDataClient: RDSDataClient | undefined;
+  let credentialsClient: S3Client | undefined;
 
-  function client(region: string): RDSDataClient {
-    rdsDataClient ??= new RDSDataClient({ maxAttempts: 1, region });
-    return rdsDataClient;
+  function credentialProvider(region: string): S3Client {
+    credentialsClient ??= new S3Client({ maxAttempts: 1, region });
+    return credentialsClient;
   }
 
-  const executeDatabaseStatement =
-    adapters.executeDatabaseStatement ??
-    ((region, input, signal) =>
-      client(region).send(new ExecuteStatementCommand(input), {
-        abortSignal: signal,
-      }));
+  const queryNativeDatabase =
+    adapters.queryNativeDatabase ??
+    (async (
+      config: PostgresDatabaseConfig,
+      signal: AbortSignal,
+    ): Promise<NativeDatabaseHealthResult> => {
+      assertNotAborted(signal);
+      const connection = createDatabaseClient(config);
+      if (connection.driver !== 'postgres') {
+        throw new Error('Health dependency configuration is unavailable.');
+      }
+      try {
+        if (connection.nativeClient === undefined) {
+          throw new Error('Health database cancellation is unavailable.');
+        }
+        const pending = connection.nativeClient.unsafe<
+          NativeDatabaseHealthResult[]
+        >(NATIVE_DATABASE_HEALTH_SQL);
+        const cancel = () => {
+          try {
+            void Promise.resolve(pending.cancel()).catch(() => undefined);
+          } catch {
+            // Cancellation is best-effort; connection teardown remains bounded.
+          }
+        };
+        signal.addEventListener('abort', cancel, { once: true });
+        if (signal.aborted) cancel();
+        let rows: readonly NativeDatabaseHealthResult[];
+        try {
+          rows = await pending;
+        } finally {
+          signal.removeEventListener('abort', cancel);
+        }
+        assertNotAborted(signal);
+        const row = rows[0];
+        if (
+          rows.length !== 1 ||
+          typeof row?.value !== 'number' ||
+          typeof row.ssl !== 'boolean' ||
+          typeof row.tlsVersion !== 'string'
+        ) {
+          throw new Error('Database health query returned an invalid result.');
+        }
+        return Object.freeze({
+          value: row.value,
+          ssl: row.ssl,
+          tlsVersion: row.tlsVersion,
+        });
+      } finally {
+        await connection.close();
+      }
+    });
   const resolveAwsCredentials =
     adapters.resolveAwsCredentials ??
     (async (region: string, signal: AbortSignal) => {
       assertNotAborted(signal);
-      const credentials = await client(region).config.credentials();
+      const credentials = await credentialProvider(region).config.credentials();
       assertNotAborted(signal);
       return credentials;
     });
@@ -670,11 +684,14 @@ export function createRuntimeDeepHealthDependencies(
   return Object.freeze({
     async checkDatabase(signal: AbortSignal): Promise<void> {
       assertNotAborted(signal);
-      const { input, region } = readDatabaseStatementInput(environment);
-      const result = await executeDatabaseStatement(region, input, signal);
+      const config = readNativeDatabaseConfiguration(environment);
+      const result = await queryNativeDatabase(config, signal);
       assertNotAborted(signal);
-      const value = result.records?.[0]?.[0];
-      if (value?.longValue !== 1) {
+      if (
+        result.value !== 1 ||
+        result.ssl !== true ||
+        !/^TLSv1[.][23]$/u.test(result.tlsVersion)
+      ) {
         throw new Error('Database health query returned an invalid result.');
       }
     },
@@ -1202,27 +1219,25 @@ export function createCanaryRouteHandler(
 }
 
 function transactionConnection(
-  driver: DatabaseConnection['driver'],
   transaction: unknown,
-): DatabaseConnection {
+): PostgresDatabaseConnection {
   const close = () => Promise.resolve();
-  return driver === 'postgres'
-    ? ({
-        driver,
-        db: transaction as PostgresDatabaseConnection['db'],
-        close,
-      } satisfies PostgresDatabaseConnection)
-    : ({
-        driver,
-        db: transaction as AwsDataApiDatabaseConnection['db'],
-        close,
-      } satisfies AwsDataApiDatabaseConnection);
+  return {
+    driver: 'postgres',
+    db: transaction as PostgresDatabaseConnection['db'],
+    close,
+  } satisfies PostgresDatabaseConnection;
 }
 
 /** Builds the production base gateway and transaction-bound runtime seam. */
 export function createRuntimeCanaryRouteDependencies(
   connection: DatabaseConnection = createDatabaseClient(readDatabaseConfig()),
 ): CanaryRouteDependencies {
+  if (connection.driver !== 'postgres') {
+    throw new Error(
+      'The exploration health canary requires native PostgreSQL.',
+    );
+  }
   const baseRuntime = createAgentRestRuntime(connection);
   return Object.freeze({
     database: connection.db as CanaryTransactionDatabase,
@@ -1230,9 +1245,7 @@ export function createRuntimeCanaryRouteDependencies(
     configureTransaction: configureCanaryTransaction,
     createRequestId: randomUUID,
     createTransactionalRuntime(transaction: unknown): AgentRestRuntime {
-      return createAgentRestRuntime(
-        transactionConnection(connection.driver, transaction),
-      );
+      return createAgentRestRuntime(transactionConnection(transaction));
     },
     now: () => new Date(),
     reportFailure(stage: CanaryFailureStage): void {
