@@ -45,7 +45,7 @@ on:
         required: true
         type: string
       acknowledge:
-        description: Type DEPLOY SYNTHETIC EXPLORATION SMOKE
+        description: Exact normal or product-owner bypass acknowledgement
         required: true
         type: string
 
@@ -96,6 +96,7 @@ jobs:
       deploy_role_boundary_arn: ${{ steps.request.outputs.deploy_role_boundary_arn }}
       deploy_role_policy_sha256: ${{ steps.request.outputs.deploy_role_policy_sha256 }}
       image_digest: ${{ steps.image.outputs.image_digest }}
+      repository_gate_record: ${{ steps.request.outputs.repository_gate_record }}
       template_sha256: ${{ steps.synth.outputs.template_sha256 }}
     env:
       ACKNOWLEDGE: ${{ inputs.acknowledge }}
@@ -161,7 +162,25 @@ jobs:
           reference_pattern='^[A-Za-z0-9][A-Za-z0-9._:/?=&%#@+-]{2,500}$'
           [[ "$PRICING_REFERENCE" =~ $reference_pattern ]]
           [[ "$CHANGE_REFERENCE" =~ $reference_pattern ]]
-          [[ "$ACKNOWLEDGE" == "DEPLOY SYNTHETIC EXPLORATION SMOKE" ]]
+          case "$ACKNOWLEDGE" in
+            "DEPLOY SYNTHETIC EXPLORATION SMOKE")
+              REPOSITORY_GATE_MODE=full
+              REPOSITORY_GATE_RECORD="FULL REPOSITORY GATE"
+              ;;
+            "DEPLOY SYNTHETIC EXPLORATION SMOKE WITHOUT FULL CI")
+              REPOSITORY_GATE_MODE=synthetic-owner-bypass
+              REPOSITORY_GATE_RECORD="EXPLICIT PRODUCT-OWNER BYPASS FOR SYNTHETIC EXPLORATION"
+              ;;
+            *)
+              echo "The deployment acknowledgement is not exact." >&2
+              exit 1
+              ;;
+          esac
+          {
+            printf '%s\n' "REPOSITORY_GATE_MODE=$REPOSITORY_GATE_MODE"
+            printf '%s\n' "REPOSITORY_GATE_RECORD=$REPOSITORY_GATE_RECORD"
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "repository_gate_record=$REPOSITORY_GATE_RECORD" >> "$GITHUB_OUTPUT"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
 
@@ -174,7 +193,17 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Run the repository gate
+        if: env.REPOSITORY_GATE_MODE == 'full'
         run: bun run check
+
+      - name: Record the product-owner synthetic gate bypass
+        if: env.REPOSITORY_GATE_MODE == 'synthetic-owner-bypass'
+        run: |
+          {
+            echo "## Synthetic exploration repository-gate bypass"
+            echo
+            echo "The product owner explicitly bypassed the full repository/Playwright gate for this synthetic-only deployment. Focused smoke tests, CDK synth, container smoke, immutable preview, protected approval, and AWS readback still run. Production deployment and live messaging/provider sends remain unavailable."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run exploration-smoke focused tests
         run: >-
@@ -337,6 +366,7 @@ jobs:
             printf '%s\n' "- Estimated monthly AWS cost: USD $MONTHLY_COST_ESTIMATE_USD"
             printf '%s\n' "- Pricing evidence: $PRICING_REFERENCE"
             printf '%s\n' "- Change/approval record: $CHANGE_REFERENCE"
+            printf '%s\n' "- Repository gate: $REPOSITORY_GATE_RECORD"
             echo
             echo "## Consequences"
             echo
@@ -414,6 +444,7 @@ jobs:
       id-token: write
     env:
       APPROVED_IDENTITY_SHA256: ${{ inputs.approved_identity_sha256 }}
+      ACKNOWLEDGE: ${{ inputs.acknowledge }}
       CONFIGURED_DEPLOY_ROLE_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
       DEPLOY_ROLE_ARN: ${{ needs.preview.outputs.deploy_role_arn }}
       EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_PERMISSIONS_BOUNDARY_ARN }}
@@ -423,6 +454,7 @@ jobs:
       PREVIOUS_IMAGE_DIGEST: ${{ inputs.previous_image_digest }}
       REQUESTED_DEPLOY_ROLE_BOUNDARY_ARN: ${{ needs.preview.outputs.deploy_role_boundary_arn }}
       REQUESTED_DEPLOY_ROLE_POLICY_SHA256: ${{ needs.preview.outputs.deploy_role_policy_sha256 }}
+      REPOSITORY_GATE_RECORD: ${{ needs.preview.outputs.repository_gate_record }}
       SOURCE_SHA: ${{ inputs.source_sha }}
       TEMPLATE_SHA256: ${{ needs.preview.outputs.template_sha256 }}
     steps:
@@ -456,6 +488,16 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          case "$ACKNOWLEDGE" in
+            "DEPLOY SYNTHETIC EXPLORATION SMOKE")
+              test "$REPOSITORY_GATE_RECORD" = "FULL REPOSITORY GATE"
+              ;;
+            "DEPLOY SYNTHETIC EXPLORATION SMOKE WITHOUT FULL CI")
+              test "$REPOSITORY_GATE_RECORD" = "EXPLICIT PRODUCT-OWNER BYPASS FOR SYNTHETIC EXPLORATION"
+              ;;
+            *) exit 1 ;;
+          esac
+          grep -Fx -- "- Repository gate: $REPOSITORY_GATE_RECORD" artifacts/consequence-preview.md
           test "$(sha256sum artifacts/cdk.out/PsdEocExplorationSmoke.template.json | cut -d' ' -f1)" = "$TEMPLATE_SHA256"
           sha256sum --check artifacts/image-registry-tar.sha256
           test "$CONFIGURED_DEPLOY_ROLE_ARN" = "$DEPLOY_ROLE_ARN"
@@ -1255,6 +1297,7 @@ jobs:
             printf '%s\n' "- The exact App Runner service and application log groups were read back with $APP_RUNNER_LOG_RETENTION_DAYS-day retention."
             printf '%s\n' "- Deployment-role policy inventory SHA-256: $(cat artifacts/readback/deployment-role-policy-inventory.sha256)"
             printf '%s\n' "- Deployment-role permissions boundary: $EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"
+            printf '%s\n' "- Repository gate: $REPOSITORY_GATE_RECORD"
             echo "- Exact runtime-role trust, absent boundary, empty attached-policy list, and one least-privilege inline policy were read back; exact-queue simulation denied SQS SendMessage and allowed only SQS GetQueueAttributes."
             echo "- Generated secrets and the OAuth credential value were not printed."
             echo "- Valid TLS and deep health succeeded at the App Runner provider URL."
