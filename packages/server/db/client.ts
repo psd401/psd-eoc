@@ -524,6 +524,10 @@ function createPostgresDatabaseConnection(
   const commonOptions = {
     connect_timeout: config.connectTimeoutSeconds,
     idle_timeout: config.idleTimeoutSeconds,
+    // The pinned postgres-js patch makes an internally retired connection
+    // generation terminal. Disable its random 30-60 minute life timer; every
+    // client in this repository already owns an explicit close boundary.
+    max_lifetime: 0,
     max: config.maxConnections,
   } as const;
   const client =
