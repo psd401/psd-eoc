@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { CapabilityEngineError } from '../../../lib/capabilities/engine';
+import { applicationUrlForRequest } from '../../../lib/auth/application-origin';
 import {
   AdminFormError,
   adminFormErrorResponse,
@@ -92,5 +93,27 @@ describe('shared administration request boundary', () => {
     expect(response.headers.get('location')).toBe(
       'https://eoc.example.invalid/facilities?status=facility-created',
     );
+  });
+
+  test('redirects a proxied production request on the fixed public origin', () => {
+    const response = adminSuccessRedirect(
+      new Request('https://localhost:3000/facilities/api', {
+        method: 'POST',
+      }),
+      '/facilities',
+      'facility-created',
+      { NODE_ENV: 'production' },
+    );
+
+    expect(response.headers.get('location')).toBe(
+      'https://eoc.psd401.net/facilities?status=facility-created',
+    );
+    expect(() =>
+      applicationUrlForRequest(
+        'https://localhost:3000/facilities/api',
+        'https://evil.example/phish',
+        { NODE_ENV: 'production' },
+      ),
+    ).toThrow('Application redirects must remain same-origin.');
   });
 });
