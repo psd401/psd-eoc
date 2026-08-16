@@ -1,17 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import {
-  BeginTransactionCommand,
-  CommitTransactionCommand,
-  ExecuteStatementCommand,
-  RollbackTransactionCommand,
-  type RDSDataClient,
-} from '@aws-sdk/client-rds-data';
-import { sql } from 'drizzle-orm';
-import { drizzle as drizzleAwsDataApi } from 'drizzle-orm/aws-data-api/pg';
 
 import {
-  CANARY_TRANSACTION_CONFIGURATION_SQL,
-  configureCanaryTransaction,
   createCanaryRouteHandler,
   createHealthRouteHandler,
   createRuntimeDeepHealthDependencies,
@@ -30,8 +19,14 @@ const ACCOUNT_ID = '123456789012';
 const QUEUE_NAME = 'psd-eoc-fanout';
 const QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT_ID}/${QUEUE_NAME}`;
 const QUEUE_ARN = `arn:aws:sqs:${REGION}:${ACCOUNT_ID}:${QUEUE_NAME}`;
-const DATABASE_RESOURCE_ARN = `arn:aws:rds:${REGION}:${ACCOUNT_ID}:cluster:psd-eoc`;
-const DATABASE_SECRET_ARN = `arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:psd-eoc-database-application-AbCdEf`;
+const RUNTIME_SECRET_ARN = `arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:psd-eoc-runtime-AbCdEf`;
+const DATABASE_HOST =
+  'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com';
+const DATABASE_PASSWORD = 'synthetic-native-health-password-value';
+const DATABASE_SSL_ROOT_CERT = new URL(
+  '../../packages/server/certs/aws-rds-global-bundle.pem',
+  import.meta.url,
+).pathname;
 const SYNTHETIC_ACCESS_KEY_ID = 'ASIA0000000000000000';
 const SYNTHETIC_SECRET_ACCESS_KEY = 'synthetic-health-secret-access-key-value';
 const SYNTHETIC_SESSION_TOKEN = 'synthetic-health-session-token-value';
@@ -64,10 +59,17 @@ function runtimeEnvironment(): Readonly<Record<string, string>> {
   return Object.freeze({
     API_SALT: 's'.repeat(64),
     AWS_REGION: REGION,
-    DATABASE_DRIVER: 'aws-data-api',
+    DATABASE_DRIVER: 'postgres',
+    DATABASE_HOST,
+    DATABASE_PORT: '5432',
     DATABASE_NAME: 'psd_eoc',
-    DATABASE_RESOURCE_ARN,
-    DATABASE_SECRET_ARN,
+    DATABASE_USERNAME: 'psd_eoc_application',
+    DATABASE_PASSWORD,
+    DATABASE_SSL_ROOT_CERT,
+    DATABASE_MAX_CONNECTIONS: '1',
+    DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
+    DATABASE_IDLE_TIMEOUT_SECONDS: '20',
+    RUNTIME_SECRET_ARN,
     FANOUT_QUEUE_URL: QUEUE_URL,
     GOOGLE_OAUTH_CONFIG: JSON.stringify({
       clientId: OAUTH_WEB_CLIENT_ID,
@@ -764,10 +766,10 @@ describe('authenticated rollback canary POST', () => {
 
 describe('production deep health reads', () => {
   it('proves DB, fan-out queue, and secret reachability using reads only', async () => {
-    type DatabaseInput = Parameters<
-      NonNullable<RuntimeHealthAdapters['executeDatabaseStatement']>
-    >[1];
-    const databaseInputs: DatabaseInput[] = [];
+    type DatabaseConfig = Parameters<
+      NonNullable<RuntimeHealthAdapters['queryNativeDatabase']>
+    >[0];
+    const databaseConfigs: DatabaseConfig[] = [];
     const requestedSignals: AbortSignal[] = [];
     const requests: Array<
       Readonly<{ endpoint: string; init: RequestInit; target: string }>
@@ -792,7 +794,7 @@ describe('production deep health reads', () => {
         );
       }
       if (target === 'secretsmanager.DescribeSecret') {
-        return new Response(JSON.stringify({ ARN: DATABASE_SECRET_ARN }), {
+        return new Response(JSON.stringify({ ARN: RUNTIME_SECRET_ARN }), {
           status: 200,
         });
       }
@@ -803,10 +805,10 @@ describe('production deep health reads', () => {
     const dependencies = createRuntimeDeepHealthDependencies(
       runtimeEnvironment(),
       {
-        executeDatabaseStatement: async (_region, input, signal) => {
-          databaseInputs.push(input);
+        queryNativeDatabase: async (config, signal) => {
+          databaseConfigs.push(config);
           requestedSignals.push(signal);
-          return { records: [[{ longValue: 1 }]] };
+          return { value: 1, ssl: true, tlsVersion: 'TLSv1.3' };
         },
         fetch: fetchImplementation,
         now: () => FIXED_TIME,
@@ -829,17 +831,20 @@ describe('production deep health reads', () => {
       dependencies.checkRuntimeSecrets(controller.signal),
     ]);
 
-    expect(databaseInputs).toEqual([
+    expect(databaseConfigs).toEqual([
       {
-        continueAfterTimeout: false,
+        driver: 'postgres',
+        host: DATABASE_HOST,
+        port: 5432,
         database: 'psd_eoc',
-        includeResultMetadata: false,
-        resourceArn: DATABASE_RESOURCE_ARN,
-        secretArn: DATABASE_SECRET_ARN,
-        sql: 'SELECT 1',
+        username: 'psd_eoc_application',
+        password: DATABASE_PASSWORD,
+        sslRootCertificatePath: DATABASE_SSL_ROOT_CERT,
+        maxConnections: 1,
+        connectTimeoutSeconds: 10,
+        idleTimeoutSeconds: 20,
       },
     ]);
-    expect(databaseInputs[0]).not.toHaveProperty('transactionId');
     expect(
       requestedSignals.every((signal) => signal === controller.signal),
     ).toBe(true);
@@ -853,7 +858,7 @@ describe('production deep health reads', () => {
       expect(headers.get('authorization')).toBe(
         request.target === 'AmazonSQS.GetQueueAttributes'
           ? 'AWS4-HMAC-SHA256 Credential=ASIA0000000000000000/20260812/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=efff8cb62799cc61ed5aee9d3f8c47f3ff1b17b9c78711bfd5f2a429a20569d4'
-          : 'AWS4-HMAC-SHA256 Credential=ASIA0000000000000000/20260812/us-west-2/secretsmanager/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=eab90e9239c61e5d39d97921e1422f4487631df24082a5fb11f28d064c5e47b1',
+          : 'AWS4-HMAC-SHA256 Credential=ASIA0000000000000000/20260812/us-west-2/secretsmanager/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=3f22f37d61f3770208bddaba6f739cd88b37fb96a232fd9c68668085640bb3c2',
       );
       expect(headers.get('content-type')).toBe(
         request.target === 'AmazonSQS.GetQueueAttributes'
@@ -889,7 +894,7 @@ describe('production deep health reads', () => {
       `https://secretsmanager.${REGION}.amazonaws.com/`,
     );
     expect(JSON.parse(String(secretRequest.init.body))).toEqual({
-      SecretId: DATABASE_SECRET_ARN,
+      SecretId: RUNTIME_SECRET_ARN,
     });
     const serializedRequests = JSON.stringify(requests);
     expect(serializedRequests).not.toContain(
@@ -959,8 +964,10 @@ describe('production deep health reads', () => {
 
   it('rejects invalid or untrusted dependency evidence', async () => {
     const baseAdapters: RuntimeHealthAdapters = {
-      executeDatabaseStatement: async () => ({
-        records: [[{ longValue: 0 }]],
+      queryNativeDatabase: async () => ({
+        value: 0,
+        ssl: false,
+        tlsVersion: 'TLSv1.3',
       }),
       fetch: async (_input, init) => {
         const target = new Headers(init?.headers).get('x-amz-target');
@@ -971,7 +978,7 @@ describe('production deep health reads', () => {
             }),
           );
         }
-        return new Response(JSON.stringify({ ARN: DATABASE_SECRET_ARN }), {
+        return new Response(JSON.stringify({ ARN: RUNTIME_SECRET_ARN }), {
           headers: { 'content-length': '65537' },
         });
       },
@@ -991,101 +998,5 @@ describe('production deep health reads', () => {
     await expect(dependencies.checkDatabase(signal)).rejects.toThrow();
     await expect(dependencies.checkFanoutQueue(signal)).rejects.toThrow();
     await expect(dependencies.checkRuntimeSecrets(signal)).rejects.toThrow();
-  });
-});
-
-describe('AWS Data API rollback protocol', () => {
-  it('keeps nested canonical transactions on savepoints and rolls back the outer transaction', async () => {
-    type RecordedCommand =
-      | BeginTransactionCommand
-      | ExecuteStatementCommand
-      | RollbackTransactionCommand
-      | CommitTransactionCommand;
-    const commands: RecordedCommand[] = [];
-    const fakeClient = {
-      async send(command: unknown): Promise<unknown> {
-        if (
-          !(command instanceof BeginTransactionCommand) &&
-          !(command instanceof ExecuteStatementCommand) &&
-          !(command instanceof RollbackTransactionCommand) &&
-          !(command instanceof CommitTransactionCommand)
-        ) {
-          throw new Error('Unexpected Data API command type.');
-        }
-        commands.push(command);
-        if (command instanceof BeginTransactionCommand) {
-          return { $metadata: {}, transactionId: 'canary-outer-transaction' };
-        }
-        if (command instanceof ExecuteStatementCommand) {
-          return {
-            $metadata: {},
-            numberOfRecordsUpdated: 0,
-            records: [[{ longValue: 1 }]],
-          };
-        }
-        if (
-          command instanceof RollbackTransactionCommand ||
-          command instanceof CommitTransactionCommand
-        ) {
-          return { $metadata: {} };
-        }
-        throw new Error('Unexpected Data API command.');
-      },
-    } as unknown as RDSDataClient;
-    const database = drizzleAwsDataApi({
-      client: fakeClient,
-      database: 'synthetic',
-      resourceArn:
-        'arn:aws:rds:us-west-2:123456789012:cluster:synthetic-canary',
-      secretArn:
-        'arn:aws:secretsmanager:us-west-2:123456789012:secret:synthetic-canary',
-    });
-    const sentinel = Object.freeze({ kind: 'identity-rollback-sentinel' });
-    let observed: unknown;
-
-    try {
-      await database.transaction(async (outerTransaction) => {
-        await configureCanaryTransaction(outerTransaction);
-        await outerTransaction.transaction(async (nestedTransaction) => {
-          await nestedTransaction.execute(sql`select 1`);
-        });
-        throw sentinel;
-      });
-    } catch (error) {
-      observed = error;
-    }
-
-    expect(observed).toBe(sentinel);
-    expect(commands.map((command) => command.constructor.name)).toEqual([
-      'BeginTransactionCommand',
-      'ExecuteStatementCommand',
-      'ExecuteStatementCommand',
-      'ExecuteStatementCommand',
-      'ExecuteStatementCommand',
-      'RollbackTransactionCommand',
-    ]);
-    const statements = commands.filter(
-      (command): command is ExecuteStatementCommand =>
-        command instanceof ExecuteStatementCommand,
-    );
-    expect(statements.map(({ input }) => input.sql)).toEqual([
-      CANARY_TRANSACTION_CONFIGURATION_SQL,
-      'savepoint sp1',
-      'select 1',
-      'release savepoint sp1',
-    ]);
-    expect(
-      statements.every(
-        ({ input }) => input.transactionId === 'canary-outer-transaction',
-      ),
-    ).toBe(true);
-    expect(
-      commands.some((command) => command instanceof CommitTransactionCommand),
-    ).toBe(false);
-    const rollback = commands.find(
-      (command): command is RollbackTransactionCommand =>
-        command instanceof RollbackTransactionCommand,
-    );
-    expect(rollback?.input.transactionId).toBe('canary-outer-transaction');
   });
 });

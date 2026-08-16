@@ -28,6 +28,26 @@ const DATA_API_ENVIRONMENT = {
     'arn:aws:secretsmanager:us-west-2:338414773271:secret:psd-eoc-synthetic-AbCdEf',
 } as const;
 
+const RDS_CA_PATH = new URL(
+  '../certs/aws-rds-global-bundle.pem',
+  import.meta.url,
+).pathname;
+
+const COMPONENT_POSTGRES_ENVIRONMENT = {
+  DATABASE_DRIVER: 'postgres',
+  DATABASE_HOST:
+    'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com',
+  DATABASE_PORT: '5432',
+  DATABASE_NAME: 'psd_eoc',
+  DATABASE_USERNAME: 'psd_eoc_application',
+  DATABASE_PASSWORD: 'synthetic-component-password-value',
+  DATABASE_SSL_ROOT_CERT: RDS_CA_PATH,
+  DATABASE_MAX_CONNECTIONS: '1',
+  DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
+  DATABASE_IDLE_TIMEOUT_SECONDS: '20',
+  NODE_ENV: 'production',
+} as const;
+
 describe('database client configuration', () => {
   test('requires an explicit transport instead of guessing', () => {
     expect(() => readDatabaseConfig({})).toThrow('DATABASE_DRIVER must be set');
@@ -47,6 +67,51 @@ describe('database client configuration', () => {
       connectTimeoutSeconds: 10,
       idleTimeoutSeconds: 20,
     });
+  });
+
+  test('requires deployed component credentials, pinned TLS, and a one-connection pool', async () => {
+    expect(readDatabaseConfig(COMPONENT_POSTGRES_ENVIRONMENT)).toEqual({
+      driver: 'postgres',
+      host: COMPONENT_POSTGRES_ENVIRONMENT.DATABASE_HOST,
+      port: 5432,
+      database: 'psd_eoc',
+      username: 'psd_eoc_application',
+      password: COMPONENT_POSTGRES_ENVIRONMENT.DATABASE_PASSWORD,
+      sslRootCertificatePath: RDS_CA_PATH,
+      maxConnections: 1,
+      connectTimeoutSeconds: 10,
+      idleTimeoutSeconds: 20,
+    });
+
+    const connection = createDatabaseClient(
+      readDatabaseConfig(COMPONENT_POSTGRES_ENVIRONMENT),
+    );
+    expect(connection.driver).toBe('postgres');
+    await connection.close();
+
+    for (const environment of [
+      { ...COMPONENT_POSTGRES_ENVIRONMENT, DATABASE_MAX_CONNECTIONS: '2' },
+      {
+        ...COMPONENT_POSTGRES_ENVIRONMENT,
+        DATABASE_URL: 'postgresql://synthetic:synthetic@localhost/psd_eoc_test',
+      },
+      {
+        DATABASE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgresql://synthetic:synthetic@localhost/psd_eoc_test',
+        NODE_ENV: 'production',
+      },
+    ]) {
+      let message = '';
+      try {
+        readDatabaseConfig(environment);
+      } catch (error) {
+        message = String(error);
+      }
+      expect(message).toBeTruthy();
+      expect(message).not.toContain(
+        COMPONENT_POSTGRES_ENVIRONMENT.DATABASE_PASSWORD,
+      );
+    }
   });
 
   test('rejects mixed transport settings without reflecting secret values', () => {

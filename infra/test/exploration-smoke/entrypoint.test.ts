@@ -119,13 +119,16 @@ describe('isolated CDK entrypoint configuration', () => {
     );
   });
 
-  it('keeps workflow publication, bootstrap order, and readback redaction aligned', async () => {
+  it('preserves the live service until the exact native bootstrap succeeds', async () => {
     const workflow = await readWorkflow();
-    const loginBoundaryStep = workflow.indexOf(
-      '- name: Establish exact application LOGIN administration boundary',
+    const stageStep = workflow.indexOf(
+      '- name: Stage the exact native bootstrap without changing the live service',
+    );
+    const publishStep = workflow.indexOf(
+      '- name: Publish and verify only the approved image digest',
     );
     const bootstrapStep = workflow.indexOf(
-      '- name: Bootstrap synthetic data before starting App Runner',
+      '- name: Run and prove the exact native bootstrap task',
     );
     const serviceStep = workflow.indexOf(
       '- name: Deploy the exact digest after bootstrap',
@@ -136,16 +139,32 @@ describe('isolated CDK entrypoint configuration', () => {
 
     expect(workflow).toContain(EXPLORATION_SMOKE_REPOSITORY_NAME);
     expect(workflow).not.toContain('repository/psd-eoc-exploration-smoke');
-    expect(loginBoundaryStep).toBeGreaterThan(-1);
-    expect(bootstrapStep).toBeGreaterThan(loginBoundaryStep);
-    expect(bootstrapStep).toBeGreaterThan(-1);
+    expect(stageStep).toBeGreaterThan(-1);
+    expect(publishStep).toBeGreaterThan(stageStep);
+    expect(bootstrapStep).toBeGreaterThan(publishStep);
     expect(serviceStep).toBeGreaterThan(bootstrapStep);
+    expect(workflow).toContain('phase_app_digest=$current_digest');
+    expect(workflow).toContain('phase_source_sha=$current_source_sha');
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST"',
+    );
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA"',
+    );
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:SourceSha=$phase_source_sha"',
+    );
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"',
+    );
+    expect(workflow).not.toContain('--overrides');
     expect(workflow).not.toContain(
       'describe-service --service-arn "$service_arn" > artifacts/readback/app-runner-service.json',
     );
     expect(workflow).toContain('unset app_runner_service');
-    expect(workflow).toContain('aws apprunner list-services');
-    expect(workflow).not.toContain('RuntimeEnvironmentVariables');
+    expect(workflow).toContain(
+      'unset runtime_environment_map runtime_secret_map',
+    );
     expect(deployJobHeader).toBeDefined();
     expect(deployJobHeader).not.toContain(
       'secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT',
@@ -158,77 +177,79 @@ describe('isolated CDK entrypoint configuration', () => {
     );
   });
 
-  it('repairs only the exact Aurora application LOGIN administration boundary', async () => {
+  it('runs one provenance-bound Fargate task and requires exact native evidence', async () => {
     const workflow = await readWorkflow();
 
-    expect(workflow).toContain('role_state_sql=\'SELECT rolname AS "roleName"');
-    expect(workflow).toContain(
-      'execute_sql \'CREATE ROLE "psd_eoc_application" LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS\'',
-    );
-    expect(workflow).toContain(
-      'execute_sql \'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT FALSE, SET FALSE\'',
-    );
-    expect(workflow).toContain('currentUser: "psd_eoc_admin"');
-    expect(workflow).toContain('memberName: "psd_eoc_admin"');
-    expect(workflow).toContain('adminOption: true');
-    expect(workflow).toContain('inheritOption: false');
-    expect(workflow).toContain('setOption: false');
-    expect(workflow).toContain(
-      '`ALTER ROLE "psd_eoc_application" WITH PASSWORD ${passwordLiteral}`',
-    );
-    expect(workflow).toContain(
-      'buildApplicationRoleStatements(\n                    password,\n                  ).slice(2)',
-    );
-    const bootstrapStages = [
-      ['readApplicationSecret', 'read-application-secret'],
-      ['migrate', 'migrate'],
-      ['configureApplicationRole', 'configure-application-role'],
-      ['seedSynthetic', 'seed-synthetic'],
-      ['seedApprovedAccess', 'seed-approved-access'],
-      ['verifyApplicationLogin', 'verify-application-login'],
-    ] as const;
-    for (const [property, label] of bootstrapStages) {
-      expect(workflow).toContain(`${property}: '${label}'`);
-      expect(workflow).toContain(
-        `markBootstrapStage(BOOTSTRAP_STAGES.${property});`,
-      );
+    for (const output of [
+      'BootstrapEcsClusterArn',
+      'BootstrapTaskDefinitionArn',
+      'BootstrapPrivateSubnetIds',
+      'BootstrapSecurityGroupId',
+      'BootstrapLogGroupName',
+      'BootstrapTaskExecutionRoleArn',
+      'BootstrapTaskRoleArn',
+      'AppRunnerVpcConnectorArn',
+      'ApprovedIdentitySecretArn',
+    ]) {
+      expect(workflow).toContain(output);
     }
+    expect(workflow).toContain('aws ecs run-task');
+    expect(workflow).toContain('aws ecs wait tasks-stopped');
+    expect(workflow).toContain('aws ecs describe-tasks');
+    expect(workflow).toContain('aws ecs describe-task-definition');
+    expect(workflow).toContain('--started-by "$started_by"');
+    expect(workflow).toContain('--client-token "$client_token"');
+    expect(workflow).toContain('assignPublicIp=DISABLED');
     expect(workflow).toContain(
-      'let bootstrapStage = BOOTSTRAP_STAGES.initialize;',
+      '.tasks[0].containers[0].imageDigest == $digest',
     );
-    expect(workflow).toContain('function markBootstrapStage(stage)');
-    expect(workflow).toContain(
-      'database bootstrap failed closed at stage ${bootstrapStage}.',
-    );
-    expect(workflow).not.toContain('error.message');
-    expect(workflow).not.toContain('application-login-authority-probe.json');
-    expect(workflow).not.toContain(
-      'ALTER ROLE "psd_eoc_application" WITH LOGIN INHERIT NOSUPERUSER',
-    );
-    expect(workflow).not.toContain(
-      'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT TRUE',
-    );
-    expect(workflow).not.toContain(
-      'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT FALSE, SET TRUE',
-    );
+    expect(workflow).toContain('.tasks[0].containers[0].exitCode == 0');
+    expect(workflow).toContain('aws logs get-log-events');
+    expect(workflow).toContain('ResourceNotFoundException');
+    expect(workflow).toContain('.database.transport == "native-postgres"');
+    expect(workflow).toContain('.database.tlsVerified == true');
+    expect(workflow).toContain('.idempotence.runs == 2');
+    expect(workflow).toContain('.idempotence.equivalent == true');
+    expect(workflow).toContain('native-bootstrap-summary.json');
+    expect(workflow).not.toContain('aws rds-data execute-statement');
+    expect(workflow).not.toContain('@aws-sdk/client-rds-data');
+    expect(workflow).not.toContain('DATABASE_RESOURCE_ARN');
+    expect(workflow).not.toContain('DATABASE_SECRET_ARN');
+    expect(workflow).not.toContain('aws-data-api');
   });
 
-  it('normalizes Aurora enum readback before exact access-fixture assertion', async () => {
+  it('previews and reads back private PostgreSQL with no database HTTP authority', async () => {
     const workflow = await readWorkflow();
 
-    expect(workflow).toContain('assertExplorationAccessFixtureEvidence,');
-    expect(workflow).not.toContain('seedExplorationAccessFixture,');
+    expect(workflow).toContain('AWS::AppRunner::VpcConnector');
+    expect(workflow).toContain('AWS::EC2::NatGateway');
+    expect(workflow).toContain('AWS::ECS::Cluster');
+    expect(workflow).toContain('AWS::ECS::TaskDefinition');
     expect(workflow).toContain(
-      "if (value.completionKind === 'completed') return 0;",
+      '.Properties.EnableHttpEndpoint // false) == true',
     );
     expect(workflow).toContain(
-      "if (value.completionKind === 'expected') return 1;",
+      '.DBClusters[0].HttpEndpointEnabled\' artifacts/readback/database-cluster.json)" = "false"',
     );
-    expect(workflow).toContain('await accessStore.apply(fixture);');
-    expect(workflow).toContain('await accessStore.readEvidence(fixture);');
     expect(workflow).toContain(
-      'snapshotGroupOrder(left) - snapshotGroupOrder(right)',
+      '.Service.NetworkConfiguration.EgressConfiguration',
     );
+    expect(workflow).toContain('EgressType: "VPC"');
+    expect(workflow).toContain('"DATABASE_DRIVER"');
+    expect(workflow).toContain(
+      'test "$(jq -er \'.DATABASE_DRIVER\' <<< "$runtime_environment_map")" = "postgres"',
+    );
+    expect(workflow).toContain('"RUNTIME_SECRET_ARN"');
+    expect(workflow).toContain(
+      'test "$(jq -er \'.RUNTIME_SECRET_ARN\' <<< "$runtime_environment_map")" = "$api_salt_secret_arn"',
+    );
+    expect(workflow).toContain('"DATABASE_USERNAME"');
+    expect(workflow).toContain('"DATABASE_PASSWORD"');
+    expect(workflow).toContain('"PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS"');
+    expect(workflow).toContain('$database_application_secret_arn:username::');
+    expect(workflow).toContain('$approved_identity_secret_arn:googleSubject::');
+    expect(workflow).toContain('($statements | length) == 2');
+    expect(workflow).not.toContain('"rds-data:ExecuteStatement"');
   });
 
   it('keeps workflow_dispatch within GitHub limits and parses combined fields', async () => {
@@ -345,7 +366,10 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain(
       `test "$(jq '.EvaluationResults | length' artifacts/readback/deployment-role-log-retention-negative-simulation.json)" -eq 2`,
     );
-    expect(workflow).not.toContain('aws logs get-log-events');
+    expect(workflow.match(/aws logs get-log-events/g)).toHaveLength(2);
+    expect(workflow).toContain(
+      '--log-stream-name "$bootstrap_log_stream_name"',
+    );
     expect(workflow).not.toContain('aws logs filter-log-events');
   });
 
