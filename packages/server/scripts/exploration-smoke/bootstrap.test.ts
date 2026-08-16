@@ -305,10 +305,10 @@ describe('application database secret and role', () => {
     const statements = buildApplicationRoleStatements(password);
     expect(statements).toHaveLength(5);
     expect(statements[0]).toContain('IF NOT EXISTS');
-    expect(statements[1]).toContain(
-      'LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',
+    expect(statements[1]).toBe(
+      `ALTER ROLE "${EXPLORATION_DATABASE_LOGIN}" WITH PASSWORD 'generated-password-with-quote-''--123456'`,
     );
-    expect(statements[1]).toContain("quote-''--123456'");
+    expect(statements[1]).not.toContain('NOSUPERUSER');
     expect(statements[2]).toContain('REVOKE %I');
     expect(statements[3]).toBe(
       `GRANT "${EXPLORATION_DATABASE_ROLE}" TO "${EXPLORATION_DATABASE_LOGIN}"`,
