@@ -405,6 +405,7 @@ jobs:
             printf '%s\n' "Assume through GitHub OIDC only: $DEPLOY_ROLE_ARN"
             printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=false' --parameters '$STACK_NAME:AppImageDigest=$ZERO_IMAGE_DIGEST' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>'"
             printf '%s\n' "docker buildx imagetools create --prefer-index=false --tag '$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server:source-$SOURCE_SHA' 'localhost:5000/psd-eoc/exploration-smoke@$IMAGE_DIGEST'"
+            printf '%s\n' "aws rds-data execute-statement <exact stack database/admin ARNs> --sql 'Create psd_eoc_application only when absent; grant CURRENT_USER ADMIN TRUE, INHERIT FALSE, SET FALSE; read back exact role and membership'"
             printf '%s\n' "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID AWS_REGION=$AWS_REGION DATABASE_NAME=<stack-output> DATABASE_RESOURCE_ARN=<stack-output> DATABASE_ADMIN_SECRET_ARN=<stack-output> DATABASE_APPLICATION_SECRET_ARN=<stack-output> APPROVED_GOOGLE_SUBJECT=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256> APPROVED_STAFF_EMAIL=<protected:$APPROVED_STAFF_EMAIL_SHA256> APPROVED_STAFF_DISPLAY_NAME=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256> SOURCE_SHA=$SOURCE_SHA bun packages/server/scripts/exploration-smoke/bootstrap.ts"
             printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=true' --parameters '$STACK_NAME:AppImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>'"
             printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/application' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
@@ -937,6 +938,86 @@ jobs:
               > artifacts/readback/ecr-image.json
           fi
           test "$(jq -r '.imageDetails[0].imageDigest' artifacts/readback/ecr-image.json)" = "$IMAGE_DIGEST"
+
+      - name: Establish exact application LOGIN administration boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          stack_file=artifacts/readback/stack-repository-phase.json
+          database_name=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DatabaseName") | .OutputValue' "$stack_file")
+          database_resource_arn=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DatabaseClusterArn") | .OutputValue' "$stack_file")
+          database_admin_secret_arn=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "DatabaseAdminSecretArn") | .OutputValue' "$stack_file")
+          test "$database_name" = "psd_eoc"
+          test "$database_resource_arn" = "arn:aws:rds:$AWS_REGION:$AWS_ACCOUNT_ID:cluster:psd-eoc-exploration-smoke"
+          [[ "$database_admin_secret_arn" =~ ^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/database/admin-[A-Za-z0-9]{6}$ ]]
+
+          execute_sql() {
+            local sql=$1
+            shift
+            aws rds-data execute-statement \
+              --resource-arn "$database_resource_arn" \
+              --secret-arn "$database_admin_secret_arn" \
+              --database "$database_name" \
+              --no-continue-after-timeout \
+              --sql "$sql" \
+              "$@"
+          }
+          query_json() {
+            execute_sql "$1" \
+              --format-records-as JSON \
+              --query formattedRecords \
+              --output text
+          }
+
+          role_state_sql='SELECT rolname AS "roleName", rolcanlogin AS "canLogin", rolsuper AS "superuser", rolcreatedb AS "createDatabase", rolcreaterole AS "createRole", rolreplication AS "replication", rolbypassrls AS "bypassRls", rolinherit AS "inherits" FROM pg_catalog.pg_roles WHERE rolname = '\''psd_eoc_application'\'''
+          query_json "$role_state_sql" > artifacts/readback/application-login-before.json
+          if jq -e 'length == 0' artifacts/readback/application-login-before.json > /dev/null; then
+            execute_sql 'CREATE ROLE "psd_eoc_application" LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS' \
+              > artifacts/readback/application-login-create.json
+          else
+            jq -e '
+              . == [{
+                roleName: "psd_eoc_application",
+                canLogin: true,
+                superuser: false,
+                createDatabase: false,
+                createRole: false,
+                replication: false,
+                bypassRls: false,
+                inherits: true
+              }]
+            ' artifacts/readback/application-login-before.json > /dev/null
+          fi
+
+          execute_sql 'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT FALSE, SET FALSE' \
+            > artifacts/readback/application-login-admin-grant.json
+          membership_sql='SELECT current_user AS "currentUser", child.rolname AS "memberName", membership.admin_option AS "adminOption", membership.inherit_option AS "inheritOption", membership.set_option AS "setOption" FROM pg_catalog.pg_auth_members AS membership JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid JOIN pg_catalog.pg_roles AS child ON child.oid = membership.member WHERE parent.rolname = '\''psd_eoc_application'\'' ORDER BY child.rolname'
+          query_json "$membership_sql" > artifacts/readback/application-login-administration.json
+          jq -e '
+            . == [{
+              currentUser: "psd_eoc_admin",
+              memberName: "psd_eoc_admin",
+              adminOption: true,
+              inheritOption: false,
+              setOption: false
+            }]
+          ' artifacts/readback/application-login-administration.json > /dev/null
+
+          execute_sql 'ALTER ROLE "psd_eoc_application" WITH LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS' \
+            > artifacts/readback/application-login-authority-probe.json
+          query_json "$role_state_sql" > artifacts/readback/application-login-ready.json
+          jq -e '
+            . == [{
+              roleName: "psd_eoc_application",
+              canLogin: true,
+              superuser: false,
+              createDatabase: false,
+              createRole: false,
+              replication: false,
+              bypassRls: false,
+              inherits: true
+            }]
+          ' artifacts/readback/application-login-ready.json > /dev/null
 
       - name: Bootstrap synthetic data before starting App Runner
         env:

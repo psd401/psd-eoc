@@ -121,6 +121,9 @@ describe('isolated CDK entrypoint configuration', () => {
 
   it('keeps workflow publication, bootstrap order, and readback redaction aligned', async () => {
     const workflow = await readWorkflow();
+    const loginBoundaryStep = workflow.indexOf(
+      '- name: Establish exact application LOGIN administration boundary',
+    );
     const bootstrapStep = workflow.indexOf(
       '- name: Bootstrap synthetic data before starting App Runner',
     );
@@ -133,6 +136,8 @@ describe('isolated CDK entrypoint configuration', () => {
 
     expect(workflow).toContain(EXPLORATION_SMOKE_REPOSITORY_NAME);
     expect(workflow).not.toContain('repository/psd-eoc-exploration-smoke');
+    expect(loginBoundaryStep).toBeGreaterThan(-1);
+    expect(bootstrapStep).toBeGreaterThan(loginBoundaryStep);
     expect(bootstrapStep).toBeGreaterThan(-1);
     expect(serviceStep).toBeGreaterThan(bootstrapStep);
     expect(workflow).not.toContain(
@@ -150,6 +155,29 @@ describe('isolated CDK entrypoint configuration', () => {
     );
     expect(deployJobHeader).not.toContain(
       'secrets.EXPLORATION_SMOKE_APPROVED_STAFF_DISPLAY_NAME',
+    );
+  });
+
+  it('repairs only the exact Aurora application LOGIN administration boundary', async () => {
+    const workflow = await readWorkflow();
+
+    expect(workflow).toContain('role_state_sql=\'SELECT rolname AS "roleName"');
+    expect(workflow).toContain(
+      'execute_sql \'CREATE ROLE "psd_eoc_application" LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS\'',
+    );
+    expect(workflow).toContain(
+      'execute_sql \'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT FALSE, SET FALSE\'',
+    );
+    expect(workflow).toContain('currentUser: "psd_eoc_admin"');
+    expect(workflow).toContain('memberName: "psd_eoc_admin"');
+    expect(workflow).toContain('adminOption: true');
+    expect(workflow).toContain('inheritOption: false');
+    expect(workflow).toContain('setOption: false');
+    expect(workflow).not.toContain(
+      'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT TRUE',
+    );
+    expect(workflow).not.toContain(
+      'GRANT "psd_eoc_application" TO CURRENT_USER WITH ADMIN TRUE, INHERIT FALSE, SET TRUE',
     );
   });
 
