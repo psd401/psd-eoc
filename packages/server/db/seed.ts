@@ -580,7 +580,17 @@ const channelConfigurationRows = [
  * Deterministic row counts owned by this fixture, not totals for an ambient
  * database that may already contain unrelated records.
  */
-export interface SeedSummary {
+export interface ReferenceSeedSummary {
+  readonly eventTypes: 8;
+  readonly eventTypeVersions: 8;
+  readonly eventTypeTemplates: 72;
+  readonly integrationStatuses: 5;
+  readonly channelConfigurations: 3;
+  readonly events: 0;
+  readonly outboxMessages: 0;
+}
+
+export interface SeedSummary extends ReferenceSeedSummary {
   readonly facilities: 2;
   readonly neighborhoods: 1;
   readonly neighborhoodFacilities: 2;
@@ -591,14 +601,17 @@ export interface SeedSummary {
   readonly rosterSnapshots: 1;
   readonly rosterRecipients: 4;
   readonly rosterEndpoints: 12;
-  readonly eventTypes: 8;
-  readonly eventTypeVersions: 8;
-  readonly eventTypeTemplates: 72;
-  readonly integrationStatuses: 5;
-  readonly channelConfigurations: 3;
-  readonly events: 0;
-  readonly outboxMessages: 0;
 }
+
+const referenceSeedSummary: ReferenceSeedSummary = {
+  eventTypes: 8,
+  eventTypeVersions: 8,
+  eventTypeTemplates: 72,
+  integrationStatuses: 5,
+  channelConfigurations: 3,
+  events: 0,
+  outboxMessages: 0,
+};
 
 const seedSummary: SeedSummary = {
   facilities: 2,
@@ -611,17 +624,90 @@ const seedSummary: SeedSummary = {
   rosterSnapshots: 1,
   rosterRecipients: 4,
   rosterEndpoints: 12,
-  eventTypes: 8,
-  eventTypeVersions: 8,
-  eventTypeTemplates: 72,
-  integrationStatuses: 5,
-  channelConfigurations: 3,
-  events: 0,
-  outboxMessages: 0,
+  ...referenceSeedSummary,
 };
 
 /**
- * Loads a completely synthetic, contract-validated district fixture.
+ * Loads only production-safe reference catalogs and fail-closed integration
+ * labels. It never creates facilities, audiences, rosters, recipients, events,
+ * notifications, or outbox work and is safe to run repeatedly at bootstrap.
+ */
+export async function seedReferenceData(
+  database: Database,
+): Promise<ReferenceSeedSummary> {
+  await database.transaction(async (transaction) => {
+    await transaction
+      .insert(eventTypes)
+      .values(
+        eventTypeRows.map((eventType) => ({
+          ...eventType,
+          createdAt: SEED_TIME,
+        })),
+      )
+      .onConflictDoNothing();
+    await transaction
+      .insert(eventTypeVersions)
+      .values(
+        eventTypeVersionRows.map((version) => ({
+          id: version.id,
+          eventTypeId: version.eventTypeId,
+          version: version.version,
+          templateMode: version.templateMode,
+          name: version.name,
+          description: version.description,
+          enabled: version.enabled,
+          supersedesVersionId: version.supersedesVersionId,
+          createdBy: version.createdBy,
+          publicationAuthorization: version.publicationAuthorization,
+          createdAt: SEED_TIME,
+        })),
+      )
+      .onConflictDoNothing();
+    await transaction
+      .insert(eventTypeTemplates)
+      .values(templateRows)
+      .onConflictDoNothing();
+
+    await transaction
+      .insert(integrationStatuses)
+      .values(
+        integrationStatusRows.map((status, index) => ({
+          id: integrationStatusIds[index],
+          integrationId: status.integrationId,
+          label: status.label,
+          verifiedAt: null,
+          verifiedByUserId: null,
+          authorizationReference: null,
+          reasonCode: status.reasonCode,
+          observedAt: SEED_TIME,
+        })),
+      )
+      .onConflictDoNothing();
+    await transaction
+      .insert(channelConfigurations)
+      .values(
+        channelConfigurationRows.map((configuration) => ({
+          integrationId: configuration.integrationId,
+          enabled: configuration.enabled,
+          statusId:
+            configuration.integrationId === 'expo-push'
+              ? ids.integrationExpoPush
+              : configuration.integrationId === 'ses-email'
+                ? ids.integrationSesEmail
+                : ids.integrationAwsEumSms,
+          statusLabel: configuration.status.label,
+          changedAt: SEED_TIME,
+        })),
+      )
+      .onConflictDoNothing();
+  });
+
+  return referenceSeedSummary;
+}
+
+/**
+ * Loads a completely synthetic, contract-validated district fixture for local
+ * development and isolated tests, then loads production-safe reference data.
  *
  * Fixed keys plus conflict-safe inserts make repeated runs idempotent. The
  * fixture deliberately creates no user/session, event, notification, attempt,
@@ -845,72 +931,9 @@ export async function seedDatabase(database: Database): Promise<SeedSummary> {
         ),
       )
       .onConflictDoNothing();
-
-    await transaction
-      .insert(eventTypes)
-      .values(
-        eventTypeRows.map((eventType) => ({
-          ...eventType,
-          createdAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
-    await transaction
-      .insert(eventTypeVersions)
-      .values(
-        eventTypeVersionRows.map((version) => ({
-          id: version.id,
-          eventTypeId: version.eventTypeId,
-          version: version.version,
-          templateMode: version.templateMode,
-          name: version.name,
-          description: version.description,
-          enabled: version.enabled,
-          supersedesVersionId: version.supersedesVersionId,
-          createdBy: version.createdBy,
-          publicationAuthorization: version.publicationAuthorization,
-          createdAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
-    await transaction
-      .insert(eventTypeTemplates)
-      .values(templateRows)
-      .onConflictDoNothing();
-
-    await transaction
-      .insert(integrationStatuses)
-      .values(
-        integrationStatusRows.map((status, index) => ({
-          id: integrationStatusIds[index],
-          integrationId: status.integrationId,
-          label: status.label,
-          verifiedAt: null,
-          verifiedByUserId: null,
-          authorizationReference: null,
-          reasonCode: status.reasonCode,
-          observedAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
-    await transaction
-      .insert(channelConfigurations)
-      .values(
-        channelConfigurationRows.map((configuration) => ({
-          integrationId: configuration.integrationId,
-          enabled: configuration.enabled,
-          statusId:
-            configuration.integrationId === 'expo-push'
-              ? ids.integrationExpoPush
-              : configuration.integrationId === 'ses-email'
-                ? ids.integrationSesEmail
-                : ids.integrationAwsEumSms,
-          statusLabel: configuration.status.label,
-          changedAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
   });
+
+  await seedReferenceData(database);
 
   return seedSummary;
 }
