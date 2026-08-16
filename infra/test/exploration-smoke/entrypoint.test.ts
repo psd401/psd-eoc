@@ -239,6 +239,10 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain(
       'test "$(jq -er \'.DATABASE_DRIVER\' <<< "$runtime_environment_map")" = "postgres"',
     );
+    expect(workflow).toContain('"RUNTIME_SECRET_ARN"');
+    expect(workflow).toContain(
+      'test "$(jq -er \'.RUNTIME_SECRET_ARN\' <<< "$runtime_environment_map")" = "$api_salt_secret_arn"',
+    );
     expect(workflow).toContain('"DATABASE_USERNAME"');
     expect(workflow).toContain('"DATABASE_PASSWORD"');
     expect(workflow).toContain('"PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS"');
