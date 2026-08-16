@@ -1,12 +1,22 @@
 import { describe, expect, test } from 'bun:test';
 
 import { SessionEstablishmentResultSchema } from '@psd-eoc/contracts';
+import { drizzle } from 'drizzle-orm/postgres-js';
 
-import type { DatabaseConnection, PostgresDatabase } from '../../db/client';
+import type {
+  Database,
+  DatabaseConnection,
+  PostgresDatabase,
+} from '../../db/client';
+import * as relations from '../../db/relations';
+import * as tables from '../../db/schema';
 import {
   DEFAULT_SESSION_POLICY,
   DefaultSessionServiceRuntime,
+  DrizzleSessionStore,
   SessionAccessError,
+  SessionService,
+  hashRefreshToken,
   type SessionStore,
   type StoredCredential,
   type StoredSessionContext,
@@ -21,6 +31,8 @@ const IDS = Object.freeze({
   snapshot: '10000000-0000-4000-8000-000000000004',
   epoch: '10000000-0000-4000-8000-000000000005',
   issuance: '10000000-0000-4000-8000-000000000006',
+  rotation: '10000000-0000-4000-8000-000000000007',
+  group: '10000000-0000-4000-8000-000000000008',
 });
 
 interface Deferred<Value> {
@@ -185,6 +197,212 @@ function controllableTimeout() {
   });
 }
 
+interface RecordedStatement {
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}
+
+interface RecordingDatabase {
+  readonly database: Database;
+  readonly statements: readonly RecordedStatement[];
+}
+
+type RawRow = readonly unknown[];
+
+function recordingDatabase(
+  rowsFor: (
+    statement: RecordedStatement,
+    statementIndex: number,
+  ) => readonly RawRow[],
+): RecordingDatabase {
+  const statements: RecordedStatement[] = [];
+  const client = {
+    options: { parsers: {}, serializers: {} },
+    unsafe(sqlText: string, params: readonly unknown[]) {
+      const statement = Object.freeze({ sql: sqlText, params });
+      const statementIndex = statements.length;
+      statements.push(statement);
+      const rows = rowsFor(statement, statementIndex);
+      return Object.assign(Promise.resolve(rows), {
+        values: () => Promise.resolve(rows),
+      });
+    },
+    begin: async (
+      transaction: (transactionClient: unknown) => Promise<unknown>,
+    ) => transaction(client),
+  };
+  return Object.freeze({
+    database: drizzle(client as never, {
+      schema: { ...tables, ...relations },
+    }) as unknown as Database,
+    statements,
+  });
+}
+
+describe('session credential read batching', () => {
+  test('proves an unknown credential with one database statement', async () => {
+    const tokenDigest = 'b'.repeat(64);
+    const recording = recordingDatabase(() => []);
+
+    await expect(
+      new DrizzleSessionStore(recording.database).inspectCredential(
+        tokenDigest,
+      ),
+    ).resolves.toEqual({ kind: 'unknown', tokenDigest });
+
+    expect(recording.statements).toHaveLength(1);
+    const [lookup] = recording.statements;
+    expect(lookup?.sql).toContain('union all');
+    expect(lookup?.sql).toContain('from "session_token_issuances"');
+    expect(lookup?.sql).toContain('from "session_token_rotations"');
+    expect(lookup?.sql).toContain('"previous_token_digest" =');
+    expect(lookup?.sql).toContain('"next_token_digest" =');
+    expect(lookup?.params).toEqual([tokenDigest, tokenDigest, tokenDigest]);
+  });
+
+  test('proves a retired credential with two database statements', async () => {
+    const tokenDigest = 'c'.repeat(64);
+    const successorDigest = 'd'.repeat(64);
+    const recording = recordingDatabase((_statement, statementIndex) => {
+      if (statementIndex === 0) return [[IDS.session]];
+      if (statementIndex === 1) {
+        return [
+          [
+            IDS.issuance,
+            tokenDigest,
+            IDS.device,
+            IDS.rotation,
+            tokenDigest,
+            successorDigest,
+          ],
+        ];
+      }
+      throw new Error('Retired credential issued an extra database statement.');
+    });
+
+    await expect(
+      new DrizzleSessionStore(recording.database).inspectCredential(
+        tokenDigest,
+      ),
+    ).resolves.toEqual({
+      kind: 'retired',
+      sessionId: IDS.session,
+      deviceEnrollmentId: IDS.device,
+      rotationId: IDS.rotation,
+      tokenDigest,
+    });
+
+    expect(recording.statements).toHaveLength(2);
+    expect(recording.statements[1]?.sql).toContain('inner join "sessions"');
+    expect(recording.statements[1]?.sql).toContain(
+      'left join "session_token_rotations"',
+    );
+  });
+
+  test('authenticates a current credential with fifteen selected-row statements', async () => {
+    const tokenDigest = hashRefreshToken(TOKEN);
+    const createdAt = new Date('2026-08-16T18:00:00.000Z');
+    const membershipValidUntil = new Date('2026-08-17T18:00:00.000Z');
+    const membershipGraceUntil = new Date('2026-08-20T18:00:00.000Z');
+    const expiresAt = new Date('2026-09-16T18:00:00.000Z');
+    const googleSubject = 'synthetic-issue-193-subject';
+    const recording = recordingDatabase((_statement, statementIndex) => {
+      switch (statementIndex) {
+        case 0:
+          return [[IDS.session]];
+        case 1:
+          return [[IDS.issuance, tokenDigest, IDS.device, null, null, null]];
+        case 2:
+          return [];
+        case 3:
+          return [
+            [
+              IDS.session,
+              IDS.user,
+              IDS.device,
+              IDS.snapshot,
+              membershipValidUntil,
+              membershipGraceUntil,
+              createdAt,
+              expiresAt,
+              null,
+              IDS.user,
+              googleSubject,
+              'synthetic.issue-193@psd401.net',
+              'Synthetic Issue 193 Administrator',
+              'district',
+              createdAt,
+              null,
+              IDS.device,
+              IDS.user,
+              'web',
+              'secure-session-cookie',
+              'synthetic-issue-193-installation',
+              createdAt,
+              createdAt,
+              null,
+            ],
+          ];
+        case 4:
+          return [['admin', true]];
+        case 5:
+          return [];
+        case 6:
+          return [[IDS.snapshot, 1, createdAt, true]];
+        case 7:
+          return [
+            [IDS.group, 'google-group', 'access', 'expected'],
+            [IDS.group, 'google-group', 'access', 'completed'],
+          ];
+        case 8:
+          return [[googleSubject, 'district']];
+        case 9:
+          return [[IDS.group, 'google-group', 'access']];
+        case 10:
+          return [];
+        case 11:
+          return [[IDS.snapshot, 1]];
+        case 12:
+          return [];
+        case 13:
+          return [[IDS.epoch, IDS.session, createdAt]];
+        case 14:
+        case 15:
+          return [];
+        default:
+          throw new Error('Current credential issued an extra statement.');
+      }
+    });
+
+    const service = new SessionService(
+      new DrizzleSessionStore(recording.database),
+    );
+    await expect(
+      service.authenticate(TOKEN, 'web', NOW),
+    ).resolves.toMatchObject({
+      result: {
+        user: { id: IDS.user, roles: ['admin'] },
+        session: { id: IDS.session },
+        deviceEnrollment: { id: IDS.device },
+      },
+    });
+
+    expect(recording.statements).toHaveLength(16);
+    expect(
+      recording.statements.filter(({ sql: statement }) =>
+        /^\(?select /u.test(statement),
+      ),
+    ).toHaveLength(15);
+    expect(recording.statements[2]?.sql).toBe(
+      'set transaction isolation level repeatable read read only',
+    );
+    expect(recording.statements[3]?.sql).toContain('left join "users"');
+    expect(recording.statements[3]?.sql).toContain(
+      'left join "device_enrollments"',
+    );
+  });
+});
+
 describe('default session-service native connection recovery', () => {
   test('bounds a hung invalid-cookie lookup and lets the replacement authenticate', async () => {
     const hungInspection = deferred<StoredCredential>();
@@ -257,7 +475,7 @@ describe('default session-service native connection recovery', () => {
     expect(replacement.closeCalls).toBe(1);
   });
 
-  test('replaces an exact CONNECTION_DESTROYED failure without retrying it', async () => {
+  test('replaces a wrapped exact CONNECTION_DESTROYED failure without retrying it', async () => {
     let failedInspectionCalls = 0;
     let replacementInspectionCalls = 0;
     const failed = fakeGeneration(() => Promise.resolve());
@@ -266,7 +484,11 @@ describe('default session-service native connection recovery', () => {
     const stores = [
       storeWithInspection(() => {
         failedInspectionCalls += 1;
-        return Promise.reject(connectionDestroyed());
+        return Promise.reject(
+          new Error('synthetic Drizzle query wrapper', {
+            cause: connectionDestroyed(),
+          }),
+        );
       }),
       storeWithInspection((tokenDigest) => {
         replacementInspectionCalls += 1;
@@ -306,6 +528,47 @@ describe('default session-service native connection recovery', () => {
     ).resolves.toMatchObject({ result: { user: { id: IDS.user } } });
     expect(replacementInspectionCalls).toBe(1);
     await runtime.close();
+  });
+
+  test('drains the timed-out inspection even when forced close reports failure', async () => {
+    const hungInspection = deferred<StoredCredential>();
+    const closeAttempted = deferred<void>();
+    let inspectionCalls = 0;
+    const failed = fakeGeneration(async () => {
+      closeAttempted.resolve();
+      throw new Error('synthetic forced-close failure');
+    });
+    const timeout = controllableTimeout();
+    const runtime = new DefaultSessionServiceRuntime({
+      createConnection: () => failed.connection,
+      createStore: () =>
+        storeWithInspection(() => {
+          inspectionCalls += 1;
+          return hungInspection.promise;
+        }),
+      readPolicy: () => DEFAULT_SESSION_POLICY,
+      authenticationTimeoutMilliseconds: 15,
+      scheduleAuthenticationTimeout: timeout.schedule,
+    });
+
+    let authenticationSettled = false;
+    const authentication = runtime
+      .get()
+      .authenticate(TOKEN, 'web', NOW)
+      .catch((error: unknown) => error)
+      .finally(() => {
+        authenticationSettled = true;
+      });
+    timeout.fire();
+    await closeAttempted.promise;
+    expect(authenticationSettled).toBe(false);
+    expect(inspectionCalls).toBe(1);
+    expect(failed.closeCalls).toBe(1);
+
+    hungInspection.reject(connectionDestroyed());
+    expectUnavailable(await authentication);
+    expect(authenticationSettled).toBe(true);
+    expect(inspectionCalls).toBe(1);
   });
 
   test('late recovery from an old generation cannot clear its replacement', async () => {

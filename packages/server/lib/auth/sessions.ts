@@ -35,7 +35,7 @@ import {
   type SessionRevocation,
   type VerifiedCurrentRefreshCredential,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -631,12 +631,18 @@ class SessionAuthenticationTimeoutError extends Error {
 }
 
 function isConnectionDestroyedError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    error.code === CONNECTION_DESTROYED_CODE
-  );
+  let candidate = error;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    if (seen.has(candidate)) return false;
+    seen.add(candidate);
+    if ('code' in candidate && candidate.code === CONNECTION_DESTROYED_CODE) {
+      return true;
+    }
+    candidate = 'cause' in candidate ? candidate.cause : undefined;
+  }
+  return false;
 }
 
 function unavailableSessionAuthentication(): SessionAccessError {
@@ -1372,25 +1378,56 @@ export class DrizzleSessionStore implements SessionStore {
     sessionId: string,
     expectedConnectivityEpochId?: string,
   ): Promise<StoredSessionContext | null> {
-    const [sessionRow] = await database
-      .select()
+    const [identityRow] = await database
+      .select({
+        session: {
+          id: sessions.id,
+          userId: sessions.userId,
+          deviceEnrollmentId: sessions.deviceEnrollmentId,
+          membershipSnapshotId: sessions.membershipSnapshotId,
+          membershipValidUntil: sessions.membershipValidUntil,
+          membershipGraceUntil: sessions.membershipGraceUntil,
+          createdAt: sessions.createdAt,
+          expiresAt: sessions.expiresAt,
+          revokedAt: sessions.revokedAt,
+        },
+        user: {
+          id: users.id,
+          googleSubject: users.googleSubject,
+          email: users.email,
+          displayName: users.displayName,
+          facilityScopeKind: users.facilityScopeKind,
+          createdAt: users.createdAt,
+          disabledAt: users.disabledAt,
+        },
+        device: {
+          id: deviceEnrollments.id,
+          userId: deviceEnrollments.userId,
+          platform: deviceEnrollments.platform,
+          unlockMethod: deviceEnrollments.unlockMethod,
+          installationId: deviceEnrollments.installationId,
+          enrolledAt: deviceEnrollments.enrolledAt,
+          lastSeenAt: deviceEnrollments.lastSeenAt,
+          revokedAt: deviceEnrollments.revokedAt,
+        },
+      })
       .from(sessions)
+      .leftJoin(users, eq(users.id, sessions.userId))
+      .leftJoin(
+        deviceEnrollments,
+        eq(deviceEnrollments.id, sessions.deviceEnrollmentId),
+      )
       .where(eq(sessions.id, sessionId))
       .limit(1);
-    if (sessionRow === undefined) {
+    if (identityRow === undefined) {
       return null;
     }
-    const [userRow] = await database
-      .select()
-      .from(users)
-      .where(eq(users.id, sessionRow.userId))
-      .limit(1);
-    const [deviceRow] = await database
-      .select()
-      .from(deviceEnrollments)
-      .where(eq(deviceEnrollments.id, sessionRow.deviceEnrollmentId))
-      .limit(1);
-    if (userRow === undefined || deviceRow === undefined) {
+    const {
+      session: sessionRow,
+      user: userRow,
+      device: deviceRow,
+    } = identityRow;
+    if (userRow === null || deviceRow === null) {
       throw new SessionAccessError(
         'INVALID_CREDENTIAL',
         'The session identity graph is incomplete.',
@@ -1691,24 +1728,23 @@ export class DrizzleSessionStore implements SessionStore {
   public async inspectCredential(
     tokenDigest: string,
   ): Promise<StoredCredential> {
-    const [issuanceMatches, previousMatches, nextMatches] = await Promise.all([
-      this.database
-        .select({ sessionId: sessionTokenIssuances.sessionId })
-        .from(sessionTokenIssuances)
-        .where(eq(sessionTokenIssuances.tokenDigest, tokenDigest)),
-      this.database
-        .select({ sessionId: sessionTokenRotations.sessionId })
-        .from(sessionTokenRotations)
-        .where(eq(sessionTokenRotations.previousTokenDigest, tokenDigest)),
-      this.database
-        .select({ sessionId: sessionTokenRotations.sessionId })
-        .from(sessionTokenRotations)
-        .where(eq(sessionTokenRotations.nextTokenDigest, tokenDigest)),
-    ]);
+    const credentialMatches = await this.database
+      .select({ sessionId: sessionTokenIssuances.sessionId })
+      .from(sessionTokenIssuances)
+      .where(eq(sessionTokenIssuances.tokenDigest, tokenDigest))
+      .unionAll(
+        this.database
+          .select({ sessionId: sessionTokenRotations.sessionId })
+          .from(sessionTokenRotations)
+          .where(
+            or(
+              eq(sessionTokenRotations.previousTokenDigest, tokenDigest),
+              eq(sessionTokenRotations.nextTokenDigest, tokenDigest),
+            ),
+          ),
+      );
     const candidateSessionIds = new Set(
-      [...issuanceMatches, ...previousMatches, ...nextMatches].map(
-        (row) => row.sessionId,
-      ),
+      credentialMatches.map((row) => row.sessionId),
     );
     if (candidateSessionIds.size === 0) {
       return Object.freeze({ kind: 'unknown', tokenDigest });
@@ -1723,26 +1759,38 @@ export class DrizzleSessionStore implements SessionStore {
     if (sessionId === undefined) {
       return Object.freeze({ kind: 'unknown', tokenDigest });
     }
-    const [issuance] = await this.database
-      .select()
+    const credentialHistoryRows = await this.database
+      .select({
+        issuance: {
+          id: sessionTokenIssuances.id,
+          tokenDigest: sessionTokenIssuances.tokenDigest,
+        },
+        deviceEnrollmentId: sessions.deviceEnrollmentId,
+        rotation: {
+          id: sessionTokenRotations.id,
+          previousTokenDigest: sessionTokenRotations.previousTokenDigest,
+          nextTokenDigest: sessionTokenRotations.nextTokenDigest,
+        },
+      })
       .from(sessionTokenIssuances)
+      .innerJoin(sessions, eq(sessions.id, sessionTokenIssuances.sessionId))
+      .leftJoin(
+        sessionTokenRotations,
+        eq(sessionTokenRotations.sessionId, sessionTokenIssuances.sessionId),
+      )
       .where(eq(sessionTokenIssuances.sessionId, sessionId))
-      .limit(1);
-    const rotationRows = await this.database
-      .select()
-      .from(sessionTokenRotations)
-      .where(eq(sessionTokenRotations.sessionId, sessionId));
-    const [sessionRow] = await this.database
-      .select({ deviceEnrollmentId: sessions.deviceEnrollmentId })
-      .from(sessions)
-      .where(eq(sessions.id, sessionId))
-      .limit(1);
-    if (issuance === undefined || sessionRow === undefined) {
+      .orderBy(asc(sessionTokenRotations.rotatedAt));
+    const issuanceAndSession = credentialHistoryRows[0];
+    if (issuanceAndSession === undefined) {
       throw new SessionAccessError(
         'INVALID_CREDENTIAL',
         'Credential history is incomplete.',
       );
     }
+    const { issuance, deviceEnrollmentId } = issuanceAndSession;
+    const rotationRows = credentialHistoryRows.flatMap(({ rotation }) =>
+      rotation === null ? [] : [rotation],
+    );
     const byPrevious = new Map(
       rotationRows.map((rotation) => [rotation.previousTokenDigest, rotation]),
     );
@@ -1777,7 +1825,7 @@ export class DrizzleSessionStore implements SessionStore {
       return Object.freeze({
         kind: 'retired' as const,
         sessionId,
-        deviceEnrollmentId: sessionRow.deviceEnrollmentId,
+        deviceEnrollmentId,
         rotationId: retiringRotation.id,
         tokenDigest,
       });
@@ -1809,7 +1857,7 @@ export class DrizzleSessionStore implements SessionStore {
       return Object.freeze({
         kind: 'retired' as const,
         sessionId,
-        deviceEnrollmentId: sessionRow.deviceEnrollmentId,
+        deviceEnrollmentId,
         rotationId: retiredAfterContextLoad.id,
         tokenDigest,
       });
@@ -2987,8 +3035,11 @@ export class DefaultSessionServiceRuntime {
             this.connection = undefined;
             this.service = undefined;
           }
-          await connection.close();
-          await pendingAuthentication;
+          // Start forced teardown immediately, then drain both edges even when
+          // teardown itself reports an error. Returning before the captured
+          // inspection settles would leave the timed-out operation running in
+          // the background and could surface an unhandled driver rejection.
+          await Promise.allSettled([connection.close(), pendingAuthentication]);
         },
       }),
     );
