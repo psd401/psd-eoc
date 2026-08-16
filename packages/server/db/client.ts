@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { RDSDataClient } from '@aws-sdk/client-rds-data';
 import {
   drizzle as drizzleAwsDataApi,
@@ -71,11 +73,61 @@ const SecretsManagerArnSchema = z
     'must be a Secrets Manager secret ARN',
   );
 
-const PostgresDatabaseConfigSchema = z
+const PostgresUrlDatabaseConfigSchema = z
   .object({
     driver: z.literal(POSTGRES_DRIVER),
     url: PostgreSqlUrlSchema,
     maxConnections: z.number().int().min(1).max(50).default(10),
+    connectTimeoutSeconds: z.number().int().min(1).max(60).default(10),
+    idleTimeoutSeconds: z.number().int().min(1).max(600).default(20),
+  })
+  .strict();
+
+const PostgresComponentDatabaseConfigSchema = z
+  .object({
+    driver: z.literal(POSTGRES_DRIVER),
+    host: z
+      .string()
+      .trim()
+      .min(1)
+      .max(253)
+      .regex(
+        /^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/u,
+        'must be a DNS hostname',
+      ),
+    port: z.number().int().min(1).max(65_535).default(5_432),
+    database: z
+      .string()
+      .trim()
+      .min(1)
+      .max(63)
+      .regex(
+        /^[A-Za-z_][A-Za-z0-9_$]*$/u,
+        'must be an unquoted PostgreSQL database name',
+      ),
+    username: z
+      .string()
+      .trim()
+      .min(1)
+      .max(63)
+      .regex(
+        /^[A-Za-z_][A-Za-z0-9_$]*$/u,
+        'must be an unquoted PostgreSQL role name',
+      ),
+    password: z
+      .string()
+      .min(1)
+      .max(4_096)
+      .refine((value) => !/[\0\r\n]/u.test(value), {
+        message: 'must be a single-line value',
+      }),
+    sslRootCertificatePath: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1_024)
+      .regex(/^\//u, 'must be an absolute path'),
+    maxConnections: z.literal(1).default(1),
     connectTimeoutSeconds: z.number().int().min(1).max(60).default(10),
     idleTimeoutSeconds: z.number().int().min(1).max(600).default(20),
   })
@@ -99,8 +151,9 @@ const AwsDataApiDatabaseConfigSchema = z
   })
   .strict();
 
-const DatabaseConfigSchema = z.discriminatedUnion('driver', [
-  PostgresDatabaseConfigSchema,
+const DatabaseConfigSchema = z.union([
+  PostgresUrlDatabaseConfigSchema,
+  PostgresComponentDatabaseConfigSchema,
   AwsDataApiDatabaseConfigSchema,
 ]);
 
@@ -108,14 +161,36 @@ const DatabaseDriverSchema = z.enum([POSTGRES_DRIVER, AWS_DATA_API_DRIVER]);
 
 type ParsedDatabaseConfig = z.output<typeof DatabaseConfigSchema>;
 
-/** Explicit configuration for a direct PostgreSQL connection. */
-export interface PostgresDatabaseConfig {
+/** Explicit local/test configuration for a direct PostgreSQL URL. */
+export interface PostgresUrlDatabaseConfig {
   readonly driver: typeof POSTGRES_DRIVER;
   readonly url: string;
   readonly maxConnections?: number;
   readonly connectTimeoutSeconds?: number;
   readonly idleTimeoutSeconds?: number;
 }
+
+/**
+ * Deployed PostgreSQL configuration assembled from individually injected
+ * credential fields. TLS verification and a single-connection pool are
+ * mandatory for this mode.
+ */
+export interface PostgresComponentDatabaseConfig {
+  readonly driver: typeof POSTGRES_DRIVER;
+  readonly host: string;
+  readonly port?: number;
+  readonly database: string;
+  readonly username: string;
+  readonly password: string;
+  readonly sslRootCertificatePath: string;
+  readonly maxConnections?: 1;
+  readonly connectTimeoutSeconds?: number;
+  readonly idleTimeoutSeconds?: number;
+}
+
+export type PostgresDatabaseConfig =
+  | PostgresUrlDatabaseConfig
+  | PostgresComponentDatabaseConfig;
 
 /**
  * Explicit configuration for Aurora through the RDS Data API.
@@ -221,12 +296,17 @@ const CONFIG_FIELD_TO_ENVIRONMENT_VARIABLE = {
   connectTimeoutSeconds: 'DATABASE_CONNECT_TIMEOUT_SECONDS',
   database: 'DATABASE_NAME',
   driver: 'DATABASE_DRIVER',
+  host: 'DATABASE_HOST',
   idleTimeoutSeconds: 'DATABASE_IDLE_TIMEOUT_SECONDS',
   maxConnections: 'DATABASE_MAX_CONNECTIONS',
+  password: 'DATABASE_PASSWORD',
+  port: 'DATABASE_PORT',
   region: 'AWS_REGION',
   resourceArn: 'DATABASE_RESOURCE_ARN',
   secretArn: 'DATABASE_SECRET_ARN',
+  sslRootCertificatePath: 'DATABASE_SSL_ROOT_CERT',
   url: 'DATABASE_URL',
+  username: 'DATABASE_USERNAME',
 } as const;
 
 function hasEnvironmentValue(
@@ -301,8 +381,9 @@ function parseDatabaseConfig(config: DatabaseConfig): ParsedDatabaseConfig {
 /**
  * Reads one explicitly selected database transport from environment values.
  *
- * `DATABASE_DRIVER` is mandatory. Direct PostgreSQL requires `DATABASE_URL`.
- * RDS Data API requires `AWS_REGION`, `DATABASE_NAME`,
+ * `DATABASE_DRIVER` is mandatory. Local/test PostgreSQL may use
+ * `DATABASE_URL`. Deployed PostgreSQL instead requires component fields and a
+ * pinned TLS root certificate. RDS Data API requires `AWS_REGION`, `DATABASE_NAME`,
  * `DATABASE_RESOURCE_ARN`, and `DATABASE_SECRET_ARN`. Configuration for the
  * unselected transport is rejected so deployment mistakes cannot silently
  * change the connection path.
@@ -322,7 +403,6 @@ export function readDatabaseConfig(
 
   if (driverResult.data === POSTGRES_DRIVER) {
     assertEnvironmentVariablesAbsent(environment, POSTGRES_DRIVER, [
-      'DATABASE_NAME',
       'DATABASE_RESOURCE_ARN',
       'DATABASE_SECRET_ARN',
     ]);
@@ -340,9 +420,45 @@ export function readDatabaseConfig(
       'DATABASE_IDLE_TIMEOUT_SECONDS',
     );
 
+    if (hasEnvironmentValue(environment, 'DATABASE_URL')) {
+      if (environment.NODE_ENV === 'production') {
+        throw new DatabaseConfigurationError(
+          'DATABASE_URL is limited to local development and tests.',
+        );
+      }
+      assertEnvironmentVariablesAbsent(environment, POSTGRES_DRIVER, [
+        'DATABASE_HOST',
+        'DATABASE_PORT',
+        'DATABASE_NAME',
+        'DATABASE_USERNAME',
+        'DATABASE_PASSWORD',
+        'DATABASE_SSL_ROOT_CERT',
+      ]);
+      return parseDatabaseConfig({
+        driver: POSTGRES_DRIVER,
+        url: environment.DATABASE_URL ?? '',
+        ...(maxConnections === undefined ? {} : { maxConnections }),
+        ...(connectTimeoutSeconds === undefined
+          ? {}
+          : { connectTimeoutSeconds }),
+        ...(idleTimeoutSeconds === undefined ? {} : { idleTimeoutSeconds }),
+      });
+    }
+
+    if (maxConnections !== undefined && maxConnections !== 1) {
+      throw new DatabaseConfigurationError(
+        'DATABASE_MAX_CONNECTIONS must be 1 for component PostgreSQL configuration.',
+      );
+    }
+    const port = parseOptionalInteger(environment, 'DATABASE_PORT');
     return parseDatabaseConfig({
       driver: POSTGRES_DRIVER,
-      url: environment.DATABASE_URL ?? '',
+      host: environment.DATABASE_HOST ?? '',
+      ...(port === undefined ? {} : { port }),
+      database: environment.DATABASE_NAME ?? '',
+      username: environment.DATABASE_USERNAME ?? '',
+      password: environment.DATABASE_PASSWORD ?? '',
+      sslRootCertificatePath: environment.DATABASE_SSL_ROOT_CERT ?? '',
       ...(maxConnections === undefined ? {} : { maxConnections }),
       ...(connectTimeoutSeconds === undefined ? {} : { connectTimeoutSeconds }),
       ...(idleTimeoutSeconds === undefined ? {} : { idleTimeoutSeconds }),
@@ -351,6 +467,11 @@ export function readDatabaseConfig(
 
   assertEnvironmentVariablesAbsent(environment, AWS_DATA_API_DRIVER, [
     'DATABASE_URL',
+    'DATABASE_HOST',
+    'DATABASE_PORT',
+    'DATABASE_USERNAME',
+    'DATABASE_PASSWORD',
+    'DATABASE_SSL_ROOT_CERT',
     'DATABASE_MAX_CONNECTIONS',
     'DATABASE_CONNECT_TIMEOUT_SECONDS',
     'DATABASE_IDLE_TIMEOUT_SECONDS',
@@ -393,19 +514,59 @@ function createSynchronousIdempotentClose(
 }
 
 function createPostgresDatabaseConnection(
-  config: z.output<typeof PostgresDatabaseConfigSchema>,
+  config:
+    | z.output<typeof PostgresUrlDatabaseConfigSchema>
+    | z.output<typeof PostgresComponentDatabaseConfigSchema>,
 ): PostgresDatabaseConnection {
-  const client = postgres(config.url, {
+  const commonOptions = {
     connect_timeout: config.connectTimeoutSeconds,
     idle_timeout: config.idleTimeoutSeconds,
     max: config.maxConnections,
-  });
+  } as const;
+  const client =
+    'url' in config
+      ? postgres(config.url, commonOptions)
+      : postgres({
+          ...commonOptions,
+          database: config.database,
+          host: config.host,
+          password: config.password,
+          port: config.port,
+          ssl: {
+            ca: readTrustedRootCertificate(config.sslRootCertificatePath),
+            rejectUnauthorized: true,
+            servername: config.host,
+          },
+          user: config.username,
+        });
 
   return {
     driver: POSTGRES_DRIVER,
     db: drizzlePostgres(client, { schema: databaseSchema }),
     close: createSynchronousIdempotentClose(() => client.end({ timeout: 0 })),
   };
+}
+
+function readTrustedRootCertificate(path: string): string {
+  let certificate: string;
+  try {
+    certificate = readFileSync(path, 'utf8');
+  } catch {
+    throw new DatabaseConfigurationError(
+      'DATABASE_SSL_ROOT_CERT could not be read.',
+    );
+  }
+  if (
+    Buffer.byteLength(certificate, 'utf8') > 1_048_576 ||
+    !certificate.includes('-----BEGIN CERTIFICATE-----') ||
+    !certificate.includes('-----END CERTIFICATE-----') ||
+    certificate.includes('-----BEGIN PRIVATE KEY-----')
+  ) {
+    throw new DatabaseConfigurationError(
+      'DATABASE_SSL_ROOT_CERT did not contain a bounded public CA bundle.',
+    );
+  }
+  return certificate;
 }
 
 function createAwsDataApiDatabaseConnection(

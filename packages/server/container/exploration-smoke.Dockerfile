@@ -49,9 +49,11 @@ ENV HOSTNAME=0.0.0.0 \
 COPY --from=production-dependencies --chown=bun:bun /app/node_modules ./node_modules
 COPY --from=production-dependencies --chown=bun:bun /app/package.json ./package.json
 COPY --from=production-dependencies --chown=bun:bun /app/packages/contracts/package.json ./packages/contracts/package.json
-COPY --from=production-dependencies --chown=bun:bun /app/packages/server/package.json ./packages/server/package.json
 COPY --from=build --chown=bun:bun /app/packages/contracts/src ./packages/contracts/src
-COPY --from=build --chown=bun:bun /app/packages/server/.next ./packages/server/.next
+# The same immutable image serves App Runner and the protected one-off native
+# PostgreSQL bootstrap task. Keep the reviewed bootstrap source, migrations,
+# and pinned RDS CA bundle beside the built Next application.
+COPY --from=build --chown=bun:bun /app/packages/server ./packages/server
 
 USER bun
 

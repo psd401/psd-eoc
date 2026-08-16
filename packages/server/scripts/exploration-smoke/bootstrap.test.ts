@@ -512,6 +512,23 @@ describe('immutable server image contract', () => {
     expect(dockerfile).toContain(
       'CMD ["bun", "--cwd", "packages/server", "start"]',
     );
+    expect(dockerfile).toContain(
+      'COPY --from=build --chown=bun:bun /app/packages/server ./packages/server',
+    );
+    const imageInputs = [
+      new URL('./bootstrap.ts', import.meta.url),
+      new URL(
+        '../../drizzle/migrations/0000_youthful_captain_stacy.sql',
+        import.meta.url,
+      ),
+      new URL('../../certs/aws-rds-global-bundle.pem', import.meta.url),
+    ];
+    for (const input of imageInputs) {
+      expect(await Bun.file(input).exists()).toBe(true);
+    }
+    const caBundle = await Bun.file(imageInputs[2]!).text();
+    expect(caBundle.match(/-----BEGIN CERTIFICATE-----/gu)).toHaveLength(108);
+    expect(caBundle).not.toContain('PRIVATE KEY');
     expect(dockerfile).not.toMatch(/(?:npm|npx|:latest)/u);
   });
 
