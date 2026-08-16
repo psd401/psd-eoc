@@ -17,6 +17,7 @@ import {
   buildApplicationRoleStatements,
   configureAndVerifyApplicationRole,
   verifyApplicationLogin,
+  verifyDatabaseTls,
 } from './application-role';
 import {
   buildGetSecretValueRequest,
@@ -33,13 +34,20 @@ import {
 } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
-const ADMIN_SECRET_ARN =
-  'arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/database/admin-AbCd12';
 const APPLICATION_SECRET_ARN =
   'arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/database/application-EfGh34';
 const RESOURCE_ARN =
   'arn:aws:rds:us-west-2:<aws-account-id>:cluster:psd-eoc-exploration-smoke';
 const GOOGLE_SUBJECT = '123456789012345678901';
+const DATABASE_HOST =
+  'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com';
+const DATABASE_ADMIN_PASSWORD = 'synthetic-admin-password-value-123456';
+const DATABASE_APPLICATION_PASSWORD =
+  'synthetic-application-password-value-123456';
+const DATABASE_SSL_ROOT_CERT = new URL(
+  '../../certs/aws-rds-global-bundle.pem',
+  import.meta.url,
+).pathname;
 
 const syntheticSeedSummary: SeedSummary = Object.freeze({
   facilities: 2,
@@ -65,10 +73,18 @@ function validConfigEnvironment(): Record<string, string> {
   return {
     AWS_ACCOUNT_ID: EXPLORATION_AWS_ACCOUNT_ID,
     AWS_REGION: EXPLORATION_AWS_REGION,
+    DATABASE_DRIVER: 'postgres',
+    DATABASE_HOST,
+    DATABASE_PORT: '5432',
     DATABASE_NAME: 'psd_eoc',
-    DATABASE_RESOURCE_ARN: RESOURCE_ARN,
-    DATABASE_ADMIN_SECRET_ARN: ADMIN_SECRET_ARN,
-    DATABASE_APPLICATION_SECRET_ARN: APPLICATION_SECRET_ARN,
+    DATABASE_SSL_ROOT_CERT,
+    DATABASE_MAX_CONNECTIONS: '1',
+    DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
+    DATABASE_IDLE_TIMEOUT_SECONDS: '20',
+    DATABASE_ADMIN_USERNAME: 'psd_eoc_admin',
+    DATABASE_ADMIN_PASSWORD,
+    DATABASE_APPLICATION_USERNAME: EXPLORATION_DATABASE_LOGIN,
+    DATABASE_APPLICATION_PASSWORD,
     APPROVED_GOOGLE_SUBJECT: GOOGLE_SUBJECT,
     APPROVED_STAFF_EMAIL: 'approved.staff@psd401.net',
     APPROVED_STAFF_DISPLAY_NAME: 'Approved Staff',
@@ -146,14 +162,22 @@ function fixtureEvidence(
 }
 
 describe('exploration-smoke configuration', () => {
-  test('pins every database ARN to the approved account, region, and namespace', () => {
+  test('pins the native writer, roles, TLS bundle, and connection bounds', () => {
     expect(readExplorationBootstrapConfig(validConfigEnvironment())).toEqual({
       accountId: EXPLORATION_AWS_ACCOUNT_ID,
       region: EXPLORATION_AWS_REGION,
+      databaseDriver: 'postgres',
+      databaseHost: DATABASE_HOST,
+      databasePort: 5432,
       databaseName: 'psd_eoc',
-      databaseResourceArn: RESOURCE_ARN,
-      databaseAdminSecretArn: ADMIN_SECRET_ARN,
-      databaseApplicationSecretArn: APPLICATION_SECRET_ARN,
+      databaseSslRootCertificate: DATABASE_SSL_ROOT_CERT,
+      databaseMaxConnections: 1,
+      databaseConnectTimeoutSeconds: 10,
+      databaseIdleTimeoutSeconds: 20,
+      databaseAdminUsername: 'psd_eoc_admin',
+      databaseAdminPassword: DATABASE_ADMIN_PASSWORD,
+      databaseApplicationUsername: EXPLORATION_DATABASE_LOGIN,
+      databaseApplicationPassword: DATABASE_APPLICATION_PASSWORD,
       approvedGoogleSubject: GOOGLE_SUBJECT,
       approvedStaffEmail: 'approved.staff@psd401.net',
       approvedStaffDisplayName: 'Approved Staff',
@@ -161,18 +185,29 @@ describe('exploration-smoke configuration', () => {
     });
   });
 
-  test('rejects another account without reflecting supplied values', () => {
-    const environment = validConfigEnvironment();
-    environment.DATABASE_RESOURCE_ARN =
-      'arn:aws:rds:us-west-2:000000000000:cluster:psd-eoc-exploration-smoke';
-    let message = '';
-    try {
-      readExplorationBootstrapConfig(environment);
-    } catch (error) {
-      message = String(error);
+  test('rejects Data API inputs and malformed native credentials without reflection', () => {
+    for (const environment of [
+      { ...validConfigEnvironment(), DATABASE_RESOURCE_ARN: RESOURCE_ARN },
+      {
+        ...validConfigEnvironment(),
+        DATABASE_HOST: 'not-the-exploration-writer.example.invalid',
+      },
+      {
+        ...validConfigEnvironment(),
+        DATABASE_ADMIN_PASSWORD: 'too-short',
+      },
+    ]) {
+      let message = '';
+      try {
+        readExplorationBootstrapConfig(environment);
+      } catch (error) {
+        message = String(error);
+      }
+      expect(message).toBeTruthy();
+      expect(message).not.toContain(RESOURCE_ARN);
+      expect(message).not.toContain('not-the-exploration-writer');
+      expect(message).not.toContain('too-short');
     }
-    expect(message).toContain('outside the exploration-smoke account');
-    expect(message).not.toContain('000000000000');
   });
 
   test('rejects personal or mixed-case email identities', () => {
@@ -325,15 +360,15 @@ describe('application database secret and role', () => {
 
     const statements: string[] = [];
     const executor = {
-      async execute(_secretArn: string, sql: string) {
-        statements.push(sql);
-        if (sql.includes('FROM pg_catalog.pg_roles')) return roleRows;
-        if (sql.includes('FROM pg_catalog.pg_auth_members')) {
+      async execute(statement: string) {
+        statements.push(statement);
+        if (statement.includes('FROM pg_catalog.pg_roles')) return roleRows;
+        if (statement.includes('FROM pg_catalog.pg_auth_members')) {
           return [
             { grantedRole: EXPLORATION_DATABASE_ROLE, adminOption: false },
           ];
         }
-        if (sql === APPLICATION_LOGIN_PROBE_QUERY) {
+        if (statement === APPLICATION_LOGIN_PROBE_QUERY) {
           return [
             {
               currentUser: EXPLORATION_DATABASE_LOGIN,
@@ -342,18 +377,18 @@ describe('application database secret and role', () => {
             },
           ];
         }
+        if (statement.includes('FROM pg_catalog.pg_stat_ssl')) {
+          return [{ ssl: true, tlsVersion: 'TLSv1.3' }];
+        }
         return [];
       },
     };
     await configureAndVerifyApplicationRole({
-      administratorSecretArn: ADMIN_SECRET_ARN,
       executor,
       password: 'A-strong-generated-password-value-123',
     });
-    await verifyApplicationLogin({
-      applicationSecretArn: APPLICATION_SECRET_ARN,
-      executor,
-    });
+    await verifyApplicationLogin({ executor });
+    await verifyDatabaseTls({ executor });
     expect(statements).toContain(APPLICATION_LOGIN_PROBE_QUERY);
   });
 });
@@ -432,16 +467,18 @@ describe('approved access fixture', () => {
 });
 
 describe('bootstrap coordinator', () => {
-  test('reapplies migrations/seeds idempotently in the safe order', async () => {
+  test('runs native TLS, migrations, and fixtures twice under one lock', async () => {
     const config = readExplorationBootstrapConfig(validConfigEnvironment());
     const calls: string[] = [];
     const dependencies = {
-      async readApplicationSecret() {
-        calls.push('read-application-secret');
-        return {
-          username: EXPLORATION_DATABASE_LOGIN,
-          password: 'A-strong-generated-password-value-123',
-        } as const;
+      async acquireAdvisoryLock(): Promise<void> {
+        calls.push('acquire-lock');
+      },
+      async releaseAdvisoryLock(): Promise<void> {
+        calls.push('release-lock');
+      },
+      async verifyAdministratorTls(): Promise<void> {
+        calls.push('verify-admin-tls');
       },
       async migrate(): Promise<void> {
         calls.push('migrate-admin');
@@ -473,25 +510,87 @@ describe('bootstrap coordinator', () => {
       async verifyApplicationLogin(): Promise<void> {
         calls.push('verify-application-login');
       },
+      async verifyApplicationTls(): Promise<void> {
+        calls.push('verify-application-tls');
+      },
     };
 
-    const first = await runExplorationBootstrap(config, dependencies);
-    const second = await runExplorationBootstrap(config, dependencies);
-    expect(second).toEqual(first);
+    const summary = await runExplorationBootstrap(config, dependencies);
     const expectedRunOrder = [
-      'read-application-secret',
+      'verify-admin-tls',
       'migrate-admin',
       'configure-application-role',
       'seed-synthetic',
       'seed-approved-access',
       'verify-application-login',
+      'verify-application-tls',
     ];
-    expect(calls).toEqual([...expectedRunOrder, ...expectedRunOrder]);
-    expect(first.integrations).toEqual({
+    expect(calls).toEqual([
+      'acquire-lock',
+      ...expectedRunOrder,
+      ...expectedRunOrder,
+      'release-lock',
+    ]);
+    expect(summary).toMatchObject({
+      sourceSha: SOURCE_SHA,
+      database: {
+        transport: 'native-postgres',
+        migrationsApplied: true,
+        tlsVerified: true,
+      },
+      idempotence: { runs: 2, equivalent: true },
+    });
+    expect(summary.integrations).toEqual({
       googleOidc: 'configured-unverified',
       googleGroups: 'mocked',
       messaging: 'disabled',
     });
+  });
+
+  test('releases the advisory lock after any native bootstrap failure', async () => {
+    const calls: string[] = [];
+    const dependencies = {
+      async acquireAdvisoryLock(): Promise<void> {
+        calls.push('acquire-lock');
+      },
+      async releaseAdvisoryLock(): Promise<void> {
+        calls.push('release-lock');
+      },
+      async verifyAdministratorTls(): Promise<void> {
+        calls.push('verify-admin-tls');
+      },
+      async migrate(): Promise<void> {
+        calls.push('migrate');
+        throw new Error('synthetic migration failure');
+      },
+      async configureApplicationRole() {
+        throw new Error('unreachable');
+      },
+      async seedSynthetic() {
+        throw new Error('unreachable');
+      },
+      async seedApprovedAccess() {
+        throw new Error('unreachable');
+      },
+      async verifyApplicationLogin(): Promise<void> {
+        throw new Error('unreachable');
+      },
+      async verifyApplicationTls(): Promise<void> {
+        throw new Error('unreachable');
+      },
+    };
+    await expect(
+      runExplorationBootstrap(
+        readExplorationBootstrapConfig(validConfigEnvironment()),
+        dependencies,
+      ),
+    ).rejects.toThrow('synthetic migration failure');
+    expect(calls).toEqual([
+      'acquire-lock',
+      'verify-admin-tls',
+      'migrate',
+      'release-lock',
+    ]);
   });
 });
 

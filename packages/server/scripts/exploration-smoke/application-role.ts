@@ -4,10 +4,7 @@ import {
 } from './config';
 
 export interface RoleStatementExecutor {
-  execute(
-    secretArn: string,
-    sql: string,
-  ): Promise<readonly Readonly<Record<string, unknown>>[]>;
+  execute(sql: string): Promise<readonly Readonly<Record<string, unknown>>[]>;
 }
 
 export interface ApplicationRoleVerification {
@@ -67,6 +64,12 @@ export const APPLICATION_LOGIN_PROBE_QUERY = `SELECT
   current_user AS "currentUser",
   session_user AS "sessionUser",
   pg_has_role(current_user, '${EXPLORATION_DATABASE_ROLE}', 'member') AS "applicationRoleMember"`;
+
+export const DATABASE_TLS_QUERY = `SELECT
+  ssl AS "ssl",
+  version AS "tlsVersion"
+FROM pg_catalog.pg_stat_ssl
+WHERE pid = pg_backend_pid()`;
 
 interface RoleRow {
   readonly roleName: string;
@@ -157,33 +160,22 @@ export function assertApplicationRoleState(
 
 /** Creates/rotates the LOGIN and then reads back all privilege invariants. */
 export async function configureAndVerifyApplicationRole(input: {
-  readonly administratorSecretArn: string;
   readonly executor: RoleStatementExecutor;
   readonly password: string;
 }): Promise<ApplicationRoleVerification> {
   for (const statement of buildApplicationRoleStatements(input.password)) {
-    await input.executor.execute(input.administratorSecretArn, statement);
+    await input.executor.execute(statement);
   }
-  const roles = await input.executor.execute(
-    input.administratorSecretArn,
-    ROLE_STATE_QUERY,
-  );
-  const memberships = await input.executor.execute(
-    input.administratorSecretArn,
-    ROLE_MEMBERSHIP_QUERY,
-  );
+  const roles = await input.executor.execute(ROLE_STATE_QUERY);
+  const memberships = await input.executor.execute(ROLE_MEMBERSHIP_QUERY);
   return assertApplicationRoleState(roles, memberships);
 }
 
 /** Proves the generated application secret authenticates as only that LOGIN. */
 export async function verifyApplicationLogin(input: {
-  readonly applicationSecretArn: string;
   readonly executor: RoleStatementExecutor;
 }): Promise<void> {
-  const rows = await input.executor.execute(
-    input.applicationSecretArn,
-    APPLICATION_LOGIN_PROBE_QUERY,
-  );
+  const rows = await input.executor.execute(APPLICATION_LOGIN_PROBE_QUERY);
   const row = rows[0];
   if (
     rows.length !== 1 ||
@@ -194,5 +186,21 @@ export async function verifyApplicationLogin(input: {
     throw new Error(
       'The application database secret could not prove its role.',
     );
+  }
+}
+
+/** Proves the current native session negotiated an authenticated TLS channel. */
+export async function verifyDatabaseTls(input: {
+  readonly executor: RoleStatementExecutor;
+}): Promise<void> {
+  const rows = await input.executor.execute(DATABASE_TLS_QUERY);
+  const row = rows[0];
+  if (
+    rows.length !== 1 ||
+    row?.ssl !== true ||
+    typeof row.tlsVersion !== 'string' ||
+    !/^TLSv1[.][23]$/u.test(row.tlsVersion)
+  ) {
+    throw new Error('The database session did not prove verified TLS.');
   }
 }
