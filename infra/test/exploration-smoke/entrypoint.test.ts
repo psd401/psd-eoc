@@ -254,6 +254,10 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain(
       'role/PsdEocExplorationSmoke-BootstrapTaskRole8B52C495-[A-Za-z0-9]+$',
     );
+    expect(workflow).toContain(
+      '--action-names logs:GetLogEvents             --resource-arns "$bootstrap_log_group_arn:*"',
+    );
+    expect(workflow).not.toContain('$bootstrap_log_stream_arn');
     expect(workflow).toContain('($statements | length) == 2');
     expect(workflow).not.toContain('"rds-data:ExecuteStatement"');
   });
