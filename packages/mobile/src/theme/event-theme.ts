@@ -48,7 +48,7 @@ export const EVENT_THEME_TOKENS = {
   drill: {
     mode: 'drill',
     classificationWord: 'DRILL — PRACTICE',
-    explanation: 'This visual state is for a training drill only.',
+    explanation: 'This visual state is for a drill or synthetic test only.',
     icon: {
       name: 'practice-pencil',
       glyph: '✎',
