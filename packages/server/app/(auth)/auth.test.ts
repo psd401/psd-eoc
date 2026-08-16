@@ -61,6 +61,18 @@ const SESSION_POLICY: Readonly<WebSessionPolicy> = Object.freeze({
   membershipGraceSeconds: 72 * 60 * 60,
 });
 
+test('auth callback uses the shared fail-closed database configuration', async () => {
+  const source = await Bun.file(
+    new URL('./auth/callback/route.ts', import.meta.url),
+  ).text();
+  expect(source).toContain('createDatabaseClient');
+  expect(source).toContain('readDatabaseConfig');
+  expect(source).toContain('Authentication requires native PostgreSQL.');
+  expect(source).not.toContain('@aws-sdk/client-rds-data');
+  expect(source).not.toContain('drizzle-orm/aws-data-api/pg');
+  expect(source).not.toContain("from 'postgres'");
+});
+
 type ClaimVariant =
   | 'valid'
   | 'missing-name'
