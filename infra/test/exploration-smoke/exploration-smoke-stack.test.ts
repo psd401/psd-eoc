@@ -11,15 +11,27 @@ import {
   EXPLORATION_SMOKE_DATABASE_PORT,
   EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
   EXPLORATION_SMOKE_DATA_CLASSIFICATION,
+  EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
+  EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+  EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
   EXPLORATION_SMOKE_ENVIRONMENT,
   EXPLORATION_SMOKE_HEALTH_PATH,
   EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
   EXPLORATION_SMOKE_QUEUE_NAME,
   EXPLORATION_SMOKE_REGION,
   EXPLORATION_SMOKE_REPOSITORY_NAME,
+  EXPLORATION_SMOKE_SES_FROM_ADDRESS,
+  EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
+  EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
   EXPLORATION_SMOKE_STACK_NAME,
 } from '../../src/exploration-smoke/config';
 import { ExplorationSmokeStack } from '../../src/exploration-smoke/exploration-smoke-stack';
+import {
+  SES_CONFIGURATION_SET_NAME,
+  SES_EVENT_DESTINATION_NAME,
+  SES_EVENT_TOPIC_NAME,
+  SES_EVENT_TYPES,
+} from '../../src/config';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -140,6 +152,24 @@ const synthesized = asRecord(template.toJSON());
 const resources = asRecord(synthesized.Resources);
 
 describe('exploration-smoke deployment boundary', () => {
+  it('labels the immutable server image as the staff-minimized live pilot', async () => {
+    const dockerfile = await Bun.file(
+      new URL(
+        '../../../packages/server/container/exploration-smoke.Dockerfile',
+        import.meta.url,
+      ),
+    ).text();
+
+    expect(dockerfile).toContain(
+      'org.opencontainers.image.title="PSD EOC live pilot"',
+    );
+    expect(dockerfile).toContain('net.psd401.environment="live-pilot"');
+    expect(dockerfile).toContain(
+      'net.psd401.data-classification="staff-minimized"',
+    );
+    expect(dockerfile).not.toContain('synthetic-only');
+  });
+
   it('rejects every account and region except the approved psd401 target', () => {
     expect(EXPLORATION_SMOKE_ACCOUNT_ALIAS).toBe('psd401');
     expect(EXPLORATION_SMOKE_ACCOUNT).toBe('338414773271');
@@ -240,7 +270,7 @@ describe('exploration-smoke deployment boundary', () => {
     ).toBe('ShouldProvisionApplication');
   });
 
-  it('tags every stateful or executable resource as isolated synthetic data', () => {
+  it('tags every stateful or executable resource as staff-minimized live pilot', () => {
     const taggableTypes = [
       'AWS::AppRunner::AutoScalingConfiguration',
       'AWS::AppRunner::Service',
@@ -271,7 +301,7 @@ describe('exploration-smoke deployment boundary', () => {
 });
 
 describe('minimal isolated resource shape', () => {
-  it('creates one bounded native application and bootstrap topology', () => {
+  it('creates one bounded native application, bootstrap, and dark email topology', () => {
     template.resourceCountIs('AWS::ECR::Repository', 1);
     template.resourceCountIs('AWS::RDS::DBCluster', 1);
     template.resourceCountIs('AWS::RDS::DBInstance', 1);
@@ -281,9 +311,13 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
     template.resourceCountIs('AWS::ECS::TaskDefinition', 1);
     template.resourceCountIs('AWS::ECS::Service', 0);
-    template.resourceCountIs('AWS::Logs::LogGroup', 1);
-    template.resourceCountIs('AWS::SQS::Queue', 1);
+    template.resourceCountIs('AWS::Logs::LogGroup', 2);
+    template.resourceCountIs('AWS::SQS::Queue', 3);
     template.resourceCountIs('AWS::SecretsManager::Secret', 5);
+    template.resourceCountIs('AWS::KMS::Key', 1);
+    template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
+    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 1);
+    template.resourceCountIs('AWS::SNS::Topic', 1);
 
     const repository = properties(onlyResource('AWS::ECR::Repository'));
     expect(repository.RepositoryName).toBe(EXPLORATION_SMOKE_REPOSITORY_NAME);
@@ -293,11 +327,51 @@ describe('minimal isolated resource shape', () => {
       'imageCountMoreThan',
     );
 
-    const queue = properties(onlyResource('AWS::SQS::Queue'));
-    expect(queue.QueueName).toBe(EXPLORATION_SMOKE_QUEUE_NAME);
-    expect(queue.SqsManagedSseEnabled).toBe(true);
-    expect(queue.MessageRetentionPeriod).toBe(86_400);
-    expect(queue).not.toHaveProperty('RedrivePolicy');
+    const queues = new Map(
+      resourceEntries('AWS::SQS::Queue').map(([, resource]) => [
+        String(properties(resource).QueueName),
+        resource,
+      ]),
+    );
+    const healthQueue = properties(
+      queues.get(EXPLORATION_SMOKE_QUEUE_NAME) ?? {},
+    );
+    expect(healthQueue.SqsManagedSseEnabled).toBe(true);
+    expect(healthQueue.MessageRetentionPeriod).toBe(86_400);
+    expect(healthQueue.VisibilityTimeout).toBe(30);
+    expect(healthQueue).not.toHaveProperty('RedrivePolicy');
+
+    const emailQueue = properties(
+      queues.get(EXPLORATION_SMOKE_EMAIL_QUEUE_NAME) ?? {},
+    );
+    expect(emailQueue.SqsManagedSseEnabled).toBe(true);
+    expect(emailQueue.MessageRetentionPeriod).toBe(345_600);
+    expect(emailQueue.VisibilityTimeout).toBe(60);
+    expect(emailQueue.RedrivePolicy).toEqual({
+      deadLetterTargetArn: {
+        'Fn::GetAtt': [expect.stringContaining('EmailDeadLetterQueue'), 'Arn'],
+      },
+      maxReceiveCount: 5,
+    });
+
+    const emailDeadLetterQueue = properties(
+      queues.get(EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME) ?? {},
+    );
+    expect(emailDeadLetterQueue.SqsManagedSseEnabled).toBe(true);
+    expect(emailDeadLetterQueue.MessageRetentionPeriod).toBe(1_209_600);
+    const redriveAllowPolicy = asRecord(
+      emailDeadLetterQueue.RedriveAllowPolicy,
+    );
+    expect(redriveAllowPolicy.redrivePermission).toBe('byQueue');
+    expect(asArray(redriveAllowPolicy.sourceQueueArns)).toHaveLength(1);
+    expect(JSON.stringify(redriveAllowPolicy.sourceQueueArns)).toContain(
+      `:sqs:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:${EXPLORATION_SMOKE_EMAIL_QUEUE_NAME}`,
+    );
+
+    for (const queue of queues.values()) {
+      expect(queue.DeletionPolicy).toBe('Retain');
+      expect(queue.UpdateReplacePolicy).toBe('Retain');
+    }
   });
 
   it('preserves Aurora and database subnets while enabling only native PostgreSQL', () => {
@@ -314,18 +388,18 @@ describe('minimal isolated resource shape', () => {
     expect(cluster.Engine).toBe('aurora-postgresql');
     expect(cluster.EnableHttpEndpoint).toBe(false);
     expect(cluster.StorageEncrypted).toBe(true);
-    expect(cluster.DeletionProtection).toBe(false);
-    expect(cluster.BackupRetentionPeriod).toBe(1);
+    expect(cluster.DeletionProtection).toBe(true);
+    expect(cluster.BackupRetentionPeriod).toBe(14);
     expect(scaling).toEqual({ MaxCapacity: 1, MinCapacity: 0.5 });
-    expect(clusterResource.DeletionPolicy).toBe('Snapshot');
-    expect(clusterResource.UpdateReplacePolicy).toBe('Snapshot');
+    expect(clusterResource.DeletionPolicy).toBe('Retain');
+    expect(clusterResource.UpdateReplacePolicy).toBe('Retain');
 
     expect(writer.DBInstanceClass).toBe('db.serverless');
     expect(writer.PromotionTier).toBe(0);
     expect(writer.PubliclyAccessible).toBe(false);
     expect(writer.AvailabilityZone).toBe(`${EXPLORATION_SMOKE_REGION}a`);
-    expect(writerResource.DeletionPolicy).toBe('Delete');
-    expect(writerResource.UpdateReplacePolicy).toBe('Delete');
+    expect(writerResource.DeletionPolicy).toBe('Retain');
+    expect(writerResource.UpdateReplacePolicy).toBe('Retain');
 
     expect(cluster.DBSubnetGroupName).toEqual({
       Ref: 'DatabaseSubnets56F17B9A',
@@ -424,8 +498,8 @@ describe('minimal isolated resource shape', () => {
       const secret = properties(resource ?? {});
       expect(secret.GenerateSecretString).toBeDefined();
       expect(secret).not.toHaveProperty('SecretString');
-      expect(resource?.DeletionPolicy).toBe('Delete');
-      expect(resource?.UpdateReplacePolicy).toBe('Delete');
+      expect(resource?.DeletionPolicy).toBe('Retain');
+      expect(resource?.UpdateReplacePolicy).toBe('Retain');
     }
 
     const identity = byName.get(
@@ -442,8 +516,8 @@ describe('minimal isolated resource shape', () => {
     expect(identitySecretString).toContain('staffEmail');
     expect(identitySecretString).toContain('ApprovedStaffEmail');
     expect(synthesized).not.toHaveProperty('Transform');
-    expect(identity?.DeletionPolicy).toBe('Delete');
-    expect(identity?.UpdateReplacePolicy).toBe('Delete');
+    expect(identity?.DeletionPolicy).toBe('Retain');
+    expect(identity?.UpdateReplacePolicy).toBe('Retain');
 
     const admin = asRecord(
       properties(byName.get('/psd-eoc/exploration-smoke/database/admin') ?? {})
@@ -523,7 +597,7 @@ describe('App Runner runtime safety boundary', () => {
     );
   });
 
-  it('injects only the required synthetic runtime and Google OIDC contract', () => {
+  it('injects only the required live-pilot runtime and Google OIDC contract', () => {
     const service = properties(onlyResource('AWS::AppRunner::Service'));
     const image = asRecord(
       asRecord(service.SourceConfiguration).ImageRepository,
@@ -555,6 +629,7 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_SSL_ROOT_CERT',
         'FANOUT_QUEUE_URL',
         'NODE_ENV',
+        'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'RUNTIME_SECRET_ARN',
         'SOURCE_SHA',
       ].sort(),
@@ -579,6 +654,9 @@ describe('App Runner runtime safety boundary', () => {
       Ref: 'RuntimeDatabaseIdleTimeoutSeconds',
     });
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
+    expect(variables.get('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE')).toBe(
+      EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
+    );
     expect(variables.get('RUNTIME_SECRET_ARN')).toEqual({
       Ref: expect.stringContaining('ApiSaltSecret'),
     });
@@ -613,7 +691,10 @@ describe('App Runner runtime safety boundary', () => {
     expect(serialized).not.toContain('ApprovedGoogleSubject');
     expect(serialized).not.toContain('GOOGLE_ROSTER_CONFIG');
     expect(serialized).not.toContain('EXPO');
-    expect(serialized).not.toContain('SES');
+    expect(serialized).not.toContain('SES_ACCESS_KEY');
+    expect(serialized).not.toContain('SES_SECRET');
+    expect(serialized).not.toContain('SES_SESSION');
+    expect(serialized).not.toContain('SES_SEND');
     expect(serialized).not.toContain('SMS');
     expect(serialized).not.toContain('MEDIA_BUCKET');
     expect(serialized).not.toContain('DELIVERY_STATE_WORKER');
@@ -634,6 +715,8 @@ describe('App Runner runtime safety boundary', () => {
       ].sort(),
     );
     expect(actions).not.toContain('sqs:SendMessage');
+    expect(actions).not.toContain('ses:SendEmail');
+    expect(actions).not.toContain('ses:SendRawEmail');
     expect(actions.some((action) => action.startsWith('rds-data:'))).toBe(
       false,
     );
@@ -678,6 +761,33 @@ describe('App Runner runtime safety boundary', () => {
         dependency.includes('AppRunnerRuntimeRoleDefaultPolicy'),
       ),
     ).toBe(true);
+  });
+
+  it('gives the dark email worker only exact queue-consumer permissions', () => {
+    const emailWorkerRole = roleLogicalIdForDescription(
+      'Dark live-pilot email worker',
+    );
+    const statements = inlineStatementsForRole(emailWorkerRole);
+    const actions = [...new Set(allAllowedActions(statements))].sort();
+
+    expect(actions).toEqual(
+      [
+        'sqs:ChangeMessageVisibility',
+        'sqs:DeleteMessage',
+        'sqs:GetQueueAttributes',
+        'sqs:GetQueueUrl',
+        'sqs:ReceiveMessage',
+      ].sort(),
+    );
+    expect(actions.some((action) => action.startsWith('ses:'))).toBe(false);
+    expect(actions.some((action) => action.startsWith('sns:'))).toBe(false);
+    expect(actions.some((action) => action.startsWith('secretsmanager:'))).toBe(
+      false,
+    );
+    expect(statements).toHaveLength(1);
+    expect(statements[0]?.Resource).toEqual({
+      'Fn::GetAtt': [expect.stringContaining('EmailQueue'), 'Arn'],
+    });
   });
 
   it('limits the App Runner image role to the isolated ECR pull contract', () => {
@@ -791,11 +901,30 @@ describe('one-off native bootstrap boundary', () => {
     expect(asRecord(logging.Options)['awslogs-stream-prefix']).toBe(
       'native-bootstrap',
     );
-    const logGroup = properties(onlyResource('AWS::Logs::LogGroup'));
+    const logGroupResource = resourceEntries('AWS::Logs::LogGroup').find(
+      ([, resource]) =>
+        properties(resource).LogGroupName ===
+        EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
+    )?.[1];
+    expect(logGroupResource).toBeDefined();
+    const logGroup = properties(logGroupResource ?? {});
     expect(logGroup.LogGroupName).toBe(
       EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
     );
-    expect(logGroup.RetentionInDays).toBe(7);
+    expect(logGroup.RetentionInDays).toBe(14);
+    expect(logGroupResource?.DeletionPolicy).toBe('Retain');
+    expect(logGroupResource?.UpdateReplacePolicy).toBe('Retain');
+
+    const emailLogGroupResource = resourceEntries('AWS::Logs::LogGroup').find(
+      ([, resource]) =>
+        properties(resource).LogGroupName ===
+        EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
+    )?.[1];
+    expect(emailLogGroupResource).toBeDefined();
+    const emailLogGroup = properties(emailLogGroupResource ?? {});
+    expect(emailLogGroup.RetentionInDays).toBe(14);
+    expect(emailLogGroupResource?.DeletionPolicy).toBe('Retain');
+    expect(emailLogGroupResource?.UpdateReplacePolicy).toBe('Retain');
   });
 
   it('keeps bootstrap secret reads on the execution role and task role empty', () => {
@@ -847,8 +976,8 @@ describe('one-off native bootstrap boundary', () => {
   });
 });
 
-describe('explicit absence of production and provider authority', () => {
-  it('creates no messaging, DNS, media, scheduler, worker, or custom-resource service', () => {
+describe('configured-unverified provider readiness boundary', () => {
+  it('creates no provider identity, DNS, media, scheduler, executable worker, or custom resource', () => {
     for (const forbiddenType of [
       'AWS::Events::Rule',
       'AWS::Lambda::Function',
@@ -856,9 +985,8 @@ describe('explicit absence of production and provider authority', () => {
       'AWS::Route53::RecordSet',
       'AWS::S3::Bucket',
       'AWS::Scheduler::Schedule',
-      'AWS::SES::ConfigurationSet',
       'AWS::SES::EmailIdentity',
-      'AWS::SNS::Topic',
+      'AWS::SNS::Subscription',
     ]) {
       template.resourceCountIs(forbiddenType, 0);
     }
@@ -872,9 +1000,93 @@ describe('explicit absence of production and provider authority', () => {
     expect(serializedTemplate).not.toContain('aws-data-api');
     expect(serializedTemplate).not.toContain('DATABASE_RESOURCE_ARN');
     expect(serializedTemplate).not.toContain('DATABASE_SECRET_ARN');
+    expect(serializedTemplate).not.toContain('ses:SendEmail');
+    expect(serializedTemplate).not.toContain('ses:SendRawEmail');
+    expect(serializedTemplate).not.toContain('controlled-recipient');
   });
 
-  it('does not expose secrets or production integration identifiers in outputs', () => {
+  it('configures the canonical SES evidence path dark and encrypted', () => {
+    const configurationSetResource = onlyResource('AWS::SES::ConfigurationSet');
+    const configurationSet = properties(configurationSetResource);
+    expect(configurationSet.Name).toBe(SES_CONFIGURATION_SET_NAME);
+    expect(configurationSet.SendingOptions).toEqual({
+      SendingEnabled: false,
+    });
+    expect(configurationSet.ReputationOptions).toEqual({
+      ReputationMetricsEnabled: true,
+    });
+    expect(configurationSetResource.DeletionPolicy).toBe('Retain');
+    expect(configurationSetResource.UpdateReplacePolicy).toBe('Retain');
+
+    const eventDestinationResource = onlyResource(
+      'AWS::SES::ConfigurationSetEventDestination',
+    );
+    const eventDestination = properties(eventDestinationResource);
+    expect(eventDestination.ConfigurationSetName).toEqual({
+      Ref: 'EmailConfigurationSet',
+    });
+    expect(eventDestination.EventDestination).toEqual({
+      Enabled: true,
+      MatchingEventTypes: [...SES_EVENT_TYPES],
+      Name: SES_EVENT_DESTINATION_NAME,
+      SnsDestination: {
+        TopicARN: {
+          Ref: expect.stringContaining('EmailEventsTopic'),
+        },
+      },
+    });
+    expect(eventDestinationResource.DeletionPolicy).toBe('Retain');
+    expect(eventDestinationResource.UpdateReplacePolicy).toBe('Retain');
+
+    const topicResource = onlyResource('AWS::SNS::Topic');
+    const topic = properties(topicResource);
+    expect(topic.TopicName).toBe(SES_EVENT_TOPIC_NAME);
+    expect(topic.KmsMasterKeyId).toEqual({
+      'Fn::GetAtt': [expect.stringContaining('EmailEventsKey'), 'Arn'],
+    });
+    expect(topicResource.DeletionPolicy).toBe('Retain');
+    expect(topicResource.UpdateReplacePolicy).toBe('Retain');
+
+    const topicPolicy = properties(onlyResource('AWS::SNS::TopicPolicy'));
+    const topicStatements = asArray(
+      asRecord(topicPolicy.PolicyDocument).Statement,
+    ).map(asRecord);
+    const sesPublish = topicStatements.find(
+      (statement) =>
+        statement.Effect === 'Allow' &&
+        asStringArray(statement.Action).includes('sns:Publish'),
+    );
+    expect(sesPublish).toBeDefined();
+    expect(sesPublish?.Principal).toEqual({ Service: 'ses.amazonaws.com' });
+    expect(sesPublish?.Condition).toEqual({
+      StringEquals: {
+        'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
+        'AWS:SourceArn': `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+      },
+    });
+
+    const keyResource = onlyResource('AWS::KMS::Key');
+    const key = properties(keyResource);
+    expect(key.EnableKeyRotation).toBe(true);
+    expect(keyResource.DeletionPolicy).toBe('Retain');
+    expect(keyResource.UpdateReplacePolicy).toBe('Retain');
+    const keyStatements = asArray(asRecord(key.KeyPolicy).Statement).map(
+      asRecord,
+    );
+    const sesKeyUse = keyStatements.find(
+      (statement) => statement.Sid === 'AllowSesEmailEventEncryption',
+    );
+    expect(sesKeyUse?.Action).toEqual(['kms:Decrypt', 'kms:GenerateDataKey*']);
+    expect(sesKeyUse?.Principal).toEqual({ Service: 'ses.amazonaws.com' });
+    expect(sesKeyUse?.Condition).toEqual({
+      StringEquals: {
+        'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
+        'AWS:SourceArn': `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+      },
+    });
+  });
+
+  it('exposes readiness state without credentials or recipient identifiers', () => {
     const outputs = asRecord(synthesized.Outputs);
     expect(Object.keys(outputs).sort()).toEqual(
       [
@@ -902,6 +1114,12 @@ describe('explicit absence of production and provider authority', () => {
         'DeploymentRegion',
         'DeployedAppImageDigest',
         'DeployedAppSourceSha',
+        'EmailChannelState',
+        'EmailDeadLetterQueueArn',
+        'EmailQueueArn',
+        'EmailQueueUrl',
+        'EmailWorkerLogGroupName',
+        'EmailWorkerRoleArn',
         'EnvironmentName',
         'ExpectedAwsAccountAlias',
         'HealthQueueArn',
@@ -909,14 +1127,31 @@ describe('explicit absence of production and provider authority', () => {
         'ImageRepositoryArn',
         'ImageRepositoryUri',
         'RuntimeRoleArn',
+        'SesConfigurationSetName',
+        'SesEmailEventsKeyArn',
+        'SesEmailEventsTopicArn',
+        'SesFromAddress',
+        'SesIdentityArn',
+        'SesIdentityDomain',
+        'SesIntegrationTruth',
       ].sort(),
     );
     const serializedOutputs = JSON.stringify(outputs);
     expect(serializedOutputs).not.toContain('GoogleOauthSecretArn');
     expect(serializedOutputs).not.toContain('GoogleOidcCookieSecret');
     expect(serializedOutputs).not.toContain('ApiSaltSecret');
-    expect(serializedOutputs).not.toContain('alerts.psd401.net');
     expect(serializedOutputs).not.toContain('eoc.psd401.net');
+    expect(serializedOutputs).not.toContain('controlled-recipient');
+    expect(asRecord(outputs.SesIdentityDomain).Value).toBe(
+      EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
+    );
+    expect(asRecord(outputs.SesFromAddress).Value).toBe(
+      EXPLORATION_SMOKE_SES_FROM_ADDRESS,
+    );
+    expect(asRecord(outputs.SesIntegrationTruth).Value).toBe(
+      'configured-unverified',
+    );
+    expect(asRecord(outputs.EmailChannelState).Value).toBe('disabled');
     expect(asRecord(outputs.BootstrapCandidateImageDigest).Value).toEqual({
       Ref: 'BootstrapImageDigest',
     });

@@ -15,14 +15,23 @@ import {
   aws_ecs as ecs,
   aws_ecr as ecr,
   aws_iam as iam,
+  aws_kms as kms,
   aws_logs as logs,
   aws_rds as rds,
   aws_secretsmanager as secretsmanager,
+  aws_ses as ses,
+  aws_sns as sns,
   aws_sqs as sqs,
 } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import type { Construct } from 'constructs';
 
+import {
+  SES_CONFIGURATION_SET_NAME,
+  SES_EVENT_DESTINATION_NAME,
+  SES_EVENT_TOPIC_NAME,
+  SES_EVENT_TYPES,
+} from '../config';
 import {
   EXPLORATION_SMOKE_ACCOUNT,
   EXPLORATION_SMOKE_ACCOUNT_ALIAS,
@@ -32,18 +41,25 @@ import {
   EXPLORATION_SMOKE_DATABASE_PORT,
   EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
   EXPLORATION_SMOKE_DATA_CLASSIFICATION,
+  EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
+  EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+  EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
   EXPLORATION_SMOKE_ENVIRONMENT,
   EXPLORATION_SMOKE_HEALTH_PATH,
   EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
   EXPLORATION_SMOKE_QUEUE_NAME,
   EXPLORATION_SMOKE_REGION,
   EXPLORATION_SMOKE_REPOSITORY_NAME,
+  EXPLORATION_SMOKE_SES_FROM_ADDRESS,
+  EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
+  EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
 } from './config';
 
 const SECRET_PREFIX = '/psd-eoc/exploration-smoke';
 const APP_RUNNER_PORT = '3000';
 const APPLICATION_SUBNET_GROUP_NAME = 'Application';
 const BOOTSTRAP_CONTAINER_NAME = 'native-bootstrap';
+const EMAIL_QUEUE_MAX_RECEIVES = 5;
 
 function secretJsonKeyArn(secret: secretsmanager.Secret, key: string): string {
   return Fn.join('', [secret.secretArn, `:${key}::`]);
@@ -60,7 +76,7 @@ function ecsSecretJsonKey(
 }
 
 /**
- * Small, disposable AWS environment for synthetic staff exploration only.
+ * Stable AWS environment for a staff-minimized live pilot.
  *
  * The first deployment sets ProvisionApplication=false so CloudFormation can
  * create the ECR repository. After the reviewed image is pushed by digest and
@@ -86,12 +102,13 @@ export class ExplorationSmokeStack extends Stack {
       );
     }
 
-    Tags.of(this).add('Application', 'PSD EOC Exploration Smoke');
+    Tags.of(this).add('Application', 'PSD EOC Live Pilot');
     Tags.of(this).add(
       'DataClassification',
       EXPLORATION_SMOKE_DATA_CLASSIFICATION,
     );
     Tags.of(this).add('Environment', EXPLORATION_SMOKE_ENVIRONMENT);
+    Tags.of(this).add('DataScope', 'staff-minimized');
     Tags.of(this).add(
       'ExpectedAwsAccountAlias',
       EXPLORATION_SMOKE_ACCOUNT_ALIAS,
@@ -281,11 +298,11 @@ export class ExplorationSmokeStack extends Stack {
       emptyOnDelete: false,
       imageScanOnPush: true,
       imageTagMutability: ecr.TagMutability.IMMUTABLE,
-      removalPolicy: RemovalPolicy.DESTROY,
+      removalPolicy: RemovalPolicy.RETAIN,
       repositoryName: EXPLORATION_SMOKE_REPOSITORY_NAME,
     });
     imageRepository.addLifecycleRule({
-      description: 'Bound synthetic exploration image retention.',
+      description: 'Bound superseded live-pilot image retention.',
       maxImageCount: 10,
       rulePriority: 1,
     });
@@ -341,14 +358,14 @@ export class ExplorationSmokeStack extends Stack {
       'DatabaseAdminSecret',
       {
         description:
-          'Generated migration-only administrator credential for synthetic exploration data.',
+          'Generated migration-only administrator credential for staff-minimized live-pilot data.',
         generateSecretString: {
           excludePunctuation: true,
           generateStringKey: 'password',
           passwordLength: 64,
           secretStringTemplate: JSON.stringify({ username: 'psd_eoc_admin' }),
         },
-        removalPolicy: RemovalPolicy.DESTROY,
+        removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/database/admin`,
       },
     );
@@ -366,7 +383,7 @@ export class ExplorationSmokeStack extends Stack {
             username: 'psd_eoc_application',
           }),
         },
-        removalPolicy: RemovalPolicy.DESTROY,
+        removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/database/application`,
       },
     );
@@ -380,7 +397,7 @@ export class ExplorationSmokeStack extends Stack {
           excludePunctuation: true,
           passwordLength: 43,
         },
-        removalPolicy: RemovalPolicy.DESTROY,
+        removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/google-oidc-cookie-secret`,
       },
     );
@@ -391,7 +408,7 @@ export class ExplorationSmokeStack extends Stack {
         excludePunctuation: true,
         passwordLength: 64,
       },
-      removalPolicy: RemovalPolicy.DESTROY,
+      removalPolicy: RemovalPolicy.RETAIN,
       secretName: `${SECRET_PREFIX}/api-salt`,
     });
     const bootstrapIdentitySecret = new secretsmanager.Secret(
@@ -399,8 +416,8 @@ export class ExplorationSmokeStack extends Stack {
       'BootstrapIdentitySecret',
       {
         description:
-          'Approved synthetic exploration bootstrap identity, supplied only through NoEcho deployment parameters.',
-        removalPolicy: RemovalPolicy.DESTROY,
+          'Approved staff-only live-pilot bootstrap identity, supplied only through NoEcho deployment parameters.',
+        removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/bootstrap/approved-identity`,
         secretObjectValue: {
           googleSubject: SecretValue.unsafePlainText(
@@ -455,7 +472,7 @@ export class ExplorationSmokeStack extends Stack {
 
     const database = new rds.DatabaseCluster(this, 'Database', {
       backup: {
-        retention: Duration.days(1),
+        retention: Duration.days(14),
       },
       clusterIdentifier: EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
       copyTagsToSnapshot: true,
@@ -463,15 +480,14 @@ export class ExplorationSmokeStack extends Stack {
         databaseAdminSecret as unknown as secretsmanager.ISecret,
       ),
       defaultDatabaseName: EXPLORATION_SMOKE_DATABASE_NAME,
-      deletionProtection: false,
+      deletionProtection: true,
       enableDataApi: false,
       engine: databaseEngine,
       parameterGroup: databaseParameterGroup,
       readers: [],
-      // Preserve the append-only synthetic event journal on stack deletion
-      // without retaining a running cluster. Snapshot cleanup remains an
-      // explicit, separately reviewed human action.
-      removalPolicy: RemovalPolicy.SNAPSHOT,
+      // Retain staff-minimized access and append-only event truth. Any future
+      // retirement is a separately reviewed human data-lifecycle decision.
+      removalPolicy: RemovalPolicy.RETAIN,
       securityGroups: [databaseSecurityGroup],
       serverlessV2MaxCapacity: 1,
       serverlessV2MinCapacity: 0.5,
@@ -492,10 +508,141 @@ export class ExplorationSmokeStack extends Stack {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
       queueName: EXPLORATION_SMOKE_QUEUE_NAME,
-      removalPolicy: RemovalPolicy.DESTROY,
+      removalPolicy: RemovalPolicy.RETAIN,
       retentionPeriod: Duration.days(1),
       visibilityTimeout: Duration.seconds(30),
     });
+
+    const emailSourceQueueIdentity = sqs.Queue.fromQueueArn(
+      this,
+      'EmailRedriveSourceQueue',
+      this.formatArn({
+        resource: EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+        service: 'sqs',
+      }),
+    );
+    const emailDeadLetterQueue = new sqs.Queue(this, 'EmailDeadLetterQueue', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      queueName: EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
+      redriveAllowPolicy: {
+        redrivePermission: sqs.RedrivePermission.BY_QUEUE,
+        sourceQueues: [emailSourceQueueIdentity],
+      },
+      removalPolicy: RemovalPolicy.RETAIN,
+      retentionPeriod: Duration.days(14),
+    });
+    const emailQueue = new sqs.Queue(this, 'EmailQueue', {
+      deadLetterQueue: {
+        maxReceiveCount: EMAIL_QUEUE_MAX_RECEIVES,
+        queue: emailDeadLetterQueue,
+      },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      queueName: EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+      removalPolicy: RemovalPolicy.RETAIN,
+      retentionPeriod: Duration.days(4),
+      visibilityTimeout: Duration.seconds(60),
+    });
+    const emailWorkerLogGroup = new logs.LogGroup(this, 'EmailWorkerLogGroup', {
+      logGroupName: EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
+      removalPolicy: RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.TWO_WEEKS,
+    });
+    const emailWorkerRole = new iam.Role(this, 'EmailWorkerRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description:
+        'Dark live-pilot email worker; consumes only its queue and has no SES send authority.',
+    });
+    iam.Grant.addToPrincipal({
+      actions: [
+        'sqs:ChangeMessageVisibility',
+        'sqs:DeleteMessage',
+        'sqs:GetQueueAttributes',
+        'sqs:GetQueueUrl',
+        'sqs:ReceiveMessage',
+      ],
+      grantee: emailWorkerRole,
+      resourceArns: [emailQueue.queueArn],
+    });
+
+    const emailConfigurationSetArn = `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`;
+    const emailEventsKey = new kms.Key(this, 'EmailEventsKey', {
+      description:
+        'Encrypts configured-unverified SES event evidence for the live pilot.',
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    emailEventsKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
+        conditions: {
+          StringEquals: {
+            'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
+            'AWS:SourceArn': emailConfigurationSetArn,
+          },
+        },
+        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+        resources: ['*'],
+        sid: 'AllowSesEmailEventEncryption',
+      }),
+    );
+    const emailConfigurationSet = new ses.CfnConfigurationSet(
+      this,
+      'EmailConfigurationSet',
+      {
+        name: SES_CONFIGURATION_SET_NAME,
+        reputationOptions: {
+          reputationMetricsEnabled: true,
+        },
+        sendingOptions: {
+          sendingEnabled: false,
+        },
+      },
+    );
+    emailConfigurationSet.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const emailEventsTopic = new sns.Topic(this, 'EmailEventsTopic', {
+      displayName: 'PSD EOC live-pilot SES event evidence',
+      enforceSSL: true,
+      masterKey: emailEventsKey,
+      topicName: SES_EVENT_TOPIC_NAME,
+    });
+    emailEventsTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const emailEventsPublishPolicy = emailEventsTopic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ['sns:Publish'],
+        conditions: {
+          StringEquals: {
+            'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
+            'AWS:SourceArn': emailConfigurationSetArn,
+          },
+        },
+        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+        resources: [emailEventsTopic.topicArn],
+        sid: 'AllowSesConfigurationSetEvents',
+      }),
+    );
+    const emailEventDestination = new ses.CfnConfigurationSetEventDestination(
+      this,
+      'EmailEventDestination',
+      {
+        configurationSetName: emailConfigurationSet.ref,
+        eventDestination: {
+          enabled: true,
+          matchingEventTypes: [...SES_EVENT_TYPES],
+          name: SES_EVENT_DESTINATION_NAME,
+          snsDestination: {
+            topicArn: emailEventsTopic.topicArn,
+          },
+        },
+      },
+    );
+    emailEventDestination.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    if (emailEventsPublishPolicy.policyDependable !== undefined) {
+      emailEventDestination.node.addDependency(
+        emailEventsPublishPolicy.policyDependable,
+      );
+    }
 
     const googleOauthSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this,
@@ -514,8 +661,8 @@ export class ExplorationSmokeStack extends Stack {
 
     const bootstrapLogGroup = new logs.LogGroup(this, 'BootstrapLogGroup', {
       logGroupName: EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
-      removalPolicy: RemovalPolicy.DESTROY,
-      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.TWO_WEEKS,
     });
     const bootstrapCluster = new ecs.Cluster(this, 'BootstrapEcsCluster', {
       clusterName: 'psd-eoc-exploration-smoke-native-bootstrap',
@@ -638,7 +785,7 @@ export class ExplorationSmokeStack extends Stack {
     const runtimeRole = new iam.Role(this, 'AppRunnerRuntimeRole', {
       assumedBy: new iam.ServicePrincipal('tasks.apprunner.amazonaws.com'),
       description:
-        'Least-privilege synthetic exploration runtime; it has no notification-send authority.',
+        'Least-privilege live-pilot runtime; it has no notification-provider authority.',
     });
     const runtimeGrants = [
       databaseApplicationSecret.grantRead(runtimeRole),
@@ -780,6 +927,10 @@ export class ExplorationSmokeStack extends Stack {
                   value: 'production',
                 },
                 {
+                  name: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
+                  value: EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
+                },
+                {
                   name: 'RUNTIME_SECRET_ARN',
                   value: apiSaltSecret.secretArn,
                 },
@@ -880,6 +1031,45 @@ export class ExplorationSmokeStack extends Stack {
     });
     new CfnOutput(this, 'HealthQueueUrl', {
       value: healthQueue.queueUrl,
+    });
+    new CfnOutput(this, 'EmailQueueArn', {
+      value: emailQueue.queueArn,
+    });
+    new CfnOutput(this, 'EmailQueueUrl', {
+      value: emailQueue.queueUrl,
+    });
+    new CfnOutput(this, 'EmailDeadLetterQueueArn', {
+      value: emailDeadLetterQueue.queueArn,
+    });
+    new CfnOutput(this, 'EmailWorkerRoleArn', {
+      value: emailWorkerRole.roleArn,
+    });
+    new CfnOutput(this, 'EmailWorkerLogGroupName', {
+      value: emailWorkerLogGroup.logGroupName,
+    });
+    new CfnOutput(this, 'SesIdentityArn', {
+      value: `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:identity/${EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN}`,
+    });
+    new CfnOutput(this, 'SesIdentityDomain', {
+      value: EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
+    });
+    new CfnOutput(this, 'SesFromAddress', {
+      value: EXPLORATION_SMOKE_SES_FROM_ADDRESS,
+    });
+    new CfnOutput(this, 'SesConfigurationSetName', {
+      value: emailConfigurationSet.ref,
+    });
+    new CfnOutput(this, 'SesEmailEventsTopicArn', {
+      value: emailEventsTopic.topicArn,
+    });
+    new CfnOutput(this, 'SesEmailEventsKeyArn', {
+      value: emailEventsKey.keyArn,
+    });
+    new CfnOutput(this, 'SesIntegrationTruth', {
+      value: 'configured-unverified',
+    });
+    new CfnOutput(this, 'EmailChannelState', {
+      value: 'disabled',
     });
     new CfnOutput(this, 'RuntimeRoleArn', {
       value: runtimeRole.roleArn,

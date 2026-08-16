@@ -1,42 +1,47 @@
-# Exploration-smoke deployment evidence
+# Live-pilot deployment evidence (retained exploration-smoke name)
 
-Status: **configured-unverified; no AWS, GCP, DNS, or provider write is proved**
+Status: **issue #204 source is configured-unverified; no issue #204 AWS, DNS,
+provider, recipient, or send write is proved**
 
-This record is the durable evidence template for the isolated
-`PsdEocExplorationSmoke` environment from issue #163, with the private native
-PostgreSQL deployment path superseded by issue #178. It is not a production
-go-live record. It must contain synthetic data and identifiers only: never a
-secret value, OAuth credential, session cookie, raw token, real recipient list,
-or provider payload.
+This record is the durable evidence template for the staff-only live-pilot
+stack whose physical name remains `PsdEocExplorationSmoke`. Issue #178
+superseded its database path with private native PostgreSQL. Issue #204
+reclassifies the source boundary from synthetic exploration to staff-minimized
+live pilot and adds dark SES readiness; it does not activate or exercise email.
+Never record a secret value, OAuth credential, session cookie, raw token, real
+recipient address/list, or provider payload here.
 
-Kris Hagel selected the isolated synthetic AWS shape and allowed real Google
-OIDC as its sole potentially live integration on 2026-08-15. That architecture
-decision is not approval of an AWS, GCP, DNS, notification-provider, or mobile
-store write. Each write still requires the exact preview and protected
-environment approval described below.
+Kris Hagel authorized the staff-only live pilot and, on 2026-08-16, authorized
+removing exploration-only blocks and preparing live provider configuration.
+The binding human-only notification boundary remains unchanged. Issue #204
+stops before activation: the canonical SES configuration set is disabled,
+runtime and worker roles have zero SES authority, and no executable email
+worker, provider call, cloud mutation, recipient mutation, or send is included.
 
 ## Fixed boundary
 
-| Field                   | Required value                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------ |
-| AWS account alias       | `psd401`                                                                             |
-| AWS account ID          | `338414773271`                                                                       |
-| AWS region              | `us-west-2`                                                                          |
-| CloudFormation stack    | `PsdEocExplorationSmoke`                                                             |
-| Environment tag         | `exploration-smoke`                                                                  |
-| Data classification tag | `synthetic-only`                                                                     |
-| GitHub workflow         | `.github/workflows/deploy-exploration-smoke.yml`                                     |
-| GitHub environment      | `exploration-smoke` with required reviewers and main-only deployment protection      |
-| Identity                | Google OIDC, hosted domain `psd401.net`, one approved immutable subject              |
-| Roster/access data      | One idempotent synthetic staff access fixture; no Groups call and no student data    |
-| Notification channels   | Disabled and mocked; no recipients, workers, provider credentials, or send authority |
-| DNS/custom domain       | Out of scope; separately previewed and approved                                      |
+| Field                   | Required value                                                                   |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| AWS account alias       | `psd401`                                                                         |
+| AWS account ID          | `338414773271`                                                                   |
+| AWS region              | `us-west-2`                                                                      |
+| CloudFormation stack    | `PsdEocExplorationSmoke`                                                         |
+| Environment tag         | `live-pilot`                                                                     |
+| Data classification tag | `staff-minimized`                                                                |
+| GitHub workflow         | `.github/workflows/deploy-exploration-smoke.yml`                                 |
+| GitHub environment      | `exploration-smoke` with required reviewers and main-only deployment protection  |
+| Identity                | Google OIDC, hosted domain `psd401.net`, one approved immutable subject          |
+| Roster/access data      | Staff-only access; no student data; population changes are separately owned      |
+| Notification channels   | Email `configured-unverified` and disabled; every other provider remains blocked |
+| DNS/custom domain       | Out of scope; separately previewed and approved                                  |
 
-The stack owns one App Runner service, one private Aurora PostgreSQL writer, an
+The source stack owns one App Runner service, one private Aurora PostgreSQL writer, an
 App Runner VPC connector, a bounded NAT egress path, one protected ECS Fargate
 bootstrap task definition/cluster/log group, one ECR repository, one
-health-only SQS queue, and generated admin/application/approved-identity/cookie/API
-secrets. Aurora's cluster HTTP endpoint is disabled. App Runner and the
+health-only SQS queue, one dark email queue/DLQ, a non-executable email worker
+role/log group, a disabled SES configuration set, an encrypted SES event topic,
+and generated admin/application/approved-identity/cookie/API secrets. Aurora's
+cluster HTTP endpoint is disabled. App Runner and the
 bootstrap task connect directly on port 5432, require certificate-verified TLS
 against the pinned AWS RDS CA bundle, and use a one-connection application
 pool. Database security-group ingress is limited to the App Runner and
@@ -45,12 +50,11 @@ path provides required public HTTPS egress, including Google OIDC, without
 making Aurora public. `ProvisionApplication=false` is permitted only for a
 first-deployment foundation phase. An existing service, image digest, and
 source SHA must never be changed during the candidate bootstrap phase of an
-ordinary release. Aurora replacement/deletion takes a final snapshot; its
-automated backup retention while running is one day. The database instance,
-generated secrets, NAT resources, VPC connector, bootstrap resources, and queue
-are deleted only on a separately approved stack teardown. The ECR repository
-cannot be deleted while it contains an image, so image deletion is a separate
-exact, human-reviewed prerequisite. The external Google OAuth secret is
+ordinary release. Aurora deletion protection is enabled and its automated
+backup retention is 14 days. Aurora, generated secrets, ECR, queues, managed
+log groups, the SES configuration set, evidence topic, and evidence key use
+retention policies. A future teardown or data-retirement action is a separate
+exact, human-reviewed decision. The external Google OAuth secret is
 referenced but not owned by the stack. App Runner creates provider-managed
 `service` and `application` CloudWatch Logs
 groups outside the synthesized resource inventory. The workflow discovers only
@@ -62,6 +66,15 @@ own that retention setting, so teardown must inventory the exact groups rather
 than assume stack deletion handled them. These are operational logs, not the
 canonical event journal or delivery-evidence ledger; append-only application
 truth remains in the retained database and is never rolled back or rewritten.
+
+The verified SES identity is the existing account-level `psd401.net` domain;
+the stack does not create or mutate an identity, hosted zone, DKIM record, MAIL
+FROM domain, credential, or recipient. The fixed source sender is
+`eoc-alerts@psd401.net`. The configuration set is
+`psd-eoc-transactional`, with `SendingEnabled=false`; the encrypted evidence
+topic is `psd-eoc-email-events`. The dark email worker role can consume only the
+exact `psd-eoc-email` queue and has no `ses:*`, secrets, SNS, or runtime
+deployment authority. No service or event source assumes that role.
 
 ## Required immutable release record
 
@@ -129,15 +142,19 @@ produce and retain a no-cloud-write artifact containing:
 - the exact phase-A command that preserves a live App Runner image/source while
   staging the candidate bootstrap image/source, the no-override Fargate
   `RunTask`/wait/log-read shape, and the phase-B promotion command;
-- the expected one-writer/one-instance topology and the absence of SES, SNS,
-  Expo, SMS, InformaCast, Google Groups, S3/media, scheduled actions, Lambda
-  invocation, queue-send, or recipient authority;
-- the consequences: AWS charges begin; synthetic application and audit data are
-  written; an approved staff identity can sign in only after OAuth is valid;
+- the expected one-writer/one-instance topology; retained email queue/DLQ;
+  disabled SES configuration set; encrypted SES event topic/key; exact
+  queue-only dark-worker policy; and the absence of SES send, provider
+  credential, executable worker, event-source, subscription, queue-send,
+  recipient, Expo, SMS, InformaCast, Google Groups, S3/media, scheduled-action,
+  or Lambda-invocation authority;
+- the consequences: AWS charges begin; staff-minimized application and audit
+  data are retained; an approved staff identity can sign in only after OAuth is valid;
   App Runner receives public HTTPS traffic at its provider URL and uses billed
   NAT egress for required public HTTPS; Aurora remains private and reachable
-  only by native TLS from the two approved security groups; no custom-domain
-  changes and no notification sends occur; and mobile apps remain blocked from
+  only by native TLS from the two approved security groups; the dark email
+  readiness resources incur charges but cannot send; no custom-domain changes
+  and no notification sends occur; and mobile apps remain blocked from
   an endpoint whose TLS/domain and sign-in have not been verified;
 - rollback and stop conditions, including the previous immutable image digest.
 
@@ -288,15 +305,15 @@ store, and notification actions are separate changes.
 
 - [ ] STS account, account alias, region, stack ID/status, and all resource
       physical IDs match the fixed boundary.
-- [ ] Every supported resource has `Environment=exploration-smoke` and
-      `DataClassification=synthetic-only`; none references `PsdEoc` production
-      resources.
+- [ ] Every supported resource has `Environment=live-pilot` and
+      `DataClassification=staff-minimized`; physical exploration-smoke names
+      are retained only for compatibility.
 - [ ] ECR reports the exact requested manifest digest; App Runner has automatic
       deployment disabled and references `repository-uri@sha256:...` exactly.
 - [ ] App Runner has exactly one minimum and one maximum instance.
 - [ ] App Runner uses the exact output VPC connector, native
       `DATABASE_DRIVER=postgres`, endpoint port 5432, pinned CA path, source
-      SHA, and bounded pool/timeouts (maximum 1, connect 10 seconds, idle 20
+      SHA, and bounded pool/timeouts (maximum 1, connect 10 seconds, idle 0
       seconds). Its database username/password and approved admin subject are
       JSON-key secret references, not ordinary runtime values. The sanitized
       artifact records names and network topology but no values.
@@ -316,7 +333,7 @@ store, and notification actions are separate changes.
       and `sqs:GetQueueAttributes` on the health queue. It has no database API
       action; native database authorization is the private network plus the
       generated least-privilege PostgreSQL login.
-- [ ] The runtime role has no `sqs:SendMessage`, SES/SNS/Expo/SMS, Google
+- [ ] The App Runner runtime role has no `sqs:SendMessage`, SES/SNS/Expo/SMS, Google
       Groups, media/S3, scheduler, event source, notification-provider
       credential, recipient, or Lambda-invoke authority. The separate
       deployment role's OIDC trust, protected-environment boundary, and
@@ -328,8 +345,22 @@ store, and notification actions are separate changes.
       App Runner retention simulation, and neighboring-resource negative
       simulation match the protected approval. The evidence does not claim the
       outer boundary applies transitively to CDK/CloudFormation roles.
-- [ ] The queue has no sender, event source, subscription, redrive producer, or
-      message; it is used only by the side-effect-free deep-health read.
+- [ ] The health queue has no sender, event source, subscription, redrive
+      producer, or message; it is used only by the side-effect-free deep-health
+      read.
+- [ ] The email queue and DLQ are encrypted, retained, and linked only by the
+      exact max-five-receive redrive policy. The dark email worker role has only
+      `ChangeMessageVisibility`, `DeleteMessage`, `GetQueueAttributes`,
+      `GetQueueUrl`, and `ReceiveMessage` on the source queue. It has no SES,
+      SNS, secret, pass-role, or wildcard action; no ECS service, Lambda, event
+      source, subscription, or queue producer invokes it.
+- [ ] SES identity readback proves existing domain `psd401.net` without a stack
+      identity or DNS mutation. The `psd-eoc-transactional` configuration set
+      reads back `SendingEnabled=false`; its complete event-type destination
+      targets retained encrypted topic `psd-eoc-email-events`. The evidence KMS
+      and SNS policies allow only the SES service from account `338414773271`
+      and that exact configuration-set ARN. No `ses:SendEmail` or
+      `ses:SendRawEmail` action exists in any live-pilot runtime/worker role.
 - [ ] Generated secrets are encrypted, referenced by ARN/JSON key, and never
       printed or passed as Fargate overrides.
 - [ ] Fargate readback proves the exact cluster, private subnets, security
@@ -341,10 +372,9 @@ store, and notification actions are separate changes.
       `psd_eoc_application` has membership only in migration-owned NOLOGIN role
       `psd_eoc_app` and is not superuser, createdb, createrole, replication, or
       bypassrls.
-- [ ] Seed/access readback contains exactly one approved staff access fixture
-      and four separate synthetic, non-routable roster recipients, identified
-      only by fingerprints in this file; no student or live-recipient data
-      exists and every notification channel is disabled.
+- [ ] Staff access readback is handled by its separately owned bootstrap/access
+      change. It contains no student data and is not reused as a notification
+      recipient list. Every notification channel remains disabled.
 - [ ] App Runner provider URL has valid HTTPS and `/api/health` succeeds against
       the exact deployed service through the certificate-verified native
       PostgreSQL path. Provider availability is not evidence of human sign-in
@@ -389,19 +419,28 @@ Never edit or delete an existing row. Add a superseding row when evidence
 changes; include the prior row's date/run in the new row. A failed or partial
 run remains recorded with `unknown` where readback did not complete.
 
-| Recorded at (UTC) | Run/change reference   | AWS platform            | Google OIDC             | Groups/roster | Messaging providers | DNS/custom domain | Evidence summary                                                                                                                                                                                                                                                                                                                                            |
-| ----------------- | ---------------------- | ----------------------- | ----------------------- | ------------- | ------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-08-15        | Issue #163 source only | `configured-unverified` | `configured-unverified` | `mocked`      | `mocked`            | `blocked`         | Deployable isolated configuration is under review. No AWS/GCP/DNS/provider write, resource readback, OAuth sign-in, TLS check, or live notification occurred.                                                                                                                                                                                               |
-| 2026-08-15        | Issue #178 source only | `configured-unverified` | `configured-unverified` | `mocked`      | `mocked`            | `blocked`         | Supersedes only the architecture description from issue #163: reviewed source removes the cluster HTTP path in favor of private native PostgreSQL, a VPC connector/NAT egress path, and an exact-digest Fargate bootstrap gate. No AWS/GCP/DNS/provider write, native session, resource readback, OAuth sign-in, TLS check, or live notification is proved. |
+| Recorded at (UTC) | Run/change reference   | AWS platform            | Google OIDC             | Groups/roster           | Messaging providers     | DNS/custom domain | Evidence summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------- | ---------------------- | ----------------------- | ----------------------- | ----------------------- | ----------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-15        | Issue #163 source only | `configured-unverified` | `configured-unverified` | `mocked`                | `mocked`                | `blocked`         | Deployable isolated configuration is under review. No AWS/GCP/DNS/provider write, resource readback, OAuth sign-in, TLS check, or live notification occurred.                                                                                                                                                                                                                                                                                                                                                    |
+| 2026-08-15        | Issue #178 source only | `configured-unverified` | `configured-unverified` | `mocked`                | `mocked`                | `blocked`         | Supersedes only the architecture description from issue #163: reviewed source removes the cluster HTTP path in favor of private native PostgreSQL, a VPC connector/NAT egress path, and an exact-digest Fargate bootstrap gate. No AWS/GCP/DNS/provider write, native session, resource readback, OAuth sign-in, TLS check, or live notification is proved.                                                                                                                                                      |
+| 2026-08-16        | Issue #204 source only | `configured-unverified` | `configured-unverified` | `configured-unverified` | `configured-unverified` | `blocked`         | Supersedes only the environment/email source description from issue #178: staff-minimized live-pilot tags and retained data safeguards replace synthetic-only lifecycle defaults. Read-only SES inventory proved production access and the existing verified `psd401.net` domain, while source defines a disabled canonical configuration set, encrypted event evidence, and a dark queue consumer with zero SES permission. No cloud/provider/recipient mutation, provider call, or notification send occurred. |
 
 ## Current blockers
 
-As of 2026-08-15, no workflow run or cloud readback has been attached. The
-protected environment, exact OIDC deployment role, exact Google OAuth client
-and secret ARN, normalized deploy-policy hash/boundary, reviewed CDK bootstrap
-role authority, exact direct ECS/pass-role/bootstrap-log grants, approved
-immutable identity fields, tested container digest, NAT-inclusive priced
-consequence preview, custom-domain work, and product-owner approval for the
-exact write all remain unproved here. Therefore the environment and Google OIDC
-are not `live-verified`, web/mobile sign-in and DNS remain blocked, and every
-messaging integration remains mocked with zero authorization for a live send.
+For issue #204, deployment and activation remain separate. The protected
+workflow owner must first integrate and preview the retained queue, log, KMS,
+SNS, and disabled SES resources without weakening its exact-digest/bootstrap/
+IAM readback. Before a later email activation, PSD EOC still needs a production
+durable SES send ledger, an executable worker and invocation verifier, exact
+least-privilege `ses:SendEmail` authority, delivery-evidence consumption and
+retention ownership, operational alarms, rollback, and a deployed readback.
+
+The first controlled email must be selected at action time and stored only in
+authorized application data, never source, issue text, workflow input, or
+artifacts. The authenticated human must see the exact consequence preview and
+confirm it in the app immediately before the send. A single authorized staff
+target, SES provider acceptance, and human receipt are three different facts;
+each remains `unknown` until separately proved. Expo push remains blocked on
+issue #40 credentials and physical-device evidence. SMS remains blocked by the
+account sandbox and missing verified destination, origination identity,
+registration, pool/sender ID, and protection configuration.
