@@ -170,6 +170,10 @@ DECLARE
 	deleted_total integer := 0;
 	table_name text;
 	graph_fingerprint text;
+	graph_variant text;
+	expected_graph_row_count integer;
+	expected_dependency_count integer;
+	expected_graph_fingerprint text;
 	audit_reference_count integer;
 	real_facility_count integer;
 	real_neighborhood_count integer;
@@ -210,27 +214,54 @@ BEGIN
 	END IF;
 
 	IF candidate_facility_count <> 2 OR EXISTS (
-		(SELECT "id", "code", "name", "active", "created_at"
+		(SELECT "id", "code", "name", "created_at"
 		 FROM public."facilities"
 		 WHERE "id" = ANY(synthetic_facility_ids)
 		    OR "code" IN ('SYN-NORTH', 'SYN-SOUTH'))
 		EXCEPT
 		(VALUES
-			('00000000-0000-4000-8000-000000000001'::uuid, 'SYN-NORTH'::varchar(32), 'Synthetic North Campus'::varchar(160), false, '2026-08-06 12:00:00+00'::timestamptz),
-			('00000000-0000-4000-8000-000000000002'::uuid, 'SYN-SOUTH'::varchar(32), 'Synthetic South Campus'::varchar(160), true, '2026-08-06 12:00:00+00'::timestamptz)
+			('00000000-0000-4000-8000-000000000001'::uuid, 'SYN-NORTH'::varchar(32), 'Synthetic North Campus'::varchar(160), '2026-08-06 12:00:00+00'::timestamptz),
+			('00000000-0000-4000-8000-000000000002'::uuid, 'SYN-SOUTH'::varchar(32), 'Synthetic South Campus'::varchar(160), '2026-08-06 12:00:00+00'::timestamptz)
 		)
 	) OR EXISTS (
 		(VALUES
-			('00000000-0000-4000-8000-000000000001'::uuid, 'SYN-NORTH'::varchar(32), 'Synthetic North Campus'::varchar(160), false, '2026-08-06 12:00:00+00'::timestamptz),
-			('00000000-0000-4000-8000-000000000002'::uuid, 'SYN-SOUTH'::varchar(32), 'Synthetic South Campus'::varchar(160), true, '2026-08-06 12:00:00+00'::timestamptz)
+			('00000000-0000-4000-8000-000000000001'::uuid, 'SYN-NORTH'::varchar(32), 'Synthetic North Campus'::varchar(160), '2026-08-06 12:00:00+00'::timestamptz),
+			('00000000-0000-4000-8000-000000000002'::uuid, 'SYN-SOUTH'::varchar(32), 'Synthetic South Campus'::varchar(160), '2026-08-06 12:00:00+00'::timestamptz)
 		)
 		EXCEPT
-		(SELECT "id", "code", "name", "active", "created_at"
+		(SELECT "id", "code", "name", "created_at"
 		 FROM public."facilities"
 		 WHERE "id" = ANY(synthetic_facility_ids)
 		    OR "code" IN ('SYN-NORTH', 'SYN-SOUTH'))
 	) THEN
-		RAISE EXCEPTION 'Canonical synthetic facility fingerprints do not match the reviewed live rows'
+		RAISE EXCEPTION 'Canonical synthetic facility identity fingerprints do not match the approved fixture'
+			USING ERRCODE = '55000';
+	END IF;
+
+	IF EXISTS (
+		SELECT 1 FROM public."facilities"
+		WHERE "id" = '00000000-0000-4000-8000-000000000001'::uuid AND "active"
+	) AND EXISTS (
+		SELECT 1 FROM public."facilities"
+		WHERE "id" = '00000000-0000-4000-8000-000000000002'::uuid AND "active"
+	) THEN
+		graph_variant := 'pristine-seed';
+		expected_graph_row_count := 53;
+		expected_dependency_count := 51;
+		expected_graph_fingerprint := '71112b7cdf186435d6a2430d1a69d876';
+	ELSIF EXISTS (
+		SELECT 1 FROM public."facilities"
+		WHERE "id" = '00000000-0000-4000-8000-000000000001'::uuid AND NOT "active"
+	) AND EXISTS (
+		SELECT 1 FROM public."facilities"
+		WHERE "id" = '00000000-0000-4000-8000-000000000002'::uuid AND "active"
+	) THEN
+		graph_variant := 'reviewed-live';
+		expected_graph_row_count := 57;
+		expected_dependency_count := 55;
+		expected_graph_fingerprint := 'eac73c9cbee04db4187c9b4c77b7922c';
+	ELSE
+		RAISE EXCEPTION 'Canonical synthetic facility active states do not match an approved purge shape'
 			USING ERRCODE = '55000';
 	END IF;
 
@@ -251,12 +282,12 @@ BEGIN
 		(SELECT count(*) FROM public."roster_recipient_group_sources" WHERE "roster_snapshot_id" = '00000000-0000-4000-8000-000000000041'::uuid AND "recipient_id" = ANY(synthetic_recipient_ids) AND "population" = 'synthetic' AND "group_source_id" = ANY(synthetic_group_ids) AND "group_source_kind" = 'synthetic') +
 		(SELECT count(*) FROM public."roster_endpoints" WHERE "roster_snapshot_id" = '00000000-0000-4000-8000-000000000041'::uuid AND "recipient_id" = ANY(synthetic_recipient_ids) AND "id" = ANY(synthetic_endpoint_ids) AND "population" = 'synthetic' AND "captured_at" = '2026-08-06 12:00:00+00'::timestamptz AND (("channel" = 'push' AND "token" LIKE 'synthetic-unroutable:%' AND "email" IS NULL AND "phone_number" IS NULL) OR ("channel" = 'email' AND "token" IS NULL AND "email" LIKE '%@example.invalid' AND "phone_number" IS NULL) OR ("channel" = 'sms' AND "token" IS NULL AND "email" IS NULL AND "phone_number" LIKE '+120255501__')))
 	INTO graph_row_count;
-	IF graph_row_count <> 57 THEN
-		RAISE EXCEPTION 'Canonical synthetic facility graph matched % of 57 reviewed rows', graph_row_count
+	IF graph_row_count <> expected_graph_row_count THEN
+		RAISE EXCEPTION 'Canonical synthetic facility % graph matched % of % approved rows', graph_variant, graph_row_count, expected_graph_row_count
 			USING ERRCODE = '55000';
 	END IF;
 
-	-- This digest covers every column of every one of the 57 reviewed rows.
+	-- This digest covers every column of every approved canonical row.
 	-- It makes the deletion fail closed if even an unroutable endpoint value,
 	-- recipient link, configuration timestamp, or target ordinal has changed.
 	SELECT pg_catalog.md5(pg_catalog.jsonb_build_object(
@@ -276,8 +307,8 @@ BEGIN
 		'recipient_groups', (SELECT pg_catalog.jsonb_agg(to_jsonb(row_value) ORDER BY "roster_snapshot_id", "recipient_id", "group_source_id") FROM public."roster_recipient_group_sources" AS row_value WHERE "roster_snapshot_id" = '00000000-0000-4000-8000-000000000041'::uuid),
 		'endpoints', (SELECT pg_catalog.jsonb_agg(to_jsonb(row_value) ORDER BY "roster_snapshot_id", "recipient_id", "id") FROM public."roster_endpoints" AS row_value WHERE "roster_snapshot_id" = '00000000-0000-4000-8000-000000000041'::uuid)
 	)::text) INTO graph_fingerprint;
-	IF graph_fingerprint <> 'eac73c9cbee04db4187c9b4c77b7922c' THEN
-		RAISE EXCEPTION 'Canonical synthetic facility graph fingerprint does not match the reviewed 57 live rows'
+	IF graph_fingerprint <> expected_graph_fingerprint THEN
+		RAISE EXCEPTION 'Canonical synthetic facility % graph fingerprint does not match the approved % rows', graph_variant, expected_graph_row_count
 			USING ERRCODE = '55000';
 	END IF;
 
@@ -297,7 +328,7 @@ BEGIN
 		(SELECT count(*) FROM public."roster_recipient_group_sources" WHERE "roster_snapshot_id" = '00000000-0000-4000-8000-000000000041'::uuid) +
 		(SELECT count(*) FROM public."roster_endpoints" WHERE "roster_snapshot_id" = '00000000-0000-4000-8000-000000000041'::uuid)
 	INTO dependency_count;
-	IF dependency_count <> 55 THEN
+	IF dependency_count <> expected_dependency_count THEN
 		RAISE EXCEPTION 'Canonical synthetic descendant graph contains extra or missing rows'
 			USING ERRCODE = '55000';
 	END IF;
@@ -351,13 +382,14 @@ BEGIN
 			USING ERRCODE = '55000';
 	END IF;
 
-	-- The only retained semantic references are the two reviewed audit rows and
-	-- one completed idempotency record. Full-row digests cover principal/action
-	-- JSON without embedding those values in the migration or its logs.
+	-- The reviewed-live variant retains its two exact audit rows and completed
+	-- idempotency record; the pristine variant requires none of those semantic
+	-- references. Full-row digests protect all other truth without embedding
+	-- principal/action JSON in the migration or its logs.
 	SELECT count(*)::integer INTO audit_reference_count
 	FROM public."security_audit_entries"
 	WHERE "facility_id" = ANY(synthetic_facility_ids);
-	IF audit_reference_count <> 2 OR (
+	IF graph_variant = 'reviewed-live' AND (audit_reference_count <> 2 OR (
 		SELECT count(*)
 		FROM public."security_audit_entries" AS audit_entry
 		WHERE (
@@ -386,12 +418,16 @@ BEGIN
 			(56, '8e7cd227e4b9b725834acdb718866e0156b47fbdd6184136c83eec7f4077b2da'),
 			(58, '8e91c4c142960f5149d6a5375c4dc7d1546d7fd94fa4325dc2535b2fab4393ff')
 		)
-	) <> 2 THEN
+	) <> 2) THEN
 		RAISE EXCEPTION 'Retained synthetic facility audit fingerprints do not match the read-only live review'
 			USING ERRCODE = '55000';
 	END IF;
+	IF graph_variant = 'pristine-seed' AND audit_reference_count <> 0 THEN
+		RAISE EXCEPTION 'Pristine canonical synthetic facility graph has unexpected retained audit references'
+			USING ERRCODE = '55000';
+	END IF;
 
-	IF (
+	IF graph_variant = 'reviewed-live' AND (
 		SELECT count(*)
 		FROM public."idempotency_records" AS idempotency_record
 		WHERE "id" = '81ec2daa-83e7-4ded-a914-b72bdda54e8e'::uuid
@@ -403,13 +439,20 @@ BEGIN
 		RAISE EXCEPTION 'Retained synthetic facility idempotency fingerprint does not match the read-only live review'
 			USING ERRCODE = '55000';
 	END IF;
+	IF graph_variant = 'pristine-seed' AND (
+		SELECT count(*) FROM public."idempotency_records"
+		WHERE "id" = '81ec2daa-83e7-4ded-a914-b72bdda54e8e'::uuid
+	) <> 0 THEN
+		RAISE EXCEPTION 'Pristine canonical synthetic facility graph has the reviewed live idempotency record'
+			USING ERRCODE = '55000';
+	END IF;
 
 	SELECT count(*)::integer,
 		pg_catalog.md5(coalesce(pg_catalog.jsonb_agg(to_jsonb(facility_row) ORDER BY "id")::text, 'null'))
 	INTO real_facility_count, real_facilities_digest_before
 	FROM public."facilities" AS facility_row
 	WHERE "id" <> ALL(synthetic_facility_ids);
-	IF real_facility_count <> 20 THEN
+	IF graph_variant = 'reviewed-live' AND real_facility_count <> 20 THEN
 		RAISE EXCEPTION 'Expected the 20 reviewed real facilities; found %', real_facility_count
 			USING ERRCODE = '55000';
 	END IF;
@@ -417,7 +460,7 @@ BEGIN
 	SELECT count(DISTINCT "id")::integer INTO real_neighborhood_count
 	FROM public."neighborhood_versions"
 	WHERE "id" <> '00000000-0000-4000-8000-000000000010'::uuid;
-	IF real_neighborhood_count <> 4 THEN
+	IF graph_variant = 'reviewed-live' AND real_neighborhood_count <> 4 THEN
 		RAISE EXCEPTION 'Expected the 4 reviewed real neighborhoods; found %', real_neighborhood_count
 			USING ERRCODE = '55000';
 	END IF;
@@ -486,8 +529,8 @@ BEGIN
 	DELETE FROM public."facilities" WHERE "id" = ANY(synthetic_facility_ids);
 	GET DIAGNOSTICS deleted_count = ROW_COUNT; deleted_total := deleted_total + deleted_count;
 
-	IF deleted_total <> 57 THEN
-		RAISE EXCEPTION 'Canonical synthetic facility purge deleted % rows instead of 57', deleted_total
+	IF deleted_total <> expected_graph_row_count THEN
+		RAISE EXCEPTION 'Canonical synthetic facility purge deleted % rows instead of %', deleted_total, expected_graph_row_count
 			USING ERRCODE = '55000';
 	END IF;
 
