@@ -406,7 +406,7 @@ jobs:
             printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=false' --parameters '$STACK_NAME:AppImageDigest=$ZERO_IMAGE_DIGEST' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>'"
             printf '%s\n' "docker buildx imagetools create --prefer-index=false --tag '$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server:source-$SOURCE_SHA' 'localhost:5000/psd-eoc/exploration-smoke@$IMAGE_DIGEST'"
             printf '%s\n' "aws rds-data execute-statement <exact stack database/admin ARNs> --sql 'Create psd_eoc_application only when absent; grant CURRENT_USER ADMIN TRUE, INHERIT FALSE, SET FALSE; read back exact role and membership'"
-            printf '%s\n' "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID AWS_REGION=$AWS_REGION DATABASE_NAME=<stack-output> DATABASE_RESOURCE_ARN=<stack-output> DATABASE_ADMIN_SECRET_ARN=<stack-output> DATABASE_APPLICATION_SECRET_ARN=<stack-output> APPROVED_GOOGLE_SUBJECT=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256> APPROVED_STAFF_EMAIL=<protected:$APPROVED_STAFF_EMAIL_SHA256> APPROVED_STAFF_DISPLAY_NAME=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256> SOURCE_SHA=$SOURCE_SHA bun packages/server/scripts/exploration-smoke/bootstrap.ts"
+            printf '%s\n' "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID AWS_REGION=$AWS_REGION DATABASE_NAME=<stack-output> DATABASE_RESOURCE_ARN=<stack-output> DATABASE_ADMIN_SECRET_ARN=<stack-output> DATABASE_APPLICATION_SECRET_ARN=<stack-output> APPROVED_GOOGLE_SUBJECT=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256> APPROVED_STAFF_EMAIL=<protected:$APPROVED_STAFF_EMAIL_SHA256> APPROVED_STAFF_DISPLAY_NAME=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256> SOURCE_SHA=$SOURCE_SHA bun artifacts/exploration-smoke-aurora-bootstrap.mjs # password-only ALTER plus existing migration, seed, access, role, and login verification"
             printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=true' --parameters '$STACK_NAME:AppImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>'"
             printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/application' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
             printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/service' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
@@ -1003,8 +1003,6 @@ jobs:
             }]
           ' artifacts/readback/application-login-administration.json > /dev/null
 
-          execute_sql 'ALTER ROLE "psd_eoc_application" WITH LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS' \
-            > artifacts/readback/application-login-authority-probe.json
           query_json "$role_state_sql" > artifacts/readback/application-login-ready.json
           jq -e '
             . == [{
@@ -1028,6 +1026,174 @@ jobs:
         run: |
           set -euo pipefail
           stack_file=artifacts/readback/stack-repository-phase.json
+          cat > artifacts/exploration-smoke-aurora-bootstrap.mjs <<'BUN'
+          import {
+            ExecuteStatementCommand,
+            RDSDataClient,
+          } from '@aws-sdk/client-rds-data';
+
+          import { createDatabaseClient } from '../packages/server/db/client.ts';
+          import { seedDatabase } from '../packages/server/db/seed.ts';
+          import { migrateDatabase } from '../packages/server/drizzle/migrate.ts';
+          import {
+            createDrizzleExplorationAccessFixtureStore,
+            createExplorationAccessFixture,
+            seedExplorationAccessFixture,
+          } from '../packages/server/scripts/exploration-smoke/access-fixture.ts';
+          import {
+            ROLE_MEMBERSHIP_QUERY,
+            ROLE_STATE_QUERY,
+            assertApplicationRoleState,
+            buildApplicationRoleStatements,
+            verifyApplicationLogin,
+          } from '../packages/server/scripts/exploration-smoke/application-role.ts';
+          import { getApplicationDatabaseSecret } from '../packages/server/scripts/exploration-smoke/application-secret.ts';
+          import { runExplorationBootstrap } from '../packages/server/scripts/exploration-smoke/bootstrap.ts';
+          import { readExplorationBootstrapConfig } from '../packages/server/scripts/exploration-smoke/config.ts';
+
+          const MAX_FORMATTED_RECORDS_BYTES = 64 * 1_024;
+
+          function formattedRows(output) {
+            const value = output.formattedRecords ?? '[]';
+            if (Buffer.byteLength(value, 'utf8') > MAX_FORMATTED_RECORDS_BYTES) {
+              throw new Error('The database verification response was too large.');
+            }
+            const rows = JSON.parse(value);
+            if (
+              !Array.isArray(rows) ||
+              rows.some(
+                (row) =>
+                  typeof row !== 'object' || row === null || Array.isArray(row),
+              )
+            ) {
+              throw new Error('The database verification response was invalid.');
+            }
+            return Object.freeze(
+              rows.map((row) => Object.freeze({ ...row })),
+            );
+          }
+
+          async function main() {
+            const config = readExplorationBootstrapConfig();
+            const adminConnection = createDatabaseClient({
+              driver: 'aws-data-api',
+              region: config.region,
+              database: config.databaseName,
+              resourceArn: config.databaseResourceArn,
+              secretArn: config.databaseAdminSecretArn,
+            });
+            if (adminConnection.driver !== 'aws-data-api') {
+              throw new Error('Exploration bootstrap requires the AWS Data API.');
+            }
+            const dataApi = new RDSDataClient({
+              maxAttempts: 3,
+              region: config.region,
+            });
+            const executor = Object.freeze({
+              async execute(secretArn, sql) {
+                return formattedRows(
+                  await dataApi.send(
+                    new ExecuteStatementCommand({
+                      continueAfterTimeout: false,
+                      database: config.databaseName,
+                      formatRecordsAs: 'JSON',
+                      includeResultMetadata: false,
+                      resourceArn: config.databaseResourceArn,
+                      secretArn,
+                      sql,
+                    }),
+                  ),
+                );
+              },
+            });
+            const accessStore = createDrizzleExplorationAccessFixtureStore(
+              adminConnection.db,
+            );
+            const fixture = createExplorationAccessFixture({
+              googleSubject: config.approvedGoogleSubject,
+              staffEmail: config.approvedStaffEmail,
+              staffDisplayName: config.approvedStaffDisplayName,
+            });
+
+            try {
+              const credentials = await dataApi.config.credentials();
+              if (credentials.sessionToken === undefined) {
+                throw new Error('Bootstrap requires temporary AWS credentials.');
+              }
+              const applicationSecret = await getApplicationDatabaseSecret({
+                credentials: Object.freeze({
+                  accessKeyId: credentials.accessKeyId,
+                  secretAccessKey: credentials.secretAccessKey,
+                  sessionToken: credentials.sessionToken,
+                  ...(credentials.expiration === undefined
+                    ? {}
+                    : { expiration: credentials.expiration }),
+                }),
+                region: config.region,
+                secretArn: config.databaseApplicationSecretArn,
+              });
+              const summary = await runExplorationBootstrap(config, {
+                async readApplicationSecret() {
+                  return applicationSecret;
+                },
+                async migrate() {
+                  await migrateDatabase(adminConnection);
+                },
+                async configureApplicationRole(_config, password) {
+                  if (password.length === 0 || /[\0\r\n]/u.test(password)) {
+                    throw new Error('The application database password was invalid.');
+                  }
+                  const passwordLiteral = `'${password.replaceAll("'", "''")}'`;
+                  await executor.execute(
+                    config.databaseAdminSecretArn,
+                    `ALTER ROLE "psd_eoc_application" WITH PASSWORD ${passwordLiteral}`,
+                  );
+                  for (const statement of buildApplicationRoleStatements(
+                    password,
+                  ).slice(2)) {
+                    await executor.execute(
+                      config.databaseAdminSecretArn,
+                      statement,
+                    );
+                  }
+                  return assertApplicationRoleState(
+                    await executor.execute(
+                      config.databaseAdminSecretArn,
+                      ROLE_STATE_QUERY,
+                    ),
+                    await executor.execute(
+                      config.databaseAdminSecretArn,
+                      ROLE_MEMBERSHIP_QUERY,
+                    ),
+                  );
+                },
+                async seedSynthetic() {
+                  return seedDatabase(adminConnection.db);
+                },
+                async seedApprovedAccess() {
+                  return seedExplorationAccessFixture({ fixture, store: accessStore });
+                },
+                async verifyApplicationLogin() {
+                  await verifyApplicationLogin({
+                    applicationSecretArn: config.databaseApplicationSecretArn,
+                    executor,
+                  });
+                },
+              });
+              console.info(JSON.stringify(summary));
+            } finally {
+              dataApi.destroy();
+              await adminConnection.close();
+            }
+          }
+
+          try {
+            await main();
+          } catch {
+            console.error('Exploration-smoke database bootstrap failed closed.');
+            process.exitCode = 1;
+          }
+          BUN
           run_bootstrap() {
             AWS_ACCOUNT_ID="$AWS_ACCOUNT_ID" \
             AWS_REGION="$AWS_REGION" \
@@ -1039,7 +1205,7 @@ jobs:
             APPROVED_STAFF_EMAIL="$APPROVED_STAFF_EMAIL" \
             APPROVED_STAFF_DISPLAY_NAME="$APPROVED_STAFF_DISPLAY_NAME" \
             SOURCE_SHA="$SOURCE_SHA" \
-            bun packages/server/scripts/exploration-smoke/bootstrap.ts
+            bun artifacts/exploration-smoke-aurora-bootstrap.mjs
           }
           run_bootstrap > artifacts/readback/bootstrap-summary-first.json
           run_bootstrap > artifacts/readback/bootstrap-summary-second.json
