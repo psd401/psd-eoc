@@ -145,9 +145,12 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(serviceStep).toBeGreaterThan(bootstrapStep);
     expect(workflow).toContain('phase_app_digest=$current_digest');
     expect(workflow).toContain(
+      'test "$current_source_sha" = "$current_runtime_source_sha"',
+    );
+    expect(workflow).toContain(
       'phase_runtime_idle_timeout=$current_runtime_idle_timeout',
     );
-    expect(workflow).toContain('phase_source_sha=$current_source_sha');
+    expect(workflow).toContain('phase_source_sha=$current_runtime_source_sha');
     expect(workflow).toContain(
       '--parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST"',
     );

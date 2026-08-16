@@ -858,19 +858,22 @@ jobs:
               [[ "$current_service_arn" =~ ^arn:aws:apprunner:us-west-2:338414773271:service/psd-eoc-exploration-smoke/[A-Za-z0-9]{32}$ ]]
               aws apprunner describe-service \
                 --service-arn "$current_service_arn" \
-                --query 'Service.{ServiceArn:ServiceArn,ServiceId:ServiceId,ServiceName:ServiceName,Status:Status,ImageIdentifier:SourceConfiguration.ImageRepository.ImageIdentifier,DatabaseIdleTimeoutSeconds:SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables.DATABASE_IDLE_TIMEOUT_SECONDS}' \
+                --query 'Service.{ServiceArn:ServiceArn,ServiceId:ServiceId,ServiceName:ServiceName,Status:Status,ImageIdentifier:SourceConfiguration.ImageRepository.ImageIdentifier,SourceSha:SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables.SOURCE_SHA,DatabaseIdleTimeoutSeconds:SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables.DATABASE_IDLE_TIMEOUT_SECONDS}' \
                 > ../artifacts/readback/app-runner-before.json
               test "$(jq -r .ServiceArn ../artifacts/readback/app-runner-before.json)" = "$current_service_arn"
               test "$(jq -r .ServiceName ../artifacts/readback/app-runner-before.json)" = "psd-eoc-exploration-smoke"
               test "$(jq -r .Status ../artifacts/readback/app-runner-before.json)" = "RUNNING"
               test "$(jq -r .ImageIdentifier ../artifacts/readback/app-runner-before.json)" = "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server@$current_digest"
+              current_runtime_source_sha=$(jq -er '.SourceSha' ../artifacts/readback/app-runner-before.json)
+              [[ "$current_runtime_source_sha" =~ ^[0-9a-f]{40}$ ]]
+              test "$current_source_sha" = "$current_runtime_source_sha"
               current_runtime_idle_timeout=$(jq -er '.DatabaseIdleTimeoutSeconds' ../artifacts/readback/app-runner-before.json)
               [[ "$current_runtime_idle_timeout" =~ ^[0-9]+$ ]]
               (( 10#$current_runtime_idle_timeout <= 600 ))
               phase_provision=true
               phase_app_digest=$current_digest
               phase_runtime_idle_timeout=$current_runtime_idle_timeout
-              phase_source_sha=$current_source_sha
+              phase_source_sha=$current_runtime_source_sha
             else
               test "$current_provision" = "false"
               test "$current_digest" = "$ZERO_IMAGE_DIGEST"
