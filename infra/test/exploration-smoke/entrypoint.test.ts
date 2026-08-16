@@ -11,9 +11,17 @@ const workflowUrl = new URL(
   '../../../.github/workflows/deploy-exploration-smoke.yml',
   import.meta.url,
 );
+const ciWorkflowUrl = new URL(
+  '../../../.github/workflows/ci.yml',
+  import.meta.url,
+);
 
 async function readWorkflow(): Promise<string> {
   return Bun.file(workflowUrl).text();
+}
+
+async function readCiWorkflow(): Promise<string> {
+  return Bun.file(ciWorkflowUrl).text();
 }
 
 describe('isolated CDK entrypoint configuration', () => {
@@ -54,6 +62,61 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(deployJobHeader).toBeDefined();
     expect(deployJobHeader).not.toContain('DATABASE_URL:');
     expect(deployJobHeader).not.toContain('TEST_DATABASE_URL:');
+  });
+
+  it('keeps the fast PR gate exact, focused, and full everywhere else', async () => {
+    const workflow = await readCiWorkflow();
+
+    expect(workflow).toContain(
+      'if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]',
+    );
+    expect(workflow).toContain('.github/workflows/ci.yml | \\');
+    expect(workflow).toContain(
+      '.github/workflows/deploy-exploration-smoke.yml | \\',
+    );
+    expect(workflow).toContain(
+      'infra/test/exploration-smoke/entrypoint.test.ts) ;;',
+    );
+    expect(workflow).toContain('mode=full');
+    expect(workflow).toContain('mode=exploration-smoke-workflow');
+    expect(workflow).toContain("if: steps.gate.outputs.mode == 'full'");
+    expect(workflow).toContain('run: bun run check');
+    expect(workflow).toContain(
+      "if: steps.gate.outputs.mode == 'exploration-smoke-workflow'",
+    );
+    expect(workflow).toContain('bun run format:check');
+    expect(workflow).toContain('bun run lint');
+    expect(workflow).toContain('bun run typecheck');
+    expect(workflow).toContain(
+      'bun test infra/test/exploration-smoke/entrypoint.test.ts',
+    );
+    expect(workflow).toContain(
+      'rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9',
+    );
+  });
+
+  it('allows only the explicit synthetic deployment bypass and binds it to readback', async () => {
+    const workflow = await readWorkflow();
+
+    expect(workflow).toContain('DEPLOY SYNTHETIC EXPLORATION SMOKE');
+    expect(workflow).toContain(
+      'DEPLOY SYNTHETIC EXPLORATION SMOKE WITHOUT FULL CI',
+    );
+    expect(workflow).toContain('REPOSITORY_GATE_MODE=full');
+    expect(workflow).toContain('REPOSITORY_GATE_MODE=synthetic-owner-bypass');
+    expect(workflow).toContain("if: env.REPOSITORY_GATE_MODE == 'full'");
+    expect(workflow).toContain(
+      "if: env.REPOSITORY_GATE_MODE == 'synthetic-owner-bypass'",
+    );
+    expect(workflow).toContain(
+      'EXPLICIT PRODUCT-OWNER BYPASS FOR SYNTHETIC EXPLORATION',
+    );
+    expect(workflow).toContain(
+      'grep -Fx -- "- Repository gate: $REPOSITORY_GATE_RECORD" artifacts/consequence-preview.md',
+    );
+    expect(workflow).toContain(
+      'Focused smoke tests, CDK synth, container smoke, immutable preview, protected approval, and AWS readback still run.',
+    );
   });
 
   it('keeps workflow publication, bootstrap order, and readback redaction aligned', async () => {
