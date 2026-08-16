@@ -225,13 +225,42 @@ function noStore(response: NextResponse): NextResponse {
   return response;
 }
 
+/**
+ * App Runner forwards the public request to the Next listener on localhost.
+ * Keep the provider-registered callback origin/path authoritative and carry
+ * across only the query that Google sent to the listener.
+ */
+function canonicalizeGoogleOidcCallbackUrl(
+  configuredRedirectUri: string,
+  runtimeRequestUrl: string,
+): URL {
+  const configured = new URL(configuredRedirectUri);
+  const runtime = new URL(runtimeRequestUrl);
+  configured.search = runtime.search;
+  return configured;
+}
+
+function createConfiguredApplicationUrl(
+  configuredRedirectUri: string,
+  destination: string,
+): URL {
+  const applicationOrigin = new URL(configuredRedirectUri).origin;
+  const resolved = new URL(destination, `${applicationOrigin}/`);
+  if (resolved.origin !== applicationOrigin) {
+    throw new Error(
+      'The authentication redirect must stay on the application origin.',
+    );
+  }
+  return resolved;
+}
+
 function deniedResponse(
-  request: Request,
+  redirectBaseUrl: string,
   reason: 'access' | 'callback' | 'configuration',
   clearCookieHeader?: string,
 ): NextResponse {
   const response = NextResponse.redirect(
-    new URL(`/denied?reason=${reason}`, request.url),
+    createConfiguredApplicationUrl(redirectBaseUrl, `/denied?reason=${reason}`),
     303,
   );
   if (clearCookieHeader !== undefined) {
@@ -274,17 +303,24 @@ function buildMembershipMember(
  */
 export async function GET(request: Request): Promise<NextResponse> {
   let configuration: ReturnType<typeof readGoogleOidcConfiguration>;
+  let callbackUrl: URL;
   let mobileRelayUrl: string | null;
+  let redirectBaseUrl = request.url;
   try {
     configuration = readGoogleOidcConfiguration();
+    redirectBaseUrl = configuration.redirectUri;
+    callbackUrl = canonicalizeGoogleOidcCallbackUrl(
+      configuration.redirectUri,
+      request.url,
+    );
     mobileRelayUrl = createGoogleMobileOidcCallbackRelayUrl(
       configuration,
-      request.url,
+      callbackUrl,
     );
   } catch (error) {
     return error instanceof GoogleOidcCallbackError
-      ? deniedResponse(request, 'callback', error.clearCookieHeader)
-      : deniedResponse(request, 'configuration');
+      ? deniedResponse(redirectBaseUrl, 'callback', error.clearCookieHeader)
+      : deniedResponse(redirectBaseUrl, 'configuration');
   }
   if (mobileRelayUrl !== null) {
     const response = new NextResponse(null, {
@@ -300,7 +336,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   try {
     const callback = await completeGoogleOidcCallback(configuration, {
       method: request.method,
-      callbackUrl: request.url,
+      callbackUrl,
       cookieHeader: request.headers.get('cookie'),
     });
     clearCookieHeader = callback.clearCookieHeader;
@@ -329,7 +365,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
     if (!access.granted) {
       return deniedResponse(
-        request,
+        configuration.redirectUri,
         denialPageReason(access.reasonCode),
         clearCookieHeader,
       );
@@ -390,7 +426,10 @@ export async function GET(request: Request): Promise<NextResponse> {
 
     const returnTo = readReturnToCookie(request.headers.get('cookie'));
     const response = NextResponse.redirect(
-      new URL(returnTo.destination, request.url),
+      createConfiguredApplicationUrl(
+        configuration.redirectUri,
+        returnTo.destination,
+      ),
       303,
     );
     response.cookies.set(sessionCookie);
@@ -420,13 +459,17 @@ export async function GET(request: Request): Promise<NextResponse> {
           });
         } catch {
           return deniedResponse(
-            request,
+            configuration.redirectUri,
             'configuration',
             error.clearCookieHeader,
           );
         }
       }
-      return deniedResponse(request, 'callback', error.clearCookieHeader);
+      return deniedResponse(
+        configuration.redirectUri,
+        'callback',
+        error.clearCookieHeader,
+      );
     }
     if (postGateAuditContext !== undefined && runtime !== undefined) {
       const reasonCode =
@@ -444,17 +487,25 @@ export async function GET(request: Request): Promise<NextResponse> {
           source: 'web',
         });
       } catch {
-        return deniedResponse(request, 'configuration', clearCookieHeader);
+        return deniedResponse(
+          configuration.redirectUri,
+          'configuration',
+          clearCookieHeader,
+        );
       }
       return deniedResponse(
-        request,
+        configuration.redirectUri,
         error instanceof WebSessionIssuanceError
           ? SESSION_DENIAL_PAGE_REASONS[error.code]
           : 'configuration',
         clearCookieHeader,
       );
     }
-    return deniedResponse(request, 'configuration', clearCookieHeader);
+    return deniedResponse(
+      configuration.redirectUri,
+      'configuration',
+      clearCookieHeader,
+    );
   } finally {
     await runtime?.close();
   }

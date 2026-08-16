@@ -45,6 +45,7 @@ import {
   WEB_RETURN_TO_COOKIE_MAX_AGE_SECONDS,
   WEB_RETURN_TO_COOKIE_NAME,
 } from './auth/return-to';
+import { GET as completeGoogleOidcSignIn } from './auth/callback/route';
 
 const GOOGLE_ISSUER = 'https://accounts.google.com';
 const CLIENT_ID = 'synthetic-unit.apps.googleusercontent.com';
@@ -71,6 +72,74 @@ test('auth callback uses the shared fail-closed database configuration', async (
   expect(source).not.toContain('@aws-sdk/client-rds-data');
   expect(source).not.toContain('drizzle-orm/aws-data-api/pg');
   expect(source).not.toContain("from 'postgres'");
+});
+
+test('auth callback keeps App Runner listener URLs off public redirects', async () => {
+  const names = [
+    'NODE_ENV',
+    'GOOGLE_OAUTH_CONFIG',
+    'GOOGLE_OIDC_COOKIE_SECRET',
+    'GOOGLE_OIDC_CLIENT_ID',
+    'GOOGLE_OIDC_CLIENT_SECRET',
+    'GOOGLE_OIDC_REDIRECT_URI',
+    'GOOGLE_OIDC_AUTHORIZATION_ENDPOINT',
+    'GOOGLE_OIDC_TOKEN_ENDPOINT',
+    'GOOGLE_OIDC_JWKS_URI',
+    'GOOGLE_OIDC_ISSUER',
+    'GOOGLE_OIDC_APPLICATION_ORIGIN',
+    'GOOGLE_OIDC_ORIGIN',
+    'GOOGLE_OIDC_HOSTED_DOMAIN',
+    'GOOGLE_OIDC_DOMAIN',
+  ] as const;
+  const original = new Map(names.map((name) => [name, process.env[name]]));
+
+  try {
+    for (const name of names) {
+      Reflect.deleteProperty(process.env, name);
+    }
+    Reflect.set(process.env, 'NODE_ENV', 'production');
+    Reflect.set(
+      process.env,
+      'GOOGLE_OAUTH_CONFIG',
+      JSON.stringify({
+        clientId: PRODUCTION_WEB_CLIENT_ID,
+        clientSecret: PRODUCTION_CLIENT_SECRET,
+        iosBundleId: 'net.psd401.eoc',
+        iosClientId: PRODUCTION_IOS_CLIENT_ID,
+        webClientId: PRODUCTION_WEB_CLIENT_ID,
+      }),
+    );
+    Reflect.set(process.env, 'GOOGLE_OIDC_COOKIE_SECRET', COOKIE_SECRET);
+
+    const state = `m1.${'a'.repeat(43)}`;
+    const mobileResponse = await completeGoogleOidcSignIn(
+      new Request(
+        `https://localhost:3000/auth/callback?error=access_denied&state=${state}`,
+      ),
+    );
+    expect(mobileResponse.status).toBe(303);
+    expect(mobileResponse.headers.get('location')).toBe(
+      `psdeoc://auth/callback?state=${state}&error=access_denied`,
+    );
+
+    const webResponse = await completeGoogleOidcSignIn(
+      new Request(
+        'https://localhost:3000/auth/callback?code=provider-code&state=server-state',
+      ),
+    );
+    expect(webResponse.status).toBe(303);
+    expect(webResponse.headers.get('location')).toBe(
+      'https://eoc.psd401.net/denied?reason=callback',
+    );
+  } finally {
+    for (const [name, value] of original) {
+      if (value === undefined) {
+        Reflect.deleteProperty(process.env, name);
+      } else {
+        Reflect.set(process.env, name, value);
+      }
+    }
+  }
 });
 
 type ClaimVariant =
