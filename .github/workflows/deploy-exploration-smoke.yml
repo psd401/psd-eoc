@@ -1001,8 +1001,8 @@ jobs:
           [[ "$bootstrap_task_definition_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-native-bootstrap:[1-9][0-9]*$ ]]
           [[ "$bootstrap_security_group_id" =~ ^sg-[0-9a-f]+$ ]]
           test "$bootstrap_log_group_name" = "/psd-eoc/exploration-smoke/bootstrap"
-          [[ "$bootstrap_execution_role_arn" =~ ^arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]*exploration-smoke[A-Za-z0-9+=,.@_/-]*$ ]]
-          [[ "$bootstrap_task_role_arn" =~ ^arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]*exploration-smoke[A-Za-z0-9+=,.@_/-]*$ ]]
+          [[ "$bootstrap_execution_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-BootstrapTaskExecutionRole1A-[A-Za-z0-9]+$ ]]
+          [[ "$bootstrap_task_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-BootstrapTaskRole8B52C495-[A-Za-z0-9]+$ ]]
           test "$bootstrap_execution_role_arn" != "$bootstrap_task_role_arn"
           [[ "$app_runner_vpc_connector_arn" =~ ^arn:aws:apprunner:us-west-2:338414773271:vpcconnector/psd-eoc-exploration-smoke-native/[1-9][0-9]*/[A-Za-z0-9]+$ ]]
           [[ "$approved_identity_secret_arn" =~ ^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/exploration-smoke/bootstrap/approved-identity-[A-Za-z0-9]{6}$ ]]
