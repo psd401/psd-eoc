@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { describe, expect, test } from 'bun:test';
 
-import type { SeedSummary } from '../../db/seed';
+import type { ReferenceSeedSummary } from '../../db/seed';
 import {
   assertExplorationAccessSnapshotCurrent,
   assertExplorationAccessFixtureEvidence,
@@ -25,7 +25,11 @@ import {
   getApplicationDatabaseSecret,
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
-import { runExplorationBootstrap } from './bootstrap';
+import {
+  runExplorationBootstrap,
+  verifyCanonicalSyntheticRemoval,
+  type CanonicalSyntheticRemovalSummary,
+} from './bootstrap';
 import {
   EXPLORATION_AWS_ACCOUNT_ID,
   EXPLORATION_AWS_REGION,
@@ -60,17 +64,7 @@ const SECOND_ACCESS_SNAPSHOT = Object.freeze({
   capturedAt: new Date('2026-08-16T18:00:00.000Z'),
 });
 
-const syntheticSeedSummary: SeedSummary = Object.freeze({
-  facilities: 2,
-  neighborhoods: 1,
-  neighborhoodFacilities: 2,
-  audienceConfigurations: 2,
-  audienceTargets: 6,
-  groupSources: 3,
-  rosterSourceConfigurations: 1,
-  rosterSnapshots: 1,
-  rosterRecipients: 4,
-  rosterEndpoints: 12,
+const referenceSeedSummary: ReferenceSeedSummary = Object.freeze({
   eventTypes: 8,
   eventTypeVersions: 8,
   eventTypeTemplates: 72,
@@ -79,6 +73,33 @@ const syntheticSeedSummary: SeedSummary = Object.freeze({
   events: 0,
   outboxMessages: 0,
 });
+
+const canonicalSyntheticRemovalSummary: CanonicalSyntheticRemovalSummary =
+  Object.freeze({
+    operationalRows: Object.freeze({
+      facilities: 0,
+      neighborhoodVersions: 0,
+      neighborhoodFacilities: 0,
+      groupSources: 0,
+      audienceConfigurations: 0,
+      audienceTargets: 0,
+      rosterSourceConfigurations: 0,
+      rosterSourceConfigurationFacilities: 0,
+      rosterSourceConfigurationGroups: 0,
+      rosterSnapshots: 0,
+      rosterSnapshotFacilities: 0,
+      rosterSnapshotSources: 0,
+      rosterRecipients: 0,
+      rosterRecipientGroupSources: 0,
+      rosterEndpoints: 0,
+      total: 0,
+    }),
+    retainedTruth: Object.freeze({
+      facilityAnchors: 2,
+      securityAuditEntries: 2,
+      idempotencyRecords: 1,
+    }),
+  });
 
 function validConfigEnvironment(): Record<string, string> {
   return {
@@ -547,6 +568,50 @@ describe('approved access fixture', () => {
 });
 
 describe('bootstrap coordinator', () => {
+  test('requires exact zero operational fixture rows and retained truth', async () => {
+    const exactReadback = {
+      ...canonicalSyntheticRemovalSummary.operationalRows,
+      facilityAnchors: 2,
+      securityAuditEntries: 2,
+      reviewedSecurityAuditEntries: 2,
+      idempotencyRecords: 1,
+    };
+    let statement = '';
+    expect(
+      await verifyCanonicalSyntheticRemoval({
+        executor: {
+          async execute(sqlStatement) {
+            statement = sqlStatement;
+            return [exactReadback];
+          },
+        },
+      }),
+    ).toEqual(canonicalSyntheticRemovalSummary);
+    expect(statement).toContain('SYN-NORTH');
+    expect(statement).toContain('Synthetic Twin Campuses');
+    expect(statement).toContain(
+      '8e7cd227e4b9b725834acdb718866e0156b47fbdd6184136c83eec7f4077b2da',
+    );
+    expect(statement).toContain('81ec2daa-83e7-4ded-a914-b72bdda54e8e');
+
+    for (const invalidReadback of [
+      { ...exactReadback, facilities: 1 },
+      { ...exactReadback, reviewedSecurityAuditEntries: 1 },
+      { ...exactReadback, facilityAnchors: 1 },
+      { ...exactReadback, idempotencyRecords: 0 },
+    ]) {
+      await expect(
+        verifyCanonicalSyntheticRemoval({
+          executor: {
+            async execute() {
+              return [invalidReadback];
+            },
+          },
+        }),
+      ).rejects.toThrow('Canonical synthetic removal readback failed.');
+    }
+  });
+
   test('runs native TLS, migrations, and fixtures twice under one lock', async () => {
     const config = readExplorationBootstrapConfig(validConfigEnvironment());
     const calls: string[] = [];
@@ -572,9 +637,9 @@ describe('bootstrap coordinator', () => {
           privilegedFlags: false,
         } as const;
       },
-      async seedSynthetic() {
-        calls.push('seed-synthetic');
-        return syntheticSeedSummary;
+      async seedReference() {
+        calls.push('seed-reference');
+        return referenceSeedSummary;
       },
       async seedApprovedAccess() {
         calls.push('seed-approved-access');
@@ -586,6 +651,10 @@ describe('bootstrap coordinator', () => {
           notificationChannelsEnabled: 0,
           matchingRosterRecipients: 0,
         } as const;
+      },
+      async verifyCanonicalSyntheticRemoval() {
+        calls.push('verify-canonical-synthetic-removal');
+        return canonicalSyntheticRemovalSummary;
       },
       async verifyApplicationLogin(): Promise<void> {
         calls.push('verify-application-login');
@@ -600,8 +669,9 @@ describe('bootstrap coordinator', () => {
       'verify-admin-tls',
       'migrate-admin',
       'configure-application-role',
-      'seed-synthetic',
+      'seed-reference',
       'seed-approved-access',
+      'verify-canonical-synthetic-removal',
       'verify-application-login',
       'verify-application-tls',
     ];
@@ -620,6 +690,10 @@ describe('bootstrap coordinator', () => {
       },
       idempotence: { runs: 2, equivalent: true },
     });
+    expect(summary.referenceSeed).toEqual(referenceSeedSummary);
+    expect(summary.canonicalSyntheticRemoval).toEqual(
+      canonicalSyntheticRemovalSummary,
+    );
     expect(summary.integrations).toEqual({
       googleOidc: 'configured-unverified',
       googleGroups: 'mocked',
@@ -646,10 +720,13 @@ describe('bootstrap coordinator', () => {
       async configureApplicationRole() {
         throw new Error('unreachable');
       },
-      async seedSynthetic() {
+      async seedReference() {
         throw new Error('unreachable');
       },
       async seedApprovedAccess() {
+        throw new Error('unreachable');
+      },
+      async verifyCanonicalSyntheticRemoval() {
         throw new Error('unreachable');
       },
       async verifyApplicationLogin(): Promise<void> {
