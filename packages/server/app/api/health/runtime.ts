@@ -625,7 +625,13 @@ export function createRuntimeDeepHealthDependencies(
         const pending = connection.nativeClient.unsafe<
           NativeDatabaseHealthResult[]
         >(NATIVE_DATABASE_HEALTH_SQL);
-        const cancel = () => pending.cancel();
+        const cancel = () => {
+          try {
+            void Promise.resolve(pending.cancel()).catch(() => undefined);
+          } catch {
+            // Cancellation is best-effort; connection teardown remains bounded.
+          }
+        };
         signal.addEventListener('abort', cancel, { once: true });
         if (signal.aborted) cancel();
         let rows: readonly NativeDatabaseHealthResult[];
