@@ -1,6 +1,10 @@
 import { IdempotencyKeySchema } from '@psd-eoc/contracts';
 import { ZodError } from 'zod';
 
+import {
+  applicationUrlForRequest,
+  type ApplicationOriginEnvironment,
+} from '../../../lib/auth/application-origin';
 import { authenticateSessionRequest } from '../../../lib/auth/middleware';
 import {
   SessionAccessError,
@@ -247,10 +251,11 @@ export function adminFormErrorResponse(
 
 export function adminSuccessRedirect(
   request: Request,
-  path: '/access' | '/facilities' | '/integrations',
+  path: '/access' | '/emergency' | '/facilities' | '/integrations',
   status: string,
+  environment: ApplicationOriginEnvironment = process.env,
 ): Response {
-  const url = new URL(path, request.url);
+  const url = applicationUrlForRequest(request.url, path, environment);
   url.searchParams.set('status', status);
   return Response.redirect(url, 303);
 }

@@ -1,5 +1,6 @@
 import {
   AdminFormError,
+  adminSuccessRedirect,
   authenticateAdminMutation,
   parseIdempotencyKey,
   readAdminForm,
@@ -52,9 +53,11 @@ export async function POST(request: Request): Promise<Response> {
       command,
       metadata: { idempotencyKey: parseIdempotencyKey(form) },
     });
-    const redirect = new URL('/emergency', request.url);
-    redirect.searchParams.set('status', EMERGENCY_CONTROL_RESOLVED_STATUS);
-    return Response.redirect(redirect, 303);
+    return adminSuccessRedirect(
+      request,
+      '/emergency',
+      EMERGENCY_CONTROL_RESOLVED_STATUS,
+    );
   } catch (error) {
     return emergencyFormErrorResponse(error);
   }
