@@ -86,7 +86,15 @@ describe('database client configuration', () => {
     const connection = createDatabaseClient(
       readDatabaseConfig(COMPONENT_POSTGRES_ENVIRONMENT),
     );
-    expect(connection.driver).toBe('postgres');
+    if (
+      connection.driver !== 'postgres' ||
+      connection.nativeClient === undefined
+    ) {
+      throw new Error('Component PostgreSQL must expose its native client.');
+    }
+    expect(connection.nativeClient.options.idle_timeout).toBe(0);
+    expect(connection.nativeClient.options.max_lifetime).toBe(0);
+    expect(connection.nativeClient.options.max).toBe(1);
     await connection.close();
 
     for (const environment of [
