@@ -112,7 +112,7 @@ let partialMigrationsDirectory: string | undefined;
 
 function openPostgresConnection(
   url: string,
-  maxConnections = 2,
+  maxConnections = 1,
 ): PostgresDatabaseConnection {
   const connection = createDatabaseClient({
     driver: 'postgres',
@@ -502,6 +502,25 @@ function postgresErrorFacts(
   return facts;
 }
 
+async function migrateReviewedFixture(
+  connection: PostgresDatabaseConnection,
+): Promise<void> {
+  try {
+    await migrateDatabase(connection);
+  } catch (error) {
+    const codes = postgresErrorFacts(error, 'code');
+    const messages = postgresErrorFacts(error, 'message');
+    const code = codes.at(-1) ?? 'unknown';
+    const message = (messages.at(-1) ?? 'unknown database rejection').slice(
+      0,
+      1_024,
+    );
+    throw new Error(
+      `Issue #199 reviewed migration failed with PostgreSQL ${code}: ${message}`,
+    );
+  }
+}
+
 async function expectPostgresRejection(
   operation: () => Promise<unknown>,
   expectedMessage: RegExp,
@@ -559,6 +578,7 @@ async function withDisposableDatabase(
       databaseCreated = true;
       const opened = openPostgresConnection(context.databaseUrl);
       connection = opened;
+      await opened.db.execute(sql.raw('set client_min_messages = warning'));
       await operation(opened);
     },
     cleanup: () =>
@@ -611,7 +631,7 @@ describeWithDatabase('canonical synthetic facility physical removal', () => {
   test('deletes exactly 57 operational rows while preserving retained truth', async () => {
     await withReviewedDatabase(async (connection) => {
       const before = await retainedTruthSnapshot(connection.db);
-      await migrateDatabase(connection);
+      await migrateReviewedFixture(connection);
       await seedReferenceData(connection.db);
       await seedReferenceData(connection.db);
 
