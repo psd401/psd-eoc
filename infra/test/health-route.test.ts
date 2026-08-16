@@ -68,7 +68,7 @@ function runtimeEnvironment(): Readonly<Record<string, string>> {
     DATABASE_SSL_ROOT_CERT,
     DATABASE_MAX_CONNECTIONS: '1',
     DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
-    DATABASE_IDLE_TIMEOUT_SECONDS: '20',
+    DATABASE_IDLE_TIMEOUT_SECONDS: '0',
     RUNTIME_SECRET_ARN,
     FANOUT_QUEUE_URL: QUEUE_URL,
     GOOGLE_OAUTH_CONFIG: JSON.stringify({
@@ -842,7 +842,7 @@ describe('production deep health reads', () => {
         sslRootCertificatePath: DATABASE_SSL_ROOT_CERT,
         maxConnections: 1,
         connectTimeoutSeconds: 10,
-        idleTimeoutSeconds: 20,
+        idleTimeoutSeconds: 0,
       },
     ]);
     expect(

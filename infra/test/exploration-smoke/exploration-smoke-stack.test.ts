@@ -566,7 +566,7 @@ describe('App Runner runtime safety boundary', () => {
     );
     expect(variables.get('DATABASE_MAX_CONNECTIONS')).toBe('1');
     expect(variables.get('DATABASE_CONNECT_TIMEOUT_SECONDS')).toBe('10');
-    expect(variables.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toBe('20');
+    expect(variables.get('DATABASE_IDLE_TIMEOUT_SECONDS')).toBe('0');
     expect(variables.get('SOURCE_SHA')).toEqual({ Ref: 'SourceSha' });
     expect(variables.get('RUNTIME_SECRET_ARN')).toEqual({
       Ref: expect.stringContaining('ApiSaltSecret'),

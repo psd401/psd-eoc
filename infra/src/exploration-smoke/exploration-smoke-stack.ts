@@ -757,7 +757,7 @@ export class ExplorationSmokeStack extends Stack {
                 },
                 {
                   name: 'DATABASE_IDLE_TIMEOUT_SECONDS',
-                  value: '20',
+                  value: '0',
                 },
                 {
                   name: 'FANOUT_QUEUE_URL',
