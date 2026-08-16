@@ -213,6 +213,24 @@ describe('isolated CDK entrypoint configuration', () => {
     );
   });
 
+  it('normalizes Aurora enum readback before exact access-fixture assertion', async () => {
+    const workflow = await readWorkflow();
+
+    expect(workflow).toContain('assertExplorationAccessFixtureEvidence,');
+    expect(workflow).not.toContain('seedExplorationAccessFixture,');
+    expect(workflow).toContain(
+      "if (value.completionKind === 'completed') return 0;",
+    );
+    expect(workflow).toContain(
+      "if (value.completionKind === 'expected') return 1;",
+    );
+    expect(workflow).toContain('await accessStore.apply(fixture);');
+    expect(workflow).toContain('await accessStore.readEvidence(fixture);');
+    expect(workflow).toContain(
+      'snapshotGroupOrder(left) - snapshotGroupOrder(right)',
+    );
+  });
+
   it('keeps workflow_dispatch within GitHub limits and parses combined fields', async () => {
     const workflow = await readWorkflow();
     const dispatchBlock = workflow.match(
