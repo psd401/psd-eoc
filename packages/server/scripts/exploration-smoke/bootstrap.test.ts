@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test';
 
 import type { SeedSummary } from '../../db/seed';
 import {
+  assertExplorationAccessSnapshotCurrent,
   assertExplorationAccessFixtureEvidence,
   createExplorationAccessFixture,
   seedExplorationAccessFixture,
@@ -48,6 +49,16 @@ const DATABASE_SSL_ROOT_CERT = new URL(
   '../../certs/aws-rds-global-bundle.pem',
   import.meta.url,
 ).pathname;
+const FIRST_ACCESS_SNAPSHOT = Object.freeze({
+  id: '00000000-0000-4000-8000-000000000165',
+  version: 163,
+  capturedAt: new Date('2026-08-16T17:00:00.000Z'),
+});
+const SECOND_ACCESS_SNAPSHOT = Object.freeze({
+  id: '00000000-0000-4000-8000-000000000166',
+  version: 164,
+  capturedAt: new Date('2026-08-16T18:00:00.000Z'),
+});
 
 const syntheticSeedSummary: SeedSummary = Object.freeze({
   facilities: 2,
@@ -399,13 +410,32 @@ describe('approved access fixture', () => {
     staffEmail: 'approved.staff@psd401.net',
     staffDisplayName: 'Approved Staff',
   } as const;
-  const fixture = createExplorationAccessFixture(fixtureInput);
+  const fixture = createExplorationAccessFixture(
+    fixtureInput,
+    FIRST_ACCESS_SNAPSHOT,
+  );
 
-  test('is deterministic, Google-group-shaped, and contains no recipient/student payload', () => {
-    expect(createExplorationAccessFixture(fixtureInput)).toEqual(fixture);
+  test('is deterministic for one allocated snapshot, current, and contains no recipient/student payload', () => {
+    expect(
+      createExplorationAccessFixture(fixtureInput, FIRST_ACCESS_SNAPSHOT),
+    ).toEqual(fixture);
     expect(fixture.snapshot.capturedAt.toISOString()).toBe(
-      '2026-08-15T12:00:00.000Z',
+      FIRST_ACCESS_SNAPSHOT.capturedAt.toISOString(),
     );
+    expect(() =>
+      assertExplorationAccessSnapshotCurrent(
+        fixture,
+        new Date(FIRST_ACCESS_SNAPSHOT.capturedAt.getTime() + 5 * 60 * 1_000),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertExplorationAccessSnapshotCurrent(
+        fixture,
+        new Date(
+          FIRST_ACCESS_SNAPSHOT.capturedAt.getTime() + 5 * 60 * 1_000 + 1,
+        ),
+      ),
+    ).toThrow('not current');
     expect(fixture.accessGroup).toMatchObject({
       kind: 'google-group',
       purpose: 'access',
@@ -438,31 +468,64 @@ describe('approved access fixture', () => {
     ).toThrow('notification channel');
   });
 
-  test('is repeatable without changing the fixture identity', async () => {
-    let applies = 0;
+  test('replays within one bootstrap and appends a newer snapshot later', async () => {
+    let publishes = 0;
+    const allocated: ExplorationAccessFixture[] = [];
     let persisted: ExplorationAccessFixture | undefined;
     const store: ExplorationAccessFixtureStore = {
-      async apply(received): Promise<void> {
-        applies += 1;
-        persisted ??= received;
+      async publish(identity, replay) {
+        publishes += 1;
+        const published =
+          replay ??
+          createExplorationAccessFixture(
+            identity,
+            allocated.length === 0
+              ? FIRST_ACCESS_SNAPSHOT
+              : SECOND_ACCESS_SNAPSHOT,
+          );
+        if (replay === null) allocated.push(published);
+        persisted = published;
+        return published;
       },
-      async readEvidence() {
+      async readEvidence(received) {
         if (persisted === undefined) {
           throw new Error('fixture was not persisted');
         }
-        return fixtureEvidence(persisted);
+        expect(received).toEqual(persisted);
+        return fixtureEvidence(received);
       },
     };
-    const first = await seedExplorationAccessFixture({ fixture, store });
-    const independentlyCreatedFixture =
-      createExplorationAccessFixture(fixtureInput);
-    const second = await seedExplorationAccessFixture({
-      fixture: independentlyCreatedFixture,
+    const first = await seedExplorationAccessFixture({
+      identity: fixtureInput,
+      replay: null,
       store,
+      now: () => new Date(FIRST_ACCESS_SNAPSHOT.capturedAt),
     });
-    expect(independentlyCreatedFixture).toEqual(fixture);
+    const second = await seedExplorationAccessFixture({
+      identity: fixtureInput,
+      replay: first.fixture,
+      store,
+      now: () => new Date(FIRST_ACCESS_SNAPSHOT.capturedAt),
+    });
+    const later = await seedExplorationAccessFixture({
+      identity: fixtureInput,
+      replay: null,
+      store,
+      now: () => new Date(SECOND_ACCESS_SNAPSHOT.capturedAt),
+    });
     expect(second).toEqual(first);
-    expect(applies).toBe(2);
+    expect(later.fixture.snapshot).toEqual({
+      ...SECOND_ACCESS_SNAPSHOT,
+      syncStartedAt: SECOND_ACCESS_SNAPSHOT.capturedAt,
+      complete: true,
+    });
+    expect(later.fixture.snapshot.id).not.toBe(first.fixture.snapshot.id);
+    expect(later.fixture.snapshot.version).toBe(
+      first.fixture.snapshot.version + 1,
+    );
+    expect(allocated).toEqual([first.fixture, later.fixture]);
+    expect(allocated[0]).toEqual(fixture);
+    expect(publishes).toBe(3);
   });
 });
 
