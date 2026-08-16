@@ -934,6 +934,51 @@ describe('transport and policy boundaries', () => {
     ).toThrow(SessionAccessError);
   });
 
+  test('verifies proxied production CSRF against the fixed public origin', () => {
+    const token = createOpaqueRefreshToken();
+    const csrf = 'synthetic-proxied-csrf-token';
+    const request = (origin: string) =>
+      new Request('https://localhost:3000/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+          cookie: `${WEB_SESSION_COOKIE_NAME}=${token}; ${WEB_CSRF_COOKIE_NAME}=${csrf}`,
+          origin,
+          'x-forwarded-host': 'evil.example',
+          'x-forwarded-proto': 'http',
+          'x-psd-eoc-csrf': csrf,
+        },
+      });
+
+    expect(
+      readPresentedSessionCredential(
+        request('https://eoc.psd401.net'),
+        { mutation: true },
+        { NODE_ENV: 'production' },
+      ),
+    ).toMatchObject({ source: 'web', csrfVerified: true });
+    expect(() =>
+      readPresentedSessionCredential(
+        request('https://localhost:3000'),
+        { mutation: true },
+        { NODE_ENV: 'production' },
+      ),
+    ).toThrow(SessionAccessError);
+    expect(() =>
+      readPresentedSessionCredential(
+        request('https://evil.example'),
+        { mutation: true },
+        { NODE_ENV: 'production' },
+      ),
+    ).toThrow(SessionAccessError);
+    expect(
+      readPresentedSessionCredential(
+        request('https://localhost:3000'),
+        { mutation: true },
+        { NODE_ENV: 'development' },
+      ),
+    ).toMatchObject({ source: 'web', csrfVerified: true });
+  });
+
   test('derives TTL and grace from snapshot capture and never from refresh time', async () => {
     const initial = createOpaqueRefreshToken();
     const store = new MemorySessionStore(initial);
