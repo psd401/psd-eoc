@@ -31,7 +31,7 @@ export function buildApplicationRoleStatements(
   const passwordLiteral = quoteSqlLiteral(password);
   return Object.freeze([
     `DO $psd_eoc_exploration$\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '${EXPLORATION_DATABASE_LOGIN}') THEN\n    CREATE ROLE "${EXPLORATION_DATABASE_LOGIN}" LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n  END IF;\nEND\n$psd_eoc_exploration$`,
-    `ALTER ROLE "${EXPLORATION_DATABASE_LOGIN}" WITH LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${passwordLiteral}`,
+    `ALTER ROLE "${EXPLORATION_DATABASE_LOGIN}" WITH PASSWORD ${passwordLiteral}`,
     `DO $psd_eoc_exploration$\nDECLARE\n  granted_role name;\nBEGIN\n  FOR granted_role IN\n    SELECT parent.rolname\n    FROM pg_catalog.pg_auth_members AS membership\n    JOIN pg_catalog.pg_roles AS child ON child.oid = membership.member\n    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid\n    WHERE child.rolname = '${EXPLORATION_DATABASE_LOGIN}'\n      AND parent.rolname <> '${EXPLORATION_DATABASE_ROLE}'\n  LOOP\n    EXECUTE format('REVOKE %I FROM "${EXPLORATION_DATABASE_LOGIN}"', granted_role);\n  END LOOP;\nEND\n$psd_eoc_exploration$`,
     `GRANT "${EXPLORATION_DATABASE_ROLE}" TO "${EXPLORATION_DATABASE_LOGIN}"`,
     `REVOKE ADMIN OPTION FOR "${EXPLORATION_DATABASE_ROLE}" FROM "${EXPLORATION_DATABASE_LOGIN}"`,
