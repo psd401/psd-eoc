@@ -16,9 +16,23 @@ const normalizedValue = (maximum: number) =>
       message: 'must be a normalized single-line value',
     });
 
-const DatabaseNameSchema = normalizedValue(63).regex(
+const DatabaseIdentifierSchema = normalizedValue(63).regex(
   /^[A-Za-z_][A-Za-z0-9_$]*$/u,
-  'must be an unquoted PostgreSQL database name',
+  'must be an unquoted PostgreSQL identifier',
+);
+
+const DatabaseHostSchema = normalizedValue(253).regex(
+  /^psd-eoc-exploration-smoke[.]cluster-[a-z0-9]+[.]us-west-2[.]rds[.]amazonaws[.]com$/u,
+  'must be the exploration Aurora writer endpoint',
+);
+
+const DatabasePasswordSchema = z
+  .string()
+  .regex(/^[\x21-\x7e]{32,128}$/u, 'must be bounded printable ASCII');
+
+const AbsolutePathSchema = normalizedValue(1_024).regex(
+  /^\//u,
+  'must be an absolute path',
 );
 
 const SourceShaSchema = z
@@ -43,10 +57,18 @@ const BootstrapEnvironmentSchema = z
   .object({
     AWS_ACCOUNT_ID: z.literal(EXPLORATION_AWS_ACCOUNT_ID),
     AWS_REGION: z.literal(EXPLORATION_AWS_REGION),
-    DATABASE_NAME: DatabaseNameSchema,
-    DATABASE_RESOURCE_ARN: normalizedValue(2_048),
-    DATABASE_ADMIN_SECRET_ARN: normalizedValue(2_048),
-    DATABASE_APPLICATION_SECRET_ARN: normalizedValue(2_048),
+    DATABASE_DRIVER: z.literal('postgres'),
+    DATABASE_HOST: DatabaseHostSchema,
+    DATABASE_PORT: z.literal('5432'),
+    DATABASE_NAME: DatabaseIdentifierSchema,
+    DATABASE_SSL_ROOT_CERT: AbsolutePathSchema,
+    DATABASE_MAX_CONNECTIONS: z.literal('1'),
+    DATABASE_CONNECT_TIMEOUT_SECONDS: z.literal('10'),
+    DATABASE_IDLE_TIMEOUT_SECONDS: z.literal('20'),
+    DATABASE_ADMIN_USERNAME: DatabaseIdentifierSchema,
+    DATABASE_ADMIN_PASSWORD: DatabasePasswordSchema,
+    DATABASE_APPLICATION_USERNAME: z.literal(EXPLORATION_DATABASE_LOGIN),
+    DATABASE_APPLICATION_PASSWORD: DatabasePasswordSchema,
     APPROVED_GOOGLE_SUBJECT: GoogleSubjectSchema,
     APPROVED_STAFF_EMAIL: StaffEmailSchema,
     APPROVED_STAFF_DISPLAY_NAME: normalizedValue(160),
@@ -54,14 +76,30 @@ const BootstrapEnvironmentSchema = z
   })
   .strict();
 
+const FORBIDDEN_DATABASE_ENVIRONMENT = Object.freeze([
+  'DATABASE_URL',
+  'DATABASE_RESOURCE_ARN',
+  'DATABASE_SECRET_ARN',
+  'DATABASE_ADMIN_SECRET_ARN',
+  'DATABASE_APPLICATION_SECRET_ARN',
+] as const);
+
 /** Fail-closed input for the one isolated exploration-smoke bootstrap. */
 export interface ExplorationBootstrapConfig {
   readonly accountId: typeof EXPLORATION_AWS_ACCOUNT_ID;
   readonly region: typeof EXPLORATION_AWS_REGION;
+  readonly databaseDriver: 'postgres';
+  readonly databaseHost: string;
+  readonly databasePort: 5432;
   readonly databaseName: string;
-  readonly databaseResourceArn: string;
-  readonly databaseAdminSecretArn: string;
-  readonly databaseApplicationSecretArn: string;
+  readonly databaseSslRootCertificate: string;
+  readonly databaseMaxConnections: 1;
+  readonly databaseConnectTimeoutSeconds: 10;
+  readonly databaseIdleTimeoutSeconds: 20;
+  readonly databaseAdminUsername: string;
+  readonly databaseAdminPassword: string;
+  readonly databaseApplicationUsername: typeof EXPLORATION_DATABASE_LOGIN;
+  readonly databaseApplicationPassword: string;
   readonly approvedGoogleSubject: string;
   readonly approvedStaffEmail: string;
   readonly approvedStaffDisplayName: string;
@@ -76,37 +114,43 @@ export class ExplorationBootstrapConfigurationError extends Error {
   }
 }
 
-function assertArnScope(
-  value: string,
-  service: 'rds' | 'secretsmanager',
-  resourcePattern: RegExp,
-): void {
-  const prefix = `arn:aws:${service}:${EXPLORATION_AWS_REGION}:${EXPLORATION_AWS_ACCOUNT_ID}:`;
-  if (
-    !value.startsWith(prefix) ||
-    !resourcePattern.test(value.slice(prefix.length))
-  ) {
-    throw new ExplorationBootstrapConfigurationError(
-      `The ${service} ARN is outside the exploration-smoke account, region, or resource namespace.`,
-    );
-  }
+function hasEnvironmentValue(environment: Environment, name: string): boolean {
+  const value = environment[name];
+  return value !== undefined && value.trim().length > 0;
 }
 
 /**
- * Reads only the explicit bootstrap contract. Ambient AWS defaults cannot
- * redirect this operation to another account or region.
+ * Reads only the explicit native bootstrap contract. Ambient AWS defaults
+ * cannot redirect this operation, and no Data API configuration is accepted.
  */
 export function readExplorationBootstrapConfig(
   environment: Environment = process.env,
 ): ExplorationBootstrapConfig {
+  const forbidden = FORBIDDEN_DATABASE_ENVIRONMENT.filter((name) =>
+    hasEnvironmentValue(environment, name),
+  );
+  if (forbidden.length > 0) {
+    throw new ExplorationBootstrapConfigurationError(
+      `Invalid exploration-smoke bootstrap configuration: ${forbidden.join(', ')}.`,
+    );
+  }
+
   const parsed = BootstrapEnvironmentSchema.safeParse({
     AWS_ACCOUNT_ID: environment.AWS_ACCOUNT_ID,
     AWS_REGION: environment.AWS_REGION,
+    DATABASE_DRIVER: environment.DATABASE_DRIVER,
+    DATABASE_HOST: environment.DATABASE_HOST,
+    DATABASE_PORT: environment.DATABASE_PORT,
     DATABASE_NAME: environment.DATABASE_NAME,
-    DATABASE_RESOURCE_ARN: environment.DATABASE_RESOURCE_ARN,
-    DATABASE_ADMIN_SECRET_ARN: environment.DATABASE_ADMIN_SECRET_ARN,
-    DATABASE_APPLICATION_SECRET_ARN:
-      environment.DATABASE_APPLICATION_SECRET_ARN,
+    DATABASE_SSL_ROOT_CERT: environment.DATABASE_SSL_ROOT_CERT,
+    DATABASE_MAX_CONNECTIONS: environment.DATABASE_MAX_CONNECTIONS,
+    DATABASE_CONNECT_TIMEOUT_SECONDS:
+      environment.DATABASE_CONNECT_TIMEOUT_SECONDS,
+    DATABASE_IDLE_TIMEOUT_SECONDS: environment.DATABASE_IDLE_TIMEOUT_SECONDS,
+    DATABASE_ADMIN_USERNAME: environment.DATABASE_ADMIN_USERNAME,
+    DATABASE_ADMIN_PASSWORD: environment.DATABASE_ADMIN_PASSWORD,
+    DATABASE_APPLICATION_USERNAME: environment.DATABASE_APPLICATION_USERNAME,
+    DATABASE_APPLICATION_PASSWORD: environment.DATABASE_APPLICATION_PASSWORD,
     APPROVED_GOOGLE_SUBJECT: environment.APPROVED_GOOGLE_SUBJECT,
     APPROVED_STAFF_EMAIL: environment.APPROVED_STAFF_EMAIL,
     APPROVED_STAFF_DISPLAY_NAME: environment.APPROVED_STAFF_DISPLAY_NAME,
@@ -124,36 +168,27 @@ export function readExplorationBootstrapConfig(
   }
 
   const value = parsed.data;
-  assertArnScope(
-    value.DATABASE_RESOURCE_ARN,
-    'rds',
-    /^cluster:psd-eoc-exploration-smoke(?:-[A-Za-z0-9-]+)?$/u,
-  );
-  assertArnScope(
-    value.DATABASE_ADMIN_SECRET_ARN,
-    'secretsmanager',
-    /^secret:\/psd-eoc\/exploration-smoke\/database\/admin-[A-Za-z0-9]+$/u,
-  );
-  assertArnScope(
-    value.DATABASE_APPLICATION_SECRET_ARN,
-    'secretsmanager',
-    /^secret:\/psd-eoc\/exploration-smoke\/database\/application-[A-Za-z0-9]+$/u,
-  );
-  if (
-    value.DATABASE_ADMIN_SECRET_ARN === value.DATABASE_APPLICATION_SECRET_ARN
-  ) {
+  if (value.DATABASE_ADMIN_USERNAME === value.DATABASE_APPLICATION_USERNAME) {
     throw new ExplorationBootstrapConfigurationError(
-      'The database administrator and application secrets must be distinct.',
+      'The database administrator and application roles must be distinct.',
     );
   }
 
   return Object.freeze({
     accountId: value.AWS_ACCOUNT_ID,
     region: value.AWS_REGION,
+    databaseDriver: value.DATABASE_DRIVER,
+    databaseHost: value.DATABASE_HOST,
+    databasePort: 5432 as const,
     databaseName: value.DATABASE_NAME,
-    databaseResourceArn: value.DATABASE_RESOURCE_ARN,
-    databaseAdminSecretArn: value.DATABASE_ADMIN_SECRET_ARN,
-    databaseApplicationSecretArn: value.DATABASE_APPLICATION_SECRET_ARN,
+    databaseSslRootCertificate: value.DATABASE_SSL_ROOT_CERT,
+    databaseMaxConnections: 1 as const,
+    databaseConnectTimeoutSeconds: 10 as const,
+    databaseIdleTimeoutSeconds: 20 as const,
+    databaseAdminUsername: value.DATABASE_ADMIN_USERNAME,
+    databaseAdminPassword: value.DATABASE_ADMIN_PASSWORD,
+    databaseApplicationUsername: value.DATABASE_APPLICATION_USERNAME,
+    databaseApplicationPassword: value.DATABASE_APPLICATION_PASSWORD,
     approvedGoogleSubject: value.APPROVED_GOOGLE_SUBJECT,
     approvedStaffEmail: value.APPROVED_STAFF_EMAIL,
     approvedStaffDisplayName: value.APPROVED_STAFF_DISPLAY_NAME,

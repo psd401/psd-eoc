@@ -264,6 +264,8 @@ export function databaseExecuteRows<Row extends Record<string, unknown>>(
 export interface PostgresDatabaseConnection {
   readonly driver: typeof POSTGRES_DRIVER;
   readonly db: PostgresDatabase;
+  /** Native driver seam used only where query cancellation is required. */
+  readonly nativeClient?: ReturnType<typeof postgres>;
   close(): Promise<void>;
 }
 
@@ -543,6 +545,7 @@ function createPostgresDatabaseConnection(
   return {
     driver: POSTGRES_DRIVER,
     db: drizzlePostgres(client, { schema: databaseSchema }),
+    nativeClient: client,
     close: createSynchronousIdempotentClose(() => client.end({ timeout: 0 })),
   };
 }
