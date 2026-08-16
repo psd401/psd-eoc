@@ -1036,9 +1036,9 @@ jobs:
           import { seedDatabase } from '../packages/server/db/seed.ts';
           import { migrateDatabase } from '../packages/server/drizzle/migrate.ts';
           import {
+            assertExplorationAccessFixtureEvidence,
             createDrizzleExplorationAccessFixtureStore,
             createExplorationAccessFixture,
-            seedExplorationAccessFixture,
           } from '../packages/server/scripts/exploration-smoke/access-fixture.ts';
           import {
             ROLE_MEMBERSHIP_QUERY,
@@ -1065,6 +1065,12 @@ jobs:
 
           function markBootstrapStage(stage) {
             bootstrapStage = stage;
+          }
+
+          function snapshotGroupOrder(value) {
+            if (value.completionKind === 'completed') return 0;
+            if (value.completionKind === 'expected') return 1;
+            return 2;
           }
 
           function formattedRows(output) {
@@ -1190,7 +1196,20 @@ jobs:
                 },
                 async seedApprovedAccess() {
                   markBootstrapStage(BOOTSTRAP_STAGES.seedApprovedAccess);
-                  return seedExplorationAccessFixture({ fixture, store: accessStore });
+                  await accessStore.apply(fixture);
+                  const evidence = await accessStore.readEvidence(fixture);
+                  return assertExplorationAccessFixtureEvidence(
+                    fixture,
+                    Object.freeze({
+                      ...evidence,
+                      snapshotGroups: Object.freeze(
+                        [...evidence.snapshotGroups].sort(
+                          (left, right) =>
+                            snapshotGroupOrder(left) - snapshotGroupOrder(right),
+                        ),
+                      ),
+                    }),
+                  );
                 },
                 async verifyApplicationLogin() {
                   markBootstrapStage(BOOTSTRAP_STAGES.verifyApplicationLogin);
