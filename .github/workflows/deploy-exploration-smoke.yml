@@ -1035,10 +1035,9 @@ jobs:
               ([$execution, $task] | sort)
           ' artifacts/readback/deployment-role-bootstrap-pass-role-simulation.json > /dev/null
           bootstrap_log_group_arn="arn:aws:logs:$AWS_REGION:$AWS_ACCOUNT_ID:log-group:$bootstrap_log_group_name"
-          bootstrap_log_stream_arn="$bootstrap_log_group_arn:log-stream:native-bootstrap/native-bootstrap/*"
           aws iam simulate-principal-policy             --policy-source-arn "$DEPLOY_ROLE_ARN"             --action-names logs:DescribeLogStreams             --resource-arns "$bootstrap_log_group_arn:*"             > artifacts/readback/deployment-role-bootstrap-describe-logs-simulation.json
           test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deployment-role-bootstrap-describe-logs-simulation.json)" = "allowed"
-          aws iam simulate-principal-policy             --policy-source-arn "$DEPLOY_ROLE_ARN"             --action-names logs:GetLogEvents             --resource-arns "$bootstrap_log_stream_arn"             > artifacts/readback/deployment-role-bootstrap-read-logs-simulation.json
+          aws iam simulate-principal-policy             --policy-source-arn "$DEPLOY_ROLE_ARN"             --action-names logs:GetLogEvents             --resource-arns "$bootstrap_log_group_arn:*"             > artifacts/readback/deployment-role-bootstrap-read-logs-simulation.json
           test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deployment-role-bootstrap-read-logs-simulation.json)" = "allowed"
 
           task_definition_file="$RUNNER_TEMP/exploration-smoke-bootstrap-task-definition.json"
