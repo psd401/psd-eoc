@@ -21,8 +21,14 @@ export const facilitiesRelations = relations(schema.facilities, ({ many }) => ({
   ),
   events: many(schema.events),
   activationPreviews: many(schema.activationPreviews),
-  securityAuditEntries: many(schema.securityAuditEntries),
 }));
+
+export const securityAuditFacilityAnchorsRelations = relations(
+  schema.securityAuditFacilityAnchors,
+  ({ many }) => ({
+    securityAuditEntries: many(schema.securityAuditEntries),
+  }),
+);
 
 export const neighborhoodVersionsRelations = relations(
   schema.neighborhoodVersions,
@@ -1516,9 +1522,9 @@ export const smsOptOutRecordsRelations = relations(
 export const securityAuditEntriesRelations = relations(
   schema.securityAuditEntries,
   ({ one }) => ({
-    facility: one(schema.facilities, {
+    facilityAnchor: one(schema.securityAuditFacilityAnchors, {
       fields: [schema.securityAuditEntries.facilityId],
-      references: [schema.facilities.id],
+      references: [schema.securityAuditFacilityAnchors.facilityId],
     }),
     confirmation: one(schema.humanConfirmationRecords, {
       fields: [schema.securityAuditEntries.confirmationId],

@@ -53,8 +53,12 @@ const describeWithDatabase =
 setDefaultTimeout(120_000);
 
 const ids = {
-  seedFacilityNorth: '00000000-0000-4000-8000-000000000001',
-  seedFacilitySouth: '00000000-0000-4000-8000-000000000002',
+  seedFacilityNorth: '26050000-0000-4000-8000-000000000035',
+  seedFacilitySouth: '26050000-0000-4000-8000-000000000036',
+  seedNeighborhood: '26050000-0000-4000-8000-000000000037',
+  seedAudience: '26050000-0000-4000-8000-000000000038',
+  seedGroup: '26050000-0000-4000-8000-000000000039',
+  seedRosterConfiguration: '26050000-0000-4000-8000-000000000040',
   upgradeStatusOld: '26050000-0000-4000-8000-000000000001',
   upgradeStatusLatest: '26050000-0000-4000-8000-000000000002',
   statusInitial: '26050000-0000-4000-8000-000000000010',
@@ -109,6 +113,11 @@ interface MarkerRow extends Record<string, unknown> {
 
 interface CountRow extends Record<string, unknown> {
   readonly count: number;
+}
+
+interface CanonicalRemovalRow extends Record<string, unknown> {
+  readonly anchor_count: number;
+  readonly facility_count: number;
 }
 
 interface ChannelProjectionRow extends Record<string, unknown> {
@@ -196,6 +205,7 @@ let statusRowsAfterFirstMigration: readonly string[] = [];
 let statusRowsAfterSecondMigration: readonly string[] = [];
 let channelRowsAfterFirstMigration: readonly string[] = [];
 let channelRowsAfterSecondMigration: readonly string[] = [];
+let canonicalRemovalRows: readonly CanonicalRemovalRow[] = [];
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -514,6 +524,157 @@ function postgresErrorFacts(
   return facts;
 }
 
+async function migrateHistoricalFixture(
+  migrationConnection: PostgresDatabaseConnection,
+): Promise<void> {
+  try {
+    await migrateDatabase(migrationConnection);
+  } catch (error) {
+    const code = postgresErrorFacts(error, 'code').at(-1) ?? 'unknown';
+    const message =
+      postgresErrorFacts(error, 'message').at(-1) ??
+      'unknown database rejection';
+    throw new Error(
+      `Issue #26 historical migration failed with PostgreSQL ${code}: ${message.slice(0, 1_024)}`,
+    );
+  }
+}
+
+async function seedPostRemovalFacilityFixture(
+  database: PostgresDatabase,
+): Promise<void> {
+  canonicalRemovalRows = databaseExecuteRows<CanonicalRemovalRow>(
+    await database.execute<CanonicalRemovalRow>(sql`
+      select
+        (select count(*)::integer
+          from facilities
+          where id in (
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            '00000000-0000-4000-8000-000000000002'::uuid
+          ) or code in ('SYN-NORTH', 'SYN-SOUTH')) as facility_count,
+        (select count(*)::integer
+          from security_audit_facility_anchors
+          where facility_id in (
+            '00000000-0000-4000-8000-000000000001'::uuid,
+            '00000000-0000-4000-8000-000000000002'::uuid
+          )) as anchor_count
+    `),
+  );
+  await database.execute(sql`
+    insert into facilities (id, code, name, active, created_at)
+    values
+      (
+        ${ids.seedFacilityNorth}::uuid,
+        'MIG-NORTH',
+        'Migration proof north facility',
+        true,
+        ${times.adminOne}::timestamptz
+      ),
+      (
+        ${ids.seedFacilitySouth}::uuid,
+        'MIG-SOUTH',
+        'Migration proof south facility',
+        true,
+        ${times.adminOne}::timestamptz
+      )
+  `);
+  await database.execute(sql`
+    insert into group_sources (
+      id, kind, purpose, facility_id, display_name, active,
+      google_group_id, email, fixture_key, created_at
+    ) values (
+      ${ids.seedGroup}::uuid,
+      'synthetic'::group_source_kind,
+      'building'::group_purpose,
+      ${ids.seedFacilityNorth}::uuid,
+      'Migration proof synthetic group',
+      true,
+      null,
+      null,
+      'issue-26-post-removal-group',
+      ${times.adminOne}::timestamptz
+    )
+  `);
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into neighborhood_versions (id, version, name, created_at)
+      values (
+        ${ids.seedNeighborhood}::uuid,
+        1,
+        'Migration proof neighborhood',
+        ${times.adminOne}::timestamptz
+      )
+    `);
+    await transaction.execute(sql`
+      insert into neighborhood_facilities (
+        neighborhood_id, neighborhood_version, facility_id
+      ) values (
+        ${ids.seedNeighborhood}::uuid,
+        1,
+        ${ids.seedFacilityNorth}::uuid
+      )
+    `);
+  });
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into audience_configurations (
+        id, facility_id, version, created_at
+      ) values (
+        ${ids.seedAudience}::uuid,
+        ${ids.seedFacilityNorth}::uuid,
+        1,
+        ${times.adminOne}::timestamptz
+      )
+    `);
+    await transaction.execute(sql`
+      insert into audience_targets (
+        audience_config_id, audience_config_version, ordinal,
+        target_kind, target_facility_id
+      ) values (
+        ${ids.seedAudience}::uuid,
+        1,
+        1,
+        'building'::audience_target_kind,
+        ${ids.seedFacilityNorth}::uuid
+      )
+    `);
+  });
+  await database.transaction(async (transaction) => {
+    await transaction.execute(sql`
+      insert into roster_source_configurations (
+        id, version, population, created_at
+      ) values (
+        ${ids.seedRosterConfiguration}::uuid,
+        1,
+        'synthetic'::roster_population,
+        ${times.adminOne}::timestamptz
+      )
+    `);
+    await transaction.execute(sql`
+      insert into roster_source_configuration_facilities (
+        configuration_id, configuration_version, facility_id
+      ) values (
+        ${ids.seedRosterConfiguration}::uuid,
+        1,
+        ${ids.seedFacilityNorth}::uuid
+      )
+    `);
+    await transaction.execute(sql`
+      insert into roster_source_configuration_groups (
+        configuration_id, configuration_version, population,
+        group_source_id, group_source_kind, group_purpose
+      ) values (
+        ${ids.seedRosterConfiguration}::uuid,
+        1,
+        'synthetic'::roster_population,
+        ${ids.seedGroup}::uuid,
+        'synthetic'::group_source_kind,
+        'building'::group_purpose
+      )
+    `);
+  });
+}
+
 function expectOperationalError(error: unknown): void {
   expect(postgresErrorFacts(error, 'code')).toContain('55000');
   expect(postgresErrorFacts(error, 'message').join('\n')).not.toHaveLength(0);
@@ -760,11 +921,12 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       await seedUpgradeFixture(connection.db);
       statusRowsBeforeUpgrade = await statusSnapshot(connection.db);
 
-      await migrateDatabase(connection);
+      await migrateHistoricalFixture(connection);
+      await seedPostRemovalFacilityFixture(connection.db);
       statusRowsAfterFirstMigration = await statusSnapshot(connection.db);
       channelRowsAfterFirstMigration = await channelSnapshot(connection.db);
 
-      await migrateDatabase(connection);
+      await migrateHistoricalFixture(connection);
       statusRowsAfterSecondMigration = await statusSnapshot(connection.db);
       channelRowsAfterSecondMigration = await channelSnapshot(connection.db);
     } catch (error) {
@@ -936,6 +1098,12 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       status_label: 'mocked',
       latest_status_label: 'mocked',
     });
+  });
+
+  test('physically removes the canonical synthetic facilities during the historical upgrade', () => {
+    expect(canonicalRemovalRows).toEqual([
+      { anchor_count: 2, facility_count: 0 },
+    ]);
   });
 
   test('rejects a legacy audience lineage moved across facilities before applying 0005', async () => {

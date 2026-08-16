@@ -217,6 +217,14 @@ const digest = (name: string) => varchar(name, { length: 64 });
 const occurredAt = (name: string) =>
   timestamp(name, { withTimezone: true, mode: 'date' });
 
+/** Opaque, retained identities used only to keep audit history resolvable. */
+export const securityAuditFacilityAnchors = pgTable(
+  'security_audit_facility_anchors',
+  {
+    facilityId: uuid('facility_id').primaryKey(),
+  },
+);
+
 /** Stable administrator-managed district facilities. */
 export const facilities = pgTable(
   'facilities',
@@ -4932,9 +4940,10 @@ export const securityAuditEntries = pgTable(
     principalKind: varchar('principal_kind', { length: 32 }).notNull(),
     principal: jsonb('principal').notNull(),
     source: invocationSourceEnum('source').notNull(),
-    facilityId: uuid('facility_id').references(() => facilities.id, {
-      onDelete: 'restrict',
-    }),
+    facilityId: uuid('facility_id').references(
+      () => securityAuditFacilityAnchors.facilityId,
+      { onDelete: 'restrict' },
+    ),
     targetKind: varchar('target_kind', { length: 32 }),
     targetId: varchar('target_id', { length: 255 }),
     requestId: uuid('request_id').notNull(),
