@@ -3,6 +3,7 @@ import {
   getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../lib/auth/sessions';
+import { applicationUrlForRequest } from '../../../lib/auth/application-origin';
 import { authenticateSessionRequest } from '../../../lib/auth/middleware';
 import { getDefaultEventTypeStore } from '../../../lib/capabilities/event-types';
 import { eventTypeLandingResponse } from './landing';
@@ -18,14 +19,14 @@ export async function GET(request: Request): Promise<Response> {
   } catch (error) {
     if (error instanceof SessionAccessError) {
       return Response.redirect(
-        new URL('/login?reason=session-required', request.url),
+        applicationUrlForRequest(request.url, '/login?reason=session-required'),
         303,
       );
     }
     throw error;
   }
   return eventTypeLandingResponse(
-    request.url,
+    applicationUrlForRequest(request.url, '/event-types').toString(),
     authenticated,
     getDefaultEventTypeStore(),
   );

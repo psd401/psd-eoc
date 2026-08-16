@@ -21,13 +21,14 @@ import {
 } from '@psd-eoc/contracts';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 
+import { PRODUCTION_APPLICATION_ORIGIN } from './application-origin';
+
 const GOOGLE_ISSUER = 'https://accounts.google.com' as const;
 const PSD_HOSTED_DOMAIN = 'psd401.net' as const;
 const GOOGLE_AUTHORIZATION_ENDPOINT =
   'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_JWKS_URI = 'https://www.googleapis.com/oauth2/v3/certs';
-const PRODUCTION_APPLICATION_ORIGIN = 'https://eoc.psd401.net' as const;
 const PRODUCTION_REDIRECT_URI =
   `${PRODUCTION_APPLICATION_ORIGIN}/auth/callback` as const;
 const IOS_BUNDLE_ID = 'net.psd401.eoc' as const;

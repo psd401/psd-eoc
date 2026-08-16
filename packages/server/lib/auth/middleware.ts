@@ -3,6 +3,10 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Role } from '@psd-eoc/contracts';
 
 import {
+  applicationOriginForRequest,
+  type ApplicationOriginEnvironment,
+} from './application-origin';
+import {
   SessionAccessError,
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
@@ -83,6 +87,7 @@ function safeEqual(first: string, second: string): boolean {
 function verifyWebMutationCsrf(
   request: Request,
   cookies: ReadonlyMap<string, string>,
+  environment: ApplicationOriginEnvironment,
 ): boolean {
   if (request.method !== 'POST') {
     return false;
@@ -99,7 +104,10 @@ function verifyWebMutationCsrf(
     return false;
   }
   try {
-    return new URL(origin).origin === new URL(request.url).origin;
+    return (
+      new URL(origin).origin ===
+      applicationOriginForRequest(request.url, environment)
+    );
   } catch {
     return false;
   }
@@ -113,6 +121,7 @@ function verifyWebMutationCsrf(
 export function readPresentedSessionCredential(
   request: Request,
   options: Readonly<{ mutation: boolean }>,
+  environment: ApplicationOriginEnvironment = process.env,
 ): PresentedSessionCredential {
   const cookies = parseCookies(request.headers.get('cookie'));
   const webToken = cookies.get(WEB_SESSION_COOKIE_NAME) ?? null;
@@ -125,7 +134,7 @@ export function readPresentedSessionCredential(
   }
   if (webToken !== null) {
     const csrfVerified =
-      !options.mutation || verifyWebMutationCsrf(request, cookies);
+      !options.mutation || verifyWebMutationCsrf(request, cookies, environment);
     if (!csrfVerified) {
       throw new SessionAccessError(
         'FORBIDDEN',
