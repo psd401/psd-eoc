@@ -10,8 +10,8 @@ import { seedDatabase, type SeedSummary } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
   createDrizzleExplorationAccessFixtureStore,
-  createExplorationAccessFixture,
   seedExplorationAccessFixture,
+  type ExplorationAccessFixture,
   type ExplorationAccessFixtureSummary,
 } from './access-fixture';
 import {
@@ -220,11 +220,12 @@ async function runFromCommandLine(): Promise<void> {
   const accessStore = createDrizzleExplorationAccessFixtureStore(
     administratorConnection.db,
   );
-  const fixture = createExplorationAccessFixture({
+  const approvedIdentity = Object.freeze({
     googleSubject: config.approvedGoogleSubject,
     staffEmail: config.approvedStaffEmail,
     staffDisplayName: config.approvedStaffDisplayName,
   });
+  let accessFixture: ExplorationAccessFixture | null = null;
 
   try {
     const summary = await runExplorationBootstrap(config, {
@@ -253,7 +254,13 @@ async function runFromCommandLine(): Promise<void> {
         return seedDatabase(administratorConnection.db);
       },
       async seedApprovedAccess() {
-        return seedExplorationAccessFixture({ fixture, store: accessStore });
+        const seeded = await seedExplorationAccessFixture({
+          identity: approvedIdentity,
+          replay: accessFixture,
+          store: accessStore,
+        });
+        accessFixture = seeded.fixture;
+        return seeded.summary;
       },
       async verifyApplicationLogin(): Promise<void> {
         await verifyApplicationLogin({ executor: applicationExecutor });

@@ -1,6 +1,8 @@
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
 
-import type { Database } from '../../db/client';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
+
+import { databaseExecuteRows, type Database } from '../../db/client';
 import {
   accessMembershipMemberGroups,
   accessMembershipMembers,
@@ -13,21 +15,29 @@ import {
   userRoles,
   users,
 } from '../../db/schema';
+import { ADMIN_AVAILABILITY_LOCK_SQL } from '../../lib/auth/role-state';
 
 export const EXPLORATION_ACCESS_FIXTURE_IDS = Object.freeze({
   accessGroup: '00000000-0000-4000-8000-000000000163',
   user: '00000000-0000-4000-8000-000000000164',
-  snapshot: '00000000-0000-4000-8000-000000000165',
 });
 
-export const EXPLORATION_ACCESS_SNAPSHOT_VERSION = 163 as const;
-
-const EXPLORATION_ACCESS_FIXTURE_TIME = new Date('2026-08-15T12:00:00.000Z');
+const EXPLORATION_ACCESS_IDENTITY_CREATED_AT = new Date(
+  '2026-08-15T12:00:00.000Z',
+);
+const MAX_BOOTSTRAP_SNAPSHOT_AGE_MS = 5 * 60 * 1_000;
+const MAX_POSTGRES_INTEGER = 2_147_483_647;
 
 export interface ExplorationAccessFixtureInput {
   readonly googleSubject: string;
   readonly staffEmail: string;
   readonly staffDisplayName: string;
+}
+
+export interface ExplorationAccessSnapshotIdentity {
+  readonly id: string;
+  readonly version: number;
+  readonly capturedAt: Date;
 }
 
 export interface ExplorationAccessFixture {
@@ -55,7 +65,7 @@ export interface ExplorationAccessFixture {
   readonly role: Readonly<{ userId: string; role: 'staff' }>;
   readonly snapshot: Readonly<{
     id: string;
-    version: typeof EXPLORATION_ACCESS_SNAPSHOT_VERSION;
+    version: number;
     complete: true;
     syncStartedAt: Date;
     capturedAt: Date;
@@ -76,7 +86,10 @@ export interface ExplorationAccessFixtureEvidence {
 }
 
 export interface ExplorationAccessFixtureStore {
-  apply(fixture: ExplorationAccessFixture): Promise<void>;
+  publish(
+    input: ExplorationAccessFixtureInput,
+    replay: ExplorationAccessFixture | null,
+  ): Promise<ExplorationAccessFixture>;
   readEvidence(
     fixture: ExplorationAccessFixture,
   ): Promise<ExplorationAccessFixtureEvidence>;
@@ -91,11 +104,28 @@ export interface ExplorationAccessFixtureSummary {
   readonly matchingRosterRecipients: 0;
 }
 
-/** Creates the one deterministic, access-only identity fixture. */
+export interface SeededExplorationAccessFixture {
+  readonly fixture: ExplorationAccessFixture;
+  readonly summary: ExplorationAccessFixtureSummary;
+}
+
+/** Creates one access-only graph around an already allocated snapshot. */
 export function createExplorationAccessFixture(
   input: ExplorationAccessFixtureInput,
+  snapshotIdentity: ExplorationAccessSnapshotIdentity,
 ): ExplorationAccessFixture {
-  const capturedAt = new Date(EXPLORATION_ACCESS_FIXTURE_TIME.getTime());
+  if (
+    !Number.isSafeInteger(snapshotIdentity.version) ||
+    snapshotIdentity.version < 1 ||
+    snapshotIdentity.version > MAX_POSTGRES_INTEGER ||
+    Number.isNaN(snapshotIdentity.capturedAt.getTime())
+  ) {
+    throw new Error('The exploration access snapshot identity was invalid.');
+  }
+  const identityCreatedAt = new Date(
+    EXPLORATION_ACCESS_IDENTITY_CREATED_AT.getTime(),
+  );
+  const capturedAt = new Date(snapshotIdentity.capturedAt.getTime());
   return Object.freeze({
     accessGroup: Object.freeze({
       id: EXPLORATION_ACCESS_FIXTURE_IDS.accessGroup,
@@ -107,7 +137,7 @@ export function createExplorationAccessFixture(
       googleGroupId: 'exploration-smoke-approved-access.invalid',
       email: 'exploration-smoke-access@example.invalid',
       fixtureKey: null,
-      createdAt: capturedAt,
+      createdAt: identityCreatedAt,
     }),
     user: Object.freeze({
       id: EXPLORATION_ACCESS_FIXTURE_IDS.user,
@@ -115,7 +145,7 @@ export function createExplorationAccessFixture(
       email: input.staffEmail,
       displayName: input.staffDisplayName,
       facilityScopeKind: 'district' as const,
-      createdAt: capturedAt,
+      createdAt: identityCreatedAt,
       disabledAt: null,
     }),
     role: Object.freeze({
@@ -123,8 +153,8 @@ export function createExplorationAccessFixture(
       role: 'staff' as const,
     }),
     snapshot: Object.freeze({
-      id: EXPLORATION_ACCESS_FIXTURE_IDS.snapshot,
-      version: EXPLORATION_ACCESS_SNAPSHOT_VERSION,
+      id: snapshotIdentity.id,
+      version: snapshotIdentity.version,
       complete: true as const,
       syncStartedAt: capturedAt,
       capturedAt,
@@ -137,8 +167,47 @@ export function createDrizzleExplorationAccessFixtureStore(
   database: Database,
 ): ExplorationAccessFixtureStore {
   return Object.freeze({
-    async apply(fixture: ExplorationAccessFixture): Promise<void> {
-      await database.transaction(async (transaction) => {
+    async publish(
+      input: ExplorationAccessFixtureInput,
+      replay: ExplorationAccessFixture | null,
+    ): Promise<ExplorationAccessFixture> {
+      return database.transaction(async (transaction) => {
+        await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+        let fixture = replay;
+        if (fixture === null) {
+          const allocationRows = databaseExecuteRows<{
+            capturedAt: Date;
+            latestVersion: number;
+          }>(
+            await transaction.execute(sql<{
+              capturedAt: Date;
+              latestVersion: number;
+            }>`
+              select
+                clock_timestamp() as "capturedAt",
+                coalesce(max(${accessMembershipSnapshots.version}), 0)::integer
+                  as "latestVersion"
+              from ${accessMembershipSnapshots}
+            `),
+          );
+          const allocation = allocationRows[0];
+          if (
+            allocationRows.length !== 1 ||
+            !(allocation?.capturedAt instanceof Date) ||
+            !Number.isSafeInteger(allocation.latestVersion) ||
+            allocation.latestVersion < 0 ||
+            allocation.latestVersion >= MAX_POSTGRES_INTEGER
+          ) {
+            throw new Error(
+              'The exploration access snapshot could not be allocated.',
+            );
+          }
+          fixture = createExplorationAccessFixture(input, {
+            id: randomUUID(),
+            version: allocation.latestVersion + 1,
+            capturedAt: allocation.capturedAt,
+          });
+        }
         await transaction
           .insert(groupSources)
           .values(fixture.accessGroup)
@@ -193,6 +262,7 @@ export function createDrizzleExplorationAccessFixtureStore(
             groupPurpose: fixture.accessGroup.purpose,
           })
           .onConflictDoNothing();
+        return fixture;
       });
     },
 
@@ -329,6 +399,24 @@ function sameRecord(
   });
 }
 
+/** Proves the just-published snapshot is safely inside the session TTL. */
+export function assertExplorationAccessSnapshotCurrent(
+  fixture: ExplorationAccessFixture,
+  checkedAt: Date,
+): void {
+  const checkedAtMilliseconds = checkedAt.getTime();
+  const capturedAtMilliseconds = fixture.snapshot.capturedAt.getTime();
+  const ageMilliseconds = checkedAtMilliseconds - capturedAtMilliseconds;
+  if (
+    Number.isNaN(checkedAtMilliseconds) ||
+    Number.isNaN(capturedAtMilliseconds) ||
+    ageMilliseconds < 0 ||
+    ageMilliseconds > MAX_BOOTSTRAP_SNAPSHOT_AGE_MS
+  ) {
+    throw new Error('The exploration access snapshot is not current.');
+  }
+}
+
 /** Validates one exact identity graph and zero enabled notification channels. */
 export function assertExplorationAccessFixtureEvidence(
   fixture: ExplorationAccessFixture,
@@ -410,14 +498,21 @@ export function assertExplorationAccessFixtureEvidence(
   });
 }
 
-/** Applies and reads back the deterministic access fixture. */
+/** Publishes or replays one exact snapshot, then proves freshness and shape. */
 export async function seedExplorationAccessFixture(input: {
-  readonly fixture: ExplorationAccessFixture;
+  readonly identity: ExplorationAccessFixtureInput;
+  readonly replay: ExplorationAccessFixture | null;
   readonly store: ExplorationAccessFixtureStore;
-}): Promise<ExplorationAccessFixtureSummary> {
-  await input.store.apply(input.fixture);
-  return assertExplorationAccessFixtureEvidence(
-    input.fixture,
-    await input.store.readEvidence(input.fixture),
+  readonly now?: () => Date;
+}): Promise<SeededExplorationAccessFixture> {
+  const fixture = await input.store.publish(input.identity, input.replay);
+  assertExplorationAccessSnapshotCurrent(
+    fixture,
+    (input.now ?? (() => new Date()))(),
   );
+  const summary = assertExplorationAccessFixtureEvidence(
+    fixture,
+    await input.store.readEvidence(fixture),
+  );
+  return Object.freeze({ fixture, summary });
 }
