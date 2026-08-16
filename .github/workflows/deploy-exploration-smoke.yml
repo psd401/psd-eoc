@@ -1052,6 +1052,20 @@ jobs:
           import { readExplorationBootstrapConfig } from '../packages/server/scripts/exploration-smoke/config.ts';
 
           const MAX_FORMATTED_RECORDS_BYTES = 64 * 1_024;
+          const BOOTSTRAP_STAGES = Object.freeze({
+            initialize: 'initialize',
+            readApplicationSecret: 'read-application-secret',
+            migrate: 'migrate',
+            configureApplicationRole: 'configure-application-role',
+            seedSynthetic: 'seed-synthetic',
+            seedApprovedAccess: 'seed-approved-access',
+            verifyApplicationLogin: 'verify-application-login',
+          });
+          let bootstrapStage = BOOTSTRAP_STAGES.initialize;
+
+          function markBootstrapStage(stage) {
+            bootstrapStage = stage;
+          }
 
           function formattedRows(output) {
             const value = output.formattedRecords ?? '[]';
@@ -1116,6 +1130,7 @@ jobs:
             });
 
             try {
+              markBootstrapStage(BOOTSTRAP_STAGES.readApplicationSecret);
               const credentials = await dataApi.config.credentials();
               if (credentials.sessionToken === undefined) {
                 throw new Error('Bootstrap requires temporary AWS credentials.');
@@ -1137,9 +1152,11 @@ jobs:
                   return applicationSecret;
                 },
                 async migrate() {
+                  markBootstrapStage(BOOTSTRAP_STAGES.migrate);
                   await migrateDatabase(adminConnection);
                 },
                 async configureApplicationRole(_config, password) {
+                  markBootstrapStage(BOOTSTRAP_STAGES.configureApplicationRole);
                   if (password.length === 0 || /[\0\r\n]/u.test(password)) {
                     throw new Error('The application database password was invalid.');
                   }
@@ -1168,12 +1185,15 @@ jobs:
                   );
                 },
                 async seedSynthetic() {
+                  markBootstrapStage(BOOTSTRAP_STAGES.seedSynthetic);
                   return seedDatabase(adminConnection.db);
                 },
                 async seedApprovedAccess() {
+                  markBootstrapStage(BOOTSTRAP_STAGES.seedApprovedAccess);
                   return seedExplorationAccessFixture({ fixture, store: accessStore });
                 },
                 async verifyApplicationLogin() {
+                  markBootstrapStage(BOOTSTRAP_STAGES.verifyApplicationLogin);
                   await verifyApplicationLogin({
                     applicationSecretArn: config.databaseApplicationSecretArn,
                     executor,
@@ -1190,7 +1210,9 @@ jobs:
           try {
             await main();
           } catch {
-            console.error('Exploration-smoke database bootstrap failed closed.');
+            console.error(
+              `Exploration-smoke database bootstrap failed closed at stage ${bootstrapStage}.`,
+            );
             process.exitCode = 1;
           }
           BUN

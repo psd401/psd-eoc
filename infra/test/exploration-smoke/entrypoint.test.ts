@@ -179,6 +179,28 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain(
       'buildApplicationRoleStatements(\n                    password,\n                  ).slice(2)',
     );
+    const bootstrapStages = [
+      ['readApplicationSecret', 'read-application-secret'],
+      ['migrate', 'migrate'],
+      ['configureApplicationRole', 'configure-application-role'],
+      ['seedSynthetic', 'seed-synthetic'],
+      ['seedApprovedAccess', 'seed-approved-access'],
+      ['verifyApplicationLogin', 'verify-application-login'],
+    ] as const;
+    for (const [property, label] of bootstrapStages) {
+      expect(workflow).toContain(`${property}: '${label}'`);
+      expect(workflow).toContain(
+        `markBootstrapStage(BOOTSTRAP_STAGES.${property});`,
+      );
+    }
+    expect(workflow).toContain(
+      'let bootstrapStage = BOOTSTRAP_STAGES.initialize;',
+    );
+    expect(workflow).toContain('function markBootstrapStage(stage)');
+    expect(workflow).toContain(
+      'database bootstrap failed closed at stage ${bootstrapStage}.',
+    );
+    expect(workflow).not.toContain('error.message');
     expect(workflow).not.toContain('application-login-authority-probe.json');
     expect(workflow).not.toContain(
       'ALTER ROLE "psd_eoc_application" WITH LOGIN INHERIT NOSUPERUSER',
