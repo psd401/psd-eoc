@@ -2331,6 +2331,62 @@ const ADMIN_GROUP_CATALOG_LIMIT = 500;
 const DATA_API_NEIGHBORHOOD_HEADER_BATCH_SIZE = 20;
 const DATA_API_AUDIENCE_HEADER_BATCH_SIZE = 2;
 
+const COMPLETE_FACILITY_CATALOG_QUERY = Object.freeze({
+  includeInactive: true,
+  cursor: null,
+  limit: ADMIN_FACILITY_CATALOG_LIMIT,
+}) satisfies CapabilityInput<'list-facilities'>;
+
+const COMPLETE_NEIGHBORHOOD_CATALOG_QUERY = Object.freeze({
+  cursor: null,
+  limit: ADMIN_NEIGHBORHOOD_CATALOG_LIMIT,
+}) satisfies CapabilityInput<'list-neighborhoods'>;
+
+function completeGroupCatalogQuery(
+  purpose: 'building' | 'others',
+): CapabilityInput<'list-group-sources'> {
+  return {
+    kind: null,
+    purpose,
+    facilityId: null,
+    active: null,
+    cursor: null,
+    limit: ADMIN_GROUP_CATALOG_LIMIT,
+  };
+}
+
+function isCompleteFacilityCatalogQuery(
+  query: CapabilityInput<'list-facilities'>,
+): boolean {
+  return (
+    query.includeInactive &&
+    query.cursor === null &&
+    query.limit === ADMIN_FACILITY_CATALOG_LIMIT
+  );
+}
+
+function isCompleteNeighborhoodCatalogQuery(
+  query: CapabilityInput<'list-neighborhoods'>,
+): boolean {
+  return (
+    query.cursor === null && query.limit === ADMIN_NEIGHBORHOOD_CATALOG_LIMIT
+  );
+}
+
+function isCompleteGroupCatalogQuery(
+  query: CapabilityInput<'list-group-sources'>,
+  purpose: 'building' | 'others',
+): boolean {
+  return (
+    query.kind === null &&
+    query.purpose === purpose &&
+    query.facilityId === null &&
+    query.active === null &&
+    query.cursor === null &&
+    query.limit === ADMIN_GROUP_CATALOG_LIMIT
+  );
+}
+
 function chunks<Item>(
   items: readonly Item[],
   size: number,
@@ -2400,39 +2456,39 @@ async function facilitiesAdminProjection(
     queries.othersGroups,
     effectiveSourceIds,
   );
-  const completeFacilities = await listFacilities(database, {
-    includeInactive: true,
-    cursor: null,
-    limit: ADMIN_FACILITY_CATALOG_LIMIT,
-  });
-  const completeNeighborhoods = await listNeighborhoods(database, {
-    cursor: null,
-    limit: ADMIN_NEIGHBORHOOD_CATALOG_LIMIT,
-  });
-  const completeBuildingGroups = await listGroupSources(
-    database,
-    {
-      kind: null,
-      purpose: 'building',
-      facilityId: null,
-      active: null,
-      cursor: null,
-      limit: ADMIN_GROUP_CATALOG_LIMIT,
-    },
-    effectiveSourceIds,
-  );
-  const completeOthersGroups = await listGroupSources(
-    database,
-    {
-      kind: null,
-      purpose: 'others',
-      facilityId: null,
-      active: null,
-      cursor: null,
-      limit: ADMIN_GROUP_CATALOG_LIMIT,
-    },
-    effectiveSourceIds,
-  );
+  // The default route requests the same bounded, first-page catalogs that its
+  // forms need as option sets. Reusing those exact pages removes a second SQL
+  // pass without weakening filter/cursor validation or deriving one query's
+  // result from a merely similar query. Non-identical pages retain the prior
+  // independent catalog reads.
+  const completeFacilities = isCompleteFacilityCatalogQuery(queries.facilities)
+    ? pagedFacilities
+    : await listFacilities(database, COMPLETE_FACILITY_CATALOG_QUERY);
+  const completeNeighborhoods = isCompleteNeighborhoodCatalogQuery(
+    queries.neighborhoods,
+  )
+    ? pagedNeighborhoods
+    : await listNeighborhoods(database, COMPLETE_NEIGHBORHOOD_CATALOG_QUERY);
+  const completeBuildingGroups = isCompleteGroupCatalogQuery(
+    queries.buildingGroups,
+    'building',
+  )
+    ? pagedBuildingGroups
+    : await listGroupSources(
+        database,
+        completeGroupCatalogQuery('building'),
+        effectiveSourceIds,
+      );
+  const completeOthersGroups = isCompleteGroupCatalogQuery(
+    queries.othersGroups,
+    'others',
+  )
+    ? pagedOthersGroups
+    : await listGroupSources(
+        database,
+        completeGroupCatalogQuery('others'),
+        effectiveSourceIds,
+      );
   return Object.freeze({
     facilities: pagedFacilities,
     neighborhoods: pagedNeighborhoods,
