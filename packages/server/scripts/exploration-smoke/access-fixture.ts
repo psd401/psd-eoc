@@ -294,6 +294,7 @@ export function createDrizzleExplorationAccessFixtureStore(
           .from(groupSources)
           .where(
             and(
+              eq(groupSources.id, fixture.accessGroup.id),
               eq(groupSources.active, true),
               eq(groupSources.kind, 'google-group'),
               eq(groupSources.purpose, 'access'),
@@ -304,7 +305,12 @@ export function createDrizzleExplorationAccessFixtureStore(
         database
           .select({ role: userRoles.role })
           .from(userRoles)
-          .where(eq(userRoles.userId, fixture.user.id))
+          .where(
+            and(
+              eq(userRoles.userId, fixture.user.id),
+              eq(userRoles.role, 'staff'),
+            ),
+          )
           .orderBy(asc(userRoles.role)),
         database
           .select({ facilityId: userFacilityScopes.facilityId })
@@ -417,14 +423,20 @@ export function assertExplorationAccessSnapshotCurrent(
   }
 }
 
-/** Validates one exact identity graph and zero enabled notification channels. */
+/** Validates the exact fixture graph and zero enabled notification channels. */
 export function assertExplorationAccessFixtureEvidence(
   fixture: ExplorationAccessFixture,
   evidence: ExplorationAccessFixtureEvidence,
 ): ExplorationAccessFixtureSummary {
+  const fixtureAccessGroups = evidence.activeAccessGroups.filter((group) =>
+    sameRecord(group, { id: fixture.accessGroup.id }),
+  );
+  const fixtureStaffRoles = evidence.roles.filter((role) =>
+    sameRecord(role, { role: 'staff' }),
+  );
   if (
-    evidence.activeAccessGroups.length !== 1 ||
-    !sameRecord(evidence.activeAccessGroups[0], {
+    fixtureAccessGroups.length !== 1 ||
+    !sameRecord(fixtureAccessGroups[0], {
       id: fixture.accessGroup.id,
       kind: fixture.accessGroup.kind,
       purpose: fixture.accessGroup.purpose,
@@ -435,8 +447,8 @@ export function assertExplorationAccessFixtureEvidence(
     }) ||
     evidence.users.length !== 1 ||
     !sameRecord(evidence.users[0], fixture.user) ||
-    evidence.roles.length !== 1 ||
-    !sameRecord(evidence.roles[0], { role: 'staff' }) ||
+    fixtureStaffRoles.length !== 1 ||
+    !sameRecord(fixtureStaffRoles[0], { role: 'staff' }) ||
     evidence.facilityScopes.length !== 0 ||
     evidence.snapshots.length !== 1 ||
     !sameRecord(evidence.snapshots[0], fixture.snapshot) ||

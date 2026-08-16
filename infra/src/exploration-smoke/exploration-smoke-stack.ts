@@ -129,6 +129,18 @@ export class ExplorationSmokeStack extends Stack {
         type: 'String',
       },
     );
+    const runtimeDatabaseIdleTimeoutSeconds = new CfnParameter(
+      this,
+      'RuntimeDatabaseIdleTimeoutSeconds',
+      {
+        default: 0,
+        description:
+          'App Runner PostgreSQL pool idle timeout. Phase A preserves the currently live value; phase B promotes the candidate-required zero value.',
+        maxValue: 600,
+        minValue: 0,
+        type: 'Number',
+      },
+    );
     const sourceSha = new CfnParameter(this, 'SourceSha', {
       allowedPattern: '^[0-9a-f]{40}$',
       constraintDescription:
@@ -757,7 +769,7 @@ export class ExplorationSmokeStack extends Stack {
                 },
                 {
                   name: 'DATABASE_IDLE_TIMEOUT_SECONDS',
-                  value: '0',
+                  value: runtimeDatabaseIdleTimeoutSeconds.valueAsString,
                 },
                 {
                   name: 'FANOUT_QUEUE_URL',
