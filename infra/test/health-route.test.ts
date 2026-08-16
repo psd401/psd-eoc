@@ -906,6 +906,89 @@ describe('production deep health reads', () => {
     expect(serializedRequests).not.toContain(SYNTHETIC_SECRET_ACCESS_KEY);
   });
 
+  it('closes an aborted native query without starting detached cancellation work', async () => {
+    type CreateDatabaseConnection = NonNullable<
+      RuntimeHealthAdapters['createDatabaseConnection']
+    >;
+    type DatabaseConnection = ReturnType<CreateDatabaseConnection>;
+    const connectionDestroyed = Object.assign(
+      new Error('synthetic private connection detail'),
+      { code: 'CONNECTION_DESTROYED' },
+    );
+    const closeStarts: number[] = [];
+    const unhandledRejections: unknown[] = [];
+    let cancellationCalls = 0;
+    let connectionCount = 0;
+    const createDatabaseConnection: CreateDatabaseConnection = () => {
+      const connectionIndex = connectionCount;
+      connectionCount += 1;
+      closeStarts[connectionIndex] = 0;
+      let rejectPending: ((reason: unknown) => void) | undefined;
+      const pending =
+        connectionIndex === 0
+          ? new Promise<
+              ReadonlyArray<{
+                value: number;
+                ssl: boolean;
+                tlsVersion: string;
+              }>
+            >((_resolve, reject) => {
+              rejectPending = reject;
+            })
+          : Promise.resolve([{ value: 1, ssl: true, tlsVersion: 'TLSv1.3' }]);
+      const cancellablePending = Object.assign(pending, {
+        cancel(): void {
+          cancellationCalls += 1;
+          void Promise.reject(connectionDestroyed);
+        },
+      });
+      let closePromise: Promise<void> | undefined;
+
+      return {
+        driver: 'postgres',
+        db: {},
+        nativeClient: {
+          unsafe: () => cancellablePending,
+        },
+        close(): Promise<void> {
+          closePromise ??= Promise.resolve().then(() => {
+            closeStarts[connectionIndex] =
+              (closeStarts[connectionIndex] ?? 0) + 1;
+            rejectPending?.(connectionDestroyed);
+          });
+          return closePromise;
+        },
+      } as unknown as DatabaseConnection;
+    };
+    const dependencies = createRuntimeDeepHealthDependencies(
+      runtimeEnvironment(),
+      { createDatabaseConnection },
+    );
+    const controller = new AbortController();
+    const observeUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', observeUnhandledRejection);
+
+    try {
+      const firstProbe = dependencies.checkDatabase(controller.signal);
+      controller.abort();
+      await expect(firstProbe).rejects.toMatchObject({
+        code: 'CONNECTION_DESTROYED',
+      });
+
+      await dependencies.checkDatabase(new AbortController().signal);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', observeUnhandledRejection);
+    }
+
+    expect(connectionCount).toBe(2);
+    expect(closeStarts).toEqual([1, 1]);
+    expect(cancellationCalls).toBe(0);
+    expect(unhandledRejections).toEqual([]);
+  });
+
   it('rejects absent runtime secret injection without contacting AWS', async () => {
     const environment = { ...runtimeEnvironment() };
     delete (environment as { GOOGLE_OAUTH_CONFIG?: string })
