@@ -79,7 +79,7 @@ const PostgresUrlDatabaseConfigSchema = z
     url: PostgreSqlUrlSchema,
     maxConnections: z.number().int().min(1).max(50).default(10),
     connectTimeoutSeconds: z.number().int().min(1).max(60).default(10),
-    idleTimeoutSeconds: z.number().int().min(1).max(600).default(20),
+    idleTimeoutSeconds: z.number().int().min(0).max(600).default(20),
   })
   .strict();
 
@@ -129,7 +129,7 @@ const PostgresComponentDatabaseConfigSchema = z
       .regex(/^\//u, 'must be an absolute path'),
     maxConnections: z.literal(1).default(1),
     connectTimeoutSeconds: z.number().int().min(1).max(60).default(10),
-    idleTimeoutSeconds: z.number().int().min(1).max(600).default(20),
+    idleTimeoutSeconds: z.number().int().min(0).max(600).default(0),
   })
   .strict();
 
@@ -173,7 +173,8 @@ export interface PostgresUrlDatabaseConfig {
 /**
  * Deployed PostgreSQL configuration assembled from individually injected
  * credential fields. TLS verification and a single-connection pool are
- * mandatory for this mode.
+ * mandatory for this mode. Idle eviction defaults off because route processes
+ * retain this max-one pool; one-off callers still close it explicitly.
  */
 export interface PostgresComponentDatabaseConfig {
   readonly driver: typeof POSTGRES_DRIVER;
@@ -349,7 +350,7 @@ function parseOptionalInteger(
 
   if (!/^\d+$/u.test(value.trim())) {
     throw new DatabaseConfigurationError(
-      `${variableName} must be a positive integer`,
+      `${variableName} must be a non-negative integer`,
     );
   }
 

@@ -1370,7 +1370,7 @@ jobs:
           test "$(jq -er '.DATABASE_NAME' <<< "$runtime_environment_map")" = "psd_eoc"
           test "$(jq -er '.DATABASE_MAX_CONNECTIONS' <<< "$runtime_environment_map")" = "1"
           test "$(jq -er '.DATABASE_CONNECT_TIMEOUT_SECONDS' <<< "$runtime_environment_map")" = "10"
-          test "$(jq -er '.DATABASE_IDLE_TIMEOUT_SECONDS' <<< "$runtime_environment_map")" = "20"
+          test "$(jq -er '.DATABASE_IDLE_TIMEOUT_SECONDS' <<< "$runtime_environment_map")" = "0"
           test "$(jq -er '.FANOUT_QUEUE_URL' <<< "$runtime_environment_map")" = "$queue_url"
           test "$(jq -er '.NODE_ENV' <<< "$runtime_environment_map")" = "production"
           test "$(jq -er '.RUNTIME_SECRET_ARN' <<< "$runtime_environment_map")" = "$api_salt_secret_arn"
