@@ -73,6 +73,8 @@ const SESSION_LIST_READ_CONCURRENCY = 8;
 const SESSIONS_PER_DEVICE_SUMMARY = 100;
 const REFRESH_RESULT_PREFIX = 'refresh-v1';
 const REVOCATION_RESULT_PREFIX = 'session-revocation-v1';
+const DEFAULT_SESSION_AUTHENTICATION_TIMEOUT_MILLISECONDS = 5_000;
+const CONNECTION_DESTROYED_CODE = 'CONNECTION_DESTROYED';
 
 /**
  * Default session policy.
@@ -611,10 +613,81 @@ function revokeRequestDigest(
   });
 }
 
+type SessionAuthenticationRecoveryReason = 'connection-destroyed' | 'timeout';
+
+interface SessionAuthenticationGuard {
+  scheduleTimeout(onTimeout: () => void): () => void;
+  recover(
+    reason: SessionAuthenticationRecoveryReason,
+    pendingAuthentication: Promise<void>,
+  ): Promise<void>;
+}
+
+class SessionAuthenticationTimeoutError extends Error {
+  public constructor() {
+    super('Session authentication exceeded its database deadline.');
+    this.name = 'SessionAuthenticationTimeoutError';
+  }
+}
+
+function isConnectionDestroyedError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === CONNECTION_DESTROYED_CODE
+  );
+}
+
+function unavailableSessionAuthentication(): SessionAccessError {
+  return new SessionAccessError(
+    'CONFIGURATION_ERROR',
+    'Session authentication is temporarily unavailable.',
+  );
+}
+
+async function inspectCredentialWithGuard(
+  store: SessionStore,
+  tokenDigest: string,
+  guard: SessionAuthenticationGuard,
+): Promise<StoredCredential> {
+  const inspection = store.inspectCredential(tokenDigest);
+  const pendingAuthentication = inspection.then(
+    () => undefined,
+    () => undefined,
+  );
+  let cancelTimeout = (): void => undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    cancelTimeout = guard.scheduleTimeout(() =>
+      reject(new SessionAuthenticationTimeoutError()),
+    );
+  });
+  try {
+    return await Promise.race([inspection, deadline]);
+  } catch (error) {
+    const reason =
+      error instanceof SessionAuthenticationTimeoutError
+        ? 'timeout'
+        : isConnectionDestroyedError(error)
+          ? 'connection-destroyed'
+          : null;
+    if (reason === null) throw error;
+    try {
+      await guard.recover(reason, pendingAuthentication);
+    } catch {
+      throw unavailableSessionAuthentication();
+    }
+    throw unavailableSessionAuthentication();
+  } finally {
+    cancelTimeout();
+  }
+}
+
 export class SessionService {
   public constructor(
     private readonly store: SessionStore,
     private readonly policy: SessionPolicy = DEFAULT_SESSION_POLICY,
+    private readonly authenticationGuard?: SessionAuthenticationGuard,
   ) {}
 
   public async establish(
@@ -673,9 +746,15 @@ export class SessionService {
     source: Extract<InvocationSource, 'web' | 'mobile'>,
     now = new Date(),
   ): Promise<AuthenticatedSession> {
-    const credential = await this.store.inspectCredential(
-      hashRefreshToken(token),
-    );
+    const tokenDigest = hashRefreshToken(token);
+    const credential =
+      this.authenticationGuard === undefined
+        ? await this.store.inspectCredential(tokenDigest)
+        : await inspectCredentialWithGuard(
+            this.store,
+            tokenDigest,
+            this.authenticationGuard,
+          );
     if (credential.kind === 'retired') {
       throw new SessionAccessError(
         'TOKEN_REPLAY',
@@ -2840,26 +2919,103 @@ export async function executeListDeviceSessionsCapability(
   });
 }
 
-let defaultConnection: DatabaseConnection | undefined;
-let defaultSessionService: SessionService | undefined;
+export interface DefaultSessionServiceRuntimeDependencies {
+  readonly createConnection: () => DatabaseConnection;
+  readonly createStore?: (connection: DatabaseConnection) => SessionStore;
+  readonly readPolicy?: () => SessionPolicy;
+  readonly authenticationTimeoutMilliseconds?: number;
+  readonly scheduleAuthenticationTimeout?: (
+    timeoutMilliseconds: number,
+    onTimeout: () => void,
+  ) => () => void;
+}
+
+/**
+ * Owns one cached database-backed service generation and fences recovery so an
+ * older failed generation can never clear or close its replacement.
+ */
+export class DefaultSessionServiceRuntime {
+  private readonly authenticationTimeoutMilliseconds: number;
+  private connection: DatabaseConnection | undefined;
+  private service: SessionService | undefined;
+
+  public constructor(
+    private readonly dependencies: DefaultSessionServiceRuntimeDependencies,
+  ) {
+    const timeout =
+      dependencies.authenticationTimeoutMilliseconds ??
+      DEFAULT_SESSION_AUTHENTICATION_TIMEOUT_MILLISECONDS;
+    if (!Number.isSafeInteger(timeout) || timeout < 1) {
+      throw new SessionConfigurationError(
+        'The session authentication timeout must be a positive integer.',
+      );
+    }
+    this.authenticationTimeoutMilliseconds = timeout;
+  }
+
+  /** Lazily returns the current service, creating exactly one generation. */
+  public get(): SessionService {
+    if (this.service !== undefined) return this.service;
+
+    const policy = this.dependencies.readPolicy?.() ?? readSessionPolicy();
+    const connection = this.dependencies.createConnection();
+    const store =
+      this.dependencies.createStore?.(connection) ??
+      new DrizzleSessionStore(connection.db);
+    const service = new SessionService(
+      store,
+      policy,
+      Object.freeze({
+        scheduleTimeout: (onTimeout: () => void) => {
+          if (this.dependencies.scheduleAuthenticationTimeout !== undefined) {
+            return this.dependencies.scheduleAuthenticationTimeout(
+              this.authenticationTimeoutMilliseconds,
+              onTimeout,
+            );
+          }
+          const timeout = setTimeout(
+            onTimeout,
+            this.authenticationTimeoutMilliseconds,
+          );
+          return () => clearTimeout(timeout);
+        },
+        recover: async (
+          _reason: SessionAuthenticationRecoveryReason,
+          pendingAuthentication: Promise<void>,
+        ) => {
+          if (this.connection === connection && this.service === service) {
+            this.connection = undefined;
+            this.service = undefined;
+          }
+          await connection.close();
+          await pendingAuthentication;
+        },
+      }),
+    );
+    this.connection = connection;
+    this.service = service;
+    return service;
+  }
+
+  /** Clears and closes only the current generation. */
+  public async close(): Promise<void> {
+    const connection = this.connection;
+    this.connection = undefined;
+    this.service = undefined;
+    await connection?.close();
+  }
+}
+
+const defaultSessionServiceRuntime = new DefaultSessionServiceRuntime({
+  createConnection: () => createDatabaseClient(readDatabaseConfig()),
+});
 
 /** Lazily creates the role-authenticated database-backed session service. */
 export function getDefaultSessionService(): SessionService {
-  if (defaultSessionService === undefined) {
-    const policy = readSessionPolicy();
-    defaultConnection = createDatabaseClient(readDatabaseConfig());
-    defaultSessionService = new SessionService(
-      new DrizzleSessionStore(defaultConnection.db),
-      policy,
-    );
-  }
-  return defaultSessionService;
+  return defaultSessionServiceRuntime.get();
 }
 
 /** Lifecycle hook for tests/scripts; normal Next.js processes retain the pool. */
 export async function closeDefaultSessionService(): Promise<void> {
-  const connection = defaultConnection;
-  defaultConnection = undefined;
-  defaultSessionService = undefined;
-  await connection?.close();
+  await defaultSessionServiceRuntime.close();
 }
