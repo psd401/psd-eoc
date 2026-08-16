@@ -5418,4 +5418,86 @@ describeWithDatabase('facilities administrator database flow', () => {
       .where(eq(securityAuditEntries.requestId, projectionRequestId));
     expect(projectionAudits).toEqual([{ requestId: projectionRequestId }]);
   });
+
+  test('returns a byte-equivalent default projection when exact catalogs are reused', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const optimizedRequestId = randomUUID();
+    const independentRequestId = randomUUID();
+    const defaultRouteQueries = Object.freeze({
+      facilities: { includeInactive: true, cursor: null, limit: 200 },
+      neighborhoods: { cursor: null, limit: 200 },
+      buildingGroups: {
+        kind: null,
+        purpose: 'building' as const,
+        facilityId: null,
+        active: null,
+        cursor: null,
+        limit: 500,
+      },
+      othersGroups: {
+        kind: null,
+        purpose: 'others' as const,
+        facilityId: null,
+        active: null,
+        cursor: null,
+        limit: 500,
+      },
+    });
+    const independentCatalogQueries = Object.freeze({
+      facilities: { ...defaultRouteQueries.facilities, limit: 199 },
+      neighborhoods: { ...defaultRouteQueries.neighborhoods, limit: 199 },
+      buildingGroups: { ...defaultRouteQueries.buildingGroups, limit: 499 },
+      othersGroups: { ...defaultRouteQueries.othersGroups, limit: 499 },
+    });
+
+    const independentlyLoaded = await executeFacilitiesAdminProjection({
+      authenticated,
+      store,
+      queries: independentCatalogQueries,
+      metadata: { requestId: independentRequestId, now: new Date() },
+    });
+    const optimized = await executeFacilitiesAdminProjection({
+      authenticated,
+      store,
+      queries: defaultRouteQueries,
+      metadata: { requestId: optimizedRequestId, now: new Date() },
+    });
+
+    expect(independentlyLoaded.facilities.pageInfo.hasMore).toBe(false);
+    expect(independentlyLoaded.neighborhoods.pageInfo.hasMore).toBe(false);
+    expect(independentlyLoaded.buildingGroups.pageInfo.hasMore).toBe(false);
+    expect(independentlyLoaded.othersGroups.pageInfo.hasMore).toBe(false);
+    expect(
+      optimized.neighborhoodOptions.some(
+        ({ facilityIds }) => facilityIds.length > 0,
+      ),
+    ).toBe(true);
+    expect(optimized.audienceConfigs.length).toBeGreaterThan(0);
+    expect(optimized).toEqual(independentlyLoaded);
+    expect(JSON.stringify(optimized)).toBe(JSON.stringify(independentlyLoaded));
+
+    const projectionAudits = await database
+      .select({
+        action: securityAuditEntries.action,
+        outcome: securityAuditEntries.outcome,
+        requestId: securityAuditEntries.requestId,
+      })
+      .from(securityAuditEntries)
+      .where(
+        inArray(securityAuditEntries.requestId, [
+          independentRequestId,
+          optimizedRequestId,
+        ]),
+      )
+      .orderBy(securityAuditEntries.requestId);
+    expect(projectionAudits).toEqual(
+      [independentRequestId, optimizedRequestId].sort().map((requestId) => ({
+        action: 'list-facilities',
+        outcome: 'success',
+        requestId,
+      })),
+    );
+  });
 });
