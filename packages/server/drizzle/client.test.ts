@@ -44,7 +44,7 @@ const COMPONENT_POSTGRES_ENVIRONMENT = {
   DATABASE_SSL_ROOT_CERT: RDS_CA_PATH,
   DATABASE_MAX_CONNECTIONS: '1',
   DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
-  DATABASE_IDLE_TIMEOUT_SECONDS: '20',
+  DATABASE_IDLE_TIMEOUT_SECONDS: '0',
   NODE_ENV: 'production',
 } as const;
 
@@ -80,7 +80,7 @@ describe('database client configuration', () => {
       sslRootCertificatePath: RDS_CA_PATH,
       maxConnections: 1,
       connectTimeoutSeconds: 10,
-      idleTimeoutSeconds: 20,
+      idleTimeoutSeconds: 0,
     });
 
     const connection = createDatabaseClient(
@@ -108,6 +108,44 @@ describe('database client configuration', () => {
         message = String(error);
       }
       expect(message).toBeTruthy();
+      expect(message).not.toContain(
+        COMPONENT_POSTGRES_ENVIRONMENT.DATABASE_PASSWORD,
+      );
+    }
+  });
+
+  test('defaults deployed max-one pools to no idle eviction', () => {
+    expect(
+      readDatabaseConfig({
+        ...COMPONENT_POSTGRES_ENVIRONMENT,
+        DATABASE_IDLE_TIMEOUT_SECONDS: undefined,
+      }),
+    ).toEqual({
+      driver: 'postgres',
+      host: COMPONENT_POSTGRES_ENVIRONMENT.DATABASE_HOST,
+      port: 5432,
+      database: 'psd_eoc',
+      username: 'psd_eoc_application',
+      password: COMPONENT_POSTGRES_ENVIRONMENT.DATABASE_PASSWORD,
+      sslRootCertificatePath: RDS_CA_PATH,
+      maxConnections: 1,
+      connectTimeoutSeconds: 10,
+      idleTimeoutSeconds: 0,
+    });
+  });
+
+  test('rejects invalid idle timeout values without reflecting credentials', () => {
+    for (const idleTimeout of ['-1', 'not-a-number', '601']) {
+      let message = '';
+      try {
+        readDatabaseConfig({
+          ...COMPONENT_POSTGRES_ENVIRONMENT,
+          DATABASE_IDLE_TIMEOUT_SECONDS: idleTimeout,
+        });
+      } catch (error) {
+        message = String(error);
+      }
+      expect(message).toContain('DATABASE_IDLE_TIMEOUT_SECONDS');
       expect(message).not.toContain(
         COMPONENT_POSTGRES_ENVIRONMENT.DATABASE_PASSWORD,
       );
