@@ -151,6 +151,7 @@ export interface HealthAwsCredentials {
 
 /** Injectable read-only boundaries for the production health dependencies. */
 export interface RuntimeHealthAdapters {
+  readonly createDatabaseConnection?: typeof createDatabaseClient;
   readonly queryNativeDatabase?: (
     config: PostgresDatabaseConfig,
     signal: AbortSignal,
@@ -598,6 +599,8 @@ export function createRuntimeDeepHealthDependencies(
   environment: HealthEnvironment = process.env,
   adapters: RuntimeHealthAdapters = {},
 ): DeepHealthDependencies {
+  const createDatabaseConnection =
+    adapters.createDatabaseConnection ?? createDatabaseClient;
   const fetchImplementation = adapters.fetch ?? globalThis.fetch;
   const now = adapters.now ?? (() => new Date());
   let credentialsClient: S3Client | undefined;
@@ -614,7 +617,7 @@ export function createRuntimeDeepHealthDependencies(
       signal: AbortSignal,
     ): Promise<NativeDatabaseHealthResult> => {
       assertNotAborted(signal);
-      const connection = createDatabaseClient(config);
+      const connection = createDatabaseConnection(config);
       if (connection.driver !== 'postgres') {
         throw new Error('Health dependency configuration is unavailable.');
       }
@@ -625,20 +628,18 @@ export function createRuntimeDeepHealthDependencies(
         const pending = connection.nativeClient.unsafe<
           NativeDatabaseHealthResult[]
         >(NATIVE_DATABASE_HEALTH_SQL);
-        const cancel = () => {
-          try {
-            void Promise.resolve(pending.cancel()).catch(() => undefined);
-          } catch {
-            // Cancellation is best-effort; connection teardown remains bounded.
-          }
+        const close = () => {
+          // postgres-js discards the Promise created by Query.cancel(). The
+          // idempotent close hook owns and observes bounded active teardown.
+          void connection.close().catch(() => undefined);
         };
-        signal.addEventListener('abort', cancel, { once: true });
-        if (signal.aborted) cancel();
+        signal.addEventListener('abort', close, { once: true });
+        if (signal.aborted) close();
         let rows: readonly NativeDatabaseHealthResult[];
         try {
           rows = await pending;
         } finally {
-          signal.removeEventListener('abort', cancel);
+          signal.removeEventListener('abort', close);
         }
         assertNotAborted(signal);
         const row = rows[0];
