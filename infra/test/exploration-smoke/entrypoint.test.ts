@@ -144,6 +144,9 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(bootstrapStep).toBeGreaterThan(publishStep);
     expect(serviceStep).toBeGreaterThan(bootstrapStep);
     expect(workflow).toContain('phase_app_digest=$current_digest');
+    expect(workflow).toContain(
+      'phase_runtime_idle_timeout=$current_runtime_idle_timeout',
+    );
     expect(workflow).toContain('phase_source_sha=$current_source_sha');
     expect(workflow).toContain(
       '--parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST"',
@@ -153,6 +156,19 @@ describe('isolated CDK entrypoint configuration', () => {
     );
     expect(workflow).toContain(
       '--parameters "$STACK_NAME:SourceSha=$phase_source_sha"',
+    );
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=$phase_runtime_idle_timeout"',
+    );
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0"',
+    );
+    expect(workflow).toContain(
+      'select(.ParameterKey == "RuntimeDatabaseIdleTimeoutSeconds")',
+    );
+    expect(workflow).toContain('app-runner-repository-phase.json');
+    expect(workflow).toContain(
+      '.RuntimeEnvironmentVariables.DATABASE_IDLE_TIMEOUT_SECONDS',
     );
     expect(workflow).toContain(
       '--parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"',

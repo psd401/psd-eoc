@@ -253,7 +253,11 @@ jobs:
             .Parameters.ApprovedStaffDisplayName.NoEcho == true and
             (.Parameters.SourceSha.AllowedPattern | type == "string") and
             (.Parameters.BootstrapSourceSha.AllowedPattern | type == "string") and
-            (.Parameters.BootstrapImageDigest.AllowedPattern | type == "string")
+            (.Parameters.BootstrapImageDigest.AllowedPattern | type == "string") and
+            .Parameters.RuntimeDatabaseIdleTimeoutSeconds.Type == "Number" and
+            .Parameters.RuntimeDatabaseIdleTimeoutSeconds.Default == 0 and
+            .Parameters.RuntimeDatabaseIdleTimeoutSeconds.MinValue == 0 and
+            .Parameters.RuntimeDatabaseIdleTimeoutSeconds.MaxValue == 600
           ' "$template" > /dev/null
 
           jq '[.. | objects | select(has("Effect") and has("Action")) | {Effect, Action, Resource, Condition}]' "$template" \
@@ -418,16 +422,16 @@ jobs:
             echo
             echo '```text'
             printf '%s\n' "Assume through GitHub OIDC only: $DEPLOY_ROLE_ARN"
-            printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=<preserve-current-or-false>' --parameters '$STACK_NAME:AppImageDigest=<preserve-current-or-zero>' --parameters '$STACK_NAME:SourceSha=<preserve-current-or-candidate>' --parameters '$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>' --parameters '$STACK_NAME:ApprovedStaffEmail=<protected:$APPROVED_STAFF_EMAIL_SHA256>' --parameters '$STACK_NAME:ApprovedStaffDisplayName=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256>'"
+            printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=<preserve-current-or-false>' --parameters '$STACK_NAME:AppImageDigest=<preserve-current-or-zero>' --parameters '$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=<preserve-current-or-zero>' --parameters '$STACK_NAME:SourceSha=<preserve-current-or-candidate>' --parameters '$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>' --parameters '$STACK_NAME:ApprovedStaffEmail=<protected:$APPROVED_STAFF_EMAIL_SHA256>' --parameters '$STACK_NAME:ApprovedStaffDisplayName=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256>'"
             printf '%s\n' "docker buildx imagetools create --prefer-index=false --tag '$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server:source-$SOURCE_SHA' 'localhost:5000/psd-eoc/exploration-smoke@$IMAGE_DIGEST'"
             printf '%s\n' "aws ecs run-task --cluster '<BootstrapEcsClusterArn>' --task-definition '<BootstrapTaskDefinitionArn pinned to $IMAGE_DIGEST>' --launch-type FARGATE --network-configuration 'awsvpcConfiguration={subnets=[<BootstrapPrivateSubnetIds>],securityGroups=[<BootstrapSecurityGroupId>],assignPublicIp=DISABLED}' # no environment or secret overrides"
             printf '%s\n' "aws ecs wait tasks-stopped --cluster '<BootstrapEcsClusterArn>' --tasks '<exact-task-arn>'; aws logs get-log-events --log-group-name '<BootstrapLogGroupName>' --log-stream-name 'native-bootstrap/native-bootstrap/<exact-task-id>' # require exit 0 plus exact source/TLS/idempotence summary"
-            printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=true' --parameters '$STACK_NAME:AppImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:SourceSha=$SOURCE_SHA' --parameters '$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>' --parameters '$STACK_NAME:ApprovedStaffEmail=<protected:$APPROVED_STAFF_EMAIL_SHA256>' --parameters '$STACK_NAME:ApprovedStaffDisplayName=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256>'"
+            printf '%s\n' "cd infra && bunx --bun cdk --app 'bun bin/exploration-smoke.ts' deploy $STACK_NAME --exclusively --require-approval never --parameters '$STACK_NAME:ProvisionApplication=true' --parameters '$STACK_NAME:AppImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0' --parameters '$STACK_NAME:SourceSha=$SOURCE_SHA' --parameters '$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST' --parameters '$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA' --parameters '$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN' --parameters '$STACK_NAME:ApprovedGoogleSubject=<protected:$APPROVED_GOOGLE_SUBJECT_SHA256>' --parameters '$STACK_NAME:ApprovedStaffEmail=<protected:$APPROVED_STAFF_EMAIL_SHA256>' --parameters '$STACK_NAME:ApprovedStaffDisplayName=<protected:$APPROVED_STAFF_DISPLAY_NAME_SHA256>'"
             printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/application' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
             printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/service' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
             echo '```'
             echo
-            echo "Phase A preserves an existing App Runner service, AppImageDigest, and SourceSha (or uses ProvisionApplication=false, the zero digest, and the candidate source on first deployment), stages only the exact BootstrapImageDigest/BootstrapSourceSha and native private-network resources, then publishes the verified digest. The protected workflow runs the task definition that references that exact digest and source, waits for exit zero, and reads the task's bounded CloudWatch stream before phase B promotes both AppImageDigest and SourceSha to App Runner. Ordinary rollback requires a fresh dispatch and approval using the previously recorded digest. No destroy, DNS, provider, or store command exists in this workflow. Database migrations and journals are forward-only and append-only."
+            echo "Phase A preserves an existing App Runner service, AppImageDigest, SourceSha, and live database idle timeout (or uses ProvisionApplication=false, the zero digest, candidate source, and zero timeout on first deployment), stages only the exact BootstrapImageDigest/BootstrapSourceSha and native private-network resources, then publishes the verified digest. The protected workflow runs the task definition that references that exact digest and source, waits for exit zero, and reads the task's bounded CloudWatch stream before phase B promotes AppImageDigest and SourceSha to App Runner with the candidate-required zero idle timeout. Ordinary rollback requires a fresh dispatch and approval using the previously recorded digest. No destroy, DNS, provider, or store command exists in this workflow. Database migrations and journals are forward-only and append-only."
           } > artifacts/consequence-preview.md
           cat artifacts/consequence-preview.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -854,14 +858,18 @@ jobs:
               [[ "$current_service_arn" =~ ^arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/[A-Za-z0-9]{32}$ ]]
               aws apprunner describe-service \
                 --service-arn "$current_service_arn" \
-                --query 'Service.{ServiceArn:ServiceArn,ServiceId:ServiceId,ServiceName:ServiceName,Status:Status,ImageIdentifier:SourceConfiguration.ImageRepository.ImageIdentifier}' \
+                --query 'Service.{ServiceArn:ServiceArn,ServiceId:ServiceId,ServiceName:ServiceName,Status:Status,ImageIdentifier:SourceConfiguration.ImageRepository.ImageIdentifier,DatabaseIdleTimeoutSeconds:SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables.DATABASE_IDLE_TIMEOUT_SECONDS}' \
                 > ../artifacts/readback/app-runner-before.json
               test "$(jq -r .ServiceArn ../artifacts/readback/app-runner-before.json)" = "$current_service_arn"
               test "$(jq -r .ServiceName ../artifacts/readback/app-runner-before.json)" = "psd-eoc-exploration-smoke"
               test "$(jq -r .Status ../artifacts/readback/app-runner-before.json)" = "RUNNING"
               test "$(jq -r .ImageIdentifier ../artifacts/readback/app-runner-before.json)" = "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server@$current_digest"
+              current_runtime_idle_timeout=$(jq -er '.DatabaseIdleTimeoutSeconds' ../artifacts/readback/app-runner-before.json)
+              [[ "$current_runtime_idle_timeout" =~ ^[0-9]+$ ]]
+              (( 10#$current_runtime_idle_timeout <= 600 ))
               phase_provision=true
               phase_app_digest=$current_digest
+              phase_runtime_idle_timeout=$current_runtime_idle_timeout
               phase_source_sha=$current_source_sha
             else
               test "$current_provision" = "false"
@@ -872,6 +880,7 @@ jobs:
               test "$(jq '[.StackResourceSummaries[] | select(.ResourceType == "AWS::AppRunner::Service")] | length' ../artifacts/readback/phase-one-resources.json)" -eq 0
               phase_provision=false
               phase_app_digest=$ZERO_IMAGE_DIGEST
+              phase_runtime_idle_timeout=0
               phase_source_sha=$SOURCE_SHA
             fi
           else
@@ -879,6 +888,7 @@ jobs:
             test "$PREVIOUS_IMAGE_DIGEST" = "none"
             phase_provision=false
             phase_app_digest=$ZERO_IMAGE_DIGEST
+            phase_runtime_idle_timeout=0
             phase_source_sha=$SOURCE_SHA
           fi
 
@@ -891,6 +901,7 @@ jobs:
             --outputs-file ../artifacts/readback/bootstrap-phase-outputs.json \
             --parameters "$STACK_NAME:ProvisionApplication=$phase_provision" \
             --parameters "$STACK_NAME:AppImageDigest=$phase_app_digest" \
+            --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=$phase_runtime_idle_timeout" \
             --parameters "$STACK_NAME:SourceSha=$phase_source_sha" \
             --parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST" \
             --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
@@ -903,9 +914,21 @@ jobs:
             > ../artifacts/readback/stack-repository-phase.json
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "ProvisionApplication") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$phase_provision"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "AppImageDigest") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$phase_app_digest"
+          test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "RuntimeDatabaseIdleTimeoutSeconds") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$phase_runtime_idle_timeout"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "SourceSha") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$phase_source_sha"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "BootstrapImageDigest") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$IMAGE_DIGEST"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "BootstrapSourceSha") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$SOURCE_SHA"
+          if [[ "$phase_provision" == "true" ]]; then
+            phase_service_arn=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "AppRunnerServiceArn") | .OutputValue' ../artifacts/readback/stack-repository-phase.json)
+            aws apprunner describe-service \
+              --service-arn "$phase_service_arn" \
+              --query 'Service.{Status:Status,ImageIdentifier:SourceConfiguration.ImageRepository.ImageIdentifier,RuntimeEnvironmentVariables:SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables}' \
+              > ../artifacts/readback/app-runner-repository-phase.json
+            test "$(jq -er '.Status' ../artifacts/readback/app-runner-repository-phase.json)" = "RUNNING"
+            test "$(jq -er '.ImageIdentifier' ../artifacts/readback/app-runner-repository-phase.json)" = "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server@$phase_app_digest"
+            test "$(jq -er '.RuntimeEnvironmentVariables.SOURCE_SHA' ../artifacts/readback/app-runner-repository-phase.json)" = "$phase_source_sha"
+            test "$(jq -er '.RuntimeEnvironmentVariables.DATABASE_IDLE_TIMEOUT_SECONDS' ../artifacts/readback/app-runner-repository-phase.json)" = "$phase_runtime_idle_timeout"
+          fi
 
       - name: Publish and verify only the approved image digest
         shell: bash
@@ -1279,6 +1302,7 @@ jobs:
             --outputs-file ../artifacts/readback/final-outputs.json \
             --parameters "$STACK_NAME:ProvisionApplication=true" \
             --parameters "$STACK_NAME:AppImageDigest=$IMAGE_DIGEST" \
+            --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
             --parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST" \
             --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
@@ -1310,6 +1334,7 @@ jobs:
             test "$(jq -r '.Stacks[0].StackStatus' artifacts/readback/stack-final.json)" = "CREATE_COMPLETE"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "ProvisionApplication") | .ParameterValue' artifacts/readback/stack-final.json)" = "true"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "AppImageDigest") | .ParameterValue' artifacts/readback/stack-final.json)" = "$IMAGE_DIGEST"
+          test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "RuntimeDatabaseIdleTimeoutSeconds") | .ParameterValue' artifacts/readback/stack-final.json)" = "0"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "SourceSha") | .ParameterValue' artifacts/readback/stack-final.json)" = "$SOURCE_SHA"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "BootstrapImageDigest") | .ParameterValue' artifacts/readback/stack-final.json)" = "$IMAGE_DIGEST"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "BootstrapSourceSha") | .ParameterValue' artifacts/readback/stack-final.json)" = "$SOURCE_SHA"
