@@ -27,6 +27,7 @@ const EXPLORATION_ACCESS_IDENTITY_CREATED_AT = new Date(
 );
 const MAX_BOOTSTRAP_SNAPSHOT_AGE_MS = 5 * 60 * 1_000;
 const MAX_POSTGRES_INTEGER = 2_147_483_647;
+const MAX_JAVASCRIPT_DATE_MILLISECONDS = 8_640_000_000_000_000;
 
 export interface ExplorationAccessFixtureInput {
   readonly googleSubject: string;
@@ -109,6 +110,38 @@ export interface SeededExplorationAccessFixture {
   readonly summary: ExplorationAccessFixtureSummary;
 }
 
+interface ExplorationAccessSnapshotAllocation {
+  readonly capturedAt: Date;
+  readonly latestVersion: number;
+}
+
+/** Decodes the scalar shape returned by a raw native postgres-js query. */
+export function parseExplorationAccessSnapshotAllocation(
+  rows: readonly Readonly<Record<string, unknown>>[],
+): ExplorationAccessSnapshotAllocation {
+  const allocation = rows[0];
+  const capturedAtMilliseconds = allocation?.capturedAtMilliseconds;
+  const latestVersion = allocation?.latestVersion;
+  if (
+    rows.length !== 1 ||
+    typeof capturedAtMilliseconds !== 'number' ||
+    !Number.isSafeInteger(capturedAtMilliseconds) ||
+    capturedAtMilliseconds <= 0 ||
+    capturedAtMilliseconds > MAX_JAVASCRIPT_DATE_MILLISECONDS ||
+    typeof latestVersion !== 'number' ||
+    !Number.isSafeInteger(latestVersion) ||
+    latestVersion < 0 ||
+    latestVersion >= MAX_POSTGRES_INTEGER
+  ) {
+    throw new Error('The exploration access snapshot could not be allocated.');
+  }
+  const capturedAt = new Date(capturedAtMilliseconds);
+  if (Number.isNaN(capturedAt.getTime())) {
+    throw new Error('The exploration access snapshot could not be allocated.');
+  }
+  return Object.freeze({ capturedAt, latestVersion });
+}
+
 /** Creates one access-only graph around an already allocated snapshot. */
 export function createExplorationAccessFixture(
   input: ExplorationAccessFixtureInput,
@@ -176,32 +209,23 @@ export function createDrizzleExplorationAccessFixtureStore(
         let fixture = replay;
         if (fixture === null) {
           const allocationRows = databaseExecuteRows<{
-            capturedAt: Date;
+            capturedAtMilliseconds: number;
             latestVersion: number;
           }>(
             await transaction.execute(sql<{
-              capturedAt: Date;
+              capturedAtMilliseconds: number;
               latestVersion: number;
             }>`
               select
-                clock_timestamp() as "capturedAt",
+                floor(extract(epoch from clock_timestamp()) * 1000)
+                  ::double precision as "capturedAtMilliseconds",
                 coalesce(max(${accessMembershipSnapshots.version}), 0)::integer
                   as "latestVersion"
               from ${accessMembershipSnapshots}
             `),
           );
-          const allocation = allocationRows[0];
-          if (
-            allocationRows.length !== 1 ||
-            !(allocation?.capturedAt instanceof Date) ||
-            !Number.isSafeInteger(allocation.latestVersion) ||
-            allocation.latestVersion < 0 ||
-            allocation.latestVersion >= MAX_POSTGRES_INTEGER
-          ) {
-            throw new Error(
-              'The exploration access snapshot could not be allocated.',
-            );
-          }
+          const allocation =
+            parseExplorationAccessSnapshotAllocation(allocationRows);
           fixture = createExplorationAccessFixture(input, {
             id: randomUUID(),
             version: allocation.latestVersion + 1,
