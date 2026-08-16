@@ -3,7 +3,8 @@
 Status: **configured-unverified; no AWS, GCP, DNS, or provider write is proved**
 
 This record is the durable evidence template for the isolated
-`PsdEocExplorationSmoke` environment from issue #163. It is not a production
+`PsdEocExplorationSmoke` environment from issue #163, with the private native
+PostgreSQL deployment path superseded by issue #178. It is not a production
 go-live record. It must contain synthetic data and identifiers only: never a
 secret value, OAuth credential, session cookie, raw token, real recipient list,
 or provider payload.
@@ -31,17 +32,27 @@ environment approval described below.
 | Notification channels   | Disabled and mocked; no recipients, workers, provider credentials, or send authority |
 | DNS/custom domain       | Out of scope; separately previewed and approved                                      |
 
-The stack owns one App Runner service, one Aurora PostgreSQL writer with the
-Data API, one ECR repository, one health-only SQS queue, and generated
-admin/application/cookie/API secrets. `ProvisionApplication=false` is permitted
-only for the first-deployment repository phase. An existing service must never
-be removed as part of an ordinary release. Aurora replacement/deletion takes a
-final snapshot; its automated backup retention while running is one day. The
-database instance, generated secrets, and queue are deleted on a separately
-approved stack teardown. The ECR repository cannot be deleted while it contains
-an image, so image deletion is a separate exact, human-reviewed prerequisite.
-The external Google OAuth secret is referenced but not owned by the stack. App
-Runner creates provider-managed `service` and `application` CloudWatch Logs
+The stack owns one App Runner service, one private Aurora PostgreSQL writer, an
+App Runner VPC connector, a bounded NAT egress path, one protected ECS Fargate
+bootstrap task definition/cluster/log group, one ECR repository, one
+health-only SQS queue, and generated admin/application/approved-identity/cookie/API
+secrets. Aurora's cluster HTTP endpoint is disabled. App Runner and the
+bootstrap task connect directly on port 5432, require certificate-verified TLS
+against the pinned AWS RDS CA bundle, and use a one-connection application
+pool. Database security-group ingress is limited to the App Runner and
+bootstrap security groups; the database subnets have no public route. The NAT
+path provides required public HTTPS egress, including Google OIDC, without
+making Aurora public. `ProvisionApplication=false` is permitted only for a
+first-deployment foundation phase. An existing service, image digest, and
+source SHA must never be changed during the candidate bootstrap phase of an
+ordinary release. Aurora replacement/deletion takes a final snapshot; its
+automated backup retention while running is one day. The database instance,
+generated secrets, NAT resources, VPC connector, bootstrap resources, and queue
+are deleted only on a separately approved stack teardown. The ECR repository
+cannot be deleted while it contains an image, so image deletion is a separate
+exact, human-reviewed prerequisite. The external Google OAuth secret is
+referenced but not owned by the stack. App Runner creates provider-managed
+`service` and `application` CloudWatch Logs
 groups outside the synthesized resource inventory. The workflow discovers only
 the two groups under the exact returned service ID, sets and reads back 14-day
 retention, and records them separately. Setting retention is an irreversible
@@ -94,10 +105,11 @@ environment variables and the stable live IAM readback before any AWS write.
 | Previous deployed image digest, if any   | `[PENDING / NONE]`                         |
 
 The cost entry must cover App Runner instance time, Aurora Serverless capacity
-and storage/backups, ECR storage, Secrets Manager secret-months/API calls, SQS
-requests, logs, and data transfer. A guessed number is not approval. Attach a
-dated AWS Pricing Calculator or equivalent reviewed estimate to the change
-reference.
+and storage/backups, the NAT gateway and processed bytes, App Runner VPC
+connector traffic, the one-off Fargate bootstrap, ECR storage, Secrets Manager
+secret-months/API calls, SQS requests, logs, and data transfer. A guessed number
+is not approval. Attach a dated AWS Pricing Calculator or equivalent reviewed
+estimate to the change reference.
 
 ## Consequence preview
 
@@ -109,15 +121,22 @@ produce and retain a no-cloud-write artifact containing:
   boundary expectation, cost estimate, and change reference;
 - every synthesized resource type and logical ID, generated IAM action, tag,
   deletion policy, update-replace policy, and stack output;
+- the NAT gateway, App Runner VPC connector, private database/bootstrap
+  security-group paths, ECS cluster/task definition, bootstrap log group, and
+  the disabled Aurora cluster HTTP endpoint;
 - the two provider-managed App Runner log-group name patterns, their 14-day
   retention, and the consequence that older log events permanently expire;
-- the exact two-phase first-deployment commands and the ordinary update command;
+- the exact phase-A command that preserves a live App Runner image/source while
+  staging the candidate bootstrap image/source, the no-override Fargate
+  `RunTask`/wait/log-read shape, and the phase-B promotion command;
 - the expected one-writer/one-instance topology and the absence of SES, SNS,
   Expo, SMS, InformaCast, Google Groups, S3/media, scheduled actions, Lambda
   invocation, queue-send, or recipient authority;
 - the consequences: AWS charges begin; synthetic application and audit data are
   written; an approved staff identity can sign in only after OAuth is valid;
-  App Runner receives public HTTPS traffic at its provider URL; no custom domain
+  App Runner receives public HTTPS traffic at its provider URL and uses billed
+  NAT egress for required public HTTPS; Aurora remains private and reachable
+  only by native TLS from the two approved security groups; no custom-domain
   changes and no notification sends occur; and mobile apps remain blocked from
   an endpoint whose TLS/domain and sign-in have not been verified;
 - rollback and stop conditions, including the previous immutable image digest.
@@ -156,6 +175,15 @@ digest, or OAuth secret ARN outside the fixed boundary.
       `arn:aws:logs:us-west-2:338414773271:log-group:/aws/apprunner/psd-eoc-exploration-smoke/*/application:*`
       and the corresponding `/service:*` ARN. Positive and neighboring-resource
       negative simulations must pass before provisioning.
+- [ ] The deployment role also permits `ecs:RunTask` only for the output
+      `BootstrapTaskDefinitionArn`, `ecs:DescribeTasks`,
+      `ecs:DescribeTaskDefinition`, `logs:DescribeLogStreams` for the output
+      `BootstrapLogGroupName`, and `logs:GetLogEvents` only for its
+      `native-bootstrap/native-bootstrap/*` streams. `iam:PassRole` is limited
+      to the exact output `BootstrapTaskExecutionRoleArn` and
+      `BootstrapTaskRoleArn` with `iam:PassedToService=ecs-tasks.amazonaws.com`.
+      The workflow positively simulates these direct permissions before
+      `RunTask`; neither application runtime role receives them.
 - [ ] The reviewed outer deployment policy restricts `sts:AssumeRole` to the
       exact required CDK bootstrap role resources. Its permissions boundary does
       not propagate into the CDK deploy or CloudFormation execution roles; those
@@ -169,11 +197,15 @@ digest, or OAuth secret ARN outside the fixed boundary.
 - [ ] The five-field OAuth credential JSON exists in the separately reviewed
       Secrets Manager ARN; only metadata and ARN are recorded here.
 - [ ] Protected environment secrets hold the approved immutable Google subject,
-      staff email, and display name. Their values are not printed.
+      staff email, and display name. CloudFormation stores them in one dedicated
+      identity secret, and ECS/App Runner use JSON-key secret references. Their
+      values are never task overrides, ordinary service variables, artifacts,
+      or printed output.
 - [ ] The exact source was reviewed and is reachable from `main`.
 - [ ] The container built from that source, passed a local startup/health smoke,
       and produced exactly the requested manifest digest in a loopback-only
-      registry before any external publication.
+      registry before any external publication. The reviewed image contains the
+      pinned AWS RDS CA bundle used by both native PostgreSQL clients.
 - [ ] The synthesized template/policy tests and the full repository gate pass.
 - [ ] The price/retention preview and rollback were reviewed.
 - [ ] The product owner approved this exact source, digest, template hash,
@@ -212,24 +244,39 @@ masked.
    OIDC trust, stable policy documents/default versions, and explicit boundary.
    Require the normalized policy hash and log-retention permission simulations
    to match the protected expectations before any write.
-3. If and only if the stack does not yet exist, deploy
-   `PsdEocExplorationSmoke` with `ProvisionApplication=false`, the all-zero
-   digest sentinel, the reviewed Google secret ARN, and the protected approved
-   Google subject. This creates the repository and isolated dependencies but no
-   App Runner service.
+3. Deploy phase A with the reviewed Google secret ARN and all three protected
+   identity fields as `NoEcho` parameters. On a missing or foundation-only
+   stack, use `ProvisionApplication=false`, the all-zero `AppImageDigest`, and
+   the candidate `SourceSha`. On a running stack, preserve its exact
+   `ProvisionApplication=true`, `AppImageDigest`, and `SourceSha`. In both
+   cases, set only `BootstrapImageDigest` and `BootstrapSourceSha` to the
+   candidate. Read all four digest/source parameters back before publication;
+   phase A must not update or remove an existing App Runner service.
 4. Push the locally verified image to the stack's ECR repository, address it by
    digest, and require ECR readback to equal the requested digest.
-5. Run the idempotent bootstrap with the admin secret, then verify the
-   application LOGIN boundary and the one synthetic staff fixture without
-   printing secret or identity values.
-6. Deploy the same stack with `ProvisionApplication=true` and the exact digest.
-   If the stack already exists, skip phase 3 so an ordinary release can never
-   remove an existing service. Bootstrap still runs before the service update,
-   because deep health requires the application LOGIN.
+5. Read the exact ECS cluster/task-definition/private-subnet/security-group/log
+   group/task-role/execution-role outputs. Simulate the direct RunTask,
+   describe, pass-role, and bounded log-read permissions. Describe the task
+   definition and require the exact `repository-uri@digest`, candidate source,
+   native PostgreSQL/TLS configuration, JSON-key secret references, Fargate
+   network mode, and `native-bootstrap` command/log contract. Call `RunTask`
+   once with `assignPublicIp=DISABLED`, provenance fields, and no environment or
+   secret overrides; wait for that exact task to stop and require exit zero and
+   the exact image digest. The task itself performs two full bootstrap passes,
+   compares their summaries, and emits one JSON evidence line only after both
+   admin and application sessions prove certificate-verified TLS. The workflow
+   reads only that exact task stream and requires the source SHA, native
+   transport, TLS, migrations, role boundary, deterministic seed/access counts,
+   two equivalent runs, mocked Groups, and disabled messaging.
+6. Only after step 5 succeeds, deploy phase B with
+   `ProvisionApplication=true`, candidate `AppImageDigest`/`SourceSha`, and the
+   same candidate bootstrap digest/source and protected parameters. Read all
+   parameters back. This is the only phase allowed to promote App Runner.
 7. From the exact returned App Runner ARN, verify the fixed service name and ID,
    discover only its `/application` and `/service` log groups, set both to
    14-day retention, and poll until the exact names, ARNs, and retention read
-   back. Do not read or archive application log events.
+   back. Do not read or archive App Runner application log events; the only log
+   content read by the workflow is the bounded one-off bootstrap summary.
 8. Run resource, IAM, queue, database, App Runner, TLS/health, and zero-send
    readback. Store a redacted artifact and job summary; do not automatically
    edit this append-only evidence file.
@@ -247,18 +294,28 @@ store, and notification actions are separate changes.
 - [ ] ECR reports the exact requested manifest digest; App Runner has automatic
       deployment disabled and references `repository-uri@sha256:...` exactly.
 - [ ] App Runner has exactly one minimum and one maximum instance.
+- [ ] App Runner uses the exact output VPC connector, native
+      `DATABASE_DRIVER=postgres`, endpoint port 5432, pinned CA path, source
+      SHA, and bounded pool/timeouts (maximum 1, connect 10 seconds, idle 20
+      seconds). Its database username/password and approved admin subject are
+      JSON-key secret references, not ordinary runtime values. The sanitized
+      artifact records names and network topology but no values.
 - [ ] The exact App Runner service ID has only the expected `/application` and
       `/service` log groups under its prefix, both in account `338414773271` and
-      region `us-west-2`, and both read back with 14-day retention. No log event
-      content or runtime environment value is captured.
-- [ ] Aurora has one writer, no reader, Data API enabled, encryption enabled,
+      region `us-west-2`, and both read back with 14-day retention. No App
+      Runner log-event content or runtime environment value is captured.
+- [ ] Aurora has one writer, no reader, its cluster HTTP endpoint disabled,
+      encryption enabled, `rds.force_ssl=1`, no public endpoint/route, ingress
+      only from the exact App Runner/bootstrap security groups on port 5432,
       and the reviewed backup/removal behavior.
 - [ ] The runtime role trust contains only
       `tasks.apprunner.amazonaws.com`/`sts:AssumeRole`, has no permissions
       boundary or attached policy, and has exactly one inline policy. That
-      policy can execute only the five required Data API calls on its cluster,
-      get/describe only its application/cookie/API/Google OAuth secret
-      resources, and call only `sqs:GetQueueAttributes` on the health queue.
+      policy has only two statements: get/describe its
+      application/approved-identity/cookie/API/Google OAuth secret resources,
+      and `sqs:GetQueueAttributes` on the health queue. It has no database API
+      action; native database authorization is the private network plus the
+      generated least-privilege PostgreSQL login.
 - [ ] The runtime role has no `sqs:SendMessage`, SES/SNS/Expo/SMS, Google
       Groups, media/S3, scheduler, event source, notification-provider
       credential, recipient, or Lambda-invoke authority. The separate
@@ -267,13 +324,20 @@ store, and notification actions are separate changes.
       application runtime.
 - [ ] The deployment-role trust, stable inline/attached/default-version policy
       inventory, explicit boundary (including `none`), canonical inventory
-      SHA-256, positive exact-log simulation, and neighboring-resource negative
+      SHA-256, exact Fargate/pass-role/bootstrap-log simulations, positive exact
+      App Runner retention simulation, and neighboring-resource negative
       simulation match the protected approval. The evidence does not claim the
       outer boundary applies transitively to CDK/CloudFormation roles.
 - [ ] The queue has no sender, event source, subscription, redrive producer, or
       message; it is used only by the side-effect-free deep-health read.
-- [ ] Generated secrets are encrypted, referenced by ARN, and never printed.
-- [ ] Bootstrap readback proves deterministic/idempotent migrations; LOGIN
+- [ ] Generated secrets are encrypted, referenced by ARN/JSON key, and never
+      printed or passed as Fargate overrides.
+- [ ] Fargate readback proves the exact cluster, private subnets, security
+      group, task definition, task/execution roles, candidate source and image
+      digest, `native-bootstrap` log stream, stopped state, and exit code zero.
+- [ ] The single bootstrap summary proves two equivalent runs, deterministic
+      migrations/seeds, native PostgreSQL transport, and certificate-verified
+      admin/application sessions; LOGIN
       `psd_eoc_application` has membership only in migration-owned NOLOGIN role
       `psd_eoc_app` and is not superuser, createdb, createrole, replication, or
       bypassrls.
@@ -281,9 +345,10 @@ store, and notification actions are separate changes.
       and four separate synthetic, non-routable roster recipients, identified
       only by fingerprints in this file; no student or live-recipient data
       exists and every notification channel is disabled.
-- [ ] App Runner provider URL has valid TLS and `/api/health` succeeds against
-      the exact deployed service. Provider availability is not evidence of
-      human sign-in or notification delivery.
+- [ ] App Runner provider URL has valid HTTPS and `/api/health` succeeds against
+      the exact deployed service through the certificate-verified native
+      PostgreSQL path. Provider availability is not evidence of human sign-in
+      or notification delivery.
 - [ ] A human exercises Google OIDC with the approved district identity and
       records custom-domain callback, hosted-domain, token-validation, session,
       and authorization results only after the separately owned
@@ -324,18 +389,19 @@ Never edit or delete an existing row. Add a superseding row when evidence
 changes; include the prior row's date/run in the new row. A failed or partial
 run remains recorded with `unknown` where readback did not complete.
 
-| Recorded at (UTC) | Run/change reference   | AWS platform            | Google OIDC             | Groups/roster | Messaging providers | DNS/custom domain | Evidence summary                                                                                                                                              |
-| ----------------- | ---------------------- | ----------------------- | ----------------------- | ------------- | ------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-08-15        | Issue #163 source only | `configured-unverified` | `configured-unverified` | `mocked`      | `mocked`            | `blocked`         | Deployable isolated configuration is under review. No AWS/GCP/DNS/provider write, resource readback, OAuth sign-in, TLS check, or live notification occurred. |
+| Recorded at (UTC) | Run/change reference   | AWS platform            | Google OIDC             | Groups/roster | Messaging providers | DNS/custom domain | Evidence summary                                                                                                                                                                                                                                                                                                                                            |
+| ----------------- | ---------------------- | ----------------------- | ----------------------- | ------------- | ------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-15        | Issue #163 source only | `configured-unverified` | `configured-unverified` | `mocked`      | `mocked`            | `blocked`         | Deployable isolated configuration is under review. No AWS/GCP/DNS/provider write, resource readback, OAuth sign-in, TLS check, or live notification occurred.                                                                                                                                                                                               |
+| 2026-08-15        | Issue #178 source only | `configured-unverified` | `configured-unverified` | `mocked`      | `mocked`            | `blocked`         | Supersedes only the architecture description from issue #163: reviewed source removes the cluster HTTP path in favor of private native PostgreSQL, a VPC connector/NAT egress path, and an exact-digest Fargate bootstrap gate. No AWS/GCP/DNS/provider write, native session, resource readback, OAuth sign-in, TLS check, or live notification is proved. |
 
 ## Current blockers
 
 As of 2026-08-15, no workflow run or cloud readback has been attached. The
 protected environment, exact OIDC deployment role, exact Google OAuth client
 and secret ARN, normalized deploy-policy hash/boundary, reviewed CDK bootstrap
-role authority, approved immutable Google subject, tested container digest,
-priced consequence preview, custom-domain work, and product-owner approval for
-the exact write all remain unproved here. Therefore the environment and Google
-OIDC are not `live-verified`, web/mobile sign-in and DNS remain blocked, and
-every messaging integration remains mocked with zero authorization for a live
-send.
+role authority, exact direct ECS/pass-role/bootstrap-log grants, approved
+immutable identity fields, tested container digest, NAT-inclusive priced
+consequence preview, custom-domain work, and product-owner approval for the
+exact write all remain unproved here. Therefore the environment and Google OIDC
+are not `live-verified`, web/mobile sign-in and DNS remain blocked, and every
+messaging integration remains mocked with zero authorization for a live send.
