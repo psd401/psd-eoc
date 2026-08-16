@@ -248,6 +248,12 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('"PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS"');
     expect(workflow).toContain('$database_application_secret_arn:username::');
     expect(workflow).toContain('$approved_identity_secret_arn:googleSubject::');
+    expect(workflow).toContain(
+      'role/PsdEocExplorationSmoke-BootstrapTaskExecutionRole1A-[A-Za-z0-9]+$',
+    );
+    expect(workflow).toContain(
+      'role/PsdEocExplorationSmoke-BootstrapTaskRole8B52C495-[A-Za-z0-9]+$',
+    );
     expect(workflow).toContain('($statements | length) == 2');
     expect(workflow).not.toContain('"rds-data:ExecuteStatement"');
   });
