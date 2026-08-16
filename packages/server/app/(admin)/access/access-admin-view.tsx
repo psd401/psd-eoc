@@ -45,7 +45,8 @@ function CreateAccessGroupForm({ csrfToken }: Readonly<{ csrfToken: string }>) {
         <legend>Add a Google access group</legend>
         <p id="new-access-group-help">
           Access groups permit staff sign-in. They do not add anyone to a
-          notification audience, and synthetic groups cannot be access groups.
+          notification audience. Only designated Google Groups can grant PSD EOC
+          access.
         </p>
         <label>
           Display name
