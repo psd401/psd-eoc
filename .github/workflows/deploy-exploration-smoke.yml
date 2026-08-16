@@ -1357,6 +1357,7 @@ jobs:
                 "DATABASE_SSL_ROOT_CERT",
                 "FANOUT_QUEUE_URL",
                 "NODE_ENV",
+                "RUNTIME_SECRET_ARN",
                 "SOURCE_SHA"
               ] and
               all($variables[]; type == "string")
@@ -1373,6 +1374,7 @@ jobs:
           test "$(jq -er '.DATABASE_IDLE_TIMEOUT_SECONDS' <<< "$runtime_environment_map")" = "20"
           test "$(jq -er '.FANOUT_QUEUE_URL' <<< "$runtime_environment_map")" = "$queue_url"
           test "$(jq -er '.NODE_ENV' <<< "$runtime_environment_map")" = "production"
+          test "$(jq -er '.RUNTIME_SECRET_ARN' <<< "$runtime_environment_map")" = "$api_salt_secret_arn"
           test "$(jq -er '.SOURCE_SHA' <<< "$runtime_environment_map")" = "$SOURCE_SHA"
           runtime_database_host=$(jq -er '.DATABASE_HOST' <<< "$runtime_environment_map")
           runtime_ssl_root_cert=$(jq -er '.DATABASE_SSL_ROOT_CERT' <<< "$runtime_environment_map")
