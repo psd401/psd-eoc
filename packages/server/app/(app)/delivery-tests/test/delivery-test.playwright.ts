@@ -22,7 +22,10 @@ const TARGET_SET_VERSION = 1;
 const ENDPOINT_REFERENCE_DIGEST = 'd'.repeat(64);
 
 function deliveryTestPreview(
-  input: Readonly<{ liveVerified: boolean }>,
+  input: Readonly<{
+    controlledEmailCanary?: boolean;
+    liveVerified: boolean;
+  }>,
 ): DeliveryTestPreview {
   const base = activationPreviewFixture(
     {
@@ -42,10 +45,21 @@ function deliveryTestPreview(
     targetSet: { id: TARGET_SET_ID, version: TARGET_SET_VERSION },
     endpointReferenceDigest: ENDPOINT_REFERENCE_DIGEST,
   };
-  const activationPreview = ActivationPreviewSchema.parse({
-    ...base,
-    deliveryTest,
-  });
+  const activationPreview = ActivationPreviewSchema.parse(
+    input.controlledEmailCanary === true
+      ? {
+          ...base,
+          recipientCount: 1,
+          channels: base.channels
+            .filter((channel) => channel.channel === 'email')
+            .map((channel) => ({ ...channel, endpointCount: 1 })),
+          blockingReasonCodes: base.blockingReasonCodes.filter(
+            (reason) => !reason.startsWith('PUSH_'),
+          ),
+          deliveryTest,
+        }
+      : { ...base, deliveryTest },
+  );
   return DeliveryTestPreviewSchema.parse({
     purpose: 'monthly-live-delivery-test',
     activationPreview,
@@ -67,8 +81,21 @@ function activationResult(
   preview: DeliveryTestPreview,
   idempotencyKey: string,
 ): StartEventResult {
+  const activationFixturePreview =
+    preview.activationPreview.channels.length === 1
+      ? activationPreviewFixture(
+          {
+            facilityId: preview.activationPreview.facilityId,
+            kind: 'drill',
+            templateMode: 'drill',
+            eventTypeVersion: preview.activationPreview.eventTypeVersion,
+            rosterPopulation: 'staff',
+          },
+          { includeSms: false, simulatedReadyStaff: true },
+        )
+      : preview.activationPreview;
   const base = activationResultFixture(
-    preview.activationPreview,
+    activationFixturePreview,
     idempotencyKey,
   );
   if (base.notificationIntent === null) {
@@ -81,6 +108,7 @@ function activationResult(
     notificationIntent: {
       ...base.notificationIntent,
       deliveryTest: preview.activationPreview.deliveryTest,
+      channels: preview.activationPreview.channels,
     },
   });
 }
@@ -94,11 +122,15 @@ interface Interception {
 async function installDeliveryTestInterception(
   page: Page,
   liveVerified: boolean,
+  controlledEmailCanary = false,
 ): Promise<Interception> {
   let previewRequestCount = 0;
   let activationRequestCount = 0;
   let targetMutationRequestCount = 0;
-  const preview = deliveryTestPreview({ liveVerified });
+  const preview = deliveryTestPreview({
+    controlledEmailCanary,
+    liveVerified,
+  });
 
   await page.route('**/delivery-tests/api/target-sets', async (route) => {
     targetMutationRequestCount += 1;
@@ -221,9 +253,28 @@ test('product-owner target configuration is keyboard-operable and a blocked prev
 test('fresh keyboard confirmation submits exactly once to an intercepted DRILL path', async ({
   page,
 }) => {
-  const intercept = await installDeliveryTestInterception(page, true);
+  const intercept = await installDeliveryTestInterception(page, true, true);
   await page.goto('/delivery-tests');
   await enterPreviewSelection(page);
+
+  await expect(
+    page.getByText('DRILL — LIVE CANARY — TRAINING ONLY', { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Email' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Push' })).toHaveCount(0);
+  await expect(page.getByText('1 exact approved endpoint')).toBeVisible();
+  await expect(
+    page.getByText('[DRILL] Synthetic browser preview', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('[DRILL] No provider can receive this browser fixture.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Live integration and credentials verified'),
+  ).toBeVisible();
+  await expect(page.locator('time[datetime]').last()).toBeVisible();
 
   const humanDecision = page.getByLabel(
     /I am an authenticated human making a fresh decision/u,

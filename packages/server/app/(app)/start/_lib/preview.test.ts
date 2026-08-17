@@ -19,6 +19,7 @@ import {
   buildActivationPreview,
   type ActivationPreviewEvidence,
 } from './preview';
+import { digestCapabilityValue } from '../../../../lib/capabilities/engine';
 import { formatNotificationStartTime } from '../../../../lib/notify/render';
 
 const CREATED_AT = new Date('2026-08-10T17:00:00.000Z');
@@ -370,6 +371,96 @@ describe('activation consequence preview', () => {
     expect(preview.deliveryTest?.endpointReferenceDigest).toBe(
       endpointReferenceDigest,
     );
+  });
+
+  test('builds one exact controlled DRILL email and signs only that consequence', () => {
+    const base = evidence('drill', 'staff');
+    const endpointReferenceDigest = 'b'.repeat(64);
+    const preview = buildActivationPreview({
+      ...base,
+      deliveryTest: {
+        purpose: 'monthly-live-delivery-test',
+        targetSet: { id: IDS.targetSet, version: 1 },
+        endpointReferenceDigest,
+      },
+      deliveryTestEndpointReferences: [
+        {
+          recipientId: IDS.recipientEmail,
+          endpointId: IDS.emailEndpoint,
+          channel: 'email',
+        },
+      ],
+    });
+
+    expect(preview.recipientCount).toBe(1);
+    expect(
+      preview.channels.map(({ channel, endpointCount }) => [
+        channel,
+        endpointCount,
+      ]),
+    ).toEqual([['email', 1]]);
+    expect(preview.channels[0]?.renderedMessage).toMatchObject({
+      channel: 'email',
+      classificationMarker: 'DRILL',
+      eventKind: 'drill',
+      templateMode: 'drill',
+    });
+    expect(JSON.stringify(preview)).not.toContain('expo-push');
+    expect(preview.sendReadiness).toBe('ready');
+    expect(preview.blockingReasonCodes).toEqual([]);
+    const { id: previewId, consequenceDigest, ...consequence } = preview;
+    expect(previewId).toBe(IDS.preview);
+    expect(consequenceDigest).toBe(
+      digestCapabilityValue({
+        capabilityId: 'start-event',
+        consequence,
+      }),
+    );
+  });
+
+  test('blocks a controlled email canary on email truth without inventing push requirements', () => {
+    const base = evidence('drill', 'staff');
+    const preview = buildActivationPreview({
+      ...base,
+      deliveryTest: {
+        purpose: 'monthly-live-delivery-test',
+        targetSet: { id: IDS.targetSet, version: 1 },
+        endpointReferenceDigest: 'c'.repeat(64),
+      },
+      deliveryTestEndpointReferences: [
+        {
+          recipientId: IDS.recipientEmail,
+          endpointId: IDS.emailEndpoint,
+          channel: 'email',
+        },
+      ],
+      channelConfigurations: channelConfigurations('synthetic'),
+    });
+
+    expect(preview.channels.map(({ channel }) => channel)).toEqual(['email']);
+    expect(preview.sendReadiness).toBe('blocked');
+    expect(preview.blockingReasonCodes).toEqual(['EMAIL_NOT_LIVE_VERIFIED']);
+  });
+
+  test('rejects a singleton non-email delivery-test target before preview persistence', () => {
+    const base = evidence('drill', 'staff');
+    expect(() =>
+      buildActivationPreview({
+        ...base,
+        deliveryTest: {
+          purpose: 'monthly-live-delivery-test',
+          targetSet: { id: IDS.targetSet, version: 1 },
+          endpointReferenceDigest: 'd'.repeat(64),
+        },
+        deliveryTestEndpointReferences: [
+          {
+            recipientId: IDS.recipientPush,
+            endpointId: IDS.pushEndpoint,
+            channel: 'push',
+          },
+        ],
+      }),
+    ).toThrow(ActivationPreviewBuildError);
   });
 
   test('keeps exact persisted activation copy independent of preview creation time', () => {
