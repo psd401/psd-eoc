@@ -1233,15 +1233,18 @@ export function createDrizzleInitialWebSessionStore(
                         )
                         .for('share');
                 const effectiveAdministratorIds =
-                  await loadEffectiveAdministratorUserIds(transaction, {
-                    accessState: {
-                      snapshotId: sourceSnapshot.id,
-                      snapshotVersion: sourceSnapshot.version,
-                      activeAccessGroupSourceIds: activeSources
-                        .map(({ id }) => id)
-                        .sort(),
-                    },
-                  });
+                  recoverySource === undefined
+                    ? []
+                    : await loadEffectiveAdministratorUserIds(transaction, {
+                        accessState: {
+                          snapshotId: sourceSnapshot.id,
+                          snapshotVersion: sourceSnapshot.version,
+                          activeAccessGroupSourceIds: activeSources
+                            .map(({ id }) => id)
+                            .sort(),
+                        },
+                        eligibleAccessGroupSourceIds: [recoverySource.id],
+                      });
                 if (
                   recoverySource === undefined ||
                   recoveryMember === undefined ||
