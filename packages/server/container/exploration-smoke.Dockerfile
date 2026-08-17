@@ -38,9 +38,9 @@ ARG SOURCE_SHA
 
 LABEL org.opencontainers.image.source="https://github.com/psd401/psd-eoc" \
       org.opencontainers.image.revision="$SOURCE_SHA" \
-      org.opencontainers.image.title="PSD EOC exploration smoke" \
-      net.psd401.environment="exploration-smoke" \
-      net.psd401.data-classification="synthetic-only"
+      org.opencontainers.image.title="PSD EOC live pilot" \
+      net.psd401.environment="live-pilot" \
+      net.psd401.data-classification="staff-minimized"
 
 ENV HOSTNAME=0.0.0.0 \
     NODE_ENV=production \
