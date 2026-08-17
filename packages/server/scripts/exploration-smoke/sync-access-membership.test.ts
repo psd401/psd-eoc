@@ -24,7 +24,7 @@ describe('protected access-membership sync task boundary', () => {
     expect(summary).toMatchObject({
       event: 'access-membership-sync-complete',
       sourceSha: SOURCE_SHA,
-      dailyAdminDirectMember: true,
+      initialTransitionCandidateDirectMember: true,
       evaluatedMembershipCount: 3,
     });
     const serialized = JSON.stringify(summary);

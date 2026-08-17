@@ -17,7 +17,7 @@ import {
   type SyncAccessMembershipInput,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
@@ -30,6 +30,7 @@ import {
   accessMembershipSnapshots,
   groupSources,
   idempotencyRecords,
+  userFacilityScopes,
   users,
 } from '../../db/schema';
 
@@ -40,9 +41,10 @@ import {
 import {
   ADMIN_AVAILABILITY_LOCK_SQL,
   loadAccessConfigurationSnapshotState,
+  loadEffectiveAdministratorUserIds,
 } from './role-state';
 
-export const DAILY_ADMIN_EMAIL = 'hagelk@psd401.net' as const;
+export const INITIAL_MOBILE_TRANSITION_EMAIL = 'hagelk@psd401.net' as const;
 
 const DESIGNATED_ACCESS_GROUP_DISPLAY_NAME =
   'TSD Engineering administrators' as const;
@@ -192,10 +194,10 @@ function validateEvaluation(
       'The evaluated access-membership digest was invalid.',
     );
   }
-  if (!evaluation.memberEmails.includes(DAILY_ADMIN_EMAIL)) {
+  if (!evaluation.memberEmails.includes(INITIAL_MOBILE_TRANSITION_EMAIL)) {
     throw new AccessMembershipSyncError(
-      'DAILY_ADMIN_NOT_DIRECT_MEMBER',
-      'The daily administrator is not a current direct member of the designated access group.',
+      'INITIAL_TRANSITION_CANDIDATE_NOT_DIRECT_MEMBER',
+      'The initial mobile transition candidate is not a current direct member of the designated access group.',
     );
   }
   return evaluation;
@@ -707,6 +709,19 @@ export function createDrizzleAccessMembershipSyncStore(
             'The access baseline changed before publication.',
           );
         }
+        if (baseline.activeAccessGroupSourceIds.length !== 1) {
+          throw new AccessMembershipSyncError(
+            'RECOVERY_TRANSITION_BASELINE_INVALID',
+            'The access baseline does not contain exactly one certified recovery source.',
+          );
+        }
+        const recoverySourceId = baseline.activeAccessGroupSourceIds[0];
+        if (recoverySourceId === undefined) {
+          throw new AccessMembershipSyncError(
+            'RECOVERY_TRANSITION_BASELINE_INVALID',
+            'The certified recovery source is unavailable.',
+          );
+        }
 
         const matchingSources = await transaction
           .select()
@@ -760,6 +775,12 @@ export function createDrizzleAccessMembershipSyncStore(
             'The designated access source conflicts with retained provider identity.',
           );
         }
+        if (designatedSource.id === recoverySourceId) {
+          throw new AccessMembershipSyncError(
+            'RECOVERY_TRANSITION_BASELINE_INVALID',
+            'The recovery source and designated source must remain distinct until mobile proof.',
+          );
+        }
         if (!designatedSource.active) {
           const [activatedSource] = await transaction
             .update(groupSources)
@@ -779,17 +800,6 @@ export function createDrizzleAccessMembershipSyncStore(
           }
           designatedSource = activatedSource;
         }
-
-        await transaction
-          .update(groupSources)
-          .set({ active: false })
-          .where(
-            and(
-              eq(groupSources.purpose, 'access'),
-              eq(groupSources.active, true),
-              ne(groupSources.id, designatedSource.id),
-            ),
-          );
 
         const accessSources = await transaction
           .select({
@@ -816,16 +826,16 @@ export function createDrizzleAccessMembershipSyncStore(
               source.googleGroupId === null ||
               source.email === null,
           ) ||
-          activeSources.length !== 1 ||
-          activeSources[0]?.id !== designatedSource.id
+          activeSources.length !== 2 ||
+          new Set(activeSources.map(({ id }) => id)).size !== 2 ||
+          !activeSources.some(({ id }) => id === recoverySourceId) ||
+          !activeSources.some(({ id }) => id === designatedSource.id)
         ) {
           throw new AccessMembershipSyncError(
             'ACTIVE_ACCESS_SOURCES_INVALID',
             'The active access-source set was invalid.',
           );
         }
-        const knownAccessSourceIds = new Set(accessSources.map(({ id }) => id));
-
         const memberRows = await transaction
           .select({
             userId: accessMembershipMembers.userId,
@@ -870,92 +880,83 @@ export function createDrizzleAccessMembershipSyncStore(
             asc(accessMembershipMemberFacilities.userId),
             asc(accessMembershipMemberFacilities.facilityId),
           );
-        const priorEvaluatedRows = await transaction
+        const recoveryMember = memberRows[0];
+        const recoveryGroup = memberGroupRows[0];
+        if (
+          memberRows.length !== 1 ||
+          recoveryMember === undefined ||
+          recoveryMember.googleSubject !==
+            recoveryMember.persistedGoogleSubject ||
+          recoveryMember.disabledAt !== null ||
+          recoveryMember.facilityScopeKind !== 'district' ||
+          !StaffRosterEmailSchema.safeParse(recoveryMember.email).success ||
+          memberGroupRows.length !== 1 ||
+          recoveryGroup === undefined ||
+          recoveryGroup.userId !== recoveryMember.userId ||
+          recoveryGroup.groupSourceId !== recoverySourceId ||
+          recoveryGroup.groupSourceKind !== 'google-group' ||
+          recoveryGroup.groupPurpose !== 'access' ||
+          memberFacilityRows.length !== 0
+        ) {
+          throw new AccessMembershipSyncError(
+            'RECOVERY_TRANSITION_BINDING_INVALID',
+            'The access baseline does not contain one strict district recovery binding.',
+          );
+        }
+
+        const recoveryAdministratorIds =
+          await loadEffectiveAdministratorUserIds(transaction, {
+            accessState: baseline,
+            eligibleAccessGroupSourceIds: [recoverySourceId],
+          });
+        if (
+          recoveryAdministratorIds.length !== 1 ||
+          recoveryAdministratorIds[0] !== recoveryMember.userId
+        ) {
+          throw new AccessMembershipSyncError(
+            'RECOVERY_TRANSITION_ADMIN_INVALID',
+            'The access baseline does not contain one reachable recovery administrator.',
+          );
+        }
+
+        const durableEvaluatedCandidates = await transaction
           .select({
-            email: accessMembershipEvaluatedMembers.email,
-            groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
-            groupSourceKind: accessMembershipEvaluatedMembers.groupSourceKind,
-            groupPurpose: accessMembershipEvaluatedMembers.groupPurpose,
+            id: users.id,
+            googleSubject: users.googleSubject,
+            email: users.email,
+            facilityScopeKind: users.facilityScopeKind,
           })
-          .from(accessMembershipEvaluatedMembers)
+          .from(users)
           .where(
-            eq(
-              accessMembershipEvaluatedMembers.snapshotId,
-              baseline.snapshotId,
+            and(
+              isNull(users.disabledAt),
+              inArray(users.email, [...evaluation.memberEmails]),
             ),
           )
-          .orderBy(
-            asc(accessMembershipEvaluatedMembers.groupSourceId),
-            asc(accessMembershipEvaluatedMembers.email),
-          );
-
-        const baselineGroupCounts = new Map<string, number>();
-        for (const { userId } of memberGroupRows) {
-          baselineGroupCounts.set(
-            userId,
-            (baselineGroupCounts.get(userId) ?? 0) + 1,
-          );
-        }
-        const baselineFacilityCounts = new Map<string, number>();
-        for (const { userId } of memberFacilityRows) {
-          baselineFacilityCounts.set(
-            userId,
-            (baselineFacilityCounts.get(userId) ?? 0) + 1,
-          );
-        }
-
-        if (
-          memberRows.length > MAX_EVALUATED_MEMBERS ||
-          memberRows.some(
-            (member) =>
-              member.googleSubject !== member.persistedGoogleSubject ||
-              member.disabledAt !== null ||
-              !StaffRosterEmailSchema.safeParse(member.email).success ||
-              (baselineGroupCounts.get(member.userId) ?? 0) < 1 ||
-              (baselineGroupCounts.get(member.userId) ?? 0) > 50 ||
-              (member.facilityScopeKind === 'district'
-                ? (baselineFacilityCounts.get(member.userId) ?? 0) !== 0
-                : (baselineFacilityCounts.get(member.userId) ?? 0) < 1),
-          ) ||
-          memberGroupRows.some(
-            (row) =>
-              row.groupSourceKind !== 'google-group' ||
-              row.groupPurpose !== 'access' ||
-              !knownAccessSourceIds.has(row.groupSourceId),
-          ) ||
-          priorEvaluatedRows.some(
-            (row) =>
-              row.groupSourceKind !== 'google-group' ||
-              row.groupPurpose !== 'access' ||
-              !knownAccessSourceIds.has(row.groupSourceId) ||
-              !StaffRosterEmailSchema.safeParse(row.email).success,
-          )
-        ) {
-          throw new AccessMembershipSyncError(
-            'ACCESS_BASELINE_GRAPH_INVALID',
-            'The access baseline identity graph was invalid.',
-          );
-        }
-
-        const recoveryDailyAdministrators = memberRows.filter(
-          ({ email }) =>
-            StaffRosterEmailSchema.parse(email) === DAILY_ADMIN_EMAIL,
+          .orderBy(asc(users.id))
+          .for('update');
+        const designatedCandidates = durableEvaluatedCandidates.filter(
+          ({ id }) => id !== recoveryMember.userId,
         );
-        if (recoveryDailyAdministrators.length !== 1) {
-          throw new AccessMembershipSyncError(
-            'DAILY_ADMIN_RECOVERY_BINDING_INVALID',
-            'The daily administrator recovery binding is unavailable.',
-          );
-        }
-
-        const baselineUserIds = new Set(memberRows.map(({ userId }) => userId));
+        const designatedCandidate = designatedCandidates[0];
+        const candidateFacilityRows =
+          designatedCandidate === undefined
+            ? []
+            : await transaction
+                .select({ facilityId: userFacilityScopes.facilityId })
+                .from(userFacilityScopes)
+                .where(eq(userFacilityScopes.userId, designatedCandidate.id))
+                .orderBy(asc(userFacilityScopes.facilityId));
         if (
-          memberGroupRows.some((row) => !baselineUserIds.has(row.userId)) ||
-          memberFacilityRows.some((row) => !baselineUserIds.has(row.userId))
+          designatedCandidates.length !== 1 ||
+          designatedCandidate === undefined ||
+          designatedCandidate.email !== INITIAL_MOBILE_TRANSITION_EMAIL ||
+          designatedCandidate.facilityScopeKind !== 'district' ||
+          candidateFacilityRows.length !== 0
         ) {
           throw new AccessMembershipSyncError(
-            'ACCESS_BASELINE_GRAPH_INVALID',
-            'The access baseline contained orphaned identity evidence.',
+            'DESIGNATED_TRANSITION_CANDIDATE_INVALID',
+            'The access baseline does not contain one strict durable designated transition candidate.',
           );
         }
 
@@ -986,6 +987,19 @@ export function createDrizzleAccessMembershipSyncStore(
             },
           ]),
         );
+        await transaction.insert(accessMembershipMembers).values({
+          snapshotId,
+          userId: recoveryMember.userId,
+          googleSubject: recoveryMember.googleSubject,
+          facilityScopeKind: 'district',
+        });
+        await transaction.insert(accessMembershipMemberGroups).values({
+          snapshotId,
+          userId: recoveryMember.userId,
+          groupSourceId: recoverySourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        });
         const evaluatedRows = evaluation.memberEmails.map((email) => ({
           snapshotId,
           email,
@@ -1020,27 +1034,58 @@ export function createDrizzleAccessMembershipSyncStore(
         const readbackState =
           await loadAccessConfigurationSnapshotState(transaction);
         const readbackRows = await transaction
-          .select({ email: accessMembershipEvaluatedMembers.email })
+          .select({
+            email: accessMembershipEvaluatedMembers.email,
+            groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
+          })
           .from(accessMembershipEvaluatedMembers)
-          .where(
-            and(
-              eq(accessMembershipEvaluatedMembers.snapshotId, snapshotId),
-              eq(
-                accessMembershipEvaluatedMembers.groupSourceId,
-                designatedSource.id,
-              ),
-            ),
-          )
+          .where(eq(accessMembershipEvaluatedMembers.snapshotId, snapshotId))
           .orderBy(asc(accessMembershipEvaluatedMembers.email));
+        const readbackMembers = await transaction
+          .select()
+          .from(accessMembershipMembers)
+          .where(eq(accessMembershipMembers.snapshotId, snapshotId));
+        const readbackMemberGroups = await transaction
+          .select()
+          .from(accessMembershipMemberGroups)
+          .where(eq(accessMembershipMemberGroups.snapshotId, snapshotId));
+        const readbackMemberFacilities = await transaction
+          .select()
+          .from(accessMembershipMemberFacilities)
+          .where(eq(accessMembershipMemberFacilities.snapshotId, snapshotId));
+        const readbackAdministratorIds =
+          readbackState === null
+            ? []
+            : await loadEffectiveAdministratorUserIds(transaction, {
+                accessState: readbackState,
+              });
+        const expectedActiveSourceIds = [
+          recoverySourceId,
+          designatedSource.id,
+        ].sort();
         if (
           readbackState?.snapshotId !== snapshotId ||
           readbackState.snapshotVersion !== snapshotVersion ||
-          readbackState.activeAccessGroupSourceIds.length !==
-            activeSources.length ||
+          readbackState.activeAccessGroupSourceIds.length !== 2 ||
+          !readbackState.activeAccessGroupSourceIds.every(
+            (id, index) => id === expectedActiveSourceIds[index],
+          ) ||
           readbackRows.length !== evaluation.memberEmails.length ||
           readbackRows.some(
-            ({ email }, index) => email !== evaluation.memberEmails[index],
-          )
+            ({ email, groupSourceId }, index) =>
+              email !== evaluation.memberEmails[index] ||
+              groupSourceId !== designatedSource.id,
+          ) ||
+          readbackMembers.length !== 1 ||
+          readbackMembers[0]?.userId !== recoveryMember.userId ||
+          readbackMembers[0]?.googleSubject !== recoveryMember.googleSubject ||
+          readbackMembers[0]?.facilityScopeKind !== 'district' ||
+          readbackMemberGroups.length !== 1 ||
+          readbackMemberGroups[0]?.userId !== recoveryMember.userId ||
+          readbackMemberGroups[0]?.groupSourceId !== recoverySourceId ||
+          readbackMemberFacilities.length !== 0 ||
+          readbackAdministratorIds.length !== 1 ||
+          readbackAdministratorIds[0] !== recoveryMember.userId
         ) {
           throw new AccessMembershipSyncError(
             'ACCESS_PUBLICATION_READBACK_FAILED',
