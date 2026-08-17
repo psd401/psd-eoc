@@ -167,7 +167,7 @@ jobs:
         with:
           allowed-account-ids: '338414773271'
           aws-region: us-west-2
-          mask-aws-account-id: false
+          mask-aws-account-id: true
           output-credentials: false
           role-duration-seconds: 3600
           role-session-name: psd-eoc-domain-${{ github.run_id }}

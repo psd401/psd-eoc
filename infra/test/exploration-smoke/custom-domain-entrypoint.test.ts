@@ -73,11 +73,14 @@ async function readWorkflow(): Promise<string> {
 }
 
 function customDomainScript(workflow: string): string {
+  const stepName = 'Inspect or associate the exact App Runner custom domain';
   const script = workflow.match(
     / {6}- name: Inspect or associate the exact App Runner custom domain[\s\S]*? {8}run: \|\n([\s\S]*?)\n {6}- name: Upload exact and redacted provider readback/,
   )?.[1];
   if (script === undefined) {
-    throw new Error('custom-domain workflow step is missing');
+    throw new Error(
+      `Expected workflow step "${stepName}" was renamed, removed, or lost its exact run boundary.`,
+    );
   }
   return script.replace(/^ {10}/gm, '');
 }
@@ -397,6 +400,7 @@ describe('exploration custom-domain protected workflow', () => {
     expect(workflow).toContain(
       'role-to-assume: ${{ env.OUTER_OIDC_ROLE_ARN }}',
     );
+    expect(workflow).toContain('mask-aws-account-id: true');
     expect(workflow).toContain(serviceArn);
     expect(workflow).not.toContain('CDK_DEPLOY_ROLE_ARN');
     expect(workflow).not.toContain('aws sts assume-role');
@@ -421,6 +425,17 @@ describe('exploration custom-domain protected workflow', () => {
     );
     expect(workflow).toContain(
       'vmnocdcpridns01.peninsula.wednet.edu (10.0.70.77)',
+    );
+  });
+
+  it('fails explicitly when the audited custom-domain step is renamed', async () => {
+    const workflow = (await readWorkflow()).replace(
+      'name: Inspect or associate the exact App Runner custom domain',
+      'name: Renamed custom-domain step',
+    );
+
+    expect(() => customDomainScript(workflow)).toThrow(
+      'Expected workflow step "Inspect or associate the exact App Runner custom domain" was renamed, removed, or lost its exact run boundary.',
     );
   });
 
