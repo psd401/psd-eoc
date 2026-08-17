@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { IntegrationChannelChangeAuthorizationSchema } from '@psd-eoc/contracts';
+import {
+  IntegrationChannelChangeAuthorizationSchema,
+  SyncAccessMembershipInputSchema,
+} from '@psd-eoc/contracts';
 import {
   afterAll,
   beforeAll,
@@ -9,7 +12,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -117,6 +120,8 @@ interface MarkerRow extends Record<string, unknown> {
 }
 
 const DATABASE_NAME_PATTERN = /^psd_eoc_i26_fac_[a-f0-9]{32}_test$/u;
+const DESIGNATED_ACCESS_GROUP_EMAIL =
+  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
 
 let context: FacilitiesTestContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
@@ -2740,7 +2745,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       },
       metadata: metadata('synthetic-building', requestIds),
     });
-    const previouslyProvenAccessGroups = await database
+    let previouslyProvenAccessGroups = await database
       .select({ id: groupSources.id })
       .from(groupSources)
       .where(
@@ -2751,7 +2756,24 @@ describeWithDatabase('facilities administrator database flow', () => {
         ),
       );
     if (previouslyProvenAccessGroups.length === 0) {
-      throw new Error('The main flow requires a previously proven access set.');
+      const [preCutoverRecoverySource] = await database
+        .insert(groupSources)
+        .values({
+          id: randomUUID(),
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          displayName: `Synthetic pre-cutover recovery ${suffix.slice(0, 8)}`,
+          active: true,
+          googleGroupId: `issue-26-precutover-recovery-${suffix}`,
+          email: `issue-26-precutover-recovery-${suffix}@example.invalid`,
+          fixtureKey: null,
+        })
+        .returning({ id: groupSources.id });
+      if (preCutoverRecoverySource === undefined) {
+        throw new Error('The pre-cutover recovery source was not created.');
+      }
+      previouslyProvenAccessGroups = [preCutoverRecoverySource];
     }
     await persistCompleteAccessSnapshotGeneration(database, {
       groups: previouslyProvenAccessGroups.map(({ id }) => ({
@@ -2778,10 +2800,33 @@ describeWithDatabase('facilities administrator database flow', () => {
         displayName: `Issue 26 access ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-access-${suffix}`,
-        email: `issue-26-access-${suffix}@example.invalid`,
+        email: DESIGNATED_ACCESS_GROUP_EMAIL,
       },
       metadata: metadata('access-group', requestIds),
     });
+    await database
+      .update(groupSources)
+      .set({ active: false })
+      .where(
+        and(
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+          eq(groupSources.active, true),
+          ne(groupSources.id, accessGroup.id),
+        ),
+      );
+    expect(
+      await database
+        .select({ id: groupSources.id, email: groupSources.email })
+        .from(groupSources)
+        .where(
+          and(
+            eq(groupSources.kind, 'google-group'),
+            eq(groupSources.purpose, 'access'),
+            eq(groupSources.active, true),
+          ),
+        ),
+    ).toEqual([{ id: accessGroup.id, email: DESIGNATED_ACCESS_GROUP_EMAIL }]);
     await persistAuthenticatedAdministrator(
       database,
       authenticated,
@@ -3247,7 +3292,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         createdAt: new Date(bootstrapSnapshotAt.getTime() + 2_000),
       }),
     );
-    expect(secondBootstrapSession.user.roles).toEqual(['staff']);
+    expect(secondBootstrapSession.user.roles).toEqual(['staff', 'admin']);
     const roleChanges = await database
       .select({
         role: userRoleChanges.role,
@@ -3259,6 +3304,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(roleChanges).toEqual([
       { role: 'admin', granted: true },
       { role: 'admin', granted: false },
+      { role: 'admin', granted: true },
     ]);
     const baseRoleRows = await database
       .select({ role: userRoles.role })
@@ -3282,9 +3328,9 @@ describeWithDatabase('facilities administrator database flow', () => {
         .from(accessMembershipMembers)
         .where(eq(accessMembershipMembers.userId, inaccessibleAdministratorId)),
     ).toEqual([{ snapshotId: previousCompleteAccessSnapshot.id }]);
-    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([
-      authenticated.actor.userId,
-    ]);
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
+      [authenticated.actor.userId, roleTargetId].sort(),
+    );
     const inaccessibleEvidence = await createDrizzleAccessGateStore(
       database,
     ).loadEvidence(`issue-26-inaccessible-admin-${suffix}`);
