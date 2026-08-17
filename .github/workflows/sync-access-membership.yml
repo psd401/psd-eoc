@@ -1,11 +1,18 @@
-name: Publish exact Google access membership
+name: Stage or finalize exact Google access membership
 
 run-name: >-
-  access-membership ${{ inputs.source_sha }} at ${{ inputs.image_digest }}
+  access-membership ${{ inputs.phase }} ${{ inputs.source_sha }} at ${{ inputs.image_digest }}
 
 on:
   workflow_dispatch:
     inputs:
+      phase:
+        description: Protected transition phase
+        required: true
+        type: choice
+        options:
+          - stage
+          - finalize
       source_sha:
         description: Exact reviewed commit on main (40 lowercase hex)
         required: true
@@ -22,8 +29,18 @@ on:
         description: GitHub issue or PR with product-owner publication authorization
         required: true
         type: string
+      mobile_session_id:
+        default: none
+        description: Opaque iOS session UUID for finalize; none for stage
+        required: true
+        type: string
+      membership_snapshot_id:
+        default: none
+        description: Opaque two-source snapshot UUID for finalize; none for stage
+        required: true
+        type: string
       acknowledge:
-        description: Enter PUBLISH EXACT ACCESS MEMBERSHIP
+        description: Enter the exact phase-specific acknowledgement
         required: true
         type: string
 
@@ -43,7 +60,7 @@ env:
 
 jobs:
   publish:
-    name: Read provider and publish one immutable access generation
+    name: Run one protected access transition phase
     if: >-
       github.repository == 'psd401/psd-eoc' &&
       github.ref == 'refs/heads/main'
@@ -58,6 +75,9 @@ jobs:
       EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_PERMISSIONS_BOUNDARY_ARN }}
       EXPECTED_DEPLOY_ROLE_POLICY_SHA256: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_POLICY_SHA256 }}
       IMAGE_DIGEST: ${{ inputs.image_digest }}
+      MEMBERSHIP_SNAPSHOT_ID: ${{ inputs.membership_snapshot_id }}
+      MOBILE_SESSION_ID: ${{ inputs.mobile_session_id }}
+      PHASE: ${{ inputs.phase }}
       SOURCE_SHA: ${{ inputs.source_sha }}
     steps:
       - name: Check out the exact reviewed source
@@ -74,7 +94,22 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           test "$IMAGE_DIGEST" != "sha256:$(printf '0%.0s' {1..64})"
-          test "$ACKNOWLEDGE" = "PUBLISH EXACT ACCESS MEMBERSHIP"
+          case "$PHASE" in
+            stage)
+              test "$ACKNOWLEDGE" = "STAGE EXACT ACCESS MEMBERSHIP"
+              test "$MOBILE_SESSION_ID" = "none"
+              test "$MEMBERSHIP_SNAPSHOT_ID" = "none"
+              ;;
+            finalize)
+              test "$ACKNOWLEDGE" = "FINALIZE PROVEN MOBILE ACCESS"
+              [[ "$MOBILE_SESSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+              [[ "$MEMBERSHIP_SNAPSHOT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+              ;;
+            *)
+              echo "The protected transition phase is invalid." >&2
+              exit 1
+              ;;
+          esac
           [[ "$CHANGE_REFERENCE" =~ ^https://github.com/psd401/psd-eoc/(issues|pull)/[1-9][0-9]*$ ]]
           deployment_authority_pattern='^(arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]*exploration-smoke[A-Za-z0-9+=,.@_/-]*)\|([0-9a-f]{64})\|(none|arn:aws:iam::(aws|[0-9]{12}):policy/[A-Za-z0-9+=,.@_/-]+)$'
           [[ "$DEPLOYMENT_AUTHORITY" =~ $deployment_authority_pattern ]]
@@ -125,6 +160,7 @@ jobs:
           repository_uri=$(jq -er '.ImageRepositoryUri' "$outputs")
           application_secret_arn=$(jq -er '.DatabaseApplicationSecretArn' "$outputs")
           admin_secret_arn=$(jq -er '.DatabaseAdminSecretArn' "$outputs")
+          approved_identity_secret_arn=$(jq -er '.ApprovedIdentitySecretArn' "$outputs")
           test "$(jq -er '.BootstrapCandidateImageDigest' "$outputs")" = "$IMAGE_DIGEST"
           test "$(jq -er '.BootstrapCandidateSourceSha' "$outputs")" = "$SOURCE_SHA"
           [[ "$cluster_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-exploration-smoke-native-bootstrap$ ]]
@@ -146,7 +182,8 @@ jobs:
             --arg image "$expected_image" \
             --arg source_sha "$SOURCE_SHA" \
             --arg log_group "$log_group_name" \
-            --arg application_secret "$application_secret_arn" '
+            --arg application_secret "$application_secret_arn" \
+            --arg identity_secret "$approved_identity_secret_arn" '
               def map_by_name: map({key: .name, value: .value}) | from_entries;
               def secrets_by_name: map({key: .name, value: .valueFrom}) | from_entries;
               .taskDefinition as $task |
@@ -191,10 +228,13 @@ jobs:
               ($secrets | keys | sort) == [
                 "DATABASE_PASSWORD",
                 "DATABASE_USERNAME",
-                "GOOGLE_ROSTER_CONFIG"
+                "GOOGLE_ROSTER_CONFIG",
+                "PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"
               ] and
               $secrets.DATABASE_PASSWORD == ($application_secret + ":password::") and
               $secrets.DATABASE_USERNAME == ($application_secret + ":username::") and
+              $secrets.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 ==
+                ($identity_secret + ":initialMobileTransitionEmailSha256::") and
               ($secrets.GOOGLE_ROSTER_CONFIG |
                 test("^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-groups(-[A-Za-z0-9]{6})?$"))
             ' "$RUNNER_TEMP/access-sync-task-definition.json" > /dev/null
@@ -221,12 +261,12 @@ jobs:
           aws iam simulate-principal-policy \
             --policy-source-arn "$execution_role_arn" \
             --action-names secretsmanager:GetSecretValue \
-            --resource-arns "$application_secret_arn" "$groups_secret_simulation_arn" "$admin_secret_arn" \
+            --resource-arns "$application_secret_arn" "$groups_secret_simulation_arn" "$approved_identity_secret_arn" "$admin_secret_arn" \
             > artifacts/readback/execution-role-secret-boundary.json
-          jq -e --arg app "$application_secret_arn" --arg groups "$groups_secret_simulation_arn" --arg admin "$admin_secret_arn" '
+          jq -e --arg app "$application_secret_arn" --arg groups "$groups_secret_simulation_arn" --arg identity "$approved_identity_secret_arn" --arg admin "$admin_secret_arn" '
             ([.EvaluationResults[].ResourceSpecificResults[] |
               select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
-              ([$app, $groups] | sort) and
+              ([$app, $groups, $identity] | sort) and
             ([.EvaluationResults[].ResourceSpecificResults[] |
               select(.EvalResourceName == $admin and .EvalResourceDecision != "allowed")] | length) == 1
           ' artifacts/readback/execution-role-secret-boundary.json > /dev/null
@@ -246,7 +286,7 @@ jobs:
             printf '%s\n' "LOG_GROUP_NAME=$log_group_name"
           } >> "$GITHUB_ENV"
 
-      - name: Run exact provider evaluation and atomic publication
+      - name: Run the exact protected transition phase
         shell: bash
         run: |
           set -euo pipefail
@@ -256,18 +296,25 @@ jobs:
           subnet_csv=$(IFS=,; printf '%s' "${subnets[*]}")
           request_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
           [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
-          idempotency_key="access-sync:github-${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          idempotency_key="access-sync:${PHASE}:github-${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           started_by="github-access-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           network_configuration="awsvpcConfiguration={subnets=[$subnet_csv],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
           jq -n \
             --arg request_id "$request_id" \
             --arg idempotency_key "$idempotency_key" \
-            '[{
+            --arg phase "$PHASE" \
+            --arg mobile_session_id "$MOBILE_SESSION_ID" \
+            --arg membership_snapshot_id "$MEMBERSHIP_SNAPSHOT_ID" '
+            [{
               name: "access-membership-sync",
-              environment: [
+              environment: ([
+                {name: "ACCESS_SYNC_PHASE", value: $phase},
                 {name: "ACCESS_SYNC_REQUEST_ID", value: $request_id},
                 {name: "ACCESS_SYNC_IDEMPOTENCY_KEY", value: $idempotency_key}
-              ]
+              ] + if $phase == "finalize" then [
+                {name: "ACCESS_SYNC_MOBILE_SESSION_ID", value: $mobile_session_id},
+                {name: "ACCESS_SYNC_MEMBERSHIP_SNAPSHOT_ID", value: $membership_snapshot_id}
+              ] else [] end)
             }]' > "$RUNNER_TEMP/container-overrides.json"
           aws ecs run-task \
             --cluster "$CLUSTER_ARN" \
@@ -331,12 +378,14 @@ jobs:
           jq -e --arg source_sha "$SOURCE_SHA" '
             (keys | sort) == [
               "activeAccessGroupCount",
+              "auditEntryHash",
               "capturedAt",
               "designatedSourceId",
               "evaluatedMembershipCount",
               "event",
-              "initialTransitionCandidateDirectMember",
               "membershipDigest",
+              "phase",
+              "proofKind",
               "providerGroupIdDigest",
               "publication",
               "snapshotId",
@@ -345,11 +394,19 @@ jobs:
             ] and
             .event == "access-membership-sync-complete" and
             .sourceSha == $source_sha and
-            .initialTransitionCandidateDirectMember == true and
+            .phase == env.PHASE and
             (.snapshotId | test("^[0-9a-f-]{36}$")) and
             (.designatedSourceId | test("^[0-9a-f-]{36}$")) and
             (.snapshotVersion | type == "number" and . >= 1) and
-            .activeAccessGroupCount == 2 and
+            (if env.PHASE == "stage" then
+              .activeAccessGroupCount == 2 and
+              .proofKind == "initial-selector-match" and
+              .auditEntryHash == null
+            else
+              .activeAccessGroupCount == 1 and
+              .proofKind == "durable-ios-session" and
+              (.auditEntryHash | test("^[a-f0-9]{64}$"))
+            end) and
             (.evaluatedMembershipCount | type == "number" and . >= 1 and . <= 1200) and
             (.membershipDigest | test("^[a-f0-9]{64}$")) and
             (.providerGroupIdDigest | test("^[a-f0-9]{64}$")) and
@@ -363,7 +420,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           if-no-files-found: error
-          name: access-membership-publication-${{ inputs.source_sha }}
+          name: access-membership-${{ inputs.phase }}-${{ inputs.source_sha }}
           path: artifacts/readback
           retention-days: 14
 
@@ -371,12 +428,16 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## Exact access-membership publication"
+            echo "## Exact access-membership $PHASE"
             echo
             echo "- Source: \`$SOURCE_SHA\`"
             echo "- Image: \`$IMAGE_DIGEST\`"
             echo "- Authorization: $CHANGE_REFERENCE"
-            echo "- Google direct-user evidence included the initial mobile transition candidate: **yes**"
+            if test "$PHASE" = "stage"; then
+              echo "- Exact direct-user evidence matched the protected transition selector: **yes**"
+            else
+              echo "- Durable nonrevoked iOS session proof passed before recovery-source deactivation: **yes**"
+            fi
             echo "- Full member emails, provider identifiers, credentials, and raw logs were not published."
             echo "- No notification provider or human-only incident action was invoked."
           } >> "$GITHUB_STEP_SUMMARY"

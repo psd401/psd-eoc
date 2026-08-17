@@ -71,9 +71,12 @@ const DATABASE_NAME_PATTERN = /^psd_eoc_i234_access_[a-f0-9]{32}_test$/u;
 const BASELINE_SOURCE_ID = '00000000-0000-4000-8000-000000000521';
 const BASELINE_SNAPSHOT_ID = '00000000-0000-4000-8000-000000000522';
 const USER_ID = '00000000-0000-4000-8000-000000000523';
-const CANDIDATE_USER_ID = '00000000-0000-4000-8000-000000000524';
 const RECOVERY_EMAIL = 'recovery.admin@psd401.net';
-const CANDIDATE_SUBJECT = 'synthetic-existing-hagelk-subject';
+const CANDIDATE_SUBJECT = 'synthetic-existing-transition-subject';
+const TRANSITION_EMAIL = 'initial.mobile@psd401.net';
+const TRANSITION_EMAIL_DIGEST = createHash('sha256')
+  .update(TRANSITION_EMAIL, 'utf8')
+  .digest('hex');
 const BASELINE_TIME = new Date('2026-08-17T11:00:00.000Z');
 const SYNC_TIME = '2026-08-17T12:00:00.000Z';
 const PROVIDER_GROUP_ID = '01exactEngineering';
@@ -232,30 +235,18 @@ async function seedStrictBaseline(
       fixtureKey: null,
       createdAt: BASELINE_TIME,
     });
-    await transaction.insert(users).values([
-      {
-        id: USER_ID,
-        googleSubject: 'synthetic-test-google-subject',
-        email: RECOVERY_EMAIL,
-        displayName: 'Synthetic Integration Administrator',
-        facilityScopeKind: 'district',
-        createdAt: BASELINE_TIME,
-        disabledAt: null,
-      },
-      {
-        id: CANDIDATE_USER_ID,
-        googleSubject: CANDIDATE_SUBJECT,
-        email: 'hagelk@psd401.net',
-        displayName: 'Synthetic Existing Designated Candidate',
-        facilityScopeKind: 'district',
-        createdAt: BASELINE_TIME,
-        disabledAt: null,
-      },
-    ]);
-    await transaction.insert(userRoles).values([
-      { userId: USER_ID, role: 'admin' },
-      { userId: CANDIDATE_USER_ID, role: 'staff' },
-    ]);
+    await transaction.insert(users).values({
+      id: USER_ID,
+      googleSubject: 'synthetic-test-google-subject',
+      email: RECOVERY_EMAIL,
+      displayName: 'Synthetic Integration Administrator',
+      facilityScopeKind: 'district',
+      createdAt: BASELINE_TIME,
+      disabledAt: null,
+    });
+    await transaction
+      .insert(userRoles)
+      .values({ userId: USER_ID, role: 'admin' });
     await transaction.insert(accessMembershipSnapshots).values({
       id: BASELINE_SNAPSHOT_ID,
       version: 1,
@@ -331,7 +322,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
 
   test('stages exact provider evidence while preserving one reachable recovery administrator', async () => {
     const database = databaseConnection().db;
-    const store = createDrizzleAccessMembershipSyncStore(database);
+    const store = createDrizzleAccessMembershipSyncStore(database, {
+      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
+    });
     const idempotencyKey = 'access-sync:database-integration-0001';
     const requestDigest = 'd'.repeat(64);
     const reservation = await store.reserve({
@@ -345,7 +338,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       throw new Error('Expected a new access-sync reservation.');
     }
     const memberEmails = Object.freeze([
-      'hagelk@psd401.net',
+      TRANSITION_EMAIL,
       'other.staff@psd401.net',
     ]);
     const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
@@ -361,7 +354,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       syncStartedAt: SYNC_TIME,
       capturedAt: SYNC_TIME,
     });
-    const result = await store.publish(reservation.id, evaluation);
+    const result = await store.stage(reservation.id, evaluation);
     expect(result).toMatchObject({
       snapshotVersion: 2,
       activeAccessGroupCount: 2,
@@ -432,7 +425,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     expect(evaluatedRows).toEqual(
       [
         {
-          email: 'hagelk@psd401.net',
+          email: TRANSITION_EMAIL,
           groupSourceId: result.designatedSourceId,
         },
         {
@@ -473,7 +466,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     const mobileCandidate = await checkAccessGate(
       {
         googleSubject: CANDIDATE_SUBJECT,
-        email: 'hagelk@psd401.net',
+        email: TRANSITION_EMAIL,
         displayName: 'Current independently verified Google profile',
         subjectDigest: 'a'.repeat(64),
         requestId: randomUUID(),
@@ -482,6 +475,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       },
       {
         store: createDrizzleAccessGateStore(database),
+        initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
         audit: {
           async append(): Promise<never> {
             throw new Error(
@@ -493,16 +487,17 @@ describeWithDatabase('access-membership atomic database publication', () => {
     );
     expect(mobileCandidate).toMatchObject({
       granted: true,
-      user: { id: CANDIDATE_USER_ID, googleSubject: CANDIDATE_SUBJECT },
+      user: { googleSubject: CANDIDATE_SUBJECT },
       firstLoginBinding: {
-        userDisposition: 'existing',
+        userDisposition: 'create',
         sourceSnapshotId: result.snapshotId,
         sourceSnapshotVersion: result.snapshotVersion,
-        normalizedEmail: 'hagelk@psd401.net',
+        normalizedEmail: TRANSITION_EMAIL,
       },
       bootstrapAdminEligible: true,
     });
     if (mobileCandidate.granted) {
+      expect(mobileCandidate.user.id).not.toBe(USER_ID);
       expect(mobileCandidate.membership.accessGroupSourceRefs).toEqual([
         {
           id: result.designatedSourceId,
@@ -512,6 +507,12 @@ describeWithDatabase('access-membership atomic database publication', () => {
         },
       ]);
     }
+    expect(
+      await database
+        .select({ id: users.id })
+        .from(users)
+        .orderBy(asc(users.id)),
+    ).toEqual([{ id: USER_ID }]);
     expect(
       await database
         .select()
@@ -539,26 +540,44 @@ describeWithDatabase('access-membership atomic database publication', () => {
       startedAt: '2026-08-17T12:01:00.000Z',
     });
     expect(replay).toEqual({ kind: 'replay', result });
+
+    const repeatedReservation = await store.reserve({
+      actor: { kind: 'system', serviceId: 'access-membership-sync' },
+      idempotencyKey: 'access-sync:database-current-transition-0001',
+      requestDigest: 'e'.repeat(64),
+      startedAt: '2026-08-17T12:02:00.000Z',
+    });
+    if (repeatedReservation.kind !== 'reserved') {
+      throw new Error('Expected a fresh transition replay reservation.');
+    }
+    expect(
+      await store.stage(repeatedReservation.id, {
+        ...evaluation,
+        syncStartedAt: '2026-08-17T12:02:00.000Z',
+        capturedAt: '2026-08-17T12:02:00.000Z',
+      }),
+    ).toEqual({ ...result, publication: 'already-current' });
+    expect(
+      await database.select({ id: users.id }).from(users).orderBy(asc(users.id)),
+    ).toEqual([{ id: USER_ID }]);
   });
 
-  test('rolls provider-source activation back without one enabled durable hagelk candidate', async () => {
+  test('rolls provider-source activation back when the protected selector is absent', async () => {
     const database = databaseConnection().db;
-    await database
-      .update(users)
-      .set({ disabledAt: new Date(SYNC_TIME) })
-      .where(eq(users.id, CANDIDATE_USER_ID));
-    const store = createDrizzleAccessMembershipSyncStore(database);
+    const store = createDrizzleAccessMembershipSyncStore(database, {
+      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
+    });
     const reservation = await store.reserve({
       actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-zero-candidate-0001',
+      idempotencyKey: 'access-sync:database-selector-absent-0001',
       requestDigest: 'a'.repeat(64),
       startedAt: SYNC_TIME,
     });
     expect(reservation.kind).toBe('reserved');
     if (reservation.kind !== 'reserved') {
-      throw new Error('Expected a zero-candidate test reservation.');
+      throw new Error('Expected a selector-absence test reservation.');
     }
-    const memberEmails = Object.freeze(['hagelk@psd401.net']);
+    const memberEmails = Object.freeze(['other.staff@psd401.net']);
     const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
       groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
       googleGroupId: PROVIDER_GROUP_ID,
@@ -573,11 +592,11 @@ describeWithDatabase('access-membership atomic database publication', () => {
       capturedAt: SYNC_TIME,
     });
 
-    await expect(
-      store.publish(reservation.id, evaluation),
-    ).rejects.toMatchObject({
-      code: 'DESIGNATED_TRANSITION_CANDIDATE_INVALID',
-    });
+    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
+      {
+        code: 'INITIAL_TRANSITION_SELECTOR_NOT_DIRECT_MEMBER',
+      },
+    );
     expect(
       await database
         .select({ id: groupSources.id })
@@ -592,7 +611,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     ).toEqual([{ active: true }]);
   });
 
-  test('rolls provider-source activation back with ambiguous durable evaluated candidates', async () => {
+  test('stages independently of unrelated durable evaluated users', async () => {
     const database = databaseConnection().db;
     const secondCandidateId = randomUUID();
     await database.insert(users).values({
@@ -604,19 +623,21 @@ describeWithDatabase('access-membership atomic database publication', () => {
       createdAt: BASELINE_TIME,
       disabledAt: null,
     });
-    const store = createDrizzleAccessMembershipSyncStore(database);
+    const store = createDrizzleAccessMembershipSyncStore(database, {
+      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
+    });
     const reservation = await store.reserve({
       actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-ambiguous-candidate-0001',
+      idempotencyKey: 'access-sync:database-unrelated-user-0001',
       requestDigest: 'b'.repeat(64),
       startedAt: SYNC_TIME,
     });
     expect(reservation.kind).toBe('reserved');
     if (reservation.kind !== 'reserved') {
-      throw new Error('Expected an ambiguous-candidate test reservation.');
+      throw new Error('Expected an unrelated-user test reservation.');
     }
     const memberEmails = Object.freeze([
-      'hagelk@psd401.net',
+      TRANSITION_EMAIL,
       'other.staff@psd401.net',
     ]);
     const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
@@ -633,23 +654,23 @@ describeWithDatabase('access-membership atomic database publication', () => {
       capturedAt: SYNC_TIME,
     });
 
-    await expect(
-      store.publish(reservation.id, evaluation),
-    ).rejects.toMatchObject({
-      code: 'DESIGNATED_TRANSITION_CANDIDATE_INVALID',
+    const result = await store.stage(reservation.id, evaluation);
+    expect(result).toMatchObject({
+      phase: 'stage',
+      activeAccessGroupCount: 2,
+      proofKind: 'initial-selector-match',
     });
     expect(
       await database
-        .select({ id: groupSources.id })
-        .from(groupSources)
-        .where(eq(groupSources.googleGroupId, PROVIDER_GROUP_ID)),
-    ).toEqual([]);
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
-    ).toEqual([{ active: true }]);
+        .select({ id: users.id, email: users.email })
+        .from(users)
+        .orderBy(asc(users.id)),
+    ).toEqual(
+      [
+        { id: USER_ID, email: RECOVERY_EMAIL },
+        { id: secondCandidateId, email: 'other.staff@psd401.net' },
+      ].sort((left, right) => left.id.localeCompare(right.id)),
+    );
   });
 
   test('rolls provider-source activation back with zero bound recovery candidates', async () => {
@@ -680,7 +701,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
         },
       ]);
     });
-    const store = createDrizzleAccessMembershipSyncStore(database);
+    const store = createDrizzleAccessMembershipSyncStore(database, {
+      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
+    });
     const reservation = await store.reserve({
       actor: { kind: 'system', serviceId: 'access-membership-sync' },
       idempotencyKey: 'access-sync:database-zero-recovery-0001',
@@ -691,7 +714,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     if (reservation.kind !== 'reserved') {
       throw new Error('Expected a zero-recovery test reservation.');
     }
-    const memberEmails = Object.freeze(['hagelk@psd401.net']);
+    const memberEmails = Object.freeze([TRANSITION_EMAIL]);
     const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
       groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
       googleGroupId: PROVIDER_GROUP_ID,
@@ -706,9 +729,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
       capturedAt: SYNC_TIME,
     });
 
-    await expect(
-      store.publish(reservation.id, evaluation),
-    ).rejects.toMatchObject({ code: 'RECOVERY_TRANSITION_BINDING_INVALID' });
+    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
+      { code: 'RECOVERY_TRANSITION_BINDING_INVALID' },
+    );
     expect(
       await database
         .select({ id: groupSources.id })
@@ -795,7 +818,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
         },
       ]);
     });
-    const store = createDrizzleAccessMembershipSyncStore(database);
+    const store = createDrizzleAccessMembershipSyncStore(database, {
+      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
+    });
     const reservation = await store.reserve({
       actor: { kind: 'system', serviceId: 'access-membership-sync' },
       idempotencyKey: 'access-sync:database-ambiguous-recovery-0001',
@@ -806,7 +831,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     if (reservation.kind !== 'reserved') {
       throw new Error('Expected an ambiguous-recovery test reservation.');
     }
-    const memberEmails = Object.freeze(['hagelk@psd401.net']);
+    const memberEmails = Object.freeze([TRANSITION_EMAIL]);
     const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
       groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
       googleGroupId: PROVIDER_GROUP_ID,
@@ -821,9 +846,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
       capturedAt: SYNC_TIME,
     });
 
-    await expect(
-      store.publish(reservation.id, evaluation),
-    ).rejects.toMatchObject({ code: 'RECOVERY_TRANSITION_BINDING_INVALID' });
+    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
+      { code: 'RECOVERY_TRANSITION_BINDING_INVALID' },
+    );
     expect(
       await database
         .select({ id: groupSources.id })
@@ -853,7 +878,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
       createdAt: BASELINE_TIME,
     }));
     await database.insert(groupSources).values(historicalSources);
-    const store = createDrizzleAccessMembershipSyncStore(database);
+    const store = createDrizzleAccessMembershipSyncStore(database, {
+      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
+    });
     const reservation = await store.reserve({
       actor: { kind: 'system', serviceId: 'access-membership-sync' },
       idempotencyKey: 'access-sync:database-rollback-0001',
@@ -864,7 +891,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     if (reservation.kind !== 'reserved') {
       throw new Error('Expected a rollback-test reservation.');
     }
-    const memberEmails = Object.freeze(['hagelk@psd401.net']);
+    const memberEmails = Object.freeze([TRANSITION_EMAIL]);
     const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
       groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
       googleGroupId: PROVIDER_GROUP_ID,
@@ -879,11 +906,11 @@ describeWithDatabase('access-membership atomic database publication', () => {
       capturedAt: SYNC_TIME,
     });
 
-    await expect(
-      store.publish(reservation.id, evaluation),
-    ).rejects.toMatchObject({
-      code: 'ACTIVE_ACCESS_SOURCES_INVALID',
-    });
+    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
+      {
+        code: 'ACTIVE_ACCESS_SOURCES_INVALID',
+      },
+    );
     expect(
       await database
         .select({ active: groupSources.active })

@@ -12,6 +12,7 @@ import {
   createDrizzleAccessMembershipSyncStore,
   createScheduledAccessMembershipSyncAuthorizer,
   createSyncAccessMembershipHandler,
+  parseInitialMobileTransitionEmailDigest,
   type AccessMembershipSyncCapabilityContext,
 } from '../../lib/auth/access-membership-sync';
 import { createGoogleAccessMembershipEvaluator } from '../../lib/auth/google-access-membership';
@@ -20,17 +21,36 @@ import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/roster/gro
 const SourceShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
 
 const AccessMembershipSyncEnvironmentSchema = z
-  .object({
-    requestId: UuidSchema,
-    idempotencyKey: IdempotencyKeySchema,
-    sourceSha: SourceShaSchema,
-  })
-  .strict()
+  .discriminatedUnion('phase', [
+    z
+      .object({
+        phase: z.literal('stage'),
+        requestId: UuidSchema,
+        idempotencyKey: IdempotencyKeySchema,
+        sourceSha: SourceShaSchema,
+        initialMobileTransitionEmailDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        mobileSessionId: z.undefined(),
+        membershipSnapshotId: z.undefined(),
+      })
+      .strict(),
+    z
+      .object({
+        phase: z.literal('finalize'),
+        requestId: UuidSchema,
+        idempotencyKey: IdempotencyKeySchema,
+        sourceSha: SourceShaSchema,
+        initialMobileTransitionEmailDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        mobileSessionId: UuidSchema,
+        membershipSnapshotId: UuidSchema,
+      })
+      .strict(),
+  ])
   .readonly();
 
 export const AccessMembershipSyncSummarySchema = z
   .object({
     event: z.literal('access-membership-sync-complete'),
+    phase: z.enum(['stage', 'finalize']),
     sourceSha: SourceShaSchema,
     snapshotId: UuidSchema,
     snapshotVersion: z.number().int().positive(),
@@ -40,7 +60,11 @@ export const AccessMembershipSyncSummarySchema = z
     evaluatedMembershipCount: z.number().int().min(1).max(1_200),
     membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-    initialTransitionCandidateDirectMember: z.literal(true),
+    proofKind: z.enum(['initial-selector-match', 'durable-ios-session']),
+    auditEntryHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .nullable(),
     publication: z.enum(['created', 'already-current']),
   })
   .strict()
@@ -55,15 +79,16 @@ type Environment = Readonly<Record<string, string | undefined>>;
 /** Reads only nonsecret run identity; provider and database secrets stay owned by their existing readers. */
 export function readAccessMembershipSyncEnvironment(
   environment: Environment = process.env,
-): Readonly<{
-  requestId: string;
-  idempotencyKey: string;
-  sourceSha: string;
-}> {
+): z.infer<typeof AccessMembershipSyncEnvironmentSchema> {
   const parsed = AccessMembershipSyncEnvironmentSchema.safeParse({
+    phase: environment.ACCESS_SYNC_PHASE,
     requestId: environment.ACCESS_SYNC_REQUEST_ID,
     idempotencyKey: environment.ACCESS_SYNC_IDEMPOTENCY_KEY,
     sourceSha: environment.SOURCE_SHA,
+    initialMobileTransitionEmailDigest:
+      environment.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256,
+    mobileSessionId: environment.ACCESS_SYNC_MOBILE_SESSION_ID,
+    membershipSnapshotId: environment.ACCESS_SYNC_MEMBERSHIP_SNAPSHOT_ID,
   });
   if (!parsed.success) {
     throw new Error(
@@ -86,6 +111,7 @@ export function accessMembershipSyncSummary(
   const result = SyncAccessMembershipResultSchema.parse(resultValue);
   return AccessMembershipSyncSummarySchema.parse({
     event: 'access-membership-sync-complete',
+    phase: result.phase,
     sourceSha: SourceShaSchema.parse(sourceSha),
     snapshotId: result.snapshotId,
     snapshotVersion: result.snapshotVersion,
@@ -95,14 +121,18 @@ export function accessMembershipSyncSummary(
     evaluatedMembershipCount: result.evaluatedMembershipCount,
     membershipDigest: result.membershipDigest,
     providerGroupIdDigest: result.providerGroupIdDigest,
-    initialTransitionCandidateDirectMember: true,
+    proofKind: result.proofKind,
+    auditEntryHash: result.auditEntryHash,
     publication: result.publication,
   });
 }
 
 async function runFromCommandLine(): Promise<void> {
   const run = readAccessMembershipSyncEnvironment();
-  const google = readGoogleCloudIdentityRosterConfiguration();
+  const initialMobileTransitionEmailDigest =
+    parseInitialMobileTransitionEmailDigest(
+      run.initialMobileTransitionEmailDigest,
+    );
   const connection = createDatabaseClient(readDatabaseConfig());
   if (connection.driver !== 'postgres') {
     throw new Error('Protected access sync requires native PostgreSQL.');
@@ -121,10 +151,29 @@ async function runFromCommandLine(): Promise<void> {
   try {
     const result = await executeCapability(
       createSyncAccessMembershipHandler({
-        evaluator: createGoogleAccessMembershipEvaluator(google),
-        store: createDrizzleAccessMembershipSyncStore(connection.db),
+        ...(run.phase === 'stage'
+          ? {
+              evaluator: createGoogleAccessMembershipEvaluator(
+                readGoogleCloudIdentityRosterConfiguration(),
+              ),
+            }
+          : {}),
+        initialMobileTransitionEmailDigest,
+        store: createDrizzleAccessMembershipSyncStore(connection.db, {
+          initialMobileTransitionEmailDigest,
+        }),
       }),
-      { designatedGroupEmail: 'tsd-engineering@psd401.net' },
+      run.phase === 'stage'
+        ? {
+            phase: 'stage',
+            designatedGroupEmail: 'tsd-engineering@psd401.net',
+          }
+        : {
+            phase: 'finalize',
+            designatedGroupEmail: 'tsd-engineering@psd401.net',
+            mobileSessionId: run.mobileSessionId,
+            membershipSnapshotId: run.membershipSnapshotId,
+          },
       {
         context,
         humanActionResolutionContext: null,

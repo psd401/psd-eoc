@@ -381,15 +381,28 @@ export type AccessMembershipSnapshot = z.infer<
 >;
 
 /**
- * Starts one trusted access-membership evaluation for the exact designated
- * Google Group. Provider locators, member rows, and credentials remain
- * server-owned dependencies and can never be supplied by the caller.
+ * Owns the two protected phases of the exact access-membership transition.
+ * Provider locators, member rows, credentials, and the one-time email selector
+ * remain server-owned dependencies and can never be supplied by the caller.
+ * Finalization accepts only opaque durable-session proof identifiers.
  */
 export const SyncAccessMembershipInputSchema = z
-  .object({
-    designatedGroupEmail: z.literal('tsd-engineering@psd401.net'),
-  })
-  .strict()
+  .discriminatedUnion('phase', [
+    z
+      .object({
+        phase: z.literal('stage'),
+        designatedGroupEmail: z.literal('tsd-engineering@psd401.net'),
+      })
+      .strict(),
+    z
+      .object({
+        phase: z.literal('finalize'),
+        designatedGroupEmail: z.literal('tsd-engineering@psd401.net'),
+        mobileSessionId: SessionIdSchema,
+        membershipSnapshotId: AccessMembershipSnapshotIdSchema,
+      })
+      .strict(),
+  ])
   .readonly();
 
 /** Exact access-membership sync command inferred from its schema. */
@@ -403,19 +416,37 @@ export type SyncAccessMembershipInput = z.infer<
  * protected persistence; only their bounded counts and digests cross the
  * capability boundary.
  */
+const syncAccessMembershipResultFields = {
+  snapshotId: AccessMembershipSnapshotIdSchema,
+  snapshotVersion: VersionSchema,
+  capturedAt: TimestampSchema,
+  designatedSourceId: UuidSchema,
+  activeAccessGroupCount: z.number().int().min(1).max(100),
+  evaluatedMembershipCount: z.number().int().min(1).max(1_200),
+  membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  publication: z.enum(['created', 'already-current']),
+} as const;
+
 export const SyncAccessMembershipResultSchema = z
-  .object({
-    snapshotId: AccessMembershipSnapshotIdSchema,
-    snapshotVersion: VersionSchema,
-    capturedAt: TimestampSchema,
-    designatedSourceId: UuidSchema,
-    activeAccessGroupCount: z.number().int().min(1).max(100),
-    evaluatedMembershipCount: z.number().int().min(1).max(1_200),
-    membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-    providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-    publication: z.enum(['created', 'already-current']),
-  })
-  .strict()
+  .discriminatedUnion('phase', [
+    z
+      .object({
+        ...syncAccessMembershipResultFields,
+        phase: z.literal('stage'),
+        proofKind: z.literal('initial-selector-match'),
+        auditEntryHash: z.null(),
+      })
+      .strict(),
+    z
+      .object({
+        ...syncAccessMembershipResultFields,
+        phase: z.literal('finalize'),
+        proofKind: z.literal('durable-ios-session'),
+        auditEntryHash: z.string().regex(/^[a-f0-9]{64}$/u),
+      })
+      .strict(),
+  ])
   .readonly();
 
 /** Aggregate access-membership publication proof inferred from its schema. */
