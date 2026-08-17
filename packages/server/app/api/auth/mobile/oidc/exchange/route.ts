@@ -23,6 +23,7 @@ import {
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
+  parseInitialMobileTransitionEmailDigest,
   type AccessGateAuditSink,
 } from '../../../../../../lib/auth/access-gate';
 import {
@@ -178,6 +179,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     connection = createDatabaseClient(readDatabaseConfig());
     auditSink = createDrizzleAccessGateAuditSink(connection.db);
+    const initialMobileTransitionEmailDigest =
+      parseInitialMobileTransitionEmailDigest(
+        process.env.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256,
+      );
     const access = await checkAccessGate(
       {
         googleSubject: exchange.principal.subject,
@@ -191,6 +196,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       {
         store: createDrizzleAccessGateStore(connection.db),
         audit: auditSink,
+        initialMobileTransitionEmailDigest,
       },
     );
     if (!access.granted) {
@@ -236,7 +242,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const policy = readSessionPolicy();
     const result = await executeCapability(
       createCompleteOidcSignInHandler({
-        store: createDrizzleInitialWebSessionStore(connection.db),
+        store: createDrizzleInitialWebSessionStore(connection.db, {
+          initialMobileTransitionEmailDigest,
+        }),
         policy,
       }),
       envelope.input,

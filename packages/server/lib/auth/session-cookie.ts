@@ -22,7 +22,7 @@ import {
   type SessionEstablishmentResult,
   type User,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
@@ -255,6 +255,10 @@ export function digestWebSessionCredential(credential: string): string {
   return createHash('sha256').update(credential, 'utf8').digest('hex');
 }
 
+function digestVerifiedEmail(email: string): string {
+  return createHash('sha256').update(email, 'utf8').digest('hex');
+}
+
 function sameFacilityScope(
   left: User['facilityScope'],
   right: User['facilityScope'],
@@ -315,6 +319,12 @@ function assertGroupAuthorizedContext(
         authorization.membershipSnapshot.version ||
       binding.sourceSnapshotVersion + 1 !== binding.successorSnapshotVersion ||
       binding.normalizedEmail !== authorization.user.email ||
+      (binding.transitionEmailDigest !== null &&
+        (!/^[a-f0-9]{64}$/u.test(binding.transitionEmailDigest) ||
+          binding.transitionEmailDigest !==
+            digestVerifiedEmail(authorization.user.email))) ||
+      (binding.userDisposition === 'existing' &&
+        binding.transitionEmailDigest !== null) ||
       authorization.user.facilityScope.kind !== 'district' ||
       (binding.userDisposition === 'create' &&
         (authorization.user.roles.length !== 1 ||
@@ -769,9 +779,26 @@ function assertPersistableIdempotency(
  * session, token digest, and connectivity epoch are committed in one
  * transaction. The raw credential never reaches it.
  */
+export interface InitialWebSessionStoreConfiguration {
+  /** Independently trusted one-time selector; never accepted from context. */
+  readonly initialMobileTransitionEmailDigest?: string | null;
+}
+
 export function createDrizzleInitialWebSessionStore(
   database: Database,
+  configuration: InitialWebSessionStoreConfiguration = {},
 ): InitialWebSessionStore {
+  const configuredTransitionEmailDigest =
+    configuration.initialMobileTransitionEmailDigest ?? null;
+  if (
+    configuredTransitionEmailDigest !== null &&
+    !/^[a-f0-9]{64}$/u.test(configuredTransitionEmailDigest)
+  ) {
+    throw new WebSessionIssuanceError(
+      'SESSION_PERSISTENCE_REJECTED',
+      'The initial mobile transition configuration is invalid.',
+    );
+  }
   return Object.freeze({
     async persist(
       request: PersistInitialWebSessionRequest,
@@ -834,6 +861,14 @@ export function createDrizzleInitialWebSessionStore(
                 firstLoginBinding.sourceSnapshotVersion + 1 !==
                   firstLoginBinding.successorSnapshotVersion ||
                 firstLoginBinding.normalizedEmail !== request.user.email ||
+                (firstLoginBinding.transitionEmailDigest !== null &&
+                  (!/^[a-f0-9]{64}$/u.test(
+                    firstLoginBinding.transitionEmailDigest,
+                  ) ||
+                    firstLoginBinding.transitionEmailDigest !==
+                      digestVerifiedEmail(request.user.email))) ||
+                (firstLoginBinding.userDisposition === 'existing' &&
+                  firstLoginBinding.transitionEmailDigest !== null) ||
                 request.membershipMember.userId !== request.user.id ||
                 request.membershipMember.googleSubject !==
                   request.user.googleSubject ||
@@ -961,8 +996,14 @@ export function createDrizzleInitialWebSessionStore(
                 designatedGroupKeys === null ||
                 !sameNonemptyKeySet(designatedGroupKeys, contextGroupKeys) ||
                 (recoveryTransition &&
-                  (request.device.platform === 'web' ||
-                    firstLoginBinding.userDisposition !== 'existing'))
+                  (request.device.platform !== 'ios' ||
+                    firstLoginBinding.userDisposition !== 'create' ||
+                    firstLoginBinding.transitionEmailDigest === null ||
+                    configuredTransitionEmailDigest === null ||
+                    firstLoginBinding.transitionEmailDigest !==
+                      configuredTransitionEmailDigest)) ||
+                (!recoveryTransition &&
+                  firstLoginBinding.transitionEmailDigest !== null)
               ) {
                 throw new WebSessionIssuanceError(
                   'SESSION_PERSISTENCE_REJECTED',
@@ -1166,41 +1207,29 @@ export function createDrizzleInitialWebSessionStore(
                 const recoverySource = recoverySources[0];
                 const recoveryMember = sourceMembers[0];
                 const recoveryMemberGroup = sourceMemberGroups[0];
-                const designatedEvaluatedEmails = sourceEvaluatedMembers
-                  .filter(
-                    ({ groupSourceId }) =>
-                      groupSourceId === designatedSource?.id,
-                  )
-                  .map(({ email }) => email);
-                const transitionCandidateRows =
-                  designatedEvaluatedEmails.length === 0
+                const recoveryIdentityRows =
+                  recoveryMember === undefined
                     ? []
                     : await transaction
                         .select({
                           id: users.id,
                           googleSubject: users.googleSubject,
-                          email: users.email,
+                          facilityScopeKind: users.facilityScopeKind,
+                          disabledAt: users.disabledAt,
                         })
                         .from(users)
-                        .where(
-                          and(
-                            inArray(users.email, designatedEvaluatedEmails),
-                            eq(users.facilityScopeKind, 'district'),
-                            isNull(users.disabledAt),
-                          ),
-                        )
+                        .where(eq(users.id, recoveryMember.userId))
+                        .limit(2)
                         .for('share');
-                const transitionCandidateFacilityRows =
-                  transitionCandidateRows.length === 0
+                const recoveryIdentity = recoveryIdentityRows[0];
+                const recoveryFacilityRows =
+                  recoveryIdentity === undefined
                     ? []
                     : await transaction
                         .select({ userId: userFacilityScopes.userId })
                         .from(userFacilityScopes)
                         .where(
-                          inArray(
-                            userFacilityScopes.userId,
-                            transitionCandidateRows.map(({ id }) => id),
-                          ),
+                          eq(userFacilityScopes.userId, recoveryIdentity.id),
                         )
                         .for('share');
                 const effectiveAdministratorIds =
@@ -1217,21 +1246,27 @@ export function createDrizzleInitialWebSessionStore(
                   recoverySource === undefined ||
                   recoveryMember === undefined ||
                   recoveryMemberGroup === undefined ||
+                  recoveryIdentity === undefined ||
+                  recoveryIdentityRows.length !== 1 ||
                   sourceMembers.length !== 1 ||
                   sourceMemberGroups.length !== 1 ||
                   sourceMemberFacilities.length !== 0 ||
                   recoveryMember.userId === request.user.id ||
                   recoveryMember.facilityScopeKind !== 'district' ||
+                  recoveryIdentity.id !== recoveryMember.userId ||
+                  recoveryIdentity.googleSubject !==
+                    recoveryMember.googleSubject ||
+                  recoveryIdentity.facilityScopeKind !== 'district' ||
+                  recoveryIdentity.disabledAt !== null ||
+                  recoveryFacilityRows.length !== 0 ||
                   recoveryMemberGroup.userId !== recoveryMember.userId ||
                   recoveryMemberGroup.groupSourceId !== recoverySource.id ||
                   recoveryMemberGroup.groupSourceKind !== recoverySource.kind ||
                   recoveryMemberGroup.groupPurpose !== recoverySource.purpose ||
-                  transitionCandidateRows.length !== 1 ||
-                  transitionCandidateRows[0]?.id !== request.user.id ||
-                  transitionCandidateRows[0]?.googleSubject !==
-                    request.user.googleSubject ||
-                  transitionCandidateRows[0]?.email !== request.user.email ||
-                  transitionCandidateFacilityRows.length !== 0 ||
+                  firstLoginBinding.userDisposition !== 'create' ||
+                  firstLoginBinding.transitionEmailDigest === null ||
+                  firstLoginBinding.transitionEmailDigest !==
+                    digestVerifiedEmail(request.user.email) ||
                   sourceEvaluatedMembers.some(
                     ({ groupSourceId }) =>
                       groupSourceId !== designatedSource?.id,
@@ -1242,25 +1277,6 @@ export function createDrizzleInitialWebSessionStore(
                   throw new WebSessionIssuanceError(
                     'SESSION_PERSISTENCE_REJECTED',
                     'The temporary recovery generation is ambiguous.',
-                  );
-                }
-                const deactivatedRecoverySources = await transaction
-                  .update(groupSources)
-                  .set({ active: false })
-                  .where(
-                    and(
-                      eq(groupSources.id, recoverySource.id),
-                      eq(groupSources.active, true),
-                    ),
-                  )
-                  .returning();
-                if (
-                  deactivatedRecoverySources.length !== 1 ||
-                  deactivatedRecoverySources[0]?.id !== recoverySource.id
-                ) {
-                  throw new WebSessionIssuanceError(
-                    'SESSION_PERSISTENCE_REJECTED',
-                    'The temporary recovery source could not be retired.',
                   );
                 }
               }
@@ -1304,25 +1320,11 @@ export function createDrizzleInitialWebSessionStore(
                 );
               }
 
-              const successorSnapshotGroups = recoveryTransition
-                ? sourceSnapshotGroups.filter(
-                    ({ groupSourceId }) =>
-                      groupSourceId === designatedSource?.id,
-                  )
-                : sourceSnapshotGroups;
-              const successorEvaluatedMembers = recoveryTransition
-                ? sourceEvaluatedMembers.filter(
-                    ({ groupSourceId }) =>
-                      groupSourceId === designatedSource?.id,
-                  )
-                : sourceEvaluatedMembers;
-              const successorMembers = recoveryTransition ? [] : sourceMembers;
-              const successorMemberGroups = recoveryTransition
-                ? []
-                : sourceMemberGroups;
-              const successorMemberFacilities = recoveryTransition
-                ? []
-                : sourceMemberFacilities;
+              const successorSnapshotGroups = sourceSnapshotGroups;
+              const successorEvaluatedMembers = sourceEvaluatedMembers;
+              const successorMembers = sourceMembers;
+              const successorMemberGroups = sourceMemberGroups;
+              const successorMemberFacilities = sourceMemberFacilities;
 
               await transaction.insert(accessMembershipSnapshotGroups).values(
                 successorSnapshotGroups.map((row) => ({
@@ -1576,8 +1578,12 @@ export function createDrizzleInitialWebSessionStore(
               transaction,
               request.user.id,
             );
+            const currentRecoverySourceIds = currentActiveGroups
+              .filter(({ email }) => email !== DESIGNATED_ACCESS_GROUP_EMAIL)
+              .map(({ id }) => id);
             const transitionAdministratorIds =
-              currentActiveGroups.length === 2
+              currentActiveGroups.length === 2 &&
+              currentRecoverySourceIds.length === 1
                 ? await loadEffectiveAdministratorUserIds(transaction, {
                     accessState: {
                       snapshotId: request.membershipSnapshot.id,
@@ -1586,6 +1592,7 @@ export function createDrizzleInitialWebSessionStore(
                         .map(({ id }) => id)
                         .sort(),
                     },
+                    eligibleAccessGroupSourceIds: currentRecoverySourceIds,
                   })
                 : [];
             const hasDesignatedMembership =
