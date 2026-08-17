@@ -11,6 +11,7 @@ import {
   FanoutControlEffectiveStateSchema,
   FanoutControlRecordSchema,
   IdempotencyPrincipalSchema,
+  SyncAccessMembershipInputSchema,
   type Actor,
   type SessionEstablishmentResult,
   type StartEventResult,
@@ -96,6 +97,8 @@ const SYNTHETIC_SOUTH_FACILITY_ID = '00000000-0000-4000-8000-000000000002';
 const SYNTHETIC_NEIGHBORHOOD_ID = '00000000-0000-4000-8000-000000000010';
 const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const ACCESS_GROUP_ID = '15000000-0000-4000-8000-000000000110';
+const DESIGNATED_ACCESS_GROUP_EMAIL =
+  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
 const MEMBER_USER_ID = PLAYWRIGHT_IDS.user;
 const MEMBER_SUBJECT = 'mock-google-subject-member';
 const FIXTURE_TIME = new Date('2026-08-10T18:00:00.000Z');
@@ -195,7 +198,7 @@ async function prepareAccessEvidence(
         displayName: 'Synthetic Start-flow Playwright Access',
         active: true,
         googleGroupId: 'synthetic-start-flow-playwright-access',
-        email: 'synthetic-start-flow-playwright@psd401.net',
+        email: DESIGNATED_ACCESS_GROUP_EMAIL,
         fixtureKey: null,
         createdAt: now,
       })
@@ -339,7 +342,7 @@ async function issueSyntheticStaffSession(
       expiresAt: new Date(now.getTime() + 90 * DAY_MS),
       membershipValidUntil: new Date(fixture.capturedAt.getTime() + DAY_MS),
       membershipGraceUntil: new Date(fixture.capturedAt.getTime() + 3 * DAY_MS),
-      grantBootstrapAdmin: false,
+      grantBootstrapAdmin: true,
       requestId: randomUUID(),
       idempotency: {
         key: `oidc:${responseDigest}`,
@@ -350,9 +353,11 @@ async function issueSyntheticStaffSession(
     });
   if (
     !result.user.roles.includes('staff') ||
-    result.user.roles.includes('admin')
+    !result.user.roles.includes('admin')
   ) {
-    throw new Error('The synthetic start-flow session is not staff-only.');
+    throw new Error(
+      'The synthetic start-flow session is not a designated-group administrator.',
+    );
   }
   const expires = Math.floor(Date.parse(result.session.expiresAt) / 1_000);
   await writeFile(

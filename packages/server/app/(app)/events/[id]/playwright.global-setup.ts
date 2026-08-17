@@ -13,6 +13,7 @@ import {
   IntegrationStatusSchema,
   JournalEntrySchema,
   MediaRecordSchema,
+  SyncAccessMembershipInputSchema,
   type Actor,
   type Event,
   type JournalEntry,
@@ -55,6 +56,8 @@ import { createOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import { requireEventRoomPlaywrightRunContext } from './test-database';
 
 const ACCESS_GROUP_ID = '16000000-0000-4000-8000-000000000110';
+const DESIGNATED_ACCESS_GROUP_EMAIL =
+  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
 const MEMBER_USER_ID = '16000000-0000-4000-8000-000000000120';
 const MEMBER_SUBJECT = 'mock-google-subject-event-room';
 const FACILITY_ID = '00000000-0000-4000-8000-000000000001';
@@ -207,7 +210,7 @@ async function prepareAccessEvidence(
         displayName: 'Synthetic Event Room Playwright Access',
         active: true,
         googleGroupId: 'synthetic-event-room-playwright-access',
-        email: 'synthetic-event-room-playwright@psd401.net',
+        email: DESIGNATED_ACCESS_GROUP_EMAIL,
         fixtureKey: null,
         createdAt: now,
       })
@@ -360,7 +363,7 @@ async function issueSyntheticOperatorSession(
     membershipGraceUntil: new Date(
       fixture.capturedAt.getTime() + 72 * 60 * 60 * 1_000,
     ),
-    grantBootstrapAdmin: false,
+    grantBootstrapAdmin: true,
     requestId: randomUUID(),
     idempotency: {
       key: `oidc:${responseDigest}`,
