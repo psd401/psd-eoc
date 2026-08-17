@@ -402,7 +402,74 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain('aws logs filter-log-events');
   });
 
-  it('proves the exact live runtime role and queue have zero send authority', async () => {
+  it('proves the exact dark email topology without a sender, worker, subscription, or recipient', async () => {
+    const workflow = await readWorkflow();
+
+    expect(workflow).toContain(
+      'select(.Type == "AWS::SQS::Queue")] | length\' "$template")" -eq 3',
+    );
+    expect(workflow).toContain(
+      'select(.Type == "AWS::KMS::Key")] | length\' "$template")" -eq 1',
+    );
+    expect(workflow).toContain(
+      'select(.Type == "AWS::SNS::Topic")] | length\' "$template")" -eq 1',
+    );
+    expect(workflow).toContain(
+      'select(.Type == "AWS::SES::ConfigurationSet")] | length\' "$template")" -eq 1',
+    );
+    expect(workflow).toContain(
+      'select(.Type == "AWS::SES::ConfigurationSetEventDestination")] | length\' "$template")" -eq 1',
+    );
+    for (const identity of [
+      'psd-eoc-exploration-smoke-health',
+      'psd-eoc-email',
+      'psd-eoc-email-dlq',
+      'psd-eoc-transactional',
+      'psd-eoc-email-events',
+      '/psd-eoc/workers/email',
+      'arn:aws:ses:$AWS_REGION:$AWS_ACCOUNT_ID:identity/psd401.net',
+    ]) {
+      expect(workflow).toContain(identity);
+    }
+    expect(workflow).toContain(
+      '$configuration_sets[0].value.Properties.SendingOptions.SendingEnabled == false',
+    );
+    expect(workflow).toContain(
+      '$email_event_topics[0].value.Properties.KmsMasterKeyId == {"Fn::GetAtt": [$email_event_key_id, "Arn"]}',
+    );
+    expect(workflow).toContain('.Principal.Service? == "ses.amazonaws.com"');
+    expect(workflow).toContain(
+      '"AWS:SourceArn": "arn:aws:ses:us-west-2:<aws-account-id>:configuration-set/psd-eoc-transactional"',
+    );
+    expect(workflow).toContain(
+      'Dark live-pilot email worker; consumes only its queue and has no SES send authority.',
+    );
+    expect(workflow).toContain('"sqs:ReceiveMessage"');
+    expect(workflow).toContain(
+      'sqs:(\\*|SendMessage)$|ses:(\\*|Send.*)|sns:(\\*|Publish)$',
+    );
+    expect(workflow).toContain('.ResourceType == "AWS::SNS::Subscription"');
+    expect(workflow).toContain('.ResourceType == "AWS::SES::EmailIdentity"');
+    expect(workflow).toContain('.ResourceType == "AWS::ECS::Service"');
+    expect(workflow).toContain('expected-stack-resource-types.tsv');
+    expect(workflow).toContain('actual-stack-resource-types.tsv');
+    expect(workflow).toContain('PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE');
+    expect(workflow).toContain(
+      'test "$(jq -er \'.PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE\' <<< "$runtime_environment_map")" = "UNVERIFIED"',
+    );
+    expect(workflow).toContain(
+      'test "$ses_integration_truth" = "configured-unverified"',
+    );
+    expect(workflow).toContain('test "$email_channel_state" = "disabled"');
+    expect(workflow).toContain('notificationChannelsEnabled: 0');
+    expect(workflow).toContain('matchingRosterRecipients: 0');
+    expect(workflow).not.toContain('aws sqs send-message');
+    expect(workflow).not.toContain('aws ses send-email');
+    expect(workflow).not.toContain('aws sesv2 send-email');
+    expect(workflow).not.toContain('aws sns subscribe');
+  });
+
+  it('proves the exact live runtime role and all dark resources have zero send authority', async () => {
     const workflow = await readWorkflow();
 
     expect(workflow).toContain('runtime-role.json');
@@ -417,9 +484,15 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('runtime-inline-policy.json');
     expect(workflow).toContain('action_set == ["sqs:GetQueueAttributes"]');
     expect(workflow).toContain('resource_set == [$queue]');
-    expect(workflow).toContain('health-queue-send-negative-simulation.json');
+    expect(workflow).toContain('queue-send-negative-simulation.json');
     expect(workflow).toContain('--action-names sqs:SendMessage');
-    expect(workflow).toContain('--resource-arns "$queue_arn"');
+    expect(workflow).toContain(
+      '--resource-arns "$queue_arn" "$email_queue_arn" "$email_dlq_arn"',
+    );
+    expect(workflow).toContain('ses-send-negative-simulation.json');
+    expect(workflow).toContain('--action-names ses:SendEmail ses:SendRawEmail');
+    expect(workflow).toContain('sns-publish-negative-simulation.json');
+    expect(workflow).toContain('--action-names sns:Publish');
     expect(workflow).not.toContain('forbidden-action-simulation.json');
   });
 });
