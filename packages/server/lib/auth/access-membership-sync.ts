@@ -19,7 +19,7 @@ import {
   type SyncAccessMembershipInput,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
