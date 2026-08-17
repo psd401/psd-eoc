@@ -514,7 +514,7 @@ function validateEvidence(
       return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
     }
     if (
-      (recoveryTransition && input.source !== 'mobile') ||
+      recoveryTransition ||
       !hasExactEvaluatedMembership ||
       evaluatedGroups === null
     ) {

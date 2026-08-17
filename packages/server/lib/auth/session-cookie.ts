@@ -22,7 +22,7 @@ import {
   type SessionEstablishmentResult,
   type User,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
@@ -960,7 +960,9 @@ export function createDrizzleInitialWebSessionStore(
                 activeGroupKeys === null ||
                 designatedGroupKeys === null ||
                 !sameNonemptyKeySet(designatedGroupKeys, contextGroupKeys) ||
-                (recoveryTransition && request.device.platform === 'web')
+                (recoveryTransition &&
+                  (request.device.platform === 'web' ||
+                    firstLoginBinding.userDisposition !== 'existing'))
               ) {
                 throw new WebSessionIssuanceError(
                   'SESSION_PERSISTENCE_REJECTED',
@@ -1164,6 +1166,43 @@ export function createDrizzleInitialWebSessionStore(
                 const recoverySource = recoverySources[0];
                 const recoveryMember = sourceMembers[0];
                 const recoveryMemberGroup = sourceMemberGroups[0];
+                const designatedEvaluatedEmails = sourceEvaluatedMembers
+                  .filter(
+                    ({ groupSourceId }) =>
+                      groupSourceId === designatedSource?.id,
+                  )
+                  .map(({ email }) => email);
+                const transitionCandidateRows =
+                  designatedEvaluatedEmails.length === 0
+                    ? []
+                    : await transaction
+                        .select({
+                          id: users.id,
+                          googleSubject: users.googleSubject,
+                          email: users.email,
+                        })
+                        .from(users)
+                        .where(
+                          and(
+                            inArray(users.email, designatedEvaluatedEmails),
+                            eq(users.facilityScopeKind, 'district'),
+                            isNull(users.disabledAt),
+                          ),
+                        )
+                        .for('share');
+                const transitionCandidateFacilityRows =
+                  transitionCandidateRows.length === 0
+                    ? []
+                    : await transaction
+                        .select({ userId: userFacilityScopes.userId })
+                        .from(userFacilityScopes)
+                        .where(
+                          inArray(
+                            userFacilityScopes.userId,
+                            transitionCandidateRows.map(({ id }) => id),
+                          ),
+                        )
+                        .for('share');
                 const effectiveAdministratorIds =
                   await loadEffectiveAdministratorUserIds(transaction, {
                     accessState: {
@@ -1187,6 +1226,12 @@ export function createDrizzleInitialWebSessionStore(
                   recoveryMemberGroup.groupSourceId !== recoverySource.id ||
                   recoveryMemberGroup.groupSourceKind !== recoverySource.kind ||
                   recoveryMemberGroup.groupPurpose !== recoverySource.purpose ||
+                  transitionCandidateRows.length !== 1 ||
+                  transitionCandidateRows[0]?.id !== request.user.id ||
+                  transitionCandidateRows[0]?.googleSubject !==
+                    request.user.googleSubject ||
+                  transitionCandidateRows[0]?.email !== request.user.email ||
+                  transitionCandidateFacilityRows.length !== 0 ||
                   sourceEvaluatedMembers.some(
                     ({ groupSourceId }) =>
                       groupSourceId !== designatedSource?.id,
