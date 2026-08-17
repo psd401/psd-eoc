@@ -23,7 +23,7 @@ import {
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
-  readBootstrapAdminSubjects,
+  parseInitialMobileTransitionEmailDigest,
   type AccessGateAuditSink,
 } from '../../../../../../lib/auth/access-gate';
 import {
@@ -160,6 +160,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let auditSink: AccessGateAuditSink | undefined;
   let postGateAuditContext: PostGateAuditContext | undefined;
   try {
+    const initialMobileTransitionEmailDigest =
+      parseInitialMobileTransitionEmailDigest(
+        process.env.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256,
+      );
     const requestBody = MobileOidcExchangeRequestSchema.parse(
       await request.json(),
     );
@@ -182,6 +186,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const access = await checkAccessGate(
       {
         googleSubject: exchange.principal.subject,
+        email: exchange.principal.email,
+        displayName: exchange.principal.displayName,
         subjectDigest: exchange.principal.subjectDigest,
         requestId,
         checkedAt: serverTime,
@@ -190,7 +196,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       {
         store: createDrizzleAccessGateStore(connection.db),
         audit: auditSink,
-        bootstrapAdminSubjects: readBootstrapAdminSubjects(),
+        initialMobileTransitionEmailDigest,
       },
     );
     if (!access.granted) {
@@ -219,6 +225,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           access.membership.accessGroupSourceRefs,
           access.user.facilityScope,
         ),
+        firstLoginBinding: access.firstLoginBinding,
         grantBootstrapAdmin: access.bootstrapAdminEligible,
       }),
       bearerSink: Object.freeze({
@@ -235,7 +242,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const policy = readSessionPolicy();
     const result = await executeCapability(
       createCompleteOidcSignInHandler({
-        store: createDrizzleInitialWebSessionStore(connection.db),
+        store: createDrizzleInitialWebSessionStore(connection.db, {
+          initialMobileTransitionEmailDigest,
+        }),
         policy,
       }),
       envelope.input,

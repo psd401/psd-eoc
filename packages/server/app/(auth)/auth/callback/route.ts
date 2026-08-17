@@ -17,7 +17,6 @@ import {
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
   POST_GATE_SIGN_IN_FAILED_REASON,
-  readBootstrapAdminSubjects,
   type AccessGateAuditSink,
   type AccessGateDenialReason,
   type AccessGateStore,
@@ -352,6 +351,8 @@ export async function GET(request: Request): Promise<NextResponse> {
     const access = await checkAccessGate(
       {
         googleSubject: callback.principal.subject,
+        email: callback.principal.email,
+        displayName: callback.principal.displayName,
         subjectDigest: callback.principal.subjectDigest,
         requestId,
         checkedAt: serverTime,
@@ -360,7 +361,6 @@ export async function GET(request: Request): Promise<NextResponse> {
       {
         store: runtime.accessStore,
         audit: runtime.auditSink,
-        bootstrapAdminSubjects: readBootstrapAdminSubjects(),
       },
     );
     if (!access.granted) {
@@ -393,6 +393,7 @@ export async function GET(request: Request): Promise<NextResponse> {
           access.membership.accessGroupSourceRefs,
           access.user.facilityScope,
         ),
+        firstLoginBinding: access.firstLoginBinding,
         grantBootstrapAdmin: access.bootstrapAdminEligible,
       }),
       cookieSink: Object.freeze({
