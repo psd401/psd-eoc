@@ -1,6 +1,6 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Retained least-privilege SES readback policy for the protected PSD EOC exploration deployment role",
+  "Description": "Retained least-privilege operations policy for the protected PSD EOC exploration deployment role",
   "Resources": {
     "ExplorationSmokeSesReadbackPolicy": {
       "DeletionPolicy": "Retain",
@@ -15,6 +15,16 @@
               "Effect": "Allow",
               "Resource": "arn:aws:ses:us-west-2:<aws-account-id>:configuration-set/psd-eoc-transactional",
               "Sid": "ReadCanonicalConfigurationSetOnly"
+            },
+            {
+              "Action": [
+                "apprunner:AssociateCustomDomain",
+                "apprunner:DescribeCustomDomains",
+                "apprunner:ListOperations"
+              ],
+              "Effect": "Allow",
+              "Resource": "arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c",
+              "Sid": "ReadAndAssociateCanonicalCustomDomainOnly"
             }
           ],
           "Version": "2012-10-17"
