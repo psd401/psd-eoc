@@ -2077,20 +2077,21 @@ describeWithDatabase('facilities administrator database flow', () => {
       }),
     ).toEqual([designatedUserId]);
 
+    const recoveryDeactivationCommand = {
+      id: recoverySource.id,
+      kind: recoverySource.kind,
+      purpose: recoverySource.purpose,
+      facilityId: recoverySource.facilityId,
+      displayName: recoverySource.displayName,
+      active: false,
+      googleGroupId: recoverySource.googleGroupId,
+      email: recoverySource.email,
+    } as const;
     await expect(
       executeUpdateGroupSourceCapability({
         authenticated,
         store,
-        command: {
-          id: recoverySource.id,
-          kind: recoverySource.kind,
-          purpose: recoverySource.purpose,
-          facilityId: recoverySource.facilityId,
-          displayName: recoverySource.displayName,
-          active: false,
-          googleGroupId: recoverySource.googleGroupId,
-          email: recoverySource.email,
-        },
+        command: recoveryDeactivationCommand,
         metadata: metadata('protected-recovery-deactivation', requestIds),
       }),
     ).rejects.toMatchObject({
@@ -2111,6 +2112,78 @@ describeWithDatabase('facilities administrator database flow', () => {
         .sort()
         .map((id) => ({ id, active: true })),
     );
+
+    const throwawaySource = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: `Throwaway access ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-236-throwaway-${suffix}`,
+        email: `issue-236-throwaway-${suffix}@example.invalid`,
+      },
+      metadata: metadata('protected-recovery-add-third', requestIds),
+    });
+    if (
+      throwawaySource.kind !== 'google-group' ||
+      throwawaySource.purpose !== 'access'
+    ) {
+      throw new Error('The throwaway access source lost its variant.');
+    }
+    expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
+
+    await expect(
+      executeUpdateGroupSourceCapability({
+        authenticated,
+        store,
+        command: recoveryDeactivationCommand,
+        metadata: metadata(
+          'protected-recovery-deactivation-after-third',
+          requestIds,
+        ),
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message:
+        'Recovery access can be deactivated only by the protected mobile-session finalizer.',
+    });
+    expect(
+      await database
+        .select({ id: groupSources.id, active: groupSources.active })
+        .from(groupSources)
+        .where(
+          inArray(groupSources.id, [
+            recoverySource.id,
+            designatedSource.id,
+            throwawaySource.id,
+          ]),
+        )
+        .orderBy(asc(groupSources.id)),
+    ).toEqual(
+      [recoverySource.id, designatedSource.id, throwawaySource.id]
+        .sort()
+        .map((id) => ({ id, active: true })),
+    );
+
+    const rolledBackThrowaway = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        id: throwawaySource.id,
+        kind: throwawaySource.kind,
+        purpose: throwawaySource.purpose,
+        facilityId: throwawaySource.facilityId,
+        displayName: throwawaySource.displayName,
+        active: false,
+        googleGroupId: throwawaySource.googleGroupId,
+        email: throwawaySource.email,
+      },
+      metadata: metadata('protected-recovery-third-rollback', requestIds),
+    });
+    expect(rolledBackThrowaway.active).toBe(false);
     expect(await loadAccessConfigurationSnapshotState(database)).toEqual(
       accessState,
     );

@@ -500,35 +500,43 @@ async function assertProtectedRecoveryFinalizationRequired(
   state: AccessSetMutationState,
   current: Extract<GroupSource, { purpose: 'access' }>,
 ): Promise<void> {
+  // Anchor the retirement boundary to the immutable newest complete pair, not
+  // the mutable live count: an unproven third source must not erase recovery.
+  const protectedSnapshotState =
+    state.latestCompleteSnapshot.kind === 'strict' &&
+    state.latestCompleteSnapshot.state.activeAccessGroupSourceIds.length === 2
+      ? state.latestCompleteSnapshot.state
+      : null;
   if (
-    state.accessState === null ||
-    state.activeAccessGroupSourceIds.length !== 2 ||
+    protectedSnapshotState === null ||
     current.email === DESIGNATED_ACCESS_GROUP_EMAIL
   ) {
     return;
   }
-  const activeSources = await database
+  const protectedSources = await database
     .select({ id: groupSources.id, email: groupSources.email })
     .from(groupSources)
     .where(
       and(
-        inArray(groupSources.id, [...state.activeAccessGroupSourceIds]),
+        inArray(groupSources.id, [
+          ...protectedSnapshotState.activeAccessGroupSourceIds,
+        ]),
         eq(groupSources.kind, 'google-group'),
         eq(groupSources.purpose, 'access'),
-        eq(groupSources.active, true),
       ),
     )
     .orderBy(asc(groupSources.id));
-  const designatedSources = activeSources.filter(
+  const designatedSources = protectedSources.filter(
     ({ email }) => email === DESIGNATED_ACCESS_GROUP_EMAIL,
   );
   if (
-    activeSources.length === 2 &&
+    protectedSources.length === 2 &&
     designatedSources.length === 1 &&
     current.id !== designatedSources[0]?.id &&
+    protectedSnapshotState.activeAccessGroupSourceIds.includes(current.id) &&
     sameSortedIds(
-      activeSources.map(({ id }) => id),
-      [...state.accessState.activeAccessGroupSourceIds].sort(),
+      protectedSources.map(({ id }) => id),
+      [...protectedSnapshotState.activeAccessGroupSourceIds].sort(),
     )
   ) {
     throw conflict(
@@ -1446,6 +1454,15 @@ async function updateGroupSource(
       'An access locator correction must create an active replacement source until a complete access snapshot proves the rotation.',
     );
   }
+  const deactivatesCurrentSource =
+    !locatorChanged && current.active && !input.active;
+  if (deactivatesCurrentSource) {
+    await assertProtectedRecoveryFinalizationRequired(
+      database,
+      accessMutationState,
+      current,
+    );
+  }
   if (accessMutationState.accessState === null) {
     accessRecovery = accessRecoveryTransition(
       accessMutationState,
@@ -1458,17 +1475,7 @@ async function updateGroupSource(
       'Correcting an access email requires a new Google Group ID so the replacement has a distinct immutable identity.',
     );
   }
-  if (
-    accessMutationState.accessState !== null &&
-    !locatorChanged &&
-    current.active &&
-    !input.active
-  ) {
-    await assertProtectedRecoveryFinalizationRequired(
-      database,
-      accessMutationState,
-      current,
-    );
+  if (accessMutationState.accessState !== null && deactivatesCurrentSource) {
     await assertReachableAdministratorRemains(
       database,
       accessMutationState,
