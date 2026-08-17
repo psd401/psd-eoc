@@ -373,7 +373,7 @@ jobs:
                 jq -e \
                   --arg domain "$CUSTOM_DOMAIN" \
                   --arg serviceArn "$APP_RUNNER_SERVICE_ARN" '
-                  (.CustomDomain.Status | ascii_upcase) as $status |
+                  ((.CustomDomain.Status // "") | ascii_upcase) as $status |
                   .ServiceArn == $serviceArn and
                   (.DNSTarget | type == "string" and test("^[A-Za-z0-9.-]+[.]?$") and length <= 253) and
                   .CustomDomain.DomainName == $domain and
