@@ -1890,8 +1890,9 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const existingUserId = randomUUID();
     const existingSubject = `hagelk-subject-${suffix}`;
     const existingEmail = `hagelk-${suffix}@example.invalid`;
-    const transitionRacedSubject = `transition-raced-subject-${suffix}`;
-    const transitionRacedEmail = `transition-raced-${suffix}@example.invalid`;
+    const ambiguousUserId = randomUUID();
+    const ambiguousSubject = `ambiguous-subject-${suffix}`;
+    const ambiguousEmail = `ambiguous-${suffix}@example.invalid`;
     const newSubject = `new-subject-${suffix}`;
     const newEmail = `new-${suffix}@example.invalid`;
     const racedSubject = `raced-subject-${suffix}`;
@@ -1990,15 +1991,13 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         },
       ]);
       await transaction.insert(accessMembershipEvaluatedMembers).values(
-        [existingEmail, transitionRacedEmail, newEmail, racedEmail].map(
-          (email) => ({
-            snapshotId: sourceSnapshotId,
-            email,
-            groupSourceId: sourceId,
-            groupSourceKind: 'google-group' as const,
-            groupPurpose: 'access' as const,
-          }),
-        ),
+        [existingEmail, ambiguousEmail, newEmail, racedEmail].map((email) => ({
+          snapshotId: sourceSnapshotId,
+          email,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+        })),
       );
       await transaction.insert(accessMembershipMembers).values([
         {
@@ -2128,12 +2127,28 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       granted: false,
       reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
     });
+    const prematureNewMobileGrant = await checkAccessGate(
+      {
+        googleSubject: newSubject,
+        email: newEmail,
+        displayName: 'Synthetic exact-group administrator',
+        subjectDigest: digest(newSubject),
+        requestId: randomUUID(),
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'mobile',
+      },
+      { store, audit },
+    );
+    expect(prematureNewMobileGrant).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
+    });
     const transitionRaceGrant = await checkAccessGate(
       {
-        googleSubject: transitionRacedSubject,
-        email: transitionRacedEmail,
-        displayName: 'Synthetic transition race',
-        subjectDigest: digest(transitionRacedSubject),
+        googleSubject: existingSubject,
+        email: existingEmail,
+        displayName: 'Changed Google display label is non-authoritative',
+        subjectDigest: digest(existingSubject),
         requestId: randomUUID(),
         checkedAt: existingCheckedAt.toISOString(),
         source: 'mobile',
@@ -2168,12 +2183,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
     expect(
       await database
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.googleSubject, transitionRacedSubject)),
-    ).toEqual([]);
-    expect(
-      await database
         .select({ active: groupSources.active })
         .from(groupSources)
         .where(eq(groupSources.id, recoverySourceId)),
@@ -2200,6 +2209,58 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
           eq(idempotencyRecords.key, transitionRaceRequest.idempotency.key),
         ),
     ).toEqual([]);
+    expect(await loadEffectiveRoles(database, existingUserId)).toEqual([
+      'staff',
+    ]);
+    await database.insert(users).values({
+      id: ambiguousUserId,
+      googleSubject: ambiguousSubject,
+      email: ambiguousEmail,
+      displayName: 'Synthetic ambiguous durable candidate',
+      facilityScopeKind: 'district',
+      createdAt: capturedAt,
+    });
+    const ambiguousGrant = await checkAccessGate(
+      {
+        googleSubject: existingSubject,
+        email: existingEmail,
+        displayName: 'Changed Google display label is non-authoritative',
+        subjectDigest: digest(existingSubject),
+        requestId: randomUUID(),
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'mobile',
+      },
+      { store, audit },
+    );
+    expect(ambiguousGrant.granted).toBe(true);
+    if (!ambiguousGrant.granted || ambiguousGrant.firstLoginBinding === null) {
+      throw new Error('Ambiguous transition did not reach persistence.');
+    }
+    const ambiguousRequest = buildPersistenceRequest(
+      ambiguousGrant,
+      existingCheckedAt,
+      'ios',
+      'ambiguous-candidate',
+    );
+    await expect(
+      createDrizzleInitialWebSessionStore(database).persist(ambiguousRequest),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
+    expect(
+      await database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, recoverySourceId)),
+    ).toEqual([{ active: true }]);
+    expect(
+      await database
+        .select({ id: idempotencyRecords.id })
+        .from(idempotencyRecords)
+        .where(eq(idempotencyRecords.key, ambiguousRequest.idempotency.key)),
+    ).toEqual([]);
+    await database
+      .update(users)
+      .set({ disabledAt: existingCheckedAt })
+      .where(eq(users.id, ambiguousUserId));
     const existingGrant = await checkAccessGate(
       {
         googleSubject: existingSubject,
