@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -16,6 +16,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  accessMembershipEvaluatedMembers,
   accessMembershipMemberFacilities,
   accessMembershipMemberGroups,
   accessMembershipMembers,
@@ -24,6 +25,7 @@ import {
   deviceEnrollments,
   facilities,
   groupSources,
+  idempotencyRecords,
   sessions,
   securityAuditEntries,
   userFacilityScopes,
@@ -57,6 +59,7 @@ import {
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
   type AccessGateEvidence,
+  type AccessGateGranted,
 } from './access-gate';
 import {
   loadAccessConfigurationSnapshotState,
@@ -346,6 +349,8 @@ describe('strict access-gate snapshot projection', () => {
     });
     const input = {
       googleSubject,
+      email: 'synthetic.strict.access@psd401.net',
+      displayName: 'Synthetic Strict Access',
       subjectDigest: 'a'.repeat(64),
       requestId: randomUUID(),
       checkedAt: '2026-08-10T18:31:00.000Z',
@@ -356,7 +361,6 @@ describe('strict access-gate snapshot projection', () => {
       await checkAccessGate(input, {
         store: { loadEvidence: async () => evidence },
         audit,
-        bootstrapAdminSubjects: new Set(),
       }),
     ).toMatchObject({ granted: true });
 
@@ -373,7 +377,6 @@ describe('strict access-gate snapshot projection', () => {
         {
           store: { loadEvidence: async () => duplicated },
           audit,
-          bootstrapAdminSubjects: new Set(),
         },
       ),
     ).toEqual({
@@ -396,7 +399,6 @@ describe('strict access-gate snapshot projection', () => {
         {
           store: { loadEvidence: async () => noncanonical },
           audit,
-          bootstrapAdminSubjects: new Set(),
         },
       ),
     ).toEqual({
@@ -444,6 +446,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const snapshotId = randomUUID();
     const googleSubject = `issue-26-access-gate-${suffix}`;
     const backupGoogleSubject = `issue-26-access-backup-${suffix}`;
+    const email = `issue-26-access-gate-${suffix}@psd401.net`;
+    const displayName = `Issue 26 access member ${suffix.slice(0, 8)}`;
     const snapshotVersion =
       2_000_000_000 + Number.parseInt(suffix.slice(0, 6), 16);
     const now = new Date(Date.now() + 60_000);
@@ -478,8 +482,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       {
         id: userId,
         googleSubject,
-        email: `issue-26-access-gate-${suffix}@psd401.net`,
-        displayName: `Issue 26 access member ${suffix.slice(0, 8)}`,
+        email,
+        displayName,
         facilityScopeKind: 'district',
         createdAt: now,
       },
@@ -753,6 +757,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const afterBuildingCorrection = await checkAccessGate(
       {
         googleSubject,
+        email,
+        displayName,
         subjectDigest: 'a'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date(now.getTime() + 1_500).toISOString(),
@@ -761,10 +767,12 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       {
         store: gateStore,
         audit: auditSink,
-        bootstrapAdminSubjects: new Set(),
       },
     );
-    expect(afterBuildingCorrection.granted).toBe(true);
+    expect(afterBuildingCorrection).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
+    });
 
     if (
       evidence.user === null ||
@@ -813,11 +821,9 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         requestDigest: digest(`building-update-request:${suffix}`),
       }),
     });
-    const issuedAfterUnrelatedUpdate =
-      await createDrizzleInitialWebSessionStore(database).persist(
-        issuanceRequest,
-      );
-    expect(issuedAfterUnrelatedUpdate.user.id).toBe(userId);
+    await expect(
+      createDrizzleInitialWebSessionStore(database).persist(issuanceRequest),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
 
     const invalidResponseDigest = digest(
       `noncanonical-membership-response:${suffix}`,
@@ -891,6 +897,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const afterAccessCorrection = await checkAccessGate(
       {
         googleSubject,
+        email,
+        displayName,
         subjectDigest: 'b'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date(now.getTime() + 3_000).toISOString(),
@@ -899,12 +907,11 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       {
         store: gateStore,
         audit: auditSink,
-        bootstrapAdminSubjects: new Set(),
       },
     );
     expect(afterAccessCorrection).toEqual({
       granted: false,
-      reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED',
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
     });
 
     const replacementSnapshotId = randomUUID();
@@ -971,6 +978,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const afterReplacementSync = await checkAccessGate(
       {
         googleSubject,
+        email,
+        displayName,
         subjectDigest: 'c'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date(now.getTime() + 4_500).toISOString(),
@@ -979,10 +988,12 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       {
         store: gateStore,
         audit: auditSink,
-        bootstrapAdminSubjects: new Set(),
       },
     );
-    expect(afterReplacementSync.granted).toBe(true);
+    expect(afterReplacementSync).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
+    });
 
     const completedReplayRequestId = randomUUID();
     const completedReplay = await executeUpdateGroupSourceCapability({
@@ -1020,6 +1031,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const afterCompletedReplay = await checkAccessGate(
       {
         googleSubject,
+        email,
+        displayName,
         subjectDigest: 'e'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date(now.getTime() + 4_900).toISOString(),
@@ -1028,10 +1041,12 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       {
         store: gateStore,
         audit: auditSink,
-        bootstrapAdminSubjects: new Set(),
       },
     );
-    expect(afterCompletedReplay.granted).toBe(true);
+    expect(afterCompletedReplay).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
+    });
 
     await appendLegacyAccessGroupUpdateAudit({
       authenticated,
@@ -1041,6 +1056,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const afterLegacyAccessCorrection = await checkAccessGate(
       {
         googleSubject,
+        email,
+        displayName,
         subjectDigest: 'd'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date(now.getTime() + 6_000).toISOString(),
@@ -1049,10 +1066,12 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       {
         store: gateStore,
         audit: auditSink,
-        bootstrapAdminSubjects: new Set(),
       },
     );
-    expect(afterLegacyAccessCorrection.granted).toBe(true);
+    expect(afterLegacyAccessCorrection).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
+    });
 
     await database
       .update(users)
@@ -1352,6 +1371,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const inactiveMembershipUserId = randomUUID();
     const validGoogleSubject = `issue-26-valid-membership-${suffix}`;
     const inactiveMembershipGoogleSubject = `issue-26-inactive-membership-${suffix}`;
+    const inactiveMembershipEmail = `issue-26-inactive-membership-${suffix}@psd401.net`;
+    const inactiveMembershipDisplayName = `Issue 26 inactive membership ${suffix.slice(0, 8)}`;
     const snapshotId = randomUUID();
     const capturedAt = new Date(Date.now() + 180_000);
 
@@ -1393,8 +1414,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       {
         id: inactiveMembershipUserId,
         googleSubject: inactiveMembershipGoogleSubject,
-        email: `issue-26-inactive-membership-${suffix}@psd401.net`,
-        displayName: `Issue 26 inactive membership ${suffix.slice(0, 8)}`,
+        email: inactiveMembershipEmail,
+        displayName: inactiveMembershipDisplayName,
         facilityScopeKind: 'district',
         createdAt: capturedAt,
       },
@@ -1505,6 +1526,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       await checkAccessGate(
         {
           googleSubject: inactiveMembershipGoogleSubject,
+          email: inactiveMembershipEmail,
+          displayName: inactiveMembershipDisplayName,
           subjectDigest: digest(inactiveMembershipGoogleSubject),
           requestId: randomUUID(),
           checkedAt: new Date(capturedAt.getTime() + 1_000).toISOString(),
@@ -1513,12 +1536,11 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         {
           store: gateStore,
           audit: gateAudit,
-          bootstrapAdminSubjects: new Set(),
         },
       ),
     ).toEqual({
       granted: false,
-      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
+      reasonCode: 'ACCESS_EVIDENCE_INVALID',
     });
 
     const sessionId = randomUUID();
@@ -1854,5 +1876,370 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         requestId: retirementRequestId,
       },
     ]);
+  });
+
+  test('atomically binds an exact evaluated email and rolls back an identity race', async () => {
+    const database = databaseConnection().db;
+    const suffix = randomUUID();
+    const sourceId = randomUUID();
+    const recoverySourceId = randomUUID();
+    const sourceSnapshotId = randomUUID();
+    const recoveryUserId = randomUUID();
+    const recoverySubject = `recovery-subject-${suffix}`;
+    const recoveryEmail = `recovery-${suffix}@example.invalid`;
+    const existingUserId = randomUUID();
+    const existingSubject = `hagelk-subject-${suffix}`;
+    const existingEmail = `hagelk-${suffix}@example.invalid`;
+    const newSubject = `new-subject-${suffix}`;
+    const newEmail = `new-${suffix}@example.invalid`;
+    const racedSubject = `raced-subject-${suffix}`;
+    const racedEmail = `raced-${suffix}@example.invalid`;
+    const capturedAt = new Date(Date.now() + 300_000);
+    const sourceVersion = 2_140_000_000;
+
+    await database
+      .update(groupSources)
+      .set({ active: false })
+      .where(eq(groupSources.purpose, 'access'));
+    await database.insert(groupSources).values([
+      {
+        id: sourceId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: 'TSD Engineering',
+        active: true,
+        googleGroupId: `synthetic-tsd-engineering-${suffix}`,
+        email: 'tsd-engineering@psd401.net',
+        fixtureKey: null,
+        createdAt: capturedAt,
+      },
+      {
+        id: recoverySourceId,
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: 'Retained recovery provenance',
+        active: false,
+        googleGroupId: `synthetic-recovery-${suffix}`,
+        email: `recovery-source-${suffix}@example.invalid`,
+        fixtureKey: null,
+        createdAt: capturedAt,
+      },
+    ]);
+    await database.insert(users).values([
+      {
+        id: recoveryUserId,
+        googleSubject: recoverySubject,
+        email: recoveryEmail,
+        displayName: 'Synthetic recovery administrator',
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+      {
+        id: existingUserId,
+        googleSubject: existingSubject,
+        email: existingEmail,
+        displayName: 'Synthetic existing district user',
+        facilityScopeKind: 'district',
+        createdAt: capturedAt,
+      },
+    ]);
+    await database.insert(userRoles).values([
+      { userId: recoveryUserId, role: 'admin' },
+      { userId: existingUserId, role: 'staff' },
+    ]);
+    await database.transaction(async (transaction) => {
+      await transaction.insert(accessMembershipSnapshots).values({
+        id: sourceSnapshotId,
+        version: sourceVersion,
+        complete: true,
+        syncStartedAt: capturedAt,
+        capturedAt,
+      });
+      await transaction.insert(accessMembershipSnapshotGroups).values([
+        {
+          snapshotId: sourceSnapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+          completionKind: 'expected',
+        },
+        {
+          snapshotId: sourceSnapshotId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+          completionKind: 'completed',
+        },
+      ]);
+      await transaction.insert(accessMembershipEvaluatedMembers).values(
+        [recoveryEmail, existingEmail, newEmail, racedEmail].map((email) => ({
+          snapshotId: sourceSnapshotId,
+          email,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+        })),
+      );
+      await transaction.insert(accessMembershipMembers).values([
+        {
+          snapshotId: sourceSnapshotId,
+          userId: recoveryUserId,
+          googleSubject: recoverySubject,
+          facilityScopeKind: 'district',
+        },
+        {
+          snapshotId: sourceSnapshotId,
+          userId: existingUserId,
+          googleSubject: existingSubject,
+          facilityScopeKind: 'district',
+        },
+      ]);
+      await transaction.insert(accessMembershipMemberGroups).values([
+        {
+          snapshotId: sourceSnapshotId,
+          userId: recoveryUserId,
+          groupSourceId: sourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+        {
+          snapshotId: sourceSnapshotId,
+          userId: existingUserId,
+          groupSourceId: recoverySourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+        },
+      ]);
+    });
+
+    const store = createDrizzleAccessGateStore(database);
+    const audit = createDrizzleAccessGateAuditSink(database);
+    const buildPersistenceRequest = (
+      grant: AccessGateGranted,
+      createdAt: Date,
+      platform: 'web' | 'ios',
+      label: string,
+    ): PersistInitialWebSessionRequest => {
+      if (grant.firstLoginBinding === null) {
+        throw new Error('A persistence request requires an atomic binding.');
+      }
+      const responseDigest = digest(`${label}-response:${suffix}`);
+      const principal = {
+        kind: 'oidc-callback' as const,
+        subjectDigest: digest(grant.user.googleSubject),
+        responseDigest,
+      };
+      return Object.freeze({
+        user: grant.user,
+        membershipSnapshot: Object.freeze({
+          id: grant.membership.snapshotId,
+          version: grant.membership.snapshotVersion,
+          complete: true as const,
+          syncStartedAt: grant.membership.syncStartedAt,
+          capturedAt: grant.membership.capturedAt,
+        }),
+        membershipMember: Object.freeze({
+          userId: grant.user.id,
+          googleSubject: grant.user.googleSubject,
+          accessGroupSourceRefs: grant.membership.accessGroupSourceRefs,
+          facilityScope: grant.user.facilityScope,
+        }),
+        firstLoginBinding: grant.firstLoginBinding,
+        device: Object.freeze({
+          platform,
+          unlockMethod:
+            platform === 'web'
+              ? ('secure-session-cookie' as const)
+              : ('biometric' as const),
+          installationId: `${platform}.${label}-${suffix}`,
+        }),
+        credentialDigest: digest(`${label}-credential:${suffix}`),
+        createdAt,
+        expiresAt: new Date(createdAt.getTime() + 3 * 60 * 60 * 1_000),
+        membershipValidUntil: new Date(createdAt.getTime() + 60 * 60 * 1_000),
+        membershipGraceUntil: new Date(
+          createdAt.getTime() + 2 * 60 * 60 * 1_000,
+        ),
+        grantBootstrapAdmin: true,
+        requestId: randomUUID(),
+        idempotency: Object.freeze({
+          key: `oidc:${responseDigest}`,
+          principal,
+          principalDigest: digest(JSON.stringify(principal)),
+          requestDigest: digest(`${label}-request:${suffix}`),
+        }),
+      });
+    };
+
+    const existingCheckedAt = new Date(capturedAt.getTime() + 1_000);
+    const existingGrant = await checkAccessGate(
+      {
+        googleSubject: existingSubject,
+        email: existingEmail,
+        displayName: 'Changed Google display label is non-authoritative',
+        subjectDigest: digest(existingSubject),
+        requestId: randomUUID(),
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'web',
+      },
+      { store, audit },
+    );
+    expect(existingGrant.granted).toBe(true);
+    if (!existingGrant.granted || existingGrant.firstLoginBinding === null) {
+      throw new Error('Existing verified identity was not re-materialized.');
+    }
+    expect(existingGrant.firstLoginBinding.userDisposition).toBe('existing');
+    const existingResult = await createDrizzleInitialWebSessionStore(
+      database,
+    ).persist(
+      buildPersistenceRequest(
+        existingGrant,
+        existingCheckedAt,
+        'web',
+        'existing-binding',
+      ),
+    );
+    expect(existingResult.user).toMatchObject({
+      id: existingUserId,
+      googleSubject: existingSubject,
+      email: existingEmail,
+      roles: ['staff', 'admin'],
+    });
+    expect(
+      await database
+        .select({ groupSourceId: accessMembershipMemberGroups.groupSourceId })
+        .from(accessMembershipMemberGroups)
+        .where(
+          and(
+            eq(
+              accessMembershipMemberGroups.snapshotId,
+              existingGrant.firstLoginBinding.successorSnapshotId,
+            ),
+            eq(accessMembershipMemberGroups.userId, existingUserId),
+          ),
+        ),
+    ).toEqual(
+      expect.arrayContaining([
+        { groupSourceId: recoverySourceId },
+        { groupSourceId: sourceId },
+      ]),
+    );
+
+    const checkedAt = new Date(existingCheckedAt.getTime() + 1_000);
+    const granted = await checkAccessGate(
+      {
+        googleSubject: newSubject,
+        email: newEmail,
+        displayName: 'Synthetic exact-group administrator',
+        subjectDigest: digest(newSubject),
+        requestId: randomUUID(),
+        checkedAt: checkedAt.toISOString(),
+        source: 'mobile',
+      },
+      { store, audit },
+    );
+    expect(granted.granted).toBe(true);
+    if (!granted.granted || granted.firstLoginBinding === null) {
+      throw new Error(
+        'Exact evaluated email did not produce a first-login bind.',
+      );
+    }
+
+    expect(granted.firstLoginBinding.userDisposition).toBe('create');
+    const request = buildPersistenceRequest(
+      granted,
+      checkedAt,
+      'ios',
+      'first-login',
+    );
+    const result =
+      await createDrizzleInitialWebSessionStore(database).persist(request);
+    expect(result.user).toMatchObject({
+      id: granted.user.id,
+      googleSubject: newSubject,
+      email: newEmail,
+      roles: ['admin'],
+      facilityScope: { kind: 'district' },
+    });
+    expect(result.session.authorization.membershipSnapshotId).toBe(
+      granted.firstLoginBinding.successorSnapshotId,
+    );
+    expect(
+      await database
+        .select({ userId: accessMembershipMembers.userId })
+        .from(accessMembershipMembers)
+        .where(
+          eq(
+            accessMembershipMembers.snapshotId,
+            granted.firstLoginBinding.successorSnapshotId,
+          ),
+        ),
+    ).toEqual(
+      expect.arrayContaining([
+        { userId: recoveryUserId },
+        { userId: granted.user.id },
+      ]),
+    );
+
+    const racedCheckedAt = new Date(checkedAt.getTime() + 1_000);
+    const racedGrant = await checkAccessGate(
+      {
+        googleSubject: racedSubject,
+        email: racedEmail,
+        displayName: 'Synthetic raced administrator',
+        subjectDigest: digest(racedSubject),
+        requestId: randomUUID(),
+        checkedAt: racedCheckedAt.toISOString(),
+        source: 'web',
+      },
+      { store, audit },
+    );
+    expect(racedGrant.granted).toBe(true);
+    if (!racedGrant.granted || racedGrant.firstLoginBinding === null) {
+      throw new Error('Raced evaluated email did not reach the binding seam.');
+    }
+    const conflictingUserId = randomUUID();
+    await database.insert(users).values({
+      id: conflictingUserId,
+      googleSubject: `conflicting-subject-${suffix}`,
+      email: racedEmail,
+      displayName: 'Synthetic conflicting identity',
+      facilityScopeKind: 'district',
+      createdAt: racedCheckedAt,
+    });
+    const racedRequest = buildPersistenceRequest(
+      racedGrant,
+      racedCheckedAt,
+      'web',
+      'raced',
+    );
+    await expect(
+      createDrizzleInitialWebSessionStore(database).persist(racedRequest),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
+    expect(
+      await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.googleSubject, racedSubject)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ id: accessMembershipSnapshots.id })
+        .from(accessMembershipSnapshots)
+        .where(
+          eq(
+            accessMembershipSnapshots.id,
+            racedGrant.firstLoginBinding.successorSnapshotId,
+          ),
+        ),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ id: idempotencyRecords.id })
+        .from(idempotencyRecords)
+        .where(eq(idempotencyRecords.key, racedRequest.idempotency.key)),
+    ).toEqual([]);
   });
 });

@@ -23,7 +23,6 @@ import {
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
-  readBootstrapAdminSubjects,
   type AccessGateAuditSink,
 } from '../../../../../../lib/auth/access-gate';
 import {
@@ -182,6 +181,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const access = await checkAccessGate(
       {
         googleSubject: exchange.principal.subject,
+        email: exchange.principal.email,
+        displayName: exchange.principal.displayName,
         subjectDigest: exchange.principal.subjectDigest,
         requestId,
         checkedAt: serverTime,
@@ -190,7 +191,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       {
         store: createDrizzleAccessGateStore(connection.db),
         audit: auditSink,
-        bootstrapAdminSubjects: readBootstrapAdminSubjects(),
       },
     );
     if (!access.granted) {
@@ -219,6 +219,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           access.membership.accessGroupSourceRefs,
           access.user.facilityScope,
         ),
+        firstLoginBinding: access.firstLoginBinding,
         grantBootstrapAdmin: access.bootstrapAdminEligible,
       }),
       bearerSink: Object.freeze({

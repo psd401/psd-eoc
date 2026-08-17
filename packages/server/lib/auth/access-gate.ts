@@ -18,6 +18,7 @@ import { and, asc, desc, eq, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
+  accessMembershipEvaluatedMembers,
   accessMembershipMemberFacilities,
   accessMembershipMemberGroups,
   accessMembershipMembers,
@@ -32,15 +33,15 @@ import type { GoogleOidcCallbackErrorCode } from './oidc';
 import { loadEffectiveRoles } from './role-state';
 import type { WebSessionIssuanceErrorCode } from './session-cookie';
 
-/** Environment variable containing comma-separated immutable Google subjects. */
-export const BOOTSTRAP_ADMIN_SUBJECTS_ENV =
-  'PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS' as const;
-
 const ACCESS_GATE_AUDIT_ACTION = 'complete-oidc-sign-in' as const;
 
 /** Safe fallback when a post-gate failure has no narrower reason taxonomy. */
 export const POST_GATE_SIGN_IN_FAILED_REASON =
   'POST_GATE_SIGN_IN_FAILED' as const;
+
+/** The sole access group authorized by the current product-owner rule. */
+export const DESIGNATED_ACCESS_GROUP_EMAIL =
+  'tsd-engineering@psd401.net' as const;
 
 /** Safe, bounded reasons that can be persisted for a denied sign-in. */
 export const ACCESS_GATE_DENIAL_REASONS = [
@@ -92,12 +93,20 @@ export interface AccessGateSnapshotEvidence {
   readonly capturedAt: string;
   readonly expectedAccessGroupSourceRefs: readonly AccessGroupSourceRef[];
   readonly completedAccessGroupSourceRefs: readonly AccessGroupSourceRef[];
+  readonly evaluatedMember?: Readonly<{
+    email: string;
+    accessGroupSourceRefs: readonly AccessGroupSourceRef[];
+  }> | null;
   readonly member: AccessGateMemberEvidence | null;
 }
 
 /** One consistent read of identity, active configuration, and cached evidence. */
 export interface AccessGateEvidence {
   readonly user: AccessGateUserRecord | null;
+  /** Existing email owner with another subject makes binding ambiguous. */
+  readonly emailBindingConflict?: boolean;
+  /** True only for the one exact product-owner-designated active source. */
+  readonly activeAccessConfigurationExact?: boolean;
   readonly activeAccessGroupSourceRefs: readonly AccessGroupSourceRef[];
   /**
    * Legacy diagnostic retained for adapter compatibility. Authorization never
@@ -109,12 +118,19 @@ export interface AccessGateEvidence {
 
 /** Persistence boundary used by the gate and easily replaced by a test fake. */
 export interface AccessGateStore {
-  loadEvidence(googleSubject: string): Promise<AccessGateEvidence>;
+  loadEvidence(
+    googleSubject: string,
+    normalizedEmail?: string,
+  ): Promise<AccessGateEvidence>;
 }
 
 /** Data required to correlate a pre-session access decision without raw PII. */
 export interface AccessGateCheckInput {
   readonly googleSubject: string;
+  /** Signature-verified Google email normalized by the OIDC adapter. */
+  readonly email: string;
+  /** Bounded display label normalized by the OIDC adapter. */
+  readonly displayName: string;
   readonly subjectDigest: string;
   readonly requestId: string;
   readonly checkedAt: string;
@@ -131,13 +147,29 @@ export interface AccessGateMembershipGrant {
   readonly accessGroupSourceRefs: readonly AccessGroupSourceRef[];
 }
 
+/**
+ * Server-generated command for an atomic evaluated-email bind. `create`
+ * persists a first-seen verified OIDC identity; `existing` adds exact current
+ * group provenance to the already durable matching sub/email. The session
+ * transaction must revalidate the source and roll back every row on failure.
+ */
+export interface AccessGateFirstLoginBinding {
+  readonly userDisposition: 'create' | 'existing';
+  readonly sourceSnapshotId: string;
+  readonly sourceSnapshotVersion: number;
+  readonly successorSnapshotId: string;
+  readonly successorSnapshotVersion: number;
+  readonly normalizedEmail: string;
+}
+
 export interface AccessGateGranted {
   readonly granted: true;
   readonly user: User;
   readonly membership: AccessGateMembershipGrant;
+  readonly firstLoginBinding: AccessGateFirstLoginBinding | null;
   /**
-   * True only after ordinary group authorization succeeds for a configured
-   * bootstrap subject. The canonical sign-in capability owns the role write.
+   * True only after exact designated-group authorization succeeds. The
+   * canonical sign-in capability owns the append-only admin role fact.
    */
   readonly bootstrapAdminEligible: boolean;
 }
@@ -181,34 +213,6 @@ export interface AccessGateAuditSink {
 export interface AccessGateDependencies {
   readonly store: AccessGateStore;
   readonly audit: AccessGateAuditSink;
-  readonly bootstrapAdminSubjects?: ReadonlySet<string>;
-}
-
-type Environment = Readonly<Record<string, string | undefined>>;
-
-/**
- * Reads immutable Google subjects used only for role recovery. Membership in a
- * currently configured access group remains mandatory for these subjects.
- */
-export function readBootstrapAdminSubjects(
-  environment: Environment = process.env,
-): ReadonlySet<string> {
-  const configured = environment[BOOTSTRAP_ADMIN_SUBJECTS_ENV];
-  if (configured === undefined || configured.trim().length === 0) {
-    return new Set<string>();
-  }
-
-  const values = configured.split(',').map((value) => value.trim());
-  if (
-    values.length > 50 ||
-    values.some((value) => value.length === 0 || value.length > 255) ||
-    new Set(values).size !== values.length
-  ) {
-    throw new AccessGateConfigurationError(
-      `${BOOTSTRAP_ADMIN_SUBJECTS_ENV} must contain 1-50 unique, comma-separated immutable subjects`,
-    );
-  }
-  return new Set(values);
 }
 
 function validateCheckInput(input: AccessGateCheckInput): void {
@@ -219,6 +223,27 @@ function validateCheckInput(input: AccessGateCheckInput): void {
   ) {
     throw new AccessGateConfigurationError(
       'Access-gate subject must be a normalized immutable Google subject',
+    );
+  }
+  if (
+    input.email !== input.email.trim() ||
+    input.email !== input.email.toLowerCase() ||
+    input.email.length < 3 ||
+    input.email.length > 320 ||
+    !/^[^\s@]+@[^\s@]+$/u.test(input.email)
+  ) {
+    throw new AccessGateConfigurationError(
+      'Access-gate email must be a normalized verified Google email',
+    );
+  }
+  if (
+    input.displayName !== input.displayName.trim() ||
+    input.displayName.length === 0 ||
+    input.displayName.length > 160 ||
+    /\p{Cc}/u.test(input.displayName)
+  ) {
+    throw new AccessGateConfigurationError(
+      'Access-gate display name must be a bounded normalized value',
     );
   }
   SecurityAuditHashSchema.parse(input.subjectDigest);
@@ -294,34 +319,26 @@ function isSameFacilityScope(
 
 function validateEvidence(
   evidence: AccessGateEvidence,
-  googleSubject: string,
+  input: AccessGateCheckInput,
 ):
   | Readonly<{
       granted: true;
       user: User;
       snapshot: AccessGateSnapshotEvidence;
       member: AccessGateMemberEvidence;
+      firstLoginBinding: AccessGateFirstLoginBinding | null;
     }>
   | AccessGateDenied {
-  if (evidence.user === null) {
-    return { granted: false, reasonCode: 'UNKNOWN_USER' };
-  }
-
-  const userResult = UserSchema.safeParse(evidence.user);
-  if (!userResult.success || userResult.data.googleSubject !== googleSubject) {
-    return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
-  }
-  if (userResult.data.disabledAt !== null) {
-    return { granted: false, reasonCode: 'USER_DISABLED' };
-  }
-
   if (evidence.activeAccessGroupSourceRefs.length === 0) {
     return { granted: false, reasonCode: 'NO_ACTIVE_ACCESS_GROUPS' };
   }
   const activeGroups = parseCanonicalAccessGroupSet(
     evidence.activeAccessGroupSourceRefs,
   );
-  if (activeGroups === null) {
+  if (
+    activeGroups === null ||
+    evidence.activeAccessConfigurationExact === false
+  ) {
     return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
   }
   if (evidence.snapshot === null) {
@@ -354,37 +371,136 @@ function validateEvidence(
     return { granted: false, reasonCode: 'ACCESS_CONFIGURATION_NOT_SYNCED' };
   }
 
-  const member = snapshot.member;
-  if (member === null) {
+  const activeGroupKeys = new Set(activeGroups.map(accessGroupKey));
+  const evaluatedMember = snapshot.evaluatedMember ?? null;
+  const evaluatedGroups = parseCanonicalAccessGroupSet(
+    evaluatedMember?.accessGroupSourceRefs ?? [],
+  );
+  const hasExactEvaluatedMembership =
+    evaluatedMember !== null &&
+    evaluatedMember.email === input.email &&
+    evaluatedGroups !== null &&
+    isSameGroupSet(activeGroups, evaluatedGroups);
+
+  let user: User;
+  let userDisposition: AccessGateFirstLoginBinding['userDisposition'];
+  if (evidence.user !== null) {
+    const userResult = UserSchema.safeParse(evidence.user);
+    if (
+      !userResult.success ||
+      userResult.data.googleSubject !== input.googleSubject ||
+      userResult.data.email !== input.email ||
+      evidence.emailBindingConflict
+    ) {
+      return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
+    }
+    if (userResult.data.disabledAt !== null) {
+      return { granted: false, reasonCode: 'USER_DISABLED' };
+    }
+
+    const member = snapshot.member;
+    if (
+      member !== null &&
+      (member.userId !== userResult.data.id ||
+        member.googleSubject !== input.googleSubject ||
+        !FacilityScopeSchema.safeParse(member.facilityScope).success ||
+        !isSameFacilityScope(
+          userResult.data.facilityScope,
+          member.facilityScope,
+        ))
+    ) {
+      return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
+    }
+    const memberGroups =
+      member === null
+        ? Object.freeze([])
+        : parseCanonicalAccessGroupSet(member.accessGroupSourceRefs);
+    if (memberGroups === null) {
+      return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
+    }
+    const activeMemberGroups = memberGroups.filter((source) =>
+      activeGroupKeys.has(accessGroupKey(source)),
+    );
+    if (isSameGroupSet(activeGroups, activeMemberGroups)) {
+      return {
+        granted: true,
+        user: userResult.data,
+        snapshot,
+        member: Object.freeze({
+          userId: userResult.data.id,
+          googleSubject: userResult.data.googleSubject,
+          accessGroupSourceRefs: activeGroups,
+          facilityScope: userResult.data.facilityScope,
+        }),
+        firstLoginBinding: null,
+      };
+    }
+    if (
+      !hasExactEvaluatedMembership ||
+      userResult.data.facilityScope.kind !== 'district'
+    ) {
+      return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
+    }
+    user = userResult.data;
+    userDisposition = 'existing';
+  } else {
+    if (evidence.emailBindingConflict) {
+      return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
+    }
+    if (!hasExactEvaluatedMembership || evaluatedGroups === null) {
+      return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
+    }
+    user = UserSchema.parse({
+      id: randomUUID(),
+      googleSubject: input.googleSubject,
+      email: input.email,
+      displayName: input.displayName,
+      roles: ['admin'],
+      facilityScope: { kind: 'district' },
+      createdAt: input.checkedAt,
+      disabledAt: null,
+    });
+    userDisposition = 'create';
+  }
+
+  if (
+    evaluatedMember === null ||
+    evaluatedMember.email !== input.email ||
+    evaluatedGroups === null ||
+    !isSameGroupSet(activeGroups, evaluatedGroups)
+  ) {
     return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
   }
+  const successorVersion = snapshot.version + 1;
   if (
-    member.userId !== userResult.data.id ||
-    member.googleSubject !== googleSubject ||
-    !FacilityScopeSchema.safeParse(member.facilityScope).success ||
-    !isSameFacilityScope(userResult.data.facilityScope, member.facilityScope)
+    !Number.isSafeInteger(successorVersion) ||
+    successorVersion > 2_147_483_647
   ) {
     return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
   }
-
-  const activeGroupKeys = new Set(activeGroups.map(accessGroupKey));
-  const memberGroups = parseCanonicalAccessGroupSet(
-    member.accessGroupSourceRefs,
-  );
-  if (
-    memberGroups === null ||
-    !memberGroups.every((source) => activeGroupKeys.has(accessGroupKey(source)))
-  ) {
-    return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
-  }
-
+  const successorSnapshotId = randomUUID();
   return {
     granted: true,
-    user: userResult.data,
-    snapshot,
+    user,
+    snapshot: Object.freeze({
+      ...snapshot,
+      id: successorSnapshotId,
+      version: successorVersion,
+      member: null,
+    }),
     member: Object.freeze({
-      ...member,
-      accessGroupSourceRefs: memberGroups,
+      userId: user.id,
+      googleSubject: user.googleSubject,
+      accessGroupSourceRefs: evaluatedGroups,
+      facilityScope: user.facilityScope,
+    }),
+    firstLoginBinding: Object.freeze({
+      userDisposition,
+      sourceSnapshotId: snapshot.id,
+      sourceSnapshotVersion: snapshot.version,
+      successorSnapshotId,
+      successorSnapshotVersion: successorVersion,
+      normalizedEmail: input.email,
     }),
   };
 }
@@ -421,8 +537,11 @@ export async function checkAccessGate(
   dependencies: AccessGateDependencies,
 ): Promise<AccessGateDecision> {
   validateCheckInput(input);
-  const evidence = await dependencies.store.loadEvidence(input.googleSubject);
-  const evaluated = validateEvidence(evidence, input.googleSubject);
+  const evidence = await dependencies.store.loadEvidence(
+    input.googleSubject,
+    input.email,
+  );
+  const evaluated = validateEvidence(evidence, input);
   if (!evaluated.granted) {
     return deny(
       input,
@@ -431,10 +550,6 @@ export async function checkAccessGate(
       validatedAuditUserId(evidence),
     );
   }
-
-  const bootstrapAdminSubjects =
-    dependencies.bootstrapAdminSubjects ?? readBootstrapAdminSubjects();
-  const bootstrapAdmin = bootstrapAdminSubjects.has(input.googleSubject);
 
   return Object.freeze({
     granted: true,
@@ -446,7 +561,10 @@ export async function checkAccessGate(
       capturedAt: evaluated.snapshot.capturedAt,
       accessGroupSourceRefs: evaluated.member.accessGroupSourceRefs,
     }),
-    bootstrapAdminEligible: bootstrapAdmin,
+    firstLoginBinding: evaluated.firstLoginBinding,
+    // The sole designated access group is the complete admin rule. The legacy
+    // field name is retained at the session seam until fixture callers migrate.
+    bootstrapAdminEligible: true,
   });
 }
 
@@ -482,7 +600,10 @@ export function createDrizzleAccessGateStore(
   database: Database,
 ): AccessGateStore {
   return Object.freeze({
-    async loadEvidence(googleSubject: string): Promise<AccessGateEvidence> {
+    async loadEvidence(
+      googleSubject: string,
+      normalizedEmail?: string,
+    ): Promise<AccessGateEvidence> {
       return database.transaction(async (transaction) => {
         await transaction.execute(
           sql`set transaction isolation level repeatable read, read only`,
@@ -494,6 +615,20 @@ export function createDrizzleAccessGateStore(
           .where(eq(users.googleSubject, googleSubject))
           .limit(1);
         const userRow = userRows[0];
+        const emailOwnerRows =
+          normalizedEmail === undefined
+            ? []
+            : await transaction
+                .select({
+                  id: users.id,
+                  googleSubject: users.googleSubject,
+                })
+                .from(users)
+                .where(eq(users.email, normalizedEmail))
+                .limit(2);
+        const emailBindingConflict = emailOwnerRows.some(
+          (owner) => owner.googleSubject !== googleSubject,
+        );
 
         const accessGroupRows = await transaction
           .select({
@@ -501,6 +636,7 @@ export function createDrizzleAccessGateStore(
             kind: groupSources.kind,
             purpose: groupSources.purpose,
             active: groupSources.active,
+            email: groupSources.email,
           })
           .from(groupSources)
           .where(
@@ -510,40 +646,38 @@ export function createDrizzleAccessGateStore(
             ),
           )
           .orderBy(asc(groupSources.id));
-        const activeAccessGroupSourceRefs = accessGroupRows
-          .filter(({ active }) => active)
-          .map(parseAccessGroupRef);
+        const activeAccessGroupRows = accessGroupRows.filter(
+          ({ active }) => active,
+        );
+        const activeAccessGroupSourceRefs =
+          activeAccessGroupRows.map(parseAccessGroupRef);
+        const activeAccessConfigurationExact =
+          activeAccessGroupRows.length === 1 &&
+          activeAccessGroupRows[0]?.email === DESIGNATED_ACCESS_GROUP_EMAIL;
 
-        if (userRow === undefined) {
-          return {
-            user: null,
-            activeAccessGroupSourceRefs,
-            latestSuccessfulGroupSourceUpdateAt: null,
-            snapshot: null,
+        let user: AccessGateUserRecord | null = null;
+        if (userRow !== undefined) {
+          const roles = await loadEffectiveRoles(transaction, userRow.id);
+          const userScopeRows = await transaction
+            .select({ facilityId: userFacilityScopes.facilityId })
+            .from(userFacilityScopes)
+            .where(eq(userFacilityScopes.userId, userRow.id))
+            .orderBy(asc(userFacilityScopes.facilityId));
+          const userFacilityScope = parseFacilityScope(
+            userRow.facilityScopeKind,
+            userScopeRows.map((row) => row.facilityId),
+          );
+          user = {
+            id: userRow.id,
+            googleSubject: userRow.googleSubject,
+            email: userRow.email,
+            displayName: userRow.displayName,
+            roles,
+            facilityScope: userFacilityScope,
+            createdAt: userRow.createdAt.toISOString(),
+            disabledAt: userRow.disabledAt?.toISOString() ?? null,
           };
         }
-
-        const roles = await loadEffectiveRoles(transaction, userRow.id);
-
-        const userScopeRows = await transaction
-          .select({ facilityId: userFacilityScopes.facilityId })
-          .from(userFacilityScopes)
-          .where(eq(userFacilityScopes.userId, userRow.id))
-          .orderBy(asc(userFacilityScopes.facilityId));
-        const userFacilityScope = parseFacilityScope(
-          userRow.facilityScopeKind,
-          userScopeRows.map((row) => row.facilityId),
-        );
-        const user: AccessGateUserRecord = {
-          id: userRow.id,
-          googleSubject: userRow.googleSubject,
-          email: userRow.email,
-          displayName: userRow.displayName,
-          roles,
-          facilityScope: userFacilityScope,
-          createdAt: userRow.createdAt.toISOString(),
-          disabledAt: userRow.disabledAt?.toISOString() ?? null,
-        };
 
         const snapshotRows = await transaction
           .select()
@@ -559,6 +693,8 @@ export function createDrizzleAccessGateStore(
         if (snapshotRow === undefined) {
           return {
             user,
+            emailBindingConflict,
+            activeAccessConfigurationExact,
             activeAccessGroupSourceRefs,
             latestSuccessfulGroupSourceUpdateAt: null,
             snapshot: null,
@@ -585,20 +721,53 @@ export function createDrizzleAccessGateStore(
           .filter((row) => row.completionKind === 'completed')
           .map(parseAccessGroupRef);
 
-        const memberRows = await transaction
-          .select()
-          .from(accessMembershipMembers)
-          .where(
-            and(
-              eq(accessMembershipMembers.snapshotId, snapshotRow.id),
-              eq(accessMembershipMembers.userId, userRow.id),
-              eq(accessMembershipMembers.googleSubject, googleSubject),
-            ),
-          )
-          .limit(1);
+        const evaluatedMemberRows =
+          normalizedEmail === undefined
+            ? []
+            : await transaction
+                .select({
+                  email: accessMembershipEvaluatedMembers.email,
+                  id: accessMembershipEvaluatedMembers.groupSourceId,
+                  kind: accessMembershipEvaluatedMembers.groupSourceKind,
+                  purpose: accessMembershipEvaluatedMembers.groupPurpose,
+                })
+                .from(accessMembershipEvaluatedMembers)
+                .where(
+                  and(
+                    eq(
+                      accessMembershipEvaluatedMembers.snapshotId,
+                      snapshotRow.id,
+                    ),
+                    eq(accessMembershipEvaluatedMembers.email, normalizedEmail),
+                  ),
+                )
+                .orderBy(asc(accessMembershipEvaluatedMembers.groupSourceId));
+        const evaluatedMember =
+          evaluatedMemberRows.length === 0 || normalizedEmail === undefined
+            ? null
+            : Object.freeze({
+                email: normalizedEmail,
+                accessGroupSourceRefs:
+                  evaluatedMemberRows.map(parseAccessGroupRef),
+              });
+
+        const memberRows =
+          userRow === undefined
+            ? []
+            : await transaction
+                .select()
+                .from(accessMembershipMembers)
+                .where(
+                  and(
+                    eq(accessMembershipMembers.snapshotId, snapshotRow.id),
+                    eq(accessMembershipMembers.userId, userRow.id),
+                    eq(accessMembershipMembers.googleSubject, googleSubject),
+                  ),
+                )
+                .limit(1);
         const memberRow = memberRows[0];
         let member: AccessGateMemberEvidence | null = null;
-        if (memberRow !== undefined) {
+        if (memberRow !== undefined && userRow !== undefined) {
           const memberGroupRows = await transaction
             .select({
               id: accessMembershipMemberGroups.groupSourceId,
@@ -638,6 +807,8 @@ export function createDrizzleAccessGateStore(
 
         return {
           user,
+          emailBindingConflict,
+          activeAccessConfigurationExact,
           activeAccessGroupSourceRefs,
           latestSuccessfulGroupSourceUpdateAt: null,
           snapshot: {
@@ -647,6 +818,7 @@ export function createDrizzleAccessGateStore(
             capturedAt: snapshotRow.capturedAt.toISOString(),
             expectedAccessGroupSourceRefs,
             completedAccessGroupSourceRefs,
+            evaluatedMember,
             member,
           },
         };
