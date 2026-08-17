@@ -25,6 +25,31 @@
               "Effect": "Allow",
               "Resource": "arn:aws:apprunner:us-west-2:338414773271:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c",
               "Sid": "ReadAndAssociateCanonicalCustomDomainOnly"
+            },
+            {
+              "Action": "ecs:RunTask",
+              "Condition": {
+                "ArnEquals": {
+                  "ecs:cluster": "arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-exploration-smoke-native-bootstrap"
+                }
+              },
+              "Effect": "Allow",
+              "Resource": "arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-access-sync:*",
+              "Sid": "RunCanonicalAccessSyncTaskOnCanonicalClusterOnly"
+            },
+            {
+              "Action": "iam:PassRole",
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": "ecs-tasks.amazonaws.com"
+                }
+              },
+              "Effect": "Allow",
+              "Resource": [
+                "arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole*",
+                "arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskRole*"
+              ],
+              "Sid": "PassCanonicalAccessSyncRolesToEcsTasksOnly"
             }
           ],
           "Version": "2012-10-17"
