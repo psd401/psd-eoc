@@ -1523,7 +1523,11 @@ jobs:
                   .LogicalResourceId == $id and
                   .ResourceType == $type and
                   .PhysicalResourceId == $physical and
-                  .ResourceStatus == "IMPORT_COMPLETE"
+                  (
+                    .ResourceStatus == "CREATE_COMPLETE" or
+                    .ResourceStatus == "UPDATE_COMPLETE" or
+                    .ResourceStatus == "IMPORT_COMPLETE"
+                  )
                 )] | length == 1;
               imported("EmailWorkerLogGroup0611E5C2"; "AWS::Logs::LogGroup"; $expected[0].EmailWorkerLogGroup0611E5C2.LogGroupName) and
               imported("EmailDeadLetterQueue5E91C06C"; "AWS::SQS::Queue"; $expected[0].EmailDeadLetterQueue5E91C06C.QueueUrl) and

@@ -137,7 +137,9 @@ async function runRecoveryScenario(options: {
         JSON.stringify({
           StackResourceSummaries: retainedRecoveryResources.map((resource) => ({
             ...resource,
-            ResourceStatus: 'IMPORT_COMPLETE',
+            // CloudFormation normalizes successfully imported resources to
+            // UPDATE_COMPLETE in the real ListStackResources response.
+            ResourceStatus: 'UPDATE_COMPLETE',
           })),
         }),
       ),
@@ -927,6 +929,7 @@ describe('isolated CDK entrypoint configuration', () => {
       "jq -n --arg state already-managed '{state: $state}'",
     );
     expect(workflow).toContain("jq -n --arg state imported '{state: $state}'");
+    expect(workflow).toContain('.ResourceStatus == "UPDATE_COMPLETE" or');
     expect(workflow).toContain(
       'Stack state $current_status is not safe for an automated retry.',
     );
