@@ -378,7 +378,7 @@ case "$1:$2" in
     ;;
   sesv2:get-configuration-set-event-destinations)
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
-    event_types='["BOUNCE","COMPLAINT","DELIVERY","DELIVERY_DELAY","REJECT","RENDERING_FAILURE","SEND"]'
+    event_types='["SEND","RENDERING_FAILURE","REJECT","DELIVERY_DELAY","DELIVERY","COMPLAINT","BOUNCE"]'
     if [[ "$EVENT_TYPE_MISMATCH" == "missing" ]]; then
       event_types='["BOUNCE","COMPLAINT","DELIVERY","REJECT","RENDERING_FAILURE","SEND"]'
     elif [[ "$EVENT_TYPE_MISMATCH" == "superset" ]]; then
