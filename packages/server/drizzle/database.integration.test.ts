@@ -4480,6 +4480,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       from unnest(array[
         'access_membership_snapshots',
         'access_membership_snapshot_groups',
+        'access_membership_evaluated_members',
         'access_membership_members',
         'access_membership_member_groups',
         'access_membership_member_facilities'
@@ -4488,6 +4489,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     `);
     expect([...tablePrivileges]).toEqual(
       [
+        'access_membership_evaluated_members',
         'access_membership_member_facilities',
         'access_membership_member_groups',
         'access_membership_members',
@@ -4529,11 +4531,14 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           'user_facility_scopes_admin_availability_lock',
           'group_sources_admin_availability_lock',
           'group_sources_identity_guard',
+          'access_membership_evaluated_members_construction_guard',
+          'access_membership_evaluated_members_retain_guard',
           'access_membership_snapshot_groups_construction_guard',
           'access_membership_members_construction_guard',
           'access_membership_member_groups_construction_guard',
           'access_membership_member_facilities_construction_guard',
           'access_membership_snapshots_immutable_guard',
+          'access_membership_evaluated_members_immutable_guard',
           'access_membership_snapshot_groups_immutable_guard',
           'access_membership_members_immutable_guard',
           'access_membership_member_groups_immutable_guard',
@@ -4551,6 +4556,32 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         function: trigger.action_statement,
       })),
     ).toEqual([
+      {
+        table: 'access_membership_evaluated_members',
+        name: 'access_membership_evaluated_members_construction_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'INSERT',
+        function:
+          'EXECUTE FUNCTION psd_eoc_guard_access_evaluated_member_insert()',
+      },
+      {
+        table: 'access_membership_evaluated_members',
+        name: 'access_membership_evaluated_members_immutable_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'UPDATE',
+        function:
+          'EXECUTE FUNCTION psd_eoc_reject_access_evaluated_member_update()',
+      },
+      {
+        table: 'access_membership_evaluated_members',
+        name: 'access_membership_evaluated_members_retain_guard',
+        timing: 'BEFORE',
+        orientation: 'ROW',
+        event: 'DELETE',
+        function: 'EXECUTE FUNCTION psd_eoc_reject_delete()',
+      },
       {
         table: 'access_membership_member_facilities',
         name: 'access_membership_member_facilities_construction_guard',
@@ -4731,15 +4762,23 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         on namespace.oid = procedure.pronamespace
       where namespace.nspname = 'public'
         and procedure.proname in (
+          'psd_eoc_guard_access_evaluated_member_insert',
           'psd_eoc_guard_access_snapshot_child_insert',
           'psd_eoc_lock_admin_availability_on_access_snapshot_insert',
           'psd_eoc_lock_admin_availability_on_user_facility_scope_write',
           'psd_eoc_lock_admin_availability_on_user_write',
+          'psd_eoc_reject_access_evaluated_member_update',
           'psd_eoc_reject_access_snapshot_update'
         )
       order by procedure.proname
     `);
     expect([...triggerFunctions]).toEqual([
+      {
+        function_name: 'psd_eoc_guard_access_evaluated_member_insert',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
       {
         function_name: 'psd_eoc_guard_access_snapshot_child_insert',
         settings: ['search_path=pg_catalog'],
@@ -4767,12 +4806,157 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         public_can_execute: false,
       },
       {
+        function_name: 'psd_eoc_reject_access_evaluated_member_update',
+        settings: ['search_path=pg_catalog'],
+        app_can_execute: false,
+        public_can_execute: false,
+      },
+      {
         function_name: 'psd_eoc_reject_access_snapshot_update',
         settings: ['search_path=pg_catalog'],
         app_can_execute: false,
         public_can_execute: false,
       },
     ]);
+  });
+
+  test('publishes normalized evaluated access emails only in an immutable snapshot transaction', async () => {
+    const db = databaseConnection().db;
+    let deleteRejection: unknown;
+
+    try {
+      await db.transaction(async (transaction) => {
+        await transaction.execute(sql`set local role "psd_eoc_app"`);
+        await transaction.execute(sql`
+          insert into group_sources (
+            id,
+            kind,
+            purpose,
+            facility_id,
+            display_name,
+            active,
+            google_group_id,
+            email,
+            fixture_key,
+            created_at
+          ) values (
+            '00000000-0000-4000-8000-000000191001'::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            null,
+            'Synthetic Issue 191 Access Group',
+            true,
+            'groups/synthetic-issue-191-access',
+            'synthetic-issue-191-access@psd401.net',
+            null,
+            '2026-08-16T12:00:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into access_membership_snapshots (
+            id,
+            version,
+            complete,
+            sync_started_at,
+            captured_at
+          ) values (
+            '00000000-0000-4000-8000-000000191002'::uuid,
+            191002,
+            true,
+            '2026-08-16T12:01:00.000Z'::timestamptz,
+            '2026-08-16T12:02:00.000Z'::timestamptz
+          )
+        `);
+        await transaction.execute(sql`
+          insert into access_membership_snapshot_groups (
+            snapshot_id,
+            group_source_id,
+            group_source_kind,
+            group_purpose,
+            completion_kind
+          ) values
+          (
+            '00000000-0000-4000-8000-000000191002'::uuid,
+            '00000000-0000-4000-8000-000000191001'::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            'expected'::group_completion_kind
+          ),
+          (
+            '00000000-0000-4000-8000-000000191002'::uuid,
+            '00000000-0000-4000-8000-000000191001'::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose,
+            'completed'::group_completion_kind
+          )
+        `);
+        await transaction.execute(sql`
+          insert into access_membership_evaluated_members (
+            snapshot_id,
+            email,
+            group_source_id,
+            group_source_kind,
+            group_purpose
+          ) values (
+            '00000000-0000-4000-8000-000000191002'::uuid,
+            'synthetic-issue-191-member@example.com',
+            '00000000-0000-4000-8000-000000191001'::uuid,
+            'google-group'::group_source_kind,
+            'access'::group_purpose
+          )
+        `);
+
+        const evidence = await transaction.execute<{
+          email: string;
+          group_source_id: string;
+          snapshot_id: string;
+        }>(sql`
+          select snapshot_id, email, group_source_id
+          from access_membership_evaluated_members
+          where snapshot_id =
+            '00000000-0000-4000-8000-000000191002'::uuid
+        `);
+        expect([...evidence]).toEqual([
+          {
+            snapshot_id: '00000000-0000-4000-8000-000000191002',
+            email: 'synthetic-issue-191-member@example.com',
+            group_source_id: '00000000-0000-4000-8000-000000191001',
+          },
+        ]);
+
+        await transaction.execute(sql`reset role`);
+        await transaction.execute(sql.raw('savepoint evaluated_update_guard'));
+        let updateRejection: unknown;
+        try {
+          await transaction.execute(sql`
+            update access_membership_evaluated_members
+            set email = email
+            where snapshot_id =
+              '00000000-0000-4000-8000-000000191002'::uuid
+          `);
+        } catch (error) {
+          updateRejection = error;
+        }
+        await transaction.execute(
+          sql.raw('rollback to savepoint evaluated_update_guard'),
+        );
+        expect(findPostgresErrorMessage(updateRejection)).toMatch(
+          /Evaluated access-member evidence is immutable/u,
+        );
+
+        await transaction.execute(sql`
+          delete from access_membership_evaluated_members
+          where snapshot_id =
+            '00000000-0000-4000-8000-000000191002'::uuid
+        `);
+      });
+    } catch (error) {
+      deleteRejection = error;
+    }
+
+    expect(findPostgresErrorMessage(deleteRejection)).toMatch(
+      /PSD EOC records are retained; DELETE is not permitted/u,
+    );
   });
 
   test('allows app-role inserts without granting sequence mutation authority', async () => {

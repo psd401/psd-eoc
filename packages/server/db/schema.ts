@@ -588,6 +588,55 @@ export const accessMembershipSnapshotGroups = pgTable(
   ],
 );
 
+/**
+ * Normalized Google-email membership selected by the configured Google
+ * evaluator for one immutable complete access snapshot. No provider user
+ * resource identifier is retained or treated as an OIDC subject. Membership
+ * topology is intentionally absent while that product decision remains
+ * unresolved.
+ */
+export const accessMembershipEvaluatedMembers = pgTable(
+  'access_membership_evaluated_members',
+  {
+    snapshotId: uuid('snapshot_id')
+      .notNull()
+      .references(() => accessMembershipSnapshots.id, {
+        onDelete: 'restrict',
+      }),
+    email: varchar('email', { length: 320 }).notNull(),
+    groupSourceId: uuid('group_source_id').notNull(),
+    groupSourceKind: groupSourceKindEnum('group_source_kind').notNull(),
+    groupPurpose: groupPurposeEnum('group_purpose').notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.snapshotId, table.email, table.groupSourceId],
+    }),
+    foreignKey({
+      columns: [table.groupSourceId, table.groupSourceKind, table.groupPurpose],
+      foreignColumns: [
+        groupSources.id,
+        groupSources.kind,
+        groupSources.purpose,
+      ],
+      name: 'access_membership_evaluated_members_access_source_fk',
+    }).onDelete('restrict'),
+    index('access_membership_evaluated_members_email_idx').on(table.email),
+    check(
+      'access_membership_evaluated_members_access_only',
+      sql`${table.groupSourceKind} = 'google-group'
+        and ${table.groupPurpose} = 'access'`,
+    ),
+    check(
+      'access_membership_evaluated_members_normalized_email',
+      sql`${table.email} = lower(${table.email})
+        and ${table.email} = btrim(${table.email})
+        and length(${table.email}) between 3 and 320
+        and ${table.email} ~ '^[^[:space:]@]+@[^[:space:]@]+$'`,
+    ),
+  ],
+);
+
 /** Minimized staff membership facts in an immutable access snapshot. */
 export const accessMembershipMembers = pgTable(
   'access_membership_members',
