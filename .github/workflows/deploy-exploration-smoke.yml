@@ -1139,12 +1139,14 @@ jobs:
 
             oidc_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
             [[ "$oidc_caller_arn" =~ ^arn:aws:sts::<aws-account-id>:assumed-role/psd-eoc-exploration-smoke-github-deploy/[A-Za-z0-9+=,.@_-]+$ ]]
+            current_template_response=../artifacts/readback/email-recovery-current-template-response.json
             current_template=../artifacts/readback/email-recovery-current-template.json
             import_template=../artifacts/readback/email-recovery-import-template.json
             import_parameters=../artifacts/readback/email-recovery-import-parameters.json
             import_resources=../artifacts/readback/email-recovery-import-resources.json
             import_object=../artifacts/readback/email-recovery-import-object.json
             import_object_head=../artifacts/readback/email-recovery-import-object-head.json
+            imported_template_response=../artifacts/readback/email-recovery-imported-template-response.json
             imported_template=../artifacts/readback/email-recovery-imported-template.json
             change_set_create=../artifacts/readback/email-recovery-change-set-create.json
             change_set_readback=../artifacts/readback/email-recovery-change-set.json
@@ -1173,8 +1175,7 @@ jobs:
               template_aws cloudformation get-template \
                 --stack-name "$STACK_NAME" \
                 --template-stage Original \
-                --query TemplateBody \
-                --output text > "$current_template"
+                --output json > "$current_template_response"
             )
             template_read_exit_code=$?
             set -e
@@ -1189,6 +1190,11 @@ jobs:
             test "$post_template_caller_arn" = "$oidc_caller_arn"
             unset template_caller_arn post_template_caller_arn
 
+            jq -e '
+              (.TemplateBody | type) == "object" and
+              (.TemplateBody.Resources | type) == "object"
+            ' "$current_template_response" > /dev/null
+            jq -S '.TemplateBody' "$current_template_response" > "$current_template"
             jq -e --argjson ids "$recovery_ids" '
               . as $template |
               all($ids[]; $template.Resources[.] == null)
@@ -1437,8 +1443,12 @@ jobs:
               import_aws cloudformation get-template \
                 --stack-name "$STACK_NAME" \
                 --template-stage Original \
-                --query TemplateBody \
-                --output text > "$imported_template"
+                --output json > "$imported_template_response"
+              jq -e '
+                (.TemplateBody | type) == "object" and
+                (.TemplateBody.Resources | type) == "object"
+              ' "$imported_template_response" > /dev/null
+              jq -S '.TemplateBody' "$imported_template_response" > "$imported_template"
               jq -e --slurpfile expected "$import_template" \
                 '. == $expected[0]' "$imported_template" > /dev/null
             )
