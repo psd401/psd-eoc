@@ -214,6 +214,9 @@ describe('exploration-smoke deployment boundary', () => {
     const subject = asRecord(parameters.ApprovedGoogleSubject);
     const email = asRecord(parameters.ApprovedStaffEmail);
     const displayName = asRecord(parameters.ApprovedStaffDisplayName);
+    const transitionEmailDigest = asRecord(
+      parameters.InitialMobileTransitionEmailSha256,
+    );
 
     expect(provision.AllowedValues).toEqual(['false', 'true']);
     expect(provision).not.toHaveProperty('Default');
@@ -242,6 +245,14 @@ describe('exploration-smoke deployment boundary', () => {
     expect(displayName.NoEcho).toBe(true);
     expect(displayName).not.toHaveProperty('Default');
     expect(displayName.AllowedPattern).toBe("^[A-Za-z0-9 .,'()&-]{1,160}$");
+    expect(transitionEmailDigest).toMatchObject({
+      AllowedPattern: '^[0-9a-f]{64}$',
+      MaxLength: 64,
+      MinLength: 64,
+      NoEcho: true,
+      Type: 'String',
+    });
+    expect(transitionEmailDigest).not.toHaveProperty('Default');
 
     const rules = asRecord(synthesized.Rules);
     const digestRule = asRecord(rules.ApplicationRequiresPublishedDigest);
@@ -522,6 +533,12 @@ describe('minimal isolated resource shape', () => {
     expect(identitySecretString).toContain('ApprovedStaffDisplayName');
     expect(identitySecretString).toContain('staffEmail');
     expect(identitySecretString).toContain('ApprovedStaffEmail');
+    expect(identitySecretString).toContain(
+      'initialMobileTransitionEmailSha256',
+    );
+    expect(identitySecretString).toContain(
+      'InitialMobileTransitionEmailSha256',
+    );
     expect(synthesized).not.toHaveProperty('Transform');
     expect(identity?.DeletionPolicy).toBe('Retain');
     expect(identity?.UpdateReplacePolicy).toBe('Retain');
@@ -719,6 +736,7 @@ describe('App Runner runtime safety boundary', () => {
         'GOOGLE_OAUTH_CONFIG',
         'GOOGLE_OIDC_COOKIE_SECRET',
         'PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS',
+        'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
       ].sort(),
     );
     expect(secrets.get('GOOGLE_OAUTH_CONFIG')).toEqual({
@@ -733,6 +751,11 @@ describe('App Runner runtime safety boundary', () => {
     expect(
       JSON.stringify(secrets.get('PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS')),
     ).toContain(':googleSubject::');
+    expect(
+      JSON.stringify(
+        secrets.get('PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'),
+      ),
+    ).toContain(':initialMobileTransitionEmailSha256::');
 
     const serialized = JSON.stringify(configuration);
     expect(serialized).not.toContain('aws-data-api');
@@ -1091,6 +1114,7 @@ describe('protected access-membership publication boundary', () => {
       'DATABASE_PASSWORD',
       'DATABASE_USERNAME',
       'GOOGLE_ROSTER_CONFIG',
+      'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
     ]);
     expect(JSON.stringify(secrets.get('DATABASE_PASSWORD'))).toContain(
       ':password::',
@@ -1101,8 +1125,14 @@ describe('protected access-membership publication boundary', () => {
     expect(JSON.stringify(secrets.get('GOOGLE_ROSTER_CONFIG'))).toContain(
       '/psd-eoc/google-groups',
     );
-    expect(JSON.stringify(secrets)).not.toContain('DatabaseAdminSecret');
-    expect(JSON.stringify(secrets)).not.toContain('BootstrapIdentitySecret');
+    expect(
+      JSON.stringify(
+        secrets.get('PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'),
+      ),
+    ).toContain(':initialMobileTransitionEmailSha256::');
+    const serializedSecretReferences = JSON.stringify([...secrets.values()]);
+    expect(serializedSecretReferences).not.toContain('DatabaseAdminSecret');
+    expect(serializedSecretReferences).toContain('BootstrapIdentitySecret');
 
     const logging = asRecord(container.LogConfiguration);
     expect(logging.LogDriver).toBe('awslogs');
@@ -1139,8 +1169,8 @@ describe('protected access-membership publication boundary', () => {
     );
     expect(secretResources).toContain('DatabaseApplicationSecret');
     expect(secretResources).toContain('/psd-eoc/google-groups');
+    expect(secretResources).toContain('BootstrapIdentitySecret');
     expect(secretResources).not.toContain('DatabaseAdminSecret');
-    expect(secretResources).not.toContain('BootstrapIdentitySecret');
     expect(secretResources).not.toContain('GoogleOauthSecretArn');
 
     const taskRole = roleLogicalIdForDescription(

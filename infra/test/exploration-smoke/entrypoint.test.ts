@@ -926,6 +926,10 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(accessProof).toContain('"DATABASE_PASSWORD"');
     expect(accessProof).toContain('"DATABASE_USERNAME"');
     expect(accessProof).toContain('"GOOGLE_ROSTER_CONFIG"');
+    expect(accessProof).toContain(
+      '"PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"',
+    );
+    expect(accessProof).toContain(':initialMobileTransitionEmailSha256::');
     expect(accessProof).toContain("jq '.PolicyNames | length'");
     expect(accessProof).toContain(
       'access-sync-task-role-inline-policies.json)" -eq 0',
@@ -969,8 +973,14 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('"DATABASE_USERNAME"');
     expect(workflow).toContain('"DATABASE_PASSWORD"');
     expect(workflow).toContain('"PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS"');
+    expect(workflow).toContain(
+      '"PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"',
+    );
     expect(workflow).toContain('$database_application_secret_arn:username::');
     expect(workflow).toContain('$approved_identity_secret_arn:googleSubject::');
+    expect(workflow).toContain(
+      '$approved_identity_secret_arn:initialMobileTransitionEmailSha256::',
+    );
     expect(workflow).toContain(
       'role/PsdEocExplorationSmoke-BootstrapTaskExecutionRole1A-[A-Za-z0-9]+$',
     );
@@ -1003,7 +1013,13 @@ describe('isolated CDK entrypoint configuration', () => {
       "deployment_authority_pattern='^(arn:aws:iam::338414773271:role/",
     );
     expect(workflow).toContain(
-      '[[ "$APPROVED_IDENTITY_SHA256" =~ ^[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64}$ ]]',
+      '[[ "$APPROVED_IDENTITY_SHA256" =~ ^[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64}$ ]]',
+    );
+    expect(workflow).toContain(
+      'secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
+    );
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"',
     );
     expect(workflow).not.toContain('approved_google_subject_sha256:');
     expect(workflow).not.toContain('approved_staff_email_sha256:');
@@ -1593,6 +1609,22 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('test "$email_channel_state" = "disabled"');
     expect(workflow).toContain('notificationChannelsEnabled: 0');
     expect(workflow).toContain('matchingRosterRecipients: 0');
+    expect(workflow).not.toContain('detect-stack-resource-drift');
+    expect(workflow).not.toContain('StackResourceDrift');
+    expect(workflow).toContain('email-worker-log-group.json');
+    expect(workflow).toContain('email-queue.json');
+    expect(workflow).toContain('email-dead-letter-queue.json');
+    expect(workflow).toContain('aws sesv2 get-configuration-set');
+    expect(workflow).toContain(
+      'aws sesv2 get-configuration-set-event-destinations',
+    );
+    expect(workflow).toContain(
+      '.Attributes.MessageRetentionPeriod == "345600"',
+    );
+    expect(workflow).toContain(
+      '.Attributes.MessageRetentionPeriod == "1209600"',
+    );
+    expect(workflow).toContain('.SendingOptions.SendingEnabled == false');
     expect(workflow).not.toContain('aws sqs send-message');
     expect(workflow).not.toContain('aws ses send-email');
     expect(workflow).not.toContain('aws sesv2 send-email');
