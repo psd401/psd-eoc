@@ -1148,6 +1148,7 @@ jobs:
             import_object_head=../artifacts/readback/email-recovery-import-object-head.json
             imported_template_response=../artifacts/readback/email-recovery-imported-template-response.json
             imported_template=../artifacts/readback/email-recovery-imported-template.json
+            change_set_request=../artifacts/readback/email-recovery-change-set-request.json
             change_set_create=../artifacts/readback/email-recovery-change-set-create.json
             change_set_readback=../artifacts/readback/email-recovery-change-set.json
 
@@ -1359,6 +1360,60 @@ jobs:
             unset publisher_caller_arn post_publish_caller_arn
 
             import_change_set_name="psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            import_description="Exact four-resource retained dark-email recovery for GitHub run $GITHUB_RUN_ID"
+            import_client_token="psd-eoc-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            jq -n \
+              --arg stack_name "$STACK_NAME" \
+              --arg change_set_name "$import_change_set_name" \
+              --arg description "$import_description" \
+              --arg template_url "$import_template_url" \
+              --arg role_arn "$CDK_CFN_EXEC_ROLE_ARN" \
+              --arg client_token "$import_client_token" \
+              --slurpfile resources "$import_resources" \
+              --slurpfile parameters "$import_parameters" '{
+                StackName: $stack_name,
+                ChangeSetName: $change_set_name,
+                ChangeSetType: "IMPORT",
+                Description: $description,
+                TemplateURL: $template_url,
+                ResourcesToImport: $resources[0],
+                Parameters: $parameters[0],
+                Capabilities: ["CAPABILITY_NAMED_IAM"],
+                RoleARN: $role_arn,
+                ClientToken: $client_token
+              }' > "$change_set_request"
+            jq -e \
+              --arg stack_name "$STACK_NAME" \
+              --arg change_set_name "$import_change_set_name" \
+              --arg description "$import_description" \
+              --arg template_url "$import_template_url" \
+              --arg role_arn "$CDK_CFN_EXEC_ROLE_ARN" \
+              --arg client_token "$import_client_token" \
+              --slurpfile resources "$import_resources" \
+              --slurpfile parameters "$import_parameters" '
+                keys == [
+                  "Capabilities",
+                  "ChangeSetName",
+                  "ChangeSetType",
+                  "ClientToken",
+                  "Description",
+                  "Parameters",
+                  "ResourcesToImport",
+                  "RoleARN",
+                  "StackName",
+                  "TemplateURL"
+                ] and
+                .StackName == $stack_name and
+                .ChangeSetName == $change_set_name and
+                .ChangeSetType == "IMPORT" and
+                .Description == $description and
+                .TemplateURL == $template_url and
+                .ResourcesToImport == $resources[0] and
+                .Parameters == $parameters[0] and
+                .Capabilities == ["CAPABILITY_NAMED_IAM"] and
+                .RoleARN == $role_arn and
+                .ClientToken == $client_token
+              ' "$change_set_request" > /dev/null
             deploy_credentials=$(aws sts assume-role \
               --role-arn "$CDK_DEPLOY_ROLE_ARN" \
               --role-session-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}" \
@@ -1381,15 +1436,7 @@ jobs:
               import_aws sts get-caller-identity --query Arn --output text \
                 > ../artifacts/readback/email-recovery-import-caller-arn.txt
               import_aws cloudformation create-change-set \
-                --stack-name "$STACK_NAME" \
-                --change-set-name "$import_change_set_name" \
-                --change-set-type IMPORT \
-                --description "Exact four-resource retained dark-email recovery for GitHub run $GITHUB_RUN_ID" \
-                --template-url "$import_template_url" \
-                --resources-to-import "file://$import_resources" \
-                --parameters "file://$import_parameters" \
-                --capabilities CAPABILITY_NAMED_IAM \
-                --role-arn "$CDK_CFN_EXEC_ROLE_ARN" \
+                --cli-input-json "file://$change_set_request" \
                 > "$change_set_create"
               change_set_id=$(jq -er .Id "$change_set_create")
               [[ "$change_set_id" =~ ^arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/[0-9a-f-]{36}$ ]]
@@ -1402,15 +1449,14 @@ jobs:
               jq -e \
                 --arg change_set_id "$change_set_id" \
                 --arg change_set_name "$import_change_set_name" \
-                --arg cfn_role "$CDK_CFN_EXEC_ROLE_ARN" '
-                  .ChangeSetId == $change_set_id and
-                  .ChangeSetName == $change_set_name and
-                  .StackName == "PsdEocExplorationSmoke" and
-                  .ChangeSetType == "IMPORT" and
-                  .Status == "CREATE_COMPLETE" and
-                  .ExecutionStatus == "AVAILABLE" and
-                  .RoleARN == $cfn_role and
-                  .Capabilities == ["CAPABILITY_NAMED_IAM"] and
+                --arg description "$import_description" '
+                .ChangeSetId == $change_set_id and
+                .ChangeSetName == $change_set_name and
+                .StackName == "PsdEocExplorationSmoke" and
+                .Description == $description and
+                .Status == "CREATE_COMPLETE" and
+                .ExecutionStatus == "AVAILABLE" and
+                .Capabilities == ["CAPABILITY_NAMED_IAM"] and
                   (.Changes | length) == 4 and
                   ([.Changes[].ResourceChange | {
                     action: .Action,
@@ -1422,7 +1468,7 @@ jobs:
                     {action: "Import", logicalId: "EmailEventsKey619540BF", resourceType: "AWS::KMS::Key"},
                     {action: "Import", logicalId: "EmailWorkerLogGroup0611E5C2", resourceType: "AWS::Logs::LogGroup"}
                   ]
-                ' "$change_set_readback" > /dev/null
+              ' "$change_set_readback" > /dev/null
               test "$(import_aws cloudformation describe-stacks \
                 --stack-name "$STACK_NAME" \
                 --query "Stacks[0].Outputs[?OutputKey=='AppRunnerVpcConnectorArn'].OutputValue | [0]" \
@@ -1430,12 +1476,16 @@ jobs:
               import_aws cloudformation execute-change-set \
                 --stack-name "$STACK_NAME" \
                 --change-set-name "$change_set_id" \
-                --client-request-token "psd-eoc-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+                --client-request-token "$import_client_token"
               import_aws cloudformation wait stack-import-complete --stack-name "$STACK_NAME"
               test "$(import_aws cloudformation describe-stacks \
                 --stack-name "$STACK_NAME" \
                 --query 'Stacks[0].StackStatus' \
                 --output text)" = "IMPORT_COMPLETE"
+              test "$(import_aws cloudformation describe-stacks \
+                --stack-name "$STACK_NAME" \
+                --query 'Stacks[0].RoleARN' \
+                --output text)" = "$CDK_CFN_EXEC_ROLE_ARN"
               test "$(import_aws cloudformation describe-stacks \
                 --stack-name "$STACK_NAME" \
                 --query "Stacks[0].Outputs[?OutputKey=='AppRunnerVpcConnectorArn'].OutputValue | [0]" \
