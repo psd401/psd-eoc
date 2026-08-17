@@ -22,13 +22,14 @@ import {
   type SessionEstablishmentResult,
   type User,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
   accessMembershipMemberFacilities,
   accessMembershipMemberGroups,
   accessMembershipMembers,
+  accessMembershipEvaluatedMembers,
   accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   connectivityEpochs,
@@ -44,9 +45,11 @@ import {
 } from '../../db/schema';
 import {
   ACCESS_GATE_AUDIT_LOCK_SQL,
+  DESIGNATED_ACCESS_GROUP_EMAIL,
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './access-gate';
+import type { AccessGateFirstLoginBinding } from './access-gate';
 import { ADMIN_AVAILABILITY_LOCK_SQL, loadEffectiveRoles } from './role-state';
 
 /**
@@ -86,11 +89,10 @@ export interface GroupAuthorizedWebIdentity {
     >
   >;
   readonly membershipMember: AccessMembershipMember;
+  readonly firstLoginBinding?: AccessGateFirstLoginBinding | null;
   /**
-   * True only after the immutable Google subject matches trusted bootstrap
-   * configuration. Persistence may add the initial admin fact only when no
-   * prior admin decision exists; later revocation remains authoritative. This
-   * flag never bypasses group membership.
+   * True only after exact designated-group authorization. The legacy field
+   * name remains at this seam while persistence enforces the group evidence.
    */
   readonly grantBootstrapAdmin: boolean;
 }
@@ -133,6 +135,7 @@ export interface PersistInitialWebSessionRequest {
   readonly user: User;
   readonly membershipSnapshot: GroupAuthorizedWebIdentity['membershipSnapshot'];
   readonly membershipMember: AccessMembershipMember;
+  readonly firstLoginBinding?: AccessGateFirstLoginBinding | null;
   readonly device: CompleteOidcSignInInput['device'];
   readonly credentialDigest: string;
   readonly createdAt: Date;
@@ -284,6 +287,7 @@ function assertGroupAuthorizedContext(
     authorization.membershipSnapshot.complete !== true ||
     authorization.user.disabledAt !== null ||
     authorization.user.googleSubject !== input.claims.subject ||
+    authorization.user.email !== input.claims.email ||
     authorization.membershipMember.userId !== authorization.user.id ||
     authorization.membershipMember.googleSubject !== input.claims.subject ||
     !sameFacilityScope(
@@ -295,6 +299,26 @@ function assertGroupAuthorizedContext(
     throw new WebSessionIssuanceError(
       'INVALID_AUTHORIZATION_CONTEXT',
       'A complete matching Google Group membership is required.',
+    );
+  }
+  const binding = authorization.firstLoginBinding ?? null;
+  if (
+    binding !== null &&
+    ((binding.userDisposition !== 'create' &&
+      binding.userDisposition !== 'existing') ||
+      binding.successorSnapshotId !== authorization.membershipSnapshot.id ||
+      binding.successorSnapshotVersion !==
+        authorization.membershipSnapshot.version ||
+      binding.sourceSnapshotVersion + 1 !== binding.successorSnapshotVersion ||
+      binding.normalizedEmail !== authorization.user.email ||
+      authorization.user.facilityScope.kind !== 'district' ||
+      (binding.userDisposition === 'create' &&
+        (authorization.user.roles.length !== 1 ||
+          authorization.user.roles[0] !== 'admin')))
+  ) {
+    throw new WebSessionIssuanceError(
+      'INVALID_AUTHORIZATION_CONTEXT',
+      'First-login binding evidence does not match the authorized identity.',
     );
   }
 }
@@ -486,7 +510,8 @@ function assertPersistedResultMatchesRequest(
       (role) =>
         requestedRoles.has(role) ||
         (request.grantBootstrapAdmin && role === 'admin'),
-    );
+    ) &&
+    (!request.grantBootstrapAdmin || result.user.roles.includes('admin'));
   const matches =
     result.user.id === request.user.id &&
     result.user.googleSubject === request.user.googleSubject &&
@@ -554,6 +579,7 @@ async function establishInitialWebSession(
     user: context.authorization.user,
     membershipSnapshot: context.authorization.membershipSnapshot,
     membershipMember: context.authorization.membershipMember,
+    firstLoginBinding: context.authorization.firstLoginBinding ?? null,
     device: input.device,
     credentialDigest,
     createdAt: now,
@@ -734,9 +760,10 @@ function assertPersistableIdempotency(
 }
 
 /**
- * Production persistence adapter. Membership evidence, optional bootstrap
- * role grant, device enrollment, session, token digest, and connectivity epoch
- * are committed in one transaction. The raw credential never reaches it.
+ * Production persistence adapter. Optional first-login identity binding,
+ * immutable membership evidence, designated-group admin grant, device,
+ * session, token digest, and connectivity epoch are committed in one
+ * transaction. The raw credential never reaches it.
  */
 export function createDrizzleInitialWebSessionStore(
   database: Database,
@@ -786,6 +813,424 @@ export function createDrizzleInitialWebSessionStore(
               throw new WebSessionIssuanceError(
                 'SESSION_REPLAY_REJECTED',
                 'The verified OIDC callback was already consumed.',
+              );
+            }
+
+            const firstLoginBinding = request.firstLoginBinding ?? null;
+            if (firstLoginBinding !== null) {
+              const contextGroupKeys = canonicalAccessGroupKeySet(
+                request.membershipMember.accessGroupSourceRefs,
+              );
+              const createdAt = new Date(request.user.createdAt);
+              if (
+                firstLoginBinding.successorSnapshotId !==
+                  request.membershipSnapshot.id ||
+                firstLoginBinding.successorSnapshotVersion !==
+                  request.membershipSnapshot.version ||
+                firstLoginBinding.sourceSnapshotVersion + 1 !==
+                  firstLoginBinding.successorSnapshotVersion ||
+                firstLoginBinding.normalizedEmail !== request.user.email ||
+                request.membershipMember.userId !== request.user.id ||
+                request.membershipMember.googleSubject !==
+                  request.user.googleSubject ||
+                request.membershipMember.facilityScope.kind !== 'district' ||
+                request.user.facilityScope.kind !== 'district' ||
+                (firstLoginBinding.userDisposition !== 'create' &&
+                  firstLoginBinding.userDisposition !== 'existing') ||
+                (firstLoginBinding.userDisposition === 'create' &&
+                  (request.user.roles.length !== 1 ||
+                    request.user.roles[0] !== 'admin')) ||
+                request.user.disabledAt !== null ||
+                !UuidSchema.safeParse(request.user.id).success ||
+                !UuidSchema.safeParse(firstLoginBinding.sourceSnapshotId)
+                  .success ||
+                !UuidSchema.safeParse(firstLoginBinding.successorSnapshotId)
+                  .success ||
+                request.user.email !== request.user.email.toLowerCase() ||
+                request.user.email !== request.user.email.trim() ||
+                request.user.displayName !== request.user.displayName.trim() ||
+                request.user.displayName.length === 0 ||
+                request.user.displayName.length > 160 ||
+                /\p{Cc}/u.test(request.user.displayName) ||
+                Number.isNaN(createdAt.getTime()) ||
+                contextGroupKeys === null
+              ) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'The first-login identity binding is invalid.',
+                );
+              }
+
+              const [sourceSnapshot] = await transaction
+                .select()
+                .from(accessMembershipSnapshots)
+                .where(
+                  and(
+                    eq(
+                      accessMembershipSnapshots.id,
+                      firstLoginBinding.sourceSnapshotId,
+                    ),
+                    eq(
+                      accessMembershipSnapshots.version,
+                      firstLoginBinding.sourceSnapshotVersion,
+                    ),
+                    eq(accessMembershipSnapshots.complete, true),
+                  ),
+                )
+                .limit(1)
+                .for('share');
+              const [latestSourceSnapshot] = await transaction
+                .select({
+                  id: accessMembershipSnapshots.id,
+                  version: accessMembershipSnapshots.version,
+                })
+                .from(accessMembershipSnapshots)
+                .where(eq(accessMembershipSnapshots.complete, true))
+                .orderBy(desc(accessMembershipSnapshots.version))
+                .limit(1)
+                .for('share');
+              if (
+                sourceSnapshot === undefined ||
+                latestSourceSnapshot?.id !== sourceSnapshot.id ||
+                latestSourceSnapshot.version !== sourceSnapshot.version ||
+                sourceSnapshot.syncStartedAt.getTime() !==
+                  new Date(
+                    request.membershipSnapshot.syncStartedAt,
+                  ).getTime() ||
+                sourceSnapshot.capturedAt.getTime() !==
+                  new Date(request.membershipSnapshot.capturedAt).getTime()
+              ) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'The evaluated access snapshot is no longer current.',
+                );
+              }
+
+              const activeSources = await transaction
+                .select({
+                  id: groupSources.id,
+                  email: groupSources.email,
+                  kind: groupSources.kind,
+                  purpose: groupSources.purpose,
+                })
+                .from(groupSources)
+                .where(
+                  and(
+                    eq(groupSources.active, true),
+                    eq(groupSources.kind, 'google-group'),
+                    eq(groupSources.purpose, 'access'),
+                  ),
+                )
+                .for('share');
+              const activeGroupKeys = canonicalAccessGroupKeySet(
+                activeSources.map(({ id, kind, purpose }) => ({
+                  id,
+                  kind,
+                  purpose,
+                  facilityId: null,
+                })),
+              );
+              if (
+                activeSources.length !== 1 ||
+                activeSources[0]?.email !== DESIGNATED_ACCESS_GROUP_EMAIL ||
+                activeGroupKeys === null ||
+                !sameNonemptyKeySet(activeGroupKeys, contextGroupKeys)
+              ) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'The designated access-group configuration is ambiguous.',
+                );
+              }
+
+              const sourceSnapshotGroups = await transaction
+                .select()
+                .from(accessMembershipSnapshotGroups)
+                .where(
+                  eq(
+                    accessMembershipSnapshotGroups.snapshotId,
+                    sourceSnapshot.id,
+                  ),
+                )
+                .for('share');
+              const expectedGroupKeys = canonicalAccessGroupKeySet(
+                sourceSnapshotGroups
+                  .filter(({ completionKind }) => completionKind === 'expected')
+                  .map(({ groupSourceId, groupSourceKind, groupPurpose }) => ({
+                    id: groupSourceId,
+                    kind: groupSourceKind,
+                    purpose: groupPurpose,
+                    facilityId: null,
+                  })),
+              );
+              const completedGroupKeys = canonicalAccessGroupKeySet(
+                sourceSnapshotGroups
+                  .filter(
+                    ({ completionKind }) => completionKind === 'completed',
+                  )
+                  .map(({ groupSourceId, groupSourceKind, groupPurpose }) => ({
+                    id: groupSourceId,
+                    kind: groupSourceKind,
+                    purpose: groupPurpose,
+                    facilityId: null,
+                  })),
+              );
+              if (
+                expectedGroupKeys === null ||
+                completedGroupKeys === null ||
+                sourceSnapshotGroups.length !== 2 ||
+                !sameNonemptyKeySet(expectedGroupKeys, activeGroupKeys) ||
+                !sameNonemptyKeySet(completedGroupKeys, activeGroupKeys)
+              ) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'The evaluated access snapshot is incomplete.',
+                );
+              }
+
+              const evaluatedGroupRows = await transaction
+                .select({
+                  id: accessMembershipEvaluatedMembers.groupSourceId,
+                  kind: accessMembershipEvaluatedMembers.groupSourceKind,
+                  purpose: accessMembershipEvaluatedMembers.groupPurpose,
+                })
+                .from(accessMembershipEvaluatedMembers)
+                .where(
+                  and(
+                    eq(
+                      accessMembershipEvaluatedMembers.snapshotId,
+                      sourceSnapshot.id,
+                    ),
+                    eq(
+                      accessMembershipEvaluatedMembers.email,
+                      firstLoginBinding.normalizedEmail,
+                    ),
+                  ),
+                )
+                .for('share');
+              const evaluatedGroupKeys = canonicalAccessGroupKeySet(
+                evaluatedGroupRows.map(({ id, kind, purpose }) => ({
+                  id,
+                  kind,
+                  purpose,
+                  facilityId: null,
+                })),
+              );
+              if (
+                evaluatedGroupKeys === null ||
+                !sameNonemptyKeySet(evaluatedGroupKeys, activeGroupKeys)
+              ) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'Exact evaluated email membership could not be confirmed.',
+                );
+              }
+
+              const identityMatches = await transaction
+                .select()
+                .from(users)
+                .where(
+                  or(
+                    eq(users.id, request.user.id),
+                    eq(users.googleSubject, request.user.googleSubject),
+                    eq(users.email, request.user.email),
+                  ),
+                )
+                .limit(3)
+                .for('share');
+              const existingIdentity = identityMatches[0];
+              const identityBindingInvalid =
+                firstLoginBinding.userDisposition === 'create'
+                  ? identityMatches.length !== 0
+                  : identityMatches.length !== 1 ||
+                    existingIdentity === undefined ||
+                    existingIdentity.id !== request.user.id ||
+                    existingIdentity.googleSubject !==
+                      request.user.googleSubject ||
+                    existingIdentity.email !== request.user.email ||
+                    existingIdentity.displayName !== request.user.displayName ||
+                    existingIdentity.facilityScopeKind !== 'district' ||
+                    existingIdentity.disabledAt !== null ||
+                    existingIdentity.createdAt.getTime() !==
+                      createdAt.getTime();
+              if (identityBindingInvalid) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'The verified identity became ambiguous before binding.',
+                );
+              }
+
+              const sourceEvaluatedMembers = await transaction
+                .select()
+                .from(accessMembershipEvaluatedMembers)
+                .where(
+                  eq(
+                    accessMembershipEvaluatedMembers.snapshotId,
+                    sourceSnapshot.id,
+                  ),
+                )
+                .for('share');
+              const sourceMembers = await transaction
+                .select()
+                .from(accessMembershipMembers)
+                .where(
+                  eq(accessMembershipMembers.snapshotId, sourceSnapshot.id),
+                )
+                .for('share');
+              const sourceMemberGroups = await transaction
+                .select()
+                .from(accessMembershipMemberGroups)
+                .where(
+                  eq(
+                    accessMembershipMemberGroups.snapshotId,
+                    sourceSnapshot.id,
+                  ),
+                )
+                .for('share');
+              const sourceMemberFacilities = await transaction
+                .select()
+                .from(accessMembershipMemberFacilities)
+                .where(
+                  eq(
+                    accessMembershipMemberFacilities.snapshotId,
+                    sourceSnapshot.id,
+                  ),
+                )
+                .for('share');
+
+              const sourceMember = sourceMembers.find(
+                ({ userId }) => userId === request.user.id,
+              );
+              const sourceBindingGroups = sourceMemberGroups.filter(
+                ({ userId }) => userId === request.user.id,
+              );
+              const sourceBindingFacilities = sourceMemberFacilities.filter(
+                ({ userId }) => userId === request.user.id,
+              );
+              const sourceAlreadyHasDesignatedMembership =
+                sourceBindingGroups.some(
+                  ({ groupSourceId, groupSourceKind, groupPurpose }) =>
+                    activeGroupKeys.has(
+                      accessGroupKey({
+                        id: groupSourceId,
+                        kind: groupSourceKind,
+                        purpose: groupPurpose,
+                      }),
+                    ),
+                );
+              if (
+                (firstLoginBinding.userDisposition === 'existing' &&
+                  ((sourceMember !== undefined &&
+                    (sourceMember.googleSubject !==
+                      request.user.googleSubject ||
+                      sourceMember.facilityScopeKind !== 'district' ||
+                      sourceBindingFacilities.length !== 0)) ||
+                    sourceAlreadyHasDesignatedMembership)) ||
+                (firstLoginBinding.userDisposition === 'create' &&
+                  sourceMember !== undefined)
+              ) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'The source identity binding no longer matches the request.',
+                );
+              }
+
+              let bindingUserId = request.user.id;
+              if (firstLoginBinding.userDisposition === 'create') {
+                const [insertedUser] = await transaction
+                  .insert(users)
+                  .values({
+                    id: request.user.id,
+                    googleSubject: request.user.googleSubject,
+                    email: request.user.email,
+                    displayName: request.user.displayName,
+                    facilityScopeKind: 'district',
+                    createdAt,
+                    disabledAt: null,
+                  })
+                  .returning();
+                if (insertedUser === undefined) {
+                  throw new WebSessionIssuanceError(
+                    'SESSION_PERSISTENCE_REJECTED',
+                    'The first-login identity could not be created.',
+                  );
+                }
+                bindingUserId = insertedUser.id;
+              }
+              const [insertedSnapshot] = await transaction
+                .insert(accessMembershipSnapshots)
+                .values({
+                  id: firstLoginBinding.successorSnapshotId,
+                  version: firstLoginBinding.successorSnapshotVersion,
+                  complete: true,
+                  syncStartedAt: sourceSnapshot.syncStartedAt,
+                  capturedAt: sourceSnapshot.capturedAt,
+                })
+                .returning();
+              if (insertedSnapshot === undefined) {
+                throw new WebSessionIssuanceError(
+                  'SESSION_PERSISTENCE_REJECTED',
+                  'The evaluated-email successor could not be created.',
+                );
+              }
+
+              await transaction.insert(accessMembershipSnapshotGroups).values(
+                sourceSnapshotGroups.map((row) => ({
+                  ...row,
+                  snapshotId: insertedSnapshot.id,
+                })),
+              );
+              if (sourceEvaluatedMembers.length > 0) {
+                await transaction
+                  .insert(accessMembershipEvaluatedMembers)
+                  .values(
+                    sourceEvaluatedMembers.map((row) => ({
+                      ...row,
+                      snapshotId: insertedSnapshot.id,
+                    })),
+                  );
+              }
+              if (sourceMembers.length > 0) {
+                await transaction.insert(accessMembershipMembers).values(
+                  sourceMembers.map((row) => ({
+                    ...row,
+                    snapshotId: insertedSnapshot.id,
+                  })),
+                );
+              }
+              if (sourceMemberGroups.length > 0) {
+                await transaction.insert(accessMembershipMemberGroups).values(
+                  sourceMemberGroups.map((row) => ({
+                    ...row,
+                    snapshotId: insertedSnapshot.id,
+                  })),
+                );
+              }
+              if (sourceMemberFacilities.length > 0) {
+                await transaction
+                  .insert(accessMembershipMemberFacilities)
+                  .values(
+                    sourceMemberFacilities.map((row) => ({
+                      ...row,
+                      snapshotId: insertedSnapshot.id,
+                    })),
+                  );
+              }
+              if (sourceMember === undefined) {
+                await transaction.insert(accessMembershipMembers).values({
+                  snapshotId: insertedSnapshot.id,
+                  userId: bindingUserId,
+                  googleSubject: request.user.googleSubject,
+                  facilityScopeKind: 'district',
+                });
+              }
+              await transaction.insert(accessMembershipMemberGroups).values(
+                evaluatedGroupRows.map(({ id, kind, purpose }) => ({
+                  snapshotId: insertedSnapshot.id,
+                  userId: bindingUserId,
+                  groupSourceId: id,
+                  groupSourceKind: kind,
+                  groupPurpose: purpose,
+                })),
               );
             }
 
@@ -872,6 +1317,7 @@ export function createDrizzleInitialWebSessionStore(
             const currentActiveGroups = await transaction
               .select({
                 id: groupSources.id,
+                email: groupSources.email,
                 kind: groupSources.kind,
                 purpose: groupSources.purpose,
               })
@@ -893,6 +1339,8 @@ export function createDrizzleInitialWebSessionStore(
               })),
             );
             const snapshotGroupsMatch =
+              currentActiveGroups.length === 1 &&
+              currentActiveGroups[0]?.email === DESIGNATED_ACCESS_GROUP_EMAIL &&
               expectedGroupKeys !== null &&
               completedGroupKeys !== null &&
               currentActiveGroupKeys !== null &&
@@ -960,7 +1408,8 @@ export function createDrizzleInitialWebSessionStore(
             const contextMatchesPersistedMembership =
               contextGroupKeys !== null &&
               membershipGroupKeys !== null &&
-              contextGroupKeys.size === membershipGroupKeys.size &&
+              currentActiveGroupKeys !== null &&
+              sameNonemptyKeySet(contextGroupKeys, currentActiveGroupKeys) &&
               [...contextGroupKeys].every((key) =>
                 membershipGroupKeys.has(key),
               );
@@ -1009,21 +1458,9 @@ export function createDrizzleInitialWebSessionStore(
               transaction,
               request.user.id,
             );
-            const [priorAdminDecision] = await transaction
-              .select({ sequence: userRoleChanges.sequence })
-              .from(userRoleChanges)
-              .where(
-                and(
-                  eq(userRoleChanges.userId, request.user.id),
-                  eq(userRoleChanges.role, 'admin'),
-                ),
-              )
-              .orderBy(desc(userRoleChanges.sequence))
-              .limit(1);
-            const shouldGrantBootstrapAdmin =
+            const shouldGrantDesignatedGroupAdmin =
               request.grantBootstrapAdmin &&
-              !rolesBeforeSession.includes('admin') &&
-              priorAdminDecision === undefined;
+              !rolesBeforeSession.includes('admin');
 
             const persistedFacilityScopes = await transaction
               .select({ facilityId: userFacilityScopes.facilityId })
@@ -1152,7 +1589,7 @@ export function createDrizzleInitialWebSessionStore(
               );
             }
 
-            if (shouldGrantBootstrapAdmin) {
+            if (shouldGrantDesignatedGroupAdmin) {
               await transaction.insert(userRoleChanges).values({
                 userId: request.user.id,
                 role: 'admin',
@@ -1163,7 +1600,7 @@ export function createDrizzleInitialWebSessionStore(
                 occurredAt: request.createdAt,
               });
             }
-            const roles = shouldGrantBootstrapAdmin
+            const roles = shouldGrantDesignatedGroupAdmin
               ? await loadEffectiveRoles(transaction, request.user.id)
               : rolesBeforeSession;
 
