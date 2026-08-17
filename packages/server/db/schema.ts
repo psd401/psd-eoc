@@ -450,7 +450,13 @@ export const users = pgTable(
   (table) => [
     uniqueIndex('users_google_subject_uq').on(table.googleSubject),
     uniqueIndex('users_email_lower_uq').on(sql`lower(${table.email})`),
-    check('users_psd_email', sql`lower(${table.email}) like '%@psd401.net'`),
+    check(
+      'users_normalized_email',
+      sql`${table.email} = lower(${table.email})
+        and ${table.email} = btrim(${table.email})
+        and length(${table.email}) between 3 and 320
+        and ${table.email} ~ '^[^[:space:]@]+@[^[:space:]@]+$'`,
+    ),
     check(
       'users_disabled_after_creation',
       sql`${table.disabledAt} is null or ${table.disabledAt} >= ${table.createdAt}`,
