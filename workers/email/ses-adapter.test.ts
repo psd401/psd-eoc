@@ -12,6 +12,7 @@ import { ProviderDispatchError } from '../shared/retry';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_CORRELATION_TAG_NAMES,
+  SES_FROM_EMAIL_ADDRESS,
   SES_V2_PROVIDER,
   SesV2EmailAdapter,
   SesV2EmailAdapterError,
@@ -264,7 +265,7 @@ function adapter(
     adapter: new SesV2EmailAdapter({
       client,
       sendLedger: ledger,
-      fromEmailAddress: 'notifications@alerts.psd401.net',
+      fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
       truthLabel: 'live-verified',
     }),
   };
@@ -290,7 +291,7 @@ describe('SES v2 live adapter', () => {
     const input = app.client.inputs[0];
     expect(input).toEqual(
       expect.objectContaining({
-        FromEmailAddress: 'notifications@alerts.psd401.net',
+        FromEmailAddress: SES_FROM_EMAIL_ADDRESS,
         ConfigurationSetName: SES_CONFIGURATION_SET_NAME,
         Destination: {
           ToAddresses: ['authorized-staff@example.invalid'],
@@ -522,7 +523,7 @@ describe('SES v2 live adapter', () => {
     const emailAdapter = new SesV2EmailAdapter({
       client,
       sendLedger: ledger,
-      fromEmailAddress: 'notifications@alerts.psd401.net',
+      fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
       truthLabel: 'live-verified',
     });
 
@@ -546,7 +547,7 @@ describe('SES v2 live adapter', () => {
     const base = {
       client,
       sendLedger: ledger,
-      fromEmailAddress: 'notifications@alerts.psd401.net',
+      fromEmailAddress: SES_FROM_EMAIL_ADDRESS,
       truthLabel: 'live-verified' as const,
     };
 
@@ -572,6 +573,13 @@ describe('SES v2 live adapter', () => {
         new SesV2EmailAdapter({
           ...base,
           fromEmailAddress: 'notifications@example.invalid',
+        }),
+    ).toThrow(SesV2EmailAdapterError);
+    expect(
+      () =>
+        new SesV2EmailAdapter({
+          ...base,
+          fromEmailAddress: 'other-sender@psd401.net',
         }),
     ).toThrow(SesV2EmailAdapterError);
   });
