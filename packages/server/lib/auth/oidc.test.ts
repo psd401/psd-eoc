@@ -185,7 +185,7 @@ describe('native Google OIDC adapter', () => {
     expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe(
       'S256',
     );
-    expect(authorizationUrl.searchParams.get('hd')).toBe('psd401.net');
+    expect(authorizationUrl.searchParams.has('hd')).toBe(false);
     expect(started.flowToken).not.toContain(VERIFIER);
     expect(started.flowToken).not.toContain(INSTALLATION_ID);
   });
@@ -409,7 +409,6 @@ describe('native Google OIDC adapter', () => {
       ['wrong nonce', { nonce: 'n'.repeat(43) }, undefined],
       ['wrong audience', { aud: 'attacker-client' }, undefined],
       ['wrong issuer', { iss: 'https://attacker.invalid' }, undefined],
-      ['wrong hosted domain', { hd: 'example.org' }, undefined],
       ['unverified email', { email_verified: false }, undefined],
       ['wrong signature', {}, otherSigningKey],
     ];
@@ -437,5 +436,31 @@ describe('native Google OIDC adapter', () => {
         expectOidcError(error, 'OIDC_ID_TOKEN_INVALID');
       }
     }
+
+    const nonDistrictFlow = await startedFlow();
+    const nonDistrictCode = 'exact-group-not-domain-membership';
+    codes.set(nonDistrictCode, {
+      nonce: nonDistrictFlow.nonce,
+      verifier: nonDistrictFlow.verifier,
+      claimOverrides: {
+        hd: 'example.org',
+        email: 'selected.member@example.org',
+      },
+    });
+    const nonDistrictExchange = await completeGoogleMobileOidcExchange(
+      configuration,
+      {
+        authorizationCode: nonDistrictCode,
+        state: nonDistrictFlow.state,
+        codeVerifier: nonDistrictFlow.verifier,
+        flowToken: nonDistrictFlow.flowToken,
+        now: NOW,
+      },
+    );
+    expect(nonDistrictExchange.capabilityInput.claims).toMatchObject({
+      hostedDomain: 'example.org',
+      email: 'selected.member@example.org',
+      emailVerified: true,
+    });
   });
 });

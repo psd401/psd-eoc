@@ -82,14 +82,15 @@ export const PreSessionOidcPrincipalSchema = z
     subjectDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     claimsDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     audienceVerified: z.literal(true),
-    hostedDomain: z.literal('psd401.net'),
+    // Informational only. Exact persisted Google Group evidence owns access.
+    hostedDomain: z.string().trim().min(1).max(255).nullable(),
     email: z
       .string()
       .trim()
       .email()
       .max(320)
-      .refine((email) => email.toLowerCase().endsWith('@psd401.net'), {
-        message: 'OIDC email must belong to the psd401.net hosted domain.',
+      .refine((email) => email === email.toLowerCase(), {
+        message: 'OIDC email must be normalized to lowercase.',
       }),
     emailVerified: z.literal(true),
     displayName: z.string().trim().min(1).max(160),
@@ -1258,6 +1259,7 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
   'refresh-session': 'none',
   'revoke-session': 'none',
   'sync-roster': 'none',
+  'sync-access-membership': 'none',
   'record-delivery-test-canary-eligibility': 'none',
   'create-delivery-test-target-set-version': 'none',
   'prepare-activation': 'none',

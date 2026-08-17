@@ -130,6 +130,8 @@ import {
   SessionEstablishmentResultSchema,
   SessionRevocationSchema,
   SetUserRolesInputSchema,
+  SyncAccessMembershipInputSchema,
+  SyncAccessMembershipResultSchema,
   UnregisterPushTokenInputSchema,
   UserPageSchema,
   UserSchema,
@@ -985,6 +987,13 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: SyncRosterInputSchema,
     outputSchema: RosterSyncResultSchema,
   }),
+  'sync-access-membership': canonicalCapability({
+    id: 'sync-access-membership',
+    operation: 'mutation',
+    safetyEffect: 'none',
+    inputSchema: SyncAccessMembershipInputSchema,
+    outputSchema: SyncAccessMembershipResultSchema,
+  }),
   'record-delivery-test-canary-eligibility': canonicalCapability({
     id: 'record-delivery-test-canary-eligibility',
     operation: 'mutation',
@@ -1592,6 +1601,10 @@ const systemWorkerScheduledInvocationPolicy = invocationPolicy(
   ['system'],
   ['worker', 'scheduled-job'],
 );
+const systemScheduledInvocationPolicy = invocationPolicy(
+  ['system'],
+  ['scheduled-job'],
+);
 const systemWorkerInvocationPolicy = invocationPolicy(['system'], ['worker']);
 const systemWorkerWebhookInvocationPolicy = invocationPolicy(
   ['system'],
@@ -1608,6 +1621,7 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'refresh-session': verifiedRefreshInvocationPolicy,
   'revoke-session': humanInteractiveInvocationPolicy,
   'sync-roster': humanAgentScheduledInvocationPolicy,
+  'sync-access-membership': systemScheduledInvocationPolicy,
   'record-delivery-test-canary-eligibility':
     humanWebAdministrationInvocationPolicy,
   'create-delivery-test-target-set-version':
