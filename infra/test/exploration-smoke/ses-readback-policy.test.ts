@@ -73,6 +73,7 @@ function applyScript(workflow: string): string {
 
 async function runScenario(options: {
   readonly changeSetMismatch?: boolean;
+  readonly eventTypeMismatch?: 'missing' | 'superset';
   readonly existingPredecessor?: boolean;
   readonly existingStack: boolean;
   readonly interruptedCreate?: boolean;
@@ -377,10 +378,16 @@ case "$1:$2" in
     ;;
   sesv2:get-configuration-set-event-destinations)
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
+    event_types='["SEND","RENDERING_FAILURE","REJECT","DELIVERY_DELAY","DELIVERY","COMPLAINT","BOUNCE"]'
+    if [[ "$EVENT_TYPE_MISMATCH" == "missing" ]]; then
+      event_types='["BOUNCE","COMPLAINT","DELIVERY","REJECT","RENDERING_FAILURE","SEND"]'
+    elif [[ "$EVENT_TYPE_MISMATCH" == "superset" ]]; then
+      event_types='["BOUNCE","COMPLAINT","DELIVERY","DELIVERY_DELAY","OPEN","REJECT","RENDERING_FAILURE","SEND"]'
+    fi
     printf '%s\n' '{"EventDestinations":[{
       "Name":"psd-eoc-email-events",
       "Enabled":true,
-      "MatchingEventTypes":["SEND","DELIVERY","BOUNCE","COMPLAINT","REJECT","RENDERING_FAILURE","DELIVERY_DELAY"],
+      "MatchingEventTypes":'"$event_types"',
       "SnsDestination":{"TopicArn":"arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events"}
     }]}'
     ;;
@@ -417,6 +424,7 @@ esac
         DEPLOY_ROLE_NAME: roleName,
         EVENT_DESTINATION_NAME: 'psd-eoc-email-events',
         EVENT_TOPIC_ARN: `arn:aws:sns:${region}:${accountId}:psd-eoc-email-events`,
+        EVENT_TYPE_MISMATCH: options.eventTypeMismatch ?? 'none',
         EXISTING_STACK: options.existingStack ? 'true' : 'false',
         GITHUB_OIDC_PROVIDER_ARN: `arn:aws:iam::${accountId}:oidc-provider/token.actions.githubusercontent.com`,
         GITHUB_OIDC_SUBJECT:
@@ -578,7 +586,7 @@ describe('protected exploration SES readback policy', () => {
     );
   });
 
-  it('accepts only the exact idempotent no-change response and does not execute it', async () => {
+  it('accepts an exact idempotent no-change response with reordered event types and does not execute it', async () => {
     const result = await runScenario({ existingStack: true });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.result).toEqual({ state: 'already-applied' });
@@ -590,6 +598,24 @@ describe('protected exploration SES readback policy', () => {
       'cloudformation:list-stack-resources:deploy-access',
     );
   });
+
+  it.each(['missing', 'superset'] as const)(
+    'fails closed when SES readback has a %s event-type set',
+    async (eventTypeMismatch) => {
+      const result = await runScenario({
+        eventTypeMismatch,
+        existingStack: true,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.result).toEqual({ state: 'already-applied' });
+      expect(result.awsCalls).not.toContain(
+        'cloudformation:execute-change-set:deploy-access',
+      );
+      expect(result.awsCalls).not.toContain(
+        'cloudformation:list-stack-resources:deploy-access',
+      );
+    },
+  );
 
   it('updates only the exact authorized SES-only predecessor without replacement', async () => {
     const result = await runScenario({

@@ -750,20 +750,20 @@ jobs:
           jq -e \
             --arg destination "$EVENT_DESTINATION_NAME" \
             --arg topic "$EVENT_TOPIC_ARN" '
-              .EventDestinations == [{
-                Enabled: true,
-                MatchingEventTypes: [
-                  "SEND",
-                  "DELIVERY",
+              (.EventDestinations | length) == 1 and
+              .EventDestinations[0] as $event_destination |
+              $event_destination.Enabled == true and
+              ($event_destination.MatchingEventTypes | sort) == [
                   "BOUNCE",
                   "COMPLAINT",
+                  "DELIVERY",
+                  "DELIVERY_DELAY",
                   "REJECT",
                   "RENDERING_FAILURE",
-                  "DELIVERY_DELAY"
-                ],
-                Name: $destination,
-                SnsDestination: {TopicArn: $topic}
-              }]
+                  "SEND"
+                ] and
+              $event_destination.Name == $destination and
+              $event_destination.SnsDestination == {TopicArn: $topic}
             ' artifacts/readback/ses-event-destinations.json > /dev/null
 
           {
