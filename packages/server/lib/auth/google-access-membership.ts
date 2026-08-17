@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { TimestampSchema } from '@psd-eoc/contracts';
+import { StaffRosterEmailSchema, TimestampSchema } from '@psd-eoc/contracts';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
 
@@ -338,10 +338,7 @@ export function createGoogleAccessMembershipEvaluator(
       const lookupUrl = new URL(
         `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
       );
-      lookupUrl.searchParams.set(
-        'groupKey.id',
-        DESIGNATED_ACCESS_GROUP_EMAIL,
-      );
+      lookupUrl.searchParams.set('groupKey.id', DESIGNATED_ACCESS_GROUP_EMAIL);
       lookupUrl.searchParams.set(
         'fields',
         'name,groupKey(id),labels,dynamicGroupMetadata',
@@ -422,7 +419,16 @@ export function createGoogleAccessMembershipEvaluator(
               Date.parse(expiryDetail.expireTime) > evaluationTime,
           );
           if (!hasCurrentRole) continue;
-          const email = membership.preferredMemberKey.id.toLowerCase();
+          const parsedEmail = StaffRosterEmailSchema.safeParse(
+            membership.preferredMemberKey.id,
+          );
+          if (!parsedEmail.success) {
+            throw new AccessMembershipEvaluationError(
+              'NON_STAFF_MEMBERSHIP',
+              'The designated access group contains a direct user outside the approved staff domain.',
+            );
+          }
+          const email = parsedEmail.data;
           if (memberEmails.has(email)) {
             throw new AccessMembershipEvaluationError(
               'DUPLICATE_EVALUATED_EMAIL',
@@ -462,10 +468,7 @@ export function createGoogleAccessMembershipEvaluator(
             capturedAt,
           });
         }
-        if (
-          seenPageTokens.has(nextPageToken) ||
-          nextPageToken === pageToken
-        ) {
+        if (seenPageTokens.has(nextPageToken) || nextPageToken === pageToken) {
           throw new AccessMembershipEvaluationError(
             'GROUP_PAGINATION_LOOP',
             'Google repeated an access-membership page token.',

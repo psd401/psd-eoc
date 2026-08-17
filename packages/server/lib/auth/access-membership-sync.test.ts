@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
+import { executeCapability } from '@psd-eoc/contracts';
 
 import {
   DESIGNATED_ACCESS_GROUP_EMAIL,
@@ -6,6 +8,8 @@ import {
 } from './google-access-membership';
 import {
   AccessMembershipSyncError,
+  createScheduledAccessMembershipSyncAuthorizer,
+  createSyncAccessMembershipHandler,
   syncAccessMembership,
   type AccessMembershipPublicationResult,
   type AccessMembershipSyncCapabilityContext,
@@ -13,12 +17,24 @@ import {
 } from './access-membership-sync';
 
 const TEST_TIME = '2026-08-17T12:00:00.000Z';
+const TEST_GOOGLE_GROUP_ID = '01synthetic_engineering';
+
+function digest(value: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(value), 'utf8')
+    .digest('hex');
+}
+
 const EVALUATION: EvaluatedAccessMembershipSet = Object.freeze({
   groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-  googleGroupId: '01synthetic_engineering',
+  googleGroupId: TEST_GOOGLE_GROUP_ID,
   memberEmails: Object.freeze(['hagelk@psd401.net']),
-  membershipDigest: 'a'.repeat(64),
-  providerGroupIdDigest: 'b'.repeat(64),
+  membershipDigest: digest([
+    DESIGNATED_ACCESS_GROUP_EMAIL,
+    TEST_GOOGLE_GROUP_ID,
+    'hagelk@psd401.net',
+  ]),
+  providerGroupIdDigest: digest([TEST_GOOGLE_GROUP_ID]),
   syncStartedAt: TEST_TIME,
   capturedAt: TEST_TIME,
 });
@@ -55,7 +71,7 @@ interface StoreHarness {
     completedAt: string;
   }>;
   readonly publications: EvaluatedAccessMembershipSet[];
-  readonly reservations: Array<Readonly<Record<string, unknown>>>;
+  readonly reservations: Parameters<AccessMembershipSyncStore['reserve']>[0][];
   readonly store: AccessMembershipSyncStore;
 }
 
@@ -64,7 +80,8 @@ function storeHarness(
 ): StoreHarness {
   const failed: StoreHarness['failed'] = [];
   const publications: EvaluatedAccessMembershipSet[] = [];
-  const reservations: Array<Readonly<Record<string, unknown>>> = [];
+  const reservations: Parameters<AccessMembershipSyncStore['reserve']>[0][] =
+    [];
   return {
     failed,
     publications,
@@ -225,5 +242,63 @@ describe('access-membership sync capability core', () => {
     ).rejects.toBeInstanceOf(AccessMembershipSyncError);
     expect(harness.publications).toEqual([]);
     expect(harness.failed[0]?.errorCode).toBe('DESIGNATED_GROUP_MISMATCH');
+  });
+
+  test('refuses publication unless the daily district account is a direct member', async () => {
+    const harness = storeHarness();
+    const memberEmails = Object.freeze(['other@psd401.net']);
+    const evaluation = Object.freeze({
+      ...EVALUATION,
+      memberEmails,
+      membershipDigest: digest([
+        DESIGNATED_ACCESS_GROUP_EMAIL,
+        TEST_GOOGLE_GROUP_ID,
+        ...memberEmails,
+      ]),
+    });
+    await expect(
+      syncAccessMembership(
+        { designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL },
+        context(),
+        {
+          evaluator: { evaluate: async () => evaluation },
+          store: harness.store,
+          now: () => new Date(TEST_TIME),
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'DAILY_ADMIN_NOT_DIRECT_MEMBER' });
+    expect(harness.publications).toEqual([]);
+    expect(harness.failed[0]?.errorCode).toBe('DAILY_ADMIN_NOT_DIRECT_MEMBER');
+  });
+
+  test('runs the scheduled-only authorizer before the canonical handler', async () => {
+    const harness = storeHarness();
+    let evaluated = false;
+    const handler = createSyncAccessMembershipHandler({
+      evaluator: {
+        async evaluate() {
+          evaluated = true;
+          return EVALUATION;
+        },
+      },
+      store: harness.store,
+      now: () => new Date(TEST_TIME),
+    });
+    await expect(
+      executeCapability(
+        handler,
+        { designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL },
+        {
+          context: context({
+            actor: { kind: 'system', serviceId: 'another-service' },
+          }),
+          humanActionResolutionContext: null,
+          safetyResolver: null,
+          authorizer: createScheduledAccessMembershipSyncAuthorizer(),
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'ACCESS_SYNC_UNAUTHORIZED' });
+    expect(evaluated).toBe(false);
+    expect(harness.reservations).toEqual([]);
   });
 });

@@ -71,7 +71,7 @@ function providerHarness(
     init?: RequestInit,
   ): Promise<Response> => {
     const url = String(input);
-    calls.push(Object.freeze({ init, url }));
+    calls.push(Object.freeze({ ...(init === undefined ? {} : { init }), url }));
     if (url === TOKEN_ENDPOINT) return tokenResponse();
     if (url.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups:lookup?`)) {
       return lookupResponse();
@@ -155,11 +155,11 @@ describe('exact Google access-membership evaluator', () => {
     const harness = providerHarness(() =>
       Response.json({
         memberships: [
-          currentMembership('ZED@EXAMPLE.NET', '000000000000000000002'),
+          currentMembership('ZED@PSD401.NET', '000000000000000000002'),
           currentMembership('hagelk@psd401.net'),
           {
             ...currentMembership(
-              'expired.user@example.net',
+              'expired.user@psd401.net',
               '000000000000000000003',
             ),
             roles: [
@@ -178,16 +178,16 @@ describe('exact Google access-membership evaluator', () => {
     expect(result).toMatchObject({
       groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
       googleGroupId: GROUP_ID,
-      memberEmails: ['hagelk@psd401.net', 'zed@example.net'],
+      memberEmails: ['hagelk@psd401.net', 'zed@psd401.net'],
       syncStartedAt: TEST_TIME,
       capturedAt: TEST_TIME,
     });
     expect(result.membershipDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(result.providerGroupIdDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(harness.calls).toHaveLength(3);
-    expect(
-      harness.calls.every(({ init }) => init?.redirect === 'error'),
-    ).toBe(true);
+    expect(harness.calls.every(({ init }) => init?.redirect === 'error')).toBe(
+      true,
+    );
 
     const tokenCall = harness.calls[0];
     if (tokenCall === undefined) throw new Error('The token call is missing.');
@@ -203,8 +203,7 @@ describe('exact Google access-membership evaluator', () => {
     expect(decodedJwtPart(assertion, 1)).toMatchObject({
       aud: TOKEN_ENDPOINT,
       iss: configuration().serviceAccountEmail,
-      scope:
-        'https://www.googleapis.com/auth/cloud-identity.groups.readonly',
+      scope: 'https://www.googleapis.com/auth/cloud-identity.groups.readonly',
     });
     expect(decodedJwtPart(assertion, 1)).not.toHaveProperty('sub');
 
@@ -231,13 +230,13 @@ describe('exact Google access-membership evaluator', () => {
       expect(pageToken).toBe('page-two');
       return Response.json({
         memberships: [
-          currentMembership('other@example.net', '000000000000000000002'),
+          currentMembership('other@psd401.net', '000000000000000000002'),
         ],
       });
     });
     expect((await evaluator(harness).evaluate()).memberEmails).toEqual([
       'hagelk@psd401.net',
-      'other@example.net',
+      'other@psd401.net',
     ]);
     expect(harness.calls).toHaveLength(4);
 
@@ -276,6 +275,16 @@ describe('exact Google access-membership evaluator', () => {
         'NESTED_OR_NON_USER_MEMBERSHIP',
       );
     }
+
+    const externalUser = providerHarness(() =>
+      Response.json({
+        memberships: [currentMembership('external@example.net')],
+      }),
+    );
+    await expectEvaluationError(
+      evaluator(externalUser).evaluate(),
+      'NON_STAFF_MEMBERSHIP',
+    );
   });
 
   test('rejects dynamic or mismatched group identity before listing members', async () => {
@@ -326,10 +335,7 @@ describe('exact Google access-membership evaluator', () => {
           Response.json({
             memberships: [
               currentMembership('HAGELK@PSD401.NET'),
-              currentMembership(
-                'hagelk@psd401.net',
-                '000000000000000000002',
-              ),
+              currentMembership('hagelk@psd401.net', '000000000000000000002'),
             ],
           }),
         ),
@@ -339,8 +345,8 @@ describe('exact Google access-membership evaluator', () => {
   });
 
   test('bounds malformed, oversized, rejected, and hanging provider responses', async () => {
-    const malformed = providerHarness(() =>
-      new Response(`{"unexpected":"${PROVIDER_SECRET}"}`),
+    const malformed = providerHarness(
+      () => new Response(`{"unexpected":"${PROVIDER_SECRET}"}`),
     );
     await expectEvaluationError(
       evaluator(malformed).evaluate(),
