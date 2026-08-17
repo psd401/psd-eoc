@@ -4,7 +4,10 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 
-import { IdempotencyPrincipalSchema } from '@psd-eoc/contracts';
+import {
+  IdempotencyPrincipalSchema,
+  SyncAccessMembershipInputSchema,
+} from '@psd-eoc/contracts';
 import type { FullConfig } from '@playwright/test';
 import { and, desc, eq } from 'drizzle-orm';
 
@@ -33,6 +36,8 @@ import {
 import { executeOperationWithCleanup } from '../facilities/owned-database-lifecycle';
 
 const ACCESS_GROUP_ID = '10000000-0000-4000-8000-000000000110';
+const DESIGNATED_ACCESS_GROUP_EMAIL =
+  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
 const MEMBER_USER_ID = '10000000-0000-4000-8000-000000000120';
 const MEMBER_SUBJECT = 'mock-google-subject-member';
 const runFile = promisify(execFile);
@@ -103,7 +108,7 @@ async function prepareAccessEvidence(
         displayName: 'Synthetic Playwright Access',
         active: true,
         googleGroupId: 'synthetic-playwright-access-group',
-        email: 'synthetic-playwright-access@psd401.net',
+        email: DESIGNATED_ACCESS_GROUP_EMAIL,
         fixtureKey: null,
         createdAt: now,
       })
