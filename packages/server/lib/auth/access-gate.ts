@@ -167,6 +167,8 @@ export interface AccessGateFirstLoginBinding {
   readonly successorSnapshotId: string;
   readonly successorSnapshotVersion: number;
   readonly normalizedEmail: string;
+  /** Protected one-time selector used only while recovery remains active. */
+  readonly transitionEmailDigest: string | null;
 }
 
 export interface AccessGateGranted {
@@ -220,6 +222,27 @@ export interface AccessGateAuditSink {
 export interface AccessGateDependencies {
   readonly store: AccessGateStore;
   readonly audit: AccessGateAuditSink;
+  /** Trusted deployment configuration; never accepted from a request body. */
+  readonly initialMobileTransitionEmailDigest?: string | null;
+}
+
+/**
+ * Parses the protected one-time mobile-transition selector without retaining
+ * or reflecting its value. Absence fails the staged transition closed.
+ */
+export function parseInitialMobileTransitionEmailDigest(
+  value: string | undefined,
+): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  const parsed = SecurityAuditHashSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new AccessGateConfigurationError(
+      'Initial mobile transition email digest must be a SHA-256 digest',
+    );
+  }
+  return parsed.data;
 }
 
 function validateCheckInput(input: AccessGateCheckInput): void {
@@ -327,6 +350,7 @@ function isSameFacilityScope(
 function validateEvidence(
   evidence: AccessGateEvidence,
   input: AccessGateCheckInput,
+  initialMobileTransitionEmailDigest: string | null,
 ):
   | Readonly<{
       granted: true;
@@ -370,12 +394,6 @@ function validateEvidence(
     (source) => accessGroupKey(source) !== accessGroupKey(designatedGroup),
   );
   const recoveryTransition = recoveryGroups.length === 1;
-  if (
-    recoveryTransition &&
-    !UuidSchema.safeParse(evidence.transitionRecoveryUserId).success
-  ) {
-    return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
-  }
   if (evidence.snapshot === null) {
     return { granted: false, reasonCode: 'ACCESS_SNAPSHOT_UNAVAILABLE' };
   }
@@ -463,7 +481,7 @@ function validateEvidence(
       designatedGroups,
       activeMemberGroups,
     );
-    if (!recoveryTransition && hasDesignatedBoundMembership) {
+    if (hasDesignatedBoundMembership) {
       return {
         granted: true,
         user: userResult.data,
@@ -501,7 +519,7 @@ function validateEvidence(
       };
     }
     if (
-      (recoveryTransition && input.source !== 'mobile') ||
+      recoveryTransition ||
       !hasExactEvaluatedMembership ||
       userResult.data.facilityScope.kind !== 'district'
     ) {
@@ -513,8 +531,13 @@ function validateEvidence(
     if (evidence.emailBindingConflict) {
       return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
     }
+    const transitionEmailDigestMatches =
+      initialMobileTransitionEmailDigest !== null &&
+      createHash('sha256').update(input.email, 'utf8').digest('hex') ===
+        initialMobileTransitionEmailDigest;
     if (
-      recoveryTransition ||
+      (recoveryTransition &&
+        (input.source !== 'mobile' || !transitionEmailDigestMatches)) ||
       !hasExactEvaluatedMembership ||
       evaluatedGroups === null
     ) {
@@ -571,6 +594,9 @@ function validateEvidence(
       successorSnapshotId,
       successorSnapshotVersion: successorVersion,
       normalizedEmail: input.email,
+      transitionEmailDigest: recoveryTransition
+        ? initialMobileTransitionEmailDigest
+        : null,
     }),
     designatedAdminEligible: true,
   };
@@ -612,7 +638,21 @@ export async function checkAccessGate(
     input.googleSubject,
     input.email,
   );
-  const evaluated = validateEvidence(evidence, input);
+  const configuredTransitionDigest =
+    dependencies.initialMobileTransitionEmailDigest ?? null;
+  if (
+    configuredTransitionDigest !== null &&
+    !SecurityAuditHashSchema.safeParse(configuredTransitionDigest).success
+  ) {
+    throw new AccessGateConfigurationError(
+      'Initial mobile transition email digest must be a SHA-256 digest',
+    );
+  }
+  const evaluated = validateEvidence(
+    evidence,
+    input,
+    configuredTransitionDigest,
+  );
   if (!evaluated.granted) {
     return deny(
       input,
@@ -885,9 +925,22 @@ export function createDrizzleAccessGateStore(
           };
         }
 
+        const transitionRecoverySourceIds = activeAccessGroupRows
+          .filter(({ id }) => id !== designatedAccessGroupSourceRef?.id)
+          .map(({ id }) => id);
         const transitionAdministratorUserIds =
-          activeAccessGroupRows.length === 2
-            ? await loadEffectiveAdministratorUserIds(transaction)
+          activeAccessGroupRows.length === 2 &&
+          transitionRecoverySourceIds.length === 1
+            ? await loadEffectiveAdministratorUserIds(transaction, {
+                accessState: {
+                  snapshotId: snapshotRow.id,
+                  snapshotVersion: snapshotRow.version,
+                  activeAccessGroupSourceIds: activeAccessGroupRows
+                    .map(({ id }) => id)
+                    .sort(),
+                },
+                eligibleAccessGroupSourceIds: transitionRecoverySourceIds,
+              })
             : [];
         const transitionRecoveryUserId =
           transitionAdministratorUserIds.length === 1
