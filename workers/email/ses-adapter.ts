@@ -23,6 +23,7 @@ import {
 export const SES_EMAIL_INTEGRATION_ID = 'ses-email' as const;
 export const SES_V2_PROVIDER = 'aws-ses-v2' as const;
 export const SES_CONFIGURATION_SET_NAME = 'psd-eoc-transactional' as const;
+export const SES_FROM_EMAIL_ADDRESS = 'eoc-alerts@psd401.net' as const;
 
 export const SES_CORRELATION_TAG_NAMES = Object.freeze({
   attemptId: 'psd-eoc-attempt-id',
@@ -33,7 +34,6 @@ export const SES_CORRELATION_TAG_NAMES = Object.freeze({
   eventKind: 'psd-eoc-event-kind',
 });
 
-const SES_FROM_DOMAIN = 'alerts.psd401.net';
 const SAFE_MESSAGE_ID_PATTERN = /^[A-Za-z0-9._@:/+=-]+$/u;
 
 export interface SesV2MessagePart {
@@ -134,20 +134,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function validFromEmailAddress(value: string): boolean {
-  if (
-    value.length < 3 ||
-    value.length > 320 ||
-    value.trim() !== value ||
-    /[\0\r\n,;]/u.test(value)
-  ) {
-    return false;
-  }
-  const separator = value.lastIndexOf('@');
-  return (
-    separator > 0 &&
-    separator < value.length - 1 &&
-    value.slice(separator + 1).toLowerCase() === SES_FROM_DOMAIN
-  );
+  return value === SES_FROM_EMAIL_ADDRESS;
 }
 
 function parseOptions(options: SesV2EmailAdapterOptions): Readonly<{
