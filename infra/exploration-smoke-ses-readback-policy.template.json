@@ -1,0 +1,29 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Retained least-privilege SES readback policy for the protected PSD EOC exploration deployment role",
+  "Resources": {
+    "ExplorationSmokeSesReadbackPolicy": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "ses:GetConfigurationSet",
+                "ses:GetConfigurationSetEventDestinations"
+              ],
+              "Effect": "Allow",
+              "Resource": "arn:aws:ses:us-west-2:338414773271:configuration-set/psd-eoc-transactional",
+              "Sid": "ReadCanonicalConfigurationSetOnly"
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "psd-eoc-exploration-smoke-ses-readback",
+        "Roles": ["psd-eoc-exploration-smoke-github-deploy"]
+      },
+      "Type": "AWS::IAM::Policy",
+      "UpdateReplacePolicy": "Retain"
+    }
+  }
+}
