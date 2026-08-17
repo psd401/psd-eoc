@@ -259,7 +259,11 @@ BEGIN
 		graph_variant := 'reviewed-live';
 		expected_graph_row_count := 57;
 		expected_dependency_count := 55;
-		expected_graph_fingerprint := 'eac73c9cbee04db4187c9b4c77b7922c';
+		-- Issue #214 re-read the unchanged live graph inside a forced read-only
+		-- VPC transaction. The original review rounded configuration version 2's
+		-- created_at from 20:49:06.444626Z to 20:49:06.444Z; this is the exact
+		-- full-row fingerprint with the retained PostgreSQL microseconds.
+		expected_graph_fingerprint := 'b03588418b5e90114442379b3216d91f';
 	ELSE
 		RAISE EXCEPTION 'Canonical synthetic facility active states do not match an approved purge shape'
 			USING ERRCODE = '55000';
