@@ -253,7 +253,7 @@ jobs:
           test "$(jq '[.Resources[] | select(.Type == "AWS::SNS::Topic")] | length' "$template")" -eq 1
           test "$(jq '[.Resources[] | select(.Type == "AWS::SNS::TopicPolicy")] | length' "$template")" -eq 1
           test "$(jq '[.Resources[] | select(.Type == "AWS::SES::ConfigurationSet")] | length' "$template")" -eq 1
-          test "$(jq '[.Resources[] | select(.Type == "AWS::SES::ConfigurationSetEventDestination")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::SES::ConfigurationSetEventDestination")] | length' "$template")" -eq 0
           test "$(jq '[.Resources[] | select(.Type == "AWS::SecretsManager::Secret")] | length' "$template")" -eq 5
           test "$(jq '[.Resources[] | select(.Type == "AWS::RDS::DBCluster" and (.Properties.EnableHttpEndpoint // false) == true)] | length' "$template")" -eq 0
           test "$(jq '[.Resources[] | select((.Type | test("^AWS::(Lambda|Scheduler|Events)::")) or .Type == "AWS::ECS::Service" or .Type == "AWS::SNS::Subscription" or .Type == "AWS::SES::EmailIdentity")] | length' "$template")" -eq 0
@@ -293,8 +293,7 @@ jobs:
             ($resources | map(select(.value.Type == "AWS::SNS::Topic"))) as $email_event_topics |
             ($email_event_topics[0].key) as $email_event_topic_id |
             ($resources | map(select(.value.Type == "AWS::SES::ConfigurationSet"))) as $configuration_sets |
-            ($configuration_sets[0].key) as $configuration_set_id |
-            ($resources | map(select(.value.Type == "AWS::SES::ConfigurationSetEventDestination"))) as $event_destinations |
+            ($resources | map(select(.value.Type == "AWS::AppRunner::Service"))) as $app_runner_services |
             ($resources | map(select(.value.Type == "AWS::SNS::TopicPolicy"))) as $topic_policies |
             ([$queues[].value.Properties.QueueName] | sort) == [
               "psd-eoc-email",
@@ -407,6 +406,14 @@ jobs:
             $configuration_sets[0].value.Properties.SendingOptions.SendingEnabled == false and
             $configuration_sets[0].value.DeletionPolicy == "Retain" and
             $configuration_sets[0].value.UpdateReplacePolicy == "Retain" and
+            ($app_runner_services | length) == 1 and
+            ($app_runner_services[0].value.Properties.Tags | sort_by(.Key)) == ([
+              {Key: "Application", Value: "PSD EOC Exploration Smoke"},
+              {Key: "DataClassification", Value: "synthetic-only"},
+              {Key: "Environment", Value: "exploration-smoke"},
+              {Key: "ExpectedAwsAccountAlias", Value: "psd401"},
+              {Key: "ManagedBy", Value: "AWS CDK"}
+            ] | sort_by(.Key)) and
             ($email_event_topics | length) == 1 and
             $email_event_topics[0].value.Properties.DisplayName == "PSD EOC live-pilot SES event evidence" and
             $email_event_topics[0].value.Properties.TopicName == "psd-eoc-email-events" and
@@ -433,25 +440,12 @@ jobs:
                 "AWS:SourceArn": "arn:aws:ses:us-west-2:338414773271:configuration-set/psd-eoc-transactional"
               }
             )] | length) == 1 and
-            ($event_destinations | length) == 1 and
-            $event_destinations[0].value.DependsOn == [$topic_policies[0].key] and
-            $event_destinations[0].value.Properties.ConfigurationSetName == {Ref: $configuration_set_id} and
-            $event_destinations[0].value.Properties.EventDestination.Enabled == true and
-            ($event_destinations[0].value.Properties.EventDestination.MatchingEventTypes | sort) == [
-              "BOUNCE",
-              "COMPLAINT",
-              "DELIVERY",
-              "DELIVERY_DELAY",
-              "REJECT",
-              "RENDERING_FAILURE",
-              "SEND"
-            ] and
-            $event_destinations[0].value.Properties.EventDestination.Name == "psd-eoc-email-events" and
-            $event_destinations[0].value.Properties.EventDestination.SnsDestination.TopicARN == {Ref: $email_event_topic_id} and
             .Outputs.EnvironmentName.Value == "live-pilot" and
             .Outputs.DataClassification.Value == "staff-minimized" and
             .Outputs.SesIdentityDomain.Value == "psd401.net" and
             .Outputs.SesFromAddress.Value == "eoc-alerts@psd401.net" and
+            .Outputs.SesEmailEventDestinationName.Value == "psd-eoc-email-events" and
+            .Outputs.SesEmailEventDestinationManagement.Value == "external-readback" and
             .Outputs.SesIntegrationTruth.Value == "configured-unverified" and
             .Outputs.EmailChannelState.Value == "disabled"
           ' "$template" > /dev/null
@@ -587,7 +581,7 @@ jobs:
             echo
             echo "## Consequences"
             echo
-            echo "AWS charges continue. The protected bootstrap physically removes only the exact reviewed 57-row canonical synthetic facility fixture, preserves its immutable audit and idempotency truth behind opaque facility anchors, loads only reference catalogs, and maintains one approved staff access fixture. App Runner remains publicly reachable at its AWS URL and reaches the private Aurora writer through a VPC connector. One NAT gateway provides bounded public HTTPS egress for Google OIDC; the database stays private, requires TLS, and has its cluster HTTP endpoint disabled. A protected one-off Fargate task runs the exact reviewed image digest inside the database VPC before the App Runner update. The protected workflow sets 14-day retention on the exact App Runner service and application log groups after service creation. That retention write permanently expires log events older than 14 days; CloudWatch Logs ordinarily deletes marked events within 72 hours. The stack adds a retained, disabled SES configuration set; an encrypted SNS/KMS delivery-evidence destination; a dark email queue and DLQ; and a non-executable queue-consumer role. The configuration remains configured-unverified and disabled: no runtime role has SES send, SNS publish, or queue-producer authority; there is no executable email worker, subscription, or recipient; and no DNS, certificate, GCP, mobile-store, recipient, provider-send, or message-send operation is performed."
+            echo "AWS charges continue. The protected bootstrap physically removes only the exact reviewed 57-row canonical synthetic facility fixture, preserves its immutable audit and idempotency truth behind opaque facility anchors, loads only reference catalogs, and maintains one approved staff access fixture. App Runner remains publicly reachable at its AWS URL and reaches the private Aurora writer through a VPC connector. One NAT gateway provides bounded public HTTPS egress for Google OIDC; the database stays private, requires TLS, and has its cluster HTTP endpoint disabled. A protected one-off Fargate task runs the exact reviewed image digest inside the database VPC before the App Runner update. The protected workflow sets 14-day retention on the exact App Runner service and application log groups after service creation. That retention write permanently expires log events older than 14 days; CloudWatch Logs ordinarily deletes marked events within 72 hours. The stack owns a retained, disabled SES configuration set; an encrypted retained SNS/KMS evidence topic; a dark email queue and DLQ; and a non-executable queue-consumer role. AWS CloudFormation cannot import the already-created SES event destination, so it remains one explicitly external resource whose exact enabled evidence-only configuration is read back before and after deployment. The configuration remains configured-unverified and sending-disabled: no runtime role has SES send, SNS publish, or queue-producer authority; there is no executable email worker, subscription, or recipient; and no DNS, certificate, GCP, mobile-store, recipient, provider-send, or message-send operation is performed."
             echo
             echo "## Resource inventory"
             echo
@@ -1044,13 +1038,116 @@ jobs:
           [[ "$prior_vpc_connector_arn" =~ ^arn:aws:apprunner:us-west-2:338414773271:vpcconnector/psd-eoc-exploration-smoke-native/[0-9]+/[A-Za-z0-9]{32}$ ]]
           printf '%s\n' "$prior_vpc_connector_arn" > ../artifacts/readback/app-runner-vpc-connector-before.txt
 
-          aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > "$before_resources"
-          recovery_ids='["EmailWorkerLogGroup0611E5C2","EmailDeadLetterQueue5E91C06C","EmailConfigurationSet","EmailEventsKey619540BF"]'
-          recovery_rows=$(jq --argjson ids "$recovery_ids" '[.StackResourceSummaries[] | select(.LogicalResourceId as $id | $ids | index($id))]' "$before_resources")
-          managed_count=$(jq '[.[] | select(.ResourceStatus != "DELETE_SKIPPED" and .ResourceStatus != "DELETE_COMPLETE")] | length' <<< "$recovery_rows")
-          retained_count=$(jq '[.[] | select(.ResourceStatus == "DELETE_SKIPPED")] | length' <<< "$recovery_rows")
+          aws sesv2 get-configuration-set \
+            --configuration-set-name psd-eoc-transactional \
+            > ../artifacts/readback/email-recovery-external-configuration-set-before.json
+          jq -e '
+            .ConfigurationSetName == "psd-eoc-transactional" and
+            .SendingOptions == {SendingEnabled: false}
+          ' ../artifacts/readback/email-recovery-external-configuration-set-before.json > /dev/null
+          aws sesv2 get-configuration-set-event-destinations \
+            --configuration-set-name psd-eoc-transactional \
+            > ../artifacts/readback/email-recovery-external-event-destination-before.json
+          jq -e '
+            (.EventDestinations | length) == 1 and
+            .EventDestinations[0].Name == "psd-eoc-email-events" and
+            .EventDestinations[0].Enabled == true and
+            (.EventDestinations[0].MatchingEventTypes | sort) == [
+              "BOUNCE",
+              "COMPLAINT",
+              "DELIVERY",
+              "DELIVERY_DELAY",
+              "REJECT",
+              "RENDERING_FAILURE",
+              "SEND"
+            ] and
+            .EventDestinations[0].SnsDestination == {
+              TopicArn: "arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events"
+            }
+          ' ../artifacts/readback/email-recovery-external-event-destination-before.json > /dev/null
 
-          if [[ "$managed_count" == "0" && "$retained_count" != "4" ]]; then
+          oidc_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+          [[ "$oidc_caller_arn" =~ ^arn:aws:sts::338414773271:assumed-role/psd-eoc-exploration-smoke-github-deploy/[A-Za-z0-9+=,.@_-]+$ ]]
+          current_template_response=../artifacts/readback/email-recovery-current-template-response.json
+          current_template=../artifacts/readback/email-recovery-current-template.json
+          template_credentials=$(aws sts assume-role \
+            --role-arn "$CDK_DEPLOY_ROLE_ARN" \
+            --role-session-name "psd-eoc-import-template-${GITHUB_RUN_ID}" \
+            --duration-seconds 900 \
+            --query Credentials \
+            --output json)
+          template_access_key=$(jq -er .AccessKeyId <<< "$template_credentials")
+          template_secret_key=$(jq -er .SecretAccessKey <<< "$template_credentials")
+          template_session_token=$(jq -er .SessionToken <<< "$template_credentials")
+          set +e
+          (
+            set -euo pipefail
+            template_aws() {
+              AWS_ACCESS_KEY_ID="$template_access_key" \
+                AWS_SECRET_ACCESS_KEY="$template_secret_key" \
+                AWS_SESSION_TOKEN="$template_session_token" \
+                aws "$@"
+            }
+            template_aws sts get-caller-identity --query Arn --output text \
+              > ../artifacts/readback/email-recovery-template-caller-arn.txt
+            template_aws cloudformation get-template \
+              --stack-name "$STACK_NAME" \
+              --template-stage Original \
+              --output json > "$current_template_response"
+          )
+          template_read_exit_code=$?
+          set -e
+          unset template_credentials template_access_key template_secret_key template_session_token
+          if [[ "$template_read_exit_code" -ne 0 ]]; then
+            exit "$template_read_exit_code"
+          fi
+          unset template_read_exit_code
+          template_caller_arn=$(cat ../artifacts/readback/email-recovery-template-caller-arn.txt)
+          [[ "$template_caller_arn" =~ ^arn:aws:sts::338414773271:assumed-role/cdk-hnb659fds-deploy-role-338414773271-us-west-2/psd-eoc-import-template-${GITHUB_RUN_ID}$ ]]
+          post_template_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+          test "$post_template_caller_arn" = "$oidc_caller_arn"
+          unset template_caller_arn post_template_caller_arn
+          jq -e '
+            (.TemplateBody | type) == "object" and
+            (.TemplateBody.Resources | type) == "object"
+          ' "$current_template_response" > /dev/null
+          jq -S '.TemplateBody' "$current_template_response" > "$current_template"
+          jq -e '
+            [.Resources | to_entries[] | select(
+              .value.Type == "AWS::SES::ConfigurationSetEventDestination" or
+              (.key | test("EventDestination"; "i"))
+            )] | length == 0
+          ' "$current_template" > /dev/null
+
+          aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > "$before_resources"
+          jq -e '
+            [.StackResourceSummaries[] | select(
+              .ResourceType == "AWS::SES::ConfigurationSetEventDestination" or
+              (.LogicalResourceId | test("EventDestination"; "i"))
+            )] | length == 0
+          ' "$before_resources" > /dev/null
+          jq -e --slurpfile candidate "$candidate_template" '
+            .Resources.AppRunnerVpcConnector.Properties ==
+              $candidate[0].Resources.AppRunnerVpcConnector.Properties and
+            .Resources.AppRunnerService.Properties.ServiceName ==
+              $candidate[0].Resources.AppRunnerService.Properties.ServiceName and
+            (.Resources.AppRunnerService.Properties.Tags | sort_by(.Key)) ==
+              ($candidate[0].Resources.AppRunnerService.Properties.Tags | sort_by(.Key)) and
+            (.Resources.AppRunnerService.Properties.EncryptionConfiguration // null) ==
+              ($candidate[0].Resources.AppRunnerService.Properties.EncryptionConfiguration // null)
+          ' "$current_template" > /dev/null
+
+          recovery_ids='["EmailWorkerLogGroup0611E5C2","EmailDeadLetterQueue5E91C06C","EmailConfigurationSet","EmailEventsKey619540BF","EmailQueue9C1DA90F","EmailEventsTopic13C4A145"]'
+          managed_rows=$(jq --argjson ids "$recovery_ids" '[.StackResourceSummaries[] | select(
+            .LogicalResourceId as $id |
+            ($ids | index($id)) and
+            .ResourceStatus != "DELETE_SKIPPED" and
+            .ResourceStatus != "DELETE_COMPLETE"
+          )]' "$before_resources")
+          managed_ids=$(jq '[.[].LogicalResourceId]' <<< "$managed_rows")
+          recovery_rows=$managed_rows
+
+          if [[ "$(jq 'length' <<< "$managed_rows")" != "6" ]]; then
             deploy_credentials=$(aws sts assume-role \
               --role-arn "$CDK_DEPLOY_ROLE_ARN" \
               --role-session-name "psd-eoc-retained-email-readback-${GITHUB_RUN_ID}" \
@@ -1064,10 +1161,14 @@ jobs:
               AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
               AWS_SESSION_TOKEN="$deploy_session_token" \
               aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
-              | jq --argjson ids "$recovery_ids" '[.StackEvents[] | select(
-                  .LogicalResourceId as $id |
-                  ($ids | index($id)) and .ResourceStatus == "DELETE_SKIPPED"
-                ) | {
+              | jq --argjson ids "$recovery_ids" --argjson managed "$managed_ids" '[
+                . as $response |
+                $ids[] as $id |
+                select(($managed | index($id)) == null) |
+                first($response.StackEvents[] | select(
+                  .LogicalResourceId == $id and
+                  .ResourceStatus == "DELETE_SKIPPED"
+                )) | {
                   LogicalResourceId,
                   PhysicalResourceId,
                   ResourceStatus,
@@ -1075,13 +1176,40 @@ jobs:
                   Timestamp
                 }]' > ../artifacts/readback/email-recovery-retained-events.json
             unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token
-            recovery_rows=$(cat ../artifacts/readback/email-recovery-retained-events.json)
-            retained_count=$(jq 'length' <<< "$recovery_rows")
+            recovery_rows=$(jq -cn \
+              --argjson managed "$managed_rows" \
+              --slurpfile retained ../artifacts/readback/email-recovery-retained-events.json \
+              '$managed + $retained[0]')
           fi
+          managed_count=$(jq '[.[] | select(.ResourceStatus != "DELETE_SKIPPED")] | length' <<< "$recovery_rows")
+          retained_count=$(jq '[.[] | select(.ResourceStatus == "DELETE_SKIPPED")] | length' <<< "$recovery_rows")
+          retained_ids=$(jq '[.[] | select(.ResourceStatus == "DELETE_SKIPPED") | .LogicalResourceId]' <<< "$recovery_rows")
 
-          if [[ "$managed_count" == "4" && "$retained_count" == "0" ]]; then
+          jq -e '
+            def exact($id; $type; $physical):
+              [.[] | select(
+                .LogicalResourceId == $id and
+                .ResourceType == $type and
+                (
+                  .ResourceStatus == "CREATE_COMPLETE" or
+                  .ResourceStatus == "UPDATE_COMPLETE" or
+                  .ResourceStatus == "IMPORT_COMPLETE" or
+                  .ResourceStatus == "DELETE_SKIPPED"
+                ) and
+                (.PhysicalResourceId | test($physical))
+              )] | length == 1;
+            length == 6 and
+            exact("EmailWorkerLogGroup0611E5C2"; "AWS::Logs::LogGroup"; "^/psd-eoc/workers/email$") and
+            exact("EmailDeadLetterQueue5E91C06C"; "AWS::SQS::Queue"; "^https://sqs[.]us-west-2[.]amazonaws[.]com/338414773271/psd-eoc-email-dlq$") and
+            exact("EmailConfigurationSet"; "AWS::SES::ConfigurationSet"; "^psd-eoc-transactional$") and
+            exact("EmailEventsKey619540BF"; "AWS::KMS::Key"; "^[0-9a-f-]{36}$") and
+            exact("EmailQueue9C1DA90F"; "AWS::SQS::Queue"; "^https://sqs[.]us-west-2[.]amazonaws[.]com/338414773271/psd-eoc-email$") and
+            exact("EmailEventsTopic13C4A145"; "AWS::SNS::Topic"; "^arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events$")
+          ' <<< "$recovery_rows" > /dev/null
+
+          if [[ "$managed_count" == "6" && "$retained_count" == "0" ]]; then
             jq -e '
-              length == 4 and
+              length == 6 and
               all(.[];
                 .ResourceStatus == "CREATE_COMPLETE" or
                 .ResourceStatus == "UPDATE_COMPLETE" or
@@ -1089,35 +1217,26 @@ jobs:
               )
             ' <<< "$recovery_rows" > /dev/null
             jq -n --arg state already-managed '{state: $state}' > ../artifacts/readback/email-recovery-result.json
-          elif [[ "$managed_count" == "0" && "$retained_count" == "4" ]]; then
-            jq -e '
-              def exact($id; $type; $physical):
-                [.[] | select(
-                  .LogicalResourceId == $id and
-                  .ResourceType == $type and
-                  .ResourceStatus == "DELETE_SKIPPED" and
-                  (.PhysicalResourceId | test($physical))
-                )] | length == 1;
-              length == 4 and
-              exact("EmailWorkerLogGroup0611E5C2"; "AWS::Logs::LogGroup"; "^/psd-eoc/workers/email$") and
-              exact("EmailDeadLetterQueue5E91C06C"; "AWS::SQS::Queue"; "^https://sqs[.]us-west-2[.]amazonaws[.]com/338414773271/psd-eoc-email-dlq$") and
-              exact("EmailConfigurationSet"; "AWS::SES::ConfigurationSet"; "^psd-eoc-transactional$") and
-              exact("EmailEventsKey619540BF"; "AWS::KMS::Key"; "^[0-9a-f-]{36}$")
-            ' <<< "$recovery_rows" > /dev/null
-
+          elif [[ "$((managed_count + retained_count))" == "6" && "$retained_count" -gt 0 ]]; then
             log_group_name=$(jq -er '.[] | select(.LogicalResourceId == "EmailWorkerLogGroup0611E5C2") | .PhysicalResourceId' <<< "$recovery_rows")
             dlq_url=$(jq -er '.[] | select(.LogicalResourceId == "EmailDeadLetterQueue5E91C06C") | .PhysicalResourceId' <<< "$recovery_rows")
             configuration_set_name=$(jq -er '.[] | select(.LogicalResourceId == "EmailConfigurationSet") | .PhysicalResourceId' <<< "$recovery_rows")
             events_key_id=$(jq -er '.[] | select(.LogicalResourceId == "EmailEventsKey619540BF") | .PhysicalResourceId' <<< "$recovery_rows")
+            email_queue_url=$(jq -er '.[] | select(.LogicalResourceId == "EmailQueue9C1DA90F") | .PhysicalResourceId' <<< "$recovery_rows")
+            events_topic_arn=$(jq -er '.[] | select(.LogicalResourceId == "EmailEventsTopic13C4A145") | .PhysicalResourceId' <<< "$recovery_rows")
             jq -n \
               --arg log_group_name "$log_group_name" \
               --arg dlq_url "$dlq_url" \
               --arg configuration_set_name "$configuration_set_name" \
-              --arg events_key_id "$events_key_id" '{
+              --arg events_key_id "$events_key_id" \
+              --arg email_queue_url "$email_queue_url" \
+              --arg events_topic_arn "$events_topic_arn" '{
                 EmailWorkerLogGroup0611E5C2: {LogGroupName: $log_group_name},
                 EmailDeadLetterQueue5E91C06C: {QueueUrl: $dlq_url},
                 EmailConfigurationSet: {Name: $configuration_set_name},
-                EmailEventsKey619540BF: {KeyId: $events_key_id}
+                EmailEventsKey619540BF: {KeyId: $events_key_id},
+                EmailQueue9C1DA90F: {QueueUrl: $email_queue_url},
+                EmailEventsTopic13C4A145: {TopicArn: $events_topic_arn}
               }' > "$mapping"
             jq -e '
               .Resources.EmailWorkerLogGroup0611E5C2.Type == "AWS::Logs::LogGroup" and
@@ -1134,7 +1253,19 @@ jobs:
               .Resources.EmailConfigurationSet.Properties.SendingOptions.SendingEnabled == false and
               .Resources.EmailEventsKey619540BF.Type == "AWS::KMS::Key" and
               .Resources.EmailEventsKey619540BF.DeletionPolicy == "Retain" and
-              .Resources.EmailEventsKey619540BF.Properties.EnableKeyRotation == true
+              .Resources.EmailEventsKey619540BF.Properties.EnableKeyRotation == true and
+              .Resources.EmailQueue9C1DA90F.Type == "AWS::SQS::Queue" and
+              .Resources.EmailQueue9C1DA90F.DeletionPolicy == "Retain" and
+              .Resources.EmailQueue9C1DA90F.UpdateReplacePolicy == "Retain" and
+              .Resources.EmailQueue9C1DA90F.Properties.QueueName == "psd-eoc-email" and
+              .Resources.EmailQueue9C1DA90F.Properties.SqsManagedSseEnabled == true and
+              .Resources.EmailQueue9C1DA90F.Properties.MessageRetentionPeriod == 345600 and
+              .Resources.EmailQueue9C1DA90F.Properties.VisibilityTimeout == 60 and
+              .Resources.EmailEventsTopic13C4A145.Type == "AWS::SNS::Topic" and
+              .Resources.EmailEventsTopic13C4A145.DeletionPolicy == "Retain" and
+              .Resources.EmailEventsTopic13C4A145.UpdateReplacePolicy == "Retain" and
+              .Resources.EmailEventsTopic13C4A145.Properties.TopicName == "psd-eoc-email-events" and
+              .Resources.EmailEventsTopic13C4A145.Properties.DisplayName == "PSD EOC live-pilot SES event evidence"
             ' "$candidate_template" > /dev/null
 
             oidc_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
@@ -1196,16 +1327,20 @@ jobs:
               (.TemplateBody.Resources | type) == "object"
             ' "$current_template_response" > /dev/null
             jq -S '.TemplateBody' "$current_template_response" > "$current_template"
-            jq -e --argjson ids "$recovery_ids" '
+            jq -e --argjson ids "$managed_ids" '
+              . as $template |
+              all($ids[]; $template.Resources[.] != null)
+            ' "$current_template" > /dev/null
+            jq -e --argjson ids "$retained_ids" '
               . as $template |
               all($ids[]; $template.Resources[.] == null)
             ' "$current_template" > /dev/null
-            jq -S --slurpfile candidate "$candidate_template" --argjson ids "$recovery_ids" '
+            jq -S --slurpfile candidate "$candidate_template" --argjson ids "$retained_ids" '
               reduce $ids[] as $id (.;
                 .Resources[$id] = $candidate[0].Resources[$id]
               )
             ' "$current_template" > "$import_template"
-            jq -e --slurpfile current "$current_template" --argjson ids "$recovery_ids" '
+            jq -e --slurpfile current "$current_template" --argjson ids "$retained_ids" '
               . as $import |
               ($current[0].Resources | keys) as $current_ids |
               ((($import.Resources | keys) - $current_ids) | sort) == ($ids | sort) and
@@ -1218,7 +1353,7 @@ jobs:
               ParameterKey,
               UsePreviousValue: true
             }] | sort_by(.ParameterKey)' "$before_stack" > "$import_parameters"
-            jq '[
+            jq --argjson retained "$retained_ids" '[
               {
                 LogicalResourceId: "EmailWorkerLogGroup0611E5C2",
                 ResourceIdentifier: {
@@ -1246,16 +1381,26 @@ jobs:
                   KeyId: .EmailEventsKey619540BF.KeyId
                 },
                 ResourceType: "AWS::KMS::Key"
+              },
+              {
+                LogicalResourceId: "EmailQueue9C1DA90F",
+                ResourceIdentifier: {
+                  QueueUrl: .EmailQueue9C1DA90F.QueueUrl
+                },
+                ResourceType: "AWS::SQS::Queue"
+              },
+              {
+                LogicalResourceId: "EmailEventsTopic13C4A145",
+                ResourceIdentifier: {
+                  TopicArn: .EmailEventsTopic13C4A145.TopicArn
+                },
+                ResourceType: "AWS::SNS::Topic"
               }
-            ]' "$mapping" > "$import_resources"
-            jq -e '
-              length == 4 and
-              ([.[].LogicalResourceId] | sort) == [
-                "EmailConfigurationSet",
-                "EmailDeadLetterQueue5E91C06C",
-                "EmailEventsKey619540BF",
-                "EmailWorkerLogGroup0611E5C2"
-              ]
+            ] | map(select(.LogicalResourceId as $id | $retained | index($id)))' \
+              "$mapping" > "$import_resources"
+            jq -e --argjson retained "$retained_ids" '
+              length == ($retained | length) and
+              ([.[].LogicalResourceId] | sort) == ($retained | sort)
             ' "$import_resources" > /dev/null
 
             import_template_sha256=$(sha256sum "$import_template" | cut -d' ' -f1)
@@ -1360,7 +1505,7 @@ jobs:
             unset publisher_caller_arn post_publish_caller_arn
 
             import_change_set_name="psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            import_description="Exact four-resource retained dark-email recovery for GitHub run $GITHUB_RUN_ID"
+            import_description="Exact ${retained_count}-resource retained dark-email recovery for GitHub run $GITHUB_RUN_ID"
             import_client_token="psd-eoc-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             jq -n \
               --arg stack_name "$STACK_NAME" \
@@ -1447,9 +1592,10 @@ jobs:
                 --stack-name "$STACK_NAME" \
                 --change-set-name "$change_set_id" > "$change_set_readback"
               jq -e \
-                --arg change_set_id "$change_set_id" \
-                --arg change_set_name "$import_change_set_name" \
-                --arg description "$import_description" '
+              --arg change_set_id "$change_set_id" \
+              --arg change_set_name "$import_change_set_name" \
+              --arg description "$import_description" \
+              --slurpfile resources "$import_resources" '
                 .ChangeSetId == $change_set_id and
                 .ChangeSetName == $change_set_name and
                 .StackName == "PsdEocExplorationSmoke" and
@@ -1457,17 +1603,18 @@ jobs:
                 .Status == "CREATE_COMPLETE" and
                 .ExecutionStatus == "AVAILABLE" and
                 .Capabilities == ["CAPABILITY_NAMED_IAM"] and
-                  (.Changes | length) == 4 and
+                  (.Changes | length) == ($resources[0] | length) and
                   ([.Changes[].ResourceChange | {
                     action: .Action,
                     logicalId: .LogicalResourceId,
                     resourceType: .ResourceType
-                  }] | sort_by(.logicalId)) == [
-                    {action: "Import", logicalId: "EmailConfigurationSet", resourceType: "AWS::SES::ConfigurationSet"},
-                    {action: "Import", logicalId: "EmailDeadLetterQueue5E91C06C", resourceType: "AWS::SQS::Queue"},
-                    {action: "Import", logicalId: "EmailEventsKey619540BF", resourceType: "AWS::KMS::Key"},
-                    {action: "Import", logicalId: "EmailWorkerLogGroup0611E5C2", resourceType: "AWS::Logs::LogGroup"}
-                  ]
+                  }] | sort_by(.logicalId)) == (
+                    $resources[0] | map({
+                      action: "Import",
+                      logicalId: .LogicalResourceId,
+                      resourceType: .ResourceType
+                    }) | sort_by(.logicalId)
+                  )
               ' "$change_set_readback" > /dev/null
               test "$(import_aws cloudformation describe-stacks \
                 --stack-name "$STACK_NAME" \
@@ -1532,7 +1679,9 @@ jobs:
               imported("EmailWorkerLogGroup0611E5C2"; "AWS::Logs::LogGroup"; $expected[0].EmailWorkerLogGroup0611E5C2.LogGroupName) and
               imported("EmailDeadLetterQueue5E91C06C"; "AWS::SQS::Queue"; $expected[0].EmailDeadLetterQueue5E91C06C.QueueUrl) and
               imported("EmailConfigurationSet"; "AWS::SES::ConfigurationSet"; $expected[0].EmailConfigurationSet.Name) and
-              imported("EmailEventsKey619540BF"; "AWS::KMS::Key"; $expected[0].EmailEventsKey619540BF.KeyId)
+              imported("EmailEventsKey619540BF"; "AWS::KMS::Key"; $expected[0].EmailEventsKey619540BF.KeyId) and
+              imported("EmailQueue9C1DA90F"; "AWS::SQS::Queue"; $expected[0].EmailQueue9C1DA90F.QueueUrl) and
+              imported("EmailEventsTopic13C4A145"; "AWS::SNS::Topic"; $expected[0].EmailEventsTopic13C4A145.TopicArn)
             ' "$after_resources" > /dev/null
             jq -n --arg state imported '{state: $state}' > ../artifacts/readback/email-recovery-result.json
           else
@@ -2096,6 +2245,8 @@ jobs:
           ses_identity_domain=$(jq -er ".${STACK_NAME}.SesIdentityDomain" "$outputs")
           ses_from_address=$(jq -er ".${STACK_NAME}.SesFromAddress" "$outputs")
           ses_configuration_set_name=$(jq -er ".${STACK_NAME}.SesConfigurationSetName" "$outputs")
+          ses_event_destination_name=$(jq -er ".${STACK_NAME}.SesEmailEventDestinationName" "$outputs")
+          ses_event_destination_management=$(jq -er ".${STACK_NAME}.SesEmailEventDestinationManagement" "$outputs")
           ses_events_topic_arn=$(jq -er ".${STACK_NAME}.SesEmailEventsTopicArn" "$outputs")
           ses_events_key_arn=$(jq -er ".${STACK_NAME}.SesEmailEventsKeyArn" "$outputs")
           ses_integration_truth=$(jq -er ".${STACK_NAME}.SesIntegrationTruth" "$outputs")
@@ -2116,6 +2267,8 @@ jobs:
           test "$ses_identity_domain" = "psd401.net"
           test "$ses_from_address" = "eoc-alerts@psd401.net"
           test "$ses_configuration_set_name" = "psd-eoc-transactional"
+          test "$ses_event_destination_name" = "psd-eoc-email-events"
+          test "$ses_event_destination_management" = "external-readback"
           test "$ses_events_topic_arn" = "arn:aws:sns:$AWS_REGION:$AWS_ACCOUNT_ID:psd-eoc-email-events"
           [[ "$ses_events_key_arn" =~ ^arn:aws:kms:us-west-2:338414773271:key/[0-9a-f-]{36}$ ]]
           test "$ses_integration_truth" = "configured-unverified"
@@ -2146,6 +2299,8 @@ jobs:
           test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesIdentityDomain") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_identity_domain"
           test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesFromAddress") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_from_address"
           test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesConfigurationSetName") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_configuration_set_name"
+          test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesEmailEventDestinationName") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_event_destination_name"
+          test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesEmailEventDestinationManagement") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_event_destination_management"
           test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesEmailEventsTopicArn") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_events_topic_arn"
           test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesEmailEventsKeyArn") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_events_key_arn"
           test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "SesIntegrationTruth") | .OutputValue' artifacts/readback/stack-final.json)" = "$ses_integration_truth"
@@ -2175,7 +2330,6 @@ jobs:
           ses_configuration_set_logical_id=$(jq -er '.Outputs.SesConfigurationSetName.Value.Ref' "$runtime_template")
           ses_events_topic_logical_id=$(jq -er '.Outputs.SesEmailEventsTopicArn.Value.Ref' "$runtime_template")
           ses_events_key_logical_id=$(jq -er '.Outputs.SesEmailEventsKeyArn.Value."Fn::GetAtt"[0]' "$runtime_template")
-          ses_event_destination_logical_id=$(jq -er '[.Resources | to_entries[] | select(.value.Type == "AWS::SES::ConfigurationSetEventDestination") | .key] | if length == 1 then .[0] else error("unexpected SES event-destination inventory") end' "$runtime_template")
           ses_events_topic_policy_logical_id=$(jq -er '[.Resources | to_entries[] | select(.value.Type == "AWS::SNS::TopicPolicy") | .key] | if length == 1 then .[0] else error("unexpected SNS topic-policy inventory") end' "$runtime_template")
           ses_events_key_id=${ses_events_key_arn##*/}
 
@@ -2191,8 +2345,10 @@ jobs:
           for logical_id in \
             "$email_worker_log_group_logical_id" \
             "$email_dlq_logical_id" \
+            "$email_queue_logical_id" \
             "$ses_configuration_set_logical_id" \
-            "$ses_events_key_logical_id"; do
+            "$ses_events_key_logical_id" \
+            "$ses_events_topic_logical_id"; do
             [[ "$logical_id" =~ ^[A-Za-z0-9]+$ ]]
             AWS_ACCESS_KEY_ID="$deploy_access_key" \
               AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
@@ -2216,6 +2372,13 @@ jobs:
           ' "artifacts/readback/email-recovery-drift-${email_dlq_logical_id}.json" > /dev/null
           jq -e '
             .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC" and
+            (.StackResourceDrift.ActualProperties | fromjson | .QueueName) == "psd-eoc-email" and
+            (.StackResourceDrift.ActualProperties | fromjson | .MessageRetentionPeriod) == 345600 and
+            (.StackResourceDrift.ActualProperties | fromjson | .VisibilityTimeout) == 60 and
+            (.StackResourceDrift.ActualProperties | fromjson | .SqsManagedSseEnabled) == true
+          ' "artifacts/readback/email-recovery-drift-${email_queue_logical_id}.json" > /dev/null
+          jq -e '
+            .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC" and
             (.StackResourceDrift.ActualProperties | fromjson | .Name) == "psd-eoc-transactional" and
             (.StackResourceDrift.ActualProperties | fromjson | .SendingOptions.SendingEnabled) == false
           ' "artifacts/readback/email-recovery-drift-${ses_configuration_set_logical_id}.json" > /dev/null
@@ -2224,6 +2387,12 @@ jobs:
             (.StackResourceDrift.ActualProperties | fromjson | .EnableKeyRotation) == true and
             (.StackResourceDrift.ActualProperties | fromjson | .Description) == "Encrypts configured-unverified SES event evidence for the live pilot."
           ' "artifacts/readback/email-recovery-drift-${ses_events_key_logical_id}.json" > /dev/null
+          jq -e --arg key_arn "$ses_events_key_arn" '
+            .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC" and
+            (.StackResourceDrift.ActualProperties | fromjson | .TopicName) == "psd-eoc-email-events" and
+            (.StackResourceDrift.ActualProperties | fromjson | .DisplayName) == "PSD EOC live-pilot SES event evidence" and
+            (.StackResourceDrift.ActualProperties | fromjson | .KmsMasterKeyId) == $key_arn
+          ' "artifacts/readback/email-recovery-drift-${ses_events_topic_logical_id}.json" > /dev/null
 
           jq -e \
             --arg health_id "$health_queue_logical_id" \
@@ -2242,7 +2411,6 @@ jobs:
             --arg topic_arn "$ses_events_topic_arn" \
             --arg key_id "$ses_events_key_logical_id" \
             --arg key_physical_id "$ses_events_key_id" \
-            --arg destination_id "$ses_event_destination_logical_id" \
             --arg topic_policy_id "$ses_events_topic_policy_logical_id" '
               def exact_resource($logical_id; $type; $physical_id):
                 [
@@ -2266,11 +2434,10 @@ jobs:
               exact_resource($config_id; "AWS::SES::ConfigurationSet"; $config_name) and
               exact_resource($topic_id; "AWS::SNS::Topic"; $topic_arn) and
               exact_resource($key_id; "AWS::KMS::Key"; $key_physical_id) and
-              ([.StackResourceSummaries[] | select(.LogicalResourceId == $destination_id and .ResourceType == "AWS::SES::ConfigurationSetEventDestination" and (.ResourceStatus == "CREATE_COMPLETE" or .ResourceStatus == "UPDATE_COMPLETE"))] | length) == 1 and
               ([.StackResourceSummaries[] | select(.LogicalResourceId == $topic_policy_id and .ResourceType == "AWS::SNS::TopicPolicy" and (.ResourceStatus == "CREATE_COMPLETE" or .ResourceStatus == "UPDATE_COMPLETE"))] | length) == 1 and
               ([.StackResourceSummaries[] | select(.ResourceType == "AWS::SQS::Queue")] | length) == 3 and
               ([.StackResourceSummaries[] | select(.ResourceType == "AWS::SES::ConfigurationSet")] | length) == 1 and
-              ([.StackResourceSummaries[] | select(.ResourceType == "AWS::SES::ConfigurationSetEventDestination")] | length) == 1 and
+              ([.StackResourceSummaries[] | select(.ResourceType == "AWS::SES::ConfigurationSetEventDestination")] | length) == 0 and
               ([.StackResourceSummaries[] | select(.ResourceType == "AWS::KMS::Key")] | length) == 1 and
               ([.StackResourceSummaries[] | select(.ResourceType == "AWS::SNS::Topic")] | length) == 1 and
               ([.StackResourceSummaries[] | select(.ResourceType == "AWS::SNS::TopicPolicy")] | length) == 1 and
@@ -2281,6 +2448,34 @@ jobs:
                 (.ResourceType | test("^AWS::(Lambda|Scheduler|Events)::"))
               )] | length) == 0
             ' artifacts/readback/stack-resources.json > /dev/null
+
+          aws sesv2 get-configuration-set \
+            --configuration-set-name "$ses_configuration_set_name" \
+            > artifacts/readback/ses-configuration-set-external.json
+          jq -e --arg name "$ses_configuration_set_name" '
+            .ConfigurationSetName == $name and
+            .SendingOptions == {SendingEnabled: false}
+          ' artifacts/readback/ses-configuration-set-external.json > /dev/null
+          aws sesv2 get-configuration-set-event-destinations \
+            --configuration-set-name "$ses_configuration_set_name" \
+            > artifacts/readback/ses-event-destination-external.json
+          jq -e \
+            --arg destination "$ses_event_destination_name" \
+            --arg topic "$ses_events_topic_arn" '
+              (.EventDestinations | length) == 1 and
+              .EventDestinations[0].Name == $destination and
+              .EventDestinations[0].Enabled == true and
+              (.EventDestinations[0].MatchingEventTypes | sort) == [
+                "BOUNCE",
+                "COMPLAINT",
+                "DELIVERY",
+                "DELIVERY_DELAY",
+                "REJECT",
+                "RENDERING_FAILURE",
+                "SEND"
+              ] and
+              .EventDestinations[0].SnsDestination == {TopicArn: $topic}
+            ' artifacts/readback/ses-event-destination-external.json > /dev/null
 
           app_runner_service=$(aws apprunner describe-service --service-arn "$service_arn")
           runtime_secret_map=$(jq -cer '
@@ -2706,7 +2901,7 @@ jobs:
             printf '%s\n' "- Deployment-role permissions boundary: $EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"
             printf '%s\n' "- Repository gate: $REPOSITORY_GATE_RECORD"
             echo "- Exact runtime-role trust, absent boundary, empty attached-policy list, and one least-privilege inline policy were read back; it can read only five exact secret resources and health-queue attributes. Simulations denied SQS SendMessage on all three queues, SES SendEmail/SendRawEmail, and SNS Publish."
-            echo "- The protected stack exactly matched the reviewed disabled SES configuration set, encrypted SNS/KMS evidence destination, and non-executable email consumer role. No SES email identity, SNS subscription, ECS service, Lambda, schedule, or event rule exists; bootstrap evidence retained zero enabled notification channels and zero matching recipients."
+            echo "- The protected stack exactly matched the reviewed disabled SES configuration set, encrypted SNS/KMS evidence topic, and non-executable email consumer role. The one externally managed SES event destination was read back exactly before and after deployment because its CloudFormation type is not importable. No SES email identity, SNS subscription, ECS service, Lambda, schedule, or event rule exists; bootstrap evidence retained zero enabled notification channels and zero matching recipients."
             echo "- Generated secrets and the OAuth credential value were not printed."
             echo "- Valid public HTTPS and deep health succeeded at the App Runner provider URL through certificate-verified native PostgreSQL."
             echo "- Google OIDC remains configured-unverified; web/mobile sign-in stays blocked until the separately owned eoc.psd401.net custom-domain work is live and a human completes an approved district sign-in."

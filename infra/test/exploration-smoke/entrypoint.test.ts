@@ -60,7 +60,30 @@ const retainedRecoveryResources: readonly RecoveryResource[] = [
     ResourceStatus: 'DELETE_SKIPPED',
     ResourceType: 'AWS::KMS::Key',
   },
+  {
+    LogicalResourceId: 'EmailQueue9C1DA90F',
+    PhysicalResourceId:
+      'https://sqs.us-west-2.amazonaws.com/338414773271/psd-eoc-email',
+    ResourceStatus: 'DELETE_SKIPPED',
+    ResourceType: 'AWS::SQS::Queue',
+  },
+  {
+    LogicalResourceId: 'EmailEventsTopic13C4A145',
+    PhysicalResourceId:
+      'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events',
+    ResourceStatus: 'DELETE_SKIPPED',
+    ResourceType: 'AWS::SNS::Topic',
+  },
 ];
+
+const previouslyManagedRecoveryResources = retainedRecoveryResources
+  .slice(0, 4)
+  .map((resource) => ({
+    ...resource,
+    ResourceStatus: 'UPDATE_COMPLETE',
+  }));
+
+const newlyRetainedRecoveryResources = retainedRecoveryResources.slice(4);
 
 function recoveryScript(workflow: string): string {
   const script = workflow.match(
@@ -74,8 +97,12 @@ function recoveryScript(workflow: string): string {
 
 async function runRecoveryScenario(options: {
   readonly before: readonly RecoveryResource[];
+  readonly currentTemplateManagesEventDestination?: boolean;
+  readonly externalDestinationTopicArn?: string;
+  readonly externalSendingEnabled?: boolean;
   readonly events: readonly RecoveryResource[];
   readonly preexistingImportObject?: boolean;
+  readonly stackInventoryManagesEventDestination?: boolean;
   readonly stackStatus: string;
 }): Promise<{
   readonly awsCalls: readonly string[];
@@ -127,10 +154,133 @@ async function runRecoveryScenario(options: {
     const publishedBucket = join(directory, 'published-bucket.txt');
     const publishedKey = join(directory, 'published-key.txt');
     const publishedTemplate = join(directory, 'published-template.json');
+    const legacyAppRunnerTags = [
+      { Key: 'Application', Value: 'PSD EOC Exploration Smoke' },
+      { Key: 'DataClassification', Value: 'synthetic-only' },
+      { Key: 'Environment', Value: 'exploration-smoke' },
+      { Key: 'ExpectedAwsAccountAlias', Value: 'psd401' },
+      { Key: 'ManagedBy', Value: 'AWS CDK' },
+    ];
+    const recoveryTemplateResources = {
+      EmailConfigurationSet: {
+        DeletionPolicy: 'Retain',
+        Properties: {
+          Name: 'psd-eoc-transactional',
+          SendingOptions: { SendingEnabled: false },
+        },
+        Type: 'AWS::SES::ConfigurationSet',
+        UpdateReplacePolicy: 'Retain',
+      },
+      EmailDeadLetterQueue5E91C06C: {
+        DeletionPolicy: 'Retain',
+        Properties: {
+          QueueName: 'psd-eoc-email-dlq',
+          SqsManagedSseEnabled: true,
+        },
+        Type: 'AWS::SQS::Queue',
+        UpdateReplacePolicy: 'Retain',
+      },
+      EmailEventsKey619540BF: {
+        DeletionPolicy: 'Retain',
+        Properties: { EnableKeyRotation: true },
+        Type: 'AWS::KMS::Key',
+        UpdateReplacePolicy: 'Retain',
+      },
+      EmailEventsTopic13C4A145: {
+        DeletionPolicy: 'Retain',
+        Properties: {
+          DisplayName: 'PSD EOC live-pilot SES event evidence',
+          TopicName: 'psd-eoc-email-events',
+        },
+        Type: 'AWS::SNS::Topic',
+        UpdateReplacePolicy: 'Retain',
+      },
+      EmailQueue9C1DA90F: {
+        DeletionPolicy: 'Retain',
+        Properties: {
+          MessageRetentionPeriod: 345_600,
+          QueueName: 'psd-eoc-email',
+          SqsManagedSseEnabled: true,
+          VisibilityTimeout: 60,
+        },
+        Type: 'AWS::SQS::Queue',
+        UpdateReplacePolicy: 'Retain',
+      },
+      EmailWorkerLogGroup0611E5C2: {
+        DeletionPolicy: 'Retain',
+        Properties: {
+          LogGroupName: '/psd-eoc/workers/email',
+          RetentionInDays: 14,
+        },
+        Type: 'AWS::Logs::LogGroup',
+        UpdateReplacePolicy: 'Retain',
+      },
+    } as const;
+    const managedEventDestinationResource = {
+      LogicalResourceId: 'EmailEventDestination',
+      PhysicalResourceId: 'psd-eoc-transactional|psd-eoc-email-events',
+      ResourceStatus: 'UPDATE_COMPLETE',
+      ResourceType: 'AWS::SES::ConfigurationSetEventDestination',
+    } as const;
+    const managedLogicalIds = new Set(
+      options.before
+        .filter(
+          (resource) =>
+            resource.ResourceStatus !== 'DELETE_SKIPPED' &&
+            resource.ResourceStatus !== 'DELETE_COMPLETE',
+        )
+        .map((resource) => resource.LogicalResourceId),
+    );
+    const appRunnerTemplateResources = {
+      AppRunnerService: {
+        Properties: {
+          ServiceName: 'psd-eoc-exploration-smoke',
+          SourceConfiguration: {},
+          Tags: legacyAppRunnerTags,
+        },
+        Type: 'AWS::AppRunner::Service',
+      },
+      AppRunnerVpcConnector: {
+        Properties: {
+          SecurityGroups: [{ Ref: 'ApplicationSecurityGroup' }],
+          Subnets: [
+            { Ref: 'ApplicationSubnet1' },
+            { Ref: 'ApplicationSubnet2' },
+          ],
+          Tags: legacyAppRunnerTags,
+          VpcConnectorName: 'psd-eoc-exploration-smoke-native',
+        },
+        Type: 'AWS::AppRunner::VpcConnector',
+      },
+    } as const;
+    const currentManagedResources = Object.fromEntries(
+      Object.entries(recoveryTemplateResources).filter(([logicalId]) =>
+        managedLogicalIds.has(logicalId),
+      ),
+    );
+    const retainedLogicalIds = new Set(
+      options.events.map((resource) => resource.LogicalResourceId),
+    );
+    const importChangeResources = retainedRecoveryResources
+      .filter((resource) => retainedLogicalIds.has(resource.LogicalResourceId))
+      .map((resource) => ({
+        ResourceChange: {
+          Action: 'Import',
+          LogicalResourceId: resource.LogicalResourceId,
+          ResourceType: resource.ResourceType,
+        },
+      }));
     await Promise.all([
       Bun.write(
         beforeFile,
-        JSON.stringify({ StackResourceSummaries: options.before }),
+        JSON.stringify({
+          StackResourceSummaries: [
+            ...options.before,
+            ...(options.stackInventoryManagesEventDestination
+              ? [managedEventDestinationResource]
+              : []),
+          ],
+        }),
       ),
       Bun.write(
         managedFile,
@@ -185,6 +335,24 @@ async function runRecoveryScenario(options: {
             'Isolated synthetic-only PSD EOC exploration web/mobile backend (GitHub issue #163)',
           Parameters: { SourceSha: { Type: 'String' } },
           Resources: {
+            ...appRunnerTemplateResources,
+            ...currentManagedResources,
+            ...(options.currentTemplateManagesEventDestination
+              ? {
+                  EmailEventDestination: {
+                    Properties: {
+                      ConfigurationSetName: {
+                        Ref: 'EmailConfigurationSet',
+                      },
+                      EventDestination: {
+                        Enabled: true,
+                        Name: 'psd-eoc-email-events',
+                      },
+                    },
+                    Type: 'AWS::SES::ConfigurationSetEventDestination',
+                  },
+                }
+              : {}),
             ExistingHealthQueue: {
               Properties: {
                 QueueName: 'psd-eoc-exploration-smoke-health',
@@ -201,38 +369,8 @@ async function runRecoveryScenario(options: {
           ChangeSetId:
             'arn:aws:cloudformation:us-west-2:338414773271:changeSet/psd-eoc-retained-email-import-1-1/00000000-0000-0000-0000-000000000000',
           ChangeSetName: 'psd-eoc-retained-email-import-1-1',
-          Changes: [
-            {
-              ResourceChange: {
-                Action: 'Import',
-                LogicalResourceId: 'EmailWorkerLogGroup0611E5C2',
-                ResourceType: 'AWS::Logs::LogGroup',
-              },
-            },
-            {
-              ResourceChange: {
-                Action: 'Import',
-                LogicalResourceId: 'EmailDeadLetterQueue5E91C06C',
-                ResourceType: 'AWS::SQS::Queue',
-              },
-            },
-            {
-              ResourceChange: {
-                Action: 'Import',
-                LogicalResourceId: 'EmailConfigurationSet',
-                ResourceType: 'AWS::SES::ConfigurationSet',
-              },
-            },
-            {
-              ResourceChange: {
-                Action: 'Import',
-                LogicalResourceId: 'EmailEventsKey619540BF',
-                ResourceType: 'AWS::KMS::Key',
-              },
-            },
-          ],
-          Description:
-            'Exact four-resource retained dark-email recovery for GitHub run 1',
+          Changes: importChangeResources,
+          Description: `Exact ${importChangeResources.length}-resource retained dark-email recovery for GitHub run 1`,
           ExecutionStatus: 'AVAILABLE',
           StackName: 'PsdEocExplorationSmoke',
           Status: 'CREATE_COMPLETE',
@@ -242,35 +380,8 @@ async function runRecoveryScenario(options: {
         join(cdkOut, 'PsdEocExplorationSmoke.template.json'),
         JSON.stringify({
           Resources: {
-            EmailConfigurationSet: {
-              DeletionPolicy: 'Retain',
-              Properties: {
-                Name: 'psd-eoc-transactional',
-                SendingOptions: { SendingEnabled: false },
-              },
-              Type: 'AWS::SES::ConfigurationSet',
-            },
-            EmailDeadLetterQueue5E91C06C: {
-              DeletionPolicy: 'Retain',
-              Properties: {
-                QueueName: 'psd-eoc-email-dlq',
-                SqsManagedSseEnabled: true,
-              },
-              Type: 'AWS::SQS::Queue',
-            },
-            EmailEventsKey619540BF: {
-              DeletionPolicy: 'Retain',
-              Properties: { EnableKeyRotation: true },
-              Type: 'AWS::KMS::Key',
-            },
-            EmailWorkerLogGroup0611E5C2: {
-              DeletionPolicy: 'Retain',
-              Properties: {
-                LogGroupName: '/psd-eoc/workers/email',
-                RetentionInDays: 14,
-              },
-              Type: 'AWS::Logs::LogGroup',
-            },
+            ...appRunnerTemplateResources,
+            ...recoveryTemplateResources,
           },
         }),
       ),
@@ -306,6 +417,22 @@ head_json() {
 }
 
 case "$1:$2" in
+  sesv2:get-configuration-set)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
+    printf '{"ConfigurationSetName":"psd-eoc-transactional","SendingOptions":{"SendingEnabled":%s}}\n' \
+      "$EXTERNAL_SENDING_ENABLED"
+    ;;
+  sesv2:get-configuration-set-event-destinations)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
+    jq -n --arg topic "$EXTERNAL_DESTINATION_TOPIC_ARN" '{
+      EventDestinations: [{
+        Enabled: true,
+        MatchingEventTypes: ["SEND", "DELIVERY", "BOUNCE", "COMPLAINT", "REJECT", "RENDERING_FAILURE", "DELIVERY_DELAY"],
+        Name: "psd-eoc-email-events",
+        SnsDestination: {TopicArn: $topic}
+      }]
+    }'
+    ;;
   cloudformation:describe-stacks)
     if printf '%s\\n' "$@" | grep -q 'StackStatus'; then
       if [[ -e "$IMPORT_MARKER" ]]; then
@@ -437,6 +564,10 @@ esac
       CHANGE_SET_FIXTURE: changeSetFixture,
       CURRENT_TEMPLATE_FIXTURE: currentTemplateFile,
       EVENTS_FIXTURE: eventsFile,
+      EXTERNAL_DESTINATION_TOPIC_ARN:
+        options.externalDestinationTopicArn ??
+        'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events',
+      EXTERNAL_SENDING_ENABLED: String(options.externalSendingEnabled ?? false),
       EXPECTED_IMPORT_TEMPLATE: join(
         readback,
         'email-recovery-import-template.json',
@@ -874,6 +1005,24 @@ describe('isolated CDK entrypoint configuration', () => {
       'EmailEventsKey619540BF: {KeyId: $events_key_id}',
     );
     expect(workflow).toContain(
+      'EmailQueue9C1DA90F: {QueueUrl: $email_queue_url}',
+    );
+    expect(workflow).toContain(
+      'EmailEventsTopic13C4A145: {TopicArn: $events_topic_arn}',
+    );
+    expect(workflow).toContain(
+      '.Resources.AppRunnerVpcConnector.Properties ==',
+    );
+    expect(workflow).toContain(
+      '.Resources.AppRunnerService.Properties.ServiceName ==',
+    );
+    expect(workflow).toContain(
+      '.Resources.AppRunnerService.Properties.Tags | sort_by(.Key)',
+    );
+    expect(workflow).toContain(
+      'aws sesv2 get-configuration-set-event-destinations',
+    );
+    expect(workflow).toContain(
       'CDK_ASSET_BUCKET: cdk-hnb659fds-assets-338414773271-us-west-2',
     );
     expect(workflow).toContain(
@@ -949,10 +1098,10 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain('cdk import');
   });
 
-  it('imports the exact four-resource rollback inventory from the prior live stack', async () => {
+  it('adopts the exact two newly retained resources beside the four already managed resources', async () => {
     const recovery = await runRecoveryScenario({
-      before: retainedRecoveryResources,
-      events: retainedRecoveryResources,
+      before: previouslyManagedRecoveryResources,
+      events: newlyRetainedRecoveryResources,
       stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
     });
 
@@ -966,6 +1115,13 @@ describe('isolated CDK entrypoint configuration', () => {
       },
       EmailEventsKey619540BF: {
         KeyId: '01234567-89ab-cdef-0123-456789abcdef',
+      },
+      EmailEventsTopic13C4A145: {
+        TopicArn: 'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events',
+      },
+      EmailQueue9C1DA90F: {
+        QueueUrl:
+          'https://sqs.us-west-2.amazonaws.com/338414773271/psd-eoc-email',
       },
       EmailWorkerLogGroup0611E5C2: {
         LogGroupName: '/psd-eoc/workers/email',
@@ -1002,74 +1158,70 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(publishedKey).toBe(
       `cdk/PsdEocExplorationSmoke/import-${importObject.sha256}.json`,
     );
-    expect(recovery.publishedTemplate).toEqual({
-      AWSTemplateFormatVersion: '2010-09-09',
-      Description:
-        'Isolated synthetic-only PSD EOC exploration web/mobile backend (GitHub issue #163)',
-      Parameters: { SourceSha: { Type: 'String' } },
-      Resources: {
-        EmailConfigurationSet: {
-          DeletionPolicy: 'Retain',
-          Properties: {
-            Name: 'psd-eoc-transactional',
-            SendingOptions: { SendingEnabled: false },
-          },
-          Type: 'AWS::SES::ConfigurationSet',
+    const publishedTemplate = recovery.publishedTemplate as {
+      readonly Resources: Readonly<Record<string, unknown>>;
+    };
+    expect(Object.keys(publishedTemplate.Resources).sort()).toEqual(
+      [
+        'AppRunnerService',
+        'AppRunnerVpcConnector',
+        'EmailConfigurationSet',
+        'EmailDeadLetterQueue5E91C06C',
+        'EmailEventsKey619540BF',
+        'EmailEventsTopic13C4A145',
+        'EmailQueue9C1DA90F',
+        'EmailWorkerLogGroup0611E5C2',
+        'ExistingHealthQueue',
+      ].sort(),
+    );
+    expect(publishedTemplate.Resources).toMatchObject({
+      AppRunnerService: {
+        Properties: {
+          ServiceName: 'psd-eoc-exploration-smoke',
+          Tags: expect.arrayContaining([
+            {
+              Key: 'Application',
+              Value: 'PSD EOC Exploration Smoke',
+            },
+          ]),
         },
-        EmailDeadLetterQueue5E91C06C: {
-          DeletionPolicy: 'Retain',
-          Properties: {
-            QueueName: 'psd-eoc-email-dlq',
-            SqsManagedSseEnabled: true,
-          },
-          Type: 'AWS::SQS::Queue',
+      },
+      EmailEventsTopic13C4A145: {
+        DeletionPolicy: 'Retain',
+        Properties: { TopicName: 'psd-eoc-email-events' },
+        Type: 'AWS::SNS::Topic',
+      },
+      EmailQueue9C1DA90F: {
+        DeletionPolicy: 'Retain',
+        Properties: {
+          QueueName: 'psd-eoc-email',
+          SqsManagedSseEnabled: true,
         },
-        EmailEventsKey619540BF: {
-          DeletionPolicy: 'Retain',
-          Properties: { EnableKeyRotation: true },
-          Type: 'AWS::KMS::Key',
-        },
-        EmailWorkerLogGroup0611E5C2: {
-          DeletionPolicy: 'Retain',
-          Properties: {
-            LogGroupName: '/psd-eoc/workers/email',
-            RetentionInDays: 14,
-          },
-          Type: 'AWS::Logs::LogGroup',
-        },
-        ExistingHealthQueue: {
-          Properties: {
-            QueueName: 'psd-eoc-exploration-smoke-health',
-          },
-          Type: 'AWS::SQS::Queue',
-        },
+        Type: 'AWS::SQS::Queue',
       },
     });
+    expect(
+      Object.values(publishedTemplate.Resources).some(
+        (resource) =>
+          (resource as { readonly Type?: string }).Type ===
+          'AWS::SES::ConfigurationSetEventDestination',
+      ),
+    ).toBe(false);
     expect(recovery.importResources).toEqual([
       {
-        LogicalResourceId: 'EmailWorkerLogGroup0611E5C2',
-        ResourceIdentifier: { LogGroupName: '/psd-eoc/workers/email' },
-        ResourceType: 'AWS::Logs::LogGroup',
-      },
-      {
-        LogicalResourceId: 'EmailDeadLetterQueue5E91C06C',
+        LogicalResourceId: 'EmailQueue9C1DA90F',
         ResourceIdentifier: {
           QueueUrl:
-            'https://sqs.us-west-2.amazonaws.com/338414773271/psd-eoc-email-dlq',
+            'https://sqs.us-west-2.amazonaws.com/338414773271/psd-eoc-email',
         },
         ResourceType: 'AWS::SQS::Queue',
       },
       {
-        LogicalResourceId: 'EmailConfigurationSet',
-        ResourceIdentifier: { Name: 'psd-eoc-transactional' },
-        ResourceType: 'AWS::SES::ConfigurationSet',
-      },
-      {
-        LogicalResourceId: 'EmailEventsKey619540BF',
+        LogicalResourceId: 'EmailEventsTopic13C4A145',
         ResourceIdentifier: {
-          KeyId: '01234567-89ab-cdef-0123-456789abcdef',
+          TopicArn: 'arn:aws:sns:us-west-2:338414773271:psd-eoc-email-events',
         },
-        ResourceType: 'AWS::KMS::Key',
+        ResourceType: 'AWS::SNS::Topic',
       },
     ]);
     expect(recovery.changeSetRequest).toEqual({
@@ -1078,7 +1230,7 @@ describe('isolated CDK entrypoint configuration', () => {
       ChangeSetType: 'IMPORT',
       ClientToken: 'psd-eoc-import-1-1',
       Description:
-        'Exact four-resource retained dark-email recovery for GitHub run 1',
+        'Exact 2-resource retained dark-email recovery for GitHub run 1',
       Parameters: [{ ParameterKey: 'SourceSha', UsePreviousValue: true }],
       ResourcesToImport: recovery.importResources,
       RoleARN:
@@ -1088,7 +1240,7 @@ describe('isolated CDK entrypoint configuration', () => {
     });
     expect(recovery.changeSet).toMatchObject({
       Description:
-        'Exact four-resource retained dark-email recovery for GitHub run 1',
+        'Exact 2-resource retained dark-email recovery for GitHub run 1',
       ExecutionStatus: 'AVAILABLE',
       Status: 'CREATE_COMPLETE',
     });
@@ -1128,10 +1280,10 @@ describe('isolated CDK entrypoint configuration', () => {
       recovery.awsCalls.filter(
         (call) => call === 'sts:get-caller-identity\toidc-access',
       ),
-    ).toHaveLength(4);
+    ).toHaveLength(6);
   });
 
-  it('retries idempotently without another import once all four resources are managed', async () => {
+  it('retries idempotently without another import once all six resources are managed', async () => {
     const recovery = await runRecoveryScenario({
       before: retainedRecoveryResources.map((resource) => ({
         ...resource,
@@ -1154,8 +1306,8 @@ describe('isolated CDK entrypoint configuration', () => {
 
   it('reuses an exact digest-matching import object after publication was interrupted', async () => {
     const recovery = await runRecoveryScenario({
-      before: retainedRecoveryResources,
-      events: retainedRecoveryResources,
+      before: previouslyManagedRecoveryResources,
+      events: newlyRetainedRecoveryResources,
       preexistingImportObject: true,
       stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
     });
@@ -1188,6 +1340,88 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(recovery.publicationResult).toBeUndefined();
     expect(recovery.importCredential).toBeUndefined();
     expect(recovery.publishedKey).toBeUndefined();
+  });
+
+  it('fails closed before recovery when the external destination drifts', async () => {
+    const recovery = await runRecoveryScenario({
+      before: previouslyManagedRecoveryResources,
+      events: newlyRetainedRecoveryResources,
+      externalDestinationTopicArn:
+        'arn:aws:sns:us-west-2:338414773271:not-the-reviewed-topic',
+      stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
+    });
+
+    expect(recovery.exitCode).not.toBe(0);
+    expect(recovery.result).toBeUndefined();
+    expect(
+      recovery.awsCalls.filter((call) => call.startsWith('sesv2:')),
+    ).toEqual([
+      'sesv2:get-configuration-set\toidc-access',
+      'sesv2:get-configuration-set-event-destinations\toidc-access',
+    ]);
+    expect(recovery.awsCalls).not.toContain(
+      'cloudformation:create-change-set\tdeploy-access',
+    );
+  });
+
+  it('fails closed before recovery when SES sending is enabled', async () => {
+    const recovery = await runRecoveryScenario({
+      before: previouslyManagedRecoveryResources,
+      events: newlyRetainedRecoveryResources,
+      externalSendingEnabled: true,
+      stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
+    });
+
+    expect(recovery.exitCode).not.toBe(0);
+    expect(recovery.result).toBeUndefined();
+    expect(
+      recovery.awsCalls.filter((call) => call.startsWith('sesv2:')),
+    ).toEqual(['sesv2:get-configuration-set\toidc-access']);
+  });
+
+  it('fails before any change set when the Original template still manages the external destination', async () => {
+    const recovery = await runRecoveryScenario({
+      before: previouslyManagedRecoveryResources,
+      currentTemplateManagesEventDestination: true,
+      events: newlyRetainedRecoveryResources,
+      stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
+    });
+
+    expect(recovery.exitCode).not.toBe(0);
+    expect(recovery.result).toBeUndefined();
+    expect(recovery.awsCalls).not.toContain(
+      'cloudformation:create-change-set\tdeploy-access',
+    );
+    expect(recovery.awsCalls).not.toContain(
+      'cloudformation:execute-change-set\tdeploy-access',
+    );
+    expect(recovery.awsCalls.some((call) => call.startsWith('s3api:'))).toBe(
+      false,
+    );
+  });
+
+  it('fails before any change set when the live stack inventory still manages the external destination', async () => {
+    const recovery = await runRecoveryScenario({
+      before: previouslyManagedRecoveryResources,
+      events: newlyRetainedRecoveryResources,
+      stackInventoryManagesEventDestination: true,
+      stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
+    });
+
+    expect(recovery.exitCode).not.toBe(0);
+    expect(recovery.result).toBeUndefined();
+    expect(recovery.awsCalls).toContain(
+      'cloudformation:list-stack-resources\toidc-access',
+    );
+    expect(recovery.awsCalls).not.toContain(
+      'cloudformation:create-change-set\tdeploy-access',
+    );
+    expect(recovery.awsCalls).not.toContain(
+      'cloudformation:execute-change-set\tdeploy-access',
+    );
+    expect(recovery.awsCalls.some((call) => call.startsWith('s3api:'))).toBe(
+      false,
+    );
   });
 
   it('scopes and verifies 14-day retention for the two exact App Runner logs', async () => {
@@ -1250,7 +1484,12 @@ describe('isolated CDK entrypoint configuration', () => {
       'select(.Type == "AWS::SES::ConfigurationSet")] | length\' "$template")" -eq 1',
     );
     expect(workflow).toContain(
-      'select(.Type == "AWS::SES::ConfigurationSetEventDestination")] | length\' "$template")" -eq 1',
+      'select(.Type == "AWS::SES::ConfigurationSetEventDestination")] | length\' "$template")" -eq 0',
+    );
+    expect(workflow).toContain('SesEmailEventDestinationManagement');
+    expect(workflow).toContain('external-readback');
+    expect(workflow).toContain(
+      'aws sesv2 get-configuration-set-event-destinations',
     );
     for (const identity of [
       'psd-eoc-exploration-smoke-health',
