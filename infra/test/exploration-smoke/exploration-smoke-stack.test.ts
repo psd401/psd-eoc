@@ -30,7 +30,6 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
-  SES_EVENT_TYPES,
 } from '../../src/config';
 
 type JsonRecord = Record<string, unknown>;
@@ -270,10 +269,9 @@ describe('exploration-smoke deployment boundary', () => {
     ).toBe('ShouldProvisionApplication');
   });
 
-  it('tags every stateful or executable resource except the immutable VPC bridge as the live pilot', () => {
+  it('tags every stateful or executable resource except the immutable App Runner identities as the live pilot', () => {
     const taggableTypes = [
       'AWS::AppRunner::AutoScalingConfiguration',
-      'AWS::AppRunner::Service',
       'AWS::ECR::Repository',
       'AWS::ECS::Cluster',
       'AWS::ECS::TaskDefinition',
@@ -315,7 +313,7 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::SecretsManager::Secret', 5);
     template.resourceCountIs('AWS::KMS::Key', 1);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
-    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 1);
+    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 0);
     template.resourceCountIs('AWS::SNS::Topic', 1);
 
     const repository = properties(onlyResource('AWS::ECR::Repository'));
@@ -549,7 +547,7 @@ describe('minimal isolated resource shape', () => {
 });
 
 describe('App Runner runtime safety boundary', () => {
-  it('pins the service and preserves the exact prior live VPC connector contract', () => {
+  it('pins the service and preserves the exact prior live App Runner identity contracts', () => {
     const scaling = properties(
       onlyResource('AWS::AppRunner::AutoScalingConfiguration'),
     );
@@ -571,6 +569,28 @@ describe('App Runner runtime safety boundary', () => {
     );
     expect(JSON.stringify(image.ImageIdentifier)).toContain('"@"');
     expect(JSON.stringify(image.ImageIdentifier)).not.toContain(':latest');
+    expect(serviceProperties.Tags).toEqual([
+      {
+        Key: 'Application',
+        Value: 'PSD EOC Exploration Smoke',
+      },
+      {
+        Key: 'DataClassification',
+        Value: 'synthetic-only',
+      },
+      {
+        Key: 'Environment',
+        Value: 'exploration-smoke',
+      },
+      {
+        Key: 'ExpectedAwsAccountAlias',
+        Value: 'psd401',
+      },
+      {
+        Key: 'ManagedBy',
+        Value: 'AWS CDK',
+      },
+    ]);
     expect(asRecord(serviceProperties.HealthCheckConfiguration).Path).toBe(
       EXPLORATION_SMOKE_HEALTH_PATH,
     );
@@ -1026,7 +1046,7 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(serializedTemplate).not.toContain('controlled-recipient');
   });
 
-  it('configures the canonical SES evidence path dark and encrypted', () => {
+  it('configures the importable SES evidence path dark and records the external destination boundary', () => {
     const configurationSetResource = onlyResource('AWS::SES::ConfigurationSet');
     const configurationSet = properties(configurationSetResource);
     expect(configurationSet.Name).toBe(SES_CONFIGURATION_SET_NAME);
@@ -1039,25 +1059,7 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(configurationSetResource.DeletionPolicy).toBe('Retain');
     expect(configurationSetResource.UpdateReplacePolicy).toBe('Retain');
 
-    const eventDestinationResource = onlyResource(
-      'AWS::SES::ConfigurationSetEventDestination',
-    );
-    const eventDestination = properties(eventDestinationResource);
-    expect(eventDestination.ConfigurationSetName).toEqual({
-      Ref: 'EmailConfigurationSet',
-    });
-    expect(eventDestination.EventDestination).toEqual({
-      Enabled: true,
-      MatchingEventTypes: [...SES_EVENT_TYPES],
-      Name: SES_EVENT_DESTINATION_NAME,
-      SnsDestination: {
-        TopicARN: {
-          Ref: expect.stringContaining('EmailEventsTopic'),
-        },
-      },
-    });
-    expect(eventDestinationResource.DeletionPolicy).toBe('Retain');
-    expect(eventDestinationResource.UpdateReplacePolicy).toBe('Retain');
+    template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 0);
 
     const topicResource = onlyResource('AWS::SNS::Topic');
     const topic = properties(topicResource);
@@ -1149,6 +1151,8 @@ describe('configured-unverified provider readiness boundary', () => {
         'ImageRepositoryUri',
         'RuntimeRoleArn',
         'SesConfigurationSetName',
+        'SesEmailEventDestinationManagement',
+        'SesEmailEventDestinationName',
         'SesEmailEventsKeyArn',
         'SesEmailEventsTopicArn',
         'SesFromAddress',
@@ -1168,6 +1172,12 @@ describe('configured-unverified provider readiness boundary', () => {
     );
     expect(asRecord(outputs.SesFromAddress).Value).toBe(
       EXPLORATION_SMOKE_SES_FROM_ADDRESS,
+    );
+    expect(asRecord(outputs.SesEmailEventDestinationName).Value).toBe(
+      SES_EVENT_DESTINATION_NAME,
+    );
+    expect(asRecord(outputs.SesEmailEventDestinationManagement).Value).toBe(
+      'external-readback',
     );
     expect(asRecord(outputs.SesIntegrationTruth).Value).toBe(
       'configured-unverified',
