@@ -4201,25 +4201,92 @@ describe('roster, facility, and identity boundaries', () => {
         },
       }).success,
     ).toBe(false);
+    const accessSnapshot = {
+      id: ids.membershipSnapshot,
+      version: 1,
+      complete: true,
+      expectedAccessGroupSourceRefs: [accessGroupRef],
+      completedAccessGroupSourceRefs: [accessGroupRef],
+      evaluatedMemberships: [
+        {
+          email: 'member@psd401.net',
+          accessGroupSourceRefs: [accessGroupRef],
+        },
+      ],
+      members: [
+        {
+          userId: ids.actor,
+          googleSubject: 'synthetic-google-subject',
+          accessGroupSourceRefs: [accessGroupRef],
+          facilityScope: { kind: 'district' },
+        },
+      ],
+      syncStartedAt: times.created,
+      capturedAt: times.activated,
+    } as const;
+    expect(
+      AccessMembershipSnapshotSchema.safeParse(accessSnapshot).success,
+    ).toBe(true);
     expect(
       AccessMembershipSnapshotSchema.safeParse({
-        id: ids.membershipSnapshot,
-        version: 1,
-        complete: true,
-        expectedAccessGroupSourceRefs: [accessGroupRef],
-        completedAccessGroupSourceRefs: [accessGroupRef],
-        members: [
+        ...accessSnapshot,
+        evaluatedMemberships: [
           {
-            userId: ids.actor,
-            googleSubject: 'synthetic-google-subject',
+            email: 'unbound.member@example.com',
             accessGroupSourceRefs: [accessGroupRef],
-            facilityScope: { kind: 'district' },
           },
         ],
-        syncStartedAt: times.created,
-        capturedAt: times.activated,
+        members: [],
       }).success,
     ).toBe(true);
+    expect(
+      AccessMembershipSnapshotSchema.safeParse({
+        ...accessSnapshot,
+        complete: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      AccessMembershipSnapshotSchema.safeParse({
+        ...accessSnapshot,
+        evaluatedMemberships: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      AccessMembershipSnapshotSchema.safeParse({
+        ...accessSnapshot,
+        evaluatedMemberships: [
+          {
+            email: 'Member@psd401.net',
+            accessGroupSourceRefs: [accessGroupRef],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AccessMembershipSnapshotSchema.safeParse({
+        ...accessSnapshot,
+        evaluatedMemberships: [
+          {
+            email: 'member@psd401.net',
+            accessGroupSourceRefs: [
+              { ...accessGroupRef, id: ids.otherFacility },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AccessMembershipSnapshotSchema.safeParse({
+        ...accessSnapshot,
+        evaluatedMemberships: [
+          ...accessSnapshot.evaluatedMemberships,
+          {
+            email: 'member@psd401.net',
+            accessGroupSourceRefs: [accessGroupRef],
+          },
+        ],
+      }).success,
+    ).toBe(false);
     expect(
       SessionTokenIssuanceSchema.safeParse({
         id: ids.tokenIssuance,
