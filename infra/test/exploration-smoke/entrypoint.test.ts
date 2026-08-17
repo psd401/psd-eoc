@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { EXPLORATION_SMOKE_REPOSITORY_NAME } from '../../src/exploration-smoke/config';
 
@@ -22,6 +25,232 @@ async function readWorkflow(): Promise<string> {
 
 async function readCiWorkflow(): Promise<string> {
   return Bun.file(ciWorkflowUrl).text();
+}
+
+interface RecoveryResource {
+  readonly LogicalResourceId: string;
+  readonly PhysicalResourceId: string;
+  readonly ResourceStatus: string;
+  readonly ResourceType: string;
+}
+
+const retainedRecoveryResources: readonly RecoveryResource[] = [
+  {
+    LogicalResourceId: 'EmailWorkerLogGroup0611E5C2',
+    PhysicalResourceId: '/psd-eoc/workers/email',
+    ResourceStatus: 'DELETE_SKIPPED',
+    ResourceType: 'AWS::Logs::LogGroup',
+  },
+  {
+    LogicalResourceId: 'EmailDeadLetterQueue5E91C06C',
+    PhysicalResourceId:
+      'https://sqs.us-west-2.amazonaws.com/<aws-account-id>/psd-eoc-email-dlq',
+    ResourceStatus: 'DELETE_SKIPPED',
+    ResourceType: 'AWS::SQS::Queue',
+  },
+  {
+    LogicalResourceId: 'EmailConfigurationSet',
+    PhysicalResourceId: 'psd-eoc-transactional',
+    ResourceStatus: 'DELETE_SKIPPED',
+    ResourceType: 'AWS::SES::ConfigurationSet',
+  },
+  {
+    LogicalResourceId: 'EmailEventsKey619540BF',
+    PhysicalResourceId: '01234567-89ab-cdef-0123-456789abcdef',
+    ResourceStatus: 'DELETE_SKIPPED',
+    ResourceType: 'AWS::KMS::Key',
+  },
+];
+
+function recoveryScript(workflow: string): string {
+  const script = workflow.match(
+    / {6}- name: Adopt exact retained dark email resources after a rolled-back transition[\s\S]*? {8}run: \|\n([\s\S]*?)\n {6}- name: Stage the exact native bootstrap without changing the live service/,
+  )?.[1];
+  if (script === undefined) {
+    throw new Error('retained-resource recovery step is missing');
+  }
+  return script.replace(/^ {10}/gm, '');
+}
+
+async function runRecoveryScenario(options: {
+  readonly before: readonly RecoveryResource[];
+  readonly events: readonly RecoveryResource[];
+  readonly stackStatus: string;
+}): Promise<{
+  readonly exitCode: number;
+  readonly importArguments: string | undefined;
+  readonly mapping: unknown;
+  readonly result: unknown;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), 'psd-eoc-email-recovery-'));
+  try {
+    const fakeBin = join(directory, 'bin');
+    const infra = join(directory, 'infra');
+    const readback = join(directory, 'artifacts', 'readback');
+    const cdkOut = join(directory, 'artifacts', 'cdk.out');
+    await Promise.all([
+      mkdir(fakeBin, { recursive: true }),
+      mkdir(infra, { recursive: true }),
+      mkdir(readback, { recursive: true }),
+      mkdir(cdkOut, { recursive: true }),
+    ]);
+
+    const beforeFile = join(directory, 'before.json');
+    const managedFile = join(directory, 'managed.json');
+    const eventsFile = join(directory, 'events.json');
+    const stackFile = join(directory, 'stack.json');
+    const importMarker = join(directory, 'imported');
+    const importArguments = join(directory, 'import-arguments.txt');
+    await Promise.all([
+      Bun.write(
+        beforeFile,
+        JSON.stringify({ StackResourceSummaries: options.before }),
+      ),
+      Bun.write(
+        managedFile,
+        JSON.stringify({
+          StackResourceSummaries: retainedRecoveryResources.map((resource) => ({
+            ...resource,
+            ResourceStatus: 'IMPORT_COMPLETE',
+          })),
+        }),
+      ),
+      Bun.write(
+        eventsFile,
+        JSON.stringify({
+          StackEvents: options.events.map((resource) => ({
+            ...resource,
+            Timestamp: '2026-08-17T02:35:19Z',
+          })),
+        }),
+      ),
+      Bun.write(
+        stackFile,
+        JSON.stringify({
+          Stacks: [
+            {
+              Outputs: [
+                {
+                  OutputKey: 'AppRunnerVpcConnectorArn',
+                  OutputValue:
+                    'arn:aws:apprunner:us-west-2:<aws-account-id>:vpcconnector/psd-eoc-exploration-smoke-native/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                },
+              ],
+              StackStatus: options.stackStatus,
+            },
+          ],
+        }),
+      ),
+      Bun.write(
+        join(cdkOut, 'PsdEocExplorationSmoke.template.json'),
+        JSON.stringify({
+          Resources: {
+            EmailConfigurationSet: {
+              DeletionPolicy: 'Retain',
+              Properties: {
+                Name: 'psd-eoc-transactional',
+                SendingOptions: { SendingEnabled: false },
+              },
+              Type: 'AWS::SES::ConfigurationSet',
+            },
+            EmailDeadLetterQueue5E91C06C: {
+              DeletionPolicy: 'Retain',
+              Properties: {
+                QueueName: 'psd-eoc-email-dlq',
+                SqsManagedSseEnabled: true,
+              },
+              Type: 'AWS::SQS::Queue',
+            },
+            EmailEventsKey619540BF: {
+              DeletionPolicy: 'Retain',
+              Properties: { EnableKeyRotation: true },
+              Type: 'AWS::KMS::Key',
+            },
+            EmailWorkerLogGroup0611E5C2: {
+              DeletionPolicy: 'Retain',
+              Properties: {
+                LogGroupName: '/psd-eoc/workers/email',
+                RetentionInDays: 14,
+              },
+              Type: 'AWS::Logs::LogGroup',
+            },
+          },
+        }),
+      ),
+    ]);
+
+    const awsPath = join(fakeBin, 'aws');
+    const bunxPath = join(fakeBin, 'bunx');
+    await Promise.all([
+      Bun.write(
+        awsPath,
+        `#!/usr/bin/env bash
+set -euo pipefail
+case "$1:$2" in
+  cloudformation:describe-stacks) cat "$STACK_FIXTURE" ;;
+  cloudformation:list-stack-resources)
+    if [[ -e "$IMPORT_MARKER" ]]; then cat "$MANAGED_FIXTURE"; else cat "$BEFORE_FIXTURE"; fi
+    ;;
+  cloudformation:describe-stack-events) cat "$EVENTS_FIXTURE" ;;
+  sts:assume-role)
+    printf '%s\\n' '{"AccessKeyId":"test","SecretAccessKey":"test","SessionToken":"test"}'
+    ;;
+  *) exit 91 ;;
+esac
+`,
+      ),
+      Bun.write(
+        bunxPath,
+        `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$@" > "$IMPORT_ARGUMENTS"
+touch "$IMPORT_MARKER"
+`,
+      ),
+    ]);
+    await Promise.all([chmod(awsPath, 0o755), chmod(bunxPath, 0o755)]);
+
+    const child = Bun.spawnSync({
+      cmd: ['bash', '-c', recoveryScript(await readWorkflow())],
+      cwd: infra,
+      env: {
+        ...process.env,
+        AWS_ACCOUNT_ID: '<aws-account-id>',
+        AWS_REGION: 'us-west-2',
+        BEFORE_FIXTURE: beforeFile,
+        CDK_DEPLOY_ROLE_ARN:
+          'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2',
+        EVENTS_FIXTURE: eventsFile,
+        GITHUB_RUN_ATTEMPT: '1',
+        GITHUB_RUN_ID: '1',
+        IMPORT_ARGUMENTS: importArguments,
+        IMPORT_MARKER: importMarker,
+        MANAGED_FIXTURE: managedFile,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        STACK_FIXTURE: stackFile,
+        STACK_NAME: 'PsdEocExplorationSmoke',
+      },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
+
+    const mappingPath = join(readback, 'email-recovery-resource-mapping.json');
+    const resultPath = join(readback, 'email-recovery-result.json');
+    return {
+      exitCode: child.exitCode,
+      importArguments: (await Bun.file(importArguments).exists())
+        ? await Bun.file(importArguments).text()
+        : undefined,
+      mapping: (await Bun.file(mappingPath).exists())
+        ? await Bun.file(mappingPath).json()
+        : undefined,
+      result: (await Bun.file(resultPath).exists())
+        ? await Bun.file(resultPath).json()
+        : undefined,
+    };
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
 }
 
 describe('isolated CDK entrypoint configuration', () => {
@@ -338,12 +567,36 @@ describe('isolated CDK entrypoint configuration', () => {
     );
   });
 
-  it('admits a completed rollback without automating failed rollback recovery', async () => {
+  it('adopts the exact retained rollback resources idempotently without deleting them', async () => {
     const workflow = await readWorkflow();
 
     expect(workflow).toContain(
-      'CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE)',
+      'Adopt exact retained dark email resources after a rolled-back transition',
     );
+    expect(workflow).toContain(
+      'CREATE_COMPLETE | IMPORT_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE)',
+    );
+    expect(workflow).toContain(
+      'EmailWorkerLogGroup0611E5C2: {LogGroupName: $log_group_name}',
+    );
+    expect(workflow).toContain(
+      'EmailDeadLetterQueue5E91C06C: {QueueUrl: $dlq_url}',
+    );
+    expect(workflow).toContain(
+      'EmailConfigurationSet: {Name: $configuration_set_name}',
+    );
+    expect(workflow).toContain(
+      'EmailEventsKey619540BF: {KeyId: $events_key_id}',
+    );
+    expect(workflow).toContain('import "$STACK_NAME" \\');
+    expect(workflow).toContain('--resource-mapping "$mapping"');
+    expect(workflow).toContain(
+      'Retained dark-email resources are partial or ambiguous; refusing recovery.',
+    );
+    expect(workflow).toContain(
+      "jq -n --arg state already-managed '{state: $state}'",
+    );
+    expect(workflow).toContain("jq -n --arg state imported '{state: $state}'");
     expect(workflow).toContain(
       'Stack state $current_status is not safe for an automated retry.',
     );
@@ -356,6 +609,66 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain(
       'aws cloudformation continue-update-rollback',
     );
+    expect(workflow).not.toContain('aws cloudformation delete-stack');
+    expect(workflow).not.toContain('aws kms schedule-key-deletion');
+  });
+
+  it('imports the exact four-resource rollback inventory from the prior live stack', async () => {
+    const recovery = await runRecoveryScenario({
+      before: retainedRecoveryResources,
+      events: retainedRecoveryResources,
+      stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
+    });
+
+    expect(recovery.exitCode).toBe(0);
+    expect(recovery.result).toEqual({ state: 'imported' });
+    expect(recovery.mapping).toEqual({
+      EmailConfigurationSet: { Name: 'psd-eoc-transactional' },
+      EmailDeadLetterQueue5E91C06C: {
+        QueueUrl:
+          'https://sqs.us-west-2.amazonaws.com/<aws-account-id>/psd-eoc-email-dlq',
+      },
+      EmailEventsKey619540BF: {
+        KeyId: '01234567-89ab-cdef-0123-456789abcdef',
+      },
+      EmailWorkerLogGroup0611E5C2: {
+        LogGroupName: '/psd-eoc/workers/email',
+      },
+    });
+    expect(recovery.importArguments).toContain(
+      'import\nPsdEocExplorationSmoke',
+    );
+    expect(recovery.importArguments).toContain('--force');
+    expect(recovery.importArguments).toContain('--resource-mapping');
+  });
+
+  it('retries idempotently without another import once all four resources are managed', async () => {
+    const recovery = await runRecoveryScenario({
+      before: retainedRecoveryResources.map((resource) => ({
+        ...resource,
+        ResourceStatus: 'IMPORT_COMPLETE',
+      })),
+      events: [],
+      stackStatus: 'IMPORT_COMPLETE',
+    });
+
+    expect(recovery.exitCode).toBe(0);
+    expect(recovery.result).toEqual({ state: 'already-managed' });
+    expect(recovery.importArguments).toBeUndefined();
+    expect(recovery.mapping).toBeUndefined();
+  });
+
+  it('fails closed on a partial retained-resource rollback inventory', async () => {
+    const partial = retainedRecoveryResources.slice(0, 1);
+    const recovery = await runRecoveryScenario({
+      before: partial,
+      events: partial,
+      stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
+    });
+
+    expect(recovery.exitCode).not.toBe(0);
+    expect(recovery.result).toBeUndefined();
+    expect(recovery.importArguments).toBeUndefined();
   });
 
   it('scopes and verifies 14-day retention for the two exact App Runner logs', async () => {

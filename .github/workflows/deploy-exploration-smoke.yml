@@ -61,6 +61,7 @@ env:
   AWS_ACCOUNT_ID: '<aws-account-id>'
   AWS_ACCOUNT_ALIAS: psd401
   AWS_REGION: us-west-2
+  CDK_DEPLOY_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2
   GITHUB_OIDC_PROVIDER_ARN: arn:aws:iam::<aws-account-id>:oidc-provider/token.actions.githubusercontent.com
   GITHUB_OIDC_SUBJECT: repo:psd401@1902994/psd-eoc@1326178900:environment:exploration-smoke
   LOCAL_REGISTRY_IMAGE: docker.io/library/registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
@@ -1017,6 +1018,151 @@ jobs:
           ' <<< "$oauth_json" > /dev/null
           unset oauth_json
 
+      - name: Adopt exact retained dark email resources after a rolled-back transition
+        working-directory: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_template=../artifacts/cdk.out/PsdEocExplorationSmoke.template.json
+          before_stack=../artifacts/readback/email-recovery-stack-before.json
+          before_resources=../artifacts/readback/email-recovery-resources-before.json
+          mapping=../artifacts/readback/email-recovery-resource-mapping.json
+          after_resources=../artifacts/readback/email-recovery-resources-after.json
+
+          aws cloudformation describe-stacks --stack-name "$STACK_NAME" > "$before_stack"
+          case "$(jq -er '.Stacks[0].StackStatus' "$before_stack")" in
+            CREATE_COMPLETE | IMPORT_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE) ;;
+            *)
+              echo "The stack is not stable enough for retained-resource recovery." >&2
+              exit 1
+              ;;
+          esac
+          prior_vpc_connector_arn=$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "AppRunnerVpcConnectorArn") | .OutputValue' "$before_stack")
+          [[ "$prior_vpc_connector_arn" =~ ^arn:aws:apprunner:us-west-2:<aws-account-id>:vpcconnector/psd-eoc-exploration-smoke-native/[0-9]+/[A-Za-z0-9]{32}$ ]]
+          printf '%s\n' "$prior_vpc_connector_arn" > ../artifacts/readback/app-runner-vpc-connector-before.txt
+
+          aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > "$before_resources"
+          recovery_ids='["EmailWorkerLogGroup0611E5C2","EmailDeadLetterQueue5E91C06C","EmailConfigurationSet","EmailEventsKey619540BF"]'
+          recovery_rows=$(jq --argjson ids "$recovery_ids" '[.StackResourceSummaries[] | select(.LogicalResourceId as $id | $ids | index($id))]' "$before_resources")
+          managed_count=$(jq '[.[] | select(.ResourceStatus != "DELETE_SKIPPED" and .ResourceStatus != "DELETE_COMPLETE")] | length' <<< "$recovery_rows")
+          retained_count=$(jq '[.[] | select(.ResourceStatus == "DELETE_SKIPPED")] | length' <<< "$recovery_rows")
+
+          if [[ "$managed_count" == "0" && "$retained_count" != "4" ]]; then
+            deploy_credentials=$(aws sts assume-role \
+              --role-arn "$CDK_DEPLOY_ROLE_ARN" \
+              --role-session-name "psd-eoc-retained-email-readback-${GITHUB_RUN_ID}" \
+              --duration-seconds 900 \
+              --query Credentials \
+              --output json)
+            deploy_access_key=$(jq -er .AccessKeyId <<< "$deploy_credentials")
+            deploy_secret_key=$(jq -er .SecretAccessKey <<< "$deploy_credentials")
+            deploy_session_token=$(jq -er .SessionToken <<< "$deploy_credentials")
+            AWS_ACCESS_KEY_ID="$deploy_access_key" \
+              AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
+              AWS_SESSION_TOKEN="$deploy_session_token" \
+              aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
+              | jq --argjson ids "$recovery_ids" '[.StackEvents[] | select(
+                  .LogicalResourceId as $id |
+                  ($ids | index($id)) and .ResourceStatus == "DELETE_SKIPPED"
+                ) | {
+                  LogicalResourceId,
+                  PhysicalResourceId,
+                  ResourceStatus,
+                  ResourceType,
+                  Timestamp
+                }]' > ../artifacts/readback/email-recovery-retained-events.json
+            unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token
+            recovery_rows=$(cat ../artifacts/readback/email-recovery-retained-events.json)
+            retained_count=$(jq 'length' <<< "$recovery_rows")
+          fi
+
+          if [[ "$managed_count" == "4" && "$retained_count" == "0" ]]; then
+            jq -e '
+              length == 4 and
+              all(.[];
+                .ResourceStatus == "CREATE_COMPLETE" or
+                .ResourceStatus == "UPDATE_COMPLETE" or
+                .ResourceStatus == "IMPORT_COMPLETE"
+              )
+            ' <<< "$recovery_rows" > /dev/null
+            jq -n --arg state already-managed '{state: $state}' > ../artifacts/readback/email-recovery-result.json
+          elif [[ "$managed_count" == "0" && "$retained_count" == "4" ]]; then
+            jq -e '
+              def exact($id; $type; $physical):
+                [.[] | select(
+                  .LogicalResourceId == $id and
+                  .ResourceType == $type and
+                  .ResourceStatus == "DELETE_SKIPPED" and
+                  (.PhysicalResourceId | test($physical))
+                )] | length == 1;
+              length == 4 and
+              exact("EmailWorkerLogGroup0611E5C2"; "AWS::Logs::LogGroup"; "^/psd-eoc/workers/email$") and
+              exact("EmailDeadLetterQueue5E91C06C"; "AWS::SQS::Queue"; "^https://sqs[.]us-west-2[.]amazonaws[.]com/<aws-account-id>/psd-eoc-email-dlq$") and
+              exact("EmailConfigurationSet"; "AWS::SES::ConfigurationSet"; "^psd-eoc-transactional$") and
+              exact("EmailEventsKey619540BF"; "AWS::KMS::Key"; "^[0-9a-f-]{36}$")
+            ' <<< "$recovery_rows" > /dev/null
+
+            log_group_name=$(jq -er '.[] | select(.LogicalResourceId == "EmailWorkerLogGroup0611E5C2") | .PhysicalResourceId' <<< "$recovery_rows")
+            dlq_url=$(jq -er '.[] | select(.LogicalResourceId == "EmailDeadLetterQueue5E91C06C") | .PhysicalResourceId' <<< "$recovery_rows")
+            configuration_set_name=$(jq -er '.[] | select(.LogicalResourceId == "EmailConfigurationSet") | .PhysicalResourceId' <<< "$recovery_rows")
+            events_key_id=$(jq -er '.[] | select(.LogicalResourceId == "EmailEventsKey619540BF") | .PhysicalResourceId' <<< "$recovery_rows")
+            jq -n \
+              --arg log_group_name "$log_group_name" \
+              --arg dlq_url "$dlq_url" \
+              --arg configuration_set_name "$configuration_set_name" \
+              --arg events_key_id "$events_key_id" '{
+                EmailWorkerLogGroup0611E5C2: {LogGroupName: $log_group_name},
+                EmailDeadLetterQueue5E91C06C: {QueueUrl: $dlq_url},
+                EmailConfigurationSet: {Name: $configuration_set_name},
+                EmailEventsKey619540BF: {KeyId: $events_key_id}
+              }' > "$mapping"
+            jq -e '
+              .Resources.EmailWorkerLogGroup0611E5C2.Type == "AWS::Logs::LogGroup" and
+              .Resources.EmailWorkerLogGroup0611E5C2.DeletionPolicy == "Retain" and
+              .Resources.EmailWorkerLogGroup0611E5C2.Properties.LogGroupName == "/psd-eoc/workers/email" and
+              .Resources.EmailWorkerLogGroup0611E5C2.Properties.RetentionInDays == 14 and
+              .Resources.EmailDeadLetterQueue5E91C06C.Type == "AWS::SQS::Queue" and
+              .Resources.EmailDeadLetterQueue5E91C06C.DeletionPolicy == "Retain" and
+              .Resources.EmailDeadLetterQueue5E91C06C.Properties.QueueName == "psd-eoc-email-dlq" and
+              .Resources.EmailDeadLetterQueue5E91C06C.Properties.SqsManagedSseEnabled == true and
+              .Resources.EmailConfigurationSet.Type == "AWS::SES::ConfigurationSet" and
+              .Resources.EmailConfigurationSet.DeletionPolicy == "Retain" and
+              .Resources.EmailConfigurationSet.Properties.Name == "psd-eoc-transactional" and
+              .Resources.EmailConfigurationSet.Properties.SendingOptions.SendingEnabled == false and
+              .Resources.EmailEventsKey619540BF.Type == "AWS::KMS::Key" and
+              .Resources.EmailEventsKey619540BF.DeletionPolicy == "Retain" and
+              .Resources.EmailEventsKey619540BF.Properties.EnableKeyRotation == true
+            ' "$candidate_template" > /dev/null
+
+            bunx --bun cdk \
+              --app "bun bin/exploration-smoke.ts" \
+              import "$STACK_NAME" \
+              --force \
+              --yes \
+              --no-notices \
+              --change-set-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              --resource-mapping "$mapping"
+
+            aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > "$after_resources"
+            jq -e --slurpfile expected "$mapping" '
+              def imported($id; $type; $physical):
+                [.StackResourceSummaries[] | select(
+                  .LogicalResourceId == $id and
+                  .ResourceType == $type and
+                  .PhysicalResourceId == $physical and
+                  .ResourceStatus == "IMPORT_COMPLETE"
+                )] | length == 1;
+              imported("EmailWorkerLogGroup0611E5C2"; "AWS::Logs::LogGroup"; $expected[0].EmailWorkerLogGroup0611E5C2.LogGroupName) and
+              imported("EmailDeadLetterQueue5E91C06C"; "AWS::SQS::Queue"; $expected[0].EmailDeadLetterQueue5E91C06C.QueueUrl) and
+              imported("EmailConfigurationSet"; "AWS::SES::ConfigurationSet"; $expected[0].EmailConfigurationSet.Name) and
+              imported("EmailEventsKey619540BF"; "AWS::KMS::Key"; $expected[0].EmailEventsKey619540BF.KeyId)
+            ' "$after_resources" > /dev/null
+            jq -n --arg state imported '{state: $state}' > ../artifacts/readback/email-recovery-result.json
+          else
+            echo "Retained dark-email resources are partial or ambiguous; refusing recovery." >&2
+            exit 1
+          fi
+
       - name: Stage the exact native bootstrap without changing the live service
         env:
           APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
@@ -1032,7 +1178,7 @@ jobs:
             current_provision=$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "ProvisionApplication") | .ParameterValue' "$stack_file")
             current_status=$(jq -er '.Stacks[0].StackStatus' "$stack_file")
             case "$current_status" in
-              CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE) ;;
+              CREATE_COMPLETE | IMPORT_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE) ;;
               *)
                 echo "Stack state $current_status is not safe for an automated retry." >&2
                 exit 1
@@ -1122,6 +1268,7 @@ jobs:
 
           aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
             > ../artifacts/readback/stack-repository-phase.json
+          test "$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "AppRunnerVpcConnectorArn") | .OutputValue' ../artifacts/readback/stack-repository-phase.json)" = "$(cat ../artifacts/readback/app-runner-vpc-connector-before.txt)"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "ProvisionApplication") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$phase_provision"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "AppImageDigest") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$phase_app_digest"
           test "$(jq -er '.Stacks[0].Parameters[] | select(.ParameterKey == "RuntimeDatabaseIdleTimeoutSeconds") | .ParameterValue' ../artifacts/readback/stack-repository-phase.json)" = "$phase_runtime_idle_timeout"
@@ -1596,6 +1743,7 @@ jobs:
           [[ "$ses_events_key_arn" =~ ^arn:aws:kms:us-west-2:<aws-account-id>:key/[0-9a-f-]{36}$ ]]
           test "$ses_integration_truth" = "configured-unverified"
           test "$email_channel_state" = "disabled"
+          test "$app_runner_vpc_connector_arn" = "$(cat artifacts/readback/app-runner-vpc-connector-before.txt)"
 
           aws cloudformation describe-stacks --stack-name "$STACK_NAME" > artifacts/readback/stack-final.json
           aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > artifacts/readback/stack-resources.json
@@ -1637,7 +1785,8 @@ jobs:
           jq -e '
             all(.StackResourceSummaries[];
               .ResourceStatus == "CREATE_COMPLETE" or
-              .ResourceStatus == "UPDATE_COMPLETE"
+              .ResourceStatus == "UPDATE_COMPLETE" or
+              .ResourceStatus == "IMPORT_COMPLETE"
             )
           ' artifacts/readback/stack-resources.json > /dev/null
 
@@ -1652,6 +1801,53 @@ jobs:
           ses_event_destination_logical_id=$(jq -er '[.Resources | to_entries[] | select(.value.Type == "AWS::SES::ConfigurationSetEventDestination") | .key] | if length == 1 then .[0] else error("unexpected SES event-destination inventory") end' "$runtime_template")
           ses_events_topic_policy_logical_id=$(jq -er '[.Resources | to_entries[] | select(.value.Type == "AWS::SNS::TopicPolicy") | .key] | if length == 1 then .[0] else error("unexpected SNS topic-policy inventory") end' "$runtime_template")
           ses_events_key_id=${ses_events_key_arn##*/}
+
+          deploy_credentials=$(aws sts assume-role \
+            --role-arn "$CDK_DEPLOY_ROLE_ARN" \
+            --role-session-name "psd-eoc-retained-email-drift-${GITHUB_RUN_ID}" \
+            --duration-seconds 900 \
+            --query Credentials \
+            --output json)
+          deploy_access_key=$(jq -er .AccessKeyId <<< "$deploy_credentials")
+          deploy_secret_key=$(jq -er .SecretAccessKey <<< "$deploy_credentials")
+          deploy_session_token=$(jq -er .SessionToken <<< "$deploy_credentials")
+          for logical_id in \
+            "$email_worker_log_group_logical_id" \
+            "$email_dlq_logical_id" \
+            "$ses_configuration_set_logical_id" \
+            "$ses_events_key_logical_id"; do
+            [[ "$logical_id" =~ ^[A-Za-z0-9]+$ ]]
+            AWS_ACCESS_KEY_ID="$deploy_access_key" \
+              AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
+              AWS_SESSION_TOKEN="$deploy_session_token" \
+              aws cloudformation detect-stack-resource-drift \
+                --stack-name "$STACK_NAME" \
+                --logical-resource-id "$logical_id" \
+                > "artifacts/readback/email-recovery-drift-${logical_id}.json"
+          done
+          unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token
+          jq -e '
+            .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC" and
+            (.StackResourceDrift.ActualProperties | fromjson | .LogGroupName) == "/psd-eoc/workers/email" and
+            (.StackResourceDrift.ActualProperties | fromjson | .RetentionInDays) == 14
+          ' "artifacts/readback/email-recovery-drift-${email_worker_log_group_logical_id}.json" > /dev/null
+          jq -e '
+            .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC" and
+            (.StackResourceDrift.ActualProperties | fromjson | .QueueName) == "psd-eoc-email-dlq" and
+            (.StackResourceDrift.ActualProperties | fromjson | .MessageRetentionPeriod) == 1209600 and
+            (.StackResourceDrift.ActualProperties | fromjson | .SqsManagedSseEnabled) == true
+          ' "artifacts/readback/email-recovery-drift-${email_dlq_logical_id}.json" > /dev/null
+          jq -e '
+            .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC" and
+            (.StackResourceDrift.ActualProperties | fromjson | .Name) == "psd-eoc-transactional" and
+            (.StackResourceDrift.ActualProperties | fromjson | .SendingOptions.SendingEnabled) == false
+          ' "artifacts/readback/email-recovery-drift-${ses_configuration_set_logical_id}.json" > /dev/null
+          jq -e '
+            .StackResourceDrift.StackResourceDriftStatus == "IN_SYNC" and
+            (.StackResourceDrift.ActualProperties | fromjson | .EnableKeyRotation) == true and
+            (.StackResourceDrift.ActualProperties | fromjson | .Description) == "Encrypts configured-unverified SES event evidence for the live pilot."
+          ' "artifacts/readback/email-recovery-drift-${ses_events_key_logical_id}.json" > /dev/null
+
           jq -e \
             --arg health_id "$health_queue_logical_id" \
             --arg health_url "$queue_url" \
@@ -1678,7 +1874,11 @@ jobs:
                     .LogicalResourceId == $logical_id and
                     .ResourceType == $type and
                     .PhysicalResourceId == $physical_id and
-                    (.ResourceStatus == "CREATE_COMPLETE" or .ResourceStatus == "UPDATE_COMPLETE")
+                    (
+                      .ResourceStatus == "CREATE_COMPLETE" or
+                      .ResourceStatus == "UPDATE_COMPLETE" or
+                      .ResourceStatus == "IMPORT_COMPLETE"
+                    )
                   )
                 ] | length == 1;
               exact_resource($health_id; "AWS::SQS::Queue"; $health_url) and
