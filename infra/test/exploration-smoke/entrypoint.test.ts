@@ -80,6 +80,7 @@ async function runRecoveryScenario(options: {
 }): Promise<{
   readonly awsCalls: readonly string[];
   readonly changeSet: unknown;
+  readonly changeSetRequest: unknown;
   readonly defaultGetTemplateExitCode: number;
   readonly exitCode: number;
   readonly importCredential: string | undefined;
@@ -112,6 +113,10 @@ async function runRecoveryScenario(options: {
     const stackFile = join(directory, 'stack.json');
     const currentTemplateFile = join(directory, 'current-template.json');
     const changeSetFixture = join(directory, 'change-set.json');
+    const capturedChangeSetRequest = join(
+      directory,
+      'captured-change-set-request.json',
+    );
     const awsCalls = join(directory, 'aws-calls.txt');
     const importMarker = join(directory, 'imported');
     const importCredential = join(directory, 'import-credential.txt');
@@ -163,6 +168,8 @@ async function runRecoveryScenario(options: {
                     'arn:aws:apprunner:us-west-2:338414773271:vpcconnector/psd-eoc-exploration-smoke-native/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                 },
               ],
+              RoleARN:
+                'arn:aws:iam::338414773271:role/cdk-hnb659fds-cfn-exec-role-338414773271-us-west-2',
               StackStatus: options.stackStatus,
             },
           ],
@@ -192,7 +199,6 @@ async function runRecoveryScenario(options: {
           ChangeSetId:
             'arn:aws:cloudformation:us-west-2:338414773271:changeSet/psd-eoc-retained-email-import-1-1/00000000-0000-0000-0000-000000000000',
           ChangeSetName: 'psd-eoc-retained-email-import-1-1',
-          ChangeSetType: 'IMPORT',
           Changes: [
             {
               ResourceChange: {
@@ -223,9 +229,9 @@ async function runRecoveryScenario(options: {
               },
             },
           ],
+          Description:
+            'Exact four-resource retained dark-email recovery for GitHub run 1',
           ExecutionStatus: 'AVAILABLE',
-          RoleARN:
-            'arn:aws:iam::338414773271:role/cdk-hnb659fds-cfn-exec-role-338414773271-us-west-2',
           StackName: 'PsdEocExplorationSmoke',
           Status: 'CREATE_COMPLETE',
         }),
@@ -307,6 +313,8 @@ case "$1:$2" in
       fi
     elif printf '%s\\n' "$@" | grep -q 'AppRunnerVpcConnectorArn'; then
       jq -r '.Stacks[0].Outputs[] | select(.OutputKey == "AppRunnerVpcConnectorArn") | .OutputValue' "$STACK_FIXTURE"
+    elif printf '%s\\n' "$@" | grep -q 'RoleARN'; then
+      jq -r '.Stacks[0].RoleARN' "$STACK_FIXTURE"
     else
       cat "$STACK_FIXTURE"
     fi
@@ -332,8 +340,9 @@ case "$1:$2" in
     ;;
   cloudformation:create-change-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-    resources=$(arg_value --resources-to-import "$@")
-    cp "\${resources#file://}" "$CAPTURED_IMPORT_RESOURCES"
+    request=$(arg_value --cli-input-json "$@")
+    cp "\${request#file://}" "$CAPTURED_CHANGE_SET_REQUEST"
+    jq '.ResourcesToImport' "\${request#file://}" > "$CAPTURED_IMPORT_RESOURCES"
     printf '%s\\n' "$AWS_ACCESS_KEY_ID" > "$IMPORT_CREDENTIAL"
     printf '%s\\n' '{"Id":"arn:aws:cloudformation:us-west-2:338414773271:changeSet/psd-eoc-retained-email-import-1-1/00000000-0000-0000-0000-000000000000","StackId":"arn:aws:cloudformation:us-west-2:338414773271:stack/PsdEocExplorationSmoke/11111111-1111-1111-1111-111111111111"}'
     ;;
@@ -414,6 +423,7 @@ esac
       AWS_SECRET_ACCESS_KEY: 'oidc-secret',
       AWS_SESSION_TOKEN: 'oidc-token',
       BEFORE_FIXTURE: beforeFile,
+      CAPTURED_CHANGE_SET_REQUEST: capturedChangeSetRequest,
       CAPTURED_IMPORT_RESOURCES: capturedImportResources,
       CDK_ASSET_BUCKET: 'cdk-hnb659fds-assets-338414773271-us-west-2',
       CDK_CFN_EXEC_ROLE_ARN:
@@ -486,6 +496,9 @@ esac
         : [],
       changeSet: (await Bun.file(changeSetPath).exists())
         ? await Bun.file(changeSetPath).json()
+        : undefined,
+      changeSetRequest: (await Bun.file(capturedChangeSetRequest).exists())
+        ? await Bun.file(capturedChangeSetRequest).json()
         : undefined,
       defaultGetTemplateExitCode: defaultGetTemplate.exitCode,
       exitCode: child.exitCode,
@@ -871,12 +884,11 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('--checksum-algorithm SHA256');
     expect(workflow).toContain('--server-side-encryption AES256');
     expect(workflow).toContain('aws cloudformation create-change-set \\');
-    expect(workflow).toContain('--change-set-type IMPORT');
-    expect(workflow).toContain(
-      '--resources-to-import "file://$import_resources"',
-    );
-    expect(workflow).toContain('--template-url "$import_template_url"');
-    expect(workflow).toContain('--role-arn "$CDK_CFN_EXEC_ROLE_ARN"');
+    expect(workflow).toContain('--cli-input-json "file://$change_set_request"');
+    expect(workflow).toContain('ChangeSetType: "IMPORT"');
+    expect(workflow).toContain('ResourcesToImport: $resources[0]');
+    expect(workflow).toContain('TemplateURL: $template_url');
+    expect(workflow).toContain('RoleARN: $role_arn');
     expect(workflow).toContain('--output json > "$current_template_response"');
     expect(workflow).toContain(
       `jq -S '.TemplateBody' "$current_template_response" > "$current_template"`,
@@ -1057,13 +1069,28 @@ describe('isolated CDK entrypoint configuration', () => {
         ResourceType: 'AWS::KMS::Key',
       },
     ]);
-    expect(recovery.changeSet).toMatchObject({
+    expect(recovery.changeSetRequest).toEqual({
+      Capabilities: ['CAPABILITY_NAMED_IAM'],
+      ChangeSetName: 'psd-eoc-retained-email-import-1-1',
       ChangeSetType: 'IMPORT',
-      ExecutionStatus: 'AVAILABLE',
+      ClientToken: 'psd-eoc-import-1-1',
+      Description:
+        'Exact four-resource retained dark-email recovery for GitHub run 1',
+      Parameters: [{ ParameterKey: 'SourceSha', UsePreviousValue: true }],
+      ResourcesToImport: recovery.importResources,
       RoleARN:
         'arn:aws:iam::338414773271:role/cdk-hnb659fds-cfn-exec-role-338414773271-us-west-2',
+      StackName: 'PsdEocExplorationSmoke',
+      TemplateURL: importObject.url,
+    });
+    expect(recovery.changeSet).toMatchObject({
+      Description:
+        'Exact four-resource retained dark-email recovery for GitHub run 1',
+      ExecutionStatus: 'AVAILABLE',
       Status: 'CREATE_COMPLETE',
     });
+    expect(recovery.changeSet).not.toHaveProperty('ChangeSetType');
+    expect(recovery.changeSet).not.toHaveProperty('RoleARN');
 
     expect(
       recovery.awsCalls.filter((call) => call.startsWith('s3api:')),
