@@ -23,6 +23,10 @@ import {
   accessMembershipSnapshots,
   groupSources,
   idempotencyRecords,
+  securityAuditChainAnchors,
+  securityAuditEntries,
+  sessionRevocations,
+  sessions,
   userRoles,
   users,
 } from '../../db/schema';
@@ -37,6 +41,10 @@ import {
   type AccessMembershipSyncReservation,
 } from './access-membership-sync';
 import { checkAccessGate, createDrizzleAccessGateStore } from './access-gate';
+import {
+  createDrizzleInitialWebSessionStore,
+  type PersistInitialWebSessionRequest,
+} from './session-cookie';
 import {
   DESIGNATED_ACCESS_GROUP_EMAIL,
   type EvaluatedAccessMembershipSet,
@@ -89,6 +97,10 @@ function digest(value: unknown): string {
   return createHash('sha256')
     .update(JSON.stringify(value), 'utf8')
     .digest('hex');
+}
+
+function textDigest(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function buildContext(baseUrl: string): TestDatabaseContext {
@@ -468,7 +480,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
         googleSubject: CANDIDATE_SUBJECT,
         email: TRANSITION_EMAIL,
         displayName: 'Current independently verified Google profile',
-        subjectDigest: 'a'.repeat(64),
+        subjectDigest: textDigest(CANDIDATE_SUBJECT),
         requestId: randomUUID(),
         checkedAt: SYNC_TIME,
         source: 'mobile',
@@ -541,6 +553,106 @@ describeWithDatabase('access-membership atomic database publication', () => {
     });
     expect(replay).toEqual({ kind: 'replay', result });
 
+    if (
+      !mobileCandidate.granted ||
+      mobileCandidate.firstLoginBinding === null
+    ) {
+      throw new Error('Expected a protected first-login binding.');
+    }
+    const mobileCreatedAt = new Date('2026-08-17T12:01:00.000Z');
+    const oidcResponseDigest = textDigest(
+      'issue-234-synthetic-mobile-oidc-response',
+    );
+    const oidcPrincipal = Object.freeze({
+      kind: 'oidc-callback' as const,
+      subjectDigest: textDigest(mobileCandidate.user.googleSubject),
+      responseDigest: oidcResponseDigest,
+    });
+    const mobilePersistenceRequest: PersistInitialWebSessionRequest =
+      Object.freeze({
+        user: mobileCandidate.user,
+        membershipSnapshot: Object.freeze({
+          id: mobileCandidate.membership.snapshotId,
+          version: mobileCandidate.membership.snapshotVersion,
+          complete: true as const,
+          syncStartedAt: mobileCandidate.membership.syncStartedAt,
+          capturedAt: mobileCandidate.membership.capturedAt,
+        }),
+        membershipMember: Object.freeze({
+          userId: mobileCandidate.user.id,
+          googleSubject: mobileCandidate.user.googleSubject,
+          accessGroupSourceRefs:
+            mobileCandidate.membership.accessGroupSourceRefs,
+          facilityScope: mobileCandidate.user.facilityScope,
+        }),
+        firstLoginBinding: mobileCandidate.firstLoginBinding,
+        device: Object.freeze({
+          platform: 'ios' as const,
+          unlockMethod: 'biometric' as const,
+          installationId: 'ios.issue-234.synthetic-transition-device',
+        }),
+        credentialDigest: textDigest(
+          'issue-234-synthetic-mobile-session-credential',
+        ),
+        createdAt: mobileCreatedAt,
+        expiresAt: new Date(mobileCreatedAt.getTime() + 3 * 60 * 60 * 1_000),
+        membershipValidUntil: new Date(
+          mobileCreatedAt.getTime() + 60 * 60 * 1_000,
+        ),
+        membershipGraceUntil: new Date(
+          mobileCreatedAt.getTime() + 2 * 60 * 60 * 1_000,
+        ),
+        grantBootstrapAdmin: mobileCandidate.bootstrapAdminEligible,
+        requestId: randomUUID(),
+        idempotency: Object.freeze({
+          key: `oidc:${oidcResponseDigest}`,
+          principal: oidcPrincipal,
+          principalDigest: digest(oidcPrincipal),
+          requestDigest: textDigest(
+            'issue-234-synthetic-mobile-persistence-request',
+          ),
+        }),
+      });
+    const mobileResult = await createDrizzleInitialWebSessionStore(database, {
+      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
+    }).persist(mobilePersistenceRequest);
+    expect(mobileResult).toMatchObject({
+      user: {
+        id: mobileCandidate.user.id,
+        googleSubject: CANDIDATE_SUBJECT,
+        email: TRANSITION_EMAIL,
+        roles: ['admin'],
+      },
+      session: {
+        userId: mobileCandidate.user.id,
+        authorization: {
+          membershipSnapshotId:
+            mobileCandidate.firstLoginBinding.successorSnapshotId,
+        },
+        revokedAt: null,
+      },
+      deviceEnrollment: {
+        userId: mobileCandidate.user.id,
+        platform: 'ios',
+        unlockMethod: 'biometric',
+        revokedAt: null,
+      },
+    });
+    expect(mobileCandidate.user.id).not.toBe(USER_ID);
+    expect(mobileResult.session.authorization.membershipSnapshotId).toBe(
+      mobileCandidate.firstLoginBinding.successorSnapshotId,
+    );
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        eligibleAccessGroupSourceIds: [result.designatedSourceId],
+      }),
+    ).toEqual([mobileCandidate.user.id]);
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        eligibleAccessGroupSourceIds: [BASELINE_SOURCE_ID],
+      }),
+    ).toEqual([USER_ID]);
+
     const repeatedReservation = await store.reserve({
       actor: { kind: 'system', serviceId: 'access-membership-sync' },
       idempotencyKey: 'access-sync:database-current-transition-0001',
@@ -550,19 +662,223 @@ describeWithDatabase('access-membership atomic database publication', () => {
     if (repeatedReservation.kind !== 'reserved') {
       throw new Error('Expected a fresh transition replay reservation.');
     }
+    const repeatedStage = await store.stage(repeatedReservation.id, {
+      ...evaluation,
+      syncStartedAt: '2026-08-17T12:02:00.000Z',
+      capturedAt: '2026-08-17T12:02:00.000Z',
+    });
+    expect(repeatedStage).toMatchObject({
+      phase: 'stage',
+      snapshotId: mobileResult.session.authorization.membershipSnapshotId,
+      snapshotVersion:
+        mobileCandidate.firstLoginBinding.successorSnapshotVersion,
+      designatedSourceId: result.designatedSourceId,
+      activeAccessGroupCount: 2,
+      evaluatedMembershipCount: evaluation.memberEmails.length,
+      membershipDigest: evaluation.membershipDigest,
+      providerGroupIdDigest: evaluation.providerGroupIdDigest,
+      proofKind: 'initial-selector-match',
+      auditEntryHash: null,
+      publication: 'already-current',
+    });
     expect(
-      await store.stage(repeatedReservation.id, {
-        ...evaluation,
-        syncStartedAt: '2026-08-17T12:02:00.000Z',
-        capturedAt: '2026-08-17T12:02:00.000Z',
+      await database
+        .select({
+          userId: accessMembershipMemberGroups.userId,
+          groupSourceId: accessMembershipMemberGroups.groupSourceId,
+        })
+        .from(accessMembershipMemberGroups)
+        .where(
+          eq(accessMembershipMemberGroups.snapshotId, repeatedStage.snapshotId),
+        )
+        .orderBy(
+          asc(accessMembershipMemberGroups.userId),
+          asc(accessMembershipMemberGroups.groupSourceId),
+        ),
+    ).toEqual(
+      [
+        {
+          userId: USER_ID,
+          groupSourceId: BASELINE_SOURCE_ID,
+        },
+        {
+          userId: mobileCandidate.user.id,
+          groupSourceId: result.designatedSourceId,
+        },
+      ].sort((left, right) =>
+        `${left.userId}:${left.groupSourceId}`.localeCompare(
+          `${right.userId}:${right.groupSourceId}`,
+        ),
+      ),
+    );
+
+    const invalidFinalizationReservation = await store.reserve({
+      actor: { kind: 'system', serviceId: 'access-membership-sync' },
+      idempotencyKey: 'access-sync:database-invalid-finalization-0001',
+      requestDigest: '1'.repeat(64),
+      startedAt: '2026-08-17T12:03:00.000Z',
+    });
+    if (invalidFinalizationReservation.kind !== 'reserved') {
+      throw new Error('Expected a tampered finalization reservation.');
+    }
+    await expect(
+      store.finalize(invalidFinalizationReservation.id, {
+        mobileSessionId: mobileResult.session.id,
+        membershipSnapshotId: result.snapshotId,
+        requestId: randomUUID(),
+        completedAt: '2026-08-17T12:03:00.000Z',
       }),
-    ).toEqual({ ...result, publication: 'already-current' });
+    ).rejects.toMatchObject({ code: 'FINALIZATION_BASELINE_INVALID' });
+    await store.failReservation(
+      invalidFinalizationReservation.id,
+      'FINALIZATION_BASELINE_INVALID',
+      '2026-08-17T12:03:00.000Z',
+    );
+    expect(
+      await database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
+    ).toEqual([{ active: true }]);
+
+    const finalIdempotencyKey = 'access-sync:database-valid-finalization-0001';
+    const finalRequestDigest = '2'.repeat(64);
+    const finalRequestId = randomUUID();
+    const finalReservation = await store.reserve({
+      actor: { kind: 'system', serviceId: 'access-membership-sync' },
+      idempotencyKey: finalIdempotencyKey,
+      requestDigest: finalRequestDigest,
+      startedAt: '2026-08-17T12:04:00.000Z',
+    });
+    if (finalReservation.kind !== 'reserved') {
+      throw new Error('Expected a protected finalization reservation.');
+    }
+    const finalResult = await store.finalize(finalReservation.id, {
+      mobileSessionId: mobileResult.session.id,
+      membershipSnapshotId:
+        mobileResult.session.authorization.membershipSnapshotId,
+      requestId: finalRequestId,
+      completedAt: '2026-08-17T12:04:00.000Z',
+    });
+    if (finalResult.phase !== 'finalize') {
+      throw new Error('Expected a protected finalization result.');
+    }
+    expect(finalResult).toMatchObject({
+      phase: 'finalize',
+      snapshotVersion:
+        mobileCandidate.firstLoginBinding.successorSnapshotVersion + 1,
+      designatedSourceId: result.designatedSourceId,
+      activeAccessGroupCount: 1,
+      evaluatedMembershipCount: evaluation.memberEmails.length,
+      membershipDigest: evaluation.membershipDigest,
+      providerGroupIdDigest: evaluation.providerGroupIdDigest,
+      proofKind: 'durable-ios-session',
+      auditEntryHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      publication: 'created',
+    });
+    expect(finalResult.snapshotId).not.toBe(repeatedStage.snapshotId);
+    expect(
+      await database
+        .select({ id: groupSources.id, active: groupSources.active })
+        .from(groupSources)
+        .where(
+          and(
+            eq(groupSources.purpose, 'access'),
+            eq(groupSources.active, true),
+          ),
+        ),
+    ).toEqual([{ id: result.designatedSourceId, active: true }]);
+    expect(
+      await database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
+    ).toEqual([{ active: false }]);
+    expect(
+      await database
+        .select({ id: users.id, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, USER_ID)),
+    ).toEqual([{ id: USER_ID, disabledAt: null }]);
+    expect(
+      await database
+        .select({ role: userRoles.role })
+        .from(userRoles)
+        .where(eq(userRoles.userId, USER_ID)),
+    ).toEqual([{ role: 'admin' }]);
+    expect(
+      await database
+        .select({ id: sessions.id, revokedAt: sessions.revokedAt })
+        .from(sessions)
+        .where(eq(sessions.id, mobileResult.session.id)),
+    ).toEqual([{ id: mobileResult.session.id, revokedAt: null }]);
+    expect(
+      await database
+        .select({ id: sessionRevocations.id })
+        .from(sessionRevocations)
+        .where(eq(sessionRevocations.sessionId, mobileResult.session.id)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({
+          snapshotId: accessMembershipMembers.snapshotId,
+          userId: accessMembershipMembers.userId,
+        })
+        .from(accessMembershipMembers)
+        .where(eq(accessMembershipMembers.snapshotId, finalResult.snapshotId)),
+    ).toEqual([
+      {
+        snapshotId: finalResult.snapshotId,
+        userId: mobileCandidate.user.id,
+      },
+    ]);
+    const [finalAudit] = await database
+      .select()
+      .from(securityAuditEntries)
+      .where(eq(securityAuditEntries.requestId, finalRequestId));
+    if (finalAudit === undefined) {
+      throw new Error('Expected a protected finalization audit entry.');
+    }
+    expect(finalAudit).toMatchObject({
+      action: 'sync-access-membership',
+      outcome: 'success',
+      source: 'scheduled-job',
+      targetKind: 'configuration',
+      targetId: finalResult.snapshotId,
+      entryHash: finalResult.auditEntryHash,
+    });
+    expect(
+      await database
+        .select({
+          sequence: securityAuditChainAnchors.sequence,
+          entryHash: securityAuditChainAnchors.entryHash,
+        })
+        .from(securityAuditChainAnchors)
+        .where(eq(securityAuditChainAnchors.sequence, finalAudit.sequence)),
+    ).toEqual([
+      {
+        sequence: finalAudit.sequence,
+        entryHash: finalResult.auditEntryHash,
+      },
+    ]);
+
+    const finalReplay = await store.reserve({
+      actor: { kind: 'system', serviceId: 'access-membership-sync' },
+      idempotencyKey: finalIdempotencyKey,
+      requestDigest: finalRequestDigest,
+      startedAt: '2026-08-17T12:05:00.000Z',
+    });
+    expect(finalReplay).toEqual({ kind: 'replay', result: finalResult });
     expect(
       await database
         .select({ id: users.id })
         .from(users)
         .orderBy(asc(users.id)),
-    ).toEqual([{ id: USER_ID }]);
+    ).toEqual(
+      [{ id: USER_ID }, { id: mobileCandidate.user.id }].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      ),
+    );
   });
 
   test('rolls provider-source activation back when the protected selector is absent', async () => {
