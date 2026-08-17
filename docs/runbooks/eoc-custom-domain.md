@@ -30,9 +30,11 @@ authoritative for the public district domain.
 Use `.github/workflows/associate-exploration-custom-domain.yml` only from an
 exact reviewed commit already on `main`. Both modes require approval in the
 protected `exploration-smoke` environment and authenticate with GitHub OIDC.
-The workflow verifies the outer OIDC identity, assumes the existing CDK deploy
-role only inside a short-lived subprocess, and verifies that the outer identity
-is restored afterward.
+The workflow verifies the outer OIDC identity, proves the exact App Runner
+domain actions are allowed only on the named service while disassociation and
+Route53 writes remain denied, and uses that same outer identity for every App
+Runner call. It does not assume the CDK deploy role or issue secondary AWS
+credentials.
 
 Use `inspect-only` with the exact acknowledgement:
 
@@ -47,8 +49,9 @@ This mode calls `DescribeCustomDomains` but never calls an AWS write API. Use
 ASSOCIATE EOC.PSD401.NET WITHOUT WWW
 ```
 
-That mode first reads the service, active operations, and all existing custom
-domains. It calls `AssociateCustomDomain` exactly once, with
+That mode reads all existing custom domains before any other App Runner call,
+then confirms the service and active-operation state. It calls
+`AssociateCustomDomain` exactly once, with
 `EnableWWWSubdomain=false`, only when the exact domain is absent. It fails
 closed on a wrong service, non-running service, active operation, foreign or
 ambiguous domain, `www` mismatch, failed/deleting association, incomplete
