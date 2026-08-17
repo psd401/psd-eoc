@@ -418,6 +418,22 @@ type EndpointReference = Readonly<{
   channel: NotificationChannel;
 }>;
 
+/**
+ * Revalidates the target-mode discriminator after opaque eligibility facts
+ * have been resolved. The controlled mode is a singleton email branch;
+ * ordinary target sets retain their push-and-email launch floor.
+ */
+export function deliveryTestTargetModeMatches(
+  input: object,
+  endpoints: readonly EndpointReference[],
+): boolean {
+  if ('mode' in input && input.mode === 'controlled-email-canary') {
+    return endpoints.length === 1 && endpoints[0]?.channel === 'email';
+  }
+  const channels = new Set(endpoints.map((endpoint) => endpoint.channel));
+  return endpoints.length >= 2 && channels.has('push') && channels.has('email');
+}
+
 function endpointKey(endpoint: EndpointReference): string {
   return `${endpoint.channel}:${endpoint.recipientId}:${endpoint.endpointId}`;
 }
@@ -830,6 +846,11 @@ async function createTargetSetVersion(
       authorizationReference: fact.authorizationReference,
     }))
     .sort((left, right) => endpointKey(left).localeCompare(endpointKey(right)));
+  if (!deliveryTestTargetModeMatches(input, endpoints)) {
+    throw forbidden(
+      'The selected delivery-test mode does not match its current approved endpoint facts.',
+    );
+  }
   const requestedReferences = endpoints.map((endpoint) => ({
     recipientId: endpoint.recipientId,
     endpointId: endpoint.endpointId,

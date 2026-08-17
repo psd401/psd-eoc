@@ -22,6 +22,7 @@ import { deliveryTestEndpointReferenceDigest } from '../../../lib/testing/e2e-de
 import {
   assertAuthenticatedDeliveryTestReportInvocation,
   decodeDeliveryTestReportPageCursor,
+  deliveryTestTargetModeMatches,
   deliveryTestReportIsInPageWindow,
   encodeDeliveryTestReportPageCursor,
   finalizeDeliveryTestReportRegistration,
@@ -88,6 +89,44 @@ class FakeSelectQuery implements PromiseLike<readonly FakeRow[]> {
 }
 
 const STARTED_AT = new Date('2026-08-13T18:00:00.000Z');
+
+describe('controlled email canary target mode', () => {
+  const email = Object.freeze({
+    recipientId: '10000000-0000-4000-8000-000000000001',
+    endpointId: '10000000-0000-4000-8000-000000000002',
+    channel: 'email' as const,
+  });
+  const push = Object.freeze({
+    recipientId: '10000000-0000-4000-8000-000000000003',
+    endpointId: '10000000-0000-4000-8000-000000000004',
+    channel: 'push' as const,
+  });
+
+  test('requires the discriminated mode to resolve to exactly one email endpoint', () => {
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-email-canary' }, [
+        email,
+      ]),
+    ).toBe(true);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-email-canary' }, [
+        push,
+      ]),
+    ).toBe(false);
+    expect(
+      deliveryTestTargetModeMatches({ mode: 'controlled-email-canary' }, [
+        email,
+        push,
+      ]),
+    ).toBe(false);
+  });
+
+  test('retains the ordinary push-and-email minimum', () => {
+    expect(deliveryTestTargetModeMatches({}, [email, push])).toBe(true);
+    expect(deliveryTestTargetModeMatches({}, [email])).toBe(false);
+    expect(deliveryTestTargetModeMatches({}, [push])).toBe(false);
+  });
+});
 
 function systemInvocation(serverTime: Date): TrustedCapabilityInvocation {
   const requestId = randomUUID();
