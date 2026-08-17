@@ -250,6 +250,10 @@ function addChannelPlanIssues(
     readonly templateMode: TemplateMode;
     readonly rosterPopulation: RosterPopulation;
     readonly purpose: NotificationPurpose;
+    readonly deliveryTest?:
+      | z.infer<typeof DeliveryTestNotificationMetadataSchema>
+      | null
+      | undefined;
     readonly channels: readonly z.infer<
       typeof ChannelConsequencePreviewSchema
     >[];
@@ -264,7 +268,22 @@ function addChannelPlanIssues(
       path: ['channels'],
     });
   }
-  if (!names.includes('push') || !names.includes('email')) {
+  const controlledEmailCanary =
+    names.length === 1 &&
+    names[0] === 'email' &&
+    value.channels[0]?.endpointCount === 1;
+  if (controlledEmailCanary && value.deliveryTest == null) {
+    context.addIssue({
+      code: 'custom',
+      message:
+        'A one-email plan requires exact controlled delivery-test provenance.',
+      path: ['deliveryTest'],
+    });
+  }
+  if (
+    !controlledEmailCanary &&
+    (!names.includes('push') || !names.includes('email'))
+  ) {
     context.addIssue({
       code: 'custom',
       message: 'Notification channel plan requires push and email.',
@@ -295,6 +314,31 @@ function addChannelPlanIssues(
     }
   });
 }
+
+const MultiChannelNotificationPlanSchema = z
+  .array(ChannelConsequencePreviewSchema)
+  .min(2)
+  .max(3)
+  .readonly();
+
+const ControlledEmailCanaryNotificationPlanSchema = z
+  .tuple([ChannelConsequencePreviewSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'email' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled email canary plan must contain exactly one email endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
+const NotificationChannelPlanSchema = z.union([
+  MultiChannelNotificationPlanSchema,
+  ControlledEmailCanaryNotificationPlanSchema,
+]);
 
 function addNotificationAuthorizationIssues(
   value: {
@@ -381,7 +425,7 @@ export const NotificationIntentSchema = z
     source: InvocationSourceSchema,
     requestId: UuidSchema,
     authorization: NotificationAuthorizationSchema,
-    channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
+    channels: NotificationChannelPlanSchema,
     createdAt: TimestampSchema,
   })
   .strict()
@@ -845,7 +889,7 @@ const NotificationOutboxMessageCommonShape = {
   deliveryTest: DeliveryTestNotificationMetadataSchema.nullish(),
   requestId: UuidSchema,
   authorization: NotificationAuthorizationSchema,
-  channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
+  channels: NotificationChannelPlanSchema,
   createdAt: TimestampSchema,
 } as const;
 
@@ -991,11 +1035,34 @@ export type DispatchOutboxInput = z.infer<typeof DispatchOutboxInputSchema>;
  * Owns one durable outbox-dispatch result. `published` means queue handoff;
  * the immutable batches carry no claim of provider or human delivery.
  */
+const MultiChannelDispatchBatchListSchema = z
+  .array(DispatchBatchSchema)
+  .min(2)
+  .max(3)
+  .readonly();
+
+const ControlledEmailCanaryDispatchBatchListSchema = z
+  .tuple([DispatchBatchSchema])
+  .superRefine(([batch], context) => {
+    if (batch.channel !== 'email' || batch.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled email canary dispatch must contain exactly one email endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const DispatchOutboxResultSchema = z
   .object({
     facilityId: FacilityIdSchema,
     outboxRecord: OutboxRecordSchema,
-    batches: z.array(DispatchBatchSchema).min(2).max(3).readonly(),
+    batches: z.union([
+      MultiChannelDispatchBatchListSchema,
+      ControlledEmailCanaryDispatchBatchListSchema,
+    ]),
   })
   .strict()
   .superRefine((result, context) => {
