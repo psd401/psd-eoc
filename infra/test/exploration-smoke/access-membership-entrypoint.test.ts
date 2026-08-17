@@ -25,7 +25,11 @@ describe('exact access-membership protected entrypoint', () => {
     expect(workflow).toContain('environment: exploration-smoke');
     expect(workflow).toContain('id-token: write');
     expect(workflow).toContain("github.ref == 'refs/heads/main'");
-    expect(workflow).toContain('PUBLISH EXACT ACCESS MEMBERSHIP');
+    expect(workflow).toContain('STAGE EXACT ACCESS MEMBERSHIP');
+    expect(workflow).toContain('FINALIZE PROVEN MOBILE ACCESS');
+    expect(workflow).toContain('type: choice');
+    expect(workflow).toContain('mobile_session_id:');
+    expect(workflow).toContain('membership_snapshot_id:');
     expect(workflow).toContain('AWS_EXPLORATION_SMOKE_DEPLOY_POLICY_SHA256');
     expect(workflow).toContain(
       'AWS_EXPLORATION_SMOKE_DEPLOY_PERMISSIONS_BOUNDARY_ARN',
@@ -46,6 +50,9 @@ describe('exact access-membership protected entrypoint', () => {
     );
     expect(workflow).toContain('ACCESS_SYNC_REQUEST_ID');
     expect(workflow).toContain('ACCESS_SYNC_IDEMPOTENCY_KEY');
+    expect(workflow).toContain('ACCESS_SYNC_PHASE');
+    expect(workflow).toContain('ACCESS_SYNC_MOBILE_SESSION_ID');
+    expect(workflow).toContain('ACCESS_SYNC_MEMBERSHIP_SNAPSHOT_ID');
     expect(workflow).not.toContain('APPROVED_GOOGLE_SUBJECT:');
     expect(workflow).not.toContain('APPROVED_STAFF_EMAIL:');
     expect(workflow).not.toContain('GOOGLE_ROSTER_CONFIG", value:');
@@ -62,6 +69,9 @@ describe('exact access-membership protected entrypoint', () => {
     expect(stack).toContain("'AccessSyncTaskRole'");
     expect(stack).toContain("'/psd-eoc/google-groups'");
     expect(stack).toContain('databaseApplicationSecret.grantRead(');
+    expect(stack).toContain(
+      "'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'",
+    );
     expect(workflow).toContain('DatabaseAdminSecretArn');
     expect(workflow).toContain(
       '.EvalResourceName == $admin and .EvalResourceDecision != "allowed"',
@@ -85,10 +95,11 @@ describe('exact access-membership protected entrypoint', () => {
       Bun.file(workflowUrl).text(),
       Bun.file(scriptUrl).text(),
     ]);
-    expect(workflow).toContain(
-      'initialTransitionCandidateDirectMember == true',
-    );
+    expect(workflow).toContain('.proofKind == "initial-selector-match"');
+    expect(workflow).toContain('.proofKind == "durable-ios-session"');
     expect(workflow).toContain('.activeAccessGroupCount == 2');
+    expect(workflow).toContain('.activeAccessGroupCount == 1');
+    expect(workflow).toContain('.auditEntryHash == null');
     expect(workflow).toContain('access-membership-publication.json');
     expect(workflow).toContain("if grep -Eq '@|users/|groups/");
     expect(workflow).not.toContain('path: $RUNNER_TEMP');
@@ -98,9 +109,11 @@ describe('exact access-membership protected entrypoint', () => {
     expect(script).toContain(
       "event: z.literal('access-membership-sync-complete')",
     );
+    expect(script).toContain("phase: z.literal('finalize')");
     expect(script).toContain(
-      'initialTransitionCandidateDirectMember: z.literal(true)',
+      'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
     );
+    expect(script).toContain("run.phase === 'stage'");
     expect(script).not.toContain('memberEmails: result');
     expect(script).not.toContain('googleGroupId: result');
   });

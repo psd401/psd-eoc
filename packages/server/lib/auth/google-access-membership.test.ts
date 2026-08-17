@@ -8,6 +8,8 @@ import {
   createGoogleAccessMembershipEvaluator,
 } from './google-access-membership';
 
+const SYNTHETIC_TRANSITION_EMAIL = 'initial.mobile@psd401.net';
+
 const TEST_TIME = '2026-08-17T12:00:00.000Z';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const CLOUD_IDENTITY_ENDPOINT = 'https://cloudidentity.googleapis.com/v1';
@@ -156,7 +158,7 @@ describe('exact Google access-membership evaluator', () => {
       Response.json({
         memberships: [
           currentMembership('ZED@PSD401.NET', '000000000000000000002'),
-          currentMembership('hagelk@psd401.net'),
+          currentMembership(SYNTHETIC_TRANSITION_EMAIL),
           {
             ...currentMembership(
               'expired.user@psd401.net',
@@ -178,7 +180,7 @@ describe('exact Google access-membership evaluator', () => {
     expect(result).toMatchObject({
       groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
       googleGroupId: GROUP_ID,
-      memberEmails: ['hagelk@psd401.net', 'zed@psd401.net'],
+      memberEmails: [SYNTHETIC_TRANSITION_EMAIL, 'zed@psd401.net'],
       syncStartedAt: TEST_TIME,
       capturedAt: TEST_TIME,
     });
@@ -223,7 +225,7 @@ describe('exact Google access-membership evaluator', () => {
     const harness = providerHarness((pageToken) => {
       if (pageToken === null) {
         return Response.json({
-          memberships: [currentMembership('hagelk@psd401.net')],
+          memberships: [currentMembership(SYNTHETIC_TRANSITION_EMAIL)],
           nextPageToken: 'page-two',
         });
       }
@@ -235,7 +237,7 @@ describe('exact Google access-membership evaluator', () => {
       });
     });
     expect((await evaluator(harness).evaluate()).memberEmails).toEqual([
-      'hagelk@psd401.net',
+      SYNTHETIC_TRANSITION_EMAIL,
       'other@psd401.net',
     ]);
     expect(harness.calls).toHaveLength(4);
@@ -318,7 +320,7 @@ describe('exact Google access-membership evaluator', () => {
   });
 
   test('rejects duplicate resources and normalized identities', async () => {
-    const duplicateResource = currentMembership('hagelk@psd401.net');
+    const duplicateResource = currentMembership(SYNTHETIC_TRANSITION_EMAIL);
     await expectEvaluationError(
       evaluator(
         providerHarness(() =>
@@ -334,8 +336,11 @@ describe('exact Google access-membership evaluator', () => {
         providerHarness(() =>
           Response.json({
             memberships: [
-              currentMembership('HAGELK@PSD401.NET'),
-              currentMembership('hagelk@psd401.net', '000000000000000000002'),
+              currentMembership('INITIAL.MOBILE@PSD401.NET'),
+              currentMembership(
+                SYNTHETIC_TRANSITION_EMAIL,
+                '000000000000000000002',
+              ),
             ],
           }),
         ),
