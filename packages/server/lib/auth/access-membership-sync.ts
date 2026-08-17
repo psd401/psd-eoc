@@ -1855,11 +1855,17 @@ export function createDrizzleAccessMembershipSyncStore(
         const tokenChainValid =
           tokenIssuances.length === 1 &&
           currentTokenDigest !== undefined &&
+          /^[a-f0-9]{64}$/u.test(currentTokenDigest) &&
           previousTokenTime !== undefined &&
+          previousTokenTime === mobileSession.createdAt.getTime() &&
+          previousTokenTime <= completedAt.getTime() &&
           tokenRotations.every((rotation) => {
             const valid =
               rotation.previousTokenDigest === currentTokenDigest &&
-              rotation.rotatedAt.getTime() >= (previousTokenTime ?? 0);
+              /^[a-f0-9]{64}$/u.test(rotation.previousTokenDigest) &&
+              /^[a-f0-9]{64}$/u.test(rotation.nextTokenDigest) &&
+              rotation.rotatedAt.getTime() >= (previousTokenTime ?? 0) &&
+              rotation.rotatedAt.getTime() <= completedAt.getTime();
             currentTokenDigest = rotation.nextTokenDigest;
             previousTokenTime = rotation.rotatedAt.getTime();
             return valid;
@@ -1900,6 +1906,8 @@ export function createDrizzleAccessMembershipSyncStore(
                 .for('share');
         if (
           currentEpoch === undefined ||
+          currentEpoch.establishedAt.getTime() !==
+            mobileSession.createdAt.getTime() ||
           currentEpoch.establishedAt.getTime() > completedAt.getTime() ||
           currentEpochInvalidations.length !== 0
         ) {
@@ -1980,15 +1988,21 @@ export function createDrizzleAccessMembershipSyncStore(
           signInAudit.data.principal.kind !== 'human' ||
           signInAudit.data.principal.userId !== designatedMember.userId ||
           signInAudit.data.principal.sessionId !== mobileSession.id ||
+          Date.parse(signInAudit.data.occurredAt) !==
+            mobileSession.createdAt.getTime() ||
+          Date.parse(signInAudit.data.occurredAt) > completedAt.getTime() ||
           calculateSecurityAuditHash(
             securityAuditHashPayload(signInAudit.data),
           ) !== signInAudit.data.entryHash ||
           signInAuditAnchor?.entryHash !== signInAudit.data.entryHash ||
           latestAdminChange === undefined ||
+          roleChanges.length !== 1 ||
           latestAdminChange.granted !== true ||
           latestAdminChange.changedByUserId !== designatedMember.userId ||
           latestAdminChange.changedWithSessionId !== mobileSession.id ||
-          latestAdminChange.requestId !== signInAudit.data.requestId
+          latestAdminChange.requestId !== signInAudit.data.requestId ||
+          latestAdminChange.occurredAt.getTime() !==
+            mobileSession.createdAt.getTime()
         ) {
           throw new AccessMembershipSyncError(
             'FINALIZATION_AUDIT_PROOF_INVALID',
