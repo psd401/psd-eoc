@@ -2799,15 +2799,37 @@ describe('human-only capability boundary', () => {
     expect(
       SyncAccessMembershipInputSchema.safeParse({
         designatedGroupEmail: 'tsd-engineering@psd401.net',
+        transition: { phase: 'stage' },
       }).success,
     ).toBe(true);
     expect(
       SyncAccessMembershipInputSchema.safeParse({
         designatedGroupEmail: 'another-group@psd401.net',
+        transition: { phase: 'stage' },
+      }).success,
+    ).toBe(false);
+    expect(
+      SyncAccessMembershipInputSchema.safeParse({
+        designatedGroupEmail: 'tsd-engineering@psd401.net',
+        transition: {
+          phase: 'finalize',
+          mobileSessionId: ids.session,
+          membershipSnapshotId: ids.membershipSnapshot,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      SyncAccessMembershipInputSchema.safeParse({
+        designatedGroupEmail: 'tsd-engineering@psd401.net',
+        transition: {
+          phase: 'finalize',
+          mobileSessionId: ids.session,
+        },
       }).success,
     ).toBe(false);
     expect(
       SyncAccessMembershipResultSchema.safeParse({
+        phase: 'stage',
         snapshotId: ids.membershipSnapshot,
         snapshotVersion: 2,
         capturedAt: times.activated,
@@ -2816,6 +2838,24 @@ describe('human-only capability boundary', () => {
         evaluatedMembershipCount: 1,
         membershipDigest: 'a'.repeat(64),
         providerGroupIdDigest: 'b'.repeat(64),
+        proofKind: 'initial-selector-match',
+        auditEntryHash: null,
+        publication: 'created',
+      }).success,
+    ).toBe(true);
+    expect(
+      SyncAccessMembershipResultSchema.safeParse({
+        phase: 'finalize',
+        snapshotId: ids.membershipSnapshot,
+        snapshotVersion: 3,
+        capturedAt: times.activated,
+        designatedSourceId: ids.group,
+        activeAccessGroupCount: 1,
+        evaluatedMembershipCount: 1,
+        membershipDigest: 'a'.repeat(64),
+        providerGroupIdDigest: 'b'.repeat(64),
+        proofKind: 'durable-ios-session',
+        auditEntryHash: 'c'.repeat(64),
         publication: 'created',
       }).success,
     ).toBe(true);
