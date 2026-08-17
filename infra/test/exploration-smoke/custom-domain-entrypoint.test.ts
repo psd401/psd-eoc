@@ -206,28 +206,62 @@ async function runScenario(options: ScenarioOptions): Promise<ScenarioResult> {
 set -euo pipefail
 printf '%s:%s\t%s\t%s\n' "$1" "$2" "\${AWS_ACCESS_KEY_ID:-missing}" "$*" >> "$AWS_CALLS_FILE"
 
-case "$1:$2" in
-  sts:assume-role)
-    test "\${AWS_ACCESS_KEY_ID:-}" = 'oidc-access'
-    printf '%s\n' '{"AccessKeyId":"ASIAAAAAAAAAAAAAAAAA","Expiration":"2026-08-17T10:15:00Z","SecretAccessKey":"ssssssssssssssssssssssssssssssssssssssss","SessionToken":"tttttttttttttttttttttttttttttttt"}'
-    ;;
-  sts:get-caller-identity)
-    if [[ "\${AWS_ACCESS_KEY_ID:-}" == 'ASIAAAAAAAAAAAAAAAAA' ]]; then
-      printf '%s\n' '{"Account":"338414773271","Arn":"arn:aws:sts::338414773271:assumed-role/cdk-hnb659fds-deploy-role-338414773271-us-west-2/psd-eoc-domain-readback-123","UserId":"AROATEST:psd-eoc-domain-readback-123"}'
-    else
-      printf '%s\n' '{"Account":"338414773271","Arn":"arn:aws:sts::338414773271:assumed-role/psd-eoc-exploration-smoke-github-deploy/psd-eoc-domain-123","UserId":"AROATEST:psd-eoc-domain-123"}'
+arg_value() {
+  local wanted=$1
+  shift
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "$wanted" ]]; then
+      printf '%s\n' "$2"
+      return 0
     fi
+    shift
+  done
+  return 1
+}
+
+case "$1:$2" in
+  sts:get-caller-identity)
+    test "\${AWS_ACCESS_KEY_ID:-}" = 'oidc-access'
+    printf '%s\n' '{"Account":"338414773271","Arn":"arn:aws:sts::338414773271:assumed-role/psd-eoc-exploration-smoke-github-deploy/psd-eoc-domain-123","UserId":"AROATEST:psd-eoc-domain-123"}'
+    ;;
+  iam:simulate-principal-policy)
+    test "\${AWS_ACCESS_KEY_ID:-}" = 'oidc-access'
+    resource=$(arg_value --resource-arns "$@")
+    actions=()
+    collect=false
+    for argument in "$@"; do
+      if [[ "$argument" == '--action-names' ]]; then
+        collect=true
+        continue
+      fi
+      if [[ "$argument" == '--resource-arns' ]]; then
+        collect=false
+      elif [[ "$collect" == true ]]; then
+        actions+=("$argument")
+      fi
+    done
+    jq -n \
+      --arg canonical "$APP_RUNNER_SERVICE_ARN" \
+      --arg resource "$resource" \
+      --args '{EvaluationResults:[$ARGS.positional[] | {
+        EvalActionName:.,
+        EvalDecision:(if
+          $resource == $canonical and
+          (. == "apprunner:AssociateCustomDomain" or . == "apprunner:DescribeCustomDomains" or . == "apprunner:ListOperations")
+          then "allowed" else "implicitDeny" end),
+        EvalResourceName:$resource
+      }]}' "\${actions[@]}"
     ;;
   apprunner:describe-service)
-    test "\${AWS_ACCESS_KEY_ID:-}" = 'ASIAAAAAAAAAAAAAAAAA'
+    test "\${AWS_ACCESS_KEY_ID:-}" = 'oidc-access'
     cat "$FIXTURE_DIRECTORY/service.json"
     ;;
   apprunner:list-operations)
-    test "\${AWS_ACCESS_KEY_ID:-}" = 'ASIAAAAAAAAAAAAAAAAA'
+    test "\${AWS_ACCESS_KEY_ID:-}" = 'oidc-access'
     cat "$FIXTURE_DIRECTORY/operations.json"
     ;;
   apprunner:describe-custom-domains)
-    test "\${AWS_ACCESS_KEY_ID:-}" = 'ASIAAAAAAAAAAAAAAAAA'
+    test "\${AWS_ACCESS_KEY_ID:-}" = 'oidc-access'
     count=$(cat "$DESCRIBE_COUNT_FILE")
     fixture="$FIXTURE_DIRECTORY/custom-domain-$count.json"
     if [[ ! -f "$fixture" ]]; then
@@ -237,7 +271,7 @@ case "$1:$2" in
     printf '%s\n' "$((count + 1))" > "$DESCRIBE_COUNT_FILE"
     ;;
   apprunner:associate-custom-domain)
-    test "\${AWS_ACCESS_KEY_ID:-}" = 'ASIAAAAAAAAAAAAAAAAA'
+    test "\${AWS_ACCESS_KEY_ID:-}" = 'oidc-access'
     cat "$FIXTURE_DIRECTORY/associate.json"
     ;;
   *)
@@ -271,8 +305,6 @@ printf '%s\n' "$*" >> "$SLEEP_CALLS_FILE"
       AWS_SECRET_ACCESS_KEY: 'oidc-secret',
       AWS_SESSION_TOKEN: 'oidc-token',
       AWS_CALLS_FILE: awsCallsFile,
-      CDK_DEPLOY_ROLE_ARN:
-        'arn:aws:iam::338414773271:role/cdk-hnb659fds-deploy-role-338414773271-us-west-2',
       CUSTOM_DOMAIN: domainName,
       CUSTOM_DOMAIN_RESPONSE_COUNT: String(
         options.customDomainResponses.length,
@@ -282,6 +314,8 @@ printf '%s\n' "$*" >> "$SLEEP_CALLS_FILE"
       GITHUB_RUN_ID: '123',
       GITHUB_STEP_SUMMARY: join(directory, 'summary.md'),
       MODE: mode,
+      OUTER_OIDC_ROLE_ARN:
+        'arn:aws:iam::338414773271:role/psd-eoc-exploration-smoke-github-deploy',
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
       READBACK_ATTEMPTS: '6',
       READBACK_RETRY_SECONDS: '5',
@@ -364,9 +398,17 @@ describe('exploration custom-domain protected workflow', () => {
       'role-to-assume: ${{ env.OUTER_OIDC_ROLE_ARN }}',
     );
     expect(workflow).toContain(serviceArn);
-    expect(workflow).toContain(
-      'arn:aws:iam::338414773271:role/cdk-hnb659fds-deploy-role-338414773271-us-west-2',
-    );
+    expect(workflow).not.toContain('CDK_DEPLOY_ROLE_ARN');
+    expect(workflow).not.toContain('aws sts assume-role');
+    expect(workflow).toContain('aws iam simulate-principal-policy');
+    expect(workflow).toContain('apprunner:AssociateCustomDomain');
+    expect(workflow).toContain('apprunner:DescribeCustomDomains');
+    expect(workflow).toContain('apprunner:ListOperations');
+    expect(workflow).toContain('apprunner:DisassociateCustomDomain');
+    expect(workflow).toContain('route53:ChangeResourceRecordSets');
+    expect(
+      workflow.indexOf('aws apprunner describe-custom-domains'),
+    ).toBeLessThan(workflow.indexOf('aws apprunner describe-service'));
     expect(
       workflow.match(/aws apprunner associate-custom-domain/g),
     ).toHaveLength(1);
@@ -556,7 +598,7 @@ describe('exploration custom-domain protected workflow', () => {
     expectNoForbiddenAwsWrites(result);
   });
 
-  it('fails closed on an active App Runner operation before domain inspection or write', async () => {
+  it('reads custom domains first and fails closed on an active operation before any write', async () => {
     const result = await runScenario({
       customDomainResponses: [response([])],
       mode: 'associate-if-absent',
@@ -564,8 +606,13 @@ describe('exploration custom-domain protected workflow', () => {
     });
 
     expect(result.exitCode).not.toBe(0);
-    expect(commandCount(result, 'apprunner:describe-custom-domains')).toBe(0);
+    expect(commandCount(result, 'apprunner:describe-custom-domains')).toBe(1);
     expect(commandCount(result, 'apprunner:associate-custom-domain')).toBe(0);
+    expect(
+      result.awsCalls
+        .find((call) => call.startsWith('apprunner:'))
+        ?.startsWith('apprunner:describe-custom-domains'),
+    ).toBe(true);
     expectNoForbiddenAwsWrites(result);
   });
 
@@ -582,22 +629,24 @@ describe('exploration custom-domain protected workflow', () => {
     expectNoForbiddenAwsWrites(result);
   });
 
-  it('scopes App Runner calls to the deploy role and restores the outer OIDC identity', async () => {
+  it('uses only the exact outer OIDC identity for policy simulation and App Runner calls', async () => {
     const result = await runScenario({
       customDomainResponses: [response([])],
       mode: 'inspect-only',
     });
 
     expect(result.exitCode).toBe(0);
-    for (const call of result.awsCalls.filter((item) =>
-      item.startsWith('apprunner:'),
+    for (const call of result.awsCalls.filter(
+      (item) => item.startsWith('apprunner:') || item.startsWith('iam:'),
     )) {
-      expect(call).toContain('\tASIAAAAAAAAAAAAAAAAA\t');
+      expect(call).toContain('\toidc-access\t');
     }
+    expect(commandCount(result, 'iam:simulate-principal-policy')).toBe(4);
+    expect(commandCount(result, 'sts:assume-role')).toBe(0);
     const identityCalls = result.awsCalls.filter((call) =>
       call.startsWith('sts:get-caller-identity'),
     );
-    expect(identityCalls[0]).toContain('\tASIAAAAAAAAAAAAAAAAA\t');
+    expect(identityCalls[0]).toContain('\toidc-access\t');
     expect(identityCalls.at(-1)).toContain('\toidc-access\t');
     expect(
       await Bun.file(

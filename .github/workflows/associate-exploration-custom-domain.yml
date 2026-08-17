@@ -39,7 +39,6 @@ env:
   AWS_ACCOUNT_ALIAS: psd401
   AWS_ACCOUNT_ID: '338414773271'
   AWS_REGION: us-west-2
-  CDK_DEPLOY_ROLE_ARN: arn:aws:iam::338414773271:role/cdk-hnb659fds-deploy-role-338414773271-us-west-2
   CUSTOM_DOMAIN: eoc.psd401.net
   OUTER_OIDC_ROLE_ARN: arn:aws:iam::338414773271:role/psd-eoc-exploration-smoke-github-deploy
 
@@ -248,30 +247,72 @@ jobs:
               ' "$1" > /dev/null
           }
 
-          deploy_credentials=$(aws sts assume-role \
-            --role-arn "$CDK_DEPLOY_ROLE_ARN" \
-            --role-session-name "psd-eoc-domain-readback-${GITHUB_RUN_ID}" \
-            --duration-seconds 900 \
-            --query Credentials \
-            --output json)
-          deploy_access_key=$(jq -er '.AccessKeyId | select(test("^ASIA[A-Z0-9]{16}$"))' <<< "$deploy_credentials")
-          deploy_secret_key=$(jq -er '.SecretAccessKey | select(type == "string" and length >= 40)' <<< "$deploy_credentials")
-          deploy_session_token=$(jq -er '.SessionToken | select(type == "string" and length > 20)' <<< "$deploy_credentials")
-          cleanup_credentials() {
-            unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token
-          }
-          trap cleanup_credentials EXIT
-
           set +e
           (
             set -euo pipefail
-            export AWS_ACCESS_KEY_ID="$deploy_access_key"
-            export AWS_SECRET_ACCESS_KEY="$deploy_secret_key"
-            export AWS_SESSION_TOKEN="$deploy_session_token"
+            aws sts get-caller-identity > "$artifact_directory/domain-call-identity.json"
+            test "$(jq -cS . "$artifact_directory/outer-identity-before.json")" = \
+              "$(jq -cS . "$artifact_directory/domain-call-identity.json")"
 
-            aws sts get-caller-identity > "$artifact_directory/deploy-role-identity.json"
-            deploy_arn=$(jq -er .Arn "$artifact_directory/deploy-role-identity.json")
-            [[ "$deploy_arn" =~ ^arn:aws:sts::338414773271:assumed-role/cdk-hnb659fds-deploy-role-338414773271-us-west-2/psd-eoc-domain-readback-[0-9]+$ ]]
+            aws iam simulate-principal-policy \
+              --policy-source-arn "$OUTER_OIDC_ROLE_ARN" \
+              --action-names \
+                apprunner:AssociateCustomDomain \
+                apprunner:DescribeCustomDomains \
+                apprunner:ListOperations \
+              --resource-arns "$APP_RUNNER_SERVICE_ARN" \
+              > "$artifact_directory/app-runner-domain-positive-simulation.json"
+            jq -e \
+              --arg resource "$APP_RUNNER_SERVICE_ARN" '
+                [.EvaluationResults[] | {action:.EvalActionName,decision:.EvalDecision,resource:.EvalResourceName}] |
+                sort_by(.action) == ([
+                  {action:"apprunner:AssociateCustomDomain",decision:"allowed",resource:$resource},
+                  {action:"apprunner:DescribeCustomDomains",decision:"allowed",resource:$resource},
+                  {action:"apprunner:ListOperations",decision:"allowed",resource:$resource}
+                ] | sort_by(.action))
+              ' "$artifact_directory/app-runner-domain-positive-simulation.json" > /dev/null
+
+            unrelated_service_arn="arn:aws:apprunner:$AWS_REGION:$AWS_ACCOUNT_ID:service/not-psd-eoc/11111111111111111111111111111111"
+            aws iam simulate-principal-policy \
+              --policy-source-arn "$OUTER_OIDC_ROLE_ARN" \
+              --action-names \
+                apprunner:AssociateCustomDomain \
+                apprunner:DescribeCustomDomains \
+                apprunner:ListOperations \
+              --resource-arns "$unrelated_service_arn" \
+              > "$artifact_directory/app-runner-unrelated-service-negative-simulation.json"
+            jq -e '
+                (.EvaluationResults | length) == 3 and
+                all(.EvaluationResults[]; .EvalDecision != "allowed")
+              ' "$artifact_directory/app-runner-unrelated-service-negative-simulation.json" > /dev/null
+
+            aws iam simulate-principal-policy \
+              --policy-source-arn "$OUTER_OIDC_ROLE_ARN" \
+              --action-names apprunner:DisassociateCustomDomain \
+              --resource-arns "$APP_RUNNER_SERVICE_ARN" \
+              > "$artifact_directory/app-runner-disassociate-negative-simulation.json"
+            jq -e '
+                (.EvaluationResults | length) == 1 and
+                all(.EvaluationResults[]; .EvalDecision != "allowed")
+              ' "$artifact_directory/app-runner-disassociate-negative-simulation.json" > /dev/null
+
+            aws iam simulate-principal-policy \
+              --policy-source-arn "$OUTER_OIDC_ROLE_ARN" \
+              --action-names route53:ChangeResourceRecordSets \
+              --resource-arns '*' \
+              > "$artifact_directory/route53-change-negative-simulation.json"
+            jq -e '
+                (.EvaluationResults | length) == 1 and
+                all(.EvaluationResults[]; .EvalDecision != "allowed")
+              ' "$artifact_directory/route53-change-negative-simulation.json" > /dev/null
+
+            aws apprunner describe-custom-domains \
+              --service-arn "$APP_RUNNER_SERVICE_ARN" \
+              > "$artifact_directory/before.raw.json"
+            redact_readback \
+              "$artifact_directory/before.raw.json" \
+              "$artifact_directory/before.redacted.json"
+            validate_custom_domain_envelope "$artifact_directory/before.raw.json"
 
             aws apprunner describe-service \
               --service-arn "$APP_RUNNER_SERVICE_ARN" \
@@ -302,14 +343,6 @@ jobs:
             redact_readback \
               "$artifact_directory/operations.raw.json" \
               "$artifact_directory/operations.redacted.json"
-
-            aws apprunner describe-custom-domains \
-              --service-arn "$APP_RUNNER_SERVICE_ARN" \
-              > "$artifact_directory/before.raw.json"
-            redact_readback \
-              "$artifact_directory/before.raw.json" \
-              "$artifact_directory/before.redacted.json"
-            validate_custom_domain_envelope "$artifact_directory/before.raw.json"
 
             exact_count=$(jq --arg domain "$CUSTOM_DOMAIN" '[.CustomDomains[] | select(.DomainName == $domain)] | length' "$artifact_directory/before.raw.json")
             association_state=existing
@@ -438,8 +471,6 @@ jobs:
           domain_exit=$?
           set -e
 
-          cleanup_credentials
-          trap - EXIT
           aws sts get-caller-identity > "$artifact_directory/outer-identity-after.json"
           test "$(jq -cS . "$artifact_directory/outer-identity-before.json")" = \
             "$(jq -cS . "$artifact_directory/outer-identity-after.json")"
