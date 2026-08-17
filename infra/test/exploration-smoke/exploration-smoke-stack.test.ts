@@ -270,11 +270,10 @@ describe('exploration-smoke deployment boundary', () => {
     ).toBe('ShouldProvisionApplication');
   });
 
-  it('tags every stateful or executable resource as staff-minimized live pilot', () => {
+  it('tags every stateful or executable resource except the immutable VPC bridge as the live pilot', () => {
     const taggableTypes = [
       'AWS::AppRunner::AutoScalingConfiguration',
       'AWS::AppRunner::Service',
-      'AWS::AppRunner::VpcConnector',
       'AWS::ECR::Repository',
       'AWS::ECS::Cluster',
       'AWS::ECS::TaskDefinition',
@@ -550,7 +549,7 @@ describe('minimal isolated resource shape', () => {
 });
 
 describe('App Runner runtime safety boundary', () => {
-  it('pins the service to a digest and exactly one provisioned instance', () => {
+  it('pins the service and preserves the exact prior live VPC connector contract', () => {
     const scaling = properties(
       onlyResource('AWS::AppRunner::AutoScalingConfiguration'),
     );
@@ -595,6 +594,28 @@ describe('App Runner runtime safety boundary', () => {
     expect(JSON.stringify(connector.SecurityGroups)).toContain(
       'ApplicationSecurityGroup',
     );
+    expect(connector.Tags).toEqual([
+      {
+        Key: 'Application',
+        Value: 'PSD EOC Exploration Smoke',
+      },
+      {
+        Key: 'DataClassification',
+        Value: 'synthetic-only',
+      },
+      {
+        Key: 'Environment',
+        Value: 'exploration-smoke',
+      },
+      {
+        Key: 'ExpectedAwsAccountAlias',
+        Value: 'psd401',
+      },
+      {
+        Key: 'ManagedBy',
+        Value: 'AWS CDK',
+      },
+    ]);
   });
 
   it('injects only the required live-pilot runtime and Google OIDC contract', () => {

@@ -658,6 +658,22 @@ export class ExplorationSmokeStack extends Stack {
         vpcConnectorName: 'psd-eoc-exploration-smoke-native',
       },
     );
+    // App Runner replaces a VPC connector when its tags change, but rejects a
+    // replacement with the same subnet/security-group combination as the live
+    // connector. Keep this immutable bridge on its original tags while the
+    // rest of the stack carries the live-pilot classification.
+    Tags.of(appRunnerVpcConnector).add(
+      'Application',
+      'PSD EOC Exploration Smoke',
+      { priority: 300 },
+    );
+    Tags.of(appRunnerVpcConnector).add('DataClassification', 'synthetic-only', {
+      priority: 300,
+    });
+    Tags.of(appRunnerVpcConnector).add('Environment', 'exploration-smoke', {
+      priority: 300,
+    });
+    Tags.of(appRunnerVpcConnector).remove('DataScope', { priority: 300 });
 
     const bootstrapLogGroup = new logs.LogGroup(this, 'BootstrapLogGroup', {
       logGroupName: EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
