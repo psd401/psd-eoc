@@ -43,7 +43,7 @@ const RESULT: AccessMembershipPublicationResult = Object.freeze({
   snapshotVersion: 4,
   capturedAt: TEST_TIME,
   designatedSourceId: '00000000-0000-4000-8000-000000000402',
-  activeAccessGroupCount: 2,
+  activeAccessGroupCount: 1,
   evaluatedMembershipCount: 1,
   membershipDigest: EVALUATION.membershipDigest,
   providerGroupIdDigest: EVALUATION.providerGroupIdDigest,

@@ -198,10 +198,12 @@ jobs:
               ($secrets.GOOGLE_ROSTER_CONFIG |
                 test("^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-groups(-[A-Za-z0-9]{6})?$"))
             ' "$RUNNER_TEMP/access-sync-task-definition.json" > /dev/null
-          groups_secret_arn=$(jq -er '
+          groups_secret_reference=$(jq -er '
             .taskDefinition.containerDefinitions[0].secrets[] |
             select(.name == "GOOGLE_ROSTER_CONFIG") | .valueFrom
           ' "$RUNNER_TEMP/access-sync-task-definition.json")
+          test "$groups_secret_reference" = "arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:/psd-eoc/google-groups"
+          groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"
 
           aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
@@ -219,9 +221,9 @@ jobs:
           aws iam simulate-principal-policy \
             --policy-source-arn "$execution_role_arn" \
             --action-names secretsmanager:GetSecretValue \
-            --resource-arns "$application_secret_arn" "$groups_secret_arn" "$admin_secret_arn" \
+            --resource-arns "$application_secret_arn" "$groups_secret_simulation_arn" "$admin_secret_arn" \
             > artifacts/readback/execution-role-secret-boundary.json
-          jq -e --arg app "$application_secret_arn" --arg groups "$groups_secret_arn" --arg admin "$admin_secret_arn" '
+          jq -e --arg app "$application_secret_arn" --arg groups "$groups_secret_simulation_arn" --arg admin "$admin_secret_arn" '
             ([.EvaluationResults[].ResourceSpecificResults[] |
               select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
               ([$app, $groups] | sort) and

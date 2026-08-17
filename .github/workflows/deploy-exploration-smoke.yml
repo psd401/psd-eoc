@@ -243,7 +243,7 @@ jobs:
           test "$(jq '[.Resources[] | select(.Type == "AWS::AppRunner::VpcConnector")] | length' "$template")" -eq 1
           test "$(jq '[.Resources[] | select(.Type == "AWS::EC2::NatGateway")] | length' "$template")" -eq 1
           test "$(jq '[.Resources[] | select(.Type == "AWS::ECS::Cluster")] | length' "$template")" -eq 1
-          test "$(jq '[.Resources[] | select(.Type == "AWS::ECS::TaskDefinition")] | length' "$template")" -eq 1
+          test "$(jq '[.Resources[] | select(.Type == "AWS::ECS::TaskDefinition")] | length' "$template")" -eq 2
           test "$(jq '[.Resources[] | select(.Type == "AWS::Logs::LogGroup")] | length' "$template")" -ge 1
           test "$(jq '[.Resources[] | select(.Type == "AWS::ECR::Repository")] | length' "$template")" -eq 1
           test "$(jq '[.Resources[] | select(.Type == "AWS::SQS::Queue")] | length' "$template")" -eq 3
@@ -269,6 +269,112 @@ jobs:
             .Parameters.RuntimeDatabaseIdleTimeoutSeconds.Default == 0 and
             .Parameters.RuntimeDatabaseIdleTimeoutSeconds.MinValue == 0 and
             .Parameters.RuntimeDatabaseIdleTimeoutSeconds.MaxValue == 600
+          ' "$template" > /dev/null
+
+          jq -e '
+            def map_by_name: map({key: .Name, value: .Value}) | from_entries;
+            def secrets_by_name: map({key: .Name, value: .ValueFrom}) | from_entries;
+            def as_array: if type == "array" then . else [.] end;
+            (.Resources | to_entries) as $resources |
+            ($resources | map(select(.value.Type == "AWS::ECS::TaskDefinition"))) as $tasks |
+            ($tasks | map(select(.value.Properties.Family == "psd-eoc-exploration-smoke-native-bootstrap"))) as $bootstrap_tasks |
+            ($tasks | map(select(.value.Properties.Family == "psd-eoc-exploration-smoke-access-sync"))) as $access_tasks |
+            ($access_tasks[0]) as $access_task |
+            ($access_task.value.Properties.TaskRoleArn."Fn::GetAtt"[0]) as $access_task_role_id |
+            ($access_task.value.Properties.ExecutionRoleArn."Fn::GetAtt"[0]) as $access_execution_role_id |
+            ($resources | map(select(.key == $access_task_role_id and .value.Type == "AWS::IAM::Role"))) as $access_task_roles |
+            ($resources | map(select(.key == $access_execution_role_id and .value.Type == "AWS::IAM::Role"))) as $access_execution_roles |
+            ($resources | map(select(
+              .value.Type == "AWS::IAM::Policy" and
+              ([.value.Properties.Roles[]? | select(.Ref == $access_task_role_id)] | length) == 1
+            ))) as $access_task_policies |
+            ($resources | map(select(
+              .value.Type == "AWS::IAM::Policy" and
+              ([.value.Properties.Roles[]? | select(.Ref == $access_execution_role_id)] | length) == 1
+            ))) as $access_execution_policies |
+            ($access_task.value.Properties.ContainerDefinitions[0]) as $container |
+            ($container.Environment | map_by_name) as $environment |
+            ($container.Secrets | secrets_by_name) as $secrets |
+            ($secrets.DATABASE_USERNAME."Fn::Join"[1][0].Ref) as $application_secret_id |
+            ($secrets.GOOGLE_ROSTER_CONFIG) as $groups_secret_arn |
+            ($access_execution_policies[0].value.Properties.PolicyDocument.Statement | as_array) as $execution_statements |
+            ($execution_statements | map(select(
+              (.Action | as_array | sort) == [
+                "secretsmanager:DescribeSecret",
+                "secretsmanager:GetSecretValue"
+              ]
+            ))) as $secret_statements |
+            ($tasks | length) == 2 and
+            ($bootstrap_tasks | length) == 1 and
+            ($access_tasks | length) == 1 and
+            ($access_task_roles | length) == 1 and
+            ($access_execution_roles | length) == 1 and
+            ($access_task_policies | length) == 0 and
+            ($access_execution_policies | length) == 1 and
+            (($access_task_roles[0].value.Properties.Policies // []) | length) == 0 and
+            (($access_task_roles[0].value.Properties.ManagedPolicyArns // []) | length) == 0 and
+            .Outputs.AccessSyncTaskDefinitionArn.Value.Ref == $access_task.key and
+            .Outputs.AccessSyncTaskExecutionRoleArn.Value."Fn::GetAtt" == [$access_execution_role_id, "Arn"] and
+            .Outputs.AccessSyncTaskRoleArn.Value."Fn::GetAtt" == [$access_task_role_id, "Arn"] and
+            $access_task.value.Properties.NetworkMode == "awsvpc" and
+            ($access_task.value.Properties.RequiresCompatibilities | sort) == ["FARGATE"] and
+            $access_task.value.Properties.Volumes == [{Name: "access-sync-tmp"}] and
+            ($access_task.value.Properties.ContainerDefinitions | length) == 1 and
+            $container.Name == "access-membership-sync" and
+            $container.Essential == true and
+            $container.ReadonlyRootFilesystem == true and
+            $container.Command == [
+              "bun",
+              "packages/server/scripts/exploration-smoke/sync-access-membership.ts"
+            ] and
+            $container.Image."Fn::Join"[1][-1].Ref == "BootstrapImageDigest" and
+            $container.LogConfiguration.LogDriver == "awslogs" and
+            $container.LogConfiguration.Options."awslogs-stream-prefix" == "access-membership-sync" and
+            $container.MountPoints == [{
+              ContainerPath: "/tmp",
+              ReadOnly: false,
+              SourceVolume: "access-sync-tmp"
+            }] and
+            ($environment | keys | sort) == [
+              "AWS_ACCOUNT_ID",
+              "AWS_REGION",
+              "DATABASE_CONNECT_TIMEOUT_SECONDS",
+              "DATABASE_DRIVER",
+              "DATABASE_HOST",
+              "DATABASE_IDLE_TIMEOUT_SECONDS",
+              "DATABASE_MAX_CONNECTIONS",
+              "DATABASE_NAME",
+              "DATABASE_PORT",
+              "DATABASE_SSL_ROOT_CERT",
+              "SOURCE_SHA",
+              "TMPDIR"
+            ] and
+            $environment.SOURCE_SHA.Ref == "BootstrapSourceSha" and
+            ($secrets | keys | sort) == [
+              "DATABASE_PASSWORD",
+              "DATABASE_USERNAME",
+              "GOOGLE_ROSTER_CONFIG"
+            ] and
+            $application_secret_id == .Outputs.DatabaseApplicationSecretArn.Value.Ref and
+            $secrets.DATABASE_PASSWORD."Fn::Join"[1] == [
+              {Ref: $application_secret_id},
+              ":password::"
+            ] and
+            $secrets.DATABASE_USERNAME."Fn::Join"[1] == [
+              {Ref: $application_secret_id},
+              ":username::"
+            ] and
+            $groups_secret_arn == "arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-groups" and
+            ($secret_statements | length) == 1 and
+            ($secret_statements[0].Resource | as_array | map(if type == "object" then .Ref else . end) | sort) == ([
+              $application_secret_id,
+              "arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-groups-??????"
+            ] | sort) and
+            ([
+              $execution_statements[] |
+              select(.Effect == "Allow") |
+              (.Action | as_array[])
+            ] | all(test("^(sqs:|ses:|sns:|lambda:|events:|scheduler:|rds-data:|secretsmanager:(Create|Delete|Put|Update|Restore|Rotate))"; "i") | not))
           ' "$template" > /dev/null
 
           jq -e '
@@ -623,7 +729,7 @@ jobs:
             printf '%s\n' "aws logs put-retention-policy --log-group-name '/aws/apprunner/psd-eoc-exploration-smoke/<exact-service-id>/service' --retention-in-days '$APP_RUNNER_LOG_RETENTION_DAYS'"
             echo '```'
             echo
-            echo "Phase A preserves an existing App Runner service, AppImageDigest, SourceSha, and live database idle timeout (or uses ProvisionApplication=false, the zero digest, candidate source, and zero timeout on first deployment), stages only the exact BootstrapImageDigest/BootstrapSourceSha and native private-network resources, then publishes the verified digest. The protected workflow runs the task definition that references that exact digest and source, waits for exit zero, and reads the task's bounded CloudWatch stream before phase B promotes AppImageDigest and SourceSha to App Runner with the candidate-required zero idle timeout. Ordinary rollback requires a fresh dispatch and approval using the previously recorded digest. No destroy, DNS, provider, or store command exists in this workflow. Database migrations and journals are forward-only and append-only."
+            echo "Phase A preserves an existing App Runner service, AppImageDigest, SourceSha, and live database idle timeout (or uses ProvisionApplication=false, the zero digest, candidate source, and zero timeout on first deployment), stages the exact BootstrapImageDigest/BootstrapSourceSha, native private-network resources, and two distinct digest-pinned task definitions, then publishes the verified digest. This deployment runs only the native bootstrap task, waits for exit zero, and reads its bounded CloudWatch stream before phase B promotes AppImageDigest and SourceSha to App Runner with the candidate-required zero idle timeout. The dedicated access-sync task remains dark; exact Google Group evaluation and append-only access publication require the separate protected manual workflow. Ordinary rollback requires a fresh dispatch and approval using the previously recorded digest. No destroy, DNS, provider, access-publication, or store command exists in this workflow. Database migrations and journals are forward-only and append-only."
           } > artifacts/consequence-preview.md
           cat artifacts/consequence-preview.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -1897,6 +2003,260 @@ jobs:
               > artifacts/readback/ecr-image.json
           fi
           test "$(jq -r '.imageDetails[0].imageDigest' artifacts/readback/ecr-image.json)" = "$IMAGE_DIGEST"
+
+      - name: Prove the dedicated access sync task is least privilege and dark
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=artifacts/readback/bootstrap-phase-outputs.json
+          cluster_arn=$(jq -er ".${STACK_NAME}.BootstrapEcsClusterArn" "$outputs")
+          access_task_definition_arn=$(jq -er ".${STACK_NAME}.AccessSyncTaskDefinitionArn" "$outputs")
+          access_execution_role_arn=$(jq -er ".${STACK_NAME}.AccessSyncTaskExecutionRoleArn" "$outputs")
+          access_task_role_arn=$(jq -er ".${STACK_NAME}.AccessSyncTaskRoleArn" "$outputs")
+          bootstrap_task_definition_arn=$(jq -er ".${STACK_NAME}.BootstrapTaskDefinitionArn" "$outputs")
+          bootstrap_execution_role_arn=$(jq -er ".${STACK_NAME}.BootstrapTaskExecutionRoleArn" "$outputs")
+          bootstrap_task_role_arn=$(jq -er ".${STACK_NAME}.BootstrapTaskRoleArn" "$outputs")
+          private_subnet_ids=$(jq -er ".${STACK_NAME}.BootstrapPrivateSubnetIds" "$outputs")
+          security_group_id=$(jq -er ".${STACK_NAME}.BootstrapSecurityGroupId" "$outputs")
+          log_group_name=$(jq -er ".${STACK_NAME}.BootstrapLogGroupName" "$outputs")
+          database_admin_secret_arn=$(jq -er ".${STACK_NAME}.DatabaseAdminSecretArn" "$outputs")
+          database_application_secret_arn=$(jq -er ".${STACK_NAME}.DatabaseApplicationSecretArn" "$outputs")
+          repository_arn=$(jq -er ".${STACK_NAME}.ImageRepositoryArn" "$outputs")
+          repository_uri=$(jq -er ".${STACK_NAME}.ImageRepositoryUri" "$outputs")
+          expected_image="$repository_uri@$IMAGE_DIGEST"
+
+          [[ "$cluster_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-exploration-smoke-native-bootstrap$ ]]
+          [[ "$access_task_definition_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-access-sync:[1-9][0-9]*$ ]]
+          [[ "$bootstrap_task_definition_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-native-bootstrap:[1-9][0-9]*$ ]]
+          [[ "$access_execution_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole[A-Za-z0-9-]+$ ]]
+          [[ "$access_task_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskRole[A-Za-z0-9-]+$ ]]
+          [[ "$security_group_id" =~ ^sg-[0-9a-f]+$ ]]
+          test "$access_task_definition_arn" != "$bootstrap_task_definition_arn"
+          test "$access_execution_role_arn" != "$bootstrap_execution_role_arn"
+          test "$access_task_role_arn" != "$bootstrap_task_role_arn"
+          test "$access_execution_role_arn" != "$access_task_role_arn"
+          test "$log_group_name" = "/psd-eoc/exploration-smoke/bootstrap"
+          test "$repository_uri" = "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/psd-eoc/exploration-smoke/server"
+          test "$repository_arn" = "arn:aws:ecr:$AWS_REGION:$AWS_ACCOUNT_ID:repository/psd-eoc/exploration-smoke/server"
+
+          IFS=, read -r -a private_subnets <<< "$private_subnet_ids"
+          test "${#private_subnets[@]}" -eq 2
+          for subnet_id in "${private_subnets[@]}"; do
+            [[ "$subnet_id" =~ ^subnet-[0-9a-f]+$ ]]
+          done
+          test "${private_subnets[0]}" != "${private_subnets[1]}"
+
+          access_task_definition_file="$RUNNER_TEMP/exploration-smoke-access-sync-task-definition.json"
+          aws ecs describe-task-definition \
+            --task-definition "$access_task_definition_arn" \
+            > "$access_task_definition_file"
+          jq -e \
+            --arg task_definition "$access_task_definition_arn" \
+            --arg task_role "$access_task_role_arn" \
+            --arg execution_role "$access_execution_role_arn" \
+            --arg image "$expected_image" \
+            --arg log_group "$log_group_name" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg application_secret "$database_application_secret_arn" '
+              def map_by_name: map({key: .name, value: .value}) | from_entries;
+              def secrets_by_name: map({key: .name, value: .valueFrom}) | from_entries;
+              .taskDefinition as $task |
+              $task.taskDefinitionArn == $task_definition and
+              $task.family == "psd-eoc-exploration-smoke-access-sync" and
+              $task.taskRoleArn == $task_role and
+              $task.executionRoleArn == $execution_role and
+              $task.networkMode == "awsvpc" and
+              ($task.requiresCompatibilities | sort) == ["FARGATE"] and
+              ($task.containerDefinitions | length) == 1 and
+              $task.containerDefinitions[0] as $container |
+              $container.name == "access-membership-sync" and
+              $container.essential == true and
+              $container.readonlyRootFilesystem == true and
+              $container.image == $image and
+              $container.command == [
+                "bun",
+                "packages/server/scripts/exploration-smoke/sync-access-membership.ts"
+              ] and
+              $container.logConfiguration.logDriver == "awslogs" and
+              $container.logConfiguration.options."awslogs-group" == $log_group and
+              $container.logConfiguration.options."awslogs-stream-prefix" == "access-membership-sync" and
+              ($container.environment | map_by_name) as $environment |
+              ($environment | keys | sort) == [
+                "AWS_ACCOUNT_ID",
+                "AWS_REGION",
+                "DATABASE_CONNECT_TIMEOUT_SECONDS",
+                "DATABASE_DRIVER",
+                "DATABASE_HOST",
+                "DATABASE_IDLE_TIMEOUT_SECONDS",
+                "DATABASE_MAX_CONNECTIONS",
+                "DATABASE_NAME",
+                "DATABASE_PORT",
+                "DATABASE_SSL_ROOT_CERT",
+                "SOURCE_SHA",
+                "TMPDIR"
+              ] and
+              $environment.SOURCE_SHA == $source_sha and
+              $environment.DATABASE_DRIVER == "postgres" and
+              $environment.DATABASE_MAX_CONNECTIONS == "1" and
+              ($container.secrets | secrets_by_name) as $secrets |
+              ($secrets | keys | sort) == [
+                "DATABASE_PASSWORD",
+                "DATABASE_USERNAME",
+                "GOOGLE_ROSTER_CONFIG"
+              ] and
+              $secrets.DATABASE_PASSWORD == ($application_secret + ":password::") and
+              $secrets.DATABASE_USERNAME == ($application_secret + ":username::") and
+              $secrets.GOOGLE_ROSTER_CONFIG == "arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-groups"
+            ' "$access_task_definition_file" > /dev/null
+          groups_secret_reference=$(jq -er '
+            .taskDefinition.containerDefinitions[0].secrets[] |
+            select(.name == "GOOGLE_ROSTER_CONFIG") | .valueFrom
+          ' "$access_task_definition_file")
+          test "$groups_secret_reference" = "arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:/psd-eoc/google-groups"
+          groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"
+          jq '{
+            taskDefinition: {
+              taskDefinitionArn: .taskDefinition.taskDefinitionArn,
+              family: .taskDefinition.family,
+              revision: .taskDefinition.revision,
+              taskRoleArn: .taskDefinition.taskRoleArn,
+              executionRoleArn: .taskDefinition.executionRoleArn,
+              networkMode: .taskDefinition.networkMode,
+              requiresCompatibilities: .taskDefinition.requiresCompatibilities,
+              container: {
+                name: .taskDefinition.containerDefinitions[0].name,
+                image: .taskDefinition.containerDefinitions[0].image,
+                command: .taskDefinition.containerDefinitions[0].command,
+                readonlyRootFilesystem: .taskDefinition.containerDefinitions[0].readonlyRootFilesystem,
+                environmentNames: [.taskDefinition.containerDefinitions[0].environment[].name] | sort,
+                secretNames: [.taskDefinition.containerDefinitions[0].secrets[].name] | sort,
+                logDriver: .taskDefinition.containerDefinitions[0].logConfiguration.logDriver,
+                logGroup: .taskDefinition.containerDefinitions[0].logConfiguration.options."awslogs-group",
+                logStreamPrefix: .taskDefinition.containerDefinitions[0].logConfiguration.options."awslogs-stream-prefix"
+              }
+            }
+          }' "$access_task_definition_file" > artifacts/readback/access-sync-task-definition.json
+
+          access_execution_role_name=${access_execution_role_arn##*/}
+          access_task_role_name=${access_task_role_arn##*/}
+          aws iam get-role \
+            --role-name "$access_execution_role_name" \
+            > artifacts/readback/access-sync-execution-role.json
+          aws iam get-role \
+            --role-name "$access_task_role_name" \
+            > artifacts/readback/access-sync-task-role.json
+          for role_file in \
+            artifacts/readback/access-sync-execution-role.json \
+            artifacts/readback/access-sync-task-role.json; do
+            jq -e '
+              (.Role | has("PermissionsBoundary") | not) and
+              .Role.AssumeRolePolicyDocument.Statement == [{
+                Action: "sts:AssumeRole",
+                Effect: "Allow",
+                Principal: {Service: "ecs-tasks.amazonaws.com"}
+              }]
+            ' "$role_file" > /dev/null
+          done
+          aws iam list-attached-role-policies \
+            --role-name "$access_execution_role_name" \
+            > artifacts/readback/access-sync-execution-role-attached-policies.json
+          aws iam list-role-policies \
+            --role-name "$access_execution_role_name" \
+            > artifacts/readback/access-sync-execution-role-inline-policies.json
+          aws iam list-attached-role-policies \
+            --role-name "$access_task_role_name" \
+            > artifacts/readback/access-sync-task-role-attached-policies.json
+          aws iam list-role-policies \
+            --role-name "$access_task_role_name" \
+            > artifacts/readback/access-sync-task-role-inline-policies.json
+          test "$(jq '.AttachedPolicies | length' artifacts/readback/access-sync-execution-role-attached-policies.json)" -eq 0
+          test "$(jq '.PolicyNames | length' artifacts/readback/access-sync-execution-role-inline-policies.json)" -eq 1
+          test "$(jq '.AttachedPolicies | length' artifacts/readback/access-sync-task-role-attached-policies.json)" -eq 0
+          test "$(jq '.PolicyNames | length' artifacts/readback/access-sync-task-role-inline-policies.json)" -eq 0
+
+          access_execution_policy_name=$(jq -er '.PolicyNames[0]' artifacts/readback/access-sync-execution-role-inline-policies.json)
+          aws iam get-role-policy \
+            --role-name "$access_execution_role_name" \
+            --policy-name "$access_execution_policy_name" \
+            > artifacts/readback/access-sync-execution-role-policy.json
+          groups_policy_resource="arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:/psd-eoc/google-groups-??????"
+          log_group_resource="arn:aws:logs:$AWS_REGION:$AWS_ACCOUNT_ID:log-group:$log_group_name:*"
+          jq -e \
+            --arg application "$database_application_secret_arn" \
+            --arg groups "$groups_policy_resource" \
+            --arg log_group "$log_group_resource" \
+            --arg repository "$repository_arn" '
+              def as_array: if type == "array" then . else [.] end;
+              .PolicyDocument.Statement as $statements |
+              ($statements | length) == 4 and
+              ([$statements[] | select(
+                (.Action | as_array | sort) == ["logs:CreateLogStream", "logs:PutLogEvents"] and
+                .Effect == "Allow" and
+                .Resource == $log_group
+              )] | length) == 1 and
+              ([$statements[] | select(
+                (.Action | as_array | sort) == [
+                  "secretsmanager:DescribeSecret",
+                  "secretsmanager:GetSecretValue"
+                ] and
+                .Effect == "Allow" and
+                ((.Resource | as_array | sort) == ([$application, $groups] | sort))
+              )] | length) == 1 and
+              ([$statements[] | select(
+                (.Action | as_array | sort) == [
+                  "ecr:BatchCheckLayerAvailability",
+                  "ecr:BatchGetImage",
+                  "ecr:GetDownloadUrlForLayer"
+                ] and
+                .Effect == "Allow" and
+                .Resource == $repository
+              )] | length) == 1 and
+              ([$statements[] | select(
+                .Action == "ecr:GetAuthorizationToken" and
+                .Effect == "Allow" and
+                .Resource == "*"
+              )] | length) == 1
+            ' artifacts/readback/access-sync-execution-role-policy.json > /dev/null
+
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names ecs:RunTask \
+            --resource-arns "$access_task_definition_arn" \
+            > artifacts/readback/deployment-role-access-sync-run-task-simulation.json
+          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deployment-role-access-sync-run-task-simulation.json)" = "allowed"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names iam:PassRole \
+            --resource-arns "$access_execution_role_arn" "$access_task_role_arn" \
+            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string \
+            > artifacts/readback/deployment-role-access-sync-pass-role-simulation.json
+          jq -e --arg execution "$access_execution_role_arn" --arg task "$access_task_role_arn" '
+            (.EvaluationResults | length) == 1 and
+            .EvaluationResults[0].EvalDecision == "allowed" and
+            (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
+            ([.EvaluationResults[0].ResourceSpecificResults[] |
+              select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
+              ([$execution, $task] | sort)
+          ' artifacts/readback/deployment-role-access-sync-pass-role-simulation.json > /dev/null
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$access_execution_role_arn" \
+            --action-names secretsmanager:GetSecretValue \
+            --resource-arns "$database_application_secret_arn" "$groups_secret_simulation_arn" "$database_admin_secret_arn" \
+            > artifacts/readback/access-sync-execution-role-secret-simulation.json
+          jq -e --arg application "$database_application_secret_arn" --arg groups "$groups_secret_simulation_arn" --arg admin "$database_admin_secret_arn" '
+            ([.EvaluationResults[].ResourceSpecificResults[] |
+              select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
+              ([$application, $groups] | sort) and
+            ([.EvaluationResults[].ResourceSpecificResults[] |
+              select(.EvalResourceName == $admin and .EvalResourceDecision != "allowed")] | length) == 1
+          ' artifacts/readback/access-sync-execution-role-secret-simulation.json > /dev/null
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$access_task_role_arn" \
+            --action-names secretsmanager:GetSecretValue sqs:SendMessage ses:SendEmail sns:Publish \
+            --resource-arns '*' \
+            > artifacts/readback/access-sync-task-role-negative-simulation.json
+          jq -e 'all(.EvaluationResults[]; .EvalDecision != "allowed")' \
+            artifacts/readback/access-sync-task-role-negative-simulation.json > /dev/null
 
       - name: Run and prove the exact native bootstrap task
         shell: bash
