@@ -552,6 +552,43 @@ describe('exploration custom-domain protected workflow', () => {
     expectNoForbiddenAwsWrites(result);
   });
 
+  it('accepts the lowercase active status observed in protected App Runner readback', async () => {
+    const liveActive = customDomain({
+      records: [
+        validationRecord('SUCCESS'),
+        {
+          Name: '_second.eoc.psd401.net.',
+          Status: 'SUCCESS',
+          Type: 'CNAME',
+          Value: '_second.acm-validations.aws.',
+        },
+      ],
+      status: 'active',
+    });
+    const result = await runScenario({
+      customDomainResponses: [response([liveActive])],
+      mode: 'associate-if-absent',
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(commandCount(result, 'apprunner:associate-custom-domain')).toBe(0);
+    expect(result.describeCount).toBe(1);
+    expect(result.result).toMatchObject({
+      dnsChanged: false,
+      state: 'existing',
+      tlsVerified: false,
+      handoff: {
+        customDomainStatus: 'active',
+        enableWWWSubdomain: false,
+      },
+    });
+    expect(
+      (result.result as { handoff: { certificateValidationCnames: unknown[] } })
+        .handoff.certificateValidationCnames,
+    ).toHaveLength(2);
+    expectNoForbiddenAwsWrites(result);
+  });
+
   it('retries only DescribeCustomDomains while validation records become complete', async () => {
     const partial = customDomain({ records: [] });
     const complete = customDomain({ records: [validationRecord()] });
