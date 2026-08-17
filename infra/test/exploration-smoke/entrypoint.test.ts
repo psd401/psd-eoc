@@ -77,8 +77,11 @@ async function runRecoveryScenario(options: {
   readonly events: readonly RecoveryResource[];
   readonly stackStatus: string;
 }): Promise<{
+  readonly awsCalls: readonly string[];
+  readonly defaultGetTemplateExitCode: number;
   readonly exitCode: number;
   readonly importArguments: string | undefined;
+  readonly importCredential: string | undefined;
   readonly mapping: unknown;
   readonly result: unknown;
 }> {
@@ -99,8 +102,10 @@ async function runRecoveryScenario(options: {
     const managedFile = join(directory, 'managed.json');
     const eventsFile = join(directory, 'events.json');
     const stackFile = join(directory, 'stack.json');
+    const awsCalls = join(directory, 'aws-calls.txt');
     const importMarker = join(directory, 'imported');
     const importArguments = join(directory, 'import-arguments.txt');
+    const importCredential = join(directory, 'import-credential.txt');
     await Promise.all([
       Bun.write(
         beforeFile,
@@ -186,14 +191,35 @@ async function runRecoveryScenario(options: {
         awsPath,
         `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\\t%s\\n' "$1:$2" "\${AWS_ACCESS_KEY_ID:-missing}" >> "$AWS_CALLS"
 case "$1:$2" in
   cloudformation:describe-stacks) cat "$STACK_FIXTURE" ;;
   cloudformation:list-stack-resources)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
     if [[ -e "$IMPORT_MARKER" ]]; then cat "$MANAGED_FIXTURE"; else cat "$BEFORE_FIXTURE"; fi
     ;;
-  cloudformation:describe-stack-events) cat "$EVENTS_FIXTURE" ;;
+  cloudformation:describe-stack-events)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
+    cat "$EVENTS_FIXTURE"
+    ;;
+  cloudformation:get-template)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
+    printf '%s\\n' '{"TemplateBody":{}}'
+    ;;
+  sts:get-caller-identity)
+    case "\${AWS_ACCESS_KEY_ID:-}" in
+      oidc-access)
+        printf '%s\\n' 'arn:aws:sts::<aws-account-id>:assumed-role/psd-eoc-exploration-smoke-github-deploy/test-oidc-session'
+        ;;
+      deploy-access)
+        printf '%s\\n' 'arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2/psd-eoc-retained-email-import-1'
+        ;;
+      *) exit 92 ;;
+    esac
+    ;;
   sts:assume-role)
-    printf '%s\\n' '{"AccessKeyId":"test","SecretAccessKey":"test","SessionToken":"test"}'
+    test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
+    printf '%s\\n' '{"AccessKeyId":"deploy-access","SecretAccessKey":"deploy-secret","SessionToken":"deploy-token"}'
     ;;
   *) exit 91 ;;
 esac
@@ -203,6 +229,11 @@ esac
         bunxPath,
         `#!/usr/bin/env bash
 set -euo pipefail
+test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
+test "\${AWS_SECRET_ACCESS_KEY:-}" = "deploy-secret"
+test "\${AWS_SESSION_TOKEN:-}" = "deploy-token"
+aws cloudformation get-template --stack-name PsdEocExplorationSmoke > /dev/null
+printf '%s\\n' "$AWS_ACCESS_KEY_ID" > "$IMPORT_CREDENTIAL"
 printf '%s\\n' "$@" > "$IMPORT_ARGUMENTS"
 touch "$IMPORT_MARKER"
 `,
@@ -210,26 +241,44 @@ touch "$IMPORT_MARKER"
     ]);
     await Promise.all([chmod(awsPath, 0o755), chmod(bunxPath, 0o755)]);
 
+    const childEnvironment = {
+      ...process.env,
+      AWS_ACCESS_KEY_ID: 'oidc-access',
+      AWS_ACCOUNT_ID: '<aws-account-id>',
+      AWS_CALLS: awsCalls,
+      AWS_REGION: 'us-west-2',
+      AWS_SECRET_ACCESS_KEY: 'oidc-secret',
+      AWS_SESSION_TOKEN: 'oidc-token',
+      BEFORE_FIXTURE: beforeFile,
+      CDK_DEPLOY_ROLE_ARN:
+        'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2',
+      EVENTS_FIXTURE: eventsFile,
+      GITHUB_RUN_ATTEMPT: '1',
+      GITHUB_RUN_ID: '1',
+      IMPORT_ARGUMENTS: importArguments,
+      IMPORT_CREDENTIAL: importCredential,
+      IMPORT_MARKER: importMarker,
+      MANAGED_FIXTURE: managedFile,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      STACK_FIXTURE: stackFile,
+      STACK_NAME: 'PsdEocExplorationSmoke',
+    };
+    const defaultGetTemplate = Bun.spawnSync({
+      cmd: [
+        awsPath,
+        'cloudformation',
+        'get-template',
+        '--stack-name',
+        'PsdEocExplorationSmoke',
+      ],
+      env: childEnvironment,
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
     const child = Bun.spawnSync({
       cmd: ['bash', '-c', recoveryScript(await readWorkflow())],
       cwd: infra,
-      env: {
-        ...process.env,
-        AWS_ACCOUNT_ID: '<aws-account-id>',
-        AWS_REGION: 'us-west-2',
-        BEFORE_FIXTURE: beforeFile,
-        CDK_DEPLOY_ROLE_ARN:
-          'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2',
-        EVENTS_FIXTURE: eventsFile,
-        GITHUB_RUN_ATTEMPT: '1',
-        GITHUB_RUN_ID: '1',
-        IMPORT_ARGUMENTS: importArguments,
-        IMPORT_MARKER: importMarker,
-        MANAGED_FIXTURE: managedFile,
-        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
-        STACK_FIXTURE: stackFile,
-        STACK_NAME: 'PsdEocExplorationSmoke',
-      },
+      env: childEnvironment,
       stderr: 'pipe',
       stdout: 'pipe',
     });
@@ -237,9 +286,16 @@ touch "$IMPORT_MARKER"
     const mappingPath = join(readback, 'email-recovery-resource-mapping.json');
     const resultPath = join(readback, 'email-recovery-result.json');
     return {
+      awsCalls: (await Bun.file(awsCalls).exists())
+        ? (await Bun.file(awsCalls).text()).trim().split('\n')
+        : [],
+      defaultGetTemplateExitCode: defaultGetTemplate.exitCode,
       exitCode: child.exitCode,
       importArguments: (await Bun.file(importArguments).exists())
         ? await Bun.file(importArguments).text()
+        : undefined,
+      importCredential: (await Bun.file(importCredential).exists())
+        ? await Bun.file(importCredential).text()
         : undefined,
       mapping: (await Bun.file(mappingPath).exists())
         ? await Bun.file(mappingPath).json()
@@ -591,6 +647,16 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('import "$STACK_NAME" \\');
     expect(workflow).toContain('--resource-mapping "$mapping"');
     expect(workflow).toContain(
+      '--role-session-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}"',
+    );
+    expect(workflow).toContain(
+      'unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token deploy_caller_arn',
+    );
+    expect(workflow).toContain(
+      'test "$post_import_caller_arn" = "$oidc_caller_arn"',
+    );
+    expect(workflow).not.toContain('export AWS_ACCESS_KEY_ID');
+    expect(workflow).toContain(
       'Retained dark-email resources are partial or ambiguous; refusing recovery.',
     );
     expect(workflow).toContain(
@@ -640,6 +706,17 @@ describe('isolated CDK entrypoint configuration', () => {
     );
     expect(recovery.importArguments).toContain('--force');
     expect(recovery.importArguments).toContain('--resource-mapping');
+    expect(recovery.defaultGetTemplateExitCode).not.toBe(0);
+    expect(recovery.importCredential).toBe('deploy-access\n');
+    const importGetTemplate = recovery.awsCalls.findIndex(
+      (call) => call === 'cloudformation:get-template\tdeploy-access',
+    );
+    expect(importGetTemplate).toBeGreaterThanOrEqual(0);
+    expect(
+      recovery.awsCalls
+        .slice(importGetTemplate + 1)
+        .every((call) => call.endsWith('\toidc-access')),
+    ).toBe(true);
   });
 
   it('retries idempotently without another import once all four resources are managed', async () => {
