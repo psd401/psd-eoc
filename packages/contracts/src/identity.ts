@@ -48,8 +48,8 @@ export const UserSchema = z
       .trim()
       .email()
       .max(320)
-      .refine((email) => email.toLowerCase().endsWith('@psd401.net'), {
-        message: 'User email must belong to the psd401.net hosted domain.',
+      .refine((email) => email === email.toLowerCase(), {
+        message: 'User email must be normalized to lowercase.',
       }),
     displayName: z.string().trim().min(1).max(160),
     roles: z
@@ -378,6 +378,49 @@ export const AccessMembershipSnapshotSchema = z
 /** Complete immutable access-membership evidence inferred from its schema. */
 export type AccessMembershipSnapshot = z.infer<
   typeof AccessMembershipSnapshotSchema
+>;
+
+/**
+ * Starts one trusted access-membership evaluation for the exact designated
+ * Google Group. Provider locators, member rows, and credentials remain
+ * server-owned dependencies and can never be supplied by the caller.
+ */
+export const SyncAccessMembershipInputSchema = z
+  .object({
+    designatedGroupEmail: z.literal('tsd-engineering@psd401.net'),
+  })
+  .strict()
+  .readonly();
+
+/** Exact access-membership sync command inferred from its schema. */
+export type SyncAccessMembershipInput = z.infer<
+  typeof SyncAccessMembershipInputSchema
+>;
+
+/**
+ * Credential-free aggregate proof for one immutable access-membership
+ * publication. Full member emails and the provider group identifier remain in
+ * protected persistence; only their bounded counts and digests cross the
+ * capability boundary.
+ */
+export const SyncAccessMembershipResultSchema = z
+  .object({
+    snapshotId: AccessMembershipSnapshotIdSchema,
+    snapshotVersion: VersionSchema,
+    capturedAt: TimestampSchema,
+    designatedSourceId: UuidSchema,
+    activeAccessGroupCount: z.number().int().min(1).max(100),
+    evaluatedMembershipCount: z.number().int().min(1).max(1_200),
+    membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    publication: z.enum(['created', 'already-current']),
+  })
+  .strict()
+  .readonly();
+
+/** Aggregate access-membership publication proof inferred from its schema. */
+export type SyncAccessMembershipResult = z.infer<
+  typeof SyncAccessMembershipResultSchema
 >;
 
 /**
@@ -806,14 +849,17 @@ export const CompleteOidcSignInInputSchema = z
         subject: z.string().trim().min(1).max(255),
         subjectDigest: z.string().regex(/^[a-f0-9]{64}$/u),
         claimsDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-        hostedDomain: z.literal('psd401.net'),
+        // Google's hosted-domain claim is retained only as untrusted identity
+        // metadata. Authorization is derived from exact persisted Group
+        // evidence, never from this value or an email-domain suffix.
+        hostedDomain: z.string().trim().min(1).max(255).nullable(),
         email: z
           .string()
           .trim()
           .email()
           .max(320)
-          .refine((email) => email.toLowerCase().endsWith('@psd401.net'), {
-            message: 'OIDC email must belong to the psd401.net hosted domain.',
+          .refine((email) => email === email.toLowerCase(), {
+            message: 'OIDC email must be normalized to lowercase.',
           }),
         emailVerified: z.literal(true),
         displayName: z.string().trim().min(1).max(160),

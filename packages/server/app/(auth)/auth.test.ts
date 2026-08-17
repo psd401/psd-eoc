@@ -659,7 +659,7 @@ describe('Google OIDC adapter', () => {
     ).toThrow(GoogleOidcConfigurationError);
   });
 
-  test('starts exact hosted-domain code+S256 PKCE without a network call', async () => {
+  test('starts code+S256 PKCE without a domain authorization hint or network call', async () => {
     const configuration = readGoogleOidcConfiguration(oidcEnvironment());
     const started = await beginGoogleOidcSignIn(configuration);
     const authorization = new URL(started.authorizationUrl);
@@ -670,7 +670,7 @@ describe('Google OIDC adapter', () => {
     expect(authorization.searchParams.get('code_challenge')).toMatch(
       /^[A-Za-z0-9_-]{43}$/u,
     );
-    expect(authorization.searchParams.get('hd')).toBe(HOSTED_DOMAIN);
+    expect(authorization.searchParams.get('hd')).toBeNull();
     expect(started.setCookieHeader).toContain('HttpOnly');
     expect(started.setCookieHeader).toContain('SameSite=Lax');
   });
@@ -731,10 +731,19 @@ describe('Google OIDC adapter', () => {
     );
   });
 
+  test('retains a signed hosted-domain claim as informational evidence', async () => {
+    const callback = await callbackForVariant('wrong-domain');
+    const result = await callback.result;
+    expect(result.capabilityInput.claims).toMatchObject({
+      email: 'member@psd401.net',
+      emailVerified: true,
+      hostedDomain: 'example.invalid',
+    });
+  });
+
   for (const variant of [
     'wrong-issuer',
     'wrong-audience',
-    'wrong-domain',
     'unverified-email',
     'wrong-nonce',
     'wrong-signature',

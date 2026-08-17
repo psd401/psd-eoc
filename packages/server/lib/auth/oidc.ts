@@ -24,7 +24,6 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { PRODUCTION_APPLICATION_ORIGIN } from './application-origin';
 
 const GOOGLE_ISSUER = 'https://accounts.google.com' as const;
-const PSD_HOSTED_DOMAIN = 'psd401.net' as const;
 const GOOGLE_AUTHORIZATION_ENDPOINT =
   'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
@@ -1148,7 +1147,6 @@ export async function beginGoogleOidcSignIn(
   authorizationUrl.searchParams.set('nonce', nonce);
   authorizationUrl.searchParams.set('code_challenge', codeChallenge);
   authorizationUrl.searchParams.set('code_challenge_method', 'S256');
-  authorizationUrl.searchParams.set('hd', PSD_HOSTED_DOMAIN);
 
   return Object.freeze({
     authorizationUrl: authorizationUrl.toString(),
@@ -1206,7 +1204,6 @@ export async function beginGoogleMobileOidcSignIn(
   authorizationUrl.searchParams.set('nonce', nonce);
   authorizationUrl.searchParams.set('code_challenge', request.codeChallenge);
   authorizationUrl.searchParams.set('code_challenge_method', 'S256');
-  authorizationUrl.searchParams.set('hd', PSD_HOSTED_DOMAIN);
 
   return MobileOidcStartResponseSchema.parse({
     clientId: configuration.clientId,
@@ -1535,7 +1532,6 @@ async function verifyIdToken(
         'exp',
         'iat',
         'nonce',
-        'hd',
         'email',
         'email_verified',
       ],
@@ -1552,6 +1548,8 @@ async function verifyIdToken(
   const { payload, protectedHeader } = verified;
   const subject = boundedClaimString(payload.sub, 255);
   const claimedDisplayName = boundedClaimString(payload.name, 160);
+  const hostedDomain =
+    boundedClaimString(payload.hd, 255)?.toLowerCase() ?? null;
   const rawEmail = boundedClaimString(payload.email, 320);
   const email = rawEmail?.toLowerCase() ?? null;
   if (
@@ -1561,10 +1559,8 @@ async function verifyIdToken(
     payload.iss !== GOOGLE_ISSUER ||
     payload.aud !== configuration.clientId ||
     subject === null ||
-    payload.hd !== PSD_HOSTED_DOMAIN ||
     payload.email_verified !== true ||
     email === null ||
-    !email.endsWith(`@${PSD_HOSTED_DOMAIN}`) ||
     typeof payload.nonce !== 'string' ||
     !constantTimeEqual(payload.nonce, expectedNonce)
   ) {
@@ -1585,7 +1581,7 @@ async function verifyIdToken(
     subject,
     subjectDigest,
     claimsDigest,
-    hostedDomain: PSD_HOSTED_DOMAIN,
+    hostedDomain,
     email,
     emailVerified: true,
     displayName,
