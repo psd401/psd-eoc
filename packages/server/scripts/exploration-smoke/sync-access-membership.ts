@@ -1,0 +1,202 @@
+import {
+  DESIGNATED_ACCESS_GROUP_EMAIL,
+  executeCapability,
+  IdempotencyKeySchema,
+  SyncAccessMembershipResultSchema,
+  UuidSchema,
+  type SyncAccessMembershipResult,
+} from '@psd-eoc/contracts';
+import { z } from 'zod';
+
+import { createDatabaseClient, readDatabaseConfig } from '../../db/client';
+import {
+  createDrizzleAccessMembershipSyncStore,
+  createScheduledAccessMembershipSyncAuthorizer,
+  createSyncAccessMembershipHandler,
+  parseInitialMobileTransitionEmailDigest,
+  type AccessMembershipSyncCapabilityContext,
+} from '../../lib/auth/access-membership-sync';
+import { createGoogleAccessMembershipEvaluator } from '../../lib/auth/google-access-membership';
+import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/roster/groups-sync';
+
+const SourceShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
+
+const AccessMembershipSyncEnvironmentSchema = z
+  .discriminatedUnion('phase', [
+    z
+      .object({
+        phase: z.literal('stage'),
+        requestId: UuidSchema,
+        idempotencyKey: IdempotencyKeySchema,
+        sourceSha: SourceShaSchema,
+        initialMobileTransitionEmailDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        mobileSessionId: z.undefined(),
+        membershipSnapshotId: z.undefined(),
+      })
+      .strict(),
+    z
+      .object({
+        phase: z.literal('finalize'),
+        requestId: UuidSchema,
+        idempotencyKey: IdempotencyKeySchema,
+        sourceSha: SourceShaSchema,
+        initialMobileTransitionEmailDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        mobileSessionId: UuidSchema,
+        membershipSnapshotId: UuidSchema,
+      })
+      .strict(),
+  ])
+  .readonly();
+
+export const AccessMembershipSyncSummarySchema = z
+  .object({
+    event: z.literal('access-membership-sync-complete'),
+    phase: z.enum(['stage', 'finalize']),
+    sourceSha: SourceShaSchema,
+    snapshotId: UuidSchema,
+    snapshotVersion: z.number().int().positive(),
+    capturedAt: z.string().datetime({ offset: true }),
+    designatedSourceId: UuidSchema,
+    activeAccessGroupCount: z.number().int().min(1).max(100),
+    evaluatedMembershipCount: z.number().int().min(1).max(1_200),
+    membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    proofKind: z.enum(['initial-selector-match', 'durable-ios-session']),
+    auditEntryHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .nullable(),
+    publication: z.enum(['created', 'already-current']),
+  })
+  .strict()
+  .readonly();
+
+export type AccessMembershipSyncSummary = z.infer<
+  typeof AccessMembershipSyncSummarySchema
+>;
+
+type Environment = Readonly<Record<string, string | undefined>>;
+
+/** Reads only nonsecret run identity; provider and database secrets stay owned by their existing readers. */
+export function readAccessMembershipSyncEnvironment(
+  environment: Environment = process.env,
+): z.infer<typeof AccessMembershipSyncEnvironmentSchema> {
+  const parsed = AccessMembershipSyncEnvironmentSchema.safeParse({
+    phase: environment.ACCESS_SYNC_PHASE,
+    requestId: environment.ACCESS_SYNC_REQUEST_ID,
+    idempotencyKey: environment.ACCESS_SYNC_IDEMPOTENCY_KEY,
+    sourceSha: environment.SOURCE_SHA,
+    initialMobileTransitionEmailDigest:
+      environment.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256,
+    mobileSessionId: environment.ACCESS_SYNC_MOBILE_SESSION_ID,
+    membershipSnapshotId: environment.ACCESS_SYNC_MEMBERSHIP_SNAPSHOT_ID,
+  });
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid protected access-sync run identity: ${[
+        ...new Set(parsed.error.issues.map((issue) => issue.path[0])),
+      ]
+        .filter((field): field is string => typeof field === 'string')
+        .sort()
+        .join(', ')}.`,
+    );
+  }
+  return parsed.data;
+}
+
+/** Converts a capability result to the only aggregate shape permitted in task logs. */
+export function accessMembershipSyncSummary(
+  sourceSha: string,
+  resultValue: SyncAccessMembershipResult,
+): AccessMembershipSyncSummary {
+  const result = SyncAccessMembershipResultSchema.parse(resultValue);
+  return AccessMembershipSyncSummarySchema.parse({
+    event: 'access-membership-sync-complete',
+    phase: result.phase,
+    sourceSha: SourceShaSchema.parse(sourceSha),
+    snapshotId: result.snapshotId,
+    snapshotVersion: result.snapshotVersion,
+    capturedAt: result.capturedAt,
+    designatedSourceId: result.designatedSourceId,
+    activeAccessGroupCount: result.activeAccessGroupCount,
+    evaluatedMembershipCount: result.evaluatedMembershipCount,
+    membershipDigest: result.membershipDigest,
+    providerGroupIdDigest: result.providerGroupIdDigest,
+    proofKind: result.proofKind,
+    auditEntryHash: result.auditEntryHash,
+    publication: result.publication,
+  });
+}
+
+async function runFromCommandLine(): Promise<void> {
+  const run = readAccessMembershipSyncEnvironment();
+  const initialMobileTransitionEmailDigest =
+    parseInitialMobileTransitionEmailDigest(
+      run.initialMobileTransitionEmailDigest,
+    );
+  const connection = createDatabaseClient(readDatabaseConfig());
+  if (connection.driver !== 'postgres') {
+    throw new Error('Protected access sync requires native PostgreSQL.');
+  }
+  const context: AccessMembershipSyncCapabilityContext = Object.freeze({
+    actor: Object.freeze({
+      kind: 'system' as const,
+      serviceId: 'access-membership-sync',
+    }),
+    source: 'scheduled-job',
+    transport: 'scheduled-execution',
+    schedulerAuthenticated: true,
+    requestId: run.requestId,
+    idempotencyKey: run.idempotencyKey,
+  });
+  try {
+    const result = await executeCapability(
+      createSyncAccessMembershipHandler({
+        ...(run.phase === 'stage'
+          ? {
+              evaluator: createGoogleAccessMembershipEvaluator(
+                readGoogleCloudIdentityRosterConfiguration(),
+              ),
+            }
+          : {}),
+        initialMobileTransitionEmailDigest,
+        store: createDrizzleAccessMembershipSyncStore(connection.db, {
+          initialMobileTransitionEmailDigest,
+        }),
+      }),
+      run.phase === 'stage'
+        ? {
+            designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            transition: { phase: 'stage' },
+          }
+        : {
+            designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            transition: {
+              phase: 'finalize',
+              mobileSessionId: run.mobileSessionId,
+              membershipSnapshotId: run.membershipSnapshotId,
+            },
+          },
+      {
+        context,
+        humanActionResolutionContext: null,
+        safetyResolver: null,
+        authorizer: createScheduledAccessMembershipSyncAuthorizer(),
+      },
+    );
+    console.info(
+      JSON.stringify(accessMembershipSyncSummary(run.sourceSha, result)),
+    );
+  } finally {
+    await connection.close();
+  }
+}
+
+if (import.meta.main) {
+  try {
+    await runFromCommandLine();
+  } catch {
+    console.error('Protected access-membership synchronization failed closed.');
+    process.exitCode = 1;
+  }
+}

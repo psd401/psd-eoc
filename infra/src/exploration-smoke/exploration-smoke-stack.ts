@@ -58,6 +58,7 @@ const SECRET_PREFIX = '/psd-eoc/exploration-smoke';
 const APP_RUNNER_PORT = '3000';
 const APPLICATION_SUBNET_GROUP_NAME = 'Application';
 const BOOTSTRAP_CONTAINER_NAME = 'native-bootstrap';
+const ACCESS_SYNC_CONTAINER_NAME = 'access-membership-sync';
 const EMAIL_QUEUE_MAX_RECEIVES = 5;
 
 function secretJsonKeyArn(secret: secretsmanager.Secret, key: string): string {
@@ -222,6 +223,21 @@ export class ExplorationSmokeStack extends Stack {
           'Approved staff display name assigned to the bootstrap administrator identity.',
         maxLength: 160,
         minLength: 1,
+        noEcho: true,
+        type: 'String',
+      },
+    );
+    const initialMobileTransitionEmailSha256 = new CfnParameter(
+      this,
+      'InitialMobileTransitionEmailSha256',
+      {
+        allowedPattern: '^[0-9a-f]{64}$',
+        constraintDescription:
+          'Use one lowercase SHA-256 digest without the underlying email value.',
+        description:
+          'Protected selector digest for the one-time initial mobile access transition.',
+        maxLength: 64,
+        minLength: 64,
         noEcho: true,
         type: 'String',
       },
@@ -421,6 +437,9 @@ export class ExplorationSmokeStack extends Stack {
         secretObjectValue: {
           googleSubject: SecretValue.unsafePlainText(
             approvedGoogleSubject.valueAsString,
+          ),
+          initialMobileTransitionEmailSha256: SecretValue.unsafePlainText(
+            initialMobileTransitionEmailSha256.valueAsString,
           ),
           staffDisplayName: SecretValue.unsafePlainText(
             approvedStaffDisplayName.valueAsString,
@@ -627,6 +646,11 @@ export class ExplorationSmokeStack extends Stack {
       'GoogleOauthSecret',
       googleOauthSecretArn.valueAsString,
     );
+    const googleGroupsSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      'GoogleGroupsSecret',
+      '/psd-eoc/google-groups',
+    );
     const appRunnerVpcConnector = new apprunner.CfnVpcConnector(
       this,
       'AppRunnerVpcConnector',
@@ -769,6 +793,98 @@ export class ExplorationSmokeStack extends Stack {
     databaseApplicationSecret.grantRead(bootstrapTaskExecutionRole);
     bootstrapIdentitySecret.grantRead(bootstrapTaskExecutionRole);
 
+    const accessSyncTaskExecutionRole = new iam.Role(
+      this,
+      'AccessSyncTaskExecutionRole',
+      {
+        assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+        description:
+          'Pulls the reviewed access-sync image, injects only the application database and Google Groups credentials, and writes aggregate logs.',
+      },
+    );
+    const accessSyncTaskRole = new iam.Role(this, 'AccessSyncTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description:
+        'No-authority task role for protected access-membership publication.',
+    });
+    const accessSyncTaskDefinition = new ecs.FargateTaskDefinition(
+      this,
+      'AccessSyncTaskDefinition',
+      {
+        cpu: 256,
+        executionRole: accessSyncTaskExecutionRole,
+        family: 'psd-eoc-exploration-smoke-access-sync',
+        memoryLimitMiB: 512,
+        runtimePlatform: {
+          cpuArchitecture: ecs.CpuArchitecture.X86_64,
+          operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        },
+        taskRole: accessSyncTaskRole,
+      },
+    );
+    accessSyncTaskDefinition.addVolume({ name: 'access-sync-tmp' });
+    const accessSyncContainer = accessSyncTaskDefinition.addContainer(
+      ACCESS_SYNC_CONTAINER_NAME,
+      {
+        command: [
+          'bun',
+          'packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+        ],
+        environment: {
+          AWS_ACCOUNT_ID: EXPLORATION_SMOKE_ACCOUNT,
+          AWS_REGION: EXPLORATION_SMOKE_REGION,
+          DATABASE_DRIVER: 'postgres',
+          DATABASE_HOST: database.clusterEndpoint.hostname,
+          DATABASE_IDLE_TIMEOUT_SECONDS: '20',
+          DATABASE_MAX_CONNECTIONS: '1',
+          DATABASE_NAME: EXPLORATION_SMOKE_DATABASE_NAME,
+          DATABASE_PORT: String(EXPLORATION_SMOKE_DATABASE_PORT),
+          DATABASE_SSL_ROOT_CERT: EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+          DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
+          SOURCE_SHA: bootstrapSourceSha.valueAsString,
+          TMPDIR: '/tmp',
+        },
+        essential: true,
+        image: ecs.ContainerImage.fromRegistry(
+          Fn.join('', [
+            imageRepository.repositoryUri,
+            '@',
+            bootstrapImageDigest.valueAsString,
+          ]),
+        ),
+        logging: ecs.LogDrivers.awsLogs({
+          logGroup: bootstrapLogGroup,
+          streamPrefix: ACCESS_SYNC_CONTAINER_NAME,
+        }),
+        readonlyRootFilesystem: true,
+        secrets: {
+          DATABASE_PASSWORD: ecsSecretJsonKey(
+            databaseApplicationSecret,
+            'password',
+          ),
+          DATABASE_USERNAME: ecsSecretJsonKey(
+            databaseApplicationSecret,
+            'username',
+          ),
+          GOOGLE_ROSTER_CONFIG:
+            ecs.Secret.fromSecretsManager(googleGroupsSecret),
+          PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ecsSecretJsonKey(
+            bootstrapIdentitySecret,
+            'initialMobileTransitionEmailSha256',
+          ),
+        },
+      },
+    );
+    accessSyncContainer.addMountPoints({
+      containerPath: '/tmp',
+      readOnly: false,
+      sourceVolume: 'access-sync-tmp',
+    });
+    imageRepository.grantPull(accessSyncTaskExecutionRole);
+    databaseApplicationSecret.grantRead(accessSyncTaskExecutionRole);
+    bootstrapIdentitySecret.grantRead(accessSyncTaskExecutionRole);
+    googleGroupsSecret.grantRead(accessSyncTaskExecutionRole);
+
     const imageAccessRole = new iam.Role(this, 'AppRunnerImageAccessRole', {
       assumedBy: new iam.ServicePrincipal('build.apprunner.amazonaws.com'),
       description:
@@ -872,6 +988,13 @@ export class ExplorationSmokeStack extends Stack {
                   value: secretJsonKeyArn(
                     bootstrapIdentitySecret,
                     'googleSubject',
+                  ),
+                },
+                {
+                  name: 'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
+                  value: secretJsonKeyArn(
+                    bootstrapIdentitySecret,
+                    'initialMobileTransitionEmailSha256',
                   ),
                 },
               ],
@@ -1029,6 +1152,15 @@ export class ExplorationSmokeStack extends Stack {
     });
     new CfnOutput(this, 'BootstrapTaskRoleArn', {
       value: bootstrapTaskRole.roleArn,
+    });
+    new CfnOutput(this, 'AccessSyncTaskDefinitionArn', {
+      value: accessSyncTaskDefinition.taskDefinitionArn,
+    });
+    new CfnOutput(this, 'AccessSyncTaskExecutionRoleArn', {
+      value: accessSyncTaskExecutionRole.roleArn,
+    });
+    new CfnOutput(this, 'AccessSyncTaskRoleArn', {
+      value: accessSyncTaskRole.roleArn,
     });
     new CfnOutput(this, 'AppRunnerVpcConnectorArn', {
       value: appRunnerVpcConnector.attrVpcConnectorArn,

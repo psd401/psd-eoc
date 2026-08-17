@@ -27,6 +27,152 @@ async function readCiWorkflow(): Promise<string> {
   return Bun.file(ciWorkflowUrl).text();
 }
 
+function markedShellBlock(workflow: string, marker: string): string {
+  const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const block = workflow.match(
+    new RegExp(
+      ` {10}# BEGIN ${escapedMarker}\\n([\\s\\S]*?)\\n {10}# END ${escapedMarker}`,
+      'u',
+    ),
+  )?.[1];
+  if (block === undefined) {
+    throw new Error(`Workflow shell block is missing: ${marker}`);
+  }
+  return block.replace(/^ {10}/gmu, '');
+}
+
+function directDarkResourceReadbackScript(workflow: string): string {
+  return [
+    markedShellBlock(workflow, 'direct dark-resource configuration readback'),
+    markedShellBlock(workflow, 'direct external SES configuration readback'),
+  ].join('\n');
+}
+
+async function runDirectDarkResourceReadback(): Promise<{
+  readonly awsCalls: readonly string[];
+  readonly exitCode: number;
+  readonly stderr: string;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), 'psd-eoc-email-readback-'));
+  try {
+    const fakeBin = join(directory, 'bin');
+    const readback = join(directory, 'artifacts', 'readback');
+    const awsCalls = join(directory, 'aws-calls.txt');
+    await Promise.all([
+      mkdir(fakeBin, { recursive: true }),
+      mkdir(readback, { recursive: true }),
+    ]);
+    const awsPath = join(fakeBin, 'aws');
+    await Bun.write(
+      awsPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$1:$2" >> "$AWS_CALLS"
+
+arg_value() {
+  local wanted=$1
+  shift
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "$wanted" ]]; then
+      printf '%s\\n' "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+case "$1:$2" in
+  logs:describe-log-groups)
+    jq -n --arg name "$email_worker_log_group_name" '{
+      logGroups: [{
+        arn: "arn:aws:logs:us-west-2:<aws-account-id>:log-group:/psd-eoc/workers/email:*",
+        logGroupName: $name,
+        retentionInDays: 14
+      }]
+    }'
+    ;;
+  sqs:get-queue-attributes)
+    queue_url=$(arg_value --queue-url "$@")
+    if [[ "$queue_url" == "$email_queue_url" ]]; then
+      jq -n --arg arn "$email_queue_arn" --arg dlq "$email_dlq_arn" '{
+        Attributes: {
+          QueueArn: $arn,
+          SqsManagedSseEnabled: "true",
+          MessageRetentionPeriod: "345600",
+          VisibilityTimeout: "60",
+          RedrivePolicy: ({deadLetterTargetArn: $dlq, maxReceiveCount: "5"} | tojson)
+        }
+      }'
+    elif [[ "$queue_url" == "$email_dlq_url" ]]; then
+      jq -n --arg arn "$email_dlq_arn" --arg source "$email_queue_arn" '{
+        Attributes: {
+          QueueArn: $arn,
+          SqsManagedSseEnabled: "true",
+          MessageRetentionPeriod: "1209600",
+          RedriveAllowPolicy: ({redrivePermission: "byQueue", sourceQueueArns: [$source]} | tojson)
+        }
+      }'
+    else
+      exit 94
+    fi
+    ;;
+  sesv2:get-configuration-set)
+    printf '%s\\n' '{"ConfigurationSetName":"psd-eoc-transactional","SendingOptions":{"SendingEnabled":false}}'
+    ;;
+  sesv2:get-configuration-set-event-destinations)
+    jq -n --arg topic "$ses_events_topic_arn" '{
+      EventDestinations: [{
+        Enabled: true,
+        MatchingEventTypes: ["SEND", "DELIVERY", "BOUNCE", "COMPLAINT", "REJECT", "RENDERING_FAILURE", "DELIVERY_DELAY"],
+        Name: "psd-eoc-email-events",
+        SnsDestination: {TopicArn: $topic}
+      }]
+    }'
+    ;;
+  *) exit 96 ;;
+esac
+`,
+    );
+    await chmod(awsPath, 0o755);
+    const child = Bun.spawnSync({
+      cmd: [
+        'bash',
+        '-c',
+        directDarkResourceReadbackScript(await readWorkflow()),
+      ],
+      cwd: directory,
+      env: {
+        ...process.env,
+        AWS_CALLS: awsCalls,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        email_dlq_arn: 'arn:aws:sqs:us-west-2:<aws-account-id>:psd-eoc-email-dlq',
+        email_dlq_url:
+          'https://sqs.us-west-2.amazonaws.com/<aws-account-id>/psd-eoc-email-dlq',
+        email_queue_arn: 'arn:aws:sqs:us-west-2:<aws-account-id>:psd-eoc-email',
+        email_queue_url:
+          'https://sqs.us-west-2.amazonaws.com/<aws-account-id>/psd-eoc-email',
+        email_worker_log_group_name: '/psd-eoc/workers/email',
+        ses_configuration_set_name: 'psd-eoc-transactional',
+        ses_event_destination_name: 'psd-eoc-email-events',
+        ses_events_topic_arn:
+          'arn:aws:sns:us-west-2:<aws-account-id>:psd-eoc-email-events',
+      },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
+    return {
+      awsCalls: (await Bun.file(awsCalls).exists())
+        ? (await Bun.file(awsCalls).text()).trim().split('\n')
+        : [],
+      exitCode: child.exitCode,
+      stderr: child.stderr.toString(),
+    };
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+}
+
 interface RecoveryResource {
   readonly LogicalResourceId: string;
   readonly PhysicalResourceId: string;
@@ -772,6 +918,9 @@ describe('isolated CDK entrypoint configuration', () => {
     const publishStep = workflow.indexOf(
       '- name: Publish and verify only the approved image digest',
     );
+    const accessProofStep = workflow.indexOf(
+      '- name: Prove the dedicated access sync task is least privilege and dark',
+    );
     const bootstrapStep = workflow.indexOf(
       '- name: Run and prove the exact native bootstrap task',
     );
@@ -786,7 +935,8 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain('repository/psd-eoc-exploration-smoke');
     expect(stageStep).toBeGreaterThan(-1);
     expect(publishStep).toBeGreaterThan(stageStep);
-    expect(bootstrapStep).toBeGreaterThan(publishStep);
+    expect(accessProofStep).toBeGreaterThan(publishStep);
+    expect(bootstrapStep).toBeGreaterThan(accessProofStep);
     expect(serviceStep).toBeGreaterThan(bootstrapStep);
     expect(workflow).toContain('phase_app_digest=$current_digest');
     expect(workflow).toContain(
@@ -852,6 +1002,9 @@ describe('isolated CDK entrypoint configuration', () => {
       'BootstrapLogGroupName',
       'BootstrapTaskExecutionRoleArn',
       'BootstrapTaskRoleArn',
+      'AccessSyncTaskDefinitionArn',
+      'AccessSyncTaskExecutionRoleArn',
+      'AccessSyncTaskRoleArn',
       'AppRunnerVpcConnectorArn',
       'ApprovedIdentitySecretArn',
     ]) {
@@ -882,6 +1035,62 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain('aws-data-api');
   });
 
+  it('stages a second named access task without executing provider or publication code', async () => {
+    const workflow = await readWorkflow();
+    const accessProof = workflow.match(
+      / {6}- name: Prove the dedicated access sync task is least privilege and dark[\s\S]*? {6}- name: Run and prove the exact native bootstrap task/,
+    )?.[0];
+
+    expect(accessProof).toBeDefined();
+    expect(workflow).toContain(
+      'select(.Type == "AWS::ECS::TaskDefinition")] | length\' "$template")" -eq 2',
+    );
+    expect(workflow).toContain('psd-eoc-exploration-smoke-native-bootstrap');
+    expect(workflow).toContain('psd-eoc-exploration-smoke-access-sync');
+    expect(accessProof).toContain('AccessSyncTaskDefinitionArn');
+    expect(accessProof).toContain('AccessSyncTaskExecutionRoleArn');
+    expect(accessProof).toContain('AccessSyncTaskRoleArn');
+    expect(accessProof).toContain(
+      'test "$access_task_definition_arn" != "$bootstrap_task_definition_arn"',
+    );
+    expect(accessProof).toContain(
+      'packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+    );
+    expect(accessProof).toContain('readonlyRootFilesystem == true');
+    expect(accessProof).toContain('networkMode == "awsvpc"');
+    expect(accessProof).toContain(
+      'expected_image="$repository_uri@$IMAGE_DIGEST"',
+    );
+    expect(accessProof).toContain('BootstrapPrivateSubnetIds');
+    expect(accessProof).toContain('BootstrapSecurityGroupId');
+    expect(accessProof).toContain('/psd-eoc/google-groups');
+    expect(accessProof).not.toContain('aws secretsmanager describe-secret');
+    expect(accessProof).not.toContain('aws secretsmanager get-secret-value');
+    expect(accessProof).toContain(
+      'groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"',
+    );
+    expect(accessProof).toContain('"DATABASE_PASSWORD"');
+    expect(accessProof).toContain('"DATABASE_USERNAME"');
+    expect(accessProof).toContain('"GOOGLE_ROSTER_CONFIG"');
+    expect(accessProof).toContain(
+      '"PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"',
+    );
+    expect(accessProof).toContain(':initialMobileTransitionEmailSha256::');
+    expect(accessProof).toContain("jq '.PolicyNames | length'");
+    expect(accessProof).toContain(
+      'access-sync-task-role-inline-policies.json)" -eq 0',
+    );
+    expect(accessProof).toContain(
+      'access-sync-execution-role-secret-simulation.json',
+    );
+    expect(accessProof).toContain(
+      'access-sync-task-role-negative-simulation.json',
+    );
+    expect(accessProof).not.toContain('aws ecs run-task');
+    expect(workflow.match(/^ {10}aws ecs run-task\b/gm)).toHaveLength(1);
+    expect(workflow).not.toContain('--overrides');
+  });
+
   it('previews and reads back private PostgreSQL with no database HTTP authority', async () => {
     const workflow = await readWorkflow();
 
@@ -910,8 +1119,14 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('"DATABASE_USERNAME"');
     expect(workflow).toContain('"DATABASE_PASSWORD"');
     expect(workflow).toContain('"PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS"');
+    expect(workflow).toContain(
+      '"PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"',
+    );
     expect(workflow).toContain('$database_application_secret_arn:username::');
     expect(workflow).toContain('$approved_identity_secret_arn:googleSubject::');
+    expect(workflow).toContain(
+      '$approved_identity_secret_arn:initialMobileTransitionEmailSha256::',
+    );
     expect(workflow).toContain(
       'role/PsdEocExplorationSmoke-BootstrapTaskExecutionRole1A-[A-Za-z0-9]+$',
     );
@@ -944,7 +1159,13 @@ describe('isolated CDK entrypoint configuration', () => {
       "deployment_authority_pattern='^(arn:aws:iam::<aws-account-id>:role/",
     );
     expect(workflow).toContain(
-      '[[ "$APPROVED_IDENTITY_SHA256" =~ ^[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64}$ ]]',
+      '[[ "$APPROVED_IDENTITY_SHA256" =~ ^[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64},[0-9a-f]{64}$ ]]',
+    );
+    expect(workflow).toContain(
+      'secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
+    );
+    expect(workflow).toContain(
+      '--parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"',
     );
     expect(workflow).not.toContain('approved_google_subject_sha256:');
     expect(workflow).not.toContain('approved_staff_email_sha256:');
@@ -1534,10 +1755,65 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain('test "$email_channel_state" = "disabled"');
     expect(workflow).toContain('notificationChannelsEnabled: 0');
     expect(workflow).toContain('matchingRosterRecipients: 0');
+    expect(workflow).not.toContain('detect-stack-resource-drift');
+    expect(workflow).not.toContain('StackResourceDrift');
+    expect(workflow).toContain('email-worker-log-group.json');
+    expect(workflow).toContain('email-queue.json');
+    expect(workflow).toContain('email-dead-letter-queue.json');
+    expect(workflow).toContain('aws sesv2 get-configuration-set');
+    expect(workflow).toContain(
+      'aws sesv2 get-configuration-set-event-destinations',
+    );
+    expect(workflow).toContain(
+      '.Attributes.MessageRetentionPeriod == "345600"',
+    );
+    expect(workflow).toContain(
+      '.Attributes.MessageRetentionPeriod == "1209600"',
+    );
+    expect(workflow).toContain('.SendingOptions.SendingEnabled == false');
     expect(workflow).not.toContain('aws sqs send-message');
     expect(workflow).not.toContain('aws ses send-email');
     expect(workflow).not.toContain('aws sesv2 send-email');
     expect(workflow).not.toContain('aws sns subscribe');
+  });
+
+  it('executes exact direct dark-resource readback without drift permission', async () => {
+    const workflow = await readWorkflow();
+    const readback = await runDirectDarkResourceReadback();
+
+    expect(readback.exitCode).toBe(0);
+    expect(readback.stderr).toBe('');
+    expect(readback.awsCalls).toEqual([
+      'logs:describe-log-groups',
+      'sqs:get-queue-attributes',
+      'sqs:get-queue-attributes',
+      'sesv2:get-configuration-set',
+      'sesv2:get-configuration-set-event-destinations',
+    ]);
+    expect(
+      readback.awsCalls.some((call) => call.startsWith('cloudformation:')),
+    ).toBe(false);
+    expect(workflow).not.toContain('detect-stack-resource-drift');
+    expect(workflow).not.toContain('StackResourceDrift');
+    expect(retainedRecoveryResources).toHaveLength(6);
+    expect(
+      retainedRecoveryResources.map(({ ResourceType }) => ResourceType).sort(),
+    ).toEqual(
+      [
+        'AWS::KMS::Key',
+        'AWS::Logs::LogGroup',
+        'AWS::SES::ConfigurationSet',
+        'AWS::SNS::Topic',
+        'AWS::SQS::Queue',
+        'AWS::SQS::Queue',
+      ].sort(),
+    );
+    expect(workflow).toContain(
+      'select(.ResourceType == "AWS::SES::ConfigurationSetEventDestination")] | length) == 0',
+    );
+    expect(workflow).toContain(
+      'test "$ses_event_destination_management" = "external-readback"',
+    );
   });
 
   it('proves the exact live runtime role and all dark resources have zero send authority', async () => {
