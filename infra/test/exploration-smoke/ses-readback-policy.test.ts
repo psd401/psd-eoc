@@ -54,6 +54,7 @@ function applyScript(workflow: string): string {
 async function runScenario(options: {
   readonly changeSetMismatch?: boolean;
   readonly existingStack: boolean;
+  readonly interruptedCreate?: boolean;
 }): Promise<ScenarioResult> {
   const directory = await mkdtemp(join(tmpdir(), 'psd-eoc-ses-policy-'));
   try {
@@ -214,18 +215,38 @@ case "$1:$2" in
   cloudformation:describe-stacks)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
     if [[ ! -e "$POLICY_MARKER" ]]; then
-      printf '%s\n' 'An error occurred (ValidationError): Stack does not exist' >&2
-      exit 254
+      if [[ "$INTERRUPTED_CREATE" == "true" ]]; then
+        printf '%s\n' '{"Stacks":[{
+          "RoleARN":"arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2",
+          "StackStatus":"REVIEW_IN_PROGRESS"
+        }]}'
+      else
+        printf '%s\n' 'An error occurred (ValidationError): Stack does not exist' >&2
+        exit 254
+      fi
+    else
+      printf '%s\n' '{"Stacks":[{
+        "RoleARN":"arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2",
+        "StackStatus":"CREATE_COMPLETE"
+      }]}'
     fi
-    printf '%s\n' '{"Stacks":[{
-      "RoleARN":"arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2",
-      "StackStatus":"CREATE_COMPLETE"
-    }]}'
     ;;
   cloudformation:get-template)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-    test -e "$POLICY_MARKER"
+    [[ -e "$POLICY_MARKER" || "$INTERRUPTED_CREATE" == "true" ]]
     template_response
+    ;;
+  cloudformation:list-change-sets)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
+    test "$INTERRUPTED_CREATE" = "true"
+    test ! -e "$POLICY_MARKER"
+    printf '%s\n' '{"Summaries":[{
+      "ChangeSetId":"arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-ses-readback-99-2/99999999-9999-9999-9999-999999999999",
+      "ChangeSetName":"psd-eoc-ses-readback-99-2",
+      "ExecutionStatus":"AVAILABLE",
+      "StackName":"PsdEocExplorationSmokeSesReadbackPolicy",
+      "Status":"CREATE_COMPLETE"
+    }]}'
     ;;
   cloudformation:create-change-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
@@ -244,11 +265,24 @@ case "$1:$2" in
     ;;
   cloudformation:describe-change-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-    if [[ "$EXISTING_STACK" == "true" ]]; then
+    if [[ "$INTERRUPTED_CREATE" == "true" && ! -e "$POLICY_MARKER" ]]; then
+      action=Add
+      if [[ "$CHANGE_SET_MISMATCH" == "true" ]]; then action=Modify; fi
+      jq -n --arg action "$action" '{
+        ChangeSetId:"arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-ses-readback-99-2/99999999-9999-9999-9999-999999999999",
+        ChangeSetName:"psd-eoc-ses-readback-99-2",
+        OnStackFailure:"ROLLBACK",
+        Description:"Exact SES readback policy for GitHub run 99/2 with client token psd-eoc-ses-readback-99-2",
+        StackName:"PsdEocExplorationSmokeSesReadbackPolicy",
+        Status:"CREATE_COMPLETE",
+        ExecutionStatus:"AVAILABLE",
+        Capabilities:["CAPABILITY_NAMED_IAM"],
+        Changes:[{ResourceChange:{Action:$action,LogicalResourceId:"ExplorationSmokeSesReadbackPolicy",ResourceType:"AWS::IAM::Policy"}}]
+      }'
+    elif [[ "$EXISTING_STACK" == "true" ]]; then
       printf '%s\n' '{
         "ChangeSetId":"arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-ses-readback-1-1/00000000-0000-0000-0000-000000000000",
         "ChangeSetName":"psd-eoc-ses-readback-1-1",
-        "ChangeSetType":"UPDATE",
         "StackName":"PsdEocExplorationSmokeSesReadbackPolicy",
         "Status":"FAILED",
         "ExecutionStatus":"UNAVAILABLE",
@@ -261,8 +295,8 @@ case "$1:$2" in
       jq -n --arg action "$action" '{
         ChangeSetId:"arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-ses-readback-1-1/00000000-0000-0000-0000-000000000000",
         ChangeSetName:"psd-eoc-ses-readback-1-1",
-        ChangeSetType:"CREATE",
-        Description:"Exact SES readback policy for GitHub run 1/1",
+        OnStackFailure:"ROLLBACK",
+        Description:"Exact SES readback policy for GitHub run 1/1 with client token psd-eoc-ses-readback-1-1",
         StackName:"PsdEocExplorationSmokeSesReadbackPolicy",
         Status:"CREATE_COMPLETE",
         ExecutionStatus:"AVAILABLE",
@@ -277,13 +311,17 @@ case "$1:$2" in
     ;;
   cloudformation:list-stack-resources)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-    test -e "$POLICY_MARKER"
-    printf '%s\n' '{"StackResourceSummaries":[{
-      "LogicalResourceId":"ExplorationSmokeSesReadbackPolicy",
-      "PhysicalResourceId":"PsdEocExplorationSmokeSesReadbackPolicy-ExplorationSmokeSesReadbackPolicy",
-      "ResourceStatus":"CREATE_COMPLETE",
-      "ResourceType":"AWS::IAM::Policy"
-    }]}'
+    if [[ "$INTERRUPTED_CREATE" == "true" && ! -e "$POLICY_MARKER" ]]; then
+      printf '%s\n' '{"StackResourceSummaries":[]}'
+    else
+      test -e "$POLICY_MARKER"
+      printf '%s\n' '{"StackResourceSummaries":[{
+        "LogicalResourceId":"ExplorationSmokeSesReadbackPolicy",
+        "PhysicalResourceId":"PsdEocExplorationSmokeSesReadbackPolicy-ExplorationSmokeSesReadbackPolicy",
+        "ResourceStatus":"CREATE_COMPLETE",
+        "ResourceType":"AWS::IAM::Policy"
+      }]}'
+    fi
     ;;
   sesv2:get-configuration-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
@@ -336,6 +374,7 @@ esac
         GITHUB_RUN_ATTEMPT: '1',
         GITHUB_RUN_ID: '1',
         GITHUB_STEP_SUMMARY: summary,
+        INTERRUPTED_CREATE: options.interruptedCreate ? 'true' : 'false',
         PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
         POLICY_MARKER: marker,
         POLICY_NAME: policyName,
@@ -437,6 +476,8 @@ describe('protected exploration SES readback policy', () => {
       Capabilities: ['CAPABILITY_NAMED_IAM'],
       ChangeSetName: 'psd-eoc-ses-readback-1-1',
       ChangeSetType: 'CREATE',
+      ClientToken: 'psd-eoc-ses-readback-1-1',
+      OnStackFailure: 'ROLLBACK',
       RoleARN: `arn:aws:iam::${accountId}:role/cdk-hnb659fds-cfn-exec-role-${accountId}-${region}`,
       StackName: 'PsdEocExplorationSmokeSesReadbackPolicy',
     });
@@ -465,6 +506,25 @@ describe('protected exploration SES readback policy', () => {
     );
   });
 
+  it('resumes an exact available CREATE after interruption without creating a second change set', async () => {
+    const result = await runScenario({
+      existingStack: false,
+      interruptedCreate: true,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.result).toEqual({ state: 'resumed-interrupted-create' });
+    expect(result.changeSetRequest).toBeUndefined();
+    expect(result.awsCalls).toContain(
+      'cloudformation:list-change-sets:deploy-access',
+    );
+    expect(result.awsCalls).toContain(
+      'cloudformation:execute-change-set:deploy-access',
+    );
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:create-change-set:deploy-access',
+    );
+  });
+
   it('fails closed before execution when the change set is not the exact one-resource add', async () => {
     const result = await runScenario({
       changeSetMismatch: true,
@@ -472,6 +532,22 @@ describe('protected exploration SES readback policy', () => {
     });
     expect(result.exitCode).not.toBe(0);
     expect(result.result).toBeUndefined();
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:execute-change-set:deploy-access',
+    );
+  });
+
+  it('fails closed on a mismatched interrupted CREATE instead of resuming it', async () => {
+    const result = await runScenario({
+      changeSetMismatch: true,
+      existingStack: false,
+      interruptedCreate: true,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.result).toBeUndefined();
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:create-change-set:deploy-access',
+    );
     expect(result.awsCalls).not.toContain(
       'cloudformation:execute-change-set:deploy-access',
     );
