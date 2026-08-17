@@ -30,7 +30,6 @@ import {
   SES_CONFIGURATION_SET_NAME,
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
-  SES_EVENT_TYPES,
 } from '../config';
 import {
   EXPLORATION_SMOKE_ACCOUNT,
@@ -608,7 +607,7 @@ export class ExplorationSmokeStack extends Stack {
       topicName: SES_EVENT_TOPIC_NAME,
     });
     emailEventsTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    const emailEventsPublishPolicy = emailEventsTopic.addToResourcePolicy(
+    emailEventsTopic.addToResourcePolicy(
       new iam.PolicyStatement({
         actions: ['sns:Publish'],
         conditions: {
@@ -622,27 +621,6 @@ export class ExplorationSmokeStack extends Stack {
         sid: 'AllowSesConfigurationSetEvents',
       }),
     );
-    const emailEventDestination = new ses.CfnConfigurationSetEventDestination(
-      this,
-      'EmailEventDestination',
-      {
-        configurationSetName: emailConfigurationSet.ref,
-        eventDestination: {
-          enabled: true,
-          matchingEventTypes: [...SES_EVENT_TYPES],
-          name: SES_EVENT_DESTINATION_NAME,
-          snsDestination: {
-            topicArn: emailEventsTopic.topicArn,
-          },
-        },
-      },
-    );
-    emailEventDestination.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    if (emailEventsPublishPolicy.policyDependable !== undefined) {
-      emailEventDestination.node.addDependency(
-        emailEventsPublishPolicy.policyDependable,
-      );
-    }
 
     const googleOauthSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this,
@@ -967,6 +945,19 @@ export class ExplorationSmokeStack extends Stack {
       },
     );
     appRunnerService.cfnOptions.condition = shouldProvisionApplication;
+    // App Runner replaces a service when its tags change. Keep the existing
+    // service's immutable legacy tags while its reviewed runtime configuration
+    // and every non-service dark resource carry the live-pilot classification.
+    Tags.of(appRunnerService).add('Application', 'PSD EOC Exploration Smoke', {
+      priority: 300,
+    });
+    Tags.of(appRunnerService).add('DataClassification', 'synthetic-only', {
+      priority: 300,
+    });
+    Tags.of(appRunnerService).add('Environment', 'exploration-smoke', {
+      priority: 300,
+    });
+    Tags.of(appRunnerService).remove('DataScope', { priority: 300 });
     imagePullGrant.applyBefore(appRunnerService);
     for (const grant of runtimeGrants) grant.applyBefore(appRunnerService);
 
@@ -1080,6 +1071,12 @@ export class ExplorationSmokeStack extends Stack {
     });
     new CfnOutput(this, 'SesEmailEventsKeyArn', {
       value: emailEventsKey.keyArn,
+    });
+    new CfnOutput(this, 'SesEmailEventDestinationName', {
+      value: SES_EVENT_DESTINATION_NAME,
+    });
+    new CfnOutput(this, 'SesEmailEventDestinationManagement', {
+      value: 'external-readback',
     });
     new CfnOutput(this, 'SesIntegrationTruth', {
       value: 'configured-unverified',
