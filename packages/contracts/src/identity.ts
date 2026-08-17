@@ -386,23 +386,24 @@ export type AccessMembershipSnapshot = z.infer<
  * remain server-owned dependencies and can never be supplied by the caller.
  * Finalization accepts only opaque durable-session proof identifiers.
  */
+export const DESIGNATED_ACCESS_GROUP_EMAIL =
+  'tsd-engineering@psd401.net' as const;
+
 export const SyncAccessMembershipInputSchema = z
-  .discriminatedUnion('phase', [
-    z
-      .object({
-        phase: z.literal('stage'),
-        designatedGroupEmail: z.literal('tsd-engineering@psd401.net'),
-      })
-      .strict(),
-    z
-      .object({
-        phase: z.literal('finalize'),
-        designatedGroupEmail: z.literal('tsd-engineering@psd401.net'),
-        mobileSessionId: SessionIdSchema,
-        membershipSnapshotId: AccessMembershipSnapshotIdSchema,
-      })
-      .strict(),
-  ])
+  .object({
+    designatedGroupEmail: z.literal(DESIGNATED_ACCESS_GROUP_EMAIL),
+    transition: z.discriminatedUnion('phase', [
+      z.object({ phase: z.literal('stage') }).strict(),
+      z
+        .object({
+          phase: z.literal('finalize'),
+          mobileSessionId: SessionIdSchema,
+          membershipSnapshotId: AccessMembershipSnapshotIdSchema,
+        })
+        .strict(),
+    ]),
+  })
+  .strict()
   .readonly();
 
 /** Exact access-membership sync command inferred from its schema. */

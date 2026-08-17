@@ -135,8 +135,8 @@ describe('access-membership sync capability core', () => {
     const harness = storeHarness();
     const result = await syncAccessMembership(
       {
-        phase: 'stage',
         designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+        transition: { phase: 'stage' },
       },
       context(),
       {
@@ -164,8 +164,8 @@ describe('access-membership sync capability core', () => {
     let evaluated = false;
     const result = await syncAccessMembership(
       {
-        phase: 'stage',
         designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+        transition: { phase: 'stage' },
       },
       context(),
       {
@@ -190,10 +190,12 @@ describe('access-membership sync capability core', () => {
     let evaluated = false;
     const result = await syncAccessMembership(
       {
-        phase: 'finalize',
         designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-        mobileSessionId: '00000000-0000-4000-8000-000000000409',
-        membershipSnapshotId: '00000000-0000-4000-8000-000000000410',
+        transition: {
+          phase: 'finalize',
+          mobileSessionId: '00000000-0000-4000-8000-000000000409',
+          membershipSnapshotId: '00000000-0000-4000-8000-000000000410',
+        },
       },
       context(),
       {
@@ -251,8 +253,8 @@ describe('access-membership sync capability core', () => {
       await expect(
         syncAccessMembership(
           {
-            phase: 'stage',
             designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            transition: { phase: 'stage' },
           },
           invalid,
           {
@@ -278,8 +280,8 @@ describe('access-membership sync capability core', () => {
     await expect(
       syncAccessMembership(
         {
-          phase: 'stage',
           designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+          transition: { phase: 'stage' },
         },
         context(),
         {
@@ -312,8 +314,8 @@ describe('access-membership sync capability core', () => {
     await expect(
       syncAccessMembership(
         {
-          phase: 'stage',
           designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+          transition: { phase: 'stage' },
         },
         context(),
         {
@@ -343,8 +345,8 @@ describe('access-membership sync capability core', () => {
     await expect(
       syncAccessMembership(
         {
-          phase: 'stage',
           designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+          transition: { phase: 'stage' },
         },
         context(),
         {
@@ -381,8 +383,8 @@ describe('access-membership sync capability core', () => {
       executeCapability(
         handler,
         {
-          phase: 'stage',
           designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+          transition: { phase: 'stage' },
         },
         {
           context: context({

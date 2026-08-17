@@ -1,4 +1,5 @@
 import {
+  DESIGNATED_ACCESS_GROUP_EMAIL,
   executeCapability,
   IdempotencyKeySchema,
   SyncAccessMembershipResultSchema,
@@ -165,14 +166,16 @@ async function runFromCommandLine(): Promise<void> {
       }),
       run.phase === 'stage'
         ? {
-            phase: 'stage',
-            designatedGroupEmail: 'tsd-engineering@psd401.net',
+            designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            transition: { phase: 'stage' },
           }
         : {
-            phase: 'finalize',
-            designatedGroupEmail: 'tsd-engineering@psd401.net',
-            mobileSessionId: run.mobileSessionId,
-            membershipSnapshotId: run.membershipSnapshotId,
+            designatedGroupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            transition: {
+              phase: 'finalize',
+              mobileSessionId: run.mobileSessionId,
+              membershipSnapshotId: run.membershipSnapshotId,
+            },
           },
       {
         context,

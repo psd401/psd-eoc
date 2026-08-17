@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import {
   ActorSchema,
+  DESIGNATED_ACCESS_GROUP_EMAIL,
   IdempotencyKeySchema,
   registerCapabilityHandler,
   SecurityAuditEntrySchema,
@@ -80,7 +81,7 @@ const InitialMobileTransitionEmailDigestSchema = z
 
 const EvaluatedAccessMembershipSetSchema = z
   .object({
-    groupEmail: z.literal('tsd-engineering@psd401.net'),
+    groupEmail: z.literal(DESIGNATED_ACCESS_GROUP_EMAIL),
     googleGroupId: z
       .string()
       .trim()
@@ -347,11 +348,11 @@ export async function syncAccessMembership(
   }
 
   try {
-    if (input.phase === 'finalize') {
+    if (input.transition.phase === 'finalize') {
       return SyncAccessMembershipResultSchema.parse(
         await dependencies.store.finalize(reservation.id, {
-          mobileSessionId: input.mobileSessionId,
-          membershipSnapshotId: input.membershipSnapshotId,
+          mobileSessionId: input.transition.mobileSessionId,
+          membershipSnapshotId: input.transition.membershipSnapshotId,
           requestId: context.requestId,
           completedAt: timestamp(now),
         }),
@@ -584,7 +585,7 @@ export function createDrizzleAccessMembershipSyncStore(
           eq(groupSources.purpose, 'access'),
           eq(
             sql<string>`lower(${groupSources.email})`,
-            'tsd-engineering@psd401.net',
+            DESIGNATED_ACCESS_GROUP_EMAIL,
           ),
         ),
       )
@@ -603,7 +604,7 @@ export function createDrizzleAccessMembershipSyncStore(
       source.facilityId !== null ||
       source.active !== true ||
       source.googleGroupId === null ||
-      source.email?.toLowerCase() !== 'tsd-engineering@psd401.net' ||
+      source.email?.toLowerCase() !== DESIGNATED_ACCESS_GROUP_EMAIL ||
       !accessState.activeAccessGroupSourceIds.includes(source.id)
     ) {
       throw new AccessMembershipSyncError(
@@ -628,11 +629,11 @@ export function createDrizzleAccessMembershipSyncStore(
     );
     const evaluation = validateEvaluation(
       {
-        groupEmail: 'tsd-engineering@psd401.net',
+        groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
         googleGroupId: source.googleGroupId,
         memberEmails,
         membershipDigest: digest([
-          'tsd-engineering@psd401.net',
+          DESIGNATED_ACCESS_GROUP_EMAIL,
           source.googleGroupId,
           ...memberEmails,
         ]),
@@ -1591,7 +1592,7 @@ export function createDrizzleAccessMembershipSyncStore(
           .orderBy(asc(groupSources.id))
           .for('update');
         const designatedSources = activeSources.filter(
-          ({ email }) => email?.toLowerCase() === 'tsd-engineering@psd401.net',
+          ({ email }) => email?.toLowerCase() === DESIGNATED_ACCESS_GROUP_EMAIL,
         );
         const designatedSource = designatedSources[0];
         const recoverySources = activeSources.filter(
@@ -1678,13 +1679,13 @@ export function createDrizzleAccessMembershipSyncStore(
           .for('share');
         const evaluation = validateEvaluation(
           {
-            groupEmail: 'tsd-engineering@psd401.net',
+            groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
             googleGroupId: designatedSource.googleGroupId,
             memberEmails: evaluatedRows.map(({ email }) =>
               StaffRosterEmailSchema.parse(email),
             ),
             membershipDigest: digest([
-              'tsd-engineering@psd401.net',
+              DESIGNATED_ACCESS_GROUP_EMAIL,
               designatedSource.googleGroupId,
               ...evaluatedRows.map(({ email }) => email),
             ]),
