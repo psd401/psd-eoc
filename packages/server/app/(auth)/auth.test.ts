@@ -981,6 +981,9 @@ describe('configured Groups access and initial session', () => {
           async loadEvidence() {
             return {
               ...evidence,
+              designatedAccessGroupSourceRef:
+                evidence.activeAccessGroupSourceRefs[0] ?? null,
+              transitionRecoveryUserId: evidence.user?.id ?? null,
               activeAccessGroupSourceRefs: [
                 ...evidence.activeAccessGroupSourceRefs,
                 additionalAccessGroup,

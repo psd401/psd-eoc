@@ -1890,6 +1890,8 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const existingUserId = randomUUID();
     const existingSubject = `hagelk-subject-${suffix}`;
     const existingEmail = `hagelk-${suffix}@example.invalid`;
+    const transitionRacedSubject = `transition-raced-subject-${suffix}`;
+    const transitionRacedEmail = `transition-raced-${suffix}@example.invalid`;
     const newSubject = `new-subject-${suffix}`;
     const newEmail = `new-${suffix}@example.invalid`;
     const racedSubject = `raced-subject-${suffix}`;
@@ -1920,7 +1922,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         purpose: 'access',
         facilityId: null,
         displayName: 'Retained recovery provenance',
-        active: false,
+        active: true,
         googleGroupId: `synthetic-recovery-${suffix}`,
         email: `recovery-source-${suffix}@example.invalid`,
         fixtureKey: null,
@@ -1972,15 +1974,31 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
           groupPurpose: 'access',
           completionKind: 'completed',
         },
+        {
+          snapshotId: sourceSnapshotId,
+          groupSourceId: recoverySourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+          completionKind: 'expected',
+        },
+        {
+          snapshotId: sourceSnapshotId,
+          groupSourceId: recoverySourceId,
+          groupSourceKind: 'google-group',
+          groupPurpose: 'access',
+          completionKind: 'completed',
+        },
       ]);
       await transaction.insert(accessMembershipEvaluatedMembers).values(
-        [recoveryEmail, existingEmail, newEmail, racedEmail].map((email) => ({
-          snapshotId: sourceSnapshotId,
-          email,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-        })),
+        [existingEmail, transitionRacedEmail, newEmail, racedEmail].map(
+          (email) => ({
+            snapshotId: sourceSnapshotId,
+            email,
+            groupSourceId: sourceId,
+            groupSourceKind: 'google-group' as const,
+            groupPurpose: 'access' as const,
+          }),
+        ),
       );
       await transaction.insert(accessMembershipMembers).values([
         {
@@ -1993,7 +2011,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       await transaction.insert(accessMembershipMemberGroups).values({
         snapshotId: sourceSnapshotId,
         userId: recoveryUserId,
-        groupSourceId: sourceId,
+        groupSourceId: recoverySourceId,
         groupSourceKind: 'google-group',
         groupPurpose: 'access',
       });
@@ -2007,9 +2025,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       platform: 'web' | 'ios',
       label: string,
     ): PersistInitialWebSessionRequest => {
-      if (grant.firstLoginBinding === null) {
-        throw new Error('A persistence request requires an atomic binding.');
-      }
       const responseDigest = digest(`${label}-response:${suffix}`);
       const principal = {
         kind: 'oidc-callback' as const,
@@ -2047,7 +2062,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         membershipGraceUntil: new Date(
           createdAt.getTime() + 2 * 60 * 60 * 1_000,
         ),
-        grantBootstrapAdmin: true,
+        grantBootstrapAdmin: grant.bootstrapAdminEligible,
         requestId: randomUUID(),
         idempotency: Object.freeze({
           key: `oidc:${responseDigest}`,
@@ -2059,7 +2074,45 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     };
 
     const existingCheckedAt = new Date(capturedAt.getTime() + 1_000);
-    const existingGrant = await checkAccessGate(
+    const recoveryGrant = await checkAccessGate(
+      {
+        googleSubject: recoverySubject,
+        email: recoveryEmail,
+        displayName: 'Synthetic recovery administrator',
+        subjectDigest: digest(recoverySubject),
+        requestId: randomUUID(),
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'web',
+      },
+      { store, audit },
+    );
+    expect(recoveryGrant).toMatchObject({
+      granted: true,
+      firstLoginBinding: null,
+      bootstrapAdminEligible: false,
+    });
+    if (!recoveryGrant.granted) {
+      throw new Error('Recovery identity did not pass the staged access gate.');
+    }
+    const recoveryResult = await createDrizzleInitialWebSessionStore(
+      database,
+    ).persist(
+      buildPersistenceRequest(
+        recoveryGrant,
+        existingCheckedAt,
+        'web',
+        'recovery',
+      ),
+    );
+    expect(recoveryResult.user).toMatchObject({
+      id: recoveryUserId,
+      googleSubject: recoverySubject,
+      roles: ['admin'],
+    });
+    expect(recoveryResult.session.authorization.membershipSnapshotId).toBe(
+      sourceSnapshotId,
+    );
+    const prematureWebGrant = await checkAccessGate(
       {
         googleSubject: existingSubject,
         email: existingEmail,
@@ -2068,6 +2121,94 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         requestId: randomUUID(),
         checkedAt: existingCheckedAt.toISOString(),
         source: 'web',
+      },
+      { store, audit },
+    );
+    expect(prematureWebGrant).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
+    });
+    const transitionRaceGrant = await checkAccessGate(
+      {
+        googleSubject: transitionRacedSubject,
+        email: transitionRacedEmail,
+        displayName: 'Synthetic transition race',
+        subjectDigest: digest(transitionRacedSubject),
+        requestId: randomUUID(),
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'mobile',
+      },
+      { store, audit },
+    );
+    expect(transitionRaceGrant.granted).toBe(true);
+    if (
+      !transitionRaceGrant.granted ||
+      transitionRaceGrant.firstLoginBinding === null
+    ) {
+      throw new Error('Transition race did not reach the atomic binding seam.');
+    }
+    const reservedTransitionVersion = sourceVersion - 100;
+    await database.insert(accessMembershipSnapshots).values({
+      id: transitionRaceGrant.firstLoginBinding.successorSnapshotId,
+      version: reservedTransitionVersion,
+      complete: true,
+      syncStartedAt: capturedAt,
+      capturedAt,
+    });
+    const transitionRaceRequest = buildPersistenceRequest(
+      transitionRaceGrant,
+      existingCheckedAt,
+      'ios',
+      'transition-raced',
+    );
+    await expect(
+      createDrizzleInitialWebSessionStore(database).persist(
+        transitionRaceRequest,
+      ),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
+    expect(
+      await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.googleSubject, transitionRacedSubject)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, recoverySourceId)),
+    ).toEqual([{ active: true }]);
+    expect(
+      await database
+        .select({
+          complete: accessMembershipSnapshots.complete,
+          version: accessMembershipSnapshots.version,
+        })
+        .from(accessMembershipSnapshots)
+        .where(
+          eq(
+            accessMembershipSnapshots.id,
+            transitionRaceGrant.firstLoginBinding.successorSnapshotId,
+          ),
+        ),
+    ).toEqual([{ complete: true, version: reservedTransitionVersion }]);
+    expect(
+      await database
+        .select({ id: idempotencyRecords.id })
+        .from(idempotencyRecords)
+        .where(
+          eq(idempotencyRecords.key, transitionRaceRequest.idempotency.key),
+        ),
+    ).toEqual([]);
+    const existingGrant = await checkAccessGate(
+      {
+        googleSubject: existingSubject,
+        email: existingEmail,
+        displayName: 'Changed Google display label is non-authoritative',
+        subjectDigest: digest(existingSubject),
+        requestId: randomUUID(),
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'mobile',
       },
       { store, audit },
     );
@@ -2082,7 +2223,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       buildPersistenceRequest(
         existingGrant,
         existingCheckedAt,
-        'web',
+        'ios',
         'existing-binding',
       ),
     );
@@ -2106,9 +2247,15 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
           ),
         ),
     ).toEqual([{ groupSourceId: sourceId }]);
-    expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
-      expect.arrayContaining([recoveryUserId, existingUserId]),
-    );
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([
+      existingUserId,
+    ]);
+    expect(
+      await database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, recoverySourceId)),
+    ).toEqual([{ active: false }]);
 
     const checkedAt = new Date(existingCheckedAt.getTime() + 1_000);
     const granted = await checkAccessGate(
@@ -2161,7 +2308,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         ),
     ).toEqual(
       expect.arrayContaining([
-        { userId: recoveryUserId },
+        { userId: existingUserId },
         { userId: granted.user.id },
       ]),
     );

@@ -30,7 +30,10 @@ import {
   users,
 } from '../../db/schema';
 import type { GoogleOidcCallbackErrorCode } from './oidc';
-import { loadEffectiveRoles } from './role-state';
+import {
+  loadEffectiveAdministratorUserIds,
+  loadEffectiveRoles,
+} from './role-state';
 import type { WebSessionIssuanceErrorCode } from './session-cookie';
 
 const ACCESS_GATE_AUDIT_ACTION = 'complete-oidc-sign-in' as const;
@@ -105,8 +108,12 @@ export interface AccessGateEvidence {
   readonly user: AccessGateUserRecord | null;
   /** Existing email owner with another subject makes binding ambiguous. */
   readonly emailBindingConflict?: boolean;
-  /** True only for the one exact product-owner-designated active source. */
+  /** True only for the designated source, optionally plus one staged recovery source. */
   readonly activeAccessConfigurationExact?: boolean;
+  /** Exact designated source selected by its persisted normalized group email. */
+  readonly designatedAccessGroupSourceRef?: AccessGroupSourceRef | null;
+  /** Sole reachable bound administrator during the two-source recovery stage. */
+  readonly transitionRecoveryUserId?: string | null;
   readonly activeAccessGroupSourceRefs: readonly AccessGroupSourceRef[];
   /**
    * Legacy diagnostic retained for adapter compatibility. Authorization never
@@ -327,6 +334,7 @@ function validateEvidence(
       snapshot: AccessGateSnapshotEvidence;
       member: AccessGateMemberEvidence;
       firstLoginBinding: AccessGateFirstLoginBinding | null;
+      designatedAdminEligible: boolean;
     }>
   | AccessGateDenied {
   if (evidence.activeAccessGroupSourceRefs.length === 0) {
@@ -335,9 +343,36 @@ function validateEvidence(
   const activeGroups = parseCanonicalAccessGroupSet(
     evidence.activeAccessGroupSourceRefs,
   );
+  const explicitDesignated = evidence.designatedAccessGroupSourceRef;
+  const designatedResult =
+    explicitDesignated === undefined
+      ? activeGroups?.length === 1
+        ? AccessGroupSourceRefSchema.safeParse(activeGroups[0])
+        : null
+      : AccessGroupSourceRefSchema.safeParse(explicitDesignated);
+  const designatedGroup =
+    designatedResult !== null && designatedResult.success
+      ? designatedResult.data
+      : null;
   if (
     activeGroups === null ||
-    evidence.activeAccessConfigurationExact === false
+    evidence.activeAccessConfigurationExact === false ||
+    designatedGroup === null ||
+    activeGroups.length > 2 ||
+    !activeGroups.some(
+      (source) => accessGroupKey(source) === accessGroupKey(designatedGroup),
+    )
+  ) {
+    return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
+  }
+  const designatedGroups = Object.freeze([designatedGroup]);
+  const recoveryGroups = activeGroups.filter(
+    (source) => accessGroupKey(source) !== accessGroupKey(designatedGroup),
+  );
+  const recoveryTransition = recoveryGroups.length === 1;
+  if (
+    recoveryTransition &&
+    !UuidSchema.safeParse(evidence.transitionRecoveryUserId).success
   ) {
     return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
   }
@@ -380,7 +415,7 @@ function validateEvidence(
     evaluatedMember !== null &&
     evaluatedMember.email === input.email &&
     evaluatedGroups !== null &&
-    isSameGroupSet(activeGroups, evaluatedGroups);
+    isSameGroupSet(designatedGroups, evaluatedGroups);
 
   let user: User;
   let userDisposition: AccessGateFirstLoginBinding['userDisposition'];
@@ -421,7 +456,14 @@ function validateEvidence(
     const activeMemberGroups = memberGroups.filter((source) =>
       activeGroupKeys.has(accessGroupKey(source)),
     );
-    if (isSameGroupSet(activeGroups, activeMemberGroups)) {
+    if (!isSameGroupSet(memberGroups, activeMemberGroups)) {
+      return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
+    }
+    const hasDesignatedBoundMembership = isSameGroupSet(
+      designatedGroups,
+      activeMemberGroups,
+    );
+    if (!recoveryTransition && hasDesignatedBoundMembership) {
       return {
         granted: true,
         user: userResult.data,
@@ -429,13 +471,37 @@ function validateEvidence(
         member: Object.freeze({
           userId: userResult.data.id,
           googleSubject: userResult.data.googleSubject,
-          accessGroupSourceRefs: activeGroups,
+          accessGroupSourceRefs: designatedGroups,
           facilityScope: userResult.data.facilityScope,
         }),
         firstLoginBinding: null,
+        designatedAdminEligible: true,
+      };
+    }
+    const isSoleRecoveryAdministrator =
+      recoveryTransition &&
+      evidence.transitionRecoveryUserId === userResult.data.id &&
+      userResult.data.roles.includes('admin') &&
+      userResult.data.facilityScope.kind === 'district' &&
+      evaluatedMember === null &&
+      isSameGroupSet(recoveryGroups, activeMemberGroups);
+    if (isSoleRecoveryAdministrator) {
+      return {
+        granted: true,
+        user: userResult.data,
+        snapshot,
+        member: Object.freeze({
+          userId: userResult.data.id,
+          googleSubject: userResult.data.googleSubject,
+          accessGroupSourceRefs: recoveryGroups,
+          facilityScope: userResult.data.facilityScope,
+        }),
+        firstLoginBinding: null,
+        designatedAdminEligible: false,
       };
     }
     if (
+      (recoveryTransition && input.source !== 'mobile') ||
       !hasExactEvaluatedMembership ||
       userResult.data.facilityScope.kind !== 'district'
     ) {
@@ -447,7 +513,11 @@ function validateEvidence(
     if (evidence.emailBindingConflict) {
       return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
     }
-    if (!hasExactEvaluatedMembership || evaluatedGroups === null) {
+    if (
+      (recoveryTransition && input.source !== 'mobile') ||
+      !hasExactEvaluatedMembership ||
+      evaluatedGroups === null
+    ) {
       return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
     }
     user = UserSchema.parse({
@@ -467,7 +537,7 @@ function validateEvidence(
     evaluatedMember === null ||
     evaluatedMember.email !== input.email ||
     evaluatedGroups === null ||
-    !isSameGroupSet(activeGroups, evaluatedGroups)
+    !isSameGroupSet(designatedGroups, evaluatedGroups)
   ) {
     return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
   }
@@ -502,6 +572,7 @@ function validateEvidence(
       successorSnapshotVersion: successorVersion,
       normalizedEmail: input.email,
     }),
+    designatedAdminEligible: true,
   };
 }
 
@@ -562,9 +633,9 @@ export async function checkAccessGate(
       accessGroupSourceRefs: evaluated.member.accessGroupSourceRefs,
     }),
     firstLoginBinding: evaluated.firstLoginBinding,
-    // The sole designated access group is the complete admin rule. The legacy
-    // field name is retained at the session seam until fixture callers migrate.
-    bootstrapAdminEligible: true,
+    // The exact designated group is the complete admin rule. The temporary
+    // bound recovery administrator never causes a new admin grant.
+    bootstrapAdminEligible: evaluated.designatedAdminEligible,
   });
 }
 
@@ -651,9 +722,16 @@ export function createDrizzleAccessGateStore(
         );
         const activeAccessGroupSourceRefs =
           activeAccessGroupRows.map(parseAccessGroupRef);
+        const designatedAccessGroupRows = activeAccessGroupRows.filter(
+          ({ email }) => email === DESIGNATED_ACCESS_GROUP_EMAIL,
+        );
+        const designatedAccessGroupSourceRef =
+          designatedAccessGroupRows.length === 1
+            ? parseAccessGroupRef(designatedAccessGroupRows[0]!)
+            : null;
         const activeAccessConfigurationExact =
-          activeAccessGroupRows.length === 1 &&
-          activeAccessGroupRows[0]?.email === DESIGNATED_ACCESS_GROUP_EMAIL;
+          designatedAccessGroupSourceRef !== null &&
+          activeAccessGroupRows.length <= 2;
 
         let user: AccessGateUserRecord | null = null;
         if (userRow !== undefined) {
@@ -695,6 +773,8 @@ export function createDrizzleAccessGateStore(
             user,
             emailBindingConflict,
             activeAccessConfigurationExact,
+            designatedAccessGroupSourceRef,
+            transitionRecoveryUserId: null,
             activeAccessGroupSourceRefs,
             latestSuccessfulGroupSourceUpdateAt: null,
             snapshot: null,
@@ -805,10 +885,21 @@ export function createDrizzleAccessGateStore(
           };
         }
 
+        const transitionAdministratorUserIds =
+          activeAccessGroupRows.length === 2
+            ? await loadEffectiveAdministratorUserIds(transaction)
+            : [];
+        const transitionRecoveryUserId =
+          transitionAdministratorUserIds.length === 1
+            ? (transitionAdministratorUserIds[0] ?? null)
+            : null;
+
         return {
           user,
           emailBindingConflict,
           activeAccessConfigurationExact,
+          designatedAccessGroupSourceRef,
+          transitionRecoveryUserId,
           activeAccessGroupSourceRefs,
           latestSuccessfulGroupSourceUpdateAt: null,
           snapshot: {
