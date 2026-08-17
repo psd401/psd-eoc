@@ -48,6 +48,141 @@ function directDarkResourceReadbackScript(workflow: string): string {
   ].join('\n');
 }
 
+async function runAccessSyncOuterRoleExecutionSimulation(options?: {
+  readonly allowNeighborCluster?: boolean;
+  readonly allowWrongService?: boolean;
+  readonly denyRunTask?: boolean;
+}): Promise<{
+  readonly awsCalls: readonly string[];
+  readonly exitCode: number;
+  readonly stderr: string;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), 'psd-eoc-access-dark-proof-'));
+  try {
+    const fakeBin = join(directory, 'bin');
+    const readback = join(directory, 'artifacts', 'readback');
+    const awsCalls = join(directory, 'aws-calls.txt');
+    await Promise.all([
+      mkdir(fakeBin, { recursive: true }),
+      mkdir(readback, { recursive: true }),
+    ]);
+    const awsPath = join(fakeBin, 'aws');
+    await Bun.write(
+      awsPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$1:$2" >> "$AWS_CALLS"
+test "$1:$2" = "iam:simulate-principal-policy"
+shift 2
+action_name=
+context_entries=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --action-names)
+      action_name=$2
+      shift 2
+      ;;
+    --context-entries)
+      context_entries=$2
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+case "$action_name" in
+  ecs:RunTask)
+    if [[ "$DENY_RUN_TASK" == "true" ]]; then
+      decision=implicitDeny
+    elif [[ "$context_entries" == "ContextKeyName=ecs:cluster,ContextKeyValues=$EXACT_CLUSTER_ARN,ContextKeyType=string" ]]; then
+      decision=allowed
+    elif [[ "$ALLOW_NEIGHBOR_CLUSTER" == "true" ]]; then
+      decision=allowed
+    else
+      decision=implicitDeny
+    fi
+    if [[ "$decision" == "allowed" ]]; then
+      jq -n '{EvaluationResults: [{EvalDecision: "allowed"}]}'
+    else
+      jq -n '{EvaluationResults: [{EvalDecision: "implicitDeny"}]}'
+    fi
+    ;;
+  iam:PassRole)
+    if [[ "$context_entries" == "ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string" ]]; then
+      decision=allowed
+    elif [[ "$ALLOW_WRONG_SERVICE" == "true" ]]; then
+      decision=allowed
+    else
+      decision=implicitDeny
+    fi
+    jq -n \
+      --arg decision "$decision" \
+      --arg execution "$ACCESS_EXECUTION_ROLE_ARN" \
+      --arg task "$ACCESS_TASK_ROLE_ARN" '{
+        EvaluationResults: [{
+          EvalDecision: $decision,
+          ResourceSpecificResults: [
+            {EvalResourceDecision: $decision, EvalResourceName: $execution},
+            {EvalResourceDecision: $decision, EvalResourceName: $task}
+          ]
+        }]
+      }'
+    ;;
+  *) exit 97 ;;
+esac
+`,
+    );
+    await chmod(awsPath, 0o755);
+    const accessExecutionRoleArn =
+      'arn:aws:iam::<aws-account-id>:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole-test';
+    const accessTaskRoleArn =
+      'arn:aws:iam::<aws-account-id>:role/PsdEocExplorationSmoke-AccessSyncTaskRole-test';
+    const child = Bun.spawnSync({
+      cmd: [
+        'bash',
+        '-c',
+        `set -euo pipefail\n${markedShellBlock(
+          await readWorkflow(),
+          'access-sync outer-role exact execution simulation',
+        )}`,
+      ],
+      cwd: directory,
+      env: {
+        ...process.env,
+        ACCESS_EXECUTION_ROLE_ARN: accessExecutionRoleArn,
+        ACCESS_TASK_ROLE_ARN: accessTaskRoleArn,
+        ALLOW_NEIGHBOR_CLUSTER: String(options?.allowNeighborCluster ?? false),
+        ALLOW_WRONG_SERVICE: String(options?.allowWrongService ?? false),
+        AWS_ACCOUNT_ID: '<aws-account-id>',
+        AWS_CALLS: awsCalls,
+        AWS_REGION: 'us-west-2',
+        DENY_RUN_TASK: String(options?.denyRunTask ?? false),
+        DEPLOY_ROLE_ARN:
+          'arn:aws:iam::<aws-account-id>:role/psd-eoc-exploration-smoke-github-deploy',
+        EXACT_CLUSTER_ARN:
+          'arn:aws:ecs:us-west-2:<aws-account-id>:cluster/psd-eoc-exploration-smoke-native-bootstrap',
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        access_execution_role_arn: accessExecutionRoleArn,
+        access_task_definition_arn:
+          'arn:aws:ecs:us-west-2:<aws-account-id>:task-definition/psd-eoc-exploration-smoke-access-sync:1',
+        access_task_role_arn: accessTaskRoleArn,
+        cluster_arn:
+          'arn:aws:ecs:us-west-2:<aws-account-id>:cluster/psd-eoc-exploration-smoke-native-bootstrap',
+      },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
+    return {
+      awsCalls: (await Bun.file(awsCalls).exists())
+        ? (await Bun.file(awsCalls).text()).trim().split('\n')
+        : [],
+      exitCode: child.exitCode,
+      stderr: child.stderr.toString(),
+    };
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+}
+
 async function runDirectDarkResourceReadback(): Promise<{
   readonly awsCalls: readonly string[];
   readonly exitCode: number;
@@ -1066,9 +1201,6 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(accessProof).toContain('/psd-eoc/google-groups');
     expect(accessProof).not.toContain('aws secretsmanager describe-secret');
     expect(accessProof).not.toContain('aws secretsmanager get-secret-value');
-    expect(accessProof).toContain(
-      'groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"',
-    );
     expect(accessProof).toContain('"DATABASE_PASSWORD"');
     expect(accessProof).toContain('"DATABASE_USERNAME"');
     expect(accessProof).toContain('"GOOGLE_ROSTER_CONFIG"');
@@ -1076,19 +1208,83 @@ describe('isolated CDK entrypoint configuration', () => {
       '"PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"',
     );
     expect(accessProof).toContain(':initialMobileTransitionEmailSha256::');
-    expect(accessProof).toContain("jq '.PolicyNames | length'");
+    expect(accessProof).toContain('access-sync-iam-template-contract.json');
     expect(accessProof).toContain(
-      'access-sync-task-role-inline-policies.json)" -eq 0',
+      '$task_roles[0].value.Properties.AssumeRolePolicyDocument == ecs_task_trust',
     );
     expect(accessProof).toContain(
-      'access-sync-execution-role-secret-simulation.json',
+      '($execution_policies[0].value.Properties.PolicyDocument.Statement | length) == 4',
     );
     expect(accessProof).toContain(
-      'access-sync-task-role-negative-simulation.json',
+      'deployment-role-access-sync-run-task-simulation.json',
+    );
+    expect(accessProof).toContain(
+      'deployment-role-access-sync-pass-role-simulation.json',
+    );
+    expect(accessProof).toContain(
+      'deployment-role-access-sync-neighbor-cluster-negative-simulation.json',
+    );
+    expect(accessProof).toContain(
+      'deployment-role-access-sync-wrong-service-negative-simulation.json',
+    );
+    expect(accessProof).toContain(
+      'ContextKeyName=ecs:cluster,ContextKeyValues="$cluster_arn",ContextKeyType=string',
+    );
+    expect(accessProof).toContain('EvalDecision == "allowed"');
+    expect(accessProof).toContain('EvalDecision != "allowed"');
+    expect(accessProof).toContain('.EvalResourceDecision != "allowed"');
+    expect(accessProof).not.toContain('aws iam get-role');
+    expect(accessProof).not.toContain('aws iam get-role-policy');
+    expect(accessProof).not.toContain('aws iam list-role-policies');
+    expect(accessProof).not.toContain('aws iam list-attached-role-policies');
+    expect(accessProof).not.toContain(
+      '--policy-source-arn "$access_execution_role_arn"',
+    );
+    expect(accessProof).not.toContain(
+      '--policy-source-arn "$access_task_role_arn"',
     );
     expect(accessProof).not.toContain('aws ecs run-task');
     expect(workflow.match(/^ {10}aws ecs run-task\b/gm)).toHaveLength(1);
     expect(workflow).not.toContain('--overrides');
+  });
+
+  it('executes the exact access authority proof and rejects missing or broader authority', async () => {
+    const exact = await runAccessSyncOuterRoleExecutionSimulation();
+
+    expect(exact.exitCode).toBe(0);
+    expect(exact.stderr).toBe('');
+    expect(exact.awsCalls).toEqual([
+      'iam:simulate-principal-policy',
+      'iam:simulate-principal-policy',
+      'iam:simulate-principal-policy',
+      'iam:simulate-principal-policy',
+    ]);
+
+    const missingRunTask = await runAccessSyncOuterRoleExecutionSimulation({
+      denyRunTask: true,
+    });
+    expect(missingRunTask.exitCode).not.toBe(0);
+    expect(missingRunTask.awsCalls).toEqual(['iam:simulate-principal-policy']);
+
+    const neighboringCluster = await runAccessSyncOuterRoleExecutionSimulation({
+      allowNeighborCluster: true,
+    });
+    expect(neighboringCluster.exitCode).not.toBe(0);
+    expect(neighboringCluster.awsCalls).toEqual([
+      'iam:simulate-principal-policy',
+      'iam:simulate-principal-policy',
+    ]);
+
+    const wrongService = await runAccessSyncOuterRoleExecutionSimulation({
+      allowWrongService: true,
+    });
+    expect(wrongService.exitCode).not.toBe(0);
+    expect(wrongService.awsCalls).toEqual([
+      'iam:simulate-principal-policy',
+      'iam:simulate-principal-policy',
+      'iam:simulate-principal-policy',
+      'iam:simulate-principal-policy',
+    ]);
   });
 
   it('previews and reads back private PostgreSQL with no database HTTP authority', async () => {
