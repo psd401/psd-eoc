@@ -253,8 +253,8 @@ describe('native initial session issuance', () => {
     expect(bearers).toHaveLength(1);
   });
 
-  test('honors a persisted bootstrap-admin revocation on later eligible sign-in', async () => {
-    const bootstrapEligibleAfterRevocation = Object.freeze({
+  test('requires the designated-group admin projection before bearer delivery', async () => {
+    const designatedGroupEligible = Object.freeze({
       ...AUTHORIZATION,
       grantBootstrapAdmin: true,
     });
@@ -262,9 +262,13 @@ describe('native initial session issuance', () => {
     const store: InitialWebSessionStore = Object.freeze({
       async persist(request: PersistInitialWebSessionRequest) {
         persisted = request;
-        // The production store returns the canonical role projection. A prior
-        // admin revocation keeps this bootstrap-eligible subject at staff.
-        return persistedResult(request);
+        return Object.freeze({
+          ...persistedResult(request),
+          user: Object.freeze({
+            ...request.user,
+            roles: Object.freeze(['staff', 'admin'] as const),
+          }),
+        });
       },
     });
     const bearers: string[] = [];
@@ -274,12 +278,12 @@ describe('native initial session issuance', () => {
       context(
         envelope('10000000-0000-4000-8000-000000000110'),
         bearers,
-        bootstrapEligibleAfterRevocation,
+        designatedGroupEligible,
       ),
     );
 
     expect(persisted?.grantBootstrapAdmin).toBe(true);
-    expect(result.user.roles).toEqual(['staff']);
+    expect(result.user.roles).toEqual(['staff', 'admin']);
     expect(bearers).toHaveLength(1);
   });
 });

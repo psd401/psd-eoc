@@ -8,10 +8,7 @@ import {
 } from '@psd-eoc/contracts';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
-import {
-  checkAccessGate,
-  readBootstrapAdminSubjects,
-} from '../../lib/auth/access-gate';
+import { checkAccessGate } from '../../lib/auth/access-gate';
 import {
   beginGoogleOidcSignIn,
   completeGoogleOidcCallback,
@@ -937,6 +934,8 @@ describe('configured Groups access and initial session', () => {
     const decision = await checkAccessGate(
       {
         googleSubject: PLAYWRIGHT_MEMBER_SUBJECT,
+        email: 'member@psd401.net',
+        displayName: 'Synthetic Member',
         subjectDigest: 'e'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
@@ -970,6 +969,8 @@ describe('configured Groups access and initial session', () => {
     const decision = await checkAccessGate(
       {
         googleSubject: PLAYWRIGHT_MEMBER_SUBJECT,
+        email: 'member@psd401.net',
+        displayName: 'Synthetic Member',
         subjectDigest: 'f'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
@@ -980,6 +981,9 @@ describe('configured Groups access and initial session', () => {
           async loadEvidence() {
             return {
               ...evidence,
+              designatedAccessGroupSourceRef:
+                evidence.activeAccessGroupSourceRefs[0] ?? null,
+              transitionRecoveryUserId: evidence.user?.id ?? null,
               activeAccessGroupSourceRefs: [
                 ...evidence.activeAccessGroupSourceRefs,
                 additionalAccessGroup,
@@ -1016,6 +1020,8 @@ describe('configured Groups access and initial session', () => {
     const decision = await checkAccessGate(
       {
         googleSubject: PLAYWRIGHT_MEMBER_SUBJECT,
+        email: 'member@psd401.net',
+        displayName: 'Synthetic Member',
         subjectDigest,
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
@@ -1058,6 +1064,8 @@ describe('configured Groups access and initial session', () => {
     const decision = await checkAccessGate(
       {
         googleSubject: PLAYWRIGHT_MEMBER_SUBJECT,
+        email: 'member@psd401.net',
+        displayName: 'Synthetic Member',
         subjectDigest: '1'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
@@ -1085,6 +1093,8 @@ describe('configured Groups access and initial session', () => {
     const decision = await checkAccessGate(
       {
         googleSubject: 'mock-google-subject-nonmember',
+        email: 'nonmember@psd401.net',
+        displayName: 'Synthetic Nonmember',
         subjectDigest: 'a'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
@@ -1105,32 +1115,56 @@ describe('configured Groups access and initial session', () => {
     });
   });
 
-  test('does not let a configured bootstrap subject bypass membership', async () => {
+  test('does not let an unevaluated email bypass exact group membership', async () => {
     const runtime = createPlaywrightAuthRuntime();
+    const memberEvidence = await runtime.accessStore.loadEvidence(
+      PLAYWRIGHT_MEMBER_SUBJECT,
+    );
     const decision = await checkAccessGate(
       {
         googleSubject: 'configured-but-unknown-subject',
+        email: 'unknown@psd401.net',
+        displayName: 'Synthetic Unknown',
         subjectDigest: 'b'.repeat(64),
         requestId: randomUUID(),
         checkedAt: new Date().toISOString(),
         source: 'web',
       },
       {
-        store: runtime.accessStore,
+        store: {
+          async loadEvidence() {
+            return {
+              ...memberEvidence,
+              user: null,
+              snapshot:
+                memberEvidence.snapshot === null
+                  ? null
+                  : {
+                      ...memberEvidence.snapshot,
+                      evaluatedMember: null,
+                      member: null,
+                    },
+            };
+          },
+        },
         audit: runtime.auditSink,
-        bootstrapAdminSubjects: new Set(['configured-but-unknown-subject']),
       },
     );
-    expect(decision).toEqual({ granted: false, reasonCode: 'UNKNOWN_USER' });
+    expect(decision).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
+    });
     expect(runtime.auditEntries).toHaveLength(1);
   });
 
-  test('grants bootstrap admin only inside canonical Group-gated issuance', async () => {
+  test('grants exact-group admin only inside canonical Group-gated issuance', async () => {
     const runtime = createPlaywrightAuthRuntime();
     const checkedAt = new Date().toISOString();
     const access = await checkAccessGate(
       {
         googleSubject: PLAYWRIGHT_MEMBER_SUBJECT,
+        email: 'member@psd401.net',
+        displayName: 'Synthetic Member',
         subjectDigest: 'c'.repeat(64),
         requestId: randomUUID(),
         checkedAt,
@@ -1139,9 +1173,6 @@ describe('configured Groups access and initial session', () => {
       {
         store: runtime.accessStore,
         audit: runtime.auditSink,
-        bootstrapAdminSubjects: readBootstrapAdminSubjects({
-          PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS: PLAYWRIGHT_MEMBER_SUBJECT,
-        }),
       },
     );
     if (!access.granted) {
