@@ -287,6 +287,7 @@ async function removePartialMigrationsDirectory(
 
 async function stageReviewedLiveShape(
   database: PostgresDatabase,
+  configurationVersionTwoCreatedAt = '2026-08-16T20:49:06.444626Z',
 ): Promise<void> {
   await seedDatabase(database);
   await database.transaction(async (transaction) => {
@@ -298,7 +299,7 @@ async function stageReviewedLiveShape(
         id, version, population, created_at
       ) values (
         ${ids.configuration}::uuid, 2, 'synthetic',
-        '2026-08-16T20:49:06.444Z'::timestamptz
+        ${configurationVersionTwoCreatedAt}::timestamptz
       )
     `);
     await transaction.execute(sql`
@@ -589,6 +590,7 @@ async function withDisposableDatabase(
 
 async function withReviewedDatabase(
   operation: (connection: PostgresDatabaseConnection) => Promise<void>,
+  configurationVersionTwoCreatedAt?: string,
 ): Promise<void> {
   if (partialMigrationsDirectory === undefined) {
     throw new Error('The partial migration directory was not prepared.');
@@ -598,7 +600,10 @@ async function withReviewedDatabase(
     await migrateWithPostgres(connection.db, {
       migrationsFolder: reviewedMigrationsDirectory,
     });
-    await stageReviewedLiveShape(connection.db);
+    await stageReviewedLiveShape(
+      connection.db,
+      configurationVersionTwoCreatedAt,
+    );
     expect(await canonicalOperationalCount(connection.db)).toBe(57);
     await operation(connection);
   });
@@ -692,6 +697,24 @@ describeWithDatabase('canonical synthetic facility physical removal', () => {
       expect(await canonicalOperationalCount(connection.db)).toBe(0);
     });
   });
+
+  for (const [description, configurationVersionTwoCreatedAt] of [
+    ['the previously rounded live timestamp', '2026-08-16T20:49:06.444Z'],
+    ['a one-microsecond near miss', '2026-08-16T20:49:06.444627Z'],
+  ] as const) {
+    test(`rolls back the entire migration for ${description}`, async () => {
+      await withReviewedDatabase(async (connection) => {
+        const before = await retainedTruthSnapshot(connection.db);
+        await expectMigrationRejection(
+          connection,
+          /graph fingerprint does not match the approved 57 rows/iu,
+        );
+        expect(await canonicalOperationalCount(connection.db)).toBe(57);
+        expect(await retainedTruthSnapshot(connection.db)).toBe(before);
+        await expectMigrationArtifactsAbsent(connection.db);
+      }, configurationVersionTwoCreatedAt);
+    });
+  }
 
   test('rolls back every DDL and row change when a real neighborhood is mixed in', async () => {
     await withReviewedDatabase(async (connection) => {
