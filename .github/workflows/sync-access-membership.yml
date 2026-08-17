@@ -1,0 +1,377 @@
+name: Publish exact Google access membership
+
+run-name: >-
+  access-membership ${{ inputs.source_sha }} at ${{ inputs.image_digest }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed commit on main (40 lowercase hex)
+        required: true
+        type: string
+      image_digest:
+        description: Exact deployed access-sync image digest
+        required: true
+        type: string
+      deployment_authority:
+        description: Role ARN|policy SHA-256|boundary ARN-or-none
+        required: true
+        type: string
+      change_reference:
+        description: GitHub issue or PR with product-owner publication authorization
+        required: true
+        type: string
+      acknowledge:
+        description: Enter PUBLISH EXACT ACCESS MEMBERSHIP
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  cancel-in-progress: false
+  group: psd-eoc-exploration-smoke-access-membership
+
+env:
+  AWS_ACCOUNT_ID: '338414773271'
+  AWS_ACCOUNT_ALIAS: psd401
+  AWS_REGION: us-west-2
+  STACK_NAME: PsdEocExplorationSmoke
+
+jobs:
+  publish:
+    name: Read provider and publish one immutable access generation
+    if: >-
+      github.repository == 'psd401/psd-eoc' &&
+      github.ref == 'refs/heads/main'
+    environment: exploration-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ACKNOWLEDGE: ${{ inputs.acknowledge }}
+      CHANGE_REFERENCE: ${{ inputs.change_reference }}
+      CONFIGURED_DEPLOY_ROLE_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
+      DEPLOYMENT_AUTHORITY: ${{ inputs.deployment_authority }}
+      EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_PERMISSIONS_BOUNDARY_ARN }}
+      EXPECTED_DEPLOY_ROLE_POLICY_SHA256: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_POLICY_SHA256 }}
+      IMAGE_DIGEST: ${{ inputs.image_digest }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Check out the exact reviewed source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Validate the protected publication request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$IMAGE_DIGEST" != "sha256:$(printf '0%.0s' {1..64})"
+          test "$ACKNOWLEDGE" = "PUBLISH EXACT ACCESS MEMBERSHIP"
+          [[ "$CHANGE_REFERENCE" =~ ^https://github.com/psd401/psd-eoc/(issues|pull)/[1-9][0-9]*$ ]]
+          deployment_authority_pattern='^(arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]*exploration-smoke[A-Za-z0-9+=,.@_/-]*)\|([0-9a-f]{64})\|(none|arn:aws:iam::(aws|[0-9]{12}):policy/[A-Za-z0-9+=,.@_/-]+)$'
+          [[ "$DEPLOYMENT_AUTHORITY" =~ $deployment_authority_pattern ]]
+          DEPLOY_ROLE_ARN=${BASH_REMATCH[1]}
+          requested_policy_sha256=${BASH_REMATCH[2]}
+          requested_boundary_arn=${BASH_REMATCH[3]}
+          test "$DEPLOY_ROLE_ARN" = "$CONFIGURED_DEPLOY_ROLE_ARN"
+          test "$requested_policy_sha256" = "$EXPECTED_DEPLOY_ROLE_POLICY_SHA256"
+          test "$requested_boundary_arn" = "$EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          printf '%s\n' "DEPLOY_ROLE_ARN=$DEPLOY_ROLE_ARN" >> "$GITHUB_ENV"
+
+      - name: Configure exact GitHub OIDC deployment role
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: psd-eoc-access-sync-${{ github.run_id }}
+          role-to-assume: ${{ env.CONFIGURED_DEPLOY_ROLE_ARN }}
+
+      - name: Prove account, deployed task, and credential boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/readback
+          aws sts get-caller-identity > artifacts/readback/sts-identity.json
+          test "$(jq -r .Account artifacts/readback/sts-identity.json)" = "$AWS_ACCOUNT_ID"
+          test "$(jq -r .Arn artifacts/readback/sts-identity.json)" = "arn:aws:sts::$AWS_ACCOUNT_ID:assumed-role/${DEPLOY_ROLE_ARN##*/}/psd-eoc-access-sync-$GITHUB_RUN_ID"
+          aws iam list-account-aliases > artifacts/readback/account-aliases.json
+          test "$(jq -r '.AccountAliases | length' artifacts/readback/account-aliases.json)" -eq 1
+          test "$(jq -r '.AccountAliases[0]' artifacts/readback/account-aliases.json)" = "$AWS_ACCOUNT_ALIAS"
+
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].Outputs' \
+            > "$RUNNER_TEMP/stack-outputs.json"
+          jq 'map({key: .OutputKey, value: .OutputValue}) | from_entries' \
+            "$RUNNER_TEMP/stack-outputs.json" \
+            > "$RUNNER_TEMP/outputs.json"
+          outputs="$RUNNER_TEMP/outputs.json"
+          cluster_arn=$(jq -er '.BootstrapEcsClusterArn' "$outputs")
+          task_definition_arn=$(jq -er '.AccessSyncTaskDefinitionArn' "$outputs")
+          execution_role_arn=$(jq -er '.AccessSyncTaskExecutionRoleArn' "$outputs")
+          task_role_arn=$(jq -er '.AccessSyncTaskRoleArn' "$outputs")
+          subnet_ids=$(jq -er '.BootstrapPrivateSubnetIds' "$outputs")
+          security_group_id=$(jq -er '.BootstrapSecurityGroupId' "$outputs")
+          log_group_name=$(jq -er '.BootstrapLogGroupName' "$outputs")
+          repository_uri=$(jq -er '.ImageRepositoryUri' "$outputs")
+          application_secret_arn=$(jq -er '.DatabaseApplicationSecretArn' "$outputs")
+          admin_secret_arn=$(jq -er '.DatabaseAdminSecretArn' "$outputs")
+          test "$(jq -er '.BootstrapCandidateImageDigest' "$outputs")" = "$IMAGE_DIGEST"
+          test "$(jq -er '.BootstrapCandidateSourceSha' "$outputs")" = "$SOURCE_SHA"
+          [[ "$cluster_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-exploration-smoke-native-bootstrap$ ]]
+          [[ "$task_definition_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-access-sync:[1-9][0-9]*$ ]]
+          [[ "$execution_role_arn" =~ ^arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+          [[ "$task_role_arn" =~ ^arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+          [[ "$security_group_id" =~ ^sg-[0-9a-f]+$ ]]
+          test "$log_group_name" = "/psd-eoc/exploration-smoke/bootstrap"
+          test "$execution_role_arn" != "$task_role_arn"
+
+          aws ecs describe-task-definition \
+            --task-definition "$task_definition_arn" \
+            > "$RUNNER_TEMP/access-sync-task-definition.json"
+          expected_image="$repository_uri@$IMAGE_DIGEST"
+          jq -e \
+            --arg task_definition "$task_definition_arn" \
+            --arg task_role "$task_role_arn" \
+            --arg execution_role "$execution_role_arn" \
+            --arg image "$expected_image" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg log_group "$log_group_name" \
+            --arg application_secret "$application_secret_arn" '
+              def map_by_name: map({key: .name, value: .value}) | from_entries;
+              def secrets_by_name: map({key: .name, value: .valueFrom}) | from_entries;
+              .taskDefinition as $task |
+              $task.taskDefinitionArn == $task_definition and
+              $task.family == "psd-eoc-exploration-smoke-access-sync" and
+              $task.taskRoleArn == $task_role and
+              $task.executionRoleArn == $execution_role and
+              $task.networkMode == "awsvpc" and
+              ($task.requiresCompatibilities | sort) == ["FARGATE"] and
+              ($task.containerDefinitions | length) == 1 and
+              $task.containerDefinitions[0] as $container |
+              $container.name == "access-membership-sync" and
+              $container.essential == true and
+              $container.readonlyRootFilesystem == true and
+              $container.image == $image and
+              $container.command == [
+                "bun",
+                "packages/server/scripts/exploration-smoke/sync-access-membership.ts"
+              ] and
+              $container.logConfiguration.logDriver == "awslogs" and
+              $container.logConfiguration.options."awslogs-group" == $log_group and
+              $container.logConfiguration.options."awslogs-stream-prefix" == "access-membership-sync" and
+              ($container.environment | map_by_name) as $environment |
+              ($environment | keys | sort) == [
+                "AWS_ACCOUNT_ID",
+                "AWS_REGION",
+                "DATABASE_CONNECT_TIMEOUT_SECONDS",
+                "DATABASE_DRIVER",
+                "DATABASE_HOST",
+                "DATABASE_IDLE_TIMEOUT_SECONDS",
+                "DATABASE_MAX_CONNECTIONS",
+                "DATABASE_NAME",
+                "DATABASE_PORT",
+                "DATABASE_SSL_ROOT_CERT",
+                "SOURCE_SHA",
+                "TMPDIR"
+              ] and
+              $environment.SOURCE_SHA == $source_sha and
+              $environment.DATABASE_DRIVER == "postgres" and
+              $environment.DATABASE_MAX_CONNECTIONS == "1" and
+              ($container.secrets | secrets_by_name) as $secrets |
+              ($secrets | keys | sort) == [
+                "DATABASE_PASSWORD",
+                "DATABASE_USERNAME",
+                "GOOGLE_ROSTER_CONFIG"
+              ] and
+              $secrets.DATABASE_PASSWORD == ($application_secret + ":password::") and
+              $secrets.DATABASE_USERNAME == ($application_secret + ":username::") and
+              ($secrets.GOOGLE_ROSTER_CONFIG |
+                test("^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-groups(-[A-Za-z0-9]{6})?$"))
+            ' "$RUNNER_TEMP/access-sync-task-definition.json" > /dev/null
+          groups_secret_arn=$(jq -er '
+            .taskDefinition.containerDefinitions[0].secrets[] |
+            select(.name == "GOOGLE_ROSTER_CONFIG") | .valueFrom
+          ' "$RUNNER_TEMP/access-sync-task-definition.json")
+
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names ecs:RunTask \
+            --resource-arns "$task_definition_arn" \
+            > artifacts/readback/deploy-role-run-task.json
+          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deploy-role-run-task.json)" = "allowed"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names iam:PassRole \
+            --resource-arns "$execution_role_arn" "$task_role_arn" \
+            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string \
+            > artifacts/readback/deploy-role-pass-role.json
+          test "$(jq '[.EvaluationResults[].ResourceSpecificResults[] | select(.EvalResourceDecision == "allowed")] | length' artifacts/readback/deploy-role-pass-role.json)" -eq 2
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$execution_role_arn" \
+            --action-names secretsmanager:GetSecretValue \
+            --resource-arns "$application_secret_arn" "$groups_secret_arn" "$admin_secret_arn" \
+            > artifacts/readback/execution-role-secret-boundary.json
+          jq -e --arg app "$application_secret_arn" --arg groups "$groups_secret_arn" --arg admin "$admin_secret_arn" '
+            ([.EvaluationResults[].ResourceSpecificResults[] |
+              select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
+              ([$app, $groups] | sort) and
+            ([.EvaluationResults[].ResourceSpecificResults[] |
+              select(.EvalResourceName == $admin and .EvalResourceDecision != "allowed")] | length) == 1
+          ' artifacts/readback/execution-role-secret-boundary.json > /dev/null
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$task_role_arn" \
+            --action-names secretsmanager:GetSecretValue sqs:SendMessage ses:SendEmail \
+            --resource-arns '*' \
+            > artifacts/readback/task-role-no-authority.json
+          jq -e 'all(.EvaluationResults[]; .EvalDecision != "allowed")' \
+            artifacts/readback/task-role-no-authority.json > /dev/null
+
+          {
+            printf '%s\n' "CLUSTER_ARN=$cluster_arn"
+            printf '%s\n' "TASK_DEFINITION_ARN=$task_definition_arn"
+            printf '%s\n' "SUBNET_IDS=$subnet_ids"
+            printf '%s\n' "SECURITY_GROUP_ID=$security_group_id"
+            printf '%s\n' "LOG_GROUP_NAME=$log_group_name"
+          } >> "$GITHUB_ENV"
+
+      - name: Run exact provider evaluation and atomic publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=, read -r -a subnets <<< "$SUBNET_IDS"
+          test "${#subnets[@]}" -eq 2
+          for subnet in "${subnets[@]}"; do [[ "$subnet" =~ ^subnet-[0-9a-f]+$ ]]; done
+          subnet_csv=$(IFS=,; printf '%s' "${subnets[*]}")
+          request_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+          [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+          idempotency_key="access-sync:github-${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          started_by="github-access-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          network_configuration="awsvpcConfiguration={subnets=[$subnet_csv],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
+          jq -n \
+            --arg request_id "$request_id" \
+            --arg idempotency_key "$idempotency_key" \
+            '[{
+              name: "access-membership-sync",
+              environment: [
+                {name: "ACCESS_SYNC_REQUEST_ID", value: $request_id},
+                {name: "ACCESS_SYNC_IDEMPOTENCY_KEY", value: $idempotency_key}
+              ]
+            }]' > "$RUNNER_TEMP/container-overrides.json"
+          aws ecs run-task \
+            --cluster "$CLUSTER_ARN" \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --count 1 \
+            --started-by "$started_by" \
+            --client-token "$request_id" \
+            --network-configuration "$network_configuration" \
+            --overrides "$(jq -c '{containerOverrides: .}' "$RUNNER_TEMP/container-overrides.json")" \
+            > "$RUNNER_TEMP/run-task.json"
+          test "$(jq '.failures | length' "$RUNNER_TEMP/run-task.json")" -eq 0
+          test "$(jq '.tasks | length' "$RUNNER_TEMP/run-task.json")" -eq 1
+          task_arn=$(jq -er '.tasks[0].taskArn' "$RUNNER_TEMP/run-task.json")
+          [[ "$task_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task/psd-eoc-exploration-smoke-native-bootstrap/[0-9a-f]{32}$ ]]
+          aws ecs wait tasks-stopped --cluster "$CLUSTER_ARN" --tasks "$task_arn"
+          aws ecs describe-tasks \
+            --cluster "$CLUSTER_ARN" \
+            --tasks "$task_arn" \
+            > "$RUNNER_TEMP/stopped-task.json"
+          jq -e \
+            --arg task "$task_arn" \
+            --arg definition "$TASK_DEFINITION_ARN" \
+            --arg started_by "$started_by" '
+              (.failures | length) == 0 and
+              (.tasks | length) == 1 and
+              .tasks[0].taskArn == $task and
+              .tasks[0].taskDefinitionArn == $definition and
+              .tasks[0].startedBy == $started_by and
+              .tasks[0].stopCode == "EssentialContainerExited" and
+              (.tasks[0].containers | length) == 1 and
+              .tasks[0].containers[0].name == "access-membership-sync" and
+              .tasks[0].containers[0].exitCode == 0
+            ' "$RUNNER_TEMP/stopped-task.json" > /dev/null
+
+          task_id=${task_arn##*/}
+          log_stream="access-membership-sync/access-membership-sync/$task_id"
+          for attempt in {1..15}; do
+            if aws logs get-log-events \
+              --log-group-name "$LOG_GROUP_NAME" \
+              --log-stream-name "$log_stream" \
+              --start-from-head \
+              > "$RUNNER_TEMP/access-sync-logs.json" 2> "$RUNNER_TEMP/access-sync-log-error.txt"; then
+              break
+            fi
+            if [[ "$attempt" -eq 15 ]]; then
+              echo "Aggregate access-sync log stream was unavailable." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          jq -r '.events[].message' "$RUNNER_TEMP/access-sync-logs.json" \
+            > "$RUNNER_TEMP/access-sync-messages.txt"
+          test "$(wc -l < "$RUNNER_TEMP/access-sync-messages.txt" | tr -d ' ')" -eq 1
+          ! grep -Eq '@|users/|groups/|access_token|private_key|Bearer ' \
+            "$RUNNER_TEMP/access-sync-messages.txt"
+          jq -e --arg source_sha "$SOURCE_SHA" '
+            (keys | sort) == [
+              "activeAccessGroupCount",
+              "capturedAt",
+              "dailyAdminDirectMember",
+              "designatedSourceId",
+              "evaluatedMembershipCount",
+              "event",
+              "membershipDigest",
+              "providerGroupIdDigest",
+              "publication",
+              "snapshotId",
+              "snapshotVersion",
+              "sourceSha"
+            ] and
+            .event == "access-membership-sync-complete" and
+            .sourceSha == $source_sha and
+            .dailyAdminDirectMember == true and
+            (.snapshotId | test("^[0-9a-f-]{36}$")) and
+            (.designatedSourceId | test("^[0-9a-f-]{36}$")) and
+            (.snapshotVersion | type == "number" and . >= 1) and
+            (.activeAccessGroupCount | type == "number" and . >= 1 and . <= 100) and
+            (.evaluatedMembershipCount | type == "number" and . >= 1 and . <= 1200) and
+            (.membershipDigest | test("^[a-f0-9]{64}$")) and
+            (.providerGroupIdDigest | test("^[a-f0-9]{64}$")) and
+            (.publication == "created" or .publication == "already-current")
+          ' "$RUNNER_TEMP/access-sync-messages.txt" \
+            > /dev/null
+          jq -cS . "$RUNNER_TEMP/access-sync-messages.txt" \
+            > artifacts/readback/access-membership-publication.json
+
+      - name: Publish aggregate proof only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          if-no-files-found: error
+          name: access-membership-publication-${{ inputs.source_sha }}
+          path: artifacts/readback
+          retention-days: 14
+
+      - name: Record protected outcome
+        shell: bash
+        run: |
+          {
+            echo "## Exact access-membership publication"
+            echo
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Image: \`$IMAGE_DIGEST\`"
+            echo "- Authorization: $CHANGE_REFERENCE"
+            echo "- Google direct-user evidence included the daily district administrator: **yes**"
+            echo "- Full member emails, provider identifiers, credentials, and raw logs were not published."
+            echo "- No notification provider or human-only incident action was invoked."
+          } >> "$GITHUB_STEP_SUMMARY"

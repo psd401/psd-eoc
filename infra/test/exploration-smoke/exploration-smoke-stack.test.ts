@@ -85,6 +85,16 @@ function onlyResource(resourceType: string): SynthesizedResource {
   return resource[1];
 }
 
+function taskDefinitionByFamily(family: string): SynthesizedResource {
+  const tasks = resourceEntries('AWS::ECS::TaskDefinition').filter(
+    ([, resource]) => properties(resource).Family === family,
+  );
+  expect(tasks).toHaveLength(1);
+  const task = tasks[0];
+  if (task === undefined) throw new Error(`Missing task family ${family}.`);
+  return task[1];
+}
+
 function properties(resource: SynthesizedResource): JsonRecord {
   return asRecord(resource.Properties);
 }
@@ -306,7 +316,7 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::AppRunner::AutoScalingConfiguration', 1);
     template.resourceCountIs('AWS::AppRunner::VpcConnector', 1);
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    template.resourceCountIs('AWS::ECS::TaskDefinition', 1);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
     template.resourceCountIs('AWS::ECS::Service', 0);
     template.resourceCountIs('AWS::Logs::LogGroup', 2);
     template.resourceCountIs('AWS::SQS::Queue', 3);
@@ -860,7 +870,9 @@ describe('App Runner runtime safety boundary', () => {
 
 describe('one-off native bootstrap boundary', () => {
   it('pins the task to the candidate digest with native TLS and secret JSON keys', () => {
-    const task = properties(onlyResource('AWS::ECS::TaskDefinition'));
+    const task = properties(
+      taskDefinitionByFamily('psd-eoc-exploration-smoke-native-bootstrap'),
+    );
     expect(task.Cpu).toBe('256');
     expect(task.Memory).toBe('512');
     expect(task.NetworkMode).toBe('awsvpc');
@@ -1017,6 +1029,132 @@ describe('one-off native bootstrap boundary', () => {
   });
 });
 
+describe('protected access-membership publication boundary', () => {
+  it('pins a dedicated private task to app credentials and the whole readonly Groups secret', () => {
+    const task = properties(
+      taskDefinitionByFamily('psd-eoc-exploration-smoke-access-sync'),
+    );
+    expect(task.Cpu).toBe('256');
+    expect(task.Memory).toBe('512');
+    expect(task.NetworkMode).toBe('awsvpc');
+    expect(task.RequiresCompatibilities).toEqual(['FARGATE']);
+    const containers = asArray(task.ContainerDefinitions).map(asRecord);
+    expect(containers).toHaveLength(1);
+    const container = containers[0];
+    if (container === undefined)
+      throw new Error('Missing access-sync container.');
+    expect(container.Name).toBe('access-membership-sync');
+    expect(container.Command).toEqual([
+      'bun',
+      'packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+    ]);
+    expect(container.ReadonlyRootFilesystem).toBe(true);
+    expect(container).not.toHaveProperty('Privileged');
+    expect(JSON.stringify(container.Image)).toContain('BootstrapImageDigest');
+    expect(JSON.stringify(container.Image)).not.toContain('AppImageDigest');
+
+    const environment = new Map(
+      asArray(container.Environment).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.Value];
+      }),
+    );
+    expect([...environment.keys()].sort()).toEqual(
+      [
+        'AWS_ACCOUNT_ID',
+        'AWS_REGION',
+        'DATABASE_CONNECT_TIMEOUT_SECONDS',
+        'DATABASE_DRIVER',
+        'DATABASE_HOST',
+        'DATABASE_IDLE_TIMEOUT_SECONDS',
+        'DATABASE_MAX_CONNECTIONS',
+        'DATABASE_NAME',
+        'DATABASE_PORT',
+        'DATABASE_SSL_ROOT_CERT',
+        'SOURCE_SHA',
+        'TMPDIR',
+      ].sort(),
+    );
+    expect(environment.get('SOURCE_SHA')).toEqual({
+      Ref: 'BootstrapSourceSha',
+    });
+    expect(JSON.stringify(environment)).not.toContain('DATABASE_ADMIN');
+    expect(JSON.stringify(environment)).not.toContain('APPROVED_');
+
+    const secrets = new Map(
+      asArray(container.Secrets).map((item) => {
+        const pair = asRecord(item);
+        return [String(pair.Name), pair.ValueFrom];
+      }),
+    );
+    expect([...secrets.keys()].sort()).toEqual([
+      'DATABASE_PASSWORD',
+      'DATABASE_USERNAME',
+      'GOOGLE_ROSTER_CONFIG',
+    ]);
+    expect(JSON.stringify(secrets.get('DATABASE_PASSWORD'))).toContain(
+      ':password::',
+    );
+    expect(JSON.stringify(secrets.get('DATABASE_USERNAME'))).toContain(
+      ':username::',
+    );
+    expect(JSON.stringify(secrets.get('GOOGLE_ROSTER_CONFIG'))).toContain(
+      '/psd-eoc/google-groups',
+    );
+    expect(JSON.stringify(secrets)).not.toContain('DatabaseAdminSecret');
+    expect(JSON.stringify(secrets)).not.toContain('BootstrapIdentitySecret');
+
+    const logging = asRecord(container.LogConfiguration);
+    expect(logging.LogDriver).toBe('awslogs');
+    expect(asRecord(logging.Options)['awslogs-stream-prefix']).toBe(
+      'access-membership-sync',
+    );
+  });
+
+  it('keeps provider reads on the execution role and gives the task no AWS authority', () => {
+    const executionRole = roleLogicalIdForDescription(
+      'Pulls the reviewed access-sync image',
+    );
+    const statements = inlineStatementsForRole(executionRole);
+    expect([...new Set(allAllowedActions(statements))].sort()).toEqual(
+      [
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:BatchGetImage',
+        'ecr:GetAuthorizationToken',
+        'ecr:GetDownloadUrlForLayer',
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+        'secretsmanager:DescribeSecret',
+        'secretsmanager:GetSecretValue',
+      ].sort(),
+    );
+    const secretResources = JSON.stringify(
+      statements
+        .filter((statement) =>
+          asStringArray(statement.Action).includes(
+            'secretsmanager:GetSecretValue',
+          ),
+        )
+        .map((statement) => statement.Resource),
+    );
+    expect(secretResources).toContain('DatabaseApplicationSecret');
+    expect(secretResources).toContain('/psd-eoc/google-groups');
+    expect(secretResources).not.toContain('DatabaseAdminSecret');
+    expect(secretResources).not.toContain('BootstrapIdentitySecret');
+    expect(secretResources).not.toContain('GoogleOauthSecretArn');
+
+    const taskRole = roleLogicalIdForDescription(
+      'No-authority task role for protected access-membership',
+    );
+    expect(inlineStatementsForRole(taskRole)).toEqual([]);
+    expect(
+      resourceEntries('AWS::IAM::Policy').some(([, policy]) =>
+        JSON.stringify(properties(policy).Roles).includes(taskRole),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe('configured-unverified provider readiness boundary', () => {
   it('creates no provider identity, DNS, media, scheduler, executable worker, or custom resource', () => {
     for (const forbiddenType of [
@@ -1113,6 +1251,9 @@ describe('configured-unverified provider readiness boundary', () => {
     const outputs = asRecord(synthesized.Outputs);
     expect(Object.keys(outputs).sort()).toEqual(
       [
+        'AccessSyncTaskDefinitionArn',
+        'AccessSyncTaskExecutionRoleArn',
+        'AccessSyncTaskRoleArn',
         'ApprovedIdentitySecretArn',
         'AppRunnerHealthCheckUrl',
         'AppRunnerImageAccessRoleArn',
