@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const workflowUrl = new URL(
   '../../../.github/workflows/sync-access-membership.yml',
@@ -16,6 +19,218 @@ const providerUrl = new URL(
   '../../../packages/server/lib/auth/google-access-membership.ts',
   import.meta.url,
 );
+
+function markedShellBlock(workflow: string, marker: string): string {
+  const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const block = workflow.match(
+    new RegExp(
+      ` {10}# BEGIN ${escapedMarker}\\n([\\s\\S]*?)\\n {10}# END ${escapedMarker}`,
+      'u',
+    ),
+  )?.[1];
+  if (block === undefined) {
+    throw new Error(`Workflow shell block is missing: ${marker}`);
+  }
+  return block.replace(/^ {10}/gmu, '');
+}
+
+async function runOuterRoleExecutionProof(options?: {
+  readonly allowNeighborCluster?: boolean;
+  readonly allowNeighborRoles?: boolean;
+  readonly allowNeighborTask?: boolean;
+  readonly allowWrongService?: boolean;
+  readonly denyExactRunTask?: boolean;
+}): Promise<{
+  readonly actions: readonly string[];
+  readonly exitCode: number;
+  readonly stderr: string;
+}> {
+  const directory = await mkdtemp(
+    join(tmpdir(), 'psd-eoc-access-stage-proof-'),
+  );
+  try {
+    const fakeBin = join(directory, 'bin');
+    const readback = join(directory, 'artifacts', 'readback');
+    const actionsPath = join(directory, 'aws-actions.txt');
+    await Promise.all([
+      mkdir(fakeBin, { recursive: true }),
+      mkdir(readback, { recursive: true }),
+    ]);
+    const awsPath = join(fakeBin, 'aws');
+    await Bun.write(
+      awsPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+test "$1:$2" = "iam:simulate-principal-policy"
+shift 2
+policy_source=
+action_name=
+context_entries=
+resources=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --policy-source-arn)
+      policy_source=$2
+      shift 2
+      ;;
+    --action-names)
+      action_name=$2
+      shift 2
+      ;;
+    --resource-arns)
+      shift
+      while [[ $# -gt 0 && "$1" != --* ]]; do
+        resources+=("$1")
+        shift
+      done
+      ;;
+    --context-entries)
+      context_entries=$2
+      shift 2
+      ;;
+    *) exit 96 ;;
+  esac
+done
+test "$policy_source" = "$DEPLOY_ROLE_ARN"
+printf '%s\\n' "$action_name" >> "$AWS_ACTIONS"
+
+case "$action_name" in
+  ecs:RunTask)
+    test "\${#resources[@]}" -eq 1
+    exact_context="ContextKeyName=ecs:cluster,ContextKeyValues=$EXACT_CLUSTER_ARN,ContextKeyType=string"
+    neighbor_context="ContextKeyName=ecs:cluster,ContextKeyValues=$NEIGHBOR_CLUSTER_ARN,ContextKeyType=string"
+    if [[ "\${resources[0]}" == "$TASK_DEFINITION_ARN" && "$context_entries" == "$exact_context" ]]; then
+      if [[ "$DENY_EXACT_RUN_TASK" == "true" ]]; then
+        decision=implicitDeny
+      else
+        decision=allowed
+      fi
+    elif [[ "\${resources[0]}" == "$NEIGHBOR_TASK_DEFINITION_ARN" && "$context_entries" == "$exact_context" ]]; then
+      if [[ "$ALLOW_NEIGHBOR_TASK" == "true" ]]; then
+        decision=allowed
+      else
+        decision=implicitDeny
+      fi
+    elif [[ "\${resources[0]}" == "$TASK_DEFINITION_ARN" && "$context_entries" == "$neighbor_context" ]]; then
+      if [[ "$ALLOW_NEIGHBOR_CLUSTER" == "true" ]]; then
+        decision=allowed
+      else
+        decision=implicitDeny
+      fi
+    else
+      exit 95
+    fi
+    jq -n --arg decision "$decision" '{
+      EvaluationResults: [{EvalDecision: $decision}]
+    }'
+    ;;
+  iam:PassRole)
+    test "\${#resources[@]}" -eq 2
+    exact_context="ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string"
+    wrong_context="ContextKeyName=iam:PassedToService,ContextKeyValues=lambda.amazonaws.com,ContextKeyType=string"
+    if [[ "\${resources[0]}" == "$EXECUTION_ROLE_ARN" && "\${resources[1]}" == "$TASK_ROLE_ARN" ]]; then
+      if [[ "$context_entries" == "$exact_context" ]]; then
+        decision=allowed
+      elif [[ "$context_entries" == "$wrong_context" && "$ALLOW_WRONG_SERVICE" == "true" ]]; then
+        decision=allowed
+      elif [[ "$context_entries" == "$wrong_context" ]]; then
+        decision=implicitDeny
+      else
+        exit 94
+      fi
+    elif [[ "\${resources[0]}" == "$NEIGHBOR_EXECUTION_ROLE_ARN" && "\${resources[1]}" == "$NEIGHBOR_TASK_ROLE_ARN" ]]; then
+      test "$context_entries" = "$exact_context"
+      if [[ "$ALLOW_NEIGHBOR_ROLES" == "true" ]]; then
+        decision=allowed
+      else
+        decision=implicitDeny
+      fi
+    else
+      exit 93
+    fi
+    jq -n \\
+      --arg decision "$decision" \\
+      --arg execution "\${resources[0]}" \\
+      --arg task "\${resources[1]}" '{
+        EvaluationResults: [{
+          EvalDecision: $decision,
+          ResourceSpecificResults: [
+            {EvalResourceDecision: $decision, EvalResourceName: $execution},
+            {EvalResourceDecision: $decision, EvalResourceName: $task}
+          ]
+        }]
+      }'
+    ;;
+  *) exit 92 ;;
+esac
+`,
+    );
+    await chmod(awsPath, 0o755);
+    const executionRoleArn =
+      'arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole-test';
+    const taskRoleArn =
+      'arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskRole-test';
+    const neighborExecutionRoleArn =
+      'arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-NeighborTaskExecutionRole';
+    const neighborTaskRoleArn =
+      'arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-NeighborTaskRole';
+    const exactClusterArn =
+      'arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-exploration-smoke-native-bootstrap';
+    const neighborClusterArn =
+      'arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-not-exploration-smoke';
+    const taskDefinitionArn =
+      'arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-access-sync:1';
+    const child = Bun.spawnSync({
+      cmd: [
+        'bash',
+        '-c',
+        `set -euo pipefail\n${markedShellBlock(
+          await Bun.file(workflowUrl).text(),
+          'access-sync outer-role exact execution simulation',
+        )}`,
+      ],
+      cwd: directory,
+      env: {
+        ...process.env,
+        ALLOW_NEIGHBOR_CLUSTER: String(options?.allowNeighborCluster ?? false),
+        ALLOW_NEIGHBOR_ROLES: String(options?.allowNeighborRoles ?? false),
+        ALLOW_NEIGHBOR_TASK: String(options?.allowNeighborTask ?? false),
+        ALLOW_WRONG_SERVICE: String(options?.allowWrongService ?? false),
+        AWS_ACCOUNT_ID: '338414773271',
+        AWS_ACTIONS: actionsPath,
+        AWS_REGION: 'us-west-2',
+        DENY_EXACT_RUN_TASK: String(options?.denyExactRunTask ?? false),
+        DEPLOY_ROLE_ARN:
+          'arn:aws:iam::338414773271:role/psd-eoc-exploration-smoke-github-deploy',
+        EXACT_CLUSTER_ARN: exactClusterArn,
+        EXECUTION_ROLE_ARN: executionRoleArn,
+        NEIGHBOR_CLUSTER_ARN: neighborClusterArn,
+        NEIGHBOR_EXECUTION_ROLE_ARN: neighborExecutionRoleArn,
+        NEIGHBOR_TASK_DEFINITION_ARN:
+          'arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-not-exploration-smoke-access-sync:1',
+        NEIGHBOR_TASK_ROLE_ARN: neighborTaskRoleArn,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        TASK_DEFINITION_ARN: taskDefinitionArn,
+        TASK_ROLE_ARN: taskRoleArn,
+        cluster_arn: exactClusterArn,
+        execution_role_arn: executionRoleArn,
+        task_definition_arn: taskDefinitionArn,
+        task_role_arn: taskRoleArn,
+      },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
+    return {
+      actions: (await Bun.file(actionsPath).exists())
+        ? (await Bun.file(actionsPath).text()).trim().split('\n')
+        : [],
+      exitCode: child.exitCode,
+      stderr: child.stderr.toString(),
+    };
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+}
 
 describe('exact access-membership protected entrypoint', () => {
   test('has no schedule and requires protected main-only publication approval', async () => {
@@ -59,7 +274,7 @@ describe('exact access-membership protected entrypoint', () => {
     expect(workflow).not.toContain('command: ["bun"');
   });
 
-  test('proves app-only database and readonly Groups credential boundaries before running', async () => {
+  test('binds the deployed app-only task without inspecting its IAM roles', async () => {
     const [workflow, stack, provider] = await Promise.all([
       Bun.file(workflowUrl).text(),
       Bun.file(stackUrl).text(),
@@ -70,22 +285,87 @@ describe('exact access-membership protected entrypoint', () => {
     expect(stack).toContain("'/psd-eoc/google-groups'");
     expect(stack).toContain('databaseApplicationSecret.grantRead(');
     expect(stack).toContain("'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'");
-    expect(workflow).toContain('DatabaseAdminSecretArn');
-    expect(workflow).toContain(
-      '.EvalResourceName == $admin and .EvalResourceDecision != "allowed"',
-    );
-    expect(workflow).toContain(
-      'groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"',
-    );
+    expect(workflow).not.toContain('DatabaseAdminSecretArn');
+    expect(workflow).not.toContain('groups_secret_simulation_arn');
+    expect(workflow).not.toContain('--policy-source-arn "$execution_role_arn"');
+    expect(workflow).not.toContain('--policy-source-arn "$task_role_arn"');
+    expect(
+      [...workflow.matchAll(/--policy-source-arn "([^"]+)"/gu)].map(
+        ([, source]) => source,
+      ),
+    ).toEqual(Array.from({ length: 6 }, () => '$DEPLOY_ROLE_ARN'));
     expect(workflow).not.toContain('aws secretsmanager describe-secret');
     expect(workflow).not.toContain('aws secretsmanager get-secret-value');
-    expect(workflow).toContain(
-      '--action-names secretsmanager:GetSecretValue sqs:SendMessage ses:SendEmail',
+    expect(workflow).not.toContain(
+      '--action-names secretsmanager:GetSecretValue',
     );
+    expect(workflow).not.toContain('--action-names sqs:SendMessage');
+    expect(workflow).not.toContain('--action-names ses:SendEmail');
     expect(provider).toContain(
       'https://www.googleapis.com/auth/cloud-identity.groups.readonly',
     );
     expect(provider).not.toContain('.setSubject(');
+  });
+
+  test('executes exact outer-role authority and fails on every broader boundary', async () => {
+    const exact = await runOuterRoleExecutionProof();
+    expect(exact.stderr).toBe('');
+    expect(exact.exitCode).toBe(0);
+    expect(exact.actions).toEqual([
+      'ecs:RunTask',
+      'ecs:RunTask',
+      'ecs:RunTask',
+      'iam:PassRole',
+      'iam:PassRole',
+      'iam:PassRole',
+    ]);
+
+    const deniedExactRun = await runOuterRoleExecutionProof({
+      denyExactRunTask: true,
+    });
+    expect(deniedExactRun.exitCode).not.toBe(0);
+    expect(deniedExactRun.actions).toEqual(['ecs:RunTask']);
+
+    const broadTask = await runOuterRoleExecutionProof({
+      allowNeighborTask: true,
+    });
+    expect(broadTask.exitCode).not.toBe(0);
+    expect(broadTask.actions).toEqual(['ecs:RunTask', 'ecs:RunTask']);
+
+    const broadCluster = await runOuterRoleExecutionProof({
+      allowNeighborCluster: true,
+    });
+    expect(broadCluster.exitCode).not.toBe(0);
+    expect(broadCluster.actions).toEqual([
+      'ecs:RunTask',
+      'ecs:RunTask',
+      'ecs:RunTask',
+    ]);
+
+    const broadService = await runOuterRoleExecutionProof({
+      allowWrongService: true,
+    });
+    expect(broadService.exitCode).not.toBe(0);
+    expect(broadService.actions).toEqual([
+      'ecs:RunTask',
+      'ecs:RunTask',
+      'ecs:RunTask',
+      'iam:PassRole',
+      'iam:PassRole',
+    ]);
+
+    const broadRoles = await runOuterRoleExecutionProof({
+      allowNeighborRoles: true,
+    });
+    expect(broadRoles.exitCode).not.toBe(0);
+    expect(broadRoles.actions).toEqual([
+      'ecs:RunTask',
+      'ecs:RunTask',
+      'ecs:RunTask',
+      'iam:PassRole',
+      'iam:PassRole',
+      'iam:PassRole',
+    ]);
   });
 
   test('publishes only bounded aggregate proof and never uploads raw provider logs', async () => {

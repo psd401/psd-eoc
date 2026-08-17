@@ -159,14 +159,13 @@ jobs:
           log_group_name=$(jq -er '.BootstrapLogGroupName' "$outputs")
           repository_uri=$(jq -er '.ImageRepositoryUri' "$outputs")
           application_secret_arn=$(jq -er '.DatabaseApplicationSecretArn' "$outputs")
-          admin_secret_arn=$(jq -er '.DatabaseAdminSecretArn' "$outputs")
           approved_identity_secret_arn=$(jq -er '.ApprovedIdentitySecretArn' "$outputs")
           test "$(jq -er '.BootstrapCandidateImageDigest' "$outputs")" = "$IMAGE_DIGEST"
           test "$(jq -er '.BootstrapCandidateSourceSha' "$outputs")" = "$SOURCE_SHA"
           [[ "$cluster_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-exploration-smoke-native-bootstrap$ ]]
           [[ "$task_definition_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-access-sync:[1-9][0-9]*$ ]]
-          [[ "$execution_role_arn" =~ ^arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]+$ ]]
-          [[ "$task_role_arn" =~ ^arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+          [[ "$execution_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole[A-Za-z0-9-]+$ ]]
+          [[ "$task_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskRole[A-Za-z0-9-]+$ ]]
           [[ "$security_group_id" =~ ^sg-[0-9a-f]+$ ]]
           test "$log_group_name" = "/psd-eoc/exploration-smoke/bootstrap"
           test "$execution_role_arn" != "$task_role_arn"
@@ -243,40 +242,81 @@ jobs:
             select(.name == "GOOGLE_ROSTER_CONFIG") | .valueFrom
           ' "$RUNNER_TEMP/access-sync-task-definition.json")
           test "$groups_secret_reference" = "arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:/psd-eoc/google-groups"
-          groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"
 
+          # BEGIN access-sync outer-role exact execution simulation
           aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names ecs:RunTask \
             --resource-arns "$task_definition_arn" \
+            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$cluster_arn",ContextKeyType=string \
             > artifacts/readback/deploy-role-run-task.json
           test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deploy-role-run-task.json)" = "allowed"
+          neighboring_task_definition_arn="arn:aws:ecs:$AWS_REGION:$AWS_ACCOUNT_ID:task-definition/psd-eoc-not-exploration-smoke-access-sync:1"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names ecs:RunTask \
+            --resource-arns "$neighboring_task_definition_arn" \
+            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$cluster_arn",ContextKeyType=string \
+            > artifacts/readback/deploy-role-neighbor-task-definition-run-task.json
+          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deploy-role-neighbor-task-definition-run-task.json)" != "allowed"
+          neighboring_cluster_arn="arn:aws:ecs:$AWS_REGION:$AWS_ACCOUNT_ID:cluster/psd-eoc-not-exploration-smoke"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names ecs:RunTask \
+            --resource-arns "$task_definition_arn" \
+            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$neighboring_cluster_arn",ContextKeyType=string \
+            > artifacts/readback/deploy-role-neighbor-cluster-run-task.json
+          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deploy-role-neighbor-cluster-run-task.json)" != "allowed"
           aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names iam:PassRole \
             --resource-arns "$execution_role_arn" "$task_role_arn" \
             --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string \
             > artifacts/readback/deploy-role-pass-role.json
-          test "$(jq '[.EvaluationResults[].ResourceSpecificResults[] | select(.EvalResourceDecision == "allowed")] | length' artifacts/readback/deploy-role-pass-role.json)" -eq 2
+          jq -e --arg execution "$execution_role_arn" --arg task "$task_role_arn" '
+            (.EvaluationResults | length) == 1 and
+            .EvaluationResults[0].EvalDecision == "allowed" and
+            (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
+            ([.EvaluationResults[0].ResourceSpecificResults[].EvalResourceName] | sort) ==
+              ([$execution, $task] | sort) and
+            all(
+              .EvaluationResults[0].ResourceSpecificResults[];
+              .EvalResourceDecision == "allowed"
+            )
+          ' artifacts/readback/deploy-role-pass-role.json > /dev/null
           aws iam simulate-principal-policy \
-            --policy-source-arn "$execution_role_arn" \
-            --action-names secretsmanager:GetSecretValue \
-            --resource-arns "$application_secret_arn" "$groups_secret_simulation_arn" "$approved_identity_secret_arn" "$admin_secret_arn" \
-            > artifacts/readback/execution-role-secret-boundary.json
-          jq -e --arg app "$application_secret_arn" --arg groups "$groups_secret_simulation_arn" --arg identity "$approved_identity_secret_arn" --arg admin "$admin_secret_arn" '
-            ([.EvaluationResults[].ResourceSpecificResults[] |
-              select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
-              ([$app, $groups, $identity] | sort) and
-            ([.EvaluationResults[].ResourceSpecificResults[] |
-              select(.EvalResourceName == $admin and .EvalResourceDecision != "allowed")] | length) == 1
-          ' artifacts/readback/execution-role-secret-boundary.json > /dev/null
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names iam:PassRole \
+            --resource-arns "$execution_role_arn" "$task_role_arn" \
+            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=lambda.amazonaws.com,ContextKeyType=string \
+            > artifacts/readback/deploy-role-wrong-service-pass-role.json
+          jq -e '
+            .EvaluationResults[0].EvalDecision != "allowed" and
+            all(
+              .EvaluationResults[0].ResourceSpecificResults[];
+              .EvalResourceDecision != "allowed"
+            )
+          ' artifacts/readback/deploy-role-wrong-service-pass-role.json > /dev/null
+          neighboring_execution_role_arn="arn:aws:iam::$AWS_ACCOUNT_ID:role/PsdEocExplorationSmoke-NeighborTaskExecutionRole"
+          neighboring_task_role_arn="arn:aws:iam::$AWS_ACCOUNT_ID:role/PsdEocExplorationSmoke-NeighborTaskRole"
           aws iam simulate-principal-policy \
-            --policy-source-arn "$task_role_arn" \
-            --action-names secretsmanager:GetSecretValue sqs:SendMessage ses:SendEmail \
-            --resource-arns '*' \
-            > artifacts/readback/task-role-no-authority.json
-          jq -e 'all(.EvaluationResults[]; .EvalDecision != "allowed")' \
-            artifacts/readback/task-role-no-authority.json > /dev/null
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names iam:PassRole \
+            --resource-arns "$neighboring_execution_role_arn" "$neighboring_task_role_arn" \
+            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string \
+            > artifacts/readback/deploy-role-neighbor-pass-role.json
+          jq -e --arg execution "$neighboring_execution_role_arn" --arg task "$neighboring_task_role_arn" '
+            (.EvaluationResults | length) == 1 and
+            .EvaluationResults[0].EvalDecision != "allowed" and
+            (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
+            ([.EvaluationResults[0].ResourceSpecificResults[].EvalResourceName] | sort) ==
+              ([$execution, $task] | sort) and
+            all(
+              .EvaluationResults[0].ResourceSpecificResults[];
+              .EvalResourceDecision != "allowed"
+            )
+          ' artifacts/readback/deploy-role-neighbor-pass-role.json > /dev/null
+          # END access-sync outer-role exact execution simulation
 
           {
             printf '%s\n' "CLUSTER_ARN=$cluster_arn"
