@@ -1,9 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import {
-  IntegrationChannelChangeAuthorizationSchema,
-  SyncAccessMembershipInputSchema,
-} from '@psd-eoc/contracts';
+import { IntegrationChannelChangeAuthorizationSchema } from '@psd-eoc/contracts';
 import {
   afterAll,
   beforeAll,
@@ -46,7 +43,10 @@ import {
 } from '../../../db/schema';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase } from '../../../drizzle/migrate';
-import { createDrizzleAccessGateStore } from '../../../lib/auth/access-gate';
+import {
+  DESIGNATED_ACCESS_GROUP_EMAIL,
+  createDrizzleAccessGateStore,
+} from '../../../lib/auth/access-gate';
 import { SECURITY_AUDIT_APPEND_LOCK_SQL } from '../../../lib/audit/drizzle-repository';
 import {
   loadAccessConfigurationSnapshotState,
@@ -120,9 +120,6 @@ interface MarkerRow extends Record<string, unknown> {
 }
 
 const DATABASE_NAME_PATTERN = /^psd_eoc_i26_fac_[a-f0-9]{32}_test$/u;
-const DESIGNATED_ACCESS_GROUP_EMAIL =
-  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
-
 let context: FacilitiesTestContext | undefined;
 let connection: PostgresDatabaseConnection | undefined;
 let databaseCreated = false;
