@@ -558,7 +558,10 @@ describeWithDatabase('access-membership atomic database publication', () => {
       }),
     ).toEqual({ ...result, publication: 'already-current' });
     expect(
-      await database.select({ id: users.id }).from(users).orderBy(asc(users.id)),
+      await database
+        .select({ id: users.id })
+        .from(users)
+        .orderBy(asc(users.id)),
     ).toEqual([{ id: USER_ID }]);
   });
 

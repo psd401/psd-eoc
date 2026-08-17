@@ -69,9 +69,7 @@ describe('exact access-membership protected entrypoint', () => {
     expect(stack).toContain("'AccessSyncTaskRole'");
     expect(stack).toContain("'/psd-eoc/google-groups'");
     expect(stack).toContain('databaseApplicationSecret.grantRead(');
-    expect(stack).toContain(
-      "'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'",
-    );
+    expect(stack).toContain("'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'");
     expect(workflow).toContain('DatabaseAdminSecretArn');
     expect(workflow).toContain(
       '.EvalResourceName == $admin and .EvalResourceDecision != "allowed"',
@@ -110,9 +108,7 @@ describe('exact access-membership protected entrypoint', () => {
       "event: z.literal('access-membership-sync-complete')",
     );
     expect(script).toContain("phase: z.literal('finalize')");
-    expect(script).toContain(
-      'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
-    );
+    expect(script).toContain('PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256');
     expect(script).toContain("run.phase === 'stage'");
     expect(script).not.toContain('memberEmails: result');
     expect(script).not.toContain('googleGroupId: result');
