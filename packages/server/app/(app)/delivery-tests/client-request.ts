@@ -229,6 +229,14 @@ export function canActivateDeliveryTest(
 ): boolean {
   const activation = preview.activationPreview;
   const metadata = activation.deliveryTest;
+  const controlledEmailCanary =
+    preview.channels.length === 1 &&
+    preview.channels[0]?.channel === 'email' &&
+    preview.channels[0].endpointCount === 1 &&
+    activation.channels.length === 1 &&
+    activation.channels[0]?.channel === 'email' &&
+    activation.channels[0].endpointCount === 1 &&
+    activation.recipientCount === 1;
   return (
     Date.parse(preview.expiresAt) > now.getTime() &&
     activation.kind === 'drill' &&
@@ -247,8 +255,9 @@ export function canActivateDeliveryTest(
         channel.credentialVerified &&
         channel.integrationStatus.label === 'live-verified',
     ) &&
-    preview.channels.some((channel) => channel.channel === 'push') &&
-    preview.channels.some((channel) => channel.channel === 'email')
+    (controlledEmailCanary ||
+      (preview.channels.some((channel) => channel.channel === 'push') &&
+        preview.channels.some((channel) => channel.channel === 'email')))
   );
 }
 
