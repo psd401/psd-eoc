@@ -766,7 +766,8 @@ export function createDrizzleAccessMembershipSyncStore(
       recoverySource.facilityId !== null ||
       recoverySource.active !== true ||
       recoverySource.googleGroupId === null ||
-      recoverySource.email === null
+      recoverySource.email === null ||
+      recoverySource.fixtureKey !== null
     ) {
       throw new AccessMembershipSyncError(
         'RECOVERY_TRANSITION_CURRENT_INVALID',
@@ -847,11 +848,13 @@ export function createDrizzleAccessMembershipSyncStore(
     const designatedMember = members.find(
       ({ userId }) => userId === designatedMemberGroups[0]?.userId,
     );
-    const recoveryAdministratorIds =
-      await loadEffectiveAdministratorUserIds(transaction, {
+    const recoveryAdministratorIds = await loadEffectiveAdministratorUserIds(
+      transaction,
+      {
         accessState: baseline,
         eligibleAccessGroupSourceIds: [recoverySource.id],
-      });
+      },
+    );
     const designatedAdministratorIds =
       designatedMember === undefined
         ? []
@@ -864,9 +867,7 @@ export function createDrizzleAccessMembershipSyncStore(
       expectedSourceIds.length === 2 &&
       completedSourceIds.length === 2 &&
       expectedSourceIds.every((id, index) => id === activeSourceIds[index]) &&
-      completedSourceIds.every(
-        (id, index) => id === activeSourceIds[index],
-      ) &&
+      completedSourceIds.every((id, index) => id === activeSourceIds[index]) &&
       evaluatedRows.length === evaluation.memberEmails.length &&
       evaluatedRows.every(
         ({ email, groupSourceId, groupSourceKind, groupPurpose }, index) =>
@@ -902,13 +903,16 @@ export function createDrizzleAccessMembershipSyncStore(
           designatedMemberGroups.length === 1 &&
           designatedMember !== undefined &&
           designatedMember.userId !== recoveryMember.userId &&
+          designatedMember.googleSubject !== recoveryMember.googleSubject &&
           designatedAdministratorIds.length === 1 &&
           designatedAdministratorIds[0] === designatedMember.userId &&
           persistedUsers.some(
             (user) =>
               user.id === designatedMember.userId &&
               digestEmail(user.email) === initialMobileTransitionEmailDigest &&
-              evaluatedEmails.includes(StaffRosterEmailSchema.parse(user.email)),
+              evaluatedEmails.includes(
+                StaffRosterEmailSchema.parse(user.email),
+              ),
           ))) &&
       memberGroups.every(
         ({ groupSourceKind, groupPurpose }) =>
@@ -1613,6 +1617,7 @@ export function createDrizzleAccessMembershipSyncStore(
           recoverySource.facilityId !== null ||
           recoverySource.googleGroupId === null ||
           recoverySource.email === null ||
+          recoverySource.fixtureKey !== null ||
           !baseline.activeAccessGroupSourceIds.every(
             (id, index) => id === expectedActiveSourceIds[index],
           )
