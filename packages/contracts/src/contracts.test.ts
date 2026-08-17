@@ -108,6 +108,8 @@ import {
   SessionTokenReplaySchema,
   SessionTokenRotationSchema,
   StaffRosterEmailSchema,
+  SyncAccessMembershipInputSchema,
+  SyncAccessMembershipResultSchema,
   StaleRosterReportSchema,
   StartEventInputSchema,
   UpdateEventTypeDraftInputSchema,
@@ -2362,6 +2364,44 @@ describe('human-only capability boundary', () => {
     expect(() =>
       parseCapabilityEnvelopeFor('complete-oidc-sign-in', oidcCallback),
     ).not.toThrow();
+    const exactGroupSelectedIdentity = {
+      ...oidcCallback,
+      principal: {
+        ...oidcCallback.principal,
+        hostedDomain: 'example.org',
+        email: 'selected.member@example.org',
+      },
+      input: {
+        ...oidcCallback.input,
+        claims: {
+          ...oidcCallback.input.claims,
+          hostedDomain: 'example.org',
+          email: 'selected.member@example.org',
+        },
+      },
+    } as const;
+    expect(() =>
+      parseCapabilityEnvelopeFor(
+        'complete-oidc-sign-in',
+        exactGroupSelectedIdentity,
+      ),
+    ).not.toThrow();
+    expect(
+      CapabilityEnvelopeSchema.safeParse({
+        ...exactGroupSelectedIdentity,
+        principal: {
+          ...exactGroupSelectedIdentity.principal,
+          email: 'Selected.Member@example.org',
+        },
+        input: {
+          ...exactGroupSelectedIdentity.input,
+          claims: {
+            ...exactGroupSelectedIdentity.input.claims,
+            email: 'Selected.Member@example.org',
+          },
+        },
+      }).success,
+    ).toBe(false);
     expect(() =>
       parseCapabilityEnvelopeFor('complete-oidc-sign-in', {
         ...oidcCallback,
@@ -2740,6 +2780,7 @@ describe('human-only capability boundary', () => {
     for (const capabilityId of [
       'complete-oidc-sign-in',
       'refresh-session',
+      'sync-access-membership',
       'dispatch-outbox',
       'record-delivery-evidence',
       'set-user-roles',
@@ -2749,6 +2790,35 @@ describe('human-only capability boundary', () => {
         false,
       );
     }
+
+    expect(getCapabilityInvocationPolicy('sync-access-membership')).toEqual({
+      principalKinds: ['system'],
+      sources: ['scheduled-job'],
+      agentGrantable: false,
+    });
+    expect(
+      SyncAccessMembershipInputSchema.safeParse({
+        designatedGroupEmail: 'tsd-engineering@psd401.net',
+      }).success,
+    ).toBe(true);
+    expect(
+      SyncAccessMembershipInputSchema.safeParse({
+        designatedGroupEmail: 'another-group@psd401.net',
+      }).success,
+    ).toBe(false);
+    expect(
+      SyncAccessMembershipResultSchema.safeParse({
+        snapshotId: ids.membershipSnapshot,
+        snapshotVersion: 2,
+        capturedAt: times.activated,
+        designatedSourceId: ids.group,
+        activeAccessGroupCount: 1,
+        evaluatedMembershipCount: 1,
+        membershipDigest: 'a'.repeat(64),
+        providerGroupIdDigest: 'b'.repeat(64),
+        publication: 'created',
+      }).success,
+    ).toBe(true);
 
     const providerInput = {
       subject: { kind: 'attempt', attemptId: ids.attempt },

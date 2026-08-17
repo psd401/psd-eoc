@@ -92,7 +92,7 @@ function authorizationPage(request: Request): Response {
     codeChallenge === null ||
     exactQueryValue(url, 'response_type') !== 'code' ||
     exactQueryValue(url, 'code_challenge_method') !== 'S256' ||
-    exactQueryValue(url, 'hd') !== HOSTED_DOMAIN ||
+    url.searchParams.has('hd') ||
     !/^https?:\/\/localhost:\d+\/auth\/callback$/u.test(redirectUri) ||
     !/^[A-Za-z0-9_-]{43}$/u.test(state) ||
     !/^[A-Za-z0-9_-]{43}$/u.test(nonce) ||
