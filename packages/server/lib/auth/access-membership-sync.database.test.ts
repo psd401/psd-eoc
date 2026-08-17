@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
-  afterAll,
-  beforeAll,
+  afterEach,
+  beforeEach,
   describe,
   expect,
   setDefaultTimeout,
@@ -23,6 +23,7 @@ import {
   accessMembershipSnapshots,
   groupSources,
   idempotencyRecords,
+  userRoles,
   users,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
@@ -35,6 +36,7 @@ import {
   createDrizzleAccessMembershipSyncStore,
   type AccessMembershipSyncReservation,
 } from './access-membership-sync';
+import { checkAccessGate, createDrizzleAccessGateStore } from './access-gate';
 import {
   DESIGNATED_ACCESS_GROUP_EMAIL,
   type EvaluatedAccessMembershipSet,
@@ -233,6 +235,10 @@ async function seedStrictBaseline(
       createdAt: BASELINE_TIME,
       disabledAt: null,
     });
+    await transaction.insert(userRoles).values({
+      userId: USER_ID,
+      role: 'staff',
+    });
     await transaction.insert(accessMembershipSnapshots).values({
       id: BASELINE_SNAPSHOT_ID,
       version: 1,
@@ -280,7 +286,7 @@ async function seedStrictBaseline(
 }
 
 describeWithDatabase('access-membership atomic database publication', () => {
-  beforeAll(async () => {
+  beforeEach(async () => {
     if (baseTestDatabaseUrl === undefined) {
       throw new Error('TEST_DATABASE_URL is required for integration tests.');
     }
@@ -304,7 +310,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     }
   });
 
-  afterAll(async () => cleanup());
+  afterEach(async () => cleanup());
 
   test('activates the exact provider source and publishes one strict append-only successor', async () => {
     const database = databaseConnection().db;
@@ -341,7 +347,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     const result = await store.publish(reservation.id, evaluation);
     expect(result).toMatchObject({
       snapshotVersion: 2,
-      activeAccessGroupCount: 2,
+      activeAccessGroupCount: 1,
       evaluatedMembershipCount: 2,
       membershipDigest: evaluation.membershipDigest,
       providerGroupIdDigest: evaluation.providerGroupIdDigest,
@@ -354,7 +360,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
       snapshotVersion: 2,
       activeAccessGroupSourceIds: expect.any(Array),
     });
-    expect(accessState?.activeAccessGroupSourceIds).toHaveLength(2);
+    expect(accessState?.activeAccessGroupSourceIds).toEqual([
+      result.designatedSourceId,
+    ]);
 
     const [designatedSource] = await database
       .select()
@@ -369,11 +377,16 @@ describeWithDatabase('access-membership atomic database publication', () => {
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
       fixtureKey: null,
     });
+    const [recoverySource] = await database
+      .select({ active: groupSources.active })
+      .from(groupSources)
+      .where(eq(groupSources.id, BASELINE_SOURCE_ID));
+    expect(recoverySource).toEqual({ active: false });
     const generationRows = await database
       .select()
       .from(accessMembershipSnapshotGroups)
       .where(eq(accessMembershipSnapshotGroups.snapshotId, result.snapshotId));
-    expect(generationRows).toHaveLength(4);
+    expect(generationRows).toHaveLength(2);
     expect(
       generationRows
         .filter(({ completionKind }) => completionKind === 'expected')
@@ -385,6 +398,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
         .map(({ groupSourceId }) => groupSourceId)
         .sort(),
     );
+    expect(
+      new Set(generationRows.map(({ groupSourceId }) => groupSourceId)),
+    ).toEqual(new Set([result.designatedSourceId]));
     const evaluatedRows = await database
       .select({
         email: accessMembershipEvaluatedMembers.email,
@@ -398,7 +414,6 @@ describeWithDatabase('access-membership atomic database publication', () => {
       );
     expect(evaluatedRows).toEqual(
       [
-        { email: 'hagelk@psd401.net', groupSourceId: BASELINE_SOURCE_ID },
         {
           email: 'hagelk@psd401.net',
           groupSourceId: result.designatedSourceId,
@@ -418,14 +433,54 @@ describeWithDatabase('access-membership atomic database publication', () => {
         .select()
         .from(accessMembershipMembers)
         .where(eq(accessMembershipMembers.snapshotId, result.snapshotId)),
-    ).toEqual([
+    ).toEqual([]);
+    expect(
+      await database
+        .select({
+          userId: accessMembershipMemberGroups.userId,
+          groupSourceId: accessMembershipMemberGroups.groupSourceId,
+        })
+        .from(accessMembershipMemberGroups)
+        .where(eq(accessMembershipMemberGroups.snapshotId, result.snapshotId)),
+    ).toEqual([]);
+    const accessDecision = await checkAccessGate(
       {
-        snapshotId: result.snapshotId,
-        userId: USER_ID,
         googleSubject: 'synthetic-test-google-subject',
-        facilityScopeKind: 'district',
+        email: 'hagelk@psd401.net',
+        displayName: 'Current Google profile label',
+        subjectDigest: 'a'.repeat(64),
+        requestId: randomUUID(),
+        checkedAt: SYNC_TIME,
+        source: 'web',
       },
-    ]);
+      {
+        store: createDrizzleAccessGateStore(database),
+        audit: {
+          async append(): Promise<never> {
+            throw new Error('A granted access check must not append a denial.');
+          },
+        },
+      },
+    );
+    expect(accessDecision).toMatchObject({
+      granted: true,
+      firstLoginBinding: {
+        userDisposition: 'existing',
+        sourceSnapshotId: result.snapshotId,
+        sourceSnapshotVersion: 2,
+        normalizedEmail: 'hagelk@psd401.net',
+      },
+    });
+    if (accessDecision.granted) {
+      expect(accessDecision.membership.accessGroupSourceRefs).toEqual([
+        {
+          id: result.designatedSourceId,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+        },
+      ]);
+    }
     expect(
       await database
         .select()
@@ -453,5 +508,71 @@ describeWithDatabase('access-membership atomic database publication', () => {
       startedAt: '2026-08-17T12:01:00.000Z',
     });
     expect(replay).toEqual({ kind: 'replay', result });
+  });
+
+  test('rolls source rotation back when the successor inventory cannot be published', async () => {
+    const database = databaseConnection().db;
+    const historicalSources = Array.from({ length: 99 }, (_, index) => ({
+      id: randomUUID(),
+      kind: 'google-group' as const,
+      purpose: 'access' as const,
+      facilityId: null,
+      displayName: `Synthetic inactive history ${index}`,
+      active: false,
+      googleGroupId: `synthetic_inactive_history_${index}`,
+      email: `synthetic.inactive.${index}@psd401.net`,
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    }));
+    await database.insert(groupSources).values(historicalSources);
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const reservation = await store.reserve({
+      actor: { kind: 'system', serviceId: 'access-membership-sync' },
+      idempotencyKey: 'access-sync:database-rollback-0001',
+      requestDigest: 'c'.repeat(64),
+      startedAt: SYNC_TIME,
+    });
+    expect(reservation.kind).toBe('reserved');
+    if (reservation.kind !== 'reserved') {
+      throw new Error('Expected a rollback-test reservation.');
+    }
+    const memberEmails = Object.freeze(['hagelk@psd401.net']);
+    const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
+      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+      googleGroupId: PROVIDER_GROUP_ID,
+      memberEmails,
+      membershipDigest: digest([
+        DESIGNATED_ACCESS_GROUP_EMAIL,
+        PROVIDER_GROUP_ID,
+        ...memberEmails,
+      ]),
+      providerGroupIdDigest: digest([PROVIDER_GROUP_ID]),
+      syncStartedAt: SYNC_TIME,
+      capturedAt: SYNC_TIME,
+    });
+
+    await expect(
+      store.publish(reservation.id, evaluation),
+    ).rejects.toMatchObject({
+      code: 'ACTIVE_ACCESS_SOURCES_INVALID',
+    });
+    expect(
+      await database
+        .select({ active: groupSources.active })
+        .from(groupSources)
+        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
+    ).toEqual([{ active: true }]);
+    expect(
+      await database
+        .select({ id: groupSources.id })
+        .from(groupSources)
+        .where(eq(groupSources.googleGroupId, PROVIDER_GROUP_ID)),
+    ).toEqual([]);
+
+    await store.failReservation(
+      reservation.id,
+      'ACTIVE_ACCESS_SOURCES_INVALID',
+      SYNC_TIME,
+    );
   });
 });

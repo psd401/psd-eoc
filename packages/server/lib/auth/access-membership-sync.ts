@@ -17,7 +17,7 @@ import {
   type SyncAccessMembershipInput,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
@@ -751,7 +751,6 @@ export function createDrizzleAccessMembershipSyncStore(
           designatedSource.kind !== 'google-group' ||
           designatedSource.purpose !== 'access' ||
           designatedSource.facilityId !== null ||
-          designatedSource.active !== true ||
           designatedSource.googleGroupId !== evaluation.googleGroupId ||
           designatedSource.email?.toLowerCase() !== evaluation.groupEmail ||
           designatedSource.fixtureKey !== null
@@ -761,8 +760,38 @@ export function createDrizzleAccessMembershipSyncStore(
             'The designated access source conflicts with retained provider identity.',
           );
         }
+        if (!designatedSource.active) {
+          const [activatedSource] = await transaction
+            .update(groupSources)
+            .set({ active: true })
+            .where(
+              and(
+                eq(groupSources.id, designatedSource.id),
+                eq(groupSources.active, false),
+              ),
+            )
+            .returning();
+          if (activatedSource === undefined) {
+            throw new AccessMembershipSyncError(
+              'DESIGNATED_SOURCE_ACTIVATION_FAILED',
+              'The proven designated access source could not be activated.',
+            );
+          }
+          designatedSource = activatedSource;
+        }
 
-        const activeSources = await transaction
+        await transaction
+          .update(groupSources)
+          .set({ active: false })
+          .where(
+            and(
+              eq(groupSources.purpose, 'access'),
+              eq(groupSources.active, true),
+              ne(groupSources.id, designatedSource.id),
+            ),
+          );
+
+        const accessSources = await transaction
           .select({
             id: groupSources.id,
             kind: groupSources.kind,
@@ -773,33 +802,29 @@ export function createDrizzleAccessMembershipSyncStore(
             email: groupSources.email,
           })
           .from(groupSources)
-          .where(
-            and(
-              eq(groupSources.active, true),
-              eq(groupSources.purpose, 'access'),
-            ),
-          )
+          .where(eq(groupSources.purpose, 'access'))
           .orderBy(asc(groupSources.id));
+        const activeSources = accessSources.filter(({ active }) => active);
         if (
-          activeSources.length < 1 ||
-          activeSources.length > MAX_ACCESS_GROUPS ||
-          activeSources.some(
+          accessSources.length < 1 ||
+          accessSources.length > MAX_ACCESS_GROUPS ||
+          accessSources.some(
             (source) =>
               source.kind !== 'google-group' ||
               source.purpose !== 'access' ||
               source.facilityId !== null ||
-              source.active !== true ||
               source.googleGroupId === null ||
               source.email === null,
           ) ||
-          !activeSources.some(({ id }) => id === designatedSource?.id)
+          activeSources.length !== 1 ||
+          activeSources[0]?.id !== designatedSource.id
         ) {
           throw new AccessMembershipSyncError(
             'ACTIVE_ACCESS_SOURCES_INVALID',
             'The active access-source set was invalid.',
           );
         }
-        const activeSourceIds = new Set(activeSources.map(({ id }) => id));
+        const knownAccessSourceIds = new Set(accessSources.map(({ id }) => id));
 
         const memberRows = await transaction
           .select({
@@ -808,6 +833,7 @@ export function createDrizzleAccessMembershipSyncStore(
             facilityScopeKind: accessMembershipMembers.facilityScopeKind,
             persistedGoogleSubject: users.googleSubject,
             email: users.email,
+            disabledAt: users.disabledAt,
           })
           .from(accessMembershipMembers)
           .innerJoin(users, eq(accessMembershipMembers.userId, users.id))
@@ -883,6 +909,7 @@ export function createDrizzleAccessMembershipSyncStore(
           memberRows.some(
             (member) =>
               member.googleSubject !== member.persistedGoogleSubject ||
+              member.disabledAt !== null ||
               !StaffRosterEmailSchema.safeParse(member.email).success ||
               (baselineGroupCounts.get(member.userId) ?? 0) < 1 ||
               (baselineGroupCounts.get(member.userId) ?? 0) > 50 ||
@@ -894,13 +921,13 @@ export function createDrizzleAccessMembershipSyncStore(
             (row) =>
               row.groupSourceKind !== 'google-group' ||
               row.groupPurpose !== 'access' ||
-              !activeSourceIds.has(row.groupSourceId),
+              !knownAccessSourceIds.has(row.groupSourceId),
           ) ||
           priorEvaluatedRows.some(
             (row) =>
               row.groupSourceKind !== 'google-group' ||
               row.groupPurpose !== 'access' ||
-              !activeSourceIds.has(row.groupSourceId) ||
+              !knownAccessSourceIds.has(row.groupSourceId) ||
               !StaffRosterEmailSchema.safeParse(row.email).success,
           )
         ) {
@@ -910,27 +937,21 @@ export function createDrizzleAccessMembershipSyncStore(
           );
         }
 
-        const currentEmailSet = new Set(evaluation.memberEmails);
-        const userEmail = new Map(
-          memberRows.map((member) => [
-            member.userId,
-            StaffRosterEmailSchema.parse(member.email),
-          ]),
+        const recoveryDailyAdministrators = memberRows.filter(
+          ({ email }) =>
+            StaffRosterEmailSchema.parse(email) === DAILY_ADMIN_EMAIL,
         );
-        const retainedGroups = memberGroupRows.filter(
-          (row) =>
-            row.groupSourceId !== designatedSource.id ||
-            currentEmailSet.has(userEmail.get(row.userId) ?? ''),
-        );
-        const retainedUserIds = new Set(
-          retainedGroups.map(({ userId }) => userId),
-        );
-        const retainedMembers = memberRows.filter(({ userId }) =>
-          retainedUserIds.has(userId),
-        );
+        if (recoveryDailyAdministrators.length !== 1) {
+          throw new AccessMembershipSyncError(
+            'DAILY_ADMIN_RECOVERY_BINDING_INVALID',
+            'The daily administrator recovery binding is unavailable.',
+          );
+        }
+
+        const baselineUserIds = new Set(memberRows.map(({ userId }) => userId));
         if (
-          memberGroupRows.some((row) => !userEmail.has(row.userId)) ||
-          memberFacilityRows.some((row) => !userEmail.has(row.userId))
+          memberGroupRows.some((row) => !baselineUserIds.has(row.userId)) ||
+          memberFacilityRows.some((row) => !baselineUserIds.has(row.userId))
         ) {
           throw new AccessMembershipSyncError(
             'ACCESS_BASELINE_GRAPH_INVALID',
@@ -965,58 +986,13 @@ export function createDrizzleAccessMembershipSyncStore(
             },
           ]),
         );
-        await insertInBatches(retainedMembers, async (batch) =>
-          transaction.insert(accessMembershipMembers).values(
-            batch.map((member) => ({
-              snapshotId,
-              userId: member.userId,
-              googleSubject: member.googleSubject,
-              facilityScopeKind: member.facilityScopeKind,
-            })),
-          ),
-        );
-        await insertInBatches(retainedGroups, async (batch) =>
-          transaction.insert(accessMembershipMemberGroups).values(
-            batch.map((row) => ({
-              snapshotId,
-              userId: row.userId,
-              groupSourceId: row.groupSourceId,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
-            })),
-          ),
-        );
-        await insertInBatches(
-          memberFacilityRows.filter(({ userId }) =>
-            retainedUserIds.has(userId),
-          ),
-          async (batch) =>
-            transaction.insert(accessMembershipMemberFacilities).values(
-              batch.map((row) => ({
-                snapshotId,
-                userId: row.userId,
-                facilityId: row.facilityId,
-              })),
-            ),
-        );
-        const evaluatedRows = [
-          ...priorEvaluatedRows
-            .filter((row) => row.groupSourceId !== designatedSource.id)
-            .map((row) => ({
-              snapshotId,
-              email: StaffRosterEmailSchema.parse(row.email),
-              groupSourceId: row.groupSourceId,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
-            })),
-          ...evaluation.memberEmails.map((email) => ({
-            snapshotId,
-            email,
-            groupSourceId: designatedSource.id,
-            groupSourceKind: 'google-group' as const,
-            groupPurpose: 'access' as const,
-          })),
-        ];
+        const evaluatedRows = evaluation.memberEmails.map((email) => ({
+          snapshotId,
+          email,
+          groupSourceId: designatedSource.id,
+          groupSourceKind: 'google-group' as const,
+          groupPurpose: 'access' as const,
+        }));
         const evaluatedSourceCounts = new Map<string, number>();
         for (const row of evaluatedRows) {
           evaluatedSourceCounts.set(

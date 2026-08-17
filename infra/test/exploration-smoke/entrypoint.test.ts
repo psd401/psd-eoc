@@ -772,6 +772,9 @@ describe('isolated CDK entrypoint configuration', () => {
     const publishStep = workflow.indexOf(
       '- name: Publish and verify only the approved image digest',
     );
+    const accessProofStep = workflow.indexOf(
+      '- name: Prove the dedicated access sync task is least privilege and dark',
+    );
     const bootstrapStep = workflow.indexOf(
       '- name: Run and prove the exact native bootstrap task',
     );
@@ -786,7 +789,8 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain('repository/psd-eoc-exploration-smoke');
     expect(stageStep).toBeGreaterThan(-1);
     expect(publishStep).toBeGreaterThan(stageStep);
-    expect(bootstrapStep).toBeGreaterThan(publishStep);
+    expect(accessProofStep).toBeGreaterThan(publishStep);
+    expect(bootstrapStep).toBeGreaterThan(accessProofStep);
     expect(serviceStep).toBeGreaterThan(bootstrapStep);
     expect(workflow).toContain('phase_app_digest=$current_digest');
     expect(workflow).toContain(
@@ -852,6 +856,9 @@ describe('isolated CDK entrypoint configuration', () => {
       'BootstrapLogGroupName',
       'BootstrapTaskExecutionRoleArn',
       'BootstrapTaskRoleArn',
+      'AccessSyncTaskDefinitionArn',
+      'AccessSyncTaskExecutionRoleArn',
+      'AccessSyncTaskRoleArn',
       'AppRunnerVpcConnectorArn',
       'ApprovedIdentitySecretArn',
     ]) {
@@ -880,6 +887,58 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).not.toContain('DATABASE_RESOURCE_ARN');
     expect(workflow).not.toContain('DATABASE_SECRET_ARN');
     expect(workflow).not.toContain('aws-data-api');
+  });
+
+  it('stages a second named access task without executing provider or publication code', async () => {
+    const workflow = await readWorkflow();
+    const accessProof = workflow.match(
+      / {6}- name: Prove the dedicated access sync task is least privilege and dark[\s\S]*? {6}- name: Run and prove the exact native bootstrap task/,
+    )?.[0];
+
+    expect(accessProof).toBeDefined();
+    expect(workflow).toContain(
+      'select(.Type == "AWS::ECS::TaskDefinition")] | length\' "$template")" -eq 2',
+    );
+    expect(workflow).toContain('psd-eoc-exploration-smoke-native-bootstrap');
+    expect(workflow).toContain('psd-eoc-exploration-smoke-access-sync');
+    expect(accessProof).toContain('AccessSyncTaskDefinitionArn');
+    expect(accessProof).toContain('AccessSyncTaskExecutionRoleArn');
+    expect(accessProof).toContain('AccessSyncTaskRoleArn');
+    expect(accessProof).toContain(
+      'test "$access_task_definition_arn" != "$bootstrap_task_definition_arn"',
+    );
+    expect(accessProof).toContain(
+      'packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+    );
+    expect(accessProof).toContain('readonlyRootFilesystem == true');
+    expect(accessProof).toContain('networkMode == "awsvpc"');
+    expect(accessProof).toContain(
+      'expected_image="$repository_uri@$IMAGE_DIGEST"',
+    );
+    expect(accessProof).toContain('BootstrapPrivateSubnetIds');
+    expect(accessProof).toContain('BootstrapSecurityGroupId');
+    expect(accessProof).toContain('/psd-eoc/google-groups');
+    expect(accessProof).not.toContain('aws secretsmanager describe-secret');
+    expect(accessProof).not.toContain('aws secretsmanager get-secret-value');
+    expect(accessProof).toContain(
+      'groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"',
+    );
+    expect(accessProof).toContain('"DATABASE_PASSWORD"');
+    expect(accessProof).toContain('"DATABASE_USERNAME"');
+    expect(accessProof).toContain('"GOOGLE_ROSTER_CONFIG"');
+    expect(accessProof).toContain("jq '.PolicyNames | length'");
+    expect(accessProof).toContain(
+      'access-sync-task-role-inline-policies.json)" -eq 0',
+    );
+    expect(accessProof).toContain(
+      'access-sync-execution-role-secret-simulation.json',
+    );
+    expect(accessProof).toContain(
+      'access-sync-task-role-negative-simulation.json',
+    );
+    expect(accessProof).not.toContain('aws ecs run-task');
+    expect(workflow.match(/^ {10}aws ecs run-task\b/gm)).toHaveLength(1);
+    expect(workflow).not.toContain('--overrides');
   });
 
   it('previews and reads back private PostgreSQL with no database HTTP authority', async () => {

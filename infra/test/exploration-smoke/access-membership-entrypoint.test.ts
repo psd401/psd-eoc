@@ -67,6 +67,11 @@ describe('exact access-membership protected entrypoint', () => {
       '.EvalResourceName == $admin and .EvalResourceDecision != "allowed"',
     );
     expect(workflow).toContain(
+      'groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"',
+    );
+    expect(workflow).not.toContain('aws secretsmanager describe-secret');
+    expect(workflow).not.toContain('aws secretsmanager get-secret-value');
+    expect(workflow).toContain(
       '--action-names secretsmanager:GetSecretValue sqs:SendMessage ses:SendEmail',
     );
     expect(provider).toContain(
