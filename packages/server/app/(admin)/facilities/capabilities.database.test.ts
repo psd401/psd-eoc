@@ -12,7 +12,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -1996,6 +1996,127 @@ describeWithDatabase('facilities administrator database flow', () => {
       (await loadAccessConfigurationSnapshotState(database))
         ?.activeAccessGroupSourceIds,
     ).toEqual(accessFixtures.map(({ id }) => id).sort());
+  });
+
+  test('reserves staged recovery deactivation for the protected mobile-session finalizer', async () => {
+    const database = databaseConnection().db;
+    const authenticated = authenticatedAdministrator();
+    const store = createDrizzleAdminCapabilityStore(database, authenticated);
+    const suffix = randomUUID();
+    const requestIds: string[] = [];
+    const recoverySource = {
+      id: randomUUID(),
+      kind: 'google-group' as const,
+      purpose: 'access' as const,
+      facilityId: null,
+      displayName: `Protected recovery ${suffix.slice(0, 8)}`,
+      active: true,
+      googleGroupId: `issue-236-protected-recovery-${suffix}`,
+      email: `issue-236-protected-recovery-${suffix}@example.invalid`,
+      fixtureKey: null,
+    };
+    const designatedSource = {
+      id: randomUUID(),
+      kind: 'google-group' as const,
+      purpose: 'access' as const,
+      facilityId: null,
+      displayName: `Protected designated ${suffix.slice(0, 8)}`,
+      active: true,
+      googleGroupId: `issue-236-protected-designated-${suffix}`,
+      email: DESIGNATED_ACCESS_GROUP_EMAIL,
+      fixtureKey: null,
+    };
+    await database
+      .update(groupSources)
+      .set({ active: false })
+      .where(
+        and(
+          eq(groupSources.kind, 'google-group'),
+          eq(groupSources.purpose, 'access'),
+          eq(groupSources.active, true),
+        ),
+      );
+    await database
+      .insert(groupSources)
+      .values([recoverySource, designatedSource]);
+    await persistAuthenticatedAdministrator(
+      database,
+      authenticated,
+      recoverySource.id,
+      suffix,
+    );
+
+    const designatedUserId = randomUUID();
+    const designatedSubject = `issue-236-designated-subject-${suffix}`;
+    await database.insert(users).values({
+      id: designatedUserId,
+      googleSubject: designatedSubject,
+      email: `issue-236-designated-${suffix}@example.invalid`,
+      displayName: 'Issue 236 designated administrator',
+      facilityScopeKind: 'district',
+    });
+    await database.insert(userRoles).values({
+      userId: designatedUserId,
+      role: 'admin',
+    });
+    const transitionSnapshot = await copyLatestAccessSnapshotWithMember(
+      database,
+      {
+        userId: designatedUserId,
+        googleSubject: designatedSubject,
+        facilityScopeKind: 'district',
+        accessGroupIds: [designatedSource.id],
+      },
+    );
+    const accessState = await loadAccessConfigurationSnapshotState(database);
+    if (accessState === null) {
+      throw new Error('The protected two-source fixture is not strict.');
+    }
+    expect(accessState.snapshotId).toBe(transitionSnapshot.id);
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState,
+        eligibleAccessGroupSourceIds: [designatedSource.id],
+      }),
+    ).toEqual([designatedUserId]);
+
+    await expect(
+      executeUpdateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          id: recoverySource.id,
+          kind: recoverySource.kind,
+          purpose: recoverySource.purpose,
+          facilityId: recoverySource.facilityId,
+          displayName: recoverySource.displayName,
+          active: false,
+          googleGroupId: recoverySource.googleGroupId,
+          email: recoverySource.email,
+        },
+        metadata: metadata('protected-recovery-deactivation', requestIds),
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message:
+        'Recovery access can be deactivated only by the protected mobile-session finalizer.',
+    });
+    expect(
+      await database
+        .select({ id: groupSources.id, active: groupSources.active })
+        .from(groupSources)
+        .where(
+          inArray(groupSources.id, [recoverySource.id, designatedSource.id]),
+        )
+        .orderBy(asc(groupSources.id)),
+    ).toEqual(
+      [recoverySource.id, designatedSource.id]
+        .sort()
+        .map((id) => ({ id, active: true })),
+    );
+    expect(await loadAccessConfigurationSnapshotState(database)).toEqual(
+      accessState,
+    );
   });
 
   test('allows only exact rollback of an unproven added access group', async () => {

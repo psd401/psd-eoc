@@ -64,6 +64,7 @@ import {
   loadEffectiveRoles,
   type AccessConfigurationSnapshotState,
 } from '../../../lib/auth/role-state';
+import { DESIGNATED_ACCESS_GROUP_EMAIL } from '../../../lib/auth/access-gate';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type {
   CapabilityHandlerContext,
@@ -490,6 +491,48 @@ async function assertReachableAdministratorRemains(
   if (remainingAdministratorIds.length === 0) {
     throw conflict(
       'Another reachable district administrator must remain through an unchanged active access group.',
+    );
+  }
+}
+
+async function assertProtectedRecoveryFinalizationRequired(
+  database: AdminQueryDatabase,
+  state: AccessSetMutationState,
+  current: Extract<GroupSource, { purpose: 'access' }>,
+): Promise<void> {
+  if (
+    state.accessState === null ||
+    state.activeAccessGroupSourceIds.length !== 2 ||
+    current.email === DESIGNATED_ACCESS_GROUP_EMAIL
+  ) {
+    return;
+  }
+  const activeSources = await database
+    .select({ id: groupSources.id, email: groupSources.email })
+    .from(groupSources)
+    .where(
+      and(
+        inArray(groupSources.id, [...state.activeAccessGroupSourceIds]),
+        eq(groupSources.kind, 'google-group'),
+        eq(groupSources.purpose, 'access'),
+        eq(groupSources.active, true),
+      ),
+    )
+    .orderBy(asc(groupSources.id));
+  const designatedSources = activeSources.filter(
+    ({ email }) => email === DESIGNATED_ACCESS_GROUP_EMAIL,
+  );
+  if (
+    activeSources.length === 2 &&
+    designatedSources.length === 1 &&
+    current.id !== designatedSources[0]?.id &&
+    sameSortedIds(
+      activeSources.map(({ id }) => id),
+      [...state.accessState.activeAccessGroupSourceIds].sort(),
+    )
+  ) {
+    throw conflict(
+      'Recovery access can be deactivated only by the protected mobile-session finalizer.',
     );
   }
 }
@@ -1421,6 +1464,11 @@ async function updateGroupSource(
     current.active &&
     !input.active
   ) {
+    await assertProtectedRecoveryFinalizationRequired(
+      database,
+      accessMutationState,
+      current,
+    );
     await assertReachableAdministratorRemains(
       database,
       accessMutationState,
