@@ -12,4 +12,6 @@ jobs:
     # Dependabot cannot grant id-token: write to the reusable (startup_failure).
     if: github.actor != 'dependabot[bot]'
     uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@main
+    with:
+      max_turns: 40
     secrets: inherit
