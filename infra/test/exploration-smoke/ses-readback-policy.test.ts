@@ -89,6 +89,7 @@ async function runScenario(options: {
     const predecessorTemplate = join(directory, 'policy-predecessor.json');
     const calls = join(directory, 'aws-calls.txt');
     const capturedRequest = join(directory, 'change-set-request.json');
+    const roleReadCount = join(directory, 'role-read-count.txt');
     const summary = join(directory, 'summary.md');
     await Promise.all([
       mkdir(fakeBin, { recursive: true }),
@@ -102,6 +103,7 @@ async function runScenario(options: {
       predecessorTemplate,
       JSON.stringify(authorizedPredecessor(await readTemplate()), null, 2),
     );
+    await Bun.write(roleReadCount, '0\n');
     if (options.existingStack) {
       await Bun.write(marker, 'existing\n');
     }
@@ -127,6 +129,14 @@ arg_value() {
 }
 
 role_json() {
+  local role_read_count string_equals
+  role_read_count=$(cat "$ROLE_READ_COUNT")
+  if (( role_read_count % 2 == 0 )); then
+    string_equals='"token.actions.githubusercontent.com:aud":"sts.amazonaws.com","token.actions.githubusercontent.com:sub":"repo:psd401@1902994/psd-eoc@1326178900:environment:exploration-smoke"'
+  else
+    string_equals='"token.actions.githubusercontent.com:sub":"repo:psd401@1902994/psd-eoc@1326178900:environment:exploration-smoke","token.actions.githubusercontent.com:aud":"sts.amazonaws.com"'
+  fi
+  printf '%s\n' "$((role_read_count + 1))" > "$ROLE_READ_COUNT"
   printf '%s\n' '{
     "Arn":"arn:aws:iam::<aws-account-id>:role/psd-eoc-exploration-smoke-github-deploy",
     "RoleId":"AROATESTROLE",
@@ -134,10 +144,7 @@ role_json() {
     "CreateDate":"2026-08-15T00:00:00Z",
     "AssumeRolePolicyDocument":{"Statement":[{
       "Action":"sts:AssumeRoleWithWebIdentity",
-      "Condition":{"StringEquals":{
-        "token.actions.githubusercontent.com:aud":"sts.amazonaws.com",
-        "token.actions.githubusercontent.com:sub":"repo:psd401@1902994/psd-eoc@1326178900:environment:exploration-smoke"
-      }},
+      "Condition":{"StringEquals":{'"$string_equals"'}},
       "Effect":"Allow",
       "Principal":{"Federated":"arn:aws:iam::<aws-account-id>:oidc-provider/token.actions.githubusercontent.com"}
     }]},
@@ -442,6 +449,7 @@ esac
           'exploration-smoke-ses-readback-policy.template.json',
         ),
         PREDECESSOR_TEMPLATE: predecessorTemplate,
+        ROLE_READ_COUNT: roleReadCount,
         RUNNER_TEMP: directory,
         SOURCE_SHA: '0'.repeat(40),
         STACK_NAME: 'PsdEocExplorationSmokeSesReadbackPolicy',
