@@ -298,8 +298,8 @@ jobs:
           test "$(jq -c '.AccountAliases' artifacts/readback/account-aliases.json)" = '["psd401"]'
           aws iam get-role \
             --role-name "$DEPLOY_ROLE_NAME" \
-            --query 'Role.{Arn:Arn,RoleId:RoleId,RoleName:RoleName,CreateDate:CreateDate,AssumeRolePolicyDocument:AssumeRolePolicyDocument,MaxSessionDuration:MaxSessionDuration,PermissionsBoundary:PermissionsBoundary}' \
-            > "$role_before"
+            --query 'Role.{Arn:Arn,RoleId:RoleId,RoleName:RoleName,CreateDate:CreateDate,AssumeRolePolicyDocument:AssumeRolePolicyDocument,MaxSessionDuration:MaxSessionDuration,PermissionsBoundary:PermissionsBoundary}' |
+            jq -S . > "$role_before"
           test "$(jq -r .Arn "$role_before")" = "$DEPLOY_ROLE_ARN"
           test "$(jq -r .MaxSessionDuration "$role_before")" -eq 3600
           jq -e \
@@ -557,8 +557,8 @@ jobs:
 
           aws iam get-role \
             --role-name "$DEPLOY_ROLE_NAME" \
-            --query 'Role.{Arn:Arn,RoleId:RoleId,RoleName:RoleName,CreateDate:CreateDate,AssumeRolePolicyDocument:AssumeRolePolicyDocument,MaxSessionDuration:MaxSessionDuration,PermissionsBoundary:PermissionsBoundary}' \
-            > "$role_after"
+            --query 'Role.{Arn:Arn,RoleId:RoleId,RoleName:RoleName,CreateDate:CreateDate,AssumeRolePolicyDocument:AssumeRolePolicyDocument,MaxSessionDuration:MaxSessionDuration,PermissionsBoundary:PermissionsBoundary}' |
+            jq -S . > "$role_after"
           cmp "$role_before" "$role_after"
           capture_policy_inventory "$inventory_after" artifacts/readback/policy-after
           jq -e \
