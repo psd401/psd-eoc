@@ -187,10 +187,24 @@ export type DeliveryTestTargetEndpointRef = z.infer<
   typeof DeliveryTestTargetEndpointRefSchema
 >;
 
-const DeliveryTestTargetEndpointListSchema = z
+const MultiChannelDeliveryTestTargetEndpointListSchema = z
   .array(DeliveryTestTargetEndpointRefSchema)
   .min(2)
   .max(12_000)
+  .readonly();
+
+const ControlledEmailCanaryTargetEndpointListSchema = z
+  .tuple([DeliveryTestTargetEndpointRefSchema])
+  .superRefine(([endpoint], context) => {
+    if (endpoint.channel !== 'email') {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled email canary target must contain exactly one email endpoint.',
+        path: [0, 'channel'],
+      });
+    }
+  })
   .readonly();
 
 function addTargetEndpointSetIssues(
@@ -220,14 +234,14 @@ function addTargetEndpointSetIssues(
  * values are opaque roster references pinned to one roster snapshot; phone
  * numbers, addresses, and push tokens are structurally absent.
  */
-export const DeliveryTestTargetSetVersionSchema = z
+const MultiChannelDeliveryTestTargetSetVersionSchema = z
   .object({
     id: UuidSchema,
     version: VersionSchema,
     facilityId: FacilityIdSchema,
     rosterSnapshotId: RosterSnapshotIdSchema,
     supersedesVersionId: UuidSchema.nullable(),
-    endpoints: DeliveryTestTargetEndpointListSchema,
+    endpoints: MultiChannelDeliveryTestTargetEndpointListSchema,
     endpointReferenceDigest: DigestSchema,
     approvedByUserId: UuidSchema,
     approvedWithSessionId: UuidSchema,
@@ -274,6 +288,72 @@ export const DeliveryTestTargetSetVersionSchema = z
   })
   .readonly();
 
+const ControlledEmailCanaryTargetSetVersionSchema = z
+  .object({
+    mode: z
+      .literal('controlled-email-canary')
+      .default('controlled-email-canary'),
+    id: UuidSchema,
+    version: VersionSchema,
+    facilityId: FacilityIdSchema,
+    rosterSnapshotId: RosterSnapshotIdSchema,
+    supersedesVersionId: UuidSchema.nullable(),
+    endpoints: ControlledEmailCanaryTargetEndpointListSchema,
+    endpointReferenceDigest: DigestSchema,
+    approvedByUserId: UuidSchema,
+    approvedWithSessionId: UuidSchema,
+    approvedAt: TimestampSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict()
+  .superRefine((targetSet, context) => {
+    if (
+      (targetSet.version === 1) !==
+      (targetSet.supersedesVersionId === null)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Only the first canary target version may omit its superseded version.',
+        path: ['supersedesVersionId'],
+      });
+    }
+    if (targetSet.supersedesVersionId === targetSet.id) {
+      context.addIssue({
+        code: 'custom',
+        message: 'A target-set version cannot supersede itself.',
+        path: ['supersedesVersionId'],
+      });
+    }
+    if (!isAtOrAfter(targetSet.approvedAt, targetSet.createdAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Target-set approval cannot precede version creation.',
+        path: ['approvedAt'],
+      });
+    }
+    if (!isAtOrAfter(targetSet.approvedAt, targetSet.endpoints[0].attestedAt)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Target-set approval cannot precede endpoint attestation.',
+        path: ['endpoints', 0, 'attestedAt'],
+      });
+    }
+  })
+  .readonly();
+
+/**
+ * Adds a single-email controlled-canary branch without relaxing the ordinary
+ * multi-channel target-set contract. Persisted endpoint shape safely derives
+ * the controlled discriminator when an older row has no dedicated column.
+ */
+export const DeliveryTestTargetSetVersionSchema = z
+  .union([
+    MultiChannelDeliveryTestTargetSetVersionSchema,
+    ControlledEmailCanaryTargetSetVersionSchema,
+  ])
+  .readonly();
+
 /** Immutable delivery-test target-set version inferred from its schema. */
 export type DeliveryTestTargetSetVersion = z.infer<
   typeof DeliveryTestTargetSetVersionSchema
@@ -284,7 +364,7 @@ export type DeliveryTestTargetSetVersion = z.infer<
  * authenticated server supplies version identity, approval principal, times,
  * and the digest of the canonical endpoint references.
  */
-export const CreateDeliveryTestTargetSetVersionInputSchema = z
+const MultiChannelDeliveryTestTargetSetVersionInputSchema = z
   .object({
     previousVersion: DeliveryTestTargetSetRefSchema.nullable(),
     facilityId: FacilityIdSchema,
@@ -299,6 +379,33 @@ export const CreateDeliveryTestTargetSetVersionInputSchema = z
       .readonly(),
   })
   .strict()
+  .readonly();
+
+const ControlledEmailCanaryTargetSetVersionInputSchema = z
+  .object({
+    mode: z
+      .literal('controlled-email-canary')
+      .default('controlled-email-canary'),
+    previousVersion: DeliveryTestTargetSetRefSchema.nullable(),
+    facilityId: FacilityIdSchema,
+    rosterSnapshotId: RosterSnapshotIdSchema,
+    eligibilityFactIds: z
+      .tuple([DeliveryTestCanaryEligibilityFactIdSchema])
+      .readonly(),
+  })
+  .strict()
+  .readonly();
+
+/**
+ * The controlled branch owns exactly one eligibility fact. The ordinary
+ * branch retains its existing minimum of two facts and its later push/email
+ * endpoint proof.
+ */
+export const CreateDeliveryTestTargetSetVersionInputSchema = z
+  .union([
+    MultiChannelDeliveryTestTargetSetVersionInputSchema,
+    ControlledEmailCanaryTargetSetVersionInputSchema,
+  ])
   .readonly();
 
 /** Delivery-test target-version creation input inferred from its schema. */
@@ -357,17 +464,36 @@ export type DeliveryTestPreviewChannel = z.infer<
  * wraps the ordinary drill/staff activation preview so the actual send still
  * passes through start-event and its fresh human-confirmation boundary.
  */
+const MultiChannelDeliveryTestPreviewChannelListSchema = z
+  .array(DeliveryTestPreviewChannelSchema)
+  .min(2)
+  .max(3)
+  .readonly();
+
+const ControlledEmailCanaryPreviewChannelListSchema = z
+  .tuple([DeliveryTestPreviewChannelSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'email' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled email canary preview must contain exactly one email endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const DeliveryTestPreviewSchema = z
   .object({
     purpose: z.literal('monthly-live-delivery-test'),
     activationPreview: ActivationPreviewSchema,
     targetSet: DeliveryTestTargetSetRefSchema,
     endpointReferenceDigest: DigestSchema,
-    channels: z
-      .array(DeliveryTestPreviewChannelSchema)
-      .min(2)
-      .max(3)
-      .readonly(),
+    channels: z.union([
+      MultiChannelDeliveryTestPreviewChannelListSchema,
+      ControlledEmailCanaryPreviewChannelListSchema,
+    ]),
     consequenceDigest: DigestSchema,
     createdAt: TimestampSchema,
     expiresAt: TimestampSchema,
@@ -414,19 +540,30 @@ export const DeliveryTestPreviewSchema = z
       });
     }
     const channelNames = preview.channels.map((channel) => channel.channel);
+    const controlledEmailCanary =
+      channelNames.length === 1 &&
+      channelNames[0] === 'email' &&
+      preview.channels[0]?.endpointCount === 1;
     if (
       new Set(channelNames).size !== channelNames.length ||
-      !channelNames.includes('push') ||
-      !channelNames.includes('email')
+      (!controlledEmailCanary &&
+        (!channelNames.includes('push') || !channelNames.includes('email')))
     ) {
       context.addIssue({
         code: 'custom',
         message:
-          'Delivery-test previews require unique push and email channel rows.',
+          'Delivery-test previews require unique push and email rows or one controlled email canary row.',
         path: ['channels'],
       });
     }
-    if (preview.channels.length !== activation.channels.length) {
+    if (
+      preview.channels.length !== activation.channels.length ||
+      controlledEmailCanary !==
+        (activation.channels.length === 1 &&
+          activation.channels[0]?.channel === 'email' &&
+          activation.channels[0].endpointCount === 1 &&
+          activation.recipientCount === 1)
+    ) {
       context.addIssue({
         code: 'custom',
         message:
@@ -588,6 +725,26 @@ const DeliveryTestFinalizerSchema = z
  * appends a superseding report instead of rewriting an earlier incomplete or
  * failed projection.
  */
+const MultiChannelDeliveryTestReportChannelListSchema = z
+  .array(DeliveryTestChannelReportSchema)
+  .min(2)
+  .max(3)
+  .readonly();
+
+const ControlledEmailCanaryReportChannelListSchema = z
+  .tuple([DeliveryTestChannelReportSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'email' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled email canary report must contain exactly one email endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const MonthlyDeliveryTestReportSchema = z
   .object({
     id: MonthlyDeliveryTestReportIdSchema,
@@ -595,7 +752,10 @@ export const MonthlyDeliveryTestReportSchema = z
     sequence: z.number().int().positive(),
     supersedesReportId: MonthlyDeliveryTestReportIdSchema.nullable(),
     status: MonthlyDeliveryTestReportStatusSchema,
-    channels: z.array(DeliveryTestChannelReportSchema).min(2).max(3).readonly(),
+    channels: z.union([
+      MultiChannelDeliveryTestReportChannelListSchema,
+      ControlledEmailCanaryReportChannelListSchema,
+    ]),
     generatedAt: TimestampSchema,
     finalizedBy: DeliveryTestFinalizerSchema,
     source: z.literal('worker'),
@@ -619,15 +779,19 @@ export const MonthlyDeliveryTestReportSchema = z
       });
     }
     const channels = report.channels.map((channel) => channel.channel);
+    const controlledEmailCanary =
+      channels.length === 1 &&
+      channels[0] === 'email' &&
+      report.channels[0]?.endpointCount === 1;
     if (
       new Set(channels).size !== channels.length ||
-      !channels.includes('push') ||
-      !channels.includes('email')
+      (!controlledEmailCanary &&
+        (!channels.includes('push') || !channels.includes('email')))
     ) {
       context.addIssue({
         code: 'custom',
         message:
-          'Delivery-test reports require unique push and email channel rows.',
+          'Delivery-test reports require unique push and email rows or one controlled email canary row.',
         path: ['channels'],
       });
     }

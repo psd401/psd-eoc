@@ -636,6 +636,26 @@ export type CreateActivationPreviewInput = z.infer<
  * audience, event-type version, recipient count, and active-event set. The
  * digest is what a human confirmation signs; stale previews fail closed.
  */
+const MultiChannelActivationPreviewPlanSchema = z
+  .array(ChannelConsequencePreviewSchema)
+  .min(2)
+  .max(3)
+  .readonly();
+
+const ControlledEmailCanaryActivationPlanSchema = z
+  .tuple([ChannelConsequencePreviewSchema])
+  .superRefine(([channel], context) => {
+    if (channel.channel !== 'email' || channel.endpointCount !== 1) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A controlled email canary consequence must contain exactly one email endpoint.',
+        path: [0],
+      });
+    }
+  })
+  .readonly();
+
 export const ActivationPreviewSchema = z
   .object({
     id: ActivationPreviewIdSchema,
@@ -647,7 +667,10 @@ export const ActivationPreviewSchema = z
     rosterPopulation: RosterPopulationSchema,
     audienceConfig: AudienceConfigRefSchema,
     recipientCount: z.number().int().nonnegative().max(1_200),
-    channels: z.array(ChannelConsequencePreviewSchema).min(2).max(3).readonly(),
+    channels: z.union([
+      MultiChannelActivationPreviewPlanSchema,
+      ControlledEmailCanaryActivationPlanSchema,
+    ]),
     sendReadiness: z.enum(['ready', 'blocked']),
     blockingReasonCodes: z
       .array(
@@ -720,7 +743,29 @@ export const ActivationPreviewSchema = z
         path: ['channels'],
       });
     }
-    if (!channelNames.includes('push') || !channelNames.includes('email')) {
+    const controlledEmailCanary =
+      channelNames.length === 1 &&
+      channelNames[0] === 'email' &&
+      preview.channels[0]?.endpointCount === 1;
+    if (
+      controlledEmailCanary &&
+      (preview.deliveryTest == null ||
+        preview.kind !== 'drill' ||
+        preview.templateMode !== 'drill' ||
+        preview.rosterPopulation !== 'staff' ||
+        preview.recipientCount !== 1)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'A one-email consequence is limited to one delivery-test staff recipient and DRILL classification.',
+        path: ['channels'],
+      });
+    }
+    if (
+      !controlledEmailCanary &&
+      (!channelNames.includes('push') || !channelNames.includes('email'))
+    ) {
       context.addIssue({
         code: 'custom',
         message:
@@ -755,9 +800,11 @@ export const ActivationPreviewSchema = z
         : channel.integrationStatus.label === 'live-verified',
     );
     const isReady = preview.sendReadiness === 'ready';
-    const requiredChannelsHaveEndpoints = preview.channels
-      .filter((channel) => ['push', 'email'].includes(channel.channel))
-      .every((channel) => channel.endpointCount > 0);
+    const requiredChannelsHaveEndpoints = controlledEmailCanary
+      ? preview.channels[0]?.endpointCount === 1
+      : preview.channels
+          .filter((channel) => ['push', 'email'].includes(channel.channel))
+          .every((channel) => channel.endpointCount > 0);
     if (
       isReady &&
       (!integrationsReady ||
