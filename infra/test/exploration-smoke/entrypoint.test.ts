@@ -75,15 +75,23 @@ function recoveryScript(workflow: string): string {
 async function runRecoveryScenario(options: {
   readonly before: readonly RecoveryResource[];
   readonly events: readonly RecoveryResource[];
+  readonly preexistingImportObject?: boolean;
   readonly stackStatus: string;
 }): Promise<{
   readonly awsCalls: readonly string[];
+  readonly changeSet: unknown;
   readonly defaultGetTemplateExitCode: number;
   readonly exitCode: number;
-  readonly importArguments: string | undefined;
   readonly importCredential: string | undefined;
+  readonly importObject: unknown;
+  readonly importResources: unknown;
   readonly mapping: unknown;
+  readonly publicationResult: unknown;
+  readonly publishedBucket: string | undefined;
+  readonly publishedKey: string | undefined;
+  readonly publishedTemplate: unknown;
   readonly result: unknown;
+  readonly stderr: string;
 }> {
   const directory = await mkdtemp(join(tmpdir(), 'psd-eoc-email-recovery-'));
   try {
@@ -102,10 +110,18 @@ async function runRecoveryScenario(options: {
     const managedFile = join(directory, 'managed.json');
     const eventsFile = join(directory, 'events.json');
     const stackFile = join(directory, 'stack.json');
+    const currentTemplateFile = join(directory, 'current-template.json');
+    const changeSetFixture = join(directory, 'change-set.json');
     const awsCalls = join(directory, 'aws-calls.txt');
     const importMarker = join(directory, 'imported');
-    const importArguments = join(directory, 'import-arguments.txt');
     const importCredential = join(directory, 'import-credential.txt');
+    const capturedImportResources = join(
+      directory,
+      'captured-import-resources.json',
+    );
+    const publishedBucket = join(directory, 'published-bucket.txt');
+    const publishedKey = join(directory, 'published-key.txt');
+    const publishedTemplate = join(directory, 'published-template.json');
     await Promise.all([
       Bun.write(
         beforeFile,
@@ -134,6 +150,12 @@ async function runRecoveryScenario(options: {
         JSON.stringify({
           Stacks: [
             {
+              Parameters: [
+                {
+                  ParameterKey: 'SourceSha',
+                  ParameterValue: '0'.repeat(40),
+                },
+              ],
               Outputs: [
                 {
                   OutputKey: 'AppRunnerVpcConnectorArn',
@@ -144,6 +166,68 @@ async function runRecoveryScenario(options: {
               StackStatus: options.stackStatus,
             },
           ],
+        }),
+      ),
+      Bun.write(
+        currentTemplateFile,
+        JSON.stringify({
+          AWSTemplateFormatVersion: '2010-09-09',
+          Description:
+            'Isolated synthetic-only PSD EOC exploration web/mobile backend (GitHub issue #163)',
+          Parameters: { SourceSha: { Type: 'String' } },
+          Resources: {
+            ExistingHealthQueue: {
+              Properties: {
+                QueueName: 'psd-eoc-exploration-smoke-health',
+              },
+              Type: 'AWS::SQS::Queue',
+            },
+          },
+        }),
+      ),
+      Bun.write(
+        changeSetFixture,
+        JSON.stringify({
+          Capabilities: ['CAPABILITY_NAMED_IAM'],
+          ChangeSetId:
+            'arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-retained-email-import-1-1/00000000-0000-0000-0000-000000000000',
+          ChangeSetName: 'psd-eoc-retained-email-import-1-1',
+          ChangeSetType: 'IMPORT',
+          Changes: [
+            {
+              ResourceChange: {
+                Action: 'Import',
+                LogicalResourceId: 'EmailWorkerLogGroup0611E5C2',
+                ResourceType: 'AWS::Logs::LogGroup',
+              },
+            },
+            {
+              ResourceChange: {
+                Action: 'Import',
+                LogicalResourceId: 'EmailDeadLetterQueue5E91C06C',
+                ResourceType: 'AWS::SQS::Queue',
+              },
+            },
+            {
+              ResourceChange: {
+                Action: 'Import',
+                LogicalResourceId: 'EmailConfigurationSet',
+                ResourceType: 'AWS::SES::ConfigurationSet',
+              },
+            },
+            {
+              ResourceChange: {
+                Action: 'Import',
+                LogicalResourceId: 'EmailEventsKey619540BF',
+                ResourceType: 'AWS::KMS::Key',
+              },
+            },
+          ],
+          ExecutionStatus: 'AVAILABLE',
+          RoleARN:
+            'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2',
+          StackName: 'PsdEocExplorationSmoke',
+          Status: 'CREATE_COMPLETE',
         }),
       ),
       Bun.write(
@@ -185,26 +269,84 @@ async function runRecoveryScenario(options: {
     ]);
 
     const awsPath = join(fakeBin, 'aws');
-    const bunxPath = join(fakeBin, 'bunx');
-    await Promise.all([
-      Bun.write(
-        awsPath,
-        `#!/usr/bin/env bash
+    await Bun.write(
+      awsPath,
+      `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\t%s\\n' "$1:$2" "\${AWS_ACCESS_KEY_ID:-missing}" >> "$AWS_CALLS"
+
+arg_value() {
+  local wanted=$1
+  shift
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "$wanted" ]]; then
+      printf '%s\\n' "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+head_json() {
+  local bytes checksum sha256
+  bytes=$(wc -c < "$PUBLISHED_TEMPLATE" | tr -d ' ')
+  checksum=$(openssl dgst -sha256 -binary "$PUBLISHED_TEMPLATE" | base64 | tr -d '\\n')
+  sha256=$(shasum -a 256 "$PUBLISHED_TEMPLATE" | cut -d' ' -f1)
+  printf '{"ChecksumSHA256":"%s","ContentLength":%s,"Metadata":{"sha256":"%s"},"ServerSideEncryption":"AES256"}\\n' \
+    "$checksum" "$bytes" "$sha256"
+}
+
 case "$1:$2" in
-  cloudformation:describe-stacks) cat "$STACK_FIXTURE" ;;
+  cloudformation:describe-stacks)
+    if printf '%s\\n' "$@" | grep -q 'StackStatus'; then
+      if [[ -e "$IMPORT_MARKER" ]]; then
+        printf '%s\\n' 'IMPORT_COMPLETE'
+      else
+        jq -r '.Stacks[0].StackStatus' "$STACK_FIXTURE"
+      fi
+    elif printf '%s\\n' "$@" | grep -q 'AppRunnerVpcConnectorArn'; then
+      jq -r '.Stacks[0].Outputs[] | select(.OutputKey == "AppRunnerVpcConnectorArn") | .OutputValue' "$STACK_FIXTURE"
+    else
+      cat "$STACK_FIXTURE"
+    fi
+    ;;
   cloudformation:list-stack-resources)
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
     if [[ -e "$IMPORT_MARKER" ]]; then cat "$MANAGED_FIXTURE"; else cat "$BEFORE_FIXTURE"; fi
     ;;
   cloudformation:describe-stack-events)
-    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
+    [[ "\${AWS_ACCESS_KEY_ID:-}" == "deploy-access" || "\${AWS_ACCESS_KEY_ID:-}" == "template-access" ]]
     cat "$EVENTS_FIXTURE"
     ;;
   cloudformation:get-template)
+    case "\${AWS_ACCESS_KEY_ID:-}" in
+      deploy-access | template-access) ;;
+      *) exit 93 ;;
+    esac
+    if [[ -e "$IMPORT_MARKER" ]]; then
+      jq -n --slurpfile template "$PUBLISHED_TEMPLATE" '{TemplateBody: $template[0]}'
+    else
+      jq -n --slurpfile template "$CURRENT_TEMPLATE_FIXTURE" '{TemplateBody: $template[0]}'
+    fi
+    ;;
+  cloudformation:create-change-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-    printf '%s\\n' '{"TemplateBody":{}}'
+    resources=$(arg_value --resources-to-import "$@")
+    cp "\${resources#file://}" "$CAPTURED_IMPORT_RESOURCES"
+    printf '%s\\n' "$AWS_ACCESS_KEY_ID" > "$IMPORT_CREDENTIAL"
+    printf '%s\\n' '{"Id":"arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-retained-email-import-1-1/00000000-0000-0000-0000-000000000000","StackId":"arn:aws:cloudformation:us-west-2:<aws-account-id>:stack/PsdEocExplorationSmoke/11111111-1111-1111-1111-111111111111"}'
+    ;;
+  cloudformation:describe-change-set)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
+    cat "$CHANGE_SET_FIXTURE"
+    ;;
+  cloudformation:execute-change-set)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
+    touch "$IMPORT_MARKER"
+    ;;
+  cloudformation:wait)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
     ;;
   sts:get-caller-identity)
     case "\${AWS_ACCESS_KEY_ID:-}" in
@@ -214,32 +356,54 @@ case "$1:$2" in
       deploy-access)
         printf '%s\\n' 'arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2/psd-eoc-retained-email-import-1'
         ;;
+      template-access)
+        printf '%s\\n' 'arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2/psd-eoc-import-template-1'
+        ;;
+      publisher-access)
+        printf '%s\\n' 'arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-file-publishing-role-<aws-account-id>-us-west-2/psd-eoc-import-publish-1'
+        ;;
       *) exit 92 ;;
     esac
     ;;
   sts:assume-role)
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
-    printf '%s\\n' '{"AccessKeyId":"deploy-access","SecretAccessKey":"deploy-secret","SessionToken":"deploy-token"}'
+    role=$(arg_value --role-arn "$@")
+    session=$(arg_value --role-session-name "$@")
+    if [[ "$role" == "$CDK_FILE_PUBLISH_ROLE_ARN" ]]; then
+      printf '%s\\n' '{"AccessKeyId":"publisher-access","SecretAccessKey":"publisher-secret","SessionToken":"publisher-token"}'
+    elif [[ "$session" == psd-eoc-import-template-* ]]; then
+      printf '%s\\n' '{"AccessKeyId":"template-access","SecretAccessKey":"template-secret","SessionToken":"template-token"}'
+    else
+      test "$role" = "$CDK_DEPLOY_ROLE_ARN"
+      printf '%s\\n' '{"AccessKeyId":"deploy-access","SecretAccessKey":"deploy-secret","SessionToken":"deploy-token"}'
+    fi
+    ;;
+  s3api:head-object)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "publisher-access"
+    if [[ "\${PREEXISTING_IMPORT_OBJECT:-false}" == "true" && ! -e "$PUBLISHED_TEMPLATE" ]]; then
+      cp "$EXPECTED_IMPORT_TEMPLATE" "$PUBLISHED_TEMPLATE"
+    fi
+    if [[ ! -e "$PUBLISHED_TEMPLATE" ]]; then
+      printf '%s\\n' 'An error occurred (404) when calling the HeadObject operation: Not Found' >&2
+      exit 254
+    fi
+    head_json
+    ;;
+  s3api:put-object)
+    test "\${AWS_ACCESS_KEY_ID:-}" = "publisher-access"
+    body=$(arg_value --body "$@")
+    bucket=$(arg_value --bucket "$@")
+    key=$(arg_value --key "$@")
+    cp "$body" "$PUBLISHED_TEMPLATE"
+    printf '%s\\n' "$bucket" > "$PUBLISHED_BUCKET"
+    printf '%s\\n' "$key" > "$PUBLISHED_KEY"
+    head_json
     ;;
   *) exit 91 ;;
 esac
 `,
-      ),
-      Bun.write(
-        bunxPath,
-        `#!/usr/bin/env bash
-set -euo pipefail
-test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-test "\${AWS_SECRET_ACCESS_KEY:-}" = "deploy-secret"
-test "\${AWS_SESSION_TOKEN:-}" = "deploy-token"
-aws cloudformation get-template --stack-name PsdEocExplorationSmoke > /dev/null
-printf '%s\\n' "$AWS_ACCESS_KEY_ID" > "$IMPORT_CREDENTIAL"
-printf '%s\\n' "$@" > "$IMPORT_ARGUMENTS"
-touch "$IMPORT_MARKER"
-`,
-      ),
-    ]);
-    await Promise.all([chmod(awsPath, 0o755), chmod(bunxPath, 0o755)]);
+    );
+    await chmod(awsPath, 0o755);
 
     const childEnvironment = {
       ...process.env,
@@ -250,16 +414,34 @@ touch "$IMPORT_MARKER"
       AWS_SECRET_ACCESS_KEY: 'oidc-secret',
       AWS_SESSION_TOKEN: 'oidc-token',
       BEFORE_FIXTURE: beforeFile,
+      CAPTURED_IMPORT_RESOURCES: capturedImportResources,
+      CDK_ASSET_BUCKET: 'cdk-hnb659fds-assets-<aws-account-id>-us-west-2',
+      CDK_CFN_EXEC_ROLE_ARN:
+        'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2',
       CDK_DEPLOY_ROLE_ARN:
         'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2',
+      CDK_FILE_PUBLISH_ROLE_ARN:
+        'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-file-publishing-role-<aws-account-id>-us-west-2',
+      CHANGE_SET_FIXTURE: changeSetFixture,
+      CURRENT_TEMPLATE_FIXTURE: currentTemplateFile,
       EVENTS_FIXTURE: eventsFile,
+      EXPECTED_IMPORT_TEMPLATE: join(
+        readback,
+        'email-recovery-import-template.json',
+      ),
       GITHUB_RUN_ATTEMPT: '1',
       GITHUB_RUN_ID: '1',
-      IMPORT_ARGUMENTS: importArguments,
       IMPORT_CREDENTIAL: importCredential,
       IMPORT_MARKER: importMarker,
       MANAGED_FIXTURE: managedFile,
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      PREEXISTING_IMPORT_OBJECT: options.preexistingImportObject
+        ? 'true'
+        : 'false',
+      PUBLISHED_BUCKET: publishedBucket,
+      PUBLISHED_KEY: publishedKey,
+      PUBLISHED_TEMPLATE: publishedTemplate,
+      RUNNER_TEMP: directory,
       STACK_FIXTURE: stackFile,
       STACK_NAME: 'PsdEocExplorationSmoke',
     };
@@ -285,24 +467,56 @@ touch "$IMPORT_MARKER"
 
     const mappingPath = join(readback, 'email-recovery-resource-mapping.json');
     const resultPath = join(readback, 'email-recovery-result.json');
+    const changeSetPath = join(readback, 'email-recovery-change-set.json');
+    const importObjectPath = join(
+      readback,
+      'email-recovery-import-object.json',
+    );
+    const importResourcesPath = join(
+      readback,
+      'email-recovery-import-resources.json',
+    );
+    const publicationResultPath = join(
+      readback,
+      'email-recovery-publication-result.json',
+    );
     return {
       awsCalls: (await Bun.file(awsCalls).exists())
         ? (await Bun.file(awsCalls).text()).trim().split('\n')
         : [],
+      changeSet: (await Bun.file(changeSetPath).exists())
+        ? await Bun.file(changeSetPath).json()
+        : undefined,
       defaultGetTemplateExitCode: defaultGetTemplate.exitCode,
       exitCode: child.exitCode,
-      importArguments: (await Bun.file(importArguments).exists())
-        ? await Bun.file(importArguments).text()
-        : undefined,
       importCredential: (await Bun.file(importCredential).exists())
         ? await Bun.file(importCredential).text()
+        : undefined,
+      importObject: (await Bun.file(importObjectPath).exists())
+        ? await Bun.file(importObjectPath).json()
+        : undefined,
+      importResources: (await Bun.file(importResourcesPath).exists())
+        ? await Bun.file(importResourcesPath).json()
         : undefined,
       mapping: (await Bun.file(mappingPath).exists())
         ? await Bun.file(mappingPath).json()
         : undefined,
+      publicationResult: (await Bun.file(publicationResultPath).exists())
+        ? await Bun.file(publicationResultPath).json()
+        : undefined,
+      publishedBucket: (await Bun.file(publishedBucket).exists())
+        ? (await Bun.file(publishedBucket).text()).trim()
+        : undefined,
+      publishedKey: (await Bun.file(publishedKey).exists())
+        ? (await Bun.file(publishedKey).text()).trim()
+        : undefined,
+      publishedTemplate: (await Bun.file(publishedTemplate).exists())
+        ? await Bun.file(publishedTemplate).json()
+        : undefined,
       result: (await Bun.file(resultPath).exists())
         ? await Bun.file(resultPath).json()
         : undefined,
+      stderr: child.stderr.toString(),
     };
   } finally {
     await rm(directory, { force: true, recursive: true });
@@ -644,18 +858,56 @@ describe('isolated CDK entrypoint configuration', () => {
     expect(workflow).toContain(
       'EmailEventsKey619540BF: {KeyId: $events_key_id}',
     );
-    expect(workflow).toContain('import "$STACK_NAME" \\');
-    expect(workflow).toContain('--resource-mapping "$mapping"');
+    expect(workflow).toContain(
+      'CDK_ASSET_BUCKET: cdk-hnb659fds-assets-<aws-account-id>-us-west-2',
+    );
+    expect(workflow).toContain(
+      'CDK_CFN_EXEC_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2',
+    );
+    expect(workflow).toContain(
+      'CDK_FILE_PUBLISH_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-file-publishing-role-<aws-account-id>-us-west-2',
+    );
+    expect(workflow).toContain('aws s3api put-object \\');
+    expect(workflow).toContain('--checksum-algorithm SHA256');
+    expect(workflow).toContain('--server-side-encryption AES256');
+    expect(workflow).toContain('aws cloudformation create-change-set \\');
+    expect(workflow).toContain('--change-set-type IMPORT');
+    expect(workflow).toContain(
+      '--resources-to-import "file://$import_resources"',
+    );
+    expect(workflow).toContain('--template-url "$import_template_url"');
+    expect(workflow).toContain('--role-arn "$CDK_CFN_EXEC_ROLE_ARN"');
+    expect(workflow).toContain('--output json > "$current_template_response"');
+    expect(workflow).toContain(
+      `jq -S '.TemplateBody' "$current_template_response" > "$current_template"`,
+    );
+    expect(workflow).toContain('--output json > "$imported_template_response"');
+    expect(workflow).toContain(
+      `jq -S '.TemplateBody' "$imported_template_response" > "$imported_template"`,
+    );
+    expect(workflow).toContain('(.TemplateBody.Resources | type) == "object"');
+    expect(workflow).not.toContain('--query TemplateBody');
+    expect(workflow).toContain(
+      '--role-session-name "psd-eoc-import-template-${GITHUB_RUN_ID}"',
+    );
+    expect(workflow).toContain(
+      '--role-session-name "psd-eoc-import-publish-${GITHUB_RUN_ID}"',
+    );
     expect(workflow).toContain(
       '--role-session-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}"',
     );
     expect(workflow).toContain(
-      'unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token deploy_caller_arn',
+      'unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token',
     );
     expect(workflow).toContain(
       'test "$post_import_caller_arn" = "$oidc_caller_arn"',
     );
     expect(workflow).not.toContain('export AWS_ACCESS_KEY_ID');
+    expect(workflow).not.toContain('export AWS_SECRET_ACCESS_KEY');
+    expect(workflow).not.toContain('export AWS_SESSION_TOKEN');
+    expect(workflow).toContain('template_aws() {');
+    expect(workflow).toContain('publisher_aws() {');
+    expect(workflow).toContain('import_aws() {');
     expect(workflow).toContain(
       'Retained dark-email resources are partial or ambiguous; refusing recovery.',
     );
@@ -676,7 +928,10 @@ describe('isolated CDK entrypoint configuration', () => {
       'aws cloudformation continue-update-rollback',
     );
     expect(workflow).not.toContain('aws cloudformation delete-stack');
+    expect(workflow).not.toContain('aws cloudformation delete-change-set');
+    expect(workflow).not.toContain('aws s3api delete-object');
     expect(workflow).not.toContain('aws kms schedule-key-deletion');
+    expect(workflow).not.toContain('cdk import');
   });
 
   it('imports the exact four-resource rollback inventory from the prior live stack', async () => {
@@ -701,22 +956,149 @@ describe('isolated CDK entrypoint configuration', () => {
         LogGroupName: '/psd-eoc/workers/email',
       },
     });
-    expect(recovery.importArguments).toContain(
-      'import\nPsdEocExplorationSmoke',
-    );
-    expect(recovery.importArguments).toContain('--force');
-    expect(recovery.importArguments).toContain('--resource-mapping');
     expect(recovery.defaultGetTemplateExitCode).not.toBe(0);
     expect(recovery.importCredential).toBe('deploy-access\n');
-    const importGetTemplate = recovery.awsCalls.findIndex(
-      (call) => call === 'cloudformation:get-template\tdeploy-access',
+    expect(recovery.publicationResult).toEqual({ state: 'published' });
+    expect(recovery.publishedBucket).toBe(
+      'cdk-hnb659fds-assets-<aws-account-id>-us-west-2',
     );
-    expect(importGetTemplate).toBeGreaterThanOrEqual(0);
+    expect(recovery.publishedKey).toMatch(
+      /^cdk\/PsdEocExplorationSmoke\/import-[0-9a-f]{64}[.]json$/,
+    );
+    const publishedKey = recovery.publishedKey as string;
+
+    const importObject = recovery.importObject as {
+      readonly bucket: string;
+      readonly bytes: number;
+      readonly checksumSha256: string;
+      readonly key: string;
+      readonly sha256: string;
+      readonly url: string;
+    };
+    expect(importObject).toEqual({
+      bucket: 'cdk-hnb659fds-assets-<aws-account-id>-us-west-2',
+      bytes: expect.any(Number),
+      checksumSha256: expect.stringMatching(/^[A-Za-z0-9+/]{43}=$/),
+      key: publishedKey,
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      url: `https://cdk-hnb659fds-assets-<aws-account-id>-us-west-2.s3.us-west-2.amazonaws.com/${publishedKey}`,
+    });
+    expect(importObject.bytes).toBeGreaterThan(0);
+    expect(publishedKey).toBe(
+      `cdk/PsdEocExplorationSmoke/import-${importObject.sha256}.json`,
+    );
+    expect(recovery.publishedTemplate).toEqual({
+      AWSTemplateFormatVersion: '2010-09-09',
+      Description:
+        'Isolated synthetic-only PSD EOC exploration web/mobile backend (GitHub issue #163)',
+      Parameters: { SourceSha: { Type: 'String' } },
+      Resources: {
+        EmailConfigurationSet: {
+          DeletionPolicy: 'Retain',
+          Properties: {
+            Name: 'psd-eoc-transactional',
+            SendingOptions: { SendingEnabled: false },
+          },
+          Type: 'AWS::SES::ConfigurationSet',
+        },
+        EmailDeadLetterQueue5E91C06C: {
+          DeletionPolicy: 'Retain',
+          Properties: {
+            QueueName: 'psd-eoc-email-dlq',
+            SqsManagedSseEnabled: true,
+          },
+          Type: 'AWS::SQS::Queue',
+        },
+        EmailEventsKey619540BF: {
+          DeletionPolicy: 'Retain',
+          Properties: { EnableKeyRotation: true },
+          Type: 'AWS::KMS::Key',
+        },
+        EmailWorkerLogGroup0611E5C2: {
+          DeletionPolicy: 'Retain',
+          Properties: {
+            LogGroupName: '/psd-eoc/workers/email',
+            RetentionInDays: 14,
+          },
+          Type: 'AWS::Logs::LogGroup',
+        },
+        ExistingHealthQueue: {
+          Properties: {
+            QueueName: 'psd-eoc-exploration-smoke-health',
+          },
+          Type: 'AWS::SQS::Queue',
+        },
+      },
+    });
+    expect(recovery.importResources).toEqual([
+      {
+        LogicalResourceId: 'EmailWorkerLogGroup0611E5C2',
+        ResourceIdentifier: { LogGroupName: '/psd-eoc/workers/email' },
+        ResourceType: 'AWS::Logs::LogGroup',
+      },
+      {
+        LogicalResourceId: 'EmailDeadLetterQueue5E91C06C',
+        ResourceIdentifier: {
+          QueueUrl:
+            'https://sqs.us-west-2.amazonaws.com/<aws-account-id>/psd-eoc-email-dlq',
+        },
+        ResourceType: 'AWS::SQS::Queue',
+      },
+      {
+        LogicalResourceId: 'EmailConfigurationSet',
+        ResourceIdentifier: { Name: 'psd-eoc-transactional' },
+        ResourceType: 'AWS::SES::ConfigurationSet',
+      },
+      {
+        LogicalResourceId: 'EmailEventsKey619540BF',
+        ResourceIdentifier: {
+          KeyId: '01234567-89ab-cdef-0123-456789abcdef',
+        },
+        ResourceType: 'AWS::KMS::Key',
+      },
+    ]);
+    expect(recovery.changeSet).toMatchObject({
+      ChangeSetType: 'IMPORT',
+      ExecutionStatus: 'AVAILABLE',
+      RoleARN:
+        'arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2',
+      Status: 'CREATE_COMPLETE',
+    });
+
     expect(
-      recovery.awsCalls
-        .slice(importGetTemplate + 1)
-        .every((call) => call.endsWith('\toidc-access')),
-    ).toBe(true);
+      recovery.awsCalls.filter((call) => call.startsWith('s3api:')),
+    ).toEqual([
+      's3api:head-object\tpublisher-access',
+      's3api:put-object\tpublisher-access',
+      's3api:head-object\tpublisher-access',
+    ]);
+    expect(
+      recovery.awsCalls.filter((call) =>
+        /^(cloudformation:(create-change-set|describe-change-set|execute-change-set|wait))\t/.test(
+          call,
+        ),
+      ),
+    ).toEqual([
+      'cloudformation:create-change-set\tdeploy-access',
+      'cloudformation:wait\tdeploy-access',
+      'cloudformation:describe-change-set\tdeploy-access',
+      'cloudformation:execute-change-set\tdeploy-access',
+      'cloudformation:wait\tdeploy-access',
+    ]);
+    expect(recovery.awsCalls).toContain(
+      'cloudformation:get-template\ttemplate-access',
+    );
+    expect(recovery.awsCalls).toContain(
+      'cloudformation:get-template\tdeploy-access',
+    );
+    expect(recovery.awsCalls.at(-1)).toBe(
+      'cloudformation:list-stack-resources\toidc-access',
+    );
+    expect(
+      recovery.awsCalls.filter(
+        (call) => call === 'sts:get-caller-identity\toidc-access',
+      ),
+    ).toHaveLength(4);
   });
 
   it('retries idempotently without another import once all four resources are managed', async () => {
@@ -731,8 +1113,36 @@ describe('isolated CDK entrypoint configuration', () => {
 
     expect(recovery.exitCode).toBe(0);
     expect(recovery.result).toEqual({ state: 'already-managed' });
-    expect(recovery.importArguments).toBeUndefined();
+    expect(recovery.publicationResult).toBeUndefined();
+    expect(recovery.importCredential).toBeUndefined();
+    expect(recovery.publishedKey).toBeUndefined();
     expect(recovery.mapping).toBeUndefined();
+    expect(recovery.awsCalls).not.toContain(
+      'cloudformation:create-change-set\tdeploy-access',
+    );
+  });
+
+  it('reuses an exact digest-matching import object after publication was interrupted', async () => {
+    const recovery = await runRecoveryScenario({
+      before: retainedRecoveryResources,
+      events: retainedRecoveryResources,
+      preexistingImportObject: true,
+      stackStatus: 'UPDATE_ROLLBACK_COMPLETE',
+    });
+
+    expect(recovery.exitCode).toBe(0);
+    expect(recovery.result).toEqual({ state: 'imported' });
+    expect(recovery.publicationResult).toEqual({ state: 'already-published' });
+    expect(
+      recovery.awsCalls.filter((call) => call.startsWith('s3api:')),
+    ).toEqual(['s3api:head-object\tpublisher-access']);
+    expect(recovery.awsCalls).not.toContain(
+      's3api:put-object\tpublisher-access',
+    );
+    expect(recovery.importCredential).toBe('deploy-access\n');
+    expect(recovery.awsCalls.at(-1)).toBe(
+      'cloudformation:list-stack-resources\toidc-access',
+    );
   });
 
   it('fails closed on a partial retained-resource rollback inventory', async () => {
@@ -745,7 +1155,9 @@ describe('isolated CDK entrypoint configuration', () => {
 
     expect(recovery.exitCode).not.toBe(0);
     expect(recovery.result).toBeUndefined();
-    expect(recovery.importArguments).toBeUndefined();
+    expect(recovery.publicationResult).toBeUndefined();
+    expect(recovery.importCredential).toBeUndefined();
+    expect(recovery.publishedKey).toBeUndefined();
   });
 
   it('scopes and verifies 14-day retention for the two exact App Runner logs', async () => {
