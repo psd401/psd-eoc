@@ -16,6 +16,7 @@ const accountId = '338414773271';
 const region = 'us-west-2';
 const roleName = 'psd-eoc-exploration-smoke-github-deploy';
 const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
+const appRunnerServiceArn = `arn:aws:apprunner:${region}:${accountId}:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c`;
 const configurationSetArn = `arn:aws:ses:${region}:${accountId}:configuration-set/psd-eoc-transactional`;
 const policyName = 'psd-eoc-exploration-smoke-ses-readback';
 
@@ -41,6 +42,25 @@ async function readTemplate(): Promise<PolicyTemplate> {
   return Bun.file(templateUrl).json();
 }
 
+function authorizedPredecessor(template: PolicyTemplate): PolicyTemplate {
+  const predecessor = structuredClone(template) as PolicyTemplate & {
+    Description: string;
+    Resources: {
+      ExplorationSmokeSesReadbackPolicy: {
+        Properties: { PolicyDocument: { Statement: unknown[] } };
+      };
+    };
+  };
+  predecessor.Description =
+    'Retained least-privilege SES readback policy for the protected PSD EOC exploration deployment role';
+  predecessor.Resources.ExplorationSmokeSesReadbackPolicy.Properties.PolicyDocument.Statement =
+    predecessor.Resources.ExplorationSmokeSesReadbackPolicy.Properties.PolicyDocument.Statement.slice(
+      0,
+      1,
+    );
+  return predecessor;
+}
+
 function applyScript(workflow: string): string {
   const script = workflow.match(
     / {6}- name: Apply exact retained policy and prove boundaries[\s\S]*? {8}run: \|\n([\s\S]*?)\n {6}- name: Upload exact policy and readback evidence/,
@@ -53,8 +73,10 @@ function applyScript(workflow: string): string {
 
 async function runScenario(options: {
   readonly changeSetMismatch?: boolean;
+  readonly existingPredecessor?: boolean;
   readonly existingStack: boolean;
   readonly interruptedCreate?: boolean;
+  readonly templateMismatch?: boolean;
 }): Promise<ScenarioResult> {
   const directory = await mkdtemp(join(tmpdir(), 'psd-eoc-ses-policy-'));
   try {
@@ -62,6 +84,8 @@ async function runScenario(options: {
     const artifacts = join(directory, 'artifacts');
     const readback = join(artifacts, 'readback');
     const marker = join(directory, 'policy-applied');
+    const updatedMarker = join(directory, 'policy-updated');
+    const predecessorTemplate = join(directory, 'policy-predecessor.json');
     const calls = join(directory, 'aws-calls.txt');
     const capturedRequest = join(directory, 'change-set-request.json');
     const summary = join(directory, 'summary.md');
@@ -72,6 +96,10 @@ async function runScenario(options: {
     await Bun.write(
       join(artifacts, 'exploration-smoke-ses-readback-policy.template.json'),
       JSON.stringify(await readTemplate(), null, 2),
+    );
+    await Bun.write(
+      predecessorTemplate,
+      JSON.stringify(authorizedPredecessor(await readTemplate()), null, 2),
     );
     if (options.existingStack) {
       await Bun.write(marker, 'existing\n');
@@ -118,7 +146,31 @@ role_json() {
 }
 
 template_response() {
-  jq -n --slurpfile template "$POLICY_TEMPLATE" '{TemplateBody:$template[0]}'
+  local source=$POLICY_TEMPLATE
+  if [[ "$AUTHORIZED_PREDECESSOR" == "true" && ! -e "$POLICY_UPDATED_MARKER" ]]; then
+    source=$PREDECESSOR_TEMPLATE
+  fi
+  if [[ "$TEMPLATE_MISMATCH" == "true" && ! -e "$POLICY_UPDATED_MARKER" ]]; then
+    jq -n --slurpfile template "$source" '{TemplateBody:($template[0] | .Description = "unapproved retained policy")}'
+  else
+    jq -n --slurpfile template "$source" '{TemplateBody:$template[0]}'
+  fi
+}
+
+retained_policy_json() {
+  local source=$POLICY_TEMPLATE
+  if [[ "$AUTHORIZED_PREDECESSOR" == "true" && ! -e "$POLICY_UPDATED_MARKER" ]]; then
+    source=$PREDECESSOR_TEMPLATE
+  fi
+  jq -n \
+    --arg policy_name "$POLICY_NAME" \
+    --arg role_name "$DEPLOY_ROLE_NAME" \
+    --slurpfile template "$source" \
+    '{
+      RoleName:$role_name,
+      PolicyName:$policy_name,
+      PolicyDocument:$template[0].Resources.ExplorationSmokeSesReadbackPolicy.Properties.PolicyDocument
+    }'
 }
 
 case "$1:$2" in
@@ -160,16 +212,7 @@ case "$1:$2" in
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
     requested=$(arg_value --policy-name "$@")
     if [[ "$requested" == "psd-eoc-exploration-smoke-ses-readback" ]]; then
-      printf '%s\n' '{
-        "RoleName":"psd-eoc-exploration-smoke-github-deploy",
-        "PolicyName":"psd-eoc-exploration-smoke-ses-readback",
-        "PolicyDocument":{"Version":"2012-10-17","Statement":[{
-          "Sid":"ReadCanonicalConfigurationSetOnly",
-          "Effect":"Allow",
-          "Action":["ses:GetConfigurationSet","ses:GetConfigurationSetEventDestinations"],
-          "Resource":"arn:aws:ses:us-west-2:338414773271:configuration-set/psd-eoc-transactional"
-        }]}
-      }'
+      retained_policy_json
     else
       printf '%s\n' '{
         "RoleName":"psd-eoc-exploration-smoke-github-deploy",
@@ -205,10 +248,14 @@ case "$1:$2" in
     done
     jq -n \
       --arg resource "$resource" \
-      --arg canonical "$CONFIGURATION_SET_ARN" \
+      --arg app_runner_canonical "$APP_RUNNER_SERVICE_ARN" \
+      --arg configuration_set_canonical "$CONFIGURATION_SET_ARN" \
       --args '{EvaluationResults:[$ARGS.positional[] | {
         EvalActionName:.,
-        EvalDecision:(if ($resource == $canonical and (. == "ses:GetConfigurationSet" or . == "ses:GetConfigurationSetEventDestinations")) then "allowed" else "implicitDeny" end),
+        EvalDecision:(if
+          ($resource == $configuration_set_canonical and (. == "ses:GetConfigurationSet" or . == "ses:GetConfigurationSetEventDestinations")) or
+          ($resource == $app_runner_canonical and (. == "apprunner:AssociateCustomDomain" or . == "apprunner:DescribeCustomDomains" or . == "apprunner:ListOperations"))
+          then "allowed" else "implicitDeny" end),
         EvalResourceName:$resource
       }]}' "\${actions[@]}"
     ;;
@@ -259,7 +306,7 @@ case "$1:$2" in
     ;;
   cloudformation:wait)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-    if [[ "$3" == "change-set-create-complete" && "$EXISTING_STACK" == "true" ]]; then
+    if [[ "$3" == "change-set-create-complete" && "$EXISTING_STACK" == "true" && "$AUTHORIZED_PREDECESSOR" == "false" ]]; then
       exit 255
     fi
     ;;
@@ -278,6 +325,20 @@ case "$1:$2" in
         ExecutionStatus:"AVAILABLE",
         Capabilities:["CAPABILITY_NAMED_IAM"],
         Changes:[{ResourceChange:{Action:$action,LogicalResourceId:"ExplorationSmokeSesReadbackPolicy",ResourceType:"AWS::IAM::Policy"}}]
+      }'
+    elif [[ "$EXISTING_STACK" == "true" && "$AUTHORIZED_PREDECESSOR" == "true" ]]; then
+      action=Modify
+      if [[ "$CHANGE_SET_MISMATCH" == "true" ]]; then action=Add; fi
+      jq -n --arg action "$action" '{
+        ChangeSetId:"arn:aws:cloudformation:us-west-2:338414773271:changeSet/psd-eoc-ses-readback-1-1/00000000-0000-0000-0000-000000000000",
+        ChangeSetName:"psd-eoc-ses-readback-1-1",
+        OnStackFailure:null,
+        Description:"Exact SES readback policy for GitHub run 1/1 with client token psd-eoc-ses-readback-1-1",
+        StackName:"PsdEocExplorationSmokeSesReadbackPolicy",
+        Status:"CREATE_COMPLETE",
+        ExecutionStatus:"AVAILABLE",
+        Capabilities:["CAPABILITY_NAMED_IAM"],
+        Changes:[{ResourceChange:{Action:$action,LogicalResourceId:"ExplorationSmokeSesReadbackPolicy",Replacement:"False",ResourceType:"AWS::IAM::Policy"}}]
       }'
     elif [[ "$EXISTING_STACK" == "true" ]]; then
       printf '%s\n' '{
@@ -308,20 +369,7 @@ case "$1:$2" in
   cloudformation:execute-change-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
     touch "$POLICY_MARKER"
-    ;;
-  cloudformation:list-stack-resources)
-    test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
-    if [[ "$INTERRUPTED_CREATE" == "true" && ! -e "$POLICY_MARKER" ]]; then
-      printf '%s\n' '{"StackResourceSummaries":[]}'
-    else
-      test -e "$POLICY_MARKER"
-      printf '%s\n' '{"StackResourceSummaries":[{
-        "LogicalResourceId":"ExplorationSmokeSesReadbackPolicy",
-        "PhysicalResourceId":"PsdEocExplorationSmokeSesReadbackPolicy-ExplorationSmokeSesReadbackPolicy",
-        "ResourceStatus":"CREATE_COMPLETE",
-        "ResourceType":"AWS::IAM::Policy"
-      }]}'
-    fi
+    touch "$POLICY_UPDATED_MARKER"
     ;;
   sesv2:get-configuration-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
@@ -351,12 +399,14 @@ esac
       env: {
         ...process.env,
         AWS_ACCESS_KEY_ID: 'oidc-access',
+        APP_RUNNER_SERVICE_ARN: appRunnerServiceArn,
         AWS_ACCOUNT_ALIAS: 'psd401',
         AWS_ACCOUNT_ID: accountId,
         AWS_CALLS: calls,
         AWS_REGION: region,
         AWS_SECRET_ACCESS_KEY: 'oidc-secret',
         AWS_SESSION_TOKEN: 'oidc-token',
+        AUTHORIZED_PREDECESSOR: options.existingPredecessor ? 'true' : 'false',
         CAPTURED_CHANGE_SET_REQUEST: capturedRequest,
         CDK_CFN_EXEC_ROLE_ARN: `arn:aws:iam::${accountId}:role/cdk-hnb659fds-cfn-exec-role-${accountId}-${region}`,
         CDK_DEPLOY_ROLE_ARN: `arn:aws:iam::${accountId}:role/cdk-hnb659fds-deploy-role-${accountId}-${region}`,
@@ -378,13 +428,16 @@ esac
         PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
         POLICY_MARKER: marker,
         POLICY_NAME: policyName,
+        POLICY_UPDATED_MARKER: updatedMarker,
         POLICY_TEMPLATE: join(
           artifacts,
           'exploration-smoke-ses-readback-policy.template.json',
         ),
+        PREDECESSOR_TEMPLATE: predecessorTemplate,
         RUNNER_TEMP: directory,
         SOURCE_SHA: '0'.repeat(40),
         STACK_NAME: 'PsdEocExplorationSmokeSesReadbackPolicy',
+        TEMPLATE_MISMATCH: options.templateMismatch ? 'true' : 'false',
       },
       stderr: 'pipe',
       stdout: 'pipe',
@@ -410,11 +463,11 @@ esac
 }
 
 describe('protected exploration SES readback policy', () => {
-  it('contains only the two exact read actions on the canonical configuration set', async () => {
+  it('contains only the exact SES reads and App Runner domain authority on canonical resources', async () => {
     expect(await readTemplate()).toEqual({
       AWSTemplateFormatVersion: '2010-09-09',
       Description:
-        'Retained least-privilege SES readback policy for the protected PSD EOC exploration deployment role',
+        'Retained least-privilege operations policy for the protected PSD EOC exploration deployment role',
       Resources: {
         ExplorationSmokeSesReadbackPolicy: {
           DeletionPolicy: 'Retain',
@@ -430,6 +483,16 @@ describe('protected exploration SES readback policy', () => {
                   Resource: configurationSetArn,
                   Sid: 'ReadCanonicalConfigurationSetOnly',
                 },
+                {
+                  Action: [
+                    'apprunner:AssociateCustomDomain',
+                    'apprunner:DescribeCustomDomains',
+                    'apprunner:ListOperations',
+                  ],
+                  Effect: 'Allow',
+                  Resource: appRunnerServiceArn,
+                  Sid: 'ReadAndAssociateCanonicalCustomDomainOnly',
+                },
               ],
               Version: '2012-10-17',
             },
@@ -443,6 +506,16 @@ describe('protected exploration SES readback policy', () => {
     });
   });
 
+  it('excludes wildcard, disassociation, Route53, send, and unrelated App Runner authority', async () => {
+    const serialized = JSON.stringify(await readTemplate());
+    expect(serialized).not.toContain('"Resource":"*"');
+    expect(serialized).not.toContain('apprunner:DisassociateCustomDomain');
+    expect(serialized).not.toContain('route53:');
+    expect(serialized).not.toContain('ses:Send');
+    expect(serialized).not.toContain('apprunner:DeleteService');
+    expect(serialized).not.toContain('apprunner:UpdateService');
+  });
+
   it('uses a protected main-only OIDC workflow with immutable source and zero provider writes', async () => {
     const workflow = await readWorkflow();
     expect(workflow).toContain('environment: exploration-smoke');
@@ -450,7 +523,7 @@ describe('protected exploration SES readback policy', () => {
     expect(workflow).toContain("github.ref == 'refs/heads/main'");
     expect(workflow).toContain('test "$SOURCE_SHA" = "$GITHUB_SHA"');
     expect(workflow).toContain(
-      'APPLY EXACT SES READBACK POLICY WITH ZERO SEND AUTHORITY',
+      'APPLY EXACT SES READS AND APP RUNNER DOMAIN AUTHORITY WITH NO SEND OR DNS AUTHORITY',
     );
     expect(workflow).toContain(
       'aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708',
@@ -466,6 +539,7 @@ describe('protected exploration SES readback policy', () => {
     expect(workflow).not.toContain('sesv2 send-');
     expect(workflow).not.toContain('apprunner associate-custom-domain');
     expect(workflow).not.toContain('route53 change-resource-record-sets');
+    expect(workflow).not.toContain('cloudformation list-stack-resources');
   });
 
   it('executes a first apply through only the scoped deploy role and restores OIDC', async () => {
@@ -494,6 +568,14 @@ describe('protected exploration SES readback policy', () => {
     ).toBe(true);
     expect(result.awsCalls).toContain('sts:get-caller-identity:oidc-access');
     expect(result.awsCalls).toContain('sts:get-caller-identity:deploy-access');
+    expect(
+      result.awsCalls.filter(
+        (call) => call === 'iam:simulate-principal-policy:oidc-access',
+      ),
+    ).toHaveLength(7);
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:list-stack-resources:deploy-access',
+    );
   });
 
   it('accepts only the exact idempotent no-change response and does not execute it', async () => {
@@ -501,6 +583,54 @@ describe('protected exploration SES readback policy', () => {
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.result).toEqual({ state: 'already-applied' });
     expect(result.changeSetRequest).toMatchObject({ ChangeSetType: 'UPDATE' });
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:execute-change-set:deploy-access',
+    );
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:list-stack-resources:deploy-access',
+    );
+  });
+
+  it('updates only the exact authorized SES-only predecessor without replacement', async () => {
+    const result = await runScenario({
+      existingPredecessor: true,
+      existingStack: true,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.result).toEqual({ state: 'applied' });
+    expect(result.changeSetRequest).toMatchObject({ ChangeSetType: 'UPDATE' });
+    expect(result.awsCalls).toContain(
+      'cloudformation:execute-change-set:deploy-access',
+    );
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:list-stack-resources:deploy-access',
+    );
+  });
+
+  it('fails closed before creating a change set when the retained template is neither authorized version', async () => {
+    const result = await runScenario({
+      existingPredecessor: true,
+      existingStack: true,
+      templateMismatch: true,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.result).toBeUndefined();
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:create-change-set:deploy-access',
+    );
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:execute-change-set:deploy-access',
+    );
+  });
+
+  it('fails closed when the authorized predecessor update is not one exact non-replacing policy modification', async () => {
+    const result = await runScenario({
+      changeSetMismatch: true,
+      existingPredecessor: true,
+      existingStack: true,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.result).toBeUndefined();
     expect(result.awsCalls).not.toContain(
       'cloudformation:execute-change-set:deploy-access',
     );
@@ -522,6 +652,9 @@ describe('protected exploration SES readback policy', () => {
     );
     expect(result.awsCalls).not.toContain(
       'cloudformation:create-change-set:deploy-access',
+    );
+    expect(result.awsCalls).not.toContain(
+      'cloudformation:list-stack-resources:deploy-access',
     );
   });
 
