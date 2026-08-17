@@ -1989,29 +1989,14 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
           googleSubject: recoverySubject,
           facilityScopeKind: 'district',
         },
-        {
-          snapshotId: sourceSnapshotId,
-          userId: existingUserId,
-          googleSubject: existingSubject,
-          facilityScopeKind: 'district',
-        },
       ]);
-      await transaction.insert(accessMembershipMemberGroups).values([
-        {
-          snapshotId: sourceSnapshotId,
-          userId: recoveryUserId,
-          groupSourceId: sourceId,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-        },
-        {
-          snapshotId: sourceSnapshotId,
-          userId: existingUserId,
-          groupSourceId: recoverySourceId,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-        },
-      ]);
+      await transaction.insert(accessMembershipMemberGroups).values({
+        snapshotId: sourceSnapshotId,
+        userId: recoveryUserId,
+        groupSourceId: sourceId,
+        groupSourceKind: 'google-group',
+        groupPurpose: 'access',
+      });
     });
 
     const store = createDrizzleAccessGateStore(database);
@@ -2120,11 +2105,9 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
             eq(accessMembershipMemberGroups.userId, existingUserId),
           ),
         ),
-    ).toEqual(
-      expect.arrayContaining([
-        { groupSourceId: recoverySourceId },
-        { groupSourceId: sourceId },
-      ]),
+    ).toEqual([{ groupSourceId: sourceId }]);
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
+      expect.arrayContaining([recoveryUserId, existingUserId]),
     );
 
     const checkedAt = new Date(existingCheckedAt.getTime() + 1_000);
