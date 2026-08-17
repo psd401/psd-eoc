@@ -40,7 +40,7 @@ export const AccessMembershipSyncSummarySchema = z
     evaluatedMembershipCount: z.number().int().min(1).max(1_200),
     membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-    dailyAdminDirectMember: z.literal(true),
+    initialTransitionCandidateDirectMember: z.literal(true),
     publication: z.enum(['created', 'already-current']),
   })
   .strict()
@@ -95,7 +95,7 @@ export function accessMembershipSyncSummary(
     evaluatedMembershipCount: result.evaluatedMembershipCount,
     membershipDigest: result.membershipDigest,
     providerGroupIdDigest: result.providerGroupIdDigest,
-    dailyAdminDirectMember: true,
+    initialTransitionCandidateDirectMember: true,
     publication: result.publication,
   });
 }

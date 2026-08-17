@@ -323,16 +323,19 @@ jobs:
           jq -r '.events[].message' "$RUNNER_TEMP/access-sync-logs.json" \
             > "$RUNNER_TEMP/access-sync-messages.txt"
           test "$(wc -l < "$RUNNER_TEMP/access-sync-messages.txt" | tr -d ' ')" -eq 1
-          ! grep -Eq '@|users/|groups/|access_token|private_key|Bearer ' \
-            "$RUNNER_TEMP/access-sync-messages.txt"
+          if grep -Eq '@|users/|groups/|access_token|private_key|Bearer ' \
+            "$RUNNER_TEMP/access-sync-messages.txt"; then
+            echo "Aggregate access-sync output contained a forbidden identity or credential marker." >&2
+            exit 1
+          fi
           jq -e --arg source_sha "$SOURCE_SHA" '
             (keys | sort) == [
               "activeAccessGroupCount",
               "capturedAt",
-              "dailyAdminDirectMember",
               "designatedSourceId",
               "evaluatedMembershipCount",
               "event",
+              "initialTransitionCandidateDirectMember",
               "membershipDigest",
               "providerGroupIdDigest",
               "publication",
@@ -342,11 +345,11 @@ jobs:
             ] and
             .event == "access-membership-sync-complete" and
             .sourceSha == $source_sha and
-            .dailyAdminDirectMember == true and
+            .initialTransitionCandidateDirectMember == true and
             (.snapshotId | test("^[0-9a-f-]{36}$")) and
             (.designatedSourceId | test("^[0-9a-f-]{36}$")) and
             (.snapshotVersion | type == "number" and . >= 1) and
-            (.activeAccessGroupCount | type == "number" and . >= 1 and . <= 100) and
+            .activeAccessGroupCount == 2 and
             (.evaluatedMembershipCount | type == "number" and . >= 1 and . <= 1200) and
             (.membershipDigest | test("^[a-f0-9]{64}$")) and
             (.providerGroupIdDigest | test("^[a-f0-9]{64}$")) and
@@ -373,7 +376,7 @@ jobs:
             echo "- Source: \`$SOURCE_SHA\`"
             echo "- Image: \`$IMAGE_DIGEST\`"
             echo "- Authorization: $CHANGE_REFERENCE"
-            echo "- Google direct-user evidence included the daily district administrator: **yes**"
+            echo "- Google direct-user evidence included the initial mobile transition candidate: **yes**"
             echo "- Full member emails, provider identifiers, credentials, and raw logs were not published."
             echo "- No notification provider or human-only incident action was invoked."
           } >> "$GITHUB_STEP_SUMMARY"

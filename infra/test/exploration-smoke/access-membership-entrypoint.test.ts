@@ -85,9 +85,12 @@ describe('exact access-membership protected entrypoint', () => {
       Bun.file(workflowUrl).text(),
       Bun.file(scriptUrl).text(),
     ]);
-    expect(workflow).toContain('dailyAdminDirectMember == true');
+    expect(workflow).toContain(
+      'initialTransitionCandidateDirectMember == true',
+    );
+    expect(workflow).toContain('.activeAccessGroupCount == 2');
     expect(workflow).toContain('access-membership-publication.json');
-    expect(workflow).toContain("! grep -Eq '@|users/|groups/");
+    expect(workflow).toContain("if grep -Eq '@|users/|groups/");
     expect(workflow).not.toContain('path: $RUNNER_TEMP');
     expect(workflow).not.toContain(
       'access-sync-logs.json\n          retention',
@@ -95,7 +98,9 @@ describe('exact access-membership protected entrypoint', () => {
     expect(script).toContain(
       "event: z.literal('access-membership-sync-complete')",
     );
-    expect(script).toContain('dailyAdminDirectMember: z.literal(true)');
+    expect(script).toContain(
+      'initialTransitionCandidateDirectMember: z.literal(true)',
+    );
     expect(script).not.toContain('memberEmails: result');
     expect(script).not.toContain('googleGroupId: result');
   });

@@ -43,7 +43,7 @@ const RESULT: AccessMembershipPublicationResult = Object.freeze({
   snapshotVersion: 4,
   capturedAt: TEST_TIME,
   designatedSourceId: '00000000-0000-4000-8000-000000000402',
-  activeAccessGroupCount: 1,
+  activeAccessGroupCount: 2,
   evaluatedMembershipCount: 1,
   membershipDigest: EVALUATION.membershipDigest,
   providerGroupIdDigest: EVALUATION.providerGroupIdDigest,
@@ -244,7 +244,7 @@ describe('access-membership sync capability core', () => {
     expect(harness.failed[0]?.errorCode).toBe('DESIGNATED_GROUP_MISMATCH');
   });
 
-  test('refuses publication unless the daily district account is a direct member', async () => {
+  test('refuses publication unless the initial mobile candidate is a direct member', async () => {
     const harness = storeHarness();
     const memberEmails = Object.freeze(['other@psd401.net']);
     const evaluation = Object.freeze({
@@ -266,9 +266,13 @@ describe('access-membership sync capability core', () => {
           now: () => new Date(TEST_TIME),
         },
       ),
-    ).rejects.toMatchObject({ code: 'DAILY_ADMIN_NOT_DIRECT_MEMBER' });
+    ).rejects.toMatchObject({
+      code: 'INITIAL_TRANSITION_CANDIDATE_NOT_DIRECT_MEMBER',
+    });
     expect(harness.publications).toEqual([]);
-    expect(harness.failed[0]?.errorCode).toBe('DAILY_ADMIN_NOT_DIRECT_MEMBER');
+    expect(harness.failed[0]?.errorCode).toBe(
+      'INITIAL_TRANSITION_CANDIDATE_NOT_DIRECT_MEMBER',
+    );
   });
 
   test('runs the scheduled-only authorizer before the canonical handler', async () => {
