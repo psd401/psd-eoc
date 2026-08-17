@@ -172,6 +172,8 @@ async function runRecoveryScenario(options: {
         currentTemplateFile,
         JSON.stringify({
           AWSTemplateFormatVersion: '2010-09-09',
+          Description:
+            'Isolated synthetic-only PSD EOC exploration web/mobile backend (GitHub issue #163)',
           Parameters: { SourceSha: { Type: 'String' } },
           Resources: {
             ExistingHealthQueue: {
@@ -322,7 +324,11 @@ case "$1:$2" in
       deploy-access | template-access) ;;
       *) exit 93 ;;
     esac
-    if [[ -e "$IMPORT_MARKER" ]]; then cat "$PUBLISHED_TEMPLATE"; else cat "$CURRENT_TEMPLATE_FIXTURE"; fi
+    if [[ -e "$IMPORT_MARKER" ]]; then
+      jq -n --slurpfile template "$PUBLISHED_TEMPLATE" '{TemplateBody: $template[0]}'
+    else
+      jq -n --slurpfile template "$CURRENT_TEMPLATE_FIXTURE" '{TemplateBody: $template[0]}'
+    fi
     ;;
   cloudformation:create-change-set)
     test "\${AWS_ACCESS_KEY_ID:-}" = "deploy-access"
@@ -871,8 +877,16 @@ describe('isolated CDK entrypoint configuration', () => {
     );
     expect(workflow).toContain('--template-url "$import_template_url"');
     expect(workflow).toContain('--role-arn "$CDK_CFN_EXEC_ROLE_ARN"');
-    expect(workflow).toContain('--output text > "$current_template"');
-    expect(workflow).toContain('--output text > "$imported_template"');
+    expect(workflow).toContain('--output json > "$current_template_response"');
+    expect(workflow).toContain(
+      `jq -S '.TemplateBody' "$current_template_response" > "$current_template"`,
+    );
+    expect(workflow).toContain('--output json > "$imported_template_response"');
+    expect(workflow).toContain(
+      `jq -S '.TemplateBody' "$imported_template_response" > "$imported_template"`,
+    );
+    expect(workflow).toContain('(.TemplateBody.Resources | type) == "object"');
+    expect(workflow).not.toContain('--query TemplateBody');
     expect(workflow).toContain(
       '--role-session-name "psd-eoc-import-template-${GITHUB_RUN_ID}"',
     );
@@ -975,6 +989,8 @@ describe('isolated CDK entrypoint configuration', () => {
     );
     expect(recovery.publishedTemplate).toEqual({
       AWSTemplateFormatVersion: '2010-09-09',
+      Description:
+        'Isolated synthetic-only PSD EOC exploration web/mobile backend (GitHub issue #163)',
       Parameters: { SourceSha: { Type: 'String' } },
       Resources: {
         EmailConfigurationSet: {
