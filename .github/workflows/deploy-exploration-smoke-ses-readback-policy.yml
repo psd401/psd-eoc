@@ -316,55 +316,136 @@ jobs:
           [[ "$deploy_caller_arn" =~ ^arn:aws:sts::338414773271:assumed-role/cdk-hnb659fds-deploy-role-338414773271-us-west-2/psd-eoc-ses-policy-${GITHUB_RUN_ID}$ ]]
 
           stack_before=artifacts/readback/policy-stack-before.json
+          resume_available_create=false
           if deploy_aws cloudformation describe-stacks --stack-name "$STACK_NAME" > "$stack_before" 2> artifacts/readback/policy-stack-before-error.txt; then
             stack_existed=true
-            case "$(jq -er '.Stacks[0].StackStatus' "$stack_before")" in
-              CREATE_COMPLETE | UPDATE_COMPLETE) ;;
+            test "$(jq -er '.Stacks[0].RoleARN' "$stack_before")" = "$CDK_CFN_EXEC_ROLE_ARN"
+            stack_status=$(jq -er '.Stacks[0].StackStatus' "$stack_before")
+            case "$stack_status" in
+              CREATE_COMPLETE | UPDATE_COMPLETE)
+                deploy_aws cloudformation get-template --stack-name "$STACK_NAME" --template-stage Original > artifacts/readback/policy-stack-template-before.json
+                jq -S '.TemplateBody' artifacts/readback/policy-stack-template-before.json > artifacts/readback/policy-stack-template-before-body.json
+                jq -S . "$template" > artifacts/readback/policy-template-canonical.json
+                cmp artifacts/readback/policy-template-canonical.json artifacts/readback/policy-stack-template-before-body.json
+                change_set_type=UPDATE
+                ;;
+              REVIEW_IN_PROGRESS)
+                deploy_aws cloudformation list-change-sets \
+                  --stack-name "$STACK_NAME" \
+                  > artifacts/readback/policy-interrupted-change-set-list.json
+                jq -e '
+                  (.NextToken // null) == null and
+                  (.Summaries | length) == 1 and
+                  .Summaries[0].Status == "CREATE_COMPLETE" and
+                  .Summaries[0].ExecutionStatus == "AVAILABLE"
+                ' artifacts/readback/policy-interrupted-change-set-list.json > /dev/null
+                change_set_id=$(jq -er '.Summaries[0].ChangeSetId' artifacts/readback/policy-interrupted-change-set-list.json)
+                change_set_name=$(jq -er '.Summaries[0].ChangeSetName' artifacts/readback/policy-interrupted-change-set-list.json)
+                [[ "$change_set_id" =~ ^arn:aws:cloudformation:us-west-2:338414773271:changeSet/psd-eoc-ses-readback-[0-9]+-[0-9]+/[0-9a-f-]{36}$ ]]
+                [[ "$change_set_name" =~ ^psd-eoc-ses-readback-([0-9]+)-([0-9]+)$ ]]
+                interrupted_run_id=${BASH_REMATCH[1]}
+                interrupted_run_attempt=${BASH_REMATCH[2]}
+                change_set_client_token="$change_set_name"
+                change_set_description="Exact SES readback policy for GitHub run ${interrupted_run_id}/${interrupted_run_attempt} with client token ${change_set_client_token}"
+                deploy_aws cloudformation describe-change-set \
+                  --change-set-name "$change_set_id" \
+                  > artifacts/readback/policy-change-set.json
+                jq -e \
+                  --arg arn "$change_set_id" \
+                  --arg description "$change_set_description" \
+                  --arg name "$change_set_name" \
+                  --arg stack "$STACK_NAME" '
+                    .ChangeSetId == $arn and
+                    .ChangeSetName == $name and
+                    # DescribeChangeSet omits ChangeSetType. ROLLBACK is a
+                    # service-enforced CREATE-only field, so it is the
+                    # retrievable proof that this is the expected CREATE.
+                    .OnStackFailure == "ROLLBACK" and
+                    .Description == $description and
+                    .StackName == $stack and
+                    .Status == "CREATE_COMPLETE" and
+                    .ExecutionStatus == "AVAILABLE" and
+                    (.Capabilities | sort) == ["CAPABILITY_NAMED_IAM"] and
+                    [.Changes[] | .ResourceChange | {
+                      Action,
+                      LogicalResourceId,
+                      ResourceType,
+                      Replacement
+                    }] == [{
+                      Action: "Add",
+                      LogicalResourceId: "ExplorationSmokeSesReadbackPolicy",
+                      Replacement: null,
+                      ResourceType: "AWS::IAM::Policy"
+                    }]
+                  ' artifacts/readback/policy-change-set.json > /dev/null
+                deploy_aws cloudformation get-template \
+                  --stack-name "$STACK_NAME" \
+                  --change-set-name "$change_set_id" \
+                  --template-stage Original \
+                  > artifacts/readback/policy-interrupted-change-set-template.json
+                jq -S '.TemplateBody' artifacts/readback/policy-interrupted-change-set-template.json > artifacts/readback/policy-interrupted-change-set-template-body.json
+                jq -S . "$template" > artifacts/readback/policy-template-canonical.json
+                cmp artifacts/readback/policy-template-canonical.json artifacts/readback/policy-interrupted-change-set-template-body.json
+                deploy_aws cloudformation list-stack-resources \
+                  --stack-name "$STACK_NAME" \
+                  > artifacts/readback/policy-interrupted-stack-resources.json
+                test "$(jq '.StackResourceSummaries | length' artifacts/readback/policy-interrupted-stack-resources.json)" -eq 0
+                change_set_type=CREATE
+                resume_available_create=true
+                ;;
               *)
                 echo "The retained policy stack is not stable." >&2
                 exit 1
                 ;;
             esac
-            deploy_aws cloudformation get-template --stack-name "$STACK_NAME" --template-stage Original > artifacts/readback/policy-stack-template-before.json
-            jq -S '.TemplateBody' artifacts/readback/policy-stack-template-before.json > artifacts/readback/policy-stack-template-before-body.json
-            jq -S . "$template" > artifacts/readback/policy-template-canonical.json
-            cmp artifacts/readback/policy-template-canonical.json artifacts/readback/policy-stack-template-before-body.json
-            change_set_type=UPDATE
           else
             grep -Eq 'does not exist|ValidationError' artifacts/readback/policy-stack-before-error.txt
             stack_existed=false
             change_set_type=CREATE
           fi
 
-          change_set_name="psd-eoc-ses-readback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          change_set_description="Exact SES readback policy for GitHub run ${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
-          change_set_request=artifacts/readback/policy-change-set-request.json
-          jq -n \
-            --arg stack_name "$STACK_NAME" \
-            --arg change_set_name "$change_set_name" \
-            --arg change_set_type "$change_set_type" \
-            --arg description "$change_set_description" \
-            --arg role_arn "$CDK_CFN_EXEC_ROLE_ARN" \
-            --rawfile template_body "$template" '{
-              Capabilities: ["CAPABILITY_NAMED_IAM"],
-              ChangeSetName: $change_set_name,
-              ChangeSetType: $change_set_type,
-              Description: $description,
-              RoleARN: $role_arn,
-              StackName: $stack_name,
-              TemplateBody: $template_body
-            }' > "$change_set_request"
-          deploy_aws cloudformation create-change-set \
-            --cli-input-json "file://$change_set_request" \
-            > artifacts/readback/policy-change-set-create.json
-          change_set_id=$(jq -er .Id artifacts/readback/policy-change-set-create.json)
-          [[ "$change_set_id" =~ ^arn:aws:cloudformation:us-west-2:338414773271:changeSet/psd-eoc-ses-readback-[0-9]+-[0-9]+/[0-9a-f-]{36}$ ]]
+          if [[ "$resume_available_create" == false ]]; then
+            change_set_name="psd-eoc-ses-readback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            change_set_client_token="$change_set_name"
+            change_set_description="Exact SES readback policy for GitHub run ${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT} with client token ${change_set_client_token}"
+            change_set_request=artifacts/readback/policy-change-set-request.json
+            jq -n \
+              --arg stack_name "$STACK_NAME" \
+              --arg change_set_name "$change_set_name" \
+              --arg change_set_type "$change_set_type" \
+              --arg client_token "$change_set_client_token" \
+              --arg description "$change_set_description" \
+              --arg role_arn "$CDK_CFN_EXEC_ROLE_ARN" \
+              --rawfile template_body "$template" '
+                {
+                  Capabilities: ["CAPABILITY_NAMED_IAM"],
+                  ChangeSetName: $change_set_name,
+                  ChangeSetType: $change_set_type,
+                  ClientToken: $client_token,
+                  Description: $description,
+                  RoleARN: $role_arn,
+                  StackName: $stack_name,
+                  TemplateBody: $template_body
+                } + if $change_set_type == "CREATE" then
+                  {OnStackFailure: "ROLLBACK"}
+                else
+                  {}
+                end
+              ' > "$change_set_request"
+            deploy_aws cloudformation create-change-set \
+              --cli-input-json "file://$change_set_request" \
+              > artifacts/readback/policy-change-set-create.json
+            change_set_id=$(jq -er .Id artifacts/readback/policy-change-set-create.json)
+            [[ "$change_set_id" =~ ^arn:aws:cloudformation:us-west-2:338414773271:changeSet/psd-eoc-ses-readback-[0-9]+-[0-9]+/[0-9a-f-]{36}$ ]]
 
-          set +e
-          deploy_aws cloudformation wait change-set-create-complete --change-set-name "$change_set_id"
-          change_set_wait_exit=$?
-          set -e
-          deploy_aws cloudformation describe-change-set --change-set-name "$change_set_id" > artifacts/readback/policy-change-set.json
+            set +e
+            deploy_aws cloudformation wait change-set-create-complete --change-set-name "$change_set_id"
+            change_set_wait_exit=$?
+            set -e
+            deploy_aws cloudformation describe-change-set --change-set-name "$change_set_id" > artifacts/readback/policy-change-set.json
+          else
+            change_set_wait_exit=0
+          fi
           if [[ "$change_set_wait_exit" -eq 0 ]]; then
             jq -e \
               --arg arn "$change_set_id" \
@@ -374,7 +455,8 @@ jobs:
               --arg type "$change_set_type" '
                 .ChangeSetId == $arn and
                 .ChangeSetName == $name and
-                .ChangeSetType == $type and
+                (($type == "CREATE" and .OnStackFailure == "ROLLBACK") or
+                  ($type == "UPDATE" and .OnStackFailure == null)) and
                 .Description == $description and
                 .StackName == $stack and
                 .Status == "CREATE_COMPLETE" and
@@ -398,7 +480,11 @@ jobs:
             else
               deploy_aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
             fi
-            jq -n --arg state applied '{state:$state}' > artifacts/readback/policy-apply-result.json
+            if [[ "$resume_available_create" == true ]]; then
+              jq -n --arg state resumed-interrupted-create '{state:$state}' > artifacts/readback/policy-apply-result.json
+            else
+              jq -n --arg state applied '{state:$state}' > artifacts/readback/policy-apply-result.json
+            fi
           else
             test "$stack_existed" = true
             jq -e \
@@ -407,7 +493,7 @@ jobs:
               --arg stack "$STACK_NAME" '
                 .ChangeSetId == $arn and
                 .ChangeSetName == $name and
-                .ChangeSetType == "UPDATE" and
+                .OnStackFailure == null and
                 .StackName == $stack and
                 .Status == "FAILED" and
                 .ExecutionStatus == "UNAVAILABLE" and
