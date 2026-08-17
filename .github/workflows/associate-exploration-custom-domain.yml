@@ -210,14 +210,18 @@ jobs:
           }
 
           exact_domain_is_complete() {
+            # AWS documents uppercase enum values, but protected live readback
+            # returned lowercase. Normalize only for validation; artifacts keep
+            # the exact provider value.
             jq -e --arg domain "$CUSTOM_DOMAIN" '
               [.CustomDomains[] | select(.DomainName == $domain)] as $matches |
+              (($matches[0].Status // "") | ascii_upcase) as $status |
               ($matches | length) == 1 and
               $matches[0].EnableWWWSubdomain == false and
-              ($matches[0].Status == "CREATING" or
-               $matches[0].Status == "PENDING_CERTIFICATE_DNS_VALIDATION" or
-               $matches[0].Status == "BINDING_CERTIFICATE" or
-               $matches[0].Status == "ACTIVE") and
+              ($status == "CREATING" or
+               $status == "PENDING_CERTIFICATE_DNS_VALIDATION" or
+               $status == "BINDING_CERTIFICATE" or
+               $status == "ACTIVE") and
               ($matches[0].CertificateValidationRecords | type == "array" and length > 0) and
               ([
                 $matches[0].CertificateValidationRecords[] |
@@ -369,14 +373,15 @@ jobs:
                 jq -e \
                   --arg domain "$CUSTOM_DOMAIN" \
                   --arg serviceArn "$APP_RUNNER_SERVICE_ARN" '
+                  ((.CustomDomain.Status // "") | ascii_upcase) as $status |
                   .ServiceArn == $serviceArn and
                   (.DNSTarget | type == "string" and test("^[A-Za-z0-9.-]+[.]?$") and length <= 253) and
                   .CustomDomain.DomainName == $domain and
                   .CustomDomain.EnableWWWSubdomain == false and
-                  (.CustomDomain.Status == "CREATING" or
-                   .CustomDomain.Status == "PENDING_CERTIFICATE_DNS_VALIDATION" or
-                   .CustomDomain.Status == "BINDING_CERTIFICATE" or
-                   .CustomDomain.Status == "ACTIVE")
+                  ($status == "CREATING" or
+                   $status == "PENDING_CERTIFICATE_DNS_VALIDATION" or
+                   $status == "BINDING_CERTIFICATE" or
+                   $status == "ACTIVE")
                 ' "$artifact_directory/associate.raw.json" > /dev/null
                 redact_readback \
                   "$artifact_directory/associate.raw.json" \
@@ -414,10 +419,11 @@ jobs:
                 "$artifact_directory/final.redacted.json"
               jq -e --arg domain "$CUSTOM_DOMAIN" '
                 [.CustomDomains[] | select(.DomainName == $domain)] as $matches |
+                (($matches[0].Status // "") | ascii_upcase) as $status |
                 ($matches | length) == 1 and
-                ($matches[0].Status != "CREATE_FAILED") and
-                ($matches[0].Status != "DELETING") and
-                ($matches[0].Status != "DELETE_FAILED")
+                ($status != "CREATE_FAILED") and
+                ($status != "DELETING") and
+                ($status != "DELETE_FAILED")
               ' "$artifact_directory/final.raw.json" > /dev/null
 
               jq -nS \
