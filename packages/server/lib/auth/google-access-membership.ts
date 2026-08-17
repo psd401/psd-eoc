@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 
-import { StaffRosterEmailSchema, TimestampSchema } from '@psd-eoc/contracts';
+import {
+  DESIGNATED_ACCESS_GROUP_EMAIL,
+  StaffRosterEmailSchema,
+  TimestampSchema,
+} from '@psd-eoc/contracts';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
 
@@ -16,8 +20,7 @@ const MAX_GROUP_PAGES = 100;
 const MAX_EVALUATED_MEMBERS = 1_200;
 const PAGE_SIZE = 200;
 
-export const DESIGNATED_ACCESS_GROUP_EMAIL =
-  'tsd-engineering@psd401.net' as const;
+export { DESIGNATED_ACCESS_GROUP_EMAIL };
 
 const GoogleTokenResponseSchema = z
   .object({

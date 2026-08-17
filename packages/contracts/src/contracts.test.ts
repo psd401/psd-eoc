@@ -2798,29 +2798,33 @@ describe('human-only capability boundary', () => {
     });
     expect(
       SyncAccessMembershipInputSchema.safeParse({
-        phase: 'stage',
         designatedGroupEmail: 'tsd-engineering@psd401.net',
+        transition: { phase: 'stage' },
       }).success,
     ).toBe(true);
     expect(
       SyncAccessMembershipInputSchema.safeParse({
-        phase: 'stage',
         designatedGroupEmail: 'another-group@psd401.net',
+        transition: { phase: 'stage' },
       }).success,
     ).toBe(false);
     expect(
       SyncAccessMembershipInputSchema.safeParse({
-        phase: 'finalize',
         designatedGroupEmail: 'tsd-engineering@psd401.net',
-        mobileSessionId: ids.session,
-        membershipSnapshotId: ids.membershipSnapshot,
+        transition: {
+          phase: 'finalize',
+          mobileSessionId: ids.session,
+          membershipSnapshotId: ids.membershipSnapshot,
+        },
       }).success,
     ).toBe(true);
     expect(
       SyncAccessMembershipInputSchema.safeParse({
-        phase: 'finalize',
         designatedGroupEmail: 'tsd-engineering@psd401.net',
-        mobileSessionId: ids.session,
+        transition: {
+          phase: 'finalize',
+          mobileSessionId: ids.session,
+        },
       }).success,
     ).toBe(false);
     expect(
