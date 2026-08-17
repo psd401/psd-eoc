@@ -16,6 +16,10 @@ const accountId = '<aws-account-id>';
 const region = 'us-west-2';
 const roleName = 'psd-eoc-exploration-smoke-github-deploy';
 const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
+const accessSyncClusterArn = `arn:aws:ecs:${region}:${accountId}:cluster/psd-eoc-exploration-smoke-native-bootstrap`;
+const accessSyncExecutionRoleArnPattern = `arn:aws:iam::${accountId}:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole*`;
+const accessSyncTaskDefinitionArnPattern = `arn:aws:ecs:${region}:${accountId}:task-definition/psd-eoc-exploration-smoke-access-sync:*`;
+const accessSyncTaskRoleArnPattern = `arn:aws:iam::${accountId}:role/PsdEocExplorationSmoke-AccessSyncTaskRole*`;
 const appRunnerServiceArn = `arn:aws:apprunner:${region}:${accountId}:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c`;
 const configurationSetArn = `arn:aws:ses:${region}:${accountId}:configuration-set/psd-eoc-transactional`;
 const policyName = 'psd-eoc-exploration-smoke-ses-readback';
@@ -51,12 +55,10 @@ function authorizedPredecessor(template: PolicyTemplate): PolicyTemplate {
       };
     };
   };
-  predecessor.Description =
-    'Retained least-privilege SES readback policy for the protected PSD EOC exploration deployment role';
   predecessor.Resources.ExplorationSmokeSesReadbackPolicy.Properties.PolicyDocument.Statement =
     predecessor.Resources.ExplorationSmokeSesReadbackPolicy.Properties.PolicyDocument.Statement.slice(
       0,
-      1,
+      2,
     );
   return predecessor;
 }
@@ -241,6 +243,7 @@ case "$1:$2" in
   iam:simulate-principal-policy)
     test "\${AWS_ACCESS_KEY_ID:-}" = "oidc-access"
     resource=$(arg_value --resource-arns "$@")
+    context=$(arg_value --context-entries "$@" || true)
     actions=()
     collect=false
     for argument in "$@"; do
@@ -256,13 +259,25 @@ case "$1:$2" in
     done
     jq -n \
       --arg resource "$resource" \
+      --arg context "$context" \
+      --arg access_sync_cluster "$ACCESS_SYNC_CLUSTER_ARN" \
+      --arg access_sync_execution_role "$ACCESS_SYNC_EXECUTION_ROLE_ARN_PATTERN" \
+      --arg access_sync_task_definition "$ACCESS_SYNC_TASK_DEFINITION_ARN_PATTERN" \
+      --arg access_sync_task_role "$ACCESS_SYNC_TASK_ROLE_ARN_PATTERN" \
       --arg app_runner_canonical "$APP_RUNNER_SERVICE_ARN" \
       --arg configuration_set_canonical "$CONFIGURATION_SET_ARN" \
       --args '{EvaluationResults:[$ARGS.positional[] | {
         EvalActionName:.,
         EvalDecision:(if
           ($resource == $configuration_set_canonical and (. == "ses:GetConfigurationSet" or . == "ses:GetConfigurationSetEventDestinations")) or
-          ($resource == $app_runner_canonical and (. == "apprunner:AssociateCustomDomain" or . == "apprunner:DescribeCustomDomains" or . == "apprunner:ListOperations"))
+          ($resource == $app_runner_canonical and (. == "apprunner:AssociateCustomDomain" or . == "apprunner:DescribeCustomDomains" or . == "apprunner:ListOperations")) or
+          (. == "ecs:RunTask" and
+            ($resource | startswith($access_sync_task_definition | rtrimstr("*"))) and
+            $context == ("ContextKeyName=ecs:cluster,ContextKeyValues=" + $access_sync_cluster + ",ContextKeyType=string")) or
+          (. == "iam:PassRole" and
+            (($resource | startswith($access_sync_execution_role | rtrimstr("*"))) or
+              ($resource | startswith($access_sync_task_role | rtrimstr("*")))) and
+            $context == "ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string")
           then "allowed" else "implicitDeny" end),
         EvalResourceName:$resource
       }]}' "\${actions[@]}"
@@ -412,6 +427,12 @@ esac
       cwd: directory,
       env: {
         ...process.env,
+        ACCESS_SYNC_CLUSTER_ARN: accessSyncClusterArn,
+        ACCESS_SYNC_EXECUTION_ROLE_ARN_PATTERN:
+          accessSyncExecutionRoleArnPattern,
+        ACCESS_SYNC_TASK_DEFINITION_ARN_PATTERN:
+          accessSyncTaskDefinitionArnPattern,
+        ACCESS_SYNC_TASK_ROLE_ARN_PATTERN: accessSyncTaskRoleArnPattern,
         AWS_ACCESS_KEY_ID: 'oidc-access',
         APP_RUNNER_SERVICE_ARN: appRunnerServiceArn,
         AWS_ACCOUNT_ALIAS: 'psd401',
@@ -479,7 +500,7 @@ esac
 }
 
 describe('protected exploration SES readback policy', () => {
-  it('contains only the exact SES reads and App Runner domain authority on canonical resources', async () => {
+  it('contains only the exact retained operations authority on canonical resources and conditions', async () => {
     expect(await readTemplate()).toEqual({
       AWSTemplateFormatVersion: '2010-09-09',
       Description:
@@ -509,6 +530,31 @@ describe('protected exploration SES readback policy', () => {
                   Resource: appRunnerServiceArn,
                   Sid: 'ReadAndAssociateCanonicalCustomDomainOnly',
                 },
+                {
+                  Action: 'ecs:RunTask',
+                  Condition: {
+                    ArnEquals: {
+                      'ecs:cluster': accessSyncClusterArn,
+                    },
+                  },
+                  Effect: 'Allow',
+                  Resource: accessSyncTaskDefinitionArnPattern,
+                  Sid: 'RunCanonicalAccessSyncTaskOnCanonicalClusterOnly',
+                },
+                {
+                  Action: 'iam:PassRole',
+                  Condition: {
+                    StringEquals: {
+                      'iam:PassedToService': 'ecs-tasks.amazonaws.com',
+                    },
+                  },
+                  Effect: 'Allow',
+                  Resource: [
+                    accessSyncExecutionRoleArnPattern,
+                    accessSyncTaskRoleArnPattern,
+                  ],
+                  Sid: 'PassCanonicalAccessSyncRolesToEcsTasksOnly',
+                },
               ],
               Version: '2012-10-17',
             },
@@ -522,7 +568,7 @@ describe('protected exploration SES readback policy', () => {
     });
   });
 
-  it('excludes wildcard, disassociation, Route53, send, and unrelated App Runner authority', async () => {
+  it('excludes broad wildcard, disassociation, Route53, send, and unrelated infrastructure authority', async () => {
     const serialized = JSON.stringify(await readTemplate());
     expect(serialized).not.toContain('"Resource":"*"');
     expect(serialized).not.toContain('apprunner:DisassociateCustomDomain');
@@ -530,6 +576,9 @@ describe('protected exploration SES readback policy', () => {
     expect(serialized).not.toContain('ses:Send');
     expect(serialized).not.toContain('apprunner:DeleteService');
     expect(serialized).not.toContain('apprunner:UpdateService');
+    expect(serialized).not.toContain('ecs:StopTask');
+    expect(serialized).not.toContain('ecs:DescribeTasks');
+    expect(serialized).not.toContain('iam:GetRole');
   });
 
   it('uses a protected main-only OIDC workflow with immutable source and zero provider writes', async () => {
@@ -539,7 +588,7 @@ describe('protected exploration SES readback policy', () => {
     expect(workflow).toContain("github.ref == 'refs/heads/main'");
     expect(workflow).toContain('test "$SOURCE_SHA" = "$GITHUB_SHA"');
     expect(workflow).toContain(
-      'APPLY EXACT SES READS AND APP RUNNER DOMAIN AUTHORITY WITH NO SEND OR DNS AUTHORITY',
+      'APPLY EXACT SES READS APP RUNNER DOMAIN AND ACCESS SYNC LAUNCH AUTHORITY WITH NO SEND OR DNS AUTHORITY',
     );
     expect(workflow).toContain(
       'aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708',
@@ -555,6 +604,8 @@ describe('protected exploration SES readback policy', () => {
     expect(workflow).not.toContain('sesv2 send-');
     expect(workflow).not.toContain('apprunner associate-custom-domain');
     expect(workflow).not.toContain('route53 change-resource-record-sets');
+    expect(workflow).not.toContain('aws ecs run-task');
+    expect(workflow).not.toContain('aws iam pass-role');
     expect(workflow).not.toContain('cloudformation list-stack-resources');
   });
 
@@ -588,7 +639,7 @@ describe('protected exploration SES readback policy', () => {
       result.awsCalls.filter(
         (call) => call === 'iam:simulate-principal-policy:oidc-access',
       ),
-    ).toHaveLength(7);
+    ).toHaveLength(15);
     expect(result.awsCalls).not.toContain(
       'cloudformation:list-stack-resources:deploy-access',
     );
@@ -625,7 +676,7 @@ describe('protected exploration SES readback policy', () => {
     },
   );
 
-  it('updates only the exact authorized SES-only predecessor without replacement', async () => {
+  it('updates only the exact authorized SES and App Runner predecessor without replacement', async () => {
     const result = await runScenario({
       existingPredecessor: true,
       existingStack: true,
