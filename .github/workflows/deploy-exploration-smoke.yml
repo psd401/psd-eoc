@@ -61,7 +61,10 @@ env:
   AWS_ACCOUNT_ID: '<aws-account-id>'
   AWS_ACCOUNT_ALIAS: psd401
   AWS_REGION: us-west-2
+  CDK_ASSET_BUCKET: cdk-hnb659fds-assets-<aws-account-id>-us-west-2
+  CDK_CFN_EXEC_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-cfn-exec-role-<aws-account-id>-us-west-2
   CDK_DEPLOY_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2
+  CDK_FILE_PUBLISH_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-file-publishing-role-<aws-account-id>-us-west-2
   GITHUB_OIDC_PROVIDER_ARN: arn:aws:iam::<aws-account-id>:oidc-provider/token.actions.githubusercontent.com
   GITHUB_OIDC_SUBJECT: repo:psd401@1902994/psd-eoc@1326178900:environment:exploration-smoke
   LOCAL_REGISTRY_IMAGE: docker.io/library/registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
@@ -1136,6 +1139,220 @@ jobs:
 
             oidc_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
             [[ "$oidc_caller_arn" =~ ^arn:aws:sts::<aws-account-id>:assumed-role/psd-eoc-exploration-smoke-github-deploy/[A-Za-z0-9+=,.@_-]+$ ]]
+            current_template=../artifacts/readback/email-recovery-current-template.json
+            import_template=../artifacts/readback/email-recovery-import-template.json
+            import_parameters=../artifacts/readback/email-recovery-import-parameters.json
+            import_resources=../artifacts/readback/email-recovery-import-resources.json
+            import_object=../artifacts/readback/email-recovery-import-object.json
+            import_object_head=../artifacts/readback/email-recovery-import-object-head.json
+            imported_template=../artifacts/readback/email-recovery-imported-template.json
+            change_set_create=../artifacts/readback/email-recovery-change-set-create.json
+            change_set_readback=../artifacts/readback/email-recovery-change-set.json
+
+            template_credentials=$(aws sts assume-role \
+              --role-arn "$CDK_DEPLOY_ROLE_ARN" \
+              --role-session-name "psd-eoc-import-template-${GITHUB_RUN_ID}" \
+              --duration-seconds 900 \
+              --query Credentials \
+              --output json)
+            template_access_key=$(jq -er .AccessKeyId <<< "$template_credentials")
+            template_secret_key=$(jq -er .SecretAccessKey <<< "$template_credentials")
+            template_session_token=$(jq -er .SessionToken <<< "$template_credentials")
+
+            set +e
+            (
+              set -euo pipefail
+              template_aws() {
+                AWS_ACCESS_KEY_ID="$template_access_key" \
+                  AWS_SECRET_ACCESS_KEY="$template_secret_key" \
+                  AWS_SESSION_TOKEN="$template_session_token" \
+                  aws "$@"
+              }
+              template_aws sts get-caller-identity --query Arn --output text \
+                > ../artifacts/readback/email-recovery-template-caller-arn.txt
+              template_aws cloudformation get-template \
+                --stack-name "$STACK_NAME" \
+                --template-stage Original \
+                --query TemplateBody \
+                --output text > "$current_template"
+            )
+            template_read_exit_code=$?
+            set -e
+            unset template_credentials template_access_key template_secret_key template_session_token
+            if [[ "$template_read_exit_code" -ne 0 ]]; then
+              exit "$template_read_exit_code"
+            fi
+            unset template_read_exit_code
+            template_caller_arn=$(cat ../artifacts/readback/email-recovery-template-caller-arn.txt)
+            [[ "$template_caller_arn" =~ ^arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2/psd-eoc-import-template-${GITHUB_RUN_ID}$ ]]
+            post_template_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+            test "$post_template_caller_arn" = "$oidc_caller_arn"
+            unset template_caller_arn post_template_caller_arn
+
+            jq -e --argjson ids "$recovery_ids" '
+              . as $template |
+              all($ids[]; $template.Resources[.] == null)
+            ' "$current_template" > /dev/null
+            jq -S --slurpfile candidate "$candidate_template" --argjson ids "$recovery_ids" '
+              reduce $ids[] as $id (.;
+                .Resources[$id] = $candidate[0].Resources[$id]
+              )
+            ' "$current_template" > "$import_template"
+            jq -e --slurpfile current "$current_template" --argjson ids "$recovery_ids" '
+              . as $import |
+              ($current[0].Resources | keys) as $current_ids |
+              ((($import.Resources | keys) - $current_ids) | sort) == ($ids | sort) and
+              all($current_ids[]; . as $id |
+                $import.Resources[$id] == $current[0].Resources[$id]
+              )
+            ' "$import_template" > /dev/null
+
+            jq '[.Stacks[0].Parameters[] | {
+              ParameterKey,
+              UsePreviousValue: true
+            }] | sort_by(.ParameterKey)' "$before_stack" > "$import_parameters"
+            jq '[
+              {
+                LogicalResourceId: "EmailWorkerLogGroup0611E5C2",
+                ResourceIdentifier: {
+                  LogGroupName: .EmailWorkerLogGroup0611E5C2.LogGroupName
+                },
+                ResourceType: "AWS::Logs::LogGroup"
+              },
+              {
+                LogicalResourceId: "EmailDeadLetterQueue5E91C06C",
+                ResourceIdentifier: {
+                  QueueUrl: .EmailDeadLetterQueue5E91C06C.QueueUrl
+                },
+                ResourceType: "AWS::SQS::Queue"
+              },
+              {
+                LogicalResourceId: "EmailConfigurationSet",
+                ResourceIdentifier: {
+                  Name: .EmailConfigurationSet.Name
+                },
+                ResourceType: "AWS::SES::ConfigurationSet"
+              },
+              {
+                LogicalResourceId: "EmailEventsKey619540BF",
+                ResourceIdentifier: {
+                  KeyId: .EmailEventsKey619540BF.KeyId
+                },
+                ResourceType: "AWS::KMS::Key"
+              }
+            ]' "$mapping" > "$import_resources"
+            jq -e '
+              length == 4 and
+              ([.[].LogicalResourceId] | sort) == [
+                "EmailConfigurationSet",
+                "EmailDeadLetterQueue5E91C06C",
+                "EmailEventsKey619540BF",
+                "EmailWorkerLogGroup0611E5C2"
+              ]
+            ' "$import_resources" > /dev/null
+
+            import_template_sha256=$(sha256sum "$import_template" | cut -d' ' -f1)
+            [[ "$import_template_sha256" =~ ^[0-9a-f]{64}$ ]]
+            import_template_bytes=$(wc -c < "$import_template" | tr -d ' ')
+            [[ "$import_template_bytes" =~ ^[1-9][0-9]*$ ]]
+            import_template_checksum_base64=$(
+              openssl dgst -sha256 -binary "$import_template" | base64 | tr -d '\n'
+            )
+            import_object_key="cdk/$STACK_NAME/import-$import_template_sha256.json"
+            import_template_url="https://$CDK_ASSET_BUCKET.s3.$AWS_REGION.amazonaws.com/$import_object_key"
+            jq -n \
+              --arg bucket "$CDK_ASSET_BUCKET" \
+              --arg key "$import_object_key" \
+              --arg sha256 "$import_template_sha256" \
+              --arg checksum "$import_template_checksum_base64" \
+              --argjson bytes "$import_template_bytes" \
+              --arg url "$import_template_url" '{
+                bucket: $bucket,
+                bytes: $bytes,
+                checksumSha256: $checksum,
+                key: $key,
+                sha256: $sha256,
+                url: $url
+              }' > "$import_object"
+
+            publisher_credentials=$(aws sts assume-role \
+              --role-arn "$CDK_FILE_PUBLISH_ROLE_ARN" \
+              --role-session-name "psd-eoc-import-publish-${GITHUB_RUN_ID}" \
+              --duration-seconds 900 \
+              --query Credentials \
+              --output json)
+            publisher_access_key=$(jq -er .AccessKeyId <<< "$publisher_credentials")
+            publisher_secret_key=$(jq -er .SecretAccessKey <<< "$publisher_credentials")
+            publisher_session_token=$(jq -er .SessionToken <<< "$publisher_credentials")
+
+            set +e
+            (
+              set -euo pipefail
+              publisher_aws() {
+                AWS_ACCESS_KEY_ID="$publisher_access_key" \
+                  AWS_SECRET_ACCESS_KEY="$publisher_secret_key" \
+                  AWS_SESSION_TOKEN="$publisher_session_token" \
+                  aws "$@"
+              }
+              publisher_aws sts get-caller-identity --query Arn --output text \
+                > ../artifacts/readback/email-recovery-publisher-caller-arn.txt
+              if publisher_aws s3api head-object \
+                --bucket "$CDK_ASSET_BUCKET" \
+                --key "$import_object_key" \
+                --checksum-mode ENABLED \
+                --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+                > "$import_object_head" \
+                2> ../artifacts/readback/email-recovery-import-object-head-error.txt; then
+                jq -n --arg state already-published '{state: $state}' \
+                  > ../artifacts/readback/email-recovery-publication-result.json
+              else
+                head_exit_code=$?
+                test "$head_exit_code" -eq 254
+                grep -Eq 'An error occurred \(404\).*HeadObject.*Not Found' \
+                  ../artifacts/readback/email-recovery-import-object-head-error.txt
+                publisher_aws s3api put-object \
+                  --bucket "$CDK_ASSET_BUCKET" \
+                  --key "$import_object_key" \
+                  --body "$import_template" \
+                  --checksum-algorithm SHA256 \
+                  --content-type application/json \
+                  --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+                  --metadata "sha256=$import_template_sha256" \
+                  --server-side-encryption AES256 \
+                  > ../artifacts/readback/email-recovery-import-object-put.json
+                publisher_aws s3api head-object \
+                  --bucket "$CDK_ASSET_BUCKET" \
+                  --key "$import_object_key" \
+                  --checksum-mode ENABLED \
+                  --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+                  > "$import_object_head"
+                jq -n --arg state published '{state: $state}' \
+                  > ../artifacts/readback/email-recovery-publication-result.json
+              fi
+              jq -e \
+                --arg checksum "$import_template_checksum_base64" \
+                --arg sha256 "$import_template_sha256" \
+                --argjson bytes "$import_template_bytes" '
+                  .ChecksumSHA256 == $checksum and
+                  .ContentLength == $bytes and
+                  .Metadata == {sha256: $sha256} and
+                  .ServerSideEncryption == "AES256"
+                ' "$import_object_head" > /dev/null
+            )
+            publication_exit_code=$?
+            set -e
+            unset publisher_credentials publisher_access_key publisher_secret_key publisher_session_token
+            if [[ "$publication_exit_code" -ne 0 ]]; then
+              exit "$publication_exit_code"
+            fi
+            unset publication_exit_code
+            publisher_caller_arn=$(cat ../artifacts/readback/email-recovery-publisher-caller-arn.txt)
+            [[ "$publisher_caller_arn" =~ ^arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-file-publishing-role-<aws-account-id>-us-west-2/psd-eoc-import-publish-${GITHUB_RUN_ID}$ ]]
+            post_publish_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+            test "$post_publish_caller_arn" = "$oidc_caller_arn"
+            unset publisher_caller_arn post_publish_caller_arn
+
+            import_change_set_name="psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             deploy_credentials=$(aws sts assume-role \
               --role-arn "$CDK_DEPLOY_ROLE_ARN" \
               --role-session-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}" \
@@ -1145,31 +1362,89 @@ jobs:
             deploy_access_key=$(jq -er .AccessKeyId <<< "$deploy_credentials")
             deploy_secret_key=$(jq -er .SecretAccessKey <<< "$deploy_credentials")
             deploy_session_token=$(jq -er .SessionToken <<< "$deploy_credentials")
-            deploy_caller_arn=$(
-              AWS_ACCESS_KEY_ID="$deploy_access_key" \
-                AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
-                AWS_SESSION_TOKEN="$deploy_session_token" \
-                aws sts get-caller-identity --query Arn --output text
-            )
-            [[ "$deploy_caller_arn" =~ ^arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2/psd-eoc-retained-email-import-${GITHUB_RUN_ID}$ ]]
-            printf '%s\n' "$deploy_caller_arn" \
-              > ../artifacts/readback/email-recovery-import-caller-arn.txt
 
             set +e
-            AWS_ACCESS_KEY_ID="$deploy_access_key" \
-              AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
-              AWS_SESSION_TOKEN="$deploy_session_token" \
-              bunx --bun cdk \
-                --app "bun bin/exploration-smoke.ts" \
-                import "$STACK_NAME" \
-                --force \
-                --yes \
-                --no-notices \
-                --change-set-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-                --resource-mapping "$mapping"
+            (
+              set -euo pipefail
+              import_aws() {
+                AWS_ACCESS_KEY_ID="$deploy_access_key" \
+                  AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
+                  AWS_SESSION_TOKEN="$deploy_session_token" \
+                  aws "$@"
+              }
+              import_aws sts get-caller-identity --query Arn --output text \
+                > ../artifacts/readback/email-recovery-import-caller-arn.txt
+              import_aws cloudformation create-change-set \
+                --stack-name "$STACK_NAME" \
+                --change-set-name "$import_change_set_name" \
+                --change-set-type IMPORT \
+                --description "Exact four-resource retained dark-email recovery for GitHub run $GITHUB_RUN_ID" \
+                --template-url "$import_template_url" \
+                --resources-to-import "file://$import_resources" \
+                --parameters "file://$import_parameters" \
+                --capabilities CAPABILITY_NAMED_IAM \
+                --role-arn "$CDK_CFN_EXEC_ROLE_ARN" \
+                > "$change_set_create"
+              change_set_id=$(jq -er .Id "$change_set_create")
+              [[ "$change_set_id" =~ ^arn:aws:cloudformation:us-west-2:<aws-account-id>:changeSet/psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/[0-9a-f-]{36}$ ]]
+              import_aws cloudformation wait change-set-create-complete \
+                --stack-name "$STACK_NAME" \
+                --change-set-name "$change_set_id"
+              import_aws cloudformation describe-change-set \
+                --stack-name "$STACK_NAME" \
+                --change-set-name "$change_set_id" > "$change_set_readback"
+              jq -e \
+                --arg change_set_id "$change_set_id" \
+                --arg change_set_name "$import_change_set_name" \
+                --arg cfn_role "$CDK_CFN_EXEC_ROLE_ARN" '
+                  .ChangeSetId == $change_set_id and
+                  .ChangeSetName == $change_set_name and
+                  .StackName == "PsdEocExplorationSmoke" and
+                  .ChangeSetType == "IMPORT" and
+                  .Status == "CREATE_COMPLETE" and
+                  .ExecutionStatus == "AVAILABLE" and
+                  .RoleARN == $cfn_role and
+                  .Capabilities == ["CAPABILITY_NAMED_IAM"] and
+                  (.Changes | length) == 4 and
+                  ([.Changes[].ResourceChange | {
+                    action: .Action,
+                    logicalId: .LogicalResourceId,
+                    resourceType: .ResourceType
+                  }] | sort_by(.logicalId)) == [
+                    {action: "Import", logicalId: "EmailConfigurationSet", resourceType: "AWS::SES::ConfigurationSet"},
+                    {action: "Import", logicalId: "EmailDeadLetterQueue5E91C06C", resourceType: "AWS::SQS::Queue"},
+                    {action: "Import", logicalId: "EmailEventsKey619540BF", resourceType: "AWS::KMS::Key"},
+                    {action: "Import", logicalId: "EmailWorkerLogGroup0611E5C2", resourceType: "AWS::Logs::LogGroup"}
+                  ]
+                ' "$change_set_readback" > /dev/null
+              test "$(import_aws cloudformation describe-stacks \
+                --stack-name "$STACK_NAME" \
+                --query "Stacks[0].Outputs[?OutputKey=='AppRunnerVpcConnectorArn'].OutputValue | [0]" \
+                --output text)" = "$prior_vpc_connector_arn"
+              import_aws cloudformation execute-change-set \
+                --stack-name "$STACK_NAME" \
+                --change-set-name "$change_set_id" \
+                --client-request-token "psd-eoc-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              import_aws cloudformation wait stack-import-complete --stack-name "$STACK_NAME"
+              test "$(import_aws cloudformation describe-stacks \
+                --stack-name "$STACK_NAME" \
+                --query 'Stacks[0].StackStatus' \
+                --output text)" = "IMPORT_COMPLETE"
+              test "$(import_aws cloudformation describe-stacks \
+                --stack-name "$STACK_NAME" \
+                --query "Stacks[0].Outputs[?OutputKey=='AppRunnerVpcConnectorArn'].OutputValue | [0]" \
+                --output text)" = "$prior_vpc_connector_arn"
+              import_aws cloudformation get-template \
+                --stack-name "$STACK_NAME" \
+                --template-stage Original \
+                --query TemplateBody \
+                --output text > "$imported_template"
+              jq -e --slurpfile expected "$import_template" \
+                '. == $expected[0]' "$imported_template" > /dev/null
+            )
             import_exit_code=$?
             set -e
-            unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token deploy_caller_arn
+            unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token
             if [[ "$import_exit_code" -ne 0 ]]; then
               exit "$import_exit_code"
             fi
