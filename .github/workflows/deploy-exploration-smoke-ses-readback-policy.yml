@@ -26,6 +26,7 @@ concurrency:
   group: psd-eoc-exploration-smoke-ses-readback-policy
 
 env:
+  APP_RUNNER_SERVICE_ARN: arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c
   AWS_ACCOUNT_ALIAS: psd401
   AWS_ACCOUNT_ID: '<aws-account-id>'
   AWS_REGION: us-west-2
@@ -74,29 +75,43 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$SOURCE_SHA" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$CHANGE_REFERENCE" = "https://github.com/psd401/psd-eoc/issues/253"
-          test "$ACKNOWLEDGE" = "APPLY EXACT SES READBACK POLICY WITH ZERO SEND AUTHORITY"
+          test "$CHANGE_REFERENCE" = "https://github.com/psd401/psd-eoc/issues/257"
+          test "$ACKNOWLEDGE" = "APPLY EXACT SES READS AND APP RUNNER DOMAIN AUTHORITY WITH NO SEND OR DNS AUTHORITY"
 
           jq -e \
+            --arg app_runner_service "$APP_RUNNER_SERVICE_ARN" \
+            --arg configuration_set "$CONFIGURATION_SET_ARN" \
             --arg policy_name "$POLICY_NAME" \
-            --arg role_name "$DEPLOY_ROLE_NAME" \
-            --arg resource "$CONFIGURATION_SET_ARN" '
+            --arg role_name "$DEPLOY_ROLE_NAME" '
               (keys | sort) == ["AWSTemplateFormatVersion", "Description", "Resources"] and
               .AWSTemplateFormatVersion == "2010-09-09" and
+              .Description == "Retained least-privilege operations policy for the protected PSD EOC exploration deployment role" and
               (.Resources | keys) == ["ExplorationSmokeSesReadbackPolicy"] and
               .Resources.ExplorationSmokeSesReadbackPolicy == {
                 DeletionPolicy: "Retain",
                 Properties: {
                   PolicyDocument: {
-                    Statement: [{
-                      Action: [
-                        "ses:GetConfigurationSet",
-                        "ses:GetConfigurationSetEventDestinations"
-                      ],
-                      Effect: "Allow",
-                      Resource: $resource,
-                      Sid: "ReadCanonicalConfigurationSetOnly"
-                    }],
+                    Statement: [
+                      {
+                        Action: [
+                          "ses:GetConfigurationSet",
+                          "ses:GetConfigurationSetEventDestinations"
+                        ],
+                        Effect: "Allow",
+                        Resource: $configuration_set,
+                        Sid: "ReadCanonicalConfigurationSetOnly"
+                      },
+                      {
+                        Action: [
+                          "apprunner:AssociateCustomDomain",
+                          "apprunner:DescribeCustomDomains",
+                          "apprunner:ListOperations"
+                        ],
+                        Effect: "Allow",
+                        Resource: $app_runner_service,
+                        Sid: "ReadAndAssociateCanonicalCustomDomainOnly"
+                      }
+                    ],
                     Version: "2012-10-17"
                   },
                   PolicyName: $policy_name,
@@ -106,14 +121,18 @@ jobs:
                 UpdateReplacePolicy: "Retain"
               }
             ' "$TEMPLATE_PATH" > /dev/null
-          test "$(jq '[.. | objects | .Action? // empty | if type == "array" then .[] else . end] | length' "$TEMPLATE_PATH")" -eq 2
-          test "$(jq '[.. | objects | .Resource? // empty] | length' "$TEMPLATE_PATH")" -eq 1
+          test "$(jq '[.. | objects | .Action? // empty | if type == "array" then .[] else . end] | length' "$TEMPLATE_PATH")" -eq 5
+          test "$(jq '[.. | objects | .Resource? // empty] | length' "$TEMPLATE_PATH")" -eq 2
+          test "$(jq -r '[.. | objects | .Resource? // empty] | sort | join("\n")' "$TEMPLATE_PATH")" = "$(printf '%s\n%s' "$APP_RUNNER_SERVICE_ARN" "$CONFIGURATION_SET_ARN" | sort)"
+          if jq -er '.. | objects | .Resource? // empty' "$TEMPLATE_PATH" | grep -Fx '*'; then
+            echo "The retained policy contains wildcard resource authority." >&2
+            exit 1
+          fi
           if jq -er '.. | objects | .Action? // empty | if type == "array" then .[] else . end' "$TEMPLATE_PATH" \
-            | grep -Eiq '(^|:)(send|put|create|update|delete|associate|disassociate|publish|route53|apprunner|[*])'; then
+            | grep -Eiq '(^|:)(send|put|create|update|delete|disassociate|publish|route53|[*])'; then
             echo "The retained policy contains an unapproved action." >&2
             exit 1
           fi
-          test "$(jq -r '.. | objects | .Resource? // empty' "$TEMPLATE_PATH")" = "$CONFIGURATION_SET_ARN"
 
           mkdir -p artifacts
           cp "$TEMPLATE_PATH" artifacts/exploration-smoke-ses-readback-policy.template.json
@@ -121,15 +140,15 @@ jobs:
           printf '%s\n' "$template_sha256" > artifacts/template.sha256
           printf '%s\n' "template_sha256=$template_sha256" >> "$GITHUB_OUTPUT"
           {
-            printf '%s\n' "# Protected SES readback policy consequence preview"
+            printf '%s\n' "# Protected exploration operations policy consequence preview"
             printf '%s\n' ""
             printf '%s\n' "- Source: \`$SOURCE_SHA\`"
             printf '%s\n' "- Change authority: $CHANGE_REFERENCE"
             printf '%s\n' "- Target role: \`$DEPLOY_ROLE_ARN\`"
-            printf '%s\n' "- Allowed actions: \`ses:GetConfigurationSet\`, \`ses:GetConfigurationSetEventDestinations\`"
-            printf '%s\n' "- Sole resource: \`$CONFIGURATION_SET_ARN\`"
+            printf '%s\n' "- SES read actions: \`ses:GetConfigurationSet\`, \`ses:GetConfigurationSetEventDestinations\` on \`$CONFIGURATION_SET_ARN\`"
+            printf '%s\n' "- App Runner actions: \`apprunner:AssociateCustomDomain\`, \`apprunner:DescribeCustomDomains\`, \`apprunner:ListOperations\` on \`$APP_RUNNER_SERVICE_ARN\`"
             printf '%s\n' "- The retained policy is applied through protected OIDC -> CDK deploy role -> CloudFormation execution role."
-            printf '%s\n' "- No SES send/write/delete, App Runner, Route53, DNS, recipient, provider configuration, or application deployment occurs."
+            printf '%s\n' "- This policy apply performs no domain association, disassociation, Route53/DNS change, SES send/write/delete, recipient/provider mutation, or application deployment."
           } > artifacts/consequence-preview.md
           cat artifacts/consequence-preview.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -177,15 +196,16 @@ jobs:
           set -euo pipefail
           test "$SOURCE_SHA" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$CHANGE_REFERENCE" = "https://github.com/psd401/psd-eoc/issues/253"
-          test "$ACKNOWLEDGE" = "APPLY EXACT SES READBACK POLICY WITH ZERO SEND AUTHORITY"
+          test "$CHANGE_REFERENCE" = "https://github.com/psd401/psd-eoc/issues/257"
+          test "$ACKNOWLEDGE" = "APPLY EXACT SES READS AND APP RUNNER DOMAIN AUTHORITY WITH NO SEND OR DNS AUTHORITY"
           test "$CONFIGURED_DEPLOY_ROLE_ARN" = "$DEPLOY_ROLE_ARN"
           [[ "$EXPECTED_TEMPLATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           test "$(cat artifacts/template.sha256)" = "$EXPECTED_TEMPLATE_SHA256"
           test "$(sha256sum artifacts/exploration-smoke-ses-readback-policy.template.json | cut -d' ' -f1)" = "$EXPECTED_TEMPLATE_SHA256"
           cmp "$TEMPLATE_PATH" artifacts/exploration-smoke-ses-readback-policy.template.json
-          grep -Fx -- "- Sole resource: \`$CONFIGURATION_SET_ARN\`" artifacts/consequence-preview.md
-          grep -Fx -- "- No SES send/write/delete, App Runner, Route53, DNS, recipient, provider configuration, or application deployment occurs." artifacts/consequence-preview.md
+          grep -Fx -- "- SES read actions: \`ses:GetConfigurationSet\`, \`ses:GetConfigurationSetEventDestinations\` on \`$CONFIGURATION_SET_ARN\`" artifacts/consequence-preview.md
+          grep -Fx -- "- App Runner actions: \`apprunner:AssociateCustomDomain\`, \`apprunner:DescribeCustomDomains\`, \`apprunner:ListOperations\` on \`$APP_RUNNER_SERVICE_ARN\`" artifacts/consequence-preview.md
+          grep -Fx -- "- This policy apply performs no domain association, disassociation, Route53/DNS change, SES send/write/delete, recipient/provider mutation, or application deployment." artifacts/consequence-preview.md
 
       - name: Assume the exact protected exploration role
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
@@ -319,6 +339,7 @@ jobs:
           resume_available_create=false
           if deploy_aws cloudformation describe-stacks --stack-name "$STACK_NAME" > "$stack_before" 2> artifacts/readback/policy-stack-before-error.txt; then
             stack_existed=true
+            test "$(jq '.Stacks | length' "$stack_before")" -eq 1
             test "$(jq -er '.Stacks[0].RoleARN' "$stack_before")" = "$CDK_CFN_EXEC_ROLE_ARN"
             stack_status=$(jq -er '.Stacks[0].StackStatus' "$stack_before")
             case "$stack_status" in
@@ -326,7 +347,14 @@ jobs:
                 deploy_aws cloudformation get-template --stack-name "$STACK_NAME" --template-stage Original > artifacts/readback/policy-stack-template-before.json
                 jq -S '.TemplateBody' artifacts/readback/policy-stack-template-before.json > artifacts/readback/policy-stack-template-before-body.json
                 jq -S . "$template" > artifacts/readback/policy-template-canonical.json
-                cmp artifacts/readback/policy-template-canonical.json artifacts/readback/policy-stack-template-before-body.json
+                jq -S '
+                  .Description = "Retained least-privilege SES readback policy for the protected PSD EOC exploration deployment role" |
+                  .Resources.ExplorationSmokeSesReadbackPolicy.Properties.PolicyDocument.Statement =
+                    [.Resources.ExplorationSmokeSesReadbackPolicy.Properties.PolicyDocument.Statement[0]]
+                ' "$template" > artifacts/readback/policy-template-authorized-predecessor.json
+                if ! cmp artifacts/readback/policy-template-canonical.json artifacts/readback/policy-stack-template-before-body.json; then
+                  cmp artifacts/readback/policy-template-authorized-predecessor.json artifacts/readback/policy-stack-template-before-body.json
+                fi
                 change_set_type=UPDATE
                 ;;
               REVIEW_IN_PROGRESS)
@@ -386,10 +414,6 @@ jobs:
                 jq -S '.TemplateBody' artifacts/readback/policy-interrupted-change-set-template.json > artifacts/readback/policy-interrupted-change-set-template-body.json
                 jq -S . "$template" > artifacts/readback/policy-template-canonical.json
                 cmp artifacts/readback/policy-template-canonical.json artifacts/readback/policy-interrupted-change-set-template-body.json
-                deploy_aws cloudformation list-stack-resources \
-                  --stack-name "$STACK_NAME" \
-                  > artifacts/readback/policy-interrupted-stack-resources.json
-                test "$(jq '.StackResourceSummaries | length' artifacts/readback/policy-interrupted-stack-resources.json)" -eq 0
                 change_set_type=CREATE
                 resume_available_create=true
                 ;;
@@ -462,17 +486,30 @@ jobs:
                 .Status == "CREATE_COMPLETE" and
                 .ExecutionStatus == "AVAILABLE" and
                 (.Capabilities | sort) == ["CAPABILITY_NAMED_IAM"] and
-                [.Changes[] | .ResourceChange | {
-                  Action,
-                  LogicalResourceId,
-                  ResourceType,
-                  Replacement
-                }] == [{
-                  Action: "Add",
-                  LogicalResourceId: "ExplorationSmokeSesReadbackPolicy",
-                  Replacement: null,
-                  ResourceType: "AWS::IAM::Policy"
-                }]
+                (($type == "CREATE" and
+                  [.Changes[] | .ResourceChange | {
+                    Action,
+                    LogicalResourceId,
+                    ResourceType,
+                    Replacement
+                  }] == [{
+                    Action: "Add",
+                    LogicalResourceId: "ExplorationSmokeSesReadbackPolicy",
+                    Replacement: null,
+                    ResourceType: "AWS::IAM::Policy"
+                  }]) or
+                  ($type == "UPDATE" and
+                    [.Changes[] | .ResourceChange | {
+                      Action,
+                      LogicalResourceId,
+                      ResourceType,
+                      Replacement
+                    }] == [{
+                      Action: "Modify",
+                      LogicalResourceId: "ExplorationSmokeSesReadbackPolicy",
+                      Replacement: "False",
+                      ResourceType: "AWS::IAM::Policy"
+                    }]))
               ' artifacts/readback/policy-change-set.json > /dev/null
             deploy_aws cloudformation execute-change-set --change-set-name "$change_set_id"
             if [[ "$change_set_type" == "CREATE" ]]; then
@@ -514,28 +551,6 @@ jobs:
           jq -S '.TemplateBody' artifacts/readback/policy-stack-template-final.json > artifacts/readback/policy-stack-template-final-body.json
           jq -S . "$template" > artifacts/readback/policy-template-canonical.json
           cmp artifacts/readback/policy-template-canonical.json artifacts/readback/policy-stack-template-final-body.json
-          deploy_aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > artifacts/readback/policy-stack-resources.json
-          jq -e '
-            [.StackResourceSummaries[] | {
-              LogicalResourceId,
-              ResourceStatus,
-              ResourceType
-            }] == [{
-              LogicalResourceId: "ExplorationSmokeSesReadbackPolicy",
-              ResourceStatus: "CREATE_COMPLETE",
-              ResourceType: "AWS::IAM::Policy"
-            }] or
-            [.StackResourceSummaries[] | {
-              LogicalResourceId,
-              ResourceStatus,
-              ResourceType
-            }] == [{
-              LogicalResourceId: "ExplorationSmokeSesReadbackPolicy",
-              ResourceStatus: "UPDATE_COMPLETE",
-              ResourceType: "AWS::IAM::Policy"
-            }]
-          ' artifacts/readback/policy-stack-resources.json > /dev/null
-
           unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token deploy_caller_arn
           post_deploy_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
           test "$post_deploy_caller_arn" = "$oidc_caller_arn"
@@ -547,26 +562,46 @@ jobs:
           cmp "$role_before" "$role_after"
           capture_policy_inventory "$inventory_after" artifacts/readback/policy-after
           jq -e \
+            --arg app_runner_service "$APP_RUNNER_SERVICE_ARN" \
+            --arg configuration_set "$CONFIGURATION_SET_ARN" \
             --arg policy_name "$POLICY_NAME" \
-            --arg resource "$CONFIGURATION_SET_ARN" '
+            '
               [.inlinePolicies[] | select(.policyName == $policy_name)] == [{
                 policyDocument: {
-                  Statement: [{
-                    Action: [
-                      "ses:GetConfigurationSet",
-                      "ses:GetConfigurationSetEventDestinations"
-                    ],
-                    Effect: "Allow",
-                    Resource: $resource,
-                    Sid: "ReadCanonicalConfigurationSetOnly"
-                  }],
+                  Statement: [
+                    {
+                      Action: [
+                        "ses:GetConfigurationSet",
+                        "ses:GetConfigurationSetEventDestinations"
+                      ],
+                      Effect: "Allow",
+                      Resource: $configuration_set,
+                      Sid: "ReadCanonicalConfigurationSetOnly"
+                    },
+                    {
+                      Action: [
+                        "apprunner:AssociateCustomDomain",
+                        "apprunner:DescribeCustomDomains",
+                        "apprunner:ListOperations"
+                      ],
+                      Effect: "Allow",
+                      Resource: $app_runner_service,
+                      Sid: "ReadAndAssociateCanonicalCustomDomainOnly"
+                    }
+                  ],
                   Version: "2012-10-17"
                 },
                 policyName: $policy_name
               }] and
               ([.inlinePolicies[] | select(.policyName != $policy_name)] | length) >= 1 and
               ([.inlinePolicies[] | select(.policyName != $policy_name)] | all(.[];
-                ([.policyDocument.Statement[] | .Action | if type == "array" then .[] else . end] | all(. != "ses:GetConfigurationSet" and . != "ses:GetConfigurationSetEventDestinations"))
+                ([.policyDocument.Statement[] | .Action | if type == "array" then .[] else . end] | all(
+                  . != "ses:GetConfigurationSet" and
+                  . != "ses:GetConfigurationSetEventDestinations" and
+                  . != "apprunner:AssociateCustomDomain" and
+                  . != "apprunner:DescribeCustomDomains" and
+                  . != "apprunner:ListOperations"
+                ))
               ))
             ' "$inventory_after" > /dev/null
           jq -e \
@@ -607,6 +642,69 @@ jobs:
                 .EvalResourceName == $resource and .EvalDecision != "allowed"
               )
             ' artifacts/readback/ses-read-neighboring-negative-simulation.json > /dev/null
+
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              apprunner:AssociateCustomDomain \
+              apprunner:DescribeCustomDomains \
+              apprunner:ListOperations \
+            --resource-arns "$APP_RUNNER_SERVICE_ARN" \
+            > artifacts/readback/app-runner-domain-positive-simulation.json
+          jq -e \
+            --arg resource "$APP_RUNNER_SERVICE_ARN" '
+              [.EvaluationResults[] | {action:.EvalActionName,decision:.EvalDecision,resource:.EvalResourceName}] |
+              sort_by(.action) == ([
+                {action:"apprunner:AssociateCustomDomain",decision:"allowed",resource:$resource},
+                {action:"apprunner:DescribeCustomDomains",decision:"allowed",resource:$resource},
+                {action:"apprunner:ListOperations",decision:"allowed",resource:$resource}
+              ] | sort_by(.action))
+            ' artifacts/readback/app-runner-domain-positive-simulation.json > /dev/null
+
+          neighboring_service_arn="arn:aws:apprunner:$AWS_REGION:$AWS_ACCOUNT_ID:service/not-psd-eoc/11111111111111111111111111111111"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              apprunner:AssociateCustomDomain \
+              apprunner:DescribeCustomDomains \
+              apprunner:ListOperations \
+            --resource-arns "$neighboring_service_arn" \
+            > artifacts/readback/app-runner-neighboring-negative-simulation.json
+          jq -e \
+            --arg resource "$neighboring_service_arn" '
+              (.EvaluationResults | length) == 3 and
+              all(.EvaluationResults[];
+                .EvalResourceName == $resource and .EvalDecision != "allowed"
+              )
+            ' artifacts/readback/app-runner-neighboring-negative-simulation.json > /dev/null
+
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              apprunner:DisassociateCustomDomain \
+              apprunner:DeleteService \
+              apprunner:PauseService \
+              apprunner:ResumeService \
+              apprunner:UpdateService \
+            --resource-arns "$APP_RUNNER_SERVICE_ARN" \
+            > artifacts/readback/app-runner-write-negative-simulation.json
+          jq -e '
+              (.EvaluationResults | length) == 5 and
+              all(.EvaluationResults[]; .EvalDecision != "allowed")
+            ' artifacts/readback/app-runner-write-negative-simulation.json > /dev/null
+
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              route53:ChangeResourceRecordSets \
+              route53:CreateHostedZone \
+              route53:DeleteHostedZone \
+            --resource-arns '*' \
+            > artifacts/readback/route53-negative-simulation.json
+          jq -e '
+              (.EvaluationResults | length) == 3 and
+              all(.EvaluationResults[]; .EvalDecision != "allowed")
+            ' artifacts/readback/route53-negative-simulation.json > /dev/null
 
           aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
@@ -669,14 +767,16 @@ jobs:
             ' artifacts/readback/ses-event-destinations.json > /dev/null
 
           {
-            printf '%s\n' "# SES readback policy applied"
+            printf '%s\n' "# Exploration operations policy applied"
             printf '%s\n' ""
             printf '%s\n' "- Source: \`$SOURCE_SHA\`"
             printf '%s\n' "- Result: \`$(jq -r .state artifacts/readback/policy-apply-result.json)\`"
             printf '%s\n' "- Complete deployment-role policy inventory SHA-256: \`$actual_policy_sha256\`"
             printf '%s\n' "- Exact SES reads are allowed only on \`$CONFIGURATION_SET_ARN\`."
+            printf '%s\n' "- Exact App Runner domain reads/association are allowed only on \`$APP_RUNNER_SERVICE_ARN\`."
             printf '%s\n' "- SES sending remains disabled; all tested send/write/delete actions and the neighboring configuration set remain denied."
-            printf '%s\n' "- No provider configuration, recipient, message, App Runner, Route53, or DNS mutation occurred."
+            printf '%s\n' "- App Runner disassociation/service mutations, unrelated services, and all tested Route53 writes remain denied."
+            printf '%s\n' "- No provider configuration, recipient, message, custom-domain association, Route53, or DNS mutation occurred."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload exact policy and readback evidence
