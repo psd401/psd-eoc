@@ -284,73 +284,24 @@ function GoogleGroupFields({
   );
 }
 
-function SyntheticGroupFields({
-  defaultDisplayName,
-  helpId,
-}: Readonly<{ defaultDisplayName?: string; helpId: string }>) {
-  return (
-    <>
-      <label>
-        Display name
-        <input
-          aria-describedby={helpId}
-          autoComplete="off"
-          defaultValue={defaultDisplayName}
-          maxLength={160}
-          name="displayName"
-          required
-        />
-      </label>
-      <label>
-        Synthetic fixture key
-        <input
-          autoCapitalize="none"
-          autoComplete="off"
-          maxLength={100}
-          name="fixtureKey"
-          pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-          required
-          spellCheck={false}
-        />
-      </label>
-    </>
-  );
-}
-
 function BuildingGroupForm({
   csrfToken,
   facilities,
-  kind,
 }: Readonly<{
   csrfToken: string;
   facilities: readonly Facility[];
-  kind: 'google-group' | 'synthetic';
 }>) {
   const activeFacilities = facilities.filter((facility) => facility.active);
-  const google = kind === 'google-group';
-  const helpId = google
-    ? 'new-google-building-group-help'
-    : 'new-synthetic-building-group-help';
+  const helpId = 'new-google-building-group-help';
   return (
     <form action="/facilities/api" method="post">
       <AdminMutationFields csrfToken={csrfToken} />
-      <input
-        name="intent"
-        type="hidden"
-        value={
-          google
-            ? 'create-google-building-group'
-            : 'create-synthetic-building-group'
-        }
-      />
+      <input name="intent" type="hidden" value="create-google-building-group" />
       <fieldset disabled={activeFacilities.length === 0}>
-        <legend>
-          Add a {google ? 'Google' : 'synthetic test'} building source
-        </legend>
+        <legend>Add a Google building source</legend>
         <p id={helpId}>
-          {google
-            ? 'Google Groups data is untrusted and is used only after a complete validated roster sync.'
-            : 'Synthetic sources are reserved for TEST workflows and cannot contain routable endpoints.'}
+          Google Groups data is untrusted and is used only after a complete
+          validated roster sync.
         </p>
         <label>
           Facility
@@ -363,14 +314,8 @@ function BuildingGroupForm({
             ))}
           </select>
         </label>
-        {google ? (
-          <GoogleGroupFields helpId={helpId} />
-        ) : (
-          <SyntheticGroupFields helpId={helpId} />
-        )}
-        <button type="submit">
-          Add {google ? 'Google' : 'synthetic'} building source
-        </button>
+        <GoogleGroupFields helpId={helpId} />
+        <button type="submit">Add Google building source</button>
       </fieldset>
       {activeFacilities.length === 0 ? (
         <p role="status">Add an active facility before its building source.</p>
@@ -381,43 +326,22 @@ function BuildingGroupForm({
 
 function OthersGroupForm({
   csrfToken,
-  kind,
 }: Readonly<{
   csrfToken: string;
-  kind: 'google-group' | 'synthetic';
 }>) {
-  const google = kind === 'google-group';
-  const helpId = google
-    ? 'new-google-others-group-help'
-    : 'new-synthetic-others-group-help';
+  const helpId = 'new-google-others-group-help';
   return (
     <form action="/facilities/api" method="post">
       <AdminMutationFields csrfToken={csrfToken} />
-      <input
-        name="intent"
-        type="hidden"
-        value={
-          google
-            ? 'create-google-others-group'
-            : 'create-synthetic-others-group'
-        }
-      />
+      <input name="intent" type="hidden" value="create-google-others-group" />
       <fieldset>
-        <legend>
-          Add a {google ? 'Google' : 'synthetic test'} others source
-        </legend>
+        <legend>Add a Google others source</legend>
         <p id={helpId}>
           Others sources are optional, district-level audience extensions.
           Select them explicitly on each facility audience version.
         </p>
-        {google ? (
-          <GoogleGroupFields helpId={helpId} />
-        ) : (
-          <SyntheticGroupFields helpId={helpId} />
-        )}
-        <button type="submit">
-          Add {google ? 'Google' : 'synthetic'} others source
-        </button>
+        <GoogleGroupFields helpId={helpId} />
+        <button type="submit">Add Google others source</button>
       </fieldset>
     </form>
   );
@@ -433,9 +357,15 @@ function GroupSourceReplacementForm({
   csrfToken,
   group,
 }: Readonly<{ csrfToken: string; group: GroupSource }>) {
-  if (group.purpose === 'access' || !group.active) return null;
+  if (
+    group.kind !== 'google-group' ||
+    group.purpose === 'access' ||
+    !group.active
+  ) {
+    return null;
+  }
   const helpId = `replace-group-${group.id}-help`;
-  const intent = `replace-${group.kind === 'google-group' ? 'google' : 'synthetic'}-${group.purpose}-group`;
+  const intent = `replace-google-${group.purpose}-group`;
   return (
     <details>
       <summary>Replace {group.displayName}</summary>
@@ -453,17 +383,10 @@ function GroupSourceReplacementForm({
             version. The current row and every historical configuration remain
             unchanged. A stale replacement is refused.
           </p>
-          {group.kind === 'google-group' ? (
-            <GoogleGroupFields
-              defaultDisplayName={group.displayName}
-              helpId={helpId}
-            />
-          ) : (
-            <SyntheticGroupFields
-              defaultDisplayName={group.displayName}
-              helpId={helpId}
-            />
-          )}
+          <GoogleGroupFields
+            defaultDisplayName={group.displayName}
+            helpId={helpId}
+          />
           <button type="submit">Replace {group.displayName}</button>
         </fieldset>
       </form>
@@ -589,18 +512,7 @@ function GroupSourcesSection({
             currentCursors,
           )
         : null}
-      <div className="admin-grid">
-        <BuildingGroupForm
-          csrfToken={csrfToken}
-          facilities={facilities}
-          kind="google-group"
-        />
-        <BuildingGroupForm
-          csrfToken={csrfToken}
-          facilities={facilities}
-          kind="synthetic"
-        />
-      </div>
+      <BuildingGroupForm csrfToken={csrfToken} facilities={facilities} />
       <h3>Optional others sources</h3>
       <GroupSourceTable
         facilitiesById={facilitiesById}
@@ -624,10 +536,7 @@ function GroupSourcesSection({
             currentCursors,
           )
         : null}
-      <div className="admin-grid">
-        <OthersGroupForm csrfToken={csrfToken} kind="google-group" />
-        <OthersGroupForm csrfToken={csrfToken} kind="synthetic" />
-      </div>
+      <OthersGroupForm csrfToken={csrfToken} />
     </section>
   );
 }
@@ -962,9 +871,8 @@ function AudienceForm({
         <fieldset>
           <legend>Optional others sources</legend>
           <p>
-            Google sources extend staff audiences; synthetic sources extend TEST
-            audiences. Do not mix both kinds in one audience version—the server
-            rejects a cross-population audience.
+            Google Group sources extend staff audiences. The server rejects any
+            selection that does not match the current staff roster population.
           </p>
           {othersGroups.length === 0 ? (
             <p>No others sources are available.</p>

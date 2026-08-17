@@ -9,10 +9,6 @@ import type {
 import { AdminMutationFields } from '../facilities/admin-form-fields';
 import { AdminNavigation } from '../facilities/admin-nav';
 import { SMS_INTEGRATION_ID } from './capabilities';
-import { TEST_MODE_TARGETING } from './test-mode';
-
-export const TEST_MODE_BANNER =
-  'TEST — SYNTHETIC RECIPIENTS ONLY — NO REAL NOTIFICATIONS' as const;
 
 export interface IntegrationsAdminViewProps {
   readonly integrationHealth: IntegrationHealth;
@@ -26,6 +22,30 @@ export interface IntegrationsAdminViewProps {
 
 function Timestamp({ value }: Readonly<{ value: string }>) {
   return <time dateTime={value}>{value}</time>;
+}
+
+function IntegrationStateSummary({
+  configurations,
+  health,
+}: Readonly<{
+  configurations: readonly ChannelConfiguration[];
+  health: IntegrationHealth;
+}>) {
+  const liveVerifiedCount = health.statuses.filter(
+    (status) => status.label === 'live-verified',
+  ).length;
+  const enabledCount = configurations.filter(
+    (configuration) => configuration.enabled,
+  ).length;
+  return (
+    <p className="notice integration-state-summary">
+      <strong>Current integration state:</strong> {liveVerifiedCount} of{' '}
+      {health.statuses.length} observed integrations are live-verified;{' '}
+      {enabledCount} of {configurations.length} notification channels are
+      enabled. Channel enablement is configuration state, not proof that a
+      notification was sent or received.
+    </p>
+  );
 }
 
 function truthLabelDescription(label: IntegrationTruthLabel): string {
@@ -277,21 +297,10 @@ export function IntegrationsAdminView({
           {statusMessage}
         </p>
       )}
-      <aside aria-labelledby="test-mode-heading" className="test-boundary">
-        <h2 id="test-mode-heading">{TEST_MODE_BANNER}</h2>
-        <p>
-          Test mode is server-fixed to test classification, drill rendering,
-          mocked integrations, and reserved synthetic endpoints.
-        </p>
-        <dl>
-          <dt>Event kind</dt>
-          <dd>{TEST_MODE_TARGETING.kind.toUpperCase()}</dd>
-          <dt>Template mode</dt>
-          <dd>{TEST_MODE_TARGETING.templateMode.toUpperCase()}</dd>
-          <dt>Roster population</dt>
-          <dd>{TEST_MODE_TARGETING.rosterPopulation.toUpperCase()}</dd>
-        </dl>
-      </aside>
+      <IntegrationStateSummary
+        configurations={channelConfigurations}
+        health={integrationHealth}
+      />
       <IntegrationHealthSection health={integrationHealth} />
       <ChannelStateSection
         configurations={channelConfigurations}
