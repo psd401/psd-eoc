@@ -209,6 +209,50 @@ export type AccessMembershipMember = z.infer<
 >;
 
 /**
+ * Owns one normalized Google email fact selected by the configured Google
+ * membership evaluator for a complete access snapshot. The evaluator's
+ * direct-versus-nested membership policy is deliberately not represented in
+ * this row while that product decision remains unresolved. This contract
+ * retains only the evaluator's resulting email and exact access-group
+ * provenance. OIDC remains the sole source of an immutable Google subject.
+ */
+export const EvaluatedAccessMembershipSchema = z
+  .object({
+    email: z
+      .string()
+      .trim()
+      .email()
+      .max(320)
+      .refine((email) => email === email.toLowerCase(), {
+        message:
+          'Evaluated access membership requires a normalized Google email.',
+      }),
+    accessGroupSourceRefs: z
+      .array(AccessGroupSourceRefSchema)
+      .min(1)
+      .max(50)
+      .readonly(),
+  })
+  .strict()
+  .superRefine((member, context) => {
+    if (
+      !hasUniqueStrings(member.accessGroupSourceRefs.map((source) => source.id))
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Evaluated access-group references must be unique.',
+        path: ['accessGroupSourceRefs'],
+      });
+    }
+  })
+  .readonly();
+
+/** Evaluated Google-email access evidence inferred from its schema. */
+export type EvaluatedAccessMembership = z.infer<
+  typeof EvaluatedAccessMembershipSchema
+>;
+
+/**
  * Owns one complete, immutable Google Groups access snapshot. Expected and
  * completed designated-group sets must match exactly; partial syncs never
  * become session authorization evidence.
@@ -227,6 +271,10 @@ export const AccessMembershipSnapshotSchema = z
       .array(AccessGroupSourceRefSchema)
       .min(1)
       .max(100)
+      .readonly(),
+    evaluatedMemberships: z
+      .array(EvaluatedAccessMembershipSchema)
+      .max(1_200)
       .readonly(),
     members: z.array(AccessMembershipMemberSchema).max(1_200).readonly(),
     syncStartedAt: TimestampSchema,
@@ -262,6 +310,34 @@ export const AccessMembershipSnapshotSchema = z
       });
     }
     const expectedSet = new Set(expected);
+    snapshot.evaluatedMemberships.forEach((member, memberIndex) => {
+      member.accessGroupSourceRefs.forEach((groupSource, groupIndex) => {
+        if (!expectedSet.has(accessGroupSourceRefKey(groupSource))) {
+          context.addIssue({
+            code: 'custom',
+            message:
+              'Evaluated membership provenance must use a designated access group.',
+            path: [
+              'evaluatedMemberships',
+              memberIndex,
+              'accessGroupSourceRefs',
+              groupIndex,
+            ],
+          });
+        }
+      });
+    });
+    if (
+      !hasUniqueStrings(
+        snapshot.evaluatedMemberships.map((member) => member.email),
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Evaluated access-member emails must be unique.',
+        path: ['evaluatedMemberships'],
+      });
+    }
     snapshot.members.forEach((member, memberIndex) => {
       member.accessGroupSourceRefs.forEach((groupSource, groupIndex) => {
         if (!expectedSet.has(accessGroupSourceRefKey(groupSource))) {
