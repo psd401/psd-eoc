@@ -58,6 +58,7 @@ import {
   checkAccessGate,
   createDrizzleAccessGateAuditSink,
   createDrizzleAccessGateStore,
+  parseInitialMobileTransitionEmailDigest,
   type AccessGateEvidence,
   type AccessGateGranted,
 } from './access-gate';
@@ -301,6 +302,21 @@ async function appendLegacyAccessGroupUpdateAudit(input: {
 }
 
 describe('strict access-gate snapshot projection', () => {
+  test('accepts only an absent or canonical protected transition selector', () => {
+    const transitionDigest = 'a'.repeat(64);
+
+    expect(parseInitialMobileTransitionEmailDigest(undefined)).toBeNull();
+    expect(parseInitialMobileTransitionEmailDigest(transitionDigest)).toBe(
+      transitionDigest,
+    );
+    expect(() =>
+      parseInitialMobileTransitionEmailDigest(transitionDigest.toUpperCase()),
+    ).toThrow(AccessGateConfigurationError);
+    expect(() =>
+      parseInitialMobileTransitionEmailDigest('not-a-sha-256-digest'),
+    ).toThrow(AccessGateConfigurationError);
+  });
+
   test('ignores audit chronology but rejects duplicated or noncanonical access refs', async () => {
     const userId = '10000000-0000-4000-8000-000000000001';
     const snapshotId = '10000000-0000-4000-8000-000000000002';
@@ -1890,7 +1906,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const existingUserId = randomUUID();
     const existingSubject = `hagelk-subject-${suffix}`;
     const existingEmail = `hagelk-${suffix}@example.invalid`;
-    const ambiguousUserId = randomUUID();
     const ambiguousSubject = `ambiguous-subject-${suffix}`;
     const ambiguousEmail = `ambiguous-${suffix}@example.invalid`;
     const newSubject = `new-subject-${suffix}`;
@@ -2018,10 +2033,15 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
 
     const store = createDrizzleAccessGateStore(database);
     const audit = createDrizzleAccessGateAuditSink(database);
+    expect(() =>
+      createDrizzleInitialWebSessionStore(database, {
+        initialMobileTransitionEmailDigest: 'not-a-sha-256-digest',
+      }),
+    ).toThrow('The initial mobile transition configuration is invalid.');
     const buildPersistenceRequest = (
       grant: AccessGateGranted,
       createdAt: Date,
-      platform: 'web' | 'ios',
+      platform: 'web' | 'ios' | 'android',
       label: string,
     ): PersistInitialWebSessionRequest => {
       const responseDigest = digest(`${label}-response:${suffix}`);
@@ -2143,124 +2163,7 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       granted: false,
       reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
     });
-    const transitionRaceGrant = await checkAccessGate(
-      {
-        googleSubject: existingSubject,
-        email: existingEmail,
-        displayName: 'Changed Google display label is non-authoritative',
-        subjectDigest: digest(existingSubject),
-        requestId: randomUUID(),
-        checkedAt: existingCheckedAt.toISOString(),
-        source: 'mobile',
-      },
-      { store, audit },
-    );
-    expect(transitionRaceGrant.granted).toBe(true);
-    if (
-      !transitionRaceGrant.granted ||
-      transitionRaceGrant.firstLoginBinding === null
-    ) {
-      throw new Error('Transition race did not reach the atomic binding seam.');
-    }
-    const reservedTransitionVersion = sourceVersion - 100;
-    await database.insert(accessMembershipSnapshots).values({
-      id: transitionRaceGrant.firstLoginBinding.successorSnapshotId,
-      version: reservedTransitionVersion,
-      complete: true,
-      syncStartedAt: capturedAt,
-      capturedAt,
-    });
-    const transitionRaceRequest = buildPersistenceRequest(
-      transitionRaceGrant,
-      existingCheckedAt,
-      'ios',
-      'transition-raced',
-    );
-    await expect(
-      createDrizzleInitialWebSessionStore(database).persist(
-        transitionRaceRequest,
-      ),
-    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, recoverySourceId)),
-    ).toEqual([{ active: true }]);
-    expect(
-      await database
-        .select({
-          complete: accessMembershipSnapshots.complete,
-          version: accessMembershipSnapshots.version,
-        })
-        .from(accessMembershipSnapshots)
-        .where(
-          eq(
-            accessMembershipSnapshots.id,
-            transitionRaceGrant.firstLoginBinding.successorSnapshotId,
-          ),
-        ),
-    ).toEqual([{ complete: true, version: reservedTransitionVersion }]);
-    expect(
-      await database
-        .select({ id: idempotencyRecords.id })
-        .from(idempotencyRecords)
-        .where(
-          eq(idempotencyRecords.key, transitionRaceRequest.idempotency.key),
-        ),
-    ).toEqual([]);
-    expect(await loadEffectiveRoles(database, existingUserId)).toEqual([
-      'staff',
-    ]);
-    await database.insert(users).values({
-      id: ambiguousUserId,
-      googleSubject: ambiguousSubject,
-      email: ambiguousEmail,
-      displayName: 'Synthetic ambiguous durable candidate',
-      facilityScopeKind: 'district',
-      createdAt: capturedAt,
-    });
-    const ambiguousGrant = await checkAccessGate(
-      {
-        googleSubject: existingSubject,
-        email: existingEmail,
-        displayName: 'Changed Google display label is non-authoritative',
-        subjectDigest: digest(existingSubject),
-        requestId: randomUUID(),
-        checkedAt: existingCheckedAt.toISOString(),
-        source: 'mobile',
-      },
-      { store, audit },
-    );
-    expect(ambiguousGrant.granted).toBe(true);
-    if (!ambiguousGrant.granted || ambiguousGrant.firstLoginBinding === null) {
-      throw new Error('Ambiguous transition did not reach persistence.');
-    }
-    const ambiguousRequest = buildPersistenceRequest(
-      ambiguousGrant,
-      existingCheckedAt,
-      'ios',
-      'ambiguous-candidate',
-    );
-    await expect(
-      createDrizzleInitialWebSessionStore(database).persist(ambiguousRequest),
-    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, recoverySourceId)),
-    ).toEqual([{ active: true }]);
-    expect(
-      await database
-        .select({ id: idempotencyRecords.id })
-        .from(idempotencyRecords)
-        .where(eq(idempotencyRecords.key, ambiguousRequest.idempotency.key)),
-    ).toEqual([]);
-    await database
-      .update(users)
-      .set({ disabledAt: existingCheckedAt })
-      .where(eq(users.id, ambiguousUserId));
+    const transitionEmailDigest = digest(newEmail);
     const existingGrant = await checkAccessGate(
       {
         googleSubject: existingSubject,
@@ -2271,110 +2174,63 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         checkedAt: existingCheckedAt.toISOString(),
         source: 'mobile',
       },
-      { store, audit },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: digest(existingEmail),
+      },
     );
-    expect(existingGrant.granted).toBe(true);
-    if (!existingGrant.granted || existingGrant.firstLoginBinding === null) {
-      throw new Error('Existing verified identity was not re-materialized.');
-    }
-    expect(existingGrant.firstLoginBinding.userDisposition).toBe('existing');
-    const existingResult = await createDrizzleInitialWebSessionStore(
-      database,
-    ).persist(
-      buildPersistenceRequest(
-        existingGrant,
-        existingCheckedAt,
-        'ios',
-        'existing-binding',
-      ),
-    );
-    expect(existingResult.user).toMatchObject({
-      id: existingUserId,
-      googleSubject: existingSubject,
-      email: existingEmail,
-      roles: ['staff', 'admin'],
+    expect(existingGrant).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
     });
-    expect(
-      await database
-        .select({ groupSourceId: accessMembershipMemberGroups.groupSourceId })
-        .from(accessMembershipMemberGroups)
-        .where(
-          and(
-            eq(
-              accessMembershipMemberGroups.snapshotId,
-              existingGrant.firstLoginBinding.successorSnapshotId,
-            ),
-            eq(accessMembershipMemberGroups.userId, existingUserId),
-          ),
-        ),
-    ).toEqual([{ groupSourceId: sourceId }]);
-    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([
-      existingUserId,
+    expect(await loadEffectiveRoles(database, existingUserId)).toEqual([
+      'staff',
     ]);
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, recoverySourceId)),
-    ).toEqual([{ active: false }]);
 
-    const checkedAt = new Date(existingCheckedAt.getTime() + 1_000);
-    const granted = await checkAccessGate(
+    const wrongSelectorGrant = await checkAccessGate(
+      {
+        googleSubject: ambiguousSubject,
+        email: ambiguousEmail,
+        displayName: 'Synthetic unselected exact-group member',
+        subjectDigest: digest(ambiguousSubject),
+        requestId: randomUUID(),
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'mobile',
+      },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      },
+    );
+    expect(wrongSelectorGrant).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
+    });
+    const selectedWebGrant = await checkAccessGate(
       {
         googleSubject: newSubject,
         email: newEmail,
         displayName: 'Synthetic exact-group administrator',
         subjectDigest: digest(newSubject),
         requestId: randomUUID(),
-        checkedAt: checkedAt.toISOString(),
-        source: 'mobile',
+        checkedAt: existingCheckedAt.toISOString(),
+        source: 'web',
       },
-      { store, audit },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      },
     );
-    expect(granted.granted).toBe(true);
-    if (!granted.granted || granted.firstLoginBinding === null) {
-      throw new Error(
-        'Exact evaluated email did not produce a first-login bind.',
-      );
-    }
-
-    expect(granted.firstLoginBinding.userDisposition).toBe('create');
-    const request = buildPersistenceRequest(
-      granted,
-      checkedAt,
-      'ios',
-      'first-login',
-    );
-    const result =
-      await createDrizzleInitialWebSessionStore(database).persist(request);
-    expect(result.user).toMatchObject({
-      id: granted.user.id,
-      googleSubject: newSubject,
-      email: newEmail,
-      roles: ['admin'],
-      facilityScope: { kind: 'district' },
+    expect(selectedWebGrant).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
     });
-    expect(result.session.authorization.membershipSnapshotId).toBe(
-      granted.firstLoginBinding.successorSnapshotId,
-    );
-    expect(
-      await database
-        .select({ userId: accessMembershipMembers.userId })
-        .from(accessMembershipMembers)
-        .where(
-          eq(
-            accessMembershipMembers.snapshotId,
-            granted.firstLoginBinding.successorSnapshotId,
-          ),
-        ),
-    ).toEqual(
-      expect.arrayContaining([
-        { userId: existingUserId },
-        { userId: granted.user.id },
-      ]),
-    );
 
-    const racedCheckedAt = new Date(checkedAt.getTime() + 1_000);
+    const racedCheckedAt = new Date(existingCheckedAt.getTime() + 1_000);
+    const racedEmailDigest = digest(racedEmail);
     const racedGrant = await checkAccessGate(
       {
         googleSubject: racedSubject,
@@ -2383,9 +2239,13 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         subjectDigest: digest(racedSubject),
         requestId: randomUUID(),
         checkedAt: racedCheckedAt.toISOString(),
-        source: 'web',
+        source: 'mobile',
       },
-      { store, audit },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: racedEmailDigest,
+      },
     );
     expect(racedGrant.granted).toBe(true);
     if (!racedGrant.granted || racedGrant.firstLoginBinding === null) {
@@ -2403,11 +2263,13 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     const racedRequest = buildPersistenceRequest(
       racedGrant,
       racedCheckedAt,
-      'web',
+      'ios',
       'raced',
     );
     await expect(
-      createDrizzleInitialWebSessionStore(database).persist(racedRequest),
+      createDrizzleInitialWebSessionStore(database, {
+        initialMobileTransitionEmailDigest: racedEmailDigest,
+      }).persist(racedRequest),
     ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
     expect(
       await database
@@ -2432,5 +2294,430 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
         .from(idempotencyRecords)
         .where(eq(idempotencyRecords.key, racedRequest.idempotency.key)),
     ).toEqual([]);
+
+    const reservedCheckedAt = new Date(racedCheckedAt.getTime() + 1_000);
+    const reservedGrant = await checkAccessGate(
+      {
+        googleSubject: newSubject,
+        email: newEmail,
+        displayName: 'Synthetic exact-group administrator',
+        subjectDigest: digest(newSubject),
+        requestId: randomUUID(),
+        checkedAt: reservedCheckedAt.toISOString(),
+        source: 'mobile',
+      },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      },
+    );
+    expect(reservedGrant.granted).toBe(true);
+    if (!reservedGrant.granted || reservedGrant.firstLoginBinding === null) {
+      throw new Error('Selected identity did not reach the snapshot race.');
+    }
+    const reservedTransitionVersion = sourceVersion - 100;
+    await database.insert(accessMembershipSnapshots).values({
+      id: reservedGrant.firstLoginBinding.successorSnapshotId,
+      version: reservedTransitionVersion,
+      complete: true,
+      syncStartedAt: capturedAt,
+      capturedAt,
+    });
+    const reservedRequest = buildPersistenceRequest(
+      reservedGrant,
+      reservedCheckedAt,
+      'ios',
+      'snapshot-raced',
+    );
+    await expect(
+      createDrizzleInitialWebSessionStore(database, {
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      }).persist(reservedRequest),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
+    expect(
+      await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.googleSubject, newSubject)),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({ id: idempotencyRecords.id })
+        .from(idempotencyRecords)
+        .where(eq(idempotencyRecords.key, reservedRequest.idempotency.key)),
+    ).toEqual([]);
+
+    const androidCheckedAt = new Date(reservedCheckedAt.getTime() + 1_000);
+    const androidGrant = await checkAccessGate(
+      {
+        googleSubject: newSubject,
+        email: newEmail,
+        displayName: 'Synthetic exact-group administrator',
+        subjectDigest: digest(newSubject),
+        requestId: randomUUID(),
+        checkedAt: androidCheckedAt.toISOString(),
+        source: 'mobile',
+      },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      },
+    );
+    if (!androidGrant.granted || androidGrant.firstLoginBinding === null) {
+      throw new Error('Selected identity did not reach platform validation.');
+    }
+    const androidRequest = buildPersistenceRequest(
+      androidGrant,
+      androidCheckedAt,
+      'android',
+      'android-transition',
+    );
+    await expect(
+      createDrizzleInitialWebSessionStore(database, {
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      }).persist(androidRequest),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
+    expect(
+      await database
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.googleSubject, newSubject)),
+    ).toEqual([]);
+
+    const mismatchCheckedAt = new Date(androidCheckedAt.getTime() + 1_000);
+    const mismatchGrant = await checkAccessGate(
+      {
+        googleSubject: newSubject,
+        email: newEmail,
+        displayName: 'Synthetic exact-group administrator',
+        subjectDigest: digest(newSubject),
+        requestId: randomUUID(),
+        checkedAt: mismatchCheckedAt.toISOString(),
+        source: 'mobile',
+      },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      },
+    );
+    if (!mismatchGrant.granted || mismatchGrant.firstLoginBinding === null) {
+      throw new Error('Selected identity did not reach selector revalidation.');
+    }
+    const mismatchRequest = buildPersistenceRequest(
+      mismatchGrant,
+      mismatchCheckedAt,
+      'ios',
+      'selector-mismatch',
+    );
+    await expect(
+      createDrizzleInitialWebSessionStore(database, {
+        initialMobileTransitionEmailDigest: digest(ambiguousEmail),
+      }).persist(mismatchRequest),
+    ).rejects.toMatchObject({ code: 'SESSION_PERSISTENCE_REJECTED' });
+    expect(
+      await database
+        .select({ id: idempotencyRecords.id })
+        .from(idempotencyRecords)
+        .where(eq(idempotencyRecords.key, mismatchRequest.idempotency.key)),
+    ).toEqual([]);
+
+    const checkedAt = new Date(mismatchCheckedAt.getTime() + 1_000);
+    const granted = await checkAccessGate(
+      {
+        googleSubject: newSubject,
+        email: newEmail,
+        displayName: 'Synthetic exact-group administrator',
+        subjectDigest: digest(newSubject),
+        requestId: randomUUID(),
+        checkedAt: checkedAt.toISOString(),
+        source: 'mobile',
+      },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      },
+    );
+    expect(granted.granted).toBe(true);
+    if (!granted.granted || granted.firstLoginBinding === null) {
+      throw new Error(
+        'Exact evaluated email did not produce a first-login bind.',
+      );
+    }
+    expect(granted.firstLoginBinding).toMatchObject({
+      userDisposition: 'create',
+      transitionEmailDigest,
+    });
+    const request = buildPersistenceRequest(
+      granted,
+      checkedAt,
+      'ios',
+      'first-login',
+    );
+    const result = await createDrizzleInitialWebSessionStore(database, {
+      initialMobileTransitionEmailDigest: transitionEmailDigest,
+    }).persist(request);
+    expect(result.user).toMatchObject({
+      id: granted.user.id,
+      googleSubject: newSubject,
+      email: newEmail,
+      roles: ['admin'],
+      facilityScope: { kind: 'district' },
+    });
+    expect(result.session.authorization.membershipSnapshotId).toBe(
+      granted.firstLoginBinding.successorSnapshotId,
+    );
+    expect(result.deviceEnrollment).toMatchObject({
+      platform: 'ios',
+      unlockMethod: 'biometric',
+      revokedAt: null,
+    });
+    expect(
+      await database
+        .select({
+          action: securityAuditEntries.action,
+          outcome: securityAuditEntries.outcome,
+          source: securityAuditEntries.source,
+          targetKind: securityAuditEntries.targetKind,
+          targetId: securityAuditEntries.targetId,
+        })
+        .from(securityAuditEntries)
+        .where(eq(securityAuditEntries.requestId, request.requestId)),
+    ).toEqual([
+      {
+        action: 'complete-oidc-sign-in',
+        outcome: 'success',
+        source: 'mobile',
+        targetKind: 'session',
+        targetId: result.session.id,
+      },
+    ]);
+    const activeAccessSources = await database
+      .select({ id: groupSources.id, active: groupSources.active })
+      .from(groupSources)
+      .where(
+        and(eq(groupSources.purpose, 'access'), eq(groupSources.active, true)),
+      );
+    expect(activeAccessSources).toHaveLength(2);
+    expect(activeAccessSources).toEqual(
+      expect.arrayContaining([
+        { id: sourceId, active: true },
+        { id: recoverySourceId, active: true },
+      ]),
+    );
+    const successorSnapshotGroups = await database
+      .select({
+        groupSourceId: accessMembershipSnapshotGroups.groupSourceId,
+        completionKind: accessMembershipSnapshotGroups.completionKind,
+      })
+      .from(accessMembershipSnapshotGroups)
+      .where(
+        eq(
+          accessMembershipSnapshotGroups.snapshotId,
+          granted.firstLoginBinding.successorSnapshotId,
+        ),
+      );
+    expect(successorSnapshotGroups).toHaveLength(4);
+    expect(successorSnapshotGroups).toEqual(
+      expect.arrayContaining([
+        { groupSourceId: sourceId, completionKind: 'expected' },
+        { groupSourceId: sourceId, completionKind: 'completed' },
+        { groupSourceId: recoverySourceId, completionKind: 'expected' },
+        { groupSourceId: recoverySourceId, completionKind: 'completed' },
+      ]),
+    );
+    const successorEvaluatedRows = await database
+      .select({
+        groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
+      })
+      .from(accessMembershipEvaluatedMembers)
+      .where(
+        eq(
+          accessMembershipEvaluatedMembers.snapshotId,
+          granted.firstLoginBinding.successorSnapshotId,
+        ),
+      );
+    expect(successorEvaluatedRows).toHaveLength(4);
+    expect(
+      successorEvaluatedRows.every(
+        ({ groupSourceId }) => groupSourceId === sourceId,
+      ),
+    ).toBe(true);
+    const successorMembers = await database
+      .select({ userId: accessMembershipMembers.userId })
+      .from(accessMembershipMembers)
+      .where(
+        eq(
+          accessMembershipMembers.snapshotId,
+          granted.firstLoginBinding.successorSnapshotId,
+        ),
+      );
+    expect(successorMembers).toHaveLength(2);
+    expect(successorMembers).toEqual(
+      expect.arrayContaining([
+        { userId: recoveryUserId },
+        { userId: granted.user.id },
+      ]),
+    );
+    const successorMemberGroups = await database
+      .select({
+        userId: accessMembershipMemberGroups.userId,
+        groupSourceId: accessMembershipMemberGroups.groupSourceId,
+      })
+      .from(accessMembershipMemberGroups)
+      .where(
+        eq(
+          accessMembershipMemberGroups.snapshotId,
+          granted.firstLoginBinding.successorSnapshotId,
+        ),
+      );
+    expect(successorMemberGroups).toHaveLength(2);
+    expect(successorMemberGroups).toEqual(
+      expect.arrayContaining([
+        { userId: recoveryUserId, groupSourceId: recoverySourceId },
+        { userId: granted.user.id, groupSourceId: sourceId },
+      ]),
+    );
+    expect(
+      await database
+        .select({ userId: accessMembershipMemberFacilities.userId })
+        .from(accessMembershipMemberFacilities)
+        .where(
+          eq(
+            accessMembershipMemberFacilities.snapshotId,
+            granted.firstLoginBinding.successorSnapshotId,
+          ),
+        ),
+    ).toEqual([]);
+    expect(
+      await database
+        .select({
+          facilityScopeKind: users.facilityScopeKind,
+          disabledAt: users.disabledAt,
+        })
+        .from(users)
+        .where(eq(users.id, granted.user.id)),
+    ).toEqual([{ facilityScopeKind: 'district', disabledAt: null }]);
+    const successorAccessState = {
+      snapshotId: granted.firstLoginBinding.successorSnapshotId,
+      snapshotVersion: granted.firstLoginBinding.successorSnapshotVersion,
+      activeAccessGroupSourceIds: [recoverySourceId, sourceId].sort(),
+    } as const;
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
+      [recoveryUserId, granted.user.id].sort(),
+    );
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: successorAccessState,
+        eligibleAccessGroupSourceIds: [recoverySourceId],
+      }),
+    ).toEqual([recoveryUserId]);
+    expect(
+      await loadEffectiveAdministratorUserIds(database, {
+        accessState: successorAccessState,
+        eligibleAccessGroupSourceIds: [sourceId],
+      }),
+    ).toEqual([granted.user.id]);
+
+    const recoveryAfterProofCheckedAt = new Date(checkedAt.getTime() + 1_000);
+    const recoveryAfterProof = await checkAccessGate(
+      {
+        googleSubject: recoverySubject,
+        email: recoveryEmail,
+        displayName: 'Synthetic recovery administrator',
+        subjectDigest: digest(recoverySubject),
+        requestId: randomUUID(),
+        checkedAt: recoveryAfterProofCheckedAt.toISOString(),
+        source: 'web',
+      },
+      { store, audit },
+    );
+    expect(recoveryAfterProof).toMatchObject({
+      granted: true,
+      firstLoginBinding: null,
+      bootstrapAdminEligible: false,
+    });
+    if (!recoveryAfterProof.granted) {
+      throw new Error('Recovery identity was not retained after iOS proof.');
+    }
+    const recoveryAfterProofResult = await createDrizzleInitialWebSessionStore(
+      database,
+    ).persist(
+      buildPersistenceRequest(
+        recoveryAfterProof,
+        recoveryAfterProofCheckedAt,
+        'web',
+        'recovery-after-proof',
+      ),
+    );
+    expect(recoveryAfterProofResult.user).toMatchObject({
+      id: recoveryUserId,
+      roles: ['admin'],
+    });
+    expect(
+      recoveryAfterProofResult.session.authorization.membershipSnapshotId,
+    ).toBe(granted.firstLoginBinding.successorSnapshotId);
+
+    const designatedAfterProofCheckedAt = new Date(checkedAt.getTime() + 2_000);
+    const designatedAfterProof = await checkAccessGate(
+      {
+        googleSubject: newSubject,
+        email: newEmail,
+        displayName: 'Synthetic exact-group administrator',
+        subjectDigest: digest(newSubject),
+        requestId: randomUUID(),
+        checkedAt: designatedAfterProofCheckedAt.toISOString(),
+        source: 'web',
+      },
+      { store, audit },
+    );
+    expect(designatedAfterProof).toMatchObject({
+      granted: true,
+      firstLoginBinding: null,
+      bootstrapAdminEligible: true,
+    });
+    if (!designatedAfterProof.granted) {
+      throw new Error('Designated identity was not retained after iOS proof.');
+    }
+    const designatedAfterProofResult =
+      await createDrizzleInitialWebSessionStore(database).persist(
+        buildPersistenceRequest(
+          designatedAfterProof,
+          designatedAfterProofCheckedAt,
+          'web',
+          'designated-after-proof',
+        ),
+      );
+    expect(designatedAfterProofResult.user).toMatchObject({
+      id: granted.user.id,
+      roles: ['admin'],
+    });
+    expect(
+      designatedAfterProofResult.session.authorization.membershipSnapshotId,
+    ).toBe(granted.firstLoginBinding.successorSnapshotId);
+
+    const otherAfterProof = await checkAccessGate(
+      {
+        googleSubject: ambiguousSubject,
+        email: ambiguousEmail,
+        displayName: 'Synthetic unselected exact-group member',
+        subjectDigest: digest(ambiguousSubject),
+        requestId: randomUUID(),
+        checkedAt: new Date(checkedAt.getTime() + 3_000).toISOString(),
+        source: 'mobile',
+      },
+      {
+        store,
+        audit,
+        initialMobileTransitionEmailDigest: transitionEmailDigest,
+      },
+    );
+    expect(otherAfterProof).toEqual({
+      granted: false,
+      reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED',
+    });
   });
 });

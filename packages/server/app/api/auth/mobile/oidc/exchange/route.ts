@@ -160,6 +160,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let auditSink: AccessGateAuditSink | undefined;
   let postGateAuditContext: PostGateAuditContext | undefined;
   try {
+    const initialMobileTransitionEmailDigest =
+      parseInitialMobileTransitionEmailDigest(
+        process.env.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256,
+      );
     const requestBody = MobileOidcExchangeRequestSchema.parse(
       await request.json(),
     );
@@ -179,10 +183,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     connection = createDatabaseClient(readDatabaseConfig());
     auditSink = createDrizzleAccessGateAuditSink(connection.db);
-    const initialMobileTransitionEmailDigest =
-      parseInitialMobileTransitionEmailDigest(
-        process.env.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256,
-      );
     const access = await checkAccessGate(
       {
         googleSubject: exchange.principal.subject,
