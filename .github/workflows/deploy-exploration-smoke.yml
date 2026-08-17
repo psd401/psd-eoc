@@ -1134,14 +1134,52 @@ jobs:
               .Resources.EmailEventsKey619540BF.Properties.EnableKeyRotation == true
             ' "$candidate_template" > /dev/null
 
-            bunx --bun cdk \
-              --app "bun bin/exploration-smoke.ts" \
-              import "$STACK_NAME" \
-              --force \
-              --yes \
-              --no-notices \
-              --change-set-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-              --resource-mapping "$mapping"
+            oidc_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+            [[ "$oidc_caller_arn" =~ ^arn:aws:sts::338414773271:assumed-role/psd-eoc-exploration-smoke-github-deploy/[A-Za-z0-9+=,.@_-]+$ ]]
+            deploy_credentials=$(aws sts assume-role \
+              --role-arn "$CDK_DEPLOY_ROLE_ARN" \
+              --role-session-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}" \
+              --duration-seconds 900 \
+              --query Credentials \
+              --output json)
+            deploy_access_key=$(jq -er .AccessKeyId <<< "$deploy_credentials")
+            deploy_secret_key=$(jq -er .SecretAccessKey <<< "$deploy_credentials")
+            deploy_session_token=$(jq -er .SessionToken <<< "$deploy_credentials")
+            deploy_caller_arn=$(
+              AWS_ACCESS_KEY_ID="$deploy_access_key" \
+                AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
+                AWS_SESSION_TOKEN="$deploy_session_token" \
+                aws sts get-caller-identity --query Arn --output text
+            )
+            [[ "$deploy_caller_arn" =~ ^arn:aws:sts::338414773271:assumed-role/cdk-hnb659fds-deploy-role-338414773271-us-west-2/psd-eoc-retained-email-import-${GITHUB_RUN_ID}$ ]]
+            printf '%s\n' "$deploy_caller_arn" \
+              > ../artifacts/readback/email-recovery-import-caller-arn.txt
+
+            set +e
+            AWS_ACCESS_KEY_ID="$deploy_access_key" \
+              AWS_SECRET_ACCESS_KEY="$deploy_secret_key" \
+              AWS_SESSION_TOKEN="$deploy_session_token" \
+              bunx --bun cdk \
+                --app "bun bin/exploration-smoke.ts" \
+                import "$STACK_NAME" \
+                --force \
+                --yes \
+                --no-notices \
+                --change-set-name "psd-eoc-retained-email-import-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                --resource-mapping "$mapping"
+            import_exit_code=$?
+            set -e
+            unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token deploy_caller_arn
+            if [[ "$import_exit_code" -ne 0 ]]; then
+              exit "$import_exit_code"
+            fi
+            unset import_exit_code
+
+            post_import_caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+            test "$post_import_caller_arn" = "$oidc_caller_arn"
+            printf '%s\n' "$post_import_caller_arn" \
+              > ../artifacts/readback/email-recovery-post-import-caller-arn.txt
+            unset oidc_caller_arn post_import_caller_arn
 
             aws cloudformation list-stack-resources --stack-name "$STACK_NAME" > "$after_resources"
             jq -e --slurpfile expected "$mapping" '
