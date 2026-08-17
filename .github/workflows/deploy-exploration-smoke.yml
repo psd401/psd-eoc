@@ -2816,6 +2816,7 @@ jobs:
               )] | length) == 0
             ' artifacts/readback/stack-resources.json > /dev/null
 
+          # BEGIN direct external SES configuration readback
           aws sesv2 get-configuration-set \
             --configuration-set-name "$ses_configuration_set_name" \
             > artifacts/readback/ses-configuration-set-external.json
@@ -2843,6 +2844,7 @@ jobs:
               ] and
               .EventDestinations[0].SnsDestination == {TopicArn: $topic}
             ' artifacts/readback/ses-event-destination-external.json > /dev/null
+          # END direct external SES configuration readback
 
           app_runner_service=$(aws apprunner describe-service --service-arn "$service_arn")
           runtime_secret_map=$(jq -cer '
