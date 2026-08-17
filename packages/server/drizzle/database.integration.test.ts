@@ -4822,12 +4822,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
 
   test('publishes normalized evaluated access emails only in an immutable snapshot transaction', async () => {
     const db = databaseConnection().db;
-    let deleteRejection: unknown;
-
-    try {
-      await db.transaction(async (transaction) => {
-        await transaction.execute(sql`set local role "psd_eoc_app"`);
-        await transaction.execute(sql`
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local role "psd_eoc_app"`);
+      await transaction.execute(sql`
           insert into group_sources (
             id,
             kind,
@@ -4852,7 +4849,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             '2026-08-16T12:00:00.000Z'::timestamptz
           )
         `);
-        await transaction.execute(sql`
+      await transaction.execute(sql`
           insert into access_membership_snapshots (
             id,
             version,
@@ -4867,7 +4864,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             '2026-08-16T12:02:00.000Z'::timestamptz
           )
         `);
-        await transaction.execute(sql`
+      await transaction.execute(sql`
           insert into access_membership_snapshot_groups (
             snapshot_id,
             group_source_id,
@@ -4890,7 +4887,7 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             'completed'::group_completion_kind
           )
         `);
-        await transaction.execute(sql`
+      await transaction.execute(sql`
           insert into access_membership_evaluated_members (
             snapshot_id,
             email,
@@ -4906,55 +4903,102 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           )
         `);
 
-        const evidence = await transaction.execute<{
-          email: string;
-          group_source_id: string;
-          snapshot_id: string;
-        }>(sql`
+      const evidence = await transaction.execute<{
+        email: string;
+        group_source_id: string;
+        snapshot_id: string;
+      }>(sql`
           select snapshot_id, email, group_source_id
           from access_membership_evaluated_members
           where snapshot_id =
             '00000000-0000-4000-8000-000000191002'::uuid
         `);
-        expect([...evidence]).toEqual([
-          {
-            snapshot_id: '00000000-0000-4000-8000-000000191002',
-            email: 'synthetic-issue-191-member@example.com',
-            group_source_id: '00000000-0000-4000-8000-000000191001',
-          },
-        ]);
+      expect([...evidence]).toEqual([
+        {
+          snapshot_id: '00000000-0000-4000-8000-000000191002',
+          email: 'synthetic-issue-191-member@example.com',
+          group_source_id: '00000000-0000-4000-8000-000000191001',
+        },
+      ]);
+    });
 
-        await transaction.execute(sql`reset role`);
-        await transaction.execute(sql.raw('savepoint evaluated_update_guard'));
-        let updateRejection: unknown;
-        try {
+    await db.transaction(async (transaction) => {
+      await transaction.execute(sql`set local role "psd_eoc_app"`);
+      await transaction.execute(sql`
+        insert into access_membership_evaluated_members (
+          snapshot_id,
+          email,
+          group_source_id,
+          group_source_kind,
+          group_purpose
+        ) values (
+          '00000000-0000-4000-8000-000000191002'::uuid,
+          'synthetic-issue-191-member@example.com',
+          '00000000-0000-4000-8000-000000191001'::uuid,
+          'google-group'::group_source_kind,
+          'access'::group_purpose
+        )
+        on conflict do nothing
+      `);
+    });
+
+    const evidenceAfterRetry = await db.execute<{
+      email: string;
+      group_source_id: string;
+      snapshot_id: string;
+    }>(sql`
+      select snapshot_id, email, group_source_id
+      from access_membership_evaluated_members
+      where snapshot_id =
+        '00000000-0000-4000-8000-000000191002'::uuid
+    `);
+    expect([...evidenceAfterRetry]).toEqual([
+      {
+        snapshot_id: '00000000-0000-4000-8000-000000191002',
+        email: 'synthetic-issue-191-member@example.com',
+        group_source_id: '00000000-0000-4000-8000-000000191001',
+      },
+    ]);
+
+    await expectPostgresRejection(
+      () =>
+        db.transaction(async (transaction) => {
+          await transaction.execute(sql`set local role "psd_eoc_app"`);
           await transaction.execute(sql`
-            update access_membership_evaluated_members
-            set email = email
-            where snapshot_id =
-              '00000000-0000-4000-8000-000000191002'::uuid
+            insert into access_membership_evaluated_members (
+              snapshot_id,
+              email,
+              group_source_id,
+              group_source_kind,
+              group_purpose
+            ) values (
+              '00000000-0000-4000-8000-000000191002'::uuid,
+              'synthetic-issue-221-late-member@example.com',
+              '00000000-0000-4000-8000-000000191001'::uuid,
+              'google-group'::group_source_kind,
+              'access'::group_purpose
+            )
           `);
-        } catch (error) {
-          updateRejection = error;
-        }
-        await transaction.execute(
-          sql.raw('rollback to savepoint evaluated_update_guard'),
-        );
-        expect(findPostgresErrorMessage(updateRejection)).toMatch(
-          /Evaluated access-member evidence is immutable/u,
-        );
-
-        await transaction.execute(sql`
+        }),
+      /Published access snapshot cannot accept evaluated member rows/u,
+    );
+    await expectPostgresRejection(
+      () =>
+        db.execute(sql`
+          update access_membership_evaluated_members
+          set email = email
+          where snapshot_id =
+            '00000000-0000-4000-8000-000000191002'::uuid
+        `),
+      /Evaluated access-member evidence is immutable/u,
+    );
+    await expectPostgresRejection(
+      () =>
+        db.execute(sql`
           delete from access_membership_evaluated_members
           where snapshot_id =
             '00000000-0000-4000-8000-000000191002'::uuid
-        `);
-      });
-    } catch (error) {
-      deleteRejection = error;
-    }
-
-    expect(findPostgresErrorMessage(deleteRejection)).toMatch(
+        `),
       /PSD EOC records are retained; DELETE is not permitted/u,
     );
   });
