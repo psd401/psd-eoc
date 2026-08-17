@@ -8,6 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
+import { SyncAccessMembershipInputSchema } from '@psd-eoc/contracts';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
@@ -99,6 +100,9 @@ interface DeferredSignal {
 }
 
 const DATABASE_NAME_PATTERN = /^psd_eoc_i26_session_[a-f0-9]{32}_test$/u;
+const DESIGNATED_ACCESS_GROUP_ID = '25200000-0000-4000-8000-000000000001';
+const DESIGNATED_ACCESS_GROUP_EMAIL =
+  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -119,6 +123,27 @@ function databaseConnection(): PostgresDatabaseConnection {
     throw new Error('The session integration database is not open.');
   }
   return connection;
+}
+
+async function ensureDesignatedAccessGroup(
+  database: PostgresDatabaseConnection['db'],
+  createdAt: Date,
+): Promise<void> {
+  await database
+    .insert(groupSources)
+    .values({
+      id: DESIGNATED_ACCESS_GROUP_ID,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+      displayName: 'Synthetic exact designated access group',
+      active: true,
+      googleGroupId: 'synthetic-exact-designated-access-group',
+      email: DESIGNATED_ACCESS_GROUP_EMAIL,
+      fixtureKey: null,
+      createdAt,
+    })
+    .onConflictDoNothing();
 }
 
 function buildContext(baseDatabaseUrl: string): SessionTestContext {
@@ -266,6 +291,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       await createOwnedDatabase(context);
       connection = openPostgresConnection(context.databaseUrl, 2);
       await migrateDatabase(connection);
+      await ensureDesignatedAccessGroup(connection.db, new Date());
     } catch (error) {
       try {
         await cleanupResources();
@@ -287,25 +313,13 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const userId = randomUUID();
-    const groupSourceId = randomUUID();
+    const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
     const snapshotId = randomUUID();
     const deviceEnrollmentId = randomUUID();
     const sessionId = randomUUID();
     const now = new Date();
     const googleSubject = `issue-26-session-${suffix}`;
 
-    await database.insert(groupSources).values({
-      id: groupSourceId,
-      kind: 'google-group',
-      purpose: 'access',
-      facilityId: null,
-      displayName: `Issue 26 session group ${suffix.slice(0, 8)}`,
-      active: true,
-      googleGroupId: `issue-26-session-${suffix}`,
-      email: `issue-26-session-${suffix}@example.invalid`,
-      fixtureKey: null,
-      createdAt: now,
-    });
     await database.insert(users).values({
       id: userId,
       googleSubject,
@@ -629,7 +643,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const userId = randomUUID();
-    const groupSourceId = randomUUID();
+    const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
     const snapshotId = randomUUID();
     const snapshotVersion =
       2_117_000_000 + Number.parseInt(suffix.slice(0, 3), 16);
@@ -637,18 +651,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const snapshotAt = new Date(Date.now() + 30_000);
     const createdAt = new Date(snapshotAt.getTime() + 1_000);
 
-    await database.insert(groupSources).values({
-      id: groupSourceId,
-      kind: 'google-group',
-      purpose: 'access',
-      facilityId: null,
-      displayName: `Issue 26 app role session ${suffix.slice(0, 8)}`,
-      active: true,
-      googleGroupId: `issue-26-app-role-session-${suffix}`,
-      email: `issue-26-app-role-session-${suffix}@example.invalid`,
-      fixtureKey: null,
-      createdAt: snapshotAt,
-    });
     await database.insert(users).values({
       id: userId,
       googleSubject,
@@ -762,7 +764,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       expiresAt: new Date(createdAt.getTime() + 3 * 60 * 60 * 1_000),
       membershipValidUntil: new Date(createdAt.getTime() + 60 * 60 * 1_000),
       membershipGraceUntil: new Date(createdAt.getTime() + 2 * 60 * 60 * 1_000),
-      grantBootstrapAdmin: false,
+      grantBootstrapAdmin: true,
       requestId: randomUUID(),
       idempotency: Object.freeze({
         key: `oidc:${responseDigest}`,
@@ -787,7 +789,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       const result = await createDrizzleInitialWebSessionStore(
         roleConnection.db,
       ).persist(request);
-      expect(result.user.roles).toEqual(['staff']);
+      expect(result.user.roles).toEqual(['staff', 'admin']);
       expect(result.session.authorization.membershipSnapshotId).toBe(
         snapshotId,
       );
@@ -899,24 +901,12 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const userId = randomUUID();
-    const groupSourceId = randomUUID();
+    const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
     const snapshotId = randomUUID();
     const googleSubject = `issue-26-bootstrap-lock-${suffix}`;
     const snapshotAt = new Date(Date.now() + 60_000);
     const createdAt = new Date(snapshotAt.getTime() + 1_000);
 
-    await database.insert(groupSources).values({
-      id: groupSourceId,
-      kind: 'google-group',
-      purpose: 'access',
-      facilityId: null,
-      displayName: `Issue 26 bootstrap lock ${suffix.slice(0, 8)}`,
-      active: true,
-      googleGroupId: `issue-26-bootstrap-lock-${suffix}`,
-      email: `issue-26-bootstrap-lock-${suffix}@example.invalid`,
-      fixtureKey: null,
-      createdAt: snapshotAt,
-    });
     await database.insert(users).values({
       id: userId,
       googleSubject,
@@ -1112,7 +1102,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const userId = randomUUID();
-    const groupSourceId = randomUUID();
+    const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
     const snapshotId = randomUUID();
     const deviceEnrollmentId = randomUUID();
     const sessionId = randomUUID();
@@ -1128,18 +1118,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     );
     const googleSubject = `issue-23-concurrent-refresh-${suffix}`;
 
-    await database.insert(groupSources).values({
-      id: groupSourceId,
-      kind: 'google-group',
-      purpose: 'access',
-      facilityId: null,
-      displayName: `Issue 23 concurrent refresh ${suffix.slice(0, 8)}`,
-      active: true,
-      googleGroupId: `issue-23-concurrent-refresh-${suffix}`,
-      email: `issue-23-concurrent-refresh-${suffix}@example.invalid`,
-      fixtureKey: null,
-      createdAt: snapshotAt,
-    });
     await database.insert(users).values({
       id: userId,
       googleSubject,
@@ -1326,24 +1304,13 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       const database = recoveryConnection.db;
       const suffix = randomUUID();
       const userId = randomUUID();
-      const groupSourceId = randomUUID();
+      const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
       const snapshotId = randomUUID();
       const snapshotAt = new Date();
       const issuedAt = new Date(snapshotAt.getTime() + 1_000);
       const googleSubject = `issue-23-revoke-recovery-${suffix}`;
 
-      await database.insert(groupSources).values({
-        id: groupSourceId,
-        kind: 'google-group',
-        purpose: 'access',
-        facilityId: null,
-        displayName: `Issue 23 revoke recovery ${suffix.slice(0, 8)}`,
-        active: true,
-        googleGroupId: `issue-23-revoke-recovery-${suffix}`,
-        email: `issue-23-revoke-recovery-${suffix}@example.invalid`,
-        fixtureKey: null,
-        createdAt: snapshotAt,
-      });
+      await ensureDesignatedAccessGroup(database, snapshotAt);
       await database.insert(users).values({
         id: userId,
         googleSubject,
