@@ -227,6 +227,21 @@ export class ExplorationSmokeStack extends Stack {
         type: 'String',
       },
     );
+    const initialMobileTransitionEmailSha256 = new CfnParameter(
+      this,
+      'InitialMobileTransitionEmailSha256',
+      {
+        allowedPattern: '^[0-9a-f]{64}$',
+        constraintDescription:
+          'Use one lowercase SHA-256 digest without the underlying email value.',
+        description:
+          'Protected selector digest for the one-time initial mobile access transition.',
+        maxLength: 64,
+        minLength: 64,
+        noEcho: true,
+        type: 'String',
+      },
+    );
     const shouldProvisionApplication = new CfnCondition(
       this,
       'ShouldProvisionApplication',
@@ -422,6 +437,9 @@ export class ExplorationSmokeStack extends Stack {
         secretObjectValue: {
           googleSubject: SecretValue.unsafePlainText(
             approvedGoogleSubject.valueAsString,
+          ),
+          initialMobileTransitionEmailSha256: SecretValue.unsafePlainText(
+            initialMobileTransitionEmailSha256.valueAsString,
           ),
           staffDisplayName: SecretValue.unsafePlainText(
             approvedStaffDisplayName.valueAsString,
@@ -850,6 +868,10 @@ export class ExplorationSmokeStack extends Stack {
           ),
           GOOGLE_ROSTER_CONFIG:
             ecs.Secret.fromSecretsManager(googleGroupsSecret),
+          PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ecsSecretJsonKey(
+            bootstrapIdentitySecret,
+            'initialMobileTransitionEmailSha256',
+          ),
         },
       },
     );
@@ -860,6 +882,7 @@ export class ExplorationSmokeStack extends Stack {
     });
     imageRepository.grantPull(accessSyncTaskExecutionRole);
     databaseApplicationSecret.grantRead(accessSyncTaskExecutionRole);
+    bootstrapIdentitySecret.grantRead(accessSyncTaskExecutionRole);
     googleGroupsSecret.grantRead(accessSyncTaskExecutionRole);
 
     const imageAccessRole = new iam.Role(this, 'AppRunnerImageAccessRole', {
@@ -965,6 +988,13 @@ export class ExplorationSmokeStack extends Stack {
                   value: secretJsonKeyArn(
                     bootstrapIdentitySecret,
                     'googleSubject',
+                  ),
+                },
+                {
+                  name: 'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
+                  value: secretJsonKeyArn(
+                    bootstrapIdentitySecret,
+                    'initialMobileTransitionEmailSha256',
                   ),
                 },
               ],
