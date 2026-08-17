@@ -92,11 +92,12 @@ test('test mode is unmistakable and SMS cannot be enabled in the browser', async
 }) => {
   await openAdminPage(page, '/integrations', 'Integrations administration');
   await expect(
-    page.getByRole('heading', {
-      level: 2,
-      name: 'TEST — SYNTHETIC RECIPIENTS ONLY — NO REAL NOTIFICATIONS',
+    page.locator('p.integration-state-summary', {
+      hasText: 'Current integration state:',
     }),
-  ).toBeVisible();
+  ).toContainText(
+    'Channel enablement is configuration state, not proof that a notification was sent or received.',
+  );
 
   const smsRow = page
     .getByRole('table', {

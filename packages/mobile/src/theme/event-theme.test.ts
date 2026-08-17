@@ -51,6 +51,9 @@ describe('event theme tokens', () => {
     expect(real.colors.pageBackground).not.toBe(drill.colors.pageBackground);
     expect(real.classificationWord).toBe('REAL INCIDENT');
     expect(drill.classificationWord).toBe('DRILL — PRACTICE');
+    expect(drill.explanation).toBe(
+      'This visual state is for a drill or synthetic test only.',
+    );
     expect(real.icon.name).not.toBe(drill.icon.name);
     expect(real.icon.glyph).not.toBe(drill.icon.glyph);
   });

@@ -199,18 +199,25 @@ describe('facilities administration view', () => {
       'create-facility',
       'update-facility',
       'create-google-building-group',
-      'create-synthetic-building-group',
       'create-google-others-group',
-      'create-synthetic-others-group',
       'replace-google-building-group',
-      'replace-synthetic-building-group',
       'replace-google-others-group',
-      'replace-synthetic-others-group',
       'create-neighborhood-version',
       'create-audience-version',
     ]) {
       expect(markup).toContain(`value="${intent}"`);
     }
+    for (const intent of [
+      'create-synthetic-building-group',
+      'create-synthetic-others-group',
+      'replace-synthetic-building-group',
+      'replace-synthetic-others-group',
+    ]) {
+      expect(markup).not.toContain(`value="${intent}"`);
+    }
+    expect(markup).not.toContain('name="fixtureKey"');
+    expect(markup).toContain('Ridge test staff');
+    expect(markup).toContain('District test response staff');
   });
 
   test('makes append-only and server-owned audience behavior explicit', () => {
@@ -243,7 +250,10 @@ describe('facilities administration view', () => {
     expect(markup).not.toContain('Harbor campus corrected — version 2');
     expect(markup).toContain('name="googleOthersGroupSourceId"');
     expect(markup).toContain('name="syntheticOthersGroupSourceId"');
-    expect(markup).toContain('Do not mix both kinds in one audience version');
+    expect(markup).toContain(
+      'The server rejects any selection that does not match the current staff roster population.',
+    );
+    expect(markup).not.toContain('synthetic sources extend TEST audiences');
     expect(markup).toContain('Current immutable audience version:');
     expect(markup).toContain(`Neighborhood ${IDS.neighborhood}, version 2`);
   });

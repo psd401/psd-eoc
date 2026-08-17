@@ -174,6 +174,10 @@ describe('AccessAdminView semantics', () => {
       'An email correction also requires a distinct Google Group ID.',
     );
     expect(html).toContain('<legend>Add a Google access group</legend>');
+    expect(html).toContain(
+      'Only designated Google Groups can grant PSD EOC access.',
+    );
+    expect(html).not.toContain('synthetic groups cannot be access groups');
     expect(html).toMatch(
       /<input[^>]*name="intent"[^>]*value="create-access-group"/u,
     );
