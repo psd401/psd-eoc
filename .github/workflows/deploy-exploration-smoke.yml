@@ -302,6 +302,8 @@ jobs:
             ($secrets.DATABASE_USERNAME."Fn::Join"[1][0].Ref) as $application_secret_id |
             ($secrets.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256."Fn::Join"[1][0].Ref) as $identity_secret_id |
             ($secrets.GOOGLE_ROSTER_CONFIG) as $groups_secret_arn |
+            ($container.LogConfiguration.Options."awslogs-group".Ref) as $log_group_id |
+            (.Outputs.ImageRepositoryArn.Value."Fn::GetAtt"[0]) as $repository_id |
             ($access_execution_policies[0].value.Properties.PolicyDocument.Statement | as_array) as $execution_statements |
             ($execution_statements | map(select(
               (.Action | as_array | sort) == [
@@ -309,6 +311,14 @@ jobs:
                 "secretsmanager:GetSecretValue"
               ]
             ))) as $secret_statements |
+            ({
+              Statement: [{
+                Action: "sts:AssumeRole",
+                Effect: "Allow",
+                Principal: {Service: "ecs-tasks.amazonaws.com"}
+              }],
+              Version: "2012-10-17"
+            }) as $ecs_task_trust |
             ($tasks | length) == 2 and
             ($bootstrap_tasks | length) == 1 and
             ($access_tasks | length) == 1 and
@@ -316,8 +326,14 @@ jobs:
             ($access_execution_roles | length) == 1 and
             ($access_task_policies | length) == 0 and
             ($access_execution_policies | length) == 1 and
+            $access_task_roles[0].value.Properties.AssumeRolePolicyDocument == $ecs_task_trust and
+            $access_execution_roles[0].value.Properties.AssumeRolePolicyDocument == $ecs_task_trust and
+            ($access_task_roles[0].value.Properties | has("PermissionsBoundary") | not) and
+            ($access_execution_roles[0].value.Properties | has("PermissionsBoundary") | not) and
             (($access_task_roles[0].value.Properties.Policies // []) | length) == 0 and
             (($access_task_roles[0].value.Properties.ManagedPolicyArns // []) | length) == 0 and
+            (($access_execution_roles[0].value.Properties.Policies // []) | length) == 0 and
+            (($access_execution_roles[0].value.Properties.ManagedPolicyArns // []) | length) == 0 and
             .Outputs.AccessSyncTaskDefinitionArn.Value.Ref == $access_task.key and
             .Outputs.AccessSyncTaskExecutionRoleArn.Value."Fn::GetAtt" == [$access_execution_role_id, "Arn"] and
             .Outputs.AccessSyncTaskRoleArn.Value."Fn::GetAtt" == [$access_task_role_id, "Arn"] and
@@ -382,6 +398,26 @@ jobs:
               $identity_secret_id,
               "arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/google-groups-??????"
             ] | sort) and
+            ($execution_statements | length) == 4 and
+            ([$execution_statements[] | select(
+              (.Action | as_array | sort) == ["logs:CreateLogStream", "logs:PutLogEvents"] and
+              .Effect == "Allow" and
+              .Resource == {"Fn::GetAtt": [$log_group_id, "Arn"]}
+            )] | length) == 1 and
+            ([$execution_statements[] | select(
+              (.Action | as_array | sort) == [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer"
+              ] and
+              .Effect == "Allow" and
+              .Resource == {"Fn::GetAtt": [$repository_id, "Arn"]}
+            )] | length) == 1 and
+            ([$execution_statements[] | select(
+              .Action == "ecr:GetAuthorizationToken" and
+              .Effect == "Allow" and
+              .Resource == "*"
+            )] | length) == 1 and
             ([
               $execution_statements[] |
               select(.Effect == "Allow") |
@@ -2038,7 +2074,6 @@ jobs:
           private_subnet_ids=$(jq -er ".${STACK_NAME}.BootstrapPrivateSubnetIds" "$outputs")
           security_group_id=$(jq -er ".${STACK_NAME}.BootstrapSecurityGroupId" "$outputs")
           log_group_name=$(jq -er ".${STACK_NAME}.BootstrapLogGroupName" "$outputs")
-          database_admin_secret_arn=$(jq -er ".${STACK_NAME}.DatabaseAdminSecretArn" "$outputs")
           database_application_secret_arn=$(jq -er ".${STACK_NAME}.DatabaseApplicationSecretArn" "$outputs")
           approved_identity_secret_arn=$(jq -er ".${STACK_NAME}.ApprovedIdentitySecretArn" "$outputs")
           repository_arn=$(jq -er ".${STACK_NAME}.ImageRepositoryArn" "$outputs")
@@ -2137,7 +2172,6 @@ jobs:
             select(.name == "GOOGLE_ROSTER_CONFIG") | .valueFrom
           ' "$access_task_definition_file")
           test "$groups_secret_reference" = "arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:/psd-eoc/google-groups"
-          groups_secret_simulation_arn="$groups_secret_reference-ABCDEF"
           jq '{
             taskDefinition: {
               taskDefinitionArn: .taskDefinition.taskDefinitionArn,
@@ -2161,94 +2195,84 @@ jobs:
             }
           }' "$access_task_definition_file" > artifacts/readback/access-sync-task-definition.json
 
-          access_execution_role_name=${access_execution_role_arn##*/}
-          access_task_role_name=${access_task_role_arn##*/}
-          aws iam get-role \
-            --role-name "$access_execution_role_name" \
-            > artifacts/readback/access-sync-execution-role.json
-          aws iam get-role \
-            --role-name "$access_task_role_name" \
-            > artifacts/readback/access-sync-task-role.json
-          for role_file in \
-            artifacts/readback/access-sync-execution-role.json \
-            artifacts/readback/access-sync-task-role.json; do
-            jq -e '
-              (.Role | has("PermissionsBoundary") | not) and
-              .Role.AssumeRolePolicyDocument.Statement == [{
+          template=artifacts/cdk.out/PsdEocExplorationSmoke.template.json
+          jq -e '
+            def ecs_task_trust: {
+              Statement: [{
                 Action: "sts:AssumeRole",
                 Effect: "Allow",
                 Principal: {Service: "ecs-tasks.amazonaws.com"}
-              }]
-            ' "$role_file" > /dev/null
-          done
-          aws iam list-attached-role-policies \
-            --role-name "$access_execution_role_name" \
-            > artifacts/readback/access-sync-execution-role-attached-policies.json
-          aws iam list-role-policies \
-            --role-name "$access_execution_role_name" \
-            > artifacts/readback/access-sync-execution-role-inline-policies.json
-          aws iam list-attached-role-policies \
-            --role-name "$access_task_role_name" \
-            > artifacts/readback/access-sync-task-role-attached-policies.json
-          aws iam list-role-policies \
-            --role-name "$access_task_role_name" \
-            > artifacts/readback/access-sync-task-role-inline-policies.json
-          test "$(jq '.AttachedPolicies | length' artifacts/readback/access-sync-execution-role-attached-policies.json)" -eq 0
-          test "$(jq '.PolicyNames | length' artifacts/readback/access-sync-execution-role-inline-policies.json)" -eq 1
-          test "$(jq '.AttachedPolicies | length' artifacts/readback/access-sync-task-role-attached-policies.json)" -eq 0
-          test "$(jq '.PolicyNames | length' artifacts/readback/access-sync-task-role-inline-policies.json)" -eq 0
+              }],
+              Version: "2012-10-17"
+            };
+            (.Resources | to_entries) as $resources |
+            ($resources | map(select(
+              .value.Type == "AWS::ECS::TaskDefinition" and
+              .value.Properties.Family == "psd-eoc-exploration-smoke-access-sync"
+            ))) as $tasks |
+            ($tasks[0]) as $task |
+            ($task.value.Properties.TaskRoleArn."Fn::GetAtt"[0]) as $task_role_id |
+            ($task.value.Properties.ExecutionRoleArn."Fn::GetAtt"[0]) as $execution_role_id |
+            ($resources | map(select(
+              .key == $task_role_id and .value.Type == "AWS::IAM::Role"
+            ))) as $task_roles |
+            ($resources | map(select(
+              .key == $execution_role_id and .value.Type == "AWS::IAM::Role"
+            ))) as $execution_roles |
+            ($resources | map(select(
+              .value.Type == "AWS::IAM::Policy" and
+              ([.value.Properties.Roles[]? | select(.Ref == $task_role_id)] | length) == 1
+            ))) as $task_policies |
+            ($resources | map(select(
+              .value.Type == "AWS::IAM::Policy" and
+              ([.value.Properties.Roles[]? | select(.Ref == $execution_role_id)] | length) == 1
+            ))) as $execution_policies |
+            select(
+              ($tasks | length) == 1 and
+              ($task_roles | length) == 1 and
+              ($execution_roles | length) == 1 and
+              ($task_policies | length) == 0 and
+              ($execution_policies | length) == 1 and
+              $task_roles[0].value.Properties.AssumeRolePolicyDocument == ecs_task_trust and
+              $execution_roles[0].value.Properties.AssumeRolePolicyDocument == ecs_task_trust and
+              ($task_roles[0].value.Properties | has("PermissionsBoundary") | not) and
+              ($execution_roles[0].value.Properties | has("PermissionsBoundary") | not) and
+              (($task_roles[0].value.Properties.ManagedPolicyArns // []) | length) == 0 and
+              (($task_roles[0].value.Properties.Policies // []) | length) == 0 and
+              (($execution_roles[0].value.Properties.ManagedPolicyArns // []) | length) == 0 and
+              (($execution_roles[0].value.Properties.Policies // []) | length) == 0 and
+              ($execution_policies[0].value.Properties.PolicyDocument.Statement | length) == 4
+            ) |
+            {
+              taskDefinitionLogicalId: $task.key,
+              taskRoleLogicalId: $task_role_id,
+              executionRoleLogicalId: $execution_role_id,
+              taskRoleTrust: $task_roles[0].value.Properties.AssumeRolePolicyDocument,
+              executionRoleTrust: $execution_roles[0].value.Properties.AssumeRolePolicyDocument,
+              taskRoleManagedPolicies: ($task_roles[0].value.Properties.ManagedPolicyArns // []),
+              taskRoleInlinePolicies: ($task_roles[0].value.Properties.Policies // []),
+              executionRoleManagedPolicies: ($execution_roles[0].value.Properties.ManagedPolicyArns // []),
+              executionRoleInlinePolicies: ($execution_roles[0].value.Properties.Policies // []),
+              executionPolicy: $execution_policies[0].value.Properties.PolicyDocument
+            }
+          ' "$template" > artifacts/readback/access-sync-iam-template-contract.json
 
-          access_execution_policy_name=$(jq -er '.PolicyNames[0]' artifacts/readback/access-sync-execution-role-inline-policies.json)
-          aws iam get-role-policy \
-            --role-name "$access_execution_role_name" \
-            --policy-name "$access_execution_policy_name" \
-            > artifacts/readback/access-sync-execution-role-policy.json
-          groups_policy_resource="arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:/psd-eoc/google-groups-??????"
-          log_group_resource="arn:aws:logs:$AWS_REGION:$AWS_ACCOUNT_ID:log-group:$log_group_name:*"
-          jq -e \
-            --arg application "$database_application_secret_arn" \
-            --arg groups "$groups_policy_resource" \
-            --arg identity "$approved_identity_secret_arn" \
-            --arg log_group "$log_group_resource" \
-            --arg repository "$repository_arn" '
-              def as_array: if type == "array" then . else [.] end;
-              .PolicyDocument.Statement as $statements |
-              ($statements | length) == 4 and
-              ([$statements[] | select(
-                (.Action | as_array | sort) == ["logs:CreateLogStream", "logs:PutLogEvents"] and
-                .Effect == "Allow" and
-                .Resource == $log_group
-              )] | length) == 1 and
-              ([$statements[] | select(
-                (.Action | as_array | sort) == [
-                  "secretsmanager:DescribeSecret",
-                  "secretsmanager:GetSecretValue"
-                ] and
-                .Effect == "Allow" and
-                ((.Resource | as_array | sort) == ([$application, $groups, $identity] | sort))
-              )] | length) == 1 and
-              ([$statements[] | select(
-                (.Action | as_array | sort) == [
-                  "ecr:BatchCheckLayerAvailability",
-                  "ecr:BatchGetImage",
-                  "ecr:GetDownloadUrlForLayer"
-                ] and
-                .Effect == "Allow" and
-                .Resource == $repository
-              )] | length) == 1 and
-              ([$statements[] | select(
-                .Action == "ecr:GetAuthorizationToken" and
-                .Effect == "Allow" and
-                .Resource == "*"
-              )] | length) == 1
-            ' artifacts/readback/access-sync-execution-role-policy.json > /dev/null
-
+          # BEGIN access-sync outer-role exact execution simulation
           aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names ecs:RunTask \
             --resource-arns "$access_task_definition_arn" \
+            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$cluster_arn",ContextKeyType=string \
             > artifacts/readback/deployment-role-access-sync-run-task-simulation.json
           test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deployment-role-access-sync-run-task-simulation.json)" = "allowed"
+          neighboring_cluster_arn="arn:aws:ecs:$AWS_REGION:$AWS_ACCOUNT_ID:cluster/psd-eoc-not-exploration-smoke"
+          aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names ecs:RunTask \
+            --resource-arns "$access_task_definition_arn" \
+            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$neighboring_cluster_arn",ContextKeyType=string \
+            > artifacts/readback/deployment-role-access-sync-neighbor-cluster-negative-simulation.json
+          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deployment-role-access-sync-neighbor-cluster-negative-simulation.json)" != "allowed"
           aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names iam:PassRole \
@@ -2259,29 +2283,27 @@ jobs:
             (.EvaluationResults | length) == 1 and
             .EvaluationResults[0].EvalDecision == "allowed" and
             (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
-            ([.EvaluationResults[0].ResourceSpecificResults[] |
-              select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
-              ([$execution, $task] | sort)
+            ([.EvaluationResults[0].ResourceSpecificResults[].EvalResourceName] | sort) ==
+              ([$execution, $task] | sort) and
+            all(
+              .EvaluationResults[0].ResourceSpecificResults[];
+              .EvalResourceDecision == "allowed"
+            )
           ' artifacts/readback/deployment-role-access-sync-pass-role-simulation.json > /dev/null
           aws iam simulate-principal-policy \
-            --policy-source-arn "$access_execution_role_arn" \
-            --action-names secretsmanager:GetSecretValue \
-            --resource-arns "$database_application_secret_arn" "$groups_secret_simulation_arn" "$approved_identity_secret_arn" "$database_admin_secret_arn" \
-            > artifacts/readback/access-sync-execution-role-secret-simulation.json
-          jq -e --arg application "$database_application_secret_arn" --arg groups "$groups_secret_simulation_arn" --arg identity "$approved_identity_secret_arn" --arg admin "$database_admin_secret_arn" '
-            ([.EvaluationResults[].ResourceSpecificResults[] |
-              select(.EvalResourceDecision == "allowed") | .EvalResourceName] | sort) ==
-              ([$application, $groups, $identity] | sort) and
-            ([.EvaluationResults[].ResourceSpecificResults[] |
-              select(.EvalResourceName == $admin and .EvalResourceDecision != "allowed")] | length) == 1
-          ' artifacts/readback/access-sync-execution-role-secret-simulation.json > /dev/null
-          aws iam simulate-principal-policy \
-            --policy-source-arn "$access_task_role_arn" \
-            --action-names secretsmanager:GetSecretValue sqs:SendMessage ses:SendEmail sns:Publish \
-            --resource-arns '*' \
-            > artifacts/readback/access-sync-task-role-negative-simulation.json
-          jq -e 'all(.EvaluationResults[]; .EvalDecision != "allowed")' \
-            artifacts/readback/access-sync-task-role-negative-simulation.json > /dev/null
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names iam:PassRole \
+            --resource-arns "$access_execution_role_arn" "$access_task_role_arn" \
+            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=lambda.amazonaws.com,ContextKeyType=string \
+            > artifacts/readback/deployment-role-access-sync-wrong-service-negative-simulation.json
+          jq -e '
+            .EvaluationResults[0].EvalDecision != "allowed" and
+            all(
+              .EvaluationResults[0].ResourceSpecificResults[];
+              .EvalResourceDecision != "allowed"
+            )
+          ' artifacts/readback/deployment-role-access-sync-wrong-service-negative-simulation.json > /dev/null
+          # END access-sync outer-role exact execution simulation
 
       - name: Run and prove the exact native bootstrap task
         shell: bash
