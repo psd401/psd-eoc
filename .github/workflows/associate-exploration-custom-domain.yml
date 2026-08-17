@@ -1,0 +1,458 @@
+name: Inspect or associate exploration custom domain
+
+run-name: >-
+  eoc.psd401.net ${{ inputs.mode }} from ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed commit on main (40 lowercase hex)
+        required: true
+        type: string
+      mode:
+        description: Read only, or associate the exact domain only when absent
+        required: true
+        type: choice
+        options:
+          - inspect-only
+          - associate-if-absent
+      change_reference:
+        description: Approved issue or comment recording the exact consequence
+        required: true
+        type: string
+      acknowledge:
+        description: Exact acknowledgement for the selected mode
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  cancel-in-progress: false
+  group: psd-eoc-exploration-custom-domain
+
+env:
+  APP_RUNNER_SERVICE_ARN: arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c
+  APP_RUNNER_SERVICE_NAME: psd-eoc-exploration-smoke
+  AWS_ACCOUNT_ALIAS: psd401
+  AWS_ACCOUNT_ID: '<aws-account-id>'
+  AWS_REGION: us-west-2
+  CDK_DEPLOY_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2
+  CUSTOM_DOMAIN: eoc.psd401.net
+  OUTER_OIDC_ROLE_ARN: arn:aws:iam::<aws-account-id>:role/psd-eoc-exploration-smoke-github-deploy
+
+jobs:
+  preview:
+    name: Validate immutable request and render consequence preview
+    if: >-
+      github.repository == 'psd401/psd-eoc' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      consequence_sha256: ${{ steps.request.outputs.consequence_sha256 }}
+    env:
+      ACKNOWLEDGE: ${{ inputs.acknowledge }}
+      CHANGE_REFERENCE: ${{ inputs.change_reference }}
+      MODE: ${{ inputs.mode }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Check out the exact requested source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Validate request and record exact consequences
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          reference_pattern='^[A-Za-z0-9][A-Za-z0-9._:/?=&%#@+-]{2,500}$'
+          [[ "$CHANGE_REFERENCE" =~ $reference_pattern ]]
+
+          case "$MODE:$ACKNOWLEDGE" in
+            'inspect-only:INSPECT EOC.PSD401.NET CUSTOM DOMAIN')
+              consequence='Read the exact App Runner custom-domain state and emit a district-DNS handoff if complete. No AWS write is permitted.'
+              ;;
+            'associate-if-absent:ASSOCIATE EOC.PSD401.NET WITHOUT WWW')
+              consequence='If and only if eoc.psd401.net is absent and the service has no active operation or foreign domain, call AssociateCustomDomain once with www disabled, then emit the exact district-DNS handoff. This does not change DNS or prove TLS.'
+              ;;
+            *)
+              echo 'The mode and acknowledgement do not match exactly.' >&2
+              exit 1
+              ;;
+          esac
+
+          consequence_record=$(jq -cnS \
+            --arg changeReference "$CHANGE_REFERENCE" \
+            --arg consequence "$consequence" \
+            --arg domain "$CUSTOM_DOMAIN" \
+            --arg mode "$MODE" \
+            --arg serviceArn "$APP_RUNNER_SERVICE_ARN" \
+            --arg sourceSha "$SOURCE_SHA" \
+            '{changeReference:$changeReference,consequence:$consequence,domain:$domain,mode:$mode,serviceArn:$serviceArn,sourceSha:$sourceSha}')
+          consequence_sha256=$(printf %s "$consequence_record" | sha256sum | cut -d' ' -f1)
+          printf '%s\n' "consequence_sha256=$consequence_sha256" >> "$GITHUB_OUTPUT"
+          {
+            echo '## Protected custom-domain consequence preview'
+            echo
+            printf '%s\n' "- Source: \`$SOURCE_SHA\`"
+            printf '%s\n' "- Service: \`$APP_RUNNER_SERVICE_ARN\`"
+            printf '%s\n' "- Domain: \`$CUSTOM_DOMAIN\` (www disabled)"
+            printf '%s\n' "- Mode: \`$MODE\`"
+            printf '%s\n' "- Change reference: \`$CHANGE_REFERENCE\`"
+            printf '%s\n' "- Consequence record SHA-256: \`$consequence_sha256\`"
+            echo
+            echo "$consequence"
+            echo
+            echo 'No Route53, district DNS, disassociation, IAM, OAuth, access, provider, recipient, messaging, or application-data mutation is present. The existing ParentSquare A records remain authoritative until a district DNS administrator applies the emitted CNAME handoff. TLS and health must not be claimed before that separate change is publicly verified.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  protected-readback:
+    name: Protected OIDC read or exact no-www association
+    needs: preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: exploration-smoke
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ACKNOWLEDGE: ${{ inputs.acknowledge }}
+      CHANGE_REFERENCE: ${{ inputs.change_reference }}
+      CONFIGURED_OUTER_OIDC_ROLE_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
+      CONSEQUENCE_SHA256: ${{ needs.preview.outputs.consequence_sha256 }}
+      MODE: ${{ inputs.mode }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Check out the exact approved source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Revalidate protected request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          test "$CONFIGURED_OUTER_OIDC_ROLE_ARN" = "$OUTER_OIDC_ROLE_ARN"
+          case "$MODE:$ACKNOWLEDGE" in
+            'inspect-only:INSPECT EOC.PSD401.NET CUSTOM DOMAIN') ;;
+            'associate-if-absent:ASSOCIATE EOC.PSD401.NET WITHOUT WWW') ;;
+            *) exit 1 ;;
+          esac
+          consequence_record=$(jq -cnS \
+            --arg changeReference "$CHANGE_REFERENCE" \
+            --arg consequence "$(case "$MODE" in inspect-only) printf %s 'Read the exact App Runner custom-domain state and emit a district-DNS handoff if complete. No AWS write is permitted.' ;; associate-if-absent) printf %s 'If and only if eoc.psd401.net is absent and the service has no active operation or foreign domain, call AssociateCustomDomain once with www disabled, then emit the exact district-DNS handoff. This does not change DNS or prove TLS.' ;; esac)" \
+            --arg domain "$CUSTOM_DOMAIN" \
+            --arg mode "$MODE" \
+            --arg serviceArn "$APP_RUNNER_SERVICE_ARN" \
+            --arg sourceSha "$SOURCE_SHA" \
+            '{changeReference:$changeReference,consequence:$consequence,domain:$domain,mode:$mode,serviceArn:$serviceArn,sourceSha:$sourceSha}')
+          test "$(printf %s "$consequence_record" | sha256sum | cut -d' ' -f1)" = "$CONSEQUENCE_SHA256"
+
+      - name: Configure temporary AWS credentials through GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+        with:
+          allowed-account-ids: '<aws-account-id>'
+          aws-region: us-west-2
+          mask-aws-account-id: false
+          output-credentials: false
+          role-duration-seconds: 3600
+          role-session-name: psd-eoc-domain-${{ github.run_id }}
+          role-to-assume: ${{ env.OUTER_OIDC_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Gate the exact outer AWS identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/custom-domain
+          aws sts get-caller-identity > artifacts/custom-domain/outer-identity-before.json
+          test "$(jq -r .Account artifacts/custom-domain/outer-identity-before.json)" = "$AWS_ACCOUNT_ID"
+          outer_arn=$(jq -er .Arn artifacts/custom-domain/outer-identity-before.json)
+          [[ "$outer_arn" =~ ^arn:aws:sts::<aws-account-id>:assumed-role/psd-eoc-exploration-smoke-github-deploy/psd-eoc-domain-[0-9]+$ ]]
+          aws iam list-account-aliases > artifacts/custom-domain/account-aliases.json
+          test "$(jq -r '.AccountAliases | length' artifacts/custom-domain/account-aliases.json)" -eq 1
+          test "$(jq -r '.AccountAliases[0]' artifacts/custom-domain/account-aliases.json)" = "$AWS_ACCOUNT_ALIAS"
+
+      - name: Inspect or associate the exact App Runner custom domain
+        env:
+          READBACK_ATTEMPTS: '6'
+          READBACK_RETRY_SECONDS: '5'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_directory=artifacts/custom-domain
+          mkdir -p "$artifact_directory"
+          : > "$artifact_directory/aws-write-record.txt"
+
+          redact_readback() {
+            # shellcheck disable=SC2016
+            jq --arg account "$AWS_ACCOUNT_ID" '
+              walk(
+                if type == "string" then gsub($account; "<redacted-account-id>")
+                else .
+                end
+              )
+            ' "$1" > "$2"
+          }
+
+          exact_domain_is_complete() {
+            jq -e --arg domain "$CUSTOM_DOMAIN" '
+              [.CustomDomains[] | select(.DomainName == $domain)] as $matches |
+              ($matches | length) == 1 and
+              $matches[0].EnableWWWSubdomain == false and
+              ($matches[0].Status == "CREATING" or
+               $matches[0].Status == "PENDING_CERTIFICATE_DNS_VALIDATION" or
+               $matches[0].Status == "BINDING_CERTIFICATE" or
+               $matches[0].Status == "ACTIVE") and
+              ($matches[0].CertificateValidationRecords | type == "array" and length > 0) and
+              ([
+                $matches[0].CertificateValidationRecords[] |
+                select(
+                  (.Name | type == "string" and test("^[A-Za-z0-9_.-]+[.]?$") and length <= 253) and
+                  .Type == "CNAME" and
+                  (.Value | type == "string" and test("^[A-Za-z0-9_.-]+[.]?$") and length <= 253) and
+                  (.Status == "PENDING_VALIDATION" or .Status == "SUCCESS")
+                )
+              ] | length) == ($matches[0].CertificateValidationRecords | length) and
+              ([$matches[0].CertificateValidationRecords[].Name] | unique | length) ==
+                ($matches[0].CertificateValidationRecords | length)
+            ' "$1" > /dev/null
+          }
+
+          validate_custom_domain_envelope() {
+            jq -e \
+              --arg domain "$CUSTOM_DOMAIN" \
+              --arg serviceArn "$APP_RUNNER_SERVICE_ARN" '
+                .ServiceArn == $serviceArn and
+                (.DNSTarget | type == "string" and test("^[A-Za-z0-9.-]+[.]?$") and length <= 253) and
+                (.CustomDomains | type == "array") and
+                ((.NextToken // "") == "") and
+                ((.VpcDNSTargets // []) | type == "array" and length == 0) and
+                ([.CustomDomains[] | select(.DomainName != $domain)] | length) == 0 and
+                ([.CustomDomains[] | select(.DomainName == $domain)] | length) <= 1
+              ' "$1" > /dev/null
+          }
+
+          deploy_credentials=$(aws sts assume-role \
+            --role-arn "$CDK_DEPLOY_ROLE_ARN" \
+            --role-session-name "psd-eoc-domain-readback-${GITHUB_RUN_ID}" \
+            --duration-seconds 900 \
+            --query Credentials \
+            --output json)
+          deploy_access_key=$(jq -er '.AccessKeyId | select(test("^ASIA[A-Z0-9]{16}$"))' <<< "$deploy_credentials")
+          deploy_secret_key=$(jq -er '.SecretAccessKey | select(type == "string" and length >= 40)' <<< "$deploy_credentials")
+          deploy_session_token=$(jq -er '.SessionToken | select(type == "string" and length > 20)' <<< "$deploy_credentials")
+          cleanup_credentials() {
+            unset deploy_credentials deploy_access_key deploy_secret_key deploy_session_token
+          }
+          trap cleanup_credentials EXIT
+
+          set +e
+          (
+            set -euo pipefail
+            export AWS_ACCESS_KEY_ID="$deploy_access_key"
+            export AWS_SECRET_ACCESS_KEY="$deploy_secret_key"
+            export AWS_SESSION_TOKEN="$deploy_session_token"
+
+            aws sts get-caller-identity > "$artifact_directory/deploy-role-identity.json"
+            deploy_arn=$(jq -er .Arn "$artifact_directory/deploy-role-identity.json")
+            [[ "$deploy_arn" =~ ^arn:aws:sts::<aws-account-id>:assumed-role/cdk-hnb659fds-deploy-role-<aws-account-id>-us-west-2/psd-eoc-domain-readback-[0-9]+$ ]]
+
+            aws apprunner describe-service \
+              --service-arn "$APP_RUNNER_SERVICE_ARN" \
+              > "$artifact_directory/service.raw.json"
+            jq -e \
+              --arg serviceArn "$APP_RUNNER_SERVICE_ARN" \
+              --arg serviceName "$APP_RUNNER_SERVICE_NAME" '
+                .Service.ServiceArn == $serviceArn and
+                .Service.ServiceName == $serviceName and
+                .Service.Status == "RUNNING"
+              ' "$artifact_directory/service.raw.json" > /dev/null
+            redact_readback \
+              "$artifact_directory/service.raw.json" \
+              "$artifact_directory/service.redacted.json"
+
+            aws apprunner list-operations \
+              --service-arn "$APP_RUNNER_SERVICE_ARN" \
+              > "$artifact_directory/operations.raw.json"
+            jq -e '
+              (.OperationSummaryList | type == "array") and
+              ((.NextToken // "") == "") and
+              ([.OperationSummaryList[] | select(
+                .Status == "PENDING" or
+                .Status == "IN_PROGRESS" or
+                .Status == "ROLLBACK_IN_PROGRESS"
+              )] | length) == 0
+            ' "$artifact_directory/operations.raw.json" > /dev/null
+            redact_readback \
+              "$artifact_directory/operations.raw.json" \
+              "$artifact_directory/operations.redacted.json"
+
+            aws apprunner describe-custom-domains \
+              --service-arn "$APP_RUNNER_SERVICE_ARN" \
+              > "$artifact_directory/before.raw.json"
+            redact_readback \
+              "$artifact_directory/before.raw.json" \
+              "$artifact_directory/before.redacted.json"
+            validate_custom_domain_envelope "$artifact_directory/before.raw.json"
+
+            exact_count=$(jq --arg domain "$CUSTOM_DOMAIN" '[.CustomDomains[] | select(.DomainName == $domain)] | length' "$artifact_directory/before.raw.json")
+            association_state=existing
+            final_readback="$artifact_directory/before.raw.json"
+
+            if [[ "$exact_count" == '0' ]]; then
+              if [[ "$MODE" == 'inspect-only' ]]; then
+                association_state=absent
+                jq -nS \
+                  --arg domain "$CUSTOM_DOMAIN" \
+                  --arg serviceArn "$APP_RUNNER_SERVICE_ARN" \
+                  '{domain:$domain,serviceArn:$serviceArn,state:"absent",dnsHandoffAvailable:false,dnsChanged:false,tlsVerified:false}' \
+                  > "$artifact_directory/result.json"
+              else
+                test "$MODE" = 'associate-if-absent'
+                test "$ACKNOWLEDGE" = 'ASSOCIATE EOC.PSD401.NET WITHOUT WWW'
+                printf '%s\n' 'AssociateCustomDomain eoc.psd401.net EnableWWWSubdomain=false' \
+                  >> "$artifact_directory/aws-write-record.txt"
+                aws apprunner associate-custom-domain \
+                  --service-arn "$APP_RUNNER_SERVICE_ARN" \
+                  --domain-name "$CUSTOM_DOMAIN" \
+                  --no-enable-www-subdomain \
+                  > "$artifact_directory/associate.raw.json"
+                jq -e \
+                  --arg domain "$CUSTOM_DOMAIN" \
+                  --arg serviceArn "$APP_RUNNER_SERVICE_ARN" '
+                  .ServiceArn == $serviceArn and
+                  (.DNSTarget | type == "string" and test("^[A-Za-z0-9.-]+[.]?$") and length <= 253) and
+                  .CustomDomain.DomainName == $domain and
+                  .CustomDomain.EnableWWWSubdomain == false and
+                  (.CustomDomain.Status == "CREATING" or
+                   .CustomDomain.Status == "PENDING_CERTIFICATE_DNS_VALIDATION" or
+                   .CustomDomain.Status == "BINDING_CERTIFICATE" or
+                   .CustomDomain.Status == "ACTIVE")
+                ' "$artifact_directory/associate.raw.json" > /dev/null
+                redact_readback \
+                  "$artifact_directory/associate.raw.json" \
+                  "$artifact_directory/associate.redacted.json"
+                association_state=associated-now
+              fi
+            fi
+
+            if [[ "$association_state" != 'absent' ]]; then
+              for attempt in $(seq 1 "$READBACK_ATTEMPTS"); do
+                if [[ "$attempt" != '1' || "$association_state" == 'associated-now' ]]; then
+                  candidate="$artifact_directory/readback-$attempt.raw.json"
+                  aws apprunner describe-custom-domains \
+                    --service-arn "$APP_RUNNER_SERVICE_ARN" \
+                    > "$candidate"
+                  redact_readback \
+                    "$candidate" \
+                    "$artifact_directory/readback-$attempt.redacted.json"
+                  validate_custom_domain_envelope "$candidate"
+                  final_readback="$candidate"
+                fi
+                if exact_domain_is_complete "$final_readback"; then
+                  break
+                fi
+                if [[ "$attempt" == "$READBACK_ATTEMPTS" ]]; then
+                  echo 'Certificate validation records remained missing, partial, invalid, or failed.' >&2
+                  exit 1
+                fi
+                sleep "$READBACK_RETRY_SECONDS"
+              done
+
+              cp "$final_readback" "$artifact_directory/final.raw.json"
+              redact_readback \
+                "$artifact_directory/final.raw.json" \
+                "$artifact_directory/final.redacted.json"
+              jq -e --arg domain "$CUSTOM_DOMAIN" '
+                [.CustomDomains[] | select(.DomainName == $domain)] as $matches |
+                ($matches | length) == 1 and
+                ($matches[0].Status != "CREATE_FAILED") and
+                ($matches[0].Status != "DELETING") and
+                ($matches[0].Status != "DELETE_FAILED")
+              ' "$artifact_directory/final.raw.json" > /dev/null
+
+              jq -nS \
+                --arg authorityPrimary '<internal-name-server> (10.0.70.76)' \
+                --arg authoritySecondary 'vmnocdcpridns01.peninsula.wednet.edu (10.0.70.77)' \
+                --arg domain "$CUSTOM_DOMAIN" \
+                --arg state "$association_state" \
+                --slurpfile response "$artifact_directory/final.raw.json" '
+                  ($response[0].CustomDomains[] | select(.DomainName == $domain)) as $customDomain |
+                  {
+                    authoritativeDistrictDnsServers: [$authorityPrimary, $authoritySecondary],
+                    certificateValidationCnames: ($customDomain.CertificateValidationRecords | map({name:.Name,type:.Type,value:.Value,status:.Status}) | sort_by(.name)),
+                    customDomainStatus: $customDomain.Status,
+                    dnsChanged: false,
+                    dnsHandoffAvailable: true,
+                    domain: $domain,
+                    enableWWWSubdomain: $customDomain.EnableWWWSubdomain,
+                    serviceArn: $response[0].ServiceArn,
+                    state: $state,
+                    tlsVerified: false,
+                    trafficCname: {name:$domain,type:"CNAME",value:$response[0].DNSTarget}
+                  }
+                ' > "$artifact_directory/district-dns-handoff.json"
+
+              jq -nS \
+                --arg domain "$CUSTOM_DOMAIN" \
+                --arg state "$association_state" \
+                --slurpfile handoff "$artifact_directory/district-dns-handoff.json" \
+                '{domain:$domain,state:$state,dnsHandoffAvailable:true,dnsChanged:false,tlsVerified:false,handoff:$handoff[0]}' \
+                > "$artifact_directory/result.json"
+
+              {
+                echo '## District DNS handoff — DNS is not changed and TLS is not yet verified'
+                echo
+                printf '%s\n' "- App Runner status: \`$(jq -r .customDomainStatus "$artifact_directory/district-dns-handoff.json")\`"
+                printf '%s\n' "- Traffic CNAME: \`$(jq -r '.trafficCname.name + " CNAME " + .trafficCname.value' "$artifact_directory/district-dns-handoff.json")\`"
+                echo '- Certificate validation CNAMEs:'
+                jq -r '.certificateValidationCnames[] | "  - `" + .name + " CNAME " + .value + "` (" + .status + ")"' \
+                  "$artifact_directory/district-dns-handoff.json"
+                echo
+                echo 'Authoritative district DNS remains vmnocdcdomcon01/vmnocdcpridns01. This workflow did not change those servers or Route53. Do not mark TLS or health verified until the district applies every record, App Runner reports ACTIVE, public hostname validation succeeds, and /api/health succeeds without an insecure override.'
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              {
+                echo '## Custom domain inspection'
+                echo
+                echo "\`eoc.psd401.net\` is absent. Inspect-only mode performed no AWS write, produced no DNS handoff, and did not change or verify TLS."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          )
+          domain_exit=$?
+          set -e
+
+          cleanup_credentials
+          trap - EXIT
+          aws sts get-caller-identity > "$artifact_directory/outer-identity-after.json"
+          test "$(jq -cS . "$artifact_directory/outer-identity-before.json")" = \
+            "$(jq -cS . "$artifact_directory/outer-identity-after.json")"
+          test "$domain_exit" -eq 0
+
+      - name: Upload exact and redacted provider readback
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          compression-level: 9
+          if-no-files-found: error
+          include-hidden-files: false
+          name: exploration-custom-domain-${{ inputs.source_sha }}-${{ github.run_id }}
+          overwrite: false
+          path: artifacts/custom-domain
+          retention-days: 7
