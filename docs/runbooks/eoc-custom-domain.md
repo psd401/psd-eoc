@@ -25,16 +25,25 @@ messaging providers, notifications, or application data. Never execute or
 adapt `/private/tmp/psd-eoc-domain-apply.sh`; its Route53 zone is not
 authoritative for the public district domain.
 
-## Protected read or association
+## Current state — association is complete
 
-Use `.github/workflows/associate-exploration-custom-domain.yml` only from an
-exact reviewed commit already on `main`. Both modes require approval in the
-protected `exploration-smoke` environment and authenticate with GitHub OIDC.
-The workflow verifies the outer OIDC identity, proves the exact App Runner
-domain actions are allowed only on the named service while disassociation and
-Route53 writes remain denied, and uses that same outer identity for every App
-Runner call. It does not assume the CDK deploy role or issue secondary AWS
-credentials.
+`eoc.psd401.net` is associated with the App Runner service and serving. Verified
+2026-08-17:
+
+```
+$ dig +short eoc.psd401.net CNAME
+evd2ngqquf.us-west-2.awsapprunner.com.
+
+$ curl https://eoc.psd401.net/api/health
+{"status":"ok"}
+```
+
+The one-time association workflow that performed this handoff has been removed
+now that its job is done. If the domain ever needs to be re-associated, use the
+AWS console or `aws apprunner associate-custom-domain` against the service ARN
+in the `APP_RUNNER_SERVICE_ARN` repository variable. Route53 and the district's
+authoritative DNS servers remain out of scope for this repository — a district
+DNS administrator applies any record change.
 
 Use `inspect-only` with the exact acknowledgement:
 
