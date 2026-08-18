@@ -63,33 +63,40 @@ jobs:
 
       # Every required piece of configuration is checked by name before any
       # build or deploy work happens. A missing secret previously surfaced as
-      # an ECS task that could not start, discovered days later, with no
-      # usable error message anywhere in the failure output.
+      # an ECS task that could not start, discovered days later, with no usable
+      # error message anywhere in the failure output (see issue #271).
+      #
+      # The deployment role holds secretsmanager:DescribeSecret on each ARN
+      # below. That returns metadata only; it never grants GetSecretValue, so
+      # this step cannot read a secret's contents.
       - name: Verify required configuration exists
         shell: bash
+        env:
+          REQUIRED_SECRETS: >-
+            ${{ vars.GOOGLE_GROUPS_SECRET_NAME }}
+            ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
+            /psd-eoc/exploration-smoke/database/application
+            /psd-eoc/exploration-smoke/bootstrap/approved-identity
         run: |
           set -euo pipefail
           missing=0
-          check_secret() {
-            if aws secretsmanager describe-secret --secret-id "$1" > /dev/null 2>&1; then
-              echo "  ok       $1"
-            else
-              echo "  MISSING  $1" >&2
-              missing=1
-            fi
-          }
-          echo "Secrets Manager:"
-          check_secret "$GOOGLE_GROUPS_SECRET_NAME"
-          check_secret "$GOOGLE_OAUTH_SECRET_ARN"
-          check_secret "/psd-eoc/exploration-smoke/database/application"
-          check_secret "/psd-eoc/exploration-smoke/bootstrap/approved-identity"
 
           echo "Repository variables:"
-          for name in AWS_ACCOUNT_ID AWS_REGION ECR_REPOSITORY STACK_NAME APP_PUBLIC_ORIGIN; do
+          for name in AWS_ACCOUNT_ID AWS_REGION ECR_REPOSITORY STACK_NAME APP_PUBLIC_ORIGIN GOOGLE_GROUPS_SECRET_NAME; do
             if [[ -n "${!name:-}" ]]; then
               echo "  ok       $name"
             else
               echo "  MISSING  $name" >&2
+              missing=1
+            fi
+          done
+
+          echo "Secrets Manager:"
+          for secret in $REQUIRED_SECRETS; do
+            if aws secretsmanager describe-secret --secret-id "$secret" > /dev/null 2>&1; then
+              echo "  ok       $secret"
+            else
+              echo "  MISSING  $secret" >&2
               missing=1
             fi
           done
