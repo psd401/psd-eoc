@@ -183,8 +183,107 @@ jobs:
             echo "| New image | \`${{ steps.target.outputs.digest }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # CDK runs the database bootstrap task, then updates App Runner.
-      - name: Deploy
+      # Three ordered phases. CDK only *defines* the bootstrap task definition;
+      # nothing in the stack runs it. Deploying the application without running
+      # it first would put new code in front of an unmigrated schema.
+      #
+      # Phase 1 stages the new bootstrap task definition while pinning the
+      # application to the digest it is already serving, so the live service is
+      # untouched. ProvisionApplication stays true throughout: the App Runner
+      # service and its scaling configuration are conditional on it, so passing
+      # false would delete the running service and its custom-domain
+      # association.
+      - name: Stage the bootstrap task without changing the live service
+        working-directory: infra
+        shell: bash
+        env:
+          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
+          APPROVED_STAFF_DISPLAY_NAME: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_DISPLAY_NAME }}
+          APPROVED_STAFF_EMAIL: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_EMAIL }}
+          INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
+          IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
+          PREVIOUS_DIGEST: ${{ steps.previous.outputs.previous }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Keep the application on what it is serving now. On a stack with no
+          # running service there is nothing to preserve, so the new digest is
+          # used and the ordering below still holds.
+          app_digest="$PREVIOUS_DIGEST"
+          if [[ ! "$app_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            app_digest="$IMAGE_DIGEST"
+          fi
+          mkdir -p ../artifacts
+          bunx --bun cdk \
+            --app "bun bin/exploration-smoke.ts" \
+            deploy "$STACK_NAME" \
+            --exclusively \
+            --require-approval never \
+            --no-notices \
+            --outputs-file ../artifacts/stack-outputs.json \
+            --parameters "$STACK_NAME:ProvisionApplication=true" \
+            --parameters "$STACK_NAME:AppImageDigest=$app_digest" \
+            --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST" \
+            --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
+            --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
+            --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
+            --parameters "$STACK_NAME:ApprovedGoogleSubject=$APPROVED_GOOGLE_SUBJECT" \
+            --parameters "$STACK_NAME:ApprovedStaffEmail=$APPROVED_STAFF_EMAIL" \
+            --parameters "$STACK_NAME:ApprovedStaffDisplayName=$APPROVED_STAFF_DISPLAY_NAME" \
+            --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
+            --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
+
+      # Phase 2 applies migrations and seeds. A failure here aborts the deploy
+      # with the application still serving its previous digest.
+      - name: Run database migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=artifacts/stack-outputs.json
+          cluster=$(jq -er ".\"$STACK_NAME\".BootstrapEcsClusterArn" "$outputs")
+          task_definition=$(jq -er ".\"$STACK_NAME\".BootstrapTaskDefinitionArn" "$outputs")
+          subnets=$(jq -er ".\"$STACK_NAME\".BootstrapPrivateSubnetIds" "$outputs")
+          security_group=$(jq -er ".\"$STACK_NAME\".BootstrapSecurityGroupId" "$outputs")
+
+          task_arn=$(aws ecs run-task \
+            --cluster "$cluster" \
+            --task-definition "$task_definition" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --count 1 \
+            --started-by "deploy-${GITHUB_RUN_ID}" \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=DISABLED}" \
+            --query 'tasks[0].taskArn' \
+            --output text)
+          if [[ -z "$task_arn" || "$task_arn" == "None" ]]; then
+            echo "::error::The bootstrap task did not start. No migration ran." >&2
+            exit 1
+          fi
+          echo "Bootstrap task: $task_arn"
+
+          aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task_arn"
+          read -r stop_code exit_code < <(aws ecs describe-tasks \
+            --cluster "$cluster" --tasks "$task_arn" \
+            --query 'tasks[0].[stopCode,containers[0].exitCode]' --output text)
+
+          {
+            echo ""
+            echo "| Migrations | |"
+            echo "|---|---|"
+            echo "| Task | \`${task_arn##*/}\` |"
+            echo "| Stop code | \`$stop_code\` |"
+            echo "| Exit code | \`$exit_code\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$exit_code" != "0" ]]; then
+            echo "::error::Bootstrap exited $exit_code ($stop_code). Log stream native-bootstrap/native-bootstrap/${task_arn##*/}. The application was not updated." >&2
+            exit 1
+          fi
+          echo "Migrations applied."
+
+      # Phase 3 cuts the application over, now that the schema is current.
+      - name: Deploy the application
         working-directory: infra
         shell: bash
         env:
