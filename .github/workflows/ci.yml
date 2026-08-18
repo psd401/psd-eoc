@@ -34,38 +34,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Select the repository gate
-        id: gate
-        shell: bash
-        run: |
-          set -euo pipefail
-          mode=full
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            base_sha=$(jq -er '.pull_request.base.sha' "$GITHUB_EVENT_PATH")
-            head_sha=$(jq -er '.pull_request.head.sha' "$GITHUB_EVENT_PATH")
-            [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
-            [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-            mapfile -d '' changed_files < <(git diff --name-only -z "$base_sha" "$head_sha")
-            if [[ "${#changed_files[@]}" -gt 0 ]]; then
-              mode=exploration-smoke-workflow
-              for changed_file in "${changed_files[@]}"; do
-                case "$changed_file" in
-                  .github/workflows/ci.yml | \
-                    .github/workflows/deploy-exploration-smoke.yml | \
-                    infra/test/exploration-smoke/entrypoint.test.ts) ;;
-                  *)
-                    mode=full
-                    break
-                    ;;
-                esac
-              done
-            fi
-          fi
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "Repository gate mode: $mode" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -76,23 +44,15 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Run the repository gate
-        if: steps.gate.outputs.mode == 'full'
         run: bun run check
 
-      - name: Run the exploration-smoke workflow gate
-        if: steps.gate.outputs.mode == 'exploration-smoke-workflow'
+      - name: Lint workflows
         run: |
-          bun run format:check
-          bun run lint
-          bun run typecheck
-          bun test infra/test/exploration-smoke/entrypoint.test.ts
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
             --workdir /repo \
             rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
-            -color \
-            .github/workflows/ci.yml \
-            .github/workflows/deploy-exploration-smoke.yml
+            -color
 
   mobile:
     name: Mobile lint, typecheck, test, and prebuild
