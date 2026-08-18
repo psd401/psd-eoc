@@ -703,6 +703,45 @@ function sameNonemptyKeySet(
 }
 
 /** Recognizes only rollback-safe database conflicts for bounded retries. */
+/**
+ * Bounded, non-sensitive description of a failed persistence attempt.
+ *
+ * Only structural PostgreSQL fields are included. `detail`, `hint`, and `where`
+ * are deliberately omitted: PostgreSQL embeds the offending row's column values
+ * in those, which for this transaction means staff email and Google subject.
+ * The result is safe to log and carries enough to identify the failing write.
+ */
+export function describeSessionPersistenceFailure(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (current === null || typeof current !== 'object') break;
+    for (const field of [
+      'name',
+      'code',
+      'constraint_name',
+      'table_name',
+      'column_name',
+      'routine',
+      'severity',
+    ] as const) {
+      const value = Reflect.get(current, field);
+      if (typeof value === 'string' && value.length > 0 && value.length < 200) {
+        parts.push(`${field}=${value}`);
+      }
+    }
+    const message = Reflect.get(current, 'message');
+    if (typeof message === 'string' && message.length > 0) {
+      parts.push(`message=${message.slice(0, 300)}`);
+    }
+    const cause: unknown = Reflect.get(current, 'cause');
+    if (cause === undefined || cause === null) break;
+    parts.push('caused-by');
+    current = cause;
+  }
+  return parts.length > 0 ? parts.join(' ') : 'no structured error detail';
+}
+
 export function isRetryableSessionTransactionError(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 5; depth += 1) {
@@ -1940,6 +1979,14 @@ export function createDrizzleInitialWebSessionStore(
             if (error instanceof WebSessionIssuanceError) {
               throw error;
             }
+            // The caller only ever sees SESSION_PERSISTENCE_REJECTED, which is
+            // correct — it must not leak persistence internals to an
+            // unauthenticated client. Without this line the underlying cause is
+            // lost entirely, and five different inserts collapse into one
+            // indistinguishable message.
+            console.error(
+              `[session-issuance] persistence failed after ${String(attempt)} attempt(s): ${describeSessionPersistenceFailure(error)}`,
+            );
             throw new WebSessionIssuanceError(
               'SESSION_PERSISTENCE_REJECTED',
               'The initial session could not be persisted.',
