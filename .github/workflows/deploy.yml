@@ -109,6 +109,14 @@ jobs:
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      # The runner's default buildx builder uses the `docker` driver, which
+      # cannot export a registry cache. The `docker-container` driver can, and
+      # the layer cache is what keeps repeat deploys short.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+
       - name: Build and push the image
         id: image
         if: inputs.rollback_image_digest == ''
