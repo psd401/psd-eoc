@@ -28,7 +28,7 @@ worker, provider call, cloud mutation, recipient mutation, or send is included.
 | CloudFormation stack    | `PsdEocExplorationSmoke`                                                         |
 | Environment tag         | `live-pilot`                                                                     |
 | Data classification tag | `staff-minimized`                                                                |
-| GitHub workflow         | `.github/workflows/deploy-exploration-smoke.yml`                                 |
+| GitHub workflow         | `.github/workflows/deploy.yml`                                                   |
 | GitHub environment      | `exploration-smoke` with required reviewers and main-only deployment protection  |
 | Identity                | Google OIDC, hosted domain `psd401.net`, one approved immutable subject          |
 | Roster/access data      | Staff-only access; no student data; population changes are separately owned      |
