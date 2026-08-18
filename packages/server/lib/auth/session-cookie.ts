@@ -1095,6 +1095,14 @@ export function createDrizzleInitialWebSessionStore(
                 );
               }
 
+              // Reads of access_membership_evaluated_members take no row lock.
+              // The table is granted SELECT and INSERT only, deliberately
+              // withholding UPDATE and DELETE so published access evidence
+              // cannot be mutated. PostgreSQL requires UPDATE, DELETE, or
+              // TRUNCATE for any locking clause, so `FOR SHARE` on this table
+              // fails with 42501 permission denied. The lock would protect
+              // nothing regardless: rows the privilege model forbids updating
+              // or deleting cannot change underneath the transaction.
               const evaluatedGroupRows = await transaction
                 .select({
                   id: accessMembershipEvaluatedMembers.groupSourceId,
@@ -1113,8 +1121,7 @@ export function createDrizzleInitialWebSessionStore(
                       firstLoginBinding.normalizedEmail,
                     ),
                   ),
-                )
-                .for('share');
+                );
               const evaluatedGroupKeys = canonicalAccessGroupKeySet(
                 evaluatedGroupRows.map(({ id, kind, purpose }) => ({
                   id,
@@ -1175,8 +1182,7 @@ export function createDrizzleInitialWebSessionStore(
                     accessMembershipEvaluatedMembers.snapshotId,
                     sourceSnapshot.id,
                   ),
-                )
-                .for('share');
+                );
               const sourceMembers = await transaction
                 .select()
                 .from(accessMembershipMembers)
