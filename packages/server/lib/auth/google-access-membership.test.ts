@@ -75,8 +75,10 @@ function providerHarness(
     const url = String(input);
     calls.push(Object.freeze({ ...(init === undefined ? {} : { init }), url }));
     if (url === TOKEN_ENDPOINT) return tokenResponse();
+    // `groups:lookup` resolves the key to a resource name and returns nothing
+    // else. Group details come from the separate `groups.get` call below.
     if (url.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups:lookup?`)) {
-      return lookupResponse();
+      return Response.json({ name: `groups/${GROUP_ID}` });
     }
     if (
       url.startsWith(
@@ -91,6 +93,9 @@ function providerHarness(
         new URL(url).searchParams.get('pageToken'),
         signal,
       );
+    }
+    if (url.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups/${GROUP_ID}?`)) {
+      return lookupResponse();
     }
     throw new Error('The evaluator contacted an unexpected provider URL.');
   }) as typeof fetch;
@@ -186,7 +191,8 @@ describe('exact Google access-membership evaluator', () => {
     });
     expect(result.membershipDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(result.providerGroupIdDigest).toMatch(/^[a-f0-9]{64}$/u);
-    expect(harness.calls).toHaveLength(3);
+    // token, groups:lookup, groups.get, memberships
+    expect(harness.calls).toHaveLength(4);
     expect(harness.calls.every(({ init }) => init?.redirect === 'error')).toBe(
       true,
     );
@@ -213,8 +219,20 @@ describe('exact Google access-membership evaluator', () => {
     expect(lookup.searchParams.get('groupKey.id')).toBe(
       DESIGNATED_ACCESS_GROUP_EMAIL,
     );
-    const memberships = new URL(
+    // `groups:lookup` returns only a resource name. Requesting groupKey,
+    // labels, or dynamicGroupMetadata from it is rejected with 400
+    // INVALID_ARGUMENT, so the mask here must stay limited to `name` and the
+    // details must be read from `groups.get`.
+    expect(lookup.searchParams.get('fields')).toBe('name');
+    const groupRead = new URL(
       harness.calls[2]?.url ?? 'https://invalid.invalid',
+    );
+    expect(groupRead.pathname).toBe(`/v1/groups/${GROUP_ID}`);
+    expect(groupRead.searchParams.get('fields')).toBe(
+      'name,groupKey(id),labels,dynamicGroupMetadata',
+    );
+    const memberships = new URL(
+      harness.calls[3]?.url ?? 'https://invalid.invalid',
     );
     expect(memberships.searchParams.get('view')).toBe('FULL');
     expect(memberships.searchParams.get('pageSize')).toBe('200');
@@ -240,7 +258,7 @@ describe('exact Google access-membership evaluator', () => {
       SYNTHETIC_TRANSITION_EMAIL,
       'other@psd401.net',
     ]);
-    expect(harness.calls).toHaveLength(4);
+    expect(harness.calls).toHaveLength(5);
 
     const looping = providerHarness(() =>
       Response.json({ memberships: [], nextPageToken: 'repeat' }),
@@ -315,7 +333,7 @@ describe('exact Google access-membership evaluator', () => {
         evaluator(harness).evaluate(),
         'DESIGNATED_GROUP_IDENTITY_INVALID',
       );
-      expect(harness.calls).toHaveLength(2);
+      expect(harness.calls).toHaveLength(3);
     }
   });
 
