@@ -6,14 +6,7 @@ import {
 } from '../../lib/auth/sessions';
 import { SignOutButton } from './sign-out-button';
 
-// MEASUREMENT ONLY — the stylesheet import is removed to attribute the
-// event-room Playwright gate's 15% slowdown. main runs that gate in 11.0 min
-// with 48/48 passing; this branch runs it in 12.6 min and pushes one heavy
-// test past the 60s per-test ceiling. Under `next dev` a distinct CSS import
-// is a distinct <link> on every navigation, so this isolates that cost from
-// the layout's async session read. No Playwright suite renders the styled
-// navigation, so nothing visual depends on this file during the run.
-// Restore or replace before merge.
+import './primary-nav.css';
 
 interface NavDestination {
   readonly href: string;
