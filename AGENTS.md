@@ -59,6 +59,14 @@ Follow these unless Kris says otherwise:
 - **Fix the thing.** If you find a bug next to the one you were sent for, fix
   it in the same PR. You are not confined to a file list. Mention what you
   touched in the PR body.
+- **Nothing about Peninsula SD gets hardcoded.** This is an open-source
+  project. Any school district must be able to clone it, supply their own
+  configuration, and run it. District names, domains, email addresses, Google
+  Group addresses, AWS account IDs, regions, bundle identifiers, store IDs,
+  OAuth client IDs, and stack names are **configuration** — environment
+  variables, deployment parameters, or database rows. Never literals in source.
+  If you are about to type `psd401`, `338414773271`, `us-west-2`, or
+  `eoc.psd401.net` into a `.ts` file, stop: it belongs in config.
 - **Simple and working beats clever and complete.** This runs for a decade in
   a school district. No new datastores, queues, services, or abstractions
   without a measured need.
@@ -91,6 +99,9 @@ These are real failure patterns from this repo's history. Avoid them.
   the deploy for no safety benefit. Verify what matters; let the rest be logs.
 - **Don't hedge documentation into uselessness.** Write what is true and
   current. If `eoc.psd401.net` resolves and serves, the doc says it works.
+- **Don't bake the tenant into the code.** The repository currently carries
+  roughly 1,100 hardcoded PSD-specific values across ~200 files. Do not add to
+  that number, and remove them where you touch them.
 - **Don't leave worktrees and branches behind.** Delete the branch when the PR
   merges. Remove the worktree when you're done.
 - **Don't argue with Kris about scope.** State a concern once, in a sentence,

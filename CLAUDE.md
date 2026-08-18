@@ -6,10 +6,21 @@ to run it.
 
 ## What this is
 
-Peninsula School District's emergency notification and operations platform —
-the replacement for Easy Alert. Staff activate incidents, run an event
-timeline, and issue all-clears. Notifications fan out over email, SMS, and
-push. Staff-only; no student data ever.
+An open-source emergency notification and operations platform for school
+districts, built by Peninsula School District as its Easy Alert replacement.
+Staff activate incidents, run an event timeline, and issue all-clears.
+Notifications fan out over email, SMS, and push. Staff-only; no student data
+ever.
+
+**It is meant to be deployable by any district.** PSD is the first tenant, not
+the only one. That constraint is not aspirational — it decides how you write
+code here. Anything specific to a district is configuration, never a literal.
+See `AGENTS.md` §4.
+
+The repository does not currently meet that bar: roughly 1,100 PSD-specific
+values (`psd401.net`, AWS account `338414773271`, `us-west-2`,
+`net.psd401.eoc`, store IDs, OAuth client IDs) are hardcoded across about 200
+files. Reducing that is active work — don't add to it.
 
 ## Live environment
 
@@ -78,11 +89,15 @@ Snapshots are produced by `lib/auth/access-membership-sync.ts` reading Google
 Cloud Identity Groups via `lib/auth/google-access-membership.ts`.
 
 **Known design defect:** the approved group is hardcoded as
-`DESIGNATED_ACCESS_GROUP_EMAIL` in `packages/contracts/src/identity.ts` and
-enforced with `z.literal()` in ~20 places. The `group_sources` table and the
-`app/(admin)/access/` UI already exist to make this configurable data. Making
-groups admin-editable is priority work, not a nice-to-have — changing who can
-sign in must never require a deploy.
+`DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net'` in
+`packages/contracts/src/identity.ts` and enforced with `z.literal()` across
+~35 call sites. `access-gate.ts` additionally caps active groups at two.
+Because `z.literal()` rejects rather than defaults, changing who may sign in
+requires a source edit and a deploy — and no other district can use the code
+at all.
+
+The `group_sources` table and the `app/(admin)/access/` UI already exist to
+make this configurable data. Fixing it is priority work.
 
 ## Mobile
 
