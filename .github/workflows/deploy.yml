@@ -27,7 +27,7 @@ env:
   STACK_NAME: ${{ vars.STACK_NAME }}
   APP_PUBLIC_ORIGIN: ${{ vars.APP_PUBLIC_ORIGIN }}
   GOOGLE_OAUTH_SECRET_ARN: ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
-  GOOGLE_GROUPS_SECRET_NAME: ${{ vars.GOOGLE_GROUPS_SECRET_NAME }}
+  GOOGLE_GROUPS_SECRET_ARN: ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
 
 jobs:
   deploy:
@@ -73,7 +73,7 @@ jobs:
         shell: bash
         env:
           REQUIRED_SECRETS: >-
-            ${{ vars.GOOGLE_GROUPS_SECRET_NAME }}
+            ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
             ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
             /psd-eoc/exploration-smoke/database/application
             /psd-eoc/exploration-smoke/bootstrap/approved-identity
@@ -82,7 +82,7 @@ jobs:
           missing=0
 
           echo "Repository variables:"
-          for name in AWS_ACCOUNT_ID AWS_REGION ECR_REPOSITORY STACK_NAME APP_PUBLIC_ORIGIN GOOGLE_GROUPS_SECRET_NAME; do
+          for name in AWS_ACCOUNT_ID AWS_REGION ECR_REPOSITORY STACK_NAME APP_PUBLIC_ORIGIN GOOGLE_GROUPS_SECRET_ARN; do
             if [[ -n "${!name:-}" ]]; then
               echo "  ok       $name"
             else
@@ -200,6 +200,7 @@ jobs:
             --parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST" \
             --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
+            --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
             --parameters "$STACK_NAME:ApprovedGoogleSubject=$APPROVED_GOOGLE_SUBJECT" \
             --parameters "$STACK_NAME:ApprovedStaffEmail=$APPROVED_STAFF_EMAIL" \
             --parameters "$STACK_NAME:ApprovedStaffDisplayName=$APPROVED_STAFF_DISPLAY_NAME" \

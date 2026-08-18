@@ -1122,8 +1122,15 @@ describe('protected access-membership publication boundary', () => {
     expect(JSON.stringify(secrets.get('DATABASE_USERNAME'))).toContain(
       ':username::',
     );
+    // The reference must be the complete-ARN parameter, never the bare secret
+    // name. A suffix-less ARN whose name ends in a hyphen plus six characters
+    // ("-groups") is parsed by Secrets Manager as name "/psd-eoc/google" with
+    // suffix "groups", which resolves to nothing and surfaces as AccessDenied.
     expect(JSON.stringify(secrets.get('GOOGLE_ROSTER_CONFIG'))).toContain(
-      '/psd-eoc/google-groups',
+      'GoogleGroupsSecretArn',
+    );
+    expect(JSON.stringify(secrets.get('GOOGLE_ROSTER_CONFIG'))).not.toContain(
+      "secret:/psd-eoc/google-groups'",
     );
     expect(
       JSON.stringify(
@@ -1168,7 +1175,11 @@ describe('protected access-membership publication boundary', () => {
         .map((statement) => statement.Resource),
     );
     expect(secretResources).toContain('DatabaseApplicationSecret');
-    expect(secretResources).toContain('/psd-eoc/google-groups');
+    // Granted on the complete-ARN parameter so the grant matches the exact
+    // ARN the task definition requests. A `<arn>-??????` wildcard grant can
+    // never match a suffix-less request.
+    expect(secretResources).toContain('GoogleGroupsSecretArn');
+    expect(secretResources).not.toContain('google-groups-??????');
     expect(secretResources).toContain('BootstrapIdentitySecret');
     expect(secretResources).not.toContain('DatabaseAdminSecret');
     expect(secretResources).not.toContain('GoogleOauthSecretArn');
