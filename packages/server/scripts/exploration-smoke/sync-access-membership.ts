@@ -195,8 +195,20 @@ async function runFromCommandLine(): Promise<void> {
 if (import.meta.main) {
   try {
     await runFromCommandLine();
-  } catch {
-    console.error('Protected access-membership synchronization failed closed.');
+  } catch (error) {
+    // Emit the failure's identity. Codes and messages on this path are
+    // authored, bounded strings; provider payloads, credentials, and member
+    // identities never reach them. Discarding this made every failure look
+    // identical and forced out-of-band reproduction to diagnose.
+    const code = Reflect.get(Object(error), 'code');
+    const message = Reflect.get(Object(error), 'message');
+    console.error(
+      'Protected access-membership synchronization failed closed.' +
+        (typeof code === 'string' ? ` code=${code}` : '') +
+        (typeof message === 'string'
+          ? ` message=${message.slice(0, 300)}`
+          : ''),
+    );
     process.exitCode = 1;
   }
 }
