@@ -6,6 +6,7 @@ import type { ReferenceSeedSummary } from '../../db/seed';
 import {
   assertExplorationAccessSnapshotCurrent,
   assertExplorationAccessFixtureEvidence,
+  assertNoRealAccessGroups,
   createExplorationAccessFixture,
   seedExplorationAccessFixture,
   type ExplorationAccessFixture,
@@ -214,7 +215,25 @@ describe('exploration-smoke configuration', () => {
       approvedStaffEmail: 'approved.staff@psd401.net',
       approvedStaffDisplayName: 'Approved Staff',
       sourceSha: SOURCE_SHA,
+      mode: 'migrate',
     });
+  });
+
+  test('defaults to migrations only and accepts nothing but the two modes', () => {
+    expect(
+      readExplorationBootstrapConfig({
+        ...validConfigEnvironment(),
+        BOOTSTRAP_MODE: 'seed-access-fixture',
+      }).mode,
+    ).toBe('seed-access-fixture');
+    for (const mode of ['', 'full', 'MIGRATE', 'seed', 'migrate ']) {
+      expect(() =>
+        readExplorationBootstrapConfig({
+          ...validConfigEnvironment(),
+          BOOTSTRAP_MODE: mode,
+        }),
+      ).toThrow('BOOTSTRAP_MODE');
+    }
   });
 
   test('rejects Data API inputs and malformed native credentials without reflection', () => {
@@ -506,6 +525,21 @@ describe('approved access fixture', () => {
     ).toThrow('notification channel');
   });
 
+  test('refuses to publish onto a stack that already has real access groups', () => {
+    expect(() => assertNoRealAccessGroups([])).not.toThrow();
+    for (const activeAccessGroupIds of [
+      ['00000000-0000-4000-8000-000000000197'],
+      [
+        '00000000-0000-4000-8000-000000000197',
+        '00000000-0000-4000-8000-000000000198',
+      ],
+    ]) {
+      expect(() => assertNoRealAccessGroups(activeAccessGroupIds)).toThrow(
+        'already has active access groups',
+      );
+    }
+  });
+
   test('replays within one bootstrap and appends a newer snapshot later', async () => {
     let publishes = 0;
     const allocated: ExplorationAccessFixture[] = [];
@@ -613,7 +647,10 @@ describe('bootstrap coordinator', () => {
   });
 
   test('runs native TLS, migrations, and fixtures twice under one lock', async () => {
-    const config = readExplorationBootstrapConfig(validConfigEnvironment());
+    const config = readExplorationBootstrapConfig({
+      ...validConfigEnvironment(),
+      BOOTSTRAP_MODE: 'seed-access-fixture',
+    });
     const calls: string[] = [];
     const dependencies = {
       async acquireAdvisoryLock(): Promise<void> {
@@ -683,6 +720,7 @@ describe('bootstrap coordinator', () => {
     ]);
     expect(summary).toMatchObject({
       sourceSha: SOURCE_SHA,
+      mode: 'seed-access-fixture',
       database: {
         transport: 'native-postgres',
         migrationsApplied: true,
@@ -699,6 +737,74 @@ describe('bootstrap coordinator', () => {
       googleGroups: 'mocked',
       messaging: 'disabled',
     });
+  });
+
+  test('migrates without touching the access fixture by default', async () => {
+    const config = readExplorationBootstrapConfig(validConfigEnvironment());
+    expect(config.mode).toBe('migrate');
+    const calls: string[] = [];
+    const dependencies = {
+      async acquireAdvisoryLock(): Promise<void> {
+        calls.push('acquire-lock');
+      },
+      async releaseAdvisoryLock(): Promise<void> {
+        calls.push('release-lock');
+      },
+      async verifyAdministratorTls(): Promise<void> {
+        calls.push('verify-admin-tls');
+      },
+      async migrate(): Promise<void> {
+        calls.push('migrate-admin');
+      },
+      async configureApplicationRole() {
+        calls.push('configure-application-role');
+        return {
+          applicationLogin: EXPLORATION_DATABASE_LOGIN,
+          inheritedRole: EXPLORATION_DATABASE_ROLE,
+          directMembershipCount: 1,
+          privilegedFlags: false,
+        } as const;
+      },
+      async seedReference() {
+        calls.push('seed-reference');
+        return referenceSeedSummary;
+      },
+      async seedApprovedAccess(): Promise<never> {
+        throw new Error('a migration run must not seed the access fixture');
+      },
+      async verifyCanonicalSyntheticRemoval(): Promise<never> {
+        throw new Error('a migration run must not read the fixture removal');
+      },
+      async verifyApplicationLogin(): Promise<void> {
+        calls.push('verify-application-login');
+      },
+      async verifyApplicationTls(): Promise<void> {
+        calls.push('verify-application-tls');
+      },
+    };
+
+    const summary = await runExplorationBootstrap(config, dependencies);
+    const expectedRunOrder = [
+      'verify-admin-tls',
+      'migrate-admin',
+      'configure-application-role',
+      'seed-reference',
+      'verify-application-login',
+      'verify-application-tls',
+    ];
+    expect(calls).toEqual([
+      'acquire-lock',
+      ...expectedRunOrder,
+      ...expectedRunOrder,
+      'release-lock',
+    ]);
+    expect(summary.mode).toBe('migrate');
+    expect(summary.idempotence).toEqual({ runs: 2, equivalent: true });
+    expect(summary.referenceSeed).toEqual(referenceSeedSummary);
+    expect(summary.approvedAccess).toBeUndefined();
+    expect(summary.canonicalSyntheticRemoval).toBeUndefined();
+    expect(Object.keys(summary)).not.toContain('approvedAccess');
+    expect(Object.keys(summary)).not.toContain('canonicalSyntheticRemoval');
   });
 
   test('releases the advisory lock after any native bootstrap failure', async () => {

@@ -5,6 +5,29 @@ export const EXPLORATION_AWS_REGION = 'us-west-2' as const;
 export const EXPLORATION_DATABASE_LOGIN = 'psd_eoc_application' as const;
 export const EXPLORATION_DATABASE_ROLE = 'psd_eoc_app' as const;
 
+/**
+ * What a bootstrap run is allowed to do.
+ *
+ * `migrate` is the only mode a deploy runs. It brings the schema and the
+ * reference catalog up to date and proves the application role still works.
+ * It writes nothing that describes who may sign in.
+ *
+ * `seed-access-fixture` additionally publishes the synthetic access fixture:
+ * one invented access group, one approved user, and an access-membership
+ * snapshot covering only that group. That snapshot supersedes whatever the
+ * access sync last published, so on a stack with real access groups it revokes
+ * everybody's access until the sync runs again. It exists to make a brand new
+ * stack reachable by one known human, and it must never run on a stack that
+ * already has real access groups.
+ */
+export const EXPLORATION_BOOTSTRAP_MODES = Object.freeze([
+  'migrate',
+  'seed-access-fixture',
+] as const);
+
+export type ExplorationBootstrapMode =
+  (typeof EXPLORATION_BOOTSTRAP_MODES)[number];
+
 type Environment = Readonly<Record<string, string | undefined>>;
 
 const normalizedValue = (maximum: number) =>
@@ -73,6 +96,7 @@ const BootstrapEnvironmentSchema = z
     APPROVED_STAFF_EMAIL: StaffEmailSchema,
     APPROVED_STAFF_DISPLAY_NAME: normalizedValue(160),
     SOURCE_SHA: SourceShaSchema,
+    BOOTSTRAP_MODE: z.enum(EXPLORATION_BOOTSTRAP_MODES).default('migrate'),
   })
   .strict();
 
@@ -104,6 +128,7 @@ export interface ExplorationBootstrapConfig {
   readonly approvedStaffEmail: string;
   readonly approvedStaffDisplayName: string;
   readonly sourceSha: string;
+  readonly mode: ExplorationBootstrapMode;
 }
 
 /** Configuration error that names fields without reflecting sensitive values. */
@@ -155,6 +180,7 @@ export function readExplorationBootstrapConfig(
     APPROVED_STAFF_EMAIL: environment.APPROVED_STAFF_EMAIL,
     APPROVED_STAFF_DISPLAY_NAME: environment.APPROVED_STAFF_DISPLAY_NAME,
     SOURCE_SHA: environment.SOURCE_SHA,
+    BOOTSTRAP_MODE: environment.BOOTSTRAP_MODE,
   });
   if (!parsed.success) {
     const fields = [
@@ -193,5 +219,6 @@ export function readExplorationBootstrapConfig(
     approvedStaffEmail: value.APPROVED_STAFF_EMAIL,
     approvedStaffDisplayName: value.APPROVED_STAFF_DISPLAY_NAME,
     sourceSha: value.SOURCE_SHA,
+    mode: value.BOOTSTRAP_MODE,
   });
 }
