@@ -1,0 +1,254 @@
+name: Deploy
+
+run-name: deploy ${{ inputs.rollback_image_digest || github.sha }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rollback_image_digest:
+        description: Previously deployed image digest to roll back to. Leave empty to build and deploy this commit.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: psd-eoc-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  STACK_NAME: ${{ vars.STACK_NAME }}
+  APP_PUBLIC_ORIGIN: ${{ vars.APP_PUBLIC_ORIGIN }}
+  GOOGLE_OAUTH_SECRET_ARN: ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
+  GOOGLE_GROUPS_SECRET_ARN: ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
+
+jobs:
+  deploy:
+    name: Build and deploy
+    if: github.repository == 'psd401/psd-eoc'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: exploration-smoke
+    steps:
+      - name: Check out the commit being deployed
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Assume the deployment role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Every required piece of configuration is checked by name before any
+      # build or deploy work happens. A missing secret previously surfaced as
+      # an ECS task that could not start, discovered days later, with no usable
+      # error message anywhere in the failure output (see issue #271).
+      #
+      # The deployment role holds secretsmanager:DescribeSecret on each ARN
+      # below. That returns metadata only; it never grants GetSecretValue, so
+      # this step cannot read a secret's contents.
+      - name: Verify required configuration exists
+        shell: bash
+        env:
+          REQUIRED_SECRETS: >-
+            ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
+            ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
+            /psd-eoc/exploration-smoke/database/application
+            /psd-eoc/exploration-smoke/bootstrap/approved-identity
+        run: |
+          set -euo pipefail
+          missing=0
+
+          echo "Repository variables:"
+          for name in AWS_ACCOUNT_ID AWS_REGION ECR_REPOSITORY STACK_NAME APP_PUBLIC_ORIGIN GOOGLE_GROUPS_SECRET_ARN; do
+            if [[ -n "${!name:-}" ]]; then
+              echo "  ok       $name"
+            else
+              echo "  MISSING  $name" >&2
+              missing=1
+            fi
+          done
+
+          echo "Secrets Manager:"
+          for secret in $REQUIRED_SECRETS; do
+            if aws secretsmanager describe-secret --secret-id "$secret" > /dev/null 2>&1; then
+              echo "  ok       $secret"
+            else
+              echo "  MISSING  $secret" >&2
+              missing=1
+            fi
+          done
+
+          if [[ "$missing" -ne 0 ]]; then
+            echo "::error::Required configuration is missing. Nothing was built or deployed." >&2
+            exit 1
+          fi
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the image
+        id: image
+        if: inputs.rollback_image_digest == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY"
+          docker buildx build \
+            --file packages/server/container/exploration-smoke.Dockerfile \
+            --build-arg "SOURCE_SHA=$GITHUB_SHA" \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --cache-from "type=registry,ref=$registry:buildcache" \
+            --cache-to "type=registry,ref=$registry:buildcache,mode=max,image-manifest=true" \
+            --push \
+            --tag "$registry:$GITHUB_SHA" \
+            --metadata-file image-metadata.json \
+            .
+          digest=$(jq -er '."containerimage.digest"' image-metadata.json)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the digest to deploy
+        id: target
+        shell: bash
+        env:
+          ROLLBACK_DIGEST: ${{ inputs.rollback_image_digest }}
+          BUILT_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${ROLLBACK_DIGEST:-}" ]]; then
+            digest="$ROLLBACK_DIGEST"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::rollback_image_digest must be sha256:<64 hex characters>" >&2
+              exit 1
+            fi
+            # Refuse to roll back to an image that is not in the registry.
+            aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids "imageDigest=$digest" > /dev/null
+          else
+            digest="$BUILT_DIGEST"
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Record the currently deployed digest
+        id: previous
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(aws apprunner describe-service \
+            --service-arn "${{ vars.APP_RUNNER_SERVICE_ARN }}" \
+            --query 'Service.SourceConfiguration.ImageRepository.ImageIdentifier' \
+            --output text 2>/dev/null || echo "unknown")
+          echo "previous=${current##*@}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Deploy"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+            echo "| Previous image | \`${current##*@}\` |"
+            echo "| New image | \`${{ steps.target.outputs.digest }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # CDK runs the database bootstrap task, then updates App Runner.
+      - name: Deploy
+        working-directory: infra
+        shell: bash
+        env:
+          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
+          APPROVED_STAFF_DISPLAY_NAME: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_DISPLAY_NAME }}
+          APPROVED_STAFF_EMAIL: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_EMAIL }}
+          INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
+          IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          bunx --bun cdk \
+            --app "bun bin/exploration-smoke.ts" \
+            deploy "$STACK_NAME" \
+            --exclusively \
+            --require-approval never \
+            --no-notices \
+            --parameters "$STACK_NAME:ProvisionApplication=true" \
+            --parameters "$STACK_NAME:AppImageDigest=$IMAGE_DIGEST" \
+            --parameters "$STACK_NAME:RuntimeDatabaseIdleTimeoutSeconds=0" \
+            --parameters "$STACK_NAME:BootstrapImageDigest=$IMAGE_DIGEST" \
+            --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
+            --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
+            --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
+            --parameters "$STACK_NAME:ApprovedGoogleSubject=$APPROVED_GOOGLE_SUBJECT" \
+            --parameters "$STACK_NAME:ApprovedStaffEmail=$APPROVED_STAFF_EMAIL" \
+            --parameters "$STACK_NAME:ApprovedStaffDisplayName=$APPROVED_STAFF_DISPLAY_NAME" \
+            --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
+            --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
+
+      # These two checks decide success. Everything above is build work.
+      - name: Verify the service is running the deployed image
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..40}; do
+            read -r status image < <(aws apprunner describe-service \
+              --service-arn "${{ vars.APP_RUNNER_SERVICE_ARN }}" \
+              --query 'Service.[Status,SourceConfiguration.ImageRepository.ImageIdentifier]' \
+              --output text)
+            if [[ "$status" == "RUNNING" && "${image##*@}" == "${{ steps.target.outputs.digest }}" ]]; then
+              echo "Service RUNNING on ${image##*@}"
+              exit 0
+            fi
+            if [[ "$status" == "CREATE_FAILED" || "$status" == "DELETED" ]]; then
+              echo "::error::App Runner reported status $status" >&2
+              exit 1
+            fi
+            echo "attempt $attempt: status=$status"
+            sleep 15
+          done
+          echo "::error::Service did not reach RUNNING on the deployed digest" >&2
+          exit 1
+
+      - name: Verify application health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..10}; do
+            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 \
+              "$APP_PUBLIC_ORIGIN/api/health" || echo "000")
+            if [[ "$code" == "200" ]]; then
+              echo "Health OK: $(cat /tmp/health.json)"
+              {
+                echo ""
+                echo "Deployed and healthy at $APP_PUBLIC_ORIGIN"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "attempt $attempt: http=$code"
+            sleep 10
+          done
+          echo "::error::$APP_PUBLIC_ORIGIN/api/health did not return 200" >&2
+          echo "Roll back with: gh workflow run deploy.yml -f rollback_image_digest=${{ steps.previous.outputs.previous }}" >&2
+          exit 1

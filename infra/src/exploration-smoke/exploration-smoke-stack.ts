@@ -187,6 +187,19 @@ export class ExplorationSmokeStack extends Stack {
         type: 'String',
       },
     );
+    const googleGroupsSecretArn = new CfnParameter(
+      this,
+      'GoogleGroupsSecretArn',
+      {
+        allowedPattern: `^arn:aws:secretsmanager:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
+        constraintDescription:
+          'Use the complete ARN of the reviewed /psd-eoc/google-groups secret in the approved account and region.',
+        description:
+          'Complete ARN of the Cloud Identity roster-reader credential. The complete ARN is required: importing this secret by name yields an ARN without the generated suffix, which the read grant can never match.',
+        noEcho: true,
+        type: 'String',
+      },
+    );
     const approvedGoogleSubject = new CfnParameter(
       this,
       'ApprovedGoogleSubject',
@@ -646,10 +659,15 @@ export class ExplorationSmokeStack extends Stack {
       'GoogleOauthSecret',
       googleOauthSecretArn.valueAsString,
     );
-    const googleGroupsSecret = secretsmanager.Secret.fromSecretNameV2(
+    // Import by complete ARN, never by name. fromSecretNameV2 yields a
+    // secretArn without the generated six-character suffix; the ECS secret
+    // reference then requests that suffix-less ARN while grantRead authorizes
+    // `<arn>-??????`. The two can never match, and the task fails to start
+    // with a ResourceInitializationError that names no cause. See issue #271.
+    const googleGroupsSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this,
       'GoogleGroupsSecret',
-      '/psd-eoc/google-groups',
+      googleGroupsSecretArn.valueAsString,
     );
     const appRunnerVpcConnector = new apprunner.CfnVpcConnector(
       this,
