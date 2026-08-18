@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ne, sql } from 'drizzle-orm';
 
 import { databaseExecuteRows, type Database } from '../../db/client';
 import {
@@ -21,6 +21,32 @@ export const EXPLORATION_ACCESS_FIXTURE_IDS = Object.freeze({
   accessGroup: '00000000-0000-4000-8000-000000000163',
   user: '00000000-0000-4000-8000-000000000164',
 });
+
+/**
+ * Refuses to publish the synthetic fixture onto a stack that already decides
+ * access for itself.
+ *
+ * Publishing the fixture appends an access-membership snapshot whose group set
+ * is the single synthetic group. Sign-in validates the latest complete
+ * snapshot's group set against the active access groups and denies everyone
+ * when they differ, so on a stack with real access groups the fixture revokes
+ * all access until the access sync republishes. It cannot self-repair: the
+ * sync refuses to run against an invalid baseline.
+ *
+ * That is not a hypothetical. It happened on 2026-08-18, when a deploy ran the
+ * bootstrap unconditionally and locked every administrator out of the live
+ * stack. The mode split keeps deploys away from this code; this keeps a
+ * deliberate run away from a stack that no longer needs it.
+ */
+export function assertNoRealAccessGroups(
+  activeAccessGroupIds: readonly string[],
+): void {
+  if (activeAccessGroupIds.length > 0) {
+    throw new Error(
+      'The exploration access fixture refuses to publish: this stack already has active access groups.',
+    );
+  }
+}
 
 const EXPLORATION_ACCESS_IDENTITY_CREATED_AT = new Date(
   '2026-08-15T12:00:00.000Z',
@@ -206,6 +232,25 @@ export function createDrizzleExplorationAccessFixtureStore(
     ): Promise<ExplorationAccessFixture> {
       return database.transaction(async (transaction) => {
         await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
+        // Inside the lock, so a concurrent access sync cannot activate a real
+        // group between the check and the writes below.
+        assertNoRealAccessGroups(
+          (
+            await transaction
+              .select({ id: groupSources.id })
+              .from(groupSources)
+              .where(
+                and(
+                  eq(groupSources.purpose, 'access'),
+                  eq(groupSources.active, true),
+                  ne(
+                    groupSources.id,
+                    EXPLORATION_ACCESS_FIXTURE_IDS.accessGroup,
+                  ),
+                ),
+              )
+          ).map((group) => group.id),
+        );
         let fixture = replay;
         if (fixture === null) {
           const allocationRows = databaseExecuteRows<{
