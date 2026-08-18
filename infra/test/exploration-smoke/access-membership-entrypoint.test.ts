@@ -282,7 +282,12 @@ describe('exact access-membership protected entrypoint', () => {
     ]);
     expect(stack).toContain("'AccessSyncTaskExecutionRole'");
     expect(stack).toContain("'AccessSyncTaskRole'");
-    expect(stack).toContain("'/psd-eoc/google-groups'");
+    // Imported by complete ARN, not by name. The bare name must not appear as
+    // a secret locator: Secrets Manager parses a suffix-less ARN ending in a
+    // hyphen plus six characters ("-groups") as a different secret entirely.
+    expect(stack).toContain("'GoogleGroupsSecretArn'");
+    expect(stack).toContain('fromSecretCompleteArn');
+    expect(stack).not.toContain("'/psd-eoc/google-groups'");
     expect(stack).toContain('databaseApplicationSecret.grantRead(');
     expect(stack).toContain("'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'");
     expect(workflow).not.toContain('DatabaseAdminSecretArn');
