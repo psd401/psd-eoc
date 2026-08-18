@@ -9,6 +9,7 @@ import {
 } from '@psd-eoc/contracts';
 
 import {
+  describeSessionPersistenceFailure,
   WebSessionIssuanceError,
   createCompleteOidcSignInAuthorizer,
   createCompleteOidcSignInHandler,
@@ -285,5 +286,62 @@ describe('native initial session issuance', () => {
     expect(persisted?.grantBootstrapAdmin).toBe(true);
     expect(result.user.roles).toEqual(['staff', 'admin']);
     expect(bearers).toHaveLength(1);
+  });
+});
+
+describe('describeSessionPersistenceFailure', () => {
+  test('surfaces the structural fields that identify the failing write', () => {
+    const failure = Object.assign(
+      new Error('duplicate key value violates unique constraint'),
+      {
+        code: '23505',
+        constraint_name: 'sessions_pkey',
+        table_name: 'sessions',
+        routine: '_bt_check_unique',
+        severity: 'ERROR',
+      },
+    );
+
+    const described = describeSessionPersistenceFailure(failure);
+
+    expect(described).toContain('code=23505');
+    expect(described).toContain('constraint_name=sessions_pkey');
+    expect(described).toContain('table_name=sessions');
+  });
+
+  test('never emits the PostgreSQL fields that embed row values', () => {
+    const failure = Object.assign(new Error('duplicate key'), {
+      code: '23505',
+      table_name: 'users',
+      detail: 'Key (email)=(staff.member@psd401.net) already exists.',
+      hint: 'staff.member@psd401.net',
+      where: 'staff.member@psd401.net',
+    });
+
+    const described = describeSessionPersistenceFailure(failure);
+
+    expect(described).toContain('table_name=users');
+    expect(described).not.toContain('staff.member@psd401.net');
+    expect(described).not.toContain('Key (email)');
+  });
+
+  test('walks cause chains and tolerates values that are not errors', () => {
+    const inner = Object.assign(new Error('inner'), {
+      code: '23503',
+      table_name: 'connectivity_epochs',
+    });
+
+    const described = describeSessionPersistenceFailure(
+      Object.assign(new Error('outer'), { cause: inner }),
+    );
+
+    expect(described).toContain('caused-by');
+    expect(described).toContain('table_name=connectivity_epochs');
+    expect(describeSessionPersistenceFailure(null)).toBe(
+      'no structured error detail',
+    );
+    expect(describeSessionPersistenceFailure('not an error')).toBe(
+      'no structured error detail',
+    );
   });
 });
