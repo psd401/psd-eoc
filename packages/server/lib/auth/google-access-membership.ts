@@ -32,6 +32,17 @@ const GoogleTokenResponseSchema = z
   .strict()
   .readonly();
 
+/**
+ * `groups:lookup` resolves a group key to a resource name and returns nothing
+ * else. Group details must be read separately with `groups.get`.
+ */
+const GroupNameLookupResponseSchema = z
+  .object({
+    name: z.string().regex(/^groups\/[A-Za-z0-9_-]+$/u),
+  })
+  .strict()
+  .readonly();
+
 const GroupLookupResponseSchema = z
   .object({
     name: z.string().regex(/^groups\/[A-Za-z0-9_-]+$/u),
@@ -338,23 +349,49 @@ export function createGoogleAccessMembershipEvaluator(
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
       };
+      // Two calls, deliberately. `groups:lookup` only resolves a group key to
+      // a resource name; its response carries no groupKey, labels, or
+      // dynamicGroupMetadata. Asking it for those through a `fields` mask is
+      // rejected with 400 INVALID_ARGUMENT ("Error expanding 'fields'
+      // parameter"), which surfaces here as GOOGLE_REQUEST_REJECTED and looks
+      // indistinguishable from an authorization failure. The details are read
+      // from `groups.get` on the resolved name.
       const lookupUrl = new URL(
         `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
       );
       lookupUrl.searchParams.set('groupKey.id', DESIGNATED_ACCESS_GROUP_EMAIL);
-      lookupUrl.searchParams.set(
+      lookupUrl.searchParams.set('fields', 'name');
+      const resolved = await providerRequest(
+        lookupUrl,
+        { headers: authorization, method: 'GET' },
+        'Exact Google access-group lookup',
+        (value) => {
+          const parsed = GroupNameLookupResponseSchema.safeParse(value);
+          return parsed.success ? parsed.data : null;
+        },
+      );
+      const groupUrl = new URL(
+        `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${resolved.name}`,
+      );
+      groupUrl.searchParams.set(
         'fields',
         'name,groupKey(id),labels,dynamicGroupMetadata',
       );
       const group = await providerRequest(
-        lookupUrl,
+        groupUrl,
         { headers: authorization, method: 'GET' },
-        'Exact Google access-group lookup',
+        'Exact Google access-group read',
         (value) => {
           const parsed = GroupLookupResponseSchema.safeParse(value);
           return parsed.success ? parsed.data : null;
         },
       );
+      if (group.name !== resolved.name) {
+        throw new AccessMembershipEvaluationError(
+          'DESIGNATED_GROUP_IDENTITY_INVALID',
+          'Google did not resolve the exact static designated access group.',
+        );
+      }
       const normalizedGroupEmail = group.groupKey.id.toLowerCase();
       if (
         normalizedGroupEmail !== DESIGNATED_ACCESS_GROUP_EMAIL ||
