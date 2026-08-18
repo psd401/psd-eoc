@@ -24,6 +24,7 @@ import {
 import {
   readExplorationBootstrapConfig,
   type ExplorationBootstrapConfig,
+  type ExplorationBootstrapMode,
 } from './config';
 
 const MAX_STATEMENT_ROWS = 32;
@@ -79,13 +80,16 @@ export interface ExplorationBootstrapDependencies {
 }
 
 interface ExplorationBootstrapRunSummary {
+  readonly mode: ExplorationBootstrapMode;
   readonly database: Readonly<{
     migrationsApplied: true;
     applicationRole: ApplicationRoleVerification;
   }>;
   readonly referenceSeed: ReferenceSeedSummary;
-  readonly approvedAccess: ExplorationAccessFixtureSummary;
-  readonly canonicalSyntheticRemoval: CanonicalSyntheticRemovalSummary;
+  /** Present only in `seed-access-fixture` mode. */
+  readonly approvedAccess?: ExplorationAccessFixtureSummary;
+  /** Present only in `seed-access-fixture` mode. */
+  readonly canonicalSyntheticRemoval?: CanonicalSyntheticRemovalSummary;
   readonly integrations: Readonly<{
     googleOidc: 'configured-unverified';
     googleGroups: 'mocked';
@@ -95,6 +99,7 @@ interface ExplorationBootstrapRunSummary {
 
 export interface ExplorationBootstrapSummary {
   readonly sourceSha: string;
+  readonly mode: ExplorationBootstrapMode;
   readonly database: Readonly<{
     transport: 'native-postgres';
     migrationsApplied: true;
@@ -106,33 +111,69 @@ export interface ExplorationBootstrapSummary {
     equivalent: true;
   }>;
   readonly referenceSeed: ReferenceSeedSummary;
-  readonly approvedAccess: ExplorationAccessFixtureSummary;
-  readonly canonicalSyntheticRemoval: CanonicalSyntheticRemovalSummary;
+  /** Present only in `seed-access-fixture` mode. */
+  readonly approvedAccess?: ExplorationAccessFixtureSummary;
+  /** Present only in `seed-access-fixture` mode. */
+  readonly canonicalSyntheticRemoval?: CanonicalSyntheticRemovalSummary;
   readonly integrations: ExplorationBootstrapRunSummary['integrations'];
+}
+
+/**
+ * The steps every mode runs. None of them write anything that decides who may
+ * sign in, so a deploy can run this against a live stack without disturbing
+ * the access-membership snapshot the access sync publishes.
+ */
+async function runSharedBootstrapSteps(
+  config: ExplorationBootstrapConfig,
+  dependencies: ExplorationBootstrapDependencies,
+): Promise<
+  Readonly<{
+    applicationRole: ApplicationRoleVerification;
+    referenceSeed: ReferenceSeedSummary;
+  }>
+> {
+  await dependencies.verifyAdministratorTls();
+  await dependencies.migrate(config);
+  const applicationRole = await dependencies.configureApplicationRole(config);
+  const referenceSeed = await dependencies.seedReference(config);
+  return Object.freeze({ applicationRole, referenceSeed });
 }
 
 async function runOneBootstrap(
   config: ExplorationBootstrapConfig,
   dependencies: ExplorationBootstrapDependencies,
 ): Promise<ExplorationBootstrapRunSummary> {
-  await dependencies.verifyAdministratorTls();
-  await dependencies.migrate(config);
-  const applicationRole = await dependencies.configureApplicationRole(config);
-  const referenceSeed = await dependencies.seedReference(config);
-  const approvedAccess = await dependencies.seedApprovedAccess(config);
-  const canonicalSyntheticRemoval =
-    await dependencies.verifyCanonicalSyntheticRemoval(config);
+  const { applicationRole, referenceSeed } = await runSharedBootstrapSteps(
+    config,
+    dependencies,
+  );
+
+  // Seeding the fixture publishes an access-membership snapshot covering only
+  // the synthetic group, which supersedes the one the access sync published.
+  // A deploy must never do that, so the mode has to ask for it by name.
+  const seedsAccessFixture = config.mode === 'seed-access-fixture';
+  const accessFixture = seedsAccessFixture
+    ? Object.freeze({
+        approvedAccess: await dependencies.seedApprovedAccess(config),
+        // Only meaningful next to the fixture: it proves the exploration
+        // synthetic operational rows stayed removed while the reviewed audit
+        // anchors survived.
+        canonicalSyntheticRemoval:
+          await dependencies.verifyCanonicalSyntheticRemoval(config),
+      })
+    : {};
+
   await dependencies.verifyApplicationLogin(config);
   await dependencies.verifyApplicationTls();
 
   return Object.freeze({
+    mode: config.mode,
     database: Object.freeze({
       migrationsApplied: true as const,
       applicationRole,
     }),
     referenceSeed,
-    approvedAccess,
-    canonicalSyntheticRemoval,
+    ...accessFixture,
     integrations: Object.freeze({
       googleOidc: 'configured-unverified' as const,
       googleGroups: 'mocked' as const,
@@ -158,8 +199,18 @@ export async function runExplorationBootstrap(
       throw new Error('The native bootstrap was not idempotent.');
     }
 
+    const accessFixture =
+      second.approvedAccess === undefined ||
+      second.canonicalSyntheticRemoval === undefined
+        ? {}
+        : {
+            approvedAccess: second.approvedAccess,
+            canonicalSyntheticRemoval: second.canonicalSyntheticRemoval,
+          };
+
     return Object.freeze({
       sourceSha: config.sourceSha,
+      mode: second.mode,
       database: Object.freeze({
         transport: 'native-postgres' as const,
         migrationsApplied: true as const,
@@ -171,8 +222,7 @@ export async function runExplorationBootstrap(
         equivalent: true as const,
       }),
       referenceSeed: second.referenceSeed,
-      approvedAccess: second.approvedAccess,
-      canonicalSyntheticRemoval: second.canonicalSyntheticRemoval,
+      ...accessFixture,
       integrations: second.integrations,
     });
   } finally {

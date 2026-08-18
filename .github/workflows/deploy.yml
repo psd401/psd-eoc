@@ -11,11 +11,6 @@ on:
         description: Previously deployed image digest to roll back to. Leave empty to build and deploy this commit.
         required: false
         type: string
-      run_migrations:
-        description: Run the bootstrap task to apply database migrations. It also reseeds the synthetic access fixture, which revokes access on a stack with real access groups until the access sync is re-run. See #297.
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -239,25 +234,26 @@ jobs:
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
             --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
 
-      # Phase 2 applies migrations and seeds. A failure here aborts the deploy
-      # with the application still serving its previous digest.
-      # Opt-in, because the bootstrap task does more than migrate.
+      # Phase 2 applies migrations. A failure here aborts the deploy with the
+      # application still serving its previous digest.
       #
-      # It also seeds the synthetic access fixture, which publishes an access
-      # snapshot covering only the fixture group. On a stack with real access
-      # groups configured that snapshot supersedes the live membership, the
-      # access baseline stops matching the active group set, and every sign-in
-      # is denied with ACCESS_CONFIGURATION_NOT_SYNCED. Recovering requires
-      # deactivating the real group so the baseline matches again, then
-      # re-running the access sync to republish.
+      # The task runs in BOOTSTRAP_MODE=migrate, which is the container's
+      # default and the only mode a deploy ever uses: schema migrations, the
+      # reference catalog, and a proof that the application role still works.
+      # It writes nothing that decides who may sign in.
       #
-      # That is exactly what happened on 2026-08-18 when this step was first
-      # added and run unconditionally. Until the bootstrap is split so deploys
-      # can migrate without seeding the fixture (#297), migrations run only
-      # when explicitly requested, and whoever requests one is expected to
-      # re-run the access sync afterwards.
+      # The other mode, seed-access-fixture, publishes the synthetic access
+      # fixture and is for a brand new stack only. Running it here on
+      # 2026-08-18 superseded the live access-membership snapshot and locked
+      # every administrator out of the live stack, which is why the two are
+      # separate modes and why the fixture also refuses to publish when real
+      # access groups exist. To run it deliberately on a brand new stack, add
+      # it to a one-off run-task:
+      #
+      #   --overrides '{"containerOverrides":[{"name":"native-bootstrap",
+      #     "environment":[{"name":"BOOTSTRAP_MODE",
+      #     "value":"seed-access-fixture"}]}]}'
       - name: Run database migrations
-        if: inputs.run_migrations == true
         shell: bash
         run: |
           set -euo pipefail
@@ -302,19 +298,6 @@ jobs:
             exit 1
           fi
           echo "Migrations applied."
-
-      - name: Note that migrations were skipped
-        if: inputs.run_migrations != true
-        shell: bash
-        run: |
-          {
-            echo ""
-            echo "| Migrations | |"
-            echo "|---|---|"
-            echo "| Ran | no |"
-            echo "| Why | run_migrations was not requested (see #297) |"
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "Migrations were not run. Any migration in this commit is NOT applied."
 
       # Phase 3 cuts the application over, now that the schema is current.
       - name: Deploy the application
