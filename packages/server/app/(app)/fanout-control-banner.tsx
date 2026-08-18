@@ -194,9 +194,11 @@ export function FanoutControlBanner({
 
 export function OperationalDocument({
   banner,
+  nav,
   children,
 }: Readonly<{
   banner: ReactNode;
+  nav?: ReactNode;
   children: ReactNode;
 }>) {
   return (
@@ -205,6 +207,7 @@ export function OperationalDocument({
         <a className="skip-link" href="#main-content">
           Skip to main content
         </a>
+        {nav}
         {banner}
         {children}
       </body>

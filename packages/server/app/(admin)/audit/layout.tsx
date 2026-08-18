@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import { PrimaryNav } from '../../nav/primary-nav';
 
 export const metadata: Metadata = {
   title: 'Security audit log | PSD EOC',
@@ -15,6 +16,7 @@ export default function AuditRootLayout({
         <a className="skip-link" href="#main-content">
           Skip to main content
         </a>
+        <PrimaryNav />
         {children}
         <style>{`
           :root {

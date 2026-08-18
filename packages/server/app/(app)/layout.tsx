@@ -8,6 +8,7 @@ import {
   OperationalDocument,
   loadOperationalFanoutControlState,
 } from './fanout-control-banner';
+import { PrimaryNav } from '../nav/primary-nav';
 
 export const metadata: Metadata = {
   title: {
@@ -35,6 +36,11 @@ export default function OperationalLayout({
           fallback={<FanoutControlBanner state={FAIL_CLOSED_FALLBACK_STATE} />}
         >
           <LoadedFanoutControlBanner />
+        </Suspense>
+      }
+      nav={
+        <Suspense fallback={null}>
+          <PrimaryNav />
         </Suspense>
       }
     >
