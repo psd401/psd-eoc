@@ -32,3 +32,16 @@ CREATE INDEX IF NOT EXISTS "access_group_members_email_idx"
 
 ALTER TABLE public."group_sources"
 	ADD COLUMN IF NOT EXISTS "members_captured_at" timestamp with time zone;
+
+-- The application role reads membership on every sign-in and every session
+-- refresh, so it needs SELECT here. It never writes: membership is replaced by
+-- the access sync running as the administrator role.
+--
+-- The grant is explicit because GRANT ... ON ALL TABLES applies only to tables
+-- that existed when it ran. A table added later is invisible to the application
+-- role until it is named, and the failure that produces is a bare
+-- "permission denied" at sign-in rather than anything that points here.
+REVOKE ALL PRIVILEGES ON TABLE public."access_group_members"
+	FROM PUBLIC, "psd_eoc_app";
+
+GRANT SELECT ON TABLE public."access_group_members" TO "psd_eoc_app";

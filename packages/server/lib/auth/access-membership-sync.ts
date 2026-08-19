@@ -18,19 +18,16 @@ import {
   type SyncAccessMembershipInput,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
 import {
+  accessGroupMembers,
   accessMembershipEvaluatedMembers,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   groupSources,
   idempotencyRecords,
-  users,
 } from '../../db/schema';
 
 import {
@@ -42,7 +39,6 @@ import {
 import {
   ADMIN_AVAILABILITY_LOCK_SQL,
   loadAccessConfigurationSnapshotState,
-  loadEffectiveAdministratorUserIds,
 } from './role-state';
 
 const MAX_EVALUATED_MEMBERS = 1_200;
@@ -902,6 +898,9 @@ export function createDrizzleAccessMembershipSyncStore(
             'The access-membership snapshot version space is exhausted.',
           );
         }
+        // A record of this sync run, not an authorization generation. Nothing
+        // reads it to decide access any more; it remains so an operator can see
+        // when membership was last read and by which run.
         const snapshotId = randomUUID();
         await transaction.insert(accessMembershipSnapshots).values({
           id: snapshotId,
@@ -911,113 +910,53 @@ export function createDrizzleAccessMembershipSyncStore(
           capturedAt: new Date(evaluation.capturedAt),
         });
 
-        // Expected and completed rows for every active source. The sign-in
-        // baseline compares both against the active set, so a snapshot that
-        // omitted either would be treated as partial and deny everyone.
-        await insertInBatches(
-          evaluation.groups.flatMap((group) =>
-            (['expected', 'completed'] as const).map((completionKind) => ({
-              snapshotId,
-              groupSourceId: group.groupSourceId,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
-              completionKind,
-            })),
-          ),
-          (batch) =>
-            transaction
-              .insert(accessMembershipSnapshotGroups)
-              .values([...batch]),
-        );
-
-        await insertInBatches(
-          evaluation.groups.flatMap((group) =>
-            group.memberEmails.map((email) => ({
-              snapshotId,
-              email,
-              groupSourceId: group.groupSourceId,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
-            })),
-          ),
-          (batch) =>
-            transaction
-              .insert(accessMembershipEvaluatedMembers)
-              .values([...batch]),
-        );
-
-        // Members are the evaluated people who already have an account. A
-        // first-time signer has no row yet; the gate creates one when they
-        // arrive and finds their evaluated membership waiting.
-        const emailToGroups = new Map<string, string[]>();
+        // Replace each group's membership wholesale and stamp when it was
+        // read. Sign-in asks whether a person is in an active trusted group
+        // whose membership is recent; there is no generation to publish, no
+        // version to agree on, and nothing for a later configuration change to
+        // contradict.
+        const capturedAt = new Date(evaluation.capturedAt);
         for (const group of evaluation.groups) {
-          for (const email of group.memberEmails) {
-            emailToGroups.set(email, [
-              ...(emailToGroups.get(email) ?? []),
-              group.groupSourceId,
-            ]);
-          }
-        }
-        const knownUsers =
-          emailToGroups.size === 0
-            ? []
-            : await transaction
-                .select({
-                  id: users.id,
-                  email: users.email,
-                  googleSubject: users.googleSubject,
-                  facilityScopeKind: users.facilityScopeKind,
-                })
-                .from(users)
-                .where(
-                  and(
-                    inArray(users.email, [...emailToGroups.keys()]),
-                    isNull(users.disabledAt),
-                  ),
-                )
-                .orderBy(asc(users.id));
-        await insertInBatches(
-          knownUsers.map((user) => ({
-            snapshotId,
-            userId: user.id,
-            googleSubject: user.googleSubject,
-            facilityScopeKind: user.facilityScopeKind,
-          })),
-          (batch) =>
-            transaction.insert(accessMembershipMembers).values([...batch]),
-        );
-        await insertInBatches(
-          knownUsers.flatMap((user) =>
-            (emailToGroups.get(user.email) ?? []).map((groupSourceId) => ({
-              snapshotId,
-              userId: user.id,
-              groupSourceId,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
+          await transaction
+            .delete(accessGroupMembers)
+            .where(eq(accessGroupMembers.groupSourceId, group.groupSourceId));
+          await insertInBatches(
+            group.memberEmails.map((email) => ({
+              groupSourceId: group.groupSourceId,
+              email,
+              capturedAt,
             })),
-          ),
-          (batch) =>
-            transaction.insert(accessMembershipMemberGroups).values([...batch]),
-        );
+            (batch) =>
+              transaction.insert(accessGroupMembers).values([...batch]),
+          );
+          await transaction
+            .update(groupSources)
+            .set({ membersCapturedAt: capturedAt })
+            .where(eq(groupSources.id, group.groupSourceId));
+        }
 
-        // The guard that makes reconfiguration safe. Projected against the
-        // snapshot just written, at least one administrator must still be able
-        // to pass the membership boundary. Otherwise the whole transaction is
-        // refused and the previous configuration stands.
-        const reachableAdministrators = await loadEffectiveAdministratorUserIds(
-          transaction,
-          {
-            accessState: Object.freeze({
-              snapshotId,
-              snapshotVersion,
-              activeAccessGroupSourceIds: Object.freeze([...activeIds].sort()),
-            }),
-          },
-        );
-        if (reachableAdministrators.length === 0) {
+        // The guard that makes reconfiguration safe. At least one person who
+        // holds the administrator role must still be reachable through a group
+        // that grants it, or the whole transaction is refused and the previous
+        // membership stands.
+        const administratorEmails = await transaction
+          .select({ email: accessGroupMembers.email })
+          .from(accessGroupMembers)
+          .innerJoin(
+            groupSources,
+            eq(groupSources.id, accessGroupMembers.groupSourceId),
+          )
+          .where(
+            and(
+              eq(groupSources.purpose, 'access'),
+              eq(groupSources.active, true),
+              eq(groupSources.grantedRole, 'admin'),
+            ),
+          );
+        if (administratorEmails.length === 0) {
           throw new AccessMembershipSyncError(
             'ACCESS_PUBLICATION_LEAVES_NO_ADMINISTRATOR',
-            'Publishing this access configuration would leave no reachable administrator.',
+            'Publishing this membership would leave no reachable administrator.',
           );
         }
 
@@ -1026,7 +965,7 @@ export function createDrizzleAccessMembershipSyncStore(
           reservationId,
           snapshotId,
           null,
-          new Date(evaluation.capturedAt),
+          capturedAt,
         );
         return publicationResult(
           evaluation,

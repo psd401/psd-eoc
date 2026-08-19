@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-import { decideAccess } from './trusted-group-access';
 import {
   CompleteOidcSignInInputSchema,
   IdempotencyKeySchema,
@@ -38,6 +37,7 @@ import {
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './access-gate';
+import { decideAccess } from './trusted-group-access';
 import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 
 /**

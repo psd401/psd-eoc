@@ -16,6 +16,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  accessGroupMembers,
   accessMembershipEvaluatedMembers,
   accessMembershipMemberGroups,
   accessMembershipMembers,
@@ -31,6 +32,7 @@ import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
 } from '../../app/(admin)/facilities/owned-database-lifecycle';
+import { decideAccess } from './trusted-group-access';
 import {
   createDrizzleAccessMembershipSyncStore,
   type AccessMembershipSyncReservation,
@@ -39,10 +41,7 @@ import {} from './session-cookie';
 import { type EvaluatedAccessMembershipSet } from './google-access-membership';
 
 const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
-import {
-  loadAccessConfigurationSnapshotState,
-  loadEffectiveAdministratorUserIds,
-} from './role-state';
+import { loadAccessConfigurationSnapshotState } from './role-state';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -227,8 +226,8 @@ async function seedStrictBaseline(
       purpose: 'access',
       facilityId: null,
       displayName: 'Retained recovery access',
-      active: true,
       grantedRole: 'admin',
+      active: true,
       googleGroupId: 'retained_recovery_access',
       email: 'retained-recovery@psd401.net',
       fixtureKey: null,
@@ -396,15 +395,20 @@ describeWithDatabase('access-membership atomic database publication', () => {
       publication: 'created',
     });
 
-    // The published snapshot is the baseline sign-in validates against. If its
-    // group set did not equal the active set, every account would be denied.
-    const state = await loadAccessConfigurationSnapshotState(database);
-    expect(state?.snapshotId).toBe(result.snapshotId);
-    expect(state?.activeAccessGroupSourceIds).toEqual([BASELINE_SOURCE_ID]);
-    if (state === null) throw new Error('the baseline should be valid');
+    // Membership is what sign-in reads. The group now holds its member and
+    // carries the instant it was read.
     expect(
-      await loadEffectiveAdministratorUserIds(database, { accessState: state }),
-    ).toEqual([USER_ID]);
+      await database
+        .select({ email: accessGroupMembers.email })
+        .from(accessGroupMembers)
+        .where(eq(accessGroupMembers.groupSourceId, BASELINE_SOURCE_ID)),
+    ).toEqual([{ email: RECOVERY_EMAIL }]);
+    expect(
+      await decideAccess(database, {
+        email: RECOVERY_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true, roles: ['admin'] });
   });
 
   test('a group added after the first snapshot becomes a valid baseline', async () => {
@@ -420,16 +424,21 @@ describeWithDatabase('access-membership atomic database publication', () => {
       purpose: 'access',
       facilityId: null,
       displayName: 'District staff access',
+      grantedRole: 'admin',
       active: true,
-      grantedRole: 'staff',
       googleGroupId: PROVIDER_GROUP_ID,
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
       fixtureKey: null,
       createdAt: BASELINE_TIME,
     });
 
-    // With two groups active and a one-group snapshot, there is no baseline.
-    expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
+    // The second group has no membership yet, so nobody in it has access.
+    expect(
+      await decideAccess(database, {
+        email: TRANSITION_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: false });
 
     const configured = await store.readConfiguredAccessGroups();
     expect(configured.map(({ email }) => email).sort()).toEqual(
@@ -461,23 +470,31 @@ describeWithDatabase('access-membership atomic database publication', () => {
     expect(result.evaluatedMembershipCount).toBe(2);
 
     // Reconciled: the snapshot now covers both groups.
-    const state = await loadAccessConfigurationSnapshotState(database);
-    expect(state?.snapshotId).toBe(result.snapshotId);
-    expect([...(state?.activeAccessGroupSourceIds ?? [])].sort()).toEqual(
-      [BASELINE_SOURCE_ID, secondSourceId].sort(),
-    );
+    // Both groups now carry membership, and a person in only the second one
+    // has access. Requiring membership in every group is what denied them.
+    expect(
+      await decideAccess(database, {
+        email: TRANSITION_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true, roles: ['staff'] });
+    expect(
+      await decideAccess(database, {
+        email: RECOVERY_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true, roles: ['admin'] });
 
     // A person in only the second group is evaluated for it. Requiring
     // membership in every group is what previously denied them.
-    const evaluated = await database
+    const members = await database
       .select({
-        email: accessMembershipEvaluatedMembers.email,
-        groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
+        email: accessGroupMembers.email,
+        groupSourceId: accessGroupMembers.groupSourceId,
       })
-      .from(accessMembershipEvaluatedMembers)
-      .where(eq(accessMembershipEvaluatedMembers.snapshotId, result.snapshotId))
-      .orderBy(asc(accessMembershipEvaluatedMembers.email));
-    expect(evaluated).toEqual(
+      .from(accessGroupMembers)
+      .orderBy(asc(accessGroupMembers.email));
+    expect(members).toEqual(
       [
         { email: TRANSITION_EMAIL, groupSourceId: secondSourceId },
         { email: RECOVERY_EMAIL, groupSourceId: BASELINE_SOURCE_ID },
@@ -497,8 +514,8 @@ describeWithDatabase('access-membership atomic database publication', () => {
       purpose: 'access',
       facilityId: null,
       displayName: 'Retiring fixture access',
-      active: false,
       grantedRole: 'admin',
+      active: false,
       googleGroupId: 'retiring_fixture',
       email: 'retiring@psd401.net',
       fixtureKey: null,
@@ -524,16 +541,45 @@ describeWithDatabase('access-membership atomic database publication', () => {
       ]),
     );
     expect(result.activeAccessGroupCount).toBe(1);
+    // The retired group's membership is gone with it, and the remaining group
+    // still grants access.
     expect(
-      (await loadAccessConfigurationSnapshotState(database))?.snapshotId,
-    ).toBe(result.snapshotId);
+      await database
+        .select({ email: accessGroupMembers.email })
+        .from(accessGroupMembers)
+        .where(eq(accessGroupMembers.groupSourceId, secondSourceId)),
+    ).toEqual([]);
+    expect(
+      await decideAccess(database, {
+        email: RECOVERY_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true });
   });
 
   test('refuses a publication that would leave no reachable administrator', async () => {
-    // The guard that makes reconfiguration safe. Without it a deployment could
-    // publish itself out of its own administration.
+    // The guard that makes reconfiguration safe. A staff group keeps the
+    // evaluation non-empty, so this reaches the guard rather than failing
+    // schema validation: people would still have access, but nobody could
+    // administer, and a deployment must not be able to publish itself out of
+    // its own administration.
     const database = databaseConnection().db;
     const store = createDrizzleAccessMembershipSyncStore(database);
+    const staffSourceId = '00000000-0000-4000-8000-000000000533';
+    await database.insert(groupSources).values({
+      id: staffSourceId,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+      displayName: 'District staff access',
+      grantedRole: 'admin',
+      active: true,
+      googleGroupId: PROVIDER_GROUP_ID,
+      email: DESIGNATED_ACCESS_GROUP_EMAIL,
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+
     const reservation = await reserve(store, 'access-sync:publish-0004');
     if (reservation.kind !== 'reserved') throw new Error('expected reserved');
 
@@ -546,17 +592,21 @@ describeWithDatabase('access-membership atomic database publication', () => {
             groupEmail: 'retained-recovery@psd401.net',
             googleGroupId: 'retained_recovery_access',
             grantedRole: 'admin',
-            // The only administrator is no longer a member.
-            memberEmails: ['someone.else@psd401.net'],
+            memberEmails: [],
+          },
+          {
+            groupSourceId: staffSourceId,
+            groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            googleGroupId: PROVIDER_GROUP_ID,
+            grantedRole: 'staff',
+            memberEmails: [TRANSITION_EMAIL],
           },
         ]),
       ),
     ).rejects.toThrow('reachable administrator');
 
-    // The transaction is refused whole: the previous baseline still stands.
-    const state = await loadAccessConfigurationSnapshotState(database);
-    expect(state?.snapshotId).toBe(BASELINE_SNAPSHOT_ID);
-    expect(state?.snapshotVersion).toBe(1);
+    // Refused whole: neither group's membership was written.
+    expect(await database.select().from(accessGroupMembers)).toEqual([]);
   });
 
   test('refuses evidence that no longer describes the active configuration', async () => {

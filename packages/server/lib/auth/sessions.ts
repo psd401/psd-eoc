@@ -1,6 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 
-import { decideAccess } from './trusted-group-access';
 import {
   AccessMembershipMemberSchema,
   CapabilityScopeSchema,
@@ -65,6 +64,7 @@ import {
   users,
 } from '../../db/schema';
 import { loadEffectiveRoles, type RoleStateDatabase } from './role-state';
+import { decideAccess } from './trusted-group-access';
 
 const SECOND_MS = 1_000;
 const DAY_SECONDS = 24 * 60 * 60;

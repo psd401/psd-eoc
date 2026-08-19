@@ -21,6 +21,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  accessGroupMembers,
   accessMembershipMemberGroups,
   accessMembershipMembers,
   accessMembershipSnapshotGroups,
@@ -123,9 +124,15 @@ function databaseConnection(): PostgresDatabaseConnection {
   return connection;
 }
 
+/**
+ * Seeds the trusted group and, when an address is given, that person's
+ * membership in it. Sign-in reads membership, so a fixture that creates only
+ * the group authorizes nobody.
+ */
 async function ensureDesignatedAccessGroup(
   database: PostgresDatabaseConnection['db'],
   createdAt: Date,
+  memberEmail?: string,
 ): Promise<void> {
   await database
     .insert(groupSources)
@@ -136,12 +143,26 @@ async function ensureDesignatedAccessGroup(
       facilityId: null,
       displayName: 'Synthetic exact designated access group',
       active: true,
+      // Staff, matching the accounts these fixtures create. Roles come from the
+      // group, so a group granting admin would make every fixture user one.
+      grantedRole: 'staff',
       googleGroupId: 'synthetic-exact-designated-access-group',
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
       fixtureKey: null,
       createdAt,
+      membersCapturedAt: createdAt,
     })
     .onConflictDoNothing();
+  if (memberEmail !== undefined) {
+    await database
+      .insert(accessGroupMembers)
+      .values({
+        groupSourceId: DESIGNATED_ACCESS_GROUP_ID,
+        email: memberEmail.toLowerCase(),
+        capturedAt: createdAt,
+      })
+      .onConflictDoNothing();
+  }
 }
 
 function buildContext(baseDatabaseUrl: string): SessionTestContext {
@@ -658,6 +679,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       createdAt: snapshotAt,
     });
     await database.insert(userRoles).values({ userId, role: 'staff' });
+    await database.insert(accessGroupMembers).values({
+      groupSourceId,
+      email: `issue-26-app-role-session-${suffix}@psd401.net`,
+      capturedAt: snapshotAt,
+    });
 
     const activeAccessGroups = await database
       .select({
@@ -770,10 +796,12 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       const result = await createDrizzleInitialWebSessionStore(
         roleConnection.db,
       ).persist(request);
-      expect(result.user.roles).toEqual(['staff', 'admin']);
-      expect(result.session.authorization.membershipSnapshotId).toBe(
-        snapshotId,
-      );
+      // Roles are what the trusted group grants; there is no bootstrap
+      // administrator added at issuance any more.
+      expect(result.user.roles).toEqual(['staff']);
+      // Sessions issued after the cutover carry no snapshot pin: staying
+      // signed in means still being in a trusted group, asked directly.
+      expect(result.session.authorization.membershipSnapshotId).toBeNull();
 
       const updatePrivileges = databaseExecuteRows<SnapshotUpdatePrivilegeRow>(
         await roleConnection.db.execute<SnapshotUpdatePrivilegeRow>(sql`
@@ -857,7 +885,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       expect(persistedSession).toEqual({
         id: result.session.id,
         userId,
-        membershipSnapshotId: snapshotId,
+        membershipSnapshotId: null,
       });
       const [tokenIssuance] = await database
         .select({
@@ -897,6 +925,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       createdAt: snapshotAt,
     });
     await database.insert(userRoles).values({ userId, role: 'staff' });
+    await database.insert(accessGroupMembers).values({
+      groupSourceId,
+      email: `issue-26-bootstrap-lock-${suffix}@psd401.net`,
+      capturedAt: snapshotAt,
+    });
 
     const activeAccessGroups = await database
       .select({
@@ -1059,7 +1092,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     if (issuanceOutcome.status === 'rejected') {
       throw issuanceOutcome.reason;
     }
-    expect(issuanceOutcome.value.user.roles).toContain('admin');
+    // The point of this test is lock ordering, not the roles: issuance takes
+    // the administrator-availability lock before its row locks, so it completes
+    // rather than deadlocking against the holder. Roles are whatever the
+    // trusted group grants.
+    expect(issuanceOutcome.value.user.roles).toEqual(['staff']);
   });
 
   test('a refresh that loses the rotation race unregisters the revoked device push token', async () => {
@@ -1274,7 +1311,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       const issuedAt = new Date(snapshotAt.getTime() + 1_000);
       const googleSubject = `issue-23-revoke-recovery-${suffix}`;
 
-      await ensureDesignatedAccessGroup(database, snapshotAt);
+      await ensureDesignatedAccessGroup(
+        database,
+        snapshotAt,
+        `issue-23-revoke-recovery-${suffix}@psd401.net`,
+      );
       await database.insert(users).values({
         id: userId,
         googleSubject,

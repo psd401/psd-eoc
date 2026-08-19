@@ -196,6 +196,7 @@ async function prepareAccessEvidence(
         purpose: 'access',
         facilityId: null,
         displayName: 'Synthetic Start-flow Playwright Access',
+        grantedRole: 'admin',
         active: true,
         googleGroupId: 'synthetic-start-flow-playwright-access',
         email: DESIGNATED_ACCESS_GROUP_EMAIL,

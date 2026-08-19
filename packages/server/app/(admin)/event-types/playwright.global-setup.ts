@@ -104,6 +104,7 @@ async function prepareAccessEvidence(
         purpose: 'access',
         facilityId: null,
         displayName: 'Synthetic Playwright Access',
+        grantedRole: 'admin',
         active: true,
         googleGroupId: 'synthetic-playwright-access-group',
         email: DESIGNATED_ACCESS_GROUP_EMAIL,

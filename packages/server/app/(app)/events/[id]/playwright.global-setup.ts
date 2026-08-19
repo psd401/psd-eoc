@@ -208,6 +208,7 @@ async function prepareAccessEvidence(
         purpose: 'access',
         facilityId: null,
         displayName: 'Synthetic Event Room Playwright Access',
+        grantedRole: 'admin',
         active: true,
         googleGroupId: 'synthetic-event-room-playwright-access',
         email: DESIGNATED_ACCESS_GROUP_EMAIL,
