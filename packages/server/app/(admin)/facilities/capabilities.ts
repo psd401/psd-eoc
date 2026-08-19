@@ -953,6 +953,11 @@ function groupSourceFromRow(
     facilityId: row.facilityId,
     displayName: row.displayName,
     active: effectiveActive,
+    // Access sources carry the role they grant; every other purpose is null.
+    // The schema union rejects either one appearing on the wrong purpose, so a
+    // row that drifted from the database check constraint fails here loudly
+    // rather than presenting a group whose authority is unclear.
+    grantedRole: row.grantedRole,
     createdAt: dateIso(row.createdAt),
   };
   return GroupSourceSchema.parse(

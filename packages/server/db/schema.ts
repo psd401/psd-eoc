@@ -300,6 +300,9 @@ export const groupSources = pgTable(
     }),
     displayName: varchar('display_name', { length: 160 }).notNull(),
     active: boolean('active').default(true).notNull(),
+    // Access sources only. The role every member of this group receives, so a
+    // deployment configures who administers instead of compiling it in.
+    grantedRole: roleEnum('granted_role'),
     googleGroupId: varchar('google_group_id', { length: 255 }),
     email: varchar('email', { length: 320 }),
     fixtureKey: varchar('fixture_key', { length: 100 }),
@@ -314,6 +317,14 @@ export const groupSources = pgTable(
     unique('group_sources_google_group_id_uq').on(table.googleGroupId),
     unique('group_sources_fixture_key_uq').on(table.fixtureKey),
     index('group_sources_facility_idx').on(table.facilityId),
+    check(
+      'group_sources_access_role_present',
+      sql`(
+        ${table.purpose} = 'access' and ${table.grantedRole} is not null
+      ) or (
+        ${table.purpose} <> 'access' and ${table.grantedRole} is null
+      )`,
+    ),
     check(
       'group_sources_valid_variant',
       sql`(

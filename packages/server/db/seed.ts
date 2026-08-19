@@ -150,6 +150,7 @@ const rosterGroupRefs: readonly RosterGroupSourceRef[] = [
 const groupSourceRows = [
   GroupSourceSchema.parse({
     ...groupNorthRef,
+    grantedRole: null,
     displayName: 'Synthetic North Staff',
     active: true,
     fixtureKey: 'synthetic-north-staff',
@@ -157,6 +158,7 @@ const groupSourceRows = [
   }),
   GroupSourceSchema.parse({
     ...groupSouthRef,
+    grantedRole: null,
     displayName: 'Synthetic South Staff',
     active: true,
     fixtureKey: 'synthetic-south-staff',
@@ -164,6 +166,7 @@ const groupSourceRows = [
   }),
   GroupSourceSchema.parse({
     ...groupOthersRef,
+    grantedRole: null,
     displayName: 'Synthetic District Support Staff',
     active: true,
     fixtureKey: 'synthetic-district-support-staff',

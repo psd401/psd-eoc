@@ -7,9 +7,11 @@ import { AccessGroupSourceRefSchema, type AccessGroupSourceRef } from './group';
 import {
   hasUniqueStrings,
   isAtOrAfter,
+  RoleSchema,
   TimestampSchema,
   UuidSchema,
   VersionSchema,
+  type Role,
 } from './shared';
 
 const accessGroupSourceRefKey = (source: AccessGroupSourceRef): string =>
@@ -20,10 +22,9 @@ const accessGroupSourceRefKey = (source: AccessGroupSourceRef): string =>
  * trusted administrative flows and always combine with server-side facility
  * scope checks.
  */
-export const RoleSchema = z.enum(['staff', 'admin']);
-
-/** Release-one user role inferred from {@link RoleSchema}. */
-export type Role = z.infer<typeof RoleSchema>;
+// Defined in `shared` so `group` can use it without an import cycle; every
+// existing importer of `identity` keeps working through this re-export.
+export { RoleSchema, type Role };
 
 /**
  * Owns the stable internal identifier for a staff user. The related immutable

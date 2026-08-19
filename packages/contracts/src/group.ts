@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { PaginationCursorSchema, paginatedSchema } from './api';
-import { TimestampSchema, UuidSchema } from './shared';
+import { RoleSchema, TimestampSchema, UuidSchema } from './shared';
 
 /**
  * Owns the stable identifier for a configured group source. Source purpose,
@@ -115,6 +115,22 @@ const groupSourceMetadataShape = {
   createdAt: TimestampSchema,
 };
 
+/**
+ * The role every member of an access group receives.
+ *
+ * Access groups answer two questions at once: who may sign in, and what they
+ * may do once they have. Carrying the role on the group is what lets a
+ * deployment name its own administrators — point an access group at the Google
+ * group whose members run the system and they are administrators — instead of
+ * compiling one district's group address in and seeding roles from a fixture.
+ *
+ * Only access sources carry one. Building and roster sources describe who is
+ * notified, not who may sign in, so their role is always null and the database
+ * holds them to that with a check constraint.
+ */
+const accessRoleShape = { grantedRole: RoleSchema };
+const noGrantedRoleShape = { grantedRole: z.null() };
+
 const googleGroupDetailsShape = {
   googleGroupId: z.string().trim().min(1).max(255),
   email: z.string().trim().email().max(320),
@@ -143,6 +159,7 @@ export const GroupSourceSchema = z
         purpose: z.literal('access'),
         facilityId: z.null(),
         ...groupSourceMetadataShape,
+        ...accessRoleShape,
         ...googleGroupDetailsShape,
       })
       .strict(),
@@ -153,6 +170,7 @@ export const GroupSourceSchema = z
         purpose: z.literal('building'),
         facilityId: UuidSchema,
         ...groupSourceMetadataShape,
+        ...noGrantedRoleShape,
         ...googleGroupDetailsShape,
       })
       .strict(),
@@ -163,6 +181,7 @@ export const GroupSourceSchema = z
         purpose: z.literal('others'),
         facilityId: z.null(),
         ...groupSourceMetadataShape,
+        ...noGrantedRoleShape,
         ...googleGroupDetailsShape,
       })
       .strict(),
@@ -173,6 +192,7 @@ export const GroupSourceSchema = z
         purpose: z.literal('building'),
         facilityId: UuidSchema,
         ...groupSourceMetadataShape,
+        ...noGrantedRoleShape,
         ...syntheticGroupDetailsShape,
       })
       .strict(),
@@ -183,6 +203,7 @@ export const GroupSourceSchema = z
         purpose: z.literal('others'),
         facilityId: z.null(),
         ...groupSourceMetadataShape,
+        ...noGrantedRoleShape,
         ...syntheticGroupDetailsShape,
       })
       .strict(),
