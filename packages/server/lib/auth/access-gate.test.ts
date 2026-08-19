@@ -322,12 +322,13 @@ describe('strict access-gate snapshot projection', () => {
     const snapshotId = '10000000-0000-4000-8000-000000000002';
     const groupSourceId = '10000000-0000-4000-8000-000000000003';
     const googleSubject = 'synthetic-strict-access-subject';
+    // An AccessGroupSourceRef, not a GroupSource: it identifies the group and
+    // carries no role. The role lives on the source row the sync reads.
     const ref = Object.freeze({
       id: groupSourceId,
       kind: 'google-group' as const,
       purpose: 'access' as const,
       facilityId: null,
-      grantedRole: 'admin',
     });
     const evidence: AccessGateEvidence = Object.freeze({
       user: Object.freeze({

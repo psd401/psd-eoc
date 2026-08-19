@@ -421,12 +421,32 @@ async function assertReachableAdministratorRemains(
   state: AccessSetMutationState,
   removedSourceId: string,
 ): Promise<void> {
-  if (state.accessState === null) {
-    throw conflict('The final active access group cannot be removed.');
-  }
   const remainingIds = state.activeAccessGroupSourceIds.filter(
     (id) => id !== removedSourceId,
   );
+  // Checked first and unconditionally. Deactivating the last access group ends
+  // all access, and it must be refused whether or not the published snapshot
+  // happens to be current. Gating this on a valid baseline was wrong: the
+  // baseline goes stale the moment the first of several groups is deactivated,
+  // so a second concurrent deactivation would arrive with no baseline and skip
+  // the guard entirely, taking the deployment to zero active groups.
+  if (remainingIds.length === 0) {
+    // Before any snapshot has ever been published there is no access to lose,
+    // so withdrawing the first group is ordinary first-run setup rather than a
+    // lockout. Once a generation exists, removing the last group ends all
+    // access and is refused however stale the current baseline happens to be.
+    if (state.latestCompleteSnapshot.kind !== 'none') {
+      throw conflict('The final active access group cannot be removed.');
+    }
+    return;
+  }
+  // Reachability is only projectable against a certified generation. Where
+  // there is none, refusing to remove the last group is the guarantee that can
+  // still be made, and the access sync re-establishes the baseline that makes
+  // the stronger check available again.
+  if (state.accessState === null) {
+    return;
+  }
   const remainingAdministratorIds = await loadEffectiveAdministratorUserIds(
     database,
     {
@@ -1370,7 +1390,10 @@ async function updateGroupSource(
   // one that stays active.
   const deactivatesCurrentSource =
     !locatorChanged && current.active && !input.active;
-  if (accessMutationState.accessState !== null && deactivatesCurrentSource) {
+  // Unconditional. The guard itself decides how much it can prove from the
+  // state it is given; skipping it whenever the baseline was stale is what let
+  // a second concurrent deactivation reach zero active access groups.
+  if (deactivatesCurrentSource) {
     await assertReachableAdministratorRemains(
       database,
       accessMutationState,
