@@ -2992,9 +2992,17 @@ test('real and drill event rooms use unmistakably different words and symbols', 
     'href',
     `/records/export/events/${fixture.keyboardEventId}`,
   );
+  // The skip link's contract is that it bypasses primary navigation and lands
+  // on the content. Asserting that the export link is simply the next tab stop
+  // only held while no navigation existed; it would break again the moment any
+  // link is added ahead of the content. Activating the skip link is the
+  // behavior keyboard users actually rely on, and #main-content carries
+  // tabIndex={-1} so focus moves there.
   const skipLink = page.getByRole('link', { name: 'Skip to main content' });
   await skipLink.focus();
   await expect(skipLink).toBeFocused();
+  await skipLink.press('Enter');
+  await expect(page.locator('#main-content')).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(exportLink).toBeFocused();
   await expectAxeClean(page, 'drill event room with PDF export');
