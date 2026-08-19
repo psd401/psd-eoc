@@ -799,9 +799,12 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       // Roles are what the trusted group grants; there is no bootstrap
       // administrator added at issuance any more.
       expect(result.user.roles).toEqual(['staff']);
-      // Sessions issued after the cutover carry no snapshot pin: staying
-      // signed in means still being in a trusted group, asked directly.
-      expect(result.session.authorization.membershipSnapshotId).toBeNull();
+      // The snapshot id is stamped for wire compatibility with shipped mobile
+      // builds, which reject a session whose id is null. Nothing reads it to
+      // decide access.
+      expect(result.session.authorization.membershipSnapshotId).toBe(
+        snapshotId,
+      );
 
       const updatePrivileges = databaseExecuteRows<SnapshotUpdatePrivilegeRow>(
         await roleConnection.db.execute<SnapshotUpdatePrivilegeRow>(sql`
@@ -885,7 +888,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       expect(persistedSession).toEqual({
         id: result.session.id,
         userId,
-        membershipSnapshotId: null,
+        membershipSnapshotId: snapshotId,
       });
       const [tokenIssuance] = await database
         .select({

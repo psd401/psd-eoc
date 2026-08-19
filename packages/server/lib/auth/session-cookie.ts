@@ -23,6 +23,7 @@ import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
+  accessMembershipSnapshots,
   connectivityEpochs,
   deviceEnrollments,
   idempotencyRecords,
@@ -902,11 +903,26 @@ export function createDrizzleInitialWebSessionStore(
               );
             }
 
+            const [latestSyncRun] = await transaction
+              .select({ id: accessMembershipSnapshots.id })
+              .from(accessMembershipSnapshots)
+              .where(eq(accessMembershipSnapshots.complete, true))
+              .orderBy(desc(accessMembershipSnapshots.version))
+              .limit(1);
+            const latestSyncRunId = latestSyncRun?.id ?? null;
+
             const [session] = await transaction
               .insert(sessions)
               .values({
                 userId: request.user.id,
                 deviceEnrollmentId: activeDevice.id,
+                // Wire compatibility, not authorization. Nothing reads this to
+                // decide access — membership is asked directly — but the
+                // shipped mobile builds parse the session with a contract that
+                // requires a snapshot id, and reject the whole response when it
+                // is null. Stamping the most recent sync run keeps those
+                // clients working until they are updated.
+                membershipSnapshotId: latestSyncRunId,
                 membershipValidUntil: request.membershipValidUntil,
                 membershipGraceUntil: request.membershipGraceUntil,
                 createdAt: request.createdAt,
