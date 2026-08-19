@@ -2,7 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 
 import { z } from 'zod';
 
-import { EXPLORATION_DATABASE_LOGIN } from './config';
+import { DATABASE_LOGIN } from './config';
 
 const AWS_REQUEST_TERMINATOR = 'aws4_request';
 const CONTENT_TYPE = 'application/x-amz-json-1.1';
@@ -17,7 +17,7 @@ export interface TemporaryAwsCredentials {
 }
 
 export interface ApplicationDatabaseSecret {
-  readonly username: typeof EXPLORATION_DATABASE_LOGIN;
+  readonly username: typeof DATABASE_LOGIN;
   readonly password: string;
 }
 
@@ -29,7 +29,7 @@ export interface SignedAwsRequest {
 
 const ApplicationDatabaseSecretSchema = z
   .object({
-    username: z.literal(EXPLORATION_DATABASE_LOGIN),
+    username: z.literal(DATABASE_LOGIN),
     password: z
       .string()
       .min(32)

@@ -7,12 +7,9 @@ const workflowUrl = new URL(
   '../../../.github/workflows/sync-access-membership.yml',
   import.meta.url,
 );
-const stackUrl = new URL(
-  '../../src/exploration-smoke/exploration-smoke-stack.ts',
-  import.meta.url,
-);
+const stackUrl = new URL('../../src/stack/psd-eoc-stack.ts', import.meta.url);
 const scriptUrl = new URL(
-  '../../../packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+  '../../../packages/server/scripts/operations/sync-access-membership.ts',
   import.meta.url,
 );
 const providerUrl = new URL(
@@ -261,7 +258,7 @@ describe('exact access-membership protected entrypoint', () => {
     expect(workflow).toContain('assignPublicIp=DISABLED');
     expect(workflow).toContain('$repository_uri@$IMAGE_DIGEST');
     expect(workflow).toContain(
-      'packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+      'packages/server/scripts/operations/sync-access-membership.ts',
     );
     expect(workflow).toContain('ACCESS_SYNC_REQUEST_ID');
     expect(workflow).toContain('ACCESS_SYNC_IDEMPOTENCY_KEY');
@@ -392,9 +389,16 @@ describe('exact access-membership protected entrypoint', () => {
     expect(script).toContain(
       "event: z.literal('access-membership-sync-complete')",
     );
-    expect(script).toContain("phase: z.literal('finalize')");
-    expect(script).toContain('PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256');
-    expect(script).toContain("run.phase === 'stage'");
+    // One run identity, no phases: the sync reads the configured groups and
+    // replaces their membership. The staged/finalized protocol and its
+    // compiled-in mobile selector are gone.
+    expect(script).toContain('ACCESS_SYNC_REQUEST_ID');
+    expect(script).toContain('ACCESS_SYNC_IDEMPOTENCY_KEY');
+    expect(script).not.toContain("phase: z.literal('finalize')");
+    expect(script).not.toContain(
+      'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
+    );
+    // The summary stays an aggregate: no member emails, no provider group id.
     expect(script).not.toContain('memberEmails: result');
     expect(script).not.toContain('googleGroupId: result');
   });

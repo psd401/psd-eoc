@@ -1,15 +1,12 @@
-import {
-  EXPLORATION_DATABASE_LOGIN,
-  EXPLORATION_DATABASE_ROLE,
-} from './config';
+import { DATABASE_LOGIN, DATABASE_ROLE } from './config';
 
 export interface RoleStatementExecutor {
   execute(sql: string): Promise<readonly Readonly<Record<string, unknown>>[]>;
 }
 
 export interface ApplicationRoleVerification {
-  readonly applicationLogin: typeof EXPLORATION_DATABASE_LOGIN;
-  readonly inheritedRole: typeof EXPLORATION_DATABASE_ROLE;
+  readonly applicationLogin: typeof DATABASE_LOGIN;
+  readonly inheritedRole: typeof DATABASE_ROLE;
   readonly directMembershipCount: 1;
   readonly privilegedFlags: false;
 }
@@ -30,11 +27,11 @@ export function buildApplicationRoleStatements(
 ): readonly string[] {
   const passwordLiteral = quoteSqlLiteral(password);
   return Object.freeze([
-    `DO $psd_eoc_exploration$\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '${EXPLORATION_DATABASE_LOGIN}') THEN\n    CREATE ROLE "${EXPLORATION_DATABASE_LOGIN}" LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n  END IF;\nEND\n$psd_eoc_exploration$`,
-    `ALTER ROLE "${EXPLORATION_DATABASE_LOGIN}" WITH PASSWORD ${passwordLiteral}`,
-    `DO $psd_eoc_exploration$\nDECLARE\n  granted_role name;\nBEGIN\n  FOR granted_role IN\n    SELECT parent.rolname\n    FROM pg_catalog.pg_auth_members AS membership\n    JOIN pg_catalog.pg_roles AS child ON child.oid = membership.member\n    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid\n    WHERE child.rolname = '${EXPLORATION_DATABASE_LOGIN}'\n      AND parent.rolname <> '${EXPLORATION_DATABASE_ROLE}'\n  LOOP\n    EXECUTE format('REVOKE %I FROM "${EXPLORATION_DATABASE_LOGIN}"', granted_role);\n  END LOOP;\nEND\n$psd_eoc_exploration$`,
-    `GRANT "${EXPLORATION_DATABASE_ROLE}" TO "${EXPLORATION_DATABASE_LOGIN}"`,
-    `REVOKE ADMIN OPTION FOR "${EXPLORATION_DATABASE_ROLE}" FROM "${EXPLORATION_DATABASE_LOGIN}"`,
+    `DO $psd_eoc_exploration$\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '${DATABASE_LOGIN}') THEN\n    CREATE ROLE "${DATABASE_LOGIN}" LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n  END IF;\nEND\n$psd_eoc_exploration$`,
+    `ALTER ROLE "${DATABASE_LOGIN}" WITH PASSWORD ${passwordLiteral}`,
+    `DO $psd_eoc_exploration$\nDECLARE\n  granted_role name;\nBEGIN\n  FOR granted_role IN\n    SELECT parent.rolname\n    FROM pg_catalog.pg_auth_members AS membership\n    JOIN pg_catalog.pg_roles AS child ON child.oid = membership.member\n    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid\n    WHERE child.rolname = '${DATABASE_LOGIN}'\n      AND parent.rolname <> '${DATABASE_ROLE}'\n  LOOP\n    EXECUTE format('REVOKE %I FROM "${DATABASE_LOGIN}"', granted_role);\n  END LOOP;\nEND\n$psd_eoc_exploration$`,
+    `GRANT "${DATABASE_ROLE}" TO "${DATABASE_LOGIN}"`,
+    `REVOKE ADMIN OPTION FOR "${DATABASE_ROLE}" FROM "${DATABASE_LOGIN}"`,
   ]);
 }
 
@@ -48,7 +45,7 @@ export const ROLE_STATE_QUERY = `SELECT
   rolbypassrls AS "bypassRls",
   rolinherit AS "inherits"
 FROM pg_catalog.pg_roles
-WHERE rolname IN ('${EXPLORATION_DATABASE_LOGIN}', '${EXPLORATION_DATABASE_ROLE}')
+WHERE rolname IN ('${DATABASE_LOGIN}', '${DATABASE_ROLE}')
 ORDER BY rolname`;
 
 export const ROLE_MEMBERSHIP_QUERY = `SELECT
@@ -57,13 +54,13 @@ export const ROLE_MEMBERSHIP_QUERY = `SELECT
 FROM pg_catalog.pg_auth_members AS membership
 JOIN pg_catalog.pg_roles AS child ON child.oid = membership.member
 JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
-WHERE child.rolname = '${EXPLORATION_DATABASE_LOGIN}'
+WHERE child.rolname = '${DATABASE_LOGIN}'
 ORDER BY parent.rolname`;
 
 export const APPLICATION_LOGIN_PROBE_QUERY = `SELECT
   current_user AS "currentUser",
   session_user AS "sessionUser",
-  pg_has_role(current_user, '${EXPLORATION_DATABASE_ROLE}', 'member') AS "applicationRoleMember"`;
+  pg_has_role(current_user, '${DATABASE_ROLE}', 'member') AS "applicationRoleMember"`;
 
 export const DATABASE_TLS_QUERY = `SELECT
   ssl AS "ssl",
@@ -117,11 +114,9 @@ export function assertApplicationRoleState(
   if (roles.length !== 2) {
     throw new Error('The database role boundary was not established.');
   }
-  const applicationRole = roles.find(
-    (role) => role.roleName === EXPLORATION_DATABASE_ROLE,
-  );
+  const applicationRole = roles.find((role) => role.roleName === DATABASE_ROLE);
   const applicationLogin = roles.find(
-    (role) => role.roleName === EXPLORATION_DATABASE_LOGIN,
+    (role) => role.roleName === DATABASE_LOGIN,
   );
   if (
     applicationRole === undefined ||
@@ -145,14 +140,14 @@ export function assertApplicationRoleState(
   }
   if (
     membershipValues.length !== 1 ||
-    membershipValues[0]?.grantedRole !== EXPLORATION_DATABASE_ROLE ||
+    membershipValues[0]?.grantedRole !== DATABASE_ROLE ||
     membershipValues[0]?.adminOption !== false
   ) {
     throw new Error('The application LOGIN has unexpected role membership.');
   }
   return Object.freeze({
-    applicationLogin: EXPLORATION_DATABASE_LOGIN,
-    inheritedRole: EXPLORATION_DATABASE_ROLE,
+    applicationLogin: DATABASE_LOGIN,
+    inheritedRole: DATABASE_ROLE,
     directMembershipCount: 1,
     privilegedFlags: false,
   });
@@ -179,8 +174,8 @@ export async function verifyApplicationLogin(input: {
   const row = rows[0];
   if (
     rows.length !== 1 ||
-    row?.currentUser !== EXPLORATION_DATABASE_LOGIN ||
-    row.sessionUser !== EXPLORATION_DATABASE_LOGIN ||
+    row?.currentUser !== DATABASE_LOGIN ||
+    row.sessionUser !== DATABASE_LOGIN ||
     row.applicationRoleMember !== true
   ) {
     throw new Error(

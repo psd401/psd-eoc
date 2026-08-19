@@ -32,13 +32,13 @@ import {
   SES_EVENT_TOPIC_NAME,
 } from '../config';
 import {
-  EXPLORATION_SMOKE_ACCOUNT,
-  EXPLORATION_SMOKE_ACCOUNT_ALIAS,
+  AWS_ACCOUNT,
+  AWS_ACCOUNT_ALIAS,
   EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
   EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
-  EXPLORATION_SMOKE_DATABASE_NAME,
-  EXPLORATION_SMOKE_DATABASE_PORT,
-  EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+  DATABASE_NAME,
+  DATABASE_PORT,
+  DATABASE_SSL_ROOT_CERT,
   EXPLORATION_SMOKE_DATA_CLASSIFICATION,
   EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
   EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
@@ -47,7 +47,7 @@ import {
   EXPLORATION_SMOKE_HEALTH_PATH,
   EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
   EXPLORATION_SMOKE_QUEUE_NAME,
-  EXPLORATION_SMOKE_REGION,
+  AWS_REGION,
   EXPLORATION_SMOKE_REPOSITORY_NAME,
   EXPLORATION_SMOKE_SES_FROM_ADDRESS,
   EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
@@ -83,7 +83,7 @@ function ecsSecretJsonKey(
  * the database is bootstrapped, an update with ProvisionApplication=true adds
  * the single App Runner service. The same stack owns both phases.
  */
-export class ExplorationSmokeStack extends Stack {
+export class PsdEocStack extends Stack {
   public constructor(scope: Construct, id: string, props: StackProps) {
     super(scope, id, props);
 
@@ -94,11 +94,11 @@ export class ExplorationSmokeStack extends Stack {
     });
 
     if (
-      Stack.of(this).account !== EXPLORATION_SMOKE_ACCOUNT ||
-      Stack.of(this).region !== EXPLORATION_SMOKE_REGION
+      Stack.of(this).account !== AWS_ACCOUNT ||
+      Stack.of(this).region !== AWS_REGION
     ) {
       throw new Error(
-        `PsdEocExplorationSmoke must target AWS account ${EXPLORATION_SMOKE_ACCOUNT} (${EXPLORATION_SMOKE_ACCOUNT_ALIAS}) in ${EXPLORATION_SMOKE_REGION}.`,
+        `PsdEocExplorationSmoke must target AWS account ${AWS_ACCOUNT} (${AWS_ACCOUNT_ALIAS}) in ${AWS_REGION}.`,
       );
     }
 
@@ -109,10 +109,7 @@ export class ExplorationSmokeStack extends Stack {
     );
     Tags.of(this).add('Environment', EXPLORATION_SMOKE_ENVIRONMENT);
     Tags.of(this).add('DataScope', 'staff-minimized');
-    Tags.of(this).add(
-      'ExpectedAwsAccountAlias',
-      EXPLORATION_SMOKE_ACCOUNT_ALIAS,
-    );
+    Tags.of(this).add('ExpectedAwsAccountAlias', AWS_ACCOUNT_ALIAS);
     Tags.of(this).add('ManagedBy', 'AWS CDK');
 
     const provisionApplication = new CfnParameter(
@@ -178,7 +175,7 @@ export class ExplorationSmokeStack extends Stack {
       this,
       'GoogleOauthSecretArn',
       {
-        allowedPattern: `^arn:aws:secretsmanager:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:secret:${SECRET_PREFIX}/google-oauth-[A-Za-z0-9]{6}$`,
+        allowedPattern: `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:${SECRET_PREFIX}/google-oauth-[A-Za-z0-9]{6}$`,
         constraintDescription:
           'Use the complete ARN of the reviewed exploration-smoke Google OAuth secret in the approved account and region.',
         description:
@@ -191,7 +188,7 @@ export class ExplorationSmokeStack extends Stack {
       this,
       'GoogleGroupsSecretArn',
       {
-        allowedPattern: `^arn:aws:secretsmanager:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
+        allowedPattern: `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:/psd-eoc/google-groups-[A-Za-z0-9]{6}$`,
         constraintDescription:
           'Use the complete ARN of the reviewed /psd-eoc/google-groups secret in the approved account and region.',
         description:
@@ -336,10 +333,7 @@ export class ExplorationSmokeStack extends Stack {
     });
 
     const network = new ec2.Vpc(this, 'DatabaseNetwork', {
-      availabilityZones: [
-        `${EXPLORATION_SMOKE_REGION}a`,
-        `${EXPLORATION_SMOKE_REGION}b`,
-      ],
+      availabilityZones: [`${AWS_REGION}a`, `${AWS_REGION}b`],
       ipAddresses: ec2.IpAddresses.cidr('10.43.0.0/24'),
       natGateways: 1,
       // Nothing in this stack uses the VPC default security group. Avoid the
@@ -420,7 +414,7 @@ export class ExplorationSmokeStack extends Stack {
       'GoogleOidcCookieSecret',
       {
         description:
-          'Generated base64url-compatible key material for exploration Google OIDC transient state.',
+          'Generated base64url-compatible key material for Google OIDC transient state.',
         generateSecretString: {
           excludePunctuation: true,
           passwordLength: 43,
@@ -470,7 +464,7 @@ export class ExplorationSmokeStack extends Stack {
       {
         allowAllOutbound: false,
         description:
-          'Isolated Aurora; accepts native PostgreSQL only from the exploration application/bootstrap security group.',
+          'Isolated Aurora; accepts native PostgreSQL only from the application/bootstrap security group.',
         vpc: network as unknown as ec2.IVpc,
       },
     );
@@ -487,7 +481,7 @@ export class ExplorationSmokeStack extends Stack {
     );
     applicationSecurityGroup.addEgressRule(
       databaseSecurityGroup,
-      ec2.Port.tcp(EXPLORATION_SMOKE_DATABASE_PORT),
+      ec2.Port.tcp(DATABASE_PORT),
       'Native PostgreSQL TLS to the isolated Aurora writer only.',
     );
     applicationSecurityGroup.addEgressRule(
@@ -497,8 +491,8 @@ export class ExplorationSmokeStack extends Stack {
     );
     databaseSecurityGroup.addIngressRule(
       applicationSecurityGroup,
-      ec2.Port.tcp(EXPLORATION_SMOKE_DATABASE_PORT),
-      'Native PostgreSQL only from the exploration application/bootstrap security group.',
+      ec2.Port.tcp(DATABASE_PORT),
+      'Native PostgreSQL only from the application/bootstrap security group.',
     );
 
     const database = new rds.DatabaseCluster(this, 'Database', {
@@ -510,7 +504,7 @@ export class ExplorationSmokeStack extends Stack {
       credentials: rds.Credentials.fromSecret(
         databaseAdminSecret as unknown as secretsmanager.ISecret,
       ),
-      defaultDatabaseName: EXPLORATION_SMOKE_DATABASE_NAME,
+      defaultDatabaseName: DATABASE_NAME,
       deletionProtection: true,
       enableDataApi: false,
       engine: databaseEngine,
@@ -529,7 +523,7 @@ export class ExplorationSmokeStack extends Stack {
       },
       writer: rds.ClusterInstance.serverlessV2('Writer', {
         autoMinorVersionUpgrade: true,
-        availabilityZone: `${EXPLORATION_SMOKE_REGION}a`,
+        availabilityZone: `${AWS_REGION}a`,
         enablePerformanceInsights: false,
         publiclyAccessible: false,
       }),
@@ -597,7 +591,7 @@ export class ExplorationSmokeStack extends Stack {
       resourceArns: [emailQueue.queueArn],
     });
 
-    const emailConfigurationSetArn = `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`;
+    const emailConfigurationSetArn = `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`;
     const emailEventsKey = new kms.Key(this, 'EmailEventsKey', {
       description:
         'Encrypts configured-unverified SES event evidence for the live pilot.',
@@ -609,7 +603,7 @@ export class ExplorationSmokeStack extends Stack {
         actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
         conditions: {
           StringEquals: {
-            'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
+            'AWS:SourceAccount': AWS_ACCOUNT,
             'AWS:SourceArn': emailConfigurationSetArn,
           },
         },
@@ -644,7 +638,7 @@ export class ExplorationSmokeStack extends Stack {
         actions: ['sns:Publish'],
         conditions: {
           StringEquals: {
-            'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
+            'AWS:SourceAccount': AWS_ACCOUNT,
             'AWS:SourceArn': emailConfigurationSetArn,
           },
         },
@@ -738,20 +732,17 @@ export class ExplorationSmokeStack extends Stack {
     const bootstrapContainer = bootstrapTaskDefinition.addContainer(
       BOOTSTRAP_CONTAINER_NAME,
       {
-        command: [
-          'bun',
-          'packages/server/scripts/exploration-smoke/bootstrap.ts',
-        ],
+        command: ['bun', 'packages/server/scripts/operations/bootstrap.ts'],
         environment: {
-          AWS_ACCOUNT_ID: EXPLORATION_SMOKE_ACCOUNT,
-          AWS_REGION: EXPLORATION_SMOKE_REGION,
+          AWS_ACCOUNT_ID: AWS_ACCOUNT,
+          AWS_REGION: AWS_REGION,
           DATABASE_DRIVER: 'postgres',
           DATABASE_HOST: database.clusterEndpoint.hostname,
           DATABASE_IDLE_TIMEOUT_SECONDS: '20',
           DATABASE_MAX_CONNECTIONS: '1',
-          DATABASE_NAME: EXPLORATION_SMOKE_DATABASE_NAME,
-          DATABASE_PORT: String(EXPLORATION_SMOKE_DATABASE_PORT),
-          DATABASE_SSL_ROOT_CERT: EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+          DATABASE_NAME: DATABASE_NAME,
+          DATABASE_PORT: String(DATABASE_PORT),
+          DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
           DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
           SOURCE_SHA: bootstrapSourceSha.valueAsString,
           TMPDIR: '/tmp',
@@ -846,18 +837,18 @@ export class ExplorationSmokeStack extends Stack {
       {
         command: [
           'bun',
-          'packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+          'packages/server/scripts/operations/sync-access-membership.ts',
         ],
         environment: {
-          AWS_ACCOUNT_ID: EXPLORATION_SMOKE_ACCOUNT,
-          AWS_REGION: EXPLORATION_SMOKE_REGION,
+          AWS_ACCOUNT_ID: AWS_ACCOUNT,
+          AWS_REGION: AWS_REGION,
           DATABASE_DRIVER: 'postgres',
           DATABASE_HOST: database.clusterEndpoint.hostname,
           DATABASE_IDLE_TIMEOUT_SECONDS: '20',
           DATABASE_MAX_CONNECTIONS: '1',
-          DATABASE_NAME: EXPLORATION_SMOKE_DATABASE_NAME,
-          DATABASE_PORT: String(EXPLORATION_SMOKE_DATABASE_PORT),
-          DATABASE_SSL_ROOT_CERT: EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+          DATABASE_NAME: DATABASE_NAME,
+          DATABASE_PORT: String(DATABASE_PORT),
+          DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
           DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
           SOURCE_SHA: bootstrapSourceSha.valueAsString,
           TMPDIR: '/tmp',
@@ -1019,7 +1010,7 @@ export class ExplorationSmokeStack extends Stack {
               runtimeEnvironmentVariables: [
                 {
                   name: 'AWS_REGION',
-                  value: EXPLORATION_SMOKE_REGION,
+                  value: AWS_REGION,
                 },
                 {
                   name: 'DATABASE_DRIVER',
@@ -1031,15 +1022,15 @@ export class ExplorationSmokeStack extends Stack {
                 },
                 {
                   name: 'DATABASE_PORT',
-                  value: String(EXPLORATION_SMOKE_DATABASE_PORT),
+                  value: String(DATABASE_PORT),
                 },
                 {
                   name: 'DATABASE_NAME',
-                  value: EXPLORATION_SMOKE_DATABASE_NAME,
+                  value: DATABASE_NAME,
                 },
                 {
                   name: 'DATABASE_SSL_ROOT_CERT',
-                  value: EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+                  value: DATABASE_SSL_ROOT_CERT,
                 },
                 {
                   name: 'DATABASE_MAX_CONNECTIONS',
@@ -1103,13 +1094,13 @@ export class ExplorationSmokeStack extends Stack {
     for (const grant of runtimeGrants) grant.applyBefore(appRunnerService);
 
     new CfnOutput(this, 'DeploymentAccount', {
-      value: EXPLORATION_SMOKE_ACCOUNT,
+      value: AWS_ACCOUNT,
     });
     new CfnOutput(this, 'DeploymentRegion', {
-      value: EXPLORATION_SMOKE_REGION,
+      value: AWS_REGION,
     });
     new CfnOutput(this, 'ExpectedAwsAccountAlias', {
-      value: EXPLORATION_SMOKE_ACCOUNT_ALIAS,
+      value: AWS_ACCOUNT_ALIAS,
     });
     new CfnOutput(this, 'EnvironmentName', {
       value: EXPLORATION_SMOKE_ENVIRONMENT,
@@ -1139,7 +1130,7 @@ export class ExplorationSmokeStack extends Stack {
       value: database.clusterArn,
     });
     new CfnOutput(this, 'DatabaseName', {
-      value: EXPLORATION_SMOKE_DATABASE_NAME,
+      value: DATABASE_NAME,
     });
     new CfnOutput(this, 'DatabaseAdminSecretArn', {
       value: databaseAdminSecret.secretArn,
@@ -1205,7 +1196,7 @@ export class ExplorationSmokeStack extends Stack {
       value: emailWorkerLogGroup.logGroupName,
     });
     new CfnOutput(this, 'SesIdentityArn', {
-      value: `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:identity/${EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN}`,
+      value: `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:identity/${EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN}`,
     });
     new CfnOutput(this, 'SesIdentityDomain', {
       value: EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
