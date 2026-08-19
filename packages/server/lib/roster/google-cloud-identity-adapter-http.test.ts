@@ -21,6 +21,7 @@ const GOOGLE_SOURCE = GroupSourceSchema.parse({
   kind: 'google-group',
   purpose: 'building',
   facilityId: '00000000-0000-4000-8000-000000000102',
+  grantedRole: null,
   displayName: 'Synthetic staff group',
   active: true,
   googleGroupId: 'synthetic-staff-group',

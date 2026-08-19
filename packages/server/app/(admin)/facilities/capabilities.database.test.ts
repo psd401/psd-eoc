@@ -43,10 +43,7 @@ import {
 } from '../../../db/schema';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase } from '../../../drizzle/migrate';
-import {
-  DESIGNATED_ACCESS_GROUP_EMAIL,
-  createDrizzleAccessGateStore,
-} from '../../../lib/auth/access-gate';
+import { decideAccess } from '../../../lib/auth/trusted-group-access';
 import { SECURITY_AUDIT_APPEND_LOCK_SQL } from '../../../lib/audit/drizzle-repository';
 import {
   loadAccessConfigurationSnapshotState,
@@ -97,6 +94,8 @@ import {
   executeUpdateFacilityCapability,
   executeUpdateGroupSourceCapability,
 } from './capabilities';
+
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -408,8 +407,7 @@ function liveAuthorizationFor(input: {
 function bootstrapSessionRequest(input: {
   readonly label: string;
   readonly user: PersistInitialWebSessionRequest['user'];
-  readonly membershipSnapshot: PersistInitialWebSessionRequest['membershipSnapshot'];
-  readonly membershipMember: PersistInitialWebSessionRequest['membershipMember'];
+  readonly membership: PersistInitialWebSessionRequest['membership'];
   readonly createdAt: Date;
 }): PersistInitialWebSessionRequest {
   const responseDigest = digest(`response:${input.label}`);
@@ -420,8 +418,7 @@ function bootstrapSessionRequest(input: {
   };
   return Object.freeze({
     user: input.user,
-    membershipSnapshot: input.membershipSnapshot,
-    membershipMember: input.membershipMember,
+    membership: input.membership,
     device: Object.freeze({
       platform: 'web',
       unlockMethod: 'secure-session-cookie',
@@ -436,7 +433,6 @@ function bootstrapSessionRequest(input: {
     membershipGraceUntil: new Date(
       input.createdAt.getTime() + 48 * 60 * 60 * 1_000,
     ),
-    grantBootstrapAdmin: true,
     requestId: randomUUID(),
     idempotency: {
       key: `oidc:${responseDigest}`,
@@ -1495,6 +1491,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `Application role access ${suffix.slice(0, 8)}`,
           active: true,
           googleGroupId: `app-role-access-${suffix}`,
@@ -1772,7 +1769,12 @@ describeWithDatabase('facilities administrator database flow', () => {
     );
   });
 
-  test('rolls the first access group back to an empty bootstrap state', async () => {
+  test('configures access groups freely before the first snapshot exists', async () => {
+    // First-run setup. With no published generation there is no access to
+    // lose, so an administrator can add, rename, add again, and withdraw
+    // without proving anything. Every one of these steps used to be a 409:
+    // the old rules required the published snapshot to already agree with the
+    // active set, which is impossible before a snapshot exists.
     const database = databaseConnection().db;
     const authenticated = authenticatedAdministrator();
     const store = createDrizzleAdminCapabilityStore(database, authenticated);
@@ -1787,6 +1789,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `First access group ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-first-access-${suffix}`,
@@ -1797,42 +1800,9 @@ describeWithDatabase('facilities administrator database flow', () => {
     if (firstGroup.kind !== 'google-group' || firstGroup.purpose !== 'access') {
       throw new Error('The first access-group fixture lost its variant.');
     }
+    expect(firstGroup.grantedRole).toBe('admin');
 
-    await expect(
-      executeUpdateGroupSourceCapability({
-        authenticated,
-        store,
-        command: {
-          id: firstGroup.id,
-          kind: firstGroup.kind,
-          purpose: firstGroup.purpose,
-          facilityId: firstGroup.facilityId,
-          displayName: `${firstGroup.displayName} changed`,
-          active: firstGroup.active,
-          googleGroupId: firstGroup.googleGroupId,
-          email: firstGroup.email,
-        },
-        metadata: metadata('first-access-display-change', requestIds),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-    await expect(
-      executeCreateGroupSourceCapability({
-        authenticated,
-        store,
-        command: {
-          kind: 'google-group',
-          purpose: 'access',
-          facilityId: null,
-          displayName: `Unproven second access ${suffix.slice(0, 8)}`,
-          active: true,
-          googleGroupId: `issue-26-second-access-${suffix}`,
-          email: `issue-26-second-access-${suffix}@example.invalid`,
-        },
-        metadata: metadata('unproven-second-access', requestIds),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-
-    const rolledBack = await executeUpdateGroupSourceCapability({
+    const renamed = await executeUpdateGroupSourceCapability({
       authenticated,
       store,
       command: {
@@ -1840,26 +1810,74 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: firstGroup.kind,
         purpose: firstGroup.purpose,
         facilityId: firstGroup.facilityId,
-        displayName: firstGroup.displayName,
-        active: false,
+        grantedRole: 'admin',
+        displayName: `${firstGroup.displayName} changed`,
+        active: firstGroup.active,
         googleGroupId: firstGroup.googleGroupId,
         email: firstGroup.email,
       },
-      metadata: metadata('first-access-rollback', requestIds),
+      metadata: metadata('first-access-display-change', requestIds),
     });
-    expect(rolledBack.active).toBe(false);
+    expect(renamed.displayName).toBe(`${firstGroup.displayName} changed`);
+
+    const secondGroup = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        grantedRole: 'staff',
+        displayName: `Second access group ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-second-access-${suffix}`,
+        email: `issue-26-second-access-${suffix}@example.invalid`,
+      },
+      metadata: metadata('second-access-create', requestIds),
+    });
+    expect(secondGroup.purpose).toBe('access');
+
+    // Withdrawing one of two is allowed. Withdrawing the last one is too,
+    // because nothing has ever been published for it to end.
+    for (const [index, group] of [firstGroup, secondGroup].entries()) {
+      if (group.kind !== 'google-group' || group.purpose !== 'access') {
+        throw new Error('An access-group fixture lost its variant.');
+      }
+      const withdrawn = await executeUpdateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          id: group.id,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          grantedRole: index === 0 ? 'admin' : 'staff',
+          displayName:
+            group.id === firstGroup.id
+              ? renamed.displayName
+              : group.displayName,
+          active: false,
+          googleGroupId: group.googleGroupId,
+          email: group.email,
+        },
+        metadata: metadata(`access-withdraw-${index}`, requestIds),
+      });
+      expect(withdrawn.active).toBe(false);
+    }
+
     expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
-    const activeRows = await database
-      .select({ id: groupSources.id })
-      .from(groupSources)
-      .where(
-        and(
-          eq(groupSources.kind, 'google-group'),
-          eq(groupSources.purpose, 'access'),
-          eq(groupSources.active, true),
+    expect(
+      await database
+        .select({ id: groupSources.id })
+        .from(groupSources)
+        .where(
+          and(
+            eq(groupSources.kind, 'google-group'),
+            eq(groupSources.purpose, 'access'),
+            eq(groupSources.active, true),
+          ),
         ),
-      );
-    expect(activeRows).toEqual([]);
+    ).toEqual([]);
   });
 
   test('serializes concurrent access-group deactivation without a row-lock deadlock', async () => {
@@ -1874,6 +1892,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Concurrent access A ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-access-race-a-${suffix}`,
@@ -1885,6 +1904,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Concurrent access B ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-access-race-b-${suffix}`,
@@ -1926,6 +1946,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: source.displayName,
           active: false,
           googleGroupId: source.googleGroupId,
@@ -1981,6 +2002,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: inactiveFixture.displayName,
         active: true,
         googleGroupId: inactiveFixture.googleGroupId,
@@ -2006,6 +2028,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: 'google-group' as const,
       purpose: 'access' as const,
       facilityId: null,
+      grantedRole: 'admin' as const,
       displayName: `Protected recovery ${suffix.slice(0, 8)}`,
       active: true,
       googleGroupId: `issue-236-protected-recovery-${suffix}`,
@@ -2017,6 +2040,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: 'google-group' as const,
       purpose: 'access' as const,
       facilityId: null,
+      grantedRole: 'admin' as const,
       displayName: `Protected designated ${suffix.slice(0, 8)}`,
       active: true,
       googleGroupId: `issue-236-protected-designated-${suffix}`,
@@ -2082,6 +2106,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: recoverySource.kind,
       purpose: recoverySource.purpose,
       facilityId: recoverySource.facilityId,
+      grantedRole: 'admin',
       displayName: recoverySource.displayName,
       active: false,
       googleGroupId: recoverySource.googleGroupId,
@@ -2094,11 +2119,10 @@ describeWithDatabase('facilities administrator database flow', () => {
         command: recoveryDeactivationCommand,
         metadata: metadata('protected-recovery-deactivation', requestIds),
       }),
-    ).rejects.toMatchObject({
-      status: 409,
-      message:
-        'Recovery access can be deactivated only by the protected mobile-session finalizer.',
-    });
+    ).resolves.toMatchObject({ active: false });
+    // Deactivating an access group is an ordinary administrative change now.
+    // The only rule is that an administrator must stay reachable through a
+    // group that remains active, which the other source here satisfies.
     expect(
       await database
         .select({ id: groupSources.id, active: groupSources.active })
@@ -2110,7 +2134,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     ).toEqual(
       [recoverySource.id, designatedSource.id]
         .sort()
-        .map((id) => ({ id, active: true })),
+        .map((id) => ({ id, active: id !== recoverySource.id })),
     );
 
     const throwawaySource = await executeCreateGroupSourceCapability({
@@ -2120,6 +2144,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Throwaway access ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-236-throwaway-${suffix}`,
@@ -2176,6 +2201,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: throwawaySource.kind,
         purpose: throwawaySource.purpose,
         facilityId: throwawaySource.facilityId,
+        grantedRole: 'admin',
         displayName: throwawaySource.displayName,
         active: false,
         googleGroupId: throwawaySource.googleGroupId,
@@ -2238,6 +2264,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Unproven added access ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-added-access-${suffix}`,
@@ -2259,6 +2286,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: addedGroup.kind,
           purpose: addedGroup.purpose,
           facilityId: addedGroup.facilityId,
+          grantedRole: 'admin',
           displayName: `${addedGroup.displayName} changed`,
           active: addedGroup.active,
           googleGroupId: addedGroup.googleGroupId,
@@ -2276,6 +2304,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: addedGroup.kind,
           purpose: addedGroup.purpose,
           facilityId: addedGroup.facilityId,
+          grantedRole: 'admin',
           displayName: addedGroup.displayName,
           active: addedGroup.active,
           googleGroupId: `${addedGroup.googleGroupId}-replacement`,
@@ -2297,6 +2326,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: nonRestorativeSource.displayName,
           active: false,
           googleGroupId: nonRestorativeSource.googleGroupId,
@@ -2314,6 +2344,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: addedGroup.kind,
         purpose: addedGroup.purpose,
         facilityId: addedGroup.facilityId,
+        grantedRole: 'admin',
         displayName: addedGroup.displayName,
         active: false,
         googleGroupId: addedGroup.googleGroupId,
@@ -2382,6 +2413,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Unreachable rollback ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-unreachable-rollback-${suffix}`,
@@ -2397,6 +2429,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: addedGroup.kind,
       purpose: addedGroup.purpose,
       facilityId: addedGroup.facilityId,
+      grantedRole: 'admin',
       displayName: addedGroup.displayName,
       active: false,
       googleGroupId: addedGroup.googleGroupId,
@@ -2477,6 +2510,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: 'google-group',
       purpose: 'access',
       facilityId: null,
+      grantedRole: 'admin',
       displayName: `Retired access source ${suffix.slice(0, 8)}`,
       active: false,
       googleGroupId: inactiveGoogleGroupId,
@@ -2497,6 +2531,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `Invalid retired access replacement ${suffix.slice(0, 8)}`,
           active: true,
           googleGroupId: inactiveReplacementGoogleGroupId,
@@ -2560,6 +2595,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `${original.displayName} rejected inactive correction`,
           active: false,
           googleGroupId: rejectedGoogleGroupId,
@@ -2597,6 +2633,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `${original.displayName} corrected`,
         active: true,
         googleGroupId: `issue-26-locator-rotation-${suffix}`,
@@ -2631,6 +2668,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: original.displayName,
           active: false,
           googleGroupId: original.googleGroupId,
@@ -2648,6 +2686,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: replacement.kind,
         purpose: replacement.purpose,
         facilityId: replacement.facilityId,
+        grantedRole: 'admin',
         displayName: replacement.displayName,
         active: false,
         googleGroupId: replacement.googleGroupId,
@@ -2714,6 +2753,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `${original.displayName} verified replacement`,
         active: true,
         googleGroupId: `issue-26-locator-complete-${suffix}`,
@@ -2790,6 +2830,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: original.displayName,
         active: false,
         googleGroupId: original.googleGroupId,
@@ -2954,6 +2995,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `Synthetic pre-cutover recovery ${suffix.slice(0, 8)}`,
           active: true,
           googleGroupId: `issue-26-precutover-recovery-${suffix}`,
@@ -2988,6 +3030,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Issue 26 access ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-access-${suffix}`,
@@ -3337,33 +3380,6 @@ describeWithDatabase('facilities administrator database flow', () => {
         accessGroupIds: [accessGroup.id],
       });
     const bootstrapSnapshotAt = new Date(Date.now() + 60_000);
-    const bootstrapSnapshot = await persistCompleteAccessSnapshotGeneration(
-      database,
-      {
-        groups: activeAccessGroups.map(({ id }) => ({
-          id,
-          kind: 'google-group' as const,
-          purpose: 'access' as const,
-        })),
-        members: [
-          {
-            userId: authenticated.actor.userId,
-            googleSubject: primaryAdministratorRow.googleSubject,
-            facilityScopeKind: 'district' as const,
-            accessGroupIds: [accessGroup.id],
-          },
-          {
-            userId: roleTargetId,
-            googleSubject: roleTargetRow.googleSubject,
-            facilityScopeKind: 'district' as const,
-            accessGroupIds: [accessGroup.id],
-          },
-        ],
-        capturedAt: bootstrapSnapshotAt,
-      },
-    );
-    const bootstrapSnapshotId = bootstrapSnapshot.id;
-    const bootstrapSnapshotVersion = bootstrapSnapshot.version;
     const bootstrapUser = {
       id: roleTargetRow.id,
       googleSubject: roleTargetRow.googleSubject,
@@ -3374,33 +3390,15 @@ describeWithDatabase('facilities administrator database flow', () => {
       createdAt: roleTargetRow.createdAt.toISOString(),
       disabledAt: null,
     };
-    const bootstrapMembershipSnapshot = {
-      id: bootstrapSnapshotId,
-      version: bootstrapSnapshotVersion,
-      complete: true as const,
-      syncStartedAt: bootstrapSnapshotAt.toISOString(),
-      capturedAt: bootstrapSnapshotAt.toISOString(),
-    };
-    const bootstrapMembershipMember = {
-      userId: roleTargetId,
-      googleSubject: roleTargetRow.googleSubject,
-      accessGroupSourceRefs: [
-        {
-          id: accessGroup.id,
-          kind: 'google-group' as const,
-          purpose: 'access' as const,
-          facilityId: null,
-        },
-      ],
-      facilityScope: { kind: 'district' as const },
-    };
     const initialSessionStore = createDrizzleInitialWebSessionStore(database);
     const firstBootstrapSession = await initialSessionStore.persist(
       bootstrapSessionRequest({
         label: `first-${suffix}`,
         user: bootstrapUser,
-        membershipSnapshot: bootstrapMembershipSnapshot,
-        membershipMember: bootstrapMembershipMember,
+        membership: {
+          groupSourceIds: [accessGroup.id],
+          capturedAt: bootstrapSnapshotAt,
+        },
         createdAt: new Date(bootstrapSnapshotAt.getTime() + 1_000),
       }),
     );
@@ -3478,8 +3476,10 @@ describeWithDatabase('facilities administrator database flow', () => {
       bootstrapSessionRequest({
         label: `after-revocation-${suffix}`,
         user: bootstrapUser,
-        membershipSnapshot: bootstrapMembershipSnapshot,
-        membershipMember: bootstrapMembershipMember,
+        membership: {
+          groupSourceIds: [accessGroup.id],
+          capturedAt: bootstrapSnapshotAt,
+        },
         createdAt: new Date(bootstrapSnapshotAt.getTime() + 2_000),
       }),
     );
@@ -3522,11 +3522,14 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
       [authenticated.actor.userId, roleTargetId].sort(),
     );
-    const inaccessibleEvidence = await createDrizzleAccessGateStore(
-      database,
-    ).loadEvidence(`issue-26-inaccessible-admin-${suffix}`);
-    expect(inaccessibleEvidence.user?.roles).toEqual(['staff', 'admin']);
-    expect(inaccessibleEvidence.snapshot?.member).toBeNull();
+    // The administrator holds the role but is not a member of any trusted
+    // group, so access is refused while the role row survives.
+    expect(
+      await decideAccess(database, {
+        email: `issue-26-inaccessible-admin-${suffix}@psd401.net`,
+        checkedAt: new Date(),
+      }),
+    ).toMatchObject({ granted: false });
 
     const contradictoryAdministratorId = randomUUID();
     const contradictoryAdministratorSubject = `issue-26-contradictory-admin-${suffix}`;

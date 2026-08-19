@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
+import { authorizeSignIn } from '../../../../../../lib/auth/sign-in-authorization';
 import {
   ApiErrorSchema,
   MobileOidcExchangeRequestSchema,
   MobileSessionResponseSchema,
   executeCapability,
   parseCapabilityEnvelopeFor,
-  type AccessGroupSourceRef,
 } from '@psd-eoc/contracts';
 import { NextResponse, type NextRequest } from 'next/server';
 import { ZodError } from 'zod';
@@ -20,9 +20,7 @@ import {
 import {
   AccessGateConfigurationError,
   POST_GATE_SIGN_IN_FAILED_REASON,
-  checkAccessGate,
   createDrizzleAccessGateAuditSink,
-  createDrizzleAccessGateStore,
   parseInitialMobileTransitionEmailDigest,
   type AccessGateAuditSink,
 } from '../../../../../../lib/auth/access-gate';
@@ -136,20 +134,6 @@ function errorResponse(error: unknown, requestId: string): NextResponse {
   );
 }
 
-function membershipMember(
-  userId: string,
-  googleSubject: string,
-  accessGroupSourceRefs: readonly AccessGroupSourceRef[],
-  facilityScope: CompleteOidcSignInContext['authorization']['user']['facilityScope'],
-): CompleteOidcSignInContext['authorization']['membershipMember'] {
-  return Object.freeze({
-    userId,
-    googleSubject,
-    accessGroupSourceRefs,
-    facilityScope,
-  });
-}
-
 /**
  * Exchanges verified Google transport evidence for one opaque app bearer. Raw
  * provider credentials are removed before executeCapability is invoked.
@@ -183,23 +167,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     connection = createDatabaseClient(readDatabaseConfig());
     auditSink = createDrizzleAccessGateAuditSink(connection.db);
-    const access = await checkAccessGate(
-      {
-        googleSubject: exchange.principal.subject,
-        email: exchange.principal.email,
-        displayName: exchange.principal.displayName,
-        subjectDigest: exchange.principal.subjectDigest,
-        requestId,
-        checkedAt: serverTime,
-        source: 'mobile',
-      },
-      {
-        store: createDrizzleAccessGateStore(connection.db),
-        audit: auditSink,
-        initialMobileTransitionEmailDigest,
-      },
-    );
-    if (!access.granted) {
+    const access = await authorizeSignIn(connection.db, {
+      googleSubject: exchange.principal.subject,
+      email: exchange.principal.email,
+      displayName: exchange.principal.displayName,
+      checkedAt: new Date(serverTime),
+    });
+    if (!access.authorized) {
       throw new MobileAccessDeniedError();
     }
     postGateAuditContext = Object.freeze({
@@ -212,21 +186,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const context: CompleteOidcSignInContext = Object.freeze({
       authorization: Object.freeze({
         user: access.user,
-        membershipSnapshot: Object.freeze({
-          id: access.membership.snapshotId,
-          version: access.membership.snapshotVersion,
-          complete: true as const,
-          syncStartedAt: access.membership.syncStartedAt,
-          capturedAt: access.membership.capturedAt,
+        membership: Object.freeze({
+          groupSourceIds: access.groupSourceIds,
+          capturedAt: new Date(serverTime),
         }),
-        membershipMember: membershipMember(
-          access.user.id,
-          access.user.googleSubject,
-          access.membership.accessGroupSourceRefs,
-          access.user.facilityScope,
-        ),
-        firstLoginBinding: access.firstLoginBinding,
-        grantBootstrapAdmin: access.bootstrapAdminEligible,
       }),
       bearerSink: Object.freeze({
         set(value: string): void {

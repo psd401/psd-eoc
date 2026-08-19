@@ -113,6 +113,34 @@
       "when": 1787060542185,
       "tag": "0015_default_school_audience",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1787146942185,
+      "tag": "0016_access_group_roles",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787233342185,
+      "tag": "0017_trusted_group_membership",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787319742185,
+      "tag": "0018_unpin_sessions_from_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787406142185,
+      "tag": "0019_retire_exploration_fixture",
+      "breakpoints": true
     }
   ]
 }

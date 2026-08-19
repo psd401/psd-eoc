@@ -1116,6 +1116,7 @@ describeWithDatabase(
           purpose: 'access',
           facilityId: null,
           displayName: 'Synthetic session-auth access group',
+          grantedRole: 'admin',
           active: true,
           googleGroupId: `synthetic-access-${suffix}`,
           email: `synthetic-access-${suffix}@example.invalid`,

@@ -605,6 +605,11 @@ class FakeRdsDataClient {
             { stringValue: FACILITY_ID },
             { stringValue: source.displayName },
             { booleanValue: true },
+            // granted_role: null. Only access sources carry a role, and this
+            // fixture is a building source.
+            { isNull: true },
+            // members_captured_at: null; only access sources are synced.
+            { isNull: true },
             { stringValue: source.googleGroupId },
             { stringValue: source.email },
             { isNull: true },
@@ -639,6 +644,11 @@ class FakeRdsDataClient {
             { stringValue: FACILITY_ID },
             { stringValue: source.displayName },
             { booleanValue: true },
+            // granted_role: null. Only access sources carry a role, and this
+            // fixture is a building source.
+            { isNull: true },
+            // members_captured_at: null; only access sources are synced.
+            { isNull: true },
             { stringValue: source.googleGroupId },
             { stringValue: source.email },
             { isNull: true },
@@ -719,6 +729,10 @@ class FakeRdsDataClient {
           { stringValue: FACILITY_ID },
           { stringValue: source.displayName },
           { booleanValue: true },
+          // granted_role: null on a building source.
+          { isNull: true },
+          // members_captured_at: null; only access sources are synced.
+          { isNull: true },
           { stringValue: source.googleGroupId },
           { stringValue: source.email },
           { isNull: true },
