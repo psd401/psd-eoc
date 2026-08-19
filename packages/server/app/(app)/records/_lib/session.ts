@@ -4,9 +4,9 @@ import { redirect } from 'next/navigation';
 import {
   SessionAccessError,
   WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../../lib/auth/sessions';
+import { authenticateWebSession } from '../../../../lib/auth/request-session';
 
 export type RecordsSignInReason = 'session-expired' | 'session-required';
 
@@ -42,7 +42,7 @@ export async function requireRecordsPageSession(
     redirect(recordsSignInUrl(returnTo, 'session-required'));
   }
   try {
-    return await getDefaultSessionService().authenticate(token, 'web');
+    return await authenticateWebSession(token);
   } catch (error) {
     if (error instanceof SessionAccessError) {
       redirect(recordsSignInUrl(returnTo, 'session-expired'));

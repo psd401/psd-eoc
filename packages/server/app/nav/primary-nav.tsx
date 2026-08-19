@@ -1,9 +1,7 @@
 import { cookies } from 'next/headers';
 
-import {
-  WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
-} from '../../lib/auth/sessions';
+import { authenticateWebSession } from '../../lib/auth/request-session';
+import { WEB_SESSION_COOKIE_NAME } from '../../lib/auth/sessions';
 import { SignOutButton } from './sign-out-button';
 
 import './primary-nav.css';
@@ -51,10 +49,8 @@ export async function PrimaryNav({
   let roles: readonly string[];
   let sessionId: string;
   try {
-    const authenticated = await getDefaultSessionService().authenticate(
-      sessionToken,
-      'web',
-    );
+    // Shared with the page inside this layout: one lookup per request.
+    const authenticated = await authenticateWebSession(sessionToken);
     email = authenticated.result.user.email;
     roles = authenticated.roles;
     sessionId = authenticated.actor.sessionId;

@@ -8,7 +8,6 @@ import { redirect } from 'next/navigation';
 
 import {
   WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../lib/auth/sessions';
 import {
@@ -24,6 +23,7 @@ import {
   type AuditFilterState,
   type AuditViewState,
 } from './filters';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
 
 async function authenticateAuditSession(): Promise<AuthenticatedSession> {
   const cookieStore = await cookies();
@@ -33,7 +33,7 @@ async function authenticateAuditSession(): Promise<AuthenticatedSession> {
   }
 
   try {
-    return await getDefaultSessionService().authenticate(token, 'web');
+    return await authenticateWebSession(token);
   } catch {
     redirect('/login?reason=session-expired');
   }

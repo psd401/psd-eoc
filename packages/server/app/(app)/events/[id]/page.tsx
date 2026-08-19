@@ -8,7 +8,6 @@ import {
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
   SessionAccessError,
-  getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../../lib/auth/sessions';
 import {
@@ -23,6 +22,7 @@ import { getDefaultEventRoomCapabilityRuntime } from '../../../../lib/capabiliti
 import { getDefaultJournalCapabilityRuntime } from '../../../../lib/capabilities/journal';
 import { EventRoom } from './event-room';
 import { eventRoomSignInUrl } from './return-to';
+import { authenticateWebSession } from '../../../../lib/auth/request-session';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -36,7 +36,7 @@ async function authenticateEventRoom(
     redirect(eventRoomSignInUrl(eventId, 'session-required'));
   }
   try {
-    return await getDefaultSessionService().authenticate(token, 'web');
+    return await authenticateWebSession(token);
   } catch (error) {
     if (error instanceof SessionAccessError) {
       redirect(eventRoomSignInUrl(eventId, 'session-expired'));

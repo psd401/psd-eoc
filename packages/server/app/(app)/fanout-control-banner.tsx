@@ -17,7 +17,6 @@ import {
 } from '../(admin)/facilities/admin-core';
 import {
   WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../lib/auth/sessions';
 import type {
@@ -25,6 +24,7 @@ import type {
   ServerCapabilityRegistration,
 } from '../../lib/capabilities/engine';
 import { readFanoutStatus } from '../../lib/notify/fanout-control';
+import { authenticateWebSession } from '../../lib/auth/request-session';
 
 const BANNER_STYLE: CSSProperties = Object.freeze({
   backgroundColor: '#7f1d1d',
@@ -131,7 +131,7 @@ const DEFAULT_FANOUT_CONTROL_DEPENDENCIES: OperationalFanoutControlDependencies 
       return (await cookies()).get(WEB_SESSION_COOKIE_NAME)?.value;
     },
     authenticate(sessionToken: string) {
-      return getDefaultSessionService().authenticate(sessionToken, 'web');
+      return authenticateWebSession(sessionToken);
     },
     execute: executeGetWebFanoutControl,
   });
