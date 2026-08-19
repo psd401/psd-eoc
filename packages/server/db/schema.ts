@@ -781,11 +781,9 @@ export const sessions = pgTable(
     deviceEnrollmentId: uuid('device_enrollment_id')
       .notNull()
       .references(() => deviceEnrollments.id, { onDelete: 'restrict' }),
-    membershipSnapshotId: uuid('membership_snapshot_id')
-      .notNull()
-      .references(() => accessMembershipSnapshots.id, {
-        onDelete: 'restrict',
-      }),
+    // Legacy. Sessions issued before the trusted-group cutover carry the
+    // generation they were pinned to; nothing reads it any more.
+    membershipSnapshotId: uuid('membership_snapshot_id'),
     membershipValidUntil: occurredAt('membership_valid_until').notNull(),
     membershipGraceUntil: occurredAt('membership_grace_until').notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
@@ -798,14 +796,6 @@ export const sessions = pgTable(
       columns: [table.deviceEnrollmentId, table.userId],
       foreignColumns: [deviceEnrollments.id, deviceEnrollments.userId],
       name: 'sessions_device_user_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.membershipSnapshotId, table.userId],
-      foreignColumns: [
-        accessMembershipMembers.snapshotId,
-        accessMembershipMembers.userId,
-      ],
-      name: 'sessions_membership_user_fk',
     }).onDelete('restrict'),
     index('sessions_user_idx').on(table.userId),
     index('sessions_device_idx').on(table.deviceEnrollmentId),

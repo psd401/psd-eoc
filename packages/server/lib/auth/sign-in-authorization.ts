@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { eq } from 'drizzle-orm';
 
-import type { Role } from '@psd-eoc/contracts';
+import { UserSchema, type User } from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
 import { users } from '../../db/schema';
@@ -11,13 +11,7 @@ import { decideAccess, type AccessRefusal } from './trusted-group-access';
 export type SignInAuthorization =
   | Readonly<{
       authorized: true;
-      user: Readonly<{
-        id: string;
-        googleSubject: string;
-        email: string;
-        displayName: string;
-        roles: readonly Role[];
-      }>;
+      user: User;
       /** The trusted groups that granted this sign-in. */
       groupSourceIds: readonly string[];
       created: boolean;
@@ -112,12 +106,17 @@ export async function authorizeSignIn(
     // working around it.
     return Object.freeze({
       authorized: true as const,
-      user: Object.freeze({
+      // The full domain user, so session issuance receives exactly the shape
+      // it persists rather than a narrowed projection.
+      user: UserSchema.parse({
         id: user.id,
         googleSubject: user.googleSubject,
         email: user.email,
         displayName: user.displayName,
         roles: decision.roles,
+        facilityScope: { kind: 'district' },
+        createdAt: input.checkedAt.toISOString(),
+        disabledAt: null,
       }),
       groupSourceIds: decision.groupSourceIds,
       created: existing === undefined,

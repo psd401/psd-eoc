@@ -450,7 +450,13 @@ export const SessionAuthorizationSchema = z
   .object({
     kind: z.literal('group-membership'),
     source: MembershipSourceSchema,
-    membershipSnapshotId: AccessMembershipSnapshotIdSchema,
+    /**
+     * Null for every session issued after the trusted-group cutover. Such a
+     * session is not pinned to a generation: it stays valid while its holder
+     * remains in a trusted group, which is checked directly. Sessions issued
+     * before the cutover keep the snapshot they were pinned to.
+     */
+    membershipSnapshotId: AccessMembershipSnapshotIdSchema.nullable(),
     membershipValidUntil: TimestampSchema,
     membershipGraceUntil: TimestampSchema,
   })

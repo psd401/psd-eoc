@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 
+import { decideAccess } from './trusted-group-access';
 import {
   AccessMembershipMemberSchema,
   CapabilityScopeSchema,
@@ -271,7 +272,7 @@ function deriveSuccessorToken(
 
 export interface EstablishDeviceSessionInput {
   readonly userId: string;
-  readonly membershipSnapshotId: string;
+  readonly membershipSnapshotId: string | null;
   readonly device: Readonly<{
     platform: DevicePlatform;
     unlockMethod: 'secure-session-cookie' | 'biometric';
@@ -299,7 +300,8 @@ export interface AuthenticatedSession {
 export interface StoredSessionContext {
   readonly result: SessionEstablishmentResult;
   /** Latest complete cached evidence considered for this authorization read. */
-  readonly membershipSnapshotId: string;
+  /** Null for sessions issued after the trusted-group cutover. */
+  readonly membershipSnapshotId: string | null;
   readonly membershipCapturedAt: Date;
   readonly membershipScope: FacilityScope;
   /** False keeps retained sessions manageable but never authorizes app use. */
@@ -701,9 +703,14 @@ export class SessionService {
     now = new Date(),
   ): Promise<IssuedDeviceSession> {
     const refreshToken = createOpaqueRefreshToken();
-    const snapshotCapturedAt = await this.store.getMembershipSnapshotCapturedAt(
-      input.membershipSnapshotId,
-    );
+    // A post-cutover establishment carries no snapshot: membership is the
+    // present question, so the capture instant is now.
+    const snapshotCapturedAt =
+      input.membershipSnapshotId === null
+        ? now
+        : await this.store.getMembershipSnapshotCapturedAt(
+            input.membershipSnapshotId,
+          );
     if (snapshotCapturedAt === null) {
       throw new SessionAccessError(
         'INVALID_MEMBERSHIP_EVIDENCE',
@@ -1216,6 +1223,54 @@ export class DrizzleSessionStore implements SessionStore {
     return snapshot?.complete === true ? snapshot.capturedAt : null;
   }
 
+  /**
+   * Membership backing a session that was issued after the trusted-group
+   * cutover. Such a session carries no snapshot id, because there is no
+   * generation to carry — authorization is the present question of whether the
+   * holder is still in a trusted group.
+   */
+  private async loadTrustedMembership(
+    user: Readonly<{ id: string; googleSubject: string; email: string }>,
+    now: Date,
+    database: Pick<Database, 'select'> = this.database,
+  ): Promise<
+    Readonly<{
+      snapshotId: string | null;
+      version: number;
+      scope: FacilityScope;
+      capturedAt: Date;
+    }>
+  > {
+    const decision = await decideAccess(database as Database, {
+      email: user.email,
+      checkedAt: now,
+    });
+    if (!decision.granted) {
+      throw new SessionAccessError(
+        'INVALID_MEMBERSHIP_EVIDENCE',
+        'The session holder is no longer in a trusted access group.',
+      );
+    }
+    const scopes = await database
+      .select({ facilityId: userFacilityScopes.facilityId })
+      .from(userFacilityScopes)
+      .where(eq(userFacilityScopes.userId, user.id));
+    return Object.freeze({
+      snapshotId: null,
+      version: 0,
+      scope:
+        scopes.length === 0
+          ? Object.freeze({ kind: 'district' as const })
+          : Object.freeze({
+              kind: 'facilities' as const,
+              facilityIds: Object.freeze(
+                scopes.map(({ facilityId }) => facilityId).sort(),
+              ),
+            }),
+      capturedAt: now,
+    });
+  }
+
   private async loadMembershipEvidence(
     snapshotId: string,
     user: Readonly<{ id: string; googleSubject: string }>,
@@ -1464,11 +1519,14 @@ export class DrizzleSessionStore implements SessionStore {
       revokedAt:
         deviceRow.revokedAt === null ? null : timestamp(deviceRow.revokedAt),
     });
-    const issuanceMembership = await this.loadMembershipEvidence(
-      sessionRow.membershipSnapshotId,
-      user,
-      database,
-    );
+    const issuanceMembership =
+      sessionRow.membershipSnapshotId === null
+        ? await this.loadTrustedMembership(user, new Date(), database)
+        : await this.loadMembershipEvidence(
+            sessionRow.membershipSnapshotId,
+            user,
+            database,
+          );
     const [latestCompleteSnapshot] = await database
       .select({
         id: accessMembershipSnapshots.id,
@@ -1632,11 +1690,13 @@ export class DrizzleSessionStore implements SessionStore {
         if (userRow === undefined || userRow.disabledAt !== null) {
           throw new SessionAccessError('FORBIDDEN', 'Session issuance denied.');
         }
-        await this.loadMembershipEvidence(
-          input.membershipSnapshotId,
-          userRow,
-          transaction,
-        );
+        if (input.membershipSnapshotId !== null) {
+          await this.loadMembershipEvidence(
+            input.membershipSnapshotId,
+            userRow,
+            transaction,
+          );
+        }
         await transaction.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${input.device.installationId}, 4017))`,
         );
@@ -1959,6 +2019,9 @@ export class DrizzleSessionStore implements SessionStore {
           .select({
             id: users.id,
             googleSubject: users.googleSubject,
+            // Needed to re-check trusted-group membership on rotation: access
+            // is decided by the groups this address is in.
+            email: users.email,
             disabledAt: users.disabledAt,
           })
           .from(users)
@@ -1988,11 +2051,18 @@ export class DrizzleSessionStore implements SessionStore {
             'The session has expired.',
           );
         }
-        const issuanceMembership = await this.loadMembershipEvidence(
-          lockedSession.membershipSnapshotId,
-          userRow,
-          transaction,
-        );
+        const issuanceMembership =
+          lockedSession.membershipSnapshotId === null
+            ? await this.loadTrustedMembership(
+                userRow,
+                new Date(),
+                transaction,
+              )
+            : await this.loadMembershipEvidence(
+                lockedSession.membershipSnapshotId,
+                userRow,
+                transaction,
+              );
         const [latestCompleteSnapshot] = await transaction
           .select({
             id: accessMembershipSnapshots.id,
