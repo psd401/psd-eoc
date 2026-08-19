@@ -289,6 +289,32 @@ export const neighborhoodFacilities = pgTable(
 );
 
 /** Purpose-bound Google Group or fail-closed synthetic source configuration. */
+/**
+ * One person currently in one trusted access group.
+ *
+ * Sign-in reads exactly this: is the viewer in a group the deployment trusts,
+ * and what role does that group grant. Membership is replaced wholesale per
+ * group when the provider is read, so a row existing means the person was in
+ * that group as of the group's `membersCapturedAt`.
+ */
+export const accessGroupMembers = pgTable(
+  'access_group_members',
+  {
+    groupSourceId: uuid('group_source_id')
+      .notNull()
+      .references(() => groupSources.id, { onDelete: 'cascade' }),
+    email: varchar('email', { length: 320 }).notNull(),
+    capturedAt: occurredAt('captured_at').defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: 'access_group_members_pk',
+      columns: [table.groupSourceId, table.email],
+    }),
+    index('access_group_members_email_idx').on(table.email),
+  ],
+);
+
 export const groupSources = pgTable(
   'group_sources',
   {
@@ -303,6 +329,10 @@ export const groupSources = pgTable(
     // Access sources only. The role every member of this group receives, so a
     // deployment configures who administers instead of compiling it in.
     grantedRole: roleEnum('granted_role'),
+    // When this group's membership was last read from the provider. Sign-in
+    // refuses membership that has gone stale, which is the only temporal
+    // question it needs to ask — there is no global generation to agree on.
+    membersCapturedAt: occurredAt('members_captured_at'),
     googleGroupId: varchar('google_group_id', { length: 255 }),
     email: varchar('email', { length: 320 }),
     fixtureKey: varchar('fixture_key', { length: 100 }),

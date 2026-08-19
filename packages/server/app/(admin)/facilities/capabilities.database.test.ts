@@ -1772,7 +1772,12 @@ describeWithDatabase('facilities administrator database flow', () => {
     );
   });
 
-  test('rolls the first access group back to an empty bootstrap state', async () => {
+  test('configures access groups freely before the first snapshot exists', async () => {
+    // First-run setup. With no published generation there is no access to
+    // lose, so an administrator can add, rename, add again, and withdraw
+    // without proving anything. Every one of these steps used to be a 409:
+    // the old rules required the published snapshot to already agree with the
+    // active set, which is impossible before a snapshot exists.
     const database = databaseConnection().db;
     const authenticated = authenticatedAdministrator();
     const store = createDrizzleAdminCapabilityStore(database, authenticated);
@@ -1798,44 +1803,9 @@ describeWithDatabase('facilities administrator database flow', () => {
     if (firstGroup.kind !== 'google-group' || firstGroup.purpose !== 'access') {
       throw new Error('The first access-group fixture lost its variant.');
     }
+    expect(firstGroup.grantedRole).toBe('admin');
 
-    await expect(
-      executeUpdateGroupSourceCapability({
-        authenticated,
-        store,
-        command: {
-          id: firstGroup.id,
-          kind: firstGroup.kind,
-          purpose: firstGroup.purpose,
-          facilityId: firstGroup.facilityId,
-          grantedRole: 'admin',
-          displayName: `${firstGroup.displayName} changed`,
-          active: firstGroup.active,
-          googleGroupId: firstGroup.googleGroupId,
-          email: firstGroup.email,
-        },
-        metadata: metadata('first-access-display-change', requestIds),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-    await expect(
-      executeCreateGroupSourceCapability({
-        authenticated,
-        store,
-        command: {
-          kind: 'google-group',
-          purpose: 'access',
-          facilityId: null,
-          grantedRole: 'admin',
-          displayName: `Unproven second access ${suffix.slice(0, 8)}`,
-          active: true,
-          googleGroupId: `issue-26-second-access-${suffix}`,
-          email: `issue-26-second-access-${suffix}@example.invalid`,
-        },
-        metadata: metadata('unproven-second-access', requestIds),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-
-    const rolledBack = await executeUpdateGroupSourceCapability({
+    const renamed = await executeUpdateGroupSourceCapability({
       authenticated,
       store,
       command: {
@@ -1844,26 +1814,73 @@ describeWithDatabase('facilities administrator database flow', () => {
         purpose: firstGroup.purpose,
         facilityId: firstGroup.facilityId,
         grantedRole: 'admin',
-        displayName: firstGroup.displayName,
-        active: false,
+        displayName: `${firstGroup.displayName} changed`,
+        active: firstGroup.active,
         googleGroupId: firstGroup.googleGroupId,
         email: firstGroup.email,
       },
-      metadata: metadata('first-access-rollback', requestIds),
+      metadata: metadata('first-access-display-change', requestIds),
     });
-    expect(rolledBack.active).toBe(false);
+    expect(renamed.displayName).toBe(`${firstGroup.displayName} changed`);
+
+    const secondGroup = await executeCreateGroupSourceCapability({
+      authenticated,
+      store,
+      command: {
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        grantedRole: 'staff',
+        displayName: `Second access group ${suffix.slice(0, 8)}`,
+        active: true,
+        googleGroupId: `issue-26-second-access-${suffix}`,
+        email: `issue-26-second-access-${suffix}@example.invalid`,
+      },
+      metadata: metadata('second-access-create', requestIds),
+    });
+    expect(secondGroup.purpose).toBe('access');
+
+    // Withdrawing one of two is allowed. Withdrawing the last one is too,
+    // because nothing has ever been published for it to end.
+    for (const [index, group] of [firstGroup, secondGroup].entries()) {
+      if (group.kind !== 'google-group' || group.purpose !== 'access') {
+        throw new Error('An access-group fixture lost its variant.');
+      }
+      const withdrawn = await executeUpdateGroupSourceCapability({
+        authenticated,
+        store,
+        command: {
+          id: group.id,
+          kind: 'google-group',
+          purpose: 'access',
+          facilityId: null,
+          grantedRole: index === 0 ? 'admin' : 'staff',
+          displayName:
+            group.id === firstGroup.id
+              ? renamed.displayName
+              : group.displayName,
+          active: false,
+          googleGroupId: group.googleGroupId,
+          email: group.email,
+        },
+        metadata: metadata(`access-withdraw-${index}`, requestIds),
+      });
+      expect(withdrawn.active).toBe(false);
+    }
+
     expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
-    const activeRows = await database
-      .select({ id: groupSources.id })
-      .from(groupSources)
-      .where(
-        and(
-          eq(groupSources.kind, 'google-group'),
-          eq(groupSources.purpose, 'access'),
-          eq(groupSources.active, true),
+    expect(
+      await database
+        .select({ id: groupSources.id })
+        .from(groupSources)
+        .where(
+          and(
+            eq(groupSources.kind, 'google-group'),
+            eq(groupSources.purpose, 'access'),
+            eq(groupSources.active, true),
+          ),
         ),
-      );
-    expect(activeRows).toEqual([]);
+    ).toEqual([]);
   });
 
   test('serializes concurrent access-group deactivation without a row-lock deadlock', async () => {

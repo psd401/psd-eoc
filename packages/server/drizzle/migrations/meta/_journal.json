@@ -120,6 +120,13 @@
       "when": 1787146942185,
       "tag": "0016_access_group_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787233342185,
+      "tag": "0017_trusted_group_membership",
+      "breakpoints": true
     }
   ]
 }
