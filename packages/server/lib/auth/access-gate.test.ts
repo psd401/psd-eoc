@@ -834,7 +834,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
       membershipGraceUntil: new Date(
         issuanceCreatedAt.getTime() + 2 * 60 * 60 * 1_000,
       ),
-      grantBootstrapAdmin: false,
       requestId: randomUUID(),
       idempotency: Object.freeze({
         key: `oidc:${responseDigest}`,
@@ -2081,7 +2080,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
           accessGroupSourceRefs: grant.membership.accessGroupSourceRefs,
           facilityScope: grant.user.facilityScope,
         }),
-        firstLoginBinding: grant.firstLoginBinding,
         device: Object.freeze({
           platform,
           unlockMethod:
@@ -2123,7 +2121,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     );
     expect(recoveryGrant).toMatchObject({
       granted: true,
-      firstLoginBinding: null,
       bootstrapAdminEligible: false,
     });
     if (!recoveryGrant.granted) {
@@ -2653,7 +2650,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     );
     expect(recoveryAfterProof).toMatchObject({
       granted: true,
-      firstLoginBinding: null,
       bootstrapAdminEligible: false,
     });
     if (!recoveryAfterProof.granted) {
@@ -2692,7 +2688,6 @@ describeWithDatabase('PostgreSQL access-gate evidence projection', () => {
     );
     expect(designatedAfterProof).toMatchObject({
       granted: true,
-      firstLoginBinding: null,
       bootstrapAdminEligible: true,
     });
     if (!designatedAfterProof.granted) {

@@ -762,7 +762,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       expiresAt: new Date(createdAt.getTime() + 3 * 60 * 60 * 1_000),
       membershipValidUntil: new Date(createdAt.getTime() + 60 * 60 * 1_000),
       membershipGraceUntil: new Date(createdAt.getTime() + 2 * 60 * 60 * 1_000),
-      grantBootstrapAdmin: true,
       requestId: randomUUID(),
       idempotency: Object.freeze({
         key: `oidc:${responseDigest}`,
@@ -1017,7 +1016,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       expiresAt: new Date(createdAt.getTime() + 3 * 60 * 60 * 1_000),
       membershipValidUntil: new Date(createdAt.getTime() + 60 * 60 * 1_000),
       membershipGraceUntil: new Date(createdAt.getTime() + 2 * 60 * 60 * 1_000),
-      grantBootstrapAdmin: true,
       requestId: randomUUID(),
       idempotency: Object.freeze({
         key: `oidc:${responseDigest}`,

@@ -7,6 +7,7 @@ import {
   type SessionEstablishmentResult,
 } from '@psd-eoc/contracts';
 
+import type { User } from '@psd-eoc/contracts';
 import type {
   AccessGateAuditEvent,
   AccessGateAuditSink,
@@ -105,6 +106,29 @@ function syntheticEvidence(googleSubject: string): AccessGateEvidence {
 }
 
 export interface PlaywrightAuthRuntime {
+  readonly authorize: (
+    input: Readonly<{
+      googleSubject: string;
+      email: string;
+      displayName: string;
+      checkedAt: Date;
+    }>,
+  ) => Promise<
+    | Readonly<{
+        authorized: true;
+        user: User;
+        groupSourceIds: readonly string[];
+        created: boolean;
+      }>
+    | Readonly<{
+        authorized: false;
+        refusal:
+          | 'NO_TRUSTED_GROUPS_CONFIGURED'
+          | 'NOT_IN_A_TRUSTED_GROUP'
+          | 'MEMBERSHIP_STALE'
+          | 'ACCOUNT_DISABLED';
+      }>
+  >;
   readonly accessStore: AccessGateStore;
   readonly auditSink: AccessGateAuditSink;
   readonly sessionStore: InitialWebSessionStore;
@@ -204,9 +228,9 @@ export function createPlaywrightAuthRuntime(): PlaywrightAuthRuntime {
 
       const sessionId = randomUUID();
       const deviceEnrollmentId = randomUUID();
-      const roles = request.grantBootstrapAdmin
-        ? [...new Set([...request.user.roles, 'admin' as const])]
-        : request.user.roles;
+      // Roles are what the trusted groups granted; the harness does not add
+      // any, because nothing in the product does any more.
+      const roles = request.user.roles;
       const result = SessionEstablishmentResultSchema.parse({
         user: { ...request.user, roles },
         session: {
@@ -218,7 +242,7 @@ export function createPlaywrightAuthRuntime(): PlaywrightAuthRuntime {
           authorization: {
             kind: 'group-membership',
             source: 'google-group-snapshot',
-            membershipSnapshotId: request.membershipSnapshot.id,
+            membershipSnapshotId: null,
             membershipValidUntil: request.membershipValidUntil.toISOString(),
             membershipGraceUntil: request.membershipGraceUntil.toISOString(),
           },
@@ -253,6 +277,26 @@ export function createPlaywrightAuthRuntime(): PlaywrightAuthRuntime {
   });
 
   return Object.freeze({
+    // The harness reuses the same synthetic identities the evidence builder
+    // knows about. Deciding group membership is the product's job; this fake
+    // only says which invented principal is a member.
+    async authorize(input: Readonly<{ googleSubject: string }>) {
+      const evidence = syntheticEvidence(input.googleSubject);
+      const user = evidence.user;
+      return user === null || input.googleSubject !== PLAYWRIGHT_MEMBER_SUBJECT
+        ? Object.freeze({
+            authorized: false as const,
+            refusal: 'NOT_IN_A_TRUSTED_GROUP' as const,
+          })
+        : Object.freeze({
+            authorized: true as const,
+            user,
+            groupSourceIds: Object.freeze([
+              PLAYWRIGHT_ACCESS_GROUP_CONFIGURATION.id,
+            ]),
+            created: false,
+          });
+    },
     accessStore,
     auditSink,
     sessionStore,

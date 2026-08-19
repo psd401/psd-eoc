@@ -1218,20 +1218,10 @@ describe('configured Groups access and initial session', () => {
     const context: CompleteOidcSignInContext = {
       authorization: {
         user: access.user,
-        membershipSnapshot: {
-          id: access.membership.snapshotId,
-          version: access.membership.snapshotVersion,
-          complete: true,
-          syncStartedAt: access.membership.syncStartedAt,
-          capturedAt: access.membership.capturedAt,
+        membership: {
+          groupSourceIds: access.groupSourceIds,
+          capturedAt: new Date(),
         },
-        membershipMember: {
-          userId: access.user.id,
-          googleSubject: access.user.googleSubject,
-          accessGroupSourceRefs: access.membership.accessGroupSourceRefs,
-          facilityScope: access.user.facilityScope,
-        },
-        grantBootstrapAdmin: access.bootstrapAdminEligible,
       },
       cookieSink: {
         set(value) {

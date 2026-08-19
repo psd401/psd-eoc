@@ -10,8 +10,6 @@ import {
   UuidSchema,
   parseCapabilityEnvelopeFor,
   registerCapabilityHandler,
-  type AccessMembershipMember,
-  type AccessMembershipSnapshot,
   type CapabilityAuthorizationRequest,
   type CapabilityExecutionAuthorizer,
   type CompleteOidcSignInInput,
@@ -23,25 +21,17 @@ import {
   type SessionEstablishmentResult,
   type User,
 } from '@psd-eoc/contracts';
-import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
-  accessMembershipMemberFacilities,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipEvaluatedMembers,
-  accessMembershipSnapshotGroups,
-  accessMembershipSnapshots,
   connectivityEpochs,
   deviceEnrollments,
-  groupSources,
   idempotencyRecords,
   securityAuditEntries,
   sessions,
   sessionTokenIssuances,
   userFacilityScopes,
-  userRoleChanges,
   users,
 } from '../../db/schema';
 import {
@@ -49,7 +39,6 @@ import {
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './access-gate';
-import type { AccessGateFirstLoginBinding } from './access-gate';
 import { ADMIN_AVAILABILITY_LOCK_SQL, loadEffectiveRoles } from './role-state';
 
 /**
@@ -224,17 +213,6 @@ function addSeconds(date: Date, seconds: number): Date {
   return result;
 }
 
-function parseTimestamp(value: string): Date {
-  const result = new Date(value);
-  if (Number.isNaN(result.getTime())) {
-    throw new WebSessionIssuanceError(
-      'INVALID_AUTHORIZATION_CONTEXT',
-      'Membership evidence has an invalid capture time.',
-    );
-  }
-  return result;
-}
-
 function generateOpaqueCredential(): string {
   return randomBytes(SESSION_CREDENTIAL_BYTES).toString('base64url');
 }
@@ -242,10 +220,6 @@ function generateOpaqueCredential(): string {
 /** SHA-256 digest used for lookup and persistence of an opaque credential. */
 export function digestWebSessionCredential(credential: string): string {
   return createHash('sha256').update(credential, 'utf8').digest('hex');
-}
-
-function digestVerifiedEmail(email: string): string {
-  return createHash('sha256').update(email, 'utf8').digest('hex');
 }
 
 function sameFacilityScope(
@@ -615,45 +589,6 @@ function accessGroupKey(source: {
   readonly purpose: string;
 }): string {
   return `${source.id}:${source.kind}:${source.purpose}`;
-}
-
-function canonicalAccessGroupKeySet(
-  sources: readonly unknown[],
-): ReadonlySet<string> | null {
-  const keys: string[] = [];
-  const ids: string[] = [];
-  for (const source of sources) {
-    const parsed = AccessGroupSourceRefSchema.safeParse(source);
-    if (
-      !parsed.success ||
-      parsed.data.kind !== 'google-group' ||
-      parsed.data.purpose !== 'access' ||
-      parsed.data.facilityId !== null
-    ) {
-      return null;
-    }
-    ids.push(parsed.data.id);
-    keys.push(accessGroupKey(parsed.data));
-  }
-  if (
-    keys.length === 0 ||
-    new Set(ids).size !== ids.length ||
-    new Set(keys).size !== keys.length
-  ) {
-    return null;
-  }
-  return new Set(keys);
-}
-
-function sameNonemptyKeySet(
-  left: ReadonlySet<string>,
-  right: ReadonlySet<string>,
-): boolean {
-  return (
-    left.size > 0 &&
-    left.size === right.size &&
-    [...left].every((key) => right.has(key))
-  );
 }
 
 /** Recognizes only rollback-safe database conflicts for bounded retries. */

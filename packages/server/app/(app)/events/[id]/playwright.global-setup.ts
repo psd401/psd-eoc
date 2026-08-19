@@ -329,25 +329,9 @@ async function issueSyntheticOperatorSession(
       createdAt: fixture.userCreatedAt.toISOString(),
       disabledAt: null,
     },
-    membershipSnapshot: {
-      id: fixture.snapshotId,
-      version: fixture.snapshotVersion,
-      complete: true,
-      syncStartedAt: fixture.syncStartedAt.toISOString(),
-      capturedAt: fixture.capturedAt.toISOString(),
-    },
-    membershipMember: {
-      userId: MEMBER_USER_ID,
-      googleSubject: MEMBER_SUBJECT,
-      accessGroupSourceRefs: [
-        {
-          id: ACCESS_GROUP_ID,
-          kind: 'google-group',
-          purpose: 'access',
-          facilityId: null,
-        },
-      ],
-      facilityScope: { kind: 'district' },
+    membership: {
+      groupSourceIds: [ACCESS_GROUP_ID],
+      capturedAt: fixture.capturedAt,
     },
     device: {
       platform: 'web',
@@ -363,7 +347,6 @@ async function issueSyntheticOperatorSession(
     membershipGraceUntil: new Date(
       fixture.capturedAt.getTime() + 72 * 60 * 60 * 1_000,
     ),
-    grantBootstrapAdmin: true,
     requestId: randomUUID(),
     idempotency: {
       key: `oidc:${responseDigest}`,

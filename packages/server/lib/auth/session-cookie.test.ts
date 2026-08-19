@@ -87,7 +87,6 @@ const AUTHORIZATION: CompleteOidcSignInContext['authorization'] = Object.freeze(
       ]),
       facilityScope: Object.freeze({ kind: 'district' as const }),
     }),
-    grantBootstrapAdmin: false,
   },
 );
 
@@ -257,7 +256,6 @@ describe('native initial session issuance', () => {
   test('requires the designated-group admin projection before bearer delivery', async () => {
     const designatedGroupEligible = Object.freeze({
       ...AUTHORIZATION,
-      grantBootstrapAdmin: true,
     });
     let persisted: PersistInitialWebSessionRequest | undefined;
     const store: InitialWebSessionStore = Object.freeze({

@@ -407,8 +407,7 @@ function liveAuthorizationFor(input: {
 function bootstrapSessionRequest(input: {
   readonly label: string;
   readonly user: PersistInitialWebSessionRequest['user'];
-  readonly membershipSnapshot: PersistInitialWebSessionRequest['membershipSnapshot'];
-  readonly membershipMember: PersistInitialWebSessionRequest['membershipMember'];
+  readonly membership: PersistInitialWebSessionRequest['membership'];
   readonly createdAt: Date;
 }): PersistInitialWebSessionRequest {
   const responseDigest = digest(`response:${input.label}`);
@@ -419,8 +418,7 @@ function bootstrapSessionRequest(input: {
   };
   return Object.freeze({
     user: input.user,
-    membershipSnapshot: input.membershipSnapshot,
-    membershipMember: input.membershipMember,
+    membership: input.membership,
     device: Object.freeze({
       platform: 'web',
       unlockMethod: 'secure-session-cookie',
@@ -435,7 +433,6 @@ function bootstrapSessionRequest(input: {
     membershipGraceUntil: new Date(
       input.createdAt.getTime() + 48 * 60 * 60 * 1_000,
     ),
-    grantBootstrapAdmin: true,
     requestId: randomUUID(),
     idempotency: {
       key: `oidc:${responseDigest}`,
@@ -3383,33 +3380,6 @@ describeWithDatabase('facilities administrator database flow', () => {
         accessGroupIds: [accessGroup.id],
       });
     const bootstrapSnapshotAt = new Date(Date.now() + 60_000);
-    const bootstrapSnapshot = await persistCompleteAccessSnapshotGeneration(
-      database,
-      {
-        groups: activeAccessGroups.map(({ id }) => ({
-          id,
-          kind: 'google-group' as const,
-          purpose: 'access' as const,
-        })),
-        members: [
-          {
-            userId: authenticated.actor.userId,
-            googleSubject: primaryAdministratorRow.googleSubject,
-            facilityScopeKind: 'district' as const,
-            accessGroupIds: [accessGroup.id],
-          },
-          {
-            userId: roleTargetId,
-            googleSubject: roleTargetRow.googleSubject,
-            facilityScopeKind: 'district' as const,
-            accessGroupIds: [accessGroup.id],
-          },
-        ],
-        capturedAt: bootstrapSnapshotAt,
-      },
-    );
-    const bootstrapSnapshotId = bootstrapSnapshot.id;
-    const bootstrapSnapshotVersion = bootstrapSnapshot.version;
     const bootstrapUser = {
       id: roleTargetRow.id,
       googleSubject: roleTargetRow.googleSubject,
@@ -3420,33 +3390,15 @@ describeWithDatabase('facilities administrator database flow', () => {
       createdAt: roleTargetRow.createdAt.toISOString(),
       disabledAt: null,
     };
-    const bootstrapMembershipSnapshot = {
-      id: bootstrapSnapshotId,
-      version: bootstrapSnapshotVersion,
-      complete: true as const,
-      syncStartedAt: bootstrapSnapshotAt.toISOString(),
-      capturedAt: bootstrapSnapshotAt.toISOString(),
-    };
-    const bootstrapMembershipMember = {
-      userId: roleTargetId,
-      googleSubject: roleTargetRow.googleSubject,
-      accessGroupSourceRefs: [
-        {
-          id: accessGroup.id,
-          kind: 'google-group' as const,
-          purpose: 'access' as const,
-          facilityId: null,
-        },
-      ],
-      facilityScope: { kind: 'district' as const },
-    };
     const initialSessionStore = createDrizzleInitialWebSessionStore(database);
     const firstBootstrapSession = await initialSessionStore.persist(
       bootstrapSessionRequest({
         label: `first-${suffix}`,
         user: bootstrapUser,
-        membershipSnapshot: bootstrapMembershipSnapshot,
-        membershipMember: bootstrapMembershipMember,
+        membership: {
+          groupSourceIds: [accessGroup.id],
+          capturedAt: bootstrapSnapshotAt,
+        },
         createdAt: new Date(bootstrapSnapshotAt.getTime() + 1_000),
       }),
     );
@@ -3524,8 +3476,10 @@ describeWithDatabase('facilities administrator database flow', () => {
       bootstrapSessionRequest({
         label: `after-revocation-${suffix}`,
         user: bootstrapUser,
-        membershipSnapshot: bootstrapMembershipSnapshot,
-        membershipMember: bootstrapMembershipMember,
+        membership: {
+          groupSourceIds: [accessGroup.id],
+          capturedAt: bootstrapSnapshotAt,
+        },
         createdAt: new Date(bootstrapSnapshotAt.getTime() + 2_000),
       }),
     );

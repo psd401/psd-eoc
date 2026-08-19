@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import {
   executeCapability,
   parseCapabilityEnvelopeFor,
-  type AccessGroupSourceRef,
 } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
 
@@ -51,7 +50,16 @@ const DEFAULT_SESSION_POLICY: Readonly<WebSessionPolicy> = Object.freeze({
 });
 
 interface AuthRuntime {
-  readonly database: DatabaseConnection['db'];
+  /**
+   * Injected rather than a raw database so the end-to-end harness can supply a
+   * process-local authorizer without standing up PostgreSQL.
+   */
+  readonly authorize: typeof authorizeSignIn extends (
+    database: infer _D,
+    input: infer I,
+  ) => infer R
+    ? (input: I) => R
+    : never;
   readonly auditSink: AccessGateAuditSink;
   readonly sessionStore: InitialWebSessionStore;
   close(): Promise<void>;
@@ -195,7 +203,7 @@ async function createAuthRuntime(): Promise<AuthRuntime> {
     );
     const runtime = getPlaywrightAuthRuntime();
     return {
-      database: runtime.database,
+      authorize: runtime.authorize,
       auditSink: runtime.auditSink,
       sessionStore: runtime.sessionStore,
       close: () => Promise.resolve(),
@@ -207,7 +215,7 @@ async function createAuthRuntime(): Promise<AuthRuntime> {
   }
   const connection = createAuthDatabaseConnection();
   return {
-    database: connection.db,
+    authorize: (input) => authorizeSignIn(connection.db, input),
     auditSink: createDrizzleAccessGateAuditSink(connection.db),
     sessionStore: createDrizzleInitialWebSessionStore(connection.db),
     close: connection.close,
@@ -271,7 +279,11 @@ function deniedResponse(
  * person is an access problem.
  */
 function denialPageReason(
-  refusal: 'NO_TRUSTED_GROUPS_CONFIGURED' | 'NOT_IN_A_TRUSTED_GROUP' | 'MEMBERSHIP_STALE' | 'ACCOUNT_DISABLED',
+  refusal:
+    | 'NO_TRUSTED_GROUPS_CONFIGURED'
+    | 'NOT_IN_A_TRUSTED_GROUP'
+    | 'MEMBERSHIP_STALE'
+    | 'ACCOUNT_DISABLED',
 ): 'access' | 'configuration' {
   return refusal === 'NO_TRUSTED_GROUPS_CONFIGURED' ||
     refusal === 'MEMBERSHIP_STALE'
@@ -331,7 +343,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
 
     runtime = await createAuthRuntime();
-    const access = await authorizeSignIn(runtime.database, {
+    const access = await runtime.authorize({
       googleSubject: callback.principal.subject,
       email: callback.principal.email,
       displayName: callback.principal.displayName,

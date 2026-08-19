@@ -7,7 +7,6 @@ import {
   MobileSessionResponseSchema,
   executeCapability,
   parseCapabilityEnvelopeFor,
-  type AccessGroupSourceRef,
 } from '@psd-eoc/contracts';
 import { NextResponse, type NextRequest } from 'next/server';
 import { ZodError } from 'zod';

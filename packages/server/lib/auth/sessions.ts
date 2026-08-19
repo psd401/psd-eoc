@@ -2053,11 +2053,7 @@ export class DrizzleSessionStore implements SessionStore {
         }
         const issuanceMembership =
           lockedSession.membershipSnapshotId === null
-            ? await this.loadTrustedMembership(
-                userRow,
-                new Date(),
-                transaction,
-              )
+            ? await this.loadTrustedMembership(userRow, new Date(), transaction)
             : await this.loadMembershipEvidence(
                 lockedSession.membershipSnapshotId,
                 userRow,
