@@ -7,9 +7,11 @@ import { AccessGroupSourceRefSchema, type AccessGroupSourceRef } from './group';
 import {
   hasUniqueStrings,
   isAtOrAfter,
+  RoleSchema,
   TimestampSchema,
   UuidSchema,
   VersionSchema,
+  type Role,
 } from './shared';
 
 const accessGroupSourceRefKey = (source: AccessGroupSourceRef): string =>
@@ -20,10 +22,9 @@ const accessGroupSourceRefKey = (source: AccessGroupSourceRef): string =>
  * trusted administrative flows and always combine with server-side facility
  * scope checks.
  */
-export const RoleSchema = z.enum(['staff', 'admin']);
-
-/** Release-one user role inferred from {@link RoleSchema}. */
-export type Role = z.infer<typeof RoleSchema>;
+// Defined in `shared` so `group` can use it without an import cycle; every
+// existing importer of `identity` keeps working through this re-export.
+export { RoleSchema, type Role };
 
 /**
  * Owns the stable internal identifier for a staff user. The related immutable
@@ -386,25 +387,16 @@ export type AccessMembershipSnapshot = z.infer<
  * remain server-owned dependencies and can never be supplied by the caller.
  * Finalization accepts only opaque durable-session proof identifiers.
  */
-export const DESIGNATED_ACCESS_GROUP_EMAIL =
-  'tsd-engineering@psd401.net' as const;
-
-export const SyncAccessMembershipInputSchema = z
-  .object({
-    designatedGroupEmail: z.literal(DESIGNATED_ACCESS_GROUP_EMAIL),
-    transition: z.discriminatedUnion('phase', [
-      z.object({ phase: z.literal('stage') }).strict(),
-      z
-        .object({
-          phase: z.literal('finalize'),
-          mobileSessionId: SessionIdSchema,
-          membershipSnapshotId: AccessMembershipSnapshotIdSchema,
-        })
-        .strict(),
-    ]),
-  })
-  .strict()
-  .readonly();
+/**
+ * The access-membership sync takes no command payload.
+ *
+ * It used to name the one designated Google group and a transition phase. Both
+ * are gone: the groups a deployment trusts are the active access sources in the
+ * database, and the sync publishes for whatever set that is. Leaving the group
+ * addressable from the command would let a caller publish a snapshot for a
+ * group the deployment never activated.
+ */
+export const SyncAccessMembershipInputSchema = z.object({}).strict().readonly();
 
 /** Exact access-membership sync command inferred from its schema. */
 export type SyncAccessMembershipInput = z.infer<
@@ -421,7 +413,6 @@ const syncAccessMembershipResultFields = {
   snapshotId: AccessMembershipSnapshotIdSchema,
   snapshotVersion: VersionSchema,
   capturedAt: TimestampSchema,
-  designatedSourceId: UuidSchema,
   activeAccessGroupCount: z.number().int().min(1).max(100),
   evaluatedMembershipCount: z.number().int().min(1).max(1_200),
   membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -430,24 +421,10 @@ const syncAccessMembershipResultFields = {
 } as const;
 
 export const SyncAccessMembershipResultSchema = z
-  .discriminatedUnion('phase', [
-    z
-      .object({
-        ...syncAccessMembershipResultFields,
-        phase: z.literal('stage'),
-        proofKind: z.literal('initial-selector-match'),
-        auditEntryHash: z.null(),
-      })
-      .strict(),
-    z
-      .object({
-        ...syncAccessMembershipResultFields,
-        phase: z.literal('finalize'),
-        proofKind: z.literal('durable-ios-session'),
-        auditEntryHash: z.string().regex(/^[a-f0-9]{64}$/u),
-      })
-      .strict(),
-  ])
+  .object({
+    ...syncAccessMembershipResultFields,
+  })
+  .strict()
   .readonly();
 
 /** Aggregate access-membership publication proof inferred from its schema. */
@@ -473,7 +450,13 @@ export const SessionAuthorizationSchema = z
   .object({
     kind: z.literal('group-membership'),
     source: MembershipSourceSchema,
-    membershipSnapshotId: AccessMembershipSnapshotIdSchema,
+    /**
+     * Null for every session issued after the trusted-group cutover. Such a
+     * session is not pinned to a generation: it stays valid while its holder
+     * remains in a trusted group, which is checked directly. Sessions issued
+     * before the cutover keep the snapshot they were pinned to.
+     */
+    membershipSnapshotId: AccessMembershipSnapshotIdSchema.nullable(),
     membershipValidUntil: TimestampSchema,
     membershipGraceUntil: TimestampSchema,
   })

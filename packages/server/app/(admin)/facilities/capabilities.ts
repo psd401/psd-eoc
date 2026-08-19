@@ -64,7 +64,6 @@ import {
   loadEffectiveRoles,
   type AccessConfigurationSnapshotState,
 } from '../../../lib/auth/role-state';
-import { DESIGNATED_ACCESS_GROUP_EMAIL } from '../../../lib/auth/access-gate';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type {
   CapabilityHandlerContext,
@@ -417,70 +416,37 @@ async function loadAccessSetMutationStateAfterLock(
   });
 }
 
-interface AccessRecoveryTransition {
-  readonly kind: 'empty-bootstrap' | 'strict-snapshot';
-  readonly snapshotState?: AccessConfigurationSnapshotState;
-}
-
-function accessRecoveryTransition(
-  state: AccessSetMutationState,
-  current: Extract<GroupSource, { purpose: 'access' }>,
-  input: Extract<CapabilityInput<'update-group-source'>, { purpose: 'access' }>,
-): AccessRecoveryTransition {
-  const locatorChanged =
-    current.googleGroupId !== input.googleGroupId ||
-    current.email !== input.email;
-  if (
-    locatorChanged ||
-    current.displayName !== input.displayName ||
-    current.active === input.active
-  ) {
-    throw conflict(
-      'While access-group evidence is incomplete, only a status change that restores a previously proven set is allowed.',
-    );
-  }
-  const prospectiveIds = state.activeAccessGroupSourceIds
-    .filter((id) => id !== current.id)
-    .concat(input.active ? [current.id] : [])
-    .sort();
-  if (
-    state.latestCompleteSnapshot.kind === 'strict' &&
-    sameSortedIds(
-      prospectiveIds,
-      state.latestCompleteSnapshot.state.activeAccessGroupSourceIds,
-    )
-  ) {
-    return Object.freeze({
-      kind: 'strict-snapshot' as const,
-      snapshotState: state.latestCompleteSnapshot.state,
-    });
-  }
-  if (
-    state.latestCompleteSnapshot.kind === 'none' &&
-    current.active &&
-    !input.active &&
-    state.activeAccessGroupSourceIds.length === 1 &&
-    state.activeAccessGroupSourceIds[0] === current.id &&
-    prospectiveIds.length === 0
-  ) {
-    return Object.freeze({ kind: 'empty-bootstrap' as const });
-  }
-  throw conflict(
-    'The access-group status change does not restore the newest proven access set.',
-  );
-}
-
 async function assertReachableAdministratorRemains(
   database: AdminQueryDatabase,
   state: AccessSetMutationState,
   removedSourceId: string,
 ): Promise<void> {
-  if (state.accessState === null) {
-    throw conflict('The final active access group cannot be removed.');
-  }
   const remainingIds = state.activeAccessGroupSourceIds.filter(
     (id) => id !== removedSourceId,
   );
+  // Checked first and unconditionally. Deactivating the last access group ends
+  // all access, and it must be refused whether or not the published snapshot
+  // happens to be current. Gating this on a valid baseline was wrong: the
+  // baseline goes stale the moment the first of several groups is deactivated,
+  // so a second concurrent deactivation would arrive with no baseline and skip
+  // the guard entirely, taking the deployment to zero active groups.
+  if (remainingIds.length === 0) {
+    // Before any snapshot has ever been published there is no access to lose,
+    // so withdrawing the first group is ordinary first-run setup rather than a
+    // lockout. Once a generation exists, removing the last group ends all
+    // access and is refused however stale the current baseline happens to be.
+    if (state.latestCompleteSnapshot.kind !== 'none') {
+      throw conflict('The final active access group cannot be removed.');
+    }
+    return;
+  }
+  // Reachability is only projectable against a certified generation. Where
+  // there is none, refusing to remove the last group is the guarantee that can
+  // still be made, and the access sync re-establishes the baseline that makes
+  // the stronger check available again.
+  if (state.accessState === null) {
+    return;
+  }
   const remainingAdministratorIds = await loadEffectiveAdministratorUserIds(
     database,
     {
@@ -491,56 +457,6 @@ async function assertReachableAdministratorRemains(
   if (remainingAdministratorIds.length === 0) {
     throw conflict(
       'Another reachable district administrator must remain through an unchanged active access group.',
-    );
-  }
-}
-
-async function assertProtectedRecoveryFinalizationRequired(
-  database: AdminQueryDatabase,
-  state: AccessSetMutationState,
-  current: Extract<GroupSource, { purpose: 'access' }>,
-): Promise<void> {
-  // Anchor the retirement boundary to the immutable newest complete pair, not
-  // the mutable live count: an unproven third source must not erase recovery.
-  const protectedSnapshotState =
-    state.latestCompleteSnapshot.kind === 'strict' &&
-    state.latestCompleteSnapshot.state.activeAccessGroupSourceIds.length === 2
-      ? state.latestCompleteSnapshot.state
-      : null;
-  if (
-    protectedSnapshotState === null ||
-    current.email === DESIGNATED_ACCESS_GROUP_EMAIL
-  ) {
-    return;
-  }
-  const protectedSources = await database
-    .select({ id: groupSources.id, email: groupSources.email })
-    .from(groupSources)
-    .where(
-      and(
-        inArray(groupSources.id, [
-          ...protectedSnapshotState.activeAccessGroupSourceIds,
-        ]),
-        eq(groupSources.kind, 'google-group'),
-        eq(groupSources.purpose, 'access'),
-      ),
-    )
-    .orderBy(asc(groupSources.id));
-  const designatedSources = protectedSources.filter(
-    ({ email }) => email === DESIGNATED_ACCESS_GROUP_EMAIL,
-  );
-  if (
-    protectedSources.length === 2 &&
-    designatedSources.length === 1 &&
-    current.id !== designatedSources[0]?.id &&
-    protectedSnapshotState.activeAccessGroupSourceIds.includes(current.id) &&
-    sameSortedIds(
-      protectedSources.map(({ id }) => id),
-      [...protectedSnapshotState.activeAccessGroupSourceIds].sort(),
-    )
-  ) {
-    throw conflict(
-      'Recovery access can be deactivated only by the protected mobile-session finalizer.',
     );
   }
 }
@@ -953,6 +869,11 @@ function groupSourceFromRow(
     facilityId: row.facilityId,
     displayName: row.displayName,
     active: effectiveActive,
+    // Access sources carry the role they grant; every other purpose is null.
+    // The schema union rejects either one appearing on the wrong purpose, so a
+    // row that drifted from the database check constraint fails here loudly
+    // rather than presenting a group whose authority is unclear.
+    grantedRole: row.grantedRole,
     createdAt: dateIso(row.createdAt),
   };
   return GroupSourceSchema.parse(
@@ -1317,23 +1238,19 @@ async function refreshRosterSourceConfiguration(
 async function createGroupSource(
   database: AdminQueryDatabase,
   inputValue: CapabilityInput<'create-group-source'>,
-  actor: Actor,
 ): Promise<GroupSource> {
   const input = CreateGroupSourceInputSchema.parse(inputValue);
   await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
   if (input.purpose !== 'access') {
     await lockRosterConfigurationPopulations(database);
-  } else {
-    const state = await loadAccessSetMutationStateAfterLock(database, actor);
-    const emptyBootstrap =
-      state.activeAccessGroupSourceIds.length === 0 &&
-      state.latestCompleteSnapshot.kind === 'none';
-    if (state.accessState === null && !emptyBootstrap) {
-      throw conflict(
-        'New access groups cannot be added until the active set is restored to proven membership evidence.',
-      );
-    }
   }
+  // Adding an access group is deliberately not gated on the baseline being
+  // current. It used to be, and that made the configuration unchangeable:
+  // activating or retiring a group is exactly what makes the published
+  // snapshot disagree with the active set, so requiring agreement first meant
+  // the two could never be reconciled. The access sync publishes for whatever
+  // set is active and refuses any publication that would leave no reachable
+  // administrator, which is where that safety belongs.
   if (input.facilityId !== null) {
     const facility = await getFacility(database, input.facilityId);
     if (facility === null || !facility.active) {
@@ -1349,6 +1266,9 @@ async function createGroupSource(
       facilityId: input.facilityId,
       displayName: input.displayName,
       active: input.active,
+      // Only access sources carry a role, and the database check constraint
+      // holds every other purpose to null.
+      grantedRole: input.purpose === 'access' ? input.grantedRole : null,
       googleGroupId: input.kind === 'google-group' ? input.googleGroupId : null,
       email: input.kind === 'google-group' ? input.email : null,
       fixtureKey: input.kind === 'synthetic' ? input.fixtureKey : null,
@@ -1374,7 +1294,7 @@ async function updateGroupSource(
 ): Promise<GroupSource> {
   const input = UpdateGroupSourceInputSchema.parse(inputValue);
   let accessMutationState: AccessSetMutationState | null = null;
-  let accessRecovery: AccessRecoveryTransition | null = null;
+
   await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
   if (input.purpose !== 'access') {
     await lockRosterConfigurationPopulations(database);
@@ -1410,6 +1330,7 @@ async function updateGroupSource(
         facilityId: input.facilityId,
         displayName: input.displayName,
         active: input.active,
+        grantedRole: input.purpose === 'access' ? input.grantedRole : null,
         googleGroupId:
           input.kind === 'google-group' ? input.googleGroupId : null,
         email: input.kind === 'google-group' ? input.email : null,
@@ -1454,28 +1375,25 @@ async function updateGroupSource(
       'An access locator correction must create an active replacement source until a complete access snapshot proves the rotation.',
     );
   }
-  const deactivatesCurrentSource =
-    !locatorChanged && current.active && !input.active;
-  if (deactivatesCurrentSource) {
-    await assertProtectedRecoveryFinalizationRequired(
-      database,
-      accessMutationState,
-      current,
-    );
-  }
-  if (accessMutationState.accessState === null) {
-    accessRecovery = accessRecoveryTransition(
-      accessMutationState,
-      current,
-      input,
-    );
-  }
+  // Changing an access group while the published snapshot is out of date used
+  // to be restricted to "a status change that restores a previously proven
+  // set". That is the same deadlock as adding one: the snapshot goes stale
+  // precisely because the configuration changed, so requiring it to be current
+  // first left no way forward. The sync reconciles it, and refuses any
+  // publication leaving no reachable administrator.
   if (locatorChanged && current.googleGroupId === input.googleGroupId) {
     throw conflict(
       'Correcting an access email requires a new Google Group ID so the replacement has a distinct immutable identity.',
     );
   }
-  if (accessMutationState.accessState !== null && deactivatesCurrentSource) {
+  // Deactivating an access group must leave an administrator reachable through
+  // one that stays active.
+  const deactivatesCurrentSource =
+    !locatorChanged && current.active && !input.active;
+  // Unconditional. The guard itself decides how much it can prove from the
+  // state it is given; skipping it whenever the baseline was stale is what let
+  // a second concurrent deactivation reach zero active access groups.
+  if (deactivatesCurrentSource) {
     await assertReachableAdministratorRemains(
       database,
       accessMutationState,
@@ -1492,6 +1410,10 @@ async function updateGroupSource(
         facilityId: null,
         displayName: input.displayName,
         active: input.active,
+        // The replacement grants what the correction asks for. Correcting a
+        // group's address must not silently change the authority its members
+        // hold, and an access source without a role cannot be stored at all.
+        grantedRole: input.grantedRole,
         googleGroupId: input.googleGroupId,
         email: input.email,
         fixtureKey: null,
@@ -1516,25 +1438,6 @@ async function updateGroupSource(
     .returning();
   if (row === undefined) {
     throw conflict('The group source could not be updated.');
-  }
-  if (
-    accessRecovery?.kind === 'strict-snapshot' &&
-    accessRecovery.snapshotState !== undefined
-  ) {
-    const reachableAdministratorIds = await loadEffectiveAdministratorUserIds(
-      database,
-      { accessState: accessRecovery.snapshotState },
-    );
-    if (
-      actor.kind !== 'human' ||
-      !reachableAdministratorIds.includes(actor.userId)
-    ) {
-      throw new AdminCapabilityError(
-        'FORBIDDEN',
-        'The restored access set must keep the current human administrator reachable.',
-        403,
-      );
-    }
   }
   const source = groupSourceFromRow(row);
   return source;
@@ -2213,11 +2116,7 @@ export const createGroupSourceRegistration: ServerCapabilityRegistration<
       ? guard(context, null)
       : resolveExistingFacilityId(context, input.facilityId),
   async handler(input, context) {
-    const output = await createGroupSource(
-      context.transaction.database,
-      input,
-      context.invocation.actor,
-    );
+    const output = await createGroupSource(context.transaction.database, input);
     context.transaction.setAuditTarget({
       kind: 'configuration',
       id: output.id,

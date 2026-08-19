@@ -4,10 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 
-import {
-  IdempotencyPrincipalSchema,
-  SyncAccessMembershipInputSchema,
-} from '@psd-eoc/contracts';
+import { IdempotencyPrincipalSchema } from '@psd-eoc/contracts';
 import type { FullConfig } from '@playwright/test';
 import { and, desc, eq } from 'drizzle-orm';
 
@@ -36,8 +33,9 @@ import {
 import { executeOperationWithCleanup } from '../facilities/owned-database-lifecycle';
 
 const ACCESS_GROUP_ID = '10000000-0000-4000-8000-000000000110';
-const DESIGNATED_ACCESS_GROUP_EMAIL =
-  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
+// The access group these browser fixtures configure. Any address works now
+// that the group set is data; this one keeps the fixtures' expectations stable.
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 const MEMBER_USER_ID = '10000000-0000-4000-8000-000000000120';
 const MEMBER_SUBJECT = 'mock-google-subject-member';
 const runFile = promisify(execFile);
@@ -106,6 +104,7 @@ async function prepareAccessEvidence(
         purpose: 'access',
         facilityId: null,
         displayName: 'Synthetic Playwright Access',
+        grantedRole: 'admin',
         active: true,
         googleGroupId: 'synthetic-playwright-access-group',
         email: DESIGNATED_ACCESS_GROUP_EMAIL,
@@ -223,25 +222,9 @@ async function issueSyntheticAdministratorSession(
       createdAt: fixture.userCreatedAt.toISOString(),
       disabledAt: null,
     },
-    membershipSnapshot: {
-      id: fixture.snapshotId,
-      version: fixture.snapshotVersion,
-      complete: true,
-      syncStartedAt: fixture.syncStartedAt.toISOString(),
-      capturedAt: fixture.capturedAt.toISOString(),
-    },
-    membershipMember: {
-      userId: MEMBER_USER_ID,
-      googleSubject: MEMBER_SUBJECT,
-      accessGroupSourceRefs: [
-        {
-          id: ACCESS_GROUP_ID,
-          kind: 'google-group',
-          purpose: 'access',
-          facilityId: null,
-        },
-      ],
-      facilityScope: { kind: 'district' },
+    membership: {
+      groupSourceIds: [ACCESS_GROUP_ID],
+      capturedAt: fixture.capturedAt,
     },
     device: {
       platform: 'web',
@@ -257,7 +240,6 @@ async function issueSyntheticAdministratorSession(
     membershipGraceUntil: new Date(
       fixture.capturedAt.getTime() + 72 * 60 * 60 * 1_000,
     ),
-    grantBootstrapAdmin: true,
     requestId: randomUUID(),
     idempotency: {
       key: `oidc:${responseDigest}`,

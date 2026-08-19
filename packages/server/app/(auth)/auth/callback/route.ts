@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import {
   executeCapability,
   parseCapabilityEnvelopeFor,
-  type AccessGroupSourceRef,
 } from '@psd-eoc/contracts';
 import { NextResponse } from 'next/server';
 
@@ -13,14 +12,11 @@ import {
   type DatabaseConnection,
 } from '../../../../db/client';
 import {
-  checkAccessGate,
   createDrizzleAccessGateAuditSink,
-  createDrizzleAccessGateStore,
   POST_GATE_SIGN_IN_FAILED_REASON,
   type AccessGateAuditSink,
-  type AccessGateDenialReason,
-  type AccessGateStore,
 } from '../../../../lib/auth/access-gate';
+import { authorizeSignIn } from '../../../../lib/auth/sign-in-authorization';
 import {
   completeGoogleOidcCallback,
   createCompleteOidcSignInEnvelope,
@@ -54,7 +50,16 @@ const DEFAULT_SESSION_POLICY: Readonly<WebSessionPolicy> = Object.freeze({
 });
 
 interface AuthRuntime {
-  readonly accessStore: AccessGateStore;
+  /**
+   * Injected rather than a raw database so the end-to-end harness can supply a
+   * process-local authorizer without standing up PostgreSQL.
+   */
+  readonly authorize: typeof authorizeSignIn extends (
+    database: infer _D,
+    input: infer I,
+  ) => infer R
+    ? (input: I) => R
+    : never;
   readonly auditSink: AccessGateAuditSink;
   readonly sessionStore: InitialWebSessionStore;
   close(): Promise<void>;
@@ -198,7 +203,7 @@ async function createAuthRuntime(): Promise<AuthRuntime> {
     );
     const runtime = getPlaywrightAuthRuntime();
     return {
-      accessStore: runtime.accessStore,
+      authorize: runtime.authorize,
       auditSink: runtime.auditSink,
       sessionStore: runtime.sessionStore,
       close: () => Promise.resolve(),
@@ -210,7 +215,7 @@ async function createAuthRuntime(): Promise<AuthRuntime> {
   }
   const connection = createAuthDatabaseConnection();
   return {
-    accessStore: createDrizzleAccessGateStore(connection.db),
+    authorize: (input) => authorizeSignIn(connection.db, input),
     auditSink: createDrizzleAccessGateAuditSink(connection.db),
     sessionStore: createDrizzleInitialWebSessionStore(connection.db),
     close: connection.close,
@@ -269,31 +274,21 @@ function deniedResponse(
   return noStore(response);
 }
 
+/**
+ * A refusal a deployment can act on is a configuration problem; one about this
+ * person is an access problem.
+ */
 function denialPageReason(
-  reasonCode: AccessGateDenialReason,
+  refusal:
+    | 'NO_TRUSTED_GROUPS_CONFIGURED'
+    | 'NOT_IN_A_TRUSTED_GROUP'
+    | 'MEMBERSHIP_STALE'
+    | 'ACCOUNT_DISABLED',
 ): 'access' | 'configuration' {
-  return [
-    'NO_ACTIVE_ACCESS_GROUPS',
-    'ACCESS_SNAPSHOT_UNAVAILABLE',
-    'ACCESS_CONFIGURATION_NOT_SYNCED',
-    'ACCESS_EVIDENCE_INVALID',
-  ].includes(reasonCode)
+  return refusal === 'NO_TRUSTED_GROUPS_CONFIGURED' ||
+    refusal === 'MEMBERSHIP_STALE'
     ? 'configuration'
     : 'access';
-}
-
-function buildMembershipMember(
-  userId: string,
-  googleSubject: string,
-  accessGroupSourceRefs: readonly AccessGroupSourceRef[],
-  facilityScope: CompleteOidcSignInContext['authorization']['user']['facilityScope'],
-): CompleteOidcSignInContext['authorization']['membershipMember'] {
-  return Object.freeze({
-    userId,
-    googleSubject,
-    accessGroupSourceRefs,
-    facilityScope,
-  });
 }
 
 /**
@@ -348,25 +343,16 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
 
     runtime = await createAuthRuntime();
-    const access = await checkAccessGate(
-      {
-        googleSubject: callback.principal.subject,
-        email: callback.principal.email,
-        displayName: callback.principal.displayName,
-        subjectDigest: callback.principal.subjectDigest,
-        requestId,
-        checkedAt: serverTime,
-        source: 'web',
-      },
-      {
-        store: runtime.accessStore,
-        audit: runtime.auditSink,
-      },
-    );
-    if (!access.granted) {
+    const access = await runtime.authorize({
+      googleSubject: callback.principal.subject,
+      email: callback.principal.email,
+      displayName: callback.principal.displayName,
+      checkedAt: new Date(serverTime),
+    });
+    if (!access.authorized) {
       return deniedResponse(
         configuration.redirectUri,
-        denialPageReason(access.reasonCode),
+        denialPageReason(access.refusal),
         clearCookieHeader,
       );
     }
@@ -380,21 +366,10 @@ export async function GET(request: Request): Promise<NextResponse> {
     const context: CompleteOidcSignInContext = Object.freeze({
       authorization: Object.freeze({
         user: access.user,
-        membershipSnapshot: Object.freeze({
-          id: access.membership.snapshotId,
-          version: access.membership.snapshotVersion,
-          complete: true as const,
-          syncStartedAt: access.membership.syncStartedAt,
-          capturedAt: access.membership.capturedAt,
+        membership: Object.freeze({
+          groupSourceIds: access.groupSourceIds,
+          capturedAt: new Date(serverTime),
         }),
-        membershipMember: buildMembershipMember(
-          access.user.id,
-          access.user.googleSubject,
-          access.membership.accessGroupSourceRefs,
-          access.user.facilityScope,
-        ),
-        firstLoginBinding: access.firstLoginBinding,
-        grantBootstrapAdmin: access.bootstrapAdminEligible,
       }),
       cookieSink: Object.freeze({
         set(cookie: WebSessionCookie): void {

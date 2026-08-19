@@ -11,6 +11,20 @@ export const UuidSchema = z.string().uuid();
 export type Uuid = z.infer<typeof UuidSchema>;
 
 /**
+ * Roles a signed-in person can hold.
+ *
+ * This lives in the dependency-free module because two domains need it and
+ * neither can import the other: identity describes who a person is, and group
+ * describes which access group grants them a role. Defining it here keeps the
+ * single source of truth without an import cycle — `identity` re-exports it, so
+ * every existing importer is unaffected.
+ */
+export const RoleSchema = z.enum(['staff', 'admin']);
+
+/** Release-one user role inferred from {@link RoleSchema}. */
+export type Role = z.infer<typeof RoleSchema>;
+
+/**
  * Owns the canonical absolute timestamp wire representation. Domain records
  * use immutable ISO 8601 strings at package boundaries rather than `Date`
  * objects, so REST, MCP, mobile, and persistence callers share one format.

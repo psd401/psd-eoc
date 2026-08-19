@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -16,17 +16,13 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  accessGroupMembers,
   accessMembershipEvaluatedMembers,
   accessMembershipMemberGroups,
   accessMembershipMembers,
   accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   groupSources,
-  idempotencyRecords,
-  securityAuditChainAnchors,
-  securityAuditEntries,
-  sessionRevocations,
-  sessions,
   userRoles,
   users,
 } from '../../db/schema';
@@ -36,23 +32,16 @@ import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
 } from '../../app/(admin)/facilities/owned-database-lifecycle';
+import { decideAccess } from './trusted-group-access';
 import {
   createDrizzleAccessMembershipSyncStore,
   type AccessMembershipSyncReservation,
 } from './access-membership-sync';
-import { checkAccessGate, createDrizzleAccessGateStore } from './access-gate';
-import {
-  createDrizzleInitialWebSessionStore,
-  type PersistInitialWebSessionRequest,
-} from './session-cookie';
-import {
-  DESIGNATED_ACCESS_GROUP_EMAIL,
-  type EvaluatedAccessMembershipSet,
-} from './google-access-membership';
-import {
-  loadAccessConfigurationSnapshotState,
-  loadEffectiveAdministratorUserIds,
-} from './role-state';
+import {} from './session-cookie';
+import { type EvaluatedAccessMembershipSet } from './google-access-membership';
+
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
+import { loadAccessConfigurationSnapshotState } from './role-state';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -80,11 +69,7 @@ const BASELINE_SOURCE_ID = '00000000-0000-4000-8000-000000000521';
 const BASELINE_SNAPSHOT_ID = '00000000-0000-4000-8000-000000000522';
 const USER_ID = '00000000-0000-4000-8000-000000000523';
 const RECOVERY_EMAIL = 'recovery.admin@psd401.net';
-const CANDIDATE_SUBJECT = 'synthetic-existing-transition-subject';
 const TRANSITION_EMAIL = 'initial.mobile@psd401.net';
-const TRANSITION_EMAIL_DIGEST = createHash('sha256')
-  .update(TRANSITION_EMAIL, 'utf8')
-  .digest('hex');
 const BASELINE_TIME = new Date('2026-08-17T11:00:00.000Z');
 const SYNC_TIME = '2026-08-17T12:00:00.000Z';
 const PROVIDER_GROUP_ID = '01exactEngineering';
@@ -241,6 +226,7 @@ async function seedStrictBaseline(
       purpose: 'access',
       facilityId: null,
       displayName: 'Retained recovery access',
+      grantedRole: 'admin',
       active: true,
       googleGroupId: 'retained_recovery_access',
       email: 'retained-recovery@psd401.net',
@@ -332,921 +318,341 @@ describeWithDatabase('access-membership atomic database publication', () => {
 
   afterEach(async () => cleanup());
 
-  test('stages exact provider evidence while preserving one reachable recovery administrator', async () => {
-    const database = databaseConnection().db;
-    const store = createDrizzleAccessMembershipSyncStore(database, {
-      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-    });
-    const idempotencyKey = 'access-sync:database-integration-0001';
-    const requestDigest = 'd'.repeat(64);
-    const reservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey,
-      requestDigest,
-      startedAt: SYNC_TIME,
-    });
-    expect(reservation.kind).toBe('reserved');
-    if (reservation.kind !== 'reserved') {
-      throw new Error('Expected a new access-sync reservation.');
-    }
-    const memberEmails = Object.freeze([
-      TRANSITION_EMAIL,
-      'other.staff@psd401.net',
-    ]);
-    const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
-      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-      googleGroupId: PROVIDER_GROUP_ID,
-      memberEmails,
-      membershipDigest: digest([
-        DESIGNATED_ACCESS_GROUP_EMAIL,
-        PROVIDER_GROUP_ID,
-        ...memberEmails,
-      ]),
-      providerGroupIdDigest: digest([PROVIDER_GROUP_ID]),
+  /** Builds a self-consistent evaluation for the given configured groups. */
+  function evaluationFor(
+    groups: readonly Readonly<{
+      groupSourceId: string;
+      groupEmail: string;
+      googleGroupId: string;
+      grantedRole: 'staff' | 'admin';
+      memberEmails: readonly string[];
+    }>[],
+  ): EvaluatedAccessMembershipSet {
+    const ordered = [...groups].sort((left, right) =>
+      left.groupSourceId.localeCompare(right.groupSourceId),
+    );
+    return Object.freeze({
+      groups: Object.freeze(
+        ordered.map((group) =>
+          Object.freeze({
+            ...group,
+            memberEmails: Object.freeze([...group.memberEmails].sort()),
+          }),
+        ),
+      ),
+      membershipDigest: digest(
+        ordered.flatMap((group) => [
+          group.groupSourceId,
+          group.groupEmail,
+          group.googleGroupId,
+          group.grantedRole,
+          ...[...group.memberEmails].sort(),
+        ]),
+      ),
+      providerGroupIdDigest: digest(
+        ordered.map(({ googleGroupId }) => googleGroupId),
+      ),
       syncStartedAt: SYNC_TIME,
       capturedAt: SYNC_TIME,
+    }) as EvaluatedAccessMembershipSet;
+  }
+
+  async function reserve(
+    store: ReturnType<typeof createDrizzleAccessMembershipSyncStore>,
+    key: string,
+  ): Promise<AccessMembershipSyncReservation> {
+    return store.reserve({
+      actor: { kind: 'system', serviceId: 'access-membership-sync' },
+      idempotencyKey: key,
+      requestDigest: textDigest(key),
+      startedAt: SYNC_TIME,
     });
-    const result = await store.stage(reservation.id, evaluation);
+  }
+
+  test('publishes a baseline covering every active group and keeps sign-in valid', async () => {
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const reservation = await reserve(store, 'access-sync:publish-0001');
+    if (reservation.kind !== 'reserved') throw new Error('expected reserved');
+
+    const result = await store.publish(
+      reservation.id,
+      evaluationFor([
+        {
+          groupSourceId: BASELINE_SOURCE_ID,
+          groupEmail: 'retained-recovery@psd401.net',
+          googleGroupId: 'retained_recovery_access',
+          grantedRole: 'admin',
+          memberEmails: [RECOVERY_EMAIL],
+        },
+      ]),
+    );
+
     expect(result).toMatchObject({
       snapshotVersion: 2,
-      activeAccessGroupCount: 2,
-      evaluatedMembershipCount: 2,
-      membershipDigest: evaluation.membershipDigest,
-      providerGroupIdDigest: evaluation.providerGroupIdDigest,
+      activeAccessGroupCount: 1,
+      evaluatedMembershipCount: 1,
       publication: 'created',
     });
 
-    const accessState = await loadAccessConfigurationSnapshotState(database);
-    expect(accessState).toEqual({
-      snapshotId: result.snapshotId,
-      snapshotVersion: 2,
-      activeAccessGroupSourceIds: expect.any(Array),
-    });
-    expect(accessState?.activeAccessGroupSourceIds).toEqual(
-      [BASELINE_SOURCE_ID, result.designatedSourceId].sort(),
-    );
+    // Membership is what sign-in reads. The group now holds its member and
+    // carries the instant it was read.
+    expect(
+      await database
+        .select({ email: accessGroupMembers.email })
+        .from(accessGroupMembers)
+        .where(eq(accessGroupMembers.groupSourceId, BASELINE_SOURCE_ID)),
+    ).toEqual([{ email: RECOVERY_EMAIL }]);
+    expect(
+      await decideAccess(database, {
+        email: RECOVERY_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true, roles: ['admin'] });
+  });
 
-    const [designatedSource] = await database
-      .select()
-      .from(groupSources)
-      .where(eq(groupSources.id, result.designatedSourceId));
-    expect(designatedSource).toMatchObject({
+  test('a group added after the first snapshot becomes a valid baseline', async () => {
+    // The behaviour the old design made impossible. Activating a second group
+    // left the snapshot disagreeing with the active set, and publication was
+    // refused for exactly that disagreement, so the two could never reconcile.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const secondSourceId = '00000000-0000-4000-8000-000000000531';
+    await database.insert(groupSources).values({
+      id: secondSourceId,
       kind: 'google-group',
       purpose: 'access',
       facilityId: null,
+      displayName: 'District staff access',
+      grantedRole: 'admin',
       active: true,
       googleGroupId: PROVIDER_GROUP_ID,
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
       fixtureKey: null,
-    });
-    const [recoverySource] = await database
-      .select({ active: groupSources.active })
-      .from(groupSources)
-      .where(eq(groupSources.id, BASELINE_SOURCE_ID));
-    expect(recoverySource).toEqual({ active: true });
-    const generationRows = await database
-      .select()
-      .from(accessMembershipSnapshotGroups)
-      .where(eq(accessMembershipSnapshotGroups.snapshotId, result.snapshotId));
-    expect(generationRows).toHaveLength(4);
-    expect(
-      generationRows
-        .filter(({ completionKind }) => completionKind === 'expected')
-        .map(({ groupSourceId }) => groupSourceId)
-        .sort(),
-    ).toEqual(
-      generationRows
-        .filter(({ completionKind }) => completionKind === 'completed')
-        .map(({ groupSourceId }) => groupSourceId)
-        .sort(),
-    );
-    expect(
-      new Set(generationRows.map(({ groupSourceId }) => groupSourceId)),
-    ).toEqual(new Set([BASELINE_SOURCE_ID, result.designatedSourceId]));
-    const evaluatedRows = await database
-      .select({
-        email: accessMembershipEvaluatedMembers.email,
-        groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
-      })
-      .from(accessMembershipEvaluatedMembers)
-      .where(eq(accessMembershipEvaluatedMembers.snapshotId, result.snapshotId))
-      .orderBy(
-        asc(accessMembershipEvaluatedMembers.groupSourceId),
-        asc(accessMembershipEvaluatedMembers.email),
-      );
-    expect(evaluatedRows).toEqual(
-      [
-        {
-          email: TRANSITION_EMAIL,
-          groupSourceId: result.designatedSourceId,
-        },
-        {
-          email: 'other.staff@psd401.net',
-          groupSourceId: result.designatedSourceId,
-        },
-      ].sort((left, right) =>
-        `${left.groupSourceId}:${left.email}`.localeCompare(
-          `${right.groupSourceId}:${right.email}`,
-        ),
-      ),
-    );
-    expect(
-      await database
-        .select()
-        .from(accessMembershipMembers)
-        .where(eq(accessMembershipMembers.snapshotId, result.snapshotId)),
-    ).toEqual([
-      {
-        snapshotId: result.snapshotId,
-        userId: USER_ID,
-        googleSubject: 'synthetic-test-google-subject',
-        facilityScopeKind: 'district',
-      },
-    ]);
-    expect(
-      await database
-        .select({
-          userId: accessMembershipMemberGroups.userId,
-          groupSourceId: accessMembershipMemberGroups.groupSourceId,
-        })
-        .from(accessMembershipMemberGroups)
-        .where(eq(accessMembershipMemberGroups.snapshotId, result.snapshotId)),
-    ).toEqual([{ userId: USER_ID, groupSourceId: BASELINE_SOURCE_ID }]);
-    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([
-      USER_ID,
-    ]);
-    const mobileCandidate = await checkAccessGate(
-      {
-        googleSubject: CANDIDATE_SUBJECT,
-        email: TRANSITION_EMAIL,
-        displayName: 'Current independently verified Google profile',
-        subjectDigest: textDigest(CANDIDATE_SUBJECT),
-        requestId: randomUUID(),
-        checkedAt: SYNC_TIME,
-        source: 'mobile',
-      },
-      {
-        store: createDrizzleAccessGateStore(database),
-        initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-        audit: {
-          async append(): Promise<never> {
-            throw new Error(
-              'The exact durable mobile candidate must not be denied.',
-            );
-          },
-        },
-      },
-    );
-    expect(mobileCandidate).toMatchObject({
-      granted: true,
-      user: { googleSubject: CANDIDATE_SUBJECT },
-      firstLoginBinding: {
-        userDisposition: 'create',
-        sourceSnapshotId: result.snapshotId,
-        sourceSnapshotVersion: result.snapshotVersion,
-        normalizedEmail: TRANSITION_EMAIL,
-      },
-      bootstrapAdminEligible: true,
-    });
-    if (mobileCandidate.granted) {
-      expect(mobileCandidate.user.id).not.toBe(USER_ID);
-      expect(mobileCandidate.membership.accessGroupSourceRefs).toEqual([
-        {
-          id: result.designatedSourceId,
-          kind: 'google-group',
-          purpose: 'access',
-          facilityId: null,
-        },
-      ]);
-    }
-    expect(
-      await database
-        .select({ id: users.id })
-        .from(users)
-        .orderBy(asc(users.id)),
-    ).toEqual([{ id: USER_ID }]);
-    expect(
-      await database
-        .select()
-        .from(accessMembershipSnapshots)
-        .where(eq(accessMembershipSnapshots.id, BASELINE_SNAPSHOT_ID)),
-    ).toHaveLength(1);
-    const [idempotency] = await database
-      .select()
-      .from(idempotencyRecords)
-      .where(
-        and(
-          eq(idempotencyRecords.capabilityId, 'sync-access-membership'),
-          eq(idempotencyRecords.key, idempotencyKey),
-        ),
-      );
-    expect(idempotency).toMatchObject({
-      status: 'completed',
-      resultReference: `access-membership-snapshot:${result.snapshotId}`,
-    });
-
-    const replay: AccessMembershipSyncReservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey,
-      requestDigest,
-      startedAt: '2026-08-17T12:01:00.000Z',
-    });
-    expect(replay).toEqual({ kind: 'replay', result });
-
-    if (
-      !mobileCandidate.granted ||
-      mobileCandidate.firstLoginBinding === null
-    ) {
-      throw new Error('Expected a protected first-login binding.');
-    }
-    const mobileCreatedAt = new Date('2026-08-17T12:01:00.000Z');
-    const oidcResponseDigest = textDigest(
-      'issue-234-synthetic-mobile-oidc-response',
-    );
-    const oidcPrincipal = Object.freeze({
-      kind: 'oidc-callback' as const,
-      subjectDigest: textDigest(mobileCandidate.user.googleSubject),
-      responseDigest: oidcResponseDigest,
-    });
-    const mobilePersistenceRequest: PersistInitialWebSessionRequest =
-      Object.freeze({
-        user: mobileCandidate.user,
-        membershipSnapshot: Object.freeze({
-          id: mobileCandidate.membership.snapshotId,
-          version: mobileCandidate.membership.snapshotVersion,
-          complete: true as const,
-          syncStartedAt: mobileCandidate.membership.syncStartedAt,
-          capturedAt: mobileCandidate.membership.capturedAt,
-        }),
-        membershipMember: Object.freeze({
-          userId: mobileCandidate.user.id,
-          googleSubject: mobileCandidate.user.googleSubject,
-          accessGroupSourceRefs:
-            mobileCandidate.membership.accessGroupSourceRefs,
-          facilityScope: mobileCandidate.user.facilityScope,
-        }),
-        firstLoginBinding: mobileCandidate.firstLoginBinding,
-        device: Object.freeze({
-          platform: 'ios' as const,
-          unlockMethod: 'biometric' as const,
-          installationId: 'ios.issue-234.synthetic-transition-device',
-        }),
-        credentialDigest: textDigest(
-          'issue-234-synthetic-mobile-session-credential',
-        ),
-        createdAt: mobileCreatedAt,
-        expiresAt: new Date(mobileCreatedAt.getTime() + 3 * 60 * 60 * 1_000),
-        membershipValidUntil: new Date(
-          mobileCreatedAt.getTime() + 60 * 60 * 1_000,
-        ),
-        membershipGraceUntil: new Date(
-          mobileCreatedAt.getTime() + 2 * 60 * 60 * 1_000,
-        ),
-        grantBootstrapAdmin: mobileCandidate.bootstrapAdminEligible,
-        requestId: randomUUID(),
-        idempotency: Object.freeze({
-          key: `oidc:${oidcResponseDigest}`,
-          principal: oidcPrincipal,
-          principalDigest: digest(oidcPrincipal),
-          requestDigest: textDigest(
-            'issue-234-synthetic-mobile-persistence-request',
-          ),
-        }),
-      });
-    const mobileResult = await createDrizzleInitialWebSessionStore(database, {
-      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-    }).persist(mobilePersistenceRequest);
-    expect(mobileResult).toMatchObject({
-      user: {
-        id: mobileCandidate.user.id,
-        googleSubject: CANDIDATE_SUBJECT,
-        email: TRANSITION_EMAIL,
-        roles: ['admin'],
-      },
-      session: {
-        userId: mobileCandidate.user.id,
-        authorization: {
-          membershipSnapshotId:
-            mobileCandidate.firstLoginBinding.successorSnapshotId,
-        },
-        revokedAt: null,
-      },
-      deviceEnrollment: {
-        userId: mobileCandidate.user.id,
-        platform: 'ios',
-        unlockMethod: 'biometric',
-        revokedAt: null,
-      },
-    });
-    expect(mobileCandidate.user.id).not.toBe(USER_ID);
-    expect(mobileResult.session.authorization.membershipSnapshotId).toBe(
-      mobileCandidate.firstLoginBinding.successorSnapshotId,
-    );
-    expect(
-      await loadEffectiveAdministratorUserIds(database, {
-        eligibleAccessGroupSourceIds: [result.designatedSourceId],
-      }),
-    ).toEqual([mobileCandidate.user.id]);
-    expect(
-      await loadEffectiveAdministratorUserIds(database, {
-        eligibleAccessGroupSourceIds: [BASELINE_SOURCE_ID],
-      }),
-    ).toEqual([USER_ID]);
-
-    const repeatedReservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-current-transition-0001',
-      requestDigest: 'e'.repeat(64),
-      startedAt: '2026-08-17T12:02:00.000Z',
-    });
-    if (repeatedReservation.kind !== 'reserved') {
-      throw new Error('Expected a fresh transition replay reservation.');
-    }
-    const repeatedStage = await store.stage(repeatedReservation.id, {
-      ...evaluation,
-      syncStartedAt: '2026-08-17T12:02:00.000Z',
-      capturedAt: '2026-08-17T12:02:00.000Z',
-    });
-    expect(repeatedStage).toMatchObject({
-      phase: 'stage',
-      snapshotId: mobileResult.session.authorization.membershipSnapshotId,
-      snapshotVersion:
-        mobileCandidate.firstLoginBinding.successorSnapshotVersion,
-      designatedSourceId: result.designatedSourceId,
-      activeAccessGroupCount: 2,
-      evaluatedMembershipCount: evaluation.memberEmails.length,
-      membershipDigest: evaluation.membershipDigest,
-      providerGroupIdDigest: evaluation.providerGroupIdDigest,
-      proofKind: 'initial-selector-match',
-      auditEntryHash: null,
-      publication: 'already-current',
-    });
-    expect(
-      await database
-        .select({
-          userId: accessMembershipMemberGroups.userId,
-          groupSourceId: accessMembershipMemberGroups.groupSourceId,
-        })
-        .from(accessMembershipMemberGroups)
-        .where(
-          eq(accessMembershipMemberGroups.snapshotId, repeatedStage.snapshotId),
-        )
-        .orderBy(
-          asc(accessMembershipMemberGroups.userId),
-          asc(accessMembershipMemberGroups.groupSourceId),
-        ),
-    ).toEqual(
-      [
-        {
-          userId: USER_ID,
-          groupSourceId: BASELINE_SOURCE_ID,
-        },
-        {
-          userId: mobileCandidate.user.id,
-          groupSourceId: result.designatedSourceId,
-        },
-      ].sort((left, right) =>
-        `${left.userId}:${left.groupSourceId}`.localeCompare(
-          `${right.userId}:${right.groupSourceId}`,
-        ),
-      ),
-    );
-
-    const invalidFinalizationReservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-invalid-finalization-0001',
-      requestDigest: '1'.repeat(64),
-      startedAt: '2026-08-17T12:03:00.000Z',
-    });
-    if (invalidFinalizationReservation.kind !== 'reserved') {
-      throw new Error('Expected a tampered finalization reservation.');
-    }
-    await expect(
-      store.finalize(invalidFinalizationReservation.id, {
-        mobileSessionId: mobileResult.session.id,
-        membershipSnapshotId: result.snapshotId,
-        requestId: randomUUID(),
-        completedAt: '2026-08-17T12:03:00.000Z',
-      }),
-    ).rejects.toMatchObject({ code: 'FINALIZATION_BASELINE_INVALID' });
-    await store.failReservation(
-      invalidFinalizationReservation.id,
-      'FINALIZATION_BASELINE_INVALID',
-      '2026-08-17T12:03:00.000Z',
-    );
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
-    ).toEqual([{ active: true }]);
-
-    const finalIdempotencyKey = 'access-sync:database-valid-finalization-0001';
-    const finalRequestDigest = '2'.repeat(64);
-    const finalRequestId = randomUUID();
-    const finalReservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: finalIdempotencyKey,
-      requestDigest: finalRequestDigest,
-      startedAt: '2026-08-17T12:04:00.000Z',
-    });
-    if (finalReservation.kind !== 'reserved') {
-      throw new Error('Expected a protected finalization reservation.');
-    }
-    const finalResult = await store.finalize(finalReservation.id, {
-      mobileSessionId: mobileResult.session.id,
-      membershipSnapshotId:
-        mobileResult.session.authorization.membershipSnapshotId,
-      requestId: finalRequestId,
-      completedAt: '2026-08-17T12:04:00.000Z',
-    });
-    if (finalResult.phase !== 'finalize') {
-      throw new Error('Expected a protected finalization result.');
-    }
-    expect(finalResult).toMatchObject({
-      phase: 'finalize',
-      snapshotVersion:
-        mobileCandidate.firstLoginBinding.successorSnapshotVersion + 1,
-      designatedSourceId: result.designatedSourceId,
-      activeAccessGroupCount: 1,
-      evaluatedMembershipCount: evaluation.memberEmails.length,
-      membershipDigest: evaluation.membershipDigest,
-      providerGroupIdDigest: evaluation.providerGroupIdDigest,
-      proofKind: 'durable-ios-session',
-      auditEntryHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      publication: 'created',
-    });
-    expect(finalResult.snapshotId).not.toBe(repeatedStage.snapshotId);
-    expect(
-      await database
-        .select({ id: groupSources.id, active: groupSources.active })
-        .from(groupSources)
-        .where(
-          and(
-            eq(groupSources.purpose, 'access'),
-            eq(groupSources.active, true),
-          ),
-        ),
-    ).toEqual([{ id: result.designatedSourceId, active: true }]);
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
-    ).toEqual([{ active: false }]);
-    expect(
-      await database
-        .select({ id: users.id, disabledAt: users.disabledAt })
-        .from(users)
-        .where(eq(users.id, USER_ID)),
-    ).toEqual([{ id: USER_ID, disabledAt: null }]);
-    expect(
-      await database
-        .select({ role: userRoles.role })
-        .from(userRoles)
-        .where(eq(userRoles.userId, USER_ID)),
-    ).toEqual([{ role: 'admin' }]);
-    expect(
-      await database
-        .select({ id: sessions.id, revokedAt: sessions.revokedAt })
-        .from(sessions)
-        .where(eq(sessions.id, mobileResult.session.id)),
-    ).toEqual([{ id: mobileResult.session.id, revokedAt: null }]);
-    expect(
-      await database
-        .select({ id: sessionRevocations.id })
-        .from(sessionRevocations)
-        .where(eq(sessionRevocations.sessionId, mobileResult.session.id)),
-    ).toEqual([]);
-    expect(
-      await database
-        .select({
-          snapshotId: accessMembershipMembers.snapshotId,
-          userId: accessMembershipMembers.userId,
-        })
-        .from(accessMembershipMembers)
-        .where(eq(accessMembershipMembers.snapshotId, finalResult.snapshotId)),
-    ).toEqual([
-      {
-        snapshotId: finalResult.snapshotId,
-        userId: mobileCandidate.user.id,
-      },
-    ]);
-    const [finalAudit] = await database
-      .select()
-      .from(securityAuditEntries)
-      .where(eq(securityAuditEntries.requestId, finalRequestId));
-    if (finalAudit === undefined) {
-      throw new Error('Expected a protected finalization audit entry.');
-    }
-    expect(finalAudit).toMatchObject({
-      action: 'sync-access-membership',
-      outcome: 'success',
-      source: 'scheduled-job',
-      targetKind: 'configuration',
-      targetId: finalResult.snapshotId,
-      entryHash: finalResult.auditEntryHash,
-    });
-    expect(
-      await database
-        .select({
-          sequence: securityAuditChainAnchors.sequence,
-          entryHash: securityAuditChainAnchors.entryHash,
-        })
-        .from(securityAuditChainAnchors)
-        .where(eq(securityAuditChainAnchors.sequence, finalAudit.sequence)),
-    ).toEqual([
-      {
-        sequence: finalAudit.sequence,
-        entryHash: finalResult.auditEntryHash,
-      },
-    ]);
-
-    const finalReplay = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: finalIdempotencyKey,
-      requestDigest: finalRequestDigest,
-      startedAt: '2026-08-17T12:05:00.000Z',
-    });
-    expect(finalReplay).toEqual({ kind: 'replay', result: finalResult });
-    expect(
-      await database
-        .select({ id: users.id })
-        .from(users)
-        .orderBy(asc(users.id)),
-    ).toEqual(
-      [{ id: USER_ID }, { id: mobileCandidate.user.id }].sort((left, right) =>
-        left.id.localeCompare(right.id),
-      ),
-    );
-  });
-
-  test('rolls provider-source activation back when the protected selector is absent', async () => {
-    const database = databaseConnection().db;
-    const store = createDrizzleAccessMembershipSyncStore(database, {
-      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-    });
-    const reservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-selector-absent-0001',
-      requestDigest: 'a'.repeat(64),
-      startedAt: SYNC_TIME,
-    });
-    expect(reservation.kind).toBe('reserved');
-    if (reservation.kind !== 'reserved') {
-      throw new Error('Expected a selector-absence test reservation.');
-    }
-    const memberEmails = Object.freeze(['other.staff@psd401.net']);
-    const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
-      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-      googleGroupId: PROVIDER_GROUP_ID,
-      memberEmails,
-      membershipDigest: digest([
-        DESIGNATED_ACCESS_GROUP_EMAIL,
-        PROVIDER_GROUP_ID,
-        ...memberEmails,
-      ]),
-      providerGroupIdDigest: digest([PROVIDER_GROUP_ID]),
-      syncStartedAt: SYNC_TIME,
-      capturedAt: SYNC_TIME,
-    });
-
-    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
-      {
-        code: 'INITIAL_TRANSITION_SELECTOR_NOT_DIRECT_MEMBER',
-      },
-    );
-    expect(
-      await database
-        .select({ id: groupSources.id })
-        .from(groupSources)
-        .where(eq(groupSources.googleGroupId, PROVIDER_GROUP_ID)),
-    ).toEqual([]);
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
-    ).toEqual([{ active: true }]);
-  });
-
-  test('stages independently of unrelated durable evaluated users', async () => {
-    const database = databaseConnection().db;
-    const secondCandidateId = randomUUID();
-    await database.insert(users).values({
-      id: secondCandidateId,
-      googleSubject: 'synthetic-second-designated-subject',
-      email: 'other.staff@psd401.net',
-      displayName: 'Synthetic Second Designated Candidate',
-      facilityScopeKind: 'district',
       createdAt: BASELINE_TIME,
-      disabledAt: null,
-    });
-    const store = createDrizzleAccessMembershipSyncStore(database, {
-      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-    });
-    const reservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-unrelated-user-0001',
-      requestDigest: 'b'.repeat(64),
-      startedAt: SYNC_TIME,
-    });
-    expect(reservation.kind).toBe('reserved');
-    if (reservation.kind !== 'reserved') {
-      throw new Error('Expected an unrelated-user test reservation.');
-    }
-    const memberEmails = Object.freeze([
-      TRANSITION_EMAIL,
-      'other.staff@psd401.net',
-    ]);
-    const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
-      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-      googleGroupId: PROVIDER_GROUP_ID,
-      memberEmails,
-      membershipDigest: digest([
-        DESIGNATED_ACCESS_GROUP_EMAIL,
-        PROVIDER_GROUP_ID,
-        ...memberEmails,
-      ]),
-      providerGroupIdDigest: digest([PROVIDER_GROUP_ID]),
-      syncStartedAt: SYNC_TIME,
-      capturedAt: SYNC_TIME,
     });
 
-    const result = await store.stage(reservation.id, evaluation);
-    expect(result).toMatchObject({
-      phase: 'stage',
-      activeAccessGroupCount: 2,
-      proofKind: 'initial-selector-match',
-    });
+    // The second group has no membership yet, so nobody in it has access.
     expect(
-      await database
-        .select({ id: users.id, email: users.email })
-        .from(users)
-        .orderBy(asc(users.id)),
-    ).toEqual(
+      await decideAccess(database, {
+        email: TRANSITION_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: false });
+
+    const configured = await store.readConfiguredAccessGroups();
+    expect(configured.map(({ email }) => email).sort()).toEqual(
+      ['retained-recovery@psd401.net', DESIGNATED_ACCESS_GROUP_EMAIL].sort(),
+    );
+
+    const reservation = await reserve(store, 'access-sync:publish-0002');
+    if (reservation.kind !== 'reserved') throw new Error('expected reserved');
+    const result = await store.publish(
+      reservation.id,
+      evaluationFor([
+        {
+          groupSourceId: BASELINE_SOURCE_ID,
+          groupEmail: 'retained-recovery@psd401.net',
+          googleGroupId: 'retained_recovery_access',
+          grantedRole: 'admin',
+          memberEmails: [RECOVERY_EMAIL],
+        },
+        {
+          groupSourceId: secondSourceId,
+          groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+          googleGroupId: PROVIDER_GROUP_ID,
+          grantedRole: 'staff',
+          memberEmails: [TRANSITION_EMAIL],
+        },
+      ]),
+    );
+    expect(result.activeAccessGroupCount).toBe(2);
+    expect(result.evaluatedMembershipCount).toBe(2);
+
+    // Reconciled: the snapshot now covers both groups.
+    // Both groups now carry membership, and a person in only the second one
+    // has access. Requiring membership in every group is what denied them.
+    expect(
+      await decideAccess(database, {
+        email: TRANSITION_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true, roles: ['staff'] });
+    expect(
+      await decideAccess(database, {
+        email: RECOVERY_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true, roles: ['admin'] });
+
+    // A person in only the second group is evaluated for it. Requiring
+    // membership in every group is what previously denied them.
+    const members = await database
+      .select({
+        email: accessGroupMembers.email,
+        groupSourceId: accessGroupMembers.groupSourceId,
+      })
+      .from(accessGroupMembers)
+      .orderBy(asc(accessGroupMembers.email));
+    expect(members).toEqual(
       [
-        { id: USER_ID, email: RECOVERY_EMAIL },
-        { id: secondCandidateId, email: 'other.staff@psd401.net' },
-      ].sort((left, right) => left.id.localeCompare(right.id)),
+        { email: TRANSITION_EMAIL, groupSourceId: secondSourceId },
+        { email: RECOVERY_EMAIL, groupSourceId: BASELINE_SOURCE_ID },
+      ].sort((left, right) => left.email.localeCompare(right.email)),
     );
   });
 
-  test('rolls provider-source activation back with zero bound recovery candidates', async () => {
+  test('a group removed after the first snapshot becomes a valid baseline', async () => {
+    // The other half, and the one this deployment actually needed: retiring a
+    // group had no implementation at all.
     const database = databaseConnection().db;
-    const emptyRecoverySnapshotId = randomUUID();
-    await database.transaction(async (transaction) => {
-      await transaction.insert(accessMembershipSnapshots).values({
-        id: emptyRecoverySnapshotId,
-        version: 2,
-        complete: true,
-        syncStartedAt: new Date('2026-08-17T11:30:00.000Z'),
-        capturedAt: new Date('2026-08-17T11:30:00.000Z'),
-      });
-      await transaction.insert(accessMembershipSnapshotGroups).values([
-        {
-          snapshotId: emptyRecoverySnapshotId,
-          groupSourceId: BASELINE_SOURCE_ID,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-          completionKind: 'expected',
-        },
-        {
-          snapshotId: emptyRecoverySnapshotId,
-          groupSourceId: BASELINE_SOURCE_ID,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-          completionKind: 'completed',
-        },
-      ]);
-    });
-    const store = createDrizzleAccessMembershipSyncStore(database, {
-      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-    });
-    const reservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-zero-recovery-0001',
-      requestDigest: 'e'.repeat(64),
-      startedAt: SYNC_TIME,
-    });
-    expect(reservation.kind).toBe('reserved');
-    if (reservation.kind !== 'reserved') {
-      throw new Error('Expected a zero-recovery test reservation.');
-    }
-    const memberEmails = Object.freeze([TRANSITION_EMAIL]);
-    const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
-      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-      googleGroupId: PROVIDER_GROUP_ID,
-      memberEmails,
-      membershipDigest: digest([
-        DESIGNATED_ACCESS_GROUP_EMAIL,
-        PROVIDER_GROUP_ID,
-        ...memberEmails,
-      ]),
-      providerGroupIdDigest: digest([PROVIDER_GROUP_ID]),
-      syncStartedAt: SYNC_TIME,
-      capturedAt: SYNC_TIME,
-    });
-
-    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
-      { code: 'RECOVERY_TRANSITION_BINDING_INVALID' },
-    );
-    expect(
-      await database
-        .select({ id: groupSources.id })
-        .from(groupSources)
-        .where(eq(groupSources.googleGroupId, PROVIDER_GROUP_ID)),
-    ).toEqual([]);
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
-    ).toEqual([{ active: true }]);
-  });
-
-  test('rolls provider-source activation back with ambiguous recovery candidates', async () => {
-    const database = databaseConnection().db;
-    const secondUserId = randomUUID();
-    const ambiguousRecoverySnapshotId = randomUUID();
-    await database.transaction(async (transaction) => {
-      await transaction.insert(users).values({
-        id: secondUserId,
-        googleSubject: 'synthetic-second-recovery-subject',
-        email: 'second.recovery@psd401.net',
-        displayName: 'Synthetic Second Recovery Administrator',
-        facilityScopeKind: 'district',
-        createdAt: BASELINE_TIME,
-        disabledAt: null,
-      });
-      await transaction.insert(userRoles).values({
-        userId: secondUserId,
-        role: 'admin',
-      });
-      await transaction.insert(accessMembershipSnapshots).values({
-        id: ambiguousRecoverySnapshotId,
-        version: 2,
-        complete: true,
-        syncStartedAt: new Date('2026-08-17T11:30:00.000Z'),
-        capturedAt: new Date('2026-08-17T11:30:00.000Z'),
-      });
-      await transaction.insert(accessMembershipSnapshotGroups).values([
-        {
-          snapshotId: ambiguousRecoverySnapshotId,
-          groupSourceId: BASELINE_SOURCE_ID,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-          completionKind: 'expected',
-        },
-        {
-          snapshotId: ambiguousRecoverySnapshotId,
-          groupSourceId: BASELINE_SOURCE_ID,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-          completionKind: 'completed',
-        },
-      ]);
-      await transaction.insert(accessMembershipMembers).values([
-        {
-          snapshotId: ambiguousRecoverySnapshotId,
-          userId: USER_ID,
-          googleSubject: 'synthetic-test-google-subject',
-          facilityScopeKind: 'district',
-        },
-        {
-          snapshotId: ambiguousRecoverySnapshotId,
-          userId: secondUserId,
-          googleSubject: 'synthetic-second-recovery-subject',
-          facilityScopeKind: 'district',
-        },
-      ]);
-      await transaction.insert(accessMembershipMemberGroups).values([
-        {
-          snapshotId: ambiguousRecoverySnapshotId,
-          userId: USER_ID,
-          groupSourceId: BASELINE_SOURCE_ID,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-        },
-        {
-          snapshotId: ambiguousRecoverySnapshotId,
-          userId: secondUserId,
-          groupSourceId: BASELINE_SOURCE_ID,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-        },
-      ]);
-    });
-    const store = createDrizzleAccessMembershipSyncStore(database, {
-      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-    });
-    const reservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-ambiguous-recovery-0001',
-      requestDigest: 'f'.repeat(64),
-      startedAt: SYNC_TIME,
-    });
-    expect(reservation.kind).toBe('reserved');
-    if (reservation.kind !== 'reserved') {
-      throw new Error('Expected an ambiguous-recovery test reservation.');
-    }
-    const memberEmails = Object.freeze([TRANSITION_EMAIL]);
-    const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
-      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-      googleGroupId: PROVIDER_GROUP_ID,
-      memberEmails,
-      membershipDigest: digest([
-        DESIGNATED_ACCESS_GROUP_EMAIL,
-        PROVIDER_GROUP_ID,
-        ...memberEmails,
-      ]),
-      providerGroupIdDigest: digest([PROVIDER_GROUP_ID]),
-      syncStartedAt: SYNC_TIME,
-      capturedAt: SYNC_TIME,
-    });
-
-    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
-      { code: 'RECOVERY_TRANSITION_BINDING_INVALID' },
-    );
-    expect(
-      await database
-        .select({ id: groupSources.id })
-        .from(groupSources)
-        .where(eq(groupSources.googleGroupId, PROVIDER_GROUP_ID)),
-    ).toEqual([]);
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
-    ).toEqual([{ active: true }]);
-  });
-
-  test('rolls staged source activation back when the successor inventory cannot be published', async () => {
-    const database = databaseConnection().db;
-    const historicalSources = Array.from({ length: 99 }, (_, index) => ({
-      id: randomUUID(),
-      kind: 'google-group' as const,
-      purpose: 'access' as const,
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const secondSourceId = '00000000-0000-4000-8000-000000000532';
+    await database.insert(groupSources).values({
+      id: secondSourceId,
+      kind: 'google-group',
+      purpose: 'access',
       facilityId: null,
-      displayName: `Synthetic inactive history ${index}`,
+      displayName: 'Retiring fixture access',
+      grantedRole: 'admin',
       active: false,
-      googleGroupId: `synthetic_inactive_history_${index}`,
-      email: `synthetic.inactive.${index}@psd401.net`,
+      googleGroupId: 'retiring_fixture',
+      email: 'retiring@psd401.net',
       fixtureKey: null,
       createdAt: BASELINE_TIME,
-    }));
-    await database.insert(groupSources).values(historicalSources);
-    const store = createDrizzleAccessMembershipSyncStore(database, {
-      initialMobileTransitionEmailDigest: TRANSITION_EMAIL_DIGEST,
-    });
-    const reservation = await store.reserve({
-      actor: { kind: 'system', serviceId: 'access-membership-sync' },
-      idempotencyKey: 'access-sync:database-rollback-0001',
-      requestDigest: 'c'.repeat(64),
-      startedAt: SYNC_TIME,
-    });
-    expect(reservation.kind).toBe('reserved');
-    if (reservation.kind !== 'reserved') {
-      throw new Error('Expected a rollback-test reservation.');
-    }
-    const memberEmails = Object.freeze([TRANSITION_EMAIL]);
-    const evaluation: EvaluatedAccessMembershipSet = Object.freeze({
-      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-      googleGroupId: PROVIDER_GROUP_ID,
-      memberEmails,
-      membershipDigest: digest([
-        DESIGNATED_ACCESS_GROUP_EMAIL,
-        PROVIDER_GROUP_ID,
-        ...memberEmails,
-      ]),
-      providerGroupIdDigest: digest([PROVIDER_GROUP_ID]),
-      syncStartedAt: SYNC_TIME,
-      capturedAt: SYNC_TIME,
     });
 
-    await expect(store.stage(reservation.id, evaluation)).rejects.toMatchObject(
-      {
-        code: 'ACTIVE_ACCESS_SOURCES_INVALID',
-      },
-    );
-    expect(
-      await database
-        .select({ active: groupSources.active })
-        .from(groupSources)
-        .where(eq(groupSources.id, BASELINE_SOURCE_ID)),
-    ).toEqual([{ active: true }]);
-    expect(
-      await database
-        .select({ id: groupSources.id })
-        .from(groupSources)
-        .where(eq(groupSources.googleGroupId, PROVIDER_GROUP_ID)),
-    ).toEqual([]);
+    const configured = await store.readConfiguredAccessGroups();
+    expect(configured).toHaveLength(1);
+    expect(configured[0]?.groupSourceId).toBe(BASELINE_SOURCE_ID);
 
-    await store.failReservation(
+    const reservation = await reserve(store, 'access-sync:publish-0003');
+    if (reservation.kind !== 'reserved') throw new Error('expected reserved');
+    const result = await store.publish(
       reservation.id,
-      'ACTIVE_ACCESS_SOURCES_INVALID',
-      SYNC_TIME,
+      evaluationFor([
+        {
+          groupSourceId: BASELINE_SOURCE_ID,
+          groupEmail: 'retained-recovery@psd401.net',
+          googleGroupId: 'retained_recovery_access',
+          grantedRole: 'admin',
+          memberEmails: [RECOVERY_EMAIL],
+        },
+      ]),
     );
+    expect(result.activeAccessGroupCount).toBe(1);
+    // The retired group's membership is gone with it, and the remaining group
+    // still grants access.
+    expect(
+      await database
+        .select({ email: accessGroupMembers.email })
+        .from(accessGroupMembers)
+        .where(eq(accessGroupMembers.groupSourceId, secondSourceId)),
+    ).toEqual([]);
+    expect(
+      await decideAccess(database, {
+        email: RECOVERY_EMAIL,
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: true });
+  });
+
+  test('refuses a publication that would leave no reachable administrator', async () => {
+    // The guard that makes reconfiguration safe. A staff group keeps the
+    // evaluation non-empty, so this reaches the guard rather than failing
+    // schema validation: people would still have access, but nobody could
+    // administer, and a deployment must not be able to publish itself out of
+    // its own administration.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const staffSourceId = '00000000-0000-4000-8000-000000000533';
+    await database.insert(groupSources).values({
+      id: staffSourceId,
+      kind: 'google-group',
+      purpose: 'access',
+      facilityId: null,
+      displayName: 'District staff access',
+      grantedRole: 'admin',
+      active: true,
+      googleGroupId: PROVIDER_GROUP_ID,
+      email: DESIGNATED_ACCESS_GROUP_EMAIL,
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+
+    const reservation = await reserve(store, 'access-sync:publish-0004');
+    if (reservation.kind !== 'reserved') throw new Error('expected reserved');
+
+    await expect(
+      store.publish(
+        reservation.id,
+        evaluationFor([
+          {
+            groupSourceId: BASELINE_SOURCE_ID,
+            groupEmail: 'retained-recovery@psd401.net',
+            googleGroupId: 'retained_recovery_access',
+            grantedRole: 'admin',
+            memberEmails: [],
+          },
+          {
+            groupSourceId: staffSourceId,
+            groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            googleGroupId: PROVIDER_GROUP_ID,
+            grantedRole: 'staff',
+            memberEmails: [TRANSITION_EMAIL],
+          },
+        ]),
+      ),
+    ).rejects.toThrow('reachable administrator');
+
+    // Refused whole: neither group's membership was written.
+    expect(await database.select().from(accessGroupMembers)).toEqual([]);
+  });
+
+  test('refuses evidence that no longer describes the active configuration', async () => {
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const reservation = await reserve(store, 'access-sync:publish-0005');
+    if (reservation.kind !== 'reserved') throw new Error('expected reserved');
+
+    // Evidence for a group that is not active — the shape a race produces when
+    // a source is retired while the provider is being read.
+    await expect(
+      store.publish(
+        reservation.id,
+        evaluationFor([
+          {
+            groupSourceId: '00000000-0000-4000-8000-0000000005ff',
+            groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+            googleGroupId: PROVIDER_GROUP_ID,
+            grantedRole: 'admin',
+            memberEmails: [RECOVERY_EMAIL],
+          },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    // Evidence whose role disagrees with the source row is refused too: the
+    // published membership would grant authority the configuration did not.
+    const second = await reserve(store, 'access-sync:publish-0006');
+    if (second.kind !== 'reserved') throw new Error('expected reserved');
+    await expect(
+      store.publish(
+        second.id,
+        evaluationFor([
+          {
+            groupSourceId: BASELINE_SOURCE_ID,
+            groupEmail: 'retained-recovery@psd401.net',
+            googleGroupId: 'retained_recovery_access',
+            grantedRole: 'staff',
+            memberEmails: [RECOVERY_EMAIL],
+          },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    expect(
+      (await loadAccessConfigurationSnapshotState(database))?.snapshotVersion,
+    ).toBe(1);
   });
 });

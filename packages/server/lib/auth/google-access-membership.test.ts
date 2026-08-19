@@ -4,9 +4,19 @@ import { exportPKCS8, generateKeyPair } from 'jose';
 import type { GoogleCloudIdentityRosterConfiguration } from '../roster/groups-sync';
 import {
   AccessMembershipEvaluationError,
-  DESIGNATED_ACCESS_GROUP_EMAIL,
   createGoogleAccessMembershipEvaluator,
 } from './google-access-membership';
+
+// The group these tests configure. Nothing about it is special any more: the
+// evaluator reads whatever the caller passes, so this is just a fixture.
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
+const CONFIGURED_GROUPS = Object.freeze([
+  Object.freeze({
+    groupSourceId: '00000000-0000-4000-8000-0000000000a1',
+    email: DESIGNATED_ACCESS_GROUP_EMAIL,
+    grantedRole: 'admin' as const,
+  }),
+]);
 
 const SYNTHETIC_TRANSITION_EMAIL = 'initial.mobile@psd401.net';
 
@@ -180,12 +190,20 @@ describe('exact Google access-membership evaluator', () => {
       }),
     );
 
-    const result = await evaluator(harness).evaluate();
+    const result = await evaluator(harness).evaluate(CONFIGURED_GROUPS);
 
     expect(result).toMatchObject({
-      groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-      googleGroupId: GROUP_ID,
-      memberEmails: [SYNTHETIC_TRANSITION_EMAIL, 'zed@psd401.net'],
+      groups: [
+        {
+          groupSourceId: CONFIGURED_GROUPS[0]?.groupSourceId,
+          groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+          googleGroupId: GROUP_ID,
+          // The role the configured group grants travels with its membership,
+          // so the publisher never has to look it up again.
+          grantedRole: 'admin',
+          memberEmails: [SYNTHETIC_TRANSITION_EMAIL, 'zed@psd401.net'],
+        },
+      ],
       syncStartedAt: TEST_TIME,
       capturedAt: TEST_TIME,
     });
@@ -239,6 +257,143 @@ describe('exact Google access-membership evaluator', () => {
     expect(memberships.searchParams.get('pageToken')).toBeNull();
   });
 
+  test('evaluates every configured group and refuses a set it cannot trust', async () => {
+    const second = Object.freeze({
+      groupSourceId: '00000000-0000-4000-8000-0000000000a2',
+      email: 'eoc-staff@psd401.net',
+      grantedRole: 'staff' as const,
+    });
+    const idFor = new Map([
+      [DESIGNATED_ACCESS_GROUP_EMAIL, GROUP_ID],
+      [second.email, '01second_group'],
+    ]);
+
+    /** Resolves each configured address to its own group and members. */
+    function multiGroupFetch(
+      membersFor: (email: string) => readonly string[],
+    ): typeof fetch {
+      return (async (input: string | URL | Request): Promise<Response> => {
+        const url = String(input);
+        if (url === TOKEN_ENDPOINT) return tokenResponse();
+        if (url.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups:lookup?`)) {
+          const key = new URL(url).searchParams.get('groupKey.id') ?? '';
+          const id = idFor.get(key);
+          if (id === undefined) throw new Error(`unexpected group ${key}`);
+          return Response.json({ name: `groups/${id}` });
+        }
+        const match = [...idFor.entries()].find(([, id]) =>
+          url.startsWith(`${CLOUD_IDENTITY_ENDPOINT}/groups/${id}`),
+        );
+        if (match === undefined) {
+          throw new Error('The evaluator contacted an unexpected URL.');
+        }
+        const [email, id] = match;
+        if (url.includes('/memberships?')) {
+          return Response.json({
+            memberships: membersFor(email).map((member, index) => ({
+              name: `groups/${id}/memberships/${index}`,
+              preferredMemberKey: { id: member },
+              roles: [{ name: 'MEMBER' }],
+              type: 'USER',
+            })),
+          });
+        }
+        return Response.json({
+          name: `groups/${id}`,
+          groupKey: { id: email },
+          labels: {
+            'cloudidentity.googleapis.com/groups.discussion_forum': '',
+          },
+        });
+      }) as typeof fetch;
+    }
+
+    // Both groups are read, and each member arrives carrying the role its own
+    // group grants — which is what lets one deployment have administrators and
+    // staff without either being compiled in.
+    const evaluated = await createGoogleAccessMembershipEvaluator(
+      configuration(),
+      {
+        fetch: multiGroupFetch((email) =>
+          email === DESIGNATED_ACCESS_GROUP_EMAIL
+            ? ['admin.one@psd401.net']
+            : ['staff.one@psd401.net'],
+        ),
+        now: () => new Date(TEST_TIME),
+      },
+    ).evaluate([...CONFIGURED_GROUPS, second]);
+    expect(
+      evaluated.groups.map(({ groupEmail, grantedRole, memberEmails }) => ({
+        groupEmail,
+        grantedRole,
+        memberEmails: [...memberEmails],
+      })),
+    ).toEqual([
+      {
+        groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
+        grantedRole: 'admin',
+        memberEmails: ['admin.one@psd401.net'],
+      },
+      {
+        groupEmail: second.email,
+        grantedRole: 'staff',
+        memberEmails: ['staff.one@psd401.net'],
+      },
+    ]);
+
+    // One empty group is allowed: a deployment may configure a group before
+    // populating it, and the other group still grants access.
+    const partiallyEmpty = await createGoogleAccessMembershipEvaluator(
+      configuration(),
+      {
+        fetch: multiGroupFetch((email) =>
+          email === DESIGNATED_ACCESS_GROUP_EMAIL
+            ? ['admin.one@psd401.net']
+            : [],
+        ),
+        now: () => new Date(TEST_TIME),
+      },
+    ).evaluate([...CONFIGURED_GROUPS, second]);
+    expect(partiallyEmpty.groups[1]?.memberEmails).toEqual([]);
+
+    // Every group empty is refused. Publishing that would grant nobody access
+    // and lock the deployment out of itself.
+    await expect(
+      createGoogleAccessMembershipEvaluator(configuration(), {
+        fetch: multiGroupFetch(() => []),
+        now: () => new Date(TEST_TIME),
+      }).evaluate([...CONFIGURED_GROUPS, second]),
+    ).rejects.toThrow(AccessMembershipEvaluationError);
+
+    // Duplicates and an empty configuration are refused before any provider
+    // call: a repeated group would be counted twice and make the digest
+    // ambiguous, and no configured group cannot grant anyone access.
+    const refuseBeforeIO = createGoogleAccessMembershipEvaluator(
+      configuration(),
+      {
+        fetch: (() => {
+          throw new Error('The evaluator contacted the provider.');
+        }) as unknown as typeof fetch,
+        now: () => new Date(TEST_TIME),
+      },
+    );
+    for (const invalid of [
+      [],
+      [
+        ...CONFIGURED_GROUPS,
+        { ...second, email: DESIGNATED_ACCESS_GROUP_EMAIL },
+      ],
+      [
+        ...CONFIGURED_GROUPS,
+        { ...second, groupSourceId: CONFIGURED_GROUPS[0]?.groupSourceId ?? '' },
+      ],
+    ]) {
+      await expect(refuseBeforeIO.evaluate(invalid)).rejects.toThrow(
+        AccessMembershipEvaluationError,
+      );
+    }
+  });
+
   test('paginates every direct edge and rejects token loops', async () => {
     const harness = providerHarness((pageToken) => {
       if (pageToken === null) {
@@ -254,17 +409,17 @@ describe('exact Google access-membership evaluator', () => {
         ],
       });
     });
-    expect((await evaluator(harness).evaluate()).memberEmails).toEqual([
-      SYNTHETIC_TRANSITION_EMAIL,
-      'other@psd401.net',
-    ]);
+    expect(
+      (await evaluator(harness).evaluate(CONFIGURED_GROUPS)).groups[0]
+        ?.memberEmails,
+    ).toEqual([SYNTHETIC_TRANSITION_EMAIL, 'other@psd401.net']);
     expect(harness.calls).toHaveLength(5);
 
     const looping = providerHarness(() =>
       Response.json({ memberships: [], nextPageToken: 'repeat' }),
     );
     await expectEvaluationError(
-      evaluator(looping).evaluate(),
+      evaluator(looping).evaluate(CONFIGURED_GROUPS),
       'GROUP_PAGINATION_LOOP',
     );
   });
@@ -291,7 +446,7 @@ describe('exact Google access-membership evaluator', () => {
         Response.json({ memberships: [membership] }),
       );
       await expectEvaluationError(
-        evaluator(harness).evaluate(),
+        evaluator(harness).evaluate(CONFIGURED_GROUPS),
         'NESTED_OR_NON_USER_MEMBERSHIP',
       );
     }
@@ -302,7 +457,7 @@ describe('exact Google access-membership evaluator', () => {
       }),
     );
     await expectEvaluationError(
-      evaluator(externalUser).evaluate(),
+      evaluator(externalUser).evaluate(CONFIGURED_GROUPS),
       'NON_STAFF_MEMBERSHIP',
     );
   });
@@ -330,7 +485,7 @@ describe('exact Google access-membership evaluator', () => {
         () => Response.json(lookup),
       );
       await expectEvaluationError(
-        evaluator(harness).evaluate(),
+        evaluator(harness).evaluate(CONFIGURED_GROUPS),
         'DESIGNATED_GROUP_IDENTITY_INVALID',
       );
       expect(harness.calls).toHaveLength(3);
@@ -346,7 +501,7 @@ describe('exact Google access-membership evaluator', () => {
             memberships: [duplicateResource, duplicateResource],
           }),
         ),
-      ).evaluate(),
+      ).evaluate(CONFIGURED_GROUPS),
       'DUPLICATE_PROVIDER_MEMBERSHIP',
     );
     await expectEvaluationError(
@@ -362,7 +517,7 @@ describe('exact Google access-membership evaluator', () => {
             ],
           }),
         ),
-      ).evaluate(),
+      ).evaluate(CONFIGURED_GROUPS),
       'DUPLICATE_EVALUATED_EMAIL',
     );
   });
@@ -372,7 +527,7 @@ describe('exact Google access-membership evaluator', () => {
       () => new Response(`{"unexpected":"${PROVIDER_SECRET}"}`),
     );
     await expectEvaluationError(
-      evaluator(malformed).evaluate(),
+      evaluator(malformed).evaluate(CONFIGURED_GROUPS),
       'GOOGLE_RESPONSE_INVALID',
     );
 
@@ -383,7 +538,7 @@ describe('exact Google access-membership evaluator', () => {
         }),
     );
     await expectEvaluationError(
-      evaluator(oversized).evaluate(),
+      evaluator(oversized).evaluate(CONFIGURED_GROUPS),
       'GOOGLE_RESPONSE_TOO_LARGE',
     );
 
@@ -391,7 +546,7 @@ describe('exact Google access-membership evaluator', () => {
       () => new Response(PROVIDER_SECRET, { status: 403 }),
     );
     await expectEvaluationError(
-      evaluator(rejected).evaluate(),
+      evaluator(rejected).evaluate(CONFIGURED_GROUPS),
       'GOOGLE_REQUEST_REJECTED',
     );
 
@@ -406,7 +561,7 @@ describe('exact Google access-membership evaluator', () => {
         }),
     );
     await expectEvaluationError(
-      evaluator(hanging, 1).evaluate(),
+      evaluator(hanging, 1).evaluate(CONFIGURED_GROUPS),
       'GOOGLE_UNAVAILABLE',
     );
   });

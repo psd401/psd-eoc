@@ -289,6 +289,32 @@ export const neighborhoodFacilities = pgTable(
 );
 
 /** Purpose-bound Google Group or fail-closed synthetic source configuration. */
+/**
+ * One person currently in one trusted access group.
+ *
+ * Sign-in reads exactly this: is the viewer in a group the deployment trusts,
+ * and what role does that group grant. Membership is replaced wholesale per
+ * group when the provider is read, so a row existing means the person was in
+ * that group as of the group's `membersCapturedAt`.
+ */
+export const accessGroupMembers = pgTable(
+  'access_group_members',
+  {
+    groupSourceId: uuid('group_source_id')
+      .notNull()
+      .references(() => groupSources.id, { onDelete: 'cascade' }),
+    email: varchar('email', { length: 320 }).notNull(),
+    capturedAt: occurredAt('captured_at').defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: 'access_group_members_pk',
+      columns: [table.groupSourceId, table.email],
+    }),
+    index('access_group_members_email_idx').on(table.email),
+  ],
+);
+
 export const groupSources = pgTable(
   'group_sources',
   {
@@ -300,6 +326,13 @@ export const groupSources = pgTable(
     }),
     displayName: varchar('display_name', { length: 160 }).notNull(),
     active: boolean('active').default(true).notNull(),
+    // Access sources only. The role every member of this group receives, so a
+    // deployment configures who administers instead of compiling it in.
+    grantedRole: roleEnum('granted_role'),
+    // When this group's membership was last read from the provider. Sign-in
+    // refuses membership that has gone stale, which is the only temporal
+    // question it needs to ask — there is no global generation to agree on.
+    membersCapturedAt: occurredAt('members_captured_at'),
     googleGroupId: varchar('google_group_id', { length: 255 }),
     email: varchar('email', { length: 320 }),
     fixtureKey: varchar('fixture_key', { length: 100 }),
@@ -314,6 +347,14 @@ export const groupSources = pgTable(
     unique('group_sources_google_group_id_uq').on(table.googleGroupId),
     unique('group_sources_fixture_key_uq').on(table.fixtureKey),
     index('group_sources_facility_idx').on(table.facilityId),
+    check(
+      'group_sources_access_role_present',
+      sql`(
+        ${table.purpose} = 'access' and ${table.grantedRole} is not null
+      ) or (
+        ${table.purpose} <> 'access' and ${table.grantedRole} is null
+      )`,
+    ),
     check(
       'group_sources_valid_variant',
       sql`(
@@ -740,11 +781,9 @@ export const sessions = pgTable(
     deviceEnrollmentId: uuid('device_enrollment_id')
       .notNull()
       .references(() => deviceEnrollments.id, { onDelete: 'restrict' }),
-    membershipSnapshotId: uuid('membership_snapshot_id')
-      .notNull()
-      .references(() => accessMembershipSnapshots.id, {
-        onDelete: 'restrict',
-      }),
+    // Legacy. Sessions issued before the trusted-group cutover carry the
+    // generation they were pinned to; nothing reads it any more.
+    membershipSnapshotId: uuid('membership_snapshot_id'),
     membershipValidUntil: occurredAt('membership_valid_until').notNull(),
     membershipGraceUntil: occurredAt('membership_grace_until').notNull(),
     createdAt: occurredAt('created_at').defaultNow().notNull(),
@@ -757,14 +796,6 @@ export const sessions = pgTable(
       columns: [table.deviceEnrollmentId, table.userId],
       foreignColumns: [deviceEnrollments.id, deviceEnrollments.userId],
       name: 'sessions_device_user_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.membershipSnapshotId, table.userId],
-      foreignColumns: [
-        accessMembershipMembers.snapshotId,
-        accessMembershipMembers.userId,
-      ],
-      name: 'sessions_membership_user_fk',
     }).onDelete('restrict'),
     index('sessions_user_idx').on(table.userId),
     index('sessions_device_idx').on(table.deviceEnrollmentId),

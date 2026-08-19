@@ -1832,6 +1832,7 @@ interface ConfiguredSourceRow {
   readonly facilityId: string | null;
   readonly displayName: string;
   readonly active: boolean;
+  readonly grantedRole: 'staff' | 'admin' | null;
   readonly googleGroupId: string | null;
   readonly email: string | null;
   readonly fixtureKey: string | null;
@@ -1846,6 +1847,8 @@ function parseConfiguredSource(row: ConfiguredSourceRow): GroupSource {
     facilityId: row.facilityId,
     displayName: row.displayName,
     active: row.active,
+    // Access sources carry the role they grant; roster purposes never do.
+    grantedRole: row.grantedRole,
     createdAt: row.createdAt.toISOString(),
   };
   return GroupSourceSchema.parse(
@@ -2099,6 +2102,7 @@ export function createDrizzleRosterSyncStore(
         facilityId: groupSources.facilityId,
         displayName: groupSources.displayName,
         active: groupSources.active,
+        grantedRole: groupSources.grantedRole,
         googleGroupId: groupSources.googleGroupId,
         email: groupSources.email,
         fixtureKey: groupSources.fixtureKey,
@@ -2726,6 +2730,7 @@ export function createDrizzleRosterSyncStore(
             facilityId: groupSources.facilityId,
             displayName: groupSources.displayName,
             active: groupSources.active,
+            grantedRole: groupSources.grantedRole,
             googleGroupId: groupSources.googleGroupId,
             email: groupSources.email,
             fixtureKey: groupSources.fixtureKey,
