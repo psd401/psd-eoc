@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import {
   ActorSchema,
-  DESIGNATED_ACCESS_GROUP_EMAIL,
   IdempotencyKeySchema,
+  RoleSchema,
   registerCapabilityHandler,
   SecurityAuditEntrySchema,
   StaffRosterEmailSchema,
@@ -79,20 +79,28 @@ const InitialMobileTransitionEmailDigestSchema = z
   .string()
   .regex(/^[a-f0-9]{64}$/u);
 
-const EvaluatedAccessMembershipSetSchema = z
+const EvaluatedAccessGroupSchema = z
   .object({
-    groupEmail: z.literal(DESIGNATED_ACCESS_GROUP_EMAIL),
+    groupSourceId: z.string().uuid(),
+    groupEmail: StaffRosterEmailSchema,
     googleGroupId: z
       .string()
       .trim()
       .min(1)
       .max(255)
       .regex(/^[A-Za-z0-9_-]+$/u),
+    grantedRole: RoleSchema,
     memberEmails: z
       .array(StaffRosterEmailSchema)
-      .min(1)
       .max(MAX_EVALUATED_MEMBERS)
       .readonly(),
+  })
+  .strict()
+  .readonly();
+
+const EvaluatedAccessMembershipSetSchema = z
+  .object({
+    groups: z.array(EvaluatedAccessGroupSchema).min(1).max(100).readonly(),
     membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     syncStartedAt: TimestampSchema,
@@ -100,19 +108,46 @@ const EvaluatedAccessMembershipSetSchema = z
   })
   .strict()
   .superRefine((evaluation, context) => {
+    for (const [index, group] of evaluation.groups.entries()) {
+      const emails = group.memberEmails;
+      if (
+        new Set(emails).size !== emails.length ||
+        emails.some(
+          (email, position) =>
+            position > 0 && email.localeCompare(emails[position - 1] ?? '') <= 0,
+        )
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Evaluated access-member emails must be sorted and unique.',
+          path: ['groups', index, 'memberEmails'],
+        });
+      }
+    }
+    const sourceIds = evaluation.groups.map(
+      ({ groupSourceId }) => groupSourceId,
+    );
     if (
-      new Set(evaluation.memberEmails).size !==
-        evaluation.memberEmails.length ||
-      evaluation.memberEmails.some(
-        (email, index) =>
-          index > 0 &&
-          email.localeCompare(evaluation.memberEmails[index - 1] ?? '') <= 0,
+      new Set(sourceIds).size !== sourceIds.length ||
+      sourceIds.some(
+        (id, index) =>
+          index > 0 && id.localeCompare(sourceIds[index - 1] ?? '') <= 0,
       )
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'Evaluated access-member emails must be sorted and unique.',
-        path: ['memberEmails'],
+        message: 'Evaluated access groups must be distinct and ordered by id.',
+        path: ['groups'],
+      });
+    }
+    const distinct = new Set(
+      evaluation.groups.flatMap(({ memberEmails }) => [...memberEmails]),
+    );
+    if (distinct.size === 0 || distinct.size > MAX_EVALUATED_MEMBERS) {
+      context.addIssue({
+        code: 'custom',
+        message: 'The configured access groups have no members, or too many.',
+        path: ['groups'],
       });
     }
     if (
@@ -120,12 +155,11 @@ const EvaluatedAccessMembershipSetSchema = z
     ) {
       context.addIssue({
         code: 'custom',
-        message: 'Access evaluation capture cannot precede its start.',
+        message: 'Evaluation capture must not precede its start.',
         path: ['capturedAt'],
       });
     }
   })
-  .readonly();
 
 export type AccessMembershipPublicationResult = SyncAccessMembershipResult;
 
@@ -223,9 +257,15 @@ export function parseInitialMobileTransitionEmailDigest(
   return parsed.data;
 }
 
+/**
+ * Re-derives both digests from the evidence rather than trusting them.
+ *
+ * The evaluator computes them and this module publishes on their basis, so it
+ * recomputes both and refuses evidence whose digest does not describe the
+ * membership it arrived with.
+ */
 function validateEvaluation(
   value: EvaluatedAccessMembershipSet,
-  initialMobileTransitionEmailDigest: string,
 ): EvaluatedAccessMembershipSet {
   const parsed = EvaluatedAccessMembershipSetSchema.safeParse(value);
   if (!parsed.success) {
@@ -237,29 +277,21 @@ function validateEvaluation(
   const evaluation = parsed.data;
   if (
     evaluation.membershipDigest !==
-      digest([
-        evaluation.groupEmail,
-        evaluation.googleGroupId,
-        ...evaluation.memberEmails,
-      ]) ||
-    evaluation.providerGroupIdDigest !== digest([evaluation.googleGroupId])
+      digest(
+        evaluation.groups.flatMap((group) => [
+          group.groupSourceId,
+          group.groupEmail,
+          group.googleGroupId,
+          group.grantedRole,
+          ...group.memberEmails,
+        ]),
+      ) ||
+    evaluation.providerGroupIdDigest !==
+      digest(evaluation.groups.map(({ googleGroupId }) => googleGroupId))
   ) {
     throw new AccessMembershipSyncError(
       'ACCESS_EVALUATION_DIGEST_INVALID',
       'The evaluated access-membership digest was invalid.',
-    );
-  }
-  const selectorMatches = evaluation.memberEmails.filter(
-    (email) =>
-      digestEmail(email) ===
-      InitialMobileTransitionEmailDigestSchema.parse(
-        initialMobileTransitionEmailDigest,
-      ),
-  );
-  if (selectorMatches.length !== 1) {
-    throw new AccessMembershipSyncError(
-      'INITIAL_TRANSITION_SELECTOR_NOT_DIRECT_MEMBER',
-      'The protected initial mobile transition selector did not match exactly one current direct member of the designated access group.',
     );
   }
   return evaluation;
