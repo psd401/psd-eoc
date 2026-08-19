@@ -5,7 +5,6 @@ import {
   IdempotencyKeySchema,
   RoleSchema,
   registerCapabilityHandler,
-  SecurityAuditEntrySchema,
   StaffRosterEmailSchema,
   SyncAccessMembershipInputSchema,
   SyncAccessMembershipResultSchema,
@@ -19,45 +18,24 @@ import {
   type SyncAccessMembershipInput,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
 import {
   accessMembershipEvaluatedMembers,
-  accessMembershipMemberFacilities,
   accessMembershipMemberGroups,
   accessMembershipMembers,
   accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
-  connectivityEpochInvalidations,
-  connectivityEpochs,
-  deviceEnrollments,
   groupSources,
   idempotencyRecords,
-  securityAuditChainAnchors,
-  securityAuditEntries,
-  sessionRevocations,
-  sessions,
-  sessionTokenIssuances,
-  sessionTokenReplays,
-  sessionTokenRotations,
-  userFacilityScopes,
-  userRoleChanges,
   users,
 } from '../../db/schema';
 
 import {
-  calculateSecurityAuditHash,
-  securityAuditHashPayload,
-} from '../audit/canonical';
-import {
-  SECURITY_AUDIT_APPEND_LOCK_SQL,
-  toSecurityAuditInsertValues,
-} from '../audit/drizzle-repository';
-import { buildSecurityAuditEntry } from '../audit/entry';
-
-import {
+  DesignatedAccessGroupSchema,
+  type DesignatedAccessGroup,
   type EvaluatedAccessMembershipSet,
   type GoogleAccessMembershipEvaluator,
 } from './google-access-membership';
@@ -67,9 +45,6 @@ import {
   loadEffectiveAdministratorUserIds,
 } from './role-state';
 
-const DESIGNATED_ACCESS_GROUP_DISPLAY_NAME =
-  'TSD Engineering administrators' as const;
-const MAX_ACCESS_GROUPS = 100;
 const MAX_EVALUATED_MEMBERS = 1_200;
 const MAX_POSTGRES_INTEGER = 2_147_483_647;
 const IDEMPOTENCY_IN_PROGRESS_MAX_AGE_MILLISECONDS = 15 * 60 * 1_000;
@@ -114,7 +89,8 @@ const EvaluatedAccessMembershipSetSchema = z
         new Set(emails).size !== emails.length ||
         emails.some(
           (email, position) =>
-            position > 0 && email.localeCompare(emails[position - 1] ?? '') <= 0,
+            position > 0 &&
+            email.localeCompare(emails[position - 1] ?? '') <= 0,
         )
       ) {
         context.addIssue({
@@ -159,7 +135,7 @@ const EvaluatedAccessMembershipSetSchema = z
         path: ['capturedAt'],
       });
     }
-  })
+  });
 
 export type AccessMembershipPublicationResult = SyncAccessMembershipResult;
 
@@ -190,18 +166,11 @@ export interface AccessMembershipSyncStore {
   reserve(
     request: AccessMembershipSyncReservationRequest,
   ): Promise<AccessMembershipSyncReservation>;
-  stage(
+  /** The active access sources a deployment has configured. */
+  readConfiguredAccessGroups(): Promise<readonly DesignatedAccessGroup[]>;
+  publish(
     reservationId: string,
     evaluation: EvaluatedAccessMembershipSet,
-  ): Promise<AccessMembershipPublicationResult>;
-  finalize(
-    reservationId: string,
-    proof: Readonly<{
-      mobileSessionId: string;
-      membershipSnapshotId: string;
-      requestId: string;
-      completedAt: string;
-    }>,
   ): Promise<AccessMembershipPublicationResult>;
   failReservation(
     reservationId: string,
@@ -212,8 +181,6 @@ export interface AccessMembershipSyncStore {
 
 export interface AccessMembershipSyncDependencies {
   readonly evaluator?: GoogleAccessMembershipEvaluator;
-  /** Independently trusted selector; never accepted from capability input. */
-  readonly initialMobileTransitionEmailDigest: string;
   readonly store: AccessMembershipSyncStore;
   readonly now?: () => Date;
 }
@@ -239,24 +206,7 @@ function digest(value: unknown): string {
     .digest('hex');
 }
 
-function digestEmail(email: string): string {
-  return createHash('sha256').update(email, 'utf8').digest('hex');
-}
-
 /** Parses the protected selector without retaining or reflecting its value. */
-export function parseInitialMobileTransitionEmailDigest(
-  value: string | undefined,
-): string {
-  const parsed = InitialMobileTransitionEmailDigestSchema.safeParse(value);
-  if (!parsed.success) {
-    throw new AccessMembershipSyncError(
-      'INITIAL_TRANSITION_SELECTOR_INVALID',
-      'The protected initial mobile transition selector is invalid.',
-    );
-  }
-  return parsed.data;
-}
-
 /**
  * Re-derives both digests from the evidence rather than trusting them.
  *
@@ -380,37 +330,44 @@ export async function syncAccessMembership(
   }
 
   try {
-    if (input.transition.phase === 'finalize') {
-      return SyncAccessMembershipResultSchema.parse(
-        await dependencies.store.finalize(reservation.id, {
-          mobileSessionId: input.transition.mobileSessionId,
-          membershipSnapshotId: input.transition.membershipSnapshotId,
-          requestId: context.requestId,
-          completedAt: timestamp(now),
-        }),
-      );
-    }
     if (dependencies.evaluator === undefined) {
       throw new AccessMembershipSyncError(
         'ACCESS_EVALUATOR_UNAVAILABLE',
         'The protected provider evaluator is unavailable.',
       );
     }
-    const evaluated = await dependencies.evaluator.evaluate();
-    if (evaluated.groupEmail !== input.designatedGroupEmail) {
+    // The groups to evaluate come from the database, never from the command.
+    // A caller cannot ask for a group the deployment has not activated.
+    const configured = await dependencies.store.readConfiguredAccessGroups();
+    if (configured.length === 0) {
       throw new AccessMembershipSyncError(
-        'DESIGNATED_GROUP_MISMATCH',
-        'The provider evaluation did not match the designated access group.',
+        'NO_CONFIGURED_ACCESS_GROUPS',
+        'No active access group is configured, so no snapshot can be published.',
       );
     }
     const evaluation = validateEvaluation(
-      evaluated,
-      parseInitialMobileTransitionEmailDigest(
-        dependencies.initialMobileTransitionEmailDigest,
-      ),
+      await dependencies.evaluator.evaluate(configured),
     );
+    // The evaluation must describe exactly the set that was asked for. A
+    // provider result covering a different set would publish a baseline that
+    // does not match the active configuration, which denies everyone.
+    const requested = configured
+      .map(({ groupSourceId }) => groupSourceId)
+      .sort();
+    const returned = evaluation.groups.map(
+      ({ groupSourceId }) => groupSourceId,
+    );
+    if (
+      requested.length !== returned.length ||
+      requested.some((id, index) => id !== returned[index])
+    ) {
+      throw new AccessMembershipSyncError(
+        'ACCESS_EVALUATION_SET_MISMATCH',
+        'The provider evaluation did not cover the configured access groups.',
+      );
+    }
     return SyncAccessMembershipResultSchema.parse(
-      await dependencies.store.stage(reservation.id, evaluation),
+      await dependencies.store.publish(reservation.id, evaluation),
     );
   } catch (error) {
     await dependencies.store
@@ -531,25 +488,21 @@ function publicationResult(
   evaluation: EvaluatedAccessMembershipSet,
   snapshotId: string,
   snapshotVersion: number,
-  designatedSourceId: string,
   activeAccessGroupCount: number,
-  auditEntryHash: string | null,
   publication: 'created' | 'already-current' = 'created',
 ): AccessMembershipPublicationResult {
-  const phase = auditEntryHash === null ? 'stage' : 'finalize';
   return SyncAccessMembershipResultSchema.parse({
-    phase,
     snapshotId,
     snapshotVersion,
     capturedAt: evaluation.capturedAt,
-    designatedSourceId,
     activeAccessGroupCount,
-    evaluatedMembershipCount: evaluation.memberEmails.length,
+    // Distinct people, not rows: someone in two configured groups is one
+    // person with access, and reporting them twice would misdescribe reach.
+    evaluatedMembershipCount: new Set(
+      evaluation.groups.flatMap(({ memberEmails }) => [...memberEmails]),
+    ).size,
     membershipDigest: evaluation.membershipDigest,
     providerGroupIdDigest: evaluation.providerGroupIdDigest,
-    proofKind:
-      phase === 'stage' ? 'initial-selector-match' : 'durable-ios-session',
-    auditEntryHash,
     publication,
   });
 }
@@ -570,14 +523,16 @@ async function insertInBatches<Row>(
  */
 export function createDrizzleAccessMembershipSyncStore(
   database: Database,
-  configuration: Readonly<{
-    initialMobileTransitionEmailDigest: string;
-  }>,
 ): AccessMembershipSyncStore {
-  const initialMobileTransitionEmailDigest =
-    parseInitialMobileTransitionEmailDigest(
-      configuration.initialMobileTransitionEmailDigest,
-    );
+  /**
+   * Rebuilds the result of a publication that already happened.
+   *
+   * A replayed idempotency key must return what the first call returned, so
+   * this reads the snapshot back and re-derives the same aggregate. It refuses
+   * if that snapshot is no longer the current access generation, because
+   * reporting a superseded publication as current would tell the caller the
+   * configuration is live when something else replaced it.
+   */
   async function loadReplay(
     proof: Readonly<{
       snapshotId: string;
@@ -600,120 +555,78 @@ export function createDrizzleAccessMembershipSyncStore(
       .from(accessMembershipSnapshots)
       .where(eq(accessMembershipSnapshots.id, proof.snapshotId))
       .limit(1);
+    if (snapshot === undefined) {
+      throw new AccessMembershipSyncError(
+        'IDEMPOTENCY_RESULT_INVALID',
+        'The prior access-sync publication could not be read back.',
+      );
+    }
     const sourceRows = await database
       .select({
         id: groupSources.id,
-        kind: groupSources.kind,
-        purpose: groupSources.purpose,
-        facilityId: groupSources.facilityId,
-        active: groupSources.active,
-        googleGroupId: groupSources.googleGroupId,
         email: groupSources.email,
+        grantedRole: groupSources.grantedRole,
+        googleGroupId: groupSources.googleGroupId,
       })
       .from(groupSources)
       .where(
         and(
           eq(groupSources.kind, 'google-group'),
           eq(groupSources.purpose, 'access'),
-          eq(
-            sql<string>`lower(${groupSources.email})`,
-            DESIGNATED_ACCESS_GROUP_EMAIL,
-          ),
+          inArray(groupSources.id, [...accessState.activeAccessGroupSourceIds]),
         ),
       )
       .orderBy(asc(groupSources.id));
-    if (snapshot === undefined || sourceRows.length !== 1) {
-      throw new AccessMembershipSyncError(
-        'IDEMPOTENCY_RESULT_INVALID',
-        'The prior access-sync publication could not be verified.',
-      );
-    }
-    const source = sourceRows[0];
-    if (
-      source === undefined ||
-      source.kind !== 'google-group' ||
-      source.purpose !== 'access' ||
-      source.facilityId !== null ||
-      source.active !== true ||
-      source.googleGroupId === null ||
-      source.email?.toLowerCase() !== DESIGNATED_ACCESS_GROUP_EMAIL ||
-      !accessState.activeAccessGroupSourceIds.includes(source.id)
-    ) {
-      throw new AccessMembershipSyncError(
-        'IDEMPOTENCY_RESULT_INVALID',
-        'The prior access-sync source identity could not be verified.',
-      );
-    }
     const memberRows = await database
-      .select({ email: accessMembershipEvaluatedMembers.email })
+      .select({
+        email: accessMembershipEvaluatedMembers.email,
+        groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
+      })
       .from(accessMembershipEvaluatedMembers)
       .where(
         and(
           eq(accessMembershipEvaluatedMembers.snapshotId, proof.snapshotId),
-          eq(accessMembershipEvaluatedMembers.groupSourceId, source.id),
           eq(accessMembershipEvaluatedMembers.groupSourceKind, 'google-group'),
           eq(accessMembershipEvaluatedMembers.groupPurpose, 'access'),
         ),
       )
       .orderBy(asc(accessMembershipEvaluatedMembers.email));
-    const memberEmails = memberRows.map(({ email }) =>
-      StaffRosterEmailSchema.parse(email),
-    );
-    const evaluation = validateEvaluation(
-      {
-        groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-        googleGroupId: source.googleGroupId,
-        memberEmails,
-        membershipDigest: digest([
-          DESIGNATED_ACCESS_GROUP_EMAIL,
-          source.googleGroupId,
-          ...memberEmails,
+
+    const groups = sourceRows.map((source) => ({
+      groupSourceId: source.id,
+      groupEmail: source.email?.toLowerCase() ?? '',
+      googleGroupId: source.googleGroupId ?? '',
+      grantedRole: source.grantedRole,
+      memberEmails: Object.freeze(
+        memberRows
+          .filter(({ groupSourceId }) => groupSourceId === source.id)
+          .map(({ email }) => StaffRosterEmailSchema.parse(email))
+          .sort(),
+      ),
+    }));
+    const capturedAt = snapshot.capturedAt.toISOString();
+    const evaluation = validateEvaluation({
+      groups: Object.freeze(groups),
+      membershipDigest: digest(
+        groups.flatMap((group) => [
+          group.groupSourceId,
+          group.groupEmail,
+          group.googleGroupId,
+          group.grantedRole,
+          ...group.memberEmails,
         ]),
-        providerGroupIdDigest: digest([source.googleGroupId]),
-        syncStartedAt: snapshot.capturedAt.toISOString(),
-        capturedAt: snapshot.capturedAt.toISOString(),
-      },
-      initialMobileTransitionEmailDigest,
-    );
-    if (
-      (proof.auditEntryHash === null &&
-        accessState.activeAccessGroupSourceIds.length !== 2) ||
-      (proof.auditEntryHash !== null &&
-        accessState.activeAccessGroupSourceIds.length !== 1)
-    ) {
-      throw new AccessMembershipSyncError(
-        'IDEMPOTENCY_RESULT_INVALID',
-        'The prior access-sync transition phase could not be verified.',
-      );
-    }
-    if (proof.auditEntryHash !== null) {
-      const auditRows = await database
-        .select({ entryHash: securityAuditEntries.entryHash })
-        .from(securityAuditEntries)
-        .where(
-          and(
-            eq(securityAuditEntries.entryHash, proof.auditEntryHash),
-            eq(securityAuditEntries.action, 'sync-access-membership'),
-            eq(securityAuditEntries.outcome, 'success'),
-            eq(securityAuditEntries.source, 'scheduled-job'),
-            eq(securityAuditEntries.targetKind, 'configuration'),
-            eq(securityAuditEntries.targetId, proof.snapshotId),
-          ),
-        );
-      if (auditRows.length !== 1) {
-        throw new AccessMembershipSyncError(
-          'IDEMPOTENCY_RESULT_INVALID',
-          'The prior access-sync finalization audit could not be verified.',
-        );
-      }
-    }
+      ),
+      providerGroupIdDigest: digest(
+        groups.map(({ googleGroupId }) => googleGroupId),
+      ),
+      syncStartedAt: capturedAt,
+      capturedAt,
+    } as EvaluatedAccessMembershipSet);
     return publicationResult(
       evaluation,
       snapshot.id,
       snapshot.version,
-      source.id,
       accessState.activeAccessGroupSourceIds.length,
-      proof.auditEntryHash,
     );
   }
 
@@ -745,247 +658,6 @@ export function createDrizzleAccessMembershipSyncStore(
         'The access-sync idempotency reservation was unavailable.',
       );
     }
-  }
-
-  async function reuseCurrentTransition(
-    transaction: AccessMembershipTransaction,
-    reservationId: string,
-    baseline: Readonly<{
-      snapshotId: string;
-      snapshotVersion: number;
-      activeAccessGroupSourceIds: readonly string[];
-    }>,
-    evaluation: EvaluatedAccessMembershipSet,
-  ): Promise<AccessMembershipPublicationResult | null> {
-    if (baseline.activeAccessGroupSourceIds.length !== 2) {
-      return null;
-    }
-    const [snapshot] = await transaction
-      .select()
-      .from(accessMembershipSnapshots)
-      .where(eq(accessMembershipSnapshots.id, baseline.snapshotId))
-      .limit(1)
-      .for('share');
-    const sources = await transaction
-      .select()
-      .from(groupSources)
-      .where(inArray(groupSources.id, [...baseline.activeAccessGroupSourceIds]))
-      .orderBy(asc(groupSources.id))
-      .for('update');
-    const designatedSources = sources.filter(
-      ({ email }) => email?.toLowerCase() === evaluation.groupEmail,
-    );
-    const designatedSource = designatedSources[0];
-    const recoverySources = sources.filter(
-      ({ id }) => id !== designatedSource?.id,
-    );
-    const recoverySource = recoverySources[0];
-    if (
-      snapshot === undefined ||
-      snapshot.version !== baseline.snapshotVersion ||
-      sources.length !== 2 ||
-      designatedSources.length !== 1 ||
-      recoverySources.length !== 1 ||
-      designatedSource === undefined ||
-      recoverySource === undefined ||
-      designatedSource.kind !== 'google-group' ||
-      designatedSource.purpose !== 'access' ||
-      designatedSource.facilityId !== null ||
-      designatedSource.active !== true ||
-      designatedSource.googleGroupId !== evaluation.googleGroupId ||
-      designatedSource.fixtureKey !== null ||
-      recoverySource.kind !== 'google-group' ||
-      recoverySource.purpose !== 'access' ||
-      recoverySource.facilityId !== null ||
-      recoverySource.active !== true ||
-      recoverySource.googleGroupId === null ||
-      recoverySource.email === null ||
-      recoverySource.fixtureKey !== null
-    ) {
-      throw new AccessMembershipSyncError(
-        'RECOVERY_TRANSITION_CURRENT_INVALID',
-        'The current two-source transition is ambiguous.',
-      );
-    }
-
-    const snapshotGroups = await transaction
-      .select()
-      .from(accessMembershipSnapshotGroups)
-      .where(eq(accessMembershipSnapshotGroups.snapshotId, snapshot.id))
-      .for('share');
-    const expectedSourceIds = snapshotGroups
-      .filter(({ completionKind }) => completionKind === 'expected')
-      .map(({ groupSourceId }) => groupSourceId)
-      .sort();
-    const completedSourceIds = snapshotGroups
-      .filter(({ completionKind }) => completionKind === 'completed')
-      .map(({ groupSourceId }) => groupSourceId)
-      .sort();
-    const activeSourceIds = sources.map(({ id }) => id).sort();
-    const evaluatedRows = await transaction
-      .select()
-      .from(accessMembershipEvaluatedMembers)
-      .where(eq(accessMembershipEvaluatedMembers.snapshotId, snapshot.id))
-      .orderBy(asc(accessMembershipEvaluatedMembers.email))
-      .for('share');
-    const evaluatedEmails = evaluatedRows.map(({ email }) =>
-      StaffRosterEmailSchema.parse(email),
-    );
-    const members = await transaction
-      .select()
-      .from(accessMembershipMembers)
-      .where(eq(accessMembershipMembers.snapshotId, snapshot.id))
-      .orderBy(asc(accessMembershipMembers.userId))
-      .for('share');
-    const memberGroups = await transaction
-      .select()
-      .from(accessMembershipMemberGroups)
-      .where(eq(accessMembershipMemberGroups.snapshotId, snapshot.id))
-      .orderBy(
-        asc(accessMembershipMemberGroups.userId),
-        asc(accessMembershipMemberGroups.groupSourceId),
-      )
-      .for('share');
-    const memberFacilities = await transaction
-      .select()
-      .from(accessMembershipMemberFacilities)
-      .where(eq(accessMembershipMemberFacilities.snapshotId, snapshot.id))
-      .for('share');
-    const memberIds = members.map(({ userId }) => userId);
-    const persistedUsers =
-      memberIds.length === 0
-        ? []
-        : await transaction
-            .select()
-            .from(users)
-            .where(inArray(users.id, memberIds))
-            .orderBy(asc(users.id))
-            .for('share');
-    const persistedFacilityRows =
-      memberIds.length === 0
-        ? []
-        : await transaction
-            .select()
-            .from(userFacilityScopes)
-            .where(inArray(userFacilityScopes.userId, memberIds))
-            .for('share');
-    const recoveryMemberGroups = memberGroups.filter(
-      ({ groupSourceId }) => groupSourceId === recoverySource.id,
-    );
-    const designatedMemberGroups = memberGroups.filter(
-      ({ groupSourceId }) => groupSourceId === designatedSource.id,
-    );
-    const recoveryMember = members.find(
-      ({ userId }) => userId === recoveryMemberGroups[0]?.userId,
-    );
-    const designatedMember = members.find(
-      ({ userId }) => userId === designatedMemberGroups[0]?.userId,
-    );
-    const recoveryAdministratorIds = await loadEffectiveAdministratorUserIds(
-      transaction,
-      {
-        accessState: baseline,
-        eligibleAccessGroupSourceIds: [recoverySource.id],
-      },
-    );
-    const designatedAdministratorIds =
-      designatedMember === undefined
-        ? []
-        : await loadEffectiveAdministratorUserIds(transaction, {
-            accessState: baseline,
-            eligibleAccessGroupSourceIds: [designatedSource.id],
-          });
-    const sourceGraphValid =
-      snapshotGroups.length === 4 &&
-      expectedSourceIds.length === 2 &&
-      completedSourceIds.length === 2 &&
-      expectedSourceIds.every((id, index) => id === activeSourceIds[index]) &&
-      completedSourceIds.every((id, index) => id === activeSourceIds[index]) &&
-      evaluatedRows.length === evaluation.memberEmails.length &&
-      evaluatedRows.every(
-        ({ email, groupSourceId, groupSourceKind, groupPurpose }, index) =>
-          email === evaluation.memberEmails[index] &&
-          groupSourceId === designatedSource.id &&
-          groupSourceKind === 'google-group' &&
-          groupPurpose === 'access',
-      ) &&
-      members.length >= 1 &&
-      members.length <= 2 &&
-      memberGroups.length === members.length &&
-      memberFacilities.length === 0 &&
-      persistedFacilityRows.length === 0 &&
-      persistedUsers.length === members.length &&
-      persistedUsers.every((user) => {
-        const member = members.find(({ userId }) => userId === user.id);
-        return (
-          member !== undefined &&
-          member.googleSubject === user.googleSubject &&
-          member.facilityScopeKind === 'district' &&
-          user.facilityScopeKind === 'district' &&
-          user.disabledAt === null
-        );
-      }) &&
-      recoveryMemberGroups.length === 1 &&
-      recoveryMember !== undefined &&
-      recoveryAdministratorIds.length === 1 &&
-      recoveryAdministratorIds[0] === recoveryMember.userId &&
-      ((members.length === 1 &&
-        designatedMemberGroups.length === 0 &&
-        designatedMember === undefined) ||
-        (members.length === 2 &&
-          designatedMemberGroups.length === 1 &&
-          designatedMember !== undefined &&
-          designatedMember.userId !== recoveryMember.userId &&
-          designatedMember.googleSubject !== recoveryMember.googleSubject &&
-          designatedAdministratorIds.length === 1 &&
-          designatedAdministratorIds[0] === designatedMember.userId &&
-          persistedUsers.some(
-            (user) =>
-              user.id === designatedMember.userId &&
-              digestEmail(user.email) === initialMobileTransitionEmailDigest &&
-              evaluatedEmails.includes(
-                StaffRosterEmailSchema.parse(user.email),
-              ),
-          ))) &&
-      memberGroups.every(
-        ({ groupSourceKind, groupPurpose }) =>
-          groupSourceKind === 'google-group' && groupPurpose === 'access',
-      );
-    if (!sourceGraphValid) {
-      throw new AccessMembershipSyncError(
-        'RECOVERY_TRANSITION_CURRENT_INVALID',
-        'The current two-source transition is ambiguous.',
-      );
-    }
-
-    const storedEvaluation = validateEvaluation(
-      {
-        groupEmail: evaluation.groupEmail,
-        googleGroupId: evaluation.googleGroupId,
-        memberEmails: evaluatedEmails,
-        membershipDigest: evaluation.membershipDigest,
-        providerGroupIdDigest: evaluation.providerGroupIdDigest,
-        syncStartedAt: snapshot.syncStartedAt.toISOString(),
-        capturedAt: snapshot.capturedAt.toISOString(),
-      },
-      initialMobileTransitionEmailDigest,
-    );
-    await completeReservation(
-      transaction,
-      reservationId,
-      snapshot.id,
-      null,
-      new Date(evaluation.capturedAt),
-    );
-    return publicationResult(
-      storedEvaluation,
-      snapshot.id,
-      snapshot.version,
-      designatedSource.id,
-      2,
-      null,
-      'already-current',
-    );
   }
 
   return Object.freeze({
@@ -1091,19 +763,59 @@ export function createDrizzleAccessMembershipSyncStore(
       });
     },
 
-    async stage(
+    async readConfiguredAccessGroups(): Promise<
+      readonly DesignatedAccessGroup[]
+    > {
+      const rows = await database
+        .select({
+          groupSourceId: groupSources.id,
+          email: groupSources.email,
+          grantedRole: groupSources.grantedRole,
+        })
+        .from(groupSources)
+        .where(
+          and(
+            eq(groupSources.purpose, 'access'),
+            eq(groupSources.active, true),
+            eq(groupSources.kind, 'google-group'),
+          ),
+        )
+        .orderBy(asc(groupSources.id));
+      return Object.freeze(
+        rows.map((row) => {
+          const parsed = DesignatedAccessGroupSchema.safeParse({
+            groupSourceId: row.groupSourceId,
+            email: row.email?.toLowerCase(),
+            grantedRole: row.grantedRole,
+          });
+          if (!parsed.success) {
+            throw new AccessMembershipSyncError(
+              'CONFIGURED_ACCESS_GROUP_INVALID',
+              'An active access group is missing the address or role it needs.',
+            );
+          }
+          return parsed.data;
+        }),
+      );
+    },
+
+    /**
+     * Publishes one snapshot describing the currently active access groups.
+     *
+     * Everything happens in one transaction under the administrator
+     * availability lock, so the active set cannot change underneath the
+     * snapshot being written for it. The transaction is refused outright if it
+     * would leave no reachable administrator, which is the guard that makes
+     * changing the configuration safe: a deployment can add or remove groups
+     * freely, but not in a way that locks itself out.
+     */
+    async publish(
       reservationIdValue: string,
-      rawEvaluation: EvaluatedAccessMembershipSet,
+      evaluationValue: EvaluatedAccessMembershipSet,
     ): Promise<AccessMembershipPublicationResult> {
       const reservationId = UuidSchema.parse(reservationIdValue);
-      const evaluation = validateEvaluation(
-        rawEvaluation,
-        initialMobileTransitionEmailDigest,
-      );
+      const evaluation = validateEvaluation(evaluationValue);
       return database.transaction(async (transaction) => {
-        await transaction.execute(
-          sql`set transaction isolation level serializable`,
-        );
         await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
         const [reservation] = await transaction
           .select({
@@ -1126,14 +838,52 @@ export function createDrizzleAccessMembershipSyncStore(
           );
         }
 
-        const baseline =
-          await loadAccessConfigurationSnapshotState(transaction);
-        if (baseline === null) {
+        // Re-read the active set inside the lock. The evaluation was produced
+        // outside it, so a group activated or retired in between must not be
+        // published as though it had been evaluated.
+        const activeSources = await transaction
+          .select({
+            id: groupSources.id,
+            email: groupSources.email,
+            grantedRole: groupSources.grantedRole,
+            googleGroupId: groupSources.googleGroupId,
+          })
+          .from(groupSources)
+          .where(
+            and(
+              eq(groupSources.purpose, 'access'),
+              eq(groupSources.active, true),
+              eq(groupSources.kind, 'google-group'),
+            ),
+          )
+          .orderBy(asc(groupSources.id))
+          .for('update');
+        const activeIds = activeSources.map(({ id }) => id);
+        const evaluatedIds = evaluation.groups.map(
+          ({ groupSourceId }) => groupSourceId,
+        );
+        if (
+          activeIds.length === 0 ||
+          activeIds.length !== evaluatedIds.length ||
+          activeIds.some((id, index) => id !== evaluatedIds[index]) ||
+          evaluation.groups.some((group) => {
+            const source = activeSources.find(
+              ({ id }) => id === group.groupSourceId,
+            );
+            return (
+              source === undefined ||
+              source.googleGroupId !== group.googleGroupId ||
+              source.email?.toLowerCase() !== group.groupEmail ||
+              source.grantedRole !== group.grantedRole
+            );
+          })
+        ) {
           throw new AccessMembershipSyncError(
-            'ACCESS_BASELINE_INVALID',
-            'A strict complete access baseline is required before publication.',
+            'ACCESS_CONFIGURATION_CHANGED',
+            'The active access configuration changed during evaluation.',
           );
         }
+
         const [latestSnapshot] = await transaction
           .select({
             id: accessMembershipSnapshots.id,
@@ -1142,238 +892,17 @@ export function createDrizzleAccessMembershipSyncStore(
           .from(accessMembershipSnapshots)
           .orderBy(desc(accessMembershipSnapshots.version))
           .limit(1);
+        const snapshotVersion = (latestSnapshot?.version ?? 0) + 1;
         if (
-          latestSnapshot === undefined ||
-          latestSnapshot.id !== baseline.snapshotId ||
-          latestSnapshot.version !== baseline.snapshotVersion ||
-          latestSnapshot.version >= MAX_POSTGRES_INTEGER
+          !Number.isSafeInteger(snapshotVersion) ||
+          snapshotVersion > MAX_POSTGRES_INTEGER
         ) {
           throw new AccessMembershipSyncError(
-            'ACCESS_BASELINE_CHANGED',
-            'The access baseline changed before publication.',
+            'ACCESS_SNAPSHOT_VERSION_EXHAUSTED',
+            'The access-membership snapshot version space is exhausted.',
           );
         }
-        const currentTransition = await reuseCurrentTransition(
-          transaction,
-          reservationId,
-          baseline,
-          evaluation,
-        );
-        if (currentTransition !== null) {
-          return currentTransition;
-        }
-        if (baseline.activeAccessGroupSourceIds.length !== 1) {
-          throw new AccessMembershipSyncError(
-            'RECOVERY_TRANSITION_BASELINE_INVALID',
-            'The access baseline does not contain exactly one certified recovery source.',
-          );
-        }
-        const recoverySourceId = baseline.activeAccessGroupSourceIds[0];
-        if (recoverySourceId === undefined) {
-          throw new AccessMembershipSyncError(
-            'RECOVERY_TRANSITION_BASELINE_INVALID',
-            'The certified recovery source is unavailable.',
-          );
-        }
-
-        const matchingSources = await transaction
-          .select()
-          .from(groupSources)
-          .where(
-            or(
-              eq(groupSources.googleGroupId, evaluation.googleGroupId),
-              eq(
-                sql<string>`lower(${groupSources.email})`,
-                evaluation.groupEmail,
-              ),
-            ),
-          )
-          .orderBy(asc(groupSources.id))
-          .for('update');
-        if (matchingSources.length > 1) {
-          throw new AccessMembershipSyncError(
-            'DESIGNATED_SOURCE_AMBIGUOUS',
-            'The designated access source identity is ambiguous.',
-          );
-        }
-        let designatedSource = matchingSources[0];
-        if (designatedSource === undefined) {
-          [designatedSource] = await transaction
-            .insert(groupSources)
-            .values({
-              id: randomUUID(),
-              kind: 'google-group',
-              purpose: 'access',
-              facilityId: null,
-              displayName: DESIGNATED_ACCESS_GROUP_DISPLAY_NAME,
-              active: true,
-              googleGroupId: evaluation.googleGroupId,
-              email: evaluation.groupEmail,
-              fixtureKey: null,
-              createdAt: new Date(evaluation.capturedAt),
-            })
-            .returning();
-        }
-        if (
-          designatedSource === undefined ||
-          designatedSource.kind !== 'google-group' ||
-          designatedSource.purpose !== 'access' ||
-          designatedSource.facilityId !== null ||
-          designatedSource.googleGroupId !== evaluation.googleGroupId ||
-          designatedSource.email?.toLowerCase() !== evaluation.groupEmail ||
-          designatedSource.fixtureKey !== null
-        ) {
-          throw new AccessMembershipSyncError(
-            'DESIGNATED_SOURCE_CONFLICT',
-            'The designated access source conflicts with retained provider identity.',
-          );
-        }
-        if (designatedSource.id === recoverySourceId) {
-          throw new AccessMembershipSyncError(
-            'RECOVERY_TRANSITION_BASELINE_INVALID',
-            'The recovery source and designated source must remain distinct until mobile proof.',
-          );
-        }
-        if (!designatedSource.active) {
-          const [activatedSource] = await transaction
-            .update(groupSources)
-            .set({ active: true })
-            .where(
-              and(
-                eq(groupSources.id, designatedSource.id),
-                eq(groupSources.active, false),
-              ),
-            )
-            .returning();
-          if (activatedSource === undefined) {
-            throw new AccessMembershipSyncError(
-              'DESIGNATED_SOURCE_ACTIVATION_FAILED',
-              'The proven designated access source could not be activated.',
-            );
-          }
-          designatedSource = activatedSource;
-        }
-
-        const accessSources = await transaction
-          .select({
-            id: groupSources.id,
-            kind: groupSources.kind,
-            purpose: groupSources.purpose,
-            facilityId: groupSources.facilityId,
-            active: groupSources.active,
-            googleGroupId: groupSources.googleGroupId,
-            email: groupSources.email,
-          })
-          .from(groupSources)
-          .where(eq(groupSources.purpose, 'access'))
-          .orderBy(asc(groupSources.id));
-        const activeSources = accessSources.filter(({ active }) => active);
-        if (
-          accessSources.length < 1 ||
-          accessSources.length > MAX_ACCESS_GROUPS ||
-          accessSources.some(
-            (source) =>
-              source.kind !== 'google-group' ||
-              source.purpose !== 'access' ||
-              source.facilityId !== null ||
-              source.googleGroupId === null ||
-              source.email === null,
-          ) ||
-          activeSources.length !== 2 ||
-          new Set(activeSources.map(({ id }) => id)).size !== 2 ||
-          !activeSources.some(({ id }) => id === recoverySourceId) ||
-          !activeSources.some(({ id }) => id === designatedSource.id)
-        ) {
-          throw new AccessMembershipSyncError(
-            'ACTIVE_ACCESS_SOURCES_INVALID',
-            'The active access-source set was invalid.',
-          );
-        }
-        const memberRows = await transaction
-          .select({
-            userId: accessMembershipMembers.userId,
-            googleSubject: accessMembershipMembers.googleSubject,
-            facilityScopeKind: accessMembershipMembers.facilityScopeKind,
-            persistedGoogleSubject: users.googleSubject,
-            email: users.email,
-            disabledAt: users.disabledAt,
-          })
-          .from(accessMembershipMembers)
-          .innerJoin(users, eq(accessMembershipMembers.userId, users.id))
-          .where(eq(accessMembershipMembers.snapshotId, baseline.snapshotId))
-          .orderBy(asc(accessMembershipMembers.userId));
-        const memberGroupRows = await transaction
-          .select({
-            userId: accessMembershipMemberGroups.userId,
-            groupSourceId: accessMembershipMemberGroups.groupSourceId,
-            groupSourceKind: accessMembershipMemberGroups.groupSourceKind,
-            groupPurpose: accessMembershipMemberGroups.groupPurpose,
-          })
-          .from(accessMembershipMemberGroups)
-          .where(
-            eq(accessMembershipMemberGroups.snapshotId, baseline.snapshotId),
-          )
-          .orderBy(
-            asc(accessMembershipMemberGroups.userId),
-            asc(accessMembershipMemberGroups.groupSourceId),
-          );
-        const memberFacilityRows = await transaction
-          .select({
-            userId: accessMembershipMemberFacilities.userId,
-            facilityId: accessMembershipMemberFacilities.facilityId,
-          })
-          .from(accessMembershipMemberFacilities)
-          .where(
-            eq(
-              accessMembershipMemberFacilities.snapshotId,
-              baseline.snapshotId,
-            ),
-          )
-          .orderBy(
-            asc(accessMembershipMemberFacilities.userId),
-            asc(accessMembershipMemberFacilities.facilityId),
-          );
-        const recoveryMember = memberRows[0];
-        const recoveryGroup = memberGroupRows[0];
-        if (
-          memberRows.length !== 1 ||
-          recoveryMember === undefined ||
-          recoveryMember.googleSubject !==
-            recoveryMember.persistedGoogleSubject ||
-          recoveryMember.disabledAt !== null ||
-          recoveryMember.facilityScopeKind !== 'district' ||
-          !StaffRosterEmailSchema.safeParse(recoveryMember.email).success ||
-          memberGroupRows.length !== 1 ||
-          recoveryGroup === undefined ||
-          recoveryGroup.userId !== recoveryMember.userId ||
-          recoveryGroup.groupSourceId !== recoverySourceId ||
-          recoveryGroup.groupSourceKind !== 'google-group' ||
-          recoveryGroup.groupPurpose !== 'access' ||
-          memberFacilityRows.length !== 0
-        ) {
-          throw new AccessMembershipSyncError(
-            'RECOVERY_TRANSITION_BINDING_INVALID',
-            'The access baseline does not contain one strict district recovery binding.',
-          );
-        }
-
-        const recoveryAdministratorIds =
-          await loadEffectiveAdministratorUserIds(transaction, {
-            accessState: baseline,
-            eligibleAccessGroupSourceIds: [recoverySourceId],
-          });
-        if (
-          recoveryAdministratorIds.length !== 1 ||
-          recoveryAdministratorIds[0] !== recoveryMember.userId
-        ) {
-          throw new AccessMembershipSyncError(
-            'RECOVERY_TRANSITION_ADMIN_INVALID',
-            'The access baseline does not contain one reachable recovery administrator.',
-          );
-        }
-
         const snapshotId = randomUUID();
-        const snapshotVersion = latestSnapshot.version + 1;
         await transaction.insert(accessMembershipSnapshots).values({
           id: snapshotId,
           version: snapshotVersion,
@@ -1381,129 +910,117 @@ export function createDrizzleAccessMembershipSyncStore(
           syncStartedAt: new Date(evaluation.syncStartedAt),
           capturedAt: new Date(evaluation.capturedAt),
         });
-        await transaction.insert(accessMembershipSnapshotGroups).values(
-          activeSources.flatMap((source) => [
-            {
+
+        // Expected and completed rows for every active source. The sign-in
+        // baseline compares both against the active set, so a snapshot that
+        // omitted either would be treated as partial and deny everyone.
+        await insertInBatches(
+          evaluation.groups.flatMap((group) =>
+            (['expected', 'completed'] as const).map((completionKind) => ({
               snapshotId,
-              groupSourceId: source.id,
+              groupSourceId: group.groupSourceId,
               groupSourceKind: 'google-group' as const,
               groupPurpose: 'access' as const,
-              completionKind: 'expected' as const,
-            },
-            {
-              snapshotId,
-              groupSourceId: source.id,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
-              completionKind: 'completed' as const,
-            },
-          ]),
-        );
-        await transaction.insert(accessMembershipMembers).values({
-          snapshotId,
-          userId: recoveryMember.userId,
-          googleSubject: recoveryMember.googleSubject,
-          facilityScopeKind: 'district',
-        });
-        await transaction.insert(accessMembershipMemberGroups).values({
-          snapshotId,
-          userId: recoveryMember.userId,
-          groupSourceId: recoverySourceId,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-        });
-        const evaluatedRows = evaluation.memberEmails.map((email) => ({
-          snapshotId,
-          email,
-          groupSourceId: designatedSource.id,
-          groupSourceKind: 'google-group' as const,
-          groupPurpose: 'access' as const,
-        }));
-        const evaluatedSourceCounts = new Map<string, number>();
-        for (const row of evaluatedRows) {
-          evaluatedSourceCounts.set(
-            row.email,
-            (evaluatedSourceCounts.get(row.email) ?? 0) + 1,
-          );
-        }
-        if (
-          evaluatedSourceCounts.size > MAX_EVALUATED_MEMBERS ||
-          [...evaluatedSourceCounts.values()].some(
-            (sourceCount) => sourceCount < 1 || sourceCount > 50,
-          )
-        ) {
-          throw new AccessMembershipSyncError(
-            'ACCESS_PUBLICATION_GRAPH_LIMIT_EXCEEDED',
-            'The resulting access publication exceeded its bounded identity graph.',
-          );
-        }
-        await insertInBatches(evaluatedRows, async (batch) =>
-          transaction
-            .insert(accessMembershipEvaluatedMembers)
-            .values([...batch]),
+              completionKind,
+            })),
+          ),
+          (batch) =>
+            transaction
+              .insert(accessMembershipSnapshotGroups)
+              .values([...batch]),
         );
 
-        const readbackState =
-          await loadAccessConfigurationSnapshotState(transaction);
-        const readbackRows = await transaction
-          .select({
-            email: accessMembershipEvaluatedMembers.email,
-            groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
-          })
-          .from(accessMembershipEvaluatedMembers)
-          .where(eq(accessMembershipEvaluatedMembers.snapshotId, snapshotId))
-          .orderBy(asc(accessMembershipEvaluatedMembers.email));
-        const readbackMembers = await transaction
-          .select()
-          .from(accessMembershipMembers)
-          .where(eq(accessMembershipMembers.snapshotId, snapshotId));
-        const readbackMemberGroups = await transaction
-          .select()
-          .from(accessMembershipMemberGroups)
-          .where(eq(accessMembershipMemberGroups.snapshotId, snapshotId));
-        const readbackMemberFacilities = await transaction
-          .select()
-          .from(accessMembershipMemberFacilities)
-          .where(eq(accessMembershipMemberFacilities.snapshotId, snapshotId));
-        const readbackAdministratorIds =
-          readbackState === null
+        await insertInBatches(
+          evaluation.groups.flatMap((group) =>
+            group.memberEmails.map((email) => ({
+              snapshotId,
+              email,
+              groupSourceId: group.groupSourceId,
+              groupSourceKind: 'google-group' as const,
+              groupPurpose: 'access' as const,
+            })),
+          ),
+          (batch) =>
+            transaction
+              .insert(accessMembershipEvaluatedMembers)
+              .values([...batch]),
+        );
+
+        // Members are the evaluated people who already have an account. A
+        // first-time signer has no row yet; the gate creates one when they
+        // arrive and finds their evaluated membership waiting.
+        const emailToGroups = new Map<string, string[]>();
+        for (const group of evaluation.groups) {
+          for (const email of group.memberEmails) {
+            emailToGroups.set(email, [
+              ...(emailToGroups.get(email) ?? []),
+              group.groupSourceId,
+            ]);
+          }
+        }
+        const knownUsers =
+          emailToGroups.size === 0
             ? []
-            : await loadEffectiveAdministratorUserIds(transaction, {
-                accessState: readbackState,
-              });
-        const expectedActiveSourceIds = [
-          recoverySourceId,
-          designatedSource.id,
-        ].sort();
-        if (
-          readbackState?.snapshotId !== snapshotId ||
-          readbackState.snapshotVersion !== snapshotVersion ||
-          readbackState.activeAccessGroupSourceIds.length !== 2 ||
-          !readbackState.activeAccessGroupSourceIds.every(
-            (id, index) => id === expectedActiveSourceIds[index],
-          ) ||
-          readbackRows.length !== evaluation.memberEmails.length ||
-          readbackRows.some(
-            ({ email, groupSourceId }, index) =>
-              email !== evaluation.memberEmails[index] ||
-              groupSourceId !== designatedSource.id,
-          ) ||
-          readbackMembers.length !== 1 ||
-          readbackMembers[0]?.userId !== recoveryMember.userId ||
-          readbackMembers[0]?.googleSubject !== recoveryMember.googleSubject ||
-          readbackMembers[0]?.facilityScopeKind !== 'district' ||
-          readbackMemberGroups.length !== 1 ||
-          readbackMemberGroups[0]?.userId !== recoveryMember.userId ||
-          readbackMemberGroups[0]?.groupSourceId !== recoverySourceId ||
-          readbackMemberFacilities.length !== 0 ||
-          readbackAdministratorIds.length !== 1 ||
-          readbackAdministratorIds[0] !== recoveryMember.userId
-        ) {
+            : await transaction
+                .select({
+                  id: users.id,
+                  email: users.email,
+                  googleSubject: users.googleSubject,
+                  facilityScopeKind: users.facilityScopeKind,
+                })
+                .from(users)
+                .where(
+                  and(
+                    inArray(users.email, [...emailToGroups.keys()]),
+                    isNull(users.disabledAt),
+                  ),
+                )
+                .orderBy(asc(users.id));
+        await insertInBatches(
+          knownUsers.map((user) => ({
+            snapshotId,
+            userId: user.id,
+            googleSubject: user.googleSubject,
+            facilityScopeKind: user.facilityScopeKind,
+          })),
+          (batch) =>
+            transaction.insert(accessMembershipMembers).values([...batch]),
+        );
+        await insertInBatches(
+          knownUsers.flatMap((user) =>
+            (emailToGroups.get(user.email) ?? []).map((groupSourceId) => ({
+              snapshotId,
+              userId: user.id,
+              groupSourceId,
+              groupSourceKind: 'google-group' as const,
+              groupPurpose: 'access' as const,
+            })),
+          ),
+          (batch) =>
+            transaction.insert(accessMembershipMemberGroups).values([...batch]),
+        );
+
+        // The guard that makes reconfiguration safe. Projected against the
+        // snapshot just written, at least one administrator must still be able
+        // to pass the membership boundary. Otherwise the whole transaction is
+        // refused and the previous configuration stands.
+        const reachableAdministrators = await loadEffectiveAdministratorUserIds(
+          transaction,
+          {
+            accessState: Object.freeze({
+              snapshotId,
+              snapshotVersion,
+              activeAccessGroupSourceIds: Object.freeze([...activeIds].sort()),
+            }),
+          },
+        );
+        if (reachableAdministrators.length === 0) {
           throw new AccessMembershipSyncError(
-            'ACCESS_PUBLICATION_READBACK_FAILED',
-            'The access publication did not pass its transactional readback.',
+            'ACCESS_PUBLICATION_LEAVES_NO_ADMINISTRATOR',
+            'Publishing this access configuration would leave no reachable administrator.',
           );
         }
+
         await completeReservation(
           transaction,
           reservationId,
@@ -1515,724 +1032,7 @@ export function createDrizzleAccessMembershipSyncStore(
           evaluation,
           snapshotId,
           snapshotVersion,
-          designatedSource.id,
-          activeSources.length,
-          null,
-        );
-      });
-    },
-
-    async finalize(
-      reservationIdValue: string,
-      proofValue: Readonly<{
-        mobileSessionId: string;
-        membershipSnapshotId: string;
-        requestId: string;
-        completedAt: string;
-      }>,
-    ): Promise<AccessMembershipPublicationResult> {
-      const reservationId = UuidSchema.parse(reservationIdValue);
-      const mobileSessionId = UuidSchema.parse(proofValue.mobileSessionId);
-      const membershipSnapshotId = UuidSchema.parse(
-        proofValue.membershipSnapshotId,
-      );
-      const requestId = UuidSchema.parse(proofValue.requestId);
-      const completedAt = new Date(
-        TimestampSchema.parse(proofValue.completedAt),
-      );
-
-      return database.transaction(async (transaction) => {
-        await transaction.execute(
-          sql`set transaction isolation level serializable`,
-        );
-        await transaction.execute(ADMIN_AVAILABILITY_LOCK_SQL);
-
-        const [reservation] = await transaction
-          .select({
-            id: idempotencyRecords.id,
-            status: idempotencyRecords.status,
-          })
-          .from(idempotencyRecords)
-          .where(
-            and(
-              eq(idempotencyRecords.id, reservationId),
-              eq(idempotencyRecords.capabilityId, 'sync-access-membership'),
-            ),
-          )
-          .for('update')
-          .limit(1);
-        if (reservation?.status !== 'in-progress') {
-          throw new AccessMembershipSyncError(
-            'IDEMPOTENCY_RESERVATION_LOST',
-            'The access-sync idempotency reservation was unavailable.',
-          );
-        }
-
-        const baseline =
-          await loadAccessConfigurationSnapshotState(transaction);
-        const [sourceSnapshot] = await transaction
-          .select()
-          .from(accessMembershipSnapshots)
-          .where(eq(accessMembershipSnapshots.id, membershipSnapshotId))
-          .limit(1)
-          .for('share');
-        const [latestSnapshot] = await transaction
-          .select({
-            id: accessMembershipSnapshots.id,
-            version: accessMembershipSnapshots.version,
-          })
-          .from(accessMembershipSnapshots)
-          .orderBy(desc(accessMembershipSnapshots.version))
-          .limit(1)
-          .for('share');
-        if (
-          baseline === null ||
-          sourceSnapshot === undefined ||
-          latestSnapshot === undefined ||
-          baseline.snapshotId !== membershipSnapshotId ||
-          sourceSnapshot.id !== baseline.snapshotId ||
-          sourceSnapshot.version !== baseline.snapshotVersion ||
-          latestSnapshot.id !== sourceSnapshot.id ||
-          latestSnapshot.version !== sourceSnapshot.version ||
-          sourceSnapshot.version >= MAX_POSTGRES_INTEGER ||
-          baseline.activeAccessGroupSourceIds.length !== 2
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_BASELINE_INVALID',
-            'The protected finalization baseline is not the latest strict two-source generation.',
-          );
-        }
-
-        const activeSources = await transaction
-          .select({
-            id: groupSources.id,
-            kind: groupSources.kind,
-            purpose: groupSources.purpose,
-            facilityId: groupSources.facilityId,
-            active: groupSources.active,
-            googleGroupId: groupSources.googleGroupId,
-            email: groupSources.email,
-            fixtureKey: groupSources.fixtureKey,
-          })
-          .from(groupSources)
-          .where(
-            and(
-              eq(groupSources.active, true),
-              eq(groupSources.purpose, 'access'),
-            ),
-          )
-          .orderBy(asc(groupSources.id))
-          .for('update');
-        const designatedSources = activeSources.filter(
-          ({ email }) => email?.toLowerCase() === DESIGNATED_ACCESS_GROUP_EMAIL,
-        );
-        const designatedSource = designatedSources[0];
-        const recoverySources = activeSources.filter(
-          ({ id }) => id !== designatedSource?.id,
-        );
-        const recoverySource = recoverySources[0];
-        const expectedActiveSourceIds = activeSources
-          .map(({ id }) => id)
-          .sort();
-        if (
-          activeSources.length !== 2 ||
-          designatedSources.length !== 1 ||
-          recoverySources.length !== 1 ||
-          designatedSource === undefined ||
-          recoverySource === undefined ||
-          designatedSource.kind !== 'google-group' ||
-          designatedSource.purpose !== 'access' ||
-          designatedSource.facilityId !== null ||
-          designatedSource.googleGroupId === null ||
-          designatedSource.fixtureKey !== null ||
-          recoverySource.kind !== 'google-group' ||
-          recoverySource.purpose !== 'access' ||
-          recoverySource.facilityId !== null ||
-          recoverySource.googleGroupId === null ||
-          recoverySource.email === null ||
-          recoverySource.fixtureKey !== null ||
-          !baseline.activeAccessGroupSourceIds.every(
-            (id, index) => id === expectedActiveSourceIds[index],
-          )
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_SOURCE_SET_INVALID',
-            'The protected finalization source set is ambiguous.',
-          );
-        }
-
-        const sourceGroupRows = await transaction
-          .select()
-          .from(accessMembershipSnapshotGroups)
-          .where(
-            eq(accessMembershipSnapshotGroups.snapshotId, sourceSnapshot.id),
-          )
-          .orderBy(
-            asc(accessMembershipSnapshotGroups.groupSourceId),
-            asc(accessMembershipSnapshotGroups.completionKind),
-          )
-          .for('share');
-        const expectedIds = sourceGroupRows
-          .filter(({ completionKind }) => completionKind === 'expected')
-          .map(({ groupSourceId }) => groupSourceId)
-          .sort();
-        const completedIds = sourceGroupRows
-          .filter(({ completionKind }) => completionKind === 'completed')
-          .map(({ groupSourceId }) => groupSourceId)
-          .sort();
-        if (
-          sourceGroupRows.length !== 4 ||
-          expectedIds.length !== 2 ||
-          completedIds.length !== 2 ||
-          !expectedIds.every(
-            (id, index) => id === expectedActiveSourceIds[index],
-          ) ||
-          !completedIds.every(
-            (id, index) => id === expectedActiveSourceIds[index],
-          ) ||
-          sourceGroupRows.some(
-            ({ groupSourceKind, groupPurpose }) =>
-              groupSourceKind !== 'google-group' || groupPurpose !== 'access',
-          )
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_SNAPSHOT_INCOMPLETE',
-            'The protected finalization snapshot is incomplete.',
-          );
-        }
-
-        const evaluatedRows = await transaction
-          .select()
-          .from(accessMembershipEvaluatedMembers)
-          .where(
-            eq(accessMembershipEvaluatedMembers.snapshotId, sourceSnapshot.id),
-          )
-          .orderBy(asc(accessMembershipEvaluatedMembers.email))
-          .for('share');
-        const evaluation = validateEvaluation(
-          {
-            groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-            googleGroupId: designatedSource.googleGroupId,
-            memberEmails: evaluatedRows.map(({ email }) =>
-              StaffRosterEmailSchema.parse(email),
-            ),
-            membershipDigest: digest([
-              DESIGNATED_ACCESS_GROUP_EMAIL,
-              designatedSource.googleGroupId,
-              ...evaluatedRows.map(({ email }) => email),
-            ]),
-            providerGroupIdDigest: digest([designatedSource.googleGroupId]),
-            syncStartedAt: sourceSnapshot.syncStartedAt.toISOString(),
-            capturedAt: sourceSnapshot.capturedAt.toISOString(),
-          },
-          initialMobileTransitionEmailDigest,
-        );
-        if (
-          evaluatedRows.length !== evaluation.memberEmails.length ||
-          evaluatedRows.some(
-            ({ groupSourceId, groupSourceKind, groupPurpose }) =>
-              groupSourceId !== designatedSource.id ||
-              groupSourceKind !== 'google-group' ||
-              groupPurpose !== 'access',
-          )
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_EVALUATION_INVALID',
-            'The protected finalization evaluation is ambiguous.',
-          );
-        }
-
-        const sourceMembers = await transaction
-          .select()
-          .from(accessMembershipMembers)
-          .where(eq(accessMembershipMembers.snapshotId, sourceSnapshot.id))
-          .orderBy(asc(accessMembershipMembers.userId))
-          .for('share');
-        const sourceMemberGroups = await transaction
-          .select()
-          .from(accessMembershipMemberGroups)
-          .where(eq(accessMembershipMemberGroups.snapshotId, sourceSnapshot.id))
-          .orderBy(
-            asc(accessMembershipMemberGroups.userId),
-            asc(accessMembershipMemberGroups.groupSourceId),
-          )
-          .for('share');
-        const sourceMemberFacilities = await transaction
-          .select()
-          .from(accessMembershipMemberFacilities)
-          .where(
-            eq(accessMembershipMemberFacilities.snapshotId, sourceSnapshot.id),
-          )
-          .for('share');
-        const designatedMemberGroup = sourceMemberGroups.find(
-          ({ groupSourceId }) => groupSourceId === designatedSource.id,
-        );
-        const recoveryMemberGroup = sourceMemberGroups.find(
-          ({ groupSourceId }) => groupSourceId === recoverySource.id,
-        );
-        const designatedMember = sourceMembers.find(
-          ({ userId }) => userId === designatedMemberGroup?.userId,
-        );
-        const recoveryMember = sourceMembers.find(
-          ({ userId }) => userId === recoveryMemberGroup?.userId,
-        );
-        if (
-          sourceMembers.length !== 2 ||
-          sourceMemberGroups.length !== 2 ||
-          sourceMemberFacilities.length !== 0 ||
-          designatedMember === undefined ||
-          recoveryMember === undefined ||
-          designatedMemberGroup === undefined ||
-          recoveryMemberGroup === undefined ||
-          designatedMember.userId === recoveryMember.userId ||
-          designatedMember.facilityScopeKind !== 'district' ||
-          recoveryMember.facilityScopeKind !== 'district' ||
-          designatedMemberGroup.groupSourceKind !== 'google-group' ||
-          designatedMemberGroup.groupPurpose !== 'access' ||
-          recoveryMemberGroup.groupSourceKind !== 'google-group' ||
-          recoveryMemberGroup.groupPurpose !== 'access'
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_MEMBER_SET_INVALID',
-            'The protected finalization member set is ambiguous.',
-          );
-        }
-
-        const [mobileSession] = await transaction
-          .select()
-          .from(sessions)
-          .where(eq(sessions.id, mobileSessionId))
-          .limit(1)
-          .for('update');
-        const [designatedUser] = await transaction
-          .select()
-          .from(users)
-          .where(eq(users.id, designatedMember.userId))
-          .limit(1)
-          .for('share');
-        const [mobileDevice] =
-          mobileSession === undefined
-            ? []
-            : await transaction
-                .select()
-                .from(deviceEnrollments)
-                .where(
-                  eq(deviceEnrollments.id, mobileSession.deviceEnrollmentId),
-                )
-                .limit(1)
-                .for('share');
-        const designatedFacilityRows = await transaction
-          .select({ facilityId: userFacilityScopes.facilityId })
-          .from(userFacilityScopes)
-          .where(eq(userFacilityScopes.userId, designatedMember.userId))
-          .for('share');
-        if (
-          mobileSession === undefined ||
-          designatedUser === undefined ||
-          mobileDevice === undefined ||
-          mobileSession.userId !== designatedMember.userId ||
-          mobileSession.membershipSnapshotId !== sourceSnapshot.id ||
-          mobileSession.revokedAt !== null ||
-          completedAt.getTime() < mobileSession.createdAt.getTime() ||
-          completedAt.getTime() > mobileSession.expiresAt.getTime() ||
-          completedAt.getTime() >
-            mobileSession.membershipGraceUntil.getTime() ||
-          mobileDevice.userId !== designatedMember.userId ||
-          mobileDevice.platform !== 'ios' ||
-          mobileDevice.unlockMethod !== 'biometric' ||
-          mobileDevice.revokedAt !== null ||
-          mobileDevice.enrolledAt.getTime() >
-            mobileSession.createdAt.getTime() ||
-          designatedUser.googleSubject !== designatedMember.googleSubject ||
-          designatedUser.disabledAt !== null ||
-          designatedUser.facilityScopeKind !== 'district' ||
-          designatedFacilityRows.length !== 0 ||
-          digestEmail(designatedUser.email) !==
-            initialMobileTransitionEmailDigest ||
-          !evaluation.memberEmails.includes(
-            StaffRosterEmailSchema.parse(designatedUser.email),
-          )
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_MOBILE_SESSION_INVALID',
-            'The protected durable iOS session proof is invalid.',
-          );
-        }
-
-        const tokenIssuances = await transaction
-          .select()
-          .from(sessionTokenIssuances)
-          .where(eq(sessionTokenIssuances.sessionId, mobileSession.id))
-          .for('share');
-        const tokenRotations = await transaction
-          .select()
-          .from(sessionTokenRotations)
-          .where(eq(sessionTokenRotations.sessionId, mobileSession.id))
-          .orderBy(
-            asc(sessionTokenRotations.rotatedAt),
-            asc(sessionTokenRotations.id),
-          )
-          .for('share');
-        const tokenReplays = await transaction
-          .select({ id: sessionTokenReplays.id })
-          .from(sessionTokenReplays)
-          .where(eq(sessionTokenReplays.sessionId, mobileSession.id))
-          .for('share');
-        const revocations = await transaction
-          .select({ id: sessionRevocations.id })
-          .from(sessionRevocations)
-          .where(eq(sessionRevocations.sessionId, mobileSession.id))
-          .for('share');
-        let currentTokenDigest = tokenIssuances[0]?.tokenDigest;
-        let previousTokenTime = tokenIssuances[0]?.issuedAt.getTime();
-        const tokenChainValid =
-          tokenIssuances.length === 1 &&
-          currentTokenDigest !== undefined &&
-          /^[a-f0-9]{64}$/u.test(currentTokenDigest) &&
-          previousTokenTime !== undefined &&
-          previousTokenTime === mobileSession.createdAt.getTime() &&
-          previousTokenTime <= completedAt.getTime() &&
-          tokenRotations.every((rotation) => {
-            const valid =
-              rotation.previousTokenDigest === currentTokenDigest &&
-              /^[a-f0-9]{64}$/u.test(rotation.previousTokenDigest) &&
-              /^[a-f0-9]{64}$/u.test(rotation.nextTokenDigest) &&
-              rotation.rotatedAt.getTime() >= (previousTokenTime ?? 0) &&
-              rotation.rotatedAt.getTime() <= completedAt.getTime();
-            currentTokenDigest = rotation.nextTokenDigest;
-            previousTokenTime = rotation.rotatedAt.getTime();
-            return valid;
-          });
-        if (
-          !tokenChainValid ||
-          tokenReplays.length !== 0 ||
-          revocations.length !== 0
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_TOKEN_PROOF_INVALID',
-            'The protected mobile token proof is invalid.',
-          );
-        }
-
-        const epochs = await transaction
-          .select()
-          .from(connectivityEpochs)
-          .where(eq(connectivityEpochs.sessionId, mobileSession.id))
-          .orderBy(
-            desc(connectivityEpochs.establishedAt),
-            desc(connectivityEpochs.id),
-          )
-          .for('share');
-        const currentEpoch = epochs[0];
-        const currentEpochInvalidations =
-          currentEpoch === undefined
-            ? []
-            : await transaction
-                .select({ id: connectivityEpochInvalidations.id })
-                .from(connectivityEpochInvalidations)
-                .where(
-                  eq(
-                    connectivityEpochInvalidations.connectivityEpochId,
-                    currentEpoch.id,
-                  ),
-                )
-                .for('share');
-        if (
-          currentEpoch === undefined ||
-          currentEpoch.establishedAt.getTime() !==
-            mobileSession.createdAt.getTime() ||
-          currentEpoch.establishedAt.getTime() > completedAt.getTime() ||
-          currentEpochInvalidations.length !== 0
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_CONNECTIVITY_PROOF_INVALID',
-            'The protected mobile connectivity proof is invalid.',
-          );
-        }
-
-        const signInAuditRows = await transaction
-          .select()
-          .from(securityAuditEntries)
-          .where(
-            and(
-              eq(securityAuditEntries.action, 'complete-oidc-sign-in'),
-              eq(securityAuditEntries.outcome, 'success'),
-              eq(securityAuditEntries.source, 'mobile'),
-              eq(securityAuditEntries.targetKind, 'session'),
-              eq(securityAuditEntries.targetId, mobileSession.id),
-            ),
-          )
-          .orderBy(asc(securityAuditEntries.sequence))
-          .for('share');
-        const signInAuditRow = signInAuditRows[0];
-        const signInAudit =
-          signInAuditRow === undefined
-            ? null
-            : SecurityAuditEntrySchema.safeParse({
-                id: signInAuditRow.id,
-                sequence: signInAuditRow.sequence,
-                previousHash: signInAuditRow.previousHash,
-                entryHash: signInAuditRow.entryHash,
-                category: signInAuditRow.category,
-                action: signInAuditRow.action,
-                actionIds: signInAuditRow.actionIds,
-                confirmationId: signInAuditRow.confirmationId,
-                outcome: signInAuditRow.outcome,
-                principal: signInAuditRow.principal,
-                source: signInAuditRow.source,
-                facilityId: signInAuditRow.facilityId,
-                target: {
-                  kind: signInAuditRow.targetKind,
-                  id: signInAuditRow.targetId,
-                },
-                requestId: signInAuditRow.requestId,
-                reasonCode: signInAuditRow.reasonCode,
-                occurredAt: signInAuditRow.occurredAt.toISOString(),
-              });
-        const [signInAuditAnchor] =
-          signInAuditRow === undefined
-            ? []
-            : await transaction
-                .select()
-                .from(securityAuditChainAnchors)
-                .where(
-                  eq(
-                    securityAuditChainAnchors.sequence,
-                    signInAuditRow.sequence,
-                  ),
-                )
-                .limit(1)
-                .for('share');
-        const roleChanges = await transaction
-          .select()
-          .from(userRoleChanges)
-          .where(
-            and(
-              eq(userRoleChanges.userId, designatedMember.userId),
-              eq(userRoleChanges.role, 'admin'),
-            ),
-          )
-          .orderBy(desc(userRoleChanges.sequence))
-          .for('share');
-        const latestAdminChange = roleChanges[0];
-        if (
-          signInAuditRows.length !== 1 ||
-          !signInAudit?.success ||
-          signInAudit.data.principal.kind !== 'human' ||
-          signInAudit.data.principal.userId !== designatedMember.userId ||
-          signInAudit.data.principal.sessionId !== mobileSession.id ||
-          Date.parse(signInAudit.data.occurredAt) !==
-            mobileSession.createdAt.getTime() ||
-          Date.parse(signInAudit.data.occurredAt) > completedAt.getTime() ||
-          calculateSecurityAuditHash(
-            securityAuditHashPayload(signInAudit.data),
-          ) !== signInAudit.data.entryHash ||
-          signInAuditAnchor?.entryHash !== signInAudit.data.entryHash ||
-          latestAdminChange === undefined ||
-          roleChanges.length !== 1 ||
-          latestAdminChange.granted !== true ||
-          latestAdminChange.changedByUserId !== designatedMember.userId ||
-          latestAdminChange.changedWithSessionId !== mobileSession.id ||
-          latestAdminChange.requestId !== signInAudit.data.requestId ||
-          latestAdminChange.occurredAt.getTime() !==
-            mobileSession.createdAt.getTime()
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_AUDIT_PROOF_INVALID',
-            'The protected mobile sign-in and administrator audit proof is invalid.',
-          );
-        }
-
-        const recoveryAdministratorIds =
-          await loadEffectiveAdministratorUserIds(transaction, {
-            accessState: baseline,
-            eligibleAccessGroupSourceIds: [recoverySource.id],
-          });
-        const designatedAdministratorIds =
-          await loadEffectiveAdministratorUserIds(transaction, {
-            accessState: baseline,
-            eligibleAccessGroupSourceIds: [designatedSource.id],
-          });
-        if (
-          recoveryAdministratorIds.length !== 1 ||
-          recoveryAdministratorIds[0] !== recoveryMember.userId ||
-          designatedAdministratorIds.length !== 1 ||
-          designatedAdministratorIds[0] !== designatedMember.userId
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_ADMIN_PROOF_INVALID',
-            'The protected transition administrator proof is invalid.',
-          );
-        }
-
-        const [deactivatedRecoverySource] = await transaction
-          .update(groupSources)
-          .set({ active: false })
-          .where(
-            and(
-              eq(groupSources.id, recoverySource.id),
-              eq(groupSources.active, true),
-            ),
-          )
-          .returning();
-        if (deactivatedRecoverySource?.id !== recoverySource.id) {
-          throw new AccessMembershipSyncError(
-            'RECOVERY_SOURCE_DEACTIVATION_FAILED',
-            'The protected recovery source could not be deactivated.',
-          );
-        }
-
-        const successorSnapshotId = randomUUID();
-        const successorSnapshotVersion = sourceSnapshot.version + 1;
-        await transaction.insert(accessMembershipSnapshots).values({
-          id: successorSnapshotId,
-          version: successorSnapshotVersion,
-          complete: true,
-          syncStartedAt: sourceSnapshot.syncStartedAt,
-          capturedAt: sourceSnapshot.capturedAt,
-        });
-        await transaction.insert(accessMembershipSnapshotGroups).values([
-          {
-            snapshotId: successorSnapshotId,
-            groupSourceId: designatedSource.id,
-            groupSourceKind: 'google-group',
-            groupPurpose: 'access',
-            completionKind: 'expected',
-          },
-          {
-            snapshotId: successorSnapshotId,
-            groupSourceId: designatedSource.id,
-            groupSourceKind: 'google-group',
-            groupPurpose: 'access',
-            completionKind: 'completed',
-          },
-        ]);
-        await insertInBatches(
-          evaluatedRows.map((row) => ({
-            ...row,
-            snapshotId: successorSnapshotId,
-          })),
-          async (batch) =>
-            transaction
-              .insert(accessMembershipEvaluatedMembers)
-              .values([...batch]),
-        );
-        await transaction.insert(accessMembershipMembers).values({
-          snapshotId: successorSnapshotId,
-          userId: designatedMember.userId,
-          googleSubject: designatedMember.googleSubject,
-          facilityScopeKind: 'district',
-        });
-        await transaction.insert(accessMembershipMemberGroups).values({
-          snapshotId: successorSnapshotId,
-          userId: designatedMember.userId,
-          groupSourceId: designatedSource.id,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-        });
-
-        const readbackState =
-          await loadAccessConfigurationSnapshotState(transaction);
-        const readbackAdministratorIds =
-          readbackState === null
-            ? []
-            : await loadEffectiveAdministratorUserIds(transaction, {
-                accessState: readbackState,
-              });
-        const readbackMembers = await transaction
-          .select()
-          .from(accessMembershipMembers)
-          .where(eq(accessMembershipMembers.snapshotId, successorSnapshotId));
-        if (
-          readbackState?.snapshotId !== successorSnapshotId ||
-          readbackState.snapshotVersion !== successorSnapshotVersion ||
-          readbackState.activeAccessGroupSourceIds.length !== 1 ||
-          readbackState.activeAccessGroupSourceIds[0] !== designatedSource.id ||
-          readbackMembers.length !== 1 ||
-          readbackMembers[0]?.userId !== designatedMember.userId ||
-          readbackAdministratorIds.length !== 1 ||
-          readbackAdministratorIds[0] !== designatedMember.userId
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_READBACK_FAILED',
-            'The protected finalization did not pass transactional readback.',
-          );
-        }
-
-        await transaction.execute(SECURITY_AUDIT_APPEND_LOCK_SQL);
-        const [auditAnchor] = await transaction
-          .select()
-          .from(securityAuditChainAnchors)
-          .orderBy(desc(securityAuditChainAnchors.sequence))
-          .limit(1)
-          .for('share');
-        const [auditHead] = await transaction
-          .select({
-            sequence: securityAuditEntries.sequence,
-            entryHash: securityAuditEntries.entryHash,
-          })
-          .from(securityAuditEntries)
-          .orderBy(desc(securityAuditEntries.sequence))
-          .limit(1)
-          .for('share');
-        const [existingAuditRequest] = await transaction
-          .select({ id: securityAuditEntries.id })
-          .from(securityAuditEntries)
-          .where(eq(securityAuditEntries.requestId, requestId))
-          .limit(1)
-          .for('share');
-        if (
-          (auditAnchor === undefined) !== (auditHead === undefined) ||
-          auditAnchor?.sequence !== auditHead?.sequence ||
-          auditAnchor?.entryHash !== auditHead?.entryHash ||
-          existingAuditRequest !== undefined
-        ) {
-          throw new AccessMembershipSyncError(
-            'FINALIZATION_AUDIT_CHAIN_INVALID',
-            'The protected finalization audit chain is unavailable.',
-          );
-        }
-        const finalizationAuditEntry = buildSecurityAuditEntry(
-          {
-            category: 'admin-change',
-            action: 'sync-access-membership',
-            actionIds: [],
-            confirmationId: null,
-            outcome: 'success',
-            principal: {
-              kind: 'system',
-              serviceId: 'access-membership-sync',
-            },
-            source: 'scheduled-job',
-            facilityId: null,
-            target: {
-              kind: 'configuration',
-              id: successorSnapshotId,
-            },
-            requestId,
-            reasonCode: null,
-            occurredAt: completedAt.toISOString(),
-          },
-          auditAnchor ?? null,
-        );
-        await transaction
-          .insert(securityAuditEntries)
-          .values(toSecurityAuditInsertValues(finalizationAuditEntry));
-
-        await completeReservation(
-          transaction,
-          reservationId,
-          successorSnapshotId,
-          finalizationAuditEntry.entryHash,
-          completedAt,
-        );
-        return publicationResult(
-          evaluation,
-          successorSnapshotId,
-          successorSnapshotVersion,
-          designatedSource.id,
-          1,
-          finalizationAuditEntry.entryHash,
+          activeIds.length,
         );
       });
     },

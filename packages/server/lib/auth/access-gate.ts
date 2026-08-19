@@ -350,7 +350,6 @@ function isSameFacilityScope(
 function validateEvidence(
   evidence: AccessGateEvidence,
   input: AccessGateCheckInput,
-  initialMobileTransitionEmailDigest: string | null,
 ):
   | Readonly<{
       granted: true;
@@ -418,7 +417,9 @@ function validateEvidence(
   const evaluatedInActiveGroup =
     evaluatedGroups !== null &&
     evaluatedGroups.length > 0 &&
-    evaluatedGroups.every((source) => activeGroupKeys.has(accessGroupKey(source)));
+    evaluatedGroups.every((source) =>
+      activeGroupKeys.has(accessGroupKey(source)),
+    );
   const hasExactEvaluatedMembership =
     evaluatedMember !== null &&
     evaluatedMember.email === input.email &&
@@ -606,11 +607,7 @@ export async function checkAccessGate(
       'Initial mobile transition email digest must be a SHA-256 digest',
     );
   }
-  const evaluated = validateEvidence(
-    evidence,
-    input,
-    configuredTransitionDigest,
-  );
+  const evaluated = validateEvidence(evidence, input);
   if (!evaluated.granted) {
     return deny(
       input,

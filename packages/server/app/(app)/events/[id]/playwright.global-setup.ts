@@ -13,7 +13,6 @@ import {
   IntegrationStatusSchema,
   JournalEntrySchema,
   MediaRecordSchema,
-  SyncAccessMembershipInputSchema,
   type Actor,
   type Event,
   type JournalEntry,
@@ -56,8 +55,9 @@ import { createOwnedEventRoomPlaywrightDatabase } from './playwright-database';
 import { requireEventRoomPlaywrightRunContext } from './test-database';
 
 const ACCESS_GROUP_ID = '16000000-0000-4000-8000-000000000110';
-const DESIGNATED_ACCESS_GROUP_EMAIL =
-  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
+// The access group these browser fixtures configure. Any address works now
+// that the group set is data; this one keeps the fixtures' expectations stable.
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 const MEMBER_USER_ID = '16000000-0000-4000-8000-000000000120';
 const MEMBER_SUBJECT = 'mock-google-subject-event-room';
 const FACILITY_ID = '00000000-0000-4000-8000-000000000001';

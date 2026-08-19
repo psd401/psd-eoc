@@ -11,7 +11,6 @@ import {
   FanoutControlEffectiveStateSchema,
   FanoutControlRecordSchema,
   IdempotencyPrincipalSchema,
-  SyncAccessMembershipInputSchema,
   type Actor,
   type SessionEstablishmentResult,
   type StartEventResult,
@@ -97,8 +96,9 @@ const SYNTHETIC_SOUTH_FACILITY_ID = '00000000-0000-4000-8000-000000000002';
 const SYNTHETIC_NEIGHBORHOOD_ID = '00000000-0000-4000-8000-000000000010';
 const SYNTHETIC_DRILL_VERSION_ID = '00000000-0000-4000-8000-000000000201';
 const ACCESS_GROUP_ID = '15000000-0000-4000-8000-000000000110';
-const DESIGNATED_ACCESS_GROUP_EMAIL =
-  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
+// The access group these browser fixtures configure. Any address works now
+// that the group set is data; this one keeps the fixtures' expectations stable.
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 const MEMBER_USER_ID = PLAYWRIGHT_IDS.user;
 const MEMBER_SUBJECT = 'mock-google-subject-member';
 const FIXTURE_TIME = new Date('2026-08-10T18:00:00.000Z');

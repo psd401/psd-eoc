@@ -381,7 +381,9 @@ export function createGoogleAccessMembershipEvaluator(
     // parameter"), which surfaces here as GOOGLE_REQUEST_REJECTED and looks
     // indistinguishable from an authorization failure. The details are read
     // from `groups.get` on the resolved name.
-    const lookupUrl = new URL(`${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`);
+    const lookupUrl = new URL(
+      `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
+    );
     lookupUrl.searchParams.set('groupKey.id', group.email);
     lookupUrl.searchParams.set('fields', 'name');
     const resolved = await providerRequest(
@@ -545,7 +547,8 @@ export function createGoogleAccessMembershipEvaluator(
       // Duplicate addresses or source IDs would let one group be counted
       // twice and make the published digest ambiguous.
       if (
-        new Set(requested.map(({ email }) => email)).size !== requested.length ||
+        new Set(requested.map(({ email }) => email)).size !==
+          requested.length ||
         new Set(requested.map(({ groupSourceId }) => groupSourceId)).size !==
           requested.length
       ) {

@@ -4,10 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 
-import {
-  IdempotencyPrincipalSchema,
-  SyncAccessMembershipInputSchema,
-} from '@psd-eoc/contracts';
+import { IdempotencyPrincipalSchema } from '@psd-eoc/contracts';
 import type { FullConfig } from '@playwright/test';
 import { and, desc, eq } from 'drizzle-orm';
 
@@ -36,8 +33,9 @@ import {
 import { executeOperationWithCleanup } from '../facilities/owned-database-lifecycle';
 
 const ACCESS_GROUP_ID = '10000000-0000-4000-8000-000000000110';
-const DESIGNATED_ACCESS_GROUP_EMAIL =
-  SyncAccessMembershipInputSchema.unwrap().shape.designatedGroupEmail.value;
+// The access group these browser fixtures configure. Any address works now
+// that the group set is data; this one keeps the fixtures' expectations stable.
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 const MEMBER_USER_ID = '10000000-0000-4000-8000-000000000120';
 const MEMBER_SUBJECT = 'mock-google-subject-member';
 const runFile = promisify(execFile);
