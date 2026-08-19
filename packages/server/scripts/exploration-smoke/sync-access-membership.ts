@@ -39,11 +39,6 @@ export const AccessMembershipSyncSummarySchema = z
     evaluatedMembershipCount: z.number().int().min(1).max(1_200),
     membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     providerGroupIdDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-    proofKind: z.enum(['initial-selector-match', 'durable-ios-session']),
-    auditEntryHash: z
-      .string()
-      .regex(/^[a-f0-9]{64}$/u)
-      .nullable(),
     publication: z.enum(['created', 'already-current']),
   })
   .strict()
@@ -60,14 +55,9 @@ export function readAccessMembershipSyncEnvironment(
   environment: Environment = process.env,
 ): z.infer<typeof AccessMembershipSyncEnvironmentSchema> {
   const parsed = AccessMembershipSyncEnvironmentSchema.safeParse({
-    phase: environment.ACCESS_SYNC_PHASE,
     requestId: environment.ACCESS_SYNC_REQUEST_ID,
     idempotencyKey: environment.ACCESS_SYNC_IDEMPOTENCY_KEY,
     sourceSha: environment.SOURCE_SHA,
-    initialMobileTransitionEmailDigest:
-      environment.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256,
-    mobileSessionId: environment.ACCESS_SYNC_MOBILE_SESSION_ID,
-    membershipSnapshotId: environment.ACCESS_SYNC_MEMBERSHIP_SNAPSHOT_ID,
   });
   if (!parsed.success) {
     throw new Error(
