@@ -6,10 +6,7 @@ import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
-import {
-  WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
-} from '../../../lib/auth/sessions';
+import { WEB_SESSION_COOKIE_NAME } from '../../../lib/auth/sessions';
 import { agentApiKeyAdministrationAccessFromSession } from '../../../lib/agents/admin-capabilities';
 import { getDefaultAgentApiKeyAdministration } from '../../../lib/agents/runtime';
 import {
@@ -20,6 +17,7 @@ import type {
   AgentAdminIssueState,
   AgentAdminRevokeState,
 } from './agent-admin';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
 
 async function authenticateAdministrationSession() {
   const cookieStore = await cookies();
@@ -28,7 +26,7 @@ async function authenticateAdministrationSession() {
     redirect('/login?reason=session-required');
   }
   try {
-    return await getDefaultSessionService().authenticate(token, 'web');
+    return await authenticateWebSession(token);
   } catch {
     redirect('/login?reason=session-expired');
   }

@@ -5,7 +5,6 @@ import {
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
   SessionAccessError,
-  getDefaultSessionService,
 } from '../../../../lib/auth/sessions';
 import {
   EventTypeCapabilityError,
@@ -13,6 +12,7 @@ import {
   getDefaultEventTypeStore,
 } from '../../../../lib/capabilities/event-types';
 import { EventTypeAdmin } from './event-type-admin';
+import { authenticateWebSession } from '../../../../lib/auth/request-session';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,7 +28,7 @@ export default async function EventTypesAdminPage({
   }
   let authenticated;
   try {
-    authenticated = await getDefaultSessionService().authenticate(token, 'web');
+    authenticated = await authenticateWebSession(token);
   } catch (error) {
     if (error instanceof SessionAccessError) {
       redirect('/login?reason=session-expired');

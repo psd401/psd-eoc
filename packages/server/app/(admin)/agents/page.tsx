@@ -4,14 +4,12 @@ import { AGENT_GRANTABLE_CAPABILITY_IDS } from '@psd-eoc/contracts';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
-import {
-  WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
-} from '../../../lib/auth/sessions';
+import { WEB_SESSION_COOKIE_NAME } from '../../../lib/auth/sessions';
 import { getDefaultAgentAdministrationPageLoader } from '../../../lib/agents/runtime';
 import { isAgentDeployedCapabilityId } from '../../../lib/agents/availability';
 import { AgentAdmin, type AgentAdminAgent } from './agent-admin';
 import { issueAgentApiKeyAction, revokeAgentApiKeyAction } from './actions';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -32,7 +30,7 @@ export default async function AgentsAdminPage() {
 
   let authenticated;
   try {
-    authenticated = await getDefaultSessionService().authenticate(token, 'web');
+    authenticated = await authenticateWebSession(token);
   } catch {
     redirect('/login?reason=session-expired');
   }

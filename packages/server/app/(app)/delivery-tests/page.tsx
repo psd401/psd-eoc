@@ -11,7 +11,6 @@ import { redirect } from 'next/navigation';
 import {
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../lib/auth/sessions';
 import { eventTypesForMode, loadOperationalViewData } from '../start/_lib/data';
@@ -23,6 +22,7 @@ import { DeliveryTestConsole } from './delivery-test-console';
 import { DeliveryTestReportList } from './report-list';
 import '../start/styles.css';
 import './styles.css';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -43,7 +43,7 @@ async function requireDeliveryTestSession(): Promise<{
   }
   let authenticated: AuthenticatedSession;
   try {
-    authenticated = await getDefaultSessionService().authenticate(token, 'web');
+    authenticated = await authenticateWebSession(token);
   } catch {
     redirect('/login?reason=session-expired&returnTo=%2Fdelivery-tests');
   }

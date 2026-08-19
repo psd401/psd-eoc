@@ -4,10 +4,10 @@ import { redirect } from 'next/navigation';
 import {
   SessionAccessError,
   WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
   type AuthenticatedSession,
 } from '../../../../lib/auth/sessions';
 import type { StartFlowReturnPath } from './return-path';
+import { authenticateWebSession } from '../../../../lib/auth/request-session';
 
 /** Resolves a fresh server-side session without any Google dependency. */
 export async function requirePageSession(
@@ -21,7 +21,7 @@ export async function requirePageSession(
   }
 
   try {
-    return await getDefaultSessionService().authenticate(token, 'web');
+    return await authenticateWebSession(token);
   } catch (error) {
     if (error instanceof SessionAccessError) {
       redirect(
