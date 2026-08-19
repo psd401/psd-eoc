@@ -23,8 +23,7 @@ import {
 const NOW = new Date('2026-08-10T18:00:00.000Z');
 const CAPTURED_AT = '2026-08-10T17:55:00.000Z';
 const USER_ID = '10000000-0000-4000-8000-000000000101';
-const SNAPSHOT_ID = '10000000-0000-4000-8000-000000000102';
-const GROUP_SOURCE_ID = '10000000-0000-4000-8000-000000000103';
+const ACCESS_GROUP_ID = '10000000-0000-4000-8000-000000000102';
 const DEVICE_ID = '10000000-0000-4000-8000-000000000104';
 const SESSION_ID = '10000000-0000-4000-8000-000000000105';
 const EPOCH_ID = '10000000-0000-4000-8000-000000000106';
@@ -67,25 +66,9 @@ const AUTHORIZATION: CompleteOidcSignInContext['authorization'] = Object.freeze(
       createdAt: '2026-08-01T00:00:00.000Z',
       disabledAt: null,
     }),
-    membershipSnapshot: Object.freeze({
-      id: SNAPSHOT_ID,
-      version: 1,
-      complete: true as const,
-      syncStartedAt: '2026-08-10T17:54:00.000Z',
-      capturedAt: CAPTURED_AT,
-    }),
-    membershipMember: Object.freeze({
-      userId: USER_ID,
-      googleSubject: INPUT.claims.subject,
-      accessGroupSourceRefs: Object.freeze([
-        Object.freeze({
-          id: GROUP_SOURCE_ID,
-          kind: 'google-group' as const,
-          purpose: 'access' as const,
-          facilityId: null,
-        }),
-      ]),
-      facilityScope: Object.freeze({ kind: 'district' as const }),
+    membership: Object.freeze({
+      groupSourceIds: Object.freeze([ACCESS_GROUP_ID]),
+      capturedAt: new Date(CAPTURED_AT),
     }),
   },
 );
@@ -141,7 +124,7 @@ function persistedResult(
       authorization: Object.freeze({
         kind: 'group-membership' as const,
         source: 'google-group-snapshot' as const,
-        membershipSnapshotId: request.membershipSnapshot.id,
+        membershipSnapshotId: null,
         membershipValidUntil: request.membershipValidUntil.toISOString(),
         membershipGraceUntil: request.membershipGraceUntil.toISOString(),
       }),
@@ -253,10 +236,11 @@ describe('native initial session issuance', () => {
     expect(bearers).toHaveLength(1);
   });
 
-  test('requires the designated-group admin projection before bearer delivery', async () => {
-    const designatedGroupEligible = Object.freeze({
-      ...AUTHORIZATION,
-    });
+  test('refuses a persisted session carrying a role the groups did not grant', async () => {
+    // Roles come from the trusted groups and nowhere else. A store returning
+    // an extra role is a persistence layer disagreeing with the authorization
+    // that produced it, which used to be how the bootstrap administrator was
+    // added and is now a rejection.
     let persisted: PersistInitialWebSessionRequest | undefined;
     const store: InitialWebSessionStore = Object.freeze({
       async persist(request: PersistInitialWebSessionRequest) {
@@ -272,18 +256,21 @@ describe('native initial session issuance', () => {
     });
     const bearers: string[] = [];
 
-    const result = await execute(
-      store,
-      context(
-        envelope('10000000-0000-4000-8000-000000000110'),
-        bearers,
-        designatedGroupEligible,
+    await expect(
+      execute(
+        store,
+        context(
+          envelope('10000000-0000-4000-8000-000000000110'),
+          bearers,
+          Object.freeze({ ...AUTHORIZATION }),
+        ),
       ),
-    );
+    ).rejects.toMatchObject({ code: 'PERSISTED_RESULT_MISMATCH' });
 
-    expect(persisted?.grantBootstrapAdmin).toBe(true);
-    expect(result.user.roles).toEqual(['staff', 'admin']);
-    expect(bearers).toHaveLength(1);
+    // The request itself carried only what the groups granted, and no bearer
+    // was delivered for a session that was refused.
+    expect(persisted?.user.roles).toEqual(['staff']);
+    expect(bearers).toHaveLength(0);
   });
 });
 

@@ -43,7 +43,7 @@ import {
 } from '../../../db/schema';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase } from '../../../drizzle/migrate';
-import { createDrizzleAccessGateStore } from '../../../lib/auth/access-gate';
+import { decideAccess } from '../../../lib/auth/trusted-group-access';
 import { SECURITY_AUDIT_APPEND_LOCK_SQL } from '../../../lib/audit/drizzle-repository';
 import {
   loadAccessConfigurationSnapshotState,
@@ -3522,11 +3522,14 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
       [authenticated.actor.userId, roleTargetId].sort(),
     );
-    const inaccessibleEvidence = await createDrizzleAccessGateStore(
-      database,
-    ).loadEvidence(`issue-26-inaccessible-admin-${suffix}`);
-    expect(inaccessibleEvidence.user?.roles).toEqual(['staff', 'admin']);
-    expect(inaccessibleEvidence.snapshot?.member).toBeNull();
+    // The administrator holds the role but is not a member of any trusted
+    // group, so access is refused while the role row survives.
+    expect(
+      await decideAccess(database, {
+        email: `issue-26-inaccessible-admin-${suffix}@psd401.net`,
+        checkedAt: new Date(),
+      }),
+    ).toMatchObject({ granted: false });
 
     const contradictoryAdministratorId = randomUUID();
     const contradictoryAdministratorSubject = `issue-26-contradictory-admin-${suffix}`;

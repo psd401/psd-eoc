@@ -2,7 +2,6 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { decideAccess } from './trusted-group-access';
 import {
-  AccessGroupSourceRefSchema,
   CompleteOidcSignInInputSchema,
   IdempotencyKeySchema,
   IdempotencyPrincipalSchema,
@@ -39,7 +38,7 @@ import {
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './access-gate';
-import { ADMIN_AVAILABILITY_LOCK_SQL, loadEffectiveRoles } from './role-state';
+import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 
 /**
  * The __Host- prefix makes browsers require Secure, Path=/, and no Domain.
@@ -581,14 +580,6 @@ export function createCompleteOidcSignInHandler(
 
 function toIsoString(value: Date): string {
   return value.toISOString();
-}
-
-function accessGroupKey(source: {
-  readonly id: string;
-  readonly kind: string;
-  readonly purpose: string;
-}): string {
-  return `${source.id}:${source.kind}:${source.purpose}`;
 }
 
 /** Recognizes only rollback-safe database conflicts for bounded retries. */

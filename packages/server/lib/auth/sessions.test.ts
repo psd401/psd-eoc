@@ -732,25 +732,9 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         createdAt: snapshotAt.toISOString(),
         disabledAt: null,
       }),
-      membershipSnapshot: Object.freeze({
-        id: snapshotId,
-        version: snapshotVersion,
-        complete: true as const,
-        syncStartedAt: snapshotAt.toISOString(),
-        capturedAt: snapshotAt.toISOString(),
-      }),
-      membershipMember: Object.freeze({
-        userId,
-        googleSubject,
-        accessGroupSourceRefs: Object.freeze([
-          Object.freeze({
-            id: groupSourceId,
-            kind: 'google-group' as const,
-            purpose: 'access' as const,
-            facilityId: null,
-          }),
-        ]),
-        facilityScope: Object.freeze({ kind: 'district' as const }),
+      membership: Object.freeze({
+        groupSourceIds: Object.freeze([groupSourceId]),
+        capturedAt: snapshotAt,
       }),
       device: Object.freeze({
         platform: 'web' as const,
@@ -986,25 +970,9 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         createdAt: snapshotAt.toISOString(),
         disabledAt: null,
       }),
-      membershipSnapshot: Object.freeze({
-        id: snapshotId,
-        version: 2_120_000_000 + Number.parseInt(suffix.slice(0, 6), 16),
-        complete: true as const,
-        syncStartedAt: snapshotAt.toISOString(),
-        capturedAt: snapshotAt.toISOString(),
-      }),
-      membershipMember: Object.freeze({
-        userId,
-        googleSubject,
-        accessGroupSourceRefs: Object.freeze([
-          Object.freeze({
-            id: groupSourceId,
-            kind: 'google-group' as const,
-            purpose: 'access' as const,
-            facilityId: null,
-          }),
-        ]),
-        facilityScope: Object.freeze({ kind: 'district' as const }),
+      membership: Object.freeze({
+        groupSourceIds: Object.freeze([groupSourceId]),
+        capturedAt: snapshotAt,
       }),
       device: Object.freeze({
         platform: 'web' as const,
