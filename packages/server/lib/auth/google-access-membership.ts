@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import {
-  DESIGNATED_ACCESS_GROUP_EMAIL,
+  RoleSchema,
   StaffRosterEmailSchema,
   TimestampSchema,
+  type Role,
 } from '@psd-eoc/contracts';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
@@ -19,8 +20,6 @@ const MAX_GOOGLE_RESPONSE_BYTES = 512 * 1024;
 const MAX_GROUP_PAGES = 100;
 const MAX_EVALUATED_MEMBERS = 1_200;
 const PAGE_SIZE = 200;
-
-export { DESIGNATED_ACCESS_GROUP_EMAIL };
 
 const GoogleTokenResponseSchema = z
   .object({
@@ -124,11 +123,38 @@ export class AccessMembershipEvaluationError extends Error {
   }
 }
 
-/** Complete direct-user evaluation of the one product-owner-selected group. */
-export interface EvaluatedAccessMembershipSet {
-  readonly groupEmail: typeof DESIGNATED_ACCESS_GROUP_EMAIL;
+/**
+ * One access group a deployment has configured, as the evaluator is asked to
+ * read it. The caller supplies these from the active access sources, which is
+ * what replaced the single compiled-in group address.
+ */
+export interface DesignatedAccessGroup {
+  readonly groupSourceId: string;
+  readonly email: string;
+  readonly grantedRole: Role;
+}
+
+export const DesignatedAccessGroupSchema = z
+  .object({
+    groupSourceId: z.string().uuid(),
+    email: StaffRosterEmailSchema,
+    grantedRole: RoleSchema,
+  })
+  .strict()
+  .readonly();
+
+/** Complete direct-user evaluation of one configured access group. */
+export interface EvaluatedAccessGroup {
+  readonly groupSourceId: string;
+  readonly groupEmail: string;
   readonly googleGroupId: string;
+  readonly grantedRole: Role;
   readonly memberEmails: readonly string[];
+}
+
+/** Complete direct-user evaluation of every configured access group. */
+export interface EvaluatedAccessMembershipSet {
+  readonly groups: readonly EvaluatedAccessGroup[];
   readonly membershipDigest: string;
   readonly providerGroupIdDigest: string;
   readonly syncStartedAt: string;
@@ -136,7 +162,9 @@ export interface EvaluatedAccessMembershipSet {
 }
 
 export interface GoogleAccessMembershipEvaluator {
-  evaluate(): Promise<EvaluatedAccessMembershipSet>;
+  evaluate(
+    groups: readonly DesignatedAccessGroup[],
+  ): Promise<EvaluatedAccessMembershipSet>;
 }
 
 function stableDigest(parts: readonly string[]): string {
@@ -341,186 +369,247 @@ export function createGoogleAccessMembershipEvaluator(
     );
   }
 
+  /** Reads one configured group's direct user members, failing closed. */
+  async function evaluateOneGroup(
+    group: DesignatedAccessGroup,
+    authorization: Readonly<Record<string, string>>,
+  ): Promise<EvaluatedAccessGroup> {
+    // Two calls, deliberately. `groups:lookup` only resolves a group key to
+    // a resource name; its response carries no groupKey, labels, or
+    // dynamicGroupMetadata. Asking it for those through a `fields` mask is
+    // rejected with 400 INVALID_ARGUMENT ("Error expanding 'fields'
+    // parameter"), which surfaces here as GOOGLE_REQUEST_REJECTED and looks
+    // indistinguishable from an authorization failure. The details are read
+    // from `groups.get` on the resolved name.
+    const lookupUrl = new URL(`${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`);
+    lookupUrl.searchParams.set('groupKey.id', group.email);
+    lookupUrl.searchParams.set('fields', 'name');
+    const resolved = await providerRequest(
+      lookupUrl,
+      { headers: authorization, method: 'GET' },
+      'Exact Google access-group lookup',
+      (value) => {
+        const parsed = GroupNameLookupResponseSchema.safeParse(value);
+        return parsed.success ? parsed.data : null;
+      },
+    );
+    const groupUrl = new URL(
+      `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${resolved.name}`,
+    );
+    groupUrl.searchParams.set(
+      'fields',
+      'name,groupKey(id),labels,dynamicGroupMetadata',
+    );
+    const resource = await providerRequest(
+      groupUrl,
+      { headers: authorization, method: 'GET' },
+      'Exact Google access-group read',
+      (value) => {
+        const parsed = GroupLookupResponseSchema.safeParse(value);
+        return parsed.success ? parsed.data : null;
+      },
+    );
+    // The resolved group must be the group that was asked for. A dynamic
+    // group is refused because its membership is a query Google re-evaluates,
+    // so a published snapshot would not describe who actually holds access.
+    if (
+      resource.name !== resolved.name ||
+      resource.groupKey.id.toLowerCase() !== group.email ||
+      resource.groupKey.id !== resource.groupKey.id.trim() ||
+      resource.dynamicGroupMetadata !== undefined ||
+      !Object.hasOwn(
+        resource.labels,
+        'cloudidentity.googleapis.com/groups.discussion_forum',
+      )
+    ) {
+      throw new AccessMembershipEvaluationError(
+        'DESIGNATED_GROUP_IDENTITY_INVALID',
+        'Google did not resolve the exact configured access group.',
+      );
+    }
+    const googleGroupId = resource.name.slice('groups/'.length);
+    const memberEmails = new Set<string>();
+    const seenMembershipNames = new Set<string>();
+    const seenPageTokens = new Set<string>();
+    let pageToken: string | undefined;
+
+    for (let page = 0; page < MAX_GROUP_PAGES; page += 1) {
+      const membershipsUrl = new URL(
+        `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${resource.name}/memberships`,
+      );
+      membershipsUrl.searchParams.set('pageSize', String(PAGE_SIZE));
+      membershipsUrl.searchParams.set('view', 'FULL');
+      membershipsUrl.searchParams.set(
+        'fields',
+        'memberships(name,preferredMemberKey(id,namespace),roles(name,expiryDetail(expireTime)),type),nextPageToken',
+      );
+      if (pageToken !== undefined) {
+        membershipsUrl.searchParams.set('pageToken', pageToken);
+      }
+      const response = await providerRequest(
+        membershipsUrl,
+        { headers: authorization, method: 'GET' },
+        'Direct Google access-membership list',
+        (value) => {
+          const parsed = MembershipPageSchema.safeParse(value);
+          return parsed.success ? parsed.data : null;
+        },
+      );
+      const evaluationTime = Date.parse(trustedTimestamp(now));
+      for (const membership of response.memberships ?? []) {
+        if (
+          membership.type !== 'USER' ||
+          membership.preferredMemberKey.namespace !== undefined
+        ) {
+          throw new AccessMembershipEvaluationError(
+            'NESTED_OR_NON_USER_MEMBERSHIP',
+            'A configured access group contains a non-user direct edge; membership semantics require review.',
+          );
+        }
+        if (seenMembershipNames.has(membership.name)) {
+          throw new AccessMembershipEvaluationError(
+            'DUPLICATE_PROVIDER_MEMBERSHIP',
+            'Google repeated one direct access-membership resource.',
+          );
+        }
+        seenMembershipNames.add(membership.name);
+        const hasCurrentRole = membership.roles.some(
+          ({ expiryDetail }) =>
+            expiryDetail === undefined ||
+            Date.parse(expiryDetail.expireTime) > evaluationTime,
+        );
+        if (!hasCurrentRole) continue;
+        const parsedEmail = StaffRosterEmailSchema.safeParse(
+          membership.preferredMemberKey.id,
+        );
+        if (!parsedEmail.success) {
+          throw new AccessMembershipEvaluationError(
+            'NON_STAFF_MEMBERSHIP',
+            'A configured access group contains a direct user outside the approved staff domain.',
+          );
+        }
+        const email = parsedEmail.data;
+        if (memberEmails.has(email)) {
+          throw new AccessMembershipEvaluationError(
+            'DUPLICATE_EVALUATED_EMAIL',
+            'Google returned duplicate normalized access-member identity.',
+          );
+        }
+        memberEmails.add(email);
+        if (memberEmails.size > MAX_EVALUATED_MEMBERS) {
+          throw new AccessMembershipEvaluationError(
+            'GROUP_MEMBER_LIMIT_EXCEEDED',
+            'A configured access group exceeds the supported member limit.',
+          );
+        }
+      }
+
+      const nextPageToken = response.nextPageToken;
+      if (nextPageToken === undefined) {
+        return Object.freeze({
+          groupSourceId: group.groupSourceId,
+          groupEmail: group.email,
+          googleGroupId,
+          grantedRole: group.grantedRole,
+          memberEmails: Object.freeze([...memberEmails].sort()),
+        });
+      }
+      if (seenPageTokens.has(nextPageToken) || nextPageToken === pageToken) {
+        throw new AccessMembershipEvaluationError(
+          'GROUP_PAGINATION_LOOP',
+          'Google repeated an access-membership page token.',
+        );
+      }
+      seenPageTokens.add(nextPageToken);
+      pageToken = nextPageToken;
+    }
+    throw new AccessMembershipEvaluationError(
+      'GROUP_PAGE_LIMIT_EXCEEDED',
+      'A configured access group exceeds the supported page limit.',
+    );
+  }
+
   return Object.freeze({
-    async evaluate(): Promise<EvaluatedAccessMembershipSet> {
+    async evaluate(
+      groups: readonly DesignatedAccessGroup[],
+    ): Promise<EvaluatedAccessMembershipSet> {
+      const requested = groups.map((group) =>
+        DesignatedAccessGroupSchema.parse(group),
+      );
+      if (requested.length === 0) {
+        throw new AccessMembershipEvaluationError(
+          'NO_CONFIGURED_ACCESS_GROUPS',
+          'No access group is configured, so no one could be granted access.',
+        );
+      }
+      // Duplicate addresses or source IDs would let one group be counted
+      // twice and make the published digest ambiguous.
+      if (
+        new Set(requested.map(({ email }) => email)).size !== requested.length ||
+        new Set(requested.map(({ groupSourceId }) => groupSourceId)).size !==
+          requested.length
+      ) {
+        throw new AccessMembershipEvaluationError(
+          'DUPLICATE_CONFIGURED_ACCESS_GROUP',
+          'The configured access groups are not distinct.',
+        );
+      }
+
       const syncStartedAt = trustedTimestamp(now);
       const token = await accessToken();
       const authorization = {
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
       };
-      // Two calls, deliberately. `groups:lookup` only resolves a group key to
-      // a resource name; its response carries no groupKey, labels, or
-      // dynamicGroupMetadata. Asking it for those through a `fields` mask is
-      // rejected with 400 INVALID_ARGUMENT ("Error expanding 'fields'
-      // parameter"), which surfaces here as GOOGLE_REQUEST_REJECTED and looks
-      // indistinguishable from an authorization failure. The details are read
-      // from `groups.get` on the resolved name.
-      const lookupUrl = new URL(
-        `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/groups:lookup`,
-      );
-      lookupUrl.searchParams.set('groupKey.id', DESIGNATED_ACCESS_GROUP_EMAIL);
-      lookupUrl.searchParams.set('fields', 'name');
-      const resolved = await providerRequest(
-        lookupUrl,
-        { headers: authorization, method: 'GET' },
-        'Exact Google access-group lookup',
-        (value) => {
-          const parsed = GroupNameLookupResponseSchema.safeParse(value);
-          return parsed.success ? parsed.data : null;
-        },
-      );
-      const groupUrl = new URL(
-        `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${resolved.name}`,
-      );
-      groupUrl.searchParams.set(
-        'fields',
-        'name,groupKey(id),labels,dynamicGroupMetadata',
-      );
-      const group = await providerRequest(
-        groupUrl,
-        { headers: authorization, method: 'GET' },
-        'Exact Google access-group read',
-        (value) => {
-          const parsed = GroupLookupResponseSchema.safeParse(value);
-          return parsed.success ? parsed.data : null;
-        },
-      );
-      if (group.name !== resolved.name) {
-        throw new AccessMembershipEvaluationError(
-          'DESIGNATED_GROUP_IDENTITY_INVALID',
-          'Google did not resolve the exact static designated access group.',
-        );
-      }
-      const normalizedGroupEmail = group.groupKey.id.toLowerCase();
-      if (
-        normalizedGroupEmail !== DESIGNATED_ACCESS_GROUP_EMAIL ||
-        group.groupKey.id !== group.groupKey.id.trim() ||
-        group.dynamicGroupMetadata !== undefined ||
-        !Object.hasOwn(
-          group.labels,
-          'cloudidentity.googleapis.com/groups.discussion_forum',
-        )
-      ) {
-        throw new AccessMembershipEvaluationError(
-          'DESIGNATED_GROUP_IDENTITY_INVALID',
-          'Google did not resolve the exact static designated access group.',
-        );
-      }
-      const googleGroupId = group.name.slice('groups/'.length);
-      const memberEmails = new Set<string>();
-      const seenMembershipNames = new Set<string>();
-      const seenPageTokens = new Set<string>();
-      let pageToken: string | undefined;
 
-      for (let page = 0; page < MAX_GROUP_PAGES; page += 1) {
-        const membershipsUrl = new URL(
-          `${GOOGLE_CLOUD_IDENTITY_ENDPOINT}/${group.name}/memberships`,
-        );
-        membershipsUrl.searchParams.set('pageSize', String(PAGE_SIZE));
-        membershipsUrl.searchParams.set('view', 'FULL');
-        membershipsUrl.searchParams.set(
-          'fields',
-          'memberships(name,preferredMemberKey(id,namespace),roles(name,expiryDetail(expireTime)),type),nextPageToken',
-        );
-        if (pageToken !== undefined) {
-          membershipsUrl.searchParams.set('pageToken', pageToken);
-        }
-        const response = await providerRequest(
-          membershipsUrl,
-          { headers: authorization, method: 'GET' },
-          'Direct Google access-membership list',
-          (value) => {
-            const parsed = MembershipPageSchema.safeParse(value);
-            return parsed.success ? parsed.data : null;
-          },
-        );
-        const evaluationTime = Date.parse(trustedTimestamp(now));
-        for (const membership of response.memberships ?? []) {
-          if (
-            membership.type !== 'USER' ||
-            membership.preferredMemberKey.namespace !== undefined
-          ) {
-            throw new AccessMembershipEvaluationError(
-              'NESTED_OR_NON_USER_MEMBERSHIP',
-              'The designated access group contains a non-user direct edge; membership semantics require product-owner review.',
-            );
-          }
-          if (seenMembershipNames.has(membership.name)) {
-            throw new AccessMembershipEvaluationError(
-              'DUPLICATE_PROVIDER_MEMBERSHIP',
-              'Google repeated one direct access-membership resource.',
-            );
-          }
-          seenMembershipNames.add(membership.name);
-          const hasCurrentRole = membership.roles.some(
-            ({ expiryDetail }) =>
-              expiryDetail === undefined ||
-              Date.parse(expiryDetail.expireTime) > evaluationTime,
-          );
-          if (!hasCurrentRole) continue;
-          const parsedEmail = StaffRosterEmailSchema.safeParse(
-            membership.preferredMemberKey.id,
-          );
-          if (!parsedEmail.success) {
-            throw new AccessMembershipEvaluationError(
-              'NON_STAFF_MEMBERSHIP',
-              'The designated access group contains a direct user outside the approved staff domain.',
-            );
-          }
-          const email = parsedEmail.data;
-          if (memberEmails.has(email)) {
-            throw new AccessMembershipEvaluationError(
-              'DUPLICATE_EVALUATED_EMAIL',
-              'Google returned duplicate normalized access-member identity.',
-            );
-          }
-          memberEmails.add(email);
-          if (memberEmails.size > MAX_EVALUATED_MEMBERS) {
-            throw new AccessMembershipEvaluationError(
-              'GROUP_MEMBER_LIMIT_EXCEEDED',
-              'The designated access group exceeds the supported member limit.',
-            );
-          }
-        }
-
-        const nextPageToken = response.nextPageToken;
-        if (nextPageToken === undefined) {
-          const capturedAt = trustedTimestamp(now);
-          const members = Object.freeze([...memberEmails].sort());
-          if (members.length === 0) {
-            throw new AccessMembershipEvaluationError(
-              'DESIGNATED_GROUP_EMPTY',
-              'The designated access group has no current direct user members.',
-            );
-          }
-          return Object.freeze({
-            groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
-            googleGroupId,
-            memberEmails: members,
-            membershipDigest: stableDigest([
-              DESIGNATED_ACCESS_GROUP_EMAIL,
-              googleGroupId,
-              ...members,
-            ]),
-            providerGroupIdDigest: stableDigest([googleGroupId]),
-            syncStartedAt,
-            capturedAt,
-          });
-        }
-        if (seenPageTokens.has(nextPageToken) || nextPageToken === pageToken) {
-          throw new AccessMembershipEvaluationError(
-            'GROUP_PAGINATION_LOOP',
-            'Google repeated an access-membership page token.',
-          );
-        }
-        seenPageTokens.add(nextPageToken);
-        pageToken = nextPageToken;
-      }
-      throw new AccessMembershipEvaluationError(
-        'GROUP_PAGE_LIMIT_EXCEEDED',
-        'The designated access group exceeds the supported page limit.',
+      // Ordered by source ID so the digest is stable regardless of the order
+      // the caller supplied, and evaluated one at a time rather than
+      // concurrently to keep provider load predictable and errors attributable.
+      const ordered = [...requested].sort((left, right) =>
+        left.groupSourceId.localeCompare(right.groupSourceId),
       );
+      const evaluated: EvaluatedAccessGroup[] = [];
+      for (const group of ordered) {
+        evaluated.push(await evaluateOneGroup(group, authorization));
+      }
+
+      // An individual group may legitimately be empty — a deployment can
+      // configure a group before populating it. What cannot happen is every
+      // group being empty, which would publish a snapshot granting nobody
+      // access and lock the deployment out of itself.
+      const distinctMembers = new Set(
+        evaluated.flatMap(({ memberEmails }) => [...memberEmails]),
+      );
+      if (distinctMembers.size === 0) {
+        throw new AccessMembershipEvaluationError(
+          'CONFIGURED_GROUPS_EMPTY',
+          'No configured access group has a current direct user member.',
+        );
+      }
+      if (distinctMembers.size > MAX_EVALUATED_MEMBERS) {
+        throw new AccessMembershipEvaluationError(
+          'GROUP_MEMBER_LIMIT_EXCEEDED',
+          'The configured access groups exceed the supported member limit.',
+        );
+      }
+
+      return Object.freeze({
+        groups: Object.freeze(evaluated),
+        membershipDigest: stableDigest(
+          evaluated.flatMap((group) => [
+            group.groupSourceId,
+            group.groupEmail,
+            group.googleGroupId,
+            group.grantedRole,
+            ...group.memberEmails,
+          ]),
+        ),
+        providerGroupIdDigest: stableDigest(
+          evaluated.map(({ googleGroupId }) => googleGroupId),
+        ),
+        syncStartedAt,
+        capturedAt: trustedTimestamp(now),
+      });
     },
   });
 }

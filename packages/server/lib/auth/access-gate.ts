@@ -367,33 +367,16 @@ function validateEvidence(
   const activeGroups = parseCanonicalAccessGroupSet(
     evidence.activeAccessGroupSourceRefs,
   );
-  const explicitDesignated = evidence.designatedAccessGroupSourceRef;
-  const designatedResult =
-    explicitDesignated === undefined
-      ? activeGroups?.length === 1
-        ? AccessGroupSourceRefSchema.safeParse(activeGroups[0])
-        : null
-      : AccessGroupSourceRefSchema.safeParse(explicitDesignated);
-  const designatedGroup =
-    designatedResult !== null && designatedResult.success
-      ? designatedResult.data
-      : null;
   if (
     activeGroups === null ||
-    evidence.activeAccessConfigurationExact === false ||
-    designatedGroup === null ||
-    activeGroups.length > 2 ||
-    !activeGroups.some(
-      (source) => accessGroupKey(source) === accessGroupKey(designatedGroup),
-    )
+    evidence.activeAccessConfigurationExact === false
   ) {
     return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
   }
-  const designatedGroups = Object.freeze([designatedGroup]);
-  const recoveryGroups = activeGroups.filter(
-    (source) => accessGroupKey(source) !== accessGroupKey(designatedGroup),
-  );
-  const recoveryTransition = recoveryGroups.length === 1;
+  // Every active access group is authoritative. There is no designated group
+  // and no cap on how many a deployment configures: access is decided by the
+  // set of rows an administrator has activated, which is what makes the
+  // configuration data rather than a compiled-in address.
   if (evidence.snapshot === null) {
     return { granted: false, reasonCode: 'ACCESS_SNAPSHOT_UNAVAILABLE' };
   }
@@ -429,11 +412,17 @@ function validateEvidence(
   const evaluatedGroups = parseCanonicalAccessGroupSet(
     evaluatedMember?.accessGroupSourceRefs ?? [],
   );
+  // Membership in any one active access group grants access. Requiring the
+  // member to appear in every active group is what made a second group
+  // impossible: nobody is in all of them, so adding one revoked everybody.
+  const evaluatedInActiveGroup =
+    evaluatedGroups !== null &&
+    evaluatedGroups.length > 0 &&
+    evaluatedGroups.every((source) => activeGroupKeys.has(accessGroupKey(source)));
   const hasExactEvaluatedMembership =
     evaluatedMember !== null &&
     evaluatedMember.email === input.email &&
-    evaluatedGroups !== null &&
-    isSameGroupSet(designatedGroups, evaluatedGroups);
+    evaluatedInActiveGroup;
 
   let user: User;
   let userDisposition: AccessGateFirstLoginBinding['userDisposition'];
@@ -477,11 +466,11 @@ function validateEvidence(
     if (!isSameGroupSet(memberGroups, activeMemberGroups)) {
       return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
     }
-    const hasDesignatedBoundMembership = isSameGroupSet(
-      designatedGroups,
-      activeMemberGroups,
-    );
-    if (hasDesignatedBoundMembership) {
+    // A member already recorded in at least one active access group keeps
+    // access. The groups they hold are carried through verbatim rather than
+    // rewritten to a single designated group, so a person who is in two
+    // configured groups keeps both and the roles both grant.
+    if (activeMemberGroups.length > 0) {
       return {
         granted: true,
         user: userResult.data,
@@ -489,37 +478,14 @@ function validateEvidence(
         member: Object.freeze({
           userId: userResult.data.id,
           googleSubject: userResult.data.googleSubject,
-          accessGroupSourceRefs: designatedGroups,
+          accessGroupSourceRefs: activeMemberGroups,
           facilityScope: userResult.data.facilityScope,
         }),
         firstLoginBinding: null,
         designatedAdminEligible: true,
       };
     }
-    const isSoleRecoveryAdministrator =
-      recoveryTransition &&
-      evidence.transitionRecoveryUserId === userResult.data.id &&
-      userResult.data.roles.includes('admin') &&
-      userResult.data.facilityScope.kind === 'district' &&
-      evaluatedMember === null &&
-      isSameGroupSet(recoveryGroups, activeMemberGroups);
-    if (isSoleRecoveryAdministrator) {
-      return {
-        granted: true,
-        user: userResult.data,
-        snapshot,
-        member: Object.freeze({
-          userId: userResult.data.id,
-          googleSubject: userResult.data.googleSubject,
-          accessGroupSourceRefs: recoveryGroups,
-          facilityScope: userResult.data.facilityScope,
-        }),
-        firstLoginBinding: null,
-        designatedAdminEligible: false,
-      };
-    }
     if (
-      recoveryTransition ||
       !hasExactEvaluatedMembership ||
       userResult.data.facilityScope.kind !== 'district'
     ) {
@@ -531,16 +497,7 @@ function validateEvidence(
     if (evidence.emailBindingConflict) {
       return { granted: false, reasonCode: 'ACCESS_EVIDENCE_INVALID' };
     }
-    const transitionEmailDigestMatches =
-      initialMobileTransitionEmailDigest !== null &&
-      createHash('sha256').update(input.email, 'utf8').digest('hex') ===
-        initialMobileTransitionEmailDigest;
-    if (
-      (recoveryTransition &&
-        (input.source !== 'mobile' || !transitionEmailDigestMatches)) ||
-      !hasExactEvaluatedMembership ||
-      evaluatedGroups === null
-    ) {
+    if (!hasExactEvaluatedMembership || evaluatedGroups === null) {
       return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
     }
     user = UserSchema.parse({
@@ -560,7 +517,10 @@ function validateEvidence(
     evaluatedMember === null ||
     evaluatedMember.email !== input.email ||
     evaluatedGroups === null ||
-    !isSameGroupSet(designatedGroups, evaluatedGroups)
+    evaluatedGroups.length === 0 ||
+    !evaluatedGroups.every((source) =>
+      activeGroupKeys.has(accessGroupKey(source)),
+    )
   ) {
     return { granted: false, reasonCode: 'ACCESS_GROUP_MEMBERSHIP_REQUIRED' };
   }
@@ -594,9 +554,7 @@ function validateEvidence(
       successorSnapshotId,
       successorSnapshotVersion: successorVersion,
       normalizedEmail: input.email,
-      transitionEmailDigest: recoveryTransition
-        ? initialMobileTransitionEmailDigest
-        : null,
+      transitionEmailDigest: null,
     }),
     designatedAdminEligible: true,
   };
