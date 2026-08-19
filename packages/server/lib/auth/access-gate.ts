@@ -30,10 +30,7 @@ import {
   users,
 } from '../../db/schema';
 import type { GoogleOidcCallbackErrorCode } from './oidc';
-import {
-  loadEffectiveAdministratorUserIds,
-  loadEffectiveRoles,
-} from './role-state';
+import { loadEffectiveRoles } from './role-state';
 import type { WebSessionIssuanceErrorCode } from './session-cookie';
 
 const ACCESS_GATE_AUDIT_ACTION = 'complete-oidc-sign-in' as const;
@@ -41,10 +38,6 @@ const ACCESS_GATE_AUDIT_ACTION = 'complete-oidc-sign-in' as const;
 /** Safe fallback when a post-gate failure has no narrower reason taxonomy. */
 export const POST_GATE_SIGN_IN_FAILED_REASON =
   'POST_GATE_SIGN_IN_FAILED' as const;
-
-/** The sole access group authorized by the current product-owner rule. */
-export const DESIGNATED_ACCESS_GROUP_EMAIL =
-  'tsd-engineering@psd401.net' as const;
 
 /** Safe, bounded reasons that can be persisted for a denied sign-in. */
 export const ACCESS_GATE_DENIAL_REASONS = [
@@ -111,9 +104,7 @@ export interface AccessGateEvidence {
   /** True only for the designated source, optionally plus one staged recovery source. */
   readonly activeAccessConfigurationExact?: boolean;
   /** Exact designated source selected by its persisted normalized group email. */
-  readonly designatedAccessGroupSourceRef?: AccessGroupSourceRef | null;
   /** Sole reachable bound administrator during the two-source recovery stage. */
-  readonly transitionRecoveryUserId?: string | null;
   readonly activeAccessGroupSourceRefs: readonly AccessGroupSourceRef[];
   /**
    * Legacy diagnostic retained for adapter compatibility. Authorization never
@@ -717,16 +708,13 @@ export function createDrizzleAccessGateStore(
         );
         const activeAccessGroupSourceRefs =
           activeAccessGroupRows.map(parseAccessGroupRef);
-        const designatedAccessGroupRows = activeAccessGroupRows.filter(
-          ({ email }) => email === DESIGNATED_ACCESS_GROUP_EMAIL,
-        );
-        const designatedAccessGroupSourceRef =
-          designatedAccessGroupRows.length === 1
-            ? parseAccessGroupRef(designatedAccessGroupRows[0]!)
-            : null;
+        // The configuration is exact when at least one access group is active
+        // and every active row parses into a canonical reference. There is no
+        // designated group to single out and no ceiling on how many a
+        // deployment configures.
         const activeAccessConfigurationExact =
-          designatedAccessGroupSourceRef !== null &&
-          activeAccessGroupRows.length <= 2;
+          activeAccessGroupRows.length > 0 &&
+          activeAccessGroupSourceRefs.every((ref) => ref !== null);
 
         let user: AccessGateUserRecord | null = null;
         if (userRow !== undefined) {
@@ -768,7 +756,6 @@ export function createDrizzleAccessGateStore(
             user,
             emailBindingConflict,
             activeAccessConfigurationExact,
-            designatedAccessGroupSourceRef,
             transitionRecoveryUserId: null,
             activeAccessGroupSourceRefs,
             latestSuccessfulGroupSourceUpdateAt: null,
@@ -880,34 +867,10 @@ export function createDrizzleAccessGateStore(
           };
         }
 
-        const transitionRecoverySourceIds = activeAccessGroupRows
-          .filter(({ id }) => id !== designatedAccessGroupSourceRef?.id)
-          .map(({ id }) => id);
-        const transitionAdministratorUserIds =
-          activeAccessGroupRows.length === 2 &&
-          transitionRecoverySourceIds.length === 1
-            ? await loadEffectiveAdministratorUserIds(transaction, {
-                accessState: {
-                  snapshotId: snapshotRow.id,
-                  snapshotVersion: snapshotRow.version,
-                  activeAccessGroupSourceIds: activeAccessGroupRows
-                    .map(({ id }) => id)
-                    .sort(),
-                },
-                eligibleAccessGroupSourceIds: transitionRecoverySourceIds,
-              })
-            : [];
-        const transitionRecoveryUserId =
-          transitionAdministratorUserIds.length === 1
-            ? (transitionAdministratorUserIds[0] ?? null)
-            : null;
-
         return {
           user,
           emailBindingConflict,
           activeAccessConfigurationExact,
-          designatedAccessGroupSourceRef,
-          transitionRecoveryUserId,
           activeAccessGroupSourceRefs,
           latestSuccessfulGroupSourceUpdateAt: null,
           snapshot: {

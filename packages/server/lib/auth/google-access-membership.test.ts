@@ -379,7 +379,10 @@ describe('exact Google access-membership evaluator', () => {
     );
     for (const invalid of [
       [],
-      [...CONFIGURED_GROUPS, { ...second, email: DESIGNATED_ACCESS_GROUP_EMAIL }],
+      [
+        ...CONFIGURED_GROUPS,
+        { ...second, email: DESIGNATED_ACCESS_GROUP_EMAIL },
+      ],
       [
         ...CONFIGURED_GROUPS,
         { ...second, groupSourceId: CONFIGURED_GROUPS[0]?.groupSourceId ?? '' },
@@ -406,10 +409,10 @@ describe('exact Google access-membership evaluator', () => {
         ],
       });
     });
-    expect((await evaluator(harness).evaluate(CONFIGURED_GROUPS)).groups[0]?.memberEmails).toEqual([
-      SYNTHETIC_TRANSITION_EMAIL,
-      'other@psd401.net',
-    ]);
+    expect(
+      (await evaluator(harness).evaluate(CONFIGURED_GROUPS)).groups[0]
+        ?.memberEmails,
+    ).toEqual([SYNTHETIC_TRANSITION_EMAIL, 'other@psd401.net']);
     expect(harness.calls).toHaveLength(5);
 
     const looping = providerHarness(() =>

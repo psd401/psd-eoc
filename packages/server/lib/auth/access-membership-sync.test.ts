@@ -2,11 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { executeCapability } from '@psd-eoc/contracts';
 
+import { type EvaluatedAccessMembershipSet } from './google-access-membership';
 import {
-  type EvaluatedAccessMembershipSet,
-} from './google-access-membership';
-import {
-  AccessMembershipSyncError,
   createScheduledAccessMembershipSyncAuthorizer,
   createSyncAccessMembershipHandler,
   syncAccessMembership,
@@ -19,9 +16,6 @@ const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 const TEST_TIME = '2026-08-17T12:00:00.000Z';
 const TEST_GOOGLE_GROUP_ID = '01synthetic_engineering';
 const TEST_TRANSITION_EMAIL = 'initial.mobile@psd401.net';
-const TEST_TRANSITION_EMAIL_DIGEST = createHash('sha256')
-  .update(TEST_TRANSITION_EMAIL, 'utf8')
-  .digest('hex');
 
 function digest(value: unknown): string {
   return createHash('sha256')
@@ -132,15 +126,11 @@ function storeHarness(
 describe('access-membership sync capability core', () => {
   test('evaluates and publishes only for the exact authenticated system context', async () => {
     const harness = storeHarness();
-    const result = await syncAccessMembership(
-      {},
-      context(),
-      {
-        evaluator: { evaluate: async () => EVALUATION },
-        store: harness.store,
-        now: () => new Date(TEST_TIME),
-      },
-    );
+    const result = await syncAccessMembership({}, context(), {
+      evaluator: { evaluate: async () => EVALUATION },
+      store: harness.store,
+      now: () => new Date(TEST_TIME),
+    });
 
     expect(result).toEqual(RESULT);
     expect(harness.reservations).toHaveLength(1);
@@ -157,20 +147,16 @@ describe('access-membership sync capability core', () => {
   test('returns an idempotent replay without provider access or publication', async () => {
     const harness = storeHarness(RESULT);
     let evaluated = false;
-    const result = await syncAccessMembership(
-      {},
-      context(),
-      {
-        evaluator: {
-          async evaluate() {
-            evaluated = true;
-            return EVALUATION;
-          },
+    const result = await syncAccessMembership({}, context(), {
+      evaluator: {
+        async evaluate() {
+          evaluated = true;
+          return EVALUATION;
         },
-        store: harness.store,
-        now: () => new Date(TEST_TIME),
       },
-    );
+      store: harness.store,
+      now: () => new Date(TEST_TIME),
+    });
     expect(result).toEqual({ ...RESULT, publication: 'already-current' });
     expect(evaluated).toBe(false);
     expect(harness.publications).toEqual([]);
@@ -276,15 +262,11 @@ describe('access-membership sync capability core', () => {
     ]) {
       const harness = storeHarness();
       await expect(
-        syncAccessMembership(
-          {},
-          invalid,
-          {
-            evaluator: { evaluate: async () => EVALUATION },
-            store: harness.store,
-            now: () => new Date(TEST_TIME),
-          },
-        ),
+        syncAccessMembership({}, invalid, {
+          evaluator: { evaluate: async () => EVALUATION },
+          store: harness.store,
+          now: () => new Date(TEST_TIME),
+        }),
       ).rejects.toMatchObject({
         code: 'ACCESS_SYNC_UNAUTHORIZED',
       });
@@ -299,19 +281,15 @@ describe('access-membership sync capability core', () => {
       { code: 'GOOGLE_UNAVAILABLE' },
     );
     await expect(
-      syncAccessMembership(
-        {},
-        context(),
-        {
-          evaluator: {
-            evaluate: async () => {
-              throw providerError;
-            },
+      syncAccessMembership({}, context(), {
+        evaluator: {
+          evaluate: async () => {
+            throw providerError;
           },
-          store: harness.store,
-          now: () => new Date(TEST_TIME),
         },
-      ),
+        store: harness.store,
+        now: () => new Date(TEST_TIME),
+      }),
     ).rejects.toBe(providerError);
     expect(harness.failed).toEqual([
       {

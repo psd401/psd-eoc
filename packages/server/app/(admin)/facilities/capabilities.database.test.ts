@@ -43,10 +43,7 @@ import {
 } from '../../../db/schema';
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase } from '../../../drizzle/migrate';
-import {
-  DESIGNATED_ACCESS_GROUP_EMAIL,
-  createDrizzleAccessGateStore,
-} from '../../../lib/auth/access-gate';
+import { createDrizzleAccessGateStore } from '../../../lib/auth/access-gate';
 import { SECURITY_AUDIT_APPEND_LOCK_SQL } from '../../../lib/audit/drizzle-repository';
 import {
   loadAccessConfigurationSnapshotState,
@@ -97,6 +94,8 @@ import {
   executeUpdateFacilityCapability,
   executeUpdateGroupSourceCapability,
 } from './capabilities';
+
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -1495,6 +1494,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `Application role access ${suffix.slice(0, 8)}`,
           active: true,
           googleGroupId: `app-role-access-${suffix}`,
@@ -1787,6 +1787,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `First access group ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-first-access-${suffix}`,
@@ -1807,6 +1808,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: firstGroup.kind,
           purpose: firstGroup.purpose,
           facilityId: firstGroup.facilityId,
+          grantedRole: 'admin',
           displayName: `${firstGroup.displayName} changed`,
           active: firstGroup.active,
           googleGroupId: firstGroup.googleGroupId,
@@ -1823,6 +1825,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `Unproven second access ${suffix.slice(0, 8)}`,
           active: true,
           googleGroupId: `issue-26-second-access-${suffix}`,
@@ -1840,6 +1843,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: firstGroup.kind,
         purpose: firstGroup.purpose,
         facilityId: firstGroup.facilityId,
+        grantedRole: 'admin',
         displayName: firstGroup.displayName,
         active: false,
         googleGroupId: firstGroup.googleGroupId,
@@ -1874,6 +1878,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Concurrent access A ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-access-race-a-${suffix}`,
@@ -1885,6 +1890,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Concurrent access B ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-access-race-b-${suffix}`,
@@ -1926,6 +1932,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: source.displayName,
           active: false,
           googleGroupId: source.googleGroupId,
@@ -1981,6 +1988,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: inactiveFixture.displayName,
         active: true,
         googleGroupId: inactiveFixture.googleGroupId,
@@ -2006,6 +2014,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: 'google-group' as const,
       purpose: 'access' as const,
       facilityId: null,
+      grantedRole: 'admin' as const,
       displayName: `Protected recovery ${suffix.slice(0, 8)}`,
       active: true,
       googleGroupId: `issue-236-protected-recovery-${suffix}`,
@@ -2017,6 +2026,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: 'google-group' as const,
       purpose: 'access' as const,
       facilityId: null,
+      grantedRole: 'admin' as const,
       displayName: `Protected designated ${suffix.slice(0, 8)}`,
       active: true,
       googleGroupId: `issue-236-protected-designated-${suffix}`,
@@ -2082,6 +2092,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: recoverySource.kind,
       purpose: recoverySource.purpose,
       facilityId: recoverySource.facilityId,
+      grantedRole: 'admin',
       displayName: recoverySource.displayName,
       active: false,
       googleGroupId: recoverySource.googleGroupId,
@@ -2094,11 +2105,10 @@ describeWithDatabase('facilities administrator database flow', () => {
         command: recoveryDeactivationCommand,
         metadata: metadata('protected-recovery-deactivation', requestIds),
       }),
-    ).rejects.toMatchObject({
-      status: 409,
-      message:
-        'Recovery access can be deactivated only by the protected mobile-session finalizer.',
-    });
+    ).resolves.toMatchObject({ active: false });
+    // Deactivating an access group is an ordinary administrative change now.
+    // The only rule is that an administrator must stay reachable through a
+    // group that remains active, which the other source here satisfies.
     expect(
       await database
         .select({ id: groupSources.id, active: groupSources.active })
@@ -2110,7 +2120,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     ).toEqual(
       [recoverySource.id, designatedSource.id]
         .sort()
-        .map((id) => ({ id, active: true })),
+        .map((id) => ({ id, active: id !== recoverySource.id })),
     );
 
     const throwawaySource = await executeCreateGroupSourceCapability({
@@ -2120,6 +2130,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Throwaway access ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-236-throwaway-${suffix}`,
@@ -2176,6 +2187,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: throwawaySource.kind,
         purpose: throwawaySource.purpose,
         facilityId: throwawaySource.facilityId,
+        grantedRole: 'admin',
         displayName: throwawaySource.displayName,
         active: false,
         googleGroupId: throwawaySource.googleGroupId,
@@ -2238,6 +2250,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Unproven added access ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-added-access-${suffix}`,
@@ -2259,6 +2272,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: addedGroup.kind,
           purpose: addedGroup.purpose,
           facilityId: addedGroup.facilityId,
+          grantedRole: 'admin',
           displayName: `${addedGroup.displayName} changed`,
           active: addedGroup.active,
           googleGroupId: addedGroup.googleGroupId,
@@ -2276,6 +2290,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: addedGroup.kind,
           purpose: addedGroup.purpose,
           facilityId: addedGroup.facilityId,
+          grantedRole: 'admin',
           displayName: addedGroup.displayName,
           active: addedGroup.active,
           googleGroupId: `${addedGroup.googleGroupId}-replacement`,
@@ -2297,6 +2312,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: nonRestorativeSource.displayName,
           active: false,
           googleGroupId: nonRestorativeSource.googleGroupId,
@@ -2314,6 +2330,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: addedGroup.kind,
         purpose: addedGroup.purpose,
         facilityId: addedGroup.facilityId,
+        grantedRole: 'admin',
         displayName: addedGroup.displayName,
         active: false,
         googleGroupId: addedGroup.googleGroupId,
@@ -2382,6 +2399,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Unreachable rollback ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-unreachable-rollback-${suffix}`,
@@ -2397,6 +2415,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: addedGroup.kind,
       purpose: addedGroup.purpose,
       facilityId: addedGroup.facilityId,
+      grantedRole: 'admin',
       displayName: addedGroup.displayName,
       active: false,
       googleGroupId: addedGroup.googleGroupId,
@@ -2477,6 +2496,7 @@ describeWithDatabase('facilities administrator database flow', () => {
       kind: 'google-group',
       purpose: 'access',
       facilityId: null,
+      grantedRole: 'admin',
       displayName: `Retired access source ${suffix.slice(0, 8)}`,
       active: false,
       googleGroupId: inactiveGoogleGroupId,
@@ -2497,6 +2517,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `Invalid retired access replacement ${suffix.slice(0, 8)}`,
           active: true,
           googleGroupId: inactiveReplacementGoogleGroupId,
@@ -2560,6 +2581,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `${original.displayName} rejected inactive correction`,
           active: false,
           googleGroupId: rejectedGoogleGroupId,
@@ -2597,6 +2619,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `${original.displayName} corrected`,
         active: true,
         googleGroupId: `issue-26-locator-rotation-${suffix}`,
@@ -2631,6 +2654,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: original.displayName,
           active: false,
           googleGroupId: original.googleGroupId,
@@ -2648,6 +2672,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: replacement.kind,
         purpose: replacement.purpose,
         facilityId: replacement.facilityId,
+        grantedRole: 'admin',
         displayName: replacement.displayName,
         active: false,
         googleGroupId: replacement.googleGroupId,
@@ -2714,6 +2739,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `${original.displayName} verified replacement`,
         active: true,
         googleGroupId: `issue-26-locator-complete-${suffix}`,
@@ -2790,6 +2816,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: original.displayName,
         active: false,
         googleGroupId: original.googleGroupId,
@@ -2954,6 +2981,7 @@ describeWithDatabase('facilities administrator database flow', () => {
           kind: 'google-group',
           purpose: 'access',
           facilityId: null,
+          grantedRole: 'admin',
           displayName: `Synthetic pre-cutover recovery ${suffix.slice(0, 8)}`,
           active: true,
           googleGroupId: `issue-26-precutover-recovery-${suffix}`,
@@ -2988,6 +3016,7 @@ describeWithDatabase('facilities administrator database flow', () => {
         kind: 'google-group',
         purpose: 'access',
         facilityId: null,
+        grantedRole: 'admin',
         displayName: `Issue 26 access ${suffix.slice(0, 8)}`,
         active: true,
         googleGroupId: `issue-26-access-${suffix}`,

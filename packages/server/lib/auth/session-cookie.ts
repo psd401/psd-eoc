@@ -45,16 +45,11 @@ import {
 } from '../../db/schema';
 import {
   ACCESS_GATE_AUDIT_LOCK_SQL,
-  DESIGNATED_ACCESS_GROUP_EMAIL,
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
 } from './access-gate';
 import type { AccessGateFirstLoginBinding } from './access-gate';
-import {
-  ADMIN_AVAILABILITY_LOCK_SQL,
-  loadEffectiveAdministratorUserIds,
-  loadEffectiveRoles,
-} from './role-state';
+import { ADMIN_AVAILABILITY_LOCK_SQL, loadEffectiveRoles } from './role-state';
 
 /**
  * The __Host- prefix makes browsers require Secure, Path=/, and no Domain.
@@ -1008,41 +1003,18 @@ export function createDrizzleInitialWebSessionStore(
                   facilityId: null,
                 })),
               );
-              const designatedSources = activeSources.filter(
-                ({ email }) => email === DESIGNATED_ACCESS_GROUP_EMAIL,
-              );
-              const designatedSource = designatedSources[0];
-              const designatedGroupKeys = canonicalAccessGroupKeySet(
-                designatedSource === undefined
-                  ? []
-                  : [
-                      {
-                        id: designatedSource.id,
-                        kind: designatedSource.kind,
-                        purpose: designatedSource.purpose,
-                        facilityId: null,
-                      },
-                    ],
-              );
-              const recoverySources = activeSources.filter(
-                ({ id }) => id !== designatedSource?.id,
-              );
-              const recoveryTransition = recoverySources.length === 1;
+              // The groups this session was granted through must all be active
+              // right now. Any active access group is sufficient — there is no
+              // designated one — and a session naming a group that is no longer
+              // configured is refused rather than persisted.
               if (
-                designatedSources.length !== 1 ||
-                activeSources.length > 2 ||
+                activeSources.length === 0 ||
                 activeGroupKeys === null ||
-                designatedGroupKeys === null ||
-                !sameNonemptyKeySet(designatedGroupKeys, contextGroupKeys) ||
-                (recoveryTransition &&
-                  (request.device.platform !== 'ios' ||
-                    firstLoginBinding.userDisposition !== 'create' ||
-                    firstLoginBinding.transitionEmailDigest === null ||
-                    configuredTransitionEmailDigest === null ||
-                    firstLoginBinding.transitionEmailDigest !==
-                      configuredTransitionEmailDigest)) ||
-                (!recoveryTransition &&
-                  firstLoginBinding.transitionEmailDigest !== null)
+                contextGroupKeys.size === 0 ||
+                ![...contextGroupKeys].every((key) =>
+                  activeGroupKeys.has(key),
+                ) ||
+                firstLoginBinding.transitionEmailDigest !== null
               ) {
                 throw new WebSessionIssuanceError(
                   'SESSION_PERSISTENCE_REJECTED',
@@ -1132,7 +1104,10 @@ export function createDrizzleInitialWebSessionStore(
               );
               if (
                 evaluatedGroupKeys === null ||
-                !sameNonemptyKeySet(evaluatedGroupKeys, designatedGroupKeys)
+                evaluatedGroupKeys.size === 0 ||
+                ![...evaluatedGroupKeys].every((key) =>
+                  activeGroupKeys.has(key),
+                )
               ) {
                 throw new WebSessionIssuanceError(
                   'SESSION_PERSISTENCE_REJECTED',
@@ -1220,17 +1195,17 @@ export function createDrizzleInitialWebSessionStore(
               const sourceBindingFacilities = sourceMemberFacilities.filter(
                 ({ userId }) => userId === request.user.id,
               );
-              const sourceAlreadyHasDesignatedMembership =
-                sourceBindingGroups.some(
-                  ({ groupSourceId, groupSourceKind, groupPurpose }) =>
-                    designatedGroupKeys.has(
-                      accessGroupKey({
-                        id: groupSourceId,
-                        kind: groupSourceKind,
-                        purpose: groupPurpose,
-                      }),
-                    ),
-                );
+              // Already bound into an active access group for this snapshot.
+              const sourceAlreadyHasActiveMembership = sourceBindingGroups.some(
+                ({ groupSourceId, groupSourceKind, groupPurpose }) =>
+                  activeGroupKeys.has(
+                    accessGroupKey({
+                      id: groupSourceId,
+                      kind: groupSourceKind,
+                      purpose: groupPurpose,
+                    }),
+                  ),
+              );
               if (
                 (firstLoginBinding.userDisposition === 'existing' &&
                   ((sourceMember !== undefined &&
@@ -1238,7 +1213,7 @@ export function createDrizzleInitialWebSessionStore(
                       request.user.googleSubject ||
                       sourceMember.facilityScopeKind !== 'district' ||
                       sourceBindingFacilities.length !== 0)) ||
-                    sourceAlreadyHasDesignatedMembership)) ||
+                    sourceAlreadyHasActiveMembership)) ||
                 (firstLoginBinding.userDisposition === 'create' &&
                   sourceMember !== undefined)
               ) {
@@ -1246,87 +1221,6 @@ export function createDrizzleInitialWebSessionStore(
                   'SESSION_PERSISTENCE_REJECTED',
                   'The source identity binding no longer matches the request.',
                 );
-              }
-
-              if (recoveryTransition) {
-                const recoverySource = recoverySources[0];
-                const recoveryMember = sourceMembers[0];
-                const recoveryMemberGroup = sourceMemberGroups[0];
-                const recoveryIdentityRows =
-                  recoveryMember === undefined
-                    ? []
-                    : await transaction
-                        .select({
-                          id: users.id,
-                          googleSubject: users.googleSubject,
-                          facilityScopeKind: users.facilityScopeKind,
-                          disabledAt: users.disabledAt,
-                        })
-                        .from(users)
-                        .where(eq(users.id, recoveryMember.userId))
-                        .limit(2)
-                        .for('share');
-                const recoveryIdentity = recoveryIdentityRows[0];
-                const recoveryFacilityRows =
-                  recoveryIdentity === undefined
-                    ? []
-                    : await transaction
-                        .select({ userId: userFacilityScopes.userId })
-                        .from(userFacilityScopes)
-                        .where(
-                          eq(userFacilityScopes.userId, recoveryIdentity.id),
-                        )
-                        .for('share');
-                const effectiveAdministratorIds =
-                  recoverySource === undefined
-                    ? []
-                    : await loadEffectiveAdministratorUserIds(transaction, {
-                        accessState: {
-                          snapshotId: sourceSnapshot.id,
-                          snapshotVersion: sourceSnapshot.version,
-                          activeAccessGroupSourceIds: activeSources
-                            .map(({ id }) => id)
-                            .sort(),
-                        },
-                        eligibleAccessGroupSourceIds: [recoverySource.id],
-                      });
-                if (
-                  recoverySource === undefined ||
-                  recoveryMember === undefined ||
-                  recoveryMemberGroup === undefined ||
-                  recoveryIdentity === undefined ||
-                  recoveryIdentityRows.length !== 1 ||
-                  sourceMembers.length !== 1 ||
-                  sourceMemberGroups.length !== 1 ||
-                  sourceMemberFacilities.length !== 0 ||
-                  recoveryMember.userId === request.user.id ||
-                  recoveryMember.facilityScopeKind !== 'district' ||
-                  recoveryIdentity.id !== recoveryMember.userId ||
-                  recoveryIdentity.googleSubject !==
-                    recoveryMember.googleSubject ||
-                  recoveryIdentity.facilityScopeKind !== 'district' ||
-                  recoveryIdentity.disabledAt !== null ||
-                  recoveryFacilityRows.length !== 0 ||
-                  recoveryMemberGroup.userId !== recoveryMember.userId ||
-                  recoveryMemberGroup.groupSourceId !== recoverySource.id ||
-                  recoveryMemberGroup.groupSourceKind !== recoverySource.kind ||
-                  recoveryMemberGroup.groupPurpose !== recoverySource.purpose ||
-                  firstLoginBinding.userDisposition !== 'create' ||
-                  firstLoginBinding.transitionEmailDigest === null ||
-                  firstLoginBinding.transitionEmailDigest !==
-                    digestVerifiedEmail(request.user.email) ||
-                  sourceEvaluatedMembers.some(
-                    ({ groupSourceId }) =>
-                      groupSourceId !== designatedSource?.id,
-                  ) ||
-                  effectiveAdministratorIds.length !== 1 ||
-                  effectiveAdministratorIds[0] !== recoveryMember.userId
-                ) {
-                  throw new WebSessionIssuanceError(
-                    'SESSION_PERSISTENCE_REJECTED',
-                    'The temporary recovery generation is ambiguous.',
-                  );
-                }
               }
 
               let bindingUserId = request.user.id;
@@ -1539,30 +1433,11 @@ export function createDrizzleInitialWebSessionStore(
                 facilityId: null,
               })),
             );
-            const currentDesignatedGroups = currentActiveGroups.filter(
-              ({ email }) => email === DESIGNATED_ACCESS_GROUP_EMAIL,
-            );
-            const currentDesignatedGroupKeys = canonicalAccessGroupKeySet(
-              currentDesignatedGroups.map(({ id, kind, purpose }) => ({
-                id,
-                kind,
-                purpose,
-                facilityId: null,
-              })),
-            );
-            const currentRecoveryGroupKeys = canonicalAccessGroupKeySet(
-              currentActiveGroups
-                .filter(({ email }) => email !== DESIGNATED_ACCESS_GROUP_EMAIL)
-                .map(({ id, kind, purpose }) => ({
-                  id,
-                  kind,
-                  purpose,
-                  facilityId: null,
-                })),
-            );
+
+            // The snapshot backing this session must still describe exactly the
+            // active configuration, however many groups that is.
             const snapshotGroupsMatch =
-              currentDesignatedGroups.length === 1 &&
-              currentActiveGroups.length <= 2 &&
+              currentActiveGroups.length > 0 &&
               expectedGroupKeys !== null &&
               completedGroupKeys !== null &&
               currentActiveGroupKeys !== null &&
@@ -1622,42 +1497,18 @@ export function createDrizzleInitialWebSessionStore(
               [...contextGroupKeys].every((key) =>
                 currentActiveGroupKeys.has(key),
               );
-            const authorizationRoles = await loadEffectiveRoles(
-              transaction,
-              request.user.id,
-            );
-            const currentRecoverySourceIds = currentActiveGroups
-              .filter(({ email }) => email !== DESIGNATED_ACCESS_GROUP_EMAIL)
-              .map(({ id }) => id);
-            const transitionAdministratorIds =
-              currentActiveGroups.length === 2 &&
-              currentRecoverySourceIds.length === 1
-                ? await loadEffectiveAdministratorUserIds(transaction, {
-                    accessState: {
-                      snapshotId: request.membershipSnapshot.id,
-                      snapshotVersion: request.membershipSnapshot.version,
-                      activeAccessGroupSourceIds: currentActiveGroups
-                        .map(({ id }) => id)
-                        .sort(),
-                    },
-                    eligibleAccessGroupSourceIds: currentRecoverySourceIds,
-                  })
-                : [];
-            const hasDesignatedMembership =
-              request.grantBootstrapAdmin &&
+
+            // The session's groups must all still be active. Which groups they
+            // are does not matter: any active access group grants access, so a
+            // session established through one stays valid while that group is
+            // configured, and stops the moment it is not.
+            const hasActiveGroupMembership =
               contextGroupKeys !== null &&
-              currentDesignatedGroupKeys !== null &&
-              sameNonemptyKeySet(contextGroupKeys, currentDesignatedGroupKeys);
-            const hasTemporaryRecoveryMembership =
-              !request.grantBootstrapAdmin &&
-              request.device.platform === 'web' &&
-              currentActiveGroups.length === 2 &&
-              authorizationRoles.includes('admin') &&
-              transitionAdministratorIds.length === 1 &&
-              transitionAdministratorIds[0] === request.user.id &&
-              contextGroupKeys !== null &&
-              currentRecoveryGroupKeys !== null &&
-              sameNonemptyKeySet(contextGroupKeys, currentRecoveryGroupKeys);
+              contextGroupKeys.size > 0 &&
+              currentActiveGroupKeys !== null &&
+              [...contextGroupKeys].every((key) =>
+                currentActiveGroupKeys.has(key),
+              );
 
             if (
               latestSnapshot === undefined ||
@@ -1668,7 +1519,7 @@ export function createDrizzleInitialWebSessionStore(
               membership === undefined ||
               !snapshotGroupsMatch ||
               !contextMatchesPersistedMembership ||
-              (!hasDesignatedMembership && !hasTemporaryRecoveryMembership) ||
+              !hasActiveGroupMembership ||
               membership.snapshotComplete !== true ||
               membership.userId !== request.membershipMember.userId ||
               membership.googleSubject !==

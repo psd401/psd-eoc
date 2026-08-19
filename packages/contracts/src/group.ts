@@ -253,6 +253,7 @@ export const CreateGroupSourceInputSchema = z
         purpose: z.literal('access'),
         facilityId: z.null(),
         ...groupSourceWriteMetadataShape,
+        ...accessRoleShape,
         ...googleGroupDetailsShape,
       })
       .strict(),
@@ -313,6 +314,7 @@ export const UpdateGroupSourceInputSchema = z
         purpose: z.literal('access'),
         facilityId: z.null(),
         ...groupSourceWriteMetadataShape,
+        ...accessRoleShape,
         ...googleGroupDetailsShape,
       })
       .strict(),

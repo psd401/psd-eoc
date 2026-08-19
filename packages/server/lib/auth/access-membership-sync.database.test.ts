@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -22,11 +22,6 @@ import {
   accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   groupSources,
-  idempotencyRecords,
-  securityAuditChainAnchors,
-  securityAuditEntries,
-  sessionRevocations,
-  sessions,
   userRoles,
   users,
 } from '../../db/schema';
@@ -40,11 +35,7 @@ import {
   createDrizzleAccessMembershipSyncStore,
   type AccessMembershipSyncReservation,
 } from './access-membership-sync';
-import { checkAccessGate, createDrizzleAccessGateStore } from './access-gate';
-import {
-  createDrizzleInitialWebSessionStore,
-  type PersistInitialWebSessionRequest,
-} from './session-cookie';
+import {} from './session-cookie';
 import { type EvaluatedAccessMembershipSet } from './google-access-membership';
 
 const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
@@ -79,11 +70,7 @@ const BASELINE_SOURCE_ID = '00000000-0000-4000-8000-000000000521';
 const BASELINE_SNAPSHOT_ID = '00000000-0000-4000-8000-000000000522';
 const USER_ID = '00000000-0000-4000-8000-000000000523';
 const RECOVERY_EMAIL = 'recovery.admin@psd401.net';
-const CANDIDATE_SUBJECT = 'synthetic-existing-transition-subject';
 const TRANSITION_EMAIL = 'initial.mobile@psd401.net';
-const TRANSITION_EMAIL_DIGEST = createHash('sha256')
-  .update(TRANSITION_EMAIL, 'utf8')
-  .digest('hex');
 const BASELINE_TIME = new Date('2026-08-17T11:00:00.000Z');
 const SYNC_TIME = '2026-08-17T12:00:00.000Z';
 const PROVIDER_GROUP_ID = '01exactEngineering';
@@ -488,14 +475,14 @@ describeWithDatabase('access-membership atomic database publication', () => {
         groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
       })
       .from(accessMembershipEvaluatedMembers)
-      .where(
-        eq(accessMembershipEvaluatedMembers.snapshotId, result.snapshotId),
-      )
+      .where(eq(accessMembershipEvaluatedMembers.snapshotId, result.snapshotId))
       .orderBy(asc(accessMembershipEvaluatedMembers.email));
-    expect(evaluated).toEqual([
-      { email: TRANSITION_EMAIL, groupSourceId: secondSourceId },
-      { email: RECOVERY_EMAIL, groupSourceId: BASELINE_SOURCE_ID },
-    ].sort((left, right) => left.email.localeCompare(right.email)));
+    expect(evaluated).toEqual(
+      [
+        { email: TRANSITION_EMAIL, groupSourceId: secondSourceId },
+        { email: RECOVERY_EMAIL, groupSourceId: BASELINE_SOURCE_ID },
+      ].sort((left, right) => left.email.localeCompare(right.email)),
+    );
   });
 
   test('a group removed after the first snapshot becomes a valid baseline', async () => {

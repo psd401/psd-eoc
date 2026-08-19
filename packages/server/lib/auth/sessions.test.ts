@@ -8,7 +8,6 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { SyncAccessMembershipInputSchema } from '@psd-eoc/contracts';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
@@ -101,8 +100,7 @@ interface DeferredSignal {
 
 const DATABASE_NAME_PATTERN = /^psd_eoc_i26_session_[a-f0-9]{32}_test$/u;
 const DESIGNATED_ACCESS_GROUP_ID = '25200000-0000-4000-8000-000000000001';
-const DESIGNATED_ACCESS_GROUP_EMAIL =
-  'tsd-engineering@psd401.net';
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
