@@ -12,8 +12,15 @@ import { accessGroupMembers, groupSources } from '../../db/schema';
  * bounds is how long a deployment keeps honouring a membership list after the
  * reads stop — if the sync has been broken for a day, access should fail
  * closed rather than run indefinitely on the last good answer.
+ *
+ * A day, against a sync that runs every two hours. The first value tried here
+ * was six hours, which locked everyone out the same evening: the sync was
+ * dispatch-only at the time, so membership was read once by hand and then aged
+ * out with nothing to refresh it. A bound this much wider than the sync
+ * interval means a single failed run, or several, never denies anyone — while
+ * a sync that has been broken for a full day still fails closed.
  */
-export const MEMBERSHIP_FRESHNESS_MS = 6 * 60 * 60 * 1_000;
+export const MEMBERSHIP_FRESHNESS_MS = 24 * 60 * 60 * 1_000;
 
 /** Why a sign-in was refused. Bounded, and safe to persist or log. */
 export type AccessRefusal =
