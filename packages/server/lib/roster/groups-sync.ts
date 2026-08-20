@@ -1187,10 +1187,14 @@ const GoogleCloudIdentityGroupSchema = z
   .strict()
   .readonly();
 
-const GoogleCloudIdentityEntityKeySchema = z
-  .object({ id: staffRosterEmail() })
-  .strict()
-  .readonly();
+// Deferred deliberately. `staffRosterEmail()` reads the configured staff
+// domain and fails closed when it is absent, and a module-scope schema would
+// run that read at import — including during `next build`, which imports every
+// route to collect page data. The image is built once and deployed by any
+// district, so it cannot require one district's domain to compile.
+const GoogleCloudIdentityEntityKeySchema = z.lazy(() =>
+  z.object({ id: staffRosterEmail() }).strict().readonly(),
+);
 
 const GoogleCloudIdentityTransitiveRoleSchema = z
   .object({

@@ -7,6 +7,9 @@ export default tseslint.config(
     ignores: [
       '**/node_modules/**',
       '**/.next/**',
+      // Agent worktrees are checkouts of this repository. Linting into them
+      // reports the same files twice, under a path nobody edits.
+      '.claude/worktrees/**',
       '**/coverage/**',
       '**/dist/**',
       '**/drizzle/meta/**',
