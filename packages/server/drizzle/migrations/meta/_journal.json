@@ -169,6 +169,13 @@
       "when": 1787492542188,
       "tag": "0023_remove_fanout_control",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1787492542189,
+      "tag": "0024_reconcile_schema_drift",
+      "breakpoints": true
     }
   ]
 }
