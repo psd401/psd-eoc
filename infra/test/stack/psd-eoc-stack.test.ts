@@ -803,9 +803,13 @@ describe('App Runner runtime safety boundary', () => {
         'secretsmanager:DescribeSecret',
         'secretsmanager:GetSecretValue',
         'sqs:GetQueueAttributes',
+        'sqs:SendMessage',
       ].sort(),
     );
-    expect(actions).not.toContain('sqs:SendMessage');
+    // sqs:SendMessage is deliberate and is not a provider grant: an activation
+    // hands its own notification batch to its own delivery queue after the
+    // event commits. Reaching a person still requires a channel worker, and the
+    // runtime has no provider authority at all — asserted just below.
     expect(actions).not.toContain('ses:SendEmail');
     expect(actions).not.toContain('ses:SendRawEmail');
     expect(actions.some((action) => action.startsWith('rds-data:'))).toBe(
@@ -824,11 +828,26 @@ describe('App Runner runtime safety boundary', () => {
       );
     }
 
-    const queueStatement = statements.find((statement) =>
-      asStringArray(statement.Action).includes('sqs:GetQueueAttributes'),
+    // The runtime reads the health queue's attributes, and both reads and
+    // writes the delivery queue. It can reach no other queue.
+    const queueStatements = statements.filter((statement) =>
+      asStringArray(statement.Action).some((action) =>
+        action.startsWith('sqs:'),
+      ),
     );
-    expect(queueStatement?.Resource).toEqual({
-      'Fn::GetAtt': [expect.stringContaining('HealthQueue'), 'Arn'],
+    const queueTargets = JSON.stringify(
+      queueStatements.map((statement) => statement.Resource),
+    );
+    expect(queueTargets).toContain('HealthQueue');
+    expect(queueTargets).toContain('DeliveryQueue');
+    for (const unreachable of ['EmailQueue', 'SmsQueue', 'PushQueue']) {
+      expect(queueTargets).not.toContain(unreachable);
+    }
+    const sendStatement = statements.find((statement) =>
+      asStringArray(statement.Action).includes('sqs:SendMessage'),
+    );
+    expect(sendStatement?.Resource).toEqual({
+      'Fn::GetAtt': [expect.stringContaining('DeliveryQueue'), 'Arn'],
     });
 
     const secretStatements = statements.filter((statement) =>

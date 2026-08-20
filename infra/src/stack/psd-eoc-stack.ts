@@ -932,6 +932,16 @@ export class PsdEocStack extends Stack {
         grantee: runtimeRole,
         resourceArns: [healthQueue.queueArn],
       }),
+      // The application both probes and writes to the delivery queue: the
+      // health route reads its attributes, and an activation sends the
+      // notification batch to it after the event transaction commits. Without
+      // the read the health check fails and App Runner rolls the deployment
+      // back; without the send the outbox row is written and never moves.
+      iam.Grant.addToPrincipal({
+        actions: ['sqs:GetQueueAttributes', 'sqs:SendMessage'],
+        grantee: runtimeRole,
+        resourceArns: [deliveryQueue.queueArn],
+      }),
     ];
 
     const appRunnerScaling = new apprunner.CfnAutoScalingConfiguration(
