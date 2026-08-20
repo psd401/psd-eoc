@@ -15,10 +15,7 @@ import { drizzle as drizzleAwsDataApi } from 'drizzle-orm/aws-data-api/pg';
 import type { Database } from '../../../db/client';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import { createDrizzleStaleRosterReportStore } from '../../../lib/roster/stale-report';
-import {
-  executeListUsersCapability,
-  executeSetUserRolesCapability,
-} from '../access/capabilities';
+import { executeListUsersCapability } from '../access/capabilities';
 import {
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
@@ -98,7 +95,6 @@ const CAPABILITY_MATRIX = Object.freeze([
   'get-audience-config',
   'get-audience-config-version',
   'list-users',
-  'set-user-roles',
   'get-integration-health',
   'set-channel-enabled',
   'get-stale-roster-report',
@@ -2032,38 +2028,6 @@ describe('admin Aurora Data API transport regression', () => {
       );
     expect(listProjectionStatements).toHaveLength(4);
 
-    const roleStatementStart = client.statements.length;
-    const roleResult = await executeSetUserRolesCapability({
-      authenticated,
-      store,
-      command: { userId: SECOND_USER_ID, roles: ['staff', 'admin'] },
-      metadata: {
-        idempotencyKey: 'synthetic-data-api-set-user-roles',
-        requestId: '00000000-0000-4000-8000-000000009115',
-        now: new Date(CLOCK_VALUE),
-      },
-    });
-    executedCapabilities.add('set-user-roles');
-    expect(roleResult.roles).toEqual(['staff', 'admin']);
-    // Administrator reachability is read from the trusted-group membership
-    // table now, not projected through the access-membership generation.
-    const reachableAdministratorStatement = requireRecordedStatement(
-      client.statements
-        .slice(roleStatementStart)
-        .find(({ sql }) => sql.includes('from "access_group_members"')),
-    );
-    expect(reachableAdministratorStatement.sql).toContain('"users"');
-    // Bound to the groups that grant administration, and to accounts that are
-    // not disabled — a disabled administrator is not reachable.
-    expect(reachableAdministratorStatement.sql).toContain(
-      '"disabled_at" is null',
-    );
-    expect(
-      reachableAdministratorStatement.parameterStrings.filter(
-        (value) => value === ACCESS_GROUP_SOURCE_ID,
-      ),
-    ).toHaveLength(1);
-
     const usersAfterRoleChange = await executeListUsersCapability({
       authenticated,
       store,
@@ -2082,7 +2046,7 @@ describe('admin Aurora Data API transport regression', () => {
       usersAfterRoleChange.items.map(({ id, roles }) => ({ id, roles })),
     ).toEqual([
       { id: USER_ID, roles: ['admin'] },
-      { id: SECOND_USER_ID, roles: ['staff', 'admin'] },
+      { id: SECOND_USER_ID, roles: ['admin'] },
     ]);
 
     const healthStatementStart = client.statements.length;

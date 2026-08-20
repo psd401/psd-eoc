@@ -2783,7 +2783,6 @@ describe('human-only capability boundary', () => {
       'sync-access-membership',
       'dispatch-outbox',
       'record-delivery-evidence',
-      'set-user-roles',
       'issue-agent-api-key',
     ]) {
       expect(AgentCapabilityGrantSchema.safeParse(capabilityId).success).toBe(
