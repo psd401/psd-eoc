@@ -176,6 +176,13 @@
       "when": 1787492542189,
       "tag": "0024_reconcile_schema_drift",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1787492542190,
+      "tag": "0025_retire_removed_capability_values",
+      "breakpoints": true
     }
   ]
 }
