@@ -31,6 +31,7 @@ import {
   SES_EVENT_DESTINATION_NAME,
   SES_EVENT_TOPIC_NAME,
 } from '../config';
+import { configureInfrastructureMonitoring } from '../monitoring';
 import {
   AWS_ACCOUNT,
   AWS_ACCOUNT_ALIAS,
@@ -43,7 +44,14 @@ import {
   EXPLORATION_SMOKE_DATA_CLASSIFICATION,
   EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
   EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+  DELIVERY_DEAD_LETTER_QUEUE_NAME,
+  DELIVERY_QUEUE_MAX_RECEIVES,
+  DELIVERY_QUEUE_NAME,
   EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
+  PUSH_DEAD_LETTER_QUEUE_NAME,
+  PUSH_QUEUE_NAME,
+  SMS_DEAD_LETTER_QUEUE_NAME,
+  SMS_QUEUE_NAME,
   EXPLORATION_SMOKE_ENVIRONMENT,
   EXPLORATION_SMOKE_HEALTH_PATH,
   EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
@@ -522,6 +530,72 @@ export class PsdEocStack extends Stack {
       retentionPeriod: Duration.days(4),
       visibilityTimeout: Duration.seconds(60),
     });
+    // One queue pair per channel, plus the delivery queue an authorized
+    // notification batch lands on before it is split across channels. Email's
+    // pair predates these and is defined above; the rest are built the same way
+    // so the alarms, runbooks, and redrive permissions line up across channels.
+    const channelQueuePairs = (
+      [
+        ['Delivery', DELIVERY_QUEUE_NAME, DELIVERY_DEAD_LETTER_QUEUE_NAME],
+        ['Sms', SMS_QUEUE_NAME, SMS_DEAD_LETTER_QUEUE_NAME],
+        ['Push', PUSH_QUEUE_NAME, PUSH_DEAD_LETTER_QUEUE_NAME],
+      ] as const
+    ).map(([id, queueName, deadLetterQueueName]) => {
+      const redriveSource = sqs.Queue.fromQueueArn(
+        this,
+        `${id}RedriveSourceQueue`,
+        this.formatArn({ resource: queueName, service: 'sqs' }),
+      );
+      const deadLetterQueue = new sqs.Queue(this, `${id}DeadLetterQueue`, {
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
+        queueName: deadLetterQueueName,
+        redriveAllowPolicy: {
+          redrivePermission: sqs.RedrivePermission.BY_QUEUE,
+          sourceQueues: [redriveSource],
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        retentionPeriod: Duration.days(14),
+      });
+      const queue = new sqs.Queue(this, `${id}Queue`, {
+        deadLetterQueue: {
+          maxReceiveCount: DELIVERY_QUEUE_MAX_RECEIVES,
+          queue: deadLetterQueue,
+        },
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
+        queueName,
+        removalPolicy: RemovalPolicy.RETAIN,
+        retentionPeriod: Duration.days(4),
+        visibilityTimeout: Duration.seconds(60),
+      });
+      return [id, { deadLetterQueue, queue }] as const;
+    });
+    const queuePairs = Object.fromEntries(channelQueuePairs) as Record<
+      'Delivery' | 'Sms' | 'Push',
+      { deadLetterQueue: sqs.Queue; queue: sqs.Queue }
+    >;
+    const deliveryQueue = queuePairs.Delivery.queue;
+
+    // Alarm routing. The operations key encrypts both topics so CloudWatch can
+    // publish to them without the topics being world-writable, and the two
+    // topics separate "look at this soon" from "wake somebody up".
+    const operationsKey = new kms.Key(this, 'OperationsKey', {
+      description: 'Encrypts PSD EOC operational alarm notifications.',
+      enableKeyRotation: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    const operationsAlarmTopic = new sns.Topic(this, 'OperationsAlarmTopic', {
+      displayName: 'PSD EOC operations',
+      masterKey: operationsKey,
+      topicName: 'psd-eoc-operations-alarms',
+    });
+    const criticalAlarmTopic = new sns.Topic(this, 'CriticalAlarmTopic', {
+      displayName: 'PSD EOC critical',
+      masterKey: operationsKey,
+      topicName: 'psd-eoc-critical-alarms',
+    });
+
     const emailWorkerLogGroup = new logs.LogGroup(this, 'EmailWorkerLogGroup', {
       logGroupName: EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
       removalPolicy: RemovalPolicy.RETAIN,
@@ -993,7 +1067,7 @@ export class PsdEocStack extends Stack {
                 },
                 {
                   name: 'DELIVERY_QUEUE_URL',
-                  value: healthQueue.queueUrl,
+                  value: deliveryQueue.queueUrl,
                 },
                 {
                   name: 'NODE_ENV',
@@ -1039,6 +1113,24 @@ export class PsdEocStack extends Stack {
     Tags.of(appRunnerService).remove('DataScope', { priority: 300 });
     imagePullGrant.applyBefore(appRunnerService);
     for (const grant of runtimeGrants) grant.applyBefore(appRunnerService);
+
+    // Alarms. Until the canary and the metrics collector have the credentials
+    // they need, only the tier with a real publisher is deployed; see
+    // `configureInfrastructureMonitoring`.
+    configureInfrastructureMonitoring(this, {
+      applicationCondition: shouldProvisionApplication,
+      appRunnerService,
+      channelQueues: {
+        email: { deadLetterQueue: emailDeadLetterQueue, queue: emailQueue },
+        push: queuePairs.Push,
+        sms: queuePairs.Sms,
+      },
+      criticalAlarmTopic,
+      database,
+      delivery: queuePairs.Delivery,
+      operationsAlarmTopic,
+      operationsKey,
+    });
 
     new CfnOutput(this, 'DeploymentAccount', {
       value: AWS_ACCOUNT,

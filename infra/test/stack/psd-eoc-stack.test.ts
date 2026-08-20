@@ -347,13 +347,18 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
     template.resourceCountIs('AWS::ECS::Service', 0);
-    template.resourceCountIs('AWS::Logs::LogGroup', 2);
-    template.resourceCountIs('AWS::SQS::Queue', 3);
+    // Three log groups: bootstrap, access sync, and the Aurora failover bridge.
+    template.resourceCountIs('AWS::Logs::LogGroup', 3);
+    // Nine queues: the health queue, plus a source/dead-letter pair each for
+    // delivery, email, SMS, and push.
+    template.resourceCountIs('AWS::SQS::Queue', 9);
     template.resourceCountIs('AWS::SecretsManager::Secret', 5);
-    template.resourceCountIs('AWS::KMS::Key', 1);
+    // Two keys: SES event evidence, and operational alarm notifications.
+    template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
     template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 0);
-    template.resourceCountIs('AWS::SNS::Topic', 1);
+    // Three topics: SES event evidence, and the two alarm routes.
+    template.resourceCountIs('AWS::SNS::Topic', 3);
 
     const repository = properties(onlyResource('AWS::ECR::Repository'));
     expect(repository.RepositoryName).toBe(EXPLORATION_SMOKE_REPOSITORY_NAME);
@@ -462,7 +467,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::EC2::Subnet', 6);
     template.resourceCountIs('AWS::EC2::NatGateway', 1);
     template.resourceCountIs('AWS::EC2::InternetGateway', 1);
-    template.resourceCountIs('AWS::Lambda::Function', 0);
+    // The only function is the Aurora failover bridge, which turns an RDS
+    // event into a metric. It has no database, queue, or provider access.
+    template.resourceCountIs('AWS::Lambda::Function', 1);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
     template.resourceCountIs('AWS::EC2::SecurityGroup', 2);
@@ -1199,19 +1206,41 @@ describe('protected access-membership publication boundary', () => {
 });
 
 describe('configured-unverified provider readiness boundary', () => {
-  it('creates no provider identity, DNS, media, scheduler, executable worker, or custom resource', () => {
+  it('creates no provider identity, DNS, media, channel worker, or custom resource', () => {
     for (const forbiddenType of [
-      'AWS::Events::Rule',
-      'AWS::Lambda::Function',
       'AWS::Route53::HostedZone',
       'AWS::Route53::RecordSet',
       'AWS::S3::Bucket',
       'AWS::Scheduler::Schedule',
       'AWS::SES::EmailIdentity',
-      'AWS::SNS::Subscription',
     ]) {
       template.resourceCountIs(forbiddenType, 0);
     }
+    // Monitoring introduces compute and schedules, so the boundary is stated
+    // by name rather than by count: the only function is the Aurora failover
+    // bridge, and the only rules drive it and a targetless human reminder.
+    expect(
+      resourceEntries('AWS::Lambda::Function').map(
+        ([, resource]) => properties(resource).FunctionName,
+      ),
+    ).toEqual(['psd-eoc-aurora-failover-metric']);
+    expect(
+      resourceEntries('AWS::Events::Rule')
+        .map(([, resource]) => String(properties(resource).Name))
+        .sort(),
+    ).toEqual([
+      'psd-eoc-aurora-failover-events',
+      'psd-eoc-monthly-live-delivery-test-due-reminder',
+    ]);
+    // Nothing consumes a notification queue: no channel worker is deployed.
+    template.resourceCountIs('AWS::Lambda::EventSourceMapping', 0);
+    template.resourceCountIs('AWS::ECS::Service', 0);
+    // The only subscriptions are the operations team's alarm routes.
+    expect(
+      resourceEntries('AWS::SNS::Subscription')
+        .map(([, resource]) => String(properties(resource).Protocol))
+        .sort(),
+    ).toEqual(['email', 'email', 'sms', 'sms']);
     expect(
       Object.values(resources).some((resource) =>
         String(asRecord(resource).Type).startsWith('Custom::'),
@@ -1242,7 +1271,12 @@ describe('configured-unverified provider readiness boundary', () => {
 
     template.resourceCountIs('AWS::SES::ConfigurationSetEventDestination', 0);
 
-    const topicResource = onlyResource('AWS::SNS::Topic');
+    const topicResource = asRecord(
+      resourceEntries('AWS::SNS::Topic').find(
+        ([, resource]) =>
+          properties(resource).TopicName === SES_EVENT_TOPIC_NAME,
+      )?.[1],
+    );
     const topic = properties(topicResource);
     expect(topic.TopicName).toBe(SES_EVENT_TOPIC_NAME);
     expect(topic.KmsMasterKeyId).toEqual({
@@ -1251,7 +1285,15 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(topicResource.DeletionPolicy).toBe('Retain');
     expect(topicResource.UpdateReplacePolicy).toBe('Retain');
 
-    const topicPolicy = properties(onlyResource('AWS::SNS::TopicPolicy'));
+    const topicPolicy = properties(
+      asRecord(
+        resourceEntries('AWS::SNS::TopicPolicy').find(([, resource]) =>
+          JSON.stringify(properties(resource).Topics).includes(
+            'EmailEventsTopic',
+          ),
+        )?.[1],
+      ),
+    );
     const topicStatements = asArray(
       asRecord(topicPolicy.PolicyDocument).Statement,
     ).map(asRecord);
@@ -1269,7 +1311,14 @@ describe('configured-unverified provider readiness boundary', () => {
       },
     });
 
-    const keyResource = onlyResource('AWS::KMS::Key');
+    // Two keys exist; this assertion is about the SES event-evidence one.
+    const keyResource = asRecord(
+      resourceEntries('AWS::KMS::Key').find(([, resource]) =>
+        String(properties(resource).Description).startsWith(
+          'Encrypts configured-unverified SES event evidence',
+        ),
+      )?.[1],
+    );
     const key = properties(keyResource);
     expect(key.EnableKeyRotation).toBe(true);
     expect(keyResource.DeletionPolicy).toBe('Retain');
@@ -1333,6 +1382,8 @@ describe('configured-unverified provider readiness boundary', () => {
         'HealthQueueUrl',
         'ImageRepositoryArn',
         'ImageRepositoryUri',
+        'MonitoringDashboardName',
+        'MonitoringDashboardUrl',
         'RuntimeRoleArn',
         'SesConfigurationSetName',
         'SesEmailEventDestinationManagement',

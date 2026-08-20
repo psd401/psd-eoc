@@ -198,6 +198,8 @@ jobs:
         shell: bash
         env:
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
+          OPERATIONS_ALARM_EMAIL: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_EMAIL }}
+          OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_SMS_NUMBER }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
           PREVIOUS_DIGEST: ${{ steps.previous.outputs.previous }}
           SOURCE_SHA: ${{ github.sha }}
@@ -226,6 +228,8 @@ jobs:
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
+            --parameters "$STACK_NAME:OperationsTeamAlarmEmail=$OPERATIONS_ALARM_EMAIL" \
+            --parameters "$STACK_NAME:OperationsTeamAlarmSmsNumber=$OPERATIONS_ALARM_SMS_NUMBER" \
             --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
 
       # Phase 2 applies migrations. A failure here aborts the deploy with the
@@ -295,6 +299,8 @@ jobs:
         shell: bash
         env:
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
+          OPERATIONS_ALARM_EMAIL: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_EMAIL }}
+          OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_SMS_NUMBER }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
@@ -313,6 +319,8 @@ jobs:
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
+            --parameters "$STACK_NAME:OperationsTeamAlarmEmail=$OPERATIONS_ALARM_EMAIL" \
+            --parameters "$STACK_NAME:OperationsTeamAlarmSmsNumber=$OPERATIONS_ALARM_SMS_NUMBER" \
             --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
 
       # These two checks decide success. Everything above is build work.

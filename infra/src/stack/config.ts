@@ -35,6 +35,27 @@ export const EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME =
   'psd-eoc-email-dlq';
 export const EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME =
   '/psd-eoc/workers/email';
+
+/**
+ * The notification delivery queues.
+ *
+ * An authorized notification lands on the delivery queue as one batch, and is
+ * split from there onto the per-channel queues a worker drains. Every queue is
+ * paired with a retained dead-letter queue: work that cannot be delivered has
+ * to be inspectable afterwards, never silently dropped.
+ *
+ * The channel queue names match the channel names in `NOTIFICATION_CHANNELS`,
+ * which is what makes the alarm names (`psd-eoc-<channel>-queue-age`) line up
+ * with the runbooks.
+ */
+export const DELIVERY_QUEUE_NAME = 'psd-eoc-delivery';
+export const DELIVERY_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-delivery-dlq';
+export const SMS_QUEUE_NAME = 'psd-eoc-sms';
+export const SMS_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-sms-dlq';
+export const PUSH_QUEUE_NAME = 'psd-eoc-push';
+export const PUSH_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-push-dlq';
+/** Redelivery attempts before a batch is retained for human inspection. */
+export const DELIVERY_QUEUE_MAX_RECEIVES = 5;
 export const EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN = 'psd401.net';
 export const EXPLORATION_SMOKE_SES_FROM_ADDRESS = 'eoc-alerts@psd401.net';
 export const EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE = 'UNVERIFIED';

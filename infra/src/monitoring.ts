@@ -1,16 +1,23 @@
 /**
  * CloudWatch alarms, dashboards, and alarm routing for PSD EOC.
  *
- * NOT WIRED. `configureMonitoring` is called from nowhere, and every alarm in
- * this repository is defined in this file, so the deployed stack raises no
- * alarms at all. That is an operational gap, not dead code: the stack this was
- * written for — `src/psd-eoc-stack.ts`, a baseline named `PsdEoc` — was never
- * the stack that deploys, and it has been deleted. Production runs
- * `bin/psd-eoc.ts` and `src/stack/`, which never called this.
+ * There are two entry points, because the alarms here do not all have something
+ * publishing their metrics yet.
  *
- * Kept rather than deleted because the answer to "production has no alarms" is
- * more likely to be "call this from the live stack" than "write it again".
- * Tracked separately; delete it if that turns out to be wrong.
+ * `configureInfrastructureMonitoring` is what the live stack calls. It deploys
+ * the alarms whose metrics AWS publishes on its own — App Runner, Aurora, and
+ * every notification queue and dead-letter queue — and needs no credential
+ * beyond the stack's own.
+ *
+ * `configureMonitoring` additionally deploys the one-minute canary and the
+ * metrics collector, and the alarms that read what they publish. It is not
+ * called yet: the canary needs a narrowly scoped agent credential that has
+ * never been issued, and the collector needs the `psd_eoc_monitoring` database
+ * login that `monitoringParameters` still describes as BLOCKED.
+ *
+ * The split matters because several application-tier alarms treat missing data
+ * as breaching. Deployed without a publisher they would page the operations
+ * team every minute forever, which is worse than having no alarm.
  */
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +39,7 @@ import {
   aws_sns_subscriptions as subscriptions,
 } from 'aws-cdk-lib';
 import type {
+  CfnCondition,
   aws_apprunner as apprunner,
   aws_kms as kms,
   aws_rds as rds,
@@ -69,6 +77,8 @@ export interface MonitoringProps {
   >;
   readonly operationsAlarmTopic: sns.ITopic;
   readonly operationsKey: kms.IKey;
+  /** The condition guarding App Runner, applied to anything that reads it. */
+  readonly applicationCondition?: CfnCondition;
 }
 
 export interface MonitoringRuntimeParameters {
@@ -76,7 +86,13 @@ export interface MonitoringRuntimeParameters {
   readonly canaryFacilityId: string;
 }
 
+type AlarmTier = 'infrastructure' | 'application';
+
 interface AlarmDefinition {
+  /** Which publisher this alarm's metric depends on. */
+  readonly tier: AlarmTier;
+  /** True when the metric is dimensioned on the conditional App Runner service. */
+  readonly dependsOnApplication?: boolean;
   readonly id: string;
   readonly name: string;
   readonly summary: string;
@@ -119,7 +135,11 @@ function alarmDescription(summary: string, runbookAnchor: string): string {
   return `${summary} Runbook: ${MONITORING_RUNBOOK_BASE_URL}#${runbookAnchor}`;
 }
 
-function createAlarm(scope: Construct, definition: AlarmDefinition): void {
+function createAlarm(
+  scope: Construct,
+  definition: AlarmDefinition,
+  applicationCondition?: CfnCondition,
+): void {
   const alarm = new cloudwatch.Alarm(scope, definition.id, {
     alarmDescription: alarmDescription(
       definition.summary,
@@ -140,6 +160,13 @@ function createAlarm(scope: Construct, definition: AlarmDefinition): void {
   const action = new cloudwatchActions.SnsAction(definition.topic);
   alarm.addAlarmAction(action);
   alarm.addOkAction(action);
+  // An alarm dimensioned on the App Runner service cannot outlive it: the
+  // service is created under a provisioning condition, so an unconditional
+  // alarm would reference a resource CloudFormation may not have made.
+  if (definition.dependsOnApplication === true && applicationCondition) {
+    (alarm.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition =
+      applicationCondition;
+  }
 }
 
 function customMetric(
@@ -751,6 +778,11 @@ function configureDashboard(
       width: 12,
     }) as unknown as cloudwatch.IWidget,
   );
+  if (props.applicationCondition) {
+    (
+      dashboard.node.defaultChild as cloudwatch.CfnDashboard
+    ).cfnOptions.condition = props.applicationCondition;
+  }
   return dashboard;
 }
 
@@ -758,15 +790,30 @@ function configureAlarms(
   scope: Construct,
   props: MonitoringProps,
   metrics: MonitoringMetrics,
+  includeApplicationTier: boolean,
 ): void {
+  // An alarm is only worth deploying once something publishes its metric. The
+  // application tier reads metrics emitted by the canary and the metrics
+  // collector, neither of which is deployed, and several of those alarms treat
+  // missing data as breaching — deploying them would page the operations team
+  // continuously and teach everyone to ignore the address. See
+  // `configureInfrastructureMonitoring`.
+  const emit = (definition: AlarmDefinition): void => {
+    if (definition.tier === 'application' && !includeApplicationTier) {
+      return;
+    }
+    createAlarm(scope, definition, props.applicationCondition);
+  };
   const canaryHeartbeat = new cloudwatch.MathExpression({
     expression: 'FILL(canarySuccess, 0)',
     label: 'Canary success (missing minute = failure)',
     period: ONE_MINUTE,
     usingMetrics: { canarySuccess: metrics.canarySuccess },
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'infrastructure',
     evaluationPeriods: 1,
+    dependsOnApplication: true,
     id: 'AppRunner5xxAlarm',
     metric: metrics.appRunner5xx,
     name: 'psd-eoc-apprunner-5xx',
@@ -776,9 +823,11 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'infrastructure',
     datapointsToAlarm: 3,
     evaluationPeriods: 5,
+    dependsOnApplication: true,
     id: 'AppRunnerLatencyAlarm',
     metric: metrics.appRunnerLatency,
     name: 'psd-eoc-apprunner-request-latency-average',
@@ -788,7 +837,8 @@ function configureAlarms(
     topic: props.operationsAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     datapointsToAlarm: 3,
     evaluationPeriods: 5,
     id: 'ActivationAcceptLatencyAlarm',
@@ -801,7 +851,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'infrastructure',
     evaluationPeriods: 1,
     id: 'AuroraFailoverBridgeErrorAlarm',
     metric: metrics.failoverBridgeErrors,
@@ -813,7 +864,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'infrastructure',
     datapointsToAlarm: 3,
     evaluationPeriods: 5,
     id: 'AuroraCapacityAlarm',
@@ -825,7 +877,8 @@ function configureAlarms(
     topic: props.operationsAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
     datapointsToAlarm: 2,
     evaluationPeriods: 2,
@@ -839,7 +892,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     evaluationPeriods: 1,
     id: 'MonthlyDeliveryTestDueReminderAlarm',
     metric: metrics.monthlyDeliveryTestDue,
@@ -851,7 +905,8 @@ function configureAlarms(
     topic: props.operationsAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     evaluationPeriods: 1,
     id: 'MonthlyDeliveryTestFailedRunAlarm',
     metric: metrics.monthlyDeliveryTestFailedRuns,
@@ -863,7 +918,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     evaluationPeriods: 1,
     id: 'MonthlyDeliveryTestMissedAlarm',
     metric: metrics.monthlyDeliveryTestMissed,
@@ -875,7 +931,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     datapointsToAlarm: 3,
     evaluationPeriods: 5,
     id: 'AuroraReplicaLagAlarm',
@@ -888,7 +945,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'infrastructure',
     evaluationPeriods: 1,
     id: 'AuroraFailoverAlarm',
     metric: metrics.auroraFailover,
@@ -899,7 +957,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
     datapointsToAlarm: 2,
     evaluationPeriods: 2,
@@ -913,7 +972,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     evaluationPeriods: 1,
     id: 'StuckOutboxAlarm',
     metric: metrics.stuckOutbox,
@@ -925,7 +985,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     evaluationPeriods: 1,
     id: 'RosterSyncFailureAgeAlarm',
     metric: metrics.rosterFailureAge,
@@ -937,7 +998,8 @@ function configureAlarms(
     topic: props.criticalAlarmTopic,
     treatMissingData: cloudwatch.TreatMissingData.BREACHING,
   });
-  createAlarm(scope, {
+  emit({
+    tier: 'application',
     evaluationPeriods: 1,
     id: 'RosterSyncSuccessAgeAlarm',
     metric: metrics.rosterSuccessAge,
@@ -962,7 +1024,8 @@ function configureAlarms(
     ),
   ] as const;
   for (const [idPrefix, name, pair] of queues) {
-    createAlarm(scope, {
+    emit({
+      tier: 'infrastructure',
       evaluationPeriods: 1,
       id: `${idPrefix}QueueAgeAlarm`,
       metric: pair.queue.metricApproximateAgeOfOldestMessage({
@@ -976,7 +1039,8 @@ function configureAlarms(
       topic: props.criticalAlarmTopic,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    createAlarm(scope, {
+    emit({
+      tier: 'infrastructure',
       evaluationPeriods: 1,
       id: `${idPrefix}DeadLetterQueueDepthAlarm`,
       metric: pair.deadLetterQueue.metricApproximateNumberOfMessagesVisible({
@@ -993,7 +1057,8 @@ function configureAlarms(
   }
   for (const channel of NOTIFICATION_CHANNELS) {
     const threshold = channel === 'push' ? 5_000 : 15_000;
-    createAlarm(scope, {
+    emit({
+      tier: 'application',
       evaluationPeriods: 1,
       id: `${channel.charAt(0).toUpperCase()}${channel.slice(1)}ProviderLatencyAlarm`,
       metric: exactPercentileMetrics('OutboxToProviderLatency', {
@@ -1006,7 +1071,8 @@ function configureAlarms(
       topic: props.criticalAlarmTopic,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    createAlarm(scope, {
+    emit({
+      tier: 'application',
       evaluationPeriods: 1,
       id: `${channel.charAt(0).toUpperCase()}${channel.slice(1)}ProviderIncompleteAlarm`,
       metric: customMetric('OutboxToProviderIncompleteCount', {
@@ -1021,6 +1087,213 @@ function configureAlarms(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
   }
+}
+
+/**
+ * Every metric the alarms and dashboard read.
+ *
+ * Building a metric creates no resource — it is a reference to a name and a
+ * namespace. Which of these actually have a publisher depends on the tier the
+ * caller deploys.
+ */
+function assembleMetrics(
+  props: MonitoringProps,
+  failoverBridgeErrors: cloudwatch.IMetric,
+  monthlyDeliveryTestDue: events.Rule,
+): MonitoringMetrics {
+  return {
+    activationAcceptLatency: exactPercentileMetrics('ActivationAcceptLatency'),
+    acuUtilization: props.database.metricACUUtilization({
+      period: ONE_MINUTE,
+      statistic: 'Maximum',
+    }),
+    appRunner5xx: appRunnerMetric(
+      props.appRunnerService,
+      '5xxStatusResponses',
+      'Sum',
+    ),
+    appRunnerLatency: appRunnerMetric(
+      props.appRunnerService,
+      'RequestLatency',
+      'Average',
+    ),
+    auroraFailover: customMetric('AuroraFailoverEvent', { statistic: 'Sum' }),
+    failoverBridgeErrors,
+    canaryLatency: customMetric('CanaryLifecycleLatencyMs', {
+      unit: cloudwatch.Unit.MILLISECONDS,
+    }),
+    canarySuccess: customMetric('CanarySuccess', { statistic: 'Minimum' }),
+    collectorSuccess: customMetric('MetricsCollectorSuccess', {
+      statistic: 'Minimum',
+    }),
+    monthlyDeliveryTestDue: new cloudwatch.Metric({
+      dimensionsMap: { RuleName: monthlyDeliveryTestDue.ruleName },
+      metricName: 'TriggeredRules',
+      namespace: 'AWS/Events',
+      period: ONE_MINUTE,
+      statistic: 'Sum',
+    }),
+    monthlyDeliveryTestFailedRuns: customMetric(
+      'MonthlyLiveDeliveryTestFailedRunCount',
+      { statistic: 'Maximum' },
+    ),
+    monthlyDeliveryTestMissed: customMetric('MonthlyLiveDeliveryTestMissed', {
+      statistic: 'Maximum',
+    }),
+    replicaLag: databaseMetric(
+      props.database,
+      'AuroraReplicaLagMaximum',
+      'Maximum',
+      cloudwatch.Unit.MILLISECONDS,
+    ),
+    rosterFailureAge: customMetric('RosterSyncFailureAgeSeconds', {
+      statistic: 'Maximum',
+      unit: cloudwatch.Unit.SECONDS,
+    }),
+    rosterSuccessAge: customMetric('RosterSyncSuccessAgeSeconds', {
+      statistic: 'Maximum',
+      unit: cloudwatch.Unit.SECONDS,
+    }),
+    stuckOutbox: customMetric('StuckOutboxCount', { statistic: 'Maximum' }),
+  };
+}
+
+/**
+ * The Aurora failover bridge: an EventBridge rule turning cluster failover
+ * events into a metric, plus a metric covering the bridge's own failures.
+ *
+ * The bridge needs no credential and no database role, so it deploys in both
+ * monitoring tiers.
+ */
+function createFailoverBridge(
+  scope: Construct,
+  props: MonitoringProps,
+  failoverMetricFunction: lambda.Function,
+): cloudwatch.IMetric {
+  const failoverEvents = new events.Rule(scope, 'AuroraFailoverEvents', {
+    description:
+      'Turns Aurora cluster failover events into a metric; performs no recovery mutation.',
+    eventPattern: {
+      detail: { EventCategories: ['failover'] },
+      detailType: ['RDS DB Cluster Event'],
+      resources: [props.database.clusterArn],
+      source: ['aws.rds'],
+    },
+    ruleName: 'psd-eoc-aurora-failover-events',
+  });
+  failoverEvents.addTarget(
+    new eventTargets.LambdaFunction(failoverMetricFunction, {
+      maxEventAge: Duration.minutes(5),
+      retryAttempts: 2,
+    }),
+  );
+  return new cloudwatch.MathExpression({
+    expression:
+      'FILL(eventbridge, 0) + FILL(lambdaErrors, 0) + FILL(lambdaThrottles, 0)',
+    label: 'Failover bridge errors',
+    period: ONE_MINUTE,
+    usingMetrics: {
+      eventbridge: new cloudwatch.Metric({
+        dimensionsMap: { RuleName: failoverEvents.ruleName },
+        metricName: 'FailedInvocations',
+        namespace: 'AWS/Events',
+        period: ONE_MINUTE,
+        statistic: 'Sum',
+      }),
+      lambdaErrors: failoverMetricFunction.metricErrors({
+        period: ONE_MINUTE,
+        statistic: 'Sum',
+      }),
+      lambdaThrottles: failoverMetricFunction.metricThrottles({
+        period: ONE_MINUTE,
+        statistic: 'Sum',
+      }),
+    },
+  });
+}
+
+/** Targetless monthly reminder; it invokes no app, queue, or provider. */
+function createMonthlyDeliveryTestReminder(scope: Construct): events.Rule {
+  return new events.Rule(scope, 'MonthlyDeliveryTestDueReminder', {
+    description:
+      'Targetless reminder only: a human may review the monthly live delivery test; this invokes no app, queue, or provider.',
+    enabled: true,
+    ruleName: 'psd-eoc-monthly-live-delivery-test-due-reminder',
+    schedule: events.Schedule.expression('cron(0 17 1 * ? *)'),
+  });
+}
+
+/** Publishes the dashboard's name and console URL under its own condition. */
+function publishDashboardOutputs(
+  scope: Construct,
+  dashboard: cloudwatch.Dashboard,
+  applicationCondition?: CfnCondition,
+): void {
+  const stack = Stack.of(scope);
+  const name = new CfnOutput(scope, 'MonitoringDashboardName', {
+    value: dashboard.dashboardName,
+  });
+  const url = new CfnOutput(scope, 'MonitoringDashboardUrl', {
+    value: `https://${stack.region}.console.aws.amazon.com/cloudwatch/home?region=${stack.region}#dashboards:name=${dashboard.dashboardName}`,
+  });
+  if (applicationCondition) {
+    name.condition = applicationCondition;
+    url.condition = applicationCondition;
+  }
+}
+
+/**
+ * The monitoring the deployed stack can actually support today.
+ *
+ * This is `configureMonitoring` minus everything that depends on a publisher
+ * that does not exist yet. It raises alarms on App Runner, Aurora, and every
+ * notification queue and dead-letter queue — all native AWS metrics, needing no
+ * credential, no Lambda beyond the failover bridge, and no database role.
+ *
+ * Left out, deliberately, and why:
+ *
+ * - the one-minute canary, which needs a narrowly scoped agent credential that
+ *   has never been issued;
+ * - the metrics collector, which needs the `psd_eoc_monitoring` database login
+ *   that `monitoringParameters` still describes as BLOCKED, and everything
+ *   downstream of it: stuck-outbox depth, roster sync ages, activation accept
+ *   latency, and the monthly delivery test;
+ * - Aurora replica lag, because the cluster runs a single writer with no
+ *   reader, so `AuroraReplicaLagMaximum` never reports;
+ * - per-channel outbox-to-provider latency, which the channel workers publish
+ *   and no channel worker is deployed.
+ *
+ * Several of those treat missing data as breaching. Deploying them against a
+ * metric nobody publishes would page the operations team every minute forever,
+ * which is worse than no alarm: it trains people to ignore the address.
+ */
+export function configureInfrastructureMonitoring(
+  scope: Construct,
+  props: MonitoringProps,
+): void {
+  configureAlarmRecipients(scope, [
+    props.operationsAlarmTopic,
+    props.criticalAlarmTopic,
+  ]);
+  allowScopedCloudWatchAlarmPublish(
+    scope,
+    [props.operationsAlarmTopic, props.criticalAlarmTopic],
+    props.operationsKey,
+  );
+  const failoverBridgeErrors = createFailoverBridge(
+    scope,
+    props,
+    createFailoverMetricFunction(scope, props),
+  );
+  const monthlyDeliveryTestDue = createMonthlyDeliveryTestReminder(scope);
+  const metrics = assembleMetrics(
+    props,
+    failoverBridgeErrors,
+    monthlyDeliveryTestDue,
+  );
+  configureAlarms(scope, props, metrics, false);
+  const dashboard = configureDashboard(scope, props, metrics);
+  publishDashboardOutputs(scope, dashboard, props.applicationCondition);
 }
 
 /** Adds phase-5 monitoring without any notification-provider send authority. */
@@ -1076,122 +1349,21 @@ export function configureMonitoring(
       retryAttempts: 1,
     }),
   );
-  const monthlyDeliveryTestDue = new events.Rule(
+  const monthlyDeliveryTestDue = createMonthlyDeliveryTestReminder(scope);
+  const failoverBridgeErrors = createFailoverBridge(
     scope,
-    'MonthlyDeliveryTestDueReminder',
-    {
-      description:
-        'Targetless reminder only: a human may review the monthly live delivery test; this invokes no app, queue, or provider.',
-      enabled: true,
-      ruleName: 'psd-eoc-monthly-live-delivery-test-due-reminder',
-      schedule: events.Schedule.expression('cron(0 17 1 * ? *)'),
-    },
+    props,
+    failoverMetricFunction,
   );
-  const failoverEvents = new events.Rule(scope, 'AuroraFailoverEvents', {
-    description:
-      'Turns Aurora cluster failover events into a metric; performs no recovery mutation.',
-    eventPattern: {
-      detail: { EventCategories: ['failover'] },
-      detailType: ['RDS DB Cluster Event'],
-      resources: [props.database.clusterArn],
-      source: ['aws.rds'],
-    },
-    ruleName: 'psd-eoc-aurora-failover-events',
-  });
-  failoverEvents.addTarget(
-    new eventTargets.LambdaFunction(failoverMetricFunction, {
-      maxEventAge: Duration.minutes(5),
-      retryAttempts: 2,
-    }),
-  );
-  const failoverBridgeErrors = new cloudwatch.MathExpression({
-    expression:
-      'FILL(eventbridge, 0) + FILL(lambdaErrors, 0) + FILL(lambdaThrottles, 0)',
-    label: 'Failover bridge errors',
-    period: ONE_MINUTE,
-    usingMetrics: {
-      eventbridge: new cloudwatch.Metric({
-        dimensionsMap: { RuleName: failoverEvents.ruleName },
-        metricName: 'FailedInvocations',
-        namespace: 'AWS/Events',
-        period: ONE_MINUTE,
-        statistic: 'Sum',
-      }),
-      lambdaErrors: failoverMetricFunction.metricErrors({
-        period: ONE_MINUTE,
-        statistic: 'Sum',
-      }),
-      lambdaThrottles: failoverMetricFunction.metricThrottles({
-        period: ONE_MINUTE,
-        statistic: 'Sum',
-      }),
-    },
-  });
 
-  const metrics: MonitoringMetrics = {
-    activationAcceptLatency: exactPercentileMetrics('ActivationAcceptLatency'),
-    acuUtilization: props.database.metricACUUtilization({
-      period: ONE_MINUTE,
-      statistic: 'Maximum',
-    }),
-    appRunner5xx: appRunnerMetric(
-      props.appRunnerService,
-      '5xxStatusResponses',
-      'Sum',
-    ),
-    appRunnerLatency: appRunnerMetric(
-      props.appRunnerService,
-      'RequestLatency',
-      'Average',
-    ),
-    auroraFailover: customMetric('AuroraFailoverEvent', { statistic: 'Sum' }),
+  const metrics = assembleMetrics(
+    props,
     failoverBridgeErrors,
-    canaryLatency: customMetric('CanaryLifecycleLatencyMs', {
-      unit: cloudwatch.Unit.MILLISECONDS,
-    }),
-    canarySuccess: customMetric('CanarySuccess', { statistic: 'Minimum' }),
-    collectorSuccess: customMetric('MetricsCollectorSuccess', {
-      statistic: 'Minimum',
-    }),
-    monthlyDeliveryTestDue: new cloudwatch.Metric({
-      dimensionsMap: { RuleName: monthlyDeliveryTestDue.ruleName },
-      metricName: 'TriggeredRules',
-      namespace: 'AWS/Events',
-      period: ONE_MINUTE,
-      statistic: 'Sum',
-    }),
-    monthlyDeliveryTestFailedRuns: customMetric(
-      'MonthlyLiveDeliveryTestFailedRunCount',
-      { statistic: 'Maximum' },
-    ),
-    monthlyDeliveryTestMissed: customMetric('MonthlyLiveDeliveryTestMissed', {
-      statistic: 'Maximum',
-    }),
-    replicaLag: databaseMetric(
-      props.database,
-      'AuroraReplicaLagMaximum',
-      'Maximum',
-      cloudwatch.Unit.MILLISECONDS,
-    ),
-    rosterFailureAge: customMetric('RosterSyncFailureAgeSeconds', {
-      statistic: 'Maximum',
-      unit: cloudwatch.Unit.SECONDS,
-    }),
-    rosterSuccessAge: customMetric('RosterSyncSuccessAgeSeconds', {
-      statistic: 'Maximum',
-      unit: cloudwatch.Unit.SECONDS,
-    }),
-    stuckOutbox: customMetric('StuckOutboxCount', { statistic: 'Maximum' }),
-  };
-  configureAlarms(scope, props, metrics);
+    monthlyDeliveryTestDue,
+  );
+  configureAlarms(scope, props, metrics, true);
   const dashboard = configureDashboard(scope, props, metrics);
-  const stack = Stack.of(scope);
-  new CfnOutput(scope, 'MonitoringDashboardName', {
-    value: dashboard.dashboardName,
-  });
-  new CfnOutput(scope, 'MonitoringDashboardUrl', {
-    value: `https://${stack.region}.console.aws.amazon.com/cloudwatch/home?region=${stack.region}#dashboards:name=${dashboard.dashboardName}`,
-  });
+  publishDashboardOutputs(scope, dashboard, props.applicationCondition);
   return {
     canaryEventTypeVersionId: parameters.eventTypeVersionId,
     canaryFacilityId: parameters.facilityId,
