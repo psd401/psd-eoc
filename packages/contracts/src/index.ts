@@ -9,7 +9,6 @@ export * from './event-room';
 export * from './event-type';
 export * from './facility';
 export * from './fanout-control';
-export * from './failure-drill-runtime';
 export * from './group';
 export * from './human-only';
 export * from './identity';
