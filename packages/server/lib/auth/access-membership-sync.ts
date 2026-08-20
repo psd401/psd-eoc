@@ -24,7 +24,6 @@ import { z } from 'zod';
 import type { Database } from '../../db/client';
 import {
   accessGroupMembers,
-  accessMembershipEvaluatedMembers,
   accessMembershipSnapshots,
   groupSources,
   idempotencyRecords,
@@ -36,10 +35,7 @@ import {
   type EvaluatedAccessMembershipSet,
   type GoogleAccessMembershipEvaluator,
 } from './google-access-membership';
-import {
-  ADMIN_AVAILABILITY_LOCK_SQL,
-  loadAccessConfigurationSnapshotState,
-} from './role-state';
+import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 
 const MAX_EVALUATED_MEMBERS = 1_200;
 const MAX_POSTGRES_INTEGER = 2_147_483_647;
@@ -535,11 +531,16 @@ export function createDrizzleAccessMembershipSyncStore(
       auditEntryHash: string | null;
     }>,
   ): Promise<AccessMembershipPublicationResult> {
-    const accessState = await loadAccessConfigurationSnapshotState(database);
-    if (accessState === null || accessState.snapshotId !== proof.snapshotId) {
+    const [latestRun] = await database
+      .select({ id: accessMembershipSnapshots.id })
+      .from(accessMembershipSnapshots)
+      .where(eq(accessMembershipSnapshots.complete, true))
+      .orderBy(desc(accessMembershipSnapshots.version))
+      .limit(1);
+    if (latestRun === undefined || latestRun.id !== proof.snapshotId) {
       throw new AccessMembershipSyncError(
         'IDEMPOTENCY_RESULT_SUPERSEDED',
-        'The prior access-sync publication is no longer the current access generation.',
+        'A later access-sync run replaced the one this result described.',
       );
     }
     const [snapshot] = await database
@@ -569,24 +570,27 @@ export function createDrizzleAccessMembershipSyncStore(
         and(
           eq(groupSources.kind, 'google-group'),
           eq(groupSources.purpose, 'access'),
-          inArray(groupSources.id, [...accessState.activeAccessGroupSourceIds]),
+          eq(groupSources.active, true),
         ),
       )
       .orderBy(asc(groupSources.id));
+    // Reconstructed from the membership the run actually wrote, which is the
+    // membership that is live. The evaluated-member rows this used to read were
+    // a second copy of the same emails, kept only so a snapshot generation
+    // could be replayed against itself.
     const memberRows = await database
       .select({
-        email: accessMembershipEvaluatedMembers.email,
-        groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
+        email: accessGroupMembers.email,
+        groupSourceId: accessGroupMembers.groupSourceId,
       })
-      .from(accessMembershipEvaluatedMembers)
+      .from(accessGroupMembers)
       .where(
-        and(
-          eq(accessMembershipEvaluatedMembers.snapshotId, proof.snapshotId),
-          eq(accessMembershipEvaluatedMembers.groupSourceKind, 'google-group'),
-          eq(accessMembershipEvaluatedMembers.groupPurpose, 'access'),
+        inArray(
+          accessGroupMembers.groupSourceId,
+          sourceRows.map(({ id }) => id),
         ),
       )
-      .orderBy(asc(accessMembershipEvaluatedMembers.email));
+      .orderBy(asc(accessGroupMembers.email));
 
     const groups = sourceRows.map((source) => ({
       groupSourceId: source.id,
@@ -622,7 +626,7 @@ export function createDrizzleAccessMembershipSyncStore(
       evaluation,
       snapshot.id,
       snapshot.version,
-      accessState.activeAccessGroupSourceIds.length,
+      sourceRows.length,
     );
   }
 

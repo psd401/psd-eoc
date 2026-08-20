@@ -20,10 +20,7 @@ export const DATABASE_ROLE = 'psd_eoc_app' as const;
  * stack reachable by one known human, and it must never run on a stack that
  * already has real access groups.
  */
-export const BOOTSTRAP_MODES = Object.freeze([
-  'migrate',
-  'seed-access-fixture',
-] as const);
+export const BOOTSTRAP_MODES = Object.freeze(['migrate'] as const);
 
 export type BootstrapMode = (typeof BOOTSTRAP_MODES)[number];
 

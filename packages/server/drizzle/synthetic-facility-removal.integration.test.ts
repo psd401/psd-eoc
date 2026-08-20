@@ -21,7 +21,7 @@ import {
 import { sql } from 'drizzle-orm';
 import { migrate as migrateWithPostgres } from 'drizzle-orm/postgres-js/migrator';
 
-import { requireSyntheticTestDatabaseUrl } from '../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
@@ -289,7 +289,49 @@ async function stageReviewedLiveShape(
   database: PostgresDatabase,
   configurationVersionTwoCreatedAt = '2026-08-16T20:49:06.444626Z',
 ): Promise<void> {
-  await seedDatabase(database);
+  await seedDatabase(database, {
+    // Written here with the columns this schema actually has: Drizzle emits
+    // every column of a table it inserts into, so seeding group sources
+    // through the current schema fails against a database held at an earlier
+    // migration. Runs after facilities and before the audience targets that
+    // reference them.
+    async insertGroupSources(transaction) {
+      await transaction.execute(sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values
+        (
+          '00000000-0000-4000-8000-000000000030'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000001'::uuid,
+          'Synthetic North Staff',
+          true, null, null, 'synthetic-north-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000031'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000002'::uuid,
+          'Synthetic South Staff',
+          true, null, null, 'synthetic-south-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000032'::uuid,
+          'synthetic'::group_source_kind,
+          'others'::group_purpose,
+          null,
+          'Synthetic District Support Staff',
+          true, null, null, 'synthetic-district-support-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        )
+      on conflict do nothing
+      `);
+    },
+  });
   await database.transaction(async (transaction) => {
     await transaction.execute(sql`
       update facilities set active = false where id = ${ids.north}::uuid

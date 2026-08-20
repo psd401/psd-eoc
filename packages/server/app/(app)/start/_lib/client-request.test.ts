@@ -17,7 +17,7 @@ import {
 import {
   activationPreviewFixture,
   activationResultFixture,
-} from '../test/playwright.fixtures';
+} from '../test/fixtures';
 
 const uuid = (suffix: number): string =>
   `17000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;

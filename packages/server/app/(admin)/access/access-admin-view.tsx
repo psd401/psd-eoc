@@ -262,98 +262,42 @@ function facilityScopeLabel(user: UserPage['items'][number]): string {
   return `${count} ${count === 1 ? 'facility' : 'facilities'}`;
 }
 
-function RoleAssignmentForm({
-  user,
-  csrfToken,
-}: Readonly<{ user: UserPage['items'][number]; csrfToken: string }>) {
-  const staffId = `user-${user.id}-staff`;
-  const adminId = `user-${user.id}-admin`;
-  const helpId = `user-${user.id}-role-help`;
-  const disabled = user.disabledAt !== null;
-
-  const RoleControl = ({
-    id,
-    label,
-    role,
-  }: Readonly<{
-    id: string;
-    label: string;
-    role: 'staff' | 'admin';
-  }>) => {
-    const alreadyGranted = user.roles.includes(role);
-    return (
-      <label htmlFor={id}>
-        <input
-          aria-describedby={helpId}
-          defaultChecked={alreadyGranted}
-          id={id}
-          name="roles"
-          type="checkbox"
-          value={role}
-        />
-        {label}
-      </label>
-    );
-  };
-
-  return (
-    <form action="/access/api" method="post">
-      <AdminMutationFields csrfToken={csrfToken} />
-      <input name="intent" type="hidden" value="set-user-roles" />
-      <input name="userId" type="hidden" value={user.id} />
-      <fieldset disabled={disabled}>
-        <legend>Roles for {user.displayName}</legend>
-        <p id={helpId}>
-          Select the complete effective role set. Changes append grant or
-          revocation facts; prior history remains immutable. Administrator
-          access does not replace server-side facility scope.
-        </p>
-        <RoleControl id={staffId} label="Staff" role="staff" />
-        <RoleControl id={adminId} label="Administrator" role="admin" />
-        <button type="submit">Save roles for {user.displayName}</button>
-      </fieldset>
-      {disabled ? (
-        <p>This account is disabled; roles cannot be changed.</p>
-      ) : null}
-    </form>
-  );
-}
-
 function UsersAndRoles({
   page,
-  csrfToken,
   cursors,
 }: Readonly<{
   page: UserPage;
-  csrfToken: string;
   cursors: AccessAdminCursorState;
 }>) {
   return (
     <section aria-labelledby="roles-heading">
       <h2 id="roles-heading">Staff roles</h2>
       <p>
-        Assign administrator access only to staff who manage district
-        configuration. Facility authorization is still enforced server-side on
-        every capability.
+        Roles are read from trusted-group membership at every request and are
+        not editable here: move somebody between groups to change what they may
+        do. Facility authorization is still enforced server-side on every
+        capability.
       </p>
       {page.items.length === 0 ? (
         <p role="status">No staff accounts match this view.</p>
       ) : (
         <div
-          aria-label="Staff role assignments"
+          aria-label="Staff accounts and granted roles"
           className="table-region"
           role="region"
           tabIndex={0}
         >
           <table>
-            <caption>Minimized staff accounts and role assignments</caption>
+            <caption>
+              Minimized staff accounts and the roles their groups grant
+            </caption>
             <thead>
               <tr>
                 <th scope="col">Staff member</th>
                 <th scope="col">Email</th>
                 <th scope="col">Facility scope</th>
                 <th scope="col">Account</th>
-                <th scope="col">Role assignment</th>
+                <th scope="col">Roles</th>
               </tr>
             </thead>
             <tbody>
@@ -364,7 +308,9 @@ function UsersAndRoles({
                   <td>{facilityScopeLabel(user)}</td>
                   <td>{user.disabledAt === null ? 'Active' : 'Disabled'}</td>
                   <td>
-                    <RoleAssignmentForm csrfToken={csrfToken} user={user} />
+                    {user.roles.length === 0
+                      ? 'None'
+                      : [...user.roles].sort().join(', ')}
                   </td>
                 </tr>
               ))}
@@ -414,11 +360,12 @@ export function AccessAdminView({
       <AdminNavigation />
       <header>
         <p>Administration</p>
-        <h1>Access groups and administrator roles</h1>
+        <h1>Access groups and the roles they grant</h1>
         <p>
-          Configure the Google Groups that gate staff sign-in and assign the
-          small set of staff who may administer PSD EOC. These controls never
-          start an event or send a notification.
+          Configure the Google Groups that gate staff sign-in. Each group grants
+          a role, so who administers PSD EOC is decided by who is in the
+          administrator group. These controls never start an event or send a
+          notification.
         </p>
       </header>
       {statusMessage === null ? null : (
@@ -431,11 +378,7 @@ export function AccessAdminView({
         cursors={view.cursors}
         page={view.accessGroups}
       />
-      <UsersAndRoles
-        csrfToken={csrfToken}
-        cursors={view.cursors}
-        page={view.users}
-      />
+      <UsersAndRoles cursors={view.cursors} page={view.users} />
     </main>
   );
 }

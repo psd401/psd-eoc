@@ -11,7 +11,7 @@ import {
 import type { Actor } from '@psd-eoc/contracts';
 import { asc, eq, inArray, sql } from 'drizzle-orm';
 
-import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   createDatabaseClient,
   type PostgresDatabaseConnection,

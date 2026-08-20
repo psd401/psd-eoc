@@ -53,9 +53,12 @@ export const UserSchema = z
         message: 'User email must be normalized to lowercase.',
       }),
     displayName: z.string().trim().min(1).max(160),
+    // Empty is meaningful: roles are what the holder's trusted groups grant, so
+    // somebody who is in none of them holds none. Such a record never
+    // authorizes a request — it exists so an administrator can still see and
+    // revoke the sessions of somebody who has been removed from every group.
     roles: z
       .array(RoleSchema)
-      .min(1)
       .max(2)
       .refine((roles) => new Set(roles).size === roles.length, {
         message: 'User roles must be unique.',
@@ -1166,25 +1169,3 @@ export const UserPageSchema = paginatedSchema(UserSchema);
 
 /** Minimized staff-user page inferred from its schema. */
 export type UserPage = z.infer<typeof UserPageSchema>;
-
-/**
- * Owns an administrative role replacement request. The authenticated actor,
- * authorization decision, and write time remain capability-engine concerns.
- */
-export const SetUserRolesInputSchema = z
-  .object({
-    userId: UserIdSchema,
-    roles: z
-      .array(RoleSchema)
-      .min(1)
-      .max(2)
-      .refine((roles) => new Set(roles).size === roles.length, {
-        message: 'User roles must be unique.',
-      })
-      .readonly(),
-  })
-  .strict()
-  .readonly();
-
-/** Administrative role-replacement input inferred from its schema. */
-export type SetUserRolesInput = z.infer<typeof SetUserRolesInputSchema>;

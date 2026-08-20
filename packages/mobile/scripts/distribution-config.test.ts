@@ -39,8 +39,8 @@ describe('mobile distribution configuration', () => {
     expect(easConfig.build.production.environment).toBe('production');
   });
 
-  test('ships app/runtime 1.0.2 as embedded-only with no OTA routing', () => {
-    expect(appConfig.expo.version).toBe('1.0.2');
+  test('ships app/runtime 1.0.3 as embedded-only with no OTA routing', () => {
+    expect(appConfig.expo.version).toBe('1.0.3');
     expect(appConfig.expo.runtimeVersion).toEqual({ policy: 'appVersion' });
     expect(appConfig.expo.updates).toEqual({
       enabled: false,
@@ -66,18 +66,18 @@ describe('mobile distribution configuration', () => {
 
   test('pins the complete current Expo SDK 57 compatibility patch set', () => {
     expect(packageManifest.dependencies).toMatchObject({
-      expo: '~57.0.14',
-      'expo-auth-session': '~57.0.7',
-      'expo-constants': '~57.0.12',
-      'expo-dev-client': '~57.0.13',
-      'expo-file-system': '~57.0.4',
-      'expo-image-picker': '~57.0.11',
-      'expo-linking': '~57.0.6',
-      'expo-location': '~57.0.11',
-      'expo-notifications': '~57.0.12',
-      'expo-router': '~57.0.14',
+      expo: '~57.0.15',
+      'expo-auth-session': '~57.0.8',
+      'expo-constants': '~57.0.13',
+      'expo-dev-client': '~57.0.14',
+      'expo-file-system': '~57.0.5',
+      'expo-image-picker': '~57.0.12',
+      'expo-linking': '~57.0.7',
+      'expo-location': '~57.0.12',
+      'expo-notifications': '~57.0.13',
+      'expo-router': '~57.0.15',
       'expo-splash-screen': '~57.0.7',
-      'expo-updates': '~57.0.15',
+      'expo-updates': '~57.0.16',
     });
     expect(packageManifest.dependencies['expo-application']).toBe('~57.0.2');
     expect(packageManifest.scripts['expo:check']).toBe('expo install --check');
@@ -293,7 +293,7 @@ describe('mobile distribution configuration', () => {
       'marked version 1.0.1/build 2 **Failed** with error 90683',
     );
     expect(iosBuildRecord).toContain(
-      'A 1.0.2 replacement BUILD and later upload remain pending separate fresh approvals',
+      'A 1.0.3 replacement BUILD and later upload remain pending separate fresh approvals',
     );
     expect(compactRelease).toContain(
       'Before the iOS BUILD, a separate provider-configuration gate was previewed, explicitly approved by the product owner for one exact write, confirmed by the authenticated human operator, and independently read back',
@@ -330,7 +330,7 @@ describe('mobile distribution configuration', () => {
     }
 
     expect(compactRelease).toContain(
-      'Remote updates are **blocked for current app/runtime 1.0.2**',
+      'Remote updates are **blocked for current app/runtime 1.0.3**',
     );
     expect(compactRelease).toContain(
       'district-held code-signing public certificate embedded in a new app version/runtime',
@@ -361,7 +361,7 @@ describe('mobile distribution configuration', () => {
     }
     expect(readme).not.toContain('`ota-preview`:');
     expect(readme).toContain(
-      'Remote updates are disabled for app/runtime 1.0.2',
+      'Remote updates are disabled for app/runtime 1.0.3',
     );
     expect(compactReadme).toContain(
       'Ordinary `preview` must never be used for production-environment OTA verification',
@@ -434,7 +434,7 @@ describe('mobile distribution configuration', () => {
     );
     expect(update).toContain('| `blocked`');
     expect(update).toContain(
-      'Remote updates are disabled in current app/runtime 1.0.2',
+      'Remote updates are disabled in current app/runtime 1.0.3',
     );
 
     for (const integration of [

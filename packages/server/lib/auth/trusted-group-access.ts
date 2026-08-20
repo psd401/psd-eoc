@@ -33,6 +33,14 @@ export type AccessDecision =
       granted: true;
       roles: readonly Role[];
       groupSourceIds: readonly string[];
+      /**
+       * When the granting membership was last read from the provider — the
+       * freshest capture among the groups that granted it. Callers that need
+       * to say how old their evidence is report this rather than the instant
+       * they asked, which is never in the future and never pretends a stale
+       * read is current.
+       */
+      capturedAt: Date;
     }>
   | Readonly<{ granted: false; refusal: AccessRefusal }>;
 
@@ -93,13 +101,17 @@ export async function decideAccess(
   // group they do not belong to says nothing about their access, and letting
   // it deny them is the same mistake as requiring membership in every group.
   const held = new Set(memberships.map(({ groupSourceId }) => groupSourceId));
-  const usable = active.filter(
-    (group) =>
-      held.has(group.id) &&
-      group.membersCapturedAt !== null &&
-      input.checkedAt.getTime() - group.membersCapturedAt.getTime() <=
-        MEMBERSHIP_FRESHNESS_MS,
-  );
+  const usable = active.flatMap((group) => {
+    const capturedAt = group.membersCapturedAt;
+    if (
+      !held.has(group.id) ||
+      capturedAt === null ||
+      input.checkedAt.getTime() - capturedAt.getTime() > MEMBERSHIP_FRESHNESS_MS
+    ) {
+      return [];
+    }
+    return [{ id: group.id, grantedRole: group.grantedRole, capturedAt }];
+  });
   if (usable.length === 0) {
     return Object.freeze({
       granted: false,
@@ -110,9 +122,13 @@ export async function decideAccess(
   const roles = [
     ...new Set(usable.map((group) => RoleSchema.parse(group.grantedRole))),
   ].sort();
+  const capturedAt = new Date(
+    Math.max(...usable.map((group) => group.capturedAt.getTime())),
+  );
   return Object.freeze({
     granted: true,
     roles: Object.freeze(roles),
     groupSourceIds: Object.freeze(usable.map(({ id }) => id).sort()),
+    capturedAt,
   });
 }

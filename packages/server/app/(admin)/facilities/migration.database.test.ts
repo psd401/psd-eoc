@@ -36,7 +36,7 @@ import {
   createDrizzleJournalCapabilityStore,
   executeJournalCapability,
 } from '../../../lib/capabilities/journal';
-import { requireSyntheticTestDatabaseUrl } from '../event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
@@ -452,7 +452,70 @@ async function channelSnapshot(
 }
 
 async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
-  await seedDatabase(database);
+  await seedDatabase(database, {
+    // The group sources the seed would write, with the columns this schema
+    // actually has. Drizzle emits every column of a table it inserts into, so
+    // seeding them through the current schema fails against a database held at
+    // migration 0004 the moment that table gains a column — as it did when
+    // access groups started carrying the role they grant. This runs at the same
+    // point in the transaction, after facilities and before the audience
+    // targets that reference them.
+    async insertGroupSources(transaction) {
+      await transaction.execute(sql`
+    insert into group_sources (
+      id, kind, purpose, facility_id, display_name, active,
+      google_group_id, email, fixture_key, created_at
+    ) values
+      (
+        '00000000-0000-4000-8000-000000000030'::uuid,
+        'synthetic'::group_source_kind,
+        'building'::group_purpose,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        'Synthetic North Staff',
+        true, null, null, 'synthetic-north-staff',
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      ),
+      (
+        '00000000-0000-4000-8000-000000000031'::uuid,
+        'synthetic'::group_source_kind,
+        'building'::group_purpose,
+        '00000000-0000-4000-8000-000000000002'::uuid,
+        'Synthetic South Staff',
+        true, null, null, 'synthetic-south-staff',
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      ),
+      (
+        '00000000-0000-4000-8000-000000000032'::uuid,
+        'synthetic'::group_source_kind,
+        'others'::group_purpose,
+        null,
+        'Synthetic District Support Staff',
+        true, null, null, 'synthetic-district-support-staff',
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      )
+    on conflict do nothing
+      `);
+    },
+  });
+  await database.execute(sql`
+    insert into facilities (id, code, name, active, created_at)
+    values
+      (
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        'SYN-NORTH',
+        'Synthetic North Campus',
+        true,
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      ),
+      (
+        '00000000-0000-4000-8000-000000000002'::uuid,
+        'SYN-SOUTH',
+        'Synthetic South Campus',
+        true,
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      )
+    on conflict do nothing
+  `);
   await database.execute(sql`
     insert into integration_statuses (
       id,
@@ -1361,14 +1424,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         from information_schema.triggers
         where trigger_schema = 'public'
           and trigger_name in (
-            'access_membership_member_facilities_construction_guard',
-            'access_membership_member_facilities_immutable_guard',
-            'access_membership_member_groups_construction_guard',
-            'access_membership_member_groups_immutable_guard',
-            'access_membership_members_construction_guard',
-            'access_membership_members_immutable_guard',
-            'access_membership_snapshot_groups_construction_guard',
-            'access_membership_snapshot_groups_immutable_guard',
             'access_membership_snapshots_admin_availability_lock',
             'access_membership_snapshots_immutable_guard',
             'group_sources_identity_guard',
@@ -1389,14 +1444,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       `),
     ).map((row) => row.snapshot);
     expect(triggers).toEqual([
-      'access_membership_member_facilities_construction_guard',
-      'access_membership_member_facilities_immutable_guard',
-      'access_membership_member_groups_construction_guard',
-      'access_membership_member_groups_immutable_guard',
-      'access_membership_members_construction_guard',
-      'access_membership_members_immutable_guard',
-      'access_membership_snapshot_groups_construction_guard',
-      'access_membership_snapshot_groups_immutable_guard',
       'access_membership_snapshots_admin_availability_lock',
       'access_membership_snapshots_immutable_guard',
       'audience_configurations_monotonic_insert_guard',
@@ -1483,6 +1530,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         facility_id,
         display_name,
         active,
+        granted_role,
         google_group_id,
         email,
         fixture_key
@@ -1494,6 +1542,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         null,
         'Synthetic access source',
         true,
+        'admin'::role,
         ${originalGoogleGroupId},
         ${originalEmail},
         null
@@ -1545,791 +1594,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       '55000',
       /Access group provider locators are immutable/u,
     );
-  });
-
-  test('publishes access snapshots atomically and keeps their complete graph immutable', async () => {
-    const db = databaseConnection().db;
-    const snapshotId = randomUUID();
-    const groupSourceId = randomUUID();
-    const lateGroupSourceId = randomUUID();
-    const userId = randomUUID();
-    const lateUserId = randomUUID();
-    const facilityId = randomUUID();
-    const lateFacilityId = randomUUID();
-    const googleSubject = `issue-26-snapshot-${userId}`;
-    const [versionRow] = databaseExecuteRows<CountRow>(
-      await db.execute<CountRow>(sql`
-        select coalesce(max(version), 0)::integer + 1 as count
-        from access_membership_snapshots
-      `),
-    );
-    const version = versionRow?.count;
-    if (version === undefined) {
-      throw new Error('The next access snapshot version is unavailable.');
-    }
-
-    await db.execute(sql`
-      insert into facilities (id, code, name, active)
-      values
-        (
-          ${facilityId}::uuid,
-          ${`I26-${facilityId.slice(0, 8).toUpperCase()}`},
-          'Synthetic access snapshot facility',
-          true
-        ),
-        (
-          ${lateFacilityId}::uuid,
-          ${`I26-${lateFacilityId.slice(0, 8).toUpperCase()}`},
-          'Synthetic late access snapshot facility',
-          true
-        )
-    `);
-    await db.execute(sql`
-      insert into group_sources (
-        id,
-        kind,
-        purpose,
-        facility_id,
-        display_name,
-        active,
-        google_group_id,
-        email,
-        fixture_key
-      )
-      values
-        (
-          ${groupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose,
-          null,
-          'Synthetic atomic access group',
-          true,
-          ${`issue-26-atomic-${groupSourceId}`},
-          ${`${groupSourceId}@example.invalid`},
-          null
-        ),
-        (
-          ${lateGroupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose,
-          null,
-          'Synthetic late access group',
-          true,
-          ${`issue-26-late-${lateGroupSourceId}`},
-          ${`${lateGroupSourceId}@example.invalid`},
-          null
-        )
-    `);
-    await db.execute(sql`
-      insert into users (
-        id,
-        google_subject,
-        email,
-        display_name,
-        facility_scope_kind
-      )
-      values
-        (
-          ${userId}::uuid,
-          ${googleSubject},
-          ${`${userId}@psd401.net`},
-          'Synthetic atomic access member',
-          'facilities'::facility_scope_kind
-        ),
-        (
-          ${lateUserId}::uuid,
-          ${`issue-26-late-${lateUserId}`},
-          ${`${lateUserId}@psd401.net`},
-          'Synthetic late access member',
-          'district'::facility_scope_kind
-        )
-    `);
-
-    await db.transaction(async (transaction) => {
-      await transaction.execute(sql`
-        insert into access_membership_snapshots (
-          id,
-          version,
-          complete,
-          sync_started_at,
-          captured_at
-        )
-        values (
-          ${snapshotId}::uuid,
-          ${version},
-          true,
-          ${times.adminOne}::timestamptz,
-          ${times.adminOne}::timestamptz
-        )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_snapshot_groups (
-          snapshot_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose,
-          completion_kind
-        )
-        values
-          (
-            ${snapshotId}::uuid,
-            ${groupSourceId}::uuid,
-            'google-group'::group_source_kind,
-            'access'::group_purpose,
-            'expected'::group_completion_kind
-          ),
-          (
-            ${snapshotId}::uuid,
-            ${groupSourceId}::uuid,
-            'google-group'::group_source_kind,
-            'access'::group_purpose,
-            'completed'::group_completion_kind
-          )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_members (
-          snapshot_id,
-          user_id,
-          google_subject,
-          facility_scope_kind
-        )
-        values (
-          ${snapshotId}::uuid,
-          ${userId}::uuid,
-          ${googleSubject},
-          'facilities'::facility_scope_kind
-        )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_member_groups (
-          snapshot_id,
-          user_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose
-        )
-        values (
-          ${snapshotId}::uuid,
-          ${userId}::uuid,
-          ${groupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose
-        )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_member_facilities (
-          snapshot_id,
-          user_id,
-          facility_id
-        )
-        values (
-          ${snapshotId}::uuid,
-          ${userId}::uuid,
-          ${facilityId}::uuid
-        )
-      `);
-    });
-
-    const graphCounts = databaseExecuteRows<TextSnapshotRow>(
-      await db.execute<TextSnapshotRow>(sql`
-        select concat_ws(
-          ':',
-          (select count(*) from access_membership_snapshot_groups
-            where snapshot_id = ${snapshotId}::uuid),
-          (select count(*) from access_membership_members
-            where snapshot_id = ${snapshotId}::uuid),
-          (select count(*) from access_membership_member_groups
-            where snapshot_id = ${snapshotId}::uuid),
-          (select count(*) from access_membership_member_facilities
-            where snapshot_id = ${snapshotId}::uuid)
-        ) as snapshot
-      `),
-    );
-    expect(graphCounts).toEqual([{ snapshot: '2:1:1:1' }]);
-
-    await db.execute(sql`
-      insert into access_membership_snapshots (
-        id,
-        version,
-        complete,
-        sync_started_at,
-        captured_at
-      ) values (
-        ${snapshotId}::uuid,
-        ${version},
-        true,
-        ${times.adminOne}::timestamptz,
-        ${times.adminOne}::timestamptz
-      ) on conflict do nothing
-    `);
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_snapshots (
-            id,
-            version,
-            complete,
-            sync_started_at,
-            captured_at
-          ) values (
-            ${snapshotId}::uuid,
-            ${version + 1},
-            true,
-            ${times.adminOne}::timestamptz,
-            ${times.adminTwo}::timestamptz
-          ) on conflict do nothing
-        `),
-      /retry for id does not match immutable history/u,
-    );
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_snapshots (
-            id,
-            version,
-            complete,
-            sync_started_at,
-            captured_at
-          ) values (
-            ${randomUUID()}::uuid,
-            ${version},
-            true,
-            ${times.adminOne}::timestamptz,
-            ${times.adminOne}::timestamptz
-          ) on conflict do nothing
-        `),
-      /retry for version does not match immutable history/u,
-    );
-
-    await db.execute(sql`
-      insert into access_membership_snapshot_groups (
-        snapshot_id,
-        group_source_id,
-        group_source_kind,
-        group_purpose,
-        completion_kind
-      ) values (
-        ${snapshotId}::uuid,
-        ${groupSourceId}::uuid,
-        'google-group'::group_source_kind,
-        'access'::group_purpose,
-        'expected'::group_completion_kind
-      ) on conflict do nothing
-    `);
-    await db.execute(sql`
-      insert into access_membership_members (
-        snapshot_id,
-        user_id,
-        google_subject,
-        facility_scope_kind
-      ) values (
-        ${snapshotId}::uuid,
-        ${userId}::uuid,
-        ${googleSubject},
-        'facilities'::facility_scope_kind
-      ) on conflict do nothing
-    `);
-    await db.execute(sql`
-      insert into access_membership_member_groups (
-        snapshot_id,
-        user_id,
-        group_source_id,
-        group_source_kind,
-        group_purpose
-      ) values (
-        ${snapshotId}::uuid,
-        ${userId}::uuid,
-        ${groupSourceId}::uuid,
-        'google-group'::group_source_kind,
-        'access'::group_purpose
-      ) on conflict do nothing
-    `);
-    await db.execute(sql`
-      insert into access_membership_member_facilities (
-        snapshot_id,
-        user_id,
-        facility_id
-      ) values (
-        ${snapshotId}::uuid,
-        ${userId}::uuid,
-        ${facilityId}::uuid
-      ) on conflict do nothing
-    `);
-
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_snapshot_groups (
-            snapshot_id,
-            group_source_id,
-            group_source_kind,
-            group_purpose,
-            completion_kind
-          ) values (
-            ${snapshotId}::uuid,
-            ${lateGroupSourceId}::uuid,
-            'google-group'::group_source_kind,
-            'access'::group_purpose,
-            'expected'::group_completion_kind
-          )
-        `),
-      /cannot accept new access_membership_snapshot_groups rows/u,
-    );
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_members (
-            snapshot_id,
-            user_id,
-            google_subject,
-            facility_scope_kind
-          ) values (
-            ${snapshotId}::uuid,
-            ${lateUserId}::uuid,
-            ${`issue-26-late-${lateUserId}`},
-            'district'::facility_scope_kind
-          )
-        `),
-      /cannot accept new access_membership_members rows/u,
-    );
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_member_groups (
-            snapshot_id,
-            user_id,
-            group_source_id,
-            group_source_kind,
-            group_purpose
-          ) values (
-            ${snapshotId}::uuid,
-            ${userId}::uuid,
-            ${lateGroupSourceId}::uuid,
-            'google-group'::group_source_kind,
-            'access'::group_purpose
-          )
-        `),
-      /cannot accept new access_membership_member_groups rows/u,
-    );
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_member_facilities (
-            snapshot_id,
-            user_id,
-            facility_id
-          ) values (
-            ${snapshotId}::uuid,
-            ${userId}::uuid,
-            ${lateFacilityId}::uuid
-          )
-        `),
-      /cannot accept new access_membership_member_facilities rows/u,
-    );
-
-    const immutableUpdates = [
-      sql`update access_membership_snapshots set complete = complete
-        where id = ${snapshotId}::uuid`,
-      sql`update access_membership_snapshot_groups
-        set group_purpose = group_purpose
-        where snapshot_id = ${snapshotId}::uuid`,
-      sql`update access_membership_members
-        set google_subject = google_subject
-        where snapshot_id = ${snapshotId}::uuid`,
-      sql`update access_membership_member_groups
-        set group_purpose = group_purpose
-        where snapshot_id = ${snapshotId}::uuid`,
-      sql`update access_membership_member_facilities
-        set facility_id = facility_id
-        where snapshot_id = ${snapshotId}::uuid`,
-    ];
-    for (const immutableUpdate of immutableUpdates) {
-      await expectOperationalRejection(
-        () => db.execute(immutableUpdate),
-        /immutable/u,
-      );
-    }
-
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_members (
-            snapshot_id,
-            user_id,
-            google_subject,
-            facility_scope_kind
-          ) values (
-            ${snapshotId}::uuid,
-            ${userId}::uuid,
-            ${`mismatched-${googleSubject}`},
-            'facilities'::facility_scope_kind
-          ) on conflict do nothing
-        `),
-      /retry does not match immutable history/u,
-    );
-
-    const appSnapshotId = randomUUID();
-    const [appVersionRow] = databaseExecuteRows<CountRow>(
-      await db.execute<CountRow>(sql`
-        select coalesce(max(version), 0)::integer + 1 as count
-        from access_membership_snapshots
-      `),
-    );
-    const appVersion = appVersionRow?.count;
-    if (appVersion === undefined) {
-      throw new Error('The app-role access snapshot version is unavailable.');
-    }
-    await db.transaction(async (transaction) => {
-      await transaction.execute(sql`set local role "psd_eoc_app"`);
-      await transaction.execute(sql`
-        insert into access_membership_snapshots (
-          id,
-          version,
-          complete,
-          sync_started_at,
-          captured_at
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${appVersion},
-          true,
-          ${times.adminTwo}::timestamptz,
-          ${times.adminTwo}::timestamptz
-        )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_snapshot_groups (
-          snapshot_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose,
-          completion_kind
-        ) values
-          (
-            ${appSnapshotId}::uuid,
-            ${groupSourceId}::uuid,
-            'google-group'::group_source_kind,
-            'access'::group_purpose,
-            'expected'::group_completion_kind
-          ),
-          (
-            ${appSnapshotId}::uuid,
-            ${groupSourceId}::uuid,
-            'google-group'::group_source_kind,
-            'access'::group_purpose,
-            'completed'::group_completion_kind
-          )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_members (
-          snapshot_id,
-          user_id,
-          google_subject,
-          facility_scope_kind
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${googleSubject},
-          'facilities'::facility_scope_kind
-        )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_member_groups (
-          snapshot_id,
-          user_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${groupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose
-        )
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_member_facilities (
-          snapshot_id,
-          user_id,
-          facility_id
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${facilityId}::uuid
-        )
-      `);
-    });
-
-    const appGraphCounts = databaseExecuteRows<TextSnapshotRow>(
-      await db.execute<TextSnapshotRow>(sql`
-        select concat_ws(
-          ':',
-          (select count(*) from access_membership_snapshot_groups
-            where snapshot_id = ${appSnapshotId}::uuid),
-          (select count(*) from access_membership_members
-            where snapshot_id = ${appSnapshotId}::uuid),
-          (select count(*) from access_membership_member_groups
-            where snapshot_id = ${appSnapshotId}::uuid),
-          (select count(*) from access_membership_member_facilities
-            where snapshot_id = ${appSnapshotId}::uuid)
-        ) as snapshot
-      `),
-    );
-    expect(appGraphCounts).toEqual([{ snapshot: '2:1:1:1' }]);
-
-    await db.transaction(async (transaction) => {
-      await transaction.execute(sql`set local role "psd_eoc_app"`);
-      await transaction.execute(sql`
-        insert into access_membership_snapshots (
-          id,
-          version,
-          complete,
-          sync_started_at,
-          captured_at
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${appVersion},
-          true,
-          ${times.adminTwo}::timestamptz,
-          ${times.adminTwo}::timestamptz
-        ) on conflict do nothing
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_snapshot_groups (
-          snapshot_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose,
-          completion_kind
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${groupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose,
-          'expected'::group_completion_kind
-        ) on conflict do nothing
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_members (
-          snapshot_id,
-          user_id,
-          google_subject,
-          facility_scope_kind
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${googleSubject},
-          'facilities'::facility_scope_kind
-        ) on conflict do nothing
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_member_groups (
-          snapshot_id,
-          user_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${groupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose
-        ) on conflict do nothing
-      `);
-      await transaction.execute(sql`
-        insert into access_membership_member_facilities (
-          snapshot_id,
-          user_id,
-          facility_id
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${facilityId}::uuid
-        ) on conflict do nothing
-      `);
-    });
-
-    const appLateChildStatements = [
-      sql`
-        insert into access_membership_snapshot_groups (
-          snapshot_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose,
-          completion_kind
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${lateGroupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose,
-          'expected'::group_completion_kind
-        )
-      `,
-      sql`
-        insert into access_membership_members (
-          snapshot_id,
-          user_id,
-          google_subject,
-          facility_scope_kind
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${lateUserId}::uuid,
-          ${`issue-26-late-${lateUserId}`},
-          'district'::facility_scope_kind
-        )
-      `,
-      sql`
-        insert into access_membership_member_groups (
-          snapshot_id,
-          user_id,
-          group_source_id,
-          group_source_kind,
-          group_purpose
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${lateGroupSourceId}::uuid,
-          'google-group'::group_source_kind,
-          'access'::group_purpose
-        )
-      `,
-      sql`
-        insert into access_membership_member_facilities (
-          snapshot_id,
-          user_id,
-          facility_id
-        ) values (
-          ${appSnapshotId}::uuid,
-          ${userId}::uuid,
-          ${lateFacilityId}::uuid
-        )
-      `,
-    ];
-    for (const lateChildStatement of appLateChildStatements) {
-      await expectOperationalRejection(
-        () =>
-          db.transaction(async (transaction) => {
-            await transaction.execute(sql`set local role "psd_eoc_app"`);
-            await transaction.execute(lateChildStatement);
-          }),
-        /cannot accept new/u,
-      );
-    }
-
-    await expectOperationalRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(sql`
-            insert into access_membership_snapshots (
-              id,
-              version,
-              complete,
-              sync_started_at,
-              captured_at
-            ) values (
-              ${appSnapshotId}::uuid,
-              ${appVersion + 1},
-              true,
-              ${times.adminOne}::timestamptz,
-              ${times.adminTwo}::timestamptz
-            ) on conflict do nothing
-          `);
-        }),
-      /retry for id does not match immutable history/u,
-    );
-    await expectOperationalRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(sql`
-            insert into access_membership_snapshots (
-              id,
-              version,
-              complete,
-              sync_started_at,
-              captured_at
-            ) values (
-              ${randomUUID()}::uuid,
-              ${appVersion},
-              true,
-              ${times.adminTwo}::timestamptz,
-              ${times.adminTwo}::timestamptz
-            ) on conflict do nothing
-          `);
-        }),
-      /retry for version does not match immutable history/u,
-    );
-    await expectOperationalRejection(
-      () =>
-        db.execute(sql`
-          insert into access_membership_snapshots (
-            id,
-            version,
-            complete,
-            sync_started_at,
-            captured_at
-          ) values (
-            ${snapshotId}::uuid,
-            ${appVersion},
-            true,
-            ${times.adminOne}::timestamptz,
-            ${times.adminOne}::timestamptz
-          ) on conflict do nothing
-        `),
-      /retry for id does not match immutable history/u,
-    );
-    await expectOperationalRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          await transaction.execute(sql`set local role "psd_eoc_app"`);
-          await transaction.execute(sql`
-            insert into access_membership_snapshots (
-              id,
-              version,
-              complete,
-              sync_started_at,
-              captured_at
-            ) values (
-              ${snapshotId}::uuid,
-              ${appVersion},
-              true,
-              ${times.adminOne}::timestamptz,
-              ${times.adminOne}::timestamptz
-            ) on conflict do nothing
-          `);
-        }),
-      /retry for id does not match immutable history/u,
-    );
-
-    const appImmutableUpdates = [
-      sql`update access_membership_snapshots set complete = complete
-        where id = ${appSnapshotId}::uuid`,
-      sql`update access_membership_snapshot_groups
-        set group_purpose = group_purpose
-        where snapshot_id = ${appSnapshotId}::uuid`,
-      sql`update access_membership_members
-        set google_subject = google_subject
-        where snapshot_id = ${appSnapshotId}::uuid`,
-      sql`update access_membership_member_groups
-        set group_purpose = group_purpose
-        where snapshot_id = ${appSnapshotId}::uuid`,
-      sql`update access_membership_member_facilities
-        set facility_id = facility_id
-        where snapshot_id = ${appSnapshotId}::uuid`,
-    ];
-    for (const immutableUpdate of appImmutableUpdates) {
-      await expectPostgresCodeRejection(
-        () =>
-          db.transaction(async (transaction) => {
-            await transaction.execute(sql`set local role "psd_eoc_app"`);
-            await transaction.execute(immutableUpdate);
-          }),
-        '42501',
-        /permission denied/u,
-      );
-    }
   });
 
   test('serializes access snapshot publication with admin availability changes', async () => {
@@ -2422,6 +1686,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         facility_id,
         display_name,
         active,
+        granted_role,
         google_group_id,
         email,
         fixture_key
@@ -2433,6 +1698,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         null,
         'Synthetic serialized access source',
         false,
+        'admin'::role,
         ${`issue-26-serialized-${sourceId}`},
         ${`${sourceId}@example.invalid`},
         null
@@ -2656,19 +1922,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           ${times.adminOne}::timestamptz
         )
       `);
-      await transaction.execute(sql`
-        insert into access_membership_members (
-          snapshot_id,
-          user_id,
-          google_subject,
-          facility_scope_kind
-        ) values (
-          ${snapshotId}::uuid,
-          ${userId}::uuid,
-          ${`issue-26-scope-role-${userId}`},
-          'district'::facility_scope_kind
-        )
-      `);
     });
     await observer.execute(sql`
       insert into device_enrollments (
@@ -2803,10 +2056,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
   test('preserves app-role row locks with narrow immutable-column privileges', async () => {
     const db = databaseConnection().db;
     const expectedPrivileges = [
-      ['access_membership_member_facilities', 'snapshot_id'],
-      ['access_membership_member_groups', 'snapshot_id'],
-      ['access_membership_members', 'snapshot_id'],
-      ['access_membership_snapshot_groups', 'snapshot_id'],
       ['access_membership_snapshots', 'id'],
       ['audience_configurations', 'id'],
       ['integration_statuses', 'id'],
@@ -2835,10 +2084,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         from (values
           ('integration_statuses', 'id'),
           ('access_membership_snapshots', 'id'),
-          ('access_membership_snapshot_groups', 'snapshot_id'),
-          ('access_membership_members', 'snapshot_id'),
-          ('access_membership_member_groups', 'snapshot_id'),
-          ('access_membership_member_facilities', 'snapshot_id'),
           ('roster_source_configurations', 'id'),
           ('roster_source_configuration_facilities', 'configuration_id'),
           ('roster_source_configuration_groups', 'configuration_id'),
@@ -2867,32 +2112,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         select snapshot.id
         from access_membership_snapshots as snapshot
         order by snapshot.version desc
-        limit 1
-        for share
-      `);
-      await transaction.execute(sql`
-        select member.user_id
-        from access_membership_members as member
-        inner join access_membership_snapshots as snapshot
-          on snapshot.id = member.snapshot_id
-        limit 1
-        for share
-      `);
-      await transaction.execute(sql`
-        select snapshot_group.group_source_id
-        from access_membership_snapshot_groups as snapshot_group
-        limit 1
-        for share
-      `);
-      await transaction.execute(sql`
-        select member_group.group_source_id
-        from access_membership_member_groups as member_group
-        limit 1
-        for share
-      `);
-      await transaction.execute(sql`
-        select member_facility.facility_id
-        from access_membership_member_facilities as member_facility
         limit 1
         for share
       `);
@@ -3054,9 +2273,22 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       reason_code: 'PERSISTENCE_CONFLICT',
     });
 
-    // The preceding atomic-publication proof constructs every access child;
-    // the seed constructs every other immutable target. Make that prerequisite
-    // explicit so a zero-row UPDATE can never masquerade as trigger coverage.
+    // Every immutable target must hold a row, or a zero-row UPDATE would
+    // masquerade as trigger coverage. The seed constructs all of them except
+    // the sync-run record, which this writes for itself rather than depending
+    // on another test having run first.
+    await db.execute(sql`
+      insert into access_membership_snapshots (
+        id, version, complete, sync_started_at, captured_at
+      ) values (
+        gen_random_uuid(),
+        260027,
+        true,
+        '2026-08-10T15:59:00.000Z'::timestamptz,
+        '2026-08-10T16:00:00.000Z'::timestamptz
+      )
+      on conflict do nothing
+    `);
     const immutableTargetPresence =
       databaseExecuteRows<ImmutableTargetPresenceRow>(
         await db.execute<ImmutableTargetPresenceRow>(sql`
@@ -3064,10 +2296,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           from (values
             ('integration_statuses', exists(select 1 from integration_statuses)),
             ('access_membership_snapshots', exists(select 1 from access_membership_snapshots)),
-            ('access_membership_snapshot_groups', exists(select 1 from access_membership_snapshot_groups)),
-            ('access_membership_members', exists(select 1 from access_membership_members)),
-            ('access_membership_member_groups', exists(select 1 from access_membership_member_groups)),
-            ('access_membership_member_facilities', exists(select 1 from access_membership_member_facilities)),
             ('roster_source_configurations', exists(select 1 from roster_source_configurations)),
             ('roster_source_configuration_facilities', exists(select 1 from roster_source_configuration_facilities)),
             ('roster_source_configuration_groups', exists(select 1 from roster_source_configuration_groups)),
@@ -3088,10 +2316,6 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
     const immutableColumnUpdates = [
       sql`update integration_statuses set id = id`,
       sql`update access_membership_snapshots set id = id`,
-      sql`update access_membership_snapshot_groups set snapshot_id = snapshot_id`,
-      sql`update access_membership_members set snapshot_id = snapshot_id`,
-      sql`update access_membership_member_groups set snapshot_id = snapshot_id`,
-      sql`update access_membership_member_facilities set snapshot_id = snapshot_id`,
       sql`update roster_source_configurations set id = id`,
       sql`update roster_source_configuration_facilities set configuration_id = configuration_id`,
       sql`update roster_source_configuration_groups set configuration_id = configuration_id`,

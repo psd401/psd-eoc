@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { asc, eq, sql } from 'drizzle-orm';
+import { asc, desc, eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -17,17 +17,13 @@ import {
 } from '../../db/client';
 import {
   accessGroupMembers,
-  accessMembershipEvaluatedMembers,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   groupSources,
   userRoles,
   users,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
-import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
@@ -41,7 +37,6 @@ import {} from './session-cookie';
 import { type EvaluatedAccessMembershipSet } from './google-access-membership';
 
 const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
-import { loadAccessConfigurationSnapshotState } from './role-state';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -252,42 +247,6 @@ async function seedStrictBaseline(
       syncStartedAt: BASELINE_TIME,
       capturedAt: BASELINE_TIME,
     });
-    await transaction.insert(accessMembershipSnapshotGroups).values([
-      {
-        snapshotId: BASELINE_SNAPSHOT_ID,
-        groupSourceId: BASELINE_SOURCE_ID,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'expected',
-      },
-      {
-        snapshotId: BASELINE_SNAPSHOT_ID,
-        groupSourceId: BASELINE_SOURCE_ID,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'completed',
-      },
-    ]);
-    await transaction.insert(accessMembershipMembers).values({
-      snapshotId: BASELINE_SNAPSHOT_ID,
-      userId: USER_ID,
-      googleSubject: 'synthetic-test-google-subject',
-      facilityScopeKind: 'district',
-    });
-    await transaction.insert(accessMembershipMemberGroups).values({
-      snapshotId: BASELINE_SNAPSHOT_ID,
-      userId: USER_ID,
-      groupSourceId: BASELINE_SOURCE_ID,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-    });
-    await transaction.insert(accessMembershipEvaluatedMembers).values({
-      snapshotId: BASELINE_SNAPSHOT_ID,
-      email: RECOVERY_EMAIL,
-      groupSourceId: BASELINE_SOURCE_ID,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-    });
   });
 }
 
@@ -424,7 +383,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       purpose: 'access',
       facilityId: null,
       displayName: 'District staff access',
-      grantedRole: 'admin',
+      grantedRole: 'staff',
       active: true,
       googleGroupId: PROVIDER_GROUP_ID,
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
@@ -572,7 +531,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       purpose: 'access',
       facilityId: null,
       displayName: 'District staff access',
-      grantedRole: 'admin',
+      grantedRole: 'staff',
       active: true,
       googleGroupId: PROVIDER_GROUP_ID,
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
@@ -651,8 +610,15 @@ describeWithDatabase('access-membership atomic database publication', () => {
       ),
     ).rejects.toThrow();
 
+    // Refused whole: no later run was recorded.
     expect(
-      (await loadAccessConfigurationSnapshotState(database))?.snapshotVersion,
+      (
+        await database
+          .select({ version: accessMembershipSnapshots.version })
+          .from(accessMembershipSnapshots)
+          .orderBy(desc(accessMembershipSnapshots.version))
+          .limit(1)
+      )[0]?.version,
     ).toBe(1);
   });
 });

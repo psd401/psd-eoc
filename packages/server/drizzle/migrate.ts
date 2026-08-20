@@ -2,6 +2,10 @@ import { migrate as migrateWithDataApi } from 'drizzle-orm/aws-data-api/pg/migra
 import { migrate as migrateWithPostgres } from 'drizzle-orm/postgres-js/migrator';
 import { join } from 'node:path';
 
+import {
+  bootstrapAccessConfiguration,
+  describeBootstrapOutcome,
+} from '../db/bootstrap-access';
 import { createDatabaseClient, readDatabaseConfig } from '../db/client';
 
 /** Absolute path keeps migrations independent of the caller's working directory. */
@@ -26,6 +30,13 @@ const runFromCommandLine = async (): Promise<void> => {
   try {
     await migrateDatabase(client);
     console.info('Database migrations applied successfully.');
+    // A deployment with no access group admits nobody, and the page that
+    // configures access groups is behind sign-in. This runs on every deploy
+    // and acts only when no access group exists at all, so it can create the
+    // first one without ever disturbing a district that has its own.
+    console.info(
+      describeBootstrapOutcome(await bootstrapAccessConfiguration(client.db)),
+    );
   } finally {
     await client.close();
   }

@@ -330,7 +330,12 @@ async function installSyntheticSloOutboxFixture(
   const intentId = randomUUID();
   const outboxId = randomUUID();
   const requestId = randomUUID();
-  const createdAt = new Date();
+  // A minute in the past. `availableAt` equals this, and the claim compares it
+  // against the database's `clock_timestamp()` rather than this process's
+  // clock — a fixture that means "ready to dispatch now" must not sit on the
+  // boundary between two machines' clocks. `outbox_operational_times` also
+  // requires `available_at >= created_at`, so both move together.
+  const createdAt = new Date(Date.now() - 60_000);
   const authorization = Object.freeze({
     kind: 'synthetic-training' as const,
     activationPreviewId: randomUUID(),

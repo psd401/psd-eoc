@@ -1,7 +1,7 @@
 import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { sql } from 'drizzle-orm';
 
-import { requireSyntheticTestDatabaseUrl } from '../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../lib/testing/database';
 import {
   createDatabaseClient,
   databaseExecuteRows,

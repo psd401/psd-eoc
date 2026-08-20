@@ -32,9 +32,9 @@ import {
 } from '../../../../db/schema';
 import { migrateDatabase } from '../../../../drizzle/migrate';
 import {
-  dropStartFlowPlaywrightDatabase,
-  recreateStartFlowPlaywrightDatabase,
-} from '../test/playwright-database';
+  createDisposableDatabase,
+  type DisposableDatabase,
+} from '../../../../lib/testing/database';
 import { BoundedDatabaseQueryError } from './bounded-query';
 import {
   loadAudienceConfiguration,
@@ -45,12 +45,11 @@ import {
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
   configuredTestDatabaseUrl === undefined ? describe.skip : describe;
-const runId = randomBytes(16).toString('hex');
 
 setDefaultTimeout(30_000);
 
 let connection: PostgresDatabaseConnection | undefined;
-let isolatedDatabaseMayExist = false;
+let isolatedDatabase: DisposableDatabase | undefined;
 
 function databaseConnection(): PostgresDatabaseConnection {
   if (connection === undefined) {
@@ -136,14 +135,14 @@ describeWithDatabase('start-flow audience version selection', () => {
         'TEST_DATABASE_URL is required for audience selection tests.',
       );
     }
-    isolatedDatabaseMayExist = true;
-    const isolatedUrl = await recreateStartFlowPlaywrightDatabase(
+    const disposable = await createDisposableDatabase(
+      'psd_eoc_start_audience',
       configuredTestDatabaseUrl,
-      runId,
     );
+    isolatedDatabase = disposable;
     const createdConnection = createDatabaseClient({
       driver: 'postgres',
-      url: isolatedUrl,
+      url: disposable.url,
       maxConnections: 1,
     });
     if (createdConnection.driver !== 'postgres') {
@@ -155,21 +154,14 @@ describeWithDatabase('start-flow audience version selection', () => {
 
   afterAll(async () => {
     const openConnection = connection;
-    const databaseMayExist = isolatedDatabaseMayExist;
+    const disposable = isolatedDatabase;
     connection = undefined;
-    isolatedDatabaseMayExist = false;
+    isolatedDatabase = undefined;
     await closeAndDropAudienceTestDatabase(
       openConnection === undefined
         ? undefined
         : async () => openConnection.close(),
-      databaseMayExist
-        ? async () => {
-            await dropStartFlowPlaywrightDatabase(
-              configuredTestDatabaseUrl,
-              runId,
-            );
-          }
-        : undefined,
+      disposable === undefined ? undefined : () => disposable.drop(),
     );
   });
 

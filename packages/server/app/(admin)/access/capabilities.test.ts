@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 
 import { AdminCapabilityError } from '../facilities/admin-core';
 import {
-  assertReachableAdministratorTransition,
   decodeUserPageCursor,
   encodeUserPageCursor,
   type UserPageCursorFilters,
@@ -124,41 +123,5 @@ describe('access user keyset pagination', () => {
         .sort((left, right) => left.id.localeCompare(right.id))
         .map(({ id }) => id),
     ).toEqual([IDS.userC]);
-  });
-});
-
-describe('reachable administrator transition guard', () => {
-  test('rejects a stale or unreachable actor and the final reachable administrator removal', () => {
-    expect(() =>
-      assertReachableAdministratorTransition({
-        actorUserId: IDS.userA,
-        targetUserId: IDS.userB,
-        currentRoles: ['staff'],
-        requestedRoles: ['staff', 'admin'],
-        reachableAdministratorUserIds: [IDS.userB],
-      }),
-    ).toThrow('role or access membership changed');
-
-    expect(() =>
-      assertReachableAdministratorTransition({
-        actorUserId: IDS.userA,
-        targetUserId: IDS.userA,
-        currentRoles: ['staff', 'admin'],
-        requestedRoles: ['staff'],
-        reachableAdministratorUserIds: [IDS.userA],
-      }),
-    ).toThrow('final reachable administrator');
-  });
-
-  test('allows removal only when another reachable administrator remains', () => {
-    expect(() =>
-      assertReachableAdministratorTransition({
-        actorUserId: IDS.userA,
-        targetUserId: IDS.userA,
-        currentRoles: ['staff', 'admin'],
-        requestedRoles: ['staff'],
-        reachableAdministratorUserIds: [IDS.userA, IDS.userB],
-      }),
-    ).not.toThrow();
   });
 });

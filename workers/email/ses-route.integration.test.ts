@@ -34,7 +34,7 @@ import {
   rosterSourceConfigurations,
 } from '../../packages/server/db/schema';
 import { migrateDatabase } from '../../packages/server/drizzle/migrate';
-import { requireSyntheticTestDatabaseUrl } from '../../packages/server/app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../packages/server/lib/testing/database';
 import {
   createDrizzleSesWebhookStore,
   createSesWebhookRouteHandler,

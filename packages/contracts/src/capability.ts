@@ -1291,7 +1291,6 @@ export const CAPABILITY_MUTATION_SAFETY_MANIFEST = Object.freeze({
   'create-audience-config-version': 'none',
   'create-group-source': 'none',
   'update-group-source': 'none',
-  'set-user-roles': 'none',
   'set-channel-enabled': 'none',
   'set-fanout-control': 'none',
   'issue-agent-api-key': 'none',
