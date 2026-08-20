@@ -353,7 +353,7 @@ describe('security audit hash chain', () => {
     expect(() =>
       parseSecurityAuditFact({
         ...baseFact,
-        email: 'synthetic.staff@psd401.net',
+        email: 'synthetic.staff@example.invalid',
         messageContent: 'content must never enter this log',
       }),
     ).toThrow('unsupported fields');
@@ -362,7 +362,7 @@ describe('security audit hash chain', () => {
         ...baseFact,
         target: {
           kind: 'configuration',
-          id: 'synthetic.staff@psd401.net',
+          id: 'synthetic.staff@example.invalid',
         },
       }),
     ).toThrow('contact data is prohibited');

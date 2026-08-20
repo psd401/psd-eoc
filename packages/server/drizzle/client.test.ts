@@ -20,12 +20,12 @@ import {
 
 const DATA_API_ENVIRONMENT = {
   DATABASE_DRIVER: 'aws-data-api',
-  AWS_REGION: 'us-west-2',
+  AWS_REGION: 'us-east-1',
   DATABASE_NAME: 'psd_eoc',
   DATABASE_RESOURCE_ARN:
-    'arn:aws:rds:us-west-2:<aws-account-id>:cluster:psd-eoc-synthetic',
+    'arn:aws:rds:us-east-1:000000000000:cluster:psd-eoc-synthetic',
   DATABASE_SECRET_ARN:
-    'arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:psd-eoc-synthetic-AbCdEf',
+    'arn:aws:secretsmanager:us-east-1:000000000000:secret:psd-eoc-synthetic-AbCdEf',
 } as const;
 
 const RDS_CA_PATH = new URL(
@@ -36,7 +36,7 @@ const RDS_CA_PATH = new URL(
 const COMPONENT_POSTGRES_ENVIRONMENT = {
   DATABASE_DRIVER: 'postgres',
   DATABASE_HOST:
-    'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com',
+    'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com',
   DATABASE_PORT: '5432',
   DATABASE_NAME: 'psd_eoc',
   DATABASE_USERNAME: 'psd_eoc_application',
@@ -263,9 +263,9 @@ describe('raw execute result compatibility', () => {
       client: fakeClient,
       database: 'synthetic',
       resourceArn:
-        'arn:aws:rds:us-west-2:000000000000:cluster:psd-eoc-synthetic',
+        'arn:aws:rds:us-east-1:000000000000:cluster:psd-eoc-synthetic',
       secretArn:
-        'arn:aws:secretsmanager:us-west-2:000000000000:secret:psd-eoc-synthetic',
+        'arn:aws:secretsmanager:us-east-1:000000000000:secret:psd-eoc-synthetic',
     });
 
     const result = await database.execute<{ value: number }>(

@@ -352,9 +352,9 @@ describe('event-room AWS Data API transaction transport', () => {
       client: fakeClient,
       database: 'synthetic',
       resourceArn:
-        'arn:aws:rds:us-west-2:000000000000:cluster:psd-eoc-synthetic',
+        'arn:aws:rds:us-east-1:000000000000:cluster:psd-eoc-synthetic',
       secretArn:
-        'arn:aws:secretsmanager:us-west-2:000000000000:secret:psd-eoc-synthetic',
+        'arn:aws:secretsmanager:us-east-1:000000000000:secret:psd-eoc-synthetic',
       schema: { events, eventTypeVersions, facilities, journalEntries },
     });
     const dataApiRuntime = createEventRoomCapabilityRuntime({

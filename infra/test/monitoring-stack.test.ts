@@ -36,7 +36,13 @@ function resources(template: Template, type: string): JsonRecord[] {
   return resourceEntries(template, type).map(([, value]) => value);
 }
 
-const app = new App();
+const app = new App({
+  context: {
+    'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+    'psdEoc:hostedDomain': 'example.invalid',
+    'psdEoc:iosBundleId': 'invalid.example.eoc',
+  },
+});
 const stack = new PsdEocStack(app, 'PsdEocMonitoringTest', {
   env: { account: DEPLOYMENT_ACCOUNT, region: DEPLOYMENT_REGION },
 });

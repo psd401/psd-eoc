@@ -947,7 +947,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
       googleSubject: `synthetic-push-race-${randomUUID()}`,
       token: `synthetic-unroutable:${randomUUID()}`,
     });
-    const staffEmail = `synthetic-push-race-${fixture.userId}@psd401.net`;
+    const staffEmail = `synthetic-push-race-${fixture.userId}@example.invalid`;
     await ensureStaffConfiguration(database);
     await database.transaction(async (transaction) => {
       await transaction.execute(sql`
@@ -1070,7 +1070,7 @@ describeWithDatabase('PostgreSQL roster synchronization', () => {
       googleSubject: `synthetic-locked-push-${randomUUID()}`,
       token: `synthetic-unroutable:${randomUUID()}`,
     });
-    const staffEmail = `synthetic-locked-push-${fixture.userId}@psd401.net`;
+    const staffEmail = `synthetic-locked-push-${fixture.userId}@example.invalid`;
     await ensureStaffConfiguration(database);
     await database.transaction(async (transaction) => {
       await transaction.execute(sql`

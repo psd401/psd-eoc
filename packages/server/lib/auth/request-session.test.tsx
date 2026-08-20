@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 
 const authenticate = mock(async (token: string, surface: string) => ({
-  result: { user: { email: `${token}@psd401.net` } },
+  result: { user: { email: `${token}@example.invalid` } },
   roles: ['staff'],
   actor: { sessionId: `session-${surface}` },
 }));
@@ -37,7 +37,7 @@ describe('web session reader', () => {
     const session = await authenticateWebSession('a-token');
 
     expect(authenticate.mock.calls[0]).toEqual(['a-token', 'web']);
-    expect(session.result.user.email).toBe('a-token@psd401.net');
+    expect(session.result.user.email).toBe('a-token@example.invalid');
     expect(session.actor.sessionId).toBe('session-web');
   });
 

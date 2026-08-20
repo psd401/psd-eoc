@@ -148,7 +148,13 @@ function tagsByKey(resource: SynthesizedResource): Map<string, unknown> {
   );
 }
 
-const app = new App();
+const app = new App({
+  context: {
+    'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+    'psdEoc:hostedDomain': 'example.invalid',
+    'psdEoc:iosBundleId': 'invalid.example.eoc',
+  },
+});
 const stack = new PsdEocStack(app, STACK_NAME, {
   env: {
     account: AWS_ACCOUNT,
@@ -186,15 +192,35 @@ describe('deployment boundary', () => {
 
     expect(
       () =>
-        new PsdEocStack(new App(), 'WrongAccount', {
-          env: { account: '000000000000', region: AWS_REGION },
-        }),
+        new PsdEocStack(
+          new App({
+            context: {
+              'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+              'psdEoc:hostedDomain': 'example.invalid',
+              'psdEoc:iosBundleId': 'invalid.example.eoc',
+            },
+          }),
+          'WrongAccount',
+          {
+            env: { account: '000000000000', region: AWS_REGION },
+          },
+        ),
     ).toThrow(`AWS account ${AWS_ACCOUNT} (${AWS_ACCOUNT_ALIAS})`);
     expect(
       () =>
-        new PsdEocStack(new App(), 'WrongRegion', {
-          env: { account: AWS_ACCOUNT, region: 'us-east-1' },
-        }),
+        new PsdEocStack(
+          new App({
+            context: {
+              'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+              'psdEoc:hostedDomain': 'example.invalid',
+              'psdEoc:iosBundleId': 'invalid.example.eoc',
+            },
+          }),
+          'WrongRegion',
+          {
+            env: { account: AWS_ACCOUNT, region: 'us-east-1' },
+          },
+        ),
     ).toThrow(`in ${AWS_REGION}`);
   });
 
@@ -686,6 +712,8 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_CONNECT_TIMEOUT_SECONDS',
         'DATABASE_DRIVER',
         'DATABASE_HOST',
+        'GOOGLE_OIDC_APPLICATION_ORIGIN',
+        'GOOGLE_OIDC_HOSTED_DOMAIN',
         'DATABASE_IDLE_TIMEOUT_SECONDS',
         'DATABASE_MAX_CONNECTIONS',
         'DATABASE_NAME',
@@ -693,6 +721,7 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_SSL_ROOT_CERT',
         'FANOUT_QUEUE_URL',
         'NODE_ENV',
+        'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
         'RUNTIME_SECRET_ARN',
         'SOURCE_SHA',

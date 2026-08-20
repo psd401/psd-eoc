@@ -11,7 +11,7 @@ export function sessionFixture(
     user: {
       id: '00000000-0000-4000-8000-000000000001',
       googleSubject: 'synthetic-staff-subject',
-      email: 'synthetic.staff@psd401.net',
+      email: 'synthetic.staff@example.invalid',
       displayName: 'Synthetic Staff',
       roles: ['staff'],
       facilityScope: { kind: 'district' },

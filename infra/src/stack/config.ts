@@ -44,3 +44,50 @@ export const DATABASE_SSL_ROOT_CERT =
   '/app/packages/server/certs/aws-rds-global-bundle.pem';
 
 export const EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL = `sha256:${'0'.repeat(64)}`;
+
+/**
+ * Who this deployment serves.
+ *
+ * These three describe the district running this stack, and the application
+ * reads them at runtime: the origin it redirects to after sign-in, the email
+ * domain its staff belong to, and the identifier of the iOS app it ships. They
+ * were literals in application source, which is what stopped anyone else from
+ * running this repository.
+ *
+ * They live in `cdk.json` context, which is data a district edits without
+ * touching code. Missing context fails the synth rather than defaulting to
+ * somebody else's district.
+ */
+export interface DeploymentIdentity {
+  readonly applicationOrigin: string;
+  readonly hostedDomain: string;
+  readonly iosBundleId: string;
+}
+
+export function readDeploymentIdentity(node: {
+  tryGetContext(key: string): unknown;
+}): DeploymentIdentity {
+  const read = (key: string, pattern: RegExp): string => {
+    const value = node.tryGetContext(key);
+    if (typeof value !== 'string' || !pattern.test(value.trim())) {
+      throw new Error(
+        `CDK context ${key} must be set for this deployment. See docs/guides/first-administrator.md.`,
+      );
+    }
+    return value.trim();
+  };
+  return Object.freeze({
+    applicationOrigin: read(
+      'psdEoc:applicationOrigin',
+      /^https:\/\/[^\s/?#]+$/u,
+    ),
+    hostedDomain: read(
+      'psdEoc:hostedDomain',
+      /^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/u,
+    ),
+    iosBundleId: read(
+      'psdEoc:iosBundleId',
+      /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/u,
+    ),
+  });
+}

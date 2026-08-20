@@ -38,11 +38,11 @@ const EVENT: EventBridgeRosterSyncEvent = {
   id: EVENT_ID,
   'detail-type': ROSTER_SYNC_EVENT_DETAIL_TYPE,
   source: ROSTER_SYNC_EVENT_SOURCE,
-  account: '<aws-account-id>',
+  account: '000000000000',
   time: NOW.toISOString(),
-  region: 'us-west-2',
+  region: 'us-east-1',
   resources: [
-    'arn:aws:scheduler:us-west-2:<aws-account-id>:schedule/default/roster-sync',
+    'arn:aws:scheduler:us-east-1:000000000000:schedule/default/roster-sync',
   ],
   detail: {
     sourceConfiguration: { id: CONFIGURATION_ID, version: 1 },

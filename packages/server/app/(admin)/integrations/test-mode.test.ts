@@ -120,7 +120,7 @@ const STAFF_SNAPSHOT = RosterSnapshotSchema.parse({
           channel: 'email',
           status: 'active',
           capturedAt: AT,
-          email: 'synthetic.staff@psd401.net',
+          email: 'synthetic.staff@example.invalid',
         },
       ],
     },

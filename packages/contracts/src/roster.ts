@@ -175,11 +175,29 @@ export const StaffRosterEmailSchema = z
   .trim()
   .toLowerCase()
   .max(320)
-  .email()
-  .refine(
-    (email) => email.slice(email.lastIndexOf('@') + 1) === 'psd401.net',
-    'Staff roster emails must use the psd401.net hosted domain.',
+  .email();
+
+/**
+ * The same schema bound to one deployment's staff domain.
+ *
+ * The domain used to be written here as a literal, which meant no district but
+ * the first could put its own staff on a roster at all. It is configuration
+ * now, and the check it enforces is unchanged: a roster holds staff of this
+ * district and nobody else, so a member whose address is outside the domain is
+ * refused rather than quietly carried.
+ */
+export function staffRosterEmailSchemaForDomain(
+  hostedDomain: string,
+): z.ZodType<string> {
+  const domain = hostedDomain.trim().toLowerCase().replace(/^@/u, '');
+  if (domain.length === 0) {
+    throw new TypeError('A staff roster domain is required.');
+  }
+  return StaffRosterEmailSchema.refine(
+    (email) => email.slice(email.lastIndexOf('@') + 1) === domain,
+    `Staff roster emails must use the ${domain} hosted domain.`,
   );
+}
 
 /** Canonical approved staff roster email inferred from its schema. */
 export type StaffRosterEmail = z.infer<typeof StaffRosterEmailSchema>;

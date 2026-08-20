@@ -34,11 +34,12 @@ import {
 import {
   AWS_ACCOUNT,
   AWS_ACCOUNT_ALIAS,
-  EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
-  EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
+  AWS_REGION,
   DATABASE_NAME,
   DATABASE_PORT,
   DATABASE_SSL_ROOT_CERT,
+  EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
+  EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
   EXPLORATION_SMOKE_DATA_CLASSIFICATION,
   EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
   EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
@@ -47,11 +48,11 @@ import {
   EXPLORATION_SMOKE_HEALTH_PATH,
   EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
   EXPLORATION_SMOKE_QUEUE_NAME,
-  AWS_REGION,
   EXPLORATION_SMOKE_REPOSITORY_NAME,
   EXPLORATION_SMOKE_SES_FROM_ADDRESS,
   EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
   EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
+  readDeploymentIdentity,
 } from './config';
 
 const SECRET_PREFIX = '/psd-eoc/exploration-smoke';
@@ -86,6 +87,7 @@ function ecsSecretJsonKey(
 export class PsdEocStack extends Stack {
   public constructor(scope: Construct, id: string, props: StackProps) {
     super(scope, id, props);
+    const deploymentIdentity = readDeploymentIdentity(this.node);
 
     Validations.of(this).acknowledge({
       id: 'CloudFormation-Validate::W3010',
@@ -1011,6 +1013,19 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'AWS_REGION',
                   value: AWS_REGION,
+                },
+                // Who this deployment serves, from cdk.json context.
+                {
+                  name: 'GOOGLE_OIDC_APPLICATION_ORIGIN',
+                  value: deploymentIdentity.applicationOrigin,
+                },
+                {
+                  name: 'GOOGLE_OIDC_HOSTED_DOMAIN',
+                  value: deploymentIdentity.hostedDomain,
+                },
+                {
+                  name: 'PSD_EOC_IOS_BUNDLE_ID',
+                  value: deploymentIdentity.iosBundleId,
                 },
                 {
                   name: 'DATABASE_DRIVER',

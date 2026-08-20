@@ -349,7 +349,7 @@ async function installFixture(database: PostgresDatabase): Promise<void> {
     await transaction.insert(users).values({
       id: fixture.userId,
       googleSubject,
-      email: `synthetic-device-${fixtureSuffix}@psd401.net`,
+      email: `synthetic-device-${fixtureSuffix}@example.invalid`,
       displayName: 'Synthetic Device Integration User',
       facilityScopeKind: 'district',
       createdAt: oneMinuteAgo,

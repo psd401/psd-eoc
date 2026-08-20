@@ -53,8 +53,14 @@ import {
 export const SES_SNS_TOPIC_ARN_ENV = 'PSD_EOC_SES_SNS_TOPIC_ARN' as const;
 export const SES_WEBHOOK_MAX_BODY_BYTES = 512 * 1024;
 
+/**
+ * The one SNS topic this webhook accepts, matched by shape rather than pinned
+ * to one district's account and region. Which topic exactly is still pinned —
+ * by `PSD_EOC_SES_SNS_TOPIC_ARN`, checked against this — so a notification from
+ * any other topic is still refused.
+ */
 const EXPECTED_TOPIC_ARN =
-  /^arn:aws:sns:us-west-2:<aws-account-id>:psd-eoc-email-events$/u;
+  /^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$/u;
 const CALLBACK_LEASE_MILLISECONDS = 5 * 60_000;
 const CALLBACK_LOCK_NAMESPACE = 4_013;
 const CALLBACK_GENERATION_WIDTH = 6;

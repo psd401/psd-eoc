@@ -1,2 +1,6 @@
 [install]
 exact = true
+
+[test]
+# Every test runs as a synthetic district, never as this one.
+preload = ["./scripts/test-preload.ts"]

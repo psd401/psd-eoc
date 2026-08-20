@@ -17,22 +17,16 @@ import {
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
 import { runBootstrap } from './bootstrap';
-import {
-  AWS_ACCOUNT_ID,
-  AWS_REGION,
-  DATABASE_LOGIN,
-  DATABASE_ROLE,
-  readBootstrapConfig,
-} from './config';
+import { DATABASE_LOGIN, DATABASE_ROLE, readBootstrapConfig } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
 const APPLICATION_SECRET_ARN =
-  'arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/database/application-EfGh34';
+  'arn:aws:secretsmanager:us-east-1:000000000000:secret:/psd-eoc/exploration-smoke/database/application-EfGh34';
 const RESOURCE_ARN =
-  'arn:aws:rds:us-west-2:<aws-account-id>:cluster:psd-eoc-exploration-smoke';
+  'arn:aws:rds:us-east-1:000000000000:cluster:psd-eoc-exploration-smoke';
 const GOOGLE_SUBJECT = '123456789012345678901';
 const DATABASE_HOST =
-  'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com';
+  'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com';
 const DATABASE_ADMIN_PASSWORD = 'synthetic-admin-password-value-123456';
 const DATABASE_APPLICATION_PASSWORD =
   'synthetic-application-password-value-123456';
@@ -52,8 +46,8 @@ const referenceSeedSummary: ReferenceSeedSummary = Object.freeze({
 
 function validConfigEnvironment(): Record<string, string> {
   return {
-    AWS_ACCOUNT_ID: AWS_ACCOUNT_ID,
-    AWS_REGION: AWS_REGION,
+    AWS_ACCOUNT_ID: '000000000000',
+    AWS_REGION: 'us-east-1',
     DATABASE_DRIVER: 'postgres',
     DATABASE_HOST,
     DATABASE_PORT: '5432',
@@ -67,7 +61,7 @@ function validConfigEnvironment(): Record<string, string> {
     DATABASE_APPLICATION_USERNAME: DATABASE_LOGIN,
     DATABASE_APPLICATION_PASSWORD,
     APPROVED_GOOGLE_SUBJECT: GOOGLE_SUBJECT,
-    APPROVED_STAFF_EMAIL: 'approved.staff@psd401.net',
+    APPROVED_STAFF_EMAIL: 'approved.staff@example.invalid',
     APPROVED_STAFF_DISPLAY_NAME: 'Approved Staff',
     SOURCE_SHA,
   };
@@ -76,8 +70,8 @@ function validConfigEnvironment(): Record<string, string> {
 describe('exploration-smoke configuration', () => {
   test('pins the native writer, roles, TLS bundle, and connection bounds', () => {
     expect(readBootstrapConfig(validConfigEnvironment())).toEqual({
-      accountId: AWS_ACCOUNT_ID,
-      region: AWS_REGION,
+      accountId: '000000000000',
+      region: 'us-east-1',
       databaseDriver: 'postgres',
       databaseHost: DATABASE_HOST,
       databasePort: 5432,
@@ -90,9 +84,6 @@ describe('exploration-smoke configuration', () => {
       databaseAdminPassword: DATABASE_ADMIN_PASSWORD,
       databaseApplicationUsername: DATABASE_LOGIN,
       databaseApplicationPassword: DATABASE_APPLICATION_PASSWORD,
-      approvedGoogleSubject: GOOGLE_SUBJECT,
-      approvedStaffEmail: 'approved.staff@psd401.net',
-      approvedStaffDisplayName: 'Approved Staff',
       sourceSha: SOURCE_SHA,
       mode: 'migrate',
     });
@@ -140,14 +131,16 @@ describe('exploration-smoke configuration', () => {
     }
   });
 
-  test('rejects personal or mixed-case email identities', () => {
-    for (const email of ['kris@example.com', 'Approved.Staff@psd401.net']) {
+  test('rejects an account or region that is not one', () => {
+    for (const [name, value] of [
+      ['AWS_ACCOUNT_ID', '12345'],
+      ['AWS_ACCOUNT_ID', '00000000000a'],
+      ['AWS_REGION', 'nowhere'],
+      ['AWS_REGION', 'US-EAST-1'],
+    ] as const) {
       expect(() =>
-        readBootstrapConfig({
-          ...validConfigEnvironment(),
-          APPROVED_STAFF_EMAIL: email,
-        }),
-      ).toThrow('APPROVED_STAFF_EMAIL');
+        readBootstrapConfig({ ...validConfigEnvironment(), [name]: value }),
+      ).toThrow(name);
     }
   });
 });
@@ -162,11 +155,11 @@ describe('application database secret and role', () => {
         expiration: new Date('2026-08-15T13:00:00.000Z'),
       },
       now: new Date('2026-08-15T12:00:00.000Z'),
-      region: AWS_REGION,
+      region: 'us-east-1',
       secretArn: APPLICATION_SECRET_ARN,
     });
     expect(request.endpoint).toBe(
-      'https://secretsmanager.us-west-2.amazonaws.com/',
+      'https://secretsmanager.us-east-1.amazonaws.com/',
     );
     expect(request.headers['x-amz-target']).toBe(
       'secretsmanager.GetSecretValue',
@@ -175,7 +168,7 @@ describe('application database secret and role', () => {
       JSON.stringify({ SecretId: APPLICATION_SECRET_ARN }),
     );
     expect(request.headers.authorization).toContain(
-      '/us-west-2/secretsmanager/aws4_request',
+      '/us-east-1/secretsmanager/aws4_request',
     );
   });
 
@@ -224,7 +217,7 @@ describe('application database secret and role', () => {
         credentials,
         fetchImplementation: oversizedResponseFetch,
         now: new Date('2026-08-15T12:00:00.000Z'),
-        region: AWS_REGION,
+        region: 'us-east-1',
         secretArn: APPLICATION_SECRET_ARN,
       }),
     ).rejects.toThrow('secret response was invalid');

@@ -84,22 +84,22 @@ describeWithDatabase('trusted group access', () => {
     await opened.db.insert(accessGroupMembers).values([
       {
         groupSourceId: ADMIN_GROUP,
-        email: 'boss@psd401.net',
+        email: 'boss@example.invalid',
         capturedAt: fresh,
       },
       {
         groupSourceId: STAFF_GROUP,
-        email: 'boss@psd401.net',
+        email: 'boss@example.invalid',
         capturedAt: fresh,
       },
       {
         groupSourceId: STAFF_GROUP,
-        email: 'teacher@psd401.net',
+        email: 'teacher@example.invalid',
         capturedAt: fresh,
       },
       {
         groupSourceId: RETIRED_GROUP,
-        email: 'former@psd401.net',
+        email: 'former@example.invalid',
         capturedAt: fresh,
       },
     ]);
@@ -115,7 +115,7 @@ describeWithDatabase('trusted group access', () => {
     // not in every configured group.
     expect(
       await decideAccess(database(), {
-        email: 'teacher@psd401.net',
+        email: 'teacher@example.invalid',
         checkedAt: NOW,
       }),
     ).toMatchObject({ granted: true, roles: ['staff'] });
@@ -123,7 +123,7 @@ describeWithDatabase('trusted group access', () => {
     // Two groups, two roles, one person.
     expect(
       await decideAccess(database(), {
-        email: 'boss@psd401.net',
+        email: 'boss@example.invalid',
         checkedAt: NOW,
       }),
     ).toMatchObject({ granted: true, roles: ['admin', 'staff'] });
@@ -132,7 +132,7 @@ describeWithDatabase('trusted group access', () => {
   test('a retired group stops granting access immediately', async () => {
     expect(
       await decideAccess(database(), {
-        email: 'former@psd401.net',
+        email: 'former@example.invalid',
         checkedAt: NOW,
       }),
     ).toMatchObject({ granted: false, refusal: 'NOT_IN_A_TRUSTED_GROUP' });
@@ -141,7 +141,7 @@ describeWithDatabase('trusted group access', () => {
   test('an unknown person is refused', async () => {
     expect(
       await decideAccess(database(), {
-        email: 'nobody@psd401.net',
+        email: 'nobody@example.invalid',
         checkedAt: NOW,
       }),
     ).toMatchObject({ granted: false, refusal: 'NOT_IN_A_TRUSTED_GROUP' });
@@ -153,7 +153,7 @@ describeWithDatabase('trusted group access', () => {
     const late = new Date(NOW.getTime() + MEMBERSHIP_FRESHNESS_MS + 60_000);
     expect(
       await decideAccess(database(), {
-        email: 'teacher@psd401.net',
+        email: 'teacher@example.invalid',
         checkedAt: late,
       }),
     ).toMatchObject({ granted: false, refusal: 'MEMBERSHIP_STALE' });
@@ -173,7 +173,7 @@ describeWithDatabase('trusted group access', () => {
       .where(eq(groupSources.id, ADMIN_GROUP));
     expect(
       await decideAccess(database(), {
-        email: 'teacher@psd401.net',
+        email: 'teacher@example.invalid',
         checkedAt: NOW,
       }),
     ).toMatchObject({ granted: true, roles: ['staff'] });

@@ -16,7 +16,7 @@ import {
 } from './artifact-store';
 
 const ENVIRONMENT = {
-  AWS_REGION: 'us-west-2',
+  AWS_REGION: 'us-east-1',
   MEDIA_BUCKET_NAME: 'synthetic-psd-eoc-private',
 } as const;
 

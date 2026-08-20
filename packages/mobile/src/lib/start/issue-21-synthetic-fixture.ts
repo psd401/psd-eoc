@@ -366,7 +366,7 @@ function syntheticSession(
     user: {
       id: IDS.user,
       googleSubject: 'issue-21-synthetic-staff-subject',
-      email: 'synthetic.staff@psd401.net',
+      email: 'synthetic.staff@example.invalid',
       displayName: 'Issue 21 Synthetic Staff',
       roles: ['staff'],
       facilityScope: {

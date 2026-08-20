@@ -62,7 +62,7 @@ function currentCredential(tokenDigest: string): StoredCredential {
     user: {
       id: IDS.user,
       googleSubject: 'synthetic-issue-193-subject',
-      email: 'synthetic.issue-193@psd401.net',
+      email: 'synthetic.issue-193@example.invalid',
       displayName: 'Synthetic Issue 193 Administrator',
       roles: ['admin'],
       facilityScope: { kind: 'district' },
@@ -328,7 +328,7 @@ describe('session credential read batching', () => {
               null,
               IDS.user,
               googleSubject,
-              'synthetic.issue-193@psd401.net',
+              'synthetic.issue-193@example.invalid',
               'Synthetic Issue 193 Administrator',
               'district',
               createdAt,

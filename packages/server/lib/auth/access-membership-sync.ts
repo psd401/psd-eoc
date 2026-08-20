@@ -21,6 +21,7 @@ import {
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 
+import { staffRosterEmail } from '../config/staff-email';
 import type { Database } from '../../db/client';
 import {
   accessGroupMembers,
@@ -600,7 +601,7 @@ export function createDrizzleAccessMembershipSyncStore(
       memberEmails: Object.freeze(
         memberRows
           .filter(({ groupSourceId }) => groupSourceId === source.id)
-          .map(({ email }) => StaffRosterEmailSchema.parse(email))
+          .map(({ email }) => staffRosterEmail().parse(email))
           .sort(),
       ),
     }));

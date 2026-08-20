@@ -51,8 +51,8 @@ async function idToken(record: CodeRecord): Promise<string> {
   const audience = typeof aud === 'string' ? aud : CLIENT_ID;
   const claims = {
     nonce: record.nonce,
-    hd: 'psd401.net',
-    email: 'synthetic.mobile@psd401.net',
+    hd: 'example.invalid',
+    email: 'synthetic.mobile@example.invalid',
     email_verified: true,
     name: 'Synthetic Mobile Staff',
     ...claimOverrides,
@@ -265,7 +265,7 @@ describe('native Google OIDC adapter', () => {
     expect(exchange.capabilityInput.claims).toMatchObject({
       issuer: 'https://accounts.google.com',
       audience: CLIENT_ID,
-      hostedDomain: 'psd401.net',
+      hostedDomain: 'example.invalid',
       emailVerified: true,
     });
     expect(exchange.transport).toEqual({

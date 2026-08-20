@@ -9,7 +9,7 @@ import {
 
 // The group these tests configure. Nothing about it is special any more: the
 // evaluator reads whatever the caller passes, so this is just a fixture.
-const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@example.invalid';
 const CONFIGURED_GROUPS = Object.freeze([
   Object.freeze({
     groupSourceId: '00000000-0000-4000-8000-0000000000a1',
@@ -18,7 +18,7 @@ const CONFIGURED_GROUPS = Object.freeze([
   }),
 ]);
 
-const SYNTHETIC_TRANSITION_EMAIL = 'initial.mobile@psd401.net';
+const SYNTHETIC_TRANSITION_EMAIL = 'initial.mobile@example.invalid';
 
 const TEST_TIME = '2026-08-17T12:00:00.000Z';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
@@ -172,11 +172,11 @@ describe('exact Google access-membership evaluator', () => {
     const harness = providerHarness(() =>
       Response.json({
         memberships: [
-          currentMembership('ZED@PSD401.NET', '000000000000000000002'),
+          currentMembership('ZED@EXAMPLE.INVALID', '000000000000000000002'),
           currentMembership(SYNTHETIC_TRANSITION_EMAIL),
           {
             ...currentMembership(
-              'expired.user@psd401.net',
+              'expired.user@example.invalid',
               '000000000000000000003',
             ),
             roles: [
@@ -201,7 +201,7 @@ describe('exact Google access-membership evaluator', () => {
           // The role the configured group grants travels with its membership,
           // so the publisher never has to look it up again.
           grantedRole: 'admin',
-          memberEmails: [SYNTHETIC_TRANSITION_EMAIL, 'zed@psd401.net'],
+          memberEmails: [SYNTHETIC_TRANSITION_EMAIL, 'zed@example.invalid'],
         },
       ],
       syncStartedAt: TEST_TIME,
@@ -260,7 +260,7 @@ describe('exact Google access-membership evaluator', () => {
   test('evaluates every configured group and refuses a set it cannot trust', async () => {
     const second = Object.freeze({
       groupSourceId: '00000000-0000-4000-8000-0000000000a2',
-      email: 'eoc-staff@psd401.net',
+      email: 'eoc-staff@example.invalid',
       grantedRole: 'staff' as const,
     });
     const idFor = new Map([
@@ -316,8 +316,8 @@ describe('exact Google access-membership evaluator', () => {
       {
         fetch: multiGroupFetch((email) =>
           email === DESIGNATED_ACCESS_GROUP_EMAIL
-            ? ['admin.one@psd401.net']
-            : ['staff.one@psd401.net'],
+            ? ['admin.one@example.invalid']
+            : ['staff.one@example.invalid'],
         ),
         now: () => new Date(TEST_TIME),
       },
@@ -332,12 +332,12 @@ describe('exact Google access-membership evaluator', () => {
       {
         groupEmail: DESIGNATED_ACCESS_GROUP_EMAIL,
         grantedRole: 'admin',
-        memberEmails: ['admin.one@psd401.net'],
+        memberEmails: ['admin.one@example.invalid'],
       },
       {
         groupEmail: second.email,
         grantedRole: 'staff',
-        memberEmails: ['staff.one@psd401.net'],
+        memberEmails: ['staff.one@example.invalid'],
       },
     ]);
 
@@ -348,7 +348,7 @@ describe('exact Google access-membership evaluator', () => {
       {
         fetch: multiGroupFetch((email) =>
           email === DESIGNATED_ACCESS_GROUP_EMAIL
-            ? ['admin.one@psd401.net']
+            ? ['admin.one@example.invalid']
             : [],
         ),
         now: () => new Date(TEST_TIME),
@@ -405,14 +405,14 @@ describe('exact Google access-membership evaluator', () => {
       expect(pageToken).toBe('page-two');
       return Response.json({
         memberships: [
-          currentMembership('other@psd401.net', '000000000000000000002'),
+          currentMembership('other@example.invalid', '000000000000000000002'),
         ],
       });
     });
     expect(
       (await evaluator(harness).evaluate(CONFIGURED_GROUPS)).groups[0]
         ?.memberEmails,
-    ).toEqual([SYNTHETIC_TRANSITION_EMAIL, 'other@psd401.net']);
+    ).toEqual([SYNTHETIC_TRANSITION_EMAIL, 'other@example.invalid']);
     expect(harness.calls).toHaveLength(5);
 
     const looping = providerHarness(() =>
@@ -427,7 +427,7 @@ describe('exact Google access-membership evaluator', () => {
   test('fails closed on nested groups, service accounts, or external namespaces', async () => {
     for (const membership of [
       {
-        ...currentMembership('nested-group@psd401.net'),
+        ...currentMembership('nested-group@example.invalid'),
         type: 'GROUP',
       },
       {
@@ -466,7 +466,7 @@ describe('exact Google access-membership evaluator', () => {
     for (const lookup of [
       {
         name: `groups/${GROUP_ID}`,
-        groupKey: { id: 'another-group@psd401.net' },
+        groupKey: { id: 'another-group@example.invalid' },
         labels: {
           'cloudidentity.googleapis.com/groups.discussion_forum': '',
         },
@@ -509,7 +509,7 @@ describe('exact Google access-membership evaluator', () => {
         providerHarness(() =>
           Response.json({
             memberships: [
-              currentMembership('INITIAL.MOBILE@PSD401.NET'),
+              currentMembership('INITIAL.MOBILE@EXAMPLE.INVALID'),
               currentMembership(
                 SYNTHETIC_TRANSITION_EMAIL,
                 '000000000000000000002',

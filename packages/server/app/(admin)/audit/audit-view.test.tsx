@@ -105,8 +105,9 @@ describe('security audit admin view', () => {
 
   test('rejects unknown, repeated, mismatched, and stale filter fields', () => {
     expect(
-      parseAuditSubmission(submission({ email: 'synthetic.staff@psd401.net' }))
-        .valid,
+      parseAuditSubmission(
+        submission({ email: 'synthetic.staff@example.invalid' }),
+      ).valid,
     ).toBe(false);
     expect(
       parseAuditSubmission(submission({ actorKind: ['agent', 'human'] })).valid,
@@ -117,7 +118,7 @@ describe('security audit admin view', () => {
     const contactData = parseAuditSubmission(
       submission({
         actorKind: 'human',
-        actorReference: 'synthetic.staff@psd401.net',
+        actorReference: 'synthetic.staff@example.invalid',
       }),
     );
     expect(contactData.valid).toBe(false);
@@ -187,7 +188,7 @@ describe('security audit admin view', () => {
     expect(html).toContain(CURSOR);
     expect(html).not.toContain('href=');
     expect(html).not.toContain(API_KEY_ID);
-    expect(html).not.toContain('@psd401.net');
+    expect(html).not.toContain('@example.invalid');
     expect(html).not.toContain('messageContent');
   });
 

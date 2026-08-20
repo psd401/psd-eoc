@@ -23,7 +23,7 @@ import {
 } from './object-store';
 
 const ENVIRONMENT = {
-  AWS_REGION: 'us-west-2',
+  AWS_REGION: 'us-east-1',
   MEDIA_BUCKET_NAME: 'psd-eoc-synthetic-private-media',
 } as const;
 const EVENT_ID = '00000000-0000-4000-8000-000000000101';
@@ -86,7 +86,7 @@ function emptyClient(
 }
 
 const FIXED_SIGNER_URL =
-  'https://synthetic-private-media.s3.us-west-2.amazonaws.com/object';
+  'https://synthetic-private-media.s3.us-east-1.amazonaws.com/object';
 
 function fixedSigner(url = FIXED_SIGNER_URL): MediaObjectStoreSigner {
   return async () => url;
@@ -921,7 +921,7 @@ describe('sanitized private media writes and reads', () => {
     const signer: MediaObjectStoreSigner = async (candidate, supplied) => {
       command = candidate as GetObjectCommand;
       options = supplied;
-      return 'https://synthetic-private-media.s3.us-west-2.amazonaws.com/sanitized';
+      return 'https://synthetic-private-media.s3.us-east-1.amazonaws.com/sanitized';
     };
     const store = createMediaObjectStore({
       environment: ENVIRONMENT,
@@ -979,7 +979,7 @@ describe('sanitized private media writes and reads', () => {
     });
     const signer: MediaObjectStoreSigner = async (command) => {
       commands.push(command);
-      return 'https://synthetic-private-media.s3.us-west-2.amazonaws.com/object';
+      return 'https://synthetic-private-media.s3.us-east-1.amazonaws.com/object';
     };
     const store = createMediaObjectStore({
       environment: ENVIRONMENT,

@@ -227,7 +227,7 @@ describeWithDatabase('start-flow audience version selection', () => {
     const snapshotId = randomUUID();
     const recipientId = randomUUID();
     const capturedAt = new Date('2030-01-04T00:00:00.000Z');
-    const staffEmail = `email-only-${randomBytes(8).toString('hex')}@psd401.net`;
+    const staffEmail = `email-only-${randomBytes(8).toString('hex')}@example.invalid`;
 
     await database.transaction(async (transaction) => {
       await transaction.insert(facilities).values({
@@ -244,7 +244,7 @@ describeWithDatabase('start-flow audience version selection', () => {
         displayName: 'Synthetic Cloud Identity staff group',
         active: true,
         googleGroupId: `synthetic-${randomBytes(8).toString('hex')}`,
-        email: `synthetic-${randomBytes(8).toString('hex')}@psd401.net`,
+        email: `synthetic-${randomBytes(8).toString('hex')}@example.invalid`,
         createdAt: capturedAt,
       });
       await transaction.insert(rosterSourceConfigurations).values({
@@ -317,7 +317,7 @@ describeWithDatabase('start-flow audience version selection', () => {
     });
 
     for (const nonCanonicalStaffEmail of [
-      'UPPERCASE.STAFF@PSD401.NET',
+      'UPPERCASE.STAFF@EXAMPLE.INVALID',
       'external.staff@example.com',
     ]) {
       await expect(

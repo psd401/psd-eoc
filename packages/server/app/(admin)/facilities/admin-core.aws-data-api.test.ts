@@ -904,7 +904,7 @@ class FakeRdsDataClient {
           [
             { stringValue: USER_ID },
             { stringValue: 'synthetic-google-subject-2670' },
-            { stringValue: 'synthetic-admin@psd401.net' },
+            { stringValue: 'synthetic-admin@example.invalid' },
             { stringValue: 'Synthetic Administrator' },
             { stringValue: 'district' },
             { stringValue: CLOCK_VALUE },
@@ -913,7 +913,7 @@ class FakeRdsDataClient {
           [
             { stringValue: SECOND_USER_ID },
             { stringValue: 'synthetic-google-subject-2675' },
-            { stringValue: 'synthetic-operator@psd401.net' },
+            { stringValue: 'synthetic-operator@example.invalid' },
             { stringValue: 'Synthetic Operator' },
             { stringValue: 'district' },
             { stringValue: CLOCK_VALUE },
@@ -939,8 +939,8 @@ class FakeRdsDataClient {
             },
             {
               stringValue: isSecondUser
-                ? 'synthetic-operator@psd401.net'
-                : 'synthetic-admin@psd401.net',
+                ? 'synthetic-operator@example.invalid'
+                : 'synthetic-admin@example.invalid',
             },
             {
               stringValue: isSecondUser
@@ -1212,9 +1212,9 @@ function fakeDatabase(client: FakeRdsDataClient): Database {
   return drizzleAwsDataApi(client as unknown as RDSDataClient, {
     database: 'synthetic_admin_test',
     resourceArn:
-      'arn:aws:rds:us-west-2:000000000000:cluster:synthetic-admin-test',
+      'arn:aws:rds:us-east-1:000000000000:cluster:synthetic-admin-test',
     secretArn:
-      'arn:aws:secretsmanager:us-west-2:000000000000:secret:synthetic-admin-test',
+      'arn:aws:secretsmanager:us-east-1:000000000000:secret:synthetic-admin-test',
   }) as unknown as Database;
 }
 
@@ -1226,9 +1226,9 @@ describe('admin Aurora Data API transport regression', () => {
       new ExecuteStatementCommand({
         database: 'synthetic_admin_test',
         resourceArn:
-          'arn:aws:rds:us-west-2:000000000000:cluster:synthetic-admin-test',
+          'arn:aws:rds:us-east-1:000000000000:cluster:synthetic-admin-test',
         secretArn:
-          'arn:aws:secretsmanager:us-west-2:000000000000:secret:synthetic-admin-test',
+          'arn:aws:secretsmanager:us-east-1:000000000000:secret:synthetic-admin-test',
         transactionId,
         sql: 'select clock_timestamp()',
       });

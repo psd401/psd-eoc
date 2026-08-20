@@ -12,10 +12,10 @@ import {
   type AccessMembershipSyncStore,
 } from './access-membership-sync';
 
-const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@example.invalid';
 const TEST_TIME = '2026-08-17T12:00:00.000Z';
 const TEST_GOOGLE_GROUP_ID = '01synthetic_engineering';
-const TEST_TRANSITION_EMAIL = 'initial.mobile@psd401.net';
+const TEST_TRANSITION_EMAIL = 'initial.mobile@example.invalid';
 
 function digest(value: unknown): string {
   return createHash('sha256')

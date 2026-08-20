@@ -25,7 +25,7 @@ const GOOGLE_SOURCE = GroupSourceSchema.parse({
   displayName: 'Synthetic staff group',
   active: true,
   googleGroupId: 'synthetic-staff-group',
-  email: 'synthetic-staff@psd401.net',
+  email: 'synthetic-staff@example.invalid',
   createdAt: TEST_TIME,
 }) as Extract<GroupSource, { kind: 'google-group'; purpose: 'building' }>;
 
@@ -162,19 +162,19 @@ describe('non-delegated Cloud Identity roster adapter HTTP boundaries', () => {
       Response.json({
         memberships: [
           {
-            preferredMemberKey: [{ id: 'DIRECT.STAFF@PSD401.NET' }],
+            preferredMemberKey: [{ id: 'DIRECT.STAFF@EXAMPLE.INVALID' }],
             member: 'users/100000000000000000001',
             roles: [{ role: 'MEMBER' }],
             relationType: 'DIRECT',
           },
           {
-            preferredMemberKey: [{ id: 'nested-group@psd401.net' }],
+            preferredMemberKey: [{ id: 'nested-group@example.invalid' }],
             member: 'groups/nested_group',
             roles: [{ role: 'MEMBER' }],
             relationType: 'DIRECT',
           },
           {
-            preferredMemberKey: [{ id: 'nested.staff@psd401.net' }],
+            preferredMemberKey: [{ id: 'nested.staff@example.invalid' }],
             member: 'users/100000000000000000002',
             roles: [{ role: 'MEMBER' }],
             relationType: 'INDIRECT',
@@ -188,16 +188,16 @@ describe('non-delegated Cloud Identity roster adapter HTTP boundaries', () => {
     expect(page).toEqual({
       members: [
         {
-          memberKey: 'direct.staff@psd401.net',
+          memberKey: 'direct.staff@example.invalid',
           googleSubject: null,
           displayName: 'Staff member',
-          email: 'direct.staff@psd401.net',
+          email: 'direct.staff@example.invalid',
         },
         {
-          memberKey: 'nested.staff@psd401.net',
+          memberKey: 'nested.staff@example.invalid',
           googleSubject: null,
           displayName: 'Staff member',
-          email: 'nested.staff@psd401.net',
+          email: 'nested.staff@example.invalid',
         },
       ],
       nextPageToken: null,
@@ -297,7 +297,7 @@ describe('non-delegated Cloud Identity roster adapter HTTP boundaries', () => {
       Response.json({
         memberships: [
           {
-            preferredMemberKey: [{ id: 'staff@psd401.net' }],
+            preferredMemberKey: [{ id: 'staff@example.invalid' }],
             member: 'users/100000000000000000001',
             roles: [{ role: 'MEMBER' }],
             relationType: 'DIRECT',
@@ -315,7 +315,7 @@ describe('non-delegated Cloud Identity roster adapter HTTP boundaries', () => {
       Response.json({
         memberships: [
           {
-            preferredMemberKey: [{ id: 'staff@psd401.net' }],
+            preferredMemberKey: [{ id: 'staff@example.invalid' }],
             member: 'users/100000000000000000001',
             roles: [{ role: 'MEMBER', expiryTime: TEST_TIME }],
             relationType: 'DIRECT',

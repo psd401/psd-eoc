@@ -69,7 +69,7 @@ describeWithDatabase('agent API-key PostgreSQL concurrency', () => {
     await createdConnection.db.insert(users).values({
       id: issuerId,
       googleSubject: `synthetic-agent-key-concurrency-${issuerId}`,
-      email: `synthetic-agent-key-concurrency-${issuerId}@psd401.net`,
+      email: `synthetic-agent-key-concurrency-${issuerId}@example.invalid`,
       displayName: 'Synthetic agent key concurrency issuer',
       facilityScopeKind: 'district',
       createdAt: issuedAt,

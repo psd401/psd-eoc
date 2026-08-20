@@ -162,7 +162,7 @@ async function insertSyntheticFanoutAdminSession(
   await database.insert(users).values({
     id: FANOUT_ADMIN_ACTOR.userId,
     googleSubject: `synthetic-fanout-admin-${suffix}`,
-    email: `synthetic.fanout.admin.${suffix}@psd401.net`,
+    email: `synthetic.fanout.admin.${suffix}@example.invalid`,
     displayName: 'Synthetic Fanout Control Administrator',
     facilityScopeKind: 'district',
     createdAt: identityCreatedAt,
@@ -1937,7 +1937,7 @@ describeWithDatabase('event journal database guarantees', () => {
         await transaction.insert(users).values({
           id: HUMAN_ACTOR.userId,
           googleSubject: `synthetic-issue77-${suffix}`,
-          email: `synthetic.issue77.${suffix}@psd401.net`,
+          email: `synthetic.issue77.${suffix}@example.invalid`,
           displayName: 'Synthetic Issue 77 Staff Operator',
           facilityScopeKind: 'district',
           createdAt: identityCreatedAt,
@@ -1999,7 +1999,7 @@ describeWithDatabase('event journal database guarantees', () => {
           user: {
             id: HUMAN_ACTOR.userId,
             googleSubject: `synthetic-issue77-${suffix}`,
-            email: `synthetic.issue77.${suffix}@psd401.net`,
+            email: `synthetic.issue77.${suffix}@example.invalid`,
             displayName: 'Synthetic Issue 77 Staff Operator',
             roles: ['staff'],
             facilityScope: { kind: 'district' },

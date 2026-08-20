@@ -479,7 +479,7 @@ async function insertSyntheticHumanPrerequisites(
     ) values (
       ${USER_ID}::uuid,
       'synthetic-fanout-control-admin',
-      'synthetic-fanout-control-admin@psd401.net',
+      'synthetic-fanout-control-admin@example.invalid',
       'Synthetic Fanout Control Admin',
       'district'::facility_scope_kind,
       '2026-08-12T18:00:00.000Z'::timestamptz
