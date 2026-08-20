@@ -1485,8 +1485,94 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     connection = createdConnection;
 
     await migrateDatabase(createdConnection);
-    firstSeedSummary = await seedDatabase(createdConnection.db);
-    expect(await seedDatabase(createdConnection.db)).toEqual(firstSeedSummary);
+    firstSeedSummary = await seedDatabase(createdConnection.db, {
+      // Written here with the columns this schema actually has: Drizzle emits
+      // every column of a table it inserts into, so seeding group sources
+      // through the current schema fails against a database held at an earlier
+      // migration. Runs after facilities and before the audience targets that
+      // reference them.
+      async insertGroupSources(transaction) {
+        await transaction.execute(sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values
+        (
+          '00000000-0000-4000-8000-000000000030'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000001'::uuid,
+          'Synthetic North Staff',
+          true, null, null, 'synthetic-north-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000031'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000002'::uuid,
+          'Synthetic South Staff',
+          true, null, null, 'synthetic-south-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000032'::uuid,
+          'synthetic'::group_source_kind,
+          'others'::group_purpose,
+          null,
+          'Synthetic District Support Staff',
+          true, null, null, 'synthetic-district-support-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        )
+      on conflict do nothing
+      `);
+      },
+    });
+    expect(
+      await seedDatabase(createdConnection.db, {
+        // Written here with the columns this schema actually has: Drizzle emits
+        // every column of a table it inserts into, so seeding group sources
+        // through the current schema fails against a database held at an earlier
+        // migration. Runs after facilities and before the audience targets that
+        // reference them.
+        async insertGroupSources(transaction) {
+          await transaction.execute(sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values
+        (
+          '00000000-0000-4000-8000-000000000030'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000001'::uuid,
+          'Synthetic North Staff',
+          true, null, null, 'synthetic-north-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000031'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000002'::uuid,
+          'Synthetic South Staff',
+          true, null, null, 'synthetic-south-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000032'::uuid,
+          'synthetic'::group_source_kind,
+          'others'::group_purpose,
+          null,
+          'Synthetic District Support Staff',
+          true, null, null, 'synthetic-district-support-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        )
+      on conflict do nothing
+      `);
+        },
+      }),
+    ).toEqual(firstSeedSummary);
   });
 
   afterAll(async () => {
@@ -2155,7 +2241,49 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       for (const migration of ISSUE_14_PRE_LIFECYCLE_MIGRATIONS) {
         await applySqlMigrationFile(createdConnection.db, migration);
       }
-      await seedDatabase(createdConnection.db);
+      await seedDatabase(createdConnection.db, {
+        // Written here with the columns this schema actually has: Drizzle emits
+        // every column of a table it inserts into, so seeding group sources
+        // through the current schema fails against a database held at an earlier
+        // migration. Runs after facilities and before the audience targets that
+        // reference them.
+        async insertGroupSources(transaction) {
+          await transaction.execute(sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values
+        (
+          '00000000-0000-4000-8000-000000000030'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000001'::uuid,
+          'Synthetic North Staff',
+          true, null, null, 'synthetic-north-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000031'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000002'::uuid,
+          'Synthetic South Staff',
+          true, null, null, 'synthetic-south-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000032'::uuid,
+          'synthetic'::group_source_kind,
+          'others'::group_purpose,
+          null,
+          'Synthetic District Support Staff',
+          true, null, null, 'synthetic-district-support-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        )
+      on conflict do nothing
+      `);
+        },
+      });
       await createdConnection.db.execute(sql`
         insert into sms_opt_out_records (
           id,
@@ -2586,7 +2714,49 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       for (const migration of ISSUE_23_PRE_OUTBOX_V2_MIGRATIONS) {
         await applySqlMigrationFile(createdConnection.db, migration);
       }
-      await seedDatabase(createdConnection.db);
+      await seedDatabase(createdConnection.db, {
+        // Written here with the columns this schema actually has: Drizzle emits
+        // every column of a table it inserts into, so seeding group sources
+        // through the current schema fails against a database held at an earlier
+        // migration. Runs after facilities and before the audience targets that
+        // reference them.
+        async insertGroupSources(transaction) {
+          await transaction.execute(sql`
+      insert into group_sources (
+        id, kind, purpose, facility_id, display_name, active,
+        google_group_id, email, fixture_key, created_at
+      ) values
+        (
+          '00000000-0000-4000-8000-000000000030'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000001'::uuid,
+          'Synthetic North Staff',
+          true, null, null, 'synthetic-north-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000031'::uuid,
+          'synthetic'::group_source_kind,
+          'building'::group_purpose,
+          '00000000-0000-4000-8000-000000000002'::uuid,
+          'Synthetic South Staff',
+          true, null, null, 'synthetic-south-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        ),
+        (
+          '00000000-0000-4000-8000-000000000032'::uuid,
+          'synthetic'::group_source_kind,
+          'others'::group_purpose,
+          null,
+          'Synthetic District Support Staff',
+          true, null, null, 'synthetic-district-support-staff',
+          '2026-08-06T12:00:00.000Z'::timestamptz
+        )
+      on conflict do nothing
+      `);
+        },
+      });
 
       await createdConnection.db.transaction(async (transaction) => {
         await transaction.execute(sql`

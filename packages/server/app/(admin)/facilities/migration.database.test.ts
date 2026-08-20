@@ -452,7 +452,70 @@ async function channelSnapshot(
 }
 
 async function seedUpgradeFixture(database: PostgresDatabase): Promise<void> {
-  await seedDatabase(database);
+  await seedDatabase(database, {
+    // The group sources the seed would write, with the columns this schema
+    // actually has. Drizzle emits every column of a table it inserts into, so
+    // seeding them through the current schema fails against a database held at
+    // migration 0004 the moment that table gains a column — as it did when
+    // access groups started carrying the role they grant. This runs at the same
+    // point in the transaction, after facilities and before the audience
+    // targets that reference them.
+    async insertGroupSources(transaction) {
+      await transaction.execute(sql`
+    insert into group_sources (
+      id, kind, purpose, facility_id, display_name, active,
+      google_group_id, email, fixture_key, created_at
+    ) values
+      (
+        '00000000-0000-4000-8000-000000000030'::uuid,
+        'synthetic'::group_source_kind,
+        'building'::group_purpose,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        'Synthetic North Staff',
+        true, null, null, 'synthetic-north-staff',
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      ),
+      (
+        '00000000-0000-4000-8000-000000000031'::uuid,
+        'synthetic'::group_source_kind,
+        'building'::group_purpose,
+        '00000000-0000-4000-8000-000000000002'::uuid,
+        'Synthetic South Staff',
+        true, null, null, 'synthetic-south-staff',
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      ),
+      (
+        '00000000-0000-4000-8000-000000000032'::uuid,
+        'synthetic'::group_source_kind,
+        'others'::group_purpose,
+        null,
+        'Synthetic District Support Staff',
+        true, null, null, 'synthetic-district-support-staff',
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      )
+    on conflict do nothing
+      `);
+    },
+  });
+  await database.execute(sql`
+    insert into facilities (id, code, name, active, created_at)
+    values
+      (
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        'SYN-NORTH',
+        'Synthetic North Campus',
+        true,
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      ),
+      (
+        '00000000-0000-4000-8000-000000000002'::uuid,
+        'SYN-SOUTH',
+        'Synthetic South Campus',
+        true,
+        '2026-08-06T12:00:00.000Z'::timestamptz
+      )
+    on conflict do nothing
+  `);
   await database.execute(sql`
     insert into integration_statuses (
       id,
@@ -1483,6 +1546,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         facility_id,
         display_name,
         active,
+        granted_role,
         google_group_id,
         email,
         fixture_key
@@ -1494,6 +1558,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         null,
         'Synthetic access source',
         true,
+        'admin'::role,
         ${originalGoogleGroupId},
         ${originalEmail},
         null
@@ -1592,6 +1657,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         facility_id,
         display_name,
         active,
+        granted_role,
         google_group_id,
         email,
         fixture_key
@@ -1604,6 +1670,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           null,
           'Synthetic atomic access group',
           true,
+          'admin'::role,
           ${`issue-26-atomic-${groupSourceId}`},
           ${`${groupSourceId}@example.invalid`},
           null
@@ -1615,6 +1682,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
           null,
           'Synthetic late access group',
           true,
+          'admin'::role,
           ${`issue-26-late-${lateGroupSourceId}`},
           ${`${lateGroupSourceId}@example.invalid`},
           null
@@ -2422,6 +2490,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         facility_id,
         display_name,
         active,
+        granted_role,
         google_group_id,
         email,
         fixture_key
@@ -2433,6 +2502,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         null,
         'Synthetic serialized access source',
         false,
+        'admin'::role,
         ${`issue-26-serialized-${sourceId}`},
         ${`${sourceId}@example.invalid`},
         null
