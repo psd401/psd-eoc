@@ -4,14 +4,14 @@ import { describe, expect, test } from 'bun:test';
 
 import type { ReferenceSeedSummary } from '../../db/seed';
 import {
-  assertExplorationAccessSnapshotCurrent,
-  assertExplorationAccessFixtureEvidence,
+  assertAccessFixtureSnapshotCurrent,
+  assertAccessFixtureEvidence,
   assertNoRealAccessGroups,
-  createExplorationAccessFixture,
-  seedExplorationAccessFixture,
-  type ExplorationAccessFixture,
-  type ExplorationAccessFixtureEvidence,
-  type ExplorationAccessFixtureStore,
+  createAccessFixture,
+  seedAccessFixture,
+  type AccessFixture,
+  type AccessFixtureEvidence,
+  type AccessFixtureStore,
 } from './access-fixture';
 import {
   APPLICATION_LOGIN_PROBE_QUERY,
@@ -27,16 +27,16 @@ import {
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
 import {
-  runExplorationBootstrap,
+  runBootstrap,
   verifyCanonicalSyntheticRemoval,
   type CanonicalSyntheticRemovalSummary,
 } from './bootstrap';
 import {
-  EXPLORATION_AWS_ACCOUNT_ID,
-  EXPLORATION_AWS_REGION,
-  EXPLORATION_DATABASE_LOGIN,
-  EXPLORATION_DATABASE_ROLE,
-  readExplorationBootstrapConfig,
+  AWS_ACCOUNT_ID,
+  AWS_REGION,
+  DATABASE_LOGIN,
+  DATABASE_ROLE,
+  readBootstrapConfig,
 } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
@@ -104,8 +104,8 @@ const canonicalSyntheticRemovalSummary: CanonicalSyntheticRemovalSummary =
 
 function validConfigEnvironment(): Record<string, string> {
   return {
-    AWS_ACCOUNT_ID: EXPLORATION_AWS_ACCOUNT_ID,
-    AWS_REGION: EXPLORATION_AWS_REGION,
+    AWS_ACCOUNT_ID: AWS_ACCOUNT_ID,
+    AWS_REGION: AWS_REGION,
     DATABASE_DRIVER: 'postgres',
     DATABASE_HOST,
     DATABASE_PORT: '5432',
@@ -116,7 +116,7 @@ function validConfigEnvironment(): Record<string, string> {
     DATABASE_IDLE_TIMEOUT_SECONDS: '20',
     DATABASE_ADMIN_USERNAME: 'psd_eoc_admin',
     DATABASE_ADMIN_PASSWORD,
-    DATABASE_APPLICATION_USERNAME: EXPLORATION_DATABASE_LOGIN,
+    DATABASE_APPLICATION_USERNAME: DATABASE_LOGIN,
     DATABASE_APPLICATION_PASSWORD,
     APPROVED_GOOGLE_SUBJECT: GOOGLE_SUBJECT,
     APPROVED_STAFF_EMAIL: 'approved.staff@psd401.net',
@@ -125,9 +125,7 @@ function validConfigEnvironment(): Record<string, string> {
   };
 }
 
-function fixtureEvidence(
-  fixture: ExplorationAccessFixture,
-): ExplorationAccessFixtureEvidence {
+function fixtureEvidence(fixture: AccessFixture): AccessFixtureEvidence {
   return Object.freeze({
     activeAccessGroups: [
       {
@@ -196,9 +194,9 @@ function fixtureEvidence(
 
 describe('exploration-smoke configuration', () => {
   test('pins the native writer, roles, TLS bundle, and connection bounds', () => {
-    expect(readExplorationBootstrapConfig(validConfigEnvironment())).toEqual({
-      accountId: EXPLORATION_AWS_ACCOUNT_ID,
-      region: EXPLORATION_AWS_REGION,
+    expect(readBootstrapConfig(validConfigEnvironment())).toEqual({
+      accountId: AWS_ACCOUNT_ID,
+      region: AWS_REGION,
       databaseDriver: 'postgres',
       databaseHost: DATABASE_HOST,
       databasePort: 5432,
@@ -209,7 +207,7 @@ describe('exploration-smoke configuration', () => {
       databaseIdleTimeoutSeconds: 20,
       databaseAdminUsername: 'psd_eoc_admin',
       databaseAdminPassword: DATABASE_ADMIN_PASSWORD,
-      databaseApplicationUsername: EXPLORATION_DATABASE_LOGIN,
+      databaseApplicationUsername: DATABASE_LOGIN,
       databaseApplicationPassword: DATABASE_APPLICATION_PASSWORD,
       approvedGoogleSubject: GOOGLE_SUBJECT,
       approvedStaffEmail: 'approved.staff@psd401.net',
@@ -221,14 +219,14 @@ describe('exploration-smoke configuration', () => {
 
   test('defaults to migrations only and accepts nothing but the two modes', () => {
     expect(
-      readExplorationBootstrapConfig({
+      readBootstrapConfig({
         ...validConfigEnvironment(),
         BOOTSTRAP_MODE: 'seed-access-fixture',
       }).mode,
     ).toBe('seed-access-fixture');
     for (const mode of ['', 'full', 'MIGRATE', 'seed', 'migrate ']) {
       expect(() =>
-        readExplorationBootstrapConfig({
+        readBootstrapConfig({
           ...validConfigEnvironment(),
           BOOTSTRAP_MODE: mode,
         }),
@@ -250,7 +248,7 @@ describe('exploration-smoke configuration', () => {
     ]) {
       let message = '';
       try {
-        readExplorationBootstrapConfig(environment);
+        readBootstrapConfig(environment);
       } catch (error) {
         message = String(error);
       }
@@ -264,7 +262,7 @@ describe('exploration-smoke configuration', () => {
   test('rejects personal or mixed-case email identities', () => {
     for (const email of ['kris@example.com', 'Approved.Staff@psd401.net']) {
       expect(() =>
-        readExplorationBootstrapConfig({
+        readBootstrapConfig({
           ...validConfigEnvironment(),
           APPROVED_STAFF_EMAIL: email,
         }),
@@ -283,7 +281,7 @@ describe('application database secret and role', () => {
         expiration: new Date('2026-08-15T13:00:00.000Z'),
       },
       now: new Date('2026-08-15T12:00:00.000Z'),
-      region: EXPLORATION_AWS_REGION,
+      region: AWS_REGION,
       secretArn: APPLICATION_SECRET_ARN,
     });
     expect(request.endpoint).toBe(
@@ -307,13 +305,13 @@ describe('application database secret and role', () => {
         {
           ARN: APPLICATION_SECRET_ARN,
           SecretString: JSON.stringify({
-            username: EXPLORATION_DATABASE_LOGIN,
+            username: DATABASE_LOGIN,
             password,
           }),
         },
         APPLICATION_SECRET_ARN,
       ),
-    ).toEqual({ username: EXPLORATION_DATABASE_LOGIN, password });
+    ).toEqual({ username: DATABASE_LOGIN, password });
 
     expect(() =>
       parseApplicationDatabaseSecretResponse(
@@ -345,7 +343,7 @@ describe('application database secret and role', () => {
         credentials,
         fetchImplementation: oversizedResponseFetch,
         now: new Date('2026-08-15T12:00:00.000Z'),
-        region: EXPLORATION_AWS_REGION,
+        region: AWS_REGION,
         secretArn: APPLICATION_SECRET_ARN,
       }),
     ).rejects.toThrow('secret response was invalid');
@@ -357,22 +355,22 @@ describe('application database secret and role', () => {
     expect(statements).toHaveLength(5);
     expect(statements[0]).toContain('IF NOT EXISTS');
     expect(statements[1]).toBe(
-      `ALTER ROLE "${EXPLORATION_DATABASE_LOGIN}" WITH PASSWORD 'generated-password-with-quote-''--123456'`,
+      `ALTER ROLE "${DATABASE_LOGIN}" WITH PASSWORD 'generated-password-with-quote-''--123456'`,
     );
     expect(statements[1]).not.toContain('NOSUPERUSER');
     expect(statements[2]).toContain('REVOKE %I');
     expect(statements[3]).toBe(
-      `GRANT "${EXPLORATION_DATABASE_ROLE}" TO "${EXPLORATION_DATABASE_LOGIN}"`,
+      `GRANT "${DATABASE_ROLE}" TO "${DATABASE_LOGIN}"`,
     );
     expect(statements[4]).toBe(
-      `REVOKE ADMIN OPTION FOR "${EXPLORATION_DATABASE_ROLE}" FROM "${EXPLORATION_DATABASE_LOGIN}"`,
+      `REVOKE ADMIN OPTION FOR "${DATABASE_ROLE}" FROM "${DATABASE_LOGIN}"`,
     );
   });
 
   test('requires exact NOLOGIN/LOGIN flags and one direct membership', async () => {
     const roleRows = [
       {
-        roleName: EXPLORATION_DATABASE_ROLE,
+        roleName: DATABASE_ROLE,
         canLogin: false,
         superuser: false,
         createDatabase: false,
@@ -382,7 +380,7 @@ describe('application database secret and role', () => {
         inherits: true,
       },
       {
-        roleName: EXPLORATION_DATABASE_LOGIN,
+        roleName: DATABASE_LOGIN,
         canLogin: true,
         superuser: false,
         createDatabase: false,
@@ -394,17 +392,17 @@ describe('application database secret and role', () => {
     ];
     expect(
       assertApplicationRoleState(roleRows, [
-        { grantedRole: EXPLORATION_DATABASE_ROLE, adminOption: false },
+        { grantedRole: DATABASE_ROLE, adminOption: false },
       ]),
     ).toEqual({
-      applicationLogin: EXPLORATION_DATABASE_LOGIN,
-      inheritedRole: EXPLORATION_DATABASE_ROLE,
+      applicationLogin: DATABASE_LOGIN,
+      inheritedRole: DATABASE_ROLE,
       directMembershipCount: 1,
       privilegedFlags: false,
     });
     expect(() =>
       assertApplicationRoleState(roleRows, [
-        { grantedRole: EXPLORATION_DATABASE_ROLE, adminOption: false },
+        { grantedRole: DATABASE_ROLE, adminOption: false },
         { grantedRole: 'unexpected_role', adminOption: false },
       ]),
     ).toThrow('unexpected role membership');
@@ -415,15 +413,13 @@ describe('application database secret and role', () => {
         statements.push(statement);
         if (statement.includes('FROM pg_catalog.pg_roles')) return roleRows;
         if (statement.includes('FROM pg_catalog.pg_auth_members')) {
-          return [
-            { grantedRole: EXPLORATION_DATABASE_ROLE, adminOption: false },
-          ];
+          return [{ grantedRole: DATABASE_ROLE, adminOption: false }];
         }
         if (statement === APPLICATION_LOGIN_PROBE_QUERY) {
           return [
             {
-              currentUser: EXPLORATION_DATABASE_LOGIN,
-              sessionUser: EXPLORATION_DATABASE_LOGIN,
+              currentUser: DATABASE_LOGIN,
+              sessionUser: DATABASE_LOGIN,
               applicationRoleMember: true,
             },
           ];
@@ -450,26 +446,23 @@ describe('approved access fixture', () => {
     staffEmail: 'approved.staff@psd401.net',
     staffDisplayName: 'Approved Staff',
   } as const;
-  const fixture = createExplorationAccessFixture(
-    fixtureInput,
-    FIRST_ACCESS_SNAPSHOT,
-  );
+  const fixture = createAccessFixture(fixtureInput, FIRST_ACCESS_SNAPSHOT);
 
   test('is deterministic for one allocated snapshot, current, and contains no recipient/student payload', () => {
-    expect(
-      createExplorationAccessFixture(fixtureInput, FIRST_ACCESS_SNAPSHOT),
-    ).toEqual(fixture);
+    expect(createAccessFixture(fixtureInput, FIRST_ACCESS_SNAPSHOT)).toEqual(
+      fixture,
+    );
     expect(fixture.snapshot.capturedAt.toISOString()).toBe(
       FIRST_ACCESS_SNAPSHOT.capturedAt.toISOString(),
     );
     expect(() =>
-      assertExplorationAccessSnapshotCurrent(
+      assertAccessFixtureSnapshotCurrent(
         fixture,
         new Date(FIRST_ACCESS_SNAPSHOT.capturedAt.getTime() + 5 * 60 * 1_000),
       ),
     ).not.toThrow();
     expect(() =>
-      assertExplorationAccessSnapshotCurrent(
+      assertAccessFixtureSnapshotCurrent(
         fixture,
         new Date(
           FIRST_ACCESS_SNAPSHOT.capturedAt.getTime() + 5 * 60 * 1_000 + 1,
@@ -491,7 +484,7 @@ describe('approved access fixture', () => {
   test('scopes fixture identity proof while rejecting any enabled provider', () => {
     const evidence = fixtureEvidence(fixture);
     expect(
-      assertExplorationAccessFixtureEvidence(fixture, {
+      assertAccessFixtureEvidence(fixture, {
         ...evidence,
         activeAccessGroups: [
           ...evidence.activeAccessGroups,
@@ -516,7 +509,7 @@ describe('approved access fixture', () => {
       matchingRosterRecipients: 0,
     });
     expect(() =>
-      assertExplorationAccessFixtureEvidence(fixture, {
+      assertAccessFixtureEvidence(fixture, {
         ...evidence,
         channels: evidence.channels.map((channel, index) =>
           index === 1 ? { ...channel, enabled: true } : channel,
@@ -542,14 +535,14 @@ describe('approved access fixture', () => {
 
   test('replays within one bootstrap and appends a newer snapshot later', async () => {
     let publishes = 0;
-    const allocated: ExplorationAccessFixture[] = [];
-    let persisted: ExplorationAccessFixture | undefined;
-    const store: ExplorationAccessFixtureStore = {
+    const allocated: AccessFixture[] = [];
+    let persisted: AccessFixture | undefined;
+    const store: AccessFixtureStore = {
       async publish(identity, replay) {
         publishes += 1;
         const published =
           replay ??
-          createExplorationAccessFixture(
+          createAccessFixture(
             identity,
             allocated.length === 0
               ? FIRST_ACCESS_SNAPSHOT
@@ -567,19 +560,19 @@ describe('approved access fixture', () => {
         return fixtureEvidence(received);
       },
     };
-    const first = await seedExplorationAccessFixture({
+    const first = await seedAccessFixture({
       identity: fixtureInput,
       replay: null,
       store,
       now: () => new Date(FIRST_ACCESS_SNAPSHOT.capturedAt),
     });
-    const second = await seedExplorationAccessFixture({
+    const second = await seedAccessFixture({
       identity: fixtureInput,
       replay: first.fixture,
       store,
       now: () => new Date(FIRST_ACCESS_SNAPSHOT.capturedAt),
     });
-    const later = await seedExplorationAccessFixture({
+    const later = await seedAccessFixture({
       identity: fixtureInput,
       replay: null,
       store,
@@ -647,7 +640,7 @@ describe('bootstrap coordinator', () => {
   });
 
   test('runs native TLS, migrations, and fixtures twice under one lock', async () => {
-    const config = readExplorationBootstrapConfig({
+    const config = readBootstrapConfig({
       ...validConfigEnvironment(),
       BOOTSTRAP_MODE: 'seed-access-fixture',
     });
@@ -668,8 +661,8 @@ describe('bootstrap coordinator', () => {
       async configureApplicationRole() {
         calls.push('configure-application-role');
         return {
-          applicationLogin: EXPLORATION_DATABASE_LOGIN,
-          inheritedRole: EXPLORATION_DATABASE_ROLE,
+          applicationLogin: DATABASE_LOGIN,
+          inheritedRole: DATABASE_ROLE,
           directMembershipCount: 1,
           privilegedFlags: false,
         } as const;
@@ -701,7 +694,7 @@ describe('bootstrap coordinator', () => {
       },
     };
 
-    const summary = await runExplorationBootstrap(config, dependencies);
+    const summary = await runBootstrap(config, dependencies);
     const expectedRunOrder = [
       'verify-admin-tls',
       'migrate-admin',
@@ -740,7 +733,7 @@ describe('bootstrap coordinator', () => {
   });
 
   test('migrates without touching the access fixture by default', async () => {
-    const config = readExplorationBootstrapConfig(validConfigEnvironment());
+    const config = readBootstrapConfig(validConfigEnvironment());
     expect(config.mode).toBe('migrate');
     const calls: string[] = [];
     const dependencies = {
@@ -759,8 +752,8 @@ describe('bootstrap coordinator', () => {
       async configureApplicationRole() {
         calls.push('configure-application-role');
         return {
-          applicationLogin: EXPLORATION_DATABASE_LOGIN,
-          inheritedRole: EXPLORATION_DATABASE_ROLE,
+          applicationLogin: DATABASE_LOGIN,
+          inheritedRole: DATABASE_ROLE,
           directMembershipCount: 1,
           privilegedFlags: false,
         } as const;
@@ -783,7 +776,7 @@ describe('bootstrap coordinator', () => {
       },
     };
 
-    const summary = await runExplorationBootstrap(config, dependencies);
+    const summary = await runBootstrap(config, dependencies);
     const expectedRunOrder = [
       'verify-admin-tls',
       'migrate-admin',
@@ -843,10 +836,7 @@ describe('bootstrap coordinator', () => {
       },
     };
     await expect(
-      runExplorationBootstrap(
-        readExplorationBootstrapConfig(validConfigEnvironment()),
-        dependencies,
-      ),
+      runBootstrap(readBootstrapConfig(validConfigEnvironment()), dependencies),
     ).rejects.toThrow('synthetic migration failure');
     expect(calls).toEqual([
       'acquire-lock',
@@ -860,7 +850,7 @@ describe('bootstrap coordinator', () => {
 describe('immutable server image contract', () => {
   test('pins the Bun base, reviewed source SHA, non-root runtime, and server-only workspace', async () => {
     const dockerfile = await Bun.file(
-      new URL('../../container/exploration-smoke.Dockerfile', import.meta.url),
+      new URL('../../container/psd-eoc.Dockerfile', import.meta.url),
     ).text();
     expect(dockerfile).toContain(
       'oven/bun:1.2.23-alpine@sha256:0841c588f6304300baf1d395ae339ce09a6e18c4b6a7cdd4fddcbdb87a2f096a',
@@ -902,7 +892,7 @@ describe('immutable server image contract', () => {
   test('excludes credentials, local build output, mobile, and infrastructure from context', async () => {
     const ignore = await Bun.file(
       new URL(
-        '../../container/exploration-smoke.Dockerfile.dockerignore',
+        '../../container/psd-eoc.Dockerfile.dockerignore',
         import.meta.url,
       ),
     ).text();

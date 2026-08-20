@@ -1,4 +1,4 @@
--- Retire the synthetic exploration access fixture.
+-- Retire the synthetic access fixture.
 --
 -- The bootstrap seeded an invented access group,
 -- `exploration-smoke-access@example.invalid`, and an invented user to go with

@@ -126,7 +126,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: packages/server/container/exploration-smoke.Dockerfile
+          file: packages/server/container/psd-eoc.Dockerfile
           build-args: SOURCE_SHA=${{ github.sha }}
           platforms: linux/amd64
           provenance: false
@@ -215,7 +215,7 @@ jobs:
           fi
           mkdir -p ../artifacts
           bunx --bun cdk \
-            --app "bun bin/exploration-smoke.ts" \
+            --app "bun bin/psd-eoc.ts" \
             deploy "$STACK_NAME" \
             --exclusively \
             --require-approval never \
@@ -313,7 +313,7 @@ jobs:
         run: |
           set -euo pipefail
           bunx --bun cdk \
-            --app "bun bin/exploration-smoke.ts" \
+            --app "bun bin/psd-eoc.ts" \
             deploy "$STACK_NAME" \
             --exclusively \
             --require-approval never \

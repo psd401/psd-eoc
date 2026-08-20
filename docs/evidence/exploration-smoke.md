@@ -254,7 +254,7 @@ records the expanded, non-secret command shape below; protected values remain
 masked.
 
 1. Build the container from the repository root with
-   `packages/server/container/exploration-smoke.Dockerfile`, run its local
+   `packages/server/container/psd-eoc.Dockerfile`, run its local
    startup smoke, and require its OCI digest to equal the requested digest.
 2. Assume the fixed-account deployment role through GitHub OIDC. Read back STS
    account `<aws-account-id>`, IAM alias `psd401`, region `us-west-2`, exact immutable

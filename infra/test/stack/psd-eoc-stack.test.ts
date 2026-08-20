@@ -3,13 +3,13 @@ import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
 import {
-  EXPLORATION_SMOKE_ACCOUNT,
-  EXPLORATION_SMOKE_ACCOUNT_ALIAS,
+  AWS_ACCOUNT,
+  AWS_ACCOUNT_ALIAS,
   EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
   EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
-  EXPLORATION_SMOKE_DATABASE_NAME,
-  EXPLORATION_SMOKE_DATABASE_PORT,
-  EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+  DATABASE_NAME,
+  DATABASE_PORT,
+  DATABASE_SSL_ROOT_CERT,
   EXPLORATION_SMOKE_DATA_CLASSIFICATION,
   EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
   EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
@@ -18,14 +18,14 @@ import {
   EXPLORATION_SMOKE_HEALTH_PATH,
   EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
   EXPLORATION_SMOKE_QUEUE_NAME,
-  EXPLORATION_SMOKE_REGION,
+  AWS_REGION,
   EXPLORATION_SMOKE_REPOSITORY_NAME,
   EXPLORATION_SMOKE_SES_FROM_ADDRESS,
   EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
   EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
-  EXPLORATION_SMOKE_STACK_NAME,
-} from '../../src/exploration-smoke/config';
-import { ExplorationSmokeStack } from '../../src/exploration-smoke/exploration-smoke-stack';
+  STACK_NAME,
+} from '../../src/stack/config';
+import { PsdEocStack } from '../../src/stack/psd-eoc-stack';
 import {
   SES_CONFIGURATION_SET_NAME,
   SES_EVENT_DESTINATION_NAME,
@@ -149,22 +149,22 @@ function tagsByKey(resource: SynthesizedResource): Map<string, unknown> {
 }
 
 const app = new App();
-const stack = new ExplorationSmokeStack(app, EXPLORATION_SMOKE_STACK_NAME, {
+const stack = new PsdEocStack(app, STACK_NAME, {
   env: {
-    account: EXPLORATION_SMOKE_ACCOUNT,
-    region: EXPLORATION_SMOKE_REGION,
+    account: AWS_ACCOUNT,
+    region: AWS_REGION,
   },
-  stackName: EXPLORATION_SMOKE_STACK_NAME,
+  stackName: STACK_NAME,
 });
 const template = Template.fromStack(stack);
 const synthesized = asRecord(template.toJSON());
 const resources = asRecord(synthesized.Resources);
 
-describe('exploration-smoke deployment boundary', () => {
+describe('deployment boundary', () => {
   it('labels the immutable server image as the staff-minimized live pilot', async () => {
     const dockerfile = await Bun.file(
       new URL(
-        '../../../packages/server/container/exploration-smoke.Dockerfile',
+        '../../../packages/server/container/psd-eoc.Dockerfile',
         import.meta.url,
       ),
     ).text();
@@ -180,24 +180,22 @@ describe('exploration-smoke deployment boundary', () => {
   });
 
   it('rejects every account and region except the approved psd401 target', () => {
-    expect(EXPLORATION_SMOKE_ACCOUNT_ALIAS).toBe('psd401');
-    expect(EXPLORATION_SMOKE_ACCOUNT).toBe('<aws-account-id>');
-    expect(EXPLORATION_SMOKE_REGION).toBe('us-west-2');
+    expect(AWS_ACCOUNT_ALIAS).toBe('psd401');
+    expect(AWS_ACCOUNT).toBe('<aws-account-id>');
+    expect(AWS_REGION).toBe('us-west-2');
 
     expect(
       () =>
-        new ExplorationSmokeStack(new App(), 'WrongAccount', {
-          env: { account: '000000000000', region: EXPLORATION_SMOKE_REGION },
+        new PsdEocStack(new App(), 'WrongAccount', {
+          env: { account: '000000000000', region: AWS_REGION },
         }),
-    ).toThrow(
-      `AWS account ${EXPLORATION_SMOKE_ACCOUNT} (${EXPLORATION_SMOKE_ACCOUNT_ALIAS})`,
-    );
+    ).toThrow(`AWS account ${AWS_ACCOUNT} (${AWS_ACCOUNT_ALIAS})`);
     expect(
       () =>
-        new ExplorationSmokeStack(new App(), 'WrongRegion', {
-          env: { account: EXPLORATION_SMOKE_ACCOUNT, region: 'us-east-1' },
+        new PsdEocStack(new App(), 'WrongRegion', {
+          env: { account: AWS_ACCOUNT, region: 'us-east-1' },
         }),
-    ).toThrow(`in ${EXPLORATION_SMOKE_REGION}`);
+    ).toThrow(`in ${AWS_REGION}`);
   });
 
   it('requires separate reviewed bootstrap and deploy digests plus protected identity', () => {
@@ -310,9 +308,7 @@ describe('exploration-smoke deployment boundary', () => {
         expect(tags.get('DataClassification')).toBe(
           EXPLORATION_SMOKE_DATA_CLASSIFICATION,
         );
-        expect(tags.get('ExpectedAwsAccountAlias')).toBe(
-          EXPLORATION_SMOKE_ACCOUNT_ALIAS,
-        );
+        expect(tags.get('ExpectedAwsAccountAlias')).toBe(AWS_ACCOUNT_ALIAS);
       }
     }
   });
@@ -383,7 +379,7 @@ describe('minimal isolated resource shape', () => {
     expect(redriveAllowPolicy.redrivePermission).toBe('byQueue');
     expect(asArray(redriveAllowPolicy.sourceQueueArns)).toHaveLength(1);
     expect(JSON.stringify(redriveAllowPolicy.sourceQueueArns)).toContain(
-      `:sqs:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:${EXPLORATION_SMOKE_EMAIL_QUEUE_NAME}`,
+      `:sqs:${AWS_REGION}:${AWS_ACCOUNT}:${EXPLORATION_SMOKE_EMAIL_QUEUE_NAME}`,
     );
 
     for (const queue of queues.values()) {
@@ -402,7 +398,7 @@ describe('minimal isolated resource shape', () => {
     expect(cluster.DBClusterIdentifier).toBe(
       EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
     );
-    expect(cluster.DatabaseName).toBe(EXPLORATION_SMOKE_DATABASE_NAME);
+    expect(cluster.DatabaseName).toBe(DATABASE_NAME);
     expect(cluster.Engine).toBe('aurora-postgresql');
     expect(cluster.EnableHttpEndpoint).toBe(false);
     expect(cluster.StorageEncrypted).toBe(true);
@@ -415,7 +411,7 @@ describe('minimal isolated resource shape', () => {
     expect(writer.DBInstanceClass).toBe('db.serverless');
     expect(writer.PromotionTier).toBe(0);
     expect(writer.PubliclyAccessible).toBe(false);
-    expect(writer.AvailabilityZone).toBe(`${EXPLORATION_SMOKE_REGION}a`);
+    expect(writer.AvailabilityZone).toBe(`${AWS_REGION}a`);
     expect(writerResource.DeletionPolicy).toBe('Retain');
     expect(writerResource.UpdateReplacePolicy).toBe('Retain');
 
@@ -472,8 +468,8 @@ describe('minimal isolated resource shape', () => {
     );
 
     const ingress = properties(onlyResource('AWS::EC2::SecurityGroupIngress'));
-    expect(ingress.FromPort).toBe(EXPLORATION_SMOKE_DATABASE_PORT);
-    expect(ingress.ToPort).toBe(EXPLORATION_SMOKE_DATABASE_PORT);
+    expect(ingress.FromPort).toBe(DATABASE_PORT);
+    expect(ingress.ToPort).toBe(DATABASE_PORT);
     expect(ingress.IpProtocol).toBe('tcp');
     expect(JSON.stringify(ingress.GroupId)).toContain(databaseSecurityGroup[0]);
     expect(JSON.stringify(ingress.SourceSecurityGroupId)).toContain(
@@ -484,8 +480,8 @@ describe('minimal isolated resource shape', () => {
     const databaseEgress = properties(
       onlyResource('AWS::EC2::SecurityGroupEgress'),
     );
-    expect(databaseEgress.FromPort).toBe(EXPLORATION_SMOKE_DATABASE_PORT);
-    expect(databaseEgress.ToPort).toBe(EXPLORATION_SMOKE_DATABASE_PORT);
+    expect(databaseEgress.FromPort).toBe(DATABASE_PORT);
+    expect(databaseEgress.ToPort).toBe(DATABASE_PORT);
     expect(JSON.stringify(databaseEgress.DestinationSecurityGroupId)).toContain(
       databaseSecurityGroup[0],
     );
@@ -702,19 +698,15 @@ describe('App Runner runtime safety boundary', () => {
         'SOURCE_SHA',
       ].sort(),
     );
-    expect(variables.get('AWS_REGION')).toBe(EXPLORATION_SMOKE_REGION);
+    expect(variables.get('AWS_REGION')).toBe(AWS_REGION);
     expect(variables.get('DATABASE_DRIVER')).toBe('postgres');
     expect(variables.get('DATABASE_HOST')).toEqual({
       'Fn::GetAtt': ['DatabaseB269D8BB', 'Endpoint.Address'],
     });
-    expect(variables.get('DATABASE_PORT')).toBe(
-      String(EXPLORATION_SMOKE_DATABASE_PORT),
-    );
-    expect(variables.get('DATABASE_NAME')).toBe(
-      EXPLORATION_SMOKE_DATABASE_NAME,
-    );
+    expect(variables.get('DATABASE_PORT')).toBe(String(DATABASE_PORT));
+    expect(variables.get('DATABASE_NAME')).toBe(DATABASE_NAME);
     expect(variables.get('DATABASE_SSL_ROOT_CERT')).toBe(
-      EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+      DATABASE_SSL_ROOT_CERT,
     );
     expect(variables.get('DATABASE_MAX_CONNECTIONS')).toBe('1');
     expect(variables.get('DATABASE_CONNECT_TIMEOUT_SECONDS')).toBe('10');
@@ -909,7 +901,7 @@ describe('one-off native bootstrap boundary', () => {
     expect(container.Name).toBe('native-bootstrap');
     expect(container.Command).toEqual([
       'bun',
-      'packages/server/scripts/exploration-smoke/bootstrap.ts',
+      'packages/server/scripts/operations/bootstrap.ts',
     ]);
     expect(container.ReadonlyRootFilesystem).toBe(true);
     expect(container).not.toHaveProperty('Privileged');
@@ -928,11 +920,9 @@ describe('one-off native bootstrap boundary', () => {
       'Fn::GetAtt': ['DatabaseB269D8BB', 'Endpoint.Address'],
     });
     expect(environment.get('DATABASE_PORT')).toBe('5432');
-    expect(environment.get('DATABASE_NAME')).toBe(
-      EXPLORATION_SMOKE_DATABASE_NAME,
-    );
+    expect(environment.get('DATABASE_NAME')).toBe(DATABASE_NAME);
     expect(environment.get('DATABASE_SSL_ROOT_CERT')).toBe(
-      EXPLORATION_SMOKE_DATABASE_SSL_ROOT_CERT,
+      DATABASE_SSL_ROOT_CERT,
     );
     expect(environment.get('DATABASE_MAX_CONNECTIONS')).toBe('1');
     expect(environment.get('DATABASE_CONNECT_TIMEOUT_SECONDS')).toBe('10');
@@ -1069,7 +1059,7 @@ describe('protected access-membership publication boundary', () => {
     expect(container.Name).toBe('access-membership-sync');
     expect(container.Command).toEqual([
       'bun',
-      'packages/server/scripts/exploration-smoke/sync-access-membership.ts',
+      'packages/server/scripts/operations/sync-access-membership.ts',
     ]);
     expect(container.ReadonlyRootFilesystem).toBe(true);
     expect(container).not.toHaveProperty('Privileged');
@@ -1262,8 +1252,8 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(sesPublish?.Principal).toEqual({ Service: 'ses.amazonaws.com' });
     expect(sesPublish?.Condition).toEqual({
       StringEquals: {
-        'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
-        'AWS:SourceArn': `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+        'AWS:SourceAccount': AWS_ACCOUNT,
+        'AWS:SourceArn': `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
       },
     });
 
@@ -1282,8 +1272,8 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(sesKeyUse?.Principal).toEqual({ Service: 'ses.amazonaws.com' });
     expect(sesKeyUse?.Condition).toEqual({
       StringEquals: {
-        'AWS:SourceAccount': EXPLORATION_SMOKE_ACCOUNT,
-        'AWS:SourceArn': `arn:aws:ses:${EXPLORATION_SMOKE_REGION}:${EXPLORATION_SMOKE_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
+        'AWS:SourceAccount': AWS_ACCOUNT,
+        'AWS:SourceArn': `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:configuration-set/${SES_CONFIGURATION_SET_NAME}`,
       },
     });
   });
