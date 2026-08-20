@@ -99,7 +99,7 @@ const HUMAN_ACTOR = Object.freeze({
   sessionId: randomUUID(),
 });
 const CONNECTIVITY_EPOCH_ID = randomUUID();
-const FANOUT_ADMIN_ACTOR = Object.freeze({
+const ADMIN_ACTOR = Object.freeze({
   kind: 'human' as const,
   userId: randomUUID(),
   sessionId: randomUUID(),
@@ -144,7 +144,7 @@ function store(): JournalCapabilityStore {
   return createDrizzleJournalCapabilityStore(databaseConnection().db);
 }
 
-async function insertSyntheticFanoutAdminSession(
+async function insertSyntheticAdminSession(
   database: Database,
   fixtureTime: Date,
 ): Promise<void> {
@@ -155,16 +155,16 @@ async function insertSyntheticFanoutAdminSession(
   const membershipSnapshotVersion = Number.parseInt(suffix.slice(0, 7), 16) + 1;
 
   await database.insert(users).values({
-    id: FANOUT_ADMIN_ACTOR.userId,
-    googleSubject: `synthetic-fanout-admin-${suffix}`,
-    email: `synthetic.fanout.admin.${suffix}@example.invalid`,
-    displayName: 'Synthetic Fanout Control Administrator',
+    id: ADMIN_ACTOR.userId,
+    googleSubject: `synthetic-admin-${suffix}`,
+    email: `synthetic.admin.${suffix}@example.invalid`,
+    displayName: 'Synthetic Administrator',
     facilityScopeKind: 'district',
     createdAt: identityCreatedAt,
     disabledAt: null,
   });
   await database.insert(userRoles).values({
-    userId: FANOUT_ADMIN_ACTOR.userId,
+    userId: ADMIN_ACTOR.userId,
     role: 'admin',
   });
   await database.insert(accessMembershipSnapshots).values({
@@ -176,17 +176,17 @@ async function insertSyntheticFanoutAdminSession(
   });
   await database.insert(deviceEnrollments).values({
     id: deviceEnrollmentId,
-    userId: FANOUT_ADMIN_ACTOR.userId,
+    userId: ADMIN_ACTOR.userId,
     platform: 'web',
     unlockMethod: 'secure-session-cookie',
-    installationId: `synthetic-fanout-admin-${suffix}`,
+    installationId: `synthetic-admin-${suffix}`,
     enrolledAt: identityCreatedAt,
     lastSeenAt: fixtureTime,
     revokedAt: null,
   });
   await database.insert(sessions).values({
-    id: FANOUT_ADMIN_ACTOR.sessionId,
-    userId: FANOUT_ADMIN_ACTOR.userId,
+    id: ADMIN_ACTOR.sessionId,
+    userId: ADMIN_ACTOR.userId,
     deviceEnrollmentId,
     membershipSnapshotId,
     membershipValidUntil: new Date(fixtureTime.getTime() + 60 * 60_000),
@@ -1276,7 +1276,7 @@ describeWithDatabase('event journal database guarantees', () => {
     );
   });
 
-  test('records synthetic all-clear fan-out and close as distinct append-only lifecycle facts', async () => {
+  test('records synthetic all-clear send and close as distinct append-only lifecycle facts', async () => {
     const ids = syntheticFixtureIds();
     const rollbackFixture = new Error(
       'Rollback the isolated drill/synthetic lifecycle fixture.',
@@ -1291,10 +1291,7 @@ describeWithDatabase('event journal database guarantees', () => {
         transactionalDatabase,
       );
       const fixtureTime = new Date();
-      await insertSyntheticFanoutAdminSession(
-        transactionalDatabase,
-        fixtureTime,
-      );
+      await insertSyntheticAdminSession(transactionalDatabase, fixtureTime);
       const integrationIds = ['expo-push', 'ses-email'] as const;
       const originalConfigurations = await transaction
         .select()
@@ -1949,10 +1946,7 @@ describeWithDatabase('event journal database guarantees', () => {
           sessionId: HUMAN_ACTOR.sessionId,
           establishedAt: fixtureTime,
         });
-        await insertSyntheticFanoutAdminSession(
-          transactionalDatabase,
-          fixtureTime,
-        );
+        await insertSyntheticAdminSession(transactionalDatabase, fixtureTime);
 
         const sessionResult = SessionEstablishmentResultSchema.parse({
           user: {

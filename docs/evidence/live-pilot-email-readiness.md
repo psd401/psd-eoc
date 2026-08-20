@@ -71,7 +71,7 @@ The retained live-pilot stack source defines:
   and
 - a production composition seam that is dark by default. Its enabled form
   requires a durable attempt store, durable SES no-resend ledger, evidence
-  writer, exact queue-invocation authorizer, fan-out authorizer, live-provider
+  writer, exact queue-invocation authorizer, delivery authorizer, live-provider
   authorizer, and final provider-send authorizer. Construction performs no
   network I/O.
 

@@ -143,7 +143,7 @@ export interface LifecyclePersistenceBundle {
   readonly outboxRecord: OutboxRecord | null;
   readonly integrationStatusIds: Readonly<Record<string, string>>;
   /** Exact reviewed preview time; null only for non-notifying lifecycle work. */
-  readonly fanoutPreviewCreatedAt: string | null;
+  readonly sendPreviewCreatedAt: string | null;
 }
 
 export interface JoinPersistenceBundle {
@@ -735,7 +735,7 @@ export const startEventRegistration: ServerCapabilityRegistration<
         context,
         payload: {
           code: 'notification-intent-recorded',
-          summary: 'Notification fan-out intent recorded.',
+          summary: 'Notification send intent recorded.',
           relatedRecordId: notification.intent.id,
         },
       }),
@@ -762,7 +762,7 @@ export const startEventRegistration: ServerCapabilityRegistration<
       result,
       outboxRecord: notification.outbox,
       integrationStatusIds: resolved.integrationStatusIds,
-      fanoutPreviewCreatedAt: preview.createdAt,
+      sendPreviewCreatedAt: preview.createdAt,
     });
     return result;
   },
@@ -914,7 +914,7 @@ async function notifyingLifecycleResult(
         context,
         payload: {
           code: 'notification-intent-recorded',
-          summary: 'Notification fan-out intent recorded.',
+          summary: 'Notification send intent recorded.',
           relatedRecordId: notification.intent.id,
         },
       }),
@@ -926,7 +926,7 @@ async function notifyingLifecycleResult(
     result,
     outboxRecord: notification.outbox,
     integrationStatusIds: resolvedPreview.integrationStatusIds,
-    fanoutPreviewCreatedAt: resolvedPreview.preview.createdAt,
+    sendPreviewCreatedAt: resolvedPreview.preview.createdAt,
   });
   return result;
 }
@@ -1101,7 +1101,7 @@ export const closeEventRegistration: ServerCapabilityRegistration<
       result,
       outboxRecord: null,
       integrationStatusIds: {},
-      fanoutPreviewCreatedAt: null,
+      sendPreviewCreatedAt: null,
     });
     return result;
   },
@@ -1203,7 +1203,7 @@ export const reopenAsCorrectionRegistration: ServerCapabilityRegistration<
       result,
       outboxRecord: null,
       integrationStatusIds: {},
-      fanoutPreviewCreatedAt: null,
+      sendPreviewCreatedAt: null,
     });
     return result;
   },
@@ -2225,9 +2225,9 @@ async function persistNotification(
   integrationStatusIds: Readonly<Record<string, string>>,
 ): Promise<void> {
   // A notification intent is inserted plainly. It used to be bound at insert to
-  // a fan-out control record and its enable epoch, so a deployment that had
-  // never been switched on refused every activation and said only that fan-out
-  // was "unavailable". What authorizes this fan-out is upstream and unchanged:
+  // a notification control record and its enable epoch, so a deployment that had
+  // never been switched on refused every activation and said only that sending
+  // was "unavailable". What authorizes this send is upstream and unchanged:
   // an authenticated human, a fresh consequence preview, and the human-only
   // capability registry.
   await database.insert(notificationIntents).values({
@@ -2385,7 +2385,7 @@ async function persistLifecycleBundle(
     if (bundle.outboxRecord === null) {
       throw conflict('Notification intent requires an atomic outbox record.');
     }
-    if (bundle.fanoutPreviewCreatedAt === null) {
+    if (bundle.sendPreviewCreatedAt === null) {
       throw conflict(
         'Notification intent requires exact consequence-preview provenance.',
       );
@@ -2434,10 +2434,10 @@ async function persistLifecycleBundle(
     }
   } else if (
     bundle.outboxRecord !== null ||
-    bundle.fanoutPreviewCreatedAt !== null
+    bundle.sendPreviewCreatedAt !== null
   ) {
     throw conflict(
-      'Fan-out provenance cannot exist without a notification intent.',
+      'Send provenance cannot exist without a notification intent.',
     );
   }
 }

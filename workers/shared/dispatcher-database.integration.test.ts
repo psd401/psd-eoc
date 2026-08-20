@@ -700,7 +700,7 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
         Entries: Array<{ Id: string; MessageBody: string }>;
       };
       expect(body.QueueUrl).toBe(
-        'https://sqs.us-west-2.amazonaws.com/123456789012/synthetic-fanout',
+        'https://sqs.us-west-2.amazonaws.com/123456789012/synthetic-delivery',
       );
       expect(body.Entries).toHaveLength(3);
       for (const entry of body.Entries) {
@@ -721,7 +721,7 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     const queue = createSqsDispatchBatchQueue(
       {
         queueUrl:
-          'https://sqs.us-west-2.amazonaws.com/123456789012/synthetic-fanout',
+          'https://sqs.us-west-2.amazonaws.com/123456789012/synthetic-delivery',
         region: 'us-west-2',
         timeoutMilliseconds: 10_000,
       },

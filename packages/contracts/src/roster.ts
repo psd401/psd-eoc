@@ -70,7 +70,7 @@ export type EndpointStatus = z.infer<typeof EndpointStatusSchema>;
 
 /**
  * Owns the stable identifier for an endpoint snapshot. Each roster version
- * retains the exact contact destination used for fan-out reconstruction.
+ * retains the exact contact destination used to rebuild the send.
  */
 export const EndpointIdSchema = UuidSchema;
 

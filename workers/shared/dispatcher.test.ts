@@ -799,7 +799,7 @@ describe('production SQS protocol', () => {
     expect(() =>
       readSqsDispatchBatchQueueConfiguration({
         AWS_REGION: 'us-west-2',
-        FANOUT_QUEUE_URL:
+        DELIVERY_QUEUE_URL:
           'https://sqs.us-west-2.amazonaws.com/123456789012/test-queue.fifo',
       }),
     ).toThrow(

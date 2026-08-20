@@ -17,7 +17,7 @@ import { SessionAccessError } from '../../packages/server/lib/auth/sessions';
 
 const REGION = 'us-west-2';
 const ACCOUNT_ID = '123456789012';
-const QUEUE_NAME = 'psd-eoc-fanout';
+const QUEUE_NAME = 'psd-eoc-delivery';
 const QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT_ID}/${QUEUE_NAME}`;
 const QUEUE_ARN = `arn:aws:sqs:${REGION}:${ACCOUNT_ID}:${QUEUE_NAME}`;
 const RUNTIME_SECRET_ARN = `arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:psd-eoc-runtime-AbCdEf`;
@@ -73,7 +73,7 @@ function runtimeEnvironment(): Readonly<Record<string, string>> {
     DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
     DATABASE_IDLE_TIMEOUT_SECONDS: '0',
     RUNTIME_SECRET_ARN,
-    FANOUT_QUEUE_URL: QUEUE_URL,
+    DELIVERY_QUEUE_URL: QUEUE_URL,
     GOOGLE_OAUTH_CONFIG: JSON.stringify({
       clientId: OAUTH_WEB_CLIENT_ID,
       clientSecret: OAUTH_CLIENT_SECRET,
@@ -97,9 +97,9 @@ function successfulDependencies(calls: string[] = []): DeepHealthDependencies {
       expect(signal.aborted).toBe(false);
       calls.push('database');
     },
-    async checkFanoutQueue(signal: AbortSignal): Promise<void> {
+    async checkDeliveryQueue(signal: AbortSignal): Promise<void> {
       expect(signal.aborted).toBe(false);
-      calls.push('fanout-queue');
+      calls.push('delivery-queue');
     },
     async checkRuntimeSecrets(signal: AbortSignal): Promise<void> {
       expect(signal.aborted).toBe(false);
@@ -440,7 +440,7 @@ describe('deep health GET contract', () => {
     expect(await response.json()).toEqual({ status: 'ok' });
     expect(calls.sort()).toEqual([
       'database',
-      'fanout-queue',
+      'delivery-queue',
       'runtime-secrets',
     ]);
     expectNoCache(response);
@@ -456,8 +456,8 @@ describe('deep health GET contract', () => {
           releaseDatabase = resolve;
         });
       },
-      async checkFanoutQueue(): Promise<void> {
-        calls.push('fanout-queue');
+      async checkDeliveryQueue(): Promise<void> {
+        calls.push('delivery-queue');
       },
       async checkRuntimeSecrets(): Promise<void> {
         calls.push('runtime-secrets');
@@ -469,7 +469,7 @@ describe('deep health GET contract', () => {
     await Promise.resolve();
     expect(calls.sort()).toEqual([
       'database',
-      'fanout-queue',
+      'delivery-queue',
       'runtime-secrets',
     ]);
     if (releaseDatabase === undefined) {
@@ -484,7 +484,7 @@ describe('deep health GET contract', () => {
   it('fails closed with one generic response for every dependency failure', async () => {
     const probeNames = [
       'checkDatabase',
-      'checkFanoutQueue',
+      'checkDeliveryQueue',
       'checkRuntimeSecrets',
     ] as const;
     const privateFailure =
@@ -499,7 +499,7 @@ describe('deep health GET contract', () => {
       };
       const response = await createHealthRouteHandler({
         checkDatabase: () => dependency('checkDatabase'),
-        checkFanoutQueue: () => dependency('checkFanoutQueue'),
+        checkDeliveryQueue: () => dependency('checkDeliveryQueue'),
         checkRuntimeSecrets: () => dependency('checkRuntimeSecrets'),
       })();
       const body = await response.text();
@@ -773,7 +773,7 @@ describe('authenticated rollback canary POST', () => {
 });
 
 describe('production deep health reads', () => {
-  it('proves both shared route pools, fan-out queue, and secret reachability using reads only', async () => {
+  it('proves both shared route pools, delivery queue, and secret reachability using reads only', async () => {
     const sharedDatabaseCalls: string[] = [];
     const sessionProbeCredentials: string[] = [];
     const requestedSignals: AbortSignal[] = [];
@@ -840,7 +840,7 @@ describe('production deep health reads', () => {
 
     await Promise.all([
       dependencies.checkDatabase(controller.signal),
-      dependencies.checkFanoutQueue(controller.signal),
+      dependencies.checkDeliveryQueue(controller.signal),
       dependencies.checkRuntimeSecrets(controller.signal),
     ]);
 
@@ -861,7 +861,7 @@ describe('production deep health reads', () => {
       const headers = new Headers(request.init.headers);
       expect(headers.get('authorization')).toBe(
         request.target === 'AmazonSQS.GetQueueAttributes'
-          ? 'AWS4-HMAC-SHA256 Credential=ASIA0000000000000000/20260812/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=efff8cb62799cc61ed5aee9d3f8c47f3ff1b17b9c78711bfd5f2a429a20569d4'
+          ? 'AWS4-HMAC-SHA256 Credential=ASIA0000000000000000/20260812/us-west-2/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=a00b8f0c9e022358e76efaaff4bf6ca9e2372c28c707495a2fabb14245dc39ec'
           : 'AWS4-HMAC-SHA256 Credential=ASIA0000000000000000/20260812/us-west-2/secretsmanager/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=3f22f37d61f3770208bddaba6f739cd88b37fb96a232fd9c68668085640bb3c2',
       );
       expect(headers.get('content-type')).toBe(
@@ -941,7 +941,7 @@ describe('production deep health reads', () => {
     const handler = createHealthRouteHandler(
       {
         checkDatabase: runtimeDependencies.checkDatabase,
-        async checkFanoutQueue(): Promise<void> {},
+        async checkDeliveryQueue(): Promise<void> {},
         async checkRuntimeSecrets(): Promise<void> {},
       },
       { timeoutMilliseconds: 10 },
@@ -1006,7 +1006,7 @@ describe('production deep health reads', () => {
     const handler = createHealthRouteHandler(
       {
         checkDatabase: runtimeDependencies.checkDatabase,
-        async checkFanoutQueue(): Promise<void> {},
+        async checkDeliveryQueue(): Promise<void> {},
         async checkRuntimeSecrets(): Promise<void> {},
       },
       { timeoutMilliseconds: 10 },
@@ -1158,7 +1158,7 @@ describe('production deep health reads', () => {
     const signal = new AbortController().signal;
 
     await expect(dependencies.checkDatabase(signal)).rejects.toThrow();
-    await expect(dependencies.checkFanoutQueue(signal)).rejects.toThrow();
+    await expect(dependencies.checkDeliveryQueue(signal)).rejects.toThrow();
     await expect(dependencies.checkRuntimeSecrets(signal)).rejects.toThrow();
   });
 });

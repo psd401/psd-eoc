@@ -54,7 +54,7 @@ evidence and approval.
   shared account cannot forge or bypass the scan result. App Runner's media
   data access is limited to `quarantine/` and `ready/` object reads/writes plus
   the exact KMS operations S3 requires.
-- A central fan-out queue plus push, email, and SMS work queues. Every queue has
+- A delivery queue plus push, email, and SMS work queues. Every queue has
   an attached retained dead-letter queue and bounded receive attempts; each
   dead-letter queue accepts redrive only from its paired source queue.
 - An App Runner service with at least two provisioned instances and automatic

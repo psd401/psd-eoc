@@ -1463,7 +1463,7 @@ describe('event lifecycle capabilities', () => {
     expect(store.outboxRecords).toHaveLength(4);
     expect(store.persistLifecycleCalls).toBe(5);
     expect(
-      store.lifecycleBundles.map((bundle) => bundle.fanoutPreviewCreatedAt),
+      store.lifecycleBundles.map((bundle) => bundle.sendPreviewCreatedAt),
     ).toEqual([
       TIMES.previewCreated,
       TIMES.firstAllClearPreview,
@@ -1541,7 +1541,7 @@ describe('event lifecycle capabilities', () => {
     expect(store.lifecycleBundles).toHaveLength(1);
     expect(store.lifecycleBundles[0]).toMatchObject({
       outboxRecord: null,
-      fanoutPreviewCreatedAt: null,
+      sendPreviewCreatedAt: null,
       result: { notificationIntent: null },
     });
   });

@@ -992,7 +992,7 @@ export class PsdEocStack extends Stack {
                   value: runtimeDatabaseIdleTimeoutSeconds.valueAsString,
                 },
                 {
-                  name: 'FANOUT_QUEUE_URL',
+                  name: 'DELIVERY_QUEUE_URL',
                   value: healthQueue.queueUrl,
                 },
                 {

@@ -8584,14 +8584,14 @@ const runSelfTest = async (): Promise<void> => {
     facilityTerminalContextEvaluations: 0,
   };
   const collisionPrefixContext = compactPopulationPrefixes(collisionFacilities);
-  const highFanoutCollisionDraft = buildDraft(
+  const broadCollisionDraft = buildDraft(
     collisionFacilities,
     collisionGroups,
     1,
     generatedAt,
     collisionMetrics,
   );
-  const highFanoutCollisionValidation = validateDraft(highFanoutCollisionDraft);
+  const broadCollisionValidation = validateDraft(broadCollisionDraft);
   assertSelfTest(
     [
       collisionPrefixContext.automaticAliasIndex,
@@ -8610,22 +8610,22 @@ const runSelfTest = async (): Promise<void> => {
         .length === MAX_FACILITY_CONTEXTS_PER_IDENTITY_FIELD &&
       collisionMetrics.facilityGroupScoreEvaluations === 0 &&
       collisionMetrics.facilityTerminalContextEvaluations === 0 &&
-      highFanoutCollisionDraft.inventoryGroups.length ===
+      broadCollisionDraft.inventoryGroups.length ===
         collisionGroups.length &&
-      highFanoutCollisionDraft.report.omittedUnverifiedGroupIdentityCount ===
+      broadCollisionDraft.report.omittedUnverifiedGroupIdentityCount ===
         0 &&
-      highFanoutCollisionDraft.report.ambiguousStaffScopeGroups.length ===
+      broadCollisionDraft.report.ambiguousStaffScopeGroups.length ===
         collisionGroups.length &&
-      highFanoutCollisionDraft.report.unassignedBuildingLikeGroups.length ===
+      broadCollisionDraft.report.unassignedBuildingLikeGroups.length ===
         collisionGroups.length &&
-      highFanoutCollisionDraft.buildingMappings.every(
+      broadCollisionDraft.buildingMappings.every(
         ({ assessment, createGroupSource }) =>
           assessment.outcome === 'missing' &&
           assessment.candidates.length === 0 &&
           createGroupSource === null,
       ) &&
-      highFanoutCollisionValidation.structuralValidationPassed,
-    'high-fanout ambiguous aliases remain visible without scoring or retaining their facility cross-product',
+      broadCollisionValidation.structuralValidationPassed,
+    'broadly ambiguous aliases remain visible without scoring or retaining their facility cross-product',
   );
 
   const ordinalCollisionFacilities = [

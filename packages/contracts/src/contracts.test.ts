@@ -166,9 +166,6 @@ const ids = {
   deliveryEligibilityPush: '00000000-0000-4000-8000-000000000046',
   deliveryEligibilityEmail: '00000000-0000-4000-8000-000000000047',
   deliveryEligibilityRevocation: '00000000-0000-4000-8000-000000000048',
-  fanoutRecord: '00000000-0000-4000-8000-000000000049',
-  previousFanoutRecord: '00000000-0000-4000-8000-000000000050',
-  fanoutEnableEpoch: '00000000-0000-4000-8000-000000000051',
 } as const;
 
 const times = {
@@ -3470,7 +3467,7 @@ describe('notification and outbox classification continuity', () => {
     ).toBe(false);
   });
 
-  test('pins type, roster, audience, and classification through fan-out', () => {
+  test('pins type, roster, audience, and classification through the send', () => {
     const staffTarget = targeting('incident', 'real', 'staff');
     const intent = {
       id: ids.intent,

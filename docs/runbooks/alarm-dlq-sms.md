@@ -19,11 +19,11 @@ is expected; routable staff work in the queue while blocked/unverified is
 
 1. Do not receive, purge, delete, copy, edit, or redrive the message. Follow
    [alarm-sqs-dlq.md](alarm-sqs-dlq.md) for common disposition rules.
-2. Confirm account/region, exact queue pair, emergency-disable epoch, oldest
+2. Confirm account/region, exact queue pair, oldest
    age, counts, channel-enable state, event-source state, provider permissions,
    and SMS integration truth without exposing a phone number.
 3. If any routable staff work or provider call exists while the integration is
-   not `live-verified`, emergency-disable fan-out and escalate **SEV-0**.
+   not `live-verified`, stop the service and escalate **SEV-0**.
 4. If SMS was independently approved/live-verified, review
    `/psd-eoc/workers/sms` by UTC interval, sanitized attempt ID, and bounded
    reason code. Separate policy/registration block, opt-out, pre-provider

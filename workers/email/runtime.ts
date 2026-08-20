@@ -115,7 +115,7 @@ async function authorizeInvocation(
 /**
  * Production email composition seam. The omitted mode is dark and constructs
  * no provider adapter. An enabled mode is possible only after callers supply
- * the durable execution and SES ledgers plus fresh fan-out, live-provider,
+ * the durable execution and SES ledgers plus fresh live-provider,
  * and final-send authorizers. Construction itself performs no network I/O.
  */
 export class SesEmailRuntime {

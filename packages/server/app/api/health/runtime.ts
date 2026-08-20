@@ -170,7 +170,7 @@ export interface RuntimeHealthAdapters {
 /** The three independent, side-effect-free checks required by deep health. */
 export interface DeepHealthDependencies {
   checkDatabase(signal: AbortSignal): Promise<void>;
-  checkFanoutQueue(signal: AbortSignal): Promise<void>;
+  checkDeliveryQueue(signal: AbortSignal): Promise<void>;
   checkRuntimeSecrets(signal: AbortSignal): Promise<void>;
 }
 
@@ -321,7 +321,7 @@ function readQueueConfiguration(
   const region = readRegion(environment);
   const queueUrlValue = requiredEnvironmentValue(
     environment,
-    'FANOUT_QUEUE_URL',
+    'DELIVERY_QUEUE_URL',
     2_048,
   );
   let queueUrl: URL;
@@ -755,7 +755,7 @@ export function createRuntimeDeepHealthDependencies(
       }
     },
 
-    async checkFanoutQueue(signal: AbortSignal): Promise<void> {
+    async checkDeliveryQueue(signal: AbortSignal): Promise<void> {
       assertNotAborted(signal);
       const configuration = readQueueConfiguration(environment);
       const credentials = await credentialsFor(configuration.region, signal);
@@ -778,7 +778,7 @@ export function createRuntimeDeepHealthDependencies(
       );
       const attributes = asRecord(response?.Attributes);
       if (attributes?.QueueArn !== configuration.queueArn) {
-        throw new Error('Fan-out queue health response was invalid.');
+        throw new Error('Delivery queue health response was invalid.');
       }
     },
 
@@ -832,7 +832,7 @@ export function createHealthRouteHandler(
         dependencies.checkDatabase(controller.signal),
       ),
       Promise.resolve().then(() =>
-        dependencies.checkFanoutQueue(controller.signal),
+        dependencies.checkDeliveryQueue(controller.signal),
       ),
       Promise.resolve().then(() =>
         dependencies.checkRuntimeSecrets(controller.signal),

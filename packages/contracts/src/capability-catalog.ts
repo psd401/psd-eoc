@@ -610,7 +610,7 @@ export const EventLifecycleMutationResultSchema = z
       context.addIssue({
         code: 'custom',
         message:
-          'Activation, all-clear, and reactivation results require exactly one fan-out intent.',
+          'Activation, all-clear, and reactivation results require exactly one send intent.',
         path: ['notificationIntent'],
       });
     }

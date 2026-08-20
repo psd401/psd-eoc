@@ -18,7 +18,7 @@ channel, or another channel outage. Safety-boundary failures are **SEV-0**.
 
 1. Do not receive, purge, delete, copy, edit, or redrive the message. Follow
    [alarm-sqs-dlq.md](alarm-sqs-dlq.md) for common disposition rules.
-2. Confirm account/region, exact queue pair, emergency-disable epoch, oldest
+2. Confirm account/region, exact queue pair, oldest
    age, counts, and Expo integration truth. Non-`live-verified` truth must make
    zero provider calls.
 3. Review `/psd-eoc/workers/push` by UTC interval, sanitized attempt ID, and

@@ -34,7 +34,7 @@ change the `mocked` SES integration truth or authorize provider I/O.
 
 ## Respond
 
-1. Confirm account `338414773271`, region `us-west-2`, current fan-out control
+1. Confirm account `338414773271`, region `us-west-2`, current delivery control
    epoch, SES integration truth, and `psd-eoc-email` queue/DLQ state.
 2. In CloudWatch, inspect `/psd-eoc/workers/email` and sanitized SES
    configuration-set metrics for the UTC interval. Count bounded reason codes;

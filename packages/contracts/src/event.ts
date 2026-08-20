@@ -961,7 +961,7 @@ export type LifecycleConsequencePreview = z.infer<
 /**
  * Owns an activation prepared for one-tap human confirmation. Agents may
  * author this separate record, but only a fresh human-confirmed start consumes
- * it to create an actual incident or staff drill and fan-out intent.
+ * it to create an actual incident or staff drill and send intent.
  */
 export const PreparedActivationSchema = z
   .object({
@@ -1087,7 +1087,7 @@ export type StartEventInput = z.infer<typeof StartEventInputSchema>;
 
 /**
  * Owns an idempotent participant join mutation. Joining never silently starts
- * a new event or triggers notification fan-out.
+ * a new event or sends notifications.
  */
 export const JoinEventInputSchema = z
   .object({
@@ -1196,7 +1196,7 @@ const eventTransitionCommonShape = {
 /**
  * Owns complete append-only event transition evidence, including fresh
  * activation or lifecycle notification authorization where a transition
- * starts a fan-out.
+ * starts sending notifications.
  */
 export const EventTransitionSchema = z
   .union([

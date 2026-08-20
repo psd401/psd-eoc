@@ -66,8 +66,8 @@ export const BASE_OUTBOX_BACKOFF_MILLISECONDS = 500;
 /** Upper bound for one persisted outbox retry delay. */
 export const MAX_OUTBOX_BACKOFF_MILLISECONDS = 30_000;
 
-/** Environment variable containing the central fan-out SQS queue URL. */
-export const FANOUT_QUEUE_URL_ENV = 'FANOUT_QUEUE_URL';
+/** Environment variable containing the delivery SQS queue URL. */
+export const DELIVERY_QUEUE_URL_ENV = 'DELIVERY_QUEUE_URL';
 
 const DEFAULT_SQS_TIMEOUT_MILLISECONDS = 10_000;
 const MAX_CONTAINER_CREDENTIAL_RESPONSE_BYTES = 32 * 1_024;
@@ -86,7 +86,6 @@ export type OutboxDispatcherErrorCode =
   | 'OUTBOX_CLAIM_LOST'
   | 'OUTBOX_CONFIGURATION_INVALID'
   | 'OUTBOX_DISPATCH_RETRY_EXHAUSTED'
-  | 'FANOUT_EMERGENCY_DISABLED'
   | 'OUTBOX_NOT_FOUND'
   | 'OUTBOX_PERSISTENCE_FAILED'
   | 'SQS_AUTHENTICATION_FAILED'
@@ -564,7 +563,7 @@ export type DispatcherEnvironment = Readonly<
   Record<string, string | undefined>
 >;
 
-/** Validated destination and timeout for the central fan-out queue. */
+/** Validated destination and timeout for the delivery queue. */
 export interface SqsDispatchBatchQueueConfiguration {
   readonly queueUrl: string;
   readonly region: string;
@@ -736,7 +735,7 @@ function validatedSqsQueueUrl(queueUrlValue: string, region: string): string {
   } catch {
     throw new OutboxDispatcherError(
       'OUTBOX_CONFIGURATION_INVALID',
-      `${FANOUT_QUEUE_URL_ENV} is not a valid URL.`,
+      `${DELIVERY_QUEUE_URL_ENV} is not a valid URL.`,
       false,
     );
   }
@@ -757,7 +756,7 @@ function validatedSqsQueueUrl(queueUrlValue: string, region: string): string {
   ) {
     throw new OutboxDispatcherError(
       'OUTBOX_CONFIGURATION_INVALID',
-      `${FANOUT_QUEUE_URL_ENV} must identify an AWS SQS queue in AWS_REGION.`,
+      `${DELIVERY_QUEUE_URL_ENV} must identify an AWS SQS queue in AWS_REGION.`,
       false,
     );
   }
@@ -787,7 +786,7 @@ function parseSqsDispatchBatchQueueConfiguration(
   });
 }
 
-/** Reads fail-closed fan-out queue configuration from the runtime. */
+/** Reads fail-closed delivery queue configuration from the runtime. */
 export function readSqsDispatchBatchQueueConfiguration(
   environment: DispatcherEnvironment = process.env,
 ): SqsDispatchBatchQueueConfiguration {
@@ -798,7 +797,7 @@ export function readSqsDispatchBatchQueueConfiguration(
   );
   const queueUrl = requiredDispatcherEnvironmentValue(
     environment,
-    FANOUT_QUEUE_URL_ENV,
+    DELIVERY_QUEUE_URL_ENV,
     2_048,
   );
   const timeoutRaw =
@@ -1981,7 +1980,7 @@ async function loadDrizzleEmailEndpointPolicy(
   );
 }
 
-/** Production destination-free policy overlay for email fan-out. */
+/** Production destination-free policy overlay for email delivery. */
 export function createDrizzleEmailEndpointPolicyStore(
   database: Database,
 ): EmailEndpointPolicyStore {
@@ -2663,40 +2662,6 @@ export async function dispatchOutbox(
   }
 
   const claim = parseDispatchClaim(claimed.claim);
-  let fanoutAuthorized = false;
-  try {
-    fanoutAuthorized = true;
-  } catch {
-    fanoutAuthorized = false;
-  }
-  if (!fanoutAuthorized) {
-    let disposition: OutboxFailureDisposition;
-    try {
-      disposition = await dependencies.store.recordFailure(
-        claim,
-        'FANOUT_EMERGENCY_DISABLED',
-        false,
-      );
-    } catch {
-      throw new OutboxDispatcherError(
-        'OUTBOX_PERSISTENCE_FAILED',
-        'Fan-out was denied and the terminal suppression could not be persisted.',
-        true,
-      );
-    }
-    if (disposition === 'stale-claim') {
-      throw new OutboxDispatcherError(
-        'OUTBOX_CLAIM_LOST',
-        'The outbox lease changed while emergency suppression was recorded.',
-        true,
-      );
-    }
-    throw new OutboxDispatcherError(
-      'FANOUT_EMERGENCY_DISABLED',
-      'Fan-out is emergency-disabled or its authorization is unavailable.',
-      false,
-    );
-  }
   // No awaited application operation may sit between this successful locked
   // check and queue.send. Once the check linearizes before a later disable,
   // the SQS handoff is classified as already admitted/in flight.

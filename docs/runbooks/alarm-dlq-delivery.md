@@ -1,7 +1,7 @@
-# Alarm runbook: central fan-out DLQ
+# Alarm runbook: delivery DLQ
 
-**Source-defined CloudWatch alarm name:** `psd-eoc-fanout-dlq-depth`, targeting
-`psd-eoc-fanout-dlq` paired only with source queue `psd-eoc-fanout`.
+**Source-defined CloudWatch alarm name:** `psd-eoc-delivery-dlq-depth`, targeting
+`psd-eoc-delivery-dlq` paired only with source queue `psd-eoc-delivery`.
 
 **Deployment/read-back truth:** issue #29 source landed in pull request #96,
 but no approved deployment, CloudWatch read-back, alarm-action exercise, or
@@ -10,7 +10,7 @@ deep link as unavailable until #91 supplies that evidence.
 
 ## Meaning and severity
 
-A central fan-out batch could not be safely routed to channel queues after
+A delivery batch could not be safely routed to channel queues after
 bounded attempts. Every approved channel may be affected. Classify **SEV-1**;
 use **SEV-0** for real/drill mismatch, unapproved routable work, control-epoch
 mismatch, or a human-only boundary failure.
@@ -21,7 +21,7 @@ mismatch, or a human-only boundary failure.
    the common safety/disposition procedure in
    [alarm-sqs-dlq.md](alarm-sqs-dlq.md).
 2. Confirm account `338414773271`, region `us-west-2`, exact DLQ/source names,
-   current emergency-disable revision/epoch, oldest age, visible count, and
+   oldest age, visible count, and
    source queue age/count.
 3. Review `/psd-eoc/dispatcher` logs by UTC interval and sanitized batch ID.
    Record bounded reason counts only; do not open or copy a body.

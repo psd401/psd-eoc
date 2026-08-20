@@ -5304,8 +5304,8 @@ export function EventRoom({
             {dialogFeedback}
             <p>
               Issuing all-clear changes this event state, appends a distinct
-              journal entry, and starts the previewed notification fan-out. It
-              does not close or delete the event.
+              journal entry, and sends the previewed notification. It does not
+              close or delete the event.
             </p>
             {dialog.loading ? (
               <p role="status">Loading a fresh consequence preview…</p>

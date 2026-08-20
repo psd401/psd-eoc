@@ -12,7 +12,7 @@ deep link as unavailable until #91 supplies that evidence.
 
 The source-defined alarm fires when at least one staff outbox row remains
 neither published nor terminally failed for one minute. Missing metric data is
-breaching. The event may exist even when fan-out has not started. The collector
+breaching. The event may exist even when delivery has not started. The collector
 excludes test data; source code is not proof that the deployed query, metric,
 or alarm is current.
 
@@ -22,22 +22,19 @@ or alarm is current.
 - Never publish a reconstructed batch directly to SQS.
 - Never tell a user to repeat a real activation solely because notification
   work is delayed.
-- If emergency-disable is active or unreadable, retained work must remain
-  terminally suppressed under its original epoch.
 
 ## Respond
 
-1. Classify **SEV-1** when real activation fan-out is delayed. Confirm account
+1. Classify **SEV-1** when real activation delivery is delayed. Confirm account
    `338414773271`, region `us-west-2`, alarm time, and current control epoch.
 2. Use the approved read-only operational metric and application evidence.
    Record only row count, oldest age, status/reason counts, and sanitized
    outbox/batch IDs. Direct production SQL is not an approved procedure in this
    runbook.
 3. Compare App Runner health, `/psd-eoc/dispatcher` logs, central
-   `psd-eoc-fanout` queue age/count, and Aurora events over the same UTC window.
-4. Separate rows that are leased, retry-scheduled, permanently failed,
-   suppressed by emergency disable, or ambiguous. Missing or contradictory
-   state fails closed and is escalated.
+   `psd-eoc-delivery` queue age/count, and Aurora events over the same UTC window.
+4. Separate rows that are leased, retry-scheduled, permanently failed, or
+   ambiguous. Missing or contradictory state fails closed and is escalated.
 5. Determine whether a dispatcher deployment/configuration, database outage,
    SQS authorization failure, or central-queue outage is the proven cause.
    Do not infer a cause from age alone.

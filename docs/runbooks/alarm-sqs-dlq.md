@@ -2,7 +2,7 @@
 
 **Source-defined CloudWatch alarm names:**
 
-- `psd-eoc-fanout-dlq-depth`;
+- `psd-eoc-delivery-dlq-depth`;
 - `psd-eoc-push-dlq-depth`;
 - `psd-eoc-email-dlq-depth`; and
 - `psd-eoc-sms-dlq-depth`.
@@ -23,15 +23,15 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 - Do not edit a body, reset receive counts, or send it to another queue.
 - An ambiguous provider call remains `unknown`. Replaying it can duplicate a
   notification.
-- Disabling fan-out terminally suppresses pending work. A later enable epoch
+- Disabling delivery terminally suppresses pending work. A later enable epoch
   must not release any message created in an older epoch.
 - Raw payloads and provider responses are untrusted. Do not place them in
   tickets, screenshots, chat, or this repository.
 
 ## Common response
 
-1. Confirm account `338414773271`, region `us-west-2`, exact DLQ name, paired
-   source queue, and current emergency-disable epoch.
+1. Confirm account `338414773271`, region `us-west-2`, exact DLQ name, and the
+   paired source queue.
 2. Classify the incident using the per-DLQ section below. Record oldest age,
    visible count, source-queue age/count, and first alarm time from CloudWatch.
 3. Inspect the paired processor logs by UTC interval and sanitized batch or
@@ -48,10 +48,10 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
    reviewed replay mechanism. No such production replay mechanism is verified
    in the current repository, so replay is **BLOCKED**.
 
-### Central fan-out DLQ
+### Delivery DLQ
 
-- Queue: `psd-eoc-fanout-dlq`
-- Source: `psd-eoc-fanout`
+- Queue: `psd-eoc-delivery-dlq`
+- Source: `psd-eoc-delivery`
 - Severity: **SEV-1**; batches for every channel can be affected.
 - Check transactional outbox evidence, central router authorization, real/drill
   classification, roster snapshot ID, and current control epoch. Any mismatch
@@ -88,6 +88,6 @@ It is not a redrive to-do list. Automatic or bulk replay is forbidden.
 
 Record the root-cause issue, deployment/configuration digest, before/after
 counts, every disposition category, all remaining `unknown` outcomes, and the
-reviewing fan-out responder. A zero DLQ count is not by itself recovery proof;
+reviewing delivery responder. A zero DLQ count is not by itself recovery proof;
 the source queue, outbox, logs, delivery evidence, and alarm evaluation window
 must agree. Never delete retained evidence merely to make a count zero.

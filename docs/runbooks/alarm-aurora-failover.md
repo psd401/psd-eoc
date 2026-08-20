@@ -45,15 +45,15 @@ facts do not prove a cluster is deployed or failover has been tested.
 5. Check SQS age and stuck-outbox alarms. Work committed before the outage must
    remain append-only and may be delayed; ambiguous work must not be blindly
    replayed.
-6. If fan-out or control truth cannot be read, treat fan-out as disabled and
-   follow [emergency-disable.md](emergency-disable.md).
+6. If delivery truth cannot be read, stop the service rather than guessing:
+   there is no notification kill switch, so follow [rollback.md](rollback.md).
 
 ## Verify recovery
 
 1. Confirm one writer and at least one healthy reader are available and the
    cluster status is stable.
-2. Confirm the side-effect-free application health route, database-backed
-   reads, and current emergency-disable truth are readable.
+2. Confirm the side-effect-free application health route and database-backed
+   reads are readable.
 3. Confirm App Runner errors and outbox/queue backlog are returning toward
    normal without purging, resetting, or replaying unknown work.
 4. Reconcile each user-reported activation outcome from immutable event,

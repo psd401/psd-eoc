@@ -16,7 +16,6 @@ deployed, so execution is **BLOCKED BY #91**.
       target if any provider request could send.
 - [ ] The exact Expo account/project and least-privilege token policy were
       independently verified.
-- [ ] Emergency-disable truth is readable and the current epoch is recorded.
 - [ ] The new token can be stored only in the approved encrypted secrets
       system; it will never be printed, committed, or exposed to App Runner/mobile.
 - [ ] An isolated non-production worker with provably unroutable synthetic
@@ -47,9 +46,8 @@ deployed, so execution is **BLOCKED BY #91**.
 
 ## Compromise and rollback
 
-For suspected token compromise, classify **SEV-0**, emergency-disable fan-out,
-revoke the token, and keep push disabled until a new epoch is explicitly
-authorized. Do not use the old token for rollback. For a non-compromise
+For suspected token compromise, classify **SEV-0**, revoke the token, and keep
+push disabled until a replacement is explicitly authorized. Do not use the old token for rollback. For a non-compromise
 rotation failure, restore the exact prior safe secret version and worker
 configuration under the approved rollback. Never replay queued/unknown push
 attempts to test the credential.

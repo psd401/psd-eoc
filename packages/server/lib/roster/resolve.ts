@@ -78,7 +78,7 @@ export type ResolvedAudienceConfigRef = Readonly<
   Pick<AudienceConfig, 'facilityId' | 'id' | 'version'>
 >;
 
-/** One selected recipient and only the active endpoints eligible for fan-out. */
+/** One selected recipient and only the active endpoints eligible to receive. */
 export interface ResolvedAudienceRecipient {
   readonly recipientId: RecipientId;
   readonly groupSourceRefs: readonly RosterGroupSourceRef[];
@@ -86,7 +86,7 @@ export interface ResolvedAudienceRecipient {
 }
 
 /**
- * Pure internal fan-out plan. It repeats every immutable version selected for
+ * Pure internal delivery plan. It repeats every immutable version selected for
  * the resolution so later syncs or configuration edits cannot change a send.
  */
 export interface ResolvedAudience {

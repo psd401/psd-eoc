@@ -712,7 +712,7 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_NAME',
         'DATABASE_PORT',
         'DATABASE_SSL_ROOT_CERT',
-        'FANOUT_QUEUE_URL',
+        'DELIVERY_QUEUE_URL',
         'NODE_ENV',
         'PSD_EOC_IOS_BUNDLE_ID',
         'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
