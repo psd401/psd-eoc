@@ -36,7 +36,7 @@ import {
 import {} from './session-cookie';
 import { type EvaluatedAccessMembershipSet } from './google-access-membership';
 
-const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@example.invalid';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -63,8 +63,8 @@ const DATABASE_NAME_PATTERN = /^psd_eoc_i234_access_[a-f0-9]{32}_test$/u;
 const BASELINE_SOURCE_ID = '00000000-0000-4000-8000-000000000521';
 const BASELINE_SNAPSHOT_ID = '00000000-0000-4000-8000-000000000522';
 const USER_ID = '00000000-0000-4000-8000-000000000523';
-const RECOVERY_EMAIL = 'recovery.admin@psd401.net';
-const TRANSITION_EMAIL = 'initial.mobile@psd401.net';
+const RECOVERY_EMAIL = 'recovery.admin@example.invalid';
+const TRANSITION_EMAIL = 'initial.mobile@example.invalid';
 const BASELINE_TIME = new Date('2026-08-17T11:00:00.000Z');
 const SYNC_TIME = '2026-08-17T12:00:00.000Z';
 const PROVIDER_GROUP_ID = '01exactEngineering';
@@ -224,7 +224,7 @@ async function seedStrictBaseline(
       grantedRole: 'admin',
       active: true,
       googleGroupId: 'retained_recovery_access',
-      email: 'retained-recovery@psd401.net',
+      email: 'retained-recovery@example.invalid',
       fixtureKey: null,
       createdAt: BASELINE_TIME,
     });
@@ -339,7 +339,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       evaluationFor([
         {
           groupSourceId: BASELINE_SOURCE_ID,
-          groupEmail: 'retained-recovery@psd401.net',
+          groupEmail: 'retained-recovery@example.invalid',
           googleGroupId: 'retained_recovery_access',
           grantedRole: 'admin',
           memberEmails: [RECOVERY_EMAIL],
@@ -401,7 +401,10 @@ describeWithDatabase('access-membership atomic database publication', () => {
 
     const configured = await store.readConfiguredAccessGroups();
     expect(configured.map(({ email }) => email).sort()).toEqual(
-      ['retained-recovery@psd401.net', DESIGNATED_ACCESS_GROUP_EMAIL].sort(),
+      [
+        'retained-recovery@example.invalid',
+        DESIGNATED_ACCESS_GROUP_EMAIL,
+      ].sort(),
     );
 
     const reservation = await reserve(store, 'access-sync:publish-0002');
@@ -411,7 +414,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       evaluationFor([
         {
           groupSourceId: BASELINE_SOURCE_ID,
-          groupEmail: 'retained-recovery@psd401.net',
+          groupEmail: 'retained-recovery@example.invalid',
           googleGroupId: 'retained_recovery_access',
           grantedRole: 'admin',
           memberEmails: [RECOVERY_EMAIL],
@@ -476,7 +479,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       grantedRole: 'admin',
       active: false,
       googleGroupId: 'retiring_fixture',
-      email: 'retiring@psd401.net',
+      email: 'retiring@example.invalid',
       fixtureKey: null,
       createdAt: BASELINE_TIME,
     });
@@ -492,7 +495,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       evaluationFor([
         {
           groupSourceId: BASELINE_SOURCE_ID,
-          groupEmail: 'retained-recovery@psd401.net',
+          groupEmail: 'retained-recovery@example.invalid',
           googleGroupId: 'retained_recovery_access',
           grantedRole: 'admin',
           memberEmails: [RECOVERY_EMAIL],
@@ -548,7 +551,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
         evaluationFor([
           {
             groupSourceId: BASELINE_SOURCE_ID,
-            groupEmail: 'retained-recovery@psd401.net',
+            groupEmail: 'retained-recovery@example.invalid',
             googleGroupId: 'retained_recovery_access',
             grantedRole: 'admin',
             memberEmails: [],
@@ -601,7 +604,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
         evaluationFor([
           {
             groupSourceId: BASELINE_SOURCE_ID,
-            groupEmail: 'retained-recovery@psd401.net',
+            groupEmail: 'retained-recovery@example.invalid',
             googleGroupId: 'retained_recovery_access',
             grantedRole: 'staff',
             memberEmails: [RECOVERY_EMAIL],

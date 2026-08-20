@@ -45,7 +45,7 @@ function accessGroups(includeUnexpected = false): GroupSourcePage {
         displayName: 'PSD EOC Staff Access',
         active: true,
         googleGroupId: '01-access-group',
-        email: 'eoc-access@psd401.net',
+        email: 'eoc-access@example.invalid',
         createdAt: CREATED_AT,
       },
       ...(includeUnexpected
@@ -77,7 +77,7 @@ function users(): UserPage {
       {
         id: IDS.user,
         googleSubject: 'synthetic-google-subject-one',
-        email: 'alex.staff@psd401.net',
+        email: 'alex.staff@example.invalid',
         displayName: 'Alex Staff',
         roles: ['staff', 'admin'],
         facilityScope: { kind: 'district' },
@@ -87,7 +87,7 @@ function users(): UserPage {
       {
         id: IDS.disabledUser,
         googleSubject: 'synthetic-google-subject-two',
-        email: 'casey.staff@psd401.net',
+        email: 'casey.staff@example.invalid',
         displayName: 'Casey Staff',
         roles: ['staff'],
         facilityScope: {
@@ -134,7 +134,7 @@ describe('AccessAdminView authorization boundary', () => {
     );
     expect(html).not.toContain('<form');
     expect(html).not.toContain('<table');
-    expect(html).not.toContain('@psd401.net');
+    expect(html).not.toContain('@example.invalid');
   });
 
   test('fails closed when a non-access group reaches the view', () => {
@@ -161,7 +161,7 @@ describe('AccessAdminView semantics', () => {
     expect(html).toContain('scope="row"');
     expect(html).toContain('PSD EOC Staff Access');
     expect(html).toContain('01-access-group');
-    expect(html).toContain('eoc-access@psd401.net');
+    expect(html).toContain('eoc-access@example.invalid');
     expect(html).toContain('<summary>Edit PSD EOC Staff Access</summary>');
     expect(html).toContain(
       'Changing only the display name or status retains this source&#x27;s internal ID.',

@@ -84,22 +84,22 @@ describeWithDatabase('sign-in authorization', () => {
     await opened.db.insert(accessGroupMembers).values([
       {
         groupSourceId: ADMIN_GROUP,
-        email: 'newcomer@psd401.net',
+        email: 'newcomer@example.invalid',
         capturedAt: fresh,
       },
       {
         groupSourceId: STAFF_GROUP,
-        email: 'demoted@psd401.net',
+        email: 'demoted@example.invalid',
         capturedAt: fresh,
       },
       {
         groupSourceId: ADMIN_GROUP,
-        email: 'demoted@psd401.net',
+        email: 'demoted@example.invalid',
         capturedAt: fresh,
       },
       {
         groupSourceId: STAFF_GROUP,
-        email: 'disabled@psd401.net',
+        email: 'disabled@example.invalid',
         capturedAt: fresh,
       },
     ]);
@@ -114,14 +114,14 @@ describeWithDatabase('sign-in authorization', () => {
     // person to arrive is an administrator because their group says so.
     const result = await authorizeSignIn(database(), {
       googleSubject: 'subject-newcomer',
-      email: 'Newcomer@psd401.net',
+      email: 'Newcomer@example.invalid',
       displayName: 'New Comer',
       checkedAt: NOW,
     });
     expect(result).toMatchObject({ authorized: true, created: true });
     if (!result.authorized) throw new Error('expected authorization');
     expect(result.user.roles).toEqual(['admin']);
-    expect(result.user.email).toBe('newcomer@psd401.net');
+    expect(result.user.email).toBe('newcomer@example.invalid');
     // Nothing was written to the legacy role tables: authority comes from the
     // group, so there is no stored grant to go stale.
     expect(await rolesOf(result.user.id)).toEqual([]);
@@ -130,7 +130,7 @@ describeWithDatabase('sign-in authorization', () => {
   test('revoking a group membership revokes the role it granted', async () => {
     const first = await authorizeSignIn(database(), {
       googleSubject: 'subject-demoted',
-      email: 'demoted@psd401.net',
+      email: 'demoted@example.invalid',
       displayName: 'De Moted',
       checkedAt: NOW,
     });
@@ -144,7 +144,7 @@ describeWithDatabase('sign-in authorization', () => {
 
     const second = await authorizeSignIn(database(), {
       googleSubject: 'subject-demoted',
-      email: 'demoted@psd401.net',
+      email: 'demoted@example.invalid',
       displayName: 'De Moted',
       checkedAt: NOW,
     });
@@ -160,7 +160,7 @@ describeWithDatabase('sign-in authorization', () => {
     const before = await database().select({ id: users.id }).from(users);
     const result = await authorizeSignIn(database(), {
       googleSubject: 'subject-stranger',
-      email: 'stranger@psd401.net',
+      email: 'stranger@example.invalid',
       displayName: 'Stran Ger',
       checkedAt: NOW,
     });
@@ -176,7 +176,7 @@ describeWithDatabase('sign-in authorization', () => {
   test('a disabled account is refused even while its groups would grant access', async () => {
     const created = await authorizeSignIn(database(), {
       googleSubject: 'subject-disabled',
-      email: 'disabled@psd401.net',
+      email: 'disabled@example.invalid',
       displayName: 'Dis Abled',
       checkedAt: NOW,
     });
@@ -188,7 +188,7 @@ describeWithDatabase('sign-in authorization', () => {
     expect(
       await authorizeSignIn(database(), {
         googleSubject: 'subject-disabled',
-        email: 'disabled@psd401.net',
+        email: 'disabled@example.invalid',
         displayName: 'Dis Abled',
         checkedAt: NOW,
       }),

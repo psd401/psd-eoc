@@ -252,7 +252,7 @@ const syntheticAdminEvidencePrerequisites = [
     ) values (
       '00000000-0000-4000-8000-000000026001'::uuid,
       'synthetic-database-admin-evidence',
-      'synthetic-database-admin-evidence@psd401.net',
+      'synthetic-database-admin-evidence@example.invalid',
       'Synthetic Database Admin Evidence',
       'district'::facility_scope_kind,
       '2026-08-10T16:00:00.000Z'::timestamptz
@@ -2771,6 +2771,9 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           ) values (
             ${ISSUE_23_PUSH_UPGRADE_IDS.user}::uuid,
             'synthetic-issue-23-upgrade-proof',
+            -- The users_psd_email constraint, as it stood at this point in
+            -- the migration history, required this exact domain. It is dropped
+            -- at 0022; a fixture seeded before then must satisfy the old rule.
             'synthetic-issue-23-upgrade-proof@psd401.net',
             'Synthetic Issue 23 Upgrade Proof',
             'district'::facility_scope_kind,

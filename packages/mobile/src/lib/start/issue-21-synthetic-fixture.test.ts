@@ -128,7 +128,7 @@ describe('issue-21 synthetic Maestro transport', () => {
         kind: 'facilities',
         facilityIds: ['71000000-0000-4000-8000-000000000001'],
       });
-      expect(vault?.session.user.email).toBe('synthetic.staff@psd401.net');
+      expect(vault?.session.user.email).toBe('synthetic.staff@example.invalid');
       expect(
         Date.parse(vault?.session.session.expiresAt ?? '') >
           FIXTURE_NOW.getTime(),

@@ -28,9 +28,9 @@ import { GET as completeGoogleOidcSignIn } from './auth/callback/route';
 const GOOGLE_ISSUER = 'https://accounts.google.com';
 const CLIENT_ID = 'synthetic-unit.apps.googleusercontent.com';
 const CLIENT_SECRET = 'synthetic-unit-client-secret';
-const HOSTED_DOMAIN = 'psd401.net';
+const HOSTED_DOMAIN = 'example.invalid';
 const COOKIE_SECRET = Buffer.alloc(32, 11).toString('base64url');
-const PRODUCTION_PROJECT_NUMBER = '338414773271';
+const PRODUCTION_PROJECT_NUMBER = '000000000000';
 const PRODUCTION_WEB_CLIENT_ID = `${PRODUCTION_PROJECT_NUMBER}-webclient.apps.googleusercontent.com`;
 const PRODUCTION_IOS_CLIENT_ID = `${PRODUCTION_PROJECT_NUMBER}-iosclient.apps.googleusercontent.com`;
 const PRODUCTION_CLIENT_SECRET = `GOCSPX-${'a'.repeat(32)}`;
@@ -63,6 +63,7 @@ test('auth callback keeps App Runner listener URLs off public redirects', async 
     'GOOGLE_OIDC_ORIGIN',
     'GOOGLE_OIDC_HOSTED_DOMAIN',
     'GOOGLE_OIDC_DOMAIN',
+    'PSD_EOC_IOS_BUNDLE_ID',
   ] as const;
   const original = new Map(names.map((name) => [name, process.env[name]]));
 
@@ -77,12 +78,25 @@ test('auth callback keeps App Runner listener URLs off public redirects', async 
       JSON.stringify({
         clientId: PRODUCTION_WEB_CLIENT_ID,
         clientSecret: PRODUCTION_CLIENT_SECRET,
-        iosBundleId: 'net.psd401.eoc',
+        iosBundleId: SYNTHETIC_IOS_BUNDLE_ID,
         iosClientId: PRODUCTION_IOS_CLIENT_ID,
         webClientId: PRODUCTION_WEB_CLIENT_ID,
       }),
     );
     Reflect.set(process.env, 'GOOGLE_OIDC_COOKIE_SECRET', COOKIE_SECRET);
+    // The district this deployment serves, which the callback needs to build a
+    // public redirect without trusting the App Runner listener URL.
+    Reflect.set(
+      process.env,
+      'GOOGLE_OIDC_APPLICATION_ORIGIN',
+      SYNTHETIC_APPLICATION_ORIGIN,
+    );
+    Reflect.set(
+      process.env,
+      'GOOGLE_OIDC_HOSTED_DOMAIN',
+      SYNTHETIC_HOSTED_DOMAIN,
+    );
+    Reflect.set(process.env, 'PSD_EOC_IOS_BUNDLE_ID', SYNTHETIC_IOS_BUNDLE_ID);
 
     const state = `m1.${'a'.repeat(43)}`;
     const mobileResponse = await completeGoogleOidcSignIn(
@@ -102,7 +116,7 @@ test('auth callback keeps App Runner listener URLs off public redirects', async 
     );
     expect(webResponse.status).toBe(303);
     expect(webResponse.headers.get('location')).toBe(
-      'https://eoc.psd401.net/denied?reason=callback',
+      'https://eoc.example.invalid/denied?reason=callback',
     );
   } finally {
     for (const [name, value] of original) {
@@ -157,7 +171,7 @@ async function signToken(instruction: TokenInstruction): Promise<string> {
     nonce:
       variant === 'wrong-nonce' ? 'not-the-request-nonce' : instruction.nonce,
     hd: variant === 'wrong-domain' ? 'example.invalid' : HOSTED_DOMAIN,
-    email: 'member@psd401.net',
+    email: 'member@example.invalid',
     email_verified: variant !== 'unverified-email',
     ...(variant === 'missing-name' ? {} : { name: 'Synthetic Member' }),
   })
@@ -263,11 +277,15 @@ function oidcEnvironment(
   };
 }
 
+const SYNTHETIC_APPLICATION_ORIGIN = 'https://eoc.example.invalid';
+const SYNTHETIC_HOSTED_DOMAIN = 'example.invalid';
+const SYNTHETIC_IOS_BUNDLE_ID = 'invalid.example.eoc';
+
 function productionOidcEnvironment(
   oauthConfig: Readonly<Record<string, unknown>> = {
     clientId: PRODUCTION_WEB_CLIENT_ID,
     clientSecret: PRODUCTION_CLIENT_SECRET,
-    iosBundleId: 'net.psd401.eoc',
+    iosBundleId: SYNTHETIC_IOS_BUNDLE_ID,
     iosClientId: PRODUCTION_IOS_CLIENT_ID,
     webClientId: PRODUCTION_WEB_CLIENT_ID,
   },
@@ -277,6 +295,11 @@ function productionOidcEnvironment(
     NODE_ENV: 'production',
     GOOGLE_OAUTH_CONFIG: JSON.stringify(oauthConfig),
     GOOGLE_OIDC_COOKIE_SECRET: COOKIE_SECRET,
+    // A synthetic district, not this one. The values below used to be written
+    // into source; a suite that supplies them proves they are configuration.
+    GOOGLE_OIDC_APPLICATION_ORIGIN: SYNTHETIC_APPLICATION_ORIGIN,
+    GOOGLE_OIDC_HOSTED_DOMAIN: SYNTHETIC_HOSTED_DOMAIN,
+    PSD_EOC_IOS_BUNDLE_ID: SYNTHETIC_IOS_BUNDLE_ID,
     ...overrides,
   };
 }
@@ -355,7 +378,7 @@ describe('protected web return destination', () => {
     expect(validateReturnTo(exactDestination)).toBe(exactDestination);
     expect(
       returnToFromRequestUrl(
-        `https://eoc.psd401.net/auth/sign-in?returnTo=${encodeURIComponent(exactDestination)}`,
+        `https://eoc.example.invalid/auth/sign-in?returnTo=${encodeURIComponent(exactDestination)}`,
       ),
     ).toBe(exactDestination);
   });
@@ -384,12 +407,12 @@ describe('protected web return destination', () => {
   });
 
   test('fails closed when the return query is omitted or duplicated', () => {
-    expect(returnToFromRequestUrl('https://eoc.psd401.net/auth/sign-in')).toBe(
-      '/',
-    );
+    expect(
+      returnToFromRequestUrl('https://eoc.example.invalid/auth/sign-in'),
+    ).toBe('/');
     expect(
       returnToFromRequestUrl(
-        'https://eoc.psd401.net/auth/sign-in?returnTo=%2Fstart&returnTo=%2Fevents',
+        'https://eoc.example.invalid/auth/sign-in?returnTo=%2Fstart&returnTo=%2Fevents',
       ),
     ).toBe('/');
   });
@@ -475,7 +498,7 @@ describe('Google OIDC adapter', () => {
     expect(configuration).toEqual({
       mode: 'production',
       clientId: PRODUCTION_WEB_CLIENT_ID,
-      redirectUri: 'https://eoc.psd401.net/auth/callback',
+      redirectUri: 'https://eoc.example.invalid/auth/callback',
       authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
       tokenEndpoint: 'https://oauth2.googleapis.com/token',
       jwksUri: 'https://www.googleapis.com/oauth2/v3/certs',
@@ -493,7 +516,7 @@ describe('Google OIDC adapter', () => {
     const valid = {
       clientId: PRODUCTION_WEB_CLIENT_ID,
       clientSecret: PRODUCTION_CLIENT_SECRET,
-      iosBundleId: 'net.psd401.eoc',
+      iosBundleId: SYNTHETIC_IOS_BUNDLE_ID,
       iosClientId: PRODUCTION_IOS_CLIENT_ID,
       webClientId: PRODUCTION_WEB_CLIENT_ID,
     } as const;
@@ -577,9 +600,9 @@ describe('Google OIDC adapter', () => {
       'GOOGLE_OIDC_TOKEN_ENDPOINT',
       'GOOGLE_OIDC_JWKS_URI',
       'GOOGLE_OIDC_ISSUER',
-      'GOOGLE_OIDC_APPLICATION_ORIGIN',
+      // The origin and hosted domain are configuration now, so they are not
+      // here; their near-miss spellings still are.
       'GOOGLE_OIDC_ORIGIN',
-      'GOOGLE_OIDC_HOSTED_DOMAIN',
       'GOOGLE_OIDC_DOMAIN',
     ] as const) {
       expect(() =>
@@ -675,7 +698,7 @@ describe('Google OIDC adapter', () => {
     const callback = await callbackForVariant('wrong-domain');
     const result = await callback.result;
     expect(result.capabilityInput.claims).toMatchObject({
-      email: 'member@psd401.net',
+      email: 'member@example.invalid',
       emailVerified: true,
       hostedDomain: 'example.invalid',
     });
@@ -797,7 +820,7 @@ describe('Google OIDC adapter', () => {
       readGoogleOidcConfiguration({
         ...oidcEnvironment(),
         NODE_ENV: 'production',
-        GOOGLE_OIDC_REDIRECT_URI: 'https://eoc.psd401.net/auth/callback',
+        GOOGLE_OIDC_REDIRECT_URI: 'https://eoc.example.invalid/auth/callback',
       }),
     ).toThrow(GoogleOidcConfigurationError);
   });
@@ -813,7 +836,8 @@ describe('Google OIDC adapter', () => {
         readGoogleOidcConfiguration(
           oidcEnvironment({
             NODE_ENV: runtimeMode,
-            GOOGLE_OIDC_REDIRECT_URI: 'https://eoc.psd401.net/auth/callback',
+            GOOGLE_OIDC_REDIRECT_URI:
+              'https://eoc.example.invalid/auth/callback',
           }),
         ),
       ).toThrow(GoogleOidcConfigurationError);

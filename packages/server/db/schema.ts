@@ -1642,7 +1642,7 @@ export const rosterRecipients = pgTable(
       'roster_recipients_staff_email_canonical',
       sql`${table.staffEmail} is null or (
         ${table.staffEmail} = lower(${table.staffEmail})
-        and ${table.staffEmail} ~ '^[^@[:space:]]+@psd401[.]net$'
+        and ${table.staffEmail} ~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$'
       )`,
     ),
   ],

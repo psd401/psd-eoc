@@ -19,7 +19,6 @@ import {
   RosterSourceConfigurationSchema,
   SyncRosterInputSchema,
   RosterSyncResultSchema,
-  StaffRosterEmailSchema,
   TimestampSchema,
   UuidSchema,
   type Actor,
@@ -37,6 +36,8 @@ import {
   type RosterSyncResult,
   type SyncRosterInput,
 } from '@psd-eoc/contracts';
+
+import { staffRosterEmail } from '../config/staff-email';
 import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { importPKCS8, SignJWT } from 'jose';
 import { z } from 'zod';
@@ -325,7 +326,7 @@ function validateMemberPopulation(
 ): void {
   const normalizedEmail = member.email.toLowerCase();
   if (population === 'staff') {
-    const staffEmail = StaffRosterEmailSchema.safeParse(member.email);
+    const staffEmail = staffRosterEmail().safeParse(member.email);
     if (
       !staffEmail.success ||
       staffEmail.data !== member.email ||
@@ -650,7 +651,7 @@ function buildRecipients(
     for (const member of group.members) {
       const identityKey =
         population === 'staff'
-          ? StaffRosterEmailSchema.parse(member.email)
+          ? staffRosterEmail().parse(member.email)
           : member.memberKey;
       const existing = accumulated.get(identityKey);
       if (
@@ -695,7 +696,7 @@ function buildRecipients(
       .parse(rawContact.googleSubject);
     const contact = Object.freeze({
       googleSubject,
-      staffEmail: StaffRosterEmailSchema.parse(rawContact.staffEmail),
+      staffEmail: staffRosterEmail().parse(rawContact.staffEmail),
       displayName: z
         .string()
         .trim()
@@ -730,7 +731,7 @@ function buildRecipients(
     .map((member) => {
       const staffEmail =
         population === 'staff'
-          ? StaffRosterEmailSchema.parse(member.email)
+          ? staffRosterEmail().parse(member.email)
           : undefined;
       const local =
         staffEmail === undefined ? undefined : contacts.get(staffEmail);
@@ -1036,7 +1037,7 @@ export async function syncRoster(
       const localIdentityKeys = fetchedGroups.flatMap((group) =>
         group.members.map((member) =>
           loaded.configuration.population === 'staff'
-            ? StaffRosterEmailSchema.parse(member.email)
+            ? staffRosterEmail().parse(member.email)
             : member.memberKey,
         ),
       );
@@ -1187,7 +1188,7 @@ const GoogleCloudIdentityGroupSchema = z
   .readonly();
 
 const GoogleCloudIdentityEntityKeySchema = z
-  .object({ id: StaffRosterEmailSchema })
+  .object({ id: staffRosterEmail() })
   .strict()
   .readonly();
 
@@ -1584,7 +1585,7 @@ export function createGoogleCloudIdentityRosterAdapter(
   async function resolveConfiguredGroup(
     source: Extract<GroupSource, { kind: 'google-group' }>,
   ): Promise<string> {
-    const groupEmail = StaffRosterEmailSchema.parse(source.email);
+    const groupEmail = staffRosterEmail().parse(source.email);
     if (!/^[A-Za-z0-9_-]+$/u.test(source.googleGroupId)) {
       throw new RosterSyncError(
         'GOOGLE_GROUP_SOURCE_INVALID',
@@ -1662,7 +1663,7 @@ export function createGoogleCloudIdentityRosterAdapter(
           'The Google roster adapter received a non-roster source.',
         );
       }
-      const groupEmail = StaffRosterEmailSchema.safeParse(source.email);
+      const groupEmail = staffRosterEmail().safeParse(source.email);
       if (!groupEmail.success) {
         throw new RosterSyncError(
           'GOOGLE_GROUP_DOMAIN_INVALID',
@@ -2478,7 +2479,7 @@ export function createDrizzleRosterSyncStore(
           ...new Set(
             identityKeys.map((identityKey) => {
               if (identityKey.includes('@')) {
-                const parsed = StaffRosterEmailSchema.safeParse(identityKey);
+                const parsed = staffRosterEmail().safeParse(identityKey);
                 if (!parsed.success) {
                   throw new RosterSyncError(
                     'LOCAL_CONTACT_IDENTITY_INVALID',
@@ -2535,7 +2536,7 @@ export function createDrizzleRosterSyncStore(
             .from(users)
             .where(and(identityPredicate, isNull(users.disabledAt)));
           for (const row of userRows) {
-            const staffEmail = StaffRosterEmailSchema.parse(row.staffEmail);
+            const staffEmail = staffRosterEmail().parse(row.staffEmail);
             const existing = contactMap.get(row.googleSubject);
             if (
               existing !== undefined &&

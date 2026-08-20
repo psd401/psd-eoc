@@ -104,7 +104,7 @@ function result(
     user: {
       id: IDS.user,
       googleSubject: 'synthetic-google-subject',
-      email: 'synthetic.staff@psd401.net',
+      email: 'synthetic.staff@example.invalid',
       displayName: 'Synthetic Staff Member',
       roles: ['staff', 'admin'],
       facilityScope: {
@@ -948,23 +948,32 @@ describe('transport and policy boundaries', () => {
 
     expect(
       readPresentedSessionCredential(
-        request('https://eoc.psd401.net'),
+        request('https://eoc.example.invalid'),
         { mutation: true },
-        { NODE_ENV: 'production' },
+        {
+          NODE_ENV: 'production',
+          GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
+        },
       ),
     ).toMatchObject({ source: 'web', csrfVerified: true });
     expect(() =>
       readPresentedSessionCredential(
         request('https://localhost:3000'),
         { mutation: true },
-        { NODE_ENV: 'production' },
+        {
+          NODE_ENV: 'production',
+          GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
+        },
       ),
     ).toThrow(SessionAccessError);
     expect(() =>
       readPresentedSessionCredential(
         request('https://evil.example'),
         { mutation: true },
-        { NODE_ENV: 'production' },
+        {
+          NODE_ENV: 'production',
+          GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
+        },
       ),
     ).toThrow(SessionAccessError);
     expect(
@@ -1090,10 +1099,10 @@ describeWithDatabase(
         groupSourceId: crypto.randomUUID(),
         userId: crypto.randomUUID(),
         googleSubject: `synthetic-google-${suffix}`,
-        email: `synthetic.auth.${suffix}@psd401.net`,
+        email: `synthetic.auth.${suffix}@example.invalid`,
         targetUserId: crypto.randomUUID(),
         targetGoogleSubject: `synthetic-target-google-${suffix}`,
-        targetEmail: `synthetic.target.${suffix}@psd401.net`,
+        targetEmail: `synthetic.target.${suffix}@example.invalid`,
       } as const;
       const createdAt = new Date('2026-08-07T08:00:00.000Z');
       const issuanceCapturedAt = new Date('2026-08-07T09:00:00.000Z');

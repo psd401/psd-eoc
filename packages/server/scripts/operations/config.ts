@@ -1,7 +1,5 @@
 import { z } from 'zod';
 
-export const AWS_ACCOUNT_ID = '338414773271' as const;
-export const AWS_REGION = 'us-west-2' as const;
 export const DATABASE_LOGIN = 'psd_eoc_application' as const;
 export const DATABASE_ROLE = 'psd_eoc_app' as const;
 
@@ -40,9 +38,12 @@ const DatabaseIdentifierSchema = normalizedValue(63).regex(
   'must be an unquoted PostgreSQL identifier',
 );
 
+// An Aurora cluster writer endpoint, in whichever account and region this
+// deployment runs. It used to name one district's cluster exactly, which meant
+// no other district's bootstrap could pass its own database host.
 const DatabaseHostSchema = normalizedValue(253).regex(
-  /^psd-eoc-exploration-smoke[.]cluster-[a-z0-9]+[.]us-west-2[.]rds[.]amazonaws[.]com$/u,
-  'must be the Aurora writer endpoint',
+  /^[a-z0-9][a-z0-9-]*[.]cluster-[a-z0-9]+[.][a-z]{2}(?:-[a-z]+)+-[0-9][.]rds[.]amazonaws[.]com$/u,
+  'must be an Aurora cluster writer endpoint',
 );
 
 const DatabasePasswordSchema = z
@@ -58,24 +59,19 @@ const SourceShaSchema = z
   .string()
   .regex(/^[a-f0-9]{40}$/u, 'must be an exact lowercase Git commit SHA');
 
-const GoogleSubjectSchema = normalizedValue(255).regex(
-  /^[A-Za-z0-9_-]+$/u,
-  'must be an immutable Google subject',
+const AwsAccountIdSchema = normalizedValue(12).regex(
+  /^[0-9]{12}$/u,
+  'must be a twelve-digit AWS account ID',
 );
-
-const StaffEmailSchema = normalizedValue(320)
-  .email()
-  .refine((value) => value === value.toLowerCase(), {
-    message: 'must be lowercase',
-  })
-  .refine((value) => value.endsWith('@psd401.net'), {
-    message: 'must use the psd401.net hosted domain',
-  });
+const AwsRegionSchema = normalizedValue(32).regex(
+  /^[a-z]{2}(?:-[a-z]+)+-[0-9]$/u,
+  'must be an AWS region identifier',
+);
 
 const BootstrapEnvironmentSchema = z
   .object({
-    AWS_ACCOUNT_ID: z.literal(AWS_ACCOUNT_ID),
-    AWS_REGION: z.literal(AWS_REGION),
+    AWS_ACCOUNT_ID: AwsAccountIdSchema,
+    AWS_REGION: AwsRegionSchema,
     DATABASE_DRIVER: z.literal('postgres'),
     DATABASE_HOST: DatabaseHostSchema,
     DATABASE_PORT: z.literal('5432'),
@@ -88,9 +84,6 @@ const BootstrapEnvironmentSchema = z
     DATABASE_ADMIN_PASSWORD: DatabasePasswordSchema,
     DATABASE_APPLICATION_USERNAME: z.literal(DATABASE_LOGIN),
     DATABASE_APPLICATION_PASSWORD: DatabasePasswordSchema,
-    APPROVED_GOOGLE_SUBJECT: GoogleSubjectSchema,
-    APPROVED_STAFF_EMAIL: StaffEmailSchema,
-    APPROVED_STAFF_DISPLAY_NAME: normalizedValue(160),
     SOURCE_SHA: SourceShaSchema,
     BOOTSTRAP_MODE: z.enum(BOOTSTRAP_MODES).default('migrate'),
   })
@@ -106,8 +99,8 @@ const FORBIDDEN_DATABASE_ENVIRONMENT = Object.freeze([
 
 /** Fail-closed input for the deployment bootstrap. */
 export interface BootstrapConfig {
-  readonly accountId: typeof AWS_ACCOUNT_ID;
-  readonly region: typeof AWS_REGION;
+  readonly accountId: string;
+  readonly region: string;
   readonly databaseDriver: 'postgres';
   readonly databaseHost: string;
   readonly databasePort: 5432;
@@ -120,9 +113,6 @@ export interface BootstrapConfig {
   readonly databaseAdminPassword: string;
   readonly databaseApplicationUsername: typeof DATABASE_LOGIN;
   readonly databaseApplicationPassword: string;
-  readonly approvedGoogleSubject: string;
-  readonly approvedStaffEmail: string;
-  readonly approvedStaffDisplayName: string;
   readonly sourceSha: string;
   readonly mode: BootstrapMode;
 }
@@ -172,9 +162,6 @@ export function readBootstrapConfig(
     DATABASE_ADMIN_PASSWORD: environment.DATABASE_ADMIN_PASSWORD,
     DATABASE_APPLICATION_USERNAME: environment.DATABASE_APPLICATION_USERNAME,
     DATABASE_APPLICATION_PASSWORD: environment.DATABASE_APPLICATION_PASSWORD,
-    APPROVED_GOOGLE_SUBJECT: environment.APPROVED_GOOGLE_SUBJECT,
-    APPROVED_STAFF_EMAIL: environment.APPROVED_STAFF_EMAIL,
-    APPROVED_STAFF_DISPLAY_NAME: environment.APPROVED_STAFF_DISPLAY_NAME,
     SOURCE_SHA: environment.SOURCE_SHA,
     BOOTSTRAP_MODE: environment.BOOTSTRAP_MODE,
   });
@@ -211,9 +198,6 @@ export function readBootstrapConfig(
     databaseAdminPassword: value.DATABASE_ADMIN_PASSWORD,
     databaseApplicationUsername: value.DATABASE_APPLICATION_USERNAME,
     databaseApplicationPassword: value.DATABASE_APPLICATION_PASSWORD,
-    approvedGoogleSubject: value.APPROVED_GOOGLE_SUBJECT,
-    approvedStaffEmail: value.APPROVED_STAFF_EMAIL,
-    approvedStaffDisplayName: value.APPROVED_STAFF_DISPLAY_NAME,
     sourceSha: value.SOURCE_SHA,
     mode: value.BOOTSTRAP_MODE,
   });

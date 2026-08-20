@@ -36,8 +36,8 @@ async function expectInvalidResponse(
 
 describe('mobile auth API client', () => {
   test('requires HTTPS except for explicit development loopback', () => {
-    expect(parseAuthApiBaseUrl('https://eoc.psd401.net/', false)).toBe(
-      'https://eoc.psd401.net',
+    expect(parseAuthApiBaseUrl('https://eoc.example.invalid/', false)).toBe(
+      'https://eoc.example.invalid',
     );
     expect(parseAuthApiBaseUrl('http://127.0.0.1:3000', true)).toBe(
       'http://127.0.0.1:3000',
@@ -45,15 +45,15 @@ describe('mobile auth API client', () => {
     expect(parseAuthApiBaseUrl('http://[::1]:3000', true)).toBe(
       'http://[::1]:3000',
     );
-    expect(() => parseAuthApiBaseUrl('http://eoc.psd401.net', true)).toThrow(
-      MobileAuthError,
-    );
+    expect(() =>
+      parseAuthApiBaseUrl('http://eoc.example.invalid', true),
+    ).toThrow(MobileAuthError);
   });
 
   for (const status of [429, 500, 503] as const) {
     test(`classifies a non-JSON ${status} outage as offline`, async () => {
       const client = new AuthApiClient(
-        () => 'https://eoc.psd401.net',
+        () => 'https://eoc.example.invalid',
         async () =>
           new Response('<html>gateway unavailable</html>', { status }),
       );
@@ -74,7 +74,7 @@ describe('mobile auth API client', () => {
 
   test('classifies a non-JSON unauthorized response as rejected', async () => {
     const client = new AuthApiClient(
-      () => 'https://eoc.psd401.net',
+      () => 'https://eoc.example.invalid',
       async () => new Response('unauthorized', { status: 401 }),
     );
     try {
@@ -94,7 +94,7 @@ describe('mobile auth API client', () => {
     const requestedSessionId = sessionFixture().session.id;
     const requests: Array<Readonly<{ input: string; init: RequestInit }>> = [];
     const client = new AuthApiClient(
-      () => 'https://eoc.psd401.net',
+      () => 'https://eoc.example.invalid',
       async (input, init) => {
         requests.push({ input, init });
         return Response.json(revocationReceipt(requestedSessionId));
@@ -105,7 +105,7 @@ describe('mobile auth API client', () => {
 
     expect(requests).toHaveLength(1);
     const request = requests[0];
-    expect(request?.input).toBe('https://eoc.psd401.net/api/auth/revoke');
+    expect(request?.input).toBe('https://eoc.example.invalid/api/auth/revoke');
     expect(request?.init.headers).toMatchObject({
       Authorization: `Bearer ${TEST_TOKEN}`,
       'Idempotency-Key': IDEMPOTENCY_KEY,
@@ -118,7 +118,7 @@ describe('mobile auth API client', () => {
 
   test('rejects a malformed successful revocation response', async () => {
     const client = new AuthApiClient(
-      () => 'https://eoc.psd401.net',
+      () => 'https://eoc.example.invalid',
       async () => Response.json({ status: 'revoked' }),
     );
 
@@ -129,7 +129,7 @@ describe('mobile auth API client', () => {
 
   test('rejects a canonical revocation receipt for a different session', async () => {
     const client = new AuthApiClient(
-      () => 'https://eoc.psd401.net',
+      () => 'https://eoc.example.invalid',
       async () => Response.json(revocationReceipt(OTHER_SESSION_ID)),
     );
 

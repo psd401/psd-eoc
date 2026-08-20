@@ -42,8 +42,8 @@ const INPUT: CompleteOidcSignInInput = Object.freeze({
     subject: 'synthetic-google-subject-mobile',
     subjectDigest: 'b'.repeat(64),
     claimsDigest: 'c'.repeat(64),
-    hostedDomain: 'psd401.net',
-    email: 'synthetic.mobile@psd401.net',
+    hostedDomain: 'example.invalid',
+    email: 'synthetic.mobile@example.invalid',
     emailVerified: true,
     displayName: 'Synthetic Mobile Staff',
   }),
@@ -298,15 +298,15 @@ describe('describeSessionPersistenceFailure', () => {
     const failure = Object.assign(new Error('duplicate key'), {
       code: '23505',
       table_name: 'users',
-      detail: 'Key (email)=(staff.member@psd401.net) already exists.',
-      hint: 'staff.member@psd401.net',
-      where: 'staff.member@psd401.net',
+      detail: 'Key (email)=(staff.member@example.invalid) already exists.',
+      hint: 'staff.member@example.invalid',
+      where: 'staff.member@example.invalid',
     });
 
     const described = describeSessionPersistenceFailure(failure);
 
     expect(described).toContain('table_name=users');
-    expect(described).not.toContain('staff.member@psd401.net');
+    expect(described).not.toContain('staff.member@example.invalid');
     expect(described).not.toContain('Key (email)');
   });
 

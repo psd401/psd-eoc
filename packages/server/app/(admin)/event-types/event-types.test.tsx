@@ -63,7 +63,7 @@ function authenticatedSession(roles: readonly Role[]): AuthenticatedSession {
     user: {
       id: IDS.user,
       googleSubject: 'synthetic-google-subject',
-      email: 'synthetic.staff@psd401.net',
+      email: 'synthetic.staff@example.invalid',
       displayName: 'Synthetic Staff Member',
       roles,
       facilityScope: { kind: 'district' },

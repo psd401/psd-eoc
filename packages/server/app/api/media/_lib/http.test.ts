@@ -51,7 +51,7 @@ const authenticatedSession = Object.freeze({
     user: {
       id: ids.user,
       googleSubject: 'synthetic-media-route-subject',
-      email: 'synthetic.media-route@psd401.net',
+      email: 'synthetic.media-route@example.invalid',
       displayName: 'Synthetic Media Route Staff',
       roles: ['staff'],
       facilityScope: { kind: 'district' },
@@ -670,7 +670,7 @@ describe('media REST helper boundary', () => {
     );
 
     const providerSecret =
-      's3.us-west-2.amazonaws.com accessKey=synthetic-do-not-expose';
+      's3.us-east-1.amazonaws.com accessKey=synthetic-do-not-expose';
     const providerFailure = testRuntime({
       executeError: new Error(providerSecret),
     });
@@ -690,6 +690,6 @@ describe('media REST helper boundary', () => {
       fieldErrors: [],
     });
     expect(JSON.stringify(providerJson)).not.toContain(providerSecret);
-    expect(JSON.stringify(providerJson)).not.toContain('s3.us-west-2');
+    expect(JSON.stringify(providerJson)).not.toContain('s3.us-east-1');
   });
 });

@@ -98,7 +98,7 @@ interface DeferredSignal {
 
 const DATABASE_NAME_PATTERN = /^psd_eoc_i26_session_[a-f0-9]{32}_test$/u;
 const DESIGNATED_ACCESS_GROUP_ID = '25200000-0000-4000-8000-000000000001';
-const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@example.invalid';
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -338,7 +338,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
-      email: `issue-26-session-${suffix}@psd401.net`,
+      email: `issue-26-session-${suffix}@example.invalid`,
       displayName: `Issue 26 session user ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
       createdAt: now,
@@ -346,7 +346,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await ensureDesignatedAccessGroup(
       database,
       now,
-      `issue-26-session-${suffix}@psd401.net`,
+      `issue-26-session-${suffix}@example.invalid`,
     );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
@@ -431,7 +431,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
-      email: `issue-23-push-revoke-${suffix}@psd401.net`,
+      email: `issue-23-push-revoke-${suffix}@example.invalid`,
       displayName: `Issue 23 push revoke ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
       createdAt: now,
@@ -439,7 +439,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await ensureDesignatedAccessGroup(
       database,
       now,
-      `issue-23-push-revoke-${suffix}@psd401.net`,
+      `issue-23-push-revoke-${suffix}@example.invalid`,
     );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
@@ -647,7 +647,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
-      email: `issue-26-app-role-session-${suffix}@psd401.net`,
+      email: `issue-26-app-role-session-${suffix}@example.invalid`,
       displayName: `Issue 26 app role user ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
       createdAt: snapshotAt,
@@ -655,7 +655,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(userRoles).values({ userId, role: 'staff' });
     await database.insert(accessGroupMembers).values({
       groupSourceId,
-      email: `issue-26-app-role-session-${suffix}@psd401.net`,
+      email: `issue-26-app-role-session-${suffix}@example.invalid`,
       capturedAt: snapshotAt,
     });
 
@@ -680,7 +680,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       user: Object.freeze({
         id: userId,
         googleSubject,
-        email: `issue-26-app-role-session-${suffix}@psd401.net`,
+        email: `issue-26-app-role-session-${suffix}@example.invalid`,
         displayName: `Issue 26 app role user ${suffix.slice(0, 8)}`,
         roles: Object.freeze(['staff'] as const),
         facilityScope: Object.freeze({ kind: 'district' as const }),
@@ -825,7 +825,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
-      email: `issue-26-bootstrap-lock-${suffix}@psd401.net`,
+      email: `issue-26-bootstrap-lock-${suffix}@example.invalid`,
       displayName: `Issue 26 bootstrap candidate ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
       createdAt: snapshotAt,
@@ -833,7 +833,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(userRoles).values({ userId, role: 'staff' });
     await database.insert(accessGroupMembers).values({
       groupSourceId,
-      email: `issue-26-bootstrap-lock-${suffix}@psd401.net`,
+      email: `issue-26-bootstrap-lock-${suffix}@example.invalid`,
       capturedAt: snapshotAt,
     });
 
@@ -857,7 +857,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       user: Object.freeze({
         id: userId,
         googleSubject,
-        email: `issue-26-bootstrap-lock-${suffix}@psd401.net`,
+        email: `issue-26-bootstrap-lock-${suffix}@example.invalid`,
         displayName: `Issue 26 bootstrap candidate ${suffix.slice(0, 8)}`,
         roles: Object.freeze(['staff'] as const),
         facilityScope: Object.freeze({ kind: 'district' as const }),
@@ -982,7 +982,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await database.insert(users).values({
       id: userId,
       googleSubject,
-      email: `issue-23-concurrent-refresh-${suffix}@psd401.net`,
+      email: `issue-23-concurrent-refresh-${suffix}@example.invalid`,
       displayName: `Issue 23 concurrent refresh ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
       createdAt: snapshotAt,
@@ -990,7 +990,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await ensureDesignatedAccessGroup(
       database,
       snapshotAt,
-      `issue-23-concurrent-refresh-${suffix}@psd401.net`,
+      `issue-23-concurrent-refresh-${suffix}@example.invalid`,
     );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
@@ -1133,12 +1133,12 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       await ensureDesignatedAccessGroup(
         database,
         snapshotAt,
-        `issue-23-revoke-recovery-${suffix}@psd401.net`,
+        `issue-23-revoke-recovery-${suffix}@example.invalid`,
       );
       await database.insert(users).values({
         id: userId,
         googleSubject,
-        email: `issue-23-revoke-recovery-${suffix}@psd401.net`,
+        email: `issue-23-revoke-recovery-${suffix}@example.invalid`,
         displayName: `Issue 23 revoke recovery ${suffix.slice(0, 8)}`,
         facilityScopeKind: 'district',
         createdAt: snapshotAt,

@@ -56,6 +56,8 @@ const CANARY_CAPABILITIES = [
   'close-event',
 ] as const;
 
+const SYNTHETIC_IOS_BUNDLE_ID = 'invalid.example.eoc';
+
 function runtimeEnvironment(): Readonly<Record<string, string>> {
   return Object.freeze({
     API_SALT: 's'.repeat(64),
@@ -75,11 +77,16 @@ function runtimeEnvironment(): Readonly<Record<string, string>> {
     GOOGLE_OAUTH_CONFIG: JSON.stringify({
       clientId: OAUTH_WEB_CLIENT_ID,
       clientSecret: OAUTH_CLIENT_SECRET,
-      iosBundleId: 'net.psd401.eoc',
+      iosBundleId: SYNTHETIC_IOS_BUNDLE_ID,
       iosClientId: OAUTH_IOS_CLIENT_ID,
       webClientId: OAUTH_WEB_CLIENT_ID,
     }),
     GOOGLE_OIDC_COOKIE_SECRET: OIDC_COOKIE_SECRET,
+    // A synthetic district: the origin, domain, and bundle identifier are
+    // configuration now rather than literals in source.
+    GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
+    GOOGLE_OIDC_HOSTED_DOMAIN: 'example.invalid',
+    PSD_EOC_IOS_BUNDLE_ID: SYNTHETIC_IOS_BUNDLE_ID,
     NODE_ENV: 'production',
   });
 }
@@ -1085,7 +1092,7 @@ describe('production deep health reads', () => {
       GOOGLE_OAUTH_CONFIG: JSON.stringify({
         clientId: OAUTH_WEB_CLIENT_ID,
         clientSecret: OAUTH_CLIENT_SECRET,
-        iosBundleId: 'net.psd401.eoc',
+        iosBundleId: SYNTHETIC_IOS_BUNDLE_ID,
         iosClientId: OAUTH_IOS_CLIENT_ID,
         webClientId: OAUTH_WEB_CLIENT_ID,
         issuer: 'https://accounts.google.com',

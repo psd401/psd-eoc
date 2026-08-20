@@ -1497,7 +1497,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       values (
         ${ids.roleUser}::uuid,
         'issue-26-migration-role-user',
-        'issue-26-migration-role-user@psd401.net',
+        'issue-26-migration-role-user@example.invalid',
         'Issue 26 synthetic role user',
         'district'::facility_scope_kind,
         ${times.adminOne}::timestamptz
@@ -1801,7 +1801,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       ) values (
         ${userId}::uuid,
         ${`issue-26-user-lock-${userId}`},
-        ${`${userId}@psd401.net`},
+        ${`${userId}@example.invalid`},
         'Synthetic serialized administrator',
         'district'::facility_scope_kind
       )
@@ -1897,7 +1897,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
       ) values (
         ${userId}::uuid,
         ${`issue-26-scope-role-${userId}`},
-        ${`${userId}@psd401.net`},
+        ${`${userId}@example.invalid`},
         'Synthetic scope-race administrator',
         'district'::facility_scope_kind
       )
@@ -2525,7 +2525,7 @@ describeWithDatabase('issue #26 PostgreSQL migration safety', () => {
         'Synthetic migration staff group',
         true,
         'issue-26-migration-staff-group',
-        'issue-26-migration-staff-group@psd401.net',
+        'issue-26-migration-staff-group@example.invalid',
         null,
         ${times.rosterOne}::timestamptz
       )

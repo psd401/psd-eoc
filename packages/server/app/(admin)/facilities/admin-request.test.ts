@@ -102,17 +102,23 @@ describe('shared administration request boundary', () => {
       }),
       '/facilities',
       'facility-created',
-      { NODE_ENV: 'production' },
+      {
+        NODE_ENV: 'production',
+        GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
+      },
     );
 
     expect(response.headers.get('location')).toBe(
-      'https://eoc.psd401.net/facilities?status=facility-created',
+      'https://eoc.example.invalid/facilities?status=facility-created',
     );
     expect(() =>
       applicationUrlForRequest(
         'https://localhost:3000/facilities/api',
         'https://evil.example/phish',
-        { NODE_ENV: 'production' },
+        {
+          NODE_ENV: 'production',
+          GOOGLE_OIDC_APPLICATION_ORIGIN: 'https://eoc.example.invalid',
+        },
       ),
     ).toThrow('Application redirects must remain same-origin.');
   });

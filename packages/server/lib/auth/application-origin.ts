@@ -1,4 +1,4 @@
-export const PRODUCTION_APPLICATION_ORIGIN = 'https://eoc.psd401.net' as const;
+import { applicationOrigin } from '../config/deployment';
 
 export type ApplicationOriginEnvironment = Readonly<
   Record<string, string | undefined>
@@ -6,15 +6,15 @@ export type ApplicationOriginEnvironment = Readonly<
 
 /**
  * Resolves the browser-visible application origin without trusting proxy
- * headers. Production is pinned to the same fixed public origin as OIDC;
- * local development and tests retain their request origin.
+ * headers. Production uses the configured public origin, the same one OIDC
+ * redirects to; local development and tests retain their request origin.
  */
 export function applicationOriginForRequest(
   requestUrl: string | URL,
   environment: ApplicationOriginEnvironment = process.env,
 ): string {
   return environment.NODE_ENV === 'production'
-    ? PRODUCTION_APPLICATION_ORIGIN
+    ? applicationOrigin(environment)
     : new URL(requestUrl).origin;
 }
 

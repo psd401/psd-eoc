@@ -98,7 +98,13 @@ function resourceProperties(resource: SynthesizedResource): JsonRecord {
   return asRecord(resource.Properties);
 }
 
-const app = new App();
+const app = new App({
+  context: {
+    'psdEoc:applicationOrigin': 'https://eoc.example.invalid',
+    'psdEoc:hostedDomain': 'example.invalid',
+    'psdEoc:iosBundleId': 'invalid.example.eoc',
+  },
+});
 const stack = new PsdEocStack(app, 'PsdEocTest', {
   env: {
     account: DEPLOYMENT_ACCOUNT,

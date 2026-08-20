@@ -108,6 +108,7 @@ import {
   SessionTokenReplaySchema,
   SessionTokenRotationSchema,
   StaffRosterEmailSchema,
+  staffRosterEmailSchemaForDomain,
   SyncAccessMembershipInputSchema,
   SyncAccessMembershipResultSchema,
   StaleRosterReportSchema,
@@ -2324,8 +2325,8 @@ describe('human-only capability boundary', () => {
         subjectDigest: '2'.repeat(64),
         claimsDigest: '3'.repeat(64),
         audienceVerified: true,
-        hostedDomain: 'psd401.net',
-        email: 'synthetic.staff@psd401.net',
+        hostedDomain: 'example.invalid',
+        email: 'synthetic.staff@example.invalid',
         emailVerified: true,
         displayName: 'Synthetic Staff',
       },
@@ -2339,8 +2340,8 @@ describe('human-only capability boundary', () => {
           subject: 'synthetic-google-subject',
           subjectDigest: '2'.repeat(64),
           claimsDigest: '3'.repeat(64),
-          hostedDomain: 'psd401.net',
-          email: 'synthetic.staff@psd401.net',
+          hostedDomain: 'example.invalid',
+          email: 'synthetic.staff@example.invalid',
           emailVerified: true,
           displayName: 'Synthetic Staff',
         },
@@ -2413,7 +2414,7 @@ describe('human-only capability boundary', () => {
             subject: 'different-subject',
             subjectDigest: 'c'.repeat(64),
             claimsDigest: 'd'.repeat(64),
-            email: 'different.staff@psd401.net',
+            email: 'different.staff@example.invalid',
           },
         },
       }),
@@ -2549,8 +2550,8 @@ describe('human-only capability boundary', () => {
       subject: 'synthetic-google-subject',
       subjectDigest: '2'.repeat(64),
       claimsDigest: '3'.repeat(64),
-      hostedDomain: 'psd401.net',
-      email: 'synthetic.staff@psd401.net',
+      hostedDomain: 'example.invalid',
+      email: 'synthetic.staff@example.invalid',
       emailVerified: true,
       displayName: 'Synthetic Staff',
     } as const;
@@ -3823,7 +3824,7 @@ describe('roster, facility, and identity boundaries', () => {
         {
           ...staffSnapshot.recipients[0],
           googleSubject: null,
-          staffEmail: '  STAFF.ONE@PSD401.NET  ',
+          staffEmail: '  STAFF.ONE@EXAMPLE.INVALID  ',
         },
       ],
     });
@@ -3831,7 +3832,7 @@ describe('roster, facility, and identity boundaries', () => {
     if (emailOnly.success) {
       expect(emailOnly.data.recipients[0]?.googleSubject).toBeNull();
       expect(emailOnly.data.recipients[0]?.staffEmail).toBe(
-        'staff.one@psd401.net',
+        'staff.one@example.invalid',
       );
     }
 
@@ -3841,7 +3842,7 @@ describe('roster, facility, and identity boundaries', () => {
         recipients: [
           {
             ...staffSnapshot.recipients[0],
-            staffEmail: 'staff.one@psd401.net',
+            staffEmail: 'staff.one@example.invalid',
           },
         ],
       }).success,
@@ -3867,33 +3868,47 @@ describe('roster, facility, and identity boundaries', () => {
         recipients: [
           {
             ...syntheticSnapshot.recipients[0],
-            staffEmail: 'staff.one@psd401.net',
+            staffEmail: 'staff.one@example.invalid',
           },
         ],
       }).success,
     ).toBe(false);
 
+    // Shape alone: an address is an address whatever district it belongs to.
     for (const staffEmail of [
       'not-an-email',
-      'staff.one@example.com',
-      'staff.one@evilpsd401.net',
-      'staff.one@psd401.net.example.com',
-      `${'a'.repeat(310)}@psd401.net`,
+      `${'a'.repeat(310)}@example.invalid`,
     ]) {
       expect(StaffRosterEmailSchema.safeParse(staffEmail).success).toBe(false);
+    }
+    // The domain is the deployment's, so the check that a member belongs to
+    // this district lives on the schema bound to its domain. Near misses are
+    // what this is really guarding: a lookalike domain, and a subdomain that
+    // ends in somebody else's.
+    const districtEmail = staffRosterEmailSchemaForDomain('example.invalid');
+    expect(districtEmail.safeParse('staff.one@example.invalid').success).toBe(
+      true,
+    );
+    for (const staffEmail of [
+      'staff.one@example.com',
+      'staff.one@evilexample.invalid',
+      'staff.one@example.invalid.example.com',
+      'staff.one@sub.example.invalid',
+    ]) {
+      expect(districtEmail.safeParse(staffEmail).success).toBe(false);
     }
   });
 
   test('rejects duplicate and ambiguous staff identity bindings', () => {
     const firstRecipient = {
       ...staffSnapshot.recipients[0],
-      staffEmail: 'staff.one@psd401.net',
+      staffEmail: 'staff.one@example.invalid',
     } as const;
     const secondRecipient = {
       ...firstRecipient,
       id: ids.secondRecipient,
       googleSubject: 'verified-google-subject-two',
-      staffEmail: 'staff.two@psd401.net',
+      staffEmail: 'staff.two@example.invalid',
       displayName: 'Staff Two',
     } as const;
 
@@ -3924,7 +3939,7 @@ describe('roster, facility, and identity boundaries', () => {
           firstRecipient,
           {
             ...secondRecipient,
-            staffEmail: '  STAFF.ONE@PSD401.NET  ',
+            staffEmail: '  STAFF.ONE@EXAMPLE.INVALID  ',
           },
         ],
       }).success,
@@ -4313,7 +4328,7 @@ describe('roster, facility, and identity boundaries', () => {
       completedAccessGroupSourceRefs: [accessGroupRef],
       evaluatedMemberships: [
         {
-          email: 'member@psd401.net',
+          email: 'member@example.invalid',
           accessGroupSourceRefs: [accessGroupRef],
         },
       ],
@@ -4360,7 +4375,7 @@ describe('roster, facility, and identity boundaries', () => {
         ...accessSnapshot,
         evaluatedMemberships: [
           {
-            email: 'Member@psd401.net',
+            email: 'Member@example.invalid',
             accessGroupSourceRefs: [accessGroupRef],
           },
         ],
@@ -4371,7 +4386,7 @@ describe('roster, facility, and identity boundaries', () => {
         ...accessSnapshot,
         evaluatedMemberships: [
           {
-            email: 'member@psd401.net',
+            email: 'member@example.invalid',
             accessGroupSourceRefs: [
               { ...accessGroupRef, id: ids.otherFacility },
             ],
@@ -4385,7 +4400,7 @@ describe('roster, facility, and identity boundaries', () => {
         evaluatedMemberships: [
           ...accessSnapshot.evaluatedMemberships,
           {
-            email: 'member@psd401.net',
+            email: 'member@example.invalid',
             accessGroupSourceRefs: [accessGroupRef],
           },
         ],

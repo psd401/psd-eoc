@@ -202,7 +202,7 @@ function staffLoadedConfiguration(): LoadedRosterSourceConfiguration {
     displayName: 'North Staff',
     active: true,
     googleGroupId: 'north-staff-group',
-    email: 'north-staff@psd401.net',
+    email: 'north-staff@example.invalid',
     createdAt: HISTORICAL_TIME,
   });
   const configuration = RosterSourceConfigurationSchema.parse({
@@ -1440,7 +1440,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
               memberKey: 'staff-google-subject',
               googleSubject: 'staff-google-subject',
               displayName: 'Staff Fixture',
-              email: 'staff-fixture@psd401.net',
+              email: 'staff-fixture@example.invalid',
             },
           ],
         }),
@@ -1465,7 +1465,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
     if (source === undefined || source.kind !== 'google-group') {
       throw new Error('Google staff source fixture was missing.');
     }
-    const staffEmail = 'staff.member@psd401.net';
+    const staffEmail = 'staff.member@example.invalid';
     const pushEndpointId = '00000000-0000-4000-8000-000000000099';
     const store = new MemoryRosterSyncStore(
       loaded,
@@ -1508,10 +1508,10 @@ describe('adapter, authorization, and configuration boundaries', () => {
               email: staffEmail,
             },
             {
-              memberKey: 'unmatched.staff@psd401.net',
+              memberKey: 'unmatched.staff@example.invalid',
               googleSubject: null,
               displayName: 'Staff member',
-              email: 'unmatched.staff@psd401.net',
+              email: 'unmatched.staff@example.invalid',
             },
           ],
           nextPageToken: null,
@@ -1534,7 +1534,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
       },
     ]);
     expect(store.loadedContactSubjects).toEqual([
-      ['staff.member@psd401.net', 'unmatched.staff@psd401.net'],
+      ['staff.member@example.invalid', 'unmatched.staff@example.invalid'],
     ]);
     expect(store.snapshots[0]?.recipients).toEqual([
       expect.objectContaining({
@@ -1551,12 +1551,12 @@ describe('adapter, authorization, and configuration boundaries', () => {
       }),
       expect.objectContaining({
         googleSubject: null,
-        staffEmail: 'unmatched.staff@psd401.net',
+        staffEmail: 'unmatched.staff@example.invalid',
         displayName: 'Staff member',
         endpoints: [
           expect.objectContaining({
             channel: 'email',
-            email: 'unmatched.staff@psd401.net',
+            email: 'unmatched.staff@example.invalid',
           }),
         ],
       }),
@@ -1582,7 +1582,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
           id: '00000000-0000-4000-8000-000000000097',
           population: 'staff',
           googleSubject: null,
-          staffEmail: 'previous.staff@psd401.net',
+          staffEmail: 'previous.staff@example.invalid',
           displayName: 'Previous Staff',
           groupSourceRefs: loaded.configuration.groupSourceRefs,
           endpoints: [],
@@ -1601,7 +1601,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
               memberKey: 'provider-supplied-subject',
               googleSubject: 'provider-supplied-subject',
               displayName: 'Unverified Provider Identity',
-              email: 'provider.subject@psd401.net',
+              email: 'provider.subject@example.invalid',
             },
           ],
           nextPageToken: null,
@@ -1640,7 +1640,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
           id: '00000000-0000-4000-8000-000000000096',
           population: 'staff',
           googleSubject: null,
-          staffEmail: 'previous.staff@psd401.net',
+          staffEmail: 'previous.staff@example.invalid',
           displayName: 'Previous Staff',
           groupSourceRefs: loaded.configuration.groupSourceRefs,
           endpoints: [],
@@ -1661,10 +1661,10 @@ describe('adapter, authorization, and configuration boundaries', () => {
           return Promise.resolve({
             members: [
               {
-                memberKey: 'partial.staff@psd401.net',
+                memberKey: 'partial.staff@example.invalid',
                 googleSubject: null,
                 displayName: 'Staff member',
-                email: 'partial.staff@psd401.net',
+                email: 'partial.staff@example.invalid',
               },
             ],
             nextPageToken: 'second-provider-page',
@@ -1721,7 +1721,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
           id: '00000000-0000-4000-8000-000000000098',
           population: 'staff',
           googleSubject: null,
-          staffEmail: 'previous.staff@psd401.net',
+          staffEmail: 'previous.staff@example.invalid',
           displayName: 'Previous Staff',
           groupSourceRefs: loaded.configuration.groupSourceRefs,
           endpoints: [],
@@ -1730,7 +1730,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
       syncStartedAt: HISTORICAL_TIME,
       capturedAt: HISTORICAL_TIME,
     });
-    const duplicateEmail = 'duplicate.staff@psd401.net';
+    const duplicateEmail = 'duplicate.staff@example.invalid';
     const store = new MemoryRosterSyncStore(
       loaded,
       [previous],
@@ -1965,7 +1965,7 @@ describe('adapter, authorization, and configuration boundaries', () => {
         ],
       },
       { domain_wide_delegation: true },
-      { delegated_subject: 'admin@psd401.net' },
+      { delegated_subject: 'admin@example.invalid' },
       { approved_staff_group_sha256: 'not-a-sha256' },
       { private_key: 'not-a-private-key' },
     ]) {

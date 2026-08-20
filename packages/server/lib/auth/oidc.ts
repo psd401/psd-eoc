@@ -21,16 +21,20 @@ import {
 } from '@psd-eoc/contracts';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 
-import { PRODUCTION_APPLICATION_ORIGIN } from './application-origin';
+import {
+  applicationOrigin,
+  iosBundleId as iosBundleId_,
+} from '../config/deployment';
 
 const GOOGLE_ISSUER = 'https://accounts.google.com' as const;
 const GOOGLE_AUTHORIZATION_ENDPOINT =
   'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_JWKS_URI = 'https://www.googleapis.com/oauth2/v3/certs';
-const PRODUCTION_REDIRECT_URI =
-  `${PRODUCTION_APPLICATION_ORIGIN}/auth/callback` as const;
-const IOS_BUNDLE_ID = 'net.psd401.eoc' as const;
+/** Where Google returns a signed-in staff member, on this deployment. */
+function productionRedirectUri(environment: Environment): string {
+  return `${applicationOrigin(environment)}/auth/callback`;
+}
 const GOOGLE_OAUTH_CONFIG_KEYS = Object.freeze([
   'clientId',
   'clientSecret',
@@ -38,6 +42,21 @@ const GOOGLE_OAUTH_CONFIG_KEYS = Object.freeze([
   'iosClientId',
   'webClientId',
 ] as const);
+/**
+ * Names that must not be set in production.
+ *
+ * Google's endpoints, the issuer, and the credentials come from the OAuth
+ * secret and nowhere else, so an environment variable cannot redirect sign-in
+ * to a different provider or client.
+ *
+ * `GOOGLE_OIDC_APPLICATION_ORIGIN` and `GOOGLE_OIDC_HOSTED_DOMAIN` are absent
+ * from this list on purpose: they name the district running this deployment,
+ * which is configuration, and pinning them in source is what stopped anyone
+ * else from running it. They carry the same trust as the database URL and the
+ * OAuth secret beside them. `GOOGLE_OIDC_ORIGIN` and `GOOGLE_OIDC_DOMAIN` stay
+ * refused because they are near-miss spellings of those two, and a typo that
+ * silently does nothing is worse than one that fails.
+ */
 const PRODUCTION_OVERRIDE_ENVIRONMENT_NAMES = Object.freeze([
   'GOOGLE_OIDC_CLIENT_ID',
   'GOOGLE_OIDC_CLIENT_SECRET',
@@ -46,9 +65,7 @@ const PRODUCTION_OVERRIDE_ENVIRONMENT_NAMES = Object.freeze([
   'GOOGLE_OIDC_TOKEN_ENDPOINT',
   'GOOGLE_OIDC_JWKS_URI',
   'GOOGLE_OIDC_ISSUER',
-  'GOOGLE_OIDC_APPLICATION_ORIGIN',
   'GOOGLE_OIDC_ORIGIN',
-  'GOOGLE_OIDC_HOSTED_DOMAIN',
   'GOOGLE_OIDC_DOMAIN',
 ] as const);
 
@@ -77,7 +94,7 @@ interface PrivateGoogleOidcConfiguration {
 interface GoogleOauthSecretConfiguration {
   readonly clientId: string;
   readonly clientSecret: string;
-  readonly iosBundleId: typeof IOS_BUNDLE_ID;
+  readonly iosBundleId: string;
   readonly iosClientId: string;
   readonly webClientId: string;
 }
@@ -321,7 +338,10 @@ function oauthClientProjectNumber(value: string): string {
   return value.slice(0, value.indexOf('-'));
 }
 
-function parseGoogleOauthConfig(value: string): GoogleOauthSecretConfiguration {
+function parseGoogleOauthConfig(
+  value: string,
+  environment: Environment,
+): GoogleOauthSecretConfiguration {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value) as unknown;
@@ -371,7 +391,10 @@ function parseGoogleOauthConfig(value: string): GoogleOauthSecretConfiguration {
       'GOOGLE_OAUTH_CONFIG contains invalid or mismatched OAuth client IDs.',
     );
   }
-  if (iosBundleId !== IOS_BUNDLE_ID) {
+  // Cross-checked against the identifier this deployment ships, so an OAuth
+  // client belonging to a different app is caught at startup rather than at
+  // somebody's first sign-in.
+  if (iosBundleId !== iosBundleId_(environment)) {
     return configurationError(
       'GOOGLE_OAUTH_CONFIG contains the wrong iOS application identifier.',
     );
@@ -539,11 +562,12 @@ export function readGoogleOidcConfiguration(
     }
     const oauth = parseGoogleOauthConfig(
       requiredEnvironmentValue(environment, 'GOOGLE_OAUTH_CONFIG', 65_536),
+      environment,
     );
     const configuration: GoogleOidcConfiguration = Object.freeze({
       mode,
       clientId: oauth.clientId,
-      redirectUri: PRODUCTION_REDIRECT_URI,
+      redirectUri: productionRedirectUri(environment),
       authorizationEndpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
       tokenEndpoint: GOOGLE_TOKEN_ENDPOINT,
       jwksUri: GOOGLE_JWKS_URI,

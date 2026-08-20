@@ -82,7 +82,7 @@ import {
   executeUpdateGroupSourceCapability,
 } from './capabilities';
 
-const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
+const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@example.invalid';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -579,7 +579,7 @@ async function persistAuthenticatedAdministrator(
     .values(
       accessGroupIds.map((groupSourceId) => ({
         groupSourceId,
-        email: `issue-26-admin-${suffix}@psd401.net`,
+        email: `issue-26-admin-${suffix}@example.invalid`,
         capturedAt: now,
       })),
     )
@@ -622,7 +622,7 @@ async function persistAdministratorIdentity(
     .values({
       id: authenticated.actor.userId,
       googleSubject: `issue-26-admin-subject-${suffix}`,
-      email: `issue-26-admin-${suffix}@psd401.net`,
+      email: `issue-26-admin-${suffix}@example.invalid`,
       displayName: `Issue 26 synthetic administrator ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
       createdAt,
@@ -654,7 +654,7 @@ async function persistAdministratorIdentity(
       .values(
         adminGroups.map(({ id }) => ({
           groupSourceId: id,
-          email: `issue-26-admin-${suffix}@psd401.net`,
+          email: `issue-26-admin-${suffix}@example.invalid`,
           capturedAt: createdAt,
         })),
       )
@@ -688,7 +688,7 @@ async function persistLiveAuthorizationActor(
     await database.insert(users).values({
       id: authenticated.actor.userId,
       googleSubject,
-      email: `issue-26-live-${label}-${authenticated.actor.userId}@psd401.net`,
+      email: `issue-26-live-${label}-${authenticated.actor.userId}@example.invalid`,
       displayName: `Issue 26 live authorization ${label}`,
       facilityScopeKind: 'district',
     });
@@ -2457,7 +2457,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     await database.insert(users).values({
       id: roleTargetId,
       googleSubject: `issue-26-subject-${suffix}`,
-      email: `issue-26-role-${suffix}@psd401.net`,
+      email: `issue-26-role-${suffix}@example.invalid`,
       displayName: `Issue 26 synthetic staff ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
     });
@@ -2469,7 +2469,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     await database.insert(users).values({
       id: rolelessContactId,
       googleSubject: `issue-26-contact-${suffix}`,
-      email: `issue-26-contact-${suffix}@psd401.net`,
+      email: `issue-26-contact-${suffix}@example.invalid`,
       displayName: `Issue 26 synthetic contact ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
     });
@@ -2478,7 +2478,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     await database.insert(users).values({
       id: inaccessibleAdministratorId,
       googleSubject: inaccessibleAdministratorSubject,
-      email: `issue-26-inaccessible-admin-${suffix}@psd401.net`,
+      email: `issue-26-inaccessible-admin-${suffix}@example.invalid`,
       displayName: `Issue 26 inaccessible administrator ${suffix.slice(0, 8)}`,
       facilityScopeKind: 'district',
     });

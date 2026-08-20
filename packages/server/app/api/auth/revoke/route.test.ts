@@ -47,7 +47,7 @@ function activeContext(): StoredSessionContext {
     user: {
       id: IDS.user,
       googleSubject: 'synthetic-route-google-subject',
-      email: 'synthetic.route.staff@psd401.net',
+      email: 'synthetic.route.staff@example.invalid',
       displayName: 'Synthetic Route Staff',
       roles: ['staff'],
       facilityScope: {

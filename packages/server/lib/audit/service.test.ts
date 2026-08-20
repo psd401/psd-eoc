@@ -409,7 +409,9 @@ describe('security audit capabilities', () => {
       'success',
     ]);
     expect(JSON.stringify(repository.entries)).not.toContain('messageContent');
-    expect(JSON.stringify(repository.entries)).not.toContain('@psd401.net');
+    expect(JSON.stringify(repository.entries)).not.toContain(
+      '@example.invalid',
+    );
   });
 
   test('audits an invalid cursor as a denied query', async () => {

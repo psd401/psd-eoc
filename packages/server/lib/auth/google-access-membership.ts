@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { staffRosterEmail } from '../config/staff-email';
 
 import {
   RoleSchema,
@@ -481,7 +482,7 @@ export function createGoogleAccessMembershipEvaluator(
             Date.parse(expiryDetail.expireTime) > evaluationTime,
         );
         if (!hasCurrentRole) continue;
-        const parsedEmail = StaffRosterEmailSchema.safeParse(
+        const parsedEmail = staffRosterEmail().safeParse(
           membership.preferredMemberKey.id,
         );
         if (!parsedEmail.success) {
