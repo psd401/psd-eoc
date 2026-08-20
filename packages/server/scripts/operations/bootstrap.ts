@@ -9,10 +9,10 @@ import {
 import { seedReferenceData, type ReferenceSeedSummary } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
-  createDrizzleExplorationAccessFixtureStore,
-  seedExplorationAccessFixture,
-  type ExplorationAccessFixture,
-  type ExplorationAccessFixtureSummary,
+  createDrizzleAccessFixtureStore,
+  seedAccessFixture,
+  type AccessFixture,
+  type AccessFixtureSummary,
 } from './access-fixture';
 import {
   configureAndVerifyApplicationRole,
@@ -22,9 +22,9 @@ import {
   type RoleStatementExecutor,
 } from './application-role';
 import {
-  readExplorationBootstrapConfig,
-  type ExplorationBootstrapConfig,
-  type ExplorationBootstrapMode,
+  readBootstrapConfig,
+  type BootstrapConfig,
+  type BootstrapMode,
 } from './config';
 
 const MAX_STATEMENT_ROWS = 32;
@@ -58,36 +58,32 @@ export interface CanonicalSyntheticRemovalSummary {
   }>;
 }
 
-export interface ExplorationBootstrapDependencies {
+export interface BootstrapDependencies {
   acquireAdvisoryLock(): Promise<void>;
   releaseAdvisoryLock(): Promise<void>;
   verifyAdministratorTls(): Promise<void>;
-  migrate(config: ExplorationBootstrapConfig): Promise<void>;
+  migrate(config: BootstrapConfig): Promise<void>;
   configureApplicationRole(
-    config: ExplorationBootstrapConfig,
+    config: BootstrapConfig,
   ): Promise<ApplicationRoleVerification>;
-  seedReference(
-    config: ExplorationBootstrapConfig,
-  ): Promise<ReferenceSeedSummary>;
-  seedApprovedAccess(
-    config: ExplorationBootstrapConfig,
-  ): Promise<ExplorationAccessFixtureSummary>;
+  seedReference(config: BootstrapConfig): Promise<ReferenceSeedSummary>;
+  seedApprovedAccess(config: BootstrapConfig): Promise<AccessFixtureSummary>;
   verifyCanonicalSyntheticRemoval(
-    config: ExplorationBootstrapConfig,
+    config: BootstrapConfig,
   ): Promise<CanonicalSyntheticRemovalSummary>;
-  verifyApplicationLogin(config: ExplorationBootstrapConfig): Promise<void>;
+  verifyApplicationLogin(config: BootstrapConfig): Promise<void>;
   verifyApplicationTls(): Promise<void>;
 }
 
-interface ExplorationBootstrapRunSummary {
-  readonly mode: ExplorationBootstrapMode;
+interface BootstrapRunSummary {
+  readonly mode: BootstrapMode;
   readonly database: Readonly<{
     migrationsApplied: true;
     applicationRole: ApplicationRoleVerification;
   }>;
   readonly referenceSeed: ReferenceSeedSummary;
   /** Present only in `seed-access-fixture` mode. */
-  readonly approvedAccess?: ExplorationAccessFixtureSummary;
+  readonly approvedAccess?: AccessFixtureSummary;
   /** Present only in `seed-access-fixture` mode. */
   readonly canonicalSyntheticRemoval?: CanonicalSyntheticRemovalSummary;
   readonly integrations: Readonly<{
@@ -97,9 +93,9 @@ interface ExplorationBootstrapRunSummary {
   }>;
 }
 
-export interface ExplorationBootstrapSummary {
+export interface BootstrapSummary {
   readonly sourceSha: string;
-  readonly mode: ExplorationBootstrapMode;
+  readonly mode: BootstrapMode;
   readonly database: Readonly<{
     transport: 'native-postgres';
     migrationsApplied: true;
@@ -112,10 +108,10 @@ export interface ExplorationBootstrapSummary {
   }>;
   readonly referenceSeed: ReferenceSeedSummary;
   /** Present only in `seed-access-fixture` mode. */
-  readonly approvedAccess?: ExplorationAccessFixtureSummary;
+  readonly approvedAccess?: AccessFixtureSummary;
   /** Present only in `seed-access-fixture` mode. */
   readonly canonicalSyntheticRemoval?: CanonicalSyntheticRemovalSummary;
-  readonly integrations: ExplorationBootstrapRunSummary['integrations'];
+  readonly integrations: BootstrapRunSummary['integrations'];
 }
 
 /**
@@ -124,8 +120,8 @@ export interface ExplorationBootstrapSummary {
  * the access-membership snapshot the access sync publishes.
  */
 async function runSharedBootstrapSteps(
-  config: ExplorationBootstrapConfig,
-  dependencies: ExplorationBootstrapDependencies,
+  config: BootstrapConfig,
+  dependencies: BootstrapDependencies,
 ): Promise<
   Readonly<{
     applicationRole: ApplicationRoleVerification;
@@ -140,9 +136,9 @@ async function runSharedBootstrapSteps(
 }
 
 async function runOneBootstrap(
-  config: ExplorationBootstrapConfig,
-  dependencies: ExplorationBootstrapDependencies,
-): Promise<ExplorationBootstrapRunSummary> {
+  config: BootstrapConfig,
+  dependencies: BootstrapDependencies,
+): Promise<BootstrapRunSummary> {
   const { applicationRole, referenceSeed } = await runSharedBootstrapSteps(
     config,
     dependencies,
@@ -187,10 +183,10 @@ async function runOneBootstrap(
  * Equality of the bounded summaries proves the migration and fixtures are
  * idempotent before App Runner can be updated to the candidate image.
  */
-export async function runExplorationBootstrap(
-  config: ExplorationBootstrapConfig,
-  dependencies: ExplorationBootstrapDependencies,
-): Promise<ExplorationBootstrapSummary> {
+export async function runBootstrap(
+  config: BootstrapConfig,
+  dependencies: BootstrapDependencies,
+): Promise<BootstrapSummary> {
   await dependencies.acquireAdvisoryLock();
   try {
     const first = await runOneBootstrap(config, dependencies);
@@ -231,7 +227,7 @@ export async function runExplorationBootstrap(
 }
 
 function createNativeConnection(
-  config: ExplorationBootstrapConfig,
+  config: BootstrapConfig,
   username: string,
   password: string,
 ): PostgresDatabaseConnection {
@@ -498,7 +494,7 @@ export async function verifyCanonicalSyntheticRemoval(input: {
 }
 
 async function runFromCommandLine(): Promise<void> {
-  const config = readExplorationBootstrapConfig();
+  const config = readBootstrapConfig();
   const administratorConnection = createNativeConnection(
     config,
     config.databaseAdminUsername,
@@ -515,7 +511,7 @@ async function runFromCommandLine(): Promise<void> {
   const applicationExecutor = createRoleStatementExecutor(
     applicationConnection,
   );
-  const accessStore = createDrizzleExplorationAccessFixtureStore(
+  const accessStore = createDrizzleAccessFixtureStore(
     administratorConnection.db,
   );
   const approvedIdentity = Object.freeze({
@@ -523,10 +519,10 @@ async function runFromCommandLine(): Promise<void> {
     staffEmail: config.approvedStaffEmail,
     staffDisplayName: config.approvedStaffDisplayName,
   });
-  let accessFixture: ExplorationAccessFixture | null = null;
+  let accessFixture: AccessFixture | null = null;
 
   try {
-    const summary = await runExplorationBootstrap(config, {
+    const summary = await runBootstrap(config, {
       async acquireAdvisoryLock(): Promise<void> {
         await administratorExecutor.execute(ADVISORY_LOCK_SQL);
       },
@@ -552,7 +548,7 @@ async function runFromCommandLine(): Promise<void> {
         return seedReferenceData(administratorConnection.db);
       },
       async seedApprovedAccess() {
-        const seeded = await seedExplorationAccessFixture({
+        const seeded = await seedAccessFixture({
           identity: approvedIdentity,
           replay: accessFixture,
           store: accessStore,
@@ -585,7 +581,7 @@ if (import.meta.main) {
   try {
     await runFromCommandLine();
   } catch {
-    console.error('Exploration-smoke native database bootstrap failed closed.');
+    console.error('Database bootstrap failed closed.');
     process.exitCode = 1;
   }
 }

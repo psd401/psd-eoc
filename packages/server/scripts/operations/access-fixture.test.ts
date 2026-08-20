@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
-import { parseExplorationAccessSnapshotAllocation } from './access-fixture';
+import { parseAccessFixtureSnapshotAllocation } from './access-fixture';
 
 const DATABASE_CLOCK_MILLISECONDS = Date.parse('2026-08-16T22:40:54.177Z');
 
-describe('native exploration access snapshot allocation', () => {
+describe('native access snapshot allocation', () => {
   test('decodes the numeric scalars returned by the native PostgreSQL query', () => {
-    const allocation = parseExplorationAccessSnapshotAllocation([
+    const allocation = parseAccessFixtureSnapshotAllocation([
       {
         capturedAtMilliseconds: DATABASE_CLOCK_MILLISECONDS,
         latestVersion: 164,
@@ -22,7 +22,7 @@ describe('native exploration access snapshot allocation', () => {
 
   test('accepts the last version that can safely allocate a PostgreSQL integer', () => {
     expect(
-      parseExplorationAccessSnapshotAllocation([
+      parseAccessFixtureSnapshotAllocation([
         {
           capturedAtMilliseconds: DATABASE_CLOCK_MILLISECONDS,
           latestVersion: 2_147_483_646,
@@ -87,8 +87,8 @@ describe('native exploration access snapshot allocation', () => {
     ];
 
     for (const rows of malformedRows) {
-      expect(() => parseExplorationAccessSnapshotAllocation(rows)).toThrow(
-        'The exploration access snapshot could not be allocated.',
+      expect(() => parseAccessFixtureSnapshotAllocation(rows)).toThrow(
+        'The access snapshot could not be allocated.',
       );
     }
   });

@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
-export const EXPLORATION_AWS_ACCOUNT_ID = '338414773271' as const;
-export const EXPLORATION_AWS_REGION = 'us-west-2' as const;
-export const EXPLORATION_DATABASE_LOGIN = 'psd_eoc_application' as const;
-export const EXPLORATION_DATABASE_ROLE = 'psd_eoc_app' as const;
+export const AWS_ACCOUNT_ID = '338414773271' as const;
+export const AWS_REGION = 'us-west-2' as const;
+export const DATABASE_LOGIN = 'psd_eoc_application' as const;
+export const DATABASE_ROLE = 'psd_eoc_app' as const;
 
 /**
  * What a bootstrap run is allowed to do.
@@ -20,13 +20,12 @@ export const EXPLORATION_DATABASE_ROLE = 'psd_eoc_app' as const;
  * stack reachable by one known human, and it must never run on a stack that
  * already has real access groups.
  */
-export const EXPLORATION_BOOTSTRAP_MODES = Object.freeze([
+export const BOOTSTRAP_MODES = Object.freeze([
   'migrate',
   'seed-access-fixture',
 ] as const);
 
-export type ExplorationBootstrapMode =
-  (typeof EXPLORATION_BOOTSTRAP_MODES)[number];
+export type BootstrapMode = (typeof BOOTSTRAP_MODES)[number];
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -46,7 +45,7 @@ const DatabaseIdentifierSchema = normalizedValue(63).regex(
 
 const DatabaseHostSchema = normalizedValue(253).regex(
   /^psd-eoc-exploration-smoke[.]cluster-[a-z0-9]+[.]us-west-2[.]rds[.]amazonaws[.]com$/u,
-  'must be the exploration Aurora writer endpoint',
+  'must be the Aurora writer endpoint',
 );
 
 const DatabasePasswordSchema = z
@@ -78,8 +77,8 @@ const StaffEmailSchema = normalizedValue(320)
 
 const BootstrapEnvironmentSchema = z
   .object({
-    AWS_ACCOUNT_ID: z.literal(EXPLORATION_AWS_ACCOUNT_ID),
-    AWS_REGION: z.literal(EXPLORATION_AWS_REGION),
+    AWS_ACCOUNT_ID: z.literal(AWS_ACCOUNT_ID),
+    AWS_REGION: z.literal(AWS_REGION),
     DATABASE_DRIVER: z.literal('postgres'),
     DATABASE_HOST: DatabaseHostSchema,
     DATABASE_PORT: z.literal('5432'),
@@ -90,13 +89,13 @@ const BootstrapEnvironmentSchema = z
     DATABASE_IDLE_TIMEOUT_SECONDS: z.literal('20'),
     DATABASE_ADMIN_USERNAME: DatabaseIdentifierSchema,
     DATABASE_ADMIN_PASSWORD: DatabasePasswordSchema,
-    DATABASE_APPLICATION_USERNAME: z.literal(EXPLORATION_DATABASE_LOGIN),
+    DATABASE_APPLICATION_USERNAME: z.literal(DATABASE_LOGIN),
     DATABASE_APPLICATION_PASSWORD: DatabasePasswordSchema,
     APPROVED_GOOGLE_SUBJECT: GoogleSubjectSchema,
     APPROVED_STAFF_EMAIL: StaffEmailSchema,
     APPROVED_STAFF_DISPLAY_NAME: normalizedValue(160),
     SOURCE_SHA: SourceShaSchema,
-    BOOTSTRAP_MODE: z.enum(EXPLORATION_BOOTSTRAP_MODES).default('migrate'),
+    BOOTSTRAP_MODE: z.enum(BOOTSTRAP_MODES).default('migrate'),
   })
   .strict();
 
@@ -108,10 +107,10 @@ const FORBIDDEN_DATABASE_ENVIRONMENT = Object.freeze([
   'DATABASE_APPLICATION_SECRET_ARN',
 ] as const);
 
-/** Fail-closed input for the one isolated exploration-smoke bootstrap. */
-export interface ExplorationBootstrapConfig {
-  readonly accountId: typeof EXPLORATION_AWS_ACCOUNT_ID;
-  readonly region: typeof EXPLORATION_AWS_REGION;
+/** Fail-closed input for the deployment bootstrap. */
+export interface BootstrapConfig {
+  readonly accountId: typeof AWS_ACCOUNT_ID;
+  readonly region: typeof AWS_REGION;
   readonly databaseDriver: 'postgres';
   readonly databaseHost: string;
   readonly databasePort: 5432;
@@ -122,20 +121,20 @@ export interface ExplorationBootstrapConfig {
   readonly databaseIdleTimeoutSeconds: 20;
   readonly databaseAdminUsername: string;
   readonly databaseAdminPassword: string;
-  readonly databaseApplicationUsername: typeof EXPLORATION_DATABASE_LOGIN;
+  readonly databaseApplicationUsername: typeof DATABASE_LOGIN;
   readonly databaseApplicationPassword: string;
   readonly approvedGoogleSubject: string;
   readonly approvedStaffEmail: string;
   readonly approvedStaffDisplayName: string;
   readonly sourceSha: string;
-  readonly mode: ExplorationBootstrapMode;
+  readonly mode: BootstrapMode;
 }
 
 /** Configuration error that names fields without reflecting sensitive values. */
-export class ExplorationBootstrapConfigurationError extends Error {
+export class BootstrapConfigurationError extends Error {
   public constructor(message: string) {
     super(message);
-    this.name = 'ExplorationBootstrapConfigurationError';
+    this.name = 'BootstrapConfigurationError';
   }
 }
 
@@ -148,15 +147,15 @@ function hasEnvironmentValue(environment: Environment, name: string): boolean {
  * Reads only the explicit native bootstrap contract. Ambient AWS defaults
  * cannot redirect this operation, and no Data API configuration is accepted.
  */
-export function readExplorationBootstrapConfig(
+export function readBootstrapConfig(
   environment: Environment = process.env,
-): ExplorationBootstrapConfig {
+): BootstrapConfig {
   const forbidden = FORBIDDEN_DATABASE_ENVIRONMENT.filter((name) =>
     hasEnvironmentValue(environment, name),
   );
   if (forbidden.length > 0) {
-    throw new ExplorationBootstrapConfigurationError(
-      `Invalid exploration-smoke bootstrap configuration: ${forbidden.join(', ')}.`,
+    throw new BootstrapConfigurationError(
+      `Invalid bootstrap configuration: ${forbidden.join(', ')}.`,
     );
   }
 
@@ -188,14 +187,14 @@ export function readExplorationBootstrapConfig(
     ]
       .filter((field): field is string => typeof field === 'string')
       .sort();
-    throw new ExplorationBootstrapConfigurationError(
-      `Invalid exploration-smoke bootstrap configuration: ${fields.join(', ')}.`,
+    throw new BootstrapConfigurationError(
+      `Invalid bootstrap configuration: ${fields.join(', ')}.`,
     );
   }
 
   const value = parsed.data;
   if (value.DATABASE_ADMIN_USERNAME === value.DATABASE_APPLICATION_USERNAME) {
-    throw new ExplorationBootstrapConfigurationError(
+    throw new BootstrapConfigurationError(
       'The database administrator and application roles must be distinct.',
     );
   }
