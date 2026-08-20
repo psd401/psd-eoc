@@ -1,3 +1,17 @@
+/**
+ * CloudWatch alarms, dashboards, and alarm routing for PSD EOC.
+ *
+ * NOT WIRED. `configureMonitoring` is called from nowhere, and every alarm in
+ * this repository is defined in this file, so the deployed stack raises no
+ * alarms at all. That is an operational gap, not dead code: the stack this was
+ * written for — `src/psd-eoc-stack.ts`, a baseline named `PsdEoc` — was never
+ * the stack that deploys, and it has been deleted. Production runs
+ * `bin/psd-eoc.ts` and `src/stack/`, which never called this.
+ *
+ * Kept rather than deleted because the answer to "production has no alarms" is
+ * more likely to be "call this from the live stack" than "write it again".
+ * Tracked separately; delete it if that turns out to be wrong.
+ */
 import { fileURLToPath } from 'node:url';
 
 import {
