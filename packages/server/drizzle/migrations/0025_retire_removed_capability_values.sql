@@ -28,6 +28,16 @@
 -- the same reason: the guard is the rule, and suspending it has to be visible,
 -- counted, and proven to have been restored. A deployment with no such rows
 -- deletes nothing and every assertion still holds.
+--
+-- Both tables are locked first, as 0012 does. The counts and digests taken
+-- before the delete have to describe the same rows the delete and the checks
+-- afterwards see, and the rebuild below takes ACCESS EXCLUSIVE on these two
+-- tables regardless. NOWAIT, so a migration that cannot have them to itself
+-- fails immediately rather than queueing behind live traffic.
+LOCK TABLE
+	public."idempotency_records",
+	public."human_confirmation_records"
+IN ACCESS EXCLUSIVE MODE NOWAIT;--> statement-breakpoint
 
 DO $$
 DECLARE
@@ -39,6 +49,8 @@ DECLARE
 	total_before integer;
 	total_after integer;
 	deleted_count integer;
+	confirmations_before integer;
+	confirmations_deleted integer;
 	survivor_digest_before text;
 	survivor_digest_after text;
 BEGIN
@@ -84,7 +96,16 @@ BEGIN
 
 	-- Empty on every deployment seen so far, but a confirmation is single-use and
 	-- short-lived, so a retired value here would block the cast just the same.
+	-- Counted and announced like the idempotency rows rather than removed
+	-- quietly: if a deployment ever does have one, that belongs in the log.
+	SELECT count(*)::integer INTO confirmations_before
+	FROM public."human_confirmation_records" WHERE "capability_id"::text = ANY(retired_values);
 	DELETE FROM public."human_confirmation_records" WHERE "capability_id"::text = ANY(retired_values);
+	GET DIAGNOSTICS confirmations_deleted = ROW_COUNT;
+	IF confirmations_deleted <> confirmations_before THEN
+		RAISE EXCEPTION 'Retired-capability purge deleted % confirmation rows instead of %', confirmations_deleted, confirmations_before
+			USING ERRCODE = '55000';
+	END IF;
 
 	FOREACH table_name IN ARRAY guarded_tables LOOP
 		EXECUTE pg_catalog.format(
@@ -121,7 +142,7 @@ BEGIN
 			USING ERRCODE = '55000';
 	END IF;
 
-	RAISE NOTICE 'Retired-capability purge removed % idempotency row(s)', deleted_count;
+	RAISE NOTICE 'Retired-capability purge removed % idempotency row(s) and % confirmation row(s)', deleted_count, confirmations_deleted;
 END;
 $$;--> statement-breakpoint
 
