@@ -1,483 +1,108 @@
-name: Stage or finalize exact Google access membership
+name: Sync access membership
 
-run-name: >-
-  access-membership ${{ inputs.phase }} ${{ inputs.source_sha }} at ${{ inputs.image_digest }}
+run-name: access-membership sync
 
+# Membership has a freshness bound: sign-in refuses a group whose membership has
+# not been read recently, so that a deployment fails closed rather than running
+# indefinitely on a stale answer. That bound is only safe if something actually
+# refreshes it.
+#
+# This used to be dispatch-only, and it produced exactly the outage the bound is
+# meant to prevent: membership was read once by hand, and everybody lost access
+# when it aged out. Running on a schedule is what makes the freshness rule a
+# safety property instead of a timer on an outage.
 on:
+  schedule:
+    # Every two hours. Well inside the freshness bound, so a single missed run
+    # never denies anyone.
+    - cron: '0 */2 * * *'
   workflow_dispatch:
-    inputs:
-      phase:
-        description: Protected transition phase
-        required: true
-        type: choice
-        options:
-          - stage
-          - finalize
-      source_sha:
-        description: Exact reviewed commit on main (40 lowercase hex)
-        required: true
-        type: string
-      image_digest:
-        description: Exact deployed access-sync image digest
-        required: true
-        type: string
-      deployment_authority:
-        description: Role ARN|policy SHA-256|boundary ARN-or-none
-        required: true
-        type: string
-      change_reference:
-        description: GitHub issue or PR with product-owner publication authorization
-        required: true
-        type: string
-      mobile_session_id:
-        default: none
-        description: Opaque iOS session UUID for finalize; none for stage
-        required: true
-        type: string
-      membership_snapshot_id:
-        default: none
-        description: Opaque two-source snapshot UUID for finalize; none for stage
-        required: true
-        type: string
-      acknowledge:
-        description: Enter the exact phase-specific acknowledgement
-        required: true
-        type: string
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
+  group: psd-eoc-access-membership-sync
   cancel-in-progress: false
-  group: psd-eoc-exploration-smoke-access-membership
-
-env:
-  AWS_ACCOUNT_ID: '338414773271'
-  AWS_ACCOUNT_ALIAS: psd401
-  AWS_REGION: us-west-2
-  STACK_NAME: PsdEocExplorationSmoke
 
 jobs:
-  publish:
-    name: Run one protected access transition phase
-    if: >-
-      github.repository == 'psd401/psd-eoc' &&
-      github.ref == 'refs/heads/main'
-    environment: exploration-smoke
+  sync:
+    name: Sync access membership
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    environment: exploration-smoke
     env:
-      ACKNOWLEDGE: ${{ inputs.acknowledge }}
-      CHANGE_REFERENCE: ${{ inputs.change_reference }}
-      CONFIGURED_DEPLOY_ROLE_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
-      DEPLOYMENT_AUTHORITY: ${{ inputs.deployment_authority }}
-      EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_PERMISSIONS_BOUNDARY_ARN }}
-      EXPECTED_DEPLOY_ROLE_POLICY_SHA256: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_POLICY_SHA256 }}
-      IMAGE_DIGEST: ${{ inputs.image_digest }}
-      MEMBERSHIP_SNAPSHOT_ID: ${{ inputs.membership_snapshot_id }}
-      MOBILE_SESSION_ID: ${{ inputs.mobile_session_id }}
-      PHASE: ${{ inputs.phase }}
-      SOURCE_SHA: ${{ inputs.source_sha }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      CLUSTER: psd-eoc-exploration-smoke-native-bootstrap
+      TASK_DEFINITION: psd-eoc-exploration-smoke-access-sync
+      SUBNETS: ${{ vars.ACCESS_SYNC_SUBNET_IDS }}
+      SECURITY_GROUP: ${{ vars.ACCESS_SYNC_SECURITY_GROUP_ID }}
     steps:
-      - name: Check out the exact reviewed source
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Assume the deployment role
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ inputs.source_sha }}
+          role-to-assume: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Validate the protected publication request
+      - name: Run the access sync
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$IMAGE_DIGEST" != "sha256:$(printf '0%.0s' {1..64})"
-          case "$PHASE" in
-            stage)
-              test "$ACKNOWLEDGE" = "STAGE EXACT ACCESS MEMBERSHIP"
-              test "$MOBILE_SESSION_ID" = "none"
-              test "$MEMBERSHIP_SNAPSHOT_ID" = "none"
-              ;;
-            finalize)
-              test "$ACKNOWLEDGE" = "FINALIZE PROVEN MOBILE ACCESS"
-              [[ "$MOBILE_SESSION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
-              [[ "$MEMBERSHIP_SNAPSHOT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
-              ;;
-            *)
-              echo "The protected transition phase is invalid." >&2
-              exit 1
-              ;;
-          esac
-          [[ "$CHANGE_REFERENCE" =~ ^https://github.com/psd401/psd-eoc/(issues|pull)/[1-9][0-9]*$ ]]
-          deployment_authority_pattern='^(arn:aws:iam::338414773271:role/[A-Za-z0-9+=,.@_/-]*exploration-smoke[A-Za-z0-9+=,.@_/-]*)\|([0-9a-f]{64})\|(none|arn:aws:iam::(aws|[0-9]{12}):policy/[A-Za-z0-9+=,.@_/-]+)$'
-          [[ "$DEPLOYMENT_AUTHORITY" =~ $deployment_authority_pattern ]]
-          DEPLOY_ROLE_ARN=${BASH_REMATCH[1]}
-          requested_policy_sha256=${BASH_REMATCH[2]}
-          requested_boundary_arn=${BASH_REMATCH[3]}
-          test "$DEPLOY_ROLE_ARN" = "$CONFIGURED_DEPLOY_ROLE_ARN"
-          test "$requested_policy_sha256" = "$EXPECTED_DEPLOY_ROLE_POLICY_SHA256"
-          test "$requested_boundary_arn" = "$EXPECTED_DEPLOY_ROLE_BOUNDARY_ARN"
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
-          printf '%s\n' "DEPLOY_ROLE_ARN=$DEPLOY_ROLE_ARN" >> "$GITHUB_ENV"
+          request_id=$(uuidgen | tr 'A-Z' 'a-z')
+          idempotency_key="access-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
-      - name: Configure exact GitHub OIDC deployment role
-        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: psd-eoc-access-sync-${{ github.run_id }}
-          role-to-assume: ${{ env.CONFIGURED_DEPLOY_ROLE_ARN }}
-
-      - name: Prove account, deployed task, and credential boundary
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/readback
-          aws sts get-caller-identity > artifacts/readback/sts-identity.json
-          test "$(jq -r .Account artifacts/readback/sts-identity.json)" = "$AWS_ACCOUNT_ID"
-          test "$(jq -r .Arn artifacts/readback/sts-identity.json)" = "arn:aws:sts::$AWS_ACCOUNT_ID:assumed-role/${DEPLOY_ROLE_ARN##*/}/psd-eoc-access-sync-$GITHUB_RUN_ID"
-          aws iam list-account-aliases > artifacts/readback/account-aliases.json
-          test "$(jq -r '.AccountAliases | length' artifacts/readback/account-aliases.json)" -eq 1
-          test "$(jq -r '.AccountAliases[0]' artifacts/readback/account-aliases.json)" = "$AWS_ACCOUNT_ALIAS"
-
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query 'Stacks[0].Outputs' \
-            > "$RUNNER_TEMP/stack-outputs.json"
-          jq 'map({key: .OutputKey, value: .OutputValue}) | from_entries' \
-            "$RUNNER_TEMP/stack-outputs.json" \
-            > "$RUNNER_TEMP/outputs.json"
-          outputs="$RUNNER_TEMP/outputs.json"
-          cluster_arn=$(jq -er '.BootstrapEcsClusterArn' "$outputs")
-          task_definition_arn=$(jq -er '.AccessSyncTaskDefinitionArn' "$outputs")
-          execution_role_arn=$(jq -er '.AccessSyncTaskExecutionRoleArn' "$outputs")
-          task_role_arn=$(jq -er '.AccessSyncTaskRoleArn' "$outputs")
-          subnet_ids=$(jq -er '.BootstrapPrivateSubnetIds' "$outputs")
-          security_group_id=$(jq -er '.BootstrapSecurityGroupId' "$outputs")
-          log_group_name=$(jq -er '.BootstrapLogGroupName' "$outputs")
-          repository_uri=$(jq -er '.ImageRepositoryUri' "$outputs")
-          application_secret_arn=$(jq -er '.DatabaseApplicationSecretArn' "$outputs")
-          approved_identity_secret_arn=$(jq -er '.ApprovedIdentitySecretArn' "$outputs")
-          test "$(jq -er '.BootstrapCandidateImageDigest' "$outputs")" = "$IMAGE_DIGEST"
-          test "$(jq -er '.BootstrapCandidateSourceSha' "$outputs")" = "$SOURCE_SHA"
-          [[ "$cluster_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:cluster/psd-eoc-exploration-smoke-native-bootstrap$ ]]
-          [[ "$task_definition_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task-definition/psd-eoc-exploration-smoke-access-sync:[1-9][0-9]*$ ]]
-          [[ "$execution_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole[A-Za-z0-9-]+$ ]]
-          [[ "$task_role_arn" =~ ^arn:aws:iam::338414773271:role/PsdEocExplorationSmoke-AccessSyncTaskRole[A-Za-z0-9-]+$ ]]
-          [[ "$security_group_id" =~ ^sg-[0-9a-f]+$ ]]
-          test "$log_group_name" = "/psd-eoc/exploration-smoke/bootstrap"
-          test "$execution_role_arn" != "$task_role_arn"
-
-          aws ecs describe-task-definition \
-            --task-definition "$task_definition_arn" \
-            > "$RUNNER_TEMP/access-sync-task-definition.json"
-          expected_image="$repository_uri@$IMAGE_DIGEST"
-          jq -e \
-            --arg task_definition "$task_definition_arn" \
-            --arg task_role "$task_role_arn" \
-            --arg execution_role "$execution_role_arn" \
-            --arg image "$expected_image" \
-            --arg source_sha "$SOURCE_SHA" \
-            --arg log_group "$log_group_name" \
-            --arg application_secret "$application_secret_arn" \
-            --arg identity_secret "$approved_identity_secret_arn" '
-              def map_by_name: map({key: .name, value: .value}) | from_entries;
-              def secrets_by_name: map({key: .name, value: .valueFrom}) | from_entries;
-              .taskDefinition as $task |
-              $task.taskDefinitionArn == $task_definition and
-              $task.family == "psd-eoc-exploration-smoke-access-sync" and
-              $task.taskRoleArn == $task_role and
-              $task.executionRoleArn == $execution_role and
-              $task.networkMode == "awsvpc" and
-              ($task.requiresCompatibilities | sort) == ["FARGATE"] and
-              ($task.containerDefinitions | length) == 1 and
-              $task.containerDefinitions[0] as $container |
-              $container.name == "access-membership-sync" and
-              $container.essential == true and
-              $container.readonlyRootFilesystem == true and
-              $container.image == $image and
-              $container.command == [
-                "bun",
-                "packages/server/scripts/exploration-smoke/sync-access-membership.ts"
-              ] and
-              $container.logConfiguration.logDriver == "awslogs" and
-              $container.logConfiguration.options."awslogs-group" == $log_group and
-              $container.logConfiguration.options."awslogs-stream-prefix" == "access-membership-sync" and
-              ($container.environment | map_by_name) as $environment |
-              ($environment | keys | sort) == [
-                "AWS_ACCOUNT_ID",
-                "AWS_REGION",
-                "DATABASE_CONNECT_TIMEOUT_SECONDS",
-                "DATABASE_DRIVER",
-                "DATABASE_HOST",
-                "DATABASE_IDLE_TIMEOUT_SECONDS",
-                "DATABASE_MAX_CONNECTIONS",
-                "DATABASE_NAME",
-                "DATABASE_PORT",
-                "DATABASE_SSL_ROOT_CERT",
-                "SOURCE_SHA",
-                "TMPDIR"
-              ] and
-              $environment.SOURCE_SHA == $source_sha and
-              $environment.DATABASE_DRIVER == "postgres" and
-              $environment.DATABASE_MAX_CONNECTIONS == "1" and
-              ($container.secrets | secrets_by_name) as $secrets |
-              ($secrets | keys | sort) == [
-                "DATABASE_PASSWORD",
-                "DATABASE_USERNAME",
-                "GOOGLE_ROSTER_CONFIG",
-                "PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256"
-              ] and
-              $secrets.DATABASE_PASSWORD == ($application_secret + ":password::") and
-              $secrets.DATABASE_USERNAME == ($application_secret + ":username::") and
-              $secrets.PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 ==
-                ($identity_secret + ":initialMobileTransitionEmailSha256::") and
-              ($secrets.GOOGLE_ROSTER_CONFIG |
-                test("^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-groups(-[A-Za-z0-9]{6})?$"))
-            ' "$RUNNER_TEMP/access-sync-task-definition.json" > /dev/null
-          groups_secret_reference=$(jq -er '
-            .taskDefinition.containerDefinitions[0].secrets[] |
-            select(.name == "GOOGLE_ROSTER_CONFIG") | .valueFrom
-          ' "$RUNNER_TEMP/access-sync-task-definition.json")
-          test "$groups_secret_reference" = "arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:/psd-eoc/google-groups"
-
-          # BEGIN access-sync outer-role exact execution simulation
-          aws iam simulate-principal-policy \
-            --policy-source-arn "$DEPLOY_ROLE_ARN" \
-            --action-names ecs:RunTask \
-            --resource-arns "$task_definition_arn" \
-            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$cluster_arn",ContextKeyType=string \
-            > artifacts/readback/deploy-role-run-task.json
-          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deploy-role-run-task.json)" = "allowed"
-          neighboring_task_definition_arn="arn:aws:ecs:$AWS_REGION:$AWS_ACCOUNT_ID:task-definition/psd-eoc-not-exploration-smoke-access-sync:1"
-          aws iam simulate-principal-policy \
-            --policy-source-arn "$DEPLOY_ROLE_ARN" \
-            --action-names ecs:RunTask \
-            --resource-arns "$neighboring_task_definition_arn" \
-            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$cluster_arn",ContextKeyType=string \
-            > artifacts/readback/deploy-role-neighbor-task-definition-run-task.json
-          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deploy-role-neighbor-task-definition-run-task.json)" != "allowed"
-          neighboring_cluster_arn="arn:aws:ecs:$AWS_REGION:$AWS_ACCOUNT_ID:cluster/psd-eoc-not-exploration-smoke"
-          aws iam simulate-principal-policy \
-            --policy-source-arn "$DEPLOY_ROLE_ARN" \
-            --action-names ecs:RunTask \
-            --resource-arns "$task_definition_arn" \
-            --context-entries ContextKeyName=ecs:cluster,ContextKeyValues="$neighboring_cluster_arn",ContextKeyType=string \
-            > artifacts/readback/deploy-role-neighbor-cluster-run-task.json
-          test "$(jq -r '.EvaluationResults[0].EvalDecision' artifacts/readback/deploy-role-neighbor-cluster-run-task.json)" != "allowed"
-          aws iam simulate-principal-policy \
-            --policy-source-arn "$DEPLOY_ROLE_ARN" \
-            --action-names iam:PassRole \
-            --resource-arns "$execution_role_arn" "$task_role_arn" \
-            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string \
-            > artifacts/readback/deploy-role-pass-role.json
-          jq -e --arg execution "$execution_role_arn" --arg task "$task_role_arn" '
-            (.EvaluationResults | length) == 1 and
-            .EvaluationResults[0].EvalDecision == "allowed" and
-            (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
-            ([.EvaluationResults[0].ResourceSpecificResults[].EvalResourceName] | sort) ==
-              ([$execution, $task] | sort) and
-            all(
-              .EvaluationResults[0].ResourceSpecificResults[];
-              .EvalResourceDecision == "allowed"
-            )
-          ' artifacts/readback/deploy-role-pass-role.json > /dev/null
-          aws iam simulate-principal-policy \
-            --policy-source-arn "$DEPLOY_ROLE_ARN" \
-            --action-names iam:PassRole \
-            --resource-arns "$execution_role_arn" "$task_role_arn" \
-            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=lambda.amazonaws.com,ContextKeyType=string \
-            > artifacts/readback/deploy-role-wrong-service-pass-role.json
-          jq -e '
-            .EvaluationResults[0].EvalDecision != "allowed" and
-            all(
-              .EvaluationResults[0].ResourceSpecificResults[];
-              .EvalResourceDecision != "allowed"
-            )
-          ' artifacts/readback/deploy-role-wrong-service-pass-role.json > /dev/null
-          neighboring_execution_role_arn="arn:aws:iam::$AWS_ACCOUNT_ID:role/PsdEocExplorationSmoke-NeighborTaskExecutionRole"
-          neighboring_task_role_arn="arn:aws:iam::$AWS_ACCOUNT_ID:role/PsdEocExplorationSmoke-NeighborTaskRole"
-          aws iam simulate-principal-policy \
-            --policy-source-arn "$DEPLOY_ROLE_ARN" \
-            --action-names iam:PassRole \
-            --resource-arns "$neighboring_execution_role_arn" "$neighboring_task_role_arn" \
-            --context-entries ContextKeyName=iam:PassedToService,ContextKeyValues=ecs-tasks.amazonaws.com,ContextKeyType=string \
-            > artifacts/readback/deploy-role-neighbor-pass-role.json
-          jq -e --arg execution "$neighboring_execution_role_arn" --arg task "$neighboring_task_role_arn" '
-            (.EvaluationResults | length) == 1 and
-            .EvaluationResults[0].EvalDecision != "allowed" and
-            (.EvaluationResults[0].ResourceSpecificResults | length) == 2 and
-            ([.EvaluationResults[0].ResourceSpecificResults[].EvalResourceName] | sort) ==
-              ([$execution, $task] | sort) and
-            all(
-              .EvaluationResults[0].ResourceSpecificResults[];
-              .EvalResourceDecision != "allowed"
-            )
-          ' artifacts/readback/deploy-role-neighbor-pass-role.json > /dev/null
-          # END access-sync outer-role exact execution simulation
-
-          {
-            printf '%s\n' "CLUSTER_ARN=$cluster_arn"
-            printf '%s\n' "TASK_DEFINITION_ARN=$task_definition_arn"
-            printf '%s\n' "SUBNET_IDS=$subnet_ids"
-            printf '%s\n' "SECURITY_GROUP_ID=$security_group_id"
-            printf '%s\n' "LOG_GROUP_NAME=$log_group_name"
-          } >> "$GITHUB_ENV"
-
-      - name: Run the exact protected transition phase
-        shell: bash
-        run: |
-          set -euo pipefail
-          IFS=, read -r -a subnets <<< "$SUBNET_IDS"
-          test "${#subnets[@]}" -eq 2
-          for subnet in "${subnets[@]}"; do [[ "$subnet" =~ ^subnet-[0-9a-f]+$ ]]; done
-          subnet_csv=$(IFS=,; printf '%s' "${subnets[*]}")
-          request_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
-          [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
-          idempotency_key="access-sync:${PHASE}:github-${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-          started_by="github-access-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          network_configuration="awsvpcConfiguration={subnets=[$subnet_csv],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=DISABLED}"
-          jq -n \
+          overrides=$(jq -nc \
             --arg request_id "$request_id" \
             --arg idempotency_key "$idempotency_key" \
-            --arg phase "$PHASE" \
-            --arg mobile_session_id "$MOBILE_SESSION_ID" \
-            --arg membership_snapshot_id "$MEMBERSHIP_SNAPSHOT_ID" '
-            [{
+            '{containerOverrides: [{
               name: "access-membership-sync",
-              environment: ([
-                {name: "ACCESS_SYNC_PHASE", value: $phase},
+              environment: [
                 {name: "ACCESS_SYNC_REQUEST_ID", value: $request_id},
                 {name: "ACCESS_SYNC_IDEMPOTENCY_KEY", value: $idempotency_key}
-              ] + if $phase == "finalize" then [
-                {name: "ACCESS_SYNC_MOBILE_SESSION_ID", value: $mobile_session_id},
-                {name: "ACCESS_SYNC_MEMBERSHIP_SNAPSHOT_ID", value: $membership_snapshot_id}
-              ] else [] end)
-            }]' > "$RUNNER_TEMP/container-overrides.json"
-          aws ecs run-task \
-            --cluster "$CLUSTER_ARN" \
-            --task-definition "$TASK_DEFINITION_ARN" \
+              ]
+            }]}')
+
+          task_arn=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEFINITION" \
             --launch-type FARGATE \
             --platform-version LATEST \
             --count 1 \
-            --started-by "$started_by" \
-            --client-token "$request_id" \
-            --network-configuration "$network_configuration" \
-            --overrides "$(jq -c '{containerOverrides: .}' "$RUNNER_TEMP/container-overrides.json")" \
-            > "$RUNNER_TEMP/run-task.json"
-          test "$(jq '.failures | length' "$RUNNER_TEMP/run-task.json")" -eq 0
-          test "$(jq '.tasks | length' "$RUNNER_TEMP/run-task.json")" -eq 1
-          task_arn=$(jq -er '.tasks[0].taskArn' "$RUNNER_TEMP/run-task.json")
-          [[ "$task_arn" =~ ^arn:aws:ecs:us-west-2:338414773271:task/psd-eoc-exploration-smoke-native-bootstrap/[0-9a-f]{32}$ ]]
-          aws ecs wait tasks-stopped --cluster "$CLUSTER_ARN" --tasks "$task_arn"
-          aws ecs describe-tasks \
-            --cluster "$CLUSTER_ARN" \
-            --tasks "$task_arn" \
-            > "$RUNNER_TEMP/stopped-task.json"
-          jq -e \
-            --arg task "$task_arn" \
-            --arg definition "$TASK_DEFINITION_ARN" \
-            --arg started_by "$started_by" '
-              (.failures | length) == 0 and
-              (.tasks | length) == 1 and
-              .tasks[0].taskArn == $task and
-              .tasks[0].taskDefinitionArn == $definition and
-              .tasks[0].startedBy == $started_by and
-              .tasks[0].stopCode == "EssentialContainerExited" and
-              (.tasks[0].containers | length) == 1 and
-              .tasks[0].containers[0].name == "access-membership-sync" and
-              .tasks[0].containers[0].exitCode == 0
-            ' "$RUNNER_TEMP/stopped-task.json" > /dev/null
-
-          task_id=${task_arn##*/}
-          log_stream="access-membership-sync/access-membership-sync/$task_id"
-          for attempt in {1..15}; do
-            if aws logs get-log-events \
-              --log-group-name "$LOG_GROUP_NAME" \
-              --log-stream-name "$log_stream" \
-              --start-from-head \
-              > "$RUNNER_TEMP/access-sync-logs.json" 2> "$RUNNER_TEMP/access-sync-log-error.txt"; then
-              break
-            fi
-            if [[ "$attempt" -eq 15 ]]; then
-              echo "Aggregate access-sync log stream was unavailable." >&2
-              exit 1
-            fi
-            sleep 2
-          done
-          jq -r '.events[].message' "$RUNNER_TEMP/access-sync-logs.json" \
-            > "$RUNNER_TEMP/access-sync-messages.txt"
-          test "$(wc -l < "$RUNNER_TEMP/access-sync-messages.txt" | tr -d ' ')" -eq 1
-          if grep -Eq '@|users/|groups/|access_token|private_key|Bearer ' \
-            "$RUNNER_TEMP/access-sync-messages.txt"; then
-            echo "Aggregate access-sync output contained a forbidden identity or credential marker." >&2
+            --started-by "access-sync-${GITHUB_RUN_ID}" \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}" \
+            --overrides "$overrides" \
+            --query 'tasks[0].taskArn' --output text)
+          if [[ -z "$task_arn" || "$task_arn" == "None" ]]; then
+            echo "::error::The access sync task did not start. Membership was not refreshed." >&2
             exit 1
           fi
-          jq -e --arg source_sha "$SOURCE_SHA" '
-            (keys | sort) == [
-              "activeAccessGroupCount",
-              "auditEntryHash",
-              "capturedAt",
-              "designatedSourceId",
-              "evaluatedMembershipCount",
-              "event",
-              "membershipDigest",
-              "phase",
-              "proofKind",
-              "providerGroupIdDigest",
-              "publication",
-              "snapshotId",
-              "snapshotVersion",
-              "sourceSha"
-            ] and
-            .event == "access-membership-sync-complete" and
-            .sourceSha == $source_sha and
-            .phase == env.PHASE and
-            (.snapshotId | test("^[0-9a-f-]{36}$")) and
-            (.designatedSourceId | test("^[0-9a-f-]{36}$")) and
-            (.snapshotVersion | type == "number" and . >= 1) and
-            (if env.PHASE == "stage" then
-              .activeAccessGroupCount == 2 and
-              .proofKind == "initial-selector-match" and
-              .auditEntryHash == null
-            else
-              .activeAccessGroupCount == 1 and
-              .proofKind == "durable-ios-session" and
-              (.auditEntryHash | test("^[a-f0-9]{64}$"))
-            end) and
-            (.evaluatedMembershipCount | type == "number" and . >= 1 and . <= 1200) and
-            (.membershipDigest | test("^[a-f0-9]{64}$")) and
-            (.providerGroupIdDigest | test("^[a-f0-9]{64}$")) and
-            (.publication == "created" or .publication == "already-current")
-          ' "$RUNNER_TEMP/access-sync-messages.txt" \
-            > /dev/null
-          jq -cS . "$RUNNER_TEMP/access-sync-messages.txt" \
-            > artifacts/readback/access-membership-publication.json
+          echo "Task: $task_arn"
 
-      - name: Publish aggregate proof only
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          if-no-files-found: error
-          name: access-membership-${{ inputs.phase }}-${{ inputs.source_sha }}
-          path: artifacts/readback
-          retention-days: 14
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task_arn"
+          read -r stop_code exit_code < <(aws ecs describe-tasks \
+            --cluster "$CLUSTER" --tasks "$task_arn" \
+            --query 'tasks[0].[stopCode,containers[0].exitCode]' --output text)
 
-      - name: Record protected outcome
-        shell: bash
-        run: |
+          # The task prints one bounded aggregate summary: counts and digests,
+          # never a member address or a provider group id.
+          summary=$(aws logs get-log-events \
+            --log-group-name /psd-eoc/exploration-smoke/bootstrap \
+            --log-stream-name "access-membership-sync/access-membership-sync/${task_arn##*/}" \
+            --query 'events[-1].message' --output text 2>/dev/null || echo '')
+
           {
-            echo "## Exact access-membership $PHASE"
-            echo
-            echo "- Source: \`$SOURCE_SHA\`"
-            echo "- Image: \`$IMAGE_DIGEST\`"
-            echo "- Authorization: $CHANGE_REFERENCE"
-            if test "$PHASE" = "stage"; then
-              echo "- Exact direct-user evidence matched the protected transition selector: **yes**"
-            else
-              echo "- Durable nonrevoked iOS session proof passed before recovery-source deactivation: **yes**"
-            fi
-            echo "- Full member emails, provider identifiers, credentials, and raw logs were not published."
-            echo "- No notification provider or human-only incident action was invoked."
+            echo "### Access membership sync"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Stop code | \`$stop_code\` |"
+            echo "| Exit code | \`$exit_code\` |"
+            echo "| Summary | \`${summary:-unavailable}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$exit_code" != "0" ]]; then
+            echo "::error::Access sync exited $exit_code ($stop_code). Membership is now ageing toward its freshness bound; sign-in will start failing closed if this is not fixed." >&2
+            exit 1
+          fi
+          echo "Membership refreshed."
