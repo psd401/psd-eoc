@@ -7,10 +7,10 @@
  * and it must not be sent twice in the meantime. This is the store that decides
  * both, and it is the piece every channel worker needs before it can exist.
  *
- * The behaviour is fixed by `AttemptExecutionStore` in `workers/shared`, which
- * this implements directly so the type checker proves conformance rather than
- * two definitions drifting apart. Only one thing is added beyond the in-memory
- * reference used by the worker tests: lease expiry. `claim` takes
+ * The behaviour is fixed by `AttemptExecutionStore` in `workers/shared`, whose
+ * shape is restated below — see the note there for why it is not imported. Only
+ * one thing is added beyond the in-memory reference used by the worker tests:
+ * lease expiry. `claim` takes
  * `leaseMilliseconds`, which is meaningless unless an expired lease can be
  * taken over, and without it one crashed worker strands an activation's
  * notification permanently.
@@ -22,18 +22,75 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
-import type {
-  AttemptExecutionClaim,
-  AttemptExecutionClaimRequest,
-  AttemptExecutionCompletion,
-  AttemptExecutionLookup,
-  AttemptExecutionLookupRequest,
-  AttemptExecutionStore,
-  CompleteAttemptExecutionRequest,
-  ReleaseAttemptExecutionRequest,
-} from '../../../../workers/shared/processor';
 import { channelAttemptExecutions } from '../../db/schema';
 import type { Database } from '../../db/client';
+
+/**
+ * The contract, restated here rather than imported from `workers/shared`.
+ *
+ * Channel workers do not share a process or a module graph with the server;
+ * they reach it over HTTP, the way `DeliveryStateWritebackClient` already does.
+ * The runtime image is built by copying named files, so importing a worker
+ * module here would drag its transitive graph into the server image to buy a
+ * compile-time check that says nothing about the boundary the two actually
+ * meet at. The shared contract belongs on the route, in `packages/contracts`.
+ *
+ * These mirror `AttemptExecutionStore` in `workers/shared/processor`. The
+ * provider outcome stays `unknown`: what a send result means is the worker's
+ * business, and it already refuses one it cannot read.
+ */
+export type AttemptExecutionCompletion =
+  | Readonly<{ kind: 'final'; outcome: unknown }>
+  | Readonly<{
+      kind: 'retry';
+      outcome: unknown;
+      delayMilliseconds: number;
+      nextAttemptNumber: number;
+      reasonCode: string;
+    }>;
+
+export interface AttemptExecutionClaimRequest {
+  readonly attemptId: string;
+  readonly fingerprint: string;
+  readonly leaseMilliseconds: number;
+}
+
+export interface AttemptExecutionLookupRequest {
+  readonly attemptId: string;
+  readonly fingerprint: string;
+}
+
+export type AttemptExecutionClaim =
+  | Readonly<{ kind: 'acquired'; leaseToken: string }>
+  | Readonly<{ kind: 'completed'; completion: AttemptExecutionCompletion }>
+  | Readonly<{ kind: 'in-progress' }>;
+
+export type AttemptExecutionLookup =
+  | Readonly<{ kind: 'missing' }>
+  | Readonly<{ kind: 'completed'; completion: AttemptExecutionCompletion }>
+  | Readonly<{ kind: 'in-progress' }>;
+
+export interface CompleteAttemptExecutionRequest {
+  readonly attemptId: string;
+  readonly fingerprint: string;
+  readonly leaseToken: string;
+  readonly completion: AttemptExecutionCompletion;
+}
+
+export interface ReleaseAttemptExecutionRequest {
+  readonly attemptId: string;
+  readonly fingerprint: string;
+  readonly leaseToken: string;
+}
+
+export interface AttemptExecutionStore {
+  lookup(
+    request: AttemptExecutionLookupRequest,
+  ): Promise<AttemptExecutionLookup>;
+  claim(request: AttemptExecutionClaimRequest): Promise<AttemptExecutionClaim>;
+  complete(request: CompleteAttemptExecutionRequest): Promise<void>;
+  release(request: ReleaseAttemptExecutionRequest): Promise<void>;
+}
 
 export type AttemptExecutionStoreErrorCode =
   /** The stored fingerprint disagrees with the caller's. */

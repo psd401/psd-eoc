@@ -103,6 +103,55 @@ async function withMaintenance<T>(
   }
 }
 
+/**
+ * Creates the cluster-wide roles once, before any shard starts.
+ *
+ * Migration 0000 creates its roles with
+ * `IF NOT EXISTS (SELECT 1 FROM pg_roles ...) THEN CREATE ROLE`. `pg_roles` is
+ * cluster-wide rather than per-database, so six shards migrating their own
+ * databases at the same time all read "not there" and all try to create it;
+ * every one but the winner fails with a duplicate object, and the shard dies
+ * partway through migrating.
+ *
+ * It only bites on a cluster that has never run the suite, because afterwards
+ * the roles already exist and the guard is satisfied. That is precisely the
+ * case in CI, which starts a fresh PostgreSQL service for every run, and it
+ * produced a failure in a different arbitrary test on each attempt.
+ *
+ * Creating them here serialises that one step. Migrations remain the source of
+ * truth for what the roles are; applied migration files are history and are not
+ * edited to work around this.
+ *
+ * @param baseUrl connection string for the PostgreSQL server under test
+ */
+async function createClusterRoles(baseUrl: string): Promise<void> {
+  const roles = new Set<string>();
+  const migrations = join(ROOT, 'packages/server/drizzle/migrations');
+  for (const entry of readdirSync(migrations)) {
+    if (!entry.endsWith('.sql')) continue;
+    const contents = await Bun.file(join(migrations, entry)).text();
+    for (const match of contents.matchAll(
+      /CREATE ROLE\s+"([A-Za-z0-9_]+)"([^;]*);/gu,
+    )) {
+      const name = match[1];
+      if (name !== undefined) roles.add(`${name}\u0000${match[2] ?? ''}`);
+    }
+  }
+  if (roles.size === 0) return;
+  await withMaintenance(baseUrl, async (sql) => {
+    for (const role of roles) {
+      const [name, options] = role.split('\u0000');
+      await sql.unsafe(`do $$
+        begin
+          if not exists (select 1 from pg_catalog.pg_roles where rolname = '${String(name)}') then
+            create role "${String(name)}" ${String(options ?? '').trim()};
+          end if;
+        end;
+      $$;`);
+    }
+  });
+}
+
 const { shardCount, passthrough } = parseShardCount(Bun.argv.slice(2));
 const files = SEARCH_ROOTS.flatMap((root) =>
   discoverTestFiles(join(ROOT, root)),
@@ -131,6 +180,7 @@ if (baseDatabaseUrl !== undefined) {
       shardDatabases.push(name);
     }
   });
+  await createClusterRoles(baseDatabaseUrl);
 }
 
 const started = Date.now();

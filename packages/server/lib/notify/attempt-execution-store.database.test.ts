@@ -17,8 +17,8 @@ import { migrateDatabase } from '../../drizzle/migrate';
 import {
   AttemptExecutionStoreError,
   createDrizzleAttemptExecutionStore,
+  type AttemptExecutionStore,
 } from './attempt-execution-store';
-import type { AttemptExecutionStore } from '../../../../workers/shared/processor';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
