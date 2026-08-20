@@ -119,7 +119,7 @@ function syntheticLoopbackDatabaseUrl(value: string | undefined): URL {
     !['127.0.0.1', '::1', '[::1]', 'localhost'].includes(
       databaseUrl.hostname,
     ) ||
-    databaseName !== 'psd_eoc_test' ||
+    !/^[A-Za-z0-9_-]+_test$/u.test(databaseName) ||
     databaseUrl.username !== 'psd_eoc_test' ||
     databaseUrl.password.length === 0 ||
     databaseUrl.search.length > 0 ||

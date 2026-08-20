@@ -53,9 +53,12 @@ export const UserSchema = z
         message: 'User email must be normalized to lowercase.',
       }),
     displayName: z.string().trim().min(1).max(160),
+    // Empty is meaningful: roles are what the holder's trusted groups grant, so
+    // somebody who is in none of them holds none. Such a record never
+    // authorizes a request — it exists so an administrator can still see and
+    // revoke the sessions of somebody who has been removed from every group.
     roles: z
       .array(RoleSchema)
-      .min(1)
       .max(2)
       .refine((roles) => new Set(roles).size === roles.length, {
         message: 'User roles must be unique.',

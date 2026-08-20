@@ -32,7 +32,7 @@ import {
   SecurityAuditRequestConflictError,
 } from '../audit';
 import type { EventTypeMutationMetadata } from '../capabilities/event-types';
-import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import { createAtomicAgentEventTypeStore } from './event-types';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;

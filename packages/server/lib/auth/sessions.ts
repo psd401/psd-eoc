@@ -35,7 +35,7 @@ import {
   type SessionRevocation,
   type VerifiedCurrentRefreshCredential,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -63,7 +63,7 @@ import {
   userFacilityScopes,
   users,
 } from '../../db/schema';
-import { loadEffectiveRoles, type RoleStateDatabase } from './role-state';
+import { type RoleStateDatabase } from './role-state';
 import { decideAccess } from './trusted-group-access';
 
 const SECOND_MS = 1_000;
@@ -435,7 +435,7 @@ export interface SessionStore {
         connectivityEpochId: string;
       }>,
   ): Promise<StoredSessionContext>;
-  inspectCredential(tokenDigest: string): Promise<StoredCredential>;
+  inspectCredential(tokenDigest: string, now?: Date): Promise<StoredCredential>;
   rotateCredential(input: RotateCredentialInput): Promise<StoredSessionContext>;
   completedRefreshRetry(
     input: CompletedRefreshRetryInput,
@@ -446,7 +446,10 @@ export interface SessionStore {
   completedSelfRevocationRetry?(
     input: CompletedSelfRevocationRetryInput,
   ): Promise<SessionRevocation | null>;
-  getSession(sessionId: string): Promise<StoredSessionContext | null>;
+  getSession(
+    sessionId: string,
+    now?: Date,
+  ): Promise<StoredSessionContext | null>;
   listDeviceSessions(): Promise<readonly StoredSessionContext[]>;
 }
 
@@ -658,8 +661,9 @@ async function inspectCredentialWithGuard(
   store: SessionStore,
   tokenDigest: string,
   guard: SessionAuthenticationGuard,
+  now: Date,
 ): Promise<StoredCredential> {
-  const inspection = store.inspectCredential(tokenDigest);
+  const inspection = store.inspectCredential(tokenDigest, now);
   const pendingAuthentication = inspection.then(
     () => undefined,
     () => undefined,
@@ -762,11 +766,12 @@ export class SessionService {
     const tokenDigest = hashRefreshToken(token);
     const credential =
       this.authenticationGuard === undefined
-        ? await this.store.inspectCredential(tokenDigest)
+        ? await this.store.inspectCredential(tokenDigest, now)
         : await inspectCredentialWithGuard(
             this.store,
             tokenDigest,
             this.authenticationGuard,
+            now,
           );
     if (credential.kind === 'retired') {
       throw new SessionAccessError(
@@ -806,7 +811,7 @@ export class SessionService {
     const parsedIdempotencyKey = IdempotencyKeySchema.parse(idempotencyKey);
     const tokenDigest = hashRefreshToken(token);
     const requestDigest = refreshRequestDigest(source);
-    const credential = await this.store.inspectCredential(tokenDigest);
+    const credential = await this.store.inspectCredential(tokenDigest, now);
     if (credential.kind === 'retired') {
       const successor = deriveSuccessorToken(
         token,
@@ -927,7 +932,7 @@ export class SessionService {
         'Session revocation requires the verified request credential.',
       );
     }
-    const target = await this.store.getSession(input.sessionId);
+    const target = await this.store.getSession(input.sessionId, now);
     if (target === null) {
       throw new SessionAccessError('FORBIDDEN', 'Session revocation denied.');
     }
@@ -1239,6 +1244,8 @@ export class DrizzleSessionStore implements SessionStore {
       version: number;
       scope: FacilityScope;
       capturedAt: Date;
+      /** What the holder's groups grant right now; never a stored grant. */
+      roles: readonly Role[];
     }>
   > {
     const decision = await decideAccess(database as Database, {
@@ -1267,7 +1274,11 @@ export class DrizzleSessionStore implements SessionStore {
                 scopes.map(({ facilityId }) => facilityId).sort(),
               ),
             }),
-      capturedAt: now,
+      // When the granting membership was actually read, not when it was
+      // asked about. A capture instant of "now" is never stale and never in
+      // the past, which makes every freshness check downstream vacuous.
+      capturedAt: decision.capturedAt,
+      roles: decision.roles,
     });
   }
 
@@ -1416,6 +1427,7 @@ export class DrizzleSessionStore implements SessionStore {
   private loadSessionContext(
     sessionId: string,
     expectedConnectivityEpochId?: string,
+    now: Date = new Date(),
   ): Promise<StoredSessionContext | null> {
     return this.database.transaction(
       (transaction) =>
@@ -1423,6 +1435,7 @@ export class DrizzleSessionStore implements SessionStore {
           transaction,
           sessionId,
           expectedConnectivityEpochId,
+          now,
         ),
       { isolationLevel: 'repeatable read', accessMode: 'read only' },
     );
@@ -1432,6 +1445,7 @@ export class DrizzleSessionStore implements SessionStore {
     database: RoleStateDatabase,
     sessionId: string,
     expectedConnectivityEpochId?: string,
+    now: Date = new Date(),
   ): Promise<StoredSessionContext | null> {
     const [identityRow] = await database
       .select({
@@ -1488,7 +1502,22 @@ export class DrizzleSessionStore implements SessionStore {
         'The session identity graph is incomplete.',
       );
     }
-    const roles = await loadEffectiveRoles(database, userRow.id);
+    // Roles and membership are the same question, asked once: which trusted
+    // groups is this address in, and what do they grant. Reading a stored
+    // grant here is what let a session carry authority its groups no longer
+    // give — and gave a first-time signer no roles at all, because nothing
+    // writes the stored grant any more.
+    //
+    // A refusal is not an error here. The session stays loadable with no roles
+    // and `membershipAccessActive` false, which never authorizes a request but
+    // does keep the session visible to an administrator who needs to revoke
+    // it. Throwing instead made a removed person's sessions unreachable.
+    const decision = await decideAccess(database as Database, {
+      email: userRow.email,
+      checkedAt: now,
+    });
+    const roles = decision.granted ? decision.roles : [];
+    const membershipAccessActive = decision.granted;
     const facilityRows = await database
       .select({ facilityId: userFacilityScopes.facilityId })
       .from(userFacilityScopes)
@@ -1519,50 +1548,16 @@ export class DrizzleSessionStore implements SessionStore {
       revokedAt:
         deviceRow.revokedAt === null ? null : timestamp(deviceRow.revokedAt),
     });
-    const issuanceMembership =
-      sessionRow.membershipSnapshotId === null
-        ? await this.loadTrustedMembership(user, new Date(), database)
-        : await this.loadMembershipEvidence(
-            sessionRow.membershipSnapshotId,
-            user,
-            database,
-          );
-    const [latestCompleteSnapshot] = await database
-      .select({
-        id: accessMembershipSnapshots.id,
-        version: accessMembershipSnapshots.version,
-      })
-      .from(accessMembershipSnapshots)
-      .where(eq(accessMembershipSnapshots.complete, true))
-      .orderBy(
-        desc(accessMembershipSnapshots.version),
-        desc(accessMembershipSnapshots.capturedAt),
-        desc(accessMembershipSnapshots.id),
-      )
-      .limit(1);
-    let membership = issuanceMembership;
-    let membershipAccessActive = true;
-    if (
-      latestCompleteSnapshot !== undefined &&
-      latestCompleteSnapshot.version > issuanceMembership.version
-    ) {
-      try {
-        membership = await this.loadMembershipEvidence(
-          latestCompleteSnapshot.id,
-          user,
-          database,
-        );
-      } catch (error) {
-        if (
-          error instanceof SessionAccessError &&
-          error.code === 'INVALID_MEMBERSHIP_EVIDENCE'
-        ) {
-          membershipAccessActive = false;
-        } else {
-          throw error;
-        }
-      }
-    }
+    // Membership was decided above, against the present. There is no snapshot
+    // to reconcile and no later generation to catch up to: the id stamped on
+    // the session row is wire compatibility for shipped mobile builds, not
+    // evidence, and reading it as evidence refused every session issued after
+    // the first membership sync.
+    const membership = {
+      snapshotId: null,
+      capturedAt: decision.granted ? decision.capturedAt : now,
+      scope: currentScope,
+    } as const;
     const [revocationRow] = await database
       .select()
       .from(sessionRevocations)
@@ -1772,6 +1767,7 @@ export class DrizzleSessionStore implements SessionStore {
     const context = await this.loadSessionContext(
       input.sessionId,
       input.connectivityEpochId,
+      input.issuedAt,
     );
     if (
       context === null ||
@@ -1787,6 +1783,7 @@ export class DrizzleSessionStore implements SessionStore {
 
   public async inspectCredential(
     tokenDigest: string,
+    now: Date = new Date(),
   ): Promise<StoredCredential> {
     const credentialMatches = await this.database
       .select({ sessionId: sessionTokenIssuances.sessionId })
@@ -1896,7 +1893,7 @@ export class DrizzleSessionStore implements SessionStore {
         'Credential history does not contain a current bearer.',
       );
     }
-    const context = await this.loadSessionContext(sessionId);
+    const context = await this.loadSessionContext(sessionId, undefined, now);
     if (context === null) {
       throw new SessionAccessError(
         'INVALID_CREDENTIAL',
@@ -2051,36 +2048,14 @@ export class DrizzleSessionStore implements SessionStore {
             'The session has expired.',
           );
         }
-        const issuanceMembership =
-          lockedSession.membershipSnapshotId === null
-            ? await this.loadTrustedMembership(userRow, new Date(), transaction)
-            : await this.loadMembershipEvidence(
-                lockedSession.membershipSnapshotId,
-                userRow,
-                transaction,
-              );
-        const [latestCompleteSnapshot] = await transaction
-          .select({
-            id: accessMembershipSnapshots.id,
-            version: accessMembershipSnapshots.version,
-          })
-          .from(accessMembershipSnapshots)
-          .where(eq(accessMembershipSnapshots.complete, true))
-          .orderBy(
-            desc(accessMembershipSnapshots.version),
-            desc(accessMembershipSnapshots.capturedAt),
-            desc(accessMembershipSnapshots.id),
-          )
-          .limit(1);
-        const effectiveMembership =
-          latestCompleteSnapshot !== undefined &&
-          latestCompleteSnapshot.version > issuanceMembership.version
-            ? await this.loadMembershipEvidence(
-                latestCompleteSnapshot.id,
-                userRow,
-                transaction,
-              )
-            : issuanceMembership;
+        // Rotation asks the same present question a read does: is this
+        // address still in an active trusted group whose membership was read
+        // recently. There is no generation to reconcile against.
+        const effectiveMembership = await this.loadTrustedMembership(
+          userRow,
+          input.rotatedAt,
+          transaction,
+        );
         const effectiveGraceUntil =
           effectiveMembership.snapshotId === lockedSession.membershipSnapshotId
             ? lockedSession.membershipGraceUntil
@@ -2301,6 +2276,7 @@ export class DrizzleSessionStore implements SessionStore {
     const context = await this.loadSessionContext(
       input.principal.sessionId,
       transactionResult.connectivityEpochId,
+      input.rotatedAt,
     );
     if (context === null) {
       throw new SessionAccessError(
@@ -2374,13 +2350,17 @@ export class DrizzleSessionStore implements SessionStore {
         'The completed refresh result does not match credential history.',
       );
     }
-    const current = await this.inspectCredential(successorDigest);
+    const current = await this.inspectCredential(
+      successorDigest,
+      input.checkedAt,
+    );
     if (current.kind !== 'current') {
       return null;
     }
     return this.loadSessionContext(
       reference.sessionId,
       reference.connectivityEpochId,
+      input.checkedAt,
     );
   }
 
@@ -2711,8 +2691,11 @@ export class DrizzleSessionStore implements SessionStore {
     });
   }
 
-  public getSession(sessionId: string): Promise<StoredSessionContext | null> {
-    return this.loadSessionContext(sessionId);
+  public getSession(
+    sessionId: string,
+    now: Date = new Date(),
+  ): Promise<StoredSessionContext | null> {
+    return this.loadSessionContext(sessionId, undefined, now);
   }
 
   public async listDeviceSessions(): Promise<readonly StoredSessionContext[]> {

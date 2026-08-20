@@ -40,7 +40,7 @@ import {
 } from '../../db/schema';
 import { seedDatabase } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
-import { requireSyntheticEventRoomTestDatabaseUrl } from '../../app/(app)/events/[id]/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   CapabilityEngineError,
   type TrustedCapabilityInvocation,
@@ -57,7 +57,7 @@ const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
   configuredTestDatabaseUrl === undefined
     ? undefined
-    : requireSyntheticEventRoomTestDatabaseUrl(configuredTestDatabaseUrl);
+    : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
   testDatabaseUrl === undefined ? describe.skip : describe;
 

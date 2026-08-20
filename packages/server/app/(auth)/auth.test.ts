@@ -13,7 +13,7 @@ import {
   readGoogleOidcConfiguration,
 } from '../../lib/auth/oidc';
 import { isRetryableSessionTransactionError } from '../../lib/auth/session-cookie';
-import { PLAYWRIGHT_MEMBER_SUBJECT } from './test/auth-test-runtime';
+const PLAYWRIGHT_MEMBER_SUBJECT = 'mock-google-subject-member' as const;
 import {
   clearReturnToCookieHeader,
   createReturnToCookieHeader,

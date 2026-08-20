@@ -6,9 +6,16 @@ const authenticate = mock(async (token: string, surface: string) => ({
   actor: { sessionId: `session-${surface}` },
 }));
 
+// `mock.module` replaces the module for the whole process and stays replaced
+// for every test file that runs after this one. A stub listing only what this
+// file needs therefore deletes every other export from `./sessions` for
+// everyone downstream, which surfaces later as an unrelated file failing to
+// find `readSessionPolicy` or `WEB_CSRF_COOKIE_NAME`. Keep the real module and
+// override only the seam under test.
+const actualSessions = await import('./sessions');
 mock.module('./sessions', () => ({
+  ...actualSessions,
   getDefaultSessionService: () => ({ authenticate }),
-  WEB_SESSION_COOKIE_NAME: '__Host-psd-eoc-session',
 }));
 
 const { authenticateWebSession } = await import('./request-session');

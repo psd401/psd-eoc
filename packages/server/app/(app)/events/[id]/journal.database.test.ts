@@ -87,13 +87,13 @@ import {
   readFanoutControlEffectiveState,
 } from '../../../../lib/notify/fanout-control';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
-import { requireSyntheticEventRoomTestDatabaseUrl } from './test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../../../lib/testing/database';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
   configuredTestDatabaseUrl === undefined
     ? undefined
-    : requireSyntheticEventRoomTestDatabaseUrl(configuredTestDatabaseUrl);
+    : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
   testDatabaseUrl === undefined ? describe.skip : describe;
 

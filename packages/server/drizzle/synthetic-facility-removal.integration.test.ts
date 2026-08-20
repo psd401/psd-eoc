@@ -21,7 +21,7 @@ import {
 import { sql } from 'drizzle-orm';
 import { migrate as migrateWithPostgres } from 'drizzle-orm/postgres-js/migrator';
 
-import { requireSyntheticTestDatabaseUrl } from '../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,

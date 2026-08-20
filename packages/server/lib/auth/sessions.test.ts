@@ -10,7 +10,7 @@ import {
 } from 'bun:test';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
-import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
@@ -328,7 +328,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     await cleanupResources();
   });
 
-  test('reloads a retained session with the latest grant and revocation facts', async () => {
+  test('reloads a retained session with the roles its trusted groups grant', async () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const userId = randomUUID();
@@ -347,7 +347,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       facilityScopeKind: 'district',
       createdAt: now,
     });
-    await database.insert(userRoles).values({ userId, role: 'staff' });
+    await ensureDesignatedAccessGroup(
+      database,
+      now,
+      `issue-26-session-${suffix}@psd401.net`,
+    );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
         id: snapshotId,
@@ -434,7 +438,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const context = await new DrizzleSessionStore(database).getSession(
       sessionId,
     );
-    expect(context?.result.user.roles).toEqual(['admin']);
+    // The append-only grant and revocation facts above are deliberately
+    // ignored. Roles are what the holder's trusted groups grant, decided on
+    // every read, so a stored grant cannot outlive the group that justified it
+    // and a stored revocation cannot take away what the group still gives.
+    expect(context?.result.user.roles).toEqual(['staff']);
   });
 
   test('revocation append-unregisters only the target device push registrations idempotently', async () => {
@@ -461,6 +469,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       facilityScopeKind: 'district',
       createdAt: now,
     });
+    await ensureDesignatedAccessGroup(
+      database,
+      now,
+      `issue-23-push-revoke-${suffix}@psd401.net`,
+    );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
         id: snapshotId,
@@ -1130,6 +1143,11 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       facilityScopeKind: 'district',
       createdAt: snapshotAt,
     });
+    await ensureDesignatedAccessGroup(
+      database,
+      snapshotAt,
+      `issue-23-concurrent-refresh-${suffix}@psd401.net`,
+    );
     const activeAccessGroups = await database
       .select({
         id: groupSources.id,

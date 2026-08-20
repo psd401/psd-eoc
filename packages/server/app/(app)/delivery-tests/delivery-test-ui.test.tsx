@@ -14,7 +14,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   activationPreviewFixture,
   activationResultFixture,
-} from '../start/test/playwright.fixtures';
+} from '../start/test/fixtures';
 import {
   DELIVERY_TEST_ACTIVATE_PATH,
   DeliveryTestRequestError,

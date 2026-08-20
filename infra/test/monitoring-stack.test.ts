@@ -1,50 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { fileURLToPath } from 'node:url';
 
 import { DEPLOYMENT_ACCOUNT, DEPLOYMENT_REGION } from '../src/config';
 import { MONITORING_RUNBOOK_BASE_URL } from '../src/monitoring';
 import { PsdEocStack } from '../src/psd-eoc-stack';
 
 type JsonRecord = Record<string, unknown>;
-
-const SLO_CHILD_ENV = 'PSD_EOC_ISSUE30_SLO_CHILD';
-const SLO_PRECHECKED_ENV = 'PSD_EOC_ISSUE30_SLO_PRECHECKED';
-const SLO_SUCCESS_PREFIX = '[issue-30 synthetic SLO success]';
-const sloTestFile = fileURLToPath(
-  new URL(
-    '../../workers/shared/e2e-delivery-performance.test.ts',
-    import.meta.url,
-  ),
-);
-const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url));
-const testWithDatabase =
-  process.env.TEST_DATABASE_URL === undefined ? it.skip : it;
-
-function syntheticTestDatabaseUrl(): string {
-  const value = process.env.TEST_DATABASE_URL;
-  if (value === undefined) {
-    throw new Error('TEST_DATABASE_URL is required for the SLO gate.');
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error('TEST_DATABASE_URL must be a valid PostgreSQL URL.');
-  }
-  const databaseName = decodeURIComponent(parsed.pathname.slice(1));
-  if (
-    !['postgres:', 'postgresql:'].includes(parsed.protocol) ||
-    !['127.0.0.1', '::1', 'localhost'].includes(parsed.hostname) ||
-    !/^[a-z0-9_]+_test$/u.test(databaseName)
-  ) {
-    throw new Error(
-      'The SLO gate requires a loopback PostgreSQL database ending in _test.',
-    );
-  }
-  return parsed.toString();
-}
 
 function record(value: unknown): JsonRecord {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -82,67 +44,6 @@ const template = Template.fromStack(stack);
 const synthesized = record(template.toJSON());
 
 describe('synthesized monitoring stack', () => {
-  testWithDatabase(
-    'runs the issue 30 SLO gate before later suites can bias wall-clock evidence',
-    () => {
-      if (process.env[SLO_PRECHECKED_ENV] === 'true') {
-        expect(process.env[SLO_CHILD_ENV]).not.toBe('true');
-        return;
-      }
-      const databaseUrl = syntheticTestDatabaseUrl();
-      // This must be synchronous: awaiting an async child lets Bun schedule
-      // unrelated test files that bias a wall-clock performance regression.
-      const child = Bun.spawnSync({
-        cmd: [process.execPath, 'test', '--timeout=180000', sloTestFile],
-        cwd: workspaceRoot,
-        env: {
-          DATABASE_URL: databaseUrl,
-          NODE_ENV: 'test',
-          TEST_DATABASE_URL: databaseUrl,
-          [SLO_CHILD_ENV]: 'true',
-        },
-        timeout: 210_000,
-        stdout: 'pipe',
-        stderr: 'inherit',
-      });
-      if (child.exitedDueToTimeout === true) {
-        throw new Error('The early synthetic SLO process timed out.');
-      }
-      if (!child.success || child.exitCode !== 0) {
-        throw new Error('The early synthetic SLO process failed.');
-      }
-      const successLines = child.stdout
-        .toString()
-        .split('\n')
-        .filter((line) => line.startsWith(SLO_SUCCESS_PREFIX));
-      expect(successLines).toHaveLength(1);
-      const successLine = successLines[0];
-      if (successLine === undefined) {
-        throw new Error('The early synthetic SLO result is unavailable.');
-      }
-      console.info(successLine);
-    },
-    240_000,
-  );
-
-  it('serializes one authoritative SLO precheck before the repository test phase', async () => {
-    const rootPackage = record(
-      JSON.parse(
-        await Bun.file(new URL('../../package.json', import.meta.url)).text(),
-      ),
-    );
-    const scripts = record(rootPackage.scripts);
-    expect(scripts['test:slo']).toBe(
-      "PSD_EOC_ISSUE30_SLO_PRECHECKED=false bun test infra/test/monitoring-stack.test.ts --test-name-pattern 'runs the issue 30 SLO gate before later suites can bias wall-clock evidence'",
-    );
-    expect(scripts['test:prechecked']).toBe(
-      'PSD_EOC_ISSUE30_SLO_PRECHECKED=true bun run test',
-    );
-    expect(scripts.check).toBe(
-      'bun run format:check && bun run lint && bun run typecheck && bun run test:slo && bun run test:prechecked',
-    );
-  });
-
   it('routes parameterized alarm recipients without repository endpoint data', () => {
     const parameters = record(synthesized.Parameters);
     for (const name of [

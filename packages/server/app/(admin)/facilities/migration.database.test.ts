@@ -36,7 +36,7 @@ import {
   createDrizzleJournalCapabilityStore,
   executeJournalCapability,
 } from '../../../lib/capabilities/journal';
-import { requireSyntheticTestDatabaseUrl } from '../event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,

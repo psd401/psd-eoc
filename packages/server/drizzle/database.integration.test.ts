@@ -16,6 +16,10 @@ import {
 import { seedDatabase, type SeedSummary } from '../db/seed';
 import { notificationIntentChannels, outbox } from '../db/schema';
 import { migrateDatabase } from './migrate';
+import {
+  createDisposableDatabase,
+  type DisposableDatabase,
+} from '../lib/testing/database';
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase =
@@ -25,6 +29,7 @@ setDefaultTimeout(30_000);
 
 let connection: PostgresDatabaseConnection | undefined;
 let firstSeedSummary: SeedSummary | undefined;
+let ownedDatabase: DisposableDatabase | undefined;
 
 const metricsCollectorSource = await Bun.file(
   new URL('../../../infra/lambda/metrics-collector/index.mjs', import.meta.url),
@@ -1472,9 +1477,14 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       );
     }
 
+    const owned = await createDisposableDatabase(
+      'psd_eoc_migration',
+      testDatabaseUrl,
+    );
+    ownedDatabase = owned;
     const createdConnection = createDatabaseClient({
       driver: 'postgres',
-      url: testDatabaseUrl,
+      url: owned.url,
       maxConnections: 2,
     });
     if (createdConnection.driver !== 'postgres') {
@@ -1577,6 +1587,10 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
 
   afterAll(async () => {
     await connection?.close();
+    connection = undefined;
+    const owned = ownedDatabase;
+    ownedDatabase = undefined;
+    await owned?.drop();
   });
 
   test('creates required outbox columns and non-null classification columns', async () => {
@@ -5005,7 +5019,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             google_group_id,
             email,
             fixture_key,
-            created_at
+            created_at,
+            granted_role
           ) values (
             '00000000-0000-4000-8000-000000191001'::uuid,
             'google-group'::group_source_kind,
@@ -5016,7 +5031,8 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
             'groups/synthetic-issue-191-access',
             'synthetic-issue-191-access@psd401.net',
             null,
-            '2026-08-16T12:00:00.000Z'::timestamptz
+            '2026-08-16T12:00:00.000Z'::timestamptz,
+            'admin'::role
           )
         `);
       await transaction.execute(sql`

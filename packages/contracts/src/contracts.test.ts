@@ -2796,69 +2796,61 @@ describe('human-only capability boundary', () => {
       sources: ['scheduled-job'],
       agentGrantable: false,
     });
+    // The sync takes no parameters. It used to carry the one permitted group
+    // address and a staged/finalize transition phase, which is how the trusted
+    // group became unchangeable without a source edit; the groups are rows now
+    // and the command simply reads them.
+    expect(SyncAccessMembershipInputSchema.safeParse({}).success).toBe(true);
     expect(
       SyncAccessMembershipInputSchema.safeParse({
-        designatedGroupEmail: 'tsd-engineering@psd401.net',
-        transition: { phase: 'stage' },
-      }).success,
-    ).toBe(true);
-    expect(
-      SyncAccessMembershipInputSchema.safeParse({
-        designatedGroupEmail: 'another-group@psd401.net',
-        transition: { phase: 'stage' },
+        designatedGroupEmail: 'anything@example.invalid',
       }).success,
     ).toBe(false);
     expect(
       SyncAccessMembershipInputSchema.safeParse({
-        designatedGroupEmail: 'tsd-engineering@psd401.net',
-        transition: {
-          phase: 'finalize',
-          mobileSessionId: ids.session,
-          membershipSnapshotId: ids.membershipSnapshot,
-        },
+        transition: { phase: 'stage' },
+      }).success,
+    ).toBe(false);
+
+    expect(
+      SyncAccessMembershipResultSchema.safeParse({
+        snapshotId: ids.membershipSnapshot,
+        snapshotVersion: 2,
+        capturedAt: times.activated,
+        activeAccessGroupCount: 2,
+        evaluatedMembershipCount: 1,
+        membershipDigest: 'a'.repeat(64),
+        providerGroupIdDigest: 'b'.repeat(64),
+        publication: 'created',
       }).success,
     ).toBe(true);
     expect(
-      SyncAccessMembershipInputSchema.safeParse({
-        designatedGroupEmail: 'tsd-engineering@psd401.net',
-        transition: {
-          phase: 'finalize',
-          mobileSessionId: ids.session,
-        },
+      SyncAccessMembershipResultSchema.safeParse({
+        snapshotId: ids.membershipSnapshot,
+        snapshotVersion: 3,
+        capturedAt: times.activated,
+        activeAccessGroupCount: 1,
+        evaluatedMembershipCount: 1,
+        membershipDigest: 'a'.repeat(64),
+        providerGroupIdDigest: 'b'.repeat(64),
+        publication: 'already-current',
       }).success,
-    ).toBe(false);
+    ).toBe(true);
+    // No phase, no designated source, no proof kind: the retired transition
+    // protocol must not parse back into the result.
     expect(
       SyncAccessMembershipResultSchema.safeParse({
         phase: 'stage',
         snapshotId: ids.membershipSnapshot,
-        snapshotVersion: 2,
+        snapshotVersion: 4,
         capturedAt: times.activated,
-        designatedSourceId: ids.group,
         activeAccessGroupCount: 1,
         evaluatedMembershipCount: 1,
         membershipDigest: 'a'.repeat(64),
         providerGroupIdDigest: 'b'.repeat(64),
-        proofKind: 'initial-selector-match',
-        auditEntryHash: null,
         publication: 'created',
       }).success,
-    ).toBe(true);
-    expect(
-      SyncAccessMembershipResultSchema.safeParse({
-        phase: 'finalize',
-        snapshotId: ids.membershipSnapshot,
-        snapshotVersion: 3,
-        capturedAt: times.activated,
-        designatedSourceId: ids.group,
-        activeAccessGroupCount: 1,
-        evaluatedMembershipCount: 1,
-        membershipDigest: 'a'.repeat(64),
-        providerGroupIdDigest: 'b'.repeat(64),
-        proofKind: 'durable-ios-session',
-        auditEntryHash: 'c'.repeat(64),
-        publication: 'created',
-      }).success,
-    ).toBe(true);
+    ).toBe(false);
 
     const providerInput = {
       subject: { kind: 'attempt', attemptId: ids.attempt },
@@ -4275,6 +4267,9 @@ describe('roster, facility, and identity boundaries', () => {
       revokedAt: null,
     } as const;
     expect(SessionSchema.safeParse(session).success).toBe(true);
+    // A session is no longer pinned to a snapshot. Authorization asks the
+    // trusted groups about the present on every request, so the field is a
+    // record of which sync run was current at issuance and may be absent.
     expect(
       SessionSchema.safeParse({
         ...session,
@@ -4283,7 +4278,7 @@ describe('roster, facility, and identity boundaries', () => {
           membershipSnapshotId: null,
         },
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       SessionSchema.safeParse({
         ...session,

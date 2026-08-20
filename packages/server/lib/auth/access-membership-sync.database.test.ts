@@ -27,7 +27,7 @@ import {
   users,
 } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
-import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
@@ -424,7 +424,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       purpose: 'access',
       facilityId: null,
       displayName: 'District staff access',
-      grantedRole: 'admin',
+      grantedRole: 'staff',
       active: true,
       googleGroupId: PROVIDER_GROUP_ID,
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
@@ -572,7 +572,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       purpose: 'access',
       facilityId: null,
       displayName: 'District staff access',
-      grantedRole: 'admin',
+      grantedRole: 'staff',
       active: true,
       googleGroupId: PROVIDER_GROUP_ID,
       email: DESIGNATED_ACCESS_GROUP_EMAIL,
