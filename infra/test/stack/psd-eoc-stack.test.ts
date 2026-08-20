@@ -235,9 +235,6 @@ describe('deployment boundary', () => {
     const sourceSha = asRecord(parameters.SourceSha);
     const bootstrapSourceSha = asRecord(parameters.BootstrapSourceSha);
     const oauthArn = asRecord(parameters.GoogleOauthSecretArn);
-    const subject = asRecord(parameters.ApprovedGoogleSubject);
-    const email = asRecord(parameters.ApprovedStaffEmail);
-    const displayName = asRecord(parameters.ApprovedStaffDisplayName);
     const transitionEmailDigest = asRecord(
       parameters.InitialMobileTransitionEmailSha256,
     );
@@ -262,13 +259,12 @@ describe('deployment boundary', () => {
     expect(oauthArn.AllowedPattern).toBe(
       '^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/google-oauth-[A-Za-z0-9]{6}$',
     );
-    expect(subject.NoEcho).toBe(true);
-    expect(subject).not.toHaveProperty('Default');
-    expect(email.NoEcho).toBe(true);
-    expect(email).not.toHaveProperty('Default');
-    expect(displayName.NoEcho).toBe(true);
-    expect(displayName).not.toHaveProperty('Default');
-    expect(displayName.AllowedPattern).toBe("^[A-Za-z0-9 .,'()&-]{1,160}$");
+    // The approved-staff identity fed the removed access fixture. The
+    // bootstrap container's environment schema is strict, so leaving these
+    // behind would fail the migration task rather than be ignored.
+    expect(parameters).not.toHaveProperty('ApprovedGoogleSubject');
+    expect(parameters).not.toHaveProperty('ApprovedStaffEmail');
+    expect(parameters).not.toHaveProperty('ApprovedStaffDisplayName');
     expect(transitionEmailDigest).toMatchObject({
       AllowedPattern: '^[0-9a-f]{64}$',
       MaxLength: 64,
@@ -549,12 +545,9 @@ describe('minimal isolated resource shape', () => {
     const identitySecretString = JSON.stringify(
       properties(identity ?? {}).SecretString,
     );
-    expect(identitySecretString).toContain('googleSubject');
-    expect(identitySecretString).toContain('ApprovedGoogleSubject');
-    expect(identitySecretString).toContain('staffDisplayName');
-    expect(identitySecretString).toContain('ApprovedStaffDisplayName');
-    expect(identitySecretString).toContain('staffEmail');
-    expect(identitySecretString).toContain('ApprovedStaffEmail');
+    expect(identitySecretString).not.toContain('googleSubject');
+    expect(identitySecretString).not.toContain('staffDisplayName');
+    expect(identitySecretString).not.toContain('staffEmail');
     expect(identitySecretString).toContain(
       'initialMobileTransitionEmailSha256',
     );
@@ -756,7 +749,6 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_USERNAME',
         'GOOGLE_OAUTH_CONFIG',
         'GOOGLE_OIDC_COOKIE_SECRET',
-        'PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS',
         'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
       ].sort(),
     );
@@ -769,9 +761,6 @@ describe('App Runner runtime safety boundary', () => {
     expect(JSON.stringify(secrets.get('DATABASE_PASSWORD'))).toContain(
       ':password::',
     );
-    expect(
-      JSON.stringify(secrets.get('PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS')),
-    ).toContain(':googleSubject::');
     expect(
       JSON.stringify(
         secrets.get('PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256'),
@@ -970,9 +959,6 @@ describe('one-off native bootstrap boundary', () => {
     );
     expect([...secrets.keys()].sort()).toEqual(
       [
-        'APPROVED_GOOGLE_SUBJECT',
-        'APPROVED_STAFF_DISPLAY_NAME',
-        'APPROVED_STAFF_EMAIL',
         'DATABASE_ADMIN_PASSWORD',
         'DATABASE_ADMIN_USERNAME',
         'DATABASE_APPLICATION_PASSWORD',
@@ -980,9 +966,6 @@ describe('one-off native bootstrap boundary', () => {
       ].sort(),
     );
     for (const [name, key] of [
-      ['APPROVED_GOOGLE_SUBJECT', 'googleSubject'],
-      ['APPROVED_STAFF_DISPLAY_NAME', 'staffDisplayName'],
-      ['APPROVED_STAFF_EMAIL', 'staffEmail'],
       ['DATABASE_ADMIN_PASSWORD', 'password'],
       ['DATABASE_ADMIN_USERNAME', 'username'],
       ['DATABASE_APPLICATION_PASSWORD', 'password'],

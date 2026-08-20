@@ -197,9 +197,6 @@ jobs:
         working-directory: infra
         shell: bash
         env:
-          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
-          APPROVED_STAFF_DISPLAY_NAME: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_DISPLAY_NAME }}
-          APPROVED_STAFF_EMAIL: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_EMAIL }}
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
           PREVIOUS_DIGEST: ${{ steps.previous.outputs.previous }}
@@ -228,9 +225,6 @@ jobs:
             --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
-            --parameters "$STACK_NAME:ApprovedGoogleSubject=$APPROVED_GOOGLE_SUBJECT" \
-            --parameters "$STACK_NAME:ApprovedStaffEmail=$APPROVED_STAFF_EMAIL" \
-            --parameters "$STACK_NAME:ApprovedStaffDisplayName=$APPROVED_STAFF_DISPLAY_NAME" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
             --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
 
@@ -300,9 +294,6 @@ jobs:
         working-directory: infra
         shell: bash
         env:
-          APPROVED_GOOGLE_SUBJECT: ${{ secrets.EXPLORATION_SMOKE_APPROVED_GOOGLE_SUBJECT }}
-          APPROVED_STAFF_DISPLAY_NAME: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_DISPLAY_NAME }}
-          APPROVED_STAFF_EMAIL: ${{ secrets.EXPLORATION_SMOKE_APPROVED_STAFF_EMAIL }}
           INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
           SOURCE_SHA: ${{ github.sha }}
@@ -321,9 +312,6 @@ jobs:
             --parameters "$STACK_NAME:BootstrapSourceSha=$SOURCE_SHA" \
             --parameters "$STACK_NAME:GoogleOauthSecretArn=$GOOGLE_OAUTH_SECRET_ARN" \
             --parameters "$STACK_NAME:GoogleGroupsSecretArn=$GOOGLE_GROUPS_SECRET_ARN" \
-            --parameters "$STACK_NAME:ApprovedGoogleSubject=$APPROVED_GOOGLE_SUBJECT" \
-            --parameters "$STACK_NAME:ApprovedStaffEmail=$APPROVED_STAFF_EMAIL" \
-            --parameters "$STACK_NAME:ApprovedStaffDisplayName=$APPROVED_STAFF_DISPLAY_NAME" \
             --parameters "$STACK_NAME:InitialMobileTransitionEmailSha256=$INITIAL_MOBILE_TRANSITION_EMAIL_SHA256" \
             --parameters "$STACK_NAME:SourceSha=$SOURCE_SHA"
 
