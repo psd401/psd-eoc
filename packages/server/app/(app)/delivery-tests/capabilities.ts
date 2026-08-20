@@ -61,7 +61,7 @@ import {
   parseSecurityAuditFact,
   securityAuditFactFromEntry,
 } from '../../../lib/audit/model';
-import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../../../lib/auth/access-gate';
+import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../../../lib/auth/sign-in-audit';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import {
   CapabilityEngineError,

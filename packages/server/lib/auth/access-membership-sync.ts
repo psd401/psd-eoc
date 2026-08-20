@@ -18,7 +18,7 @@ import {
   type SyncAccessMembershipInput,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
@@ -36,10 +36,7 @@ import {
   type EvaluatedAccessMembershipSet,
   type GoogleAccessMembershipEvaluator,
 } from './google-access-membership';
-import {
-  ADMIN_AVAILABILITY_LOCK_SQL,
-  loadAccessConfigurationSnapshotState,
-} from './role-state';
+import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 
 const MAX_EVALUATED_MEMBERS = 1_200;
 const MAX_POSTGRES_INTEGER = 2_147_483_647;
@@ -535,11 +532,16 @@ export function createDrizzleAccessMembershipSyncStore(
       auditEntryHash: string | null;
     }>,
   ): Promise<AccessMembershipPublicationResult> {
-    const accessState = await loadAccessConfigurationSnapshotState(database);
-    if (accessState === null || accessState.snapshotId !== proof.snapshotId) {
+    const [latestRun] = await database
+      .select({ id: accessMembershipSnapshots.id })
+      .from(accessMembershipSnapshots)
+      .where(eq(accessMembershipSnapshots.complete, true))
+      .orderBy(desc(accessMembershipSnapshots.version))
+      .limit(1);
+    if (latestRun === undefined || latestRun.id !== proof.snapshotId) {
       throw new AccessMembershipSyncError(
         'IDEMPOTENCY_RESULT_SUPERSEDED',
-        'The prior access-sync publication is no longer the current access generation.',
+        'A later access-sync run replaced the one this result described.',
       );
     }
     const [snapshot] = await database
@@ -569,7 +571,7 @@ export function createDrizzleAccessMembershipSyncStore(
         and(
           eq(groupSources.kind, 'google-group'),
           eq(groupSources.purpose, 'access'),
-          inArray(groupSources.id, [...accessState.activeAccessGroupSourceIds]),
+          eq(groupSources.active, true),
         ),
       )
       .orderBy(asc(groupSources.id));
@@ -622,7 +624,7 @@ export function createDrizzleAccessMembershipSyncStore(
       evaluation,
       snapshot.id,
       snapshot.version,
-      accessState.activeAccessGroupSourceIds.length,
+      sourceRows.length,
     );
   }
 

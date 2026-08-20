@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import type { SecurityAuditEntry } from '@psd-eoc/contracts';
 
-import { buildAccessGateAuditEntry } from '../auth/access-gate';
+import { buildAccessGateAuditEntry } from '../auth/sign-in-audit';
 import {
   calculateSecurityAuditHash,
   canonicalSecurityAuditJson,

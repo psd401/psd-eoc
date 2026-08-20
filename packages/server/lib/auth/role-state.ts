@@ -1,15 +1,9 @@
-import {
-  AccessGroupSourceRefSchema,
-  RoleSchema,
-  type Role,
-} from '@psd-eoc/contracts';
+import { RoleSchema, type Role } from '@psd-eoc/contracts';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
   accessGroupMembers,
-  accessMembershipSnapshotGroups,
-  accessMembershipSnapshots,
   groupSources,
   userRoleChanges,
   userRoles,
@@ -22,25 +16,12 @@ export type RoleStateDatabase = Pick<Database, 'select' | 'selectDistinctOn'>;
 /** Serializes every mutation that can change effective administrator reachability. */
 export const ADMIN_AVAILABILITY_LOCK_SQL = sql`select pg_advisory_xact_lock(hashtextextended('psd-eoc-admin-availability', 0))`;
 
-/**
- * One certified access-configuration generation. `null` means the latest
- * complete snapshot is absent, malformed, partial, duplicated, or does not
- * exactly match the current nonempty active Google access-source ID set.
- */
-export interface AccessConfigurationSnapshotState {
-  readonly snapshotId: string;
-  readonly snapshotVersion: number;
-  readonly activeAccessGroupSourceIds: readonly string[];
-}
-
 /** Optional prospective filter for the effective-administrator projection. */
 export interface EffectiveAdministratorQueryOptions {
-  /** A state already loaded under the caller's administrator-availability lock. */
-  readonly accessState?: AccessConfigurationSnapshotState;
   /**
    * Existing active IDs that will remain eligible after a proposed mutation.
-   * New, inactive, duplicated, malformed, or otherwise uncertified IDs fail
-   * closed and yield no reachable administrators.
+   * New, inactive, or otherwise ineligible IDs yield no reachable
+   * administrators, so a caller can ask what would remain before committing.
    */
   readonly eligibleAccessGroupSourceIds?: readonly string[];
 }
@@ -119,117 +100,11 @@ export async function loadEffectiveRoles(
   );
 }
 
-function canonicalAccessGroupIds(
-  rows: readonly Readonly<{
-    id: string;
-    kind: 'google-group' | 'synthetic';
-    purpose: 'access' | 'building' | 'others';
-  }>[],
-): readonly string[] | null {
-  const parsedIds: string[] = [];
-  for (const row of rows) {
-    const parsed = AccessGroupSourceRefSchema.safeParse({
-      id: row.id,
-      kind: row.kind,
-      purpose: row.purpose,
-      facilityId: null,
-    });
-    if (
-      !parsed.success ||
-      parsed.data.kind !== 'google-group' ||
-      parsed.data.purpose !== 'access' ||
-      parsed.data.facilityId !== null
-    ) {
-      return null;
-    }
-    parsedIds.push(parsed.data.id);
-  }
-  if (parsedIds.length === 0 || new Set(parsedIds).size !== parsedIds.length) {
-    return null;
-  }
-  return Object.freeze(parsedIds.sort());
-}
-
-function sameIds(left: readonly string[], right: readonly string[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((id, index) => id === right[index])
-  );
-}
-
 /**
  * Loads the latest complete access snapshot only when its expected and
  * completed source sets are both strict, duplicate-free, and exactly equal to
  * the current nonempty active Google access-source set.
  */
-export async function loadAccessConfigurationSnapshotState(
-  database: RoleStateDatabase,
-): Promise<AccessConfigurationSnapshotState | null> {
-  const activeRows = await database
-    .select({
-      id: groupSources.id,
-      kind: groupSources.kind,
-      purpose: groupSources.purpose,
-    })
-    .from(groupSources)
-    .where(
-      and(eq(groupSources.active, true), eq(groupSources.purpose, 'access')),
-    )
-    .orderBy(asc(groupSources.id));
-  const activeIds = canonicalAccessGroupIds(activeRows);
-  if (activeIds === null) return null;
-
-  const [snapshot] = await database
-    .select({
-      id: accessMembershipSnapshots.id,
-      version: accessMembershipSnapshots.version,
-    })
-    .from(accessMembershipSnapshots)
-    .where(eq(accessMembershipSnapshots.complete, true))
-    .orderBy(
-      desc(accessMembershipSnapshots.version),
-      desc(accessMembershipSnapshots.capturedAt),
-      desc(accessMembershipSnapshots.id),
-    )
-    .limit(1);
-  if (snapshot === undefined) return null;
-
-  const snapshotRows = await database
-    .select({
-      id: accessMembershipSnapshotGroups.groupSourceId,
-      kind: accessMembershipSnapshotGroups.groupSourceKind,
-      purpose: accessMembershipSnapshotGroups.groupPurpose,
-      completionKind: accessMembershipSnapshotGroups.completionKind,
-    })
-    .from(accessMembershipSnapshotGroups)
-    .where(eq(accessMembershipSnapshotGroups.snapshotId, snapshot.id))
-    .orderBy(
-      asc(accessMembershipSnapshotGroups.completionKind),
-      asc(accessMembershipSnapshotGroups.groupSourceId),
-    );
-  const expectedIds = canonicalAccessGroupIds(
-    snapshotRows.filter(({ completionKind }) => completionKind === 'expected'),
-  );
-  const completedIds = canonicalAccessGroupIds(
-    snapshotRows.filter(({ completionKind }) => completionKind === 'completed'),
-  );
-  if (
-    expectedIds === null ||
-    completedIds === null ||
-    snapshotRows.length !== expectedIds.length + completedIds.length ||
-    !sameIds(activeIds, expectedIds) ||
-    !sameIds(expectedIds, completedIds)
-  ) {
-    return null;
-  }
-
-  return Object.freeze({
-    snapshotId: snapshot.id,
-    snapshotVersion: snapshot.version,
-    activeAccessGroupSourceIds: activeIds,
-  });
-}
-
 /**
  * Loads district administrators who remain eligible through the newest
  * complete access snapshot. A role-bearing user who can no longer pass the

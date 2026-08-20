@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { asc, eq, sql } from 'drizzle-orm';
+import { asc, desc, eq, sql } from 'drizzle-orm';
 
 import {
   createDatabaseClient,
@@ -41,7 +41,6 @@ import {} from './session-cookie';
 import { type EvaluatedAccessMembershipSet } from './google-access-membership';
 
 const DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net';
-import { loadAccessConfigurationSnapshotState } from './role-state';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const baseTestDatabaseUrl =
@@ -651,8 +650,15 @@ describeWithDatabase('access-membership atomic database publication', () => {
       ),
     ).rejects.toThrow();
 
+    // Refused whole: no later run was recorded.
     expect(
-      (await loadAccessConfigurationSnapshotState(database))?.snapshotVersion,
+      (
+        await database
+          .select({ version: accessMembershipSnapshots.version })
+          .from(accessMembershipSnapshots)
+          .orderBy(desc(accessMembershipSnapshots.version))
+          .limit(1)
+      )[0]?.version,
     ).toBe(1);
   });
 });

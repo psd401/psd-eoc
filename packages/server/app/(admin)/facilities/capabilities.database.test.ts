@@ -43,10 +43,7 @@ import {
 import { seedDatabase } from '../../../db/seed';
 import { migrateDatabase } from '../../../drizzle/migrate';
 import { SECURITY_AUDIT_APPEND_LOCK_SQL } from '../../../lib/audit/drizzle-repository';
-import {
-  loadAccessConfigurationSnapshotState,
-  loadEffectiveAdministratorUserIds,
-} from '../../../lib/auth/role-state';
+import { loadEffectiveAdministratorUserIds } from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import {
   createDrizzleInitialWebSessionStore,
@@ -1867,7 +1864,6 @@ describeWithDatabase('facilities administrator database flow', () => {
       expect(withdrawn.active).toBe(false);
     }
 
-    expect(await loadAccessConfigurationSnapshotState(database)).toBeNull();
     expect(
       await database
         .select({ id: groupSources.id })
@@ -2014,8 +2010,20 @@ describeWithDatabase('facilities administrator database flow', () => {
     });
     expect(restored.active).toBe(true);
     expect(
-      (await loadAccessConfigurationSnapshotState(database))
-        ?.activeAccessGroupSourceIds,
+      (
+        await database
+          .select({ id: groupSources.id })
+          .from(groupSources)
+          .where(
+            and(
+              eq(groupSources.kind, 'google-group'),
+              eq(groupSources.purpose, 'access'),
+              eq(groupSources.active, true),
+            ),
+          )
+      )
+        .map(({ id }) => id)
+        .sort(),
     ).toEqual(accessFixtures.map(({ id }) => id).sort());
   });
 

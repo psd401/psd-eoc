@@ -15,7 +15,7 @@ import {
   createDrizzleAccessGateAuditSink,
   POST_GATE_SIGN_IN_FAILED_REASON,
   type AccessGateAuditSink,
-} from '../../../../lib/auth/access-gate';
+} from '../../../../lib/auth/sign-in-audit';
 import { authorizeSignIn } from '../../../../lib/auth/sign-in-authorization';
 import {
   completeGoogleOidcCallback,

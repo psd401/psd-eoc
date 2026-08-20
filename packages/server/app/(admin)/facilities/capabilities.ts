@@ -44,8 +44,6 @@ import {
 } from 'drizzle-orm';
 
 import {
-  accessMembershipSnapshotGroups,
-  accessMembershipSnapshots,
   audienceConfigurations,
   audienceTargets,
   facilities,
@@ -59,10 +57,8 @@ import {
 } from '../../../db/schema';
 import {
   ADMIN_AVAILABILITY_LOCK_SQL,
-  loadAccessConfigurationSnapshotState,
   loadEffectiveAdministratorUserIds,
   loadEffectiveRoles,
-  type AccessConfigurationSnapshotState,
 } from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import type {
@@ -265,86 +261,9 @@ async function lockRosterConfigurationPopulations(
 }
 
 interface AccessSetMutationState {
-  readonly accessState: AccessConfigurationSnapshotState | null;
   readonly activeAccessGroupSourceIds: readonly string[];
-  readonly latestCompleteSnapshot:
-    | Readonly<{ kind: 'none' }>
-    | Readonly<{ kind: 'invalid' }>
-    | Readonly<{
-        kind: 'strict';
-        state: AccessConfigurationSnapshotState;
-      }>;
-}
-
-function sameSortedIds(
-  left: readonly string[],
-  right: readonly string[],
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every((id, index) => id === right[index])
-  );
-}
-
-async function loadLatestStrictCompleteAccessSnapshot(
-  database: AdminQueryDatabase,
-): Promise<AccessSetMutationState['latestCompleteSnapshot']> {
-  const [snapshot] = await database
-    .select({
-      id: accessMembershipSnapshots.id,
-      version: accessMembershipSnapshots.version,
-    })
-    .from(accessMembershipSnapshots)
-    .where(eq(accessMembershipSnapshots.complete, true))
-    .orderBy(
-      desc(accessMembershipSnapshots.version),
-      desc(accessMembershipSnapshots.capturedAt),
-      desc(accessMembershipSnapshots.id),
-    )
-    .limit(1);
-  if (snapshot === undefined) return Object.freeze({ kind: 'none' as const });
-
-  const rows = await database
-    .select({
-      id: accessMembershipSnapshotGroups.groupSourceId,
-      kind: accessMembershipSnapshotGroups.groupSourceKind,
-      purpose: accessMembershipSnapshotGroups.groupPurpose,
-      completionKind: accessMembershipSnapshotGroups.completionKind,
-    })
-    .from(accessMembershipSnapshotGroups)
-    .where(eq(accessMembershipSnapshotGroups.snapshotId, snapshot.id))
-    .orderBy(
-      asc(accessMembershipSnapshotGroups.completionKind),
-      asc(accessMembershipSnapshotGroups.groupSourceId),
-    );
-  const expectedIds = rows
-    .filter(({ completionKind }) => completionKind === 'expected')
-    .map(({ id }) => id)
-    .sort();
-  const completedIds = rows
-    .filter(({ completionKind }) => completionKind === 'completed')
-    .map(({ id }) => id)
-    .sort();
-  if (
-    expectedIds.length === 0 ||
-    rows.some(
-      ({ kind, purpose }) => kind !== 'google-group' || purpose !== 'access',
-    ) ||
-    rows.length !== expectedIds.length + completedIds.length ||
-    new Set(expectedIds).size !== expectedIds.length ||
-    new Set(completedIds).size !== completedIds.length ||
-    !sameSortedIds(expectedIds, completedIds)
-  ) {
-    return Object.freeze({ kind: 'invalid' as const });
-  }
-  return Object.freeze({
-    kind: 'strict' as const,
-    state: Object.freeze({
-      snapshotId: snapshot.id,
-      snapshotVersion: snapshot.version,
-      activeAccessGroupSourceIds: Object.freeze(expectedIds),
-    }),
-  });
+  /** Who administers right now, through the groups that grant it. */
+  readonly reachableAdministratorUserIds: readonly string[];
 }
 
 async function loadAccessSetMutationStateAfterLock(
@@ -393,26 +312,30 @@ async function loadAccessSetMutationStateAfterLock(
   const activeAccessGroupSourceIds = Object.freeze(
     activeRows.map(({ id }) => id),
   );
-  const accessState = await loadAccessConfigurationSnapshotState(database);
-  const latestCompleteSnapshot =
-    await loadLatestStrictCompleteAccessSnapshot(database);
-  if (accessState !== null) {
-    const reachableAdministratorIds = await loadEffectiveAdministratorUserIds(
-      database,
-      { accessState },
+  // Who administers is a question about trusted-group membership, asked
+  // directly. It used to be projected through a published snapshot generation
+  // and skipped whenever that generation disagreed with the active group set —
+  // which, once the generation stopped being published, was always.
+  const reachableAdministratorUserIds = await loadEffectiveAdministratorUserIds(
+    database,
+    { eligibleAccessGroupSourceIds: activeAccessGroupSourceIds },
+  );
+  // Nobody is reachable before the first membership sync: the groups exist and
+  // grant nobody anything yet. That is ordinary first-run setup, not a lockout,
+  // so there is nothing to protect and nothing to refuse.
+  if (
+    reachableAdministratorUserIds.length > 0 &&
+    !reachableAdministratorUserIds.includes(actor.userId)
+  ) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'The current administrator is not reachable through an active access group.',
+      403,
     );
-    if (!reachableAdministratorIds.includes(actor.userId)) {
-      throw new AdminCapabilityError(
-        'FORBIDDEN',
-        'The current administrator is not reachable through the exact access snapshot.',
-        403,
-      );
-    }
   }
   return Object.freeze({
-    accessState,
     activeAccessGroupSourceIds,
-    latestCompleteSnapshot,
+    reachableAdministratorUserIds,
   });
 }
 
@@ -421,39 +344,26 @@ async function assertReachableAdministratorRemains(
   state: AccessSetMutationState,
   removedSourceId: string,
 ): Promise<void> {
+  // Nothing to protect until somebody is reachable, which keeps first-run
+  // setup free: add a group, rename it, withdraw it again.
+  if (state.reachableAdministratorUserIds.length === 0) return;
+
   const remainingIds = state.activeAccessGroupSourceIds.filter(
     (id) => id !== removedSourceId,
   );
-  // Checked first and unconditionally. Deactivating the last access group ends
-  // all access, and it must be refused whether or not the published snapshot
-  // happens to be current. Gating this on a valid baseline was wrong: the
-  // baseline goes stale the moment the first of several groups is deactivated,
-  // so a second concurrent deactivation would arrive with no baseline and skip
-  // the guard entirely, taking the deployment to zero active groups.
-  if (remainingIds.length === 0) {
-    // Before any snapshot has ever been published there is no access to lose,
-    // so withdrawing the first group is ordinary first-run setup rather than a
-    // lockout. Once a generation exists, removing the last group ends all
-    // access and is refused however stale the current baseline happens to be.
-    if (state.latestCompleteSnapshot.kind !== 'none') {
-      throw conflict('The final active access group cannot be removed.');
-    }
-    return;
-  }
-  // Reachability is only projectable against a certified generation. Where
-  // there is none, refusing to remove the last group is the guarantee that can
-  // still be made, and the access sync re-establishes the baseline that makes
-  // the stronger check available again.
-  if (state.accessState === null) {
-    return;
-  }
-  const remainingAdministratorIds = await loadEffectiveAdministratorUserIds(
-    database,
-    {
-      accessState: state.accessState,
-      eligibleAccessGroupSourceIds: remainingIds,
-    },
-  );
+  // Asked against what would remain, not against a published baseline. Gating
+  // this on a current generation was wrong twice over: the baseline went stale
+  // the moment the first of several groups was deactivated, so a second
+  // concurrent deactivation skipped the guard entirely; and once generations
+  // stopped being published the stronger check never ran at all, leaving a
+  // deployment able to deactivate the one group that grants administration
+  // while another group kept the count above zero.
+  const remainingAdministratorIds =
+    remainingIds.length === 0
+      ? []
+      : await loadEffectiveAdministratorUserIds(database, {
+          eligibleAccessGroupSourceIds: remainingIds,
+        });
   if (remainingAdministratorIds.length === 0) {
     throw conflict(
       'Another reachable district administrator must remain through an unchanged active access group.',

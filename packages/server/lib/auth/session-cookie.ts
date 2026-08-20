@@ -37,7 +37,7 @@ import {
   ACCESS_GATE_AUDIT_LOCK_SQL,
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
-} from './access-gate';
+} from './sign-in-audit';
 import { decideAccess } from './trusted-group-access';
 import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 
