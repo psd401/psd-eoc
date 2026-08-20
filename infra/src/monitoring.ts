@@ -61,6 +61,8 @@ export const MONITORING_RUNBOOK_BASE_URL =
   'https://github.com/psd401/psd-eoc/blob/main/infra/README.md';
 
 const ONE_MINUTE = Duration.minutes(1);
+/** Every log group this module creates lives under one prefix. */
+const MONITORING_LOG_GROUP_PREFIX = '/psd-eoc/monitoring/';
 
 interface QueueWithDeadLetterQueue {
   readonly deadLetterQueue: sqs.IQueue;
@@ -321,6 +323,52 @@ function allowScopedCloudWatchAlarmPublish(
       }),
     );
   }
+}
+
+/**
+ * Lets CloudWatch Logs encrypt the monitoring log groups with the operations
+ * key.
+ *
+ * `allowScopedCloudWatchAlarmPublish` grants `cloudwatch.amazonaws.com`, which
+ * is the alarm service. Logs is a different, regional principal, and without
+ * this the log group is refused at creation with "The specified KMS key does
+ * not exist or is not allowed to be used with Arn ...", which reads like a
+ * missing key rather than a missing grant.
+ *
+ * Scoped by encryption context to this account's monitoring log groups, so the
+ * key cannot be used to read an unrelated log group.
+ */
+function allowMonitoringLogEncryption(
+  scope: Construct,
+  operationsKey: kms.IKey,
+): void {
+  const stack = Stack.of(scope);
+  operationsKey.addToResourcePolicy(
+    new iam.PolicyStatement({
+      actions: [
+        'kms:Decrypt',
+        'kms:Describe*',
+        'kms:Encrypt*',
+        'kms:GenerateDataKey*',
+        'kms:ReEncrypt*',
+      ],
+      conditions: {
+        ArnLike: {
+          'kms:EncryptionContext:aws:logs:arn': stack.formatArn({
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resource: 'log-group',
+            resourceName: `${MONITORING_LOG_GROUP_PREFIX}*`,
+            service: 'logs',
+          }),
+        },
+      },
+      principals: [
+        new iam.ServicePrincipal(`logs.${stack.region}.amazonaws.com`),
+      ],
+      resources: ['*'],
+      sid: 'AllowMonitoringLogGroupEncryption',
+    }),
+  );
 }
 
 function monitoringParameters(scope: Construct): Readonly<{
@@ -1280,6 +1328,7 @@ export function configureInfrastructureMonitoring(
     [props.operationsAlarmTopic, props.criticalAlarmTopic],
     props.operationsKey,
   );
+  allowMonitoringLogEncryption(scope, props.operationsKey);
   const failoverBridgeErrors = createFailoverBridge(
     scope,
     props,
@@ -1311,6 +1360,7 @@ export function configureMonitoring(
     [props.operationsAlarmTopic, props.criticalAlarmTopic],
     props.operationsKey,
   );
+  allowMonitoringLogEncryption(scope, props.operationsKey);
 
   const canaryFunction = createCanaryFunction(
     scope,
