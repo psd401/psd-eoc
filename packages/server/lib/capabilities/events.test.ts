@@ -36,6 +36,7 @@ import {
   type TrustedCapabilityInvocation,
 } from './engine';
 import {
+  createEventCapabilityRuntimeOverStore,
   executeEventCapability,
   type EventCapabilityStore,
   type EventCapabilityTransaction,
@@ -1893,5 +1894,87 @@ describe('event lifecycle capabilities', () => {
         ]);
       }
     }
+  });
+});
+
+describe('post-commit outbox dispatch', () => {
+  // An activation that never reaches the delivery queue is the failure this
+  // seam exists to prevent: the outbox row and the event commit together, and
+  // nothing moved the row until the runtime started asking.
+  function runtimeWithSpy(store: EventCapabilityStore) {
+    const calls: number[] = [];
+    const runtime = createEventCapabilityRuntimeOverStore(
+      store,
+      async () => {
+        calls.push(calls.length);
+      },
+      async () => {},
+    );
+    return { calls, runtime };
+  }
+
+  test('hands a started event to the delivery queue after it commits', async () => {
+    const store = new MemoryEventCapabilityStore();
+    const { calls, runtime } = runtimeWithSpy(store);
+    const preview = activationPreview();
+    seedActivation(store, preview);
+
+    const started = await runtime.execute(
+      'start-event',
+      {
+        source: 'activation-preview',
+        activationPreviewId: preview.id,
+        activeEventDecision: {
+          decision: 'start-new',
+          activeEventIdsSeen: preview.activeEventIds,
+        },
+      },
+      humanMutationInvocation({
+        requestId: uuid(240),
+        idempotencyKey: 'post-commit-dispatch-key-0001',
+        serverTime: TIMES.activation,
+      }),
+    );
+
+    expect(started.notificationIntent).not.toBeNull();
+    expect(store.outboxRecords).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  test('does not dispatch for a capability that sends nothing', async () => {
+    const store = new MemoryEventCapabilityStore();
+    const preview = activationPreview();
+    seedActivation(store, preview);
+    const { calls, runtime } = runtimeWithSpy(store);
+
+    const started = await runtime.execute(
+      'start-event',
+      {
+        source: 'activation-preview',
+        activationPreviewId: preview.id,
+        activeEventDecision: {
+          decision: 'start-new',
+          activeEventIdsSeen: preview.activeEventIds,
+        },
+      },
+      humanMutationInvocation({
+        requestId: uuid(241),
+        idempotencyKey: 'post-commit-dispatch-key-0002',
+        serverTime: TIMES.activation,
+      }),
+    );
+    calls.length = 0;
+
+    await runtime.execute(
+      'join-event',
+      { eventId: started.event.id },
+      humanMutationInvocation({
+        requestId: uuid(242),
+        idempotencyKey: 'post-commit-join-key-0001',
+        serverTime: TIMES.firstAllClear,
+      }),
+    );
+
+    expect(calls).toHaveLength(0);
   });
 });

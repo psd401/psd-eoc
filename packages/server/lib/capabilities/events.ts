@@ -61,6 +61,12 @@ import {
   type DatabaseQuery,
 } from '../../db/client';
 import {
+  createConfiguredSqsDispatchBatchQueue,
+  createDrizzleOutboxDispatcherStore,
+  pollOutbox,
+  type OutboxDispatcherDependencies,
+} from '../notify/dispatcher';
+import {
   activationPreviews,
   audienceConfigurations,
   channelConfigurations,
@@ -3039,17 +3045,92 @@ export function createDrizzleEventCapabilityStore(
   };
 }
 
+/**
+ * Hands a freshly committed notification to the delivery queue.
+ *
+ * An activation writes its notification intent and an outbox row in the same
+ * transaction as the event, which is what makes the two impossible to
+ * disagree. Nothing then moved that row: `pollOutbox` and
+ * `dispatchOutboxAfterCommit` were both written and both called from nowhere,
+ * so every outbox row ever written has stayed pending and no notification has
+ * ever reached a queue.
+ *
+ * This runs after commit, never inside the transaction. It cannot roll the
+ * activation back and it never throws: the event is already durable, and an
+ * operator who has been told the incident is active must not then see it fail.
+ * A row this misses stays pending and available to any later sweep.
+ *
+ * It polls rather than dispatching one known id so a row stranded by an earlier
+ * failure is picked up by the next activation instead of waiting forever.
+ */
+export type OutboxDispatchHook = () => Promise<void>;
+
+function createOutboxDispatchHook(database: Database): OutboxDispatchHook {
+  let dependencies: OutboxDispatcherDependencies | null = null;
+  return async () => {
+    try {
+      dependencies ??= {
+        queue: createConfiguredSqsDispatchBatchQueue(),
+        store: createDrizzleOutboxDispatcherStore(database),
+      };
+      await pollOutbox(dependencies, POST_COMMIT_OUTBOX_DISPATCH_LIMIT);
+    } catch {
+      // Reading the queue configuration can fail, and a deployment without a
+      // reachable queue must still be able to record an incident. The rows
+      // remain pending.
+    }
+  };
+}
+
+/** How many outbox rows one activation will try to move. */
+const POST_COMMIT_OUTBOX_DISPATCH_LIMIT = 10;
+
+function producedNotificationIntent(output: unknown): boolean {
+  return (
+    typeof output === 'object' &&
+    output !== null &&
+    'notificationIntent' in output &&
+    (output as { notificationIntent: unknown }).notificationIntent !== null
+  );
+}
+
+/**
+ * Pairs a store with the post-commit dispatch, independent of how the store is
+ * backed, so the dispatch seam is reachable from a test without a database.
+ */
+export function createEventCapabilityRuntimeOverStore(
+  store: EventCapabilityStore,
+  dispatchOutbox: OutboxDispatchHook,
+  close: () => Promise<void>,
+): EventCapabilityRuntime {
+  return {
+    store,
+    execute: async (capabilityId, input, invocation) => {
+      const output = await executeEventCapability(
+        capabilityId,
+        input,
+        invocation,
+        store,
+      );
+      if (producedNotificationIntent(output)) {
+        await dispatchOutbox();
+      }
+      return output;
+    },
+    close,
+  };
+}
+
 /** Builds a runtime around an explicitly managed database connection. */
 export function createEventCapabilityRuntime(
   connection: DatabaseConnection,
+  dispatchOutbox: OutboxDispatchHook = createOutboxDispatchHook(connection.db),
 ): EventCapabilityRuntime {
-  const store = createDrizzleEventCapabilityStore(connection.db);
-  return {
-    store,
-    execute: (capabilityId, input, invocation) =>
-      executeEventCapability(capabilityId, input, invocation, store),
-    close: () => connection.close(),
-  };
+  return createEventCapabilityRuntimeOverStore(
+    createDrizzleEventCapabilityStore(connection.db),
+    dispatchOutbox,
+    () => connection.close(),
+  );
 }
 
 let defaultEventCapabilityRuntime: EventCapabilityRuntime | undefined;
