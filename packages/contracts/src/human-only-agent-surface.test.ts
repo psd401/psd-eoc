@@ -54,34 +54,4 @@ describe('human-only agent-surface manifest guard', () => {
       expect(agentSurfaceIds.has(protectedWorkflowId)).toBe(false);
     }
   });
-
-  test('keeps district fanout control human-only and agent-free', () => {
-    for (const capabilityId of [
-      'get-fanout-status',
-      'get-fanout-control',
-      'set-fanout-control',
-    ] as const) {
-      expect(AGENT_GRANTABLE_CAPABILITY_IDS).not.toContain(capabilityId);
-      expect(agentTransportCapabilities).not.toContain(capabilityId);
-      expect(CAPABILITY_INVOCATION_POLICY[capabilityId]).toEqual({
-        principalKinds: ['human'],
-        sources:
-          capabilityId === 'get-fanout-status' ? ['web', 'mobile'] : ['web'],
-        agentGrantable: false,
-      });
-    }
-    expect(
-      CAPABILITY_INVOCATION_POLICY['authorize-notification-fanout'],
-    ).toEqual({
-      principalKinds: ['system'],
-      sources: ['worker'],
-      agentGrantable: false,
-    });
-    expect(AGENT_GRANTABLE_CAPABILITY_IDS).not.toContain(
-      'authorize-notification-fanout',
-    );
-    expect(agentTransportCapabilities).not.toContain(
-      'authorize-notification-fanout',
-    );
-  });
 });

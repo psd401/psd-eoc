@@ -3,7 +3,6 @@ import {
   FacilityIdSchema,
   type ActivationPreview,
   type EventTypeListItem,
-  type FanoutStatus,
   type TemplateMode,
 } from '@psd-eoc/contracts';
 import * as Crypto from 'expo-crypto';
@@ -35,9 +34,7 @@ import {
   activationAudienceLabel,
   Call911Affordance,
   EventTypeChoice,
-  FanoutControlBanner,
   ISSUE_21_MAESTRO_IDS,
-  isFanoutActivationEnabled,
   OtherSessionStartMutationAttention,
   StartMutationAttention,
   StartMutationRecoveryBlockedAttention,
@@ -63,10 +60,7 @@ import {
   useStartMutationHardwareBackGuard,
   useStartMutationNavigationGuard,
 } from '../../lib/start';
-import {
-  FANOUT_CONTROL_UNAVAILABLE_STATE,
-  loadFanoutControlState,
-} from '../../lib/start/start-api-client';
+import {} from '../../lib/start/start-api-client';
 import { getEventTheme } from '../../theme/event-theme';
 
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
@@ -120,8 +114,6 @@ export default function StartEventScreen() {
   const [data, setData] = useState<StartHomeData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [fanoutControlState, setFanoutControlState] =
-    useState<FanoutStatus | null>(FANOUT_CONTROL_UNAVAILABLE_STATE);
   const [selectedType, setSelectedType] = useState<EventTypeListItem | null>(
     null,
   );
@@ -197,12 +189,8 @@ export default function StartEventScreen() {
     setPreview(null);
     setPreviewLoading(false);
     setPreviewError(null);
-    setFanoutControlState(
-      state.phase === 'online' ? null : FANOUT_CONTROL_UNAVAILABLE_STATE,
-    );
 
     if (facilityId === null || mode === null) {
-      setFanoutControlState(FANOUT_CONTROL_UNAVAILABLE_STATE);
       setLoadError('The site or event mode is invalid. No action was taken.');
       setLoading(false);
       return;
@@ -220,9 +208,6 @@ export default function StartEventScreen() {
     let active = true;
     setLoading(true);
     setLoadError(null);
-    void loadFanoutControlState(requestAuthenticated).then((nextState) => {
-      if (active) setFanoutControlState(nextState);
-    });
     void loadStartHomeData(requestAuthenticated).then(
       (nextData) => {
         if (!active) return;
@@ -254,7 +239,6 @@ export default function StartEventScreen() {
             item.eventType.templateMode === mode && item.latestVersion.enabled,
         );
   const theme = mode === null ? null : getEventTheme(mode);
-  const fanoutActivationEnabled = isFanoutActivationEnabled(fanoutControlState);
   const boundPreview = getBoundActivationPreview({
     activeEvents: data?.activeEvents.map((choice) => choice.event) ?? [],
     facilityId,
@@ -268,14 +252,8 @@ export default function StartEventScreen() {
       facility === undefined ||
       mode === null ||
       previewLoading ||
-      previewInFlight.current ||
-      !fanoutActivationEnabled
+      previewInFlight.current
     ) {
-      if (!fanoutActivationEnabled) {
-        AccessibilityInfo.announceForAccessibility(
-          'New incident and drill activation is blocked because notification fanout is not verified as enabled. Nothing was queued.',
-        );
-      }
       return;
     }
     previewInFlight.current = true;
@@ -627,8 +605,6 @@ export default function StartEventScreen() {
 
         {SYNTHETIC_FIXTURE_ENABLED ? <SyntheticModeBanner /> : null}
 
-        <FanoutControlBanner state={fanoutControlState} />
-
         {mode === null ? null : boundPreview === null ? (
           <ClassificationBanner mode={mode} />
         ) : null}
@@ -743,7 +719,7 @@ export default function StartEventScreen() {
                   {eventTypes.map((item, index) => (
                     <EventTypeChoice
                       description={item.latestVersion.description}
-                      disabled={previewLoading || !fanoutActivationEnabled}
+                      disabled={previewLoading}
                       key={item.eventType.id}
                       mode={mode}
                       name={item.latestVersion.name}
@@ -778,7 +754,7 @@ export default function StartEventScreen() {
               mutationSnapshot.operation === 'activate'
             }
             channels={boundPreview.channels}
-            disabled={mutationPending || !fanoutActivationEnabled}
+            disabled={mutationPending}
             eventTypeName={selectedType.latestVersion.name}
             facilityName={facility.name}
             mode={mode}

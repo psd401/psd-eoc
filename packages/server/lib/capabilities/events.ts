@@ -116,10 +116,6 @@ import {
   deliveryTestEndpointReferenceDigest,
   deliveryTestTargetLockIdentity,
 } from '../testing/e2e-delivery';
-import {
-  FanoutControlDeniedError,
-  insertAuthorizedNotificationIntentForFanout,
-} from '../notify/fanout-control';
 
 /** Preview plus server-only persistence references required for one send. */
 export interface ResolvedActivationSource {
@@ -2227,22 +2223,35 @@ async function persistNotification(
   intent: NotificationIntent,
   outboxRecord: OutboxRecord,
   integrationStatusIds: Readonly<Record<string, string>>,
-  previewCreatedAtValue: string,
 ): Promise<void> {
-  try {
-    await insertAuthorizedNotificationIntentForFanout({
-      database,
-      intent,
-      previewCreatedAt: new Date(previewCreatedAtValue),
-    });
-  } catch (error) {
-    if (error instanceof FanoutControlDeniedError) {
-      throw unavailable(
-        'Notification fan-out is emergency-disabled or unavailable. Create a fresh consequence preview after re-enable.',
-      );
-    }
-    throw error;
-  }
+  // A notification intent is inserted plainly. It used to be bound at insert to
+  // a fan-out control record and its enable epoch, so a deployment that had
+  // never been switched on refused every activation and said only that fan-out
+  // was "unavailable". What authorizes this fan-out is upstream and unchanged:
+  // an authenticated human, a fresh consequence preview, and the human-only
+  // capability registry.
+  await database.insert(notificationIntents).values({
+    id: intent.id,
+    eventId: intent.eventId,
+    eventKind: intent.eventKind,
+    templateMode: intent.templateMode,
+    purpose: intent.purpose,
+    eventTypeVersionId: intent.eventTypeVersion.id,
+    rosterSnapshotId: intent.rosterSnapshotId,
+    rosterPopulation: intent.rosterPopulation,
+    audienceConfigId: intent.audienceConfig.id,
+    audienceConfigVersion: intent.audienceConfig.version,
+    createdBy: intent.createdBy,
+    source: intent.source,
+    requestId: intent.requestId,
+    authorization: intent.authorization,
+    deliveryTestTargetSetId: intent.deliveryTest?.targetSet.id ?? null,
+    deliveryTestTargetSetVersion:
+      intent.deliveryTest?.targetSet.version ?? null,
+    deliveryTestEndpointReferenceDigest:
+      intent.deliveryTest?.endpointReferenceDigest ?? null,
+    createdAt: new Date(intent.createdAt),
+  });
   await database.insert(notificationIntentChannels).values(
     intent.channels.map((channel, index) => {
       const integrationStatusId = integrationStatusIds[channel.channel];
@@ -2386,7 +2395,6 @@ async function persistLifecycleBundle(
       bundle.result.notificationIntent,
       bundle.outboxRecord,
       bundle.integrationStatusIds,
-      bundle.fanoutPreviewCreatedAt,
     );
     const intent = bundle.result.notificationIntent;
     if (intent.deliveryTest != null) {

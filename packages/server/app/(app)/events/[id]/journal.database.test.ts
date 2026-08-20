@@ -80,11 +80,6 @@ import {
   readyStorageKey,
 } from '../../../../lib/media/model';
 import { buildPhotoChecksumExportQuery } from '../../../../lib/media/repository';
-import {
-  appendFanoutControlRecord,
-  lockAndReadCurrentFanoutControl,
-  readFanoutControlEffectiveState,
-} from '../../../../lib/notify/fanout-control';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
 import { requireSyntheticTestDatabaseUrl } from '../../../../lib/testing/database';
 
@@ -200,32 +195,6 @@ async function insertSyntheticFanoutAdminSession(
     expiresAt: new Date(fixtureTime.getTime() + 24 * 60 * 60_000),
     revokedAt: null,
   });
-}
-
-async function appendSyntheticEnabledFanoutEpoch(input: {
-  readonly database: Database;
-  readonly changedAt: Date;
-  readonly fixtureName: string;
-}): Promise<void> {
-  const current = await lockAndReadCurrentFanoutControl(input.database);
-  expect(current).toBeNull();
-  const appendedRecord = await appendFanoutControlRecord({
-    database: input.database,
-    actor: FANOUT_ADMIN_ACTOR,
-    requestId: randomUUID(),
-    expectedCurrentRecordId: null,
-    desiredMode: 'enabled',
-    reason: `Synthetic ${input.fixtureName} fixture only.`,
-    productOwnerApprovalReference: `synthetic-test-only-po-approval-${input.fixtureName}-${randomUUID()}`,
-    changedAt: input.changedAt,
-  });
-  expect(await readFanoutControlEffectiveState(input.database)).toEqual({
-    kind: 'current',
-    effectiveMode: 'enabled',
-    currentEpochId: appendedRecord.enableEpochId,
-    currentRecord: appendedRecord,
-  });
-  expect(appendedRecord.enableEpochId).not.toBeNull();
 }
 
 function humanMutationInvocation(
@@ -1326,11 +1295,6 @@ describeWithDatabase('event journal database guarantees', () => {
         transactionalDatabase,
         fixtureTime,
       );
-      await appendSyntheticEnabledFanoutEpoch({
-        database: transactionalDatabase,
-        changedAt: new Date(fixtureTime.getTime() - 30_000),
-        fixtureName: 'journal-drill-synthetic',
-      });
       const integrationIds = ['expo-push', 'ses-email'] as const;
       const originalConfigurations = await transaction
         .select()
@@ -1989,11 +1953,6 @@ describeWithDatabase('event journal database guarantees', () => {
           transactionalDatabase,
           fixtureTime,
         );
-        await appendSyntheticEnabledFanoutEpoch({
-          database: transactionalDatabase,
-          changedAt: new Date(fixtureTime.getTime() - 30_000),
-          fixtureName: 'journal-real-staff',
-        });
 
         const sessionResult = SessionEstablishmentResultSchema.parse({
           user: {

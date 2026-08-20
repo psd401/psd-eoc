@@ -1,13 +1,7 @@
 import type { Metadata } from 'next';
-import { Suspense, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
-import type { FanoutStatus } from '@psd-eoc/contracts';
-
-import {
-  FanoutControlBanner,
-  OperationalDocument,
-  loadOperationalFanoutControlState,
-} from './fanout-control-banner';
+import { OperationalDocument } from './operational-document';
 import { PrimaryNav } from '../nav/primary-nav';
 
 export const metadata: Metadata = {
@@ -16,15 +10,6 @@ export const metadata: Metadata = {
     template: '%s | PSD EOC',
   },
 };
-
-const FAIL_CLOSED_FALLBACK_STATE: FanoutStatus = Object.freeze({
-  status: 'unavailable',
-});
-
-async function LoadedFanoutControlBanner() {
-  const state = await loadOperationalFanoutControlState();
-  return <FanoutControlBanner state={state} />;
-}
 
 export default function OperationalLayout({
   children,
@@ -36,21 +21,7 @@ export default function OperationalLayout({
   // on — a real defect for anyone on a slow connection, not only a test
   // artifact. Without a boundary the navigation is part of the initial HTML and
   // the document is not patched afterwards.
-  //
-  // The fan-out banner keeps its boundary: it renders a fail-closed fallback
-  // immediately and swaps content in place, so it never delays the shell.
   return (
-    <OperationalDocument
-      banner={
-        <Suspense
-          fallback={<FanoutControlBanner state={FAIL_CLOSED_FALLBACK_STATE} />}
-        >
-          <LoadedFanoutControlBanner />
-        </Suspense>
-      }
-      nav={<PrimaryNav />}
-    >
-      {children}
-    </OperationalDocument>
+    <OperationalDocument nav={<PrimaryNav />}>{children}</OperationalDocument>
   );
 }

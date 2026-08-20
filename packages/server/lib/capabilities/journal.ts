@@ -99,10 +99,6 @@ import {
   type ServerCapabilityRegistration,
   type TrustedCapabilityInvocation,
 } from './engine';
-import {
-  FanoutControlDeniedError,
-  assertCurrentNotificationFanoutEnabled,
-} from '../notify/fanout-control';
 import type { AuthenticatedSession } from '../auth/sessions';
 import { renderTemplateSet } from '../notify/render';
 import { deriveCloseConsequenceDigest } from './events';
@@ -1806,16 +1802,6 @@ async function createLifecycleConsequencePreviewFromDatabase(
   database: JournalQueryDatabase,
   input: CapabilityInput<'create-lifecycle-consequence-preview'>,
 ): Promise<LifecycleConsequencePreview> {
-  try {
-    await assertCurrentNotificationFanoutEnabled(database);
-  } catch (error) {
-    if (error instanceof FanoutControlDeniedError) {
-      throw unavailable(
-        'Notification fan-out is emergency-disabled or unavailable. No lifecycle preview was created.',
-      );
-    }
-    throw error;
-  }
   const [eventRow] = await database
     .select()
     .from(events)

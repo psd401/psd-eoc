@@ -19,7 +19,6 @@ import {
   type AttemptExecutionStore,
   type AttemptIdempotentProviderAdapter,
   type CompleteAttemptExecutionRequest,
-  type FanoutControlAuthorizer,
   type LiveProviderAuthorizer,
   type ProviderRecoveryResult,
   type ProviderSendOutcome,
@@ -73,7 +72,6 @@ export interface ExpoPushWorkerOptions {
   readonly retryPolicy?: RetryPolicy;
   readonly leaseMilliseconds?: number;
   readonly random?: () => number;
-  readonly authorizeFanout: FanoutControlAuthorizer;
   readonly authorizeLiveProvider?: LiveProviderAuthorizer;
 }
 
@@ -751,7 +749,6 @@ export class ExpoPushWorker {
         ? {}
         : { leaseMilliseconds: options.leaseMilliseconds }),
       ...(options.random === undefined ? {} : { random: options.random }),
-      authorizeFanout: options.authorizeFanout,
       ...(options.authorizeLiveProvider === undefined
         ? {}
         : { authorizeLiveProvider: options.authorizeLiveProvider }),
@@ -879,7 +876,6 @@ export function createProductionExpoPushWorker(
     endpointInvalidator: options.endpointInvalidator,
     receiptScheduler: options.receiptScheduler,
     endpointEligibility,
-    authorizeFanout: options.authorizeFanout,
     ...(options.retryPolicy === undefined
       ? {}
       : { retryPolicy: options.retryPolicy }),

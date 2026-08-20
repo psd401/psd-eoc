@@ -159,7 +159,6 @@ function enabledMode(
     sendLedger,
     executionStore,
     evidenceWriter,
-    authorizeFanout: () => true,
     authorizeLiveProvider: () => true,
     authorizeProviderSend,
   };

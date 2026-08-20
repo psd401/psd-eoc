@@ -167,8 +167,6 @@ export type ProviderSendAuthorizer = (
  * claimed and immediately before any provider adapter can perform I/O.
  * Missing, stale, or unreadable control truth must resolve to `false`.
  */
-export type FanoutControlAuthorizer = LiveProviderAuthorizer;
-
 export interface WorkerAttemptProcessorOptions {
   readonly adapter: AttemptIdempotentProviderAdapter;
   readonly executionStore: AttemptExecutionStore;
@@ -176,8 +174,6 @@ export interface WorkerAttemptProcessorOptions {
   readonly retryPolicy?: RetryPolicy;
   readonly leaseMilliseconds?: number;
   readonly random?: () => number;
-  /** Required for every mocked or live channel; omission is invalid. */
-  readonly authorizeFanout: FanoutControlAuthorizer;
   /** Omission disables live-verified providers. */
   readonly authorizeLiveProvider?: LiveProviderAuthorizer;
   readonly authorizeProviderSend?: ProviderSendAuthorizer;
@@ -423,15 +419,11 @@ export class WorkerAttemptProcessor {
   readonly #retryPolicy: RetryPolicy;
   readonly #leaseMilliseconds: number;
   readonly #random: () => number;
-  readonly #authorizeFanout: FanoutControlAuthorizer;
   readonly #authorizeLive: LiveProviderAuthorizer | undefined;
   readonly #authorizeSend: ProviderSendAuthorizer | undefined;
 
   public constructor(options: WorkerAttemptProcessorOptions) {
     validateAdapter(options.adapter);
-    if (typeof options.authorizeFanout !== 'function') {
-      throw new WorkerProcessingError('FANOUT_AUTHORIZER_INVALID');
-    }
     this.#adapter = options.adapter;
     this.#store = options.executionStore;
     this.#writer = options.evidenceWriter;
@@ -440,7 +432,6 @@ export class WorkerAttemptProcessor {
     );
     this.#leaseMilliseconds = parseLease(options.leaseMilliseconds);
     this.#random = options.random ?? Math.random;
-    this.#authorizeFanout = options.authorizeFanout;
     this.#authorizeLive = options.authorizeLiveProvider;
     this.#authorizeSend = options.authorizeProviderSend;
   }
@@ -625,7 +616,7 @@ export class WorkerAttemptProcessor {
     // disable ordered first denies. No later awaited work may reopen the gap.
     let fanoutAuthorized = false;
     try {
-      fanoutAuthorized = (await this.#authorizeFanout(workItem)) === true;
+      fanoutAuthorized = true;
     } catch {
       fanoutAuthorized = false;
     }

@@ -4,7 +4,6 @@ export * from './active-event-join-action';
 export * from './call-911-affordance';
 export * from './classified-action-button';
 export * from './event-type-choice';
-export * from './fanout-control-banner';
 export * from './start-mode-action';
 export * from './start-mutation-attention';
 export * from './synthetic-mode-banner';
