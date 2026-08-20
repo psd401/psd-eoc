@@ -2995,7 +2995,7 @@ describe('write gates and reconciliation', () => {
     expect(buildCap.mutations).toHaveLength(0);
   });
 
-  test('rejects tester links at the maximum group or app relationship fan-out before mutation', async () => {
+  test('rejects tester links at the maximum group or app relationship count before mutation', async () => {
     for (const relationship of ['betaGroups', 'apps'] as const) {
       const client = new StatefulClient();
       const tester = resource('betaTesters', `cap-${relationship}-tester`, {

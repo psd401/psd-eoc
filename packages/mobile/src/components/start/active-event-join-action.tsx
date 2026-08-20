@@ -15,7 +15,7 @@ export interface ActiveEventJoinActionProps {
   readonly testID?: string;
 }
 
-/** Explicit join choice; this action never implies a new activation or fan-out. */
+/** Explicit join choice; this action never implies a new activation or send. */
 export function ActiveEventJoinAction({
   busy = false,
   disabled = false,

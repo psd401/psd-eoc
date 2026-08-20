@@ -2,7 +2,7 @@
 
 **Source-defined CloudWatch alarm names:**
 
-- `psd-eoc-fanout-queue-age`;
+- `psd-eoc-delivery-queue-age`;
 - `psd-eoc-push-queue-age`;
 - `psd-eoc-email-queue-age`; and
 - `psd-eoc-sms-queue-age`.
@@ -28,17 +28,14 @@ side effects unless the exact attempt is safely fenced.
   owner approval.
 - Do not inspect message bodies in the console. They are untrusted and may
   contain operational event content. Use bounded metrics and sanitized IDs.
-- If the emergency-disable state is disabled or unreadable, queued work must
-  remain suppressed. Re-enable must never release work from an earlier enable
-  epoch.
 
 ## Identify the affected stage
 
 | Queue            | Stage                                             | Initial severity and next check                                                                                                         |
 | ---------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `psd-eoc-fanout` | Central batch routing before channel queues       | **SEV-1** because all channels may be delayed; check stuck outbox and dispatcher/router runtime                                         |
+| `psd-eoc-delivery` | Central batch routing before channel queues       | **SEV-1** because all channels may be delayed; check stuck outbox and dispatcher/router runtime                                         |
 | `psd-eoc-push`   | Push worker before Expo provider boundary         | **SEV-2**, or **SEV-1** if push is the only available launch channel; use [provider-expo.md](provider-expo.md)                          |
-| `psd-eoc-email`  | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader fan-out impact; use [provider-ses.md](provider-ses.md)                                             |
+| `psd-eoc-email`  | Email worker before SES provider boundary         | **SEV-2**, or **SEV-1** with broader delivery impact; use [provider-ses.md](provider-ses.md)                                             |
 | `psd-eoc-sms`    | SMS worker before AWS End User Messaging boundary | SMS is allowed to remain dark under D-013. Keep it dark while its integration is `blocked`; unexpected routable staff work is **SEV-0** |
 
 ## Respond
@@ -49,14 +46,11 @@ side effects unless the exact attempt is safely fenced.
 2. Check the paired worker/router log group for startup, authorization,
    parsing, persistence, throttling, and provider reason codes. Use the UTC
    interval and sanitized batch/attempt IDs; do not copy raw payloads.
-3. Confirm the current emergency-disable state and enable epoch from the
-   authenticated application control view. If it cannot be read, treat it as
-   disabled and escalate.
 4. Check whether the paired DLQ depth is nonzero. If so, continue with the
-   matching runbook: [central fan-out](alarm-dlq-fanout.md),
+   matching runbook: [delivery](alarm-dlq-delivery.md),
    [push](alarm-dlq-push.md), [email](alarm-dlq-email.md), or
    [SMS](alarm-dlq-sms.md).
-5. For the fan-out queue, also inspect outbox age and App Runner health. For a
+5. For the delivery queue, also inspect outbox age and App Runner health. For a
    channel queue, inspect only that provider's status and adapter logs; a
    provider status page is not delivery evidence.
 6. Determine whether work is being processed slowly, repeatedly failing, or

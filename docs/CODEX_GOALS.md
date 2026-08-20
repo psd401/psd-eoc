@@ -53,7 +53,7 @@ seeded synthetic district loads, every contracts module exports documented
 Zod schemas that downstream issues can import unchanged.
 ```
 
-## Wave 2 — Nine-way parallel fan-out (one goal per agent)
+## Wave 2 — Nine-way parallel work (one goal per agent)
 
 Run up to twelve agents at once, one block each:
 
@@ -184,7 +184,7 @@ Goal: complete issue #32 (Playwright+axe web suites, Maestro mobile suites).
 ```
 ```
 Goal: complete issue #33 (TestFlight + Play distribution + install guides)
-then #34 (runbooks, emergency-disable switch, go-live checklist). Go-live
+then #34 (runbooks, go-live checklist). Go-live
 requires product-owner sign-off — prepare the checklist, do not self-approve.
 ```
 

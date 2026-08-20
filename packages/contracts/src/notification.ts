@@ -77,7 +77,7 @@ export type AttemptDeliveryTruthState = z.infer<
 >;
 
 /**
- * Owns the stable identifier for an immutable notification fan-out intent.
+ * Owns the stable identifier for an immutable notification send intent.
  * The event transaction creates this record before dispatch begins.
  */
 export const NotificationIntentIdSchema = UuidSchema;
@@ -405,7 +405,7 @@ function addNotificationAuthorizationIssues(
 }
 
 /**
- * Owns the immutable, transactionally recorded fan-out intent. It pins event,
+ * Owns the immutable, transactionally recorded send intent. It pins event,
  * type, roster, and audience versions and repeats classification before work
  * crosses the outbox boundary.
  */
@@ -461,7 +461,7 @@ export const NotificationIntentSchema = z
   })
   .readonly();
 
-/** Immutable fan-out intent inferred from its schema. */
+/** Immutable send intent inferred from its schema. */
 export type NotificationIntent = z.infer<typeof NotificationIntentSchema>;
 
 /**

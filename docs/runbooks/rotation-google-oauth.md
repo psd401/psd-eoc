@@ -68,7 +68,7 @@ Never weaken domain/group gates. Use the district security reporting process.
 
 Verify strict five-field runtime readback, new sign-in, denied-domain/group
 behavior, existing-session continuity, application health, and no unexpected
-roster/fan-out impact. A successful readback advances the integration to at
+roster/delivery impact. A successful readback advances the integration to at
 most `configured-unverified`; only the separately approved exercised district
 sign-in can justify `live-verified`. If new sign-in fails and the old secret is
 still safe, redeploy the exact previous secret version and image/configuration

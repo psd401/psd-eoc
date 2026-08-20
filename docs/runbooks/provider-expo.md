@@ -30,7 +30,7 @@ change the `mocked` Expo integration truth or authorize provider I/O.
 
 ## Respond
 
-1. Confirm the environment, current emergency-disable epoch, push integration
+1. Confirm the environment, push integration
    truth label, and `psd-eoc-push` queue/DLQ state. If the label is not
    `live-verified`, provider I/O must remain disabled.
 2. In CloudWatch, inspect `/psd-eoc/workers/push` by UTC interval, sanitized

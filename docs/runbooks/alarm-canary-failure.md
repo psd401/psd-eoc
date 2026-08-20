@@ -25,7 +25,7 @@ proof that the deployed canary preserves those boundaries.
 - Do not manually trigger the transaction in production to diagnose it.
 - If evidence shows a real/drill event, staff audience, provider call, or
   human-only action, classify **SEV-0**, preserve evidence, and follow
-  [emergency-disable.md](emergency-disable.md).
+  [rollback.md](rollback.md).
 
 ## Respond
 

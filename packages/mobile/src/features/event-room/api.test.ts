@@ -835,7 +835,7 @@ describe('mobile event-room API', () => {
     ).rejects.toThrow('another event');
   });
 
-  test('fails closed when all-clear omits fan-out or close invents fan-out', async () => {
+  test('fails closed when all-clear omits the send or close invents one', async () => {
     const allClear = allClearResult();
     const missingIntent = requestHarness({
       ...allClear,

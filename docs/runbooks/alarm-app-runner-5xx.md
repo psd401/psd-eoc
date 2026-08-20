@@ -18,13 +18,12 @@ sent.
 ## Safety posture
 
 - Do not retry a real activation for a user. First establish whether an event
-  and fan-out intent committed; an ambiguous result requires an authenticated
+  and delivery intent committed; an ambiguous result requires an authenticated
   human to inspect the app and make a fresh decision.
 - Do not use direct database writes, forge requests, bypass authorization, or
   call a human-only action on the user's behalf.
-- If errors create real/drill ambiguity, hide the emergency-disable truth, or
-  make fan-out consequences uncertain, classify **SEV-0** and follow
-  [emergency-disable.md](emergency-disable.md).
+- If errors create real/drill ambiguity or make delivery consequences
+  uncertain, classify **SEV-0** and follow [rollback.md](rollback.md).
 
 ## Respond
 
@@ -56,8 +55,6 @@ sent.
 2. Confirm the side-effect-free `/api/health` route is returning `200`, the
    exact 5xx alarm has a complete healthy evaluation period, and related
    latency evidence is current.
-3. Verify the emergency-disable state is readable and honestly rendered. Do
-   not re-enable it as part of a health check.
 4. Review append-only event/outbox evidence for requests reported ambiguous by
    users. Never create, close, all-clear, or send a real event as a test.
 5. Use only the approved isolated non-production synthetic test path after #91

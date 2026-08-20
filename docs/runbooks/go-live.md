@@ -23,7 +23,7 @@ Release candidate:
 - iOS version/build: `[TO FILL]`
 - Android version/build: `[TO FILL]`
 - Emergency-control revision/enable epoch: `[TO FILL]`
-- Internal fan-out authorization secret resource/version reference:
+- Internal delivery authorization secret resource/version reference:
   `[TO FILL — NEVER THE VALUE]`
 - Evidence package link: `[CONTROLLED LINK TO FILL]`
 
@@ -88,7 +88,7 @@ Release candidate:
 - [ ] Aurora has a positive capacity floor/no auto-pause, writer and reader in
       separate Availability Zones, TLS/encryption, Data API least privilege,
       retained backups, and deletion protection.
-- [ ] Central fan-out plus push/email/SMS queues and paired retained DLQs have
+- [ ] Delivery queue plus push/email/SMS queues and paired retained DLQs have
       bounded retries, encryption, least privilege, and deployed consumers only
       for approved channels.
 - [ ] CloudWatch dashboard shows p50/p95/p99 activation-accept and outbox-to-
@@ -123,7 +123,7 @@ Release candidate:
       and server-side denied all canonical human-only actions.
 - Evidence: `[BLOCKED / TO FILL]`
 
-## 5. Fan-out, integrations, and delivery truth
+## 5. Delivery, integrations, and delivery truth
 
 - [ ] `docs/INTEGRATIONS.md` was reviewed on the release commit; every external
       integration uses only `mocked`, `configured-unverified`, `live-verified`, or
@@ -156,41 +156,7 @@ Release candidate:
 
 Selection/evidence/product-owner acceptance: `[BLOCKED — NEITHER SELECTED]`
 
-## 6. Emergency-disable readiness
-
-- [ ] Append-only control truth, fail-disabled reads, fresh enable epochs, and
-      authenticated human-admin CSRF flow are deployed.
-- [ ] Emergency control is absent from REST/MCP grants and cannot be exercised
-      by an agent, automation, GET request, or stale session/request.
-- [ ] The application reads the dedicated internal worker authorization
-      credential only from `PSD_EOC_FANOUT_CONTROL_WORKER_TOKEN`; every
-      provider-bound worker supplies the same approved secret version only to
-      `FanoutControlClient`, using the exact approved HTTPS application origin.
-- [ ] Two-responder deployment readback proves the application and every
-      provider-bound worker share that exact secret resource/version through
-      encrypted runtime injection, no unrelated runtime receives it, and the
-      evidence contains references/version IDs only—never the secret value.
-- [ ] Isolated tests prove a missing, invalid, or mismatched internal worker
-      credential fails closed and terminally suppresses provider I/O; it is
-      never reused as a database, provider, delivery-writeback, session, or
-      agent credential.
-- [ ] Web and mobile prominently render disabled and unavailable states.
-- [ ] Tests and deployed isolated evidence prove disable stops preview,
-      activation/reactivation/all-clear fan-out, outbox dispatch, queued batches,
-      and provider I/O at every channel boundary.
-- [ ] Evidence proves the shared lock gives disable and each final handoff
-      authorization one order: disable-first work is suppressed, while any
-      transport observed after the disable timestamp is correlated only to an
-      immutable authorization that linearized first and was already in flight.
-- [ ] Tests prove disable/re-enable never releases preview, outbox, or queued
-      work from an earlier epoch.
-- [ ] Two human responders followed
-      [emergency-disable.md](emergency-disable.md) in isolated non-production,
-      including the `/emergency` CSRF-form readback, internal worker credential
-      reference readback, and a fresh product-owner-authorized re-enable.
-- Evidence: `[BLOCKED / TO FILL]`
-
-## 7. Backup, restore, failure drills, and SLOs
+## 6. Backup, restore, failure drills, and SLOs
 
 - [ ] Automated Aurora backup window/retention and latest restorable time are
       verified on the deployed environment; encryption and deletion protection
@@ -200,7 +166,7 @@ Selection/evidence/product-owner acceptance: `[BLOCKED — NEITHER SELECTED]`
       hour, honest restored-point/RPO gap, integrity/hash-chain checks, and zero
       provider calls.
 - [ ] All #31 drills have expected versus observed evidence and gap tickets:
-      worker killed mid-fan-out, Aurora failover, Google outage, DLQ disposition,
+      worker killed mid-send, Aurora failover, Google outage, DLQ disposition,
       duplicate callback, delayed callback after all-clear, revoked device, and
       roster-sync failure/last-good snapshot.
 - [ ] p95 activation accepted is under 500 ms, push handoff under 5 seconds,
@@ -226,7 +192,7 @@ integrations are not live-verified.
 - [ ] Missed/failed monthly-test alarm and runbook route were exercised.
 - Evidence: `[BLOCKED — NO LIVE TEST EXECUTED]`
 
-## 8. Private mobile distribution and staff readiness
+## 7. Private mobile distribution and staff readiness
 
 - [ ] Exact iOS build is installed from the approved internal TestFlight group
       on a staff-context test device; Apple record/group/build IDs and human
@@ -239,13 +205,13 @@ integrations are not live-verified.
       help/revoke access.
 - [ ] Mobile real/drill visual distinction, foreground/background/locked-screen
       handling, biometric unlock, stale-session behavior, offline refusal, and
-      emergency-disable banner passed on both platforms.
+      real/drill theming passed on both platforms.
 - [ ] Store/OTA version policy and rollback were reviewed; native,
       authentication, push, runtime, and safety-boundary changes cannot ship as a
       JavaScript-only OTA update.
 - Evidence: `[BLOCKED / TO FILL]`
 
-## 9. Operator rehearsal and rollback
+## 8. Operator rehearsal and rollback
 
 - [ ] A non-author used every alarm/provider/roster runbook in isolated
       non-production and recorded unclear or incorrect steps as fixed gap issues.
@@ -258,7 +224,7 @@ integrations are not live-verified.
       not 911; call-911 remains a plain human action and does not imply dispatch.
 - Evidence: `[BLOCKED / TO FILL]`
 
-## 10. Accepted gaps
+## 9. Accepted gaps
 
 Every gap needs a GitHub issue, consequence statement, compensating control,
 owner, deadline, and explicit product-owner acceptance. Binding safety rules
@@ -272,12 +238,12 @@ cannot be accepted away.
 - [ ] Every listed gap is eligible for acceptance and has explicit product-
       owner acceptance; no AGENTS.md absolute is weakened.
 
-## 11. Human sign-off
+## 10. Human sign-off
 
 Technical reviewers may attest evidence but cannot approve go-live.
 
 - Operations incident lead review/name/time: `[TO FILL — NOT SIGNED]`
-- Application/fan-out review/name/time: `[TO FILL — NOT SIGNED]`
+- Application/delivery review/name/time: `[TO FILL — NOT SIGNED]`
 - Database/AWS review/name/time: `[TO FILL — NOT SIGNED]`
 - Identity/roster review/name/time: `[TO FILL — NOT SIGNED]`
 - Security/privacy review/name/time: `[TO FILL — NOT SIGNED]`

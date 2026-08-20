@@ -153,10 +153,6 @@ export const outboxStatusEnum = pgEnum('outbox_status', [
   'published',
   'failed',
 ]);
-export const fanoutControlModeEnum = pgEnum('fanout_control_mode', [
-  'enabled',
-  'emergency-disabled',
-]);
 export const integrationTruthLabelEnum = pgEnum('integration_truth_label', [
   'mocked',
   'configured-unverified',
@@ -635,87 +631,6 @@ export const sessions = pgTable(
         and ${table.membershipValidUntil} >= ${table.createdAt}
         and ${table.membershipGraceUntil} >= ${table.membershipValidUntil}
         and (${table.revokedAt} is null or ${table.revokedAt} >= ${table.createdAt})`,
-    ),
-  ],
-);
-
-/**
- * Append-only district-wide notification fan-out control history.
- *
- * Absence is deliberately interpreted as emergency-disabled by the shared
- * reader. An enabled record is valid only with a fresh epoch and retained
- * product-owner authorization reference.
- */
-export const fanoutControlRecords = pgTable(
-  'fanout_control_records',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    revision: integer('revision').notNull(),
-    previousRecordId: uuid('previous_record_id'),
-    mode: fanoutControlModeEnum('mode').notNull(),
-    enableEpochId: uuid('enable_epoch_id'),
-    reason: varchar('reason', { length: 500 }).notNull(),
-    productOwnerApprovalReference: varchar('product_owner_approval_reference', {
-      length: 255,
-    }),
-    changedByUserId: uuid('changed_by_user_id').notNull(),
-    changedWithSessionId: uuid('changed_with_session_id').notNull(),
-    requestId: uuid('request_id').notNull(),
-    changedAt: occurredAt('changed_at').defaultNow().notNull(),
-  },
-  (table) => [
-    uniqueIndex('fanout_control_records_revision_uq').on(table.revision),
-    uniqueIndex('fanout_control_records_previous_uq')
-      .on(table.previousRecordId)
-      .where(sql`${table.previousRecordId} is not null`),
-    uniqueIndex('fanout_control_records_enable_epoch_uq')
-      .on(table.enableEpochId)
-      .where(sql`${table.enableEpochId} is not null`),
-    uniqueIndex('fanout_control_records_approval_reference_uq')
-      .on(sql`lower(${table.productOwnerApprovalReference})`)
-      .where(sql`${table.productOwnerApprovalReference} is not null`),
-    uniqueIndex('fanout_control_records_request_uq').on(table.requestId),
-    unique('fanout_control_records_enabled_anchor_uq').on(
-      table.id,
-      table.enableEpochId,
-      table.mode,
-    ),
-    index('fanout_control_records_latest_idx').on(table.revision.desc()),
-    foreignKey({
-      columns: [table.previousRecordId],
-      foreignColumns: [table.id],
-      name: 'fanout_control_records_previous_fk',
-    }).onDelete('restrict'),
-    foreignKey({
-      columns: [table.changedWithSessionId, table.changedByUserId],
-      foreignColumns: [sessions.id, sessions.userId],
-      name: 'fanout_control_records_changer_session_fk',
-    }).onDelete('restrict'),
-    check(
-      'fanout_control_records_revision_positive',
-      sql`${table.revision} > 0`,
-    ),
-    check(
-      'fanout_control_records_root_revision',
-      sql`(${table.revision} = 1) = (${table.previousRecordId} is null)`,
-    ),
-    check(
-      'fanout_control_records_reason_nonempty',
-      sql`${table.reason} = btrim(${table.reason}) and length(${table.reason}) > 0`,
-    ),
-    check(
-      'fanout_control_records_mode_evidence',
-      sql`(
-        ${table.mode} = 'enabled'
-        and ${table.enableEpochId} is not null
-        and ${table.productOwnerApprovalReference} is not null
-        and ${table.productOwnerApprovalReference} = btrim(${table.productOwnerApprovalReference})
-        and length(${table.productOwnerApprovalReference}) > 0
-      ) or (
-        ${table.mode} = 'emergency-disabled'
-        and ${table.enableEpochId} is null
-        and ${table.productOwnerApprovalReference} is null
-      )`,
     ),
   ],
 );
@@ -3442,7 +3357,7 @@ export const journalEntries = pgTable(
   ],
 );
 
-/** Immutable, transactionally recorded fan-out intents. */
+/** Immutable, transactionally recorded notification send intents. */
 export const notificationIntents = pgTable(
   'notification_intents',
   {
@@ -3628,41 +3543,6 @@ export const notificationIntents = pgTable(
       'notification_intents_delivery_test_digest_format',
       sql`${table.deliveryTestEndpointReferenceDigest} is null
         or ${table.deliveryTestEndpointReferenceDigest} ~ '^[a-f0-9]{64}$'`,
-    ),
-  ],
-);
-
-/**
- * Immutable proof that one notification intent was admitted by the exact
- * enabled control epoch current in the lifecycle transaction.
- */
-export const fanoutIntentAuthorizations = pgTable(
-  'fanout_intent_authorizations',
-  {
-    intentId: uuid('intent_id')
-      .primaryKey()
-      .references(() => notificationIntents.id, { onDelete: 'restrict' }),
-    controlRecordId: uuid('control_record_id').notNull(),
-    enableEpochId: uuid('enable_epoch_id').notNull(),
-    controlMode: fanoutControlModeEnum('control_mode')
-      .default('enabled')
-      .notNull(),
-    authorizedAt: occurredAt('authorized_at').defaultNow().notNull(),
-  },
-  (table) => [
-    foreignKey({
-      columns: [table.controlRecordId, table.enableEpochId, table.controlMode],
-      foreignColumns: [
-        fanoutControlRecords.id,
-        fanoutControlRecords.enableEpochId,
-        fanoutControlRecords.mode,
-      ],
-      name: 'fanout_intent_authorizations_enabled_control_fk',
-    }).onDelete('restrict'),
-    index('fanout_intent_authorizations_epoch_idx').on(table.enableEpochId),
-    check(
-      'fanout_intent_authorizations_enabled_only',
-      sql`${table.controlMode} = 'enabled'`,
     ),
   ],
 );

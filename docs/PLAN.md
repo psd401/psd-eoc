@@ -9,11 +9,11 @@
 
 ## 1. Executive summary
 
-Build a district-owned notification + documentation platform ("call 911 first" positioning, D-004) with a high-reliability activation/fan-out core (D-017). One deployable system (modular monolith + isolated fan-out workers), three clients (web, native iOS, native Android), agent-native capability layer with MCP/REST parity for district AI agents (D-019), with four human-only actions (D-020).
+Build a district-owned notification + documentation platform ("call 911 first" positioning, D-004) with a high-reliability activation/delivery core (D-017). One deployable system (modular monolith + isolated delivery workers), three clients (web, native iOS, native Android), agent-native capability layer with MCP/REST parity for district AI agents (D-019), with four human-only actions (D-020).
 
 **Release 1 (go-live before Easy Alert shutdown):**
 - Any staff member (Google Groups-gated) starts an incident or drill: site → type → confirm (≤3 taps after unlock).
-- Fan-out: native push + email (+ SMS when carrier registration clears, D-013) to configurable audience: building staff + neighborhood staff + "others" group (D-008).
+- Delivery: native push + email (+ SMS when carrier registration clears, D-013) to configurable audience: building staff + neighborhood staff + "others" group (D-008).
 - Live event: timeline with text, photos, location pins; join-or-start-new for concurrent events (D-025); anyone can all-clear/close (D-009).
 - Drill records captured automatically by running the drill in-app (D-018).
 - Agent surfaces: REST + MCP over the same capability layer — read/report/draft only for live-event actions (D-020).
@@ -47,7 +47,7 @@ One deployment family in AWS account `<aws-account-id>` (us-west-2, D-026), full
 
 - **Web/API tier:** Next.js App Router on App Runner, **min 2 instances** (no Maps-style single-instance cap).
 - **Database:** Aurora Serverless v2 PostgreSQL, **auto-pause disabled**, multi-AZ replica, RDS Data API (mirrors Maps conventions without its availability posture).
-- **Fan-out:** transactional outbox row written in the same transaction as event creation → SQS → per-channel Lambda workers with bounded retries, DLQ, and delivery-state callbacks. Activation is durably accepted when the event + fan-out intent commit.
+- **Delivery:** transactional outbox row written in the same transaction as event creation → SQS → per-channel Lambda workers with bounded retries, DLQ, and delivery-state callbacks. Activation is durably accepted when the event + delivery intent commit.
 - **Realtime timeline:** short-polling (3–5s) at launch; SSE as fast-follow. At ≤1,200 users (D-024), polling is simple and sufficient.
 - **Media:** presigned S3 upload → validate by content → re-encode (sharp) → strip EXIF (location is an explicit field, never inferred from EXIF).
 
@@ -174,10 +174,10 @@ Phases gate on dependencies; issues within a phase are parallel-safe.
 ### Phase 5 — Reliability & launch (after Phases 1–3)
 29. Monitoring: CloudWatch alarms → team notification, dashboards, shallow canary.
 30. Monthly live end-to-end delivery test harness (controlled recipients) + latency measurement vs SLO.
-31. Failure drills: kill worker mid-fan-out, DB failover, Google-outage login, duplicate-delivery reconciliation — documented evidence.
+31. Failure drills: kill worker mid-send, DB failover, Google-outage login, duplicate-delivery reconciliation — documented evidence.
 32. E2E: Playwright + axe (WCAG 2.2 AA on activation/event/all-clear paths); Maestro smoke on both platforms.
 33. TestFlight + Android distribution pipeline; enrollment/install guide for staff.
-34. Runbooks (per §12 failure list), on-call escalation matrix, go-live/rollback/emergency-disable checklist.
+34. Runbooks (per §12 failure list), on-call escalation matrix, go-live/rollback checklist.
 
 ### External-dependency tasks (humans, start immediately — issues labeled `external`)
 E1. A2P 10DLC brand/campaign registration (+ toll-free interim number).

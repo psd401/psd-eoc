@@ -4,7 +4,7 @@ Use this runbook when a deployed PSD EOC application, worker,
 infrastructure/configuration, or mobile release causes a proven regression.
 Rollback is a production change and requires an exact consequence preview,
 rollback point, and explicit product-owner approval. A safety stop may require
-immediate emergency disable first; it does not authorize an improvised deploy.
+the service stopped first; it does not authorize an improvised deploy.
 
 ## Current status
 
@@ -22,13 +22,14 @@ must follow after those prerequisites exist.
    disable revision/epoch.
 2. If the regression can misclassify real/drill, release unapproved work,
    expose a human-only action, or send through a blocked/unverified provider,
-   follow [emergency-disable.md](emergency-disable.md) before rollback.
+   stop the App Runner service before rolling back; there is no kill switch
+   that stops delivery on its own.
 3. Prove the last known-good artifact by immutable digest/version and evidence.
    A branch name, `latest` tag, mutable channel, or operator memory is not a
    rollback point.
 4. Define scope: server, one or more workers, infrastructure/configuration,
    database, secret, web static assets, mobile OTA, or mobile store build.
-5. Write a consequence preview: expected user impact, fan-out effect, old/new
+5. Write a consequence preview: expected user impact, delivery effect, old/new
    control epochs, data/schema compatibility, provider changes, exact artifact,
    stop condition, and forward-recovery plan.
 6. Obtain product-owner approval for the exact production change. A previous
@@ -39,7 +40,7 @@ must follow after those prerequisites exist.
 8. Verify read-only health, control truth, safety invariants, metrics, logs,
    queue/outbox state, and append-only evidence. Do not send a live notification
    as a smoke test.
-9. If fan-out was disabled, keep it disabled until the separate re-enable
+9. If delivery was disabled, keep it disabled until the separate re-enable
    procedure receives a fresh product-owner authorization and creates a new
    epoch. Rollback success is not re-enable approval.
 
@@ -82,7 +83,7 @@ must follow after those prerequisites exist.
   restore over the production cluster, or point production at an unvalidated
   restore.
 - Prefer a forward-only compatibility fix. If recovery requires restore, keep
-  fan-out disabled and use [backup-restore.md](backup-restore.md) to create a
+  delivery disabled and use [backup-restore.md](backup-restore.md) to create a
   separate isolated target under an independently approved recovery plan.
 - Record schema version, backup/restore point, RPO/RTO, integrity/hash-chain
   evidence, and every unknown. Database recovery cannot silently discard a
@@ -100,8 +101,8 @@ must follow after those prerequisites exist.
   permit reverting installed binaries. TestFlight/Play tester changes and
   submissions remain human provider writes under issue #33.
 - Verify real/drill theming, notification permissions/handling, biometric
-  session behavior, activation offline refusal, and emergency-disable banner
-  on both platforms with synthetic non-production evidence.
+  session behavior, and activation offline refusal on both platforms with
+  synthetic non-production evidence.
 
 ## Completion evidence
 

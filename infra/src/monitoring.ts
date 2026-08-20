@@ -63,7 +63,7 @@ export interface MonitoringProps {
   readonly appRunnerService: apprunner.CfnService;
   readonly criticalAlarmTopic: sns.ITopic;
   readonly database: rds.DatabaseCluster;
-  readonly fanout: QueueWithDeadLetterQueue;
+  readonly delivery: QueueWithDeadLetterQueue;
   readonly channelQueues: Readonly<
     Record<(typeof NOTIFICATION_CHANNELS)[number], QueueWithDeadLetterQueue>
   >;
@@ -579,7 +579,7 @@ function configureDashboard(
     start: '-PT6H',
   });
   const queues = [
-    ['fanout', props.fanout],
+    ['delivery', props.delivery],
     ...NOTIFICATION_CHANNELS.map(
       (channel) => [channel, props.channelQueues[channel]] as const,
     ),
@@ -951,7 +951,7 @@ function configureAlarms(
   });
 
   const queues = [
-    ['Fanout', 'fanout', props.fanout],
+    ['Delivery', 'delivery', props.delivery],
     ...NOTIFICATION_CHANNELS.map(
       (channel) =>
         [

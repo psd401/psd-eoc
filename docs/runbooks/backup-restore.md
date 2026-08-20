@@ -101,8 +101,7 @@ The approved validator must record aggregate or digest evidence only:
   every synthetic fixture;
 - no student data, routable endpoint, real recipient, or live-provider truth
   exists;
-- emergency-disable state is readable; missing/ambiguous state fails disabled;
-- restored old-epoch work remains suppressed and no queue/provider call occurs;
+- no queue or provider call occurs during restore verification;
 - database-backed application health/read-only queries pass in the isolated
   environment; and
 - actual RTO and selected restore point/RPO gap are recorded.
@@ -138,7 +137,6 @@ attempt.
 - Schema and aggregate digest evidence: `[BLOCKED]`
 - Append-only/hash-chain verification: `[BLOCKED]`
 - Real/drill fixture verification: `[BLOCKED]`
-- Emergency-disable/old-epoch suppression verification: `[BLOCKED]`
 - Zero queue/provider calls evidence: `[BLOCKED]`
 - S3 scope statement: `[BLOCKED]`
 - Observed behavior: `[BLOCKED — DO NOT FABRICATE]`

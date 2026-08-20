@@ -163,7 +163,7 @@ export type ProviderSendAuthorizer = (
 ) => boolean | Promise<boolean>;
 
 /**
- * Fresh global fan-out authorization checked after the immutable attempt is
+ * Fresh authorization checked after the immutable attempt is
  * claimed and immediately before any provider adapter can perform I/O.
  * Missing, stale, or unreadable control truth must resolve to `false`.
  */
@@ -181,7 +181,6 @@ export interface WorkerAttemptProcessorOptions {
 
 export type WorkerProcessingErrorCode =
   | 'INVALID_ADAPTER'
-  | 'FANOUT_AUTHORIZER_INVALID'
   | 'ADAPTER_MISMATCH'
   | 'LIVE_PROVIDER_DISABLED'
   | 'PROVIDER_SEND_DISABLED'
@@ -604,46 +603,11 @@ export class WorkerAttemptProcessor {
     });
     // The initial check avoids creating attempted evidence for an endpoint
     // already known to be ineligible. This final check closes the asynchronous
-    // evidence-write window. The global fan-out gate below then provides the
-    // final linearization point before provider I/O.
+    // evidence-write window, and is deliberately the last awaited operation
+    // before adapter.send: its locked transaction is the provider handoff's
+    // linearization point. No later awaited work may reopen that gap.
     if (!(await this.#providerSendIsAuthorized(workItem))) {
       await this.#releaseProviderSendDenied(lease);
-    }
-
-    // This is deliberately the final awaited operation before adapter.send.
-    // Its locked transaction is the provider handoff's linearization point:
-    // an authorization ordered before disable is already admitted/in flight;
-    // disable ordered first denies. No later awaited work may reopen the gap.
-    let fanoutAuthorized = false;
-    try {
-      fanoutAuthorized = true;
-    } catch {
-      fanoutAuthorized = false;
-    }
-    if (!fanoutAuthorized) {
-      const outcome = failureOutcome(
-        'failed',
-        this.#adapter.provider,
-        'FANOUT_EMERGENCY_DISABLED',
-        null,
-      );
-      const completion = Object.freeze({ kind: 'final' as const, outcome });
-      try {
-        await this.#store.complete({ ...lease, completion });
-      } catch {
-        throw new WorkerProcessingError('IDEMPOTENCY_STORE_FAILED');
-      }
-      const outcomeEvidence = await this.#writer.recordAttemptEvidence({
-        attempt,
-        evidence: finalInput(attempt.id, outcome),
-      });
-      return Object.freeze({
-        kind: finalKind(outcome),
-        replayed: false,
-        outcome,
-        attemptedEvidence,
-        outcomeEvidence,
-      });
     }
     let rawOutcome: ProviderSendOutcome | unknown;
     try {

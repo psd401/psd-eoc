@@ -36,11 +36,11 @@ change the `blocked` SMS integration truth or authorize provider I/O.
 
 ## Respond
 
-1. Confirm account `<aws-account-id>`, region `us-west-2`, current fan-out control
+1. Confirm account `<aws-account-id>`, region `us-west-2`, current delivery control
    epoch, SMS truth label, and `psd-eoc-sms` queue/DLQ state.
 2. If routable staff work reached the provider boundary while SMS was blocked
    or unverified, classify **SEV-0**, preserve evidence, and follow
-   [emergency-disable.md](emergency-disable.md). Do not send or replay it.
+   [rollback.md](rollback.md). Do not send or replay it.
 3. If SMS was separately approved and `live-verified`, inspect read-only AWS
    Health, registration/number status, CloudWatch metrics, and
    `/psd-eoc/workers/sms` reason codes for the UTC interval. Do not expose the
@@ -50,7 +50,7 @@ change the `blocked` SMS integration truth or authorize provider I/O.
    delivery proof, and ambiguous outcome.
 5. Use [alarm-sqs-age.md](alarm-sqs-age.md) or
    [alarm-dlq-sms.md](alarm-dlq-sms.md). Check push and email
-   independently; normal canonical fan-out may continue through approved
+   independently; normal canonical delivery may continue through approved
    channels, but operators must not manually reroute.
 
 ## Recover and verify

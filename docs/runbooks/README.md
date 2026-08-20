@@ -21,10 +21,9 @@ Stop, preserve evidence, and escalate immediately when any of these is true:
   receipt;
 - event-journal or delivery history appears to have been rewritten or deleted;
   or
-- the emergency-disable state is missing, unreadable, contradictory, or
-  cannot be proved current. Treat that state as disabled.
+- delivery state is missing, unreadable, or contradictory.
 
-Do not bypass a gate, replay ambiguous work, re-enable fan-out, start or close
+Do not bypass a gate, replay ambiguous work, re-enable delivery, start or close
 an event, or send a test while investigating. Call 911 through normal district
 procedure when the physical situation requires it; PSD EOC is not a 911
 service.
@@ -40,7 +39,7 @@ service.
 4. Start an append-only operations record in the approved district system.
    Record only non-sensitive resource identifiers, UTC timestamps, metric
    values, decisions, approvers, and links to access-controlled evidence.
-5. Determine whether the impact is activation, fan-out, one provider, roster
+5. Determine whether the impact is activation, delivery, one provider, roster
    freshness, or monitoring only. Never infer notification delivery from a
    green provider status.
 
@@ -78,11 +77,11 @@ widget for that read-back.
 | `psd-eoc-stuck-production-outbox`             | At least one staff outbox row remains unpublished and nonterminal for one minute              | [Stuck outbox](alarm-outbox-stuck.md)                    | source-defined / live-unverified |
 | `psd-eoc-roster-sync-failure-age`             | Latest staff sync remains failed or partial-rejected for at least 15 minutes                  | [Stale roster](alarm-roster-stale.md)                    | source-defined / live-unverified |
 | `psd-eoc-roster-sync-success-age`             | No complete staff sync is retained within 25 hours                                            | [Stale roster](alarm-roster-stale.md)                    | source-defined / live-unverified |
-| `psd-eoc-fanout-queue-age`                    | Oldest central fan-out message reaches 60 seconds                                             | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
+| `psd-eoc-delivery-queue-age`                    | Oldest delivery message reaches 60 seconds                                             | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
 | `psd-eoc-push-queue-age`                      | Oldest push message reaches 60 seconds                                                        | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
 | `psd-eoc-email-queue-age`                     | Oldest email message reaches 60 seconds                                                       | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
 | `psd-eoc-sms-queue-age`                       | Oldest SMS message reaches 60 seconds                                                         | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
-| `psd-eoc-fanout-dlq-depth`                    | At least one visible central fan-out DLQ message                                              | [DLQ: central fan-out](alarm-dlq-fanout.md)              | source-defined / live-unverified |
+| `psd-eoc-delivery-dlq-depth`                    | At least one visible delivery DLQ message                                              | [DLQ: delivery](alarm-dlq-delivery.md)              | source-defined / live-unverified |
 | `psd-eoc-push-dlq-depth`                      | At least one visible push DLQ message                                                         | [DLQ: push](alarm-dlq-push.md)                           | source-defined / live-unverified |
 | `psd-eoc-email-dlq-depth`                     | At least one visible email DLQ message                                                        | [DLQ: email](alarm-dlq-email.md)                         | source-defined / live-unverified |
 | `psd-eoc-sms-dlq-depth`                       | At least one visible SMS DLQ message                                                          | [DLQ: SMS](alarm-dlq-sms.md)                             | source-defined / live-unverified |
@@ -122,7 +121,7 @@ any go-live monitoring item.
 
 | Operation                                                        | Runbook                                   |
 | ---------------------------------------------------------------- | ----------------------------------------- |
-| Stop notification fan-out                                        | [Emergency disable](emergency-disable.md) |
+| Stop notification delivery                                       | [Rollback](rollback.md) — no kill switch  |
 | Roll back application, workers, configuration, or mobile release | [Rollback](rollback.md)                   |
 | Decide whether production traffic may begin                      | [Go-live checklist](go-live.md)           |
 
@@ -141,9 +140,10 @@ any go-live monitoring item.
 - The monthly human-confirmed delivery test and stored SLO evidence are open in
   [#30](https://github.com/psd401/psd-eoc/issues/30). A scheduled job may remind
   a human that a test is due; it may never send the test.
-- The emergency-disable implementation and tests are part of
-  [#34](https://github.com/psd401/psd-eoc/issues/34). Documentation alone is
-  not proof that it works.
+- There is no switch that stops notifications. That was deliberate: this is an
+  emergency notification system, and a control that silently suppresses it is a
+  liability. Stopping delivery means stopping the service — see
+  [rollback.md](rollback.md).
 - `docs/INTEGRATIONS.md` is authoritative for provider truth. A mock, dry run,
   synthesized stack, provider status page, or accepted API request does not
   prove end-to-end delivery.
