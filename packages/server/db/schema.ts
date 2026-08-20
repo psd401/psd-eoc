@@ -4265,6 +4265,51 @@ export const channelAttempts = pgTable(
   ],
 );
 
+/**
+ * The lease and outcome for one channel attempt's provider call.
+ *
+ * `channel_attempts` records that an attempt exists, and is immutable. This
+ * records who currently holds permission to call the provider for that attempt
+ * and what the call returned, which is mutable by nature: a lease expires, a
+ * worker that dies mid-send has to become reclaimable, and a retry decision
+ * supersedes an earlier one.
+ *
+ * Keyed by the attempt id, but deliberately without a foreign key to
+ * `channel_attempts`. A worker claims execution before it writes attempted
+ * evidence, so the attempt row is not guaranteed to exist yet at claim time; a
+ * foreign key would reject the very claim that makes the send safe.
+ *
+ * `fingerprint` is the caller's identity for the work it believes it is doing.
+ * A claim whose fingerprint disagrees with the stored one is a programming
+ * error rather than contention, and is refused rather than reconciled.
+ */
+export const channelAttemptExecutions = pgTable(
+  'channel_attempt_executions',
+  {
+    attemptId: uuid('attempt_id').primaryKey(),
+    fingerprint: varchar('fingerprint', { length: 200 }).notNull(),
+    leaseToken: uuid('lease_token').notNull(),
+    leaseExpiresAt: occurredAt('lease_expires_at').notNull(),
+    completion: jsonb('completion'),
+    completedAt: occurredAt('completed_at'),
+    createdAt: occurredAt('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    check(
+      'channel_attempt_executions_completion_pairing',
+      sql`(${table.completion} is null) = (${table.completedAt} is null)`,
+    ),
+    check(
+      'channel_attempt_executions_fingerprint_nonempty',
+      sql`${table.fingerprint} = btrim(${table.fingerprint})
+        and length(${table.fingerprint}) > 0`,
+    ),
+    index('channel_attempt_executions_reclaimable_idx')
+      .on(table.leaseExpiresAt)
+      .where(sql`${table.completion} is null`),
+  ],
+);
+
 /** Append-only, evidence-honest notification delivery facts. */
 export const deliveryEvidence = pgTable(
   'delivery_evidence',
