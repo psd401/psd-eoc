@@ -199,46 +199,6 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
-    const approvedGoogleSubject = new CfnParameter(
-      this,
-      'ApprovedGoogleSubject',
-      {
-        allowedPattern: '^[A-Za-z0-9._:@+-]{1,255}$',
-        constraintDescription:
-          'Use one approved immutable Google subject without whitespace or commas.',
-        description:
-          'Approved immutable Google subject eligible for human-session bootstrap recovery after ordinary access-group authorization.',
-        maxLength: 255,
-        minLength: 1,
-        noEcho: true,
-        type: 'String',
-      },
-    );
-    const approvedStaffEmail = new CfnParameter(this, 'ApprovedStaffEmail', {
-      allowedPattern: '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,63}$',
-      constraintDescription: 'Use one approved staff email address.',
-      description:
-        'Approved staff email assigned to the bootstrap administrator identity.',
-      maxLength: 320,
-      minLength: 3,
-      noEcho: true,
-      type: 'String',
-    });
-    const approvedStaffDisplayName = new CfnParameter(
-      this,
-      'ApprovedStaffDisplayName',
-      {
-        allowedPattern: "^[A-Za-z0-9 .,'()&-]{1,160}$",
-        constraintDescription:
-          'Use one approved display name containing letters, digits, spaces, or common name punctuation.',
-        description:
-          'Approved staff display name assigned to the bootstrap administrator identity.',
-        maxLength: 160,
-        minLength: 1,
-        noEcho: true,
-        type: 'String',
-      },
-    );
     const initialMobileTransitionEmailSha256 = new CfnParameter(
       this,
       'InitialMobileTransitionEmailSha256',
@@ -440,21 +400,12 @@ export class PsdEocStack extends Stack {
       'BootstrapIdentitySecret',
       {
         description:
-          'Approved staff-only live-pilot bootstrap identity, supplied only through NoEcho deployment parameters.',
+          'Bootstrap identity material supplied through NoEcho deployment parameters. Holds only the initial mobile transition digest; the approved-staff identity it also carried fed the access fixture, which is gone.',
         removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/bootstrap/approved-identity`,
         secretObjectValue: {
-          googleSubject: SecretValue.unsafePlainText(
-            approvedGoogleSubject.valueAsString,
-          ),
           initialMobileTransitionEmailSha256: SecretValue.unsafePlainText(
             initialMobileTransitionEmailSha256.valueAsString,
-          ),
-          staffDisplayName: SecretValue.unsafePlainText(
-            approvedStaffDisplayName.valueAsString,
-          ),
-          staffEmail: SecretValue.unsafePlainText(
-            approvedStaffEmail.valueAsString,
           ),
         },
       },
@@ -763,18 +714,6 @@ export class PsdEocStack extends Stack {
         }),
         readonlyRootFilesystem: true,
         secrets: {
-          APPROVED_GOOGLE_SUBJECT: ecsSecretJsonKey(
-            bootstrapIdentitySecret,
-            'googleSubject',
-          ),
-          APPROVED_STAFF_DISPLAY_NAME: ecsSecretJsonKey(
-            bootstrapIdentitySecret,
-            'staffDisplayName',
-          ),
-          APPROVED_STAFF_EMAIL: ecsSecretJsonKey(
-            bootstrapIdentitySecret,
-            'staffEmail',
-          ),
           DATABASE_ADMIN_PASSWORD: ecsSecretJsonKey(
             databaseAdminSecret,
             'password',
@@ -992,13 +931,6 @@ export class PsdEocStack extends Stack {
                   value: secretJsonKeyArn(
                     databaseApplicationSecret,
                     'username',
-                  ),
-                },
-                {
-                  name: 'PSD_EOC_BOOTSTRAP_ADMIN_SUBJECTS',
-                  value: secretJsonKeyArn(
-                    bootstrapIdentitySecret,
-                    'googleSubject',
                   ),
                 },
                 {
