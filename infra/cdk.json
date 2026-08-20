@@ -1,5 +1,5 @@
 {
-  "app": "bun src/app.ts",
+  "app": "bun bin/psd-eoc.ts",
   "context": {
     "@aws-cdk/aws-signer:signingProfileNamePassedToCfn": true,
     "@aws-cdk/core:newStyleStackSynthesis": true,
