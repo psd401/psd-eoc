@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 import {
   CfnCondition,
   CfnOutput,
@@ -16,6 +18,8 @@ import {
   aws_ecr as ecr,
   aws_iam as iam,
   aws_kms as kms,
+  aws_lambda as lambda,
+  aws_lambda_event_sources as lambdaEventSources,
   aws_logs as logs,
   aws_rds as rds,
   aws_secretsmanager as secretsmanager,
@@ -595,6 +599,54 @@ export class PsdEocStack extends Stack {
       masterKey: operationsKey,
       topicName: 'psd-eoc-critical-alarms',
     });
+
+    // The delivery queue's consumer. It moves each authorized batch to the
+    // queue for its channel and does nothing else — no database, no provider,
+    // no VPC, and no authority to change what it forwards.
+    const deliveryRouterLogGroup = new logs.LogGroup(
+      this,
+      'DeliveryRouterLogGroup',
+      {
+        logGroupName: '/psd-eoc/workers/delivery-router',
+        removalPolicy: RemovalPolicy.RETAIN,
+        retention: logs.RetentionDays.TWO_WEEKS,
+      },
+    );
+    const deliveryRouter = new lambda.Function(this, 'DeliveryRouter', {
+      code: lambda.Code.fromAsset(
+        fileURLToPath(new URL('../../lambda/delivery-router', import.meta.url)),
+      ),
+      description:
+        'Routes one authorized notification batch from the delivery queue to its channel queue.',
+      environment: {
+        EMAIL_QUEUE_URL: emailQueue.queueUrl,
+        PUSH_QUEUE_URL: queuePairs.Push.queue.queueUrl,
+        SMS_QUEUE_URL: queuePairs.Sms.queue.queueUrl,
+      },
+      functionName: 'psd-eoc-delivery-router',
+      handler: 'index.handler',
+      logGroup: deliveryRouterLogGroup,
+      memorySize: 256,
+      reservedConcurrentExecutions: 5,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: Duration.seconds(30),
+    });
+    deliveryQueue.grantConsumeMessages(deliveryRouter);
+    for (const pair of [
+      { queue: emailQueue },
+      queuePairs.Push,
+      queuePairs.Sms,
+    ]) {
+      pair.queue.grantSendMessages(deliveryRouter);
+    }
+    deliveryRouter.addEventSource(
+      new lambdaEventSources.SqsEventSource(deliveryQueue, {
+        batchSize: 10,
+        // One unroutable batch must not drag its siblings back onto the queue;
+        // the handler reports failures per message.
+        reportBatchItemFailures: true,
+      }),
+    );
 
     const emailWorkerLogGroup = new logs.LogGroup(this, 'EmailWorkerLogGroup', {
       logGroupName: EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,

@@ -347,8 +347,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
     template.resourceCountIs('AWS::ECS::Service', 0);
-    // Three log groups: bootstrap, access sync, and the Aurora failover bridge.
-    template.resourceCountIs('AWS::Logs::LogGroup', 3);
+    // Four log groups: bootstrap, access sync, the Aurora failover bridge, and
+    // the delivery router.
+    template.resourceCountIs('AWS::Logs::LogGroup', 4);
     // Nine queues: the health queue, plus a source/dead-letter pair each for
     // delivery, email, SMS, and push.
     template.resourceCountIs('AWS::SQS::Queue', 9);
@@ -467,9 +468,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::EC2::Subnet', 6);
     template.resourceCountIs('AWS::EC2::NatGateway', 1);
     template.resourceCountIs('AWS::EC2::InternetGateway', 1);
-    // The only function is the Aurora failover bridge, which turns an RDS
-    // event into a metric. It has no database, queue, or provider access.
-    template.resourceCountIs('AWS::Lambda::Function', 1);
+    // Two functions: the Aurora failover bridge, and the delivery router. Both
+    // are outside the VPC and neither can reach the database or a provider.
+    template.resourceCountIs('AWS::Lambda::Function', 2);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
     template.resourceCountIs('AWS::EC2::SecurityGroup', 2);
@@ -1224,6 +1225,69 @@ describe('protected access-membership publication boundary', () => {
   });
 });
 
+describe('delivery router boundary', () => {
+  it('moves batches between queues and can do nothing else', () => {
+    const router = resourceEntries('AWS::Lambda::Function').find(
+      ([, resource]) =>
+        properties(resource).FunctionName === 'psd-eoc-delivery-router',
+    );
+    const routerProperties = properties(asRecord(router?.[1]));
+
+    // Outside the VPC on purpose: it speaks only to SQS, so it needs neither a
+    // database route nor the NAT path, and it cannot reach Aurora.
+    expect(routerProperties).not.toHaveProperty('VpcConfig');
+    expect(routerProperties.Runtime).toBe('nodejs22.x');
+    expect(routerProperties.ReservedConcurrentExecutions).toBe(5);
+
+    const environment = asRecord(
+      asRecord(routerProperties.Environment).Variables,
+    );
+    expect(Object.keys(environment).sort()).toEqual([
+      'EMAIL_QUEUE_URL',
+      'PUSH_QUEUE_URL',
+      'SMS_QUEUE_URL',
+    ]);
+
+    const roleReference = JSON.stringify(routerProperties.Role);
+    const routerRole = resourceEntries('AWS::IAM::Role').find(([logicalId]) =>
+      roleReference.includes(logicalId),
+    );
+    const statements = inlineStatementsForRole(String(routerRole?.[0]));
+    const actions = [...new Set(allAllowedActions(statements))].sort();
+
+    // Reading its source queue and writing the channel queues. No provider
+    // action, no database, no secret, and nothing that could start or change an
+    // event.
+    for (const action of actions) {
+      expect(action.startsWith('sqs:')).toBe(true);
+    }
+    expect(actions).toContain('sqs:ReceiveMessage');
+    expect(actions).toContain('sqs:SendMessage');
+    for (const forbidden of ['ses:', 'sns:', 'rds', 'secretsmanager:', 's3:']) {
+      expect(actions.some((action) => action.startsWith(forbidden))).toBe(
+        false,
+      );
+    }
+
+    // It may write the three channel queues, and must not be able to write its
+    // own source queue back onto itself.
+    const targets = JSON.stringify(
+      statements.map((statement) => statement.Resource),
+    );
+    for (const reachable of ['EmailQueue', 'SmsQueue', 'PushQueue']) {
+      expect(targets).toContain(reachable);
+    }
+    const sendTargets = JSON.stringify(
+      statements
+        .filter((statement) =>
+          asStringArray(statement.Action).includes('sqs:SendMessage'),
+        )
+        .map((statement) => statement.Resource),
+    );
+    expect(sendTargets).not.toContain('DeliveryQueue');
+  });
+});
+
 describe('configured-unverified provider readiness boundary', () => {
   it('creates no provider identity, DNS, media, channel worker, or custom resource', () => {
     for (const forbiddenType of [
@@ -1239,10 +1303,10 @@ describe('configured-unverified provider readiness boundary', () => {
     // by name rather than by count: the only function is the Aurora failover
     // bridge, and the only rules drive it and a targetless human reminder.
     expect(
-      resourceEntries('AWS::Lambda::Function').map(
-        ([, resource]) => properties(resource).FunctionName,
-      ),
-    ).toEqual(['psd-eoc-aurora-failover-metric']);
+      resourceEntries('AWS::Lambda::Function')
+        .map(([, resource]) => String(properties(resource).FunctionName))
+        .sort(),
+    ).toEqual(['psd-eoc-aurora-failover-metric', 'psd-eoc-delivery-router']);
     expect(
       resourceEntries('AWS::Events::Rule')
         .map(([, resource]) => String(properties(resource).Name))
@@ -1251,9 +1315,14 @@ describe('configured-unverified provider readiness boundary', () => {
       'psd-eoc-aurora-failover-events',
       'psd-eoc-monthly-live-delivery-test-due-reminder',
     ]);
-    // Nothing consumes a notification queue: no channel worker is deployed.
-    template.resourceCountIs('AWS::Lambda::EventSourceMapping', 0);
+    // Exactly one consumer exists, and it is the router: it moves a batch from
+    // the delivery queue to a channel queue. No channel worker is deployed, so
+    // nothing yet drains a channel queue and nothing reaches a provider.
+    template.resourceCountIs('AWS::Lambda::EventSourceMapping', 1);
     template.resourceCountIs('AWS::ECS::Service', 0);
+    const mapping = properties(onlyResource('AWS::Lambda::EventSourceMapping'));
+    expect(JSON.stringify(mapping.EventSourceArn)).toContain('DeliveryQueue');
+    expect(mapping.FunctionResponseTypes).toEqual(['ReportBatchItemFailures']);
     // The only subscriptions are the operations team's alarm routes.
     expect(
       resourceEntries('AWS::SNS::Subscription')
