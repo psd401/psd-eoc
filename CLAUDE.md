@@ -79,30 +79,35 @@ Sign-in is two independent steps, and they fail for different reasons:
 
 1. **Google OIDC** — `packages/server/lib/auth/oidc.ts`, `app/(auth)/`.
    Working. `/auth/sign-in` redirects to Google; `/auth/callback` returns.
-2. **The access gate** — `packages/server/lib/auth/access-gate.ts`. After
-   OIDC succeeds, the user must appear in a published *access membership
-   snapshot* proving they're in an approved Google Group. No snapshot means
-   nobody signs in, including admins. Denial reasons are enumerated in
-   `ACCESS_GATE_DENIAL_REASONS`.
+2. **The trusted-group check** — `packages/server/lib/auth/trusted-group-access.ts`.
+   After OIDC succeeds, `decideAccess` asks one question about the present: is
+   this address in an active access group whose membership was read within the
+   last 24 hours? It refuses with `NO_TRUSTED_GROUPS_CONFIGURED`,
+   `NOT_IN_A_TRUSTED_GROUP`, or `MEMBERSHIP_STALE`. Sign-in attempts are
+   recorded by `lib/auth/sign-in-audit.ts`.
 
-Snapshots are produced by `lib/auth/access-membership-sync.ts` reading Google
-Cloud Identity Groups via `lib/auth/google-access-membership.ts`.
+Membership is read by `lib/auth/access-membership-sync.ts` from Google Cloud
+Identity Groups via `lib/auth/google-access-membership.ts`, on a schedule.
 
-**Known design defect:** the approved group is hardcoded as
-`DESIGNATED_ACCESS_GROUP_EMAIL = 'tsd-engineering@psd401.net'` in
-`packages/contracts/src/identity.ts` and enforced with `z.literal()` across
-~35 call sites. `access-gate.ts` additionally caps active groups at two.
-Because `z.literal()` rejects rather than defaults, changing who may sign in
-requires a source edit and a deploy — and no other district can use the code
-at all.
+Trusted groups are rows in `group_sources` with `purpose='access'`, `active`,
+and a `granted_role`. Membership lives in `access_group_members`, replaced
+wholesale by the sync. Roles are derived from group membership on every request
+and are never stored — there is no way to make somebody an administrator except
+by putting them in a group that grants it.
 
-The `group_sources` table and the `app/(admin)/access/` UI already exist to
-make this configurable data. Fixing it is priority work.
+A deployment with no access group admits nobody, and the page that configures
+access groups is behind sign-in, so the first group comes from configuration:
+`PSD_EOC_INITIAL_ACCESS_GROUP_ID` and `PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL`,
+applied with migrations and only when no access group exists at all. See
+`docs/guides/first-administrator.md`.
 
 ## Mobile
 
-iOS and Android are live to testers (TestFlight / Play internal testing) at
-app version 1.0.2. `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` must be
+App version is 1.0.3. What is actually in the field is not what this file used
+to claim — `docs/INTEGRATIONS.md` and `docs/runbooks/release.md` are the truth
+register, and they record iOS 1.0.1/build 2 as having failed Apple processing
+and Android 1.0.1 as an unexposed Play internal-testing draft. Read them before
+believing anything about store state. `EXPO_PUBLIC_PSD_EOC_API_BASE_URL` must be
 `https://eoc.psd401.net`. Native projects are generated — edit `app.json`, not
 `ios/` or `android/` directly. `bun run prebuild:check` regenerates them.
 
