@@ -659,6 +659,21 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
+    // Administrators are now the people in an active access group that grants
+    // admin, read from access_group_members rather than projected through the
+    // membership generation.
+    if (
+      sql.includes('from "access_group_members"') &&
+      sql.includes('"users"')
+    ) {
+      return {
+        records: [
+          [{ stringValue: USER_ID }],
+          [{ stringValue: SECOND_USER_ID }],
+        ],
+        $metadata: {},
+      };
+    }
     if (
       sql.includes('effective_admin_roles') &&
       sql.includes(
@@ -677,6 +692,17 @@ class FakeRdsDataClient {
       };
     }
     if (sql.includes('from "group_sources"')) {
+      // The active groups that grant administration, which is how an
+      // administrator is identified now.
+      if (
+        sql.startsWith('select "id" from "group_sources"') &&
+        sql.includes('"granted_role"')
+      ) {
+        return {
+          records: [[{ stringValue: ACCESS_GROUP_SOURCE_ID }]],
+          $metadata: {},
+        };
+      }
       if (
         sql.startsWith('select "id", "kind", "purpose"') &&
         !sql.includes('"display_name"') &&
@@ -2019,22 +2045,24 @@ describe('admin Aurora Data API transport regression', () => {
     });
     executedCapabilities.add('set-user-roles');
     expect(roleResult.roles).toEqual(['staff', 'admin']);
+    // Administrator reachability is read from the trusted-group membership
+    // table now, not projected through the access-membership generation.
     const reachableAdministratorStatement = requireRecordedStatement(
       client.statements
         .slice(roleStatementStart)
-        .find(({ sql }) => sql.includes('effective_admin_roles')),
+        .find(({ sql }) => sql.includes('from "access_group_members"')),
     );
+    expect(reachableAdministratorStatement.sql).toContain('"users"');
+    // Bound to the groups that grant administration, and to accounts that are
+    // not disabled — a disabled administrator is not reachable.
     expect(reachableAdministratorStatement.sql).toContain(
-      'not exists (select "user_id" from "access_membership_member_groups"',
-    );
-    expect(reachableAdministratorStatement.sql).toContain(
-      'not exists (select "id" from "group_sources"',
+      '"disabled_at" is null',
     );
     expect(
       reachableAdministratorStatement.parameterStrings.filter(
         (value) => value === ACCESS_GROUP_SOURCE_ID,
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
 
     const usersAfterRoleChange = await executeListUsersCapability({
       authenticated,

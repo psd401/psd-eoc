@@ -1,31 +1,18 @@
 import {
   AccessGroupSourceRefSchema,
-  UuidSchema,
   RoleSchema,
   type Role,
 } from '@psd-eoc/contracts';
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  inArray,
-  isNull,
-  notExists,
-  sql,
-} from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
-  accessMembershipMemberFacilities,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
+  accessGroupMembers,
   accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   groupSources,
   userRoleChanges,
   userRoles,
-  userFacilityScopes,
   users,
 } from '../../db/schema';
 
@@ -170,36 +157,6 @@ function sameIds(left: readonly string[], right: readonly string[]): boolean {
   );
 }
 
-function validateAccessState(
-  state: AccessConfigurationSnapshotState,
-): AccessConfigurationSnapshotState | null {
-  if (
-    !UuidSchema.safeParse(state.snapshotId).success ||
-    !Number.isSafeInteger(state.snapshotVersion) ||
-    state.snapshotVersion < 1
-  ) {
-    return null;
-  }
-  const ids = state.activeAccessGroupSourceIds.map((id) =>
-    UuidSchema.safeParse(id),
-  );
-  if (
-    ids.length === 0 ||
-    ids.some((id) => !id.success) ||
-    new Set(state.activeAccessGroupSourceIds).size !==
-      state.activeAccessGroupSourceIds.length
-  ) {
-    return null;
-  }
-  return Object.freeze({
-    snapshotId: state.snapshotId,
-    snapshotVersion: state.snapshotVersion,
-    activeAccessGroupSourceIds: Object.freeze(
-      [...state.activeAccessGroupSourceIds].sort(),
-    ),
-  });
-}
-
 /**
  * Loads the latest complete access snapshot only when its expected and
  * completed source sets are both strict, duplicate-free, and exactly equal to
@@ -278,166 +235,56 @@ export async function loadAccessConfigurationSnapshotState(
  * complete access snapshot. A role-bearing user who can no longer pass the
  * membership boundary is not a safe backup for the final-admin guard.
  */
+/**
+ * Administrators who can still reach the system.
+ *
+ * Under the trusted-group model an administrator is simply a person in an
+ * active access group that grants `admin`: roles come from groups, and there is
+ * no stored grant to consult. This is what the final-administrator guards ask
+ * before letting a group be deactivated.
+ *
+ * It used to project stored role grants through the access-membership
+ * generation, which stopped working the moment the sync began writing
+ * `access_group_members` instead of snapshot member rows — the projection kept
+ * answering from tables nothing populates any more, so every guard saw zero
+ * reachable administrators.
+ *
+ * `eligibleAccessGroupSourceIds` asks the same question about a proposed
+ * configuration: given only these groups remaining active, would an
+ * administrator still reach the system.
+ */
 export async function loadEffectiveAdministratorUserIds(
   database: RoleStateDatabase,
   options: EffectiveAdministratorQueryOptions = {},
 ): Promise<readonly string[]> {
-  const loadedAccessState =
-    options.accessState ??
-    (await loadAccessConfigurationSnapshotState(database));
-  if (loadedAccessState === null) return Object.freeze([]);
-  const accessState = validateAccessState(loadedAccessState);
-  if (accessState === null) return Object.freeze([]);
-
-  const eligibleIds =
-    options.eligibleAccessGroupSourceIds === undefined
-      ? accessState.activeAccessGroupSourceIds
-      : [...options.eligibleAccessGroupSourceIds].sort();
-  if (
-    eligibleIds.length === 0 ||
-    new Set(eligibleIds).size !== eligibleIds.length ||
-    eligibleIds.some(
-      (id) =>
-        !UuidSchema.safeParse(id).success ||
-        !accessState.activeAccessGroupSourceIds.includes(id),
-    )
-  ) {
-    return Object.freeze([]);
-  }
-
-  const baseAdmins = database
-    .select({ userId: userRoles.userId })
-    .from(userRoles)
-    .where(eq(userRoles.role, 'admin'))
-    .as('base_admin_grants');
-  const latestAdminChanges = database
-    .selectDistinctOn([userRoleChanges.userId], {
-      userId: userRoleChanges.userId,
-      granted: userRoleChanges.granted,
-    })
-    .from(userRoleChanges)
-    .where(eq(userRoleChanges.role, 'admin'))
-    .orderBy(asc(userRoleChanges.userId), desc(userRoleChanges.sequence))
-    .as('latest_admin_changes');
-  const effectiveAdmins = database
-    .select({
-      userId:
-        sql<string>`coalesce(${latestAdminChanges.userId}, ${baseAdmins.userId})`.as(
-          'effective_admin_user_id',
-        ),
-      granted: sql<boolean>`coalesce(${latestAdminChanges.granted}, true)`.as(
-        'effective_admin_granted',
-      ),
-    })
-    .from(baseAdmins)
-    .fullJoin(
-      latestAdminChanges,
-      eq(latestAdminChanges.userId, baseAdmins.userId),
-    )
-    .as('effective_admin_roles');
-  const rows = await database
-    .selectDistinctOn([effectiveAdmins.userId], {
-      userId: effectiveAdmins.userId,
-    })
-    .from(effectiveAdmins)
-    .innerJoin(users, eq(users.id, effectiveAdmins.userId))
-    .innerJoin(
-      accessMembershipMembers,
-      and(
-        eq(accessMembershipMembers.snapshotId, accessState.snapshotId),
-        eq(accessMembershipMembers.userId, effectiveAdmins.userId),
-        eq(accessMembershipMembers.googleSubject, users.googleSubject),
-        eq(accessMembershipMembers.facilityScopeKind, 'district'),
-      ),
-    )
-    .innerJoin(
-      accessMembershipMemberGroups,
-      and(
-        eq(accessMembershipMemberGroups.snapshotId, accessState.snapshotId),
-        eq(accessMembershipMemberGroups.userId, effectiveAdmins.userId),
-      ),
-    )
-    .innerJoin(
-      groupSources,
-      and(
-        eq(groupSources.id, accessMembershipMemberGroups.groupSourceId),
-        eq(groupSources.kind, accessMembershipMemberGroups.groupSourceKind),
-        eq(groupSources.purpose, accessMembershipMemberGroups.groupPurpose),
-      ),
-    )
+  const activeAdminGroups = await database
+    .select({ id: groupSources.id })
+    .from(groupSources)
     .where(
       and(
-        eq(effectiveAdmins.granted, true),
-        eq(users.facilityScopeKind, 'district'),
-        isNull(users.disabledAt),
-        notExists(
-          database
-            .select({ userId: userFacilityScopes.userId })
-            .from(userFacilityScopes)
-            .where(eq(userFacilityScopes.userId, effectiveAdmins.userId)),
-        ),
-        notExists(
-          database
-            .select({ userId: accessMembershipMemberFacilities.userId })
-            .from(accessMembershipMemberFacilities)
-            .where(
-              and(
-                eq(
-                  accessMembershipMemberFacilities.snapshotId,
-                  accessState.snapshotId,
-                ),
-                eq(
-                  accessMembershipMemberFacilities.userId,
-                  effectiveAdmins.userId,
-                ),
-              ),
-            ),
-        ),
-        notExists(
-          database
-            .select({ userId: accessMembershipMemberGroups.userId })
-            .from(accessMembershipMemberGroups)
-            .where(
-              and(
-                eq(
-                  accessMembershipMemberGroups.snapshotId,
-                  accessState.snapshotId,
-                ),
-                eq(accessMembershipMemberGroups.userId, effectiveAdmins.userId),
-                notExists(
-                  database
-                    .select({ id: groupSources.id })
-                    .from(groupSources)
-                    .where(
-                      and(
-                        eq(
-                          groupSources.id,
-                          accessMembershipMemberGroups.groupSourceId,
-                        ),
-                        eq(
-                          groupSources.kind,
-                          accessMembershipMemberGroups.groupSourceKind,
-                        ),
-                        eq(
-                          groupSources.purpose,
-                          accessMembershipMemberGroups.groupPurpose,
-                        ),
-                        eq(groupSources.active, true),
-                        eq(groupSources.kind, 'google-group'),
-                        eq(groupSources.purpose, 'access'),
-                        inArray(groupSources.id, [...eligibleIds]),
-                      ),
-                    ),
-                ),
-              ),
-            ),
-        ),
-        eq(groupSources.active, true),
-        eq(groupSources.kind, 'google-group'),
         eq(groupSources.purpose, 'access'),
-        inArray(groupSources.id, eligibleIds),
+        eq(groupSources.active, true),
+        eq(groupSources.grantedRole, 'admin'),
+      ),
+    );
+  const eligible =
+    options.eligibleAccessGroupSourceIds === undefined
+      ? activeAdminGroups.map(({ id }) => id)
+      : activeAdminGroups
+          .map(({ id }) => id)
+          .filter((id) => options.eligibleAccessGroupSourceIds?.includes(id));
+  if (eligible.length === 0) return Object.freeze([]);
+
+  const rows = await database
+    .selectDistinctOn([users.id], { userId: users.id })
+    .from(accessGroupMembers)
+    .innerJoin(users, eq(users.email, accessGroupMembers.email))
+    .where(
+      and(
+        inArray(accessGroupMembers.groupSourceId, eligible),
+        isNull(users.disabledAt),
       ),
     )
-    .orderBy(asc(effectiveAdmins.userId));
+    .orderBy(asc(users.id));
   return Object.freeze(rows.map(({ userId }) => userId));
 }

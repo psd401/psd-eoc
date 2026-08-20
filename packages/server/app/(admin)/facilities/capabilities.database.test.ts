@@ -17,6 +17,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../db/client';
 import {
+  accessGroupMembers,
   accessMembershipMemberFacilities,
   accessMembershipMemberGroups,
   accessMembershipMembers,
@@ -771,6 +772,31 @@ async function persistAdministratorIdentity(
       role: 'admin',
     })
     .onConflictDoNothing();
+  // An administrator is someone in an active access group that grants admin.
+  // A fixture that writes the role row alone leaves nobody reachable, and the
+  // final-administrator guards then refuse every change.
+  const adminGroups = await database
+    .select({ id: groupSources.id })
+    .from(groupSources)
+    .where(
+      and(
+        eq(groupSources.purpose, 'access'),
+        eq(groupSources.active, true),
+        eq(groupSources.grantedRole, 'admin'),
+      ),
+    );
+  if (adminGroups.length > 0) {
+    await database
+      .insert(accessGroupMembers)
+      .values(
+        adminGroups.map(({ id }) => ({
+          groupSourceId: id,
+          email: `issue-26-admin-${suffix}@psd401.net`,
+          capturedAt: createdAt,
+        })),
+      )
+      .onConflictDoNothing();
+  }
 }
 
 async function persistLiveAuthorizationActor(
@@ -3390,6 +3416,23 @@ describeWithDatabase('facilities administrator database flow', () => {
       createdAt: roleTargetRow.createdAt.toISOString(),
       disabledAt: null,
     };
+    // Sign-in reads membership, so a fixture that creates the group without
+    // putting anyone in it authorizes nobody.
+    await database
+      .insert(accessGroupMembers)
+      .values({
+        groupSourceId: accessGroup.id,
+        email: bootstrapUser.email,
+        capturedAt: bootstrapSnapshotAt,
+      })
+      .onConflictDoNothing();
+    await database
+      .update(groupSources)
+      // Staff, matching this fixture's account. Roles come from the group, so a
+      // group granting admin would make its members administrators and the
+      // authorized set would not match the account the fixture built.
+      .set({ membersCapturedAt: bootstrapSnapshotAt, grantedRole: 'staff' })
+      .where(eq(groupSources.id, accessGroup.id));
     const initialSessionStore = createDrizzleInitialWebSessionStore(database);
     const firstBootstrapSession = await initialSessionStore.persist(
       bootstrapSessionRequest({
@@ -3402,7 +3445,9 @@ describeWithDatabase('facilities administrator database flow', () => {
         createdAt: new Date(bootstrapSnapshotAt.getTime() + 1_000),
       }),
     );
-    expect(firstBootstrapSession.user.roles).toEqual(['staff', 'admin']);
+    // Exactly what the trusted group grants. Session issuance no longer adds a
+    // bootstrap administrator role on top.
+    expect(firstBootstrapSession.user.roles).toEqual(['staff']);
 
     const accessAccounts = await executeListUsersCapability({
       authenticated,
@@ -3418,9 +3463,13 @@ describeWithDatabase('facilities administrator database flow', () => {
     expect(
       accessAccounts.items.some(({ id }) => id === rolelessContactId),
     ).toBe(false);
-    expect(await loadEffectiveAdministratorUserIds(database)).toEqual(
-      [authenticated.actor.userId, roleTargetId].sort(),
-    );
+    // Only the acting administrator. The session's holder is in a group that
+    // grants staff, and issuance no longer adds an administrator role on top,
+    // so they become one through the explicit assignment below rather than by
+    // signing in.
+    expect(await loadEffectiveAdministratorUserIds(database)).toEqual([
+      authenticated.actor.userId,
+    ]);
     const roleAssignmentMetadata = metadata('role-assignment', requestIds);
     const roleResult = await executeSetUserRolesCapability({
       authenticated,
