@@ -22,7 +22,7 @@ import {
 } from '../../db/schema';
 import { seedDatabase } from '../../db/seed';
 import { migrateDatabase } from '../../drizzle/migrate';
-import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   executeOperationWithCleanup,
   executeOwnedDatabaseCreation,
@@ -509,16 +509,6 @@ async function insertSyntheticHumanPrerequisites(
         true,
         '2026-08-12T17:59:00.000Z'::timestamptz,
         '2026-08-12T18:00:00.000Z'::timestamptz
-      )
-    `);
-    await transaction.execute(sql`
-      insert into access_membership_members (
-        snapshot_id, user_id, google_subject, facility_scope_kind
-      ) values (
-        ${SNAPSHOT_ID}::uuid,
-        ${USER_ID}::uuid,
-        'synthetic-fanout-control-admin',
-        'district'::facility_scope_kind
       )
     `);
   });

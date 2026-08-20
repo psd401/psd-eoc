@@ -129,12 +129,10 @@ import {
   RevokeSessionInputSchema,
   SessionEstablishmentResultSchema,
   SessionRevocationSchema,
-  SetUserRolesInputSchema,
   SyncAccessMembershipInputSchema,
   SyncAccessMembershipResultSchema,
   UnregisterPushTokenInputSchema,
   UserPageSchema,
-  UserSchema,
 } from './identity';
 import {
   GetIntegrationHealthInputSchema,
@@ -1211,13 +1209,6 @@ export const CAPABILITY_CATALOG = Object.freeze({
     inputSchema: UpdateGroupSourceInputSchema,
     outputSchema: GroupSourceSchema,
   }),
-  'set-user-roles': canonicalCapability({
-    id: 'set-user-roles',
-    operation: 'mutation',
-    safetyEffect: 'none',
-    inputSchema: SetUserRolesInputSchema,
-    outputSchema: UserSchema,
-  }),
   'set-channel-enabled': canonicalCapability({
     id: 'set-channel-enabled',
     operation: 'mutation',
@@ -1655,7 +1646,6 @@ export const CAPABILITY_INVOCATION_POLICY = Object.freeze({
   'create-audience-config-version': humanAgentInvocationPolicy,
   'create-group-source': humanAgentInvocationPolicy,
   'update-group-source': humanAgentInvocationPolicy,
-  'set-user-roles': humanWebAdministrationInvocationPolicy,
   'set-channel-enabled': humanAgentInvocationPolicy,
   'set-fanout-control': humanWebAdministrationInvocationPolicy,
   'issue-agent-api-key': humanWebAdministrationInvocationPolicy,

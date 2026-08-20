@@ -237,22 +237,18 @@ jobs:
       # Phase 2 applies migrations. A failure here aborts the deploy with the
       # application still serving its previous digest.
       #
-      # The task runs in BOOTSTRAP_MODE=migrate, which is the container's
-      # default and the only mode a deploy ever uses: schema migrations, the
-      # reference catalog, and a proof that the application role still works.
-      # It writes nothing that decides who may sign in.
+      # The task runs in BOOTSTRAP_MODE=migrate, the only mode there is:
+      # schema migrations, the reference catalog, a proof that the application
+      # role still works, and the initial access group when a deployment has
+      # none at all.
       #
-      # The other mode, seed-access-fixture, publishes the synthetic access
-      # fixture and is for a brand new stack only. Running it here on
-      # 2026-08-18 superseded the live access-membership snapshot and locked
-      # every administrator out of the live stack, which is why the two are
-      # separate modes and why the fixture also refuses to publish when real
-      # access groups exist. To run it deliberately on a brand new stack, add
-      # it to a one-off run-task:
-      #
-      #   --overrides '{"containerOverrides":[{"name":"native-bootstrap",
-      #     "environment":[{"name":"BOOTSTRAP_MODE",
-      #     "value":"seed-access-fixture"}]}]}'
+      # That last step is why there is no second mode any more. There used to
+      # be one that published a synthetic access fixture for a brand new
+      # stack; running it here on 2026-08-18 superseded the live
+      # access-membership snapshot and locked every administrator out. What
+      # replaced it reads PSD_EOC_INITIAL_ACCESS_GROUP_ID and
+      # PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL and creates that group only when no
+      # access group exists at all, so it cannot disturb a configured stack.
       - name: Run database migrations
         shell: bash
         run: |

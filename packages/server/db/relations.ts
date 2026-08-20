@@ -8,9 +8,6 @@ export const facilitiesRelations = relations(schema.facilities, ({ many }) => ({
   groupSources: many(schema.groupSources),
   audienceConfigurations: many(schema.audienceConfigurations),
   userFacilityScopes: many(schema.userFacilityScopes),
-  accessMembershipMemberFacilities: many(
-    schema.accessMembershipMemberFacilities,
-  ),
   rosterSourceConfigurationFacilities: many(
     schema.rosterSourceConfigurationFacilities,
   ),
@@ -66,8 +63,6 @@ export const groupSourcesRelations = relations(
       references: [schema.facilities.id],
     }),
     audienceTargets: many(schema.audienceTargets),
-    accessMembershipSnapshotGroups: many(schema.accessMembershipSnapshotGroups),
-    accessMembershipMemberGroups: many(schema.accessMembershipMemberGroups),
     rosterSourceConfigurationGroups: many(
       schema.rosterSourceConfigurationGroups,
     ),
@@ -139,7 +134,6 @@ export const usersRelations = relations(schema.users, ({ many }) => ({
   }),
   facilityScopes: many(schema.userFacilityScopes),
   deviceEnrollments: many(schema.deviceEnrollments),
-  accessMemberships: many(schema.accessMembershipMembers),
   issuedAgentApiKeys: many(schema.agentApiKeys),
   agentApiKeyRevocations: many(schema.agentApiKeyRevocations),
   integrationVerifications: many(schema.integrationStatuses),
@@ -222,248 +216,9 @@ export const deviceEnrollmentsRelations = relations(
 export const accessMembershipSnapshotsRelations = relations(
   schema.accessMembershipSnapshots,
   ({ many }) => ({
-    groups: many(schema.accessMembershipSnapshotGroups),
-    members: many(schema.accessMembershipMembers),
     sessions: many(schema.sessions),
   }),
 );
-
-export const accessMembershipSnapshotGroupsRelations = relations(
-  schema.accessMembershipSnapshotGroups,
-  ({ one }) => ({
-    snapshot: one(schema.accessMembershipSnapshots, {
-      fields: [schema.accessMembershipSnapshotGroups.snapshotId],
-      references: [schema.accessMembershipSnapshots.id],
-    }),
-    groupSource: one(schema.groupSources, {
-      fields: [schema.accessMembershipSnapshotGroups.groupSourceId],
-      references: [schema.groupSources.id],
-    }),
-  }),
-);
-
-export const accessMembershipMembersRelations = relations(
-  schema.accessMembershipMembers,
-  ({ one, many }) => ({
-    snapshot: one(schema.accessMembershipSnapshots, {
-      fields: [schema.accessMembershipMembers.snapshotId],
-      references: [schema.accessMembershipSnapshots.id],
-    }),
-    user: one(schema.users, {
-      fields: [schema.accessMembershipMembers.userId],
-      references: [schema.users.id],
-    }),
-    groupSources: many(schema.accessMembershipMemberGroups),
-    facilities: many(schema.accessMembershipMemberFacilities),
-  }),
-);
-
-export const accessMembershipMemberGroupsRelations = relations(
-  schema.accessMembershipMemberGroups,
-  ({ one }) => ({
-    member: one(schema.accessMembershipMembers, {
-      fields: [
-        schema.accessMembershipMemberGroups.snapshotId,
-        schema.accessMembershipMemberGroups.userId,
-      ],
-      references: [
-        schema.accessMembershipMembers.snapshotId,
-        schema.accessMembershipMembers.userId,
-      ],
-    }),
-    groupSource: one(schema.groupSources, {
-      fields: [schema.accessMembershipMemberGroups.groupSourceId],
-      references: [schema.groupSources.id],
-    }),
-  }),
-);
-
-export const accessMembershipMemberFacilitiesRelations = relations(
-  schema.accessMembershipMemberFacilities,
-  ({ one }) => ({
-    member: one(schema.accessMembershipMembers, {
-      fields: [
-        schema.accessMembershipMemberFacilities.snapshotId,
-        schema.accessMembershipMemberFacilities.userId,
-      ],
-      references: [
-        schema.accessMembershipMembers.snapshotId,
-        schema.accessMembershipMembers.userId,
-      ],
-    }),
-    facility: one(schema.facilities, {
-      fields: [schema.accessMembershipMemberFacilities.facilityId],
-      references: [schema.facilities.id],
-    }),
-  }),
-);
-
-export const sessionsRelations = relations(
-  schema.sessions,
-  ({ one, many }) => ({
-    user: one(schema.users, {
-      fields: [schema.sessions.userId],
-      references: [schema.users.id],
-    }),
-    deviceEnrollment: one(schema.deviceEnrollments, {
-      fields: [schema.sessions.deviceEnrollmentId],
-      references: [schema.deviceEnrollments.id],
-    }),
-    membershipSnapshot: one(schema.accessMembershipSnapshots, {
-      fields: [schema.sessions.membershipSnapshotId],
-      references: [schema.accessMembershipSnapshots.id],
-    }),
-    connectivityEpochs: many(schema.connectivityEpochs),
-    tokenIssuances: many(schema.sessionTokenIssuances),
-    tokenRotations: many(schema.sessionTokenRotations),
-    tokenReplays: many(schema.sessionTokenReplays),
-    revocations: many(schema.sessionRevocations),
-    roleChangesMade: many(schema.userRoleChanges),
-    channelChangesAuthorized: many(
-      schema.integrationChannelChangeAuthorizations,
-      { relationName: 'channelChangeAuthorizerSession' },
-    ),
-    channelChangesConsumed: many(
-      schema.integrationChannelChangeAuthorizations,
-      { relationName: 'channelChangeConsumerSession' },
-    ),
-    humanConfirmationRecords: many(schema.humanConfirmationRecords),
-    deliveryTestCanaryEligibilityDecisions: many(
-      schema.deliveryTestCanaryEligibilityFacts,
-      { relationName: 'deliveryTestCanaryEligibilitySession' },
-    ),
-    deliveryTestTargetSetsApproved: many(schema.deliveryTestTargetSetVersions, {
-      relationName: 'deliveryTestTargetSetApprovalSession',
-    }),
-    deliveryTestRunsStarted: many(schema.deliveryTestRuns, {
-      relationName: 'deliveryTestRunSession',
-    }),
-  }),
-);
-
-export const connectivityEpochsRelations = relations(
-  schema.connectivityEpochs,
-  ({ one, many }) => ({
-    session: one(schema.sessions, {
-      fields: [schema.connectivityEpochs.sessionId],
-      references: [schema.sessions.id],
-    }),
-    invalidations: many(schema.connectivityEpochInvalidations),
-    humanConfirmationRecords: many(schema.humanConfirmationRecords),
-  }),
-);
-
-export const connectivityEpochInvalidationsRelations = relations(
-  schema.connectivityEpochInvalidations,
-  ({ one }) => ({
-    connectivityEpoch: one(schema.connectivityEpochs, {
-      fields: [schema.connectivityEpochInvalidations.connectivityEpochId],
-      references: [schema.connectivityEpochs.id],
-    }),
-  }),
-);
-
-export const sessionTokenIssuancesRelations = relations(
-  schema.sessionTokenIssuances,
-  ({ one }) => ({
-    session: one(schema.sessions, {
-      fields: [schema.sessionTokenIssuances.sessionId],
-      references: [schema.sessions.id],
-    }),
-  }),
-);
-
-export const sessionTokenRotationsRelations = relations(
-  schema.sessionTokenRotations,
-  ({ one, many }) => ({
-    session: one(schema.sessions, {
-      fields: [schema.sessionTokenRotations.sessionId],
-      references: [schema.sessions.id],
-    }),
-    replayDetections: many(schema.sessionTokenReplays),
-  }),
-);
-
-export const sessionTokenReplaysRelations = relations(
-  schema.sessionTokenReplays,
-  ({ one }) => ({
-    session: one(schema.sessions, {
-      fields: [schema.sessionTokenReplays.sessionId],
-      references: [schema.sessions.id],
-    }),
-    rotation: one(schema.sessionTokenRotations, {
-      fields: [schema.sessionTokenReplays.rotationId],
-      references: [schema.sessionTokenRotations.id],
-    }),
-  }),
-);
-
-export const sessionRevocationsRelations = relations(
-  schema.sessionRevocations,
-  ({ one }) => ({
-    session: one(schema.sessions, {
-      fields: [schema.sessionRevocations.sessionId],
-      references: [schema.sessions.id],
-    }),
-  }),
-);
-
-export const devicePushTokenRegistrationsRelations = relations(
-  schema.devicePushTokenRegistrations,
-  ({ one, many }) => ({
-    deviceEnrollment: one(schema.deviceEnrollments, {
-      fields: [schema.devicePushTokenRegistrations.deviceEnrollmentId],
-      references: [schema.deviceEnrollments.id],
-    }),
-    unregistrations: many(schema.devicePushTokenUnregistrations),
-  }),
-);
-
-export const devicePushTokenUnregistrationsRelations = relations(
-  schema.devicePushTokenUnregistrations,
-  ({ one }) => ({
-    registration: one(schema.devicePushTokenRegistrations, {
-      fields: [schema.devicePushTokenUnregistrations.registrationId],
-      references: [schema.devicePushTokenRegistrations.id],
-    }),
-  }),
-);
-
-export const humanConfirmationRecordsRelations = relations(
-  schema.humanConfirmationRecords,
-  ({ one, many }) => ({
-    connectivityEpoch: one(schema.connectivityEpochs, {
-      fields: [schema.humanConfirmationRecords.connectivityEpochId],
-      references: [schema.connectivityEpochs.id],
-    }),
-    confirmedBy: one(schema.users, {
-      fields: [schema.humanConfirmationRecords.confirmedByUserId],
-      references: [schema.users.id],
-    }),
-    session: one(schema.sessions, {
-      fields: [schema.humanConfirmationRecords.confirmedWithSessionId],
-      references: [schema.sessions.id],
-    }),
-    actions: many(schema.humanConfirmationActions),
-    eventTransitions: many(schema.eventTransitions),
-    securityAuditEntries: many(schema.securityAuditEntries),
-    deliveryTestRun: many(schema.deliveryTestRuns),
-  }),
-);
-
-export const humanConfirmationActionsRelations = relations(
-  schema.humanConfirmationActions,
-  ({ one }) => ({
-    confirmation: one(schema.humanConfirmationRecords, {
-      fields: [schema.humanConfirmationActions.confirmationId],
-      references: [schema.humanConfirmationRecords.id],
-    }),
-  }),
-);
-
-export const agentsRelations = relations(schema.agents, ({ many }) => ({
-  apiKeys: many(schema.agentApiKeys),
-}));
 
 export const agentApiKeysRelations = relations(
   schema.agentApiKeys,

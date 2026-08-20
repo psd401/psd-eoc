@@ -23,7 +23,7 @@ import {
   createDrizzleAccessGateAuditSink,
   parseInitialMobileTransitionEmailDigest,
   type AccessGateAuditSink,
-} from '../../../../../../lib/auth/access-gate';
+} from '../../../../../../lib/auth/sign-in-audit';
 import {
   GoogleOidcCallbackError,
   GoogleOidcConfigurationError,

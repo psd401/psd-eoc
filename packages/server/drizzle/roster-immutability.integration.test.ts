@@ -665,7 +665,7 @@ describeWithDatabase('published roster graph immutability', () => {
     await db.execute(sql`
       insert into group_sources (
         id, kind, purpose, facility_id, display_name, active,
-        google_group_id, email, fixture_key, created_at
+        google_group_id, email, fixture_key, created_at, granted_role
       ) values (
         ${ids.configurableAccessGroup}::uuid,
         'google-group'::group_source_kind,
@@ -676,7 +676,8 @@ describeWithDatabase('published roster graph immutability', () => {
         'synthetic-configurable-access-primary',
         'synthetic-configurable-access-primary@example.invalid',
         null,
-        now()
+        now(),
+        'admin'::role
       )
       on conflict do nothing
     `);

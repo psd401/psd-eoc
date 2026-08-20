@@ -1,6 +1,5 @@
 import {
   CreateGroupSourceInputSchema,
-  SetUserRolesInputSchema,
   UpdateGroupSourceInputSchema,
 } from '@psd-eoc/contracts';
 
@@ -16,7 +15,6 @@ import {
   parseIdempotencyKey,
   readAdminForm,
 } from '../../facilities/admin-request';
-import { executeSetUserRolesCapability } from '../capabilities';
 
 export const dynamic = 'force-dynamic';
 
@@ -84,19 +82,6 @@ export async function POST(request: Request): Promise<Response> {
           metadata: { idempotencyKey },
         });
         return adminSuccessRedirect(request, '/access', 'access-group-updated');
-      }
-      case 'set-user-roles': {
-        form.assertFields([...COMMON_FIELDS, 'userId', 'roles'], ['roles']);
-        const command = SetUserRolesInputSchema.parse({
-          userId: form.required('userId'),
-          roles: form.all('roles'),
-        });
-        await executeSetUserRolesCapability({
-          authenticated,
-          command,
-          metadata: { idempotencyKey },
-        });
-        return adminSuccessRedirect(request, '/access', 'roles-updated');
       }
       default:
         throw new AdminFormError(

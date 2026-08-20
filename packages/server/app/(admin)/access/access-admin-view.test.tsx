@@ -153,7 +153,7 @@ describe('AccessAdminView semantics', () => {
     const html = renderAuthorized();
 
     expect(html).toContain('id="main-content"');
-    expect(html).toContain('Access groups and administrator roles');
+    expect(html).toContain('Access groups and the roles they grant');
     expect(html).toContain(
       '<caption>Designated Google Groups that permit staff sign-in</caption>',
     );
@@ -188,42 +188,32 @@ describe('AccessAdminView semantics', () => {
     );
     expect(
       html.match(/<form action="\/access\/api" method="post">/gu),
-    ).toHaveLength(4);
-    expect(html.match(/name="csrfToken"/gu)).toHaveLength(4);
-    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(4);
-    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(4);
+    ).toHaveLength(2);
+    expect(html.match(/name="csrfToken"/gu)).toHaveLength(2);
+    expect(html.match(/value="synthetic-csrf-token"/gu)).toHaveLength(2);
+    expect(html.match(/name="idempotencyKey"/gu)).toHaveLength(2);
     expect(html).not.toContain('method="get"');
     expect(html).not.toContain('fixtureKey');
     expect(html).not.toContain('name="kind"');
     expect(html).not.toContain('name="purpose"');
   });
 
-  test('renders keyboard-native role controls without exposing Google subjects', () => {
+  test('lists the roles the groups grant without a control that writes them', () => {
     const html = renderAuthorized();
 
     expect(html).toContain(
-      '<caption>Minimized staff accounts and role assignments</caption>',
+      '<caption>Minimized staff accounts and the roles their groups grant</caption>',
     );
-    expect(html).toContain('<legend>Roles for Alex Staff</legend>');
-    expect(html).toContain(
-      'id="user-10000000-0000-4000-8000-000000000003-staff"',
-    );
-    expect(html).toMatch(
-      /<input[^>]*id="user-10000000-0000-4000-8000-000000000003-admin"[^>]*checked=""[^>]*value="admin"/u,
-    );
-    expect(html).toContain('Save roles for Alex Staff');
-    expect(html).toContain(
-      'Changes append grant or revocation facts; prior history remains immutable.',
-    );
-    expect(html).toContain('>Administrator</label>');
-    expect(html).not.toMatch(/name="roles" type="hidden"/u);
-    expect(html).not.toMatch(/id="user-[^"]+-admin"[^>]*disabled/u);
+    expect(html).toContain('<th scope="col">Roles</th>');
+    expect(html).toContain('<td>admin, staff</td>');
+    expect(html).toContain('<td>staff</td>');
     expect(html).toContain('District-wide');
     expect(html).toContain('1 facility');
-    expect(html).toContain(
-      'This account is disabled; roles cannot be changed.',
-    );
-    expect(html).toContain('<fieldset disabled="">');
+    // There is no role editor. Roles come from trusted-group membership on
+    // every request, so a control here would write a grant nothing reads.
+    expect(html).not.toContain('set-user-roles');
+    expect(html).not.toContain('<legend>Roles for Alex Staff</legend>');
+    expect(html).not.toMatch(/name="roles"/u);
     expect(html).not.toContain('synthetic-google-subject-one');
     expect(html).not.toContain('synthetic-google-subject-two');
     expect(html).not.toMatch(/<(?:button|input|select)[^>]*tabindex=/u);

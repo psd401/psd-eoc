@@ -4,16 +4,6 @@ import { describe, expect, test } from 'bun:test';
 
 import type { ReferenceSeedSummary } from '../../db/seed';
 import {
-  assertAccessFixtureSnapshotCurrent,
-  assertAccessFixtureEvidence,
-  assertNoRealAccessGroups,
-  createAccessFixture,
-  seedAccessFixture,
-  type AccessFixture,
-  type AccessFixtureEvidence,
-  type AccessFixtureStore,
-} from './access-fixture';
-import {
   APPLICATION_LOGIN_PROBE_QUERY,
   assertApplicationRoleState,
   buildApplicationRoleStatements,
@@ -26,11 +16,7 @@ import {
   getApplicationDatabaseSecret,
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
-import {
-  runBootstrap,
-  verifyCanonicalSyntheticRemoval,
-  type CanonicalSyntheticRemovalSummary,
-} from './bootstrap';
+import { runBootstrap } from './bootstrap';
 import {
   AWS_ACCOUNT_ID,
   AWS_REGION,
@@ -54,17 +40,6 @@ const DATABASE_SSL_ROOT_CERT = new URL(
   '../../certs/aws-rds-global-bundle.pem',
   import.meta.url,
 ).pathname;
-const FIRST_ACCESS_SNAPSHOT = Object.freeze({
-  id: '00000000-0000-4000-8000-000000000165',
-  version: 163,
-  capturedAt: new Date('2026-08-16T17:00:00.000Z'),
-});
-const SECOND_ACCESS_SNAPSHOT = Object.freeze({
-  id: '00000000-0000-4000-8000-000000000166',
-  version: 164,
-  capturedAt: new Date('2026-08-16T18:00:00.000Z'),
-});
-
 const referenceSeedSummary: ReferenceSeedSummary = Object.freeze({
   eventTypes: 8,
   eventTypeVersions: 8,
@@ -74,33 +49,6 @@ const referenceSeedSummary: ReferenceSeedSummary = Object.freeze({
   events: 0,
   outboxMessages: 0,
 });
-
-const canonicalSyntheticRemovalSummary: CanonicalSyntheticRemovalSummary =
-  Object.freeze({
-    operationalRows: Object.freeze({
-      facilities: 0,
-      neighborhoodVersions: 0,
-      neighborhoodFacilities: 0,
-      groupSources: 0,
-      audienceConfigurations: 0,
-      audienceTargets: 0,
-      rosterSourceConfigurations: 0,
-      rosterSourceConfigurationFacilities: 0,
-      rosterSourceConfigurationGroups: 0,
-      rosterSnapshots: 0,
-      rosterSnapshotFacilities: 0,
-      rosterSnapshotSources: 0,
-      rosterRecipients: 0,
-      rosterRecipientGroupSources: 0,
-      rosterEndpoints: 0,
-      total: 0,
-    }),
-    retainedTruth: Object.freeze({
-      facilityAnchors: 2,
-      securityAuditEntries: 2,
-      idempotencyRecords: 1,
-    }),
-  });
 
 function validConfigEnvironment(): Record<string, string> {
   return {
@@ -123,73 +71,6 @@ function validConfigEnvironment(): Record<string, string> {
     APPROVED_STAFF_DISPLAY_NAME: 'Approved Staff',
     SOURCE_SHA,
   };
-}
-
-function fixtureEvidence(fixture: AccessFixture): AccessFixtureEvidence {
-  return Object.freeze({
-    activeAccessGroups: [
-      {
-        id: fixture.accessGroup.id,
-        kind: 'google-group',
-        purpose: 'access',
-        active: true,
-        googleGroupId: fixture.accessGroup.googleGroupId,
-        email: fixture.accessGroup.email,
-        fixtureKey: null,
-      },
-    ],
-    users: [{ ...fixture.user }],
-    roles: [{ role: 'staff' }],
-    facilityScopes: [],
-    snapshots: [{ ...fixture.snapshot }],
-    snapshotGroups: [
-      {
-        groupSourceId: fixture.accessGroup.id,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'completed',
-      },
-      {
-        groupSourceId: fixture.accessGroup.id,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'expected',
-      },
-    ],
-    members: [
-      {
-        snapshotId: fixture.snapshot.id,
-        userId: fixture.user.id,
-        googleSubject: fixture.user.googleSubject,
-        facilityScopeKind: 'district',
-      },
-    ],
-    memberGroups: [
-      {
-        groupSourceId: fixture.accessGroup.id,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-      },
-    ],
-    channels: [
-      {
-        integrationId: 'aws-eum-sms',
-        enabled: false,
-        statusLabel: 'blocked',
-      },
-      {
-        integrationId: 'expo-push',
-        enabled: false,
-        statusLabel: 'mocked',
-      },
-      {
-        integrationId: 'ses-email',
-        enabled: false,
-        statusLabel: 'mocked',
-      },
-    ],
-    matchingRosterRecipients: 0,
-  });
 }
 
 describe('exploration-smoke configuration', () => {
@@ -221,9 +102,9 @@ describe('exploration-smoke configuration', () => {
     expect(
       readBootstrapConfig({
         ...validConfigEnvironment(),
-        BOOTSTRAP_MODE: 'seed-access-fixture',
+        BOOTSTRAP_MODE: 'migrate',
       }).mode,
-    ).toBe('seed-access-fixture');
+    ).toBe('migrate');
     for (const mode of ['', 'full', 'MIGRATE', 'seed', 'migrate ']) {
       expect(() =>
         readBootstrapConfig({
@@ -440,209 +321,11 @@ describe('application database secret and role', () => {
   });
 });
 
-describe('approved access fixture', () => {
-  const fixtureInput = {
-    googleSubject: GOOGLE_SUBJECT,
-    staffEmail: 'approved.staff@psd401.net',
-    staffDisplayName: 'Approved Staff',
-  } as const;
-  const fixture = createAccessFixture(fixtureInput, FIRST_ACCESS_SNAPSHOT);
-
-  test('is deterministic for one allocated snapshot, current, and contains no recipient/student payload', () => {
-    expect(createAccessFixture(fixtureInput, FIRST_ACCESS_SNAPSHOT)).toEqual(
-      fixture,
-    );
-    expect(fixture.snapshot.capturedAt.toISOString()).toBe(
-      FIRST_ACCESS_SNAPSHOT.capturedAt.toISOString(),
-    );
-    expect(() =>
-      assertAccessFixtureSnapshotCurrent(
-        fixture,
-        new Date(FIRST_ACCESS_SNAPSHOT.capturedAt.getTime() + 5 * 60 * 1_000),
-      ),
-    ).not.toThrow();
-    expect(() =>
-      assertAccessFixtureSnapshotCurrent(
-        fixture,
-        new Date(
-          FIRST_ACCESS_SNAPSHOT.capturedAt.getTime() + 5 * 60 * 1_000 + 1,
-        ),
-      ),
-    ).toThrow('not current');
-    expect(fixture.accessGroup).toMatchObject({
-      kind: 'google-group',
-      purpose: 'access',
-      googleGroupId: 'exploration-smoke-approved-access.invalid',
-      email: 'exploration-smoke-access@example.invalid',
-    });
-    expect(fixture.role).toEqual({ userId: fixture.user.id, role: 'staff' });
-    expect(JSON.stringify(fixture)).not.toMatch(
-      /student|recipient|phoneNumber|pushToken|endpoint/iu,
-    );
-  });
-
-  test('scopes fixture identity proof while rejecting any enabled provider', () => {
-    const evidence = fixtureEvidence(fixture);
-    expect(
-      assertAccessFixtureEvidence(fixture, {
-        ...evidence,
-        activeAccessGroups: [
-          ...evidence.activeAccessGroups,
-          {
-            id: '00000000-0000-4000-8000-000000000197',
-            kind: 'google-group',
-            purpose: 'access',
-            active: true,
-            googleGroupId: 'real-approved-group',
-            email: 'approved-group@psd401.net',
-            fixtureKey: null,
-          },
-        ],
-        roles: [...evidence.roles, { role: 'admin' }],
-      }),
-    ).toEqual({
-      accessGroups: 1,
-      users: 1,
-      staffRoles: 1,
-      accessSnapshots: 1,
-      notificationChannelsEnabled: 0,
-      matchingRosterRecipients: 0,
-    });
-    expect(() =>
-      assertAccessFixtureEvidence(fixture, {
-        ...evidence,
-        channels: evidence.channels.map((channel, index) =>
-          index === 1 ? { ...channel, enabled: true } : channel,
-        ),
-      }),
-    ).toThrow('notification channel');
-  });
-
-  test('refuses to publish onto a stack that already has real access groups', () => {
-    expect(() => assertNoRealAccessGroups([])).not.toThrow();
-    for (const activeAccessGroupIds of [
-      ['00000000-0000-4000-8000-000000000197'],
-      [
-        '00000000-0000-4000-8000-000000000197',
-        '00000000-0000-4000-8000-000000000198',
-      ],
-    ]) {
-      expect(() => assertNoRealAccessGroups(activeAccessGroupIds)).toThrow(
-        'already has active access groups',
-      );
-    }
-  });
-
-  test('replays within one bootstrap and appends a newer snapshot later', async () => {
-    let publishes = 0;
-    const allocated: AccessFixture[] = [];
-    let persisted: AccessFixture | undefined;
-    const store: AccessFixtureStore = {
-      async publish(identity, replay) {
-        publishes += 1;
-        const published =
-          replay ??
-          createAccessFixture(
-            identity,
-            allocated.length === 0
-              ? FIRST_ACCESS_SNAPSHOT
-              : SECOND_ACCESS_SNAPSHOT,
-          );
-        if (replay === null) allocated.push(published);
-        persisted = published;
-        return published;
-      },
-      async readEvidence(received) {
-        if (persisted === undefined) {
-          throw new Error('fixture was not persisted');
-        }
-        expect(received).toEqual(persisted);
-        return fixtureEvidence(received);
-      },
-    };
-    const first = await seedAccessFixture({
-      identity: fixtureInput,
-      replay: null,
-      store,
-      now: () => new Date(FIRST_ACCESS_SNAPSHOT.capturedAt),
-    });
-    const second = await seedAccessFixture({
-      identity: fixtureInput,
-      replay: first.fixture,
-      store,
-      now: () => new Date(FIRST_ACCESS_SNAPSHOT.capturedAt),
-    });
-    const later = await seedAccessFixture({
-      identity: fixtureInput,
-      replay: null,
-      store,
-      now: () => new Date(SECOND_ACCESS_SNAPSHOT.capturedAt),
-    });
-    expect(second).toEqual(first);
-    expect(later.fixture.snapshot).toEqual({
-      ...SECOND_ACCESS_SNAPSHOT,
-      syncStartedAt: SECOND_ACCESS_SNAPSHOT.capturedAt,
-      complete: true,
-    });
-    expect(later.fixture.snapshot.id).not.toBe(first.fixture.snapshot.id);
-    expect(later.fixture.snapshot.version).toBe(
-      first.fixture.snapshot.version + 1,
-    );
-    expect(allocated).toEqual([first.fixture, later.fixture]);
-    expect(allocated[0]).toEqual(fixture);
-    expect(publishes).toBe(3);
-  });
-});
-
 describe('bootstrap coordinator', () => {
-  test('requires exact zero operational fixture rows and retained truth', async () => {
-    const exactReadback = {
-      ...canonicalSyntheticRemovalSummary.operationalRows,
-      facilityAnchors: 2,
-      securityAuditEntries: 2,
-      reviewedSecurityAuditEntries: 2,
-      idempotencyRecords: 1,
-    };
-    let statement = '';
-    expect(
-      await verifyCanonicalSyntheticRemoval({
-        executor: {
-          async execute(sqlStatement) {
-            statement = sqlStatement;
-            return [exactReadback];
-          },
-        },
-      }),
-    ).toEqual(canonicalSyntheticRemovalSummary);
-    expect(statement).toContain('SYN-NORTH');
-    expect(statement).toContain('Synthetic Twin Campuses');
-    expect(statement).toContain(
-      '8e7cd227e4b9b725834acdb718866e0156b47fbdd6184136c83eec7f4077b2da',
-    );
-    expect(statement).toContain('81ec2daa-83e7-4ded-a914-b72bdda54e8e');
-
-    for (const invalidReadback of [
-      { ...exactReadback, facilities: 1 },
-      { ...exactReadback, reviewedSecurityAuditEntries: 1 },
-      { ...exactReadback, facilityAnchors: 1 },
-      { ...exactReadback, idempotencyRecords: 0 },
-    ]) {
-      await expect(
-        verifyCanonicalSyntheticRemoval({
-          executor: {
-            async execute() {
-              return [invalidReadback];
-            },
-          },
-        }),
-      ).rejects.toThrow('Canonical synthetic removal readback failed.');
-    }
-  });
-
-  test('runs native TLS, migrations, and fixtures twice under one lock', async () => {
+  test('runs native TLS, migrations, and the access bootstrap twice under one lock', async () => {
     const config = readBootstrapConfig({
       ...validConfigEnvironment(),
-      BOOTSTRAP_MODE: 'seed-access-fixture',
+      BOOTSTRAP_MODE: 'migrate',
     });
     const calls: string[] = [];
     const dependencies = {
@@ -671,20 +354,13 @@ describe('bootstrap coordinator', () => {
         calls.push('seed-reference');
         return referenceSeedSummary;
       },
-      async seedApprovedAccess() {
-        calls.push('seed-approved-access');
+      async bootstrapAccess() {
+        calls.push('bootstrap-access');
         return {
-          accessGroups: 1,
-          users: 1,
-          staffRoles: 1,
-          accessSnapshots: 1,
-          notificationChannelsEnabled: 0,
-          matchingRosterRecipients: 0,
-        } as const;
-      },
-      async verifyCanonicalSyntheticRemoval() {
-        calls.push('verify-canonical-synthetic-removal');
-        return canonicalSyntheticRemovalSummary;
+          kind: 'created' as const,
+          groupSourceId: 'synthetic',
+          email: 'admins@example.invalid',
+        };
       },
       async verifyApplicationLogin(): Promise<void> {
         calls.push('verify-application-login');
@@ -700,8 +376,7 @@ describe('bootstrap coordinator', () => {
       'migrate-admin',
       'configure-application-role',
       'seed-reference',
-      'seed-approved-access',
-      'verify-canonical-synthetic-removal',
+      'bootstrap-access',
       'verify-application-login',
       'verify-application-tls',
     ];
@@ -713,7 +388,7 @@ describe('bootstrap coordinator', () => {
     ]);
     expect(summary).toMatchObject({
       sourceSha: SOURCE_SHA,
-      mode: 'seed-access-fixture',
+      mode: 'migrate',
       database: {
         transport: 'native-postgres',
         migrationsApplied: true,
@@ -722,9 +397,7 @@ describe('bootstrap coordinator', () => {
       idempotence: { runs: 2, equivalent: true },
     });
     expect(summary.referenceSeed).toEqual(referenceSeedSummary);
-    expect(summary.canonicalSyntheticRemoval).toEqual(
-      canonicalSyntheticRemovalSummary,
-    );
+    expect(summary.accessBootstrap).toBe('created');
     expect(summary.integrations).toEqual({
       googleOidc: 'configured-unverified',
       googleGroups: 'mocked',
@@ -732,7 +405,7 @@ describe('bootstrap coordinator', () => {
     });
   });
 
-  test('migrates without touching the access fixture by default', async () => {
+  test('migrates and leaves access alone when no initial group is configured', async () => {
     const config = readBootstrapConfig(validConfigEnvironment());
     expect(config.mode).toBe('migrate');
     const calls: string[] = [];
@@ -762,11 +435,9 @@ describe('bootstrap coordinator', () => {
         calls.push('seed-reference');
         return referenceSeedSummary;
       },
-      async seedApprovedAccess(): Promise<never> {
-        throw new Error('a migration run must not seed the access fixture');
-      },
-      async verifyCanonicalSyntheticRemoval(): Promise<never> {
-        throw new Error('a migration run must not read the fixture removal');
+      async bootstrapAccess() {
+        calls.push('bootstrap-access');
+        return { kind: 'not-configured' as const };
       },
       async verifyApplicationLogin(): Promise<void> {
         calls.push('verify-application-login');
@@ -782,6 +453,8 @@ describe('bootstrap coordinator', () => {
       'migrate-admin',
       'configure-application-role',
       'seed-reference',
+      // Runs on every deploy and reports that it had nothing to do.
+      'bootstrap-access',
       'verify-application-login',
       'verify-application-tls',
     ];
@@ -794,8 +467,7 @@ describe('bootstrap coordinator', () => {
     expect(summary.mode).toBe('migrate');
     expect(summary.idempotence).toEqual({ runs: 2, equivalent: true });
     expect(summary.referenceSeed).toEqual(referenceSeedSummary);
-    expect(summary.approvedAccess).toBeUndefined();
-    expect(summary.canonicalSyntheticRemoval).toBeUndefined();
+    expect(summary.accessBootstrap).toBe('not-configured');
     expect(Object.keys(summary)).not.toContain('approvedAccess');
     expect(Object.keys(summary)).not.toContain('canonicalSyntheticRemoval');
   });
@@ -822,11 +494,13 @@ describe('bootstrap coordinator', () => {
       async seedReference() {
         throw new Error('unreachable');
       },
-      async seedApprovedAccess() {
-        throw new Error('unreachable');
-      },
-      async verifyCanonicalSyntheticRemoval() {
-        throw new Error('unreachable');
+      async bootstrapAccess() {
+        calls.push('bootstrap-access');
+        return {
+          kind: 'created' as const,
+          groupSourceId: 'synthetic',
+          email: 'admins@example.invalid',
+        };
       },
       async verifyApplicationLogin(): Promise<void> {
         throw new Error('unreachable');

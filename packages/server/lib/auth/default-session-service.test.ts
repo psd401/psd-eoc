@@ -299,7 +299,7 @@ describe('session credential read batching', () => {
     );
   });
 
-  test('authenticates a current credential with fifteen selected-row statements', async () => {
+  test('authenticates a current credential with ten selected-row statements', async () => {
     const tokenDigest = hashRefreshToken(TOKEN);
     const createdAt = new Date('2026-08-16T18:00:00.000Z');
     const membershipValidUntil = new Date('2026-08-17T18:00:00.000Z');
@@ -343,31 +343,25 @@ describe('session credential read batching', () => {
               null,
             ],
           ];
+        // The active trusted groups, then this address's membership in them.
+        // These two replaced eight statements: the append-only role
+        // projection, the snapshot header, its expected-versus-completed
+        // group evidence, the member row, the member's group provenance, the
+        // member's facilities, and the latest-generation catch-up read.
         case 4:
-          return [['admin', true]];
+          return [[IDS.group, 'admin', createdAt]];
         case 5:
-          return [];
+          return [[IDS.group]];
         case 6:
-          return [[IDS.snapshot, 1, createdAt, true]];
+          return [];
         case 7:
-          return [
-            [IDS.group, 'google-group', 'access', 'expected'],
-            [IDS.group, 'google-group', 'access', 'completed'],
-          ];
+          return [];
         case 8:
-          return [[googleSubject, 'district']];
-        case 9:
-          return [[IDS.group, 'google-group', 'access']];
-        case 10:
-          return [];
-        case 11:
-          return [[IDS.snapshot, 1]];
-        case 12:
-          return [];
-        case 13:
           return [[IDS.epoch, IDS.session, createdAt]];
-        case 14:
-        case 15:
+        case 9:
+          return [];
+        // No rotation has retired the issued digest, so it is still current.
+        case 10:
           return [];
         default:
           throw new Error('Current credential issued an extra statement.');
@@ -387,12 +381,12 @@ describe('session credential read batching', () => {
       },
     });
 
-    expect(recording.statements).toHaveLength(16);
+    expect(recording.statements).toHaveLength(11);
     expect(
       recording.statements.filter(({ sql: statement }) =>
         /^\(?select /u.test(statement),
       ),
-    ).toHaveLength(15);
+    ).toHaveLength(10);
     expect(recording.statements[2]?.sql).toBe(
       'set transaction isolation level repeatable read read only',
     );

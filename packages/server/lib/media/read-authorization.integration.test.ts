@@ -10,7 +10,7 @@ import {
 } from 'bun:test';
 import { asc, eq, sql } from 'drizzle-orm';
 
-import { requireSyntheticTestDatabaseUrl } from '../../app/(admin)/event-types/test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
   createDatabaseClient,
   type PostgresDatabase,

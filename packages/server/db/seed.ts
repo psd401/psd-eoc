@@ -717,7 +717,32 @@ export async function seedReferenceData(
  * or outbox row, and every provider channel remains disabled and mocked or
  * blocked. Active synthetic endpoints are reserved, provably unroutable values.
  */
-export async function seedDatabase(database: Database): Promise<SeedSummary> {
+/**
+ * Options for seeding a database that is deliberately not at the current
+ * schema.
+ *
+ * `skipGroupSources` exists for the historical-migration fixture, which holds a
+ * database at migration 0004 and then upgrades it. Drizzle emits every column
+ * of a table it inserts into, so seeding group sources through the current
+ * schema fails there the moment that table gains a column — as it did when
+ * access groups started carrying the role they grant. The fixture inserts those
+ * rows itself with the columns its schema actually has.
+ */
+export interface SeedDatabaseOptions {
+  /**
+   * Writes the group sources in place of the seed, at the point in the
+   * transaction where they must exist: after facilities, before the audience
+   * targets that reference them.
+   */
+  readonly insertGroupSources?: (
+    transaction: Parameters<Parameters<Database['transaction']>[0]>[0],
+  ) => Promise<void>;
+}
+
+export async function seedDatabase(
+  database: Database,
+  options: SeedDatabaseOptions = {},
+): Promise<SeedSummary> {
   await database.transaction(async (transaction) => {
     await transaction
       .insert(facilities)
@@ -749,23 +774,27 @@ export async function seedDatabase(database: Database): Promise<SeedSummary> {
       )
       .onConflictDoNothing();
 
-    await transaction
-      .insert(groupSources)
-      .values(
-        groupSourceRows.map((source) => ({
-          id: source.id,
-          kind: source.kind,
-          purpose: source.purpose,
-          facilityId: source.facilityId,
-          displayName: source.displayName,
-          active: source.active,
-          googleGroupId: null,
-          email: null,
-          fixtureKey: source.kind === 'synthetic' ? source.fixtureKey : null,
-          createdAt: SEED_TIME,
-        })),
-      )
-      .onConflictDoNothing();
+    if (options.insertGroupSources !== undefined) {
+      await options.insertGroupSources(transaction);
+    } else {
+      await transaction
+        .insert(groupSources)
+        .values(
+          groupSourceRows.map((source) => ({
+            id: source.id,
+            kind: source.kind,
+            purpose: source.purpose,
+            facilityId: source.facilityId,
+            displayName: source.displayName,
+            active: source.active,
+            googleGroupId: null,
+            email: null,
+            fixtureKey: source.kind === 'synthetic' ? source.fixtureKey : null,
+            createdAt: SEED_TIME,
+          })),
+        )
+        .onConflictDoNothing();
+    }
 
     await transaction
       .insert(audienceConfigurations)

@@ -23,7 +23,6 @@ import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
-  accessMembershipSnapshots,
   connectivityEpochs,
   deviceEnrollments,
   idempotencyRecords,
@@ -37,7 +36,7 @@ import {
   ACCESS_GATE_AUDIT_LOCK_SQL,
   buildAccessGateAuditEntry,
   toAccessGateAuditInsertValues,
-} from './access-gate';
+} from './sign-in-audit';
 import { decideAccess } from './trusted-group-access';
 import { ADMIN_AVAILABILITY_LOCK_SQL } from './role-state';
 
@@ -903,26 +902,18 @@ export function createDrizzleInitialWebSessionStore(
               );
             }
 
-            const [latestSyncRun] = await transaction
-              .select({ id: accessMembershipSnapshots.id })
-              .from(accessMembershipSnapshots)
-              .where(eq(accessMembershipSnapshots.complete, true))
-              .orderBy(desc(accessMembershipSnapshots.version))
-              .limit(1);
-            const latestSyncRunId = latestSyncRun?.id ?? null;
-
             const [session] = await transaction
               .insert(sessions)
               .values({
                 userId: request.user.id,
                 deviceEnrollmentId: activeDevice.id,
-                // Wire compatibility, not authorization. Nothing reads this to
-                // decide access — membership is asked directly — but the
-                // shipped mobile builds parse the session with a contract that
-                // requires a snapshot id, and reject the whole response when it
-                // is null. Stamping the most recent sync run keeps those
-                // clients working until they are updated.
-                membershipSnapshotId: latestSyncRunId,
+                // A session is not pinned to anything. Authorization asks the
+                // trusted groups about the present on every request, so there
+                // is no generation to record. This briefly carried the latest
+                // sync run so builds shipped on 2026-08-15 — which required a
+                // non-null id — kept working; the column stays only because
+                // sessions issued before the cutover still carry theirs.
+                membershipSnapshotId: null,
                 membershipValidUntil: request.membershipValidUntil,
                 membershipGraceUntil: request.membershipGraceUntil,
                 createdAt: request.createdAt,

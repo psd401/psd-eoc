@@ -1,9 +1,7 @@
 import {
-  SetUserRolesInputSchema,
   UserPageSchema,
   UserSchema,
   UuidSchema,
-  type Actor,
   type CapabilityInput,
   type Role,
   type User,
@@ -18,78 +16,25 @@ import {
   users,
 } from '../../../db/schema';
 import {
-  ADMIN_AVAILABILITY_LOCK_SQL,
-  loadAccessConfigurationSnapshotState,
-  loadEffectiveAdministratorUserIds,
-  loadEffectiveRoles,
   projectEffectiveRoles,
   type RoleChangeFact,
 } from '../../../lib/auth/role-state';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
-import {
-  digestCapabilityValue,
-  readCapabilityTime,
-  type ServerCapabilityRegistration,
-} from '../../../lib/capabilities/engine';
+import { type ServerCapabilityRegistration } from '../../../lib/capabilities/engine';
 import {
   AdminCapabilityError,
   createDrizzleAdminCapabilityStore,
-  executeAdminMutationCapability,
   executeAdminQueryCapability,
   getDefaultAdminDatabase,
   requireAdminCapabilityAuthorization,
   type AdminCapabilityStore,
   type AdminCapabilityTransaction,
-  type AdminMutationMetadata,
   type AdminQueryDatabase,
   type AdminQueryMetadata,
 } from '../facilities/admin-core';
 
 function invalid(message: string): AdminCapabilityError {
   return new AdminCapabilityError('VALIDATION_ERROR', message, 400);
-}
-
-function notFound(message: string): AdminCapabilityError {
-  return new AdminCapabilityError('NOT_FOUND', message, 404);
-}
-
-function conflict(message: string): AdminCapabilityError {
-  return new AdminCapabilityError('CONFLICT', message, 409);
-}
-
-function userResultReference(user: User): string {
-  return Buffer.from(
-    JSON.stringify({
-      id: user.id,
-      outputDigest: digestCapabilityValue(user),
-    }),
-    'utf8',
-  ).toString('base64url');
-}
-
-function parseUserResultReference(value: string): Readonly<{
-  id: string;
-  outputDigest: string;
-}> {
-  try {
-    const parsed: unknown = JSON.parse(
-      Buffer.from(value, 'base64url').toString('utf8'),
-    );
-    if (typeof parsed !== 'object' || parsed === null) throw new TypeError();
-    const outputDigest = Reflect.get(parsed, 'outputDigest');
-    if (
-      typeof outputDigest !== 'string' ||
-      !/^[a-f0-9]{64}$/u.test(outputDigest)
-    ) {
-      throw new TypeError();
-    }
-    return Object.freeze({
-      id: UuidSchema.parse(Reflect.get(parsed, 'id')),
-      outputDigest,
-    });
-  } catch {
-    throw conflict('The role-assignment replay reference is invalid.');
-  }
 }
 
 function guard(
@@ -210,42 +155,6 @@ export function decodeUserPageCursor(
   } catch {
     return invalidUserCursor();
   }
-}
-
-async function loadUser(
-  database: AdminQueryDatabase,
-  userId: string,
-): Promise<User | null> {
-  const [row] = await database
-    .select()
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-  if (row === undefined) return null;
-  // Aurora Data API rejects concurrent statements that share a transaction
-  // ID, so every read on this capability transaction is deliberately serial.
-  const roles = await loadEffectiveRoles(database, userId);
-  const facilityRows = await database
-    .select({ facilityId: userFacilityScopes.facilityId })
-    .from(userFacilityScopes)
-    .where(eq(userFacilityScopes.userId, userId))
-    .orderBy(asc(userFacilityScopes.facilityId));
-  return UserSchema.parse({
-    id: row.id,
-    googleSubject: row.googleSubject,
-    email: row.email,
-    displayName: row.displayName,
-    roles,
-    facilityScope:
-      row.facilityScopeKind === 'district'
-        ? { kind: 'district' }
-        : {
-            kind: 'facilities',
-            facilityIds: facilityRows.map(({ facilityId }) => facilityId),
-          },
-    createdAt: row.createdAt.toISOString(),
-    disabledAt: row.disabledAt?.toISOString() ?? null,
-  });
 }
 
 async function projectUserPage(
@@ -386,109 +295,7 @@ async function listUsers(
   });
 }
 
-async function setUserRoles(
-  database: AdminQueryDatabase,
-  inputValue: CapabilityInput<'set-user-roles'>,
-  actor: Actor,
-  requestId: string,
-  readOccurredAt: () => Promise<Date>,
-): Promise<User> {
-  const input = SetUserRolesInputSchema.parse(inputValue);
-  await database.execute(ADMIN_AVAILABILITY_LOCK_SQL);
-  const accessState = await loadAccessConfigurationSnapshotState(database);
-  if (accessState === null) {
-    throw conflict(
-      'Roles cannot be changed until the latest access snapshot exactly matches the active access groups.',
-    );
-  }
-  const [lockedUser] = await database
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.id, input.userId))
-    .limit(1)
-    .for('update');
-  if (lockedUser === undefined)
-    throw notFound('The staff account was not found.');
-  const current = await loadUser(database, input.userId);
-  if (current === null) throw notFound('The staff account was not found.');
-  if (current.disabledAt !== null) {
-    throw conflict('Roles cannot be changed for a disabled account.');
-  }
-  if (actor.kind !== 'human') {
-    throw new AdminCapabilityError(
-      'FORBIDDEN',
-      'A human administrator is required to change roles.',
-      403,
-    );
-  }
-  const effectiveAdministratorIds = await loadEffectiveAdministratorUserIds(
-    database,
-    { accessState },
-  );
-  assertReachableAdministratorTransition({
-    actorUserId: actor.userId,
-    targetUserId: input.userId,
-    currentRoles: current.roles,
-    requestedRoles: input.roles,
-    reachableAdministratorUserIds: effectiveAdministratorIds,
-  });
-  const removedRoles = current.roles.filter(
-    (role) => !input.roles.includes(role),
-  );
-  const addedRoles = input.roles.filter(
-    (role) => !current.roles.includes(role),
-  );
-  const changes = [
-    ...removedRoles.map((role) => ({ role, granted: false })),
-    ...addedRoles.map((role) => ({ role, granted: true })),
-  ];
-  if (changes.length > 0) {
-    const occurredAt = await readOccurredAt();
-    await database.insert(userRoleChanges).values(
-      changes.map(({ role, granted }) => ({
-        userId: input.userId,
-        role,
-        granted,
-        changedByUserId: actor.userId,
-        changedWithSessionId: actor.sessionId,
-        requestId,
-        occurredAt,
-      })),
-    );
-  }
-  const updated = await loadUser(database, input.userId);
-  if (updated === null)
-    throw conflict('The updated user could not be reloaded.');
-  return updated;
-}
-
 /** Applies the role-transition invariants after one exact locked DB projection. */
-export function assertReachableAdministratorTransition(
-  input: Readonly<{
-    actorUserId: string;
-    targetUserId: string;
-    currentRoles: readonly Role[];
-    requestedRoles: readonly Role[];
-    reachableAdministratorUserIds: readonly string[];
-  }>,
-): void {
-  if (!input.reachableAdministratorUserIds.includes(input.actorUserId)) {
-    throw new AdminCapabilityError(
-      'FORBIDDEN',
-      'The administrator role or access membership changed before this request could commit.',
-      403,
-    );
-  }
-  if (
-    input.currentRoles.includes('admin') &&
-    !input.requestedRoles.includes('admin') &&
-    input.reachableAdministratorUserIds.includes(input.targetUserId) &&
-    input.reachableAdministratorUserIds.length <= 1
-  ) {
-    throw conflict('The final reachable administrator cannot be removed.');
-  }
-}
-
 export const listUsersRegistration: ServerCapabilityRegistration<
   'list-users',
   AdminCapabilityTransaction
@@ -496,38 +303,6 @@ export const listUsersRegistration: ServerCapabilityRegistration<
   id: 'list-users',
   resolveFacilityId: (_input, context) => guard(context),
   handler: (input, context) => listUsers(context.transaction.database, input),
-};
-
-export const setUserRolesRegistration: ServerCapabilityRegistration<
-  'set-user-roles',
-  AdminCapabilityTransaction
-> = {
-  id: 'set-user-roles',
-  resolveFacilityId: (_input, context) => guard(context),
-  async handler(input, context) {
-    return setUserRoles(
-      context.transaction.database,
-      input,
-      context.invocation.actor,
-      context.invocation.requestId,
-      () => readCapabilityTime(context),
-    );
-  },
-  resultReference: userResultReference,
-  async loadReplay(reference, context) {
-    const parsed = parseUserResultReference(reference);
-    const user = await loadUser(context.transaction.database, parsed.id);
-    if (user === null)
-      throw notFound('The previous role result is unavailable.');
-    if (digestCapabilityValue(user) !== parsed.outputDigest) {
-      throw conflict(
-        'The original role-assignment result is no longer reconstructable; replay was refused rather than returning changed data.',
-      );
-    }
-    return user;
-  },
-  resolveReplayFacilityId: (_reference, context) => guard(context),
-  replayFacilityId: () => null,
 };
 
 export function executeListUsersCapability(input: {
@@ -545,27 +320,6 @@ export function executeListUsersCapability(input: {
   return executeAdminQueryCapability(
     listUsersRegistration,
     input.query,
-    input.authenticated,
-    store,
-    input.metadata,
-  );
-}
-
-export function executeSetUserRolesCapability(input: {
-  readonly authenticated: AuthenticatedSession;
-  readonly command: CapabilityInput<'set-user-roles'>;
-  readonly metadata: AdminMutationMetadata;
-  readonly store?: AdminCapabilityStore;
-}): Promise<User> {
-  const store =
-    input.store ??
-    createDrizzleAdminCapabilityStore(
-      getDefaultAdminDatabase(),
-      input.authenticated,
-    );
-  return executeAdminMutationCapability(
-    setUserRolesRegistration,
-    input.command,
     input.authenticated,
     store,
     input.metadata,

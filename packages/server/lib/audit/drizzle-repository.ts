@@ -30,7 +30,7 @@ import {
   securityAuditChainAnchors,
   securityAuditEntries,
 } from '../../db/schema';
-import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/access-gate';
+import { ACCESS_GATE_AUDIT_LOCK_SQL } from '../auth/sign-in-audit';
 import {
   calculateCanonicalSecurityAuditDigest,
   calculateSecurityAuditHash,

@@ -15,10 +15,7 @@ import { drizzle as drizzleAwsDataApi } from 'drizzle-orm/aws-data-api/pg';
 import type { Database } from '../../../db/client';
 import type { AuthenticatedSession } from '../../../lib/auth/sessions';
 import { createDrizzleStaleRosterReportStore } from '../../../lib/roster/stale-report';
-import {
-  executeListUsersCapability,
-  executeSetUserRolesCapability,
-} from '../access/capabilities';
+import { executeListUsersCapability } from '../access/capabilities';
 import {
   executeIntegrationHealthProjection,
   executeSetChannelEnabledCapability,
@@ -98,7 +95,6 @@ const CAPABILITY_MATRIX = Object.freeze([
   'get-audience-config',
   'get-audience-config-version',
   'list-users',
-  'set-user-roles',
   'get-integration-health',
   'set-channel-enabled',
   'get-stale-roster-report',
@@ -659,11 +655,23 @@ class FakeRdsDataClient {
         $metadata: {},
       };
     }
+    // Administrators are now the people in an active access group that grants
+    // admin, read from access_group_members rather than projected through the
+    // membership generation.
+    if (
+      sql.includes('from "access_group_members"') &&
+      sql.includes('"users"')
+    ) {
+      return {
+        records: [
+          [{ stringValue: USER_ID }],
+          [{ stringValue: SECOND_USER_ID }],
+        ],
+        $metadata: {},
+      };
+    }
     if (
       sql.includes('effective_admin_roles') &&
-      sql.includes(
-        'not exists (select "user_id" from "access_membership_member_groups"',
-      ) &&
       sql.includes('not exists (select "id" from "group_sources"') &&
       parameterStrings.filter((value) => value === ACCESS_GROUP_SOURCE_ID)
         .length === 2
@@ -677,6 +685,17 @@ class FakeRdsDataClient {
       };
     }
     if (sql.includes('from "group_sources"')) {
+      // The active groups that grant administration, which is how an
+      // administrator is identified now.
+      if (
+        sql.startsWith('select "id" from "group_sources"') &&
+        sql.includes('"granted_role"')
+      ) {
+        return {
+          records: [[{ stringValue: ACCESS_GROUP_SOURCE_ID }]],
+          $metadata: {},
+        };
+      }
       if (
         sql.startsWith('select "id", "kind", "purpose"') &&
         !sql.includes('"display_name"') &&
@@ -991,25 +1010,6 @@ class FakeRdsDataClient {
     if (sql.includes('from "access_membership_snapshots"')) {
       return {
         records: [[{ stringValue: ACCESS_SNAPSHOT_ID }, { longValue: 1 }]],
-        $metadata: {},
-      };
-    }
-    if (sql.includes('from "access_membership_snapshot_groups"')) {
-      return {
-        records: [
-          [
-            { stringValue: ACCESS_GROUP_SOURCE_ID },
-            { stringValue: 'google-group' },
-            { stringValue: 'access' },
-            { stringValue: 'completed' },
-          ],
-          [
-            { stringValue: ACCESS_GROUP_SOURCE_ID },
-            { stringValue: 'google-group' },
-            { stringValue: 'access' },
-            { stringValue: 'expected' },
-          ],
-        ],
         $metadata: {},
       };
     }
@@ -2006,36 +2006,6 @@ describe('admin Aurora Data API transport regression', () => {
       );
     expect(listProjectionStatements).toHaveLength(4);
 
-    const roleStatementStart = client.statements.length;
-    const roleResult = await executeSetUserRolesCapability({
-      authenticated,
-      store,
-      command: { userId: SECOND_USER_ID, roles: ['staff', 'admin'] },
-      metadata: {
-        idempotencyKey: 'synthetic-data-api-set-user-roles',
-        requestId: '00000000-0000-4000-8000-000000009115',
-        now: new Date(CLOCK_VALUE),
-      },
-    });
-    executedCapabilities.add('set-user-roles');
-    expect(roleResult.roles).toEqual(['staff', 'admin']);
-    const reachableAdministratorStatement = requireRecordedStatement(
-      client.statements
-        .slice(roleStatementStart)
-        .find(({ sql }) => sql.includes('effective_admin_roles')),
-    );
-    expect(reachableAdministratorStatement.sql).toContain(
-      'not exists (select "user_id" from "access_membership_member_groups"',
-    );
-    expect(reachableAdministratorStatement.sql).toContain(
-      'not exists (select "id" from "group_sources"',
-    );
-    expect(
-      reachableAdministratorStatement.parameterStrings.filter(
-        (value) => value === ACCESS_GROUP_SOURCE_ID,
-      ),
-    ).toHaveLength(2);
-
     const usersAfterRoleChange = await executeListUsersCapability({
       authenticated,
       store,
@@ -2054,7 +2024,7 @@ describe('admin Aurora Data API transport regression', () => {
       usersAfterRoleChange.items.map(({ id, roles }) => ({ id, roles })),
     ).toEqual([
       { id: USER_ID, roles: ['admin'] },
-      { id: SECOND_USER_ID, roles: ['staff', 'admin'] },
+      { id: SECOND_USER_ID, roles: ['admin'] },
     ]);
 
     const healthStatementStart = client.statements.length;

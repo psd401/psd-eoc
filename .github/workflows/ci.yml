@@ -141,7 +141,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The suite runs in parallel shards and is expected to finish in about a
+    # minute. A generous ceiling here only hides a regression in that.
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16-alpine
@@ -178,13 +180,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # The SLO gate must observe an unbiased wall clock, so it runs before the
-      # rest of the suite rather than alongside it.
-      - name: Run the SLO gate
-        run: bun run test:slo
-
       - name: Run the test suite
-        run: bun run test:prechecked
+        run: bun run test
 
   mobile:
     name: Mobile

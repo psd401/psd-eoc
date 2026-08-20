@@ -15,7 +15,7 @@ import {
   createDrizzleAccessGateAuditSink,
   POST_GATE_SIGN_IN_FAILED_REASON,
   type AccessGateAuditSink,
-} from '../../../../lib/auth/access-gate';
+} from '../../../../lib/auth/sign-in-audit';
 import { authorizeSignIn } from '../../../../lib/auth/sign-in-authorization';
 import {
   completeGoogleOidcCallback,
@@ -83,61 +83,6 @@ const SESSION_DENIAL_PAGE_REASONS: Readonly<
   SESSION_PERSISTENCE_REJECTED: 'configuration',
 });
 
-function configuredEnvironmentValue(name: string): string | undefined {
-  const value = process.env[name]?.trim();
-  return value === undefined || value.length === 0 ? undefined : value;
-}
-
-function requiredEnvironmentValue(name: string): string {
-  const value = configuredEnvironmentValue(name);
-  if (value === undefined || /[\r\n\0]/u.test(value)) {
-    throw new Error(`${name} must be configured.`);
-  }
-  return value;
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  return (
-    normalized === 'localhost' ||
-    normalized === '::1' ||
-    normalized === '[::1]' ||
-    /^127(?:\.\d{1,3}){3}$/u.test(normalized)
-  );
-}
-
-function assertLoopbackHttpEnvironmentUrl(name: string): void {
-  let url: URL;
-  try {
-    url = new URL(requiredEnvironmentValue(name));
-  } catch {
-    throw new Error(`${name} must be a loopback HTTP URL in auth test mode.`);
-  }
-  if (
-    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
-    !isLoopbackHostname(url.hostname) ||
-    url.username.length > 0 ||
-    url.password.length > 0 ||
-    url.hash.length > 0
-  ) {
-    throw new Error(`${name} must be a loopback HTTP URL in auth test mode.`);
-  }
-}
-
-function assertPlaywrightAuthTestRuntime(): void {
-  if (process.env.NODE_ENV !== 'development') {
-    throw new Error(
-      'The Playwright auth runtime requires the development runtime.',
-    );
-  }
-  [
-    'GOOGLE_OIDC_REDIRECT_URI',
-    'GOOGLE_OIDC_AUTHORIZATION_ENDPOINT',
-    'GOOGLE_OIDC_TOKEN_ENDPOINT',
-    'GOOGLE_OIDC_JWKS_URI',
-  ].forEach(assertLoopbackHttpEnvironmentUrl);
-}
-
 function createAuthDatabaseConnection(): DatabaseConnection {
   const config = readDatabaseConfig();
   if (config.driver !== 'postgres') {
@@ -195,24 +140,7 @@ function readSessionPolicy(): Readonly<WebSessionPolicy> {
   });
 }
 
-async function createAuthRuntime(): Promise<AuthRuntime> {
-  if (process.env.PSD_EOC_AUTH_TEST_MODE === 'playwright') {
-    assertPlaywrightAuthTestRuntime();
-    const { getPlaywrightAuthRuntime } = await import(
-      '../../test/auth-test-runtime'
-    );
-    const runtime = getPlaywrightAuthRuntime();
-    return {
-      authorize: runtime.authorize,
-      auditSink: runtime.auditSink,
-      sessionStore: runtime.sessionStore,
-      close: () => Promise.resolve(),
-    };
-  }
-
-  if (process.env.PSD_EOC_AUTH_TEST_MODE !== undefined) {
-    throw new Error('PSD_EOC_AUTH_TEST_MODE has an invalid value.');
-  }
+function createAuthRuntime(): AuthRuntime {
   const connection = createAuthDatabaseConnection();
   return {
     authorize: (input) => authorizeSignIn(connection.db, input),

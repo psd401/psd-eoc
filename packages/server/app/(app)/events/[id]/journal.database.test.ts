@@ -25,7 +25,6 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../../db/client';
 import {
-  accessMembershipMembers,
   accessMembershipSnapshots,
   activationPreviews,
   audienceConfigurations,
@@ -87,13 +86,13 @@ import {
   readFanoutControlEffectiveState,
 } from '../../../../lib/notify/fanout-control';
 import type { AuthenticatedSession } from '../../../../lib/auth/sessions';
-import { requireSyntheticEventRoomTestDatabaseUrl } from './test-database';
+import { requireSyntheticTestDatabaseUrl } from '../../../../lib/testing/database';
 
 const configuredTestDatabaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
   configuredTestDatabaseUrl === undefined
     ? undefined
-    : requireSyntheticEventRoomTestDatabaseUrl(configuredTestDatabaseUrl);
+    : requireSyntheticTestDatabaseUrl(configuredTestDatabaseUrl);
 const describeWithDatabase =
   testDatabaseUrl === undefined ? describe.skip : describe;
 
@@ -179,12 +178,6 @@ async function insertSyntheticFanoutAdminSession(
     complete: true,
     syncStartedAt: identityCreatedAt,
     capturedAt: identityCreatedAt,
-  });
-  await database.insert(accessMembershipMembers).values({
-    snapshotId: membershipSnapshotId,
-    userId: FANOUT_ADMIN_ACTOR.userId,
-    googleSubject: `synthetic-fanout-admin-${suffix}`,
-    facilityScopeKind: 'district',
   });
   await database.insert(deviceEnrollments).values({
     id: deviceEnrollmentId,
@@ -1956,12 +1949,6 @@ describeWithDatabase('event journal database guarantees', () => {
           complete: true,
           syncStartedAt: identityCreatedAt,
           capturedAt: identityCreatedAt,
-        });
-        await transaction.insert(accessMembershipMembers).values({
-          snapshotId: membershipSnapshotId,
-          userId: HUMAN_ACTOR.userId,
-          googleSubject: `synthetic-issue77-${suffix}`,
-          facilityScopeKind: 'district',
         });
         await transaction.insert(deviceEnrollments).values({
           id: deviceEnrollmentId,

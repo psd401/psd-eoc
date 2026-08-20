@@ -7,7 +7,7 @@ import {
   spyOn,
   test,
 } from 'bun:test';
-import { max, sql } from 'drizzle-orm';
+import { and, eq, max, sql } from 'drizzle-orm';
 
 import {
   SessionEstablishmentResultSchema,
@@ -52,10 +52,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../db/client.js';
 import {
-  accessMembershipMemberFacilities,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
+  accessGroupMembers,
   accessMembershipSnapshots,
   connectivityEpochInvalidations,
   connectivityEpochs,
@@ -1085,7 +1082,7 @@ describeWithDatabase(
       await connection?.close();
     });
 
-    test('refreshes after issuance grace from newer cached evidence with Google offline, then revokes across instances', async () => {
+    test('refreshes from recently read trusted-group membership with Google offline, then revokes across instances', async () => {
       const database = databaseConnection().db;
       const suffix = crypto.randomUUID().replaceAll('-', '');
       const fixture = {
@@ -1122,6 +1119,7 @@ describeWithDatabase(
           email: `synthetic-access-${suffix}@example.invalid`,
           fixtureKey: null,
           createdAt,
+          membersCapturedAt: issuanceCapturedAt,
         });
         await transaction.insert(users).values([
           {
@@ -1152,11 +1150,27 @@ describeWithDatabase(
           { userId: fixture.userId, facilityId: fixture.facilityId },
           { userId: fixture.targetUserId, facilityId: fixture.facilityId },
         ]);
+        // Both people are in the trusted group, read at 12:30. This is what
+        // authorizes them; the snapshot rows below are an operator-visible
+        // record of the sync run and are not consulted.
+        await transaction.insert(accessGroupMembers).values([
+          {
+            groupSourceId: fixture.groupSourceId,
+            email: fixture.email.toLowerCase(),
+            capturedAt: issuanceCapturedAt,
+          },
+          {
+            groupSourceId: fixture.groupSourceId,
+            email: fixture.targetEmail.toLowerCase(),
+            capturedAt: issuanceCapturedAt,
+          },
+        ]);
       });
 
+      // Records one sync run. The evidence tables it used to populate are gone;
+      // membership lives in `access_group_members`, seeded above.
       async function insertCompleteMembershipSnapshot(
         capturedAt: Date,
-        includeTargetMember: boolean,
       ): Promise<string> {
         return database.transaction(async (transaction) => {
           await transaction.execute(sql`select pg_advisory_xact_lock(401, 7)`);
@@ -1164,75 +1178,19 @@ describeWithDatabase(
             .select({ version: max(accessMembershipSnapshots.version) })
             .from(accessMembershipSnapshots);
           const snapshotId = crypto.randomUUID();
-          const version = Number(current?.version ?? 0) + 1;
           await transaction.insert(accessMembershipSnapshots).values({
             id: snapshotId,
-            version,
+            version: Number(current?.version ?? 0) + 1,
             complete: true,
             syncStartedAt: new Date(capturedAt.getTime() - 60_000),
             capturedAt,
           });
-          await transaction.insert(accessMembershipSnapshotGroups).values([
-            {
-              snapshotId,
-              groupSourceId: fixture.groupSourceId,
-              groupSourceKind: 'google-group',
-              groupPurpose: 'access',
-              completionKind: 'expected',
-            },
-            {
-              snapshotId,
-              groupSourceId: fixture.groupSourceId,
-              groupSourceKind: 'google-group',
-              groupPurpose: 'access',
-              completionKind: 'completed',
-            },
-          ]);
-          const members = [
-            {
-              userId: fixture.userId,
-              googleSubject: fixture.googleSubject,
-            },
-            ...(includeTargetMember
-              ? [
-                  {
-                    userId: fixture.targetUserId,
-                    googleSubject: fixture.targetGoogleSubject,
-                  },
-                ]
-              : []),
-          ];
-          await transaction.insert(accessMembershipMembers).values(
-            members.map((member) => ({
-              snapshotId,
-              ...member,
-              facilityScopeKind: 'facilities' as const,
-            })),
-          );
-          await transaction.insert(accessMembershipMemberGroups).values(
-            members.map((member) => ({
-              snapshotId,
-              userId: member.userId,
-              groupSourceId: fixture.groupSourceId,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
-            })),
-          );
-          await transaction.insert(accessMembershipMemberFacilities).values(
-            members.map((member) => ({
-              snapshotId,
-              userId: member.userId,
-              facilityId: fixture.facilityId,
-            })),
-          );
           return snapshotId;
         });
       }
 
-      const issuanceSnapshotId = await insertCompleteMembershipSnapshot(
-        issuanceCapturedAt,
-        true,
-      );
+      const issuanceSnapshotId =
+        await insertCompleteMembershipSnapshot(issuanceCapturedAt);
       const policy = {
         sessionLifetimeSeconds: 30 * 24 * 60 * 60,
         membershipTtlSeconds: 60 * 60,
@@ -1270,10 +1228,21 @@ describeWithDatabase(
         },
         new Date('2026-08-07T09:31:00.000Z'),
       );
-      const renewedSnapshotId = await insertCompleteMembershipSnapshot(
-        renewedCapturedAt,
-        true,
-      );
+      const renewedSnapshotId =
+        await insertCompleteMembershipSnapshot(renewedCapturedAt);
+      // A later sync read the same membership again. That newer read is what
+      // carries the session past its issuance freshness window, with the
+      // provider offline throughout.
+      await database.transaction(async (transaction) => {
+        await transaction
+          .update(accessGroupMembers)
+          .set({ capturedAt: renewedCapturedAt })
+          .where(eq(accessGroupMembers.groupSourceId, fixture.groupSourceId));
+        await transaction
+          .update(groupSources)
+          .set({ membersCapturedAt: renewedCapturedAt })
+          .where(eq(groupSources.id, fixture.groupSourceId));
+      });
       const offlineIdp = spyOn(globalThis, 'fetch').mockRejectedValue(
         new Error('Google IdP is offline'),
       );
@@ -1341,10 +1310,25 @@ describeWithDatabase(
         });
         expect(devices.items).toHaveLength(1);
 
-        await insertCompleteMembershipSnapshot(
-          new Date('2026-08-07T13:20:00.000Z'),
-          false,
-        );
+        const removalCapturedAt = new Date('2026-08-07T13:20:00.000Z');
+        await database.transaction(async (transaction) => {
+          await transaction
+            .delete(accessGroupMembers)
+            .where(
+              and(
+                eq(accessGroupMembers.groupSourceId, fixture.groupSourceId),
+                eq(accessGroupMembers.email, fixture.targetEmail.toLowerCase()),
+              ),
+            );
+          await transaction
+            .update(accessGroupMembers)
+            .set({ capturedAt: removalCapturedAt })
+            .where(eq(accessGroupMembers.groupSourceId, fixture.groupSourceId));
+          await transaction
+            .update(groupSources)
+            .set({ membersCapturedAt: removalCapturedAt })
+            .where(eq(groupSources.id, fixture.groupSourceId));
+        });
         const afterRemoval = new Date('2026-08-07T13:21:00.000Z');
         const adminAfterRemoval = await firstInstance.authenticate(
           refreshed.refreshToken,

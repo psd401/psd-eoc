@@ -13,10 +13,8 @@
     "format:check": "prettier --check package.json tsconfig.base.json eslint.config.mjs .prettierrc .github packages workers infra",
     "lint": "eslint .",
     "typecheck": "bun run --filter '*' typecheck",
-    "test:slo": "PSD_EOC_ISSUE30_SLO_PRECHECKED=false bun test infra/test/monitoring-stack.test.ts --test-name-pattern 'runs the issue 30 SLO gate before later suites can bias wall-clock evidence'",
-    "test": "if find packages workers infra -type f \\( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' \\) -print -quit | grep -q .; then bun test; else echo 'No tests have been added yet.'; fi && bun run --cwd packages/mobile test:native",
-    "test:prechecked": "PSD_EOC_ISSUE30_SLO_PRECHECKED=true bun run test",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test:slo && bun run test:prechecked"
+    "test": "bun scripts/test.ts && bun run --cwd packages/mobile test:native",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test"
   },
   "devDependencies": {
     "@eslint/js": "9.35.0",
