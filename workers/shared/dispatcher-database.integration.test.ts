@@ -599,7 +599,6 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     const result = await dispatchOutbox(outboxId, {
       store: createDrizzleOutboxDispatcherStore(database),
       queue,
-      authorizeFanout: () => true,
     });
 
     expect(result.facilityId).toBe(SEEDED.facility);
@@ -627,7 +626,6 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       dispatchOutbox(outboxId, {
         store: createDrizzleOutboxDispatcherStore(database),
         queue,
-        authorizeFanout: () => true,
       }),
     ).rejects.toMatchObject({
       code: 'OUTBOX_PERSISTENCE_FAILED',
@@ -661,7 +659,6 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       dispatchOutbox(ids.outbox, {
         store: crashingStore,
         queue,
-        authorizeFanout: () => true,
       }),
     ).rejects.toThrow('Synthetic process crash after SQS acceptance.');
     expect(queue.calls).toHaveLength(1);
@@ -670,7 +667,6 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     const replayed = await dispatchOutbox(ids.outbox, {
       store: durableStore,
       queue,
-      authorizeFanout: () => true,
     });
     expect(replayed.outboxRecord).toEqual(
       expect.objectContaining({ status: 'published', attempts: 1 }),
@@ -751,7 +747,6 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
       const result = await dispatchOutbox(outboxId, {
         store,
         queue,
-        authorizeFanout: () => true,
       });
       samples.push(performance.now() - startedAt);
       expect(result.batches).toHaveLength(3);
@@ -777,7 +772,6 @@ describeWithDatabase('PostgreSQL outbox crash and reconciliation proof', () => {
     const published = await dispatchOutbox(ids.outbox, {
       store: durableStore,
       queue: batch,
-      authorizeFanout: () => true,
     });
     const pushBatch = published.batches.find(
       (candidate) => candidate.channel === 'push',

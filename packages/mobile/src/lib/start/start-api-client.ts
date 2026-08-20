@@ -6,7 +6,6 @@ import {
   EventSchema,
   EventTypePageSchema,
   EventTypeVersionSchema,
-  FanoutStatusSchema,
   FacilityPageSchema,
   IdempotencyKeySchema,
   isAtOrAfter,
@@ -18,7 +17,6 @@ import {
   type CreateActivationPreviewInput,
   type Event,
   type EventTypeListItem,
-  type FanoutStatus,
   type Facility,
   type JoinEventResult,
   type StartEventResult,
@@ -74,11 +72,6 @@ type RequestKind = 'query' | 'preview' | 'mutation';
 const MAX_PAGES_PER_COLLECTION = 100;
 const START_QUERY_TIMEOUT_MS = 10_000;
 const START_MUTATION_TIMEOUT_MS = 20_000;
-
-/** Canonical client fallback while district fanout state cannot be trusted. */
-export const FANOUT_CONTROL_UNAVAILABLE_STATE = FanoutStatusSchema.parse({
-  status: 'unavailable',
-});
 
 function requestFailure(kind: RequestKind, message?: string): StartClientError {
   if (kind === 'mutation') {
@@ -362,29 +355,6 @@ export async function loadStartHomeData(
       ),
     ),
   });
-}
-
-/**
- * Loads read-only global fanout status. Any request, timeout, or contract
- * failure becomes the canonical unavailable/disabled state and never queues a
- * retry, mutation, or activation.
- */
-export async function loadFanoutControlState(
-  request: StartAuthenticatedRequest,
-): Promise<FanoutStatus> {
-  try {
-    return await requestJson(
-      request,
-      {
-        method: 'GET',
-        path: '/api/mobile/start/fanout-control',
-        schema: FanoutStatusSchema,
-      },
-      'query',
-    );
-  } catch {
-    return FANOUT_CONTROL_UNAVAILABLE_STATE;
-  }
 }
 
 function sameVersion(

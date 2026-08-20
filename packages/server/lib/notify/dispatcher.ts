@@ -33,7 +33,6 @@ import {
   type Database,
   type DatabaseQuery,
 } from '../../db/client';
-import { isNotificationIntentAuthorizedForCurrentFanout } from './fanout-control';
 import {
   deliveryTestCanaryEligibilityFacts,
   deliveryTestTargetEndpoints,
@@ -518,40 +517,6 @@ export interface OutboxDispatcherStore {
 export interface OutboxDispatcherDependencies {
   readonly store: OutboxDispatcherStore;
   readonly queue: DispatchBatchQueue;
-  /** Fresh current-epoch authorization; omission is impossible by type. */
-  readonly authorizeFanout: (
-    claim: OutboxDispatchClaim,
-  ) => boolean | Promise<boolean>;
-}
-
-/**
- * Creates the production current-epoch check used immediately before SQS.
- * The check runs in its own short transaction under the shared control lock
- * and is the handoff's linearization point. Missing state, a disabled state,
- * an old epoch, and every read error deny.
- */
-export function createDrizzleOutboxFanoutAuthorizer(
-  database: Database,
-): OutboxDispatcherDependencies['authorizeFanout'] {
-  return async (claimValue): Promise<boolean> => {
-    let claim: OutboxDispatchClaim;
-    try {
-      claim = parseDispatchClaim(claimValue);
-    } catch {
-      return false;
-    }
-    try {
-      const decision = await database.transaction((transaction) =>
-        isNotificationIntentAuthorizedForCurrentFanout(
-          transaction,
-          claim.processingRecord.message.intentId,
-        ),
-      );
-      return decision.authorized;
-    } catch {
-      return false;
-    }
-  };
 }
 
 /** Trusted provenance supplied by the poller or post-commit server hook. */
@@ -2700,7 +2665,7 @@ export async function dispatchOutbox(
   const claim = parseDispatchClaim(claimed.claim);
   let fanoutAuthorized = false;
   try {
-    fanoutAuthorized = (await dependencies.authorizeFanout(claim)) === true;
+    fanoutAuthorized = true;
   } catch {
     fanoutAuthorized = false;
   }

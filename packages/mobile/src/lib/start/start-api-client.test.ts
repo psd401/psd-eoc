@@ -6,7 +6,6 @@ import {
   CreateActivationPreviewInputSchema,
   EventSchema,
   EventTypeVersionSchema,
-  FanoutStatusSchema,
   JoinEventResultSchema,
   StartEventResultSchema,
   type ActivationPreview,
@@ -28,9 +27,7 @@ import {
   activate,
   createPreview,
   join,
-  loadFanoutControlState,
   loadStartHomeData,
-  FANOUT_CONTROL_UNAVAILABLE_STATE,
   StartClientError,
   type StartAuthenticatedRequest,
 } from './start-api-client';
@@ -421,55 +418,6 @@ function oneResponseRequest(
 }
 
 describe('mobile start API client', () => {
-  test('loads canonical fanout status using only an authenticated GET', async () => {
-    const state = FanoutStatusSchema.parse({ status: 'unavailable' });
-    const calls: RecordedAuthenticatedRequest[] = [];
-
-    await expect(
-      loadFanoutControlState(oneResponseRequest(state, calls)),
-    ).resolves.toEqual(state);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({
-      method: 'GET',
-      path: '/api/mobile/start/fanout-control',
-    });
-    expect(calls[0]?.body).toBeUndefined();
-    expect(calls[0]?.idempotencyKey).toBeUndefined();
-  });
-
-  test('fails malformed or unreadable fanout status closed without retrying', async () => {
-    let failures = 0;
-    const unreadable: StartAuthenticatedRequest = async () => {
-      failures += 1;
-      throw new AuthenticatedRequestFailure(
-        'network',
-        'Synthetic status read failed.',
-      );
-    };
-
-    await expect(loadFanoutControlState(unreadable)).resolves.toEqual(
-      FANOUT_CONTROL_UNAVAILABLE_STATE,
-    );
-    expect(failures).toBe(1);
-    await expect(
-      loadFanoutControlState(
-        oneResponseRequest({ kind: 'current', effectiveMode: 'enabled' }),
-      ),
-    ).resolves.toEqual(FANOUT_CONTROL_UNAVAILABLE_STATE);
-    await expect(
-      loadFanoutControlState(
-        oneResponseRequest({
-          status: 'enabled',
-          currentRecord: {
-            reason: 'private-admin-provenance-must-not-cross',
-            productOwnerApprovalReference:
-              'private-admin-provenance-must-not-cross',
-          },
-        }),
-      ),
-    ).resolves.toEqual(FANOUT_CONTROL_UNAVAILABLE_STATE);
-  });
-
   test('loads every page while retaining inactive-site names only for active events', async () => {
     const latestVersion = eventTypeVersionFixture({
       id: IDS.latestVersion,

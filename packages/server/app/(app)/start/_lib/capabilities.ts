@@ -97,10 +97,6 @@ import {
   isDeliveryTestEndpointReferenceSubset,
 } from '../../../../lib/testing/e2e-delivery';
 import {
-  FanoutControlDeniedError,
-  assertCurrentNotificationFanoutEnabled,
-} from '../../../../lib/notify/fanout-control';
-import {
   BoundedDatabaseQueryError,
   START_FLOW_DATABASE_PAGE_SIZE,
   collectBoundedDatabaseRows,
@@ -920,11 +916,6 @@ function mapPreviewConstructionError(error: unknown): never {
   if (error instanceof CapabilityEngineError) {
     throw error;
   }
-  if (error instanceof FanoutControlDeniedError) {
-    throw unavailable(
-      'Notification fan-out is emergency-disabled or unavailable. No activation preview was created.',
-    );
-  }
   if (error instanceof EventTypeCapabilityError) {
     if (error.code === 'NOT_FOUND') {
       throw unavailable('The selected event type is unavailable.');
@@ -1263,7 +1254,6 @@ async function createActivationPreviewFromDatabase(
   hydrationCache?: RosterSnapshotHydrationCache,
 ): Promise<ActivationPreview> {
   try {
-    await assertCurrentNotificationFanoutEnabled(database);
     // The Data API permits only one in-flight statement for a transaction ID.
     // Keep every independent consequence read explicitly sequential.
     const facilityRows = await database
