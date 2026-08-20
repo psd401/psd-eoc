@@ -1,0 +1,108 @@
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+
+import { describe, expect, test } from 'bun:test';
+
+/**
+ * The server image is assembled from named files, not from the repository.
+ *
+ * `psd-eoc.Dockerfile` copies `packages/server`, `packages/contracts/src`, and
+ * then two specific files out of `workers/`. Importing any other worker module
+ * from the server compiles everywhere except inside the image, where the file
+ * simply is not there — and the failure surfaces as a `next build` type error
+ * during the deploy, after the image has already been building for a minute.
+ *
+ * CI cannot catch this by building the server: it builds with the whole
+ * repository checked out, so the import resolves. This checks the thing that
+ * actually differs — what the Dockerfile copies versus what the server imports.
+ */
+const REPOSITORY_ROOT = resolve(import.meta.dir, '../../..');
+const SERVER_ROOT = join(REPOSITORY_ROOT, 'packages/server');
+const DOCKERFILE = join(
+  REPOSITORY_ROOT,
+  'packages/server/container/psd-eoc.Dockerfile',
+);
+
+const SKIP_DIRECTORIES = new Set(['node_modules', '.next', 'dist', 'coverage']);
+const SOURCE_SUFFIXES = ['.ts', '.tsx', '.mts', '.cts'];
+
+function sourceFiles(directory: string): readonly string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(directory)) {
+    if (SKIP_DIRECTORIES.has(entry)) {
+      continue;
+    }
+    const path = join(directory, entry);
+    if (statSync(path).isDirectory()) {
+      found.push(...sourceFiles(path));
+    } else if (SOURCE_SUFFIXES.some((suffix) => entry.endsWith(suffix))) {
+      found.push(path);
+    }
+  }
+  return found;
+}
+
+/** Every `workers/...` module the server reaches for, repository-relative. */
+function importedWorkerModules(): readonly string[] {
+  const pattern = /from\s+'(?:\.\.\/)+(workers\/[A-Za-z0-9._/-]+)'/gu;
+  const modules = new Set<string>();
+  for (const file of sourceFiles(SERVER_ROOT)) {
+    const contents = readFileSync(file, 'utf8');
+    for (const match of contents.matchAll(pattern)) {
+      const specifier = match[1];
+      if (specifier !== undefined) {
+        modules.add(specifier);
+      }
+    }
+  }
+  return [...modules].sort();
+}
+
+/** Every `workers/...` file the Dockerfile copies into the build stage. */
+function copiedWorkerFiles(): readonly string[] {
+  const dockerfile = readFileSync(DOCKERFILE, 'utf8');
+  const copied = new Set<string>();
+  for (const line of dockerfile.split('\n')) {
+    if (!line.startsWith('COPY ')) {
+      continue;
+    }
+    for (const token of line.slice('COPY '.length).trim().split(/\s+/u)) {
+      if (token.startsWith('workers/') && token.endsWith('.ts')) {
+        copied.add(token);
+      }
+    }
+  }
+  return [...copied].sort();
+}
+
+describe('server image contents', () => {
+  test('every worker module the server imports is copied into the image', () => {
+    const copied = copiedWorkerFiles();
+    expect(copied.length).toBeGreaterThan(0);
+
+    const missing = importedWorkerModules().filter(
+      (specifier) => !copied.includes(`${specifier}.ts`),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  test('the Dockerfile copies no worker file the server does not import', () => {
+    // Kept tight on purpose: the image's surface is the reason this file can
+    // be reasoned about at all, and an unused copy is how it starts widening.
+    const imported = importedWorkerModules().map(
+      (specifier) => `${specifier}.ts`,
+    );
+    const unused = copiedWorkerFiles().filter(
+      (file) => !imported.includes(file),
+    );
+    expect(unused).toEqual([]);
+  });
+
+  test('it scans the server sources it claims to scan', () => {
+    const scanned = sourceFiles(SERVER_ROOT).map((file) =>
+      relative(REPOSITORY_ROOT, file),
+    );
+    expect(scanned).toContain('packages/server/lib/notify/dispatcher.ts');
+    expect(scanned.length).toBeGreaterThan(100);
+  });
+});
