@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          request_id=$(uuidgen | tr 'A-Z' 'a-z')
+          request_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
           idempotency_key="access-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           overrides=$(jq -nc \
