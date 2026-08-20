@@ -672,9 +672,6 @@ class FakeRdsDataClient {
     }
     if (
       sql.includes('effective_admin_roles') &&
-      sql.includes(
-        'not exists (select "user_id" from "access_membership_member_groups"',
-      ) &&
       sql.includes('not exists (select "id" from "group_sources"') &&
       parameterStrings.filter((value) => value === ACCESS_GROUP_SOURCE_ID)
         .length === 2
@@ -1013,25 +1010,6 @@ class FakeRdsDataClient {
     if (sql.includes('from "access_membership_snapshots"')) {
       return {
         records: [[{ stringValue: ACCESS_SNAPSHOT_ID }, { longValue: 1 }]],
-        $metadata: {},
-      };
-    }
-    if (sql.includes('from "access_membership_snapshot_groups"')) {
-      return {
-        records: [
-          [
-            { stringValue: ACCESS_GROUP_SOURCE_ID },
-            { stringValue: 'google-group' },
-            { stringValue: 'access' },
-            { stringValue: 'completed' },
-          ],
-          [
-            { stringValue: ACCESS_GROUP_SOURCE_ID },
-            { stringValue: 'google-group' },
-            { stringValue: 'access' },
-            { stringValue: 'expected' },
-          ],
-        ],
         $metadata: {},
       };
     }

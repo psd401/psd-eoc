@@ -17,10 +17,6 @@ import {
 } from '../../db/client';
 import {
   accessGroupMembers,
-  accessMembershipEvaluatedMembers,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   groupSources,
   userRoles,
@@ -250,42 +246,6 @@ async function seedStrictBaseline(
       complete: true,
       syncStartedAt: BASELINE_TIME,
       capturedAt: BASELINE_TIME,
-    });
-    await transaction.insert(accessMembershipSnapshotGroups).values([
-      {
-        snapshotId: BASELINE_SNAPSHOT_ID,
-        groupSourceId: BASELINE_SOURCE_ID,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'expected',
-      },
-      {
-        snapshotId: BASELINE_SNAPSHOT_ID,
-        groupSourceId: BASELINE_SOURCE_ID,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
-        completionKind: 'completed',
-      },
-    ]);
-    await transaction.insert(accessMembershipMembers).values({
-      snapshotId: BASELINE_SNAPSHOT_ID,
-      userId: USER_ID,
-      googleSubject: 'synthetic-test-google-subject',
-      facilityScopeKind: 'district',
-    });
-    await transaction.insert(accessMembershipMemberGroups).values({
-      snapshotId: BASELINE_SNAPSHOT_ID,
-      userId: USER_ID,
-      groupSourceId: BASELINE_SOURCE_ID,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
-    });
-    await transaction.insert(accessMembershipEvaluatedMembers).values({
-      snapshotId: BASELINE_SNAPSHOT_ID,
-      email: RECOVERY_EMAIL,
-      groupSourceId: BASELINE_SOURCE_ID,
-      groupSourceKind: 'google-group',
-      groupPurpose: 'access',
     });
   });
 }

@@ -1,7 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 
 import {
-  AccessMembershipMemberSchema,
   CapabilityScopeSchema,
   DeviceEnrollmentPageSchema,
   DeviceEnrollmentSchema,
@@ -44,10 +43,6 @@ import {
   type DatabaseConnection,
 } from '../../db/client';
 import {
-  accessMembershipMemberFacilities,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   connectivityEpochInvalidations,
   connectivityEpochs,
@@ -1123,22 +1118,6 @@ function decodeCursor(cursor: string | null): number {
   return Number(decoded);
 }
 
-function exactStringSets(
-  first: readonly string[],
-  second: readonly string[],
-): boolean {
-  if (
-    first.length === 0 ||
-    first.length !== new Set(first).size ||
-    second.length !== new Set(second).size ||
-    first.length !== second.length
-  ) {
-    return false;
-  }
-  const secondSet = new Set(second);
-  return first.every((value) => secondSet.has(value));
-}
-
 function buildFacilityScope(
   kind: 'district' | 'facilities',
   facilityIds: readonly string[],
@@ -1279,148 +1258,6 @@ export class DrizzleSessionStore implements SessionStore {
       // the past, which makes every freshness check downstream vacuous.
       capturedAt: decision.capturedAt,
       roles: decision.roles,
-    });
-  }
-
-  private async loadMembershipEvidence(
-    snapshotId: string,
-    user: Readonly<{ id: string; googleSubject: string }>,
-    database: Pick<Database, 'select'> = this.database,
-  ): Promise<
-    Readonly<{
-      snapshotId: string;
-      version: number;
-      scope: FacilityScope;
-      capturedAt: Date;
-    }>
-  > {
-    const [snapshot] = await database
-      .select({
-        id: accessMembershipSnapshots.id,
-        version: accessMembershipSnapshots.version,
-        capturedAt: accessMembershipSnapshots.capturedAt,
-        complete: accessMembershipSnapshots.complete,
-      })
-      .from(accessMembershipSnapshots)
-      .where(eq(accessMembershipSnapshots.id, snapshotId))
-      .limit(1);
-    if (snapshot?.complete !== true) {
-      throw new SessionAccessError(
-        'INVALID_MEMBERSHIP_EVIDENCE',
-        'The access-membership snapshot is incomplete.',
-      );
-    }
-
-    const snapshotGroupRows = await database
-      .select({
-        groupSourceId: accessMembershipSnapshotGroups.groupSourceId,
-        groupSourceKind: accessMembershipSnapshotGroups.groupSourceKind,
-        groupPurpose: accessMembershipSnapshotGroups.groupPurpose,
-        completionKind: accessMembershipSnapshotGroups.completionKind,
-      })
-      .from(accessMembershipSnapshotGroups)
-      .where(eq(accessMembershipSnapshotGroups.snapshotId, snapshotId));
-    const toKey = (row: (typeof snapshotGroupRows)[number]): string =>
-      `${row.groupSourceId}:${row.groupSourceKind}:${row.groupPurpose}`;
-    const expected = snapshotGroupRows
-      .filter((row) => row.completionKind === 'expected')
-      .map(toKey);
-    const completed = snapshotGroupRows
-      .filter((row) => row.completionKind === 'completed')
-      .map(toKey);
-    if (
-      snapshotGroupRows.some(
-        (row) =>
-          row.groupSourceKind !== 'google-group' ||
-          row.groupPurpose !== 'access',
-      ) ||
-      !exactStringSets(expected, completed)
-    ) {
-      throw new SessionAccessError(
-        'INVALID_MEMBERSHIP_EVIDENCE',
-        'The access-membership snapshot did not complete every configured group.',
-      );
-    }
-
-    const [member] = await database
-      .select({
-        googleSubject: accessMembershipMembers.googleSubject,
-        facilityScopeKind: accessMembershipMembers.facilityScopeKind,
-      })
-      .from(accessMembershipMembers)
-      .where(
-        and(
-          eq(accessMembershipMembers.snapshotId, snapshotId),
-          eq(accessMembershipMembers.userId, user.id),
-        ),
-      )
-      .limit(1);
-    if (member === undefined || member.googleSubject !== user.googleSubject) {
-      throw new SessionAccessError(
-        'INVALID_MEMBERSHIP_EVIDENCE',
-        'The user is absent from the cached access-membership snapshot.',
-      );
-    }
-    const memberGroups = await database
-      .select({
-        groupSourceId: accessMembershipMemberGroups.groupSourceId,
-        groupSourceKind: accessMembershipMemberGroups.groupSourceKind,
-        groupPurpose: accessMembershipMemberGroups.groupPurpose,
-      })
-      .from(accessMembershipMemberGroups)
-      .where(
-        and(
-          eq(accessMembershipMemberGroups.snapshotId, snapshotId),
-          eq(accessMembershipMemberGroups.userId, user.id),
-        ),
-      );
-    const expectedSet = new Set(expected);
-    const accessGroupSourceRefs = memberGroups.map((row) => ({
-      id: row.groupSourceId,
-      kind: row.groupSourceKind,
-      purpose: row.groupPurpose,
-      facilityId: null,
-    }));
-    if (
-      memberGroups.length === 0 ||
-      memberGroups.some(
-        (row) =>
-          row.groupSourceKind !== 'google-group' ||
-          row.groupPurpose !== 'access' ||
-          !expectedSet.has(
-            `${row.groupSourceId}:${row.groupSourceKind}:${row.groupPurpose}`,
-          ),
-      )
-    ) {
-      throw new SessionAccessError(
-        'INVALID_MEMBERSHIP_EVIDENCE',
-        'The cached member lacks designated access-group provenance.',
-      );
-    }
-    const memberFacilityRows = await database
-      .select({ facilityId: accessMembershipMemberFacilities.facilityId })
-      .from(accessMembershipMemberFacilities)
-      .where(
-        and(
-          eq(accessMembershipMemberFacilities.snapshotId, snapshotId),
-          eq(accessMembershipMemberFacilities.userId, user.id),
-        ),
-      );
-    const scope = buildFacilityScope(
-      member.facilityScopeKind,
-      memberFacilityRows.map((row) => row.facilityId),
-    );
-    AccessMembershipMemberSchema.parse({
-      userId: user.id,
-      googleSubject: user.googleSubject,
-      accessGroupSourceRefs,
-      facilityScope: scope,
-    });
-    return Object.freeze({
-      snapshotId: snapshot.id,
-      version: snapshot.version,
-      scope,
-      capturedAt: snapshot.capturedAt,
     });
   }
 
@@ -1684,13 +1521,6 @@ export class DrizzleSessionStore implements SessionStore {
           .limit(1);
         if (userRow === undefined || userRow.disabledAt !== null) {
           throw new SessionAccessError('FORBIDDEN', 'Session issuance denied.');
-        }
-        if (input.membershipSnapshotId !== null) {
-          await this.loadMembershipEvidence(
-            input.membershipSnapshotId,
-            userRow,
-            transaction,
-          );
         }
         await transaction.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${input.device.installationId}, 4017))`,

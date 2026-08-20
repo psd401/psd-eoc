@@ -53,10 +53,6 @@ import {
 } from '../../../db/client.js';
 import {
   accessGroupMembers,
-  accessMembershipMemberFacilities,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   connectivityEpochInvalidations,
   connectivityEpochs,
@@ -1171,9 +1167,10 @@ describeWithDatabase(
         ]);
       });
 
+      // Records one sync run. The evidence tables it used to populate are gone;
+      // membership lives in `access_group_members`, seeded above.
       async function insertCompleteMembershipSnapshot(
         capturedAt: Date,
-        includeTargetMember: boolean,
       ): Promise<string> {
         return database.transaction(async (transaction) => {
           await transaction.execute(sql`select pg_advisory_xact_lock(401, 7)`);
@@ -1181,75 +1178,19 @@ describeWithDatabase(
             .select({ version: max(accessMembershipSnapshots.version) })
             .from(accessMembershipSnapshots);
           const snapshotId = crypto.randomUUID();
-          const version = Number(current?.version ?? 0) + 1;
           await transaction.insert(accessMembershipSnapshots).values({
             id: snapshotId,
-            version,
+            version: Number(current?.version ?? 0) + 1,
             complete: true,
             syncStartedAt: new Date(capturedAt.getTime() - 60_000),
             capturedAt,
           });
-          await transaction.insert(accessMembershipSnapshotGroups).values([
-            {
-              snapshotId,
-              groupSourceId: fixture.groupSourceId,
-              groupSourceKind: 'google-group',
-              groupPurpose: 'access',
-              completionKind: 'expected',
-            },
-            {
-              snapshotId,
-              groupSourceId: fixture.groupSourceId,
-              groupSourceKind: 'google-group',
-              groupPurpose: 'access',
-              completionKind: 'completed',
-            },
-          ]);
-          const members = [
-            {
-              userId: fixture.userId,
-              googleSubject: fixture.googleSubject,
-            },
-            ...(includeTargetMember
-              ? [
-                  {
-                    userId: fixture.targetUserId,
-                    googleSubject: fixture.targetGoogleSubject,
-                  },
-                ]
-              : []),
-          ];
-          await transaction.insert(accessMembershipMembers).values(
-            members.map((member) => ({
-              snapshotId,
-              ...member,
-              facilityScopeKind: 'facilities' as const,
-            })),
-          );
-          await transaction.insert(accessMembershipMemberGroups).values(
-            members.map((member) => ({
-              snapshotId,
-              userId: member.userId,
-              groupSourceId: fixture.groupSourceId,
-              groupSourceKind: 'google-group' as const,
-              groupPurpose: 'access' as const,
-            })),
-          );
-          await transaction.insert(accessMembershipMemberFacilities).values(
-            members.map((member) => ({
-              snapshotId,
-              userId: member.userId,
-              facilityId: fixture.facilityId,
-            })),
-          );
           return snapshotId;
         });
       }
 
-      const issuanceSnapshotId = await insertCompleteMembershipSnapshot(
-        issuanceCapturedAt,
-        true,
-      );
+      const issuanceSnapshotId =
+        await insertCompleteMembershipSnapshot(issuanceCapturedAt);
       const policy = {
         sessionLifetimeSeconds: 30 * 24 * 60 * 60,
         membershipTtlSeconds: 60 * 60,
@@ -1287,10 +1228,8 @@ describeWithDatabase(
         },
         new Date('2026-08-07T09:31:00.000Z'),
       );
-      const renewedSnapshotId = await insertCompleteMembershipSnapshot(
-        renewedCapturedAt,
-        true,
-      );
+      const renewedSnapshotId =
+        await insertCompleteMembershipSnapshot(renewedCapturedAt);
       // A later sync read the same membership again. That newer read is what
       // carries the session past its issuance freshness window, with the
       // provider offline throughout.

@@ -8,7 +8,7 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 
 import { requireSyntheticTestDatabaseUrl } from '../../lib/testing/database';
 import {
@@ -22,9 +22,6 @@ import {
 } from '../../db/client';
 import {
   accessGroupMembers,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   connectivityEpochs,
   deviceEnrollments,
@@ -332,7 +329,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const userId = randomUUID();
-    const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
     const snapshotId = randomUUID();
     const deviceEnrollmentId = randomUUID();
     const sessionId = randomUUID();
@@ -359,35 +355,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         complete: true,
         syncStartedAt: now,
         capturedAt: now,
-      });
-      await transaction.insert(accessMembershipSnapshotGroups).values([
-        {
-          snapshotId,
-          groupSourceId,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-          completionKind: 'expected',
-        },
-        {
-          snapshotId,
-          groupSourceId,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
-          completionKind: 'completed',
-        },
-      ]);
-      await transaction.insert(accessMembershipMembers).values({
-        snapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
-      });
-      await transaction.insert(accessMembershipMemberGroups).values({
-        snapshotId,
-        userId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
       });
     });
     await database.insert(deviceEnrollments).values({
@@ -481,12 +448,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         complete: true,
         syncStartedAt: now,
         capturedAt: now,
-      });
-      await transaction.insert(accessMembershipMembers).values({
-        snapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
       });
     });
     await database.insert(deviceEnrollments).values([
@@ -698,20 +659,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       capturedAt: snapshotAt,
     });
 
-    const activeAccessGroups = await database
-      .select({
-        id: groupSources.id,
-        kind: groupSources.kind,
-        purpose: groupSources.purpose,
-      })
-      .from(groupSources)
-      .where(
-        and(
-          eq(groupSources.active, true),
-          eq(groupSources.kind, 'google-group'),
-          eq(groupSources.purpose, 'access'),
-        ),
-      );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
         id: snapshotId,
@@ -719,37 +666,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         complete: true,
         syncStartedAt: snapshotAt,
         capturedAt: snapshotAt,
-      });
-      await transaction.insert(accessMembershipSnapshotGroups).values(
-        activeAccessGroups.flatMap((source) => [
-          {
-            snapshotId,
-            groupSourceId: source.id,
-            groupSourceKind: source.kind,
-            groupPurpose: source.purpose,
-            completionKind: 'expected' as const,
-          },
-          {
-            snapshotId,
-            groupSourceId: source.id,
-            groupSourceKind: source.kind,
-            groupPurpose: source.purpose,
-            completionKind: 'completed' as const,
-          },
-        ]),
-      );
-      await transaction.insert(accessMembershipMembers).values({
-        snapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
-      });
-      await transaction.insert(accessMembershipMemberGroups).values({
-        snapshotId,
-        userId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
       });
     });
 
@@ -812,22 +728,16 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       // Roles are what the trusted group grants; there is no bootstrap
       // administrator added at issuance any more.
       expect(result.user.roles).toEqual(['staff']);
-      // The snapshot id is stamped for wire compatibility with shipped mobile
-      // builds, which reject a session whose id is null. Nothing reads it to
-      // decide access.
-      expect(result.session.authorization.membershipSnapshotId).toBe(
-        snapshotId,
-      );
+      // A session is pinned to nothing. Authorization asks the trusted groups
+      // about the present on every request, so there is no generation to
+      // record and nothing to stamp.
+      expect(result.session.authorization.membershipSnapshotId).toBeNull();
 
       const updatePrivileges = databaseExecuteRows<SnapshotUpdatePrivilegeRow>(
         await roleConnection.db.execute<SnapshotUpdatePrivilegeRow>(sql`
             with snapshot_tables(table_name) as (
               values
-                ('access_membership_snapshots'::text),
-                ('access_membership_snapshot_groups'::text),
-                ('access_membership_members'::text),
-                ('access_membership_member_groups'::text),
-                ('access_membership_member_facilities'::text)
+                ('access_membership_snapshots'::text)
             )
             select
               snapshot_tables.table_name,
@@ -864,26 +774,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       );
       expect(updatePrivileges).toEqual([
         {
-          table_name: 'access_membership_member_facilities',
-          table_update: false,
-          update_columns: ['snapshot_id'],
-        },
-        {
-          table_name: 'access_membership_member_groups',
-          table_update: false,
-          update_columns: ['snapshot_id'],
-        },
-        {
-          table_name: 'access_membership_members',
-          table_update: false,
-          update_columns: ['snapshot_id'],
-        },
-        {
-          table_name: 'access_membership_snapshot_groups',
-          table_update: false,
-          update_columns: ['snapshot_id'],
-        },
-        {
           table_name: 'access_membership_snapshots',
           table_update: false,
           update_columns: ['id'],
@@ -901,7 +791,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       expect(persistedSession).toEqual({
         id: result.session.id,
         userId,
-        membershipSnapshotId: snapshotId,
+        membershipSnapshotId: null,
       });
       const [tokenIssuance] = await database
         .select({
@@ -947,20 +837,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       capturedAt: snapshotAt,
     });
 
-    const activeAccessGroups = await database
-      .select({
-        id: groupSources.id,
-        kind: groupSources.kind,
-        purpose: groupSources.purpose,
-      })
-      .from(groupSources)
-      .where(
-        and(
-          eq(groupSources.active, true),
-          eq(groupSources.kind, 'google-group'),
-          eq(groupSources.purpose, 'access'),
-        ),
-      );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
         id: snapshotId,
@@ -968,37 +844,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         complete: true,
         syncStartedAt: snapshotAt,
         capturedAt: snapshotAt,
-      });
-      await transaction.insert(accessMembershipSnapshotGroups).values(
-        activeAccessGroups.flatMap((source) => [
-          {
-            snapshotId,
-            groupSourceId: source.id,
-            groupSourceKind: source.kind,
-            groupPurpose: source.purpose,
-            completionKind: 'expected' as const,
-          },
-          {
-            snapshotId,
-            groupSourceId: source.id,
-            groupSourceKind: source.kind,
-            groupPurpose: source.purpose,
-            completionKind: 'completed' as const,
-          },
-        ]),
-      );
-      await transaction.insert(accessMembershipMembers).values({
-        snapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
-      });
-      await transaction.insert(accessMembershipMemberGroups).values({
-        snapshotId,
-        userId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
       });
     });
 
@@ -1119,7 +964,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
     const database = databaseConnection().db;
     const suffix = randomUUID();
     const userId = randomUUID();
-    const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
     const snapshotId = randomUUID();
     const deviceEnrollmentId = randomUUID();
     const sessionId = randomUUID();
@@ -1148,20 +992,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       snapshotAt,
       `issue-23-concurrent-refresh-${suffix}@psd401.net`,
     );
-    const activeAccessGroups = await database
-      .select({
-        id: groupSources.id,
-        kind: groupSources.kind,
-        purpose: groupSources.purpose,
-      })
-      .from(groupSources)
-      .where(
-        and(
-          eq(groupSources.active, true),
-          eq(groupSources.kind, 'google-group'),
-          eq(groupSources.purpose, 'access'),
-        ),
-      );
     await database.transaction(async (transaction) => {
       await transaction.insert(accessMembershipSnapshots).values({
         id: snapshotId,
@@ -1169,37 +999,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         complete: true,
         syncStartedAt: snapshotAt,
         capturedAt: snapshotAt,
-      });
-      await transaction.insert(accessMembershipSnapshotGroups).values(
-        activeAccessGroups.flatMap((source) => [
-          {
-            snapshotId,
-            groupSourceId: source.id,
-            groupSourceKind: source.kind,
-            groupPurpose: source.purpose,
-            completionKind: 'expected' as const,
-          },
-          {
-            snapshotId,
-            groupSourceId: source.id,
-            groupSourceKind: source.kind,
-            groupPurpose: source.purpose,
-            completionKind: 'completed' as const,
-          },
-        ]),
-      );
-      await transaction.insert(accessMembershipMembers).values({
-        snapshotId,
-        userId,
-        googleSubject,
-        facilityScopeKind: 'district',
-      });
-      await transaction.insert(accessMembershipMemberGroups).values({
-        snapshotId,
-        userId,
-        groupSourceId,
-        groupSourceKind: 'google-group',
-        groupPurpose: 'access',
       });
     });
     await database.insert(deviceEnrollments).values({
@@ -1326,7 +1125,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       const database = recoveryConnection.db;
       const suffix = randomUUID();
       const userId = randomUUID();
-      const groupSourceId = DESIGNATED_ACCESS_GROUP_ID;
       const snapshotId = randomUUID();
       const snapshotAt = new Date();
       const issuedAt = new Date(snapshotAt.getTime() + 1_000);
@@ -1346,20 +1144,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
         createdAt: snapshotAt,
       });
       await database.insert(userRoles).values({ userId, role: 'staff' });
-      const activeAccessGroups = await database
-        .select({
-          id: groupSources.id,
-          kind: groupSources.kind,
-          purpose: groupSources.purpose,
-        })
-        .from(groupSources)
-        .where(
-          and(
-            eq(groupSources.active, true),
-            eq(groupSources.kind, 'google-group'),
-            eq(groupSources.purpose, 'access'),
-          ),
-        );
       await database.transaction(async (transaction) => {
         await transaction.insert(accessMembershipSnapshots).values({
           id: snapshotId,
@@ -1367,37 +1151,6 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
           complete: true,
           syncStartedAt: snapshotAt,
           capturedAt: snapshotAt,
-        });
-        await transaction.insert(accessMembershipSnapshotGroups).values(
-          activeAccessGroups.flatMap((source) => [
-            {
-              snapshotId,
-              groupSourceId: source.id,
-              groupSourceKind: source.kind,
-              groupPurpose: source.purpose,
-              completionKind: 'expected' as const,
-            },
-            {
-              snapshotId,
-              groupSourceId: source.id,
-              groupSourceKind: source.kind,
-              groupPurpose: source.purpose,
-              completionKind: 'completed' as const,
-            },
-          ]),
-        );
-        await transaction.insert(accessMembershipMembers).values({
-          snapshotId,
-          userId,
-          googleSubject,
-          facilityScopeKind: 'district',
-        });
-        await transaction.insert(accessMembershipMemberGroups).values({
-          snapshotId,
-          userId,
-          groupSourceId,
-          groupSourceKind: 'google-group',
-          groupPurpose: 'access',
         });
       });
 

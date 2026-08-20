@@ -18,10 +18,6 @@ import {
 } from '../../../db/client';
 import {
   accessGroupMembers,
-  accessMembershipMemberFacilities,
-  accessMembershipMemberGroups,
-  accessMembershipMembers,
-  accessMembershipSnapshotGroups,
   accessMembershipSnapshots,
   audienceConfigurations,
   channelConfigurations,
@@ -460,6 +456,16 @@ interface PersistedAccessSnapshotFixture {
   readonly capturedAt: Date;
 }
 
+/**
+ * Records one sync run.
+ *
+ * This used to publish an access-membership generation: expected and completed
+ * group evidence, member rows, each member's group provenance, and their
+ * facilities. Sign-in re-derived its answer from all of it. Nothing reads any
+ * of that now, and the tables are gone; what remains is the operator-visible
+ * record of when membership was last read, which some fixtures still want an
+ * id and version from.
+ */
 async function persistCompleteAccessSnapshotGeneration(
   database: PostgresDatabaseConnection['db'],
   input: PersistAccessSnapshotFixtureInput,
@@ -467,184 +473,91 @@ async function persistCompleteAccessSnapshotGeneration(
   if (input.groups.length === 0) {
     throw new Error('A complete access fixture requires an expected group.');
   }
-  const groupIds = new Set(input.groups.map(({ id }) => id));
-  if (groupIds.size !== input.groups.length) {
-    throw new Error('A complete access fixture cannot repeat a group.');
-  }
-  for (const member of input.members) {
-    if (member.accessGroupIds.some((id) => !groupIds.has(id))) {
-      throw new Error(
-        'An access member fixture references a group outside its snapshot.',
-      );
-    }
-  }
-
+  const capturedAt = input.capturedAt ?? new Date();
   return database.transaction(async (transaction) => {
-    const [latestSnapshot] = await transaction
-      .select({
-        version: sql<number>`coalesce(max(${accessMembershipSnapshots.version}), 0)::integer`,
-      })
-      .from(accessMembershipSnapshots);
-    const snapshot = Object.freeze({
-      id: randomUUID(),
-      version: (latestSnapshot?.version ?? 0) + 1,
-      capturedAt: input.capturedAt ?? new Date(),
-    });
+    const [latest] = await transaction
+      .select({ version: accessMembershipSnapshots.version })
+      .from(accessMembershipSnapshots)
+      .orderBy(desc(accessMembershipSnapshots.version))
+      .limit(1);
+    const version = (latest?.version ?? 0) + 1;
+    const id = randomUUID();
     await transaction.insert(accessMembershipSnapshots).values({
-      id: snapshot.id,
-      version: snapshot.version,
+      id,
+      version,
       complete: true,
-      syncStartedAt: snapshot.capturedAt,
-      capturedAt: snapshot.capturedAt,
+      syncStartedAt: new Date(capturedAt.getTime() - 1_000),
+      capturedAt,
     });
-    await transaction.insert(accessMembershipSnapshotGroups).values(
-      input.groups.flatMap((group) => [
-        {
-          snapshotId: snapshot.id,
-          groupSourceId: group.id,
-          groupSourceKind: group.kind,
-          groupPurpose: group.purpose,
-          completionKind: 'expected' as const,
-        },
-        {
-          snapshotId: snapshot.id,
-          groupSourceId: group.id,
-          groupSourceKind: group.kind,
-          groupPurpose: group.purpose,
-          completionKind: 'completed' as const,
-        },
-      ]),
-    );
-    if (input.members.length > 0) {
-      await transaction.insert(accessMembershipMembers).values(
-        input.members.map((member) => ({
-          snapshotId: snapshot.id,
-          userId: member.userId,
-          googleSubject: member.googleSubject,
-          facilityScopeKind: member.facilityScopeKind,
-        })),
-      );
+    // Membership is what actually grants access, so a fixture that names
+    // members writes it where authorization reads it.
+    for (const member of input.members) {
+      const [account] = await transaction
+        .select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, member.userId))
+        .limit(1);
+      if (account === undefined) continue;
+      for (const groupSourceId of member.accessGroupIds) {
+        await transaction
+          .insert(accessGroupMembers)
+          .values({
+            groupSourceId,
+            email: account.email.toLowerCase(),
+            capturedAt,
+          })
+          .onConflictDoNothing();
+        await transaction
+          .update(groupSources)
+          .set({ membersCapturedAt: capturedAt })
+          .where(eq(groupSources.id, groupSourceId));
+      }
     }
-    const memberGroups = input.members.flatMap((member) =>
-      member.accessGroupIds.map((groupSourceId) => ({
-        snapshotId: snapshot.id,
-        userId: member.userId,
-        groupSourceId,
-        groupSourceKind: 'google-group' as const,
-        groupPurpose: 'access' as const,
-      })),
-    );
-    if (memberGroups.length > 0) {
-      await transaction
-        .insert(accessMembershipMemberGroups)
-        .values(memberGroups);
-    }
-    const memberFacilities = input.members.flatMap((member) =>
-      (member.facilityIds ?? []).map((facilityId) => ({
-        snapshotId: snapshot.id,
-        userId: member.userId,
-        facilityId,
-      })),
-    );
-    if (memberFacilities.length > 0) {
-      await transaction
-        .insert(accessMembershipMemberFacilities)
-        .values(memberFacilities);
-    }
-    return snapshot;
+    return Object.freeze({ id, version, capturedAt });
   });
 }
 
+/** Adds one more person to the trusted groups that are already active. */
 async function copyLatestAccessSnapshotWithMember(
   database: PostgresDatabaseConnection['db'],
   addedMember: AccessSnapshotMemberFixture,
 ): Promise<PersistedAccessSnapshotFixture> {
-  const [latestSnapshot] = await database
-    .select({ id: accessMembershipSnapshots.id })
-    .from(accessMembershipSnapshots)
-    .where(eq(accessMembershipSnapshots.complete, true))
-    .orderBy(
-      desc(accessMembershipSnapshots.version),
-      desc(accessMembershipSnapshots.capturedAt),
-      desc(accessMembershipSnapshots.id),
-    )
-    .limit(1);
-  if (latestSnapshot === undefined) {
-    throw new Error('A complete access snapshot is required to copy members.');
+  const activeGroups = await database
+    .select({ id: groupSources.id })
+    .from(groupSources)
+    .where(
+      and(
+        eq(groupSources.kind, 'google-group'),
+        eq(groupSources.purpose, 'access'),
+        eq(groupSources.active, true),
+      ),
+    );
+  if (activeGroups.length === 0) {
+    throw new Error('An active access group is required to add a member.');
   }
-  const groupRows = await database
-    .select({
-      id: accessMembershipSnapshotGroups.groupSourceId,
-      kind: accessMembershipSnapshotGroups.groupSourceKind,
-      purpose: accessMembershipSnapshotGroups.groupPurpose,
-      completionKind: accessMembershipSnapshotGroups.completionKind,
-    })
-    .from(accessMembershipSnapshotGroups)
-    .where(eq(accessMembershipSnapshotGroups.snapshotId, latestSnapshot.id));
-  const expectedGroups = groupRows
-    .filter(({ completionKind }) => completionKind === 'expected')
-    .map(({ id, kind, purpose }) => ({ id, kind, purpose }))
-    .sort((left, right) => left.id.localeCompare(right.id));
-  const completedIds = groupRows
-    .filter(({ completionKind }) => completionKind === 'completed')
-    .map(({ id }) => id)
-    .sort();
-  if (
-    expectedGroups.length === 0 ||
-    expectedGroups.some(
-      ({ kind, purpose }) => kind !== 'google-group' || purpose !== 'access',
-    ) ||
-    expectedGroups.map(({ id }) => id).join('\n') !== completedIds.join('\n')
-  ) {
-    throw new Error('The latest access snapshot is not strict and complete.');
-  }
-  const members = await database
-    .select({
-      userId: accessMembershipMembers.userId,
-      googleSubject: accessMembershipMembers.googleSubject,
-      facilityScopeKind: accessMembershipMembers.facilityScopeKind,
-    })
-    .from(accessMembershipMembers)
-    .where(eq(accessMembershipMembers.snapshotId, latestSnapshot.id));
-  if (members.some(({ userId }) => userId === addedMember.userId)) {
-    throw new Error('The copied access snapshot already contains that member.');
-  }
-  const memberGroups = await database
-    .select({
-      userId: accessMembershipMemberGroups.userId,
-      groupSourceId: accessMembershipMemberGroups.groupSourceId,
-    })
-    .from(accessMembershipMemberGroups)
-    .where(eq(accessMembershipMemberGroups.snapshotId, latestSnapshot.id));
-  const memberFacilities = await database
-    .select({
-      userId: accessMembershipMemberFacilities.userId,
-      facilityId: accessMembershipMemberFacilities.facilityId,
-    })
-    .from(accessMembershipMemberFacilities)
-    .where(eq(accessMembershipMemberFacilities.snapshotId, latestSnapshot.id));
-
   return persistCompleteAccessSnapshotGeneration(database, {
-    groups: expectedGroups.map(({ id }) => ({
+    groups: activeGroups.map(({ id }) => ({
       id,
       kind: 'google-group' as const,
       purpose: 'access' as const,
     })),
     members: [
-      ...members.map((member) => ({
-        ...member,
-        accessGroupIds: memberGroups
-          .filter(({ userId }) => userId === member.userId)
-          .map(({ groupSourceId }) => groupSourceId),
-        facilityIds: memberFacilities
-          .filter(({ userId }) => userId === member.userId)
-          .map(({ facilityId }) => facilityId),
-      })),
-      addedMember,
+      {
+        ...addedMember,
+        accessGroupIds:
+          addedMember.accessGroupIds.length > 0
+            ? addedMember.accessGroupIds
+            : activeGroups.map(({ id }) => id),
+      },
     ],
   });
 }
 
+/**
+ * A synthetic administrator with a live session: the account, membership in
+ * the trusted groups that grant administration, a device, and a session row.
+ * There is no snapshot to pin the session to any more.
+ */
 async function persistAuthenticatedAdministrator(
   database: PostgresDatabaseConnection['db'],
   authenticated: AuthenticatedSession,
@@ -655,51 +568,28 @@ async function persistAuthenticatedAdministrator(
     throw new Error('The synthetic administrator must be human.');
   }
   const now = new Date();
-  const validUntil = new Date(now.getTime() + 24 * 60 * 60 * 1_000);
-  const graceUntil = new Date(now.getTime() + 48 * 60 * 60 * 1_000);
-  const expiresAt = new Date(now.getTime() + 72 * 60 * 60 * 1_000);
   const deviceId = randomUUID();
   const accessGroupIds = Array.isArray(accessGroupIdsValue)
-    ? accessGroupIdsValue
-    : [accessGroupIdsValue];
+    ? [...accessGroupIdsValue]
+    : [accessGroupIdsValue as string];
 
   await persistAdministratorIdentity(database, authenticated, suffix, now);
-  const activeAccessGroups = await database
-    .select({
-      id: groupSources.id,
-      kind: groupSources.kind,
-      purpose: groupSources.purpose,
-    })
-    .from(groupSources)
-    .where(
-      and(
-        eq(groupSources.kind, 'google-group'),
-        eq(groupSources.purpose, 'access'),
-        eq(groupSources.active, true),
-      ),
-    );
-  const activeAccessGroupIds = new Set(activeAccessGroups.map(({ id }) => id));
-  if (accessGroupIds.some((id) => !activeAccessGroupIds.has(id))) {
-    throw new Error(
-      'The synthetic administrator must belong to an active access group.',
-    );
+  await database
+    .insert(accessGroupMembers)
+    .values(
+      accessGroupIds.map((groupSourceId) => ({
+        groupSourceId,
+        email: `issue-26-admin-${suffix}@psd401.net`,
+        capturedAt: now,
+      })),
+    )
+    .onConflictDoNothing();
+  for (const groupSourceId of accessGroupIds) {
+    await database
+      .update(groupSources)
+      .set({ membersCapturedAt: now })
+      .where(eq(groupSources.id, groupSourceId));
   }
-  const snapshot = await persistCompleteAccessSnapshotGeneration(database, {
-    groups: activeAccessGroups.map(({ id }) => ({
-      id,
-      kind: 'google-group' as const,
-      purpose: 'access' as const,
-    })),
-    members: [
-      {
-        userId: authenticated.actor.userId,
-        googleSubject: `issue-26-admin-subject-${suffix}`,
-        facilityScopeKind: 'district',
-        accessGroupIds,
-      },
-    ],
-    capturedAt: now,
-  });
   await database.insert(deviceEnrollments).values({
     id: deviceId,
     userId: authenticated.actor.userId,
@@ -713,11 +603,11 @@ async function persistAuthenticatedAdministrator(
     id: authenticated.actor.sessionId,
     userId: authenticated.actor.userId,
     deviceEnrollmentId: deviceId,
-    membershipSnapshotId: snapshot.id,
-    membershipValidUntil: validUntil,
-    membershipGraceUntil: graceUntil,
+    membershipSnapshotId: null,
+    membershipValidUntil: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
+    membershipGraceUntil: new Date(now.getTime() + 48 * 60 * 60 * 1_000),
     createdAt: now,
-    expiresAt,
+    expiresAt: new Date(now.getTime() + 72 * 60 * 60 * 1_000),
   });
 }
 
@@ -806,20 +696,11 @@ async function persistLiveAuthorizationActor(
       userId: authenticated.actor.userId,
       role: 'admin',
     });
-    const expectedGroups = await database
-      .select({ id: accessMembershipSnapshotGroups.groupSourceId })
-      .from(accessMembershipSnapshotGroups)
-      .where(
-        and(
-          eq(accessMembershipSnapshotGroups.snapshotId, membershipSnapshot.id),
-          eq(accessMembershipSnapshotGroups.completionKind, 'expected'),
-        ),
-      );
     const copiedSnapshot = await copyLatestAccessSnapshotWithMember(database, {
       userId: authenticated.actor.userId,
       googleSubject,
       facilityScopeKind: 'district',
-      accessGroupIds: expectedGroups.map(({ id }) => id),
+      accessGroupIds: [],
     });
     membershipSnapshot = { id: copiedSnapshot.id };
   }

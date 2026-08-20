@@ -18,13 +18,12 @@ import {
   type SyncAccessMembershipInput,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 
 import type { Database } from '../../db/client';
 import {
   accessGroupMembers,
-  accessMembershipEvaluatedMembers,
   accessMembershipSnapshots,
   groupSources,
   idempotencyRecords,
@@ -575,20 +574,23 @@ export function createDrizzleAccessMembershipSyncStore(
         ),
       )
       .orderBy(asc(groupSources.id));
+    // Reconstructed from the membership the run actually wrote, which is the
+    // membership that is live. The evaluated-member rows this used to read were
+    // a second copy of the same emails, kept only so a snapshot generation
+    // could be replayed against itself.
     const memberRows = await database
       .select({
-        email: accessMembershipEvaluatedMembers.email,
-        groupSourceId: accessMembershipEvaluatedMembers.groupSourceId,
+        email: accessGroupMembers.email,
+        groupSourceId: accessGroupMembers.groupSourceId,
       })
-      .from(accessMembershipEvaluatedMembers)
+      .from(accessGroupMembers)
       .where(
-        and(
-          eq(accessMembershipEvaluatedMembers.snapshotId, proof.snapshotId),
-          eq(accessMembershipEvaluatedMembers.groupSourceKind, 'google-group'),
-          eq(accessMembershipEvaluatedMembers.groupPurpose, 'access'),
+        inArray(
+          accessGroupMembers.groupSourceId,
+          sourceRows.map(({ id }) => id),
         ),
       )
-      .orderBy(asc(accessMembershipEvaluatedMembers.email));
+      .orderBy(asc(accessGroupMembers.email));
 
     const groups = sourceRows.map((source) => ({
       groupSourceId: source.id,

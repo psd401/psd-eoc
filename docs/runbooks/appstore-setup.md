@@ -64,7 +64,7 @@ version 1.0.1/build 2 **Failed** with error 90683 because its Info.plist lacks
 `NSMotionUsageDescription`. That immutable binary is not eligible for retry or
 TestFlight. No processed build, group assignment, tester, invitation, or
 physical installation exists. The repository correction advances the next
-candidate to app/runtime 1.0.2; its replacement build and later upload require
+candidate to app/runtime 1.0.3; its replacement build and later upload require
 fresh separate approvals and remain pending.
 
 The bundle identifier already existed in the Apple Developer account, so the

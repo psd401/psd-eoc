@@ -511,16 +511,6 @@ async function insertSyntheticHumanPrerequisites(
         '2026-08-12T18:00:00.000Z'::timestamptz
       )
     `);
-    await transaction.execute(sql`
-      insert into access_membership_members (
-        snapshot_id, user_id, google_subject, facility_scope_kind
-      ) values (
-        ${SNAPSHOT_ID}::uuid,
-        ${USER_ID}::uuid,
-        'synthetic-fanout-control-admin',
-        'district'::facility_scope_kind
-      )
-    `);
   });
   await database.execute(sql`
     insert into sessions (

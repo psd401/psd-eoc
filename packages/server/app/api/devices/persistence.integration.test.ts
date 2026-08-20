@@ -30,7 +30,6 @@ import {
 } from '../../../db/client';
 import { seedDatabase } from '../../../db/seed';
 import {
-  accessMembershipMembers,
   accessMembershipSnapshots,
   dispatchBatches,
   deviceEnrollments,
@@ -361,12 +360,6 @@ async function installFixture(database: PostgresDatabase): Promise<void> {
       complete: true,
       syncStartedAt: oneMinuteAgo,
       capturedAt: now,
-    });
-    await transaction.insert(accessMembershipMembers).values({
-      snapshotId: fixture.membershipSnapshotId,
-      userId: fixture.userId,
-      googleSubject,
-      facilityScopeKind: 'district',
     });
     await transaction.insert(deviceEnrollments).values([
       {
