@@ -21,7 +21,10 @@ import { join, relative } from 'node:path';
 import postgres from 'postgres';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const SEARCH_ROOTS = ['packages', 'workers', 'infra'];
+// `scripts` is here because leaving it out meant a colocated test could be
+// written, committed, and never run. `scripts/ops/appstore/asc.test.ts` had
+// been in that state: 171 assertions the gate had never once executed.
+const SEARCH_ROOTS = ['packages', 'workers', 'infra', 'scripts'];
 const TEST_PATTERN = /\.(test|spec)\.tsx?$/u;
 const SKIP_DIRECTORIES = new Set([
   'node_modules',
