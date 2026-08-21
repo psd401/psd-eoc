@@ -306,6 +306,39 @@ function allowScopedCloudWatchAlarmPublish(
   // they are created. The operations key still encrypts the monitoring log
   // groups, which is granted separately.
   for (const topic of topics) {
+    // Restore the owner statement SNS creates by default.
+    //
+    // A topic with no explicit policy carries an implicit default granting the
+    // owning account the ordinary SNS actions, including Subscribe and Receive.
+    // Adding any statement replaces that default wholesale, so a topic that had
+    // only the CloudWatch grant below authorised publishing and nothing else —
+    // and an endpoint that may not receive never gets its subscription
+    // confirmation. The subscription is created, sits in PendingConfirmation
+    // forever, and no error is reported anywhere.
+    //
+    // `Principal: *` is what the real default uses; the SourceOwner condition
+    // is what confines it to this account.
+    topic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'SNS:AddPermission',
+          'SNS:DeleteTopic',
+          'SNS:GetTopicAttributes',
+          'SNS:ListSubscriptionsByTopic',
+          'SNS:Publish',
+          'SNS:Receive',
+          'SNS:RemovePermission',
+          'SNS:SetTopicAttributes',
+          'SNS:Subscribe',
+        ],
+        conditions: {
+          StringEquals: { 'AWS:SourceOwner': stack.account },
+        },
+        principals: [new iam.AnyPrincipal()],
+        resources: [topic.topicArn],
+        sid: '__default_statement_ID',
+      }),
+    );
     topic.addToResourcePolicy(
       new iam.PolicyStatement({
         actions: ['sns:Publish'],

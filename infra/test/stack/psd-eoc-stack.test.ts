@@ -1264,6 +1264,27 @@ describe('alarm topic delivery', () => {
       expect(properties(resource)).not.toHaveProperty('KmsMasterKeyId');
     }
 
+    // Adding any statement to a topic policy replaces the implicit default that
+    // grants the owning account Subscribe and Receive. Without it an endpoint
+    // may not receive, so the subscription confirmation is never delivered and
+    // the subscription sits in PendingConfirmation with no error anywhere.
+    for (const [, resource] of resourceEntries('AWS::SNS::TopicPolicy').filter(
+      ([logicalId]) => logicalId.includes('Alarm'),
+    )) {
+      const statements = asArray(
+        asRecord(properties(resource).PolicyDocument).Statement,
+      ).map(asRecord);
+      const owner = statements.find(
+        (statement) => statement.Sid === '__default_statement_ID',
+      );
+      expect(owner).toBeDefined();
+      expect(owner?.Action).toContain('SNS:Receive');
+      expect(owner?.Action).toContain('SNS:Subscribe');
+      expect(owner?.Condition).toEqual({
+        StringEquals: { 'AWS:SourceOwner': AWS_ACCOUNT },
+      });
+    }
+
     // An alarm still has to be able to publish, which is a topic policy and
     // never depended on encryption.
     const publishSids = resourceEntries('AWS::SNS::TopicPolicy').flatMap(
