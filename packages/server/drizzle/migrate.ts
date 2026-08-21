@@ -6,6 +6,12 @@ import {
   bootstrapAccessConfiguration,
   describeBootstrapOutcome,
 } from '../db/bootstrap-access';
+import {
+  bootstrapFacilities,
+  bootstrapNeighborhoods,
+  describeFacilityOutcome,
+  describeNeighborhoodOutcome,
+} from '../db/bootstrap-facilities';
 import { createDatabaseClient, readDatabaseConfig } from '../db/client';
 
 /** Absolute path keeps migrations independent of the caller's working directory. */
@@ -36,6 +42,17 @@ const runFromCommandLine = async (): Promise<void> => {
     // first one without ever disturbing a district that has its own.
     console.info(
       describeBootstrapOutcome(await bootstrapAccessConfiguration(client.db)),
+    );
+    // Facilities are the district's schools. They were only creatable through
+    // the admin UI, so a rebuilt deployment came up with none and whatever
+    // somebody had typed in was gone. Configured facilities are created here,
+    // matched on code, leaving any that already exist untouched.
+    console.info(describeFacilityOutcome(await bootstrapFacilities(client.db)));
+    // Neighborhoods group facilities that are notified together. Also only
+    // creatable through the admin UI, so also lost on a rebuild, and useless to
+    // restore facilities without.
+    console.info(
+      describeNeighborhoodOutcome(await bootstrapNeighborhoods(client.db)),
     );
   } finally {
     await client.close();

@@ -67,9 +67,11 @@ import {
   SES_IDENTITY_DOMAIN,
   SES_VERIFICATION_REFERENCE,
   readDeploymentIdentity,
+  readFacilityContext,
+  readNeighborhoodContext,
 } from './config';
 
-const SECRET_PREFIX = '/psd-eoc/exploration-smoke';
+const SECRET_PREFIX = '/psd-eoc';
 const APP_RUNNER_PORT = '3000';
 const APPLICATION_SUBNET_GROUP_NAME = 'Application';
 const BOOTSTRAP_CONTAINER_NAME = 'native-bootstrap';
@@ -114,7 +116,7 @@ export class PsdEocStack extends Stack {
       Stack.of(this).region !== AWS_REGION
     ) {
       throw new Error(
-        `PsdEocExplorationSmoke must target AWS account ${AWS_ACCOUNT} (${AWS_ACCOUNT_ALIAS}) in ${AWS_REGION}.`,
+        `PsdEoc must target AWS account ${AWS_ACCOUNT} (${AWS_ACCOUNT_ALIAS}) in ${AWS_REGION}.`,
       );
     }
 
@@ -190,7 +192,7 @@ export class PsdEocStack extends Stack {
       {
         allowedPattern: `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:${SECRET_PREFIX}/google-oauth-[A-Za-z0-9]{6}$`,
         constraintDescription:
-          'Use the complete ARN of the reviewed exploration-smoke Google OAuth secret in the approved account and region.',
+          'Use the complete ARN of the reviewed production Google OAuth secret in the approved account and region.',
         description:
           'Complete ARN of the independently reviewed Google OAuth configuration. Google OIDC is the only live integration.',
         noEcho: true,
@@ -210,6 +212,42 @@ export class PsdEocStack extends Stack {
         type: 'String',
       },
     );
+    // The first trusted group. Without it a rebuilt deployment admits nobody,
+    // because the page that configures access groups sits behind sign-in. Empty
+    // by default so an already-configured district passes nothing; supplying
+    // only part of it is refused rather than producing a deployment that
+    // silently cannot be signed into.
+    const initialAccessGroupId = new CfnParameter(
+      this,
+      'InitialAccessGroupId',
+      {
+        default: '',
+        description:
+          'Cloud Identity group id whose membership grants administrator on a first run. Leave empty once access groups exist.',
+        type: 'String',
+      },
+    );
+    const initialAccessGroupEmail = new CfnParameter(
+      this,
+      'InitialAccessGroupEmail',
+      {
+        default: '',
+        description:
+          'Address of that group. Never committed; supplied per deployment.',
+        noEcho: true,
+        type: 'String',
+      },
+    );
+    const initialAccessGroupName = new CfnParameter(
+      this,
+      'InitialAccessGroupName',
+      {
+        default: '',
+        description: 'Display name for the first access group.',
+        type: 'String',
+      },
+    );
+
     const initialMobileTransitionEmailSha256 = new CfnParameter(
       this,
       'InitialMobileTransitionEmailSha256',
@@ -476,7 +514,7 @@ export class PsdEocStack extends Stack {
         allowAllOutbound: false,
         description:
           'Native PostgreSQL and HTTPS egress only for App Runner and one-off bootstrap tasks.',
-        securityGroupName: 'psd-eoc-exploration-smoke-application',
+        securityGroupName: 'psd-eoc-application',
         vpc: network as unknown as ec2.IVpc,
       },
     );
@@ -799,7 +837,7 @@ export class PsdEocStack extends Stack {
       {
         securityGroups: [applicationSecurityGroup.securityGroupId],
         subnets: applicationSubnets.subnetIds,
-        vpcConnectorName: 'psd-eoc-exploration-smoke-native',
+        vpcConnectorName: 'psd-eoc-vpc',
       },
     );
     // App Runner replaces a VPC connector when its tags change, but rejects a
@@ -814,7 +852,7 @@ export class PsdEocStack extends Stack {
     Tags.of(appRunnerVpcConnector).add('DataClassification', 'synthetic-only', {
       priority: 300,
     });
-    Tags.of(appRunnerVpcConnector).add('Environment', 'exploration-smoke', {
+    Tags.of(appRunnerVpcConnector).add('Environment', 'production', {
       priority: 300,
     });
     Tags.of(appRunnerVpcConnector).remove('DataScope', { priority: 300 });
@@ -825,7 +863,7 @@ export class PsdEocStack extends Stack {
       retention: logs.RetentionDays.TWO_WEEKS,
     });
     const bootstrapCluster = new ecs.Cluster(this, 'BootstrapEcsCluster', {
-      clusterName: 'psd-eoc-exploration-smoke-native-bootstrap',
+      clusterName: 'psd-eoc-bootstrap',
       containerInsightsV2: ecs.ContainerInsights.DISABLED,
       vpc: network as unknown as ec2.IVpc,
     });
@@ -849,7 +887,7 @@ export class PsdEocStack extends Stack {
       {
         cpu: 256,
         executionRole: bootstrapTaskExecutionRole,
-        family: 'psd-eoc-exploration-smoke-native-bootstrap',
+        family: 'psd-eoc-bootstrap',
         memoryLimitMiB: 512,
         runtimePlatform: {
           cpuArchitecture: ecs.CpuArchitecture.X86_64,
@@ -874,6 +912,13 @@ export class PsdEocStack extends Stack {
           DATABASE_PORT: String(DATABASE_PORT),
           DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
           DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
+          PSD_EOC_FACILITIES: readFacilityContext(this.node),
+          PSD_EOC_NEIGHBORHOODS: readNeighborhoodContext(this.node),
+          PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL:
+            initialAccessGroupEmail.valueAsString,
+          PSD_EOC_INITIAL_ACCESS_GROUP_ID: initialAccessGroupId.valueAsString,
+          PSD_EOC_INITIAL_ACCESS_GROUP_NAME:
+            initialAccessGroupName.valueAsString,
           SOURCE_SHA: bootstrapSourceSha.valueAsString,
           TMPDIR: '/tmp',
         },
@@ -940,7 +985,7 @@ export class PsdEocStack extends Stack {
       {
         cpu: 256,
         executionRole: accessSyncTaskExecutionRole,
-        family: 'psd-eoc-exploration-smoke-access-sync',
+        family: 'psd-eoc-access-sync',
         memoryLimitMiB: 512,
         runtimePlatform: {
           cpuArchitecture: ecs.CpuArchitecture.X86_64,
@@ -1103,7 +1148,7 @@ export class PsdEocStack extends Stack {
       this,
       'AppRunnerScaling',
       {
-        autoScalingConfigurationName: 'psd-eoc-exploration-smoke-single',
+        autoScalingConfigurationName: 'psd-eoc-single',
         maxConcurrency: 10,
         maxSize: 1,
         minSize: 1,
@@ -1136,7 +1181,7 @@ export class PsdEocStack extends Stack {
             vpcConnectorArn: appRunnerVpcConnector.attrVpcConnectorArn,
           },
         },
-        serviceName: 'psd-eoc-exploration-smoke',
+        serviceName: 'psd-eoc',
         sourceConfiguration: {
           authenticationConfiguration: {
             accessRoleArn: imageAccessRole.roleArn,
@@ -1280,7 +1325,7 @@ export class PsdEocStack extends Stack {
     Tags.of(appRunnerService).add('DataClassification', 'synthetic-only', {
       priority: 300,
     });
-    Tags.of(appRunnerService).add('Environment', 'exploration-smoke', {
+    Tags.of(appRunnerService).add('Environment', 'production', {
       priority: 300,
     });
     Tags.of(appRunnerService).remove('DataScope', { priority: 300 });

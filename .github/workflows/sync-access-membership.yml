@@ -40,8 +40,8 @@ jobs:
     environment: production
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
-      CLUSTER: psd-eoc-exploration-smoke-native-bootstrap
-      TASK_DEFINITION: psd-eoc-exploration-smoke-access-sync
+      CLUSTER: psd-eoc-bootstrap
+      TASK_DEFINITION: psd-eoc-access-sync
       SUBNETS: ${{ vars.ACCESS_SYNC_SUBNET_IDS }}
       SECURITY_GROUP: ${{ vars.ACCESS_SYNC_SECURITY_GROUP_ID }}
     steps:
@@ -93,7 +93,7 @@ jobs:
           # The task prints one bounded aggregate summary: counts and digests,
           # never a member address or a provider group id.
           summary=$(aws logs get-log-events \
-            --log-group-name /psd-eoc/exploration-smoke/bootstrap \
+            --log-group-name /psd-eoc/bootstrap \
             --log-stream-name "access-membership-sync/access-membership-sync/${task_arn##*/}" \
             --query 'events[-1].message' --output text 2>/dev/null || echo '')
 

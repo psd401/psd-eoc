@@ -16,18 +16,18 @@ export const AWS_REGION = 'us-west-2';
  * then this constant carries the old value deliberately, and every identifier
  * around it has been renamed so the misleading word stops spreading.
  */
-export const STACK_NAME = 'PsdEocExplorationSmoke';
+export const STACK_NAME = 'PsdEoc';
 
 // Physical resource names remain stable while the deployed environment moves
 // from the initial synthetic fixture to staff-only live operation.
 export const DEPLOYMENT_ENVIRONMENT = 'live-pilot';
 export const DATA_CLASSIFICATION = 'staff-minimized';
 export const DATABASE_NAME = 'psd_eoc';
-export const DATABASE_IDENTIFIER = 'psd-eoc-exploration-smoke';
+export const DATABASE_IDENTIFIER = 'psd-eoc';
 export const DATABASE_PORT = 5_432;
 export const HEALTH_PATH = '/api/health';
-export const SERVER_REPOSITORY_NAME = 'psd-eoc/exploration-smoke/server';
-export const HEALTH_QUEUE_NAME = 'psd-eoc-exploration-smoke-health';
+export const SERVER_REPOSITORY_NAME = 'psd-eoc/server';
+export const HEALTH_QUEUE_NAME = 'psd-eoc-health';
 export const EMAIL_QUEUE_NAME = 'psd-eoc-email';
 export const EMAIL_DEAD_LETTER_QUEUE_NAME = 'psd-eoc-email-dlq';
 export const EMAIL_WORKER_LOG_GROUP_NAME = '/psd-eoc/workers/email';
@@ -55,7 +55,7 @@ export const DELIVERY_QUEUE_MAX_RECEIVES = 5;
 export const SES_IDENTITY_DOMAIN = 'psd401.net';
 export const SES_FROM_ADDRESS = 'eoc-alerts@psd401.net';
 export const SES_VERIFICATION_REFERENCE = 'UNVERIFIED';
-export const BOOTSTRAP_LOG_GROUP_NAME = '/psd-eoc/exploration-smoke/bootstrap';
+export const BOOTSTRAP_LOG_GROUP_NAME = '/psd-eoc/bootstrap';
 export const DATABASE_SSL_ROOT_CERT =
   '/app/packages/server/certs/aws-rds-global-bundle.pem';
 
@@ -78,6 +78,72 @@ export interface DeploymentIdentity {
   readonly applicationOrigin: string;
   readonly hostedDomain: string;
   readonly iosBundleId: string;
+}
+
+/**
+ * The district's facilities, read from CDK context.
+ *
+ * These were rows only the admin UI could create, which meant nothing in this
+ * repository could produce them and a rebuilt deployment came up with no
+ * schools at all. A district's sites are configuration, so they are declared
+ * here and seeded by the bootstrap task.
+ *
+ * Absent context is allowed: a deployment that manages facilities through the
+ * admin UI is legitimate. Malformed context is not, because the failure would
+ * otherwise be a deployment that silently has nowhere to declare an incident.
+ */
+export function readFacilityContext(node: {
+  tryGetContext(key: string): unknown;
+}): string {
+  const value = node.tryGetContext('psdEoc:facilities');
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('CDK context psdEoc:facilities must be an array.');
+  }
+  for (const entry of value) {
+    const facility = entry as Record<string, unknown>;
+    if (
+      typeof facility?.code !== 'string' ||
+      !/^[A-Z0-9-]{1,32}$/u.test(facility.code) ||
+      typeof facility.name !== 'string' ||
+      facility.name.trim().length === 0
+    ) {
+      throw new Error(
+        'Each psdEoc:facilities entry needs an upper-case code and a name.',
+      );
+    }
+  }
+  // Passed through as JSON so the container reads exactly what was declared.
+  return JSON.stringify(value);
+}
+
+/** The district's facility groupings, read from CDK context. */
+export function readNeighborhoodContext(node: {
+  tryGetContext(key: string): unknown;
+}): string {
+  const value = node.tryGetContext('psdEoc:neighborhoods');
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('CDK context psdEoc:neighborhoods must be an array.');
+  }
+  for (const entry of value) {
+    const neighborhood = entry as Record<string, unknown>;
+    if (
+      typeof neighborhood?.name !== 'string' ||
+      neighborhood.name.trim().length === 0 ||
+      !Array.isArray(neighborhood.facilityCodes) ||
+      neighborhood.facilityCodes.length === 0
+    ) {
+      throw new Error(
+        'Each psdEoc:neighborhoods entry needs a name and at least one facility code.',
+      );
+    }
+  }
+  return JSON.stringify(value);
 }
 
 export function readDeploymentIdentity(node: {
