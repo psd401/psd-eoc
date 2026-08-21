@@ -407,6 +407,43 @@ export class PsdEocStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       secretName: `${SECRET_PREFIX}/api-salt`,
     });
+    // Credentials for the two internal worker routes. Both routes have existed
+    // and refused every request, because nothing ever provisioned the bearer
+    // they check against — they fail closed, so the effect was invisible until
+    // a worker needed them.
+    //
+    // Generated rather than supplied: no human needs to know these, and a value
+    // nobody types is a value nobody pastes somewhere it does not belong. Each
+    // route gets its own so one can be rotated without disturbing the other.
+    const deliveryStateWorkerSecret = new secretsmanager.Secret(
+      this,
+      'DeliveryStateWorkerSecret',
+      {
+        description:
+          'Generated bearer a channel worker presents to the delivery-state writeback route.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/workers/delivery-state-token`,
+      },
+    );
+    const attemptExecutionWorkerSecret = new secretsmanager.Secret(
+      this,
+      'AttemptExecutionWorkerSecret',
+      {
+        description:
+          'Generated bearer a channel worker presents to the attempt-execution route.',
+        generateSecretString: {
+          excludePunctuation: true,
+          passwordLength: 64,
+        },
+        removalPolicy: RemovalPolicy.RETAIN,
+        secretName: `${SECRET_PREFIX}/workers/attempt-execution-token`,
+      },
+    );
+
     const bootstrapIdentitySecret = new secretsmanager.Secret(
       this,
       'BootstrapIdentitySecret',
@@ -979,6 +1016,8 @@ export class PsdEocStack extends Stack {
       googleOauthSecret.grantRead(runtimeRole),
       googleOidcCookieSecret.grantRead(runtimeRole),
       apiSaltSecret.grantRead(runtimeRole),
+      deliveryStateWorkerSecret.grantRead(runtimeRole),
+      attemptExecutionWorkerSecret.grantRead(runtimeRole),
       iam.Grant.addToPrincipal({
         actions: ['sqs:GetQueueAttributes'],
         grantee: runtimeRole,
@@ -1068,6 +1107,14 @@ export class PsdEocStack extends Stack {
                     databaseApplicationSecret,
                     'username',
                   ),
+                },
+                {
+                  name: 'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+                  value: deliveryStateWorkerSecret.secretArn,
+                },
+                {
+                  name: 'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
+                  value: attemptExecutionWorkerSecret.secretArn,
                 },
                 {
                   name: 'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
