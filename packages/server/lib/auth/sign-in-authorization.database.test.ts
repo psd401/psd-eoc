@@ -7,12 +7,7 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import {
-  accessGroupMembers,
-  groupSources,
-  userRoles,
-  users,
-} from '../../db/schema';
+import { groupMembers, groupSources, userRoles, users } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { authorizeSignIn } from './sign-in-authorization';
 
@@ -81,7 +76,7 @@ describeWithDatabase('sign-in authorization', () => {
         fixtureKey: null,
       });
     }
-    await opened.db.insert(accessGroupMembers).values([
+    await opened.db.insert(groupMembers).values([
       {
         groupSourceId: ADMIN_GROUP,
         email: 'newcomer@example.invalid',
@@ -139,8 +134,8 @@ describeWithDatabase('sign-in authorization', () => {
 
     // Removed from the administrator group at the provider.
     await database()
-      .delete(accessGroupMembers)
-      .where(eq(accessGroupMembers.groupSourceId, ADMIN_GROUP));
+      .delete(groupMembers)
+      .where(eq(groupMembers.groupSourceId, ADMIN_GROUP));
 
     const second = await authorizeSignIn(database(), {
       googleSubject: 'subject-demoted',

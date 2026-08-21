@@ -8,7 +8,7 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { accessGroupMembers, groupSources } from '../../db/schema';
+import { groupMembers, groupSources } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import {
   createDrizzleInitialWebSessionStore,
@@ -164,7 +164,7 @@ describeWithDatabase('sign-in to session round trip', () => {
         accessGroup(STAFF_GROUP, 'staff', capturedAt),
       ]);
     await database()
-      .insert(accessGroupMembers)
+      .insert(groupMembers)
       .values([
         { groupSourceId: ADMIN_GROUP, email: ADMIN_EMAIL, capturedAt },
         { groupSourceId: STAFF_GROUP, email: STAFF_EMAIL, capturedAt },

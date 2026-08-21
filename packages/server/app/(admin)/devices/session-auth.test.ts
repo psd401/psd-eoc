@@ -52,7 +52,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../db/client.js';
 import {
-  accessGroupMembers,
+  groupMembers,
   accessMembershipSnapshots,
   connectivityEpochInvalidations,
   connectivityEpochs,
@@ -1162,7 +1162,7 @@ describeWithDatabase(
         // Both people are in the trusted group, read at 12:30. This is what
         // authorizes them; the snapshot rows below are an operator-visible
         // record of the sync run and are not consulted.
-        await transaction.insert(accessGroupMembers).values([
+        await transaction.insert(groupMembers).values([
           {
             groupSourceId: fixture.groupSourceId,
             email: fixture.email.toLowerCase(),
@@ -1244,9 +1244,9 @@ describeWithDatabase(
       // provider offline throughout.
       await database.transaction(async (transaction) => {
         await transaction
-          .update(accessGroupMembers)
+          .update(groupMembers)
           .set({ capturedAt: renewedCapturedAt })
-          .where(eq(accessGroupMembers.groupSourceId, fixture.groupSourceId));
+          .where(eq(groupMembers.groupSourceId, fixture.groupSourceId));
         await transaction
           .update(groupSources)
           .set({ membersCapturedAt: renewedCapturedAt })
@@ -1322,17 +1322,17 @@ describeWithDatabase(
         const removalCapturedAt = new Date('2026-08-07T13:20:00.000Z');
         await database.transaction(async (transaction) => {
           await transaction
-            .delete(accessGroupMembers)
+            .delete(groupMembers)
             .where(
               and(
-                eq(accessGroupMembers.groupSourceId, fixture.groupSourceId),
-                eq(accessGroupMembers.email, fixture.targetEmail.toLowerCase()),
+                eq(groupMembers.groupSourceId, fixture.groupSourceId),
+                eq(groupMembers.email, fixture.targetEmail.toLowerCase()),
               ),
             );
           await transaction
-            .update(accessGroupMembers)
+            .update(groupMembers)
             .set({ capturedAt: removalCapturedAt })
-            .where(eq(accessGroupMembers.groupSourceId, fixture.groupSourceId));
+            .where(eq(groupMembers.groupSourceId, fixture.groupSourceId));
           await transaction
             .update(groupSources)
             .set({ membersCapturedAt: removalCapturedAt })

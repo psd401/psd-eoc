@@ -24,7 +24,7 @@ import { z } from 'zod';
 import { staffRosterEmail } from '../config/staff-email';
 import type { Database } from '../../db/client';
 import {
-  accessGroupMembers,
+  groupMembers,
   accessMembershipSnapshots,
   groupSources,
   idempotencyRecords,
@@ -581,17 +581,17 @@ export function createDrizzleAccessMembershipSyncStore(
     // could be replayed against itself.
     const memberRows = await database
       .select({
-        email: accessGroupMembers.email,
-        groupSourceId: accessGroupMembers.groupSourceId,
+        email: groupMembers.email,
+        groupSourceId: groupMembers.groupSourceId,
       })
-      .from(accessGroupMembers)
+      .from(groupMembers)
       .where(
         inArray(
-          accessGroupMembers.groupSourceId,
+          groupMembers.groupSourceId,
           sourceRows.map(({ id }) => id),
         ),
       )
-      .orderBy(asc(accessGroupMembers.email));
+      .orderBy(asc(groupMembers.email));
 
     const groups = sourceRows.map((source) => ({
       groupSourceId: source.id,
@@ -923,16 +923,15 @@ export function createDrizzleAccessMembershipSyncStore(
         const capturedAt = new Date(evaluation.capturedAt);
         for (const group of evaluation.groups) {
           await transaction
-            .delete(accessGroupMembers)
-            .where(eq(accessGroupMembers.groupSourceId, group.groupSourceId));
+            .delete(groupMembers)
+            .where(eq(groupMembers.groupSourceId, group.groupSourceId));
           await insertInBatches(
             group.memberEmails.map((email) => ({
               groupSourceId: group.groupSourceId,
               email,
               capturedAt,
             })),
-            (batch) =>
-              transaction.insert(accessGroupMembers).values([...batch]),
+            (batch) => transaction.insert(groupMembers).values([...batch]),
           );
           await transaction
             .update(groupSources)
@@ -945,11 +944,11 @@ export function createDrizzleAccessMembershipSyncStore(
         // that grants it, or the whole transaction is refused and the previous
         // membership stands.
         const administratorEmails = await transaction
-          .select({ email: accessGroupMembers.email })
-          .from(accessGroupMembers)
+          .select({ email: groupMembers.email })
+          .from(groupMembers)
           .innerJoin(
             groupSources,
-            eq(groupSources.id, accessGroupMembers.groupSourceId),
+            eq(groupSources.id, groupMembers.groupSourceId),
           )
           .where(
             and(

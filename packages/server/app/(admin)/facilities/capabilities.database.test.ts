@@ -17,7 +17,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../../db/client';
 import {
-  accessGroupMembers,
+  groupMembers,
   accessMembershipSnapshots,
   audienceConfigurations,
   channelConfigurations,
@@ -500,7 +500,7 @@ async function persistCompleteAccessSnapshotGeneration(
       if (account === undefined) continue;
       for (const groupSourceId of member.accessGroupIds) {
         await transaction
-          .insert(accessGroupMembers)
+          .insert(groupMembers)
           .values({
             groupSourceId,
             email: account.email.toLowerCase(),
@@ -575,7 +575,7 @@ async function persistAuthenticatedAdministrator(
 
   await persistAdministratorIdentity(database, authenticated, suffix, now);
   await database
-    .insert(accessGroupMembers)
+    .insert(groupMembers)
     .values(
       accessGroupIds.map((groupSourceId) => ({
         groupSourceId,
@@ -650,7 +650,7 @@ async function persistAdministratorIdentity(
     );
   if (adminGroups.length > 0) {
     await database
-      .insert(accessGroupMembers)
+      .insert(groupMembers)
       .values(
         adminGroups.map(({ id }) => ({
           groupSourceId: id,
@@ -2516,7 +2516,7 @@ describeWithDatabase('facilities administrator database flow', () => {
     // Sign-in reads membership, so a fixture that creates the group without
     // putting anyone in it authorizes nobody.
     await database
-      .insert(accessGroupMembers)
+      .insert(groupMembers)
       .values({
         groupSourceId: accessGroup.id,
         email: bootstrapUser.email,

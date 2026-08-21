@@ -16,7 +16,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
-  accessGroupMembers,
+  groupMembers,
   accessMembershipSnapshots,
   groupSources,
   userRoles,
@@ -358,9 +358,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
     // carries the instant it was read.
     expect(
       await database
-        .select({ email: accessGroupMembers.email })
-        .from(accessGroupMembers)
-        .where(eq(accessGroupMembers.groupSourceId, BASELINE_SOURCE_ID)),
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, BASELINE_SOURCE_ID)),
     ).toEqual([{ email: RECOVERY_EMAIL }]);
     expect(
       await decideAccess(database, {
@@ -451,11 +451,11 @@ describeWithDatabase('access-membership atomic database publication', () => {
     // membership in every group is what previously denied them.
     const members = await database
       .select({
-        email: accessGroupMembers.email,
-        groupSourceId: accessGroupMembers.groupSourceId,
+        email: groupMembers.email,
+        groupSourceId: groupMembers.groupSourceId,
       })
-      .from(accessGroupMembers)
-      .orderBy(asc(accessGroupMembers.email));
+      .from(groupMembers)
+      .orderBy(asc(groupMembers.email));
     expect(members).toEqual(
       [
         { email: TRANSITION_EMAIL, groupSourceId: secondSourceId },
@@ -507,9 +507,9 @@ describeWithDatabase('access-membership atomic database publication', () => {
     // still grants access.
     expect(
       await database
-        .select({ email: accessGroupMembers.email })
-        .from(accessGroupMembers)
-        .where(eq(accessGroupMembers.groupSourceId, secondSourceId)),
+        .select({ email: groupMembers.email })
+        .from(groupMembers)
+        .where(eq(groupMembers.groupSourceId, secondSourceId)),
     ).toEqual([]);
     expect(
       await decideAccess(database, {
@@ -568,7 +568,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
     ).rejects.toThrow('reachable administrator');
 
     // Refused whole: neither group's membership was written.
-    expect(await database.select().from(accessGroupMembers)).toEqual([]);
+    expect(await database.select().from(groupMembers)).toEqual([]);
   });
 
   test('refuses evidence that no longer describes the active configuration', async () => {
