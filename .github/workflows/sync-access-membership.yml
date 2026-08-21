@@ -5,17 +5,23 @@ run-name: access-membership sync
 # Membership has a freshness bound: sign-in refuses a group whose membership has
 # not been read recently, so that a deployment fails closed rather than running
 # indefinitely on a stale answer. That bound is only safe if something actually
-# refreshes it.
+# refreshes it — and this workflow is no longer what does.
 #
-# This used to be dispatch-only, and it produced exactly the outage the bound is
-# meant to prevent: membership was read once by hand, and everybody lost access
-# when it aged out. Running on a schedule is what makes the freshness rule a
-# safety property instead of a timer on an outage.
+# It cannot be. Every scheduled run parked waiting for the environment approval
+# below and was cancelled, which produced the exact outage the bound exists to
+# prevent. The refresh now runs on an EventBridge schedule against the same ECS
+# task, under no human's approval; see `AccessSyncSchedule` in
+# infra/src/stack/psd-eoc-stack.ts.
 on:
-  schedule:
-    # Every two hours. Well inside the freshness bound, so a single missed run
-    # never denies anyone.
-    - cron: '0 */2 * * *'
+  # Deliberately manual-only. The schedule that keeps membership fresh now runs
+  # as an EventBridge rule against the same ECS task (`AccessSyncSchedule` in
+  # infra/src/stack/psd-eoc-stack.ts), because a scheduled run here could never
+  # complete: the `exploration-smoke` environment below requires a named human
+  # reviewer, so every cron-triggered run parked waiting for an approval a cron
+  # cannot give and was cancelled when the next one queued behind it.
+  #
+  # What remains is break-glass: a way to force a refresh immediately rather
+  # than waiting for the next scheduled run.
   workflow_dispatch:
 
 permissions:
