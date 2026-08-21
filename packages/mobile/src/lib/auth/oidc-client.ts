@@ -6,6 +6,7 @@ import {
 
 import type { AuthApiClient } from './auth-api-client';
 import { MobileAuthError } from './auth-errors';
+import type { PendingOidcFlowStore } from './pending-oidc-flow';
 
 const BASE64_ALPHABET =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -77,6 +78,7 @@ export class MobileOidcClient {
     private readonly browser: OidcBrowser,
     private readonly pkceSource: PkceSource,
     private readonly now: () => Date = () => new Date(),
+    private readonly pendingFlowStore: PendingOidcFlowStore | null = null,
   ) {}
 
   public async signIn(
@@ -95,30 +97,90 @@ export class MobileOidcClient {
         'The Google sign-in attempt expired. Try again.',
       );
     }
-    const authorization = await this.browser.authorize(start);
-    if (authorization.kind === 'cancelled') {
+    // Written before the browser opens, because on Android the redirect can
+    // come back to a process that no longer holds this closure.
+    await this.pendingFlowStore?.save({
+      state: start.state,
+      codeVerifier: pkce.verifier,
+      flowToken: start.flowToken,
+      expiresAt: start.expiresAt,
+    });
+    try {
+      const authorization = await this.browser.authorize(start);
+      if (authorization.kind === 'cancelled') {
+        throw new MobileAuthError(
+          'rejected',
+          'Google sign-in was cancelled. No device session was created.',
+        );
+      }
+      if (authorization.state !== start.state) {
+        throw new MobileAuthError(
+          'rejected',
+          'Google sign-in could not be verified. No device session was created.',
+        );
+      }
+      if (this.now().getTime() >= Date.parse(start.expiresAt)) {
+        throw new MobileAuthError(
+          'rejected',
+          'The Google sign-in attempt expired. Try again.',
+        );
+      }
+      return await this.transport.exchangeOidc({
+        authorizationCode: authorization.authorizationCode,
+        state: authorization.state,
+        codeVerifier: pkce.verifier,
+        flowToken: start.flowToken,
+      });
+    } finally {
+      // This attempt is over either way. Leaving the record behind would let a
+      // later redelivery of the same deep link start a second exchange.
+      await this.pendingFlowStore?.clear();
+    }
+  }
+
+  /**
+   * Completes an attempt whose redirect arrived outside `promptAsync`.
+   *
+   * This is the Android cold-start path: the OS routed `psdeoc://auth/callback`
+   * into a process that never ran `signIn`, so the verifier and flow token come
+   * from storage rather than a closure. The state comparison is what makes that
+   * safe — a deep link that does not match the attempt this device actually
+   * started is refused before any code is exchanged.
+   */
+  public async completeSignIn(
+    authorizationCode: string,
+    state: string,
+  ): Promise<MobileSessionResponse> {
+    if (this.pendingFlowStore === null) {
       throw new MobileAuthError(
-        'rejected',
-        'Google sign-in was cancelled. No device session was created.',
+        'configuration',
+        'This build cannot resume a Google sign-in that was started elsewhere.',
       );
     }
-    if (authorization.state !== start.state) {
+    const pending = await this.pendingFlowStore.take();
+    if (pending === null) {
+      throw new MobileAuthError(
+        'rejected',
+        'There is no Google sign-in waiting to be completed. Start sign-in again.',
+      );
+    }
+    if (pending.state !== state) {
       throw new MobileAuthError(
         'rejected',
         'Google sign-in could not be verified. No device session was created.',
       );
     }
-    if (this.now().getTime() >= Date.parse(start.expiresAt)) {
+    if (this.now().getTime() >= Date.parse(pending.expiresAt)) {
       throw new MobileAuthError(
         'rejected',
         'The Google sign-in attempt expired. Try again.',
       );
     }
     return this.transport.exchangeOidc({
-      authorizationCode: authorization.authorizationCode,
-      state: authorization.state,
-      codeVerifier: pkce.verifier,
-      flowToken: start.flowToken,
+      authorizationCode,
+      state,
+      codeVerifier: pending.codeVerifier,
+      flowToken: pending.flowToken,
     });
   }
 }
