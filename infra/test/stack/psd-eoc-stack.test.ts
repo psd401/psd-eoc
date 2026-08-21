@@ -1099,6 +1099,87 @@ describe('one-off native bootstrap boundary', () => {
       ),
     ).toBe(false);
   });
+
+  it('refreshes membership on a schedule no human has to approve', () => {
+    // The previous trigger was a GitHub Actions workflow whose environment
+    // required a named reviewer, so every scheduled run parked waiting for an
+    // approval a cron cannot give. Membership then aged past the freshness
+    // bound in trusted-group-access.ts and refused everyone.
+    const named = resourceEntries('AWS::Events::Rule').filter(
+      ([, resource]) =>
+        properties(resource).Name ===
+        'psd-eoc-access-membership-sync-every-two-hours',
+    );
+    expect(named).toHaveLength(1);
+    const ruleEntry = named[0];
+    if (ruleEntry === undefined)
+      throw new Error('Missing the access-sync schedule.');
+    const rule = properties(ruleEntry[1]);
+    expect(rule.State).toBe('ENABLED');
+    // Well inside MEMBERSHIP_FRESHNESS_MS (24h), so several consecutive
+    // failures still deny nobody.
+    expect(rule.ScheduleExpression).toBe('cron(0 */2 * * ? *)');
+
+    const targets = asArray(rule.Targets).map(asRecord);
+    expect(targets).toHaveLength(1);
+    const target = targets[0];
+    if (target === undefined) throw new Error('Missing access-sync target.');
+    expect(JSON.stringify(target.Arn)).toContain('BootstrapEcsCluster');
+
+    const ecsParameters = asRecord(target.EcsParameters);
+    expect(ecsParameters.LaunchType).toBe('FARGATE');
+    expect(ecsParameters.TaskCount).toBe(1);
+    expect(JSON.stringify(ecsParameters.TaskDefinitionArn)).toContain(
+      'AccessSyncTaskDefinition',
+    );
+    const network = asRecord(
+      asRecord(ecsParameters.NetworkConfiguration).AwsVpcConfiguration,
+    );
+    // Private subnets reaching Google only through the NAT path.
+    expect(network.AssignPublicIp).toBe('DISABLED');
+    expect(JSON.stringify(network.SecurityGroups)).toContain(
+      'ApplicationSecurityGroup',
+    );
+    expect(asArray(network.Subnets)).toHaveLength(2);
+    expect(JSON.stringify(network.Subnets)).toContain('ApplicationSubnet');
+  });
+
+  it('gives the scheduler only the authority to start that one task', () => {
+    const eventsRole = roleLogicalIdForServicePrincipal('events.amazonaws.com');
+    const statements = inlineStatementsForRole(eventsRole);
+    expect([...new Set(allAllowedActions(statements))].sort()).toEqual(
+      ['ecs:RunTask', 'ecs:TagResource', 'iam:PassRole'].sort(),
+    );
+
+    const runTask = statements.filter((statement) =>
+      asStringArray(statement.Action).includes('ecs:RunTask'),
+    );
+    expect(runTask).toHaveLength(1);
+    const runTaskStatement = runTask[0];
+    if (runTaskStatement === undefined)
+      throw new Error('Missing ecs:RunTask statement.');
+    // Scoped to the exact task definition, inside the exact cluster.
+    expect(JSON.stringify(runTaskStatement.Resource)).toContain(
+      'AccessSyncTaskDefinition',
+    );
+    expect(JSON.stringify(runTaskStatement.Condition)).toContain(
+      'BootstrapEcsCluster',
+    );
+
+    // It may hand over the two access-sync roles and nothing else — notably not
+    // the App Runner runtime role or the database admin path.
+    const passRole = JSON.stringify(
+      statements
+        .filter((statement) =>
+          asStringArray(statement.Action).includes('iam:PassRole'),
+        )
+        .map((statement) => statement.Resource),
+    );
+    expect(passRole).toContain('AccessSyncTaskExecutionRole');
+    expect(passRole).toContain('AccessSyncTaskRole');
+    expect(passRole).not.toContain('AppRunnerRuntimeRole');
+    expect(passRole).not.toContain('BootstrapTaskRole');
+  });
 });
 
 describe('protected access-membership publication boundary', () => {
@@ -1400,7 +1481,8 @@ describe('configured-unverified provider readiness boundary', () => {
     }
     // Monitoring introduces compute and schedules, so the boundary is stated
     // by name rather than by count: the only function is the Aurora failover
-    // bridge, and the only rules drive it and a targetless human reminder.
+    // bridge, and the only rules drive it, a targetless human reminder, and the
+    // access-membership refresh that keeps sign-in from aging out.
     expect(
       resourceEntries('AWS::Lambda::Function')
         .map(([, resource]) => String(properties(resource).FunctionName))
@@ -1411,6 +1493,7 @@ describe('configured-unverified provider readiness boundary', () => {
         .map(([, resource]) => String(properties(resource).Name))
         .sort(),
     ).toEqual([
+      'psd-eoc-access-membership-sync-every-two-hours',
       'psd-eoc-aurora-failover-events',
       'psd-eoc-monthly-live-delivery-test-due-reminder',
     ]);
