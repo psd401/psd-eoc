@@ -35,8 +35,7 @@ const RDS_CA_PATH = new URL(
 
 const COMPONENT_POSTGRES_ENVIRONMENT = {
   DATABASE_DRIVER: 'postgres',
-  DATABASE_HOST:
-    'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com',
+  DATABASE_HOST: 'psd-eoc.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com',
   DATABASE_PORT: '5432',
   DATABASE_NAME: 'psd_eoc',
   DATABASE_USERNAME: 'psd_eoc_application',

@@ -79,7 +79,7 @@ async function waitForStartup(origin: string): Promise<void> {
 export async function smokeLocalContainer(
   imageReference: string,
 ): Promise<void> {
-  const containerName = `psd-eoc-exploration-smoke-${randomUUID()}`;
+  const containerName = `psd-eoc-container-check-${randomUUID()}`;
   let started = false;
   let result:
     | Readonly<{
@@ -159,7 +159,7 @@ export async function smokeLocalContainer(
     throw new Error('The temporary smoke container could not be removed.');
   }
   if (result === undefined) {
-    throw new Error('The local exploration-smoke result was unavailable.');
+    throw new Error('The local container-check result was unavailable.');
   }
   console.info(JSON.stringify(result));
 }
@@ -168,7 +168,7 @@ if (import.meta.main) {
   try {
     await smokeLocalContainer(readImageReference(process.argv.slice(2)));
   } catch {
-    console.error('The local exploration-smoke container check failed.');
+    console.error('The local container check failed.');
     process.exitCode = 1;
   }
 }
