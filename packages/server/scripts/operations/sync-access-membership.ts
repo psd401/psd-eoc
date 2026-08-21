@@ -5,6 +5,7 @@ import {
   UuidSchema,
   type SyncAccessMembershipResult,
 } from '@psd-eoc/contracts';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import { createDatabaseClient, readDatabaseConfig } from '../../db/client';
@@ -28,6 +29,31 @@ const AccessMembershipSyncEnvironmentSchema = z
   .strict()
   .readonly();
 
+/**
+ * How often the schedule refreshes membership, and therefore how wide one
+ * idempotency bucket is. EventBridge delivers at least once, so two runs of the
+ * *same* occurrence must collapse into one publication while consecutive
+ * occurrences must not.
+ */
+export const SCHEDULED_SYNC_INTERVAL_MS = 2 * 60 * 60 * 1_000;
+
+const SCHEDULED_IDEMPOTENCY_PREFIX = 'access-sync:scheduled:';
+
+/**
+ * A key that is stable across a redelivered occurrence and distinct across
+ * consecutive ones. Truncating the clock to the schedule interval is what gives
+ * both properties without the scheduler having to template a value in.
+ */
+export function scheduledIdempotencyKey(now: Date): string {
+  const bucket = new Date(
+    Math.floor(now.getTime() / SCHEDULED_SYNC_INTERVAL_MS) *
+      SCHEDULED_SYNC_INTERVAL_MS,
+  );
+  return IdempotencyKeySchema.parse(
+    `${SCHEDULED_IDEMPOTENCY_PREFIX}${bucket.toISOString()}`,
+  );
+}
+
 export const AccessMembershipSyncSummarySchema = z
   .object({
     event: z.literal('access-membership-sync-complete'),
@@ -50,13 +76,24 @@ export type AccessMembershipSyncSummary = z.infer<
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
-/** Reads only nonsecret run identity; provider and database secrets stay owned by their existing readers. */
+/**
+ * Reads only nonsecret run identity; provider and database secrets stay owned by
+ * their existing readers.
+ *
+ * The run identity is optional because the scheduler cannot invent one. An
+ * operator invoking this by hand may still pin both values, and a caller that
+ * supplies a malformed one is refused rather than quietly given a generated
+ * substitute.
+ */
 export function readAccessMembershipSyncEnvironment(
   environment: Environment = process.env,
+  now: () => Date = () => new Date(),
+  newRequestId: () => string = randomUUID,
 ): z.infer<typeof AccessMembershipSyncEnvironmentSchema> {
   const parsed = AccessMembershipSyncEnvironmentSchema.safeParse({
-    requestId: environment.ACCESS_SYNC_REQUEST_ID,
-    idempotencyKey: environment.ACCESS_SYNC_IDEMPOTENCY_KEY,
+    requestId: environment.ACCESS_SYNC_REQUEST_ID ?? newRequestId(),
+    idempotencyKey:
+      environment.ACCESS_SYNC_IDEMPOTENCY_KEY ?? scheduledIdempotencyKey(now()),
     sourceSha: environment.SOURCE_SHA,
   });
   if (!parsed.success) {
