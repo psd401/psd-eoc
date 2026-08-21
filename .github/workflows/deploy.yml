@@ -123,7 +123,7 @@ jobs:
       - name: Build and push the image
         id: image
         if: inputs.rollback_image_digest == ''
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: packages/server/container/psd-eoc.Dockerfile
