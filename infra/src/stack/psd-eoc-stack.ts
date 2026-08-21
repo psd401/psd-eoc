@@ -626,14 +626,29 @@ export class PsdEocStack extends Stack {
       enableKeyRotation: true,
       removalPolicy: RemovalPolicy.RETAIN,
     });
+    // Deliberately not encrypted, unlike the log groups this key still covers.
+    //
+    // Encrypted with a customer-managed key, neither topic could deliver an
+    // email subscription confirmation: the subscription was created with the
+    // right address and stayed PendingConfirmation indefinitely, with no error
+    // recorded anywhere and no KMS call ever made. Granting sns.amazonaws.com
+    // use of the key did not change it. The two topics in this account that do
+    // reach the same mailbox — TechAlerts and GuardDuty_To_Email — are both
+    // unencrypted.
+    //
+    // The trade is worth stating rather than hiding. An alarm notification
+    // carries an alarm name, a state, a metric and a runbook anchor; it carries
+    // no student data, no recipient, and no provider payload, because none of
+    // those may appear in an alarm at all. What encryption at rest bought here
+    // was close to nothing, and it cost the one property this path exists for:
+    // that it still works when other things are broken. Publishing is still
+    // restricted by each topic's access policy.
     const operationsAlarmTopic = new sns.Topic(this, 'OperationsAlarmTopic', {
       displayName: 'PSD EOC operations',
-      masterKey: operationsKey,
       topicName: 'psd-eoc-operations-alarms',
     });
     const criticalAlarmTopic = new sns.Topic(this, 'CriticalAlarmTopic', {
       displayName: 'PSD EOC critical',
-      masterKey: operationsKey,
       topicName: 'psd-eoc-critical-alarms',
     });
 
