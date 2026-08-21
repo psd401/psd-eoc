@@ -353,7 +353,9 @@ describe('minimal isolated resource shape', () => {
     // Nine queues: the health queue, plus a source/dead-letter pair each for
     // delivery, email, SMS, and push.
     template.resourceCountIs('AWS::SQS::Queue', 9);
-    template.resourceCountIs('AWS::SecretsManager::Secret', 5);
+    // Seven: the five the application has always had, plus one generated
+    // bearer for each internal worker route.
+    template.resourceCountIs('AWS::SecretsManager::Secret', 7);
     // Two keys: SES event evidence, and operational alarm notifications.
     template.resourceCountIs('AWS::KMS::Key', 2);
     template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
@@ -529,6 +531,8 @@ describe('minimal isolated resource shape', () => {
         '/psd-eoc/exploration-smoke/database/admin',
         '/psd-eoc/exploration-smoke/database/application',
         '/psd-eoc/exploration-smoke/google-oidc-cookie-secret',
+        '/psd-eoc/exploration-smoke/workers/attempt-execution-token',
+        '/psd-eoc/exploration-smoke/workers/delivery-state-token',
       ].sort(),
     );
     for (const name of [
@@ -536,6 +540,8 @@ describe('minimal isolated resource shape', () => {
       '/psd-eoc/exploration-smoke/database/admin',
       '/psd-eoc/exploration-smoke/database/application',
       '/psd-eoc/exploration-smoke/google-oidc-cookie-secret',
+      '/psd-eoc/exploration-smoke/workers/attempt-execution-token',
+      '/psd-eoc/exploration-smoke/workers/delivery-state-token',
     ]) {
       const resource = byName.get(name);
       expect(resource).toBeDefined();
@@ -757,6 +763,8 @@ describe('App Runner runtime safety boundary', () => {
         'DATABASE_USERNAME',
         'GOOGLE_OAUTH_CONFIG',
         'GOOGLE_OIDC_COOKIE_SECRET',
+        'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
+        'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
         'PSD_EOC_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256',
       ].sort(),
     );
@@ -789,7 +797,19 @@ describe('App Runner runtime safety boundary', () => {
     expect(serialized).not.toContain('SES_SEND');
     expect(serialized).not.toContain('SMS');
     expect(serialized).not.toContain('MEDIA_BUCKET');
-    expect(serialized).not.toContain('DELIVERY_STATE_WORKER');
+
+    // The application holds both internal worker bearers, because verifying a
+    // bearer means comparing against it. That is not a provider credential and
+    // is not what this list guards: the runtime still holds nothing that can
+    // reach SES, SMS, Expo, or object storage. Both arrive as resolved secret
+    // references rather than plain environment values.
+    for (const name of [
+      'PSD_EOC_ATTEMPT_EXECUTION_WORKER_TOKEN',
+      'PSD_EOC_DELIVERY_STATE_WORKER_TOKEN',
+    ]) {
+      expect(secrets.has(name)).toBe(true);
+      expect(variables.has(name)).toBe(false);
+    }
   });
 
   it('gives the runtime only application-secret and health-read permissions', () => {
