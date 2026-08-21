@@ -38,7 +38,7 @@ jobs:
     environment: exploration-smoke
     steps:
       - name: Check out the commit being deployed
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
