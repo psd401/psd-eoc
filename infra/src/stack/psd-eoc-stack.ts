@@ -45,27 +45,27 @@ import {
   DATABASE_NAME,
   DATABASE_PORT,
   DATABASE_SSL_ROOT_CERT,
-  EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
-  EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
-  EXPLORATION_SMOKE_DATA_CLASSIFICATION,
-  EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
-  EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+  BOOTSTRAP_LOG_GROUP_NAME,
+  DATABASE_IDENTIFIER,
+  DATA_CLASSIFICATION,
+  EMAIL_DEAD_LETTER_QUEUE_NAME,
+  EMAIL_QUEUE_NAME,
   DELIVERY_DEAD_LETTER_QUEUE_NAME,
   DELIVERY_QUEUE_MAX_RECEIVES,
   DELIVERY_QUEUE_NAME,
-  EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
+  EMAIL_WORKER_LOG_GROUP_NAME,
   PUSH_DEAD_LETTER_QUEUE_NAME,
   PUSH_QUEUE_NAME,
   SMS_DEAD_LETTER_QUEUE_NAME,
   SMS_QUEUE_NAME,
-  EXPLORATION_SMOKE_ENVIRONMENT,
-  EXPLORATION_SMOKE_HEALTH_PATH,
-  EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
-  EXPLORATION_SMOKE_QUEUE_NAME,
-  EXPLORATION_SMOKE_REPOSITORY_NAME,
-  EXPLORATION_SMOKE_SES_FROM_ADDRESS,
-  EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
-  EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
+  DEPLOYMENT_ENVIRONMENT,
+  HEALTH_PATH,
+  IMAGE_DIGEST_SENTINEL,
+  HEALTH_QUEUE_NAME,
+  SERVER_REPOSITORY_NAME,
+  SES_FROM_ADDRESS,
+  SES_IDENTITY_DOMAIN,
+  SES_VERIFICATION_REFERENCE,
   readDeploymentIdentity,
 } from './config';
 
@@ -119,11 +119,8 @@ export class PsdEocStack extends Stack {
     }
 
     Tags.of(this).add('Application', 'PSD EOC Live Pilot');
-    Tags.of(this).add(
-      'DataClassification',
-      EXPLORATION_SMOKE_DATA_CLASSIFICATION,
-    );
-    Tags.of(this).add('Environment', EXPLORATION_SMOKE_ENVIRONMENT);
+    Tags.of(this).add('DataClassification', DATA_CLASSIFICATION);
+    Tags.of(this).add('Environment', DEPLOYMENT_ENVIRONMENT);
     Tags.of(this).add('DataScope', 'staff-minimized');
     Tags.of(this).add('ExpectedAwsAccountAlias', AWS_ACCOUNT_ALIAS);
     Tags.of(this).add('ManagedBy', 'AWS CDK');
@@ -142,7 +139,7 @@ export class PsdEocStack extends Stack {
       allowedPattern: '^sha256:[0-9a-f]{64}$',
       constraintDescription:
         'Use one lowercase SHA-256 digest in sha256:<64 hex characters> form.',
-      default: EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
+      default: IMAGE_DIGEST_SENTINEL,
       description:
         "Immutable digest already present in this stack's ECR repository; the all-zero sentinel is accepted only while ProvisionApplication=false.",
       type: 'String',
@@ -244,7 +241,7 @@ export class PsdEocStack extends Stack {
           assert: Fn.conditionNot(
             Fn.conditionEquals(
               appImageDigest.valueAsString,
-              EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
+              IMAGE_DIGEST_SENTINEL,
             ),
           ),
           assertDescription:
@@ -262,7 +259,7 @@ export class PsdEocStack extends Stack {
           assert: Fn.conditionNot(
             Fn.conditionEquals(
               bootstrapImageDigest.valueAsString,
-              EXPLORATION_SMOKE_IMAGE_DIGEST_SENTINEL,
+              IMAGE_DIGEST_SENTINEL,
             ),
           ),
           assertDescription:
@@ -300,7 +297,7 @@ export class PsdEocStack extends Stack {
       imageScanOnPush: true,
       imageTagMutability: ecr.TagMutability.IMMUTABLE,
       removalPolicy: RemovalPolicy.RETAIN,
-      repositoryName: EXPLORATION_SMOKE_REPOSITORY_NAME,
+      repositoryName: SERVER_REPOSITORY_NAME,
     });
     imageRepository.addLifecycleRule({
       description: 'Bound superseded live-pilot image retention.',
@@ -503,7 +500,7 @@ export class PsdEocStack extends Stack {
       backup: {
         retention: Duration.days(14),
       },
-      clusterIdentifier: EXPLORATION_SMOKE_DATABASE_IDENTIFIER,
+      clusterIdentifier: DATABASE_IDENTIFIER,
       copyTagsToSnapshot: true,
       credentials: rds.Credentials.fromSecret(
         databaseAdminSecret as unknown as secretsmanager.ISecret,
@@ -536,7 +533,7 @@ export class PsdEocStack extends Stack {
     const healthQueue = new sqs.Queue(this, 'HealthQueue', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
-      queueName: EXPLORATION_SMOKE_QUEUE_NAME,
+      queueName: HEALTH_QUEUE_NAME,
       removalPolicy: RemovalPolicy.RETAIN,
       retentionPeriod: Duration.days(1),
       visibilityTimeout: Duration.seconds(30),
@@ -546,14 +543,14 @@ export class PsdEocStack extends Stack {
       this,
       'EmailRedriveSourceQueue',
       this.formatArn({
-        resource: EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+        resource: EMAIL_QUEUE_NAME,
         service: 'sqs',
       }),
     );
     const emailDeadLetterQueue = new sqs.Queue(this, 'EmailDeadLetterQueue', {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
-      queueName: EXPLORATION_SMOKE_EMAIL_DEAD_LETTER_QUEUE_NAME,
+      queueName: EMAIL_DEAD_LETTER_QUEUE_NAME,
       redriveAllowPolicy: {
         redrivePermission: sqs.RedrivePermission.BY_QUEUE,
         sourceQueues: [emailSourceQueueIdentity],
@@ -568,7 +565,7 @@ export class PsdEocStack extends Stack {
       },
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
-      queueName: EXPLORATION_SMOKE_EMAIL_QUEUE_NAME,
+      queueName: EMAIL_QUEUE_NAME,
       removalPolicy: RemovalPolicy.RETAIN,
       retentionPeriod: Duration.days(4),
       visibilityTimeout: Duration.seconds(60),
@@ -703,7 +700,7 @@ export class PsdEocStack extends Stack {
     );
 
     const emailWorkerLogGroup = new logs.LogGroup(this, 'EmailWorkerLogGroup', {
-      logGroupName: EXPLORATION_SMOKE_EMAIL_WORKER_LOG_GROUP_NAME,
+      logGroupName: EMAIL_WORKER_LOG_GROUP_NAME,
       removalPolicy: RemovalPolicy.RETAIN,
       retention: logs.RetentionDays.TWO_WEEKS,
     });
@@ -823,7 +820,7 @@ export class PsdEocStack extends Stack {
     Tags.of(appRunnerVpcConnector).remove('DataScope', { priority: 300 });
 
     const bootstrapLogGroup = new logs.LogGroup(this, 'BootstrapLogGroup', {
-      logGroupName: EXPLORATION_SMOKE_BOOTSTRAP_LOG_GROUP_NAME,
+      logGroupName: BOOTSTRAP_LOG_GROUP_NAME,
       removalPolicy: RemovalPolicy.RETAIN,
       retention: logs.RetentionDays.TWO_WEEKS,
     });
@@ -1123,7 +1120,7 @@ export class PsdEocStack extends Stack {
         healthCheckConfiguration: {
           healthyThreshold: 1,
           interval: 10,
-          path: EXPLORATION_SMOKE_HEALTH_PATH,
+          path: HEALTH_PATH,
           protocol: 'HTTP',
           timeout: 5,
           unhealthyThreshold: 5,
@@ -1251,7 +1248,7 @@ export class PsdEocStack extends Stack {
                 },
                 {
                   name: 'PSD_EOC_SES_CREDENTIAL_VERIFICATION_REFERENCE',
-                  value: EXPLORATION_SMOKE_SES_VERIFICATION_REFERENCE,
+                  value: SES_VERIFICATION_REFERENCE,
                 },
                 {
                   name: 'RUNTIME_SECRET_ARN',
@@ -1318,10 +1315,10 @@ export class PsdEocStack extends Stack {
       value: AWS_ACCOUNT_ALIAS,
     });
     new CfnOutput(this, 'EnvironmentName', {
-      value: EXPLORATION_SMOKE_ENVIRONMENT,
+      value: DEPLOYMENT_ENVIRONMENT,
     });
     new CfnOutput(this, 'DataClassification', {
-      value: EXPLORATION_SMOKE_DATA_CLASSIFICATION,
+      value: DATA_CLASSIFICATION,
     });
     new CfnOutput(this, 'ImageRepositoryArn', {
       value: imageRepository.repositoryArn,
@@ -1411,13 +1408,13 @@ export class PsdEocStack extends Stack {
       value: emailWorkerLogGroup.logGroupName,
     });
     new CfnOutput(this, 'SesIdentityArn', {
-      value: `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:identity/${EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN}`,
+      value: `arn:aws:ses:${AWS_REGION}:${AWS_ACCOUNT}:identity/${SES_IDENTITY_DOMAIN}`,
     });
     new CfnOutput(this, 'SesIdentityDomain', {
-      value: EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN,
+      value: SES_IDENTITY_DOMAIN,
     });
     new CfnOutput(this, 'SesFromAddress', {
-      value: EXPLORATION_SMOKE_SES_FROM_ADDRESS,
+      value: SES_FROM_ADDRESS,
     });
     new CfnOutput(this, 'SesConfigurationSetName', {
       value: emailConfigurationSet.ref,
@@ -1456,7 +1453,7 @@ export class PsdEocStack extends Stack {
     });
     new CfnOutput(this, 'AppRunnerHealthCheckUrl', {
       condition: shouldProvisionApplication,
-      value: `https://${appRunnerService.attrServiceUrl}${EXPLORATION_SMOKE_HEALTH_PATH}`,
+      value: `https://${appRunnerService.attrServiceUrl}${HEALTH_PATH}`,
     });
   }
 }

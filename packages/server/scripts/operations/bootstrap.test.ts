@@ -21,12 +21,11 @@ import { DATABASE_LOGIN, DATABASE_ROLE, readBootstrapConfig } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
 const APPLICATION_SECRET_ARN =
-  'arn:aws:secretsmanager:us-east-1:000000000000:secret:/psd-eoc/exploration-smoke/database/application-EfGh34';
-const RESOURCE_ARN =
-  'arn:aws:rds:us-east-1:000000000000:cluster:psd-eoc-exploration-smoke';
+  'arn:aws:secretsmanager:us-east-1:000000000000:secret:/psd-eoc/database/application-EfGh34';
+const RESOURCE_ARN = 'arn:aws:rds:us-east-1:000000000000:cluster:psd-eoc';
 const GOOGLE_SUBJECT = '123456789012345678901';
 const DATABASE_HOST =
-  'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com';
+  'psd-eoc.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com';
 const DATABASE_ADMIN_PASSWORD = 'synthetic-admin-password-value-123456';
 const DATABASE_APPLICATION_PASSWORD =
   'synthetic-application-password-value-123456';
@@ -67,7 +66,7 @@ function validConfigEnvironment(): Record<string, string> {
   };
 }
 
-describe('exploration-smoke configuration', () => {
+describe('bootstrap configuration', () => {
   test('pins the native writer, roles, TLS bundle, and connection bounds', () => {
     expect(readBootstrapConfig(validConfigEnvironment())).toEqual({
       accountId: '000000000000',

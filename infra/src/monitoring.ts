@@ -54,7 +54,7 @@ import {
   DEPLOYMENT_REGION,
   NOTIFICATION_CHANNELS,
 } from './config';
-import { EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN as SES_IDENTITY_DOMAIN } from './stack/config';
+import { SES_IDENTITY_DOMAIN as SES_IDENTITY_DOMAIN } from './stack/config';
 
 export const MONITORING_METRIC_NAMESPACE = 'PSD/EOC';
 export const MONITORING_DASHBOARD_NAME = 'psd-eoc-operations';
