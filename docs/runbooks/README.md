@@ -45,6 +45,15 @@ service.
 
 Use [escalation.md](escalation.md) to assign severity and contact roles.
 
+## Setting a deployment up for the first time
+
+[first-run.md](first-run.md) is the ordered path from a deployed stack to a
+first drill: what the bootstrap seed does and does not create, getting the
+first administrator in, and — the step most worth not skipping — proving that
+the access-membership sync is actually running, because a deployment whose
+membership stops refreshing locks its district out 24 hours later while looking
+healthy the whole time.
+
 ## P5.1 alarm-to-runbook inventory
 
 Issue [#29](https://github.com/psd401/psd-eoc/issues/29) landed on `main` in
@@ -54,37 +63,50 @@ alarm a stable runbook anchor. This proves source definition only. It does
 **not** prove that the stack, metrics, alarm actions, or recipients are deployed
 or that an alarm was read back from CloudWatch.
 
-Every row is currently **source-defined / live-unverified**. No approved
-deployment/read-back evidence or CloudWatch console deep link is recorded in
-the repository; those fields remain blocked by
-[#91](https://github.com/psd401/psd-eoc/issues/91). An operator must match the
-exact source-defined name against the approved account and region after a
-deployment, then store the console link in the access-controlled evidence
-package. Never substitute a synthesized template, source name, or dashboard
-widget for that read-back.
+Thirteen of these are now deployed and read back. On 2026-08-21
+`aws cloudwatch describe-alarms --alarm-name-prefix psd-eoc` returned 13 alarms
+in account `338414773271`, region `us-west-2`, every one in state `OK` with
+exactly one alarm action. Both destination topics carry a confirmed SMS
+subscription, a confirmed email subscription, and the `psd-eoc-alarm-mailer`
+SES function, so an alarm reaches a person. Those rows read
+**live-verified 2026-08-21**.
+
+The rest remain **source-defined / live-unverified**, and not by oversight:
+they depend on a publisher that does not exist yet — the one-minute canary
+needs a credential that has never been issued, and the metrics collector needs
+the `psd_eoc_monitoring` database login. Several treat missing data as
+breaching, so deploying them against a metric nobody publishes would page the
+operations team every minute forever. `configureInfrastructureMonitoring`
+deploys exactly the subset that can be satisfied today; `configureMonitoring`
+deploys all of them and is deliberately not called.
+
+An operator must still match the exact source-defined name against the approved
+account and region after a deployment, and store the console link in the
+access-controlled evidence package. Never substitute a synthesized template,
+source name, or dashboard widget for that read-back.
 
 | Exact source-defined CloudWatch alarm name    | Source condition                                                                              | Operator runbook                                         | Truth                            |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------- |
-| `psd-eoc-apprunner-5xx`                       | At least one App Runner 5xx response in one minute                                            | [App Runner 5xx](alarm-app-runner-5xx.md)                | source-defined / live-unverified |
-| `psd-eoc-apprunner-request-latency-average`   | All-route average latency at least 500 ms in 3 of 5 minutes                                   | [App Runner latency](alarm-app-runner-latency.md)        | source-defined / live-unverified |
+| `psd-eoc-apprunner-5xx`                       | At least one App Runner 5xx response in one minute                                            | [App Runner 5xx](alarm-app-runner-5xx.md)                | live-verified 2026-08-21         |
+| `psd-eoc-apprunner-request-latency-average`   | All-route average latency at least 500 ms in 3 of 5 minutes                                   | [App Runner latency](alarm-app-runner-latency.md)        | live-verified 2026-08-21         |
 | `psd-eoc-activation-accept-latency-p95`       | Staff incident/drill activation-accept p95 at least 500 ms in 3 of 5 closed minutes           | [Activation-accept latency](alarm-activation-latency.md) | source-defined / live-unverified |
-| `psd-eoc-aurora-failover-bridge-errors`       | At least one failover EventBridge target or metric-Lambda error in one minute                 | [Aurora failover](alarm-aurora-failover.md)              | source-defined / live-unverified |
-| `psd-eoc-aurora-acu-utilization`              | Aurora ACU utilization at least 80% in 3 of 5 minutes                                         | [Aurora capacity](alarm-aurora-capacity.md)              | source-defined / live-unverified |
+| `psd-eoc-aurora-failover-bridge-errors`       | At least one failover EventBridge target or metric-Lambda error in one minute                 | [Aurora failover](alarm-aurora-failover.md)              | live-verified 2026-08-21         |
+| `psd-eoc-aurora-acu-utilization`              | Aurora ACU utilization at least 80% in 3 of 5 minutes                                         | [Aurora capacity](alarm-aurora-capacity.md)              | live-verified 2026-08-21         |
 | `psd-eoc-metrics-collector-failure`           | Collector success below 1 for 2 consecutive minutes, including missing data                   | [Metrics collector](alarm-metrics-collector.md)          | source-defined / live-unverified |
 | `psd-eoc-aurora-replica-lag`                  | Maximum replica lag at least 1,000 ms in 3 of 5 minutes                                       | [Aurora failover](alarm-aurora-failover.md)              | source-defined / live-unverified |
-| `psd-eoc-aurora-failover-event`               | At least one Aurora cluster failover event in one minute                                      | [Aurora failover](alarm-aurora-failover.md)              | source-defined / live-unverified |
+| `psd-eoc-aurora-failover-event`               | At least one Aurora cluster failover event in one minute                                      | [Aurora failover](alarm-aurora-failover.md)              | live-verified 2026-08-21         |
 | `psd-eoc-one-minute-canary-failure`           | Canary success below 1 for 2 consecutive minutes, including missing data                      | [Canary failure](alarm-canary-failure.md)                | source-defined / live-unverified |
 | `psd-eoc-stuck-production-outbox`             | At least one staff outbox row remains unpublished and nonterminal for one minute              | [Stuck outbox](alarm-outbox-stuck.md)                    | source-defined / live-unverified |
 | `psd-eoc-roster-sync-failure-age`             | Latest staff sync remains failed or partial-rejected for at least 15 minutes                  | [Stale roster](alarm-roster-stale.md)                    | source-defined / live-unverified |
 | `psd-eoc-roster-sync-success-age`             | No complete staff sync is retained within 25 hours                                            | [Stale roster](alarm-roster-stale.md)                    | source-defined / live-unverified |
-| `psd-eoc-delivery-queue-age`                    | Oldest delivery message reaches 60 seconds                                             | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
-| `psd-eoc-push-queue-age`                      | Oldest push message reaches 60 seconds                                                        | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
-| `psd-eoc-email-queue-age`                     | Oldest email message reaches 60 seconds                                                       | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
-| `psd-eoc-sms-queue-age`                       | Oldest SMS message reaches 60 seconds                                                         | [Queue age](alarm-sqs-age.md)                            | source-defined / live-unverified |
-| `psd-eoc-delivery-dlq-depth`                    | At least one visible delivery DLQ message                                              | [DLQ: delivery](alarm-dlq-delivery.md)              | source-defined / live-unverified |
-| `psd-eoc-push-dlq-depth`                      | At least one visible push DLQ message                                                         | [DLQ: push](alarm-dlq-push.md)                           | source-defined / live-unverified |
-| `psd-eoc-email-dlq-depth`                     | At least one visible email DLQ message                                                        | [DLQ: email](alarm-dlq-email.md)                         | source-defined / live-unverified |
-| `psd-eoc-sms-dlq-depth`                       | At least one visible SMS DLQ message                                                          | [DLQ: SMS](alarm-dlq-sms.md)                             | source-defined / live-unverified |
+| `psd-eoc-delivery-queue-age`                  | Oldest delivery message reaches 60 seconds                                                    | [Queue age](alarm-sqs-age.md)                            | live-verified 2026-08-21         |
+| `psd-eoc-push-queue-age`                      | Oldest push message reaches 60 seconds                                                        | [Queue age](alarm-sqs-age.md)                            | live-verified 2026-08-21         |
+| `psd-eoc-email-queue-age`                     | Oldest email message reaches 60 seconds                                                       | [Queue age](alarm-sqs-age.md)                            | live-verified 2026-08-21         |
+| `psd-eoc-sms-queue-age`                       | Oldest SMS message reaches 60 seconds                                                         | [Queue age](alarm-sqs-age.md)                            | live-verified 2026-08-21         |
+| `psd-eoc-delivery-dlq-depth`                  | At least one visible delivery DLQ message                                                     | [DLQ: delivery](alarm-dlq-delivery.md)                   | live-verified 2026-08-21         |
+| `psd-eoc-push-dlq-depth`                      | At least one visible push DLQ message                                                         | [DLQ: push](alarm-dlq-push.md)                           | live-verified 2026-08-21         |
+| `psd-eoc-email-dlq-depth`                     | At least one visible email DLQ message                                                        | [DLQ: email](alarm-dlq-email.md)                         | live-verified 2026-08-21         |
+| `psd-eoc-sms-dlq-depth`                       | At least one visible SMS DLQ message                                                          | [DLQ: SMS](alarm-dlq-sms.md)                             | live-verified 2026-08-21         |
 | `psd-eoc-push-outbox-to-provider-p95`         | Push outbox-to-provider p95 reaches 5 seconds                                                 | [Expo Push](provider-expo.md)                            | source-defined / live-unverified |
 | `psd-eoc-push-outbox-to-provider-incomplete`  | At least one push endpoint misses provider acceptance by the deterministic one-minute cutoff  | [Expo Push](provider-expo.md)                            | source-defined / live-unverified |
 | `psd-eoc-email-outbox-to-provider-p95`        | Email outbox-to-provider p95 reaches 15 seconds                                               | [Amazon SES](provider-ses.md)                            | source-defined / live-unverified |
@@ -119,11 +141,11 @@ any go-live monitoring item.
 
 ## High-consequence controls and release
 
-| Operation                                                        | Runbook                                   |
-| ---------------------------------------------------------------- | ----------------------------------------- |
-| Stop notification delivery                                       | [Rollback](rollback.md) — no kill switch  |
-| Roll back application, workers, configuration, or mobile release | [Rollback](rollback.md)                   |
-| Decide whether production traffic may begin                      | [Go-live checklist](go-live.md)           |
+| Operation                                                        | Runbook                                  |
+| ---------------------------------------------------------------- | ---------------------------------------- |
+| Stop notification delivery                                       | [Rollback](rollback.md) — no kill switch |
+| Roll back application, workers, configuration, or mobile release | [Rollback](rollback.md)                  |
+| Decide whether production traffic may begin                      | [Go-live checklist](go-live.md)          |
 
 ## Current readiness truth (2026-08-13)
 
