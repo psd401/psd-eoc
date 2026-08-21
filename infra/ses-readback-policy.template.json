@@ -1,8 +1,8 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Retained least-privilege operations policy for the protected PSD EOC exploration deployment role",
+  "Description": "Retained least-privilege operations policy for the protected PSD EOC deployment role",
   "Resources": {
-    "ExplorationSmokeSesReadbackPolicy": {
+    "SesReadbackPolicy": {
       "DeletionPolicy": "Retain",
       "Properties": {
         "PolicyDocument": {
