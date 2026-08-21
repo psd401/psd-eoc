@@ -113,7 +113,7 @@ jobs:
       # cannot export a registry cache. The `docker-container` driver can, and
       # the layer cache is what keeps repeat deploys short.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
 
