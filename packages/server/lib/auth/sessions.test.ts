@@ -21,7 +21,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
-  accessGroupMembers,
+  groupMembers,
   accessMembershipSnapshots,
   connectivityEpochs,
   deviceEnrollments,
@@ -152,7 +152,7 @@ async function ensureDesignatedAccessGroup(
     .onConflictDoNothing();
   if (memberEmail !== undefined) {
     await database
-      .insert(accessGroupMembers)
+      .insert(groupMembers)
       .values({
         groupSourceId: DESIGNATED_ACCESS_GROUP_ID,
         email: memberEmail.toLowerCase(),
@@ -653,7 +653,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       createdAt: snapshotAt,
     });
     await database.insert(userRoles).values({ userId, role: 'staff' });
-    await database.insert(accessGroupMembers).values({
+    await database.insert(groupMembers).values({
       groupSourceId,
       email: `issue-26-app-role-session-${suffix}@example.invalid`,
       capturedAt: snapshotAt,
@@ -831,7 +831,7 @@ describeWithDatabase('PostgreSQL session effective-role projection', () => {
       createdAt: snapshotAt,
     });
     await database.insert(userRoles).values({ userId, role: 'staff' });
-    await database.insert(accessGroupMembers).values({
+    await database.insert(groupMembers).values({
       groupSourceId,
       email: `issue-26-bootstrap-lock-${suffix}@example.invalid`,
       capturedAt: snapshotAt,

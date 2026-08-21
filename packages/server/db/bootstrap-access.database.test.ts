@@ -15,7 +15,7 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from './client';
-import { accessGroupMembers, groupSources } from './schema';
+import { groupMembers, groupSources } from './schema';
 
 const baseUrl = process.env.TEST_DATABASE_URL;
 const describeWithDatabase = baseUrl === undefined ? describe.skip : describe;
@@ -151,7 +151,7 @@ describeWithDatabase(
       if (group === undefined)
         throw new Error('the bootstrap group is missing');
       const capturedAt = new Date();
-      await database().insert(accessGroupMembers).values({
+      await database().insert(groupMembers).values({
         groupSourceId: group.id,
         email: 'first.administrator@example.invalid',
         capturedAt,

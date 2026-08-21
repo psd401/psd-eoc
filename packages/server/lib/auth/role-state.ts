@@ -3,7 +3,7 @@ import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client';
 import {
-  accessGroupMembers,
+  groupMembers,
   groupSources,
   userRoleChanges,
   userRoles,
@@ -152,11 +152,11 @@ export async function loadEffectiveAdministratorUserIds(
 
   const rows = await database
     .selectDistinctOn([users.id], { userId: users.id })
-    .from(accessGroupMembers)
-    .innerJoin(users, eq(users.email, accessGroupMembers.email))
+    .from(groupMembers)
+    .innerJoin(users, eq(users.email, groupMembers.email))
     .where(
       and(
-        inArray(accessGroupMembers.groupSourceId, eligible),
+        inArray(groupMembers.groupSourceId, eligible),
         isNull(users.disabledAt),
       ),
     )
