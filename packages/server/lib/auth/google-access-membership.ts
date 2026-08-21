@@ -125,31 +125,36 @@ export class AccessMembershipEvaluationError extends Error {
 }
 
 /**
- * One access group a deployment has configured, as the evaluator is asked to
- * read it. The caller supplies these from the active access sources, which is
- * what replaced the single compiled-in group address.
+ * One group a deployment has configured, as the evaluator is asked to read it.
+ * The caller supplies these from the active sources.
+ *
+ * `grantedRole` is null for any group that does not grant one — a school's
+ * staff group confers no role, it only says who is at that school. The
+ * evaluator carries the value into its digest and never decides with it; the
+ * roles a person receives are read from `group_sources` at sign-in, by
+ * `decideAccess`, and only ever from sources whose purpose is 'access'.
  */
 export interface DesignatedAccessGroup {
   readonly groupSourceId: string;
   readonly email: string;
-  readonly grantedRole: Role;
+  readonly grantedRole: Role | null;
 }
 
 export const DesignatedAccessGroupSchema = z
   .object({
     groupSourceId: z.string().uuid(),
     email: StaffRosterEmailSchema,
-    grantedRole: RoleSchema,
+    grantedRole: RoleSchema.nullable(),
   })
   .strict()
   .readonly();
 
-/** Complete direct-user evaluation of one configured access group. */
+/** Complete direct-user evaluation of one configured group. */
 export interface EvaluatedAccessGroup {
   readonly groupSourceId: string;
   readonly groupEmail: string;
   readonly googleGroupId: string;
-  readonly grantedRole: Role;
+  readonly grantedRole: Role | null;
   readonly memberEmails: readonly string[];
 }
 
@@ -168,7 +173,12 @@ export interface GoogleAccessMembershipEvaluator {
   ): Promise<EvaluatedAccessMembershipSet>;
 }
 
-function stableDigest(parts: readonly string[]): string {
+/**
+ * Accepts null so a group that grants no role is distinguishable from one that
+ * grants a role named "". `JSON.stringify` writes null unquoted, so the two
+ * can never collide into the same digest.
+ */
+function stableDigest(parts: readonly (string | null)[]): string {
   return createHash('sha256')
     .update(JSON.stringify(parts), 'utf8')
     .digest('hex');
