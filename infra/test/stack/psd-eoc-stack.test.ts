@@ -1245,13 +1245,47 @@ describe('protected access-membership publication boundary', () => {
   });
 });
 
-describe('alarm topic encryption', () => {
-  it('lets SNS use the operations key, or no alarm ever reaches anyone', () => {
-    // Both alarm topics are encrypted with this key. SNS needs a data key to
-    // handle any message on them, including the confirmation it generates when
-    // somebody subscribes — so without this grant a subscription is created and
-    // stays PendingConfirmation forever with no email ever sent. That presents
-    // as a mail problem and is not one, which is why it is pinned here.
+describe('alarm topic delivery', () => {
+  it('leaves the alarm topics unencrypted so a confirmation can be sent', () => {
+    // Encrypted with a customer-managed key, neither topic could deliver an
+    // email subscription confirmation: it was created with the right address
+    // and stayed PendingConfirmation indefinitely, no error recorded anywhere,
+    // no KMS call ever made, and granting sns.amazonaws.com the key did not
+    // change it. The topics in this account that do reach the same mailbox are
+    // unencrypted. Re-encrypting these would silently stop every page.
+    const alarmTopics = resourceEntries('AWS::SNS::Topic').filter(
+      ([, resource]) =>
+        String(properties(resource).TopicName).endsWith('-alarms'),
+    );
+    expect(
+      alarmTopics.map(([, resource]) => properties(resource).TopicName).sort(),
+    ).toEqual(['psd-eoc-critical-alarms', 'psd-eoc-operations-alarms']);
+    for (const [, resource] of alarmTopics) {
+      expect(properties(resource)).not.toHaveProperty('KmsMasterKeyId');
+    }
+
+    // An alarm still has to be able to publish, which is a topic policy and
+    // never depended on encryption.
+    const publishSids = resourceEntries('AWS::SNS::TopicPolicy').flatMap(
+      ([, resource]) =>
+        asArray(asRecord(properties(resource).PolicyDocument).Statement)
+          .map(asRecord)
+          // Some statements use a bare "*" principal, so this cannot assume
+          // every Principal is an object.
+          .filter((statement) =>
+            JSON.stringify(statement.Principal).includes(
+              'cloudwatch.amazonaws.com',
+            ),
+          )
+          .map((statement) => statement.Sid),
+    );
+    expect(publishSids).toEqual([
+      'AllowScopedCloudWatchAlarmPublish',
+      'AllowScopedCloudWatchAlarmPublish',
+    ]);
+
+    // The operations key survives for the monitoring log groups, which do want
+    // encryption and are not on the paging path.
     const operationsKey = asRecord(
       resourceEntries('AWS::KMS::Key').find(([, resource]) =>
         String(properties(resource).Description).startsWith(
@@ -1259,30 +1293,13 @@ describe('alarm topic encryption', () => {
         ),
       )?.[1],
     );
-    const statements = asArray(
+    const sids = asArray(
       asRecord(properties(operationsKey).KeyPolicy).Statement,
-    ).map(asRecord);
-
-    const forSns = statements.find(
-      (statement) =>
-        asRecord(statement.Principal).Service === 'sns.amazonaws.com',
-    );
-    expect(forSns).toBeDefined();
-    expect(forSns?.Action).toEqual(['kms:Decrypt', 'kms:GenerateDataKey*']);
-    expect(forSns?.Condition).toEqual({
-      StringEquals: { 'aws:SourceAccount': AWS_ACCOUNT },
-    });
-
-    // Every topic encrypted with this key needs that grant to be usable.
-    const encrypted = resourceEntries('AWS::SNS::Topic').filter(
-      ([, resource]) =>
-        JSON.stringify(properties(resource).KmsMasterKeyId).includes(
-          'OperationsKey',
-        ),
-    );
-    expect(
-      encrypted.map(([, resource]) => properties(resource).TopicName).sort(),
-    ).toEqual(['psd-eoc-critical-alarms', 'psd-eoc-operations-alarms']);
+    )
+      .map(asRecord)
+      .map((statement) => statement.Sid)
+      .filter((sid) => sid !== undefined);
+    expect(sids).toEqual(['AllowMonitoringLogGroupEncryption']);
   });
 });
 
