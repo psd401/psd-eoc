@@ -314,10 +314,26 @@ function configureAlarmRecipients(
           'ses:FromAddress': `eoc-alarms@${SES_IDENTITY_DOMAIN}`,
         },
       },
+      // Both the identity and a configuration set, because the district's
+      // `psd401.net` identity has a default configuration set attached that SES
+      // applies to every send through it. Without the second resource the send
+      // is refused with AccessDenied naming a configuration set this stack does
+      // not own and did not ask for.
+      //
+      // The configuration set is wildcarded rather than named: it belongs to
+      // another team, and this breaking because they renamed theirs would be a
+      // silent loss of alarm mail. Nothing is given away by it — the condition
+      // above still allows exactly one From address, so this role can send as
+      // the alarm sender and as nothing else.
       resources: [
         Stack.of(scope).formatArn({
           resource: 'identity',
           resourceName: SES_IDENTITY_DOMAIN,
+          service: 'ses',
+        }),
+        Stack.of(scope).formatArn({
+          resource: 'configuration-set',
+          resourceName: '*',
           service: 'ses',
         }),
       ],
