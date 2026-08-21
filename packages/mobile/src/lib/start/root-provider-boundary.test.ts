@@ -123,6 +123,47 @@ describe('root layout provider placement', () => {
     expect(routeNames[0]).toBe('index');
   });
 
+  test('keeps the OIDC callback reachable without a session', async () => {
+    // Android delivers psdeoc://auth/callback as an OS intent, and it arrives
+    // before there is anything to guard on. A guarded — or missing — route puts
+    // the authorization code back on Expo Router's Unmatched Route, which is
+    // the defect in issue #290.
+    const source = await Bun.file(LAYOUT_PATH).text();
+    const sourceFile = ts.createSourceFile(
+      '_layout.tsx',
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const stack = jsxElement(
+      returnedExpression(sourceFile, 'AuthenticatedStack'),
+      'AuthenticatedStack',
+    );
+    const routeNames = stackScreenNames(stack, sourceFile);
+
+    expect(routeNames).toContain('auth/callback');
+    // Last, so it is a destination rather than the anchor route.
+    expect(routeNames[0]).not.toBe('auth/callback');
+
+    const guardedNames: string[] = [];
+    const collectGuarded = (node: ts.Node): void => {
+      if (
+        ts.isJsxElement(node) &&
+        node.openingElement.tagName.getText(sourceFile) === 'Stack.Protected'
+      ) {
+        guardedNames.push(...stackScreenNames(node, sourceFile));
+        return;
+      }
+      ts.forEachChild(node, collectGuarded);
+    };
+    collectGuarded(stack);
+
+    // Proves the sweep found the guards it is meant to police.
+    expect(guardedNames).toContain('(auth)/sign-in');
+    expect(guardedNames).not.toContain('auth/callback');
+  });
+
   test('keeps the app-lifetime mutation owner above all authenticated routes', async () => {
     const source = await Bun.file(LAYOUT_PATH).text();
     const sourceFile = ts.createSourceFile(
