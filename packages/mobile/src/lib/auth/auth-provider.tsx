@@ -2,6 +2,8 @@ import * as Crypto from 'expo-crypto';
 import type {
   ConnectivityEpochId,
   DeviceEnrollmentId,
+  MobileSessionResponse,
+  NativeDevicePlatform,
   SessionId,
   UserId,
 } from '@psd-eoc/contracts';
@@ -29,6 +31,7 @@ import { MobileAuthError } from './auth-errors';
 import { expoOidcBrowser, expoPkceSource } from './expo-oidc';
 import { createLocalAuthenticator } from './local-authenticator';
 import { MobileOidcClient } from './oidc-client';
+import { createSecurePendingOidcFlowStore } from './secure-pending-oidc-flow';
 import { createSecureSessionStore } from './secure-session-store';
 import {
   createIssue21SyntheticAuthFixture,
@@ -42,6 +45,11 @@ export interface MobileAuthContextValue {
   readonly isSigningIn: boolean;
   readonly signInError: string | null;
   readonly beginGoogleSignIn: () => Promise<void>;
+  /** Resumes an attempt whose redirect arrived outside `promptAsync`. */
+  readonly completeGoogleSignIn: (
+    authorizationCode: string,
+    state: string,
+  ) => Promise<void>;
   readonly unlock: () => Promise<void>;
   readonly retryConnection: () => Promise<void>;
   readonly signOut: () => Promise<void>;
@@ -104,7 +112,13 @@ function createRuntime(): AuthRuntime {
   return Object.freeze({
     controller,
     storage,
-    oidc: new MobileOidcClient(api, expoOidcBrowser, expoPkceSource),
+    oidc: new MobileOidcClient(
+      api,
+      expoOidcBrowser,
+      expoPkceSource,
+      () => new Date(),
+      createSecurePendingOidcFlowStore(),
+    ),
   });
 }
 
@@ -158,39 +172,64 @@ export function AuthProvider({ children }: PropsWithChildren) {
     };
   }, [runtime]);
 
-  const beginGoogleSignIn = useCallback(async () => {
-    if (signingInRef.current) {
-      return;
-    }
-    signingInRef.current = true;
-    setIsSigningIn(true);
-    setSignInError(null);
-    try {
-      if (runtime.oidc === null) {
-        throw new MobileAuthError(
-          'configuration',
-          'Synthetic accessibility testing does not use Google sign-in. Restart the development build to restore its in-memory enrollment.',
-        );
+  const runSignIn = useCallback(
+    async (
+      attempt: (
+        oidc: MobileOidcClient,
+        platform: NativeDevicePlatform,
+      ) => Promise<MobileSessionResponse>,
+    ) => {
+      if (signingInRef.current) {
+        return;
       }
-      if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
-        throw new MobileAuthError(
-          'configuration',
-          'Mobile Google sign-in requires an iOS or Android development build.',
-        );
+      signingInRef.current = true;
+      setIsSigningIn(true);
+      setSignInError(null);
+      try {
+        if (runtime.oidc === null) {
+          throw new MobileAuthError(
+            'configuration',
+            'Synthetic accessibility testing does not use Google sign-in. Restart the development build to restore its in-memory enrollment.',
+          );
+        }
+        if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
+          throw new MobileAuthError(
+            'configuration',
+            'Mobile Google sign-in requires an iOS or Android development build.',
+          );
+        }
+        // Platform is narrowed by the guard above, so the attempt never has
+        // to assert it.
+        const payload = await attempt(runtime.oidc, Platform.OS);
+        const enrolled = await runtime.controller.enroll(payload);
+        if (!enrolled) {
+          setSignInError(runtime.controller.getSnapshot().message);
+        }
+      } catch (error) {
+        setSignInError(publicSignInError(error));
+      } finally {
+        signingInRef.current = false;
+        setIsSigningIn(false);
       }
-      const installationId = await runtime.storage.getOrCreateInstallationId();
-      const payload = await runtime.oidc.signIn(Platform.OS, installationId);
-      const enrolled = await runtime.controller.enroll(payload);
-      if (!enrolled) {
-        setSignInError(runtime.controller.getSnapshot().message);
-      }
-    } catch (error) {
-      setSignInError(publicSignInError(error));
-    } finally {
-      signingInRef.current = false;
-      setIsSigningIn(false);
-    }
-  }, [runtime]);
+    },
+    [runtime],
+  );
+
+  const beginGoogleSignIn = useCallback(
+    () =>
+      runSignIn(async (oidc, platform) => {
+        const installationId =
+          await runtime.storage.getOrCreateInstallationId();
+        return oidc.signIn(platform, installationId);
+      }),
+    [runSignIn, runtime],
+  );
+
+  const completeGoogleSignIn = useCallback(
+    (authorizationCode: string, state: string) =>
+      runSignIn((oidc) => oidc.completeSignIn(authorizationCode, state)),
+    [runSignIn],
+  );
 
   const subscribeState = useCallback(
     (listener: () => void) => runtime.controller.subscribe(listener),
@@ -218,6 +257,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       isSigningIn,
       signInError,
       beginGoogleSignIn,
+      completeGoogleSignIn,
       unlock: () => runtime.controller.foreground(),
       retryConnection: () => runtime.controller.retryConnection(),
       subscribeState,
@@ -231,6 +271,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }),
     [
       beginGoogleSignIn,
+      completeGoogleSignIn,
       isOnlineSession,
       isSigningIn,
       runtime,

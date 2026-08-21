@@ -61,6 +61,18 @@ export function AuthenticatedStack() {
             options={{ headerShown: false, title: 'Sign in to PSD EOC' }}
           />
         </Stack.Protected>
+
+        {/*
+          Deliberately outside every guard: the Android OIDC redirect lands here
+          precisely when there is no session yet, so a guard that depends on one
+          would turn the callback back into an Unmatched Route. Declared last so
+          it stays a destination and never becomes the anchor route — `index`
+          holds that position.
+        */}
+        <Stack.Screen
+          name="auth/callback"
+          options={{ headerShown: false, title: 'Completing sign-in' }}
+        />
       </Stack>
     </View>
   );
