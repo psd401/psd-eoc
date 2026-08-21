@@ -971,6 +971,12 @@ export class PsdEocStack extends Stack {
           DATABASE_PORT: String(DATABASE_PORT),
           DATABASE_SSL_ROOT_CERT: DATABASE_SSL_ROOT_CERT,
           DATABASE_CONNECT_TIMEOUT_SECONDS: '10',
+          // The sync resolves every member address against this district's
+          // staff domain before admitting it, so the task cannot run without
+          // it. It became required when the auth values moved to configuration
+          // and was never added here, which broke every run from that deploy
+          // onward: `GOOGLE_OIDC_HOSTED_DOMAIN must be configured.`
+          GOOGLE_OIDC_HOSTED_DOMAIN: deploymentIdentity.hostedDomain,
           SOURCE_SHA: bootstrapSourceSha.valueAsString,
           TMPDIR: '/tmp',
         },

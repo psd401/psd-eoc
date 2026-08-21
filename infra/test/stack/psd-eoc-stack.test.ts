@@ -1225,6 +1225,7 @@ describe('protected access-membership publication boundary', () => {
         'DATABASE_NAME',
         'DATABASE_PORT',
         'DATABASE_SSL_ROOT_CERT',
+        'GOOGLE_OIDC_HOSTED_DOMAIN',
         'SOURCE_SHA',
         'TMPDIR',
       ].sort(),
@@ -1232,6 +1233,13 @@ describe('protected access-membership publication boundary', () => {
     expect(environment.get('SOURCE_SHA')).toEqual({
       Ref: 'BootstrapSourceSha',
     });
+    // Without this the task cannot resolve a member address against the
+    // district's staff domain, and every run fails closed with
+    // `GOOGLE_OIDC_HOSTED_DOMAIN must be configured.` — which is exactly what
+    // happened from the deploy that made the auth values configuration.
+    expect(environment.get('GOOGLE_OIDC_HOSTED_DOMAIN')).toBe(
+      'example.invalid',
+    );
     expect(JSON.stringify(environment)).not.toContain('DATABASE_ADMIN');
     expect(JSON.stringify(environment)).not.toContain('APPROVED_');
 
