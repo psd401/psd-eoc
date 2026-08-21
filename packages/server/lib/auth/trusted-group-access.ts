@@ -3,7 +3,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { RoleSchema, type Role } from '@psd-eoc/contracts';
 
 import type { Database } from '../../db/client';
-import { accessGroupMembers, groupSources } from '../../db/schema';
+import { groupMembers, groupSources } from '../../db/schema';
 
 /**
  * How stale a group's membership may be and still authorize a sign-in.
@@ -79,13 +79,13 @@ export async function decideAccess(
   }
 
   const memberships = await database
-    .select({ groupSourceId: accessGroupMembers.groupSourceId })
-    .from(accessGroupMembers)
+    .select({ groupSourceId: groupMembers.groupSourceId })
+    .from(groupMembers)
     .where(
       and(
-        eq(accessGroupMembers.email, input.email.toLowerCase()),
+        eq(groupMembers.email, input.email.toLowerCase()),
         inArray(
-          accessGroupMembers.groupSourceId,
+          groupMembers.groupSourceId,
           active.map(({ id }) => id),
         ),
       ),

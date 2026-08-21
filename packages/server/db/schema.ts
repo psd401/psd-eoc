@@ -286,15 +286,24 @@ export const neighborhoodFacilities = pgTable(
 
 /** Purpose-bound Google Group or fail-closed synthetic source configuration. */
 /**
- * One person currently in one trusted access group.
+ * One person currently in one group source, whatever that source is for.
  *
- * Sign-in reads exactly this: is the viewer in a group the deployment trusts,
- * and what role does that group grant. Membership is replaced wholesale per
- * group when the provider is read, so a row existing means the person was in
- * that group as of the group's `membersCapturedAt`.
+ * Sign-in reads the rows whose source has `purpose = 'access'`: is the viewer
+ * in a group the deployment trusts, and what role does that group grant.
+ * Notification recipients read the rows whose source has `purpose = 'building'`
+ * — the staff at a school, which is what an event at that school notifies.
+ *
+ * One table for both because the row is the same fact either way, and because
+ * membership from a group the district has not activated for a purpose cannot
+ * leak into that purpose: every reader constrains `group_source_id` to the
+ * sources it has already selected by purpose.
+ *
+ * Membership is replaced wholesale per group when the provider is read, so a
+ * row existing means the person was in that group as of the source's
+ * `membersCapturedAt`.
  */
-export const accessGroupMembers = pgTable(
-  'access_group_members',
+export const groupMembers = pgTable(
+  'group_members',
   {
     groupSourceId: uuid('group_source_id')
       .notNull()
@@ -304,10 +313,10 @@ export const accessGroupMembers = pgTable(
   },
   (table) => [
     primaryKey({
-      name: 'access_group_members_pk',
+      name: 'group_members_pk',
       columns: [table.groupSourceId, table.email],
     }),
-    index('access_group_members_email_idx').on(table.email),
+    index('group_members_email_idx').on(table.email),
   ],
 );
 

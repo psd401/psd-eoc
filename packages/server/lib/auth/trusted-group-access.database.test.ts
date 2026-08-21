@@ -7,7 +7,7 @@ import {
   createDatabaseClient,
   type PostgresDatabaseConnection,
 } from '../../db/client';
-import { accessGroupMembers, groupSources } from '../../db/schema';
+import { groupMembers, groupSources } from '../../db/schema';
 import { migrateDatabase } from '../../drizzle/migrate';
 import { decideAccess, MEMBERSHIP_FRESHNESS_MS } from './trusted-group-access';
 
@@ -81,7 +81,7 @@ describeWithDatabase('trusted group access', () => {
         group(STAFF_GROUP, 'staff', true, fresh),
         group(RETIRED_GROUP, 'admin', false, fresh),
       ]);
-    await opened.db.insert(accessGroupMembers).values([
+    await opened.db.insert(groupMembers).values([
       {
         groupSourceId: ADMIN_GROUP,
         email: 'boss@example.invalid',
