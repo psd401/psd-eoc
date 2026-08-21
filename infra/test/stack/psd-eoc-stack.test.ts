@@ -347,9 +347,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
     template.resourceCountIs('AWS::ECS::Service', 0);
-    // Four log groups: bootstrap, access sync, the Aurora failover bridge, and
-    // the delivery router.
-    template.resourceCountIs('AWS::Logs::LogGroup', 4);
+    // Five log groups: bootstrap, access sync, the Aurora failover bridge, the
+    // delivery router, and the alarm mailer.
+    template.resourceCountIs('AWS::Logs::LogGroup', 5);
     // Nine queues: the health queue, plus a source/dead-letter pair each for
     // delivery, email, SMS, and push.
     template.resourceCountIs('AWS::SQS::Queue', 9);
@@ -470,9 +470,10 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::EC2::Subnet', 6);
     template.resourceCountIs('AWS::EC2::NatGateway', 1);
     template.resourceCountIs('AWS::EC2::InternetGateway', 1);
-    // Two functions: the Aurora failover bridge, and the delivery router. Both
-    // are outside the VPC and neither can reach the database or a provider.
-    template.resourceCountIs('AWS::Lambda::Function', 2);
+    // Three functions, all outside the VPC and none able to reach the database.
+    // Only the alarm mailer may reach a provider, and only SES, and only from
+    // the operational alarm address.
+    template.resourceCountIs('AWS::Lambda::Function', 3);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
     template.resourceCountIs('AWS::EC2::SecurityGroup', 2);
@@ -1487,7 +1488,11 @@ describe('configured-unverified provider readiness boundary', () => {
       resourceEntries('AWS::Lambda::Function')
         .map(([, resource]) => String(properties(resource).FunctionName))
         .sort(),
-    ).toEqual(['psd-eoc-aurora-failover-metric', 'psd-eoc-delivery-router']);
+    ).toEqual([
+      'psd-eoc-alarm-mailer',
+      'psd-eoc-aurora-failover-metric',
+      'psd-eoc-delivery-router',
+    ]);
     expect(
       resourceEntries('AWS::Events::Rule')
         .map(([, resource]) => String(properties(resource).Name))
@@ -1505,12 +1510,15 @@ describe('configured-unverified provider readiness boundary', () => {
     const mapping = properties(onlyResource('AWS::Lambda::EventSourceMapping'));
     expect(JSON.stringify(mapping.EventSourceArn)).toContain('DeliveryQueue');
     expect(mapping.FunctionResponseTypes).toEqual(['ReportBatchItemFailures']);
-    // The only subscriptions are the operations team's alarm routes.
+    // Alarm email goes through the mailer rather than an SNS email
+    // subscription, so there is no unsubscribe link and no confirmation step in
+    // the paging path. SMS stays a direct subscription; it auto-confirms and
+    // carries no such link.
     expect(
       resourceEntries('AWS::SNS::Subscription')
         .map(([, resource]) => String(properties(resource).Protocol))
         .sort(),
-    ).toEqual(['email', 'email', 'sms', 'sms']);
+    ).toEqual(['lambda', 'lambda', 'sms', 'sms']);
     expect(
       Object.values(resources).some((resource) =>
         String(asRecord(resource).Type).startsWith('Custom::'),
@@ -1521,8 +1529,33 @@ describe('configured-unverified provider readiness boundary', () => {
     expect(serializedTemplate).not.toContain('aws-data-api');
     expect(serializedTemplate).not.toContain('DATABASE_RESOURCE_ARN');
     expect(serializedTemplate).not.toContain('DATABASE_SECRET_ARN');
-    expect(serializedTemplate).not.toContain('ses:SendEmail');
+    // ses:SendEmail exists exactly once, on the alarm mailer, and is confined by
+    // condition to the operational alarm sender. That is not the staff
+    // notification path: the mailer has no roster, no database, no recipient
+    // from a snapshot, and cannot send as the notification address. Nothing
+    // else in the stack may send mail at all, and SendRawEmail exists nowhere.
     expect(serializedTemplate).not.toContain('ses:SendRawEmail');
+    const sesSenders = resourceEntries('AWS::IAM::Policy').filter(
+      ([, resource]) =>
+        JSON.stringify(properties(resource).PolicyDocument).includes(
+          'ses:SendEmail',
+        ),
+    );
+    expect(sesSenders).toHaveLength(1);
+    const sesStatement = asArray(
+      asRecord(properties(asRecord(sesSenders[0]?.[1])).PolicyDocument)
+        .Statement,
+    )
+      .map(asRecord)
+      .find((statement) =>
+        asStringArray(statement.Action).includes('ses:SendEmail'),
+      );
+    expect(sesStatement?.Condition).toEqual({
+      StringEquals: {
+        'ses:FromAddress': `eoc-alarms@${EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN}`,
+      },
+    });
+    expect(JSON.stringify(sesSenders[0]?.[1])).toContain('AlarmMailer');
     expect(serializedTemplate).not.toContain('controlled-recipient');
   });
 
