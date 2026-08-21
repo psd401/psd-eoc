@@ -1245,6 +1245,47 @@ describe('protected access-membership publication boundary', () => {
   });
 });
 
+describe('alarm topic encryption', () => {
+  it('lets SNS use the operations key, or no alarm ever reaches anyone', () => {
+    // Both alarm topics are encrypted with this key. SNS needs a data key to
+    // handle any message on them, including the confirmation it generates when
+    // somebody subscribes — so without this grant a subscription is created and
+    // stays PendingConfirmation forever with no email ever sent. That presents
+    // as a mail problem and is not one, which is why it is pinned here.
+    const operationsKey = asRecord(
+      resourceEntries('AWS::KMS::Key').find(([, resource]) =>
+        String(properties(resource).Description).startsWith(
+          'Encrypts PSD EOC operational alarm notifications',
+        ),
+      )?.[1],
+    );
+    const statements = asArray(
+      asRecord(properties(operationsKey).KeyPolicy).Statement,
+    ).map(asRecord);
+
+    const forSns = statements.find(
+      (statement) =>
+        asRecord(statement.Principal).Service === 'sns.amazonaws.com',
+    );
+    expect(forSns).toBeDefined();
+    expect(forSns?.Action).toEqual(['kms:Decrypt', 'kms:GenerateDataKey*']);
+    expect(forSns?.Condition).toEqual({
+      StringEquals: { 'aws:SourceAccount': AWS_ACCOUNT },
+    });
+
+    // Every topic encrypted with this key needs that grant to be usable.
+    const encrypted = resourceEntries('AWS::SNS::Topic').filter(
+      ([, resource]) =>
+        JSON.stringify(properties(resource).KmsMasterKeyId).includes(
+          'OperationsKey',
+        ),
+    );
+    expect(
+      encrypted.map(([, resource]) => properties(resource).TopicName).sort(),
+    ).toEqual(['psd-eoc-critical-alarms', 'psd-eoc-operations-alarms']);
+  });
+});
+
 describe('delivery router boundary', () => {
   it('moves batches between queues and can do nothing else', () => {
     const router = resourceEntries('AWS::Lambda::Function').find(

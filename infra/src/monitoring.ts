@@ -312,6 +312,27 @@ function allowScopedCloudWatchAlarmPublish(
       sid: 'AllowScopedCloudWatchAlarmTopicEncryption',
     }),
   );
+  // SNS itself, not only the services that publish through it.
+  //
+  // Both alarm topics are encrypted with this key, and SNS needs a data key to
+  // handle any message on them — including the confirmation it generates when
+  // somebody subscribes. Without this the subscription is created and then sits
+  // in PendingConfirmation forever with no email ever sent, which looks exactly
+  // like a mail delivery problem and is not one.
+  //
+  // Scoped by account rather than by topic ARN or encryption context: the
+  // confusable-deputy risk is another account's SNS using this key, and
+  // narrower conditions depend on context keys SNS does not supply on every
+  // path — including, apparently, the one that sends a confirmation.
+  operationsKey.addToResourcePolicy(
+    new iam.PolicyStatement({
+      actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
+      conditions: { StringEquals: { 'aws:SourceAccount': stack.account } },
+      principals: [new iam.ServicePrincipal('sns.amazonaws.com')],
+      resources: ['*'],
+      sid: 'AllowSnsAlarmTopicEncryption',
+    }),
+  );
   for (const topic of topics) {
     topic.addToResourcePolicy(
       new iam.PolicyStatement({
