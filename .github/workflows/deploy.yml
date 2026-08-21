@@ -35,7 +35,7 @@ jobs:
     if: github.repository == 'psd401/psd-eoc'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: exploration-smoke
+    environment: production
     steps:
       - name: Check out the commit being deployed
         uses: actions/checkout@v7
@@ -58,7 +58,7 @@ jobs:
       - name: Assume the deployment role
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
       # Every required piece of configuration is checked by name before any
@@ -197,9 +197,9 @@ jobs:
         working-directory: infra
         shell: bash
         env:
-          INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
-          OPERATIONS_ALARM_EMAIL: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_EMAIL }}
-          OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_SMS_NUMBER }}
+          INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
+          OPERATIONS_ALARM_EMAIL: ${{ secrets.OPERATIONS_ALARM_EMAIL }}
+          OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.OPERATIONS_ALARM_SMS_NUMBER }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
           PREVIOUS_DIGEST: ${{ steps.previous.outputs.previous }}
           SOURCE_SHA: ${{ github.sha }}
@@ -298,9 +298,9 @@ jobs:
         working-directory: infra
         shell: bash
         env:
-          INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.EXPLORATION_SMOKE_INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
-          OPERATIONS_ALARM_EMAIL: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_EMAIL }}
-          OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.EXPLORATION_SMOKE_OPERATIONS_ALARM_SMS_NUMBER }}
+          INITIAL_MOBILE_TRANSITION_EMAIL_SHA256: ${{ secrets.INITIAL_MOBILE_TRANSITION_EMAIL_SHA256 }}
+          OPERATIONS_ALARM_EMAIL: ${{ secrets.OPERATIONS_ALARM_EMAIL }}
+          OPERATIONS_ALARM_SMS_NUMBER: ${{ secrets.OPERATIONS_ALARM_SMS_NUMBER }}
           IMAGE_DIGEST: ${{ steps.target.outputs.digest }}
           SOURCE_SHA: ${{ github.sha }}
         run: |

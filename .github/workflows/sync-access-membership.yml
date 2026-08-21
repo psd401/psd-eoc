@@ -16,7 +16,7 @@ on:
   # Deliberately manual-only. The schedule that keeps membership fresh now runs
   # as an EventBridge rule against the same ECS task (`AccessSyncSchedule` in
   # infra/src/stack/psd-eoc-stack.ts), because a scheduled run here could never
-  # complete: the `exploration-smoke` environment below requires a named human
+  # complete: the `production` environment below requires a named human
   # reviewer, so every cron-triggered run parked waiting for an approval a cron
   # cannot give and was cancelled when the next one queued behind it.
   #
@@ -37,7 +37,7 @@ jobs:
     name: Sync access membership
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: exploration-smoke
+    environment: production
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       CLUSTER: psd-eoc-exploration-smoke-native-bootstrap
@@ -48,7 +48,7 @@ jobs:
       - name: Assume the deployment role
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ vars.AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Run the access sync
