@@ -155,6 +155,36 @@ jobs:
       - name: Build the server
         run: bun run --cwd packages/server build
 
+  # An applied migration is a record of something that already happened, and
+  # nothing else notices when one is edited: drizzle records each file's hash on
+  # the way in and never reads it again. Only a pull request has a base to
+  # compare against, so this cannot run on push.
+  migrations:
+    name: Applied migrations unchanged
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Check that this change only adds to the migration chain
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          bun scripts/check-applied-migrations.ts "$BASE_SHA" "$HEAD_SHA"
+
   workflows:
     name: Lint workflows
     needs: changes
