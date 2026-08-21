@@ -54,6 +54,7 @@ import {
   DEPLOYMENT_REGION,
   NOTIFICATION_CHANNELS,
 } from './config';
+import { EXPLORATION_SMOKE_SES_IDENTITY_DOMAIN as SES_IDENTITY_DOMAIN } from './stack/config';
 
 export const MONITORING_METRIC_NAMESPACE = 'PSD/EOC';
 export const MONITORING_DASHBOARD_NAME = 'psd-eoc-operations';
@@ -278,10 +279,54 @@ function configureAlarmRecipients(
     type: 'String',
   });
 
+  // Email goes through a Lambda that sends with SES, not through an SNS email
+  // subscription. See `infra/lambda/alarm-mailer` for why. SMS stays a direct
+  // subscription: it auto-confirms and carries no unsubscribe link.
+  const mailer = new lambda.Function(scope, 'AlarmMailer', {
+    code: lambda.Code.fromAsset(
+      fileURLToPath(new URL('../lambda/alarm-mailer', import.meta.url)),
+    ),
+    description:
+      'Sends CloudWatch alarm notifications to the operations team with SES.',
+    environment: {
+      ALARM_FROM_ADDRESS: `eoc-alarms@${SES_IDENTITY_DOMAIN}`,
+      ALARM_TO_ADDRESSES: email.valueAsString,
+    },
+    functionName: 'psd-eoc-alarm-mailer',
+    handler: 'index.handler',
+    logGroup: new logs.LogGroup(scope, 'AlarmMailerLogGroup', {
+      logGroupName: '/psd-eoc/monitoring/alarm-mailer',
+      removalPolicy: RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.TWO_WEEKS,
+    }),
+    memorySize: 256,
+    reservedConcurrentExecutions: 5,
+    runtime: lambda.Runtime.NODEJS_22_X,
+    timeout: Duration.seconds(20),
+  });
+  // Only from the one address, and only through SES. It has no roster, no
+  // database, and no part in the staff notification path.
+  mailer.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['ses:SendEmail'],
+      conditions: {
+        StringEquals: {
+          'ses:FromAddress': `eoc-alarms@${SES_IDENTITY_DOMAIN}`,
+        },
+      },
+      resources: [
+        Stack.of(scope).formatArn({
+          resource: 'identity',
+          resourceName: SES_IDENTITY_DOMAIN,
+          service: 'ses',
+        }),
+      ],
+      sid: 'SendOperationalAlarmMailOnly',
+    }),
+  );
+
   for (const topic of topics) {
-    topic.addSubscription(
-      new subscriptions.EmailSubscription(email.valueAsString),
-    );
+    topic.addSubscription(new subscriptions.LambdaSubscription(mailer));
     topic.addSubscription(new subscriptions.SmsSubscription(sms.valueAsString));
   }
 }
