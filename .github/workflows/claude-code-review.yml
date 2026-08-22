@@ -14,4 +14,34 @@ jobs:
     uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@main
     with:
       max_turns: 40
+      # A drizzle migration regenerates a whole schema snapshot — 0027 is 10,437
+      # lines of machine-written JSON restating every table. Reading it line by
+      # line is what exhausted the turn budget on #325: the review ended in
+      # `error_max_turns` without producing a single finding, which reports as a
+      # red check indistinguishable from a real one. Left alone this fails on
+      # exactly the changes that most need review.
+      extra_prompt: |
+
+        Some files in this repository are generated wholesale by tooling and
+        must not be read line by line. Reviewing them finds nothing and can
+        exhaust the turn budget before the human-written diff is reached:
+
+        - `packages/server/drizzle/migrations/meta/*_snapshot.json` and
+          `_journal.json` — written by `drizzle-kit generate`
+        - `bun.lock`
+        - `packages/mobile/ios/**` and `packages/mobile/android/**` — generated
+          by `expo prebuild` from `app.json`
+
+        For a database change, review the hand-written migration SQL under
+        `packages/server/drizzle/migrations/*.sql` and the `db/schema.ts` diff.
+        Those carry the intent and the risk. Treat the snapshot as a derived
+        artifact: worth one check that it exists and corresponds to the
+        migration, never a line-by-line read.
+
+        Two things in this repository are worth more attention than their size
+        suggests. A migration that rewrites or deletes an already-applied file
+        is a correctness problem, not style — `scripts/check-applied-migrations.ts`
+        explains why. And a `*.database.test.ts` that stops running is a
+        silently weakened gate, because those tests skip rather than fail when
+        no database is configured.
     secrets: inherit
