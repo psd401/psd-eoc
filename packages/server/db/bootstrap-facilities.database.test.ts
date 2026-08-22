@@ -15,6 +15,7 @@ import {
   bootstrapFacilities,
   describeFacilityOutcome,
   readFacilityConfiguration,
+  readNeighborhoodConfiguration,
 } from './bootstrap-facilities';
 import {
   createDatabaseClient,
@@ -81,6 +82,28 @@ describe('facility configuration parsing', () => {
         readFacilityConfiguration({ PSD_EOC_FACILITIES: value }),
       ).toThrow(FacilityConfigurationError);
     }
+  });
+});
+
+describe('neighborhood configuration parsing', () => {
+  test('refuses the same facility listed twice in one neighborhood', () => {
+    // The membership rows are keyed on (neighborhood, version, facility), so a
+    // repeat is a duplicate-key violation from the driver rather than a named
+    // configuration error.
+    expect(() =>
+      readNeighborhoodConfiguration({
+        PSD_EOC_NEIGHBORHOODS: JSON.stringify([
+          { name: 'North', facilityCodes: ['AES', 'AES'] },
+        ]),
+      }),
+    ).toThrow(FacilityConfigurationError);
+    expect(
+      readNeighborhoodConfiguration({
+        PSD_EOC_NEIGHBORHOODS: JSON.stringify([
+          { name: 'North', facilityCodes: ['AES', 'DES'] },
+        ]),
+      }),
+    ).toHaveLength(1);
   });
 });
 

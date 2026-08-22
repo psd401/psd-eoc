@@ -87,6 +87,28 @@ describe('initial access group configuration', () => {
     }
   });
 
+  test('refuses an address the roster schema could never match', () => {
+    // The looser regex this replaced admitted every one of these. Each would
+    // have been written to group_sources and then made readConfiguredAccessGroups
+    // throw CONFIGURED_ACCESS_GROUP_INVALID for the whole district, with the
+    // row immutable and sign-in closed.
+    for (const value of [
+      'admin..group@example.invalid',
+      '.admin@example.invalid',
+      'admin.@example.invalid',
+      'admin@example.invalid.',
+      'admin@example..invalid',
+      'admin@-example.invalid',
+    ]) {
+      expect(() =>
+        readInitialAccessGroupConfiguration({
+          PSD_EOC_INITIAL_ACCESS_GROUP_ID: '03jtnz0s3nmkpvk',
+          PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: value,
+        }),
+      ).toThrow(InitialAccessGroupConfigurationError);
+    }
+  });
+
   test('refuses a group id the evaluated-group schema could never match', () => {
     for (const value of ['groups/', 'has space', 'nested/path/id', 'has.dot']) {
       expect(() =>

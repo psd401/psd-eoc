@@ -446,6 +446,49 @@ describe('deep health GET contract', () => {
     expectNoCache(response);
   });
 
+  it('never writes driver statement text or bound parameters to the log', async () => {
+    // What drizzle actually throws: the statement and the bound parameters are
+    // in the message, and again on .query/.params. Logging cause.message
+    // verbatim would put a staff address or a credential into CloudWatch.
+    const wrapped = Object.assign(
+      new Error(
+        'Failed query: insert into "group_members" ("email") values ($1)\nparams: someone@psd401.net',
+      ),
+      {
+        name: 'DrizzleQueryError',
+        query: 'insert into "group_members" ("email") values ($1)',
+        params: ['someone@psd401.net'],
+      },
+    );
+    const handler = createHealthRouteHandler({
+      checkDatabase: () => Promise.reject(wrapped),
+      checkDeliveryQueue: () => Promise.resolve(),
+      checkRuntimeSecrets: () => Promise.resolve(),
+    });
+
+    const written: string[] = [];
+    const original = console.error;
+    console.error = (line: unknown) => {
+      written.push(String(line));
+    };
+    try {
+      const response = await handler();
+      expect(response.status).toBe(503);
+    } finally {
+      console.error = original;
+    }
+
+    const all = written.join('\n');
+    expect(all).toContain('health-check-failed');
+    expect(all).toContain('database');
+    // The whole point: none of the payload survives.
+    expect(all).not.toContain('someone@psd401.net');
+    expect(all).not.toContain('group_members');
+    expect(all).not.toContain('insert into');
+    expect(all).not.toContain('params:');
+    expect(all).toContain('redacted');
+  });
+
   it('coalesces concurrent public probes into one set of dependency reads', async () => {
     const calls: string[] = [];
     let releaseDatabase: (() => void) | undefined;

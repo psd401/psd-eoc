@@ -822,6 +822,56 @@ export function createRuntimeDeepHealthDependencies(
   });
 }
 
+/**
+ * A reason safe to write to a log.
+ *
+ * The probes that reach this either throw messages this repository authored —
+ * which name a variable or a field and never its value — or they surface an
+ * error straight from the PostgreSQL driver. The second kind cannot be logged
+ * verbatim. drizzle wraps every failed query in a `DrizzleQueryError` whose
+ * message is `Failed query: <statement>` followed by the bound parameters, and
+ * a raw `PostgresError` echoes rejected values back in `detail`, `hint` and
+ * `where`. `querySharedAdminDatabase` issues a real query with no wrapper of
+ * its own, so a connection, TLS or authentication failure arrives here as
+ * whatever text the driver chose.
+ *
+ * Driver-shaped errors are therefore reduced to their class and, where present,
+ * the SQLSTATE or errno — enough to tell a refused connection from a bad
+ * certificate, and nothing that can carry a statement, a bound parameter or an
+ * address. Anything else keeps its message, bounded.
+ */
+function loggableReason(cause: unknown): string {
+  if (!(cause instanceof Error)) return 'non-error thrown';
+  for (
+    let current: unknown = cause, depth = 0;
+    current instanceof Error && depth < 8;
+    current = (current as { cause?: unknown }).cause, depth += 1
+  ) {
+    const candidate = current as {
+      severity?: unknown;
+      routine?: unknown;
+      query?: unknown;
+      params?: unknown;
+      code?: unknown;
+      name?: unknown;
+    };
+    const driverShaped =
+      candidate.severity !== undefined ||
+      candidate.routine !== undefined ||
+      candidate.query !== undefined ||
+      candidate.params !== undefined ||
+      candidate.name === 'DrizzleQueryError';
+    if (driverShaped) {
+      const code =
+        typeof candidate.code === 'string' && candidate.code.length <= 32
+          ? candidate.code
+          : 'none';
+      return `database driver error redacted (class=${String(candidate.name ?? 'Error')} code=${code})`;
+    }
+  }
+  return cause.message.slice(0, 300);
+}
+
 /** Creates the unauthenticated, fail-closed GET handler used by App Runner. */
 export function createHealthRouteHandler(
   dependencies: DeepHealthDependencies,
@@ -858,7 +908,7 @@ export function createHealthRouteHandler(
             JSON.stringify({
               event: 'health-check-failed',
               dependency: name,
-              reason: cause instanceof Error ? cause.message : String(cause),
+              reason: loggableReason(cause),
             }),
           );
           throw cause;
@@ -882,7 +932,7 @@ export function createHealthRouteHandler(
       console.error(
         JSON.stringify({
           event: 'health-unavailable',
-          reason: cause instanceof Error ? cause.message : String(cause),
+          reason: loggableReason(cause),
         }),
       );
       return false;

@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { and, eq } from 'drizzle-orm';
 
+import { StaffRosterEmailSchema } from '@psd-eoc/contracts';
+
 import type { Database } from './client';
 import { groupSources } from './schema';
 
@@ -97,9 +99,21 @@ export function readInitialAccessGroupConfiguration(
       `${GROUP_ID_ENV} must be a Cloud Identity group id, optionally prefixed with "groups/".`,
     );
   }
-  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) {
+  // The same schema the sync parses this row back with, not a looser regex of
+  // our own. An ad hoc pattern admits addresses the roster schema refuses —
+  // a doubled dot, a leading or trailing dot, a leading hyphen in the domain —
+  // and the consequence is not a rejected row, it is a deployment nobody can
+  // sign in to. readConfiguredAccessGroups parses *every* active access group
+  // through StaffRosterEmailSchema and throws CONFIGURED_ACCESS_GROUP_INVALID
+  // if any one of them fails, so a single malformed address stops the sync for
+  // the whole district. And `email` is immutable for an access-purpose row, so
+  // the row cannot be corrected in place.
+  //
+  // This is exactly the mismatch that made googleGroupId unusable above. It is
+  // the same mistake, one field over.
+  if (!StaffRosterEmailSchema.safeParse(email).success) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_EMAIL_ENV} must be a group email address.`,
+      `${GROUP_EMAIL_ENV} must be a group email address the roster schema accepts.`,
     );
   }
   if (displayName !== undefined && displayName.length > 160) {
@@ -143,28 +157,35 @@ export async function bootstrapAccessConfiguration(
     return Object.freeze({ kind: 'not-configured' as const });
   }
 
-  // Only an *active* access group counts as configured.
+  // Any access group at all counts as configured, active or not.
   //
-  // This used to consider every row, active or not, so that configuration
-  // could never reopen a deployment a district had deliberately closed. But
-  // group_sources is append-only by trigger — DELETE is refused outright and
-  // provider locators are immutable — so an inactive row can never be removed.
-  // One bad row therefore blocked seeding permanently, and since roles derive
-  // from group membership and the page that manages access groups sits behind
-  // sign-in, the deployment became unrecoverable: nobody could sign in, and no
-  // supported path could create a group that worked.
+  // This briefly considered only *active* groups. The reasoning was that
+  // group_sources was append-only by trigger, so a malformed row could never
+  // be removed and would block seeding forever — which is how the rebuilt
+  // stack ended up with an access group the sync could not match and no
+  // supported way to replace it.
   //
-  // Deactivating every access group already means nobody can sign in, so
-  // seeding from configuration at that point restores the documented first-run
-  // recovery rather than widening access. It still only happens when the
-  // initial-group variables are set, which is opt-in per deployment.
-  const active = await database
+  // Migration 0029 removed that blanket DELETE ban, so the premise is gone: a
+  // bad row can now simply be deleted and re-seeded. And keying off "none
+  // active" is dangerous in a way the original is not. The initial-group
+  // CfnParameters are sticky — the deploy workflow never passes them, so
+  // CloudFormation carries the values an operator supplied once forward on
+  // every later deploy indefinitely. A district that deactivates its access
+  // groups on purpose, say while investigating a compromise, would then have a
+  // routine deploy silently recreate an active administrator-granting group
+  // pointed at whatever that stale parameter still names. Automation must not
+  // be able to reopen sign-in that a human closed.
+  const existing = await database
     .select({ id: groupSources.id })
     .from(groupSources)
-    .where(
-      and(eq(groupSources.purpose, 'access'), eq(groupSources.active, true)),
-    );
-  if (active.length > 0) {
+    .where(eq(groupSources.purpose, 'access'));
+  if (existing.length > 0) {
+    const active = await database
+      .select({ id: groupSources.id })
+      .from(groupSources)
+      .where(
+        and(eq(groupSources.purpose, 'access'), eq(groupSources.active, true)),
+      );
     return Object.freeze({
       kind: 'already-configured' as const,
       activeGroupCount: active.length,

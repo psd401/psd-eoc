@@ -257,7 +257,7 @@ describe('deployment boundary', () => {
     expect(bootstrapSourceSha).not.toHaveProperty('Default');
     expect(oauthArn.NoEcho).toBe(true);
     expect(oauthArn.AllowedPattern).toBe(
-      '^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/(?:[a-z0-9-]+/)*google-oauth-[A-Za-z0-9]{6}$',
+      '^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$',
     );
     // The approved-staff identity fed the removed access fixture. The
     // bootstrap container's environment schema is strict, so leaving these

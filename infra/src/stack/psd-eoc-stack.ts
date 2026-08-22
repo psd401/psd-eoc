@@ -190,13 +190,16 @@ export class PsdEocStack extends Stack {
       this,
       'GoogleOauthSecretArn',
       {
-        // The path is deliberately not pinned. This secret is created and
-        // rotated outside the stack, so its location is not something the
-        // stack's own naming governs — pinning it meant renaming the stack's
-        // secret prefix invalidated an ARN that had not moved and could not.
-        // Account, region and secret name stay pinned, which is what actually
-        // prevents pointing this at the wrong credential.
-        allowedPattern: `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:/psd-eoc/(?:[a-z0-9-]+/)*google-oauth-[A-Za-z0-9]{6}$`,
+        // Pinned to the exact path the secret occupies.
+        //
+        // This was briefly widened to allow any depth of segment under
+        // /psd-eoc/, because the secret then lived at
+        // /psd-eoc/exploration-smoke/google-oauth and the stack rename would
+        // otherwise have invalidated an ARN that had not moved. The secret has
+        // since been copied to /psd-eoc/google-oauth, so the widening buys
+        // nothing and only enlarges the set of ARNs CI will accept without
+        // question. A wrong path should fail the deploy, not pass validation.
+        allowedPattern: `^arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT}:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$`,
         constraintDescription:
           'Use the complete ARN of the reviewed production Google OAuth secret in the approved account and region.',
         description:

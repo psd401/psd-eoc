@@ -197,7 +197,25 @@ const NeighborhoodConfigurationSchema = z
           .regex(/^[A-Z0-9-]{1,32}$/u),
       )
       .min(1)
-      .max(2_000),
+      .max(2_000)
+      // Refused here rather than at insert. The membership rows are keyed on
+      // (neighborhoodId, neighborhoodVersion, facilityId), so a code repeated
+      // within one campus becomes a duplicate-key violation from the driver
+      // instead of the named error the unknown-code case gets a few lines
+      // down — an operator typo surfacing as raw SQL failure text.
+      .superRefine((codes, context) => {
+        const seen = new Set<string>();
+        for (const [index, code] of codes.entries()) {
+          if (seen.has(code)) {
+            context.addIssue({
+              code: 'custom',
+              message: `Facility ${code} is listed twice in one neighborhood.`,
+              path: [index],
+            });
+          }
+          seen.add(code);
+        }
+      }),
   })
   .strict();
 
