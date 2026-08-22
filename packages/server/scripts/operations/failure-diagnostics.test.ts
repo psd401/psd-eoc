@@ -240,6 +240,43 @@ describe('hostile error objects', () => {
 
     expect(describeFailure(PREFIX, hostile)).toBe(PREFIX);
   });
+
+  test('does not throw when the cause accessor throws', () => {
+    // Reading `cause` bare reopened the hole `readString` exists to close: the
+    // throw escaped describeFailure, reached the runtime's default handler, and
+    // that handler prints enumerable own properties — publishing the detail and
+    // hint the allowlist suppresses.
+    const hostile = new Error('boom');
+    Object.defineProperty(hostile, 'cause', {
+      get() {
+        throw Object.assign(new Error('detonated'), {
+          detail: 'Key (email)=(staff@example.invalid) already exists.',
+        });
+      },
+    });
+
+    expect(() => describeFailure(PREFIX, hostile)).not.toThrow();
+    expect(describeFailure(PREFIX, hostile)).toContain('message=boom');
+    expect(describeFailure(PREFIX, hostile)).not.toContain(
+      'staff@example.invalid',
+    );
+  });
+
+  test('keeps an authored message that merely carries a driver cause', () => {
+    // Suppressing this would discard the sentence saying what was attempted,
+    // which is the diagnostic loss this module exists to prevent.
+    const authored = new Error('The access sync refused to publish.', {
+      cause: driverFailureFixture(),
+    });
+
+    const described = describeFailure(PREFIX, authored).split('\n')[0];
+
+    expect(described).toContain('message=The access sync refused to publish.');
+    expect(described).toContain('code=23505');
+    for (const leak of DRIVER_FAILURE_LEAKS) {
+      expect(described).not.toContain(leak);
+    }
+  });
 });
 
 describe('singleLine', () => {

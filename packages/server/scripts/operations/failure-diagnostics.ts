@@ -79,7 +79,7 @@ function findDriverError(error: unknown): Error | undefined {
     if (current instanceof postgres.PostgresError) {
       return current;
     }
-    current = Reflect.get(current, 'cause');
+    current = readCause(current);
   }
   return undefined;
 }
@@ -100,8 +100,58 @@ export function describeQueryFailure(error: unknown): string {
     return describeDriverError(driver);
   }
   return error instanceof DrizzleQueryError
-    ? describeDriverError(Reflect.get(error, 'cause'))
+    ? describeDriverError(readCause(error))
     : describeDriverError(error);
+}
+
+/**
+ * Reads `cause` without letting an exotic accessor escape.
+ *
+ * Every other read here goes through `readString` for this reason. Reading
+ * `cause` bare reopened the same hole: an accessor that throws escaped
+ * `describeFailure`, which is documented as never throwing, and reached the
+ * runtime's default handler — the one that prints enumerable own properties and
+ * so publishes the `detail` and `hint` this module exists to suppress.
+ */
+function readCause(source: object): unknown {
+  try {
+    return Reflect.get(source, 'cause');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether this error is itself the driver's — by class, or failing that by
+ * shape.
+ *
+ * The shape fallbacks are not decoration. An error can lose its prototype
+ * crossing a boundary, and a check resting on class identity alone silently
+ * stops redacting when that happens. They stay deliberately narrow: a
+ * SQLSTATE-shaped code alone is not enough, because Node's errno codes are the
+ * same five uppercase characters — EPIPE, EPERM, EBUSY, EROFS, EBADF, EINTR,
+ * ESRCH, EXDEV, ENXIO, ELOOP, EIDRM — and this container runs on a read-only
+ * root filesystem reading a certificate by path, so those are reachable.
+ * Treating one as a driver error would suppress the message naming the file at
+ * fault. Postgres always sends a severity and never a code beginning with `E`,
+ * so requiring the corroborating field separates the two spaces exactly.
+ *
+ * This asks only about the error in hand. An error merely *carrying* a driver
+ * error as `cause` is authored, and keeps its own message.
+ */
+function isDriverErrorItself(error: object): boolean {
+  if (error instanceof postgres.PostgresError) {
+    return true;
+  }
+  if (readString(error, 'name') === 'PostgresError') {
+    return true;
+  }
+  const code = readString(error, 'code');
+  return (
+    code !== undefined &&
+    SQLSTATE.test(code) &&
+    readString(error, 'severity') !== undefined
+  );
 }
 
 /**
@@ -124,21 +174,7 @@ export function describeQueryFailure(error: unknown): string {
  * field separates the two spaces exactly.
  */
 export function isDriverError(error: object): boolean {
-  if (
-    findDriverError(error) !== undefined ||
-    error instanceof DrizzleQueryError
-  ) {
-    return true;
-  }
-  if (readString(error, 'name') === 'PostgresError') {
-    return true;
-  }
-  const code = readString(error, 'code');
-  return (
-    code !== undefined &&
-    SQLSTATE.test(code) &&
-    readString(error, 'severity') !== undefined
-  );
+  return error instanceof DrizzleQueryError || isDriverErrorItself(error);
 }
 
 /**
@@ -165,10 +201,11 @@ export async function withReducedDriverErrors<T>(
   try {
     return await run();
   } catch (error) {
-    const raisedByAQuery =
-      findDriverError(error) !== undefined ||
-      error instanceof DrizzleQueryError;
-    if (!raisedByAQuery) {
+    // Only the wrapper and the driver's own error carry a message that cannot
+    // be logged. An authored error holding one as `cause` is rethrown intact:
+    // describeFailure reports its sentence and the driver's allowlisted fields,
+    // without the driver's message.
+    if (typeof error !== 'object' || error === null || !isDriverError(error)) {
       throw error;
     }
     // The original stops here. It is not attached as `cause`: anything that
@@ -191,6 +228,27 @@ export function describeDriverError(error: unknown): string {
       ? ''
       : ` ${field}=${singleLine(value, MAX_LABEL_CHARS)}`;
   }).join('');
+}
+
+/**
+ * Describes an error by whichever of its parts is safe to report.
+ *
+ * Only the wrapper and the driver's own error have to lose their message: the
+ * wrapper's embeds the statement and bound parameters, and Postgres echoes a
+ * rejected value into its own. An authored error that merely carries one of
+ * those as `cause` keeps its message and gains the driver's allowlisted fields,
+ * because discarding it would throw away the sentence saying what was being
+ * attempted — the diagnostic loss this module exists to prevent.
+ */
+function describeErrorBody(error: object, message: string | undefined): string {
+  if (isDriverError(error)) {
+    return describeQueryFailure(error);
+  }
+  const driver = findDriverError(error);
+  return (
+    describeAuthoredError(error, message) +
+    (driver === undefined ? '' : describeDriverError(driver))
+  );
 }
 
 /** Reports an authored error in full; nothing on that path echoes a value. */
@@ -265,9 +323,7 @@ export function describeFailure(prefix: string, error: unknown): string {
   const described =
     prefix +
     (name === undefined ? '' : ` name=${singleLine(name, MAX_LABEL_CHARS)}`) +
-    (isDriverError(error)
-      ? describeQueryFailure(error)
-      : describeAuthoredError(error, message));
+    describeErrorBody(error, message);
   const stack = readString(error, 'stack');
   const frames = stack === undefined ? '' : stackFrames(stack, message);
   return frames.length > 0 ? `${described}\n${frames}` : described;
