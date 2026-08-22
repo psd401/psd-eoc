@@ -17,7 +17,13 @@ import {
   getApplicationDatabaseSecret,
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
-import { createRoleStatementExecutor, runBootstrap } from './bootstrap';
+import postgres from 'postgres';
+
+import {
+  createBootstrapDependencies,
+  createRoleStatementExecutor,
+  runBootstrap,
+} from './bootstrap';
 import { DATABASE_LOGIN, DATABASE_ROLE, readBootstrapConfig } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
@@ -738,4 +744,104 @@ describe('bootstrap statement executor', () => {
     expect(rows).toEqual([{ unlocked: true }]);
     expect(Object.isFrozen(rows[0])).toBe(true);
   });
+});
+
+describe('bootstrap steps that issue SQL outside the executor', () => {
+  // See failure-diagnostics.test.ts for why the constructor is cast.
+  const DriverError = postgres.PostgresError as unknown as new (
+    fields: Readonly<Record<string, string>>,
+  ) => Error;
+
+  function driverFailure(): Error {
+    return new DriverError({
+      severity: 'ERROR',
+      code: '23505',
+      message: 'duplicate key value violates unique constraint',
+      detail: 'Key (email)=(staff@example.invalid) already exists.',
+      hint: 'A member with that address is already recorded.',
+      where: 'SQL statement "INSERT INTO access_group_members"',
+      schema_name: 'public',
+      table_name: 'access_group_members',
+      constraint_name: 'access_group_members_pkey',
+      routine: '_bt_check_unique',
+    });
+  }
+
+  /**
+   * A connection on which every interaction raises a driver error, so a step is
+   * proven wrapped wherever in its work it first reaches the database.
+   */
+  function failingConnection() {
+    const raise = (): never => {
+      throw driverFailure();
+    };
+    const db = new Proxy({} as Record<string, unknown>, {
+      get: raise,
+      apply: raise,
+    });
+    return { driver: 'postgres' as const, db, close: () => Promise.resolve() };
+  }
+
+  const steps = [
+    ['migration', 'migrate'],
+    ['reference seed', 'seedReference'],
+    ['access bootstrap', 'bootstrapAccess'],
+  ] as const;
+
+  for (const [label, method] of steps) {
+    test(`${method} reduces a driver error where it is raised`, async () => {
+      const connection = failingConnection() as unknown as Parameters<
+        typeof createBootstrapDependencies
+      >[1];
+      const dependencies = createBootstrapDependencies(
+        readBootstrapConfig(validConfigEnvironment()),
+        connection,
+        connection,
+      );
+
+      // bootstrapAccess returns `not-configured` without touching the database
+      // unless an initial access group is configured, so the step would never
+      // reach the connection and the test would prove nothing.
+      const previous = {
+        PSD_EOC_INITIAL_ACCESS_GROUP_ID:
+          process.env.PSD_EOC_INITIAL_ACCESS_GROUP_ID,
+        PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL:
+          process.env.PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL,
+      };
+      process.env.PSD_EOC_INITIAL_ACCESS_GROUP_ID = 'synthetic-group-id';
+      process.env.PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL =
+        'access-group@example.invalid';
+
+      const raised = await Promise.resolve(
+        dependencies[method](readBootstrapConfig(validConfigEnvironment())),
+      )
+        .finally(() => {
+          for (const [name, value] of Object.entries(previous)) {
+            if (value === undefined) {
+              delete process.env[name];
+            } else {
+              process.env[name] = value;
+            }
+          }
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+
+      expect(raised).not.toBeNull();
+      expect(raised instanceof postgres.PostgresError).toBe(false);
+      const message = String(Reflect.get(Object(raised), 'message'));
+      expect(message).toContain(`The ${label} step failed in the database.`);
+      expect(message).toContain('code=23505');
+      for (const leak of [
+        'duplicate key value',
+        'staff@example.invalid',
+        'A member with that address',
+        'INSERT INTO access_group_members',
+      ]) {
+        expect(message).not.toContain(leak);
+      }
+    });
+  }
 });

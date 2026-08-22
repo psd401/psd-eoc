@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import postgres from 'postgres';
 import { z } from 'zod';
 
 import {
@@ -7,6 +8,7 @@ import {
   invalidConfigurationFields,
   isDriverError,
   singleLine,
+  withReducedDriverErrors,
 } from './failure-diagnostics';
 
 const PREFIX = 'Database bootstrap failed closed.';
@@ -283,5 +285,90 @@ describe('invalidConfigurationFields', () => {
       'PSD_EOC_FACILITIES',
       'SOURCE_SHA',
     ]);
+  });
+});
+
+describe('withReducedDriverErrors', () => {
+  // The published types declare `PostgresError(message?: string)`, but the
+  // driver constructs it from the wire fields it received and copies them onto
+  // the instance (src/errors.js). Building it the driver's way is what makes
+  // `instanceof` meaningful here.
+  const DriverError = postgres.PostgresError as unknown as new (
+    fields: Readonly<Record<string, string>>,
+  ) => Error;
+
+  /** Built the way the driver builds one, from the wire fields it received. */
+  function driverFailure(): Error {
+    return new DriverError({
+      severity: 'ERROR',
+      code: '23505',
+      message: 'duplicate key value violates unique constraint',
+      detail: 'Key (email)=(staff@example.invalid) already exists.',
+      hint: 'A member with that address is already recorded.',
+      where: 'SQL statement "INSERT INTO access_group_members"',
+      schema_name: 'public',
+      table_name: 'access_group_members',
+      constraint_name: 'access_group_members_pkey',
+      routine: '_bt_check_unique',
+    });
+  }
+
+  test('reduces a driver error at the step that raised it', async () => {
+    const rejected = withReducedDriverErrors('reference seed', () =>
+      Promise.reject(driverFailure()),
+    );
+
+    await expect(rejected).rejects.toThrow(
+      'The reference seed step failed in the database. code=23505' +
+        ' severity=ERROR routine=_bt_check_unique schema_name=public' +
+        ' table_name=access_group_members' +
+        ' constraint_name=access_group_members_pkey',
+    );
+  });
+
+  test('leaves nothing for describeFailure to have to recognize', async () => {
+    // The point of reducing here rather than at the log: what reaches the entry
+    // point is an authored error, so redaction no longer depends on a guess.
+    const error = await withReducedDriverErrors('migration', () =>
+      Promise.reject(driverFailure()),
+    ).catch((raised: unknown) => raised as object);
+
+    expect(error instanceof postgres.PostgresError).toBe(false);
+    expect(isDriverError(error)).toBe(false);
+    for (const leak of [
+      'duplicate key value',
+      'staff@example.invalid',
+      'A member with that address',
+      'INSERT INTO access_group_members',
+    ]) {
+      expect(describeFailure(PREFIX, error)).not.toContain(leak);
+    }
+  });
+
+  test('rethrows a non-driver failure untouched', async () => {
+    // Reducing these too would recreate the errno regression: the message is
+    // the only thing naming the file or endpoint at fault.
+    const authored = new Error('Google Cloud Identity refused the request.');
+    const errno = Object.assign(
+      new Error('EROFS: read-only file system, open /etc/rds-ca.pem'),
+      { code: 'EROFS' },
+    );
+
+    for (const original of [authored, errno]) {
+      const raised = await withReducedDriverErrors('access bootstrap', () =>
+        Promise.reject(original),
+      ).catch((error: unknown) => error);
+
+      expect(raised).toBe(original);
+      expect(describeFailure(PREFIX, raised)).toContain(
+        `message=${original.message}`,
+      );
+    }
+  });
+
+  test('returns the value when the step succeeds', async () => {
+    await expect(
+      withReducedDriverErrors('migration', () => Promise.resolve({ ok: 7 })),
+    ).resolves.toEqual({ ok: 7 });
   });
 });
