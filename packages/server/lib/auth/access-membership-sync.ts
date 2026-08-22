@@ -57,7 +57,10 @@ const EvaluatedAccessGroupSchema = z
       .min(1)
       .max(255)
       .regex(/^[A-Za-z0-9_-]+$/u),
-    grantedRole: RoleSchema,
+    // Null for a building group: it says who is at a school, not what they
+    // may do. `group_sources_access_role_present` is the authority on which
+    // purposes may carry a role.
+    grantedRole: RoleSchema.nullable(),
     memberEmails: z
       .array(StaffRosterEmailSchema)
       .max(MAX_EVALUATED_MEMBERS)
@@ -335,7 +338,7 @@ export async function syncAccessMembership(
     if (configured.length === 0) {
       throw new AccessMembershipSyncError(
         'NO_CONFIGURED_ACCESS_GROUPS',
-        'No active access group is configured, so no snapshot can be published.',
+        'No active access or building group is configured, so there is nothing to read.',
       );
     }
     const evaluation = validateEvaluation(
@@ -772,11 +775,12 @@ export function createDrizzleAccessMembershipSyncStore(
           groupSourceId: groupSources.id,
           email: groupSources.email,
           grantedRole: groupSources.grantedRole,
+          purpose: groupSources.purpose,
         })
         .from(groupSources)
         .where(
           and(
-            eq(groupSources.purpose, 'access'),
+            inArray(groupSources.purpose, ['access', 'building']),
             eq(groupSources.active, true),
             eq(groupSources.kind, 'google-group'),
           ),
@@ -784,6 +788,11 @@ export function createDrizzleAccessMembershipSyncStore(
         .orderBy(asc(groupSources.id));
       return Object.freeze(
         rows.map((row) => {
+          // No purpose/role check here on purpose. The database already
+          // refuses any other combination, in the `group_sources_access_role_present`
+          // constraint: an access group must grant a role, and nothing else may.
+          // Restating it in application code would give the invariant two homes
+          // and one of them would eventually be wrong.
           const parsed = DesignatedAccessGroupSchema.safeParse({
             groupSourceId: row.groupSourceId,
             email: row.email?.toLowerCase(),
@@ -852,7 +861,7 @@ export function createDrizzleAccessMembershipSyncStore(
           .from(groupSources)
           .where(
             and(
-              eq(groupSources.purpose, 'access'),
+              inArray(groupSources.purpose, ['access', 'building']),
               eq(groupSources.active, true),
               eq(groupSources.kind, 'google-group'),
             ),
