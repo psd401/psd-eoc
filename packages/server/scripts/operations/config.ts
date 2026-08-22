@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { invalidConfigurationFields } from './failure-diagnostics';
+
 export const DATABASE_LOGIN = 'psd_eoc_application' as const;
 export const DATABASE_ROLE = 'psd_eoc_app' as const;
 
@@ -166,13 +168,10 @@ export function readBootstrapConfig(
     BOOTSTRAP_MODE: environment.BOOTSTRAP_MODE,
   });
   if (!parsed.success) {
-    const fields = [
-      ...new Set(parsed.error.issues.map((issue) => issue.path[0])),
-    ]
-      .filter((field): field is string => typeof field === 'string')
-      .sort();
     throw new BootstrapConfigurationError(
-      `Invalid bootstrap configuration: ${fields.join(', ')}.`,
+      `Invalid bootstrap configuration: ${invalidConfigurationFields(
+        parsed.error,
+      ).join(', ')}.`,
     );
   }
 

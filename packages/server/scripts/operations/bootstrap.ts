@@ -25,8 +25,10 @@ import {
   type BootstrapConfig,
   type BootstrapMode,
 } from './config';
+import { describeFailure, singleLine } from './failure-diagnostics';
 
 const MAX_STATEMENT_ROWS = 32;
+const MAX_DRIVER_FIELD_CHARS = 64;
 const MAX_STATEMENT_RESULT_BYTES = 64 * 1_024;
 const ADVISORY_LOCK_SQL = 'SELECT pg_advisory_lock(178401)';
 const ADVISORY_UNLOCK_SQL = 'SELECT pg_advisory_unlock(178401) AS "unlocked"';
@@ -199,35 +201,101 @@ function createNativeConnection(
   return connection;
 }
 
-function createRoleStatementExecutor(
+/**
+ * The fields of a driver error that carry no caller data.
+ *
+ * `message`, `detail`, `hint`, and `where` can echo a rejected value, and
+ * postgres.js hangs the complete statement text on `query` — which for the role
+ * DDL is the application password literal. This is an allowlist for that
+ * reason: `PostgresError` copies every field the server sent onto itself, so
+ * anything not named here must be assumed to carry a value.
+ */
+const SAFE_DRIVER_ERROR_FIELDS = Object.freeze([
+  'code',
+  'severity',
+  'routine',
+  'schema',
+  'table',
+  'column',
+  'constraint',
+] as const);
+
+/**
+ * The leading bare keywords of a statement, which say which step failed without
+ * quoting it. A literal can never survive the identifier test, so the password
+ * in the role DDL cannot reach a log through here.
+ */
+function describeStatement(statement: string): string {
+  const words = statement
+    .trim()
+    .split(/\s+/u)
+    .slice(0, 2)
+    .filter((word) => /^[A-Za-z_]+$/u.test(word));
+  return words.length > 0 ? words.join(' ').toUpperCase() : 'UNKNOWN';
+}
+
+/** Reduces a driver error to its allowlisted, bounded fields. */
+function describeDriverError(error: unknown): string {
+  if (typeof error !== 'object' || error === null) {
+    return '';
+  }
+  return SAFE_DRIVER_ERROR_FIELDS.map((field) => {
+    const value = Reflect.get(error, field);
+    return typeof value === 'string' && value.length > 0
+      ? ` ${field}=${singleLine(value, MAX_DRIVER_FIELD_CHARS)}`
+      : '';
+  }).join('');
+}
+
+/** Treats an unserializable result as oversized rather than letting it escape. */
+function serializedByteLength(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+export function createRoleStatementExecutor(
   connection: PostgresDatabaseConnection,
 ): RoleStatementExecutor {
   return Object.freeze({
     async execute(
       statement: string,
     ): Promise<readonly Readonly<Record<string, unknown>>[]> {
+      let result: unknown;
       try {
-        const result = await connection.db.execute(sql.raw(statement));
-        if (
-          !Array.isArray(result) ||
-          result.length > MAX_STATEMENT_ROWS ||
-          result.some(
-            (row) =>
-              typeof row !== 'object' || row === null || Array.isArray(row),
-          ) ||
-          Buffer.byteLength(JSON.stringify(result), 'utf8') >
-            MAX_STATEMENT_RESULT_BYTES
-        ) {
-          throw new Error('invalid result');
-        }
-        return Object.freeze(
-          result.map((row) =>
-            Object.freeze(row as Readonly<Record<string, unknown>>),
-          ),
+        result = await connection.db.execute(sql.raw(statement));
+      } catch (error) {
+        // Naming the step and the SQLSTATE is what separates a missing
+        // migration from a revoked grant from an unreachable writer. Collapsing
+        // all three into one sentence is why a failed run used to be
+        // undiagnosable from its logs alone.
+        throw new Error(
+          `A native database bootstrap statement failed. statement=${describeStatement(
+            statement,
+          )}${describeDriverError(error)}`,
         );
-      } catch {
-        throw new Error('A native database bootstrap statement failed.');
       }
+      if (
+        !Array.isArray(result) ||
+        result.length > MAX_STATEMENT_ROWS ||
+        result.some(
+          (row) =>
+            typeof row !== 'object' || row === null || Array.isArray(row),
+        ) ||
+        serializedByteLength(result) > MAX_STATEMENT_RESULT_BYTES
+      ) {
+        throw new Error(
+          'A native database bootstrap statement returned an unusable result. ' +
+            `statement=${describeStatement(statement)}`,
+        );
+      }
+      return Object.freeze(
+        result.map((row) =>
+          Object.freeze(row as Readonly<Record<string, unknown>>),
+        ),
+      );
     },
   });
 }
@@ -300,11 +368,18 @@ async function runFromCommandLine(): Promise<void> {
   }
 }
 
+export const BOOTSTRAP_FAILURE_PREFIX = 'Database bootstrap failed closed.';
+
+/** Fail-closed diagnostic for the bootstrap entry point. */
+export function describeBootstrapFailure(error: unknown): string {
+  return describeFailure(BOOTSTRAP_FAILURE_PREFIX, error);
+}
+
 if (import.meta.main) {
   try {
     await runFromCommandLine();
-  } catch {
-    console.error('Database bootstrap failed closed.');
+  } catch (error) {
+    console.error(describeBootstrapFailure(error));
     process.exitCode = 1;
   }
 }
