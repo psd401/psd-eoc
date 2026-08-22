@@ -1114,7 +1114,12 @@ describe('production deep health reads', () => {
 
     await expect(
       dependencies.checkRuntimeSecrets(new AbortController().signal),
-    ).rejects.toThrow('Health dependency configuration is unavailable.');
+      // The message now names the cause. That is the point of it: a 503 from
+      // /api/health used to say only 'unavailable', which during a live outage
+      // gave no way to tell a bad OAuth contract from an unreachable database.
+    ).rejects.toThrow(
+      'Health dependency configuration is unavailable: GOOGLE_OAUTH_CONFIG must contain exactly the approved five fields.',
+    );
     expect(fetchCalled).toBe(false);
   });
 
