@@ -20,6 +20,7 @@ import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/roster/gro
 import {
   describeFailure,
   invalidConfigurationFields,
+  withReducedDriverErrors,
 } from './failure-diagnostics';
 
 const SourceShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
@@ -148,20 +149,22 @@ async function runFromCommandLine(): Promise<void> {
     idempotencyKey: run.idempotencyKey,
   });
   try {
-    const result = await executeCapability(
-      createSyncAccessMembershipHandler({
-        evaluator: createGoogleAccessMembershipEvaluator(
-          readGoogleCloudIdentityRosterConfiguration(),
-        ),
-        store: createDrizzleAccessMembershipSyncStore(connection.db),
-      }),
-      {},
-      {
-        context,
-        humanActionResolutionContext: null,
-        safetyResolver: null,
-        authorizer: createScheduledAccessMembershipSyncAuthorizer(),
-      },
+    const result = await withReducedDriverErrors('access-membership sync', () =>
+      executeCapability(
+        createSyncAccessMembershipHandler({
+          evaluator: createGoogleAccessMembershipEvaluator(
+            readGoogleCloudIdentityRosterConfiguration(),
+          ),
+          store: createDrizzleAccessMembershipSyncStore(connection.db),
+        }),
+        {},
+        {
+          context,
+          humanActionResolutionContext: null,
+          safetyResolver: null,
+          authorizer: createScheduledAccessMembershipSyncAuthorizer(),
+        },
+      ),
     );
     console.info(
       JSON.stringify(accessMembershipSyncSummary(run.sourceSha, result)),

@@ -25,7 +25,11 @@ import {
   type BootstrapConfig,
   type BootstrapMode,
 } from './config';
-import { describeDriverError, describeFailure } from './failure-diagnostics';
+import {
+  describeDriverError,
+  describeFailure,
+  withReducedDriverErrors,
+} from './failure-diagnostics';
 
 const MAX_STATEMENT_ROWS = 32;
 const MAX_STATEMENT_RESULT_BYTES = 64 * 1_024;
@@ -267,6 +271,70 @@ export function createRoleStatementExecutor(
   });
 }
 
+/**
+ * Wires the bootstrap steps to two live connections.
+ *
+ * Exported so each step's failure handling can be exercised without a database.
+ * The steps that issue SQL outside the statement executor have to reduce a
+ * driver error where it is raised, and only a test that drives these proves the
+ * wiring rather than the reducer in isolation.
+ */
+export function createBootstrapDependencies(
+  config: BootstrapConfig,
+  administratorConnection: PostgresDatabaseConnection,
+  applicationConnection: PostgresDatabaseConnection,
+): BootstrapDependencies {
+  const administratorExecutor = createRoleStatementExecutor(
+    administratorConnection,
+  );
+  const applicationExecutor = createRoleStatementExecutor(
+    applicationConnection,
+  );
+  return Object.freeze({
+    async acquireAdvisoryLock(): Promise<void> {
+      await administratorExecutor.execute(ADVISORY_LOCK_SQL);
+    },
+    async releaseAdvisoryLock(): Promise<void> {
+      const rows = await administratorExecutor.execute(ADVISORY_UNLOCK_SQL);
+      if (rows.length !== 1 || rows[0]?.unlocked !== true) {
+        throw new Error('The native bootstrap advisory lock was not held.');
+      }
+    },
+    async verifyAdministratorTls(): Promise<void> {
+      await verifyDatabaseTls({ executor: administratorExecutor });
+    },
+    async migrate(): Promise<void> {
+      await withReducedDriverErrors('migration', () =>
+        migrateDatabase(administratorConnection),
+      );
+    },
+    async configureApplicationRole() {
+      return configureAndVerifyApplicationRole({
+        executor: administratorExecutor,
+        password: config.databaseApplicationPassword,
+      });
+    },
+    async seedReference() {
+      return withReducedDriverErrors('reference seed', () =>
+        seedReferenceData(administratorConnection.db),
+      );
+    },
+    async bootstrapAccess() {
+      const outcome = await withReducedDriverErrors('access bootstrap', () =>
+        bootstrapAccessConfiguration(administratorConnection.db),
+      );
+      console.info(describeBootstrapOutcome(outcome));
+      return outcome;
+    },
+    async verifyApplicationLogin(): Promise<void> {
+      await verifyApplicationLogin({ executor: applicationExecutor });
+    },
+    async verifyApplicationTls(): Promise<void> {
+      await verifyDatabaseTls({ executor: applicationExecutor });
+    },
+  });
+}
+
 /** Fails closed unless the exact canonical fixture is absent after bootstrap. */
 async function runFromCommandLine(): Promise<void> {
   const config = readBootstrapConfig();
@@ -280,52 +348,15 @@ async function runFromCommandLine(): Promise<void> {
     config.databaseApplicationUsername,
     config.databaseApplicationPassword,
   );
-  const administratorExecutor = createRoleStatementExecutor(
-    administratorConnection,
-  );
-  const applicationExecutor = createRoleStatementExecutor(
-    applicationConnection,
-  );
   try {
-    const summary = await runBootstrap(config, {
-      async acquireAdvisoryLock(): Promise<void> {
-        await administratorExecutor.execute(ADVISORY_LOCK_SQL);
-      },
-      async releaseAdvisoryLock(): Promise<void> {
-        const rows = await administratorExecutor.execute(ADVISORY_UNLOCK_SQL);
-        if (rows.length !== 1 || rows[0]?.unlocked !== true) {
-          throw new Error('The native bootstrap advisory lock was not held.');
-        }
-      },
-      async verifyAdministratorTls(): Promise<void> {
-        await verifyDatabaseTls({ executor: administratorExecutor });
-      },
-      async migrate(): Promise<void> {
-        await migrateDatabase(administratorConnection);
-      },
-      async configureApplicationRole() {
-        return configureAndVerifyApplicationRole({
-          executor: administratorExecutor,
-          password: config.databaseApplicationPassword,
-        });
-      },
-      async seedReference() {
-        return seedReferenceData(administratorConnection.db);
-      },
-      async bootstrapAccess() {
-        const outcome = await bootstrapAccessConfiguration(
-          administratorConnection.db,
-        );
-        console.info(describeBootstrapOutcome(outcome));
-        return outcome;
-      },
-      async verifyApplicationLogin(): Promise<void> {
-        await verifyApplicationLogin({ executor: applicationExecutor });
-      },
-      async verifyApplicationTls(): Promise<void> {
-        await verifyDatabaseTls({ executor: applicationExecutor });
-      },
-    });
+    const summary = await runBootstrap(
+      config,
+      createBootstrapDependencies(
+        config,
+        administratorConnection,
+        applicationConnection,
+      ),
+    );
     console.info(JSON.stringify(summary));
   } finally {
     await Promise.all([
