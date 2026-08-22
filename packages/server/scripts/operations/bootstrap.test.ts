@@ -17,7 +17,21 @@ import {
   getApplicationDatabaseSecret,
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
-import { createRoleStatementExecutor, runBootstrap } from './bootstrap';
+import postgres from 'postgres';
+
+import {
+  DRIVER_FAILURE_LEAKS,
+  driverFailureFixture,
+  WRAPPED_PARAMETERS,
+  WRAPPED_STATEMENT,
+  wrappedDriverFailureFixture,
+} from './driver-error-test-fixtures';
+
+import {
+  createBootstrapDependencies,
+  createRoleStatementExecutor,
+  runBootstrap,
+} from './bootstrap';
 import { DATABASE_LOGIN, DATABASE_ROLE, readBootstrapConfig } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
@@ -738,4 +752,87 @@ describe('bootstrap statement executor', () => {
     expect(rows).toEqual([{ unlocked: true }]);
     expect(Object.isFrozen(rows[0])).toBe(true);
   });
+});
+
+describe('bootstrap steps that issue SQL outside the executor', () => {
+  /**
+   * A connection on which every interaction raises a driver error, so a step is
+   * proven wrapped wherever in its work it first reaches the database.
+   */
+  function failingConnection() {
+    // Wrapped, because that is the only shape these steps can actually raise:
+    // drizzle wraps every failed query. A bare PostgresError matches at depth 0
+    // and so passes whether or not the cause chain is walked at all.
+    const raise = (): never => {
+      throw wrappedDriverFailureFixture(driverFailureFixture());
+    };
+    const db = new Proxy({} as Record<string, unknown>, {
+      get: raise,
+      apply: raise,
+    });
+    return { driver: 'postgres' as const, db, close: () => Promise.resolve() };
+  }
+
+  const steps = [
+    ['migration', 'migrate'],
+    ['reference seed', 'seedReference'],
+    ['access bootstrap', 'bootstrapAccess'],
+  ] as const;
+
+  for (const [label, method] of steps) {
+    test(`${method} reduces a driver error where it is raised`, async () => {
+      const connection = failingConnection() as unknown as Parameters<
+        typeof createBootstrapDependencies
+      >[1];
+      const dependencies = createBootstrapDependencies(
+        readBootstrapConfig(validConfigEnvironment()),
+        connection,
+        connection,
+      );
+
+      // bootstrapAccess returns `not-configured` without touching the database
+      // unless an initial access group is configured, so the step would never
+      // reach the connection and the test would prove nothing.
+      const previous = {
+        PSD_EOC_INITIAL_ACCESS_GROUP_ID:
+          process.env.PSD_EOC_INITIAL_ACCESS_GROUP_ID,
+        PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL:
+          process.env.PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL,
+      };
+      process.env.PSD_EOC_INITIAL_ACCESS_GROUP_ID = 'synthetic-group-id';
+      process.env.PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL =
+        'access-group@example.invalid';
+
+      const raised = await Promise.resolve(
+        dependencies[method](readBootstrapConfig(validConfigEnvironment())),
+      )
+        .finally(() => {
+          for (const [name, value] of Object.entries(previous)) {
+            if (value === undefined) {
+              delete process.env[name];
+            } else {
+              process.env[name] = value;
+            }
+          }
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+
+      expect(raised).not.toBeNull();
+      expect(raised instanceof postgres.PostgresError).toBe(false);
+      const message = String(Reflect.get(Object(raised), 'message'));
+      expect(message).toContain(`The ${label} step failed in the database.`);
+      expect(message).toContain('code=23505');
+      for (const leak of [
+        ...DRIVER_FAILURE_LEAKS,
+        WRAPPED_STATEMENT,
+        ...WRAPPED_PARAMETERS,
+        'Failed query',
+      ]) {
+        expect(message).not.toContain(leak);
+      }
+    });
+  }
 });

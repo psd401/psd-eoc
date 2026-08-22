@@ -1,3 +1,5 @@
+import { DrizzleQueryError } from 'drizzle-orm/errors';
+import postgres from 'postgres';
 import type { z } from 'zod';
 
 const MAX_LABEL_CHARS = 64;
@@ -57,21 +59,90 @@ function readString(source: object, key: string): string | undefined {
   }
 }
 
+/** How far to follow `cause` before giving up on a self-referential chain. */
+const MAX_CAUSE_DEPTH = 8;
+
 /**
- * Whether an error came from the database server, and so must be reduced to
- * allowlisted fields rather than described by its message.
+ * The driver's own error, wherever it sits in the cause chain.
  *
- * A SQLSTATE-shaped code is not sufficient on its own. Node's errno codes are
- * the same five uppercase characters — EPIPE, EPERM, EBUSY, EROFS, EBADF,
- * EINTR, ESRCH, EXDEV, ENXIO, ELOOP, EIDRM — and this container runs on a
- * read-only root filesystem reading a certificate by path, so those are
- * reachable. Treating one as a driver error would suppress a message that is
- * both safe and the only thing naming the path or endpoint at fault, which is
- * the diagnostic loss this module exists to prevent. Postgres always sends a
- * severity with an error, and never a code beginning with `E`, so requiring a
- * corroborating field separates the two spaces exactly.
+ * drizzle does not surface one directly. Every failed query arrives wrapped in
+ * `DrizzleQueryError`, with the real error underneath as `cause`, so testing
+ * the outermost error alone found nothing and the SQLSTATE never reached a log.
  */
-export function isDriverError(error: object): boolean {
+function findDriverError(error: unknown): Error | undefined {
+  let current: unknown = error;
+  for (
+    let depth = 0;
+    depth < MAX_CAUSE_DEPTH && typeof current === 'object' && current !== null;
+    depth += 1
+  ) {
+    if (current instanceof postgres.PostgresError) {
+      return current;
+    }
+    current = readCause(current);
+  }
+  return undefined;
+}
+
+/**
+ * The allowlisted description of whatever actually failed, unwrapping the query
+ * wrapper first.
+ *
+ * `DrizzleQueryError` must never be described by its own fields. It builds its
+ * message as `Failed query: <statement>\nparams: <bound parameters>` and keeps
+ * both on `query` and `params`, so it carries the statement text — the
+ * application password, for the role DDL — and every bound value, which for the
+ * access-membership inserts is staff email addresses.
+ */
+export function describeQueryFailure(error: unknown): string {
+  const driver = findDriverError(error);
+  if (driver !== undefined) {
+    return describeDriverError(driver);
+  }
+  return error instanceof DrizzleQueryError
+    ? describeDriverError(readCause(error))
+    : describeDriverError(error);
+}
+
+/**
+ * Reads `cause` without letting an exotic accessor escape.
+ *
+ * Every other read here goes through `readString` for this reason. Reading
+ * `cause` bare reopened the same hole: an accessor that throws escaped
+ * `describeFailure`, which is documented as never throwing, and reached the
+ * runtime's default handler — the one that prints enumerable own properties and
+ * so publishes the `detail` and `hint` this module exists to suppress.
+ */
+function readCause(source: object): unknown {
+  try {
+    return Reflect.get(source, 'cause');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether this error is itself the driver's — by class, or failing that by
+ * shape.
+ *
+ * The shape fallbacks are not decoration. An error can lose its prototype
+ * crossing a boundary, and a check resting on class identity alone silently
+ * stops redacting when that happens. They stay deliberately narrow: a
+ * SQLSTATE-shaped code alone is not enough, because Node's errno codes are the
+ * same five uppercase characters — EPIPE, EPERM, EBUSY, EROFS, EBADF, EINTR,
+ * ESRCH, EXDEV, ENXIO, ELOOP, EIDRM — and this container runs on a read-only
+ * root filesystem reading a certificate by path, so those are reachable.
+ * Treating one as a driver error would suppress the message naming the file at
+ * fault. Postgres always sends a severity and never a code beginning with `E`,
+ * so requiring the corroborating field separates the two spaces exactly.
+ *
+ * This asks only about the error in hand. An error merely *carrying* a driver
+ * error as `cause` is authored, and keeps its own message.
+ */
+function isDriverErrorItself(error: object): boolean {
+  if (error instanceof postgres.PostgresError) {
+    return true;
+  }
   if (readString(error, 'name') === 'PostgresError') {
     return true;
   }
@@ -81,6 +152,69 @@ export function isDriverError(error: object): boolean {
     SQLSTATE.test(code) &&
     readString(error, 'severity') !== undefined
   );
+}
+
+/**
+ * Whether an error came from the database server.
+ *
+ * The driver's own class is the only definitive answer, and every path that
+ * issues SQL now reduces its errors at the point of failure, so this should
+ * find nothing. It stays as a second layer for an error that reached a log
+ * without passing through `withReducedDriverErrors` — one that crossed a
+ * boundary and lost its prototype, or a path added later that forgets to wrap.
+ *
+ * The fallbacks are deliberately narrow. A SQLSTATE-shaped code alone is not
+ * enough: Node's errno codes are the same five uppercase characters — EPIPE,
+ * EPERM, EBUSY, EROFS, EBADF, EINTR, ESRCH, EXDEV, ENXIO, ELOOP, EIDRM — and
+ * this container runs on a read-only root filesystem reading a certificate by
+ * path, so those are reachable. Treating one as a driver error would suppress
+ * the message naming the file or endpoint at fault, which is the diagnostic
+ * loss this module exists to prevent. Postgres always sends a severity with an
+ * error and never a code beginning with `E`, so requiring the corroborating
+ * field separates the two spaces exactly.
+ */
+export function isDriverError(error: object): boolean {
+  return error instanceof DrizzleQueryError || isDriverErrorItself(error);
+}
+
+/**
+ * Runs a database step, reducing any driver error to allowlisted fields before
+ * it can leave.
+ *
+ * Redaction has to hold where the query is issued, not where the log is
+ * written. `createRoleStatementExecutor` already did that for the statements it
+ * runs, but migrations, reference seeding, the access bootstrap, and the
+ * access-sync capability issue their own SQL through the connection and handed
+ * the raw driver error to the entry point, leaving `describeFailure` to
+ * recognize it by name and code. Recognition is a guess, and it was wrong once
+ * already: an early version classified eleven Node errno codes as SQLSTATEs and
+ * swallowed their messages. `instanceof` against the driver's own class is not
+ * a guess.
+ *
+ * Anything that is not a driver error is rethrown untouched, so an authored
+ * failure or a filesystem error keeps the message that explains it.
+ */
+export async function withReducedDriverErrors<T>(
+  step: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    // Only the wrapper and the driver's own error carry a message that cannot
+    // be logged. An authored error holding one as `cause` is rethrown intact:
+    // describeFailure reports its sentence and the driver's allowlisted fields,
+    // without the driver's message.
+    if (typeof error !== 'object' || error === null || !isDriverError(error)) {
+      throw error;
+    }
+    // The original stops here. It is not attached as `cause`: anything that
+    // later inspected the chain would undo the reduction, and the chain is
+    // where the statement text and bound parameters live.
+    throw new Error(
+      `The ${step} step failed in the database.${describeQueryFailure(error)}`,
+    );
+  }
 }
 
 /** Reduces a driver error to its allowlisted, bounded fields. */
@@ -94,6 +228,27 @@ export function describeDriverError(error: unknown): string {
       ? ''
       : ` ${field}=${singleLine(value, MAX_LABEL_CHARS)}`;
   }).join('');
+}
+
+/**
+ * Describes an error by whichever of its parts is safe to report.
+ *
+ * Only the wrapper and the driver's own error have to lose their message: the
+ * wrapper's embeds the statement and bound parameters, and Postgres echoes a
+ * rejected value into its own. An authored error that merely carries one of
+ * those as `cause` keeps its message and gains the driver's allowlisted fields,
+ * because discarding it would throw away the sentence saying what was being
+ * attempted — the diagnostic loss this module exists to prevent.
+ */
+function describeErrorBody(error: object, message: string | undefined): string {
+  if (isDriverError(error)) {
+    return describeQueryFailure(error);
+  }
+  const driver = findDriverError(error);
+  return (
+    describeAuthoredError(error, message) +
+    (driver === undefined ? '' : describeDriverError(driver))
+  );
 }
 
 /** Reports an authored error in full; nothing on that path echoes a value. */
@@ -168,9 +323,7 @@ export function describeFailure(prefix: string, error: unknown): string {
   const described =
     prefix +
     (name === undefined ? '' : ` name=${singleLine(name, MAX_LABEL_CHARS)}`) +
-    (isDriverError(error)
-      ? describeDriverError(error)
-      : describeAuthoredError(error, message));
+    describeErrorBody(error, message);
   const stack = readString(error, 'stack');
   const frames = stack === undefined ? '' : stackFrames(stack, message);
   return frames.length > 0 ? `${described}\n${frames}` : described;
