@@ -385,12 +385,26 @@ function readSecretConfiguration(
 function assertInjectedRuntimeSecrets(environment: HealthEnvironment): void {
   const apiSalt = requiredEnvironmentValue(environment, 'API_SALT', 65_536);
   if (apiSalt.length < 32 || apiSalt.startsWith('arn:')) {
-    throw new Error('Health dependency configuration is unavailable.');
+    // Naming the shape of the problem, never the value. A salt that still
+    // starts with "arn:" means the platform injected the reference instead of
+    // resolving the secret, which is a different fix from a short salt.
+    throw new Error(
+      apiSalt.startsWith('arn:')
+        ? 'Health dependency configuration is unavailable: API_SALT was injected as an ARN, not a resolved secret.'
+        : 'Health dependency configuration is unavailable: API_SALT is shorter than 32 characters.',
+    );
   }
   try {
     readGoogleOidcConfiguration(environment);
-  } catch {
-    throw new Error('Health dependency configuration is unavailable.');
+  } catch (cause) {
+    // The OIDC reader's own messages name the offending variable and carry no
+    // credential material, so passing one through is safe and is the whole
+    // difference between a diagnosable failure and a silent one.
+    throw new Error(
+      `Health dependency configuration is unavailable: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
   }
 }
 
