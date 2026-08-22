@@ -842,10 +842,16 @@ export function createRuntimeDeepHealthDependencies(
  */
 function loggableReason(cause: unknown): string {
   if (!(cause instanceof Error)) return 'non-error thrown';
+  let driverFound = false;
+  let className = 'Error';
+  let code = 'none';
+  const seen = new Set<unknown>();
   for (
     let current: unknown = cause, depth = 0;
-    current instanceof Error && depth < 8;
-    current = (current as { cause?: unknown }).cause, depth += 1
+    current instanceof Error && depth < 8 && !seen.has(current);
+    seen.add(current),
+      current = (current as { cause?: unknown }).cause,
+      depth += 1
   ) {
     const candidate = current as {
       severity?: unknown;
@@ -859,17 +865,27 @@ function loggableReason(cause: unknown): string {
       candidate.severity !== undefined ||
       candidate.routine !== undefined ||
       candidate.query !== undefined ||
-      candidate.params !== undefined ||
-      candidate.name === 'DrizzleQueryError';
-    if (driverShaped) {
-      const code =
-        typeof candidate.code === 'string' && candidate.code.length <= 32
-          ? candidate.code
-          : 'none';
-      return `database driver error redacted (class=${String(candidate.name ?? 'Error')} code=${code})`;
+      candidate.params !== undefined;
+    if (!driverShaped) continue;
+    driverFound = true;
+    // Keep walking rather than returning here. drizzle wraps every failed
+    // query in a DrizzleQueryError, and that wrapper is itself driver-shaped
+    // (it always sets query and params) while carrying no SQLSTATE and no name
+    // of its own — `.name` is the inherited 'Error'. Returning on the first
+    // match therefore described every database failure identically as
+    // "class=Error code=none": a connection timeout and a division_by_zero
+    // rendered the same, which is the diagnostic blindness this function was
+    // added to remove. The specific error is one link further down .cause.
+    if (typeof candidate.name === 'string' && candidate.name !== 'Error') {
+      className = candidate.name;
+    }
+    if (typeof candidate.code === 'string' && candidate.code.length <= 32) {
+      code = candidate.code;
     }
   }
-  return cause.message.slice(0, 300);
+  return driverFound
+    ? `database driver error redacted (class=${className} code=${code})`
+    : cause.message.slice(0, 300);
 }
 
 /** Creates the unauthenticated, fail-closed GET handler used by App Runner. */

@@ -487,6 +487,46 @@ describe('deep health GET contract', () => {
     expect(all).not.toContain('insert into');
     expect(all).not.toContain('params:');
     expect(all).toContain('redacted');
+    // This wrapper has no inner cause, so the wrapper's own name is all there
+    // is to report. The sibling test below covers the case that actually
+    // matters: a real drizzle wrapper with the PostgresError underneath it.
+    expect(all).toContain('class=DrizzleQueryError');
+  });
+
+  it('reports the SQLSTATE from inside the drizzle wrapper, not the wrapper', async () => {
+    // What drizzle really produces: its wrapper is itself driver-shaped (it
+    // always sets query and params) but carries no code, and its .name is the
+    // inherited 'Error'. The real error is one link down .cause.
+    const inner = Object.assign(new Error('division by zero'), {
+      name: 'PostgresError',
+      severity: 'ERROR',
+      code: '22012',
+      routine: 'int4div',
+    });
+    const wrapper = Object.assign(
+      new Error('Failed query: select 1/0\nparams: '),
+      { query: 'select 1/0', params: [], cause: inner },
+    );
+    const handler = createHealthRouteHandler({
+      checkDatabase: () => Promise.reject(wrapper),
+      checkDeliveryQueue: () => Promise.resolve(),
+      checkRuntimeSecrets: () => Promise.resolve(),
+    });
+    const written: string[] = [];
+    const original = console.error;
+    console.error = (line: unknown) => {
+      written.push(String(line));
+    };
+    try {
+      expect((await handler()).status).toBe(503);
+    } finally {
+      console.error = original;
+    }
+    const all = written.join('\n');
+    expect(all).toContain('class=PostgresError');
+    expect(all).toContain('code=22012');
+    expect(all).not.toContain('select 1/0');
+    expect(all).not.toContain('division by zero');
   });
 
   it('coalesces concurrent public probes into one set of dependency reads', async () => {

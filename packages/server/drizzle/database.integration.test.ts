@@ -2566,9 +2566,23 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         /immutable truth cannot be changed/u,
       );
       // Migration 0029 removed the blanket retain guard, so a delete here is
-      // no longer refused by trigger. The application still cannot delete
-      // these rows: it has never been granted DELETE, which the
-      // has_table_privilege assertions elsewhere in this file check directly.
+      // no longer refused by trigger. What still stops the application is the
+      // grant — and unlike the other tables whose delete assertions were
+      // dropped, endpoint_status_records had no has_table_privilege check
+      // anywhere in this file, so the protection was left entirely unasserted.
+      // It is asserted here rather than claimed in a comment.
+      const endpointStatusDeleteGrant = await createdConnection.db.execute<{
+        can_delete: boolean;
+      }>(sql`
+        select has_table_privilege(
+          'psd_eoc_app',
+          'public.endpoint_status_records',
+          'DELETE'
+        ) as can_delete
+      `);
+      expect(endpointStatusDeleteGrant.map((row) => row.can_delete)).toEqual([
+        false,
+      ]);
 
       await expectConstraintViolation(
         () =>
