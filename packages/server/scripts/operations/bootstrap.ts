@@ -25,10 +25,9 @@ import {
   type BootstrapConfig,
   type BootstrapMode,
 } from './config';
-import { describeFailure, singleLine } from './failure-diagnostics';
+import { describeDriverError, describeFailure } from './failure-diagnostics';
 
 const MAX_STATEMENT_ROWS = 32;
-const MAX_DRIVER_FIELD_CHARS = 64;
 const MAX_STATEMENT_RESULT_BYTES = 64 * 1_024;
 const ADVISORY_LOCK_SQL = 'SELECT pg_advisory_lock(178401)';
 const ADVISORY_UNLOCK_SQL = 'SELECT pg_advisory_unlock(178401) AS "unlocked"';
@@ -202,25 +201,6 @@ function createNativeConnection(
 }
 
 /**
- * The fields of a driver error that carry no caller data.
- *
- * `message`, `detail`, `hint`, and `where` can echo a rejected value, and
- * postgres.js hangs the complete statement text on `query` — which for the role
- * DDL is the application password literal. This is an allowlist for that
- * reason: `PostgresError` copies every field the server sent onto itself, so
- * anything not named here must be assumed to carry a value.
- */
-const SAFE_DRIVER_ERROR_FIELDS = Object.freeze([
-  'code',
-  'severity',
-  'routine',
-  'schema',
-  'table',
-  'column',
-  'constraint',
-] as const);
-
-/**
  * The leading bare keywords of a statement, which say which step failed without
  * quoting it. A literal can never survive the identifier test, so the password
  * in the role DDL cannot reach a log through here.
@@ -232,19 +212,6 @@ function describeStatement(statement: string): string {
     .slice(0, 2)
     .filter((word) => /^[A-Za-z_]+$/u.test(word));
   return words.length > 0 ? words.join(' ').toUpperCase() : 'UNKNOWN';
-}
-
-/** Reduces a driver error to its allowlisted, bounded fields. */
-function describeDriverError(error: unknown): string {
-  if (typeof error !== 'object' || error === null) {
-    return '';
-  }
-  return SAFE_DRIVER_ERROR_FIELDS.map((field) => {
-    const value = Reflect.get(error, field);
-    return typeof value === 'string' && value.length > 0
-      ? ` ${field}=${singleLine(value, MAX_DRIVER_FIELD_CHARS)}`
-      : '';
-  }).join('');
 }
 
 /** Treats an unserializable result as oversized rather than letting it escape. */
@@ -368,18 +335,13 @@ async function runFromCommandLine(): Promise<void> {
   }
 }
 
-export const BOOTSTRAP_FAILURE_PREFIX = 'Database bootstrap failed closed.';
-
-/** Fail-closed diagnostic for the bootstrap entry point. */
-export function describeBootstrapFailure(error: unknown): string {
-  return describeFailure(BOOTSTRAP_FAILURE_PREFIX, error);
-}
+const BOOTSTRAP_FAILURE_PREFIX = 'Database bootstrap failed closed.';
 
 if (import.meta.main) {
   try {
     await runFromCommandLine();
   } catch (error) {
-    console.error(describeBootstrapFailure(error));
+    console.error(describeFailure(BOOTSTRAP_FAILURE_PREFIX, error));
     process.exitCode = 1;
   }
 }

@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { z } from 'zod';
 
 import {
+  describeDriverError,
   describeFailure,
   invalidConfigurationFields,
+  isDriverError,
   singleLine,
 } from './failure-diagnostics';
 
@@ -34,15 +36,38 @@ describe('describeFailure', () => {
 
   test('keeps the message on one line so it cannot forge a log record', () => {
     const forged = '{"event":"access-membership-sync-complete"}';
-
     const lines = describeFailure(PREFIX, new Error(`first\n${forged}`)).split(
       '\n',
     );
 
     expect(lines[0]).toBe(`${PREFIX} name=Error message=first ${forged}`);
-    // Every remaining line is a call frame, so the newline in the message
-    // cannot reappear below the headline and forge a second record.
     expect(lines.slice(1).every((line) => /^\s+at\s/u.test(line))).toBe(true);
+  });
+
+  test('excises the message before reading frames, so none can be forged', () => {
+    // The stack begins with `Name: message`, so a message carrying a newline
+    // and a frame-shaped line would otherwise emit it as a genuine frame.
+    const error = new Error('boom\n    at totallyReal (production.ts:1:1)');
+    const frames = describeFailure(PREFIX, error).split('\n').slice(1);
+
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames).not.toContain('    at totallyReal (production.ts:1:1)');
+    expect(frames.join('\n')).toContain('failure-diagnostics.test.ts');
+  });
+
+  test('collapses every character a log reader may treat as a break', () => {
+    for (const character of [
+      '\u0000',
+      '\u000b',
+      '\u000c',
+      '\u001f',
+      '\u007f',
+      '\u0085',
+      '\u2028',
+      '\u2029',
+    ]) {
+      expect(singleLine(`a${character}b`, 64)).toBe('a b');
+    }
   });
 
   test('bounds an unbounded message and stack', () => {
@@ -76,6 +101,78 @@ describe('describeFailure', () => {
 
   test('omits fields the error does not carry', () => {
     expect(describeFailure(PREFIX, Object.create(null))).toBe(PREFIX);
+  });
+});
+
+describe('driver errors', () => {
+  function postgresError(): Error {
+    return Object.assign(new Error('invalid input syntax for type uuid: "x"'), {
+      name: 'PostgresError',
+      code: '22P02',
+      severity: 'ERROR',
+      routine: 'string_to_uuid',
+      detail: 'Key (email)=(staff@example.invalid) already exists.',
+      hint: 'Perhaps you meant to reference the column "t.email".',
+      where: 'PL/pgSQL function inline_code_block line 3',
+      query: "ALTER ROLE x WITH PASSWORD 'SECRET-PASSWORD-VALUE'",
+    });
+  }
+
+  test('recognizes a driver error by name or SQLSTATE', () => {
+    expect(isDriverError(postgresError())).toBe(true);
+    expect(
+      isDriverError(Object.assign(new Error('x'), { code: '42501' })),
+    ).toBe(true);
+    expect(isDriverError(new Error('authored'))).toBe(false);
+    expect(
+      isDriverError(Object.assign(new Error('x'), { code: 'ECONNREFUSED' })),
+    ).toBe(false);
+  });
+
+  test('reduces a driver error to allowlisted fields', () => {
+    expect(describeDriverError(postgresError())).toBe(
+      ' code=22P02 severity=ERROR routine=string_to_uuid',
+    );
+  });
+
+  test('never describes a driver error by its message', () => {
+    // migrate, seedReference, bootstrapAccess, and the access-sync capability
+    // all run SQL through the connection directly rather than through the
+    // bootstrap statement executor, so an unreduced driver error reaches here.
+    const described = describeFailure(PREFIX, postgresError());
+
+    expect(described.split('\n')[0]).toBe(
+      `${PREFIX} name=PostgresError code=22P02 severity=ERROR` +
+        ' routine=string_to_uuid',
+    );
+    for (const leak of [
+      'invalid input syntax',
+      'staff@example.invalid',
+      'Perhaps you meant',
+      'PL/pgSQL function',
+      'SECRET-PASSWORD-VALUE',
+    ]) {
+      expect(described).not.toContain(leak);
+    }
+  });
+});
+
+describe('hostile error objects', () => {
+  test('does not throw when an accessor throws', () => {
+    // Escaping the caller's catch would hand the raw error to the runtime's
+    // default handler, which prints enumerable own properties — including the
+    // detail and hint fields the allowlist exists to suppress.
+    const hostile = new Error('x');
+    for (const key of ['name', 'message', 'stack', 'code']) {
+      Object.defineProperty(hostile, key, {
+        get() {
+          throw new Error('getter exploded');
+        },
+        configurable: true,
+      });
+    }
+
+    expect(describeFailure(PREFIX, hostile)).toBe(PREFIX);
   });
 });
 
@@ -116,6 +213,13 @@ describe('invalidConfigurationFields', () => {
         PSD_EOC_NEIGHBORHOODS: 'b',
       }),
     ).toEqual(['PSD_EOC_FACILITIES', 'PSD_EOC_NEIGHBORHOODS']);
+  });
+
+  test('falls back to issue codes when no issue names a field', () => {
+    // A root-level refusal carries an empty path and is not an unrecognized
+    // key, so collecting only named fields reproduced the very bug this
+    // function exists to fix: a refusal that blamed nothing at all.
+    expect(fieldsFor('not an object at all')).toEqual(['invalid_type']);
   });
 
   test('merges both kinds of refusal, sorted and deduplicated', () => {
