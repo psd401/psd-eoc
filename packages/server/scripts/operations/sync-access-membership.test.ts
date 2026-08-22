@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  ACCESS_SYNC_FAILURE_PREFIX,
   accessMembershipSyncSummary,
   readAccessMembershipSyncEnvironment,
   scheduledIdempotencyKey,
@@ -101,5 +102,33 @@ describe('scheduled access-sync idempotency bucketing', () => {
     expect(key.length).toBeGreaterThanOrEqual(16);
     expect(key.length).toBeLessThanOrEqual(200);
     expect(/^[A-Za-z0-9._:-]+$/u.test(key)).toBe(true);
+  });
+});
+
+describe('access-sync failure reporting', () => {
+  test('writes the cause to stderr and still exits non-zero', async () => {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        new URL('./sync-access-membership.ts', import.meta.url).pathname,
+      ],
+      {
+        env: { PATH: process.env.PATH ?? '', SOURCE_SHA: 'not-a-sha' },
+        stderr: 'pipe',
+        stdout: 'pipe',
+      },
+    );
+    const [exitCode, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain(ACCESS_SYNC_FAILURE_PREFIX);
+    expect(stderr).toContain(
+      'message=Invalid protected access-sync run identity: sourceSha.',
+    );
+    // The refusal names the field, never the value it rejected.
+    expect(stderr).not.toContain('not-a-sha');
   });
 });

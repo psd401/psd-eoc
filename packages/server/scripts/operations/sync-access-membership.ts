@@ -17,6 +17,10 @@ import {
 } from '../../lib/auth/access-membership-sync';
 import { createGoogleAccessMembershipEvaluator } from '../../lib/auth/google-access-membership';
 import { readGoogleCloudIdentityRosterConfiguration } from '../../lib/roster/groups-sync';
+import {
+  describeFailure,
+  invalidConfigurationFields,
+} from './failure-diagnostics';
 
 const SourceShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
 
@@ -98,12 +102,9 @@ export function readAccessMembershipSyncEnvironment(
   });
   if (!parsed.success) {
     throw new Error(
-      `Invalid protected access-sync run identity: ${[
-        ...new Set(parsed.error.issues.map((issue) => issue.path[0])),
-      ]
-        .filter((field): field is string => typeof field === 'string')
-        .sort()
-        .join(', ')}.`,
+      `Invalid protected access-sync run identity: ${invalidConfigurationFields(
+        parsed.error,
+      ).join(', ')}.`,
     );
   }
   return parsed.data;
@@ -170,23 +171,14 @@ async function runFromCommandLine(): Promise<void> {
   }
 }
 
+export const ACCESS_SYNC_FAILURE_PREFIX =
+  'Protected access-membership synchronization failed closed.';
+
 if (import.meta.main) {
   try {
     await runFromCommandLine();
   } catch (error) {
-    // Emit the failure's identity. Codes and messages on this path are
-    // authored, bounded strings; provider payloads, credentials, and member
-    // identities never reach them. Discarding this made every failure look
-    // identical and forced out-of-band reproduction to diagnose.
-    const code = Reflect.get(Object(error), 'code');
-    const message = Reflect.get(Object(error), 'message');
-    console.error(
-      'Protected access-membership synchronization failed closed.' +
-        (typeof code === 'string' ? ` code=${code}` : '') +
-        (typeof message === 'string'
-          ? ` message=${message.slice(0, 300)}`
-          : ''),
-    );
+    console.error(describeFailure(ACCESS_SYNC_FAILURE_PREFIX, error));
     process.exitCode = 1;
   }
 }
