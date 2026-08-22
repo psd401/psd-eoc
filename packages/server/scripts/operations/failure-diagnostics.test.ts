@@ -3,6 +3,11 @@ import postgres from 'postgres';
 import { z } from 'zod';
 
 import {
+  DRIVER_FAILURE_LEAKS,
+  driverFailureFixture,
+} from './driver-error-test-fixtures';
+
+import {
   describeDriverError,
   describeFailure,
   invalidConfigurationFields,
@@ -289,33 +294,9 @@ describe('invalidConfigurationFields', () => {
 });
 
 describe('withReducedDriverErrors', () => {
-  // The published types declare `PostgresError(message?: string)`, but the
-  // driver constructs it from the wire fields it received and copies them onto
-  // the instance (src/errors.js). Building it the driver's way is what makes
-  // `instanceof` meaningful here.
-  const DriverError = postgres.PostgresError as unknown as new (
-    fields: Readonly<Record<string, string>>,
-  ) => Error;
-
-  /** Built the way the driver builds one, from the wire fields it received. */
-  function driverFailure(): Error {
-    return new DriverError({
-      severity: 'ERROR',
-      code: '23505',
-      message: 'duplicate key value violates unique constraint',
-      detail: 'Key (email)=(staff@example.invalid) already exists.',
-      hint: 'A member with that address is already recorded.',
-      where: 'SQL statement "INSERT INTO access_group_members"',
-      schema_name: 'public',
-      table_name: 'access_group_members',
-      constraint_name: 'access_group_members_pkey',
-      routine: '_bt_check_unique',
-    });
-  }
-
   test('reduces a driver error at the step that raised it', async () => {
     const rejected = withReducedDriverErrors('reference seed', () =>
-      Promise.reject(driverFailure()),
+      Promise.reject(driverFailureFixture()),
     );
 
     await expect(rejected).rejects.toThrow(
@@ -330,17 +311,12 @@ describe('withReducedDriverErrors', () => {
     // The point of reducing here rather than at the log: what reaches the entry
     // point is an authored error, so redaction no longer depends on a guess.
     const error = await withReducedDriverErrors('migration', () =>
-      Promise.reject(driverFailure()),
+      Promise.reject(driverFailureFixture()),
     ).catch((raised: unknown) => raised as object);
 
     expect(error instanceof postgres.PostgresError).toBe(false);
     expect(isDriverError(error)).toBe(false);
-    for (const leak of [
-      'duplicate key value',
-      'staff@example.invalid',
-      'A member with that address',
-      'INSERT INTO access_group_members',
-    ]) {
+    for (const leak of DRIVER_FAILURE_LEAKS) {
       expect(describeFailure(PREFIX, error)).not.toContain(leak);
     }
   });
