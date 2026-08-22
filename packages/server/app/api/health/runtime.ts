@@ -385,12 +385,26 @@ function readSecretConfiguration(
 function assertInjectedRuntimeSecrets(environment: HealthEnvironment): void {
   const apiSalt = requiredEnvironmentValue(environment, 'API_SALT', 65_536);
   if (apiSalt.length < 32 || apiSalt.startsWith('arn:')) {
-    throw new Error('Health dependency configuration is unavailable.');
+    // Naming the shape of the problem, never the value. A salt that still
+    // starts with "arn:" means the platform injected the reference instead of
+    // resolving the secret, which is a different fix from a short salt.
+    throw new Error(
+      apiSalt.startsWith('arn:')
+        ? 'Health dependency configuration is unavailable: API_SALT was injected as an ARN, not a resolved secret.'
+        : 'Health dependency configuration is unavailable: API_SALT is shorter than 32 characters.',
+    );
   }
   try {
     readGoogleOidcConfiguration(environment);
-  } catch {
-    throw new Error('Health dependency configuration is unavailable.');
+  } catch (cause) {
+    // The OIDC reader's own messages name the offending variable and carry no
+    // credential material, so passing one through is safe and is the whole
+    // difference between a diagnosable failure and a silent one.
+    throw new Error(
+      `Health dependency configuration is unavailable: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
   }
 }
 
@@ -808,6 +822,72 @@ export function createRuntimeDeepHealthDependencies(
   });
 }
 
+/**
+ * A reason safe to write to a log.
+ *
+ * The probes that reach this either throw messages this repository authored —
+ * which name a variable or a field and never its value — or they surface an
+ * error straight from the PostgreSQL driver. The second kind cannot be logged
+ * verbatim. drizzle wraps every failed query in a `DrizzleQueryError` whose
+ * message is `Failed query: <statement>` followed by the bound parameters, and
+ * a raw `PostgresError` echoes rejected values back in `detail`, `hint` and
+ * `where`. `querySharedAdminDatabase` issues a real query with no wrapper of
+ * its own, so a connection, TLS or authentication failure arrives here as
+ * whatever text the driver chose.
+ *
+ * Driver-shaped errors are therefore reduced to their class and, where present,
+ * the SQLSTATE or errno — enough to tell a refused connection from a bad
+ * certificate, and nothing that can carry a statement, a bound parameter or an
+ * address. Anything else keeps its message, bounded.
+ */
+function loggableReason(cause: unknown): string {
+  if (!(cause instanceof Error)) return 'non-error thrown';
+  let driverFound = false;
+  let className = 'Error';
+  let code = 'none';
+  const seen = new Set<unknown>();
+  for (
+    let current: unknown = cause, depth = 0;
+    current instanceof Error && depth < 8 && !seen.has(current);
+    seen.add(current),
+      current = (current as { cause?: unknown }).cause,
+      depth += 1
+  ) {
+    const candidate = current as {
+      severity?: unknown;
+      routine?: unknown;
+      query?: unknown;
+      params?: unknown;
+      code?: unknown;
+      name?: unknown;
+    };
+    const driverShaped =
+      candidate.severity !== undefined ||
+      candidate.routine !== undefined ||
+      candidate.query !== undefined ||
+      candidate.params !== undefined;
+    if (!driverShaped) continue;
+    driverFound = true;
+    // Keep walking rather than returning here. drizzle wraps every failed
+    // query in a DrizzleQueryError, and that wrapper is itself driver-shaped
+    // (it always sets query and params) while carrying no SQLSTATE and no name
+    // of its own — `.name` is the inherited 'Error'. Returning on the first
+    // match therefore described every database failure identically as
+    // "class=Error code=none": a connection timeout and a division_by_zero
+    // rendered the same, which is the diagnostic blindness this function was
+    // added to remove. The specific error is one link further down .cause.
+    if (typeof candidate.name === 'string' && candidate.name !== 'Error') {
+      className = candidate.name;
+    }
+    if (typeof candidate.code === 'string' && candidate.code.length <= 32) {
+      code = candidate.code;
+    }
+  }
+  return driverFound
+    ? `database driver error redacted (class=${className} code=${code})`
+    : cause.message.slice(0, 300);
+}
+
 /** Creates the unauthenticated, fail-closed GET handler used by App Runner. */
 export function createHealthRouteHandler(
   dependencies: DeepHealthDependencies,
@@ -827,14 +907,35 @@ export function createHealthRouteHandler(
         reject(new Error('Deep health deadline exceeded.'));
       }, timeoutMilliseconds);
     });
+    // Each probe is labelled so a failure names the dependency that caused it.
+    // Returning a bare false here once cost hours of a live outage: the route
+    // reported "unavailable" with no way to tell which of the three checks was
+    // unhappy, and nothing reached the logs at all.
+    const labelled = (
+      name: string,
+      run: () => Promise<unknown>,
+    ): Promise<unknown> =>
+      Promise.resolve()
+        .then(run)
+        .catch((cause: unknown) => {
+          // Only the dependency name and the error message: no payload, no
+          // credential, no row, nothing carrying PII.
+          console.error(
+            JSON.stringify({
+              event: 'health-check-failed',
+              dependency: name,
+              reason: loggableReason(cause),
+            }),
+          );
+          throw cause;
+        });
+
     const checks = Promise.all([
-      Promise.resolve().then(() =>
-        dependencies.checkDatabase(controller.signal),
-      ),
-      Promise.resolve().then(() =>
+      labelled('database', () => dependencies.checkDatabase(controller.signal)),
+      labelled('delivery-queue', () =>
         dependencies.checkDeliveryQueue(controller.signal),
       ),
-      Promise.resolve().then(() =>
+      labelled('runtime-secrets', () =>
         dependencies.checkRuntimeSecrets(controller.signal),
       ),
     ]);
@@ -842,8 +943,14 @@ export function createHealthRouteHandler(
     try {
       await Promise.race([checks, deadline]);
       return true;
-    } catch {
+    } catch (cause) {
       controller.abort();
+      console.error(
+        JSON.stringify({
+          event: 'health-unavailable',
+          reason: loggableReason(cause),
+        }),
+      );
       return false;
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
@@ -1293,9 +1400,7 @@ export function createRuntimeCanaryRouteDependencies(
   connection: DatabaseConnection = createDatabaseClient(readDatabaseConfig()),
 ): CanaryRouteDependencies {
   if (connection.driver !== 'postgres') {
-    throw new Error(
-      'The exploration health canary requires native PostgreSQL.',
-    );
+    throw new Error('The health canary requires native PostgreSQL.');
   }
   const baseRuntime = createAgentRestRuntime(connection);
   return Object.freeze({

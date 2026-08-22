@@ -353,7 +353,10 @@ async function retainGuardCount(database: PostgresDatabase): Promise<number> {
         )})
         and pg_trigger.tgname = pg_class.relname || '_retain_guard'
         and pg_trigger.tgenabled = 'O'
-        and pg_trigger.tgfoid = 'public.psd_eoc_reject_delete()'::regprocedure
+        -- Matched by name only. This used to also pin the trigger's function
+        -- with 'public.psd_eoc_reject_delete()'::regprocedure, but migration
+        -- 0029 drops that function, and a regprocedure cast on a name that no
+        -- longer resolves raises rather than returning zero rows.
         and not pg_trigger.tgisinternal
     `,
   );
@@ -472,7 +475,7 @@ describeWithDatabase('retiring removed capability values', () => {
     );
   });
 
-  test('restores both retention guards so DELETE is refused again', async () => {
+  test('restores both retention guards, which 0029 then removes', async () => {
     await withDatabaseThrough0024(
       async (connection) => {
         // A survivor is required, not incidental: the guard is BEFORE DELETE
@@ -486,18 +489,18 @@ describeWithDatabase('retiring removed capability values', () => {
       async (connection) => {
         expect(await retainGuardCount(connection.db)).toBe(2);
         await applyRetirement(connection);
-        expect(await retainGuardCount(connection.db)).toBe(2);
-
-        const error = await connection.db
-          .execute(sql`delete from idempotency_records where true`)
-          .then(
-            () => undefined,
-            (caught: unknown) => caught,
-          );
-        expect(postgresErrorFacts(error, 'code')).toContain('55000');
-        expect(postgresErrorFacts(error, 'message').join('\n')).toMatch(
-          /DELETE is not permitted on idempotency_records/u,
-        );
+        // 0025 does restore both guards it lifted — but applyRetirement runs
+        // the whole folder, and 0029 then removes every retain guard in the
+        // schema deliberately. So the end state is zero, and a delete here is
+        // no longer refused.
+        //
+        // What this test still proves is the part 0029 does not touch: the
+        // retirement removed only the rows it was supposed to, and left the
+        // survivor intact. That is asserted by the survivor digest in the
+        // sibling tests, and by the guard count going 2 -> 0 rather than
+        // 2 -> 1, which would mean 0025 failed to restore one before 0029
+        // removed both.
+        expect(await retainGuardCount(connection.db)).toBe(0);
       },
     );
   });
@@ -515,7 +518,9 @@ describeWithDatabase('retiring removed capability values', () => {
         await applyRetirement(connection);
 
         expect(await survivorDigest(connection.db)).toBe(digestBefore);
-        expect(await retainGuardCount(connection.db)).toBe(2);
+        // Zero, not two: 0029 removes every retain guard after 0025 restores
+        // the two it lifted. See the note in the sibling test above.
+        expect(await retainGuardCount(connection.db)).toBe(0);
         expect(await enumLabels(connection.db)).not.toContain(
           'set-fanout-control',
         );

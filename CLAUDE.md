@@ -29,12 +29,21 @@ files. Reducing that is active work — don't add to it.
 | URL | https://eoc.psd401.net |
 | AWS account | `<aws-account-id>` (`psd401`), `us-west-2` |
 | Local profile | `psd401-prr-prod` (`aws sso login --profile psd401-prr-prod`) |
-| Stack | `PsdEocExplorationSmoke` (legacy physical name; this is the live stack) |
+| Stack | `PsdEoc` |
 | Compute | App Runner → VPC connector → private Aurora PostgreSQL 16 |
 | Sign-in | Google OIDC, hosted domain `psd401.net`, callback `/auth/callback` |
 
-The stack's physical names still say "exploration-smoke" for CloudFormation
-compatibility. Do not read that as "not real" — it serves production traffic.
+The stack and its physical names were `PsdEocExplorationSmoke` /
+`psd-eoc-exploration-smoke` until 2026-08-21. CloudFormation identifies a stack
+by name, so the rename could not be done in place: the old stack was deleted and
+`PsdEoc` created in its place, and every physical name was reissued with it.
+`docs/evidence/live-pilot.md` records that cutover.
+
+Two references to the old name are deliberate and must stay. Migration
+`0019_retire_exploration_fixture.sql` is applied history and its filename is
+part of the record. The docstring of `scripts/check-applied-migrations.ts` cites
+the incident where an earlier sweep of these words edited that applied
+migration, which is why the guard exists at all.
 
 ## Layout
 

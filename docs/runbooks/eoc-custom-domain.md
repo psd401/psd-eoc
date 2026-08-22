@@ -2,12 +2,12 @@
 
 ## Purpose and fixed boundary
 
-This runbook recovers public TLS for the exact exploration service without
+This runbook recovers public TLS for the exact live App Runner service without
 allowing GitHub Actions to change DNS. The fixed provider boundary is:
 
 - AWS account `<aws-account-id>` (`psd401`), region `us-west-2`;
 - App Runner service
-  `arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c`;
+  `arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc/596fe233dacc4b0a816a890e44af4f59`;
 - provider URL `<app-runner-default-domain>`;
 - custom domain `eoc.psd401.net`, with the `www` subdomain disabled; and
 - authoritative district DNS servers
@@ -68,7 +68,7 @@ validation records, or identity-restoration failure. An existing exact pending
 or active association is read idempotently and is never rewritten.
 
 The protected artifact is named
-`exploration-custom-domain-<source-sha>-<run-id>`. Retain its exact raw and
+`custom-domain-<source-sha>-<run-id>`. Retain its exact raw and
 redacted provider responses with the run. The actionable handoff is
 `district-dns-handoff.json`; it has this shape:
 
@@ -91,7 +91,7 @@ redacted provider responses with the run. The actionable handoff is
   "dnsHandoffAvailable": true,
   "domain": "eoc.psd401.net",
   "enableWWWSubdomain": false,
-  "serviceArn": "arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c",
+  "serviceArn": "arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc/596fe233dacc4b0a816a890e44af4f59",
   "state": "associated-now",
   "tlsVerified": false,
   "trafficCname": {

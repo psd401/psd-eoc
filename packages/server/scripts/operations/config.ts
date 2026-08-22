@@ -88,6 +88,35 @@ const BootstrapEnvironmentSchema = z
     DATABASE_APPLICATION_PASSWORD: DatabasePasswordSchema,
     SOURCE_SHA: SourceShaSchema,
     BOOTSTRAP_MODE: z.enum(BOOTSTRAP_MODES).default('migrate'),
+    // First-run configuration. All four are optional: a district already
+    // configured through the admin UI supplies none of them. They are listed
+    // here because this schema is strict, and until they were, the bootstrap
+    // task rejected the very variables `bootstrapAccessConfiguration` reads —
+    // so the first access group could never be created and a fresh deployment
+    // admitted nobody. That is not hypothetical; it locked this deployment out
+    // of itself.
+    PSD_EOC_INITIAL_ACCESS_GROUP_ID: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .optional(),
+    PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: z
+      .string()
+      .trim()
+      .min(3)
+      .max(320)
+      .optional(),
+    PSD_EOC_INITIAL_ACCESS_GROUP_NAME: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .optional(),
+    /** JSON list of the district's facilities; see db/bootstrap-facilities.ts. */
+    PSD_EOC_FACILITIES: z.string().max(200_000).optional(),
+    /** JSON list of facility groupings notified together. */
+    PSD_EOC_NEIGHBORHOODS: z.string().max(200_000).optional(),
   })
   .strict();
 

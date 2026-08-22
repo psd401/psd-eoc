@@ -14,6 +14,12 @@ import {
   type BootstrapAccessOutcome,
 } from '../../db/bootstrap-access';
 import {
+  bootstrapFacilities,
+  bootstrapNeighborhoods,
+  describeFacilityOutcome,
+  describeNeighborhoodOutcome,
+} from '../../db/bootstrap-facilities';
+import {
   configureAndVerifyApplicationRole,
   verifyApplicationLogin,
   verifyDatabaseTls,
@@ -47,8 +53,25 @@ export interface BootstrapDependencies {
   seedReference(config: BootstrapConfig): Promise<ReferenceSeedSummary>;
   /** Creates the configured first trusted group when a deployment has none. */
   bootstrapAccess(config: BootstrapConfig): Promise<BootstrapAccessOutcome>;
+  /** Creates the district's configured facilities and neighborhoods. */
+  bootstrapDistrict(config: BootstrapConfig): Promise<DistrictBootstrapOutcome>;
   verifyApplicationLogin(config: BootstrapConfig): Promise<void>;
   verifyApplicationTls(): Promise<void>;
+}
+
+/**
+ * What the district-configuration step found and what it had to create.
+ *
+ * The counts are split deliberately: `configured` is what the deployment
+ * declares and is identical on every run, while `created` is what a given run
+ * actually had to write and is necessarily zero once the rows exist. The
+ * idempotence check relies on that distinction.
+ */
+export interface DistrictBootstrapOutcome {
+  readonly facilitiesConfigured: number;
+  readonly facilitiesCreated: number;
+  readonly neighborhoodsConfigured: number;
+  readonly neighborhoodsCreated: number;
 }
 
 interface BootstrapRunSummary {
@@ -60,6 +83,8 @@ interface BootstrapRunSummary {
   readonly referenceSeed: ReferenceSeedSummary;
   /** What the initial-group configuration did, or did not, need to do. */
   readonly accessBootstrap: BootstrapAccessOutcome['kind'];
+  /** What the district's facilities and neighborhoods needed. */
+  readonly district: DistrictBootstrapOutcome;
   readonly integrations: Readonly<{
     googleOidc: 'configured-unverified';
     googleGroups: 'mocked';
@@ -83,6 +108,8 @@ export interface BootstrapSummary {
   readonly referenceSeed: ReferenceSeedSummary;
   /** What the initial-group configuration did, or did not, need to do. */
   readonly accessBootstrap: BootstrapAccessOutcome['kind'];
+  /** What the district's facilities and neighborhoods needed. */
+  readonly district: DistrictBootstrapOutcome;
   readonly integrations: BootstrapRunSummary['integrations'];
 }
 
@@ -123,6 +150,12 @@ async function runOneBootstrap(
   // one, and locked every administrator out of this stack on 2026-08-18.
   const accessBootstrap = (await dependencies.bootstrapAccess(config)).kind;
 
+  // The district's own schools and campuses. Like the access group, these were
+  // only ever creatable through the admin UI, so a rebuilt deployment came up
+  // with none. Matched on the district's own codes, so re-running creates
+  // nothing and never disturbs an edit somebody made in the app.
+  const district = await dependencies.bootstrapDistrict(config);
+
   await dependencies.verifyApplicationLogin(config);
   await dependencies.verifyApplicationTls();
 
@@ -134,6 +167,7 @@ async function runOneBootstrap(
     }),
     referenceSeed,
     accessBootstrap,
+    district,
     integrations: Object.freeze({
       googleOidc: 'configured-unverified' as const,
       googleGroups: 'mocked' as const,
@@ -155,8 +189,40 @@ export async function runBootstrap(
   try {
     const first = await runOneBootstrap(config, dependencies);
     const second = await runOneBootstrap(config, dependencies);
-    if (!isDeepStrictEqual(first, second)) {
+
+    // Idempotence is "the second run changed nothing", not "both runs said the
+    // same thing". Those are different claims, and the second one is false for
+    // any deployment that has something to create: a first run reports
+    // accessBootstrap 'created' and a facility count, the run after it reports
+    // 'already-configured' and zero, and a deep equality over the whole
+    // summary therefore fails on exactly the fresh database this bootstrap
+    // exists to stand up. It did, on 2026-08-21, with the failure surfacing
+    // only as a non-zero exit.
+    //
+    // So the convergent fields are compared, and the creating fields are
+    // asserted to be no-ops on the second run — which is the stronger check.
+    const convergent = (run: BootstrapRunSummary) =>
+      Object.freeze({
+        mode: run.mode,
+        database: run.database,
+        referenceSeed: run.referenceSeed,
+        integrations: run.integrations,
+      });
+    if (!isDeepStrictEqual(convergent(first), convergent(second))) {
       throw new Error('The native bootstrap was not idempotent.');
+    }
+    if (second.accessBootstrap === 'created') {
+      throw new Error(
+        'The native bootstrap created an access group twice; it is not idempotent.',
+      );
+    }
+    if (
+      second.district.facilitiesCreated !== 0 ||
+      second.district.neighborhoodsCreated !== 0
+    ) {
+      throw new Error(
+        'The native bootstrap created district configuration twice; it is not idempotent.',
+      );
     }
 
     return Object.freeze({
@@ -173,7 +239,8 @@ export async function runBootstrap(
         equivalent: true as const,
       }),
       referenceSeed: second.referenceSeed,
-      accessBootstrap: second.accessBootstrap,
+      accessBootstrap: first.accessBootstrap,
+      district: first.district,
       integrations: second.integrations,
     });
   } finally {
@@ -325,6 +392,31 @@ export function createBootstrapDependencies(
       );
       console.info(describeBootstrapOutcome(outcome));
       return outcome;
+    },
+    async bootstrapDistrict(): Promise<DistrictBootstrapOutcome> {
+      // Facilities before neighborhoods: a campus names its schools by the
+      // district's own codes and is refused if one of them is not there yet.
+      //
+      // Both go through the drizzle handle rather than the executor, so they
+      // are a driver-error bypass path and need the same wrapper the steps
+      // above use — without it a failure logs the statement text and its bound
+      // parameters, which here are facility codes and campus names.
+      const facilities = await withReducedDriverErrors(
+        'facility bootstrap',
+        () => bootstrapFacilities(administratorConnection.db),
+      );
+      console.info(describeFacilityOutcome(facilities));
+      const neighborhoods = await withReducedDriverErrors(
+        'neighborhood bootstrap',
+        () => bootstrapNeighborhoods(administratorConnection.db),
+      );
+      console.info(describeNeighborhoodOutcome(neighborhoods));
+      return Object.freeze({
+        facilitiesConfigured: facilities.configured,
+        facilitiesCreated: facilities.created.length,
+        neighborhoodsConfigured: neighborhoods.configured,
+        neighborhoodsCreated: neighborhoods.created.length,
+      });
     },
     async verifyApplicationLogin(): Promise<void> {
       await verifyApplicationLogin({ executor: applicationExecutor });

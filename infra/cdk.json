@@ -104,6 +104,106 @@
     "@aws-cdk/core:validateAgainstDefaultRules": true,
     "psdEoc:applicationOrigin": "https://eoc.psd401.net",
     "psdEoc:hostedDomain": "psd401.net",
-    "psdEoc:iosBundleId": "net.psd401.eoc"
+    "psdEoc:iosBundleId": "net.psd401.eoc",
+    "psdEoc:facilities": [
+      {
+        "code": "AES",
+        "name": "Artondale Elementary School"
+      },
+      {
+        "code": "DES",
+        "name": "Discovery Elementary School"
+      },
+      {
+        "code": "DRC",
+        "name": "District Resource Center"
+      },
+      {
+        "code": "EES",
+        "name": "Evergreen Elementary School"
+      },
+      {
+        "code": "ESC",
+        "name": "Educational Service Center"
+      },
+      {
+        "code": "GHH",
+        "name": "Gig Harbor High School"
+      },
+      {
+        "code": "GMS",
+        "name": "Goodman Middle School"
+      },
+      {
+        "code": "HBH",
+        "name": "Henderson Bay High School"
+      },
+      {
+        "code": "HHE",
+        "name": "Harbor Heights Elementary School"
+      },
+      {
+        "code": "HRM",
+        "name": "Harbor Ridge Middle School"
+      },
+      {
+        "code": "KMS",
+        "name": "Kopachuck Middle School"
+      },
+      {
+        "code": "KPM",
+        "name": "Key Peninsula Middle School"
+      },
+      {
+        "code": "MES",
+        "name": "Minter Creek Elementary School"
+      },
+      {
+        "code": "PES",
+        "name": "Purdy Elementary School"
+      },
+      {
+        "code": "PHS",
+        "name": "Peninsula High School"
+      },
+      {
+        "code": "PIE",
+        "name": "Pioneer Elementary School"
+      },
+      {
+        "code": "SWE",
+        "name": "Swift Water Elementary School"
+      },
+      {
+        "code": "TRA",
+        "name": "Transportation"
+      },
+      {
+        "code": "VES",
+        "name": "Vaughn Elementary School"
+      },
+      {
+        "code": "VGE",
+        "name": "Voyager Elementary School"
+      }
+    ],
+    "psdEoc:neighborhoods": [
+      {
+        "name": "Gig Harbor Campus",
+        "facilityCodes": ["DES", "DRC", "GHH", "HBH", "PIE"]
+      },
+      {
+        "name": "Goodman–Harbor Heights Campus",
+        "facilityCodes": ["GMS", "HHE"]
+      },
+      {
+        "name": "Kopachuck–Voyager Campus",
+        "facilityCodes": ["KMS", "VGE"]
+      },
+      {
+        "name": "Peninsula Campus",
+        "facilityCodes": ["ESC", "PES", "PHS", "TRA"]
+      }
+    ]
   }
 }

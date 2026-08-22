@@ -257,7 +257,7 @@ describe('deployment boundary', () => {
     expect(bootstrapSourceSha).not.toHaveProperty('Default');
     expect(oauthArn.NoEcho).toBe(true);
     expect(oauthArn.AllowedPattern).toBe(
-      '^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/exploration-smoke/google-oauth-[A-Za-z0-9]{6}$',
+      '^arn:aws:secretsmanager:us-west-2:<aws-account-id>:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$',
     );
     // The approved-staff identity fed the removed access fixture. The
     // bootstrap container's environment schema is strict, so leaving these
@@ -477,8 +477,7 @@ describe('minimal isolated resource shape', () => {
     );
     const applicationSecurityGroup = securityGroups.find(
       ([, resource]) =>
-        properties(resource).GroupName ===
-        'psd-eoc-exploration-smoke-application',
+        properties(resource).GroupName === 'psd-eoc-application',
     );
     expect(databaseSecurityGroup).toBeDefined();
     expect(applicationSecurityGroup).toBeDefined();
@@ -519,22 +518,22 @@ describe('minimal isolated resource shape', () => {
     );
     expect([...byName.keys()].sort()).toEqual(
       [
-        '/psd-eoc/exploration-smoke/api-salt',
-        '/psd-eoc/exploration-smoke/bootstrap/approved-identity',
-        '/psd-eoc/exploration-smoke/database/admin',
-        '/psd-eoc/exploration-smoke/database/application',
-        '/psd-eoc/exploration-smoke/google-oidc-cookie-secret',
-        '/psd-eoc/exploration-smoke/workers/attempt-execution-token',
-        '/psd-eoc/exploration-smoke/workers/delivery-state-token',
+        '/psd-eoc/api-salt',
+        '/psd-eoc/bootstrap/approved-identity',
+        '/psd-eoc/database/admin',
+        '/psd-eoc/database/application',
+        '/psd-eoc/google-oidc-cookie-secret',
+        '/psd-eoc/workers/attempt-execution-token',
+        '/psd-eoc/workers/delivery-state-token',
       ].sort(),
     );
     for (const name of [
-      '/psd-eoc/exploration-smoke/api-salt',
-      '/psd-eoc/exploration-smoke/database/admin',
-      '/psd-eoc/exploration-smoke/database/application',
-      '/psd-eoc/exploration-smoke/google-oidc-cookie-secret',
-      '/psd-eoc/exploration-smoke/workers/attempt-execution-token',
-      '/psd-eoc/exploration-smoke/workers/delivery-state-token',
+      '/psd-eoc/api-salt',
+      '/psd-eoc/database/admin',
+      '/psd-eoc/database/application',
+      '/psd-eoc/google-oidc-cookie-secret',
+      '/psd-eoc/workers/attempt-execution-token',
+      '/psd-eoc/workers/delivery-state-token',
     ]) {
       const resource = byName.get(name);
       expect(resource).toBeDefined();
@@ -545,9 +544,7 @@ describe('minimal isolated resource shape', () => {
       expect(resource?.UpdateReplacePolicy).toBe('Retain');
     }
 
-    const identity = byName.get(
-      '/psd-eoc/exploration-smoke/bootstrap/approved-identity',
-    );
+    const identity = byName.get('/psd-eoc/bootstrap/approved-identity');
     expect(identity).toBeDefined();
     const identitySecretString = JSON.stringify(
       properties(identity ?? {}).SecretString,
@@ -566,7 +563,7 @@ describe('minimal isolated resource shape', () => {
     expect(identity?.UpdateReplacePolicy).toBe('Retain');
 
     const admin = asRecord(
-      properties(byName.get('/psd-eoc/exploration-smoke/database/admin') ?? {})
+      properties(byName.get('/psd-eoc/database/admin') ?? {})
         .GenerateSecretString,
     );
     expect(admin.SecretStringTemplate).toBe(
@@ -575,9 +572,8 @@ describe('minimal isolated resource shape', () => {
     expect(admin.ExcludePunctuation).toBe(true);
 
     const application = asRecord(
-      properties(
-        byName.get('/psd-eoc/exploration-smoke/database/application') ?? {},
-      ).GenerateSecretString,
+      properties(byName.get('/psd-eoc/database/application') ?? {})
+        .GenerateSecretString,
     );
     expect(application.SecretStringTemplate).toBe(
       JSON.stringify({ username: 'psd_eoc_application' }),
@@ -585,12 +581,13 @@ describe('minimal isolated resource shape', () => {
     expect(application.ExcludePunctuation).toBe(true);
 
     const cookie = asRecord(
-      properties(
-        byName.get('/psd-eoc/exploration-smoke/google-oidc-cookie-secret') ??
-          {},
-      ).GenerateSecretString,
+      properties(byName.get('/psd-eoc/google-oidc-cookie-secret') ?? {})
+        .GenerateSecretString,
     );
-    expect(cookie.PasswordLength).toBe(43);
+    // 44, not 43: the reader requires canonical unpadded base64url and a
+    // 43-character value only round-trips when its two leftover bits happen
+    // to be zero, which is true of about a quarter of generated secrets.
+    expect(cookie.PasswordLength).toBe(44);
     expect(cookie.ExcludePunctuation).toBe(true);
   });
 });
@@ -629,7 +626,7 @@ describe('App Runner runtime safety boundary', () => {
       },
       {
         Key: 'Environment',
-        Value: 'exploration-smoke',
+        Value: 'production',
       },
       {
         Key: 'ExpectedAwsAccountAlias',
@@ -674,7 +671,7 @@ describe('App Runner runtime safety boundary', () => {
       },
       {
         Key: 'Environment',
-        Value: 'exploration-smoke',
+        Value: 'production',
       },
       {
         Key: 'ExpectedAwsAccountAlias',
@@ -943,9 +940,7 @@ describe('App Runner runtime safety boundary', () => {
 
 describe('one-off native bootstrap boundary', () => {
   it('pins the task to the candidate digest with native TLS and secret JSON keys', () => {
-    const task = properties(
-      taskDefinitionByFamily('psd-eoc-exploration-smoke-native-bootstrap'),
-    );
+    const task = properties(taskDefinitionByFamily('psd-eoc-bootstrap'));
     expect(task.Cpu).toBe('256');
     expect(task.Memory).toBe('512');
     expect(task.NetworkMode).toBe('awsvpc');
@@ -1173,9 +1168,7 @@ describe('one-off native bootstrap boundary', () => {
 
 describe('protected access-membership publication boundary', () => {
   it('pins a dedicated private task to app credentials and the whole readonly Groups secret', () => {
-    const task = properties(
-      taskDefinitionByFamily('psd-eoc-exploration-smoke-access-sync'),
-    );
+    const task = properties(taskDefinitionByFamily('psd-eoc-access-sync'));
     expect(task.Cpu).toBe('256');
     expect(task.Memory).toBe('512');
     expect(task.NetworkMode).toBe('awsvpc');

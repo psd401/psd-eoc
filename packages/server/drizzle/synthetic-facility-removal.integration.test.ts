@@ -719,7 +719,12 @@ describeWithDatabase('canonical synthetic facility physical removal', () => {
         {
           anchor_count: 2,
           audit_count: 2,
-          guard_count: 15,
+          // Zero, not 15. Migration 0012 restores every retain guard it lifts,
+          // and 0029 then removes all of them from the schema deliberately.
+          // The counts either side of this are what the test is really for:
+          // the purge removed exactly the operational rows and left the
+          // district's own facilities, campuses, anchors and audit trail.
+          guard_count: 0,
           idempotency_count: 1,
           operational_count: 0,
           real_facility_count: 20,

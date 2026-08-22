@@ -23,18 +23,18 @@
                 "apprunner:ListOperations"
               ],
               "Effect": "Allow",
-              "Resource": "arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc-exploration-smoke/fd60545104344bd39ae9920feef7dd5c",
+              "Resource": "arn:aws:apprunner:us-west-2:<aws-account-id>:service/psd-eoc/596fe233dacc4b0a816a890e44af4f59",
               "Sid": "ReadAndAssociateCanonicalCustomDomainOnly"
             },
             {
               "Action": "ecs:RunTask",
               "Condition": {
                 "ArnEquals": {
-                  "ecs:cluster": "arn:aws:ecs:us-west-2:<aws-account-id>:cluster/psd-eoc-exploration-smoke-native-bootstrap"
+                  "ecs:cluster": "arn:aws:ecs:us-west-2:<aws-account-id>:cluster/psd-eoc-bootstrap"
                 }
               },
               "Effect": "Allow",
-              "Resource": "arn:aws:ecs:us-west-2:<aws-account-id>:task-definition/psd-eoc-exploration-smoke-access-sync:*",
+              "Resource": "arn:aws:ecs:us-west-2:<aws-account-id>:task-definition/psd-eoc-access-sync:*",
               "Sid": "RunCanonicalAccessSyncTaskOnCanonicalClusterOnly"
             },
             {
@@ -46,16 +46,16 @@
               },
               "Effect": "Allow",
               "Resource": [
-                "arn:aws:iam::<aws-account-id>:role/PsdEocExplorationSmoke-AccessSyncTaskExecutionRole*",
-                "arn:aws:iam::<aws-account-id>:role/PsdEocExplorationSmoke-AccessSyncTaskRole*"
+                "arn:aws:iam::<aws-account-id>:role/PsdEoc-AccessSyncTaskExecutionRole*",
+                "arn:aws:iam::<aws-account-id>:role/PsdEoc-AccessSyncTaskRole*"
               ],
               "Sid": "PassCanonicalAccessSyncRolesToEcsTasksOnly"
             }
           ],
           "Version": "2012-10-17"
         },
-        "PolicyName": "psd-eoc-exploration-smoke-ses-readback",
-        "Roles": ["psd-eoc-exploration-smoke-github-deploy"]
+        "PolicyName": "psd-eoc-ses-readback",
+        "Roles": ["psd-eoc-github-deploy"]
       },
       "Type": "AWS::IAM::Policy",
       "UpdateReplacePolicy": "Retain"
