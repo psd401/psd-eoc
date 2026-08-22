@@ -3,8 +3,12 @@ import postgres from 'postgres';
 import { z } from 'zod';
 
 import {
+  connectionFailureFixture,
   DRIVER_FAILURE_LEAKS,
   driverFailureFixture,
+  WRAPPED_PARAMETERS,
+  WRAPPED_STATEMENT,
+  wrappedDriverFailureFixture,
 } from './driver-error-test-fixtures';
 
 import {
@@ -346,5 +350,77 @@ describe('withReducedDriverErrors', () => {
     await expect(
       withReducedDriverErrors('migration', () => Promise.resolve({ ok: 7 })),
     ).resolves.toEqual({ ok: 7 });
+  });
+});
+
+describe('the query wrapper drizzle puts around every failure', () => {
+  const wrappedLeaks = [
+    ...DRIVER_FAILURE_LEAKS,
+    WRAPPED_STATEMENT,
+    ...WRAPPED_PARAMETERS,
+    'Failed query',
+    'params:',
+  ];
+
+  test('is recognized even though it carries no SQLSTATE of its own', () => {
+    const wrapped = wrappedDriverFailureFixture(driverFailureFixture());
+
+    // Its own `name` is 'Error' and it has no `code`, so every check that
+    // looked only at the outermost error found nothing to redact.
+    expect(Reflect.get(wrapped, 'code')).toBeUndefined();
+    expect(isDriverError(wrapped)).toBe(true);
+  });
+
+  test('is described by the wrapped error, never by the wrapper', () => {
+    const described = describeFailure(
+      PREFIX,
+      wrappedDriverFailureFixture(driverFailureFixture()),
+    );
+
+    expect(described.split('\n')[0]).toBe(
+      `${PREFIX} name=Error code=23505 severity=ERROR` +
+        ' routine=_bt_check_unique schema_name=public' +
+        ' table_name=access_group_members' +
+        ' constraint_name=access_group_members_pkey',
+    );
+    for (const leak of wrappedLeaks) {
+      expect(described).not.toContain(leak);
+    }
+  });
+
+  test('surfaces a connection failure that carries no SQLSTATE', () => {
+    // Unwrapping has to reach the cause even when it is not a PostgresError,
+    // or an unreachable database reports nothing but the step that failed.
+    const described = describeFailure(
+      PREFIX,
+      wrappedDriverFailureFixture(connectionFailureFixture()),
+    );
+
+    expect(described.split('\n')[0]).toBe(
+      `${PREFIX} name=Error code=ENOTFOUND`,
+    );
+    expect(described).not.toContain(WRAPPED_STATEMENT);
+  });
+
+  test('is reduced by withReducedDriverErrors', async () => {
+    const message = await withReducedDriverErrors(
+      'access-membership sync',
+      () => Promise.reject(wrappedDriverFailureFixture(driverFailureFixture())),
+    ).catch((error: unknown) => String(Reflect.get(Object(error), 'message')));
+
+    expect(message).toContain(
+      'The access-membership sync step failed in the database. code=23505',
+    );
+    for (const leak of wrappedLeaks) {
+      expect(message).not.toContain(leak);
+    }
+  });
+
+  test('survives a self-referential cause chain', () => {
+    const looping = new Error('looping');
+    Object.defineProperty(looping, 'cause', { value: looping });
+
+    expect(() => describeFailure(PREFIX, looping)).not.toThrow();
+    expect(describeFailure(PREFIX, looping)).toContain('message=looping');
   });
 });
