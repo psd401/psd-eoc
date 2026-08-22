@@ -1,5 +1,15 @@
 import { describe, expect, test } from 'bun:test';
+import postgres from 'postgres';
 import { z } from 'zod';
+
+import {
+  connectionFailureFixture,
+  DRIVER_FAILURE_LEAKS,
+  driverFailureFixture,
+  WRAPPED_PARAMETERS,
+  WRAPPED_STATEMENT,
+  wrappedDriverFailureFixture,
+} from './driver-error-test-fixtures';
 
 import {
   describeDriverError,
@@ -7,6 +17,7 @@ import {
   invalidConfigurationFields,
   isDriverError,
   singleLine,
+  withReducedDriverErrors,
 } from './failure-diagnostics';
 
 const PREFIX = 'Database bootstrap failed closed.';
@@ -229,6 +240,43 @@ describe('hostile error objects', () => {
 
     expect(describeFailure(PREFIX, hostile)).toBe(PREFIX);
   });
+
+  test('does not throw when the cause accessor throws', () => {
+    // Reading `cause` bare reopened the hole `readString` exists to close: the
+    // throw escaped describeFailure, reached the runtime's default handler, and
+    // that handler prints enumerable own properties — publishing the detail and
+    // hint the allowlist suppresses.
+    const hostile = new Error('boom');
+    Object.defineProperty(hostile, 'cause', {
+      get() {
+        throw Object.assign(new Error('detonated'), {
+          detail: 'Key (email)=(staff@example.invalid) already exists.',
+        });
+      },
+    });
+
+    expect(() => describeFailure(PREFIX, hostile)).not.toThrow();
+    expect(describeFailure(PREFIX, hostile)).toContain('message=boom');
+    expect(describeFailure(PREFIX, hostile)).not.toContain(
+      'staff@example.invalid',
+    );
+  });
+
+  test('keeps an authored message that merely carries a driver cause', () => {
+    // Suppressing this would discard the sentence saying what was attempted,
+    // which is the diagnostic loss this module exists to prevent.
+    const authored = new Error('The access sync refused to publish.', {
+      cause: driverFailureFixture(),
+    });
+
+    const described = describeFailure(PREFIX, authored).split('\n')[0];
+
+    expect(described).toContain('message=The access sync refused to publish.');
+    expect(described).toContain('code=23505');
+    for (const leak of DRIVER_FAILURE_LEAKS) {
+      expect(described).not.toContain(leak);
+    }
+  });
 });
 
 describe('singleLine', () => {
@@ -283,5 +331,133 @@ describe('invalidConfigurationFields', () => {
       'PSD_EOC_FACILITIES',
       'SOURCE_SHA',
     ]);
+  });
+});
+
+describe('withReducedDriverErrors', () => {
+  test('reduces a driver error at the step that raised it', async () => {
+    const rejected = withReducedDriverErrors('reference seed', () =>
+      Promise.reject(driverFailureFixture()),
+    );
+
+    await expect(rejected).rejects.toThrow(
+      'The reference seed step failed in the database. code=23505' +
+        ' severity=ERROR routine=_bt_check_unique schema_name=public' +
+        ' table_name=access_group_members' +
+        ' constraint_name=access_group_members_pkey',
+    );
+  });
+
+  test('leaves nothing for describeFailure to have to recognize', async () => {
+    // The point of reducing here rather than at the log: what reaches the entry
+    // point is an authored error, so redaction no longer depends on a guess.
+    const error = await withReducedDriverErrors('migration', () =>
+      Promise.reject(driverFailureFixture()),
+    ).catch((raised: unknown) => raised as object);
+
+    expect(error instanceof postgres.PostgresError).toBe(false);
+    expect(isDriverError(error)).toBe(false);
+    for (const leak of DRIVER_FAILURE_LEAKS) {
+      expect(describeFailure(PREFIX, error)).not.toContain(leak);
+    }
+  });
+
+  test('rethrows a non-driver failure untouched', async () => {
+    // Reducing these too would recreate the errno regression: the message is
+    // the only thing naming the file or endpoint at fault.
+    const authored = new Error('Google Cloud Identity refused the request.');
+    const errno = Object.assign(
+      new Error('EROFS: read-only file system, open /etc/rds-ca.pem'),
+      { code: 'EROFS' },
+    );
+
+    for (const original of [authored, errno]) {
+      const raised = await withReducedDriverErrors('access bootstrap', () =>
+        Promise.reject(original),
+      ).catch((error: unknown) => error);
+
+      expect(raised).toBe(original);
+      expect(describeFailure(PREFIX, raised)).toContain(
+        `message=${original.message}`,
+      );
+    }
+  });
+
+  test('returns the value when the step succeeds', async () => {
+    await expect(
+      withReducedDriverErrors('migration', () => Promise.resolve({ ok: 7 })),
+    ).resolves.toEqual({ ok: 7 });
+  });
+});
+
+describe('the query wrapper drizzle puts around every failure', () => {
+  const wrappedLeaks = [
+    ...DRIVER_FAILURE_LEAKS,
+    WRAPPED_STATEMENT,
+    ...WRAPPED_PARAMETERS,
+    'Failed query',
+    'params:',
+  ];
+
+  test('is recognized even though it carries no SQLSTATE of its own', () => {
+    const wrapped = wrappedDriverFailureFixture(driverFailureFixture());
+
+    // Its own `name` is 'Error' and it has no `code`, so every check that
+    // looked only at the outermost error found nothing to redact.
+    expect(Reflect.get(wrapped, 'code')).toBeUndefined();
+    expect(isDriverError(wrapped)).toBe(true);
+  });
+
+  test('is described by the wrapped error, never by the wrapper', () => {
+    const described = describeFailure(
+      PREFIX,
+      wrappedDriverFailureFixture(driverFailureFixture()),
+    );
+
+    expect(described.split('\n')[0]).toBe(
+      `${PREFIX} name=Error code=23505 severity=ERROR` +
+        ' routine=_bt_check_unique schema_name=public' +
+        ' table_name=access_group_members' +
+        ' constraint_name=access_group_members_pkey',
+    );
+    for (const leak of wrappedLeaks) {
+      expect(described).not.toContain(leak);
+    }
+  });
+
+  test('surfaces a connection failure that carries no SQLSTATE', () => {
+    // Unwrapping has to reach the cause even when it is not a PostgresError,
+    // or an unreachable database reports nothing but the step that failed.
+    const described = describeFailure(
+      PREFIX,
+      wrappedDriverFailureFixture(connectionFailureFixture()),
+    );
+
+    expect(described.split('\n')[0]).toBe(
+      `${PREFIX} name=Error code=ENOTFOUND`,
+    );
+    expect(described).not.toContain(WRAPPED_STATEMENT);
+  });
+
+  test('is reduced by withReducedDriverErrors', async () => {
+    const message = await withReducedDriverErrors(
+      'access-membership sync',
+      () => Promise.reject(wrappedDriverFailureFixture(driverFailureFixture())),
+    ).catch((error: unknown) => String(Reflect.get(Object(error), 'message')));
+
+    expect(message).toContain(
+      'The access-membership sync step failed in the database. code=23505',
+    );
+    for (const leak of wrappedLeaks) {
+      expect(message).not.toContain(leak);
+    }
+  });
+
+  test('survives a self-referential cause chain', () => {
+    const looping = new Error('looping');
+    Object.defineProperty(looping, 'cause', { value: looping });
+
+    expect(() => describeFailure(PREFIX, looping)).not.toThrow();
+    expect(describeFailure(PREFIX, looping)).toContain('message=looping');
   });
 });
