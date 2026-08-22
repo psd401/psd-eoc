@@ -827,14 +827,35 @@ export function createHealthRouteHandler(
         reject(new Error('Deep health deadline exceeded.'));
       }, timeoutMilliseconds);
     });
+    // Each probe is labelled so a failure names the dependency that caused it.
+    // Returning a bare false here once cost hours of a live outage: the route
+    // reported "unavailable" with no way to tell which of the three checks was
+    // unhappy, and nothing reached the logs at all.
+    const labelled = (
+      name: string,
+      run: () => Promise<unknown>,
+    ): Promise<unknown> =>
+      Promise.resolve()
+        .then(run)
+        .catch((cause: unknown) => {
+          // Only the dependency name and the error message: no payload, no
+          // credential, no row, nothing carrying PII.
+          console.error(
+            JSON.stringify({
+              event: 'health-check-failed',
+              dependency: name,
+              reason: cause instanceof Error ? cause.message : String(cause),
+            }),
+          );
+          throw cause;
+        });
+
     const checks = Promise.all([
-      Promise.resolve().then(() =>
-        dependencies.checkDatabase(controller.signal),
-      ),
-      Promise.resolve().then(() =>
+      labelled('database', () => dependencies.checkDatabase(controller.signal)),
+      labelled('delivery-queue', () =>
         dependencies.checkDeliveryQueue(controller.signal),
       ),
-      Promise.resolve().then(() =>
+      labelled('runtime-secrets', () =>
         dependencies.checkRuntimeSecrets(controller.signal),
       ),
     ]);
@@ -842,8 +863,14 @@ export function createHealthRouteHandler(
     try {
       await Promise.race([checks, deadline]);
       return true;
-    } catch {
+    } catch (cause) {
       controller.abort();
+      console.error(
+        JSON.stringify({
+          event: 'health-unavailable',
+          reason: cause instanceof Error ? cause.message : String(cause),
+        }),
+      );
       return false;
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
