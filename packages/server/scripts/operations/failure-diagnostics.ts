@@ -1,3 +1,4 @@
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import postgres from 'postgres';
 import type { z } from 'zod';
 
@@ -58,6 +59,51 @@ function readString(source: object, key: string): string | undefined {
   }
 }
 
+/** How far to follow `cause` before giving up on a self-referential chain. */
+const MAX_CAUSE_DEPTH = 8;
+
+/**
+ * The driver's own error, wherever it sits in the cause chain.
+ *
+ * drizzle does not surface one directly. Every failed query arrives wrapped in
+ * `DrizzleQueryError`, with the real error underneath as `cause`, so testing
+ * the outermost error alone found nothing and the SQLSTATE never reached a log.
+ */
+function findDriverError(error: unknown): Error | undefined {
+  let current: unknown = error;
+  for (
+    let depth = 0;
+    depth < MAX_CAUSE_DEPTH && typeof current === 'object' && current !== null;
+    depth += 1
+  ) {
+    if (current instanceof postgres.PostgresError) {
+      return current;
+    }
+    current = Reflect.get(current, 'cause');
+  }
+  return undefined;
+}
+
+/**
+ * The allowlisted description of whatever actually failed, unwrapping the query
+ * wrapper first.
+ *
+ * `DrizzleQueryError` must never be described by its own fields. It builds its
+ * message as `Failed query: <statement>\nparams: <bound parameters>` and keeps
+ * both on `query` and `params`, so it carries the statement text — the
+ * application password, for the role DDL — and every bound value, which for the
+ * access-membership inserts is staff email addresses.
+ */
+export function describeQueryFailure(error: unknown): string {
+  const driver = findDriverError(error);
+  if (driver !== undefined) {
+    return describeDriverError(driver);
+  }
+  return error instanceof DrizzleQueryError
+    ? describeDriverError(Reflect.get(error, 'cause'))
+    : describeDriverError(error);
+}
+
 /**
  * Whether an error came from the database server.
  *
@@ -78,7 +124,10 @@ function readString(source: object, key: string): string | undefined {
  * field separates the two spaces exactly.
  */
 export function isDriverError(error: object): boolean {
-  if (error instanceof postgres.PostgresError) {
+  if (
+    findDriverError(error) !== undefined ||
+    error instanceof DrizzleQueryError
+  ) {
     return true;
   }
   if (readString(error, 'name') === 'PostgresError') {
@@ -116,13 +165,17 @@ export async function withReducedDriverErrors<T>(
   try {
     return await run();
   } catch (error) {
-    if (!(error instanceof postgres.PostgresError)) {
+    const raisedByAQuery =
+      findDriverError(error) !== undefined ||
+      error instanceof DrizzleQueryError;
+    if (!raisedByAQuery) {
       throw error;
     }
     // The original stops here. It is not attached as `cause`: anything that
-    // later inspected the chain would undo the reduction.
+    // later inspected the chain would undo the reduction, and the chain is
+    // where the statement text and bound parameters live.
     throw new Error(
-      `The ${step} step failed in the database.${describeDriverError(error)}`,
+      `The ${step} step failed in the database.${describeQueryFailure(error)}`,
     );
   }
 }
@@ -213,7 +266,7 @@ export function describeFailure(prefix: string, error: unknown): string {
     prefix +
     (name === undefined ? '' : ` name=${singleLine(name, MAX_LABEL_CHARS)}`) +
     (isDriverError(error)
-      ? describeDriverError(error)
+      ? describeQueryFailure(error)
       : describeAuthoredError(error, message));
   const stack = readString(error, 'stack');
   const frames = stack === undefined ? '' : stackFrames(stack, message);

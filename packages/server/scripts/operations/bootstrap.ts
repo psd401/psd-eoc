@@ -26,8 +26,8 @@ import {
   type BootstrapMode,
 } from './config';
 import {
-  describeDriverError,
   describeFailure,
+  describeQueryFailure,
   withReducedDriverErrors,
 } from './failure-diagnostics';
 
@@ -245,7 +245,7 @@ export function createRoleStatementExecutor(
         throw new Error(
           `A native database bootstrap statement failed. statement=${describeStatement(
             statement,
-          )}${describeDriverError(error)}`,
+          )}${describeQueryFailure(error)}`,
         );
       }
       if (

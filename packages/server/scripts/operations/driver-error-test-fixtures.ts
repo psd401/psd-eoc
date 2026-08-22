@@ -1,3 +1,4 @@
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import postgres from 'postgres';
 
 /**
@@ -38,3 +39,33 @@ export const DRIVER_FAILURE_LEAKS = Object.freeze([
   'A member with that address',
   'INSERT INTO access_group_members',
 ] as const);
+
+/** The statement text and bound parameters a query wrapper carries. */
+export const WRAPPED_STATEMENT =
+  'INSERT INTO access_group_members (email) VALUES ($1)';
+export const WRAPPED_PARAMETERS = Object.freeze(['staff@example.invalid']);
+
+/**
+ * A failure shaped as drizzle actually delivers one.
+ *
+ * Every failed query arrives wrapped: the real error is the `cause`, and the
+ * wrapper's own message is `Failed query: <statement>\nparams: <parameters>`,
+ * with both also kept on `query` and `params`. Tests that build a bare
+ * `PostgresError` never see that wrapper and so cannot catch a leak through it.
+ */
+export function wrappedDriverFailureFixture(cause: Error): Error {
+  return new DrizzleQueryError(
+    WRAPPED_STATEMENT,
+    [...WRAPPED_PARAMETERS],
+    cause,
+  );
+}
+
+/** A connection-level failure, which carries an errno rather than a SQLSTATE. */
+export function connectionFailureFixture(): Error {
+  return Object.assign(new Error('getaddrinfo ENOTFOUND'), {
+    name: 'DNSException',
+    code: 'ENOTFOUND',
+    syscall: 'getaddrinfo',
+  });
+}
