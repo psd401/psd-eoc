@@ -8,6 +8,7 @@ import {
   assertApplicationRoleState,
   buildApplicationRoleStatements,
   configureAndVerifyApplicationRole,
+  ROLE_STATE_QUERY,
   verifyApplicationLogin,
   verifyDatabaseTls,
 } from './application-role';
@@ -16,7 +17,7 @@ import {
   getApplicationDatabaseSecret,
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
-import { runBootstrap } from './bootstrap';
+import { createRoleStatementExecutor, runBootstrap } from './bootstrap';
 import { DATABASE_LOGIN, DATABASE_ROLE, readBootstrapConfig } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
@@ -573,5 +574,168 @@ describe('immutable server image contract', () => {
     ]) {
       expect(ignore.split('\n')).toContain(excluded);
     }
+  });
+});
+
+describe('bootstrap failure reporting', () => {
+  test('writes the cause to stderr and still exits non-zero', async () => {
+    const environment = validConfigEnvironment();
+    delete environment.DATABASE_HOST;
+    const child = Bun.spawn(
+      [process.execPath, new URL('./bootstrap.ts', import.meta.url).pathname],
+      {
+        env: { ...environment, PATH: process.env.PATH ?? '' },
+        stderr: 'pipe',
+        stdout: 'pipe',
+      },
+    );
+    const [exitCode, stderr, stdout] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+      new Response(child.stdout).text(),
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Database bootstrap failed closed.');
+    expect(stderr).toContain('name=BootstrapConfigurationError');
+    expect(stderr).toContain(
+      'message=Invalid bootstrap configuration: DATABASE_HOST.',
+    );
+    // The diagnostic names the variable at fault, never its value.
+    for (const secret of [
+      DATABASE_ADMIN_PASSWORD,
+      DATABASE_APPLICATION_PASSWORD,
+    ]) {
+      expect(stderr).not.toContain(secret);
+      expect(stdout).not.toContain(secret);
+    }
+  });
+});
+
+describe('bootstrap statement executor', () => {
+  // The executor reaches only `db.execute`; the rest of the connection surface
+  // is irrelevant to what these tests prove.
+  function connectionThat(execute: () => Promise<unknown>) {
+    return { db: { execute } } as unknown as Parameters<
+      typeof createRoleStatementExecutor
+    >[0];
+  }
+
+  function driverError(): Error {
+    return Object.assign(
+      // Postgres reports the offending token, so a failure on the role DDL can
+      // put the password literal in `message`.
+      new Error(`syntax error at or near "${DATABASE_APPLICATION_PASSWORD}"`),
+      {
+        code: '42601',
+        severity: 'ERROR',
+        routine: 'scanner_yyerror',
+        constraint_name: 'psd_eoc_app_pkey',
+        detail: 'Key (email)=(staff@example.invalid) already exists.',
+        hint: 'Perhaps you meant to reference the column "t.email".',
+        where: 'PL/pgSQL function inline_code_block line 3',
+        // postgres.js hangs the whole statement here, password and all.
+        query: `ALTER ROLE "psd_eoc_application" WITH PASSWORD '${DATABASE_APPLICATION_PASSWORD}'`,
+      },
+    );
+  }
+
+  test('names the failing step and the SQLSTATE', async () => {
+    const executor = createRoleStatementExecutor(
+      connectionThat(() => Promise.reject(driverError())),
+    );
+
+    await expect(
+      executor.execute(`GRANT "${DATABASE_ROLE}" TO "${DATABASE_LOGIN}"`),
+    ).rejects.toThrow(
+      'A native database bootstrap statement failed. statement=GRANT' +
+        ' code=42601 severity=ERROR routine=scanner_yyerror' +
+        ' constraint_name=psd_eoc_app_pkey',
+    );
+  });
+
+  test('never reflects the statement, its password, or row data', async () => {
+    const executor = createRoleStatementExecutor(
+      connectionThat(() => Promise.reject(driverError())),
+    );
+    const statement = `ALTER ROLE "${DATABASE_LOGIN}" WITH PASSWORD '${DATABASE_APPLICATION_PASSWORD}'`;
+
+    const message = await executor.execute(statement).then(
+      () => 'the executor resolved',
+      (error: unknown) => String(Reflect.get(Object(error), 'message')),
+    );
+
+    expect(message).toContain('statement=ALTER ROLE');
+    for (const leak of [
+      DATABASE_APPLICATION_PASSWORD,
+      'staff@example.invalid',
+      'syntax error at or near',
+      'Perhaps you meant',
+      'PL/pgSQL function',
+    ]) {
+      expect(message).not.toContain(leak);
+    }
+  });
+
+  test('reduces a statement to bare leading keywords', async () => {
+    const labels: string[] = [];
+    for (const statement of [
+      ...buildApplicationRoleStatements(DATABASE_APPLICATION_PASSWORD),
+      ROLE_STATE_QUERY,
+      'SELECT pg_advisory_lock(178401)',
+    ]) {
+      const executor = createRoleStatementExecutor(
+        connectionThat(() => Promise.reject(new Error('boom'))),
+      );
+      const message = await executor.execute(statement).then(
+        () => '',
+        (error: unknown) => String(Reflect.get(Object(error), 'message')),
+      );
+      labels.push(message.replace(/^.*statement=/u, ''));
+      expect(message).not.toContain(DATABASE_APPLICATION_PASSWORD);
+    }
+
+    expect(labels).toEqual([
+      'DO',
+      'ALTER ROLE',
+      'DO',
+      'GRANT',
+      'REVOKE ADMIN',
+      'SELECT ROLNAME',
+      'SELECT',
+    ]);
+  });
+
+  test('separates an unusable result from a driver failure', async () => {
+    const executor = createRoleStatementExecutor(
+      connectionThat(() => Promise.resolve('not rows')),
+    );
+
+    await expect(executor.execute('SELECT 1')).rejects.toThrow(
+      'A native database bootstrap statement returned an unusable result.' +
+        ' statement=SELECT',
+    );
+  });
+
+  test('treats an unserializable result as unusable rather than throwing', async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const executor = createRoleStatementExecutor(
+      connectionThat(() => Promise.resolve([circular])),
+    );
+
+    await expect(executor.execute('SELECT 1')).rejects.toThrow(
+      'returned an unusable result',
+    );
+  });
+
+  test('freezes the rows it returns', async () => {
+    const executor = createRoleStatementExecutor(
+      connectionThat(() => Promise.resolve([{ unlocked: true }])),
+    );
+
+    const rows = await executor.execute('SELECT 1');
+    expect(rows).toEqual([{ unlocked: true }]);
+    expect(Object.isFrozen(rows[0])).toBe(true);
   });
 });

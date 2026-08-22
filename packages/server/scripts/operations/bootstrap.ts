@@ -25,6 +25,7 @@ import {
   type BootstrapConfig,
   type BootstrapMode,
 } from './config';
+import { describeDriverError, describeFailure } from './failure-diagnostics';
 
 const MAX_STATEMENT_ROWS = 32;
 const MAX_STATEMENT_RESULT_BYTES = 64 * 1_024;
@@ -199,35 +200,69 @@ function createNativeConnection(
   return connection;
 }
 
-function createRoleStatementExecutor(
+/**
+ * The leading bare keywords of a statement, which say which step failed without
+ * quoting it. A literal can never survive the identifier test, so the password
+ * in the role DDL cannot reach a log through here.
+ */
+function describeStatement(statement: string): string {
+  const words = statement
+    .trim()
+    .split(/\s+/u)
+    .slice(0, 2)
+    .filter((word) => /^[A-Za-z_]+$/u.test(word));
+  return words.length > 0 ? words.join(' ').toUpperCase() : 'UNKNOWN';
+}
+
+/** Treats an unserializable result as oversized rather than letting it escape. */
+function serializedByteLength(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+export function createRoleStatementExecutor(
   connection: PostgresDatabaseConnection,
 ): RoleStatementExecutor {
   return Object.freeze({
     async execute(
       statement: string,
     ): Promise<readonly Readonly<Record<string, unknown>>[]> {
+      let result: unknown;
       try {
-        const result = await connection.db.execute(sql.raw(statement));
-        if (
-          !Array.isArray(result) ||
-          result.length > MAX_STATEMENT_ROWS ||
-          result.some(
-            (row) =>
-              typeof row !== 'object' || row === null || Array.isArray(row),
-          ) ||
-          Buffer.byteLength(JSON.stringify(result), 'utf8') >
-            MAX_STATEMENT_RESULT_BYTES
-        ) {
-          throw new Error('invalid result');
-        }
-        return Object.freeze(
-          result.map((row) =>
-            Object.freeze(row as Readonly<Record<string, unknown>>),
-          ),
+        result = await connection.db.execute(sql.raw(statement));
+      } catch (error) {
+        // Naming the step and the SQLSTATE is what separates a missing
+        // migration from a revoked grant from an unreachable writer. Collapsing
+        // all three into one sentence is why a failed run used to be
+        // undiagnosable from its logs alone.
+        throw new Error(
+          `A native database bootstrap statement failed. statement=${describeStatement(
+            statement,
+          )}${describeDriverError(error)}`,
         );
-      } catch {
-        throw new Error('A native database bootstrap statement failed.');
       }
+      if (
+        !Array.isArray(result) ||
+        result.length > MAX_STATEMENT_ROWS ||
+        result.some(
+          (row) =>
+            typeof row !== 'object' || row === null || Array.isArray(row),
+        ) ||
+        serializedByteLength(result) > MAX_STATEMENT_RESULT_BYTES
+      ) {
+        throw new Error(
+          'A native database bootstrap statement returned an unusable result. ' +
+            `statement=${describeStatement(statement)}`,
+        );
+      }
+      return Object.freeze(
+        result.map((row) =>
+          Object.freeze(row as Readonly<Record<string, unknown>>),
+        ),
+      );
     },
   });
 }
@@ -300,11 +335,13 @@ async function runFromCommandLine(): Promise<void> {
   }
 }
 
+const BOOTSTRAP_FAILURE_PREFIX = 'Database bootstrap failed closed.';
+
 if (import.meta.main) {
   try {
     await runFromCommandLine();
-  } catch {
-    console.error('Database bootstrap failed closed.');
+  } catch (error) {
+    console.error(describeFailure(BOOTSTRAP_FAILURE_PREFIX, error));
     process.exitCode = 1;
   }
 }
