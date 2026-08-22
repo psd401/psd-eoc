@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { and, eq } from 'drizzle-orm';
 
+import { StaffRosterEmailSchema } from '@psd-eoc/contracts';
+
 import type { Database } from './client';
 import { groupSources } from './schema';
 
@@ -74,14 +76,44 @@ export function readInitialAccessGroupConfiguration(
       `${GROUP_ID_ENV} and ${GROUP_EMAIL_ENV} must be set together.`,
     );
   }
-  if (googleGroupId.length > 255) {
+  // Cloud Identity names a group "groups/<id>", and that is the form its API
+  // returns and the form an administrator copies out of the console. Everything
+  // downstream stores and compares the bare <id>: the membership reader slices
+  // the prefix off before it ever reaches the database, and the evaluated-group
+  // schema refuses anything outside [A-Za-z0-9_-], so a stored "groups/..."
+  // can never equal a resolved id.
+  //
+  // Accepting the prefixed form verbatim produced a deployment that looked
+  // correctly configured and could never sync: every run failed closed with
+  // ACCESS_CONFIGURATION_CHANGED, and because roles are derived from
+  // membership, nobody could sign in. Normalise it here instead, where the
+  // value enters the system.
+  const normalisedGroupId = googleGroupId.replace(/^groups\//u, '');
+  if (normalisedGroupId.length > 255 || normalisedGroupId.length === 0) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_ID_ENV} must be at most 255 characters.`,
+      `${GROUP_ID_ENV} must be between 1 and 255 characters.`,
     );
   }
-  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) {
+  if (!/^[A-Za-z0-9_-]+$/u.test(normalisedGroupId)) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_EMAIL_ENV} must be a group email address.`,
+      `${GROUP_ID_ENV} must be a Cloud Identity group id, optionally prefixed with "groups/".`,
+    );
+  }
+  // The same schema the sync parses this row back with, not a looser regex of
+  // our own. An ad hoc pattern admits addresses the roster schema refuses —
+  // a doubled dot, a leading or trailing dot, a leading hyphen in the domain —
+  // and the consequence is not a rejected row, it is a deployment nobody can
+  // sign in to. readConfiguredAccessGroups parses *every* active access group
+  // through StaffRosterEmailSchema and throws CONFIGURED_ACCESS_GROUP_INVALID
+  // if any one of them fails, so a single malformed address stops the sync for
+  // the whole district. And `email` is immutable for an access-purpose row, so
+  // the row cannot be corrected in place.
+  //
+  // This is exactly the mismatch that made googleGroupId unusable above. It is
+  // the same mistake, one field over.
+  if (!StaffRosterEmailSchema.safeParse(email).success) {
+    throw new InitialAccessGroupConfigurationError(
+      `${GROUP_EMAIL_ENV} must be a group email address the roster schema accepts.`,
     );
   }
   if (displayName !== undefined && displayName.length > 160) {
@@ -90,7 +122,7 @@ export function readInitialAccessGroupConfiguration(
     );
   }
   return Object.freeze({
-    googleGroupId,
+    googleGroupId: normalisedGroupId,
     email: email.toLowerCase(),
     displayName: displayName ?? 'Administrators',
   });
@@ -125,6 +157,24 @@ export async function bootstrapAccessConfiguration(
     return Object.freeze({ kind: 'not-configured' as const });
   }
 
+  // Any access group at all counts as configured, active or not.
+  //
+  // This briefly considered only *active* groups. The reasoning was that
+  // group_sources was append-only by trigger, so a malformed row could never
+  // be removed and would block seeding forever — which is how the rebuilt
+  // stack ended up with an access group the sync could not match and no
+  // supported way to replace it.
+  //
+  // Migration 0029 removed that blanket DELETE ban, so the premise is gone: a
+  // bad row can now simply be deleted and re-seeded. And keying off "none
+  // active" is dangerous in a way the original is not. The initial-group
+  // CfnParameters are sticky — the deploy workflow never passes them, so
+  // CloudFormation carries the values an operator supplied once forward on
+  // every later deploy indefinitely. A district that deactivates its access
+  // groups on purpose, say while investigating a compromise, would then have a
+  // routine deploy silently recreate an active administrator-granting group
+  // pointed at whatever that stale parameter still names. Automation must not
+  // be able to reopen sign-in that a human closed.
   const existing = await database
     .select({ id: groupSources.id })
     .from(groupSources)
@@ -152,7 +202,12 @@ export async function bootstrapAccessConfiguration(
       displayName: configuration.displayName,
       active: true,
       grantedRole: 'admin',
-      googleGroupId: configuration.googleGroupId,
+      // Normalised again at the point the row is written, not only where the
+      // environment is read. A caller can hand this function a configuration
+      // object it built itself — the tests do — and a locator with the
+      // "groups/" prefix still on it is one the membership sync can never
+      // match, which is the failure this whole path exists to prevent.
+      googleGroupId: configuration.googleGroupId.replace(/^groups\//u, ''),
       email: configuration.email,
       fixtureKey: null,
     })

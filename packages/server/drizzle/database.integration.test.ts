@@ -2565,14 +2565,24 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         `),
         /immutable truth cannot be changed/u,
       );
-      await expectPostgresRejection(
-        () =>
-          createdConnection.db.execute(sql`
-            delete from endpoint_status_records
-            where id = '00000000-0000-4000-8000-000000027011'::uuid
-          `),
-        /records are retained/u,
-      );
+      // Migration 0029 removed the blanket retain guard, so a delete here is
+      // no longer refused by trigger. What still stops the application is the
+      // grant — and unlike the other tables whose delete assertions were
+      // dropped, endpoint_status_records had no has_table_privilege check
+      // anywhere in this file, so the protection was left entirely unasserted.
+      // It is asserted here rather than claimed in a comment.
+      const endpointStatusDeleteGrant = await createdConnection.db.execute<{
+        can_delete: boolean;
+      }>(sql`
+        select has_table_privilege(
+          'psd_eoc_app',
+          'public.endpoint_status_records',
+          'DELETE'
+        ) as can_delete
+      `);
+      expect(endpointStatusDeleteGrant.map((row) => row.can_delete)).toEqual([
+        false,
+      ]);
 
       await expectConstraintViolation(
         () =>
@@ -4011,7 +4021,17 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         .filter((row) => row.event_object_table === tableName)
         .map((row) => row.event_manipulation);
       expect(events).toContain('UPDATE');
-      expect(events).toContain('DELETE');
+      // Only media_records still refuses DELETE by trigger. Its guard is
+      // psd_eoc_reject_immutable_mutation, which is targeted at that table and
+      // fires on both events. The other three were covered only by the blanket
+      // retain guard migration 0029 removed; what stops the application
+      // deleting them is the grant, asserted above — psd_eoc_app has never
+      // held DELETE on any of them.
+      if (tableName === 'media_records') {
+        expect(events).toContain('DELETE');
+      } else {
+        expect(events).not.toContain('DELETE');
+      }
     }
 
     async function expectMediaMutationRejected(
@@ -4502,23 +4522,16 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         timing: 'BEFORE',
         event: 'UPDATE',
       },
-      {
-        table: 'integration_channel_change_authorizations',
-        name: 'integration_channel_change_authorizations_retain_guard',
-        timing: 'BEFORE',
-        event: 'DELETE',
-      },
+      // The two *_retain_guard rows that used to sit here are gone: they were
+      // instances of the blanket DELETE ban migration 0029 removed. The
+      // *_immutable_guard triggers below are targeted and stay, so these rows
+      // still cannot be rewritten — only the DELETE backstop is gone, and the
+      // application was never granted DELETE on either table.
       {
         table: 'user_role_changes',
         name: 'user_role_changes_immutable_guard',
         timing: 'BEFORE',
         event: 'UPDATE',
-      },
-      {
-        table: 'user_role_changes',
-        name: 'user_role_changes_retain_guard',
-        timing: 'BEFORE',
-        event: 'DELETE',
       },
       {
         table: 'user_role_changes',
@@ -4566,7 +4579,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
       where namespace.nspname = 'public'
         and procedure.proname in (
           'psd_eoc_guard_user_role_change_insert',
-          'psd_eoc_reject_delete',
           'psd_eoc_reject_immutable_mutation'
         )
       order by procedure.proname
@@ -4574,11 +4586,6 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
     expect([...triggerFunctionPrivileges]).toEqual([
       {
         function_name: 'psd_eoc_guard_user_role_change_insert',
-        app_can_execute: false,
-        public_can_execute: false,
-      },
-      {
-        function_name: 'psd_eoc_reject_delete',
         app_can_execute: false,
         public_can_execute: false,
       },
@@ -5176,20 +5183,16 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         }),
       /immutable truth cannot be changed/u,
     );
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          for (const statement of syntheticAdminEvidencePrerequisites) {
-            await transaction.execute(statement);
-          }
-          await transaction.execute(insertSyntheticRoleChange);
-          await transaction.execute(sql`
-            delete from user_role_changes
-            where request_id = '00000000-0000-4000-8000-000000026007'::uuid
-          `);
-        }),
-      /records are retained/u,
-    );
+    // The companion DELETE assertion is gone. Migration 0029 removed the
+    // blanket retain guard, so a delete here is no longer refused — and
+    // leaving the assertion in place was actively harmful: the delete sits in
+    // a transaction that also inserts the synthetic prerequisites, so once it
+    // stopped raising, the transaction committed and every later fixture
+    // insert in this file collided on users_pkey.
+    //
+    // What still stops the application deleting a role change is the grant,
+    // asserted in 'limits app-role privileges': psd_eoc_app has never held
+    // DELETE on user_role_changes. The UPDATE guard above is unchanged.
     await expectPostgresRejection(
       () =>
         db.transaction(async (transaction) => {
@@ -5205,20 +5208,14 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         }),
       /immutable truth cannot be changed/u,
     );
-    await expectPostgresRejection(
-      () =>
-        db.transaction(async (transaction) => {
-          for (const statement of syntheticAdminEvidencePrerequisites) {
-            await transaction.execute(statement);
-          }
-          await transaction.execute(insertSyntheticChannelChangeAuthorization);
-          await transaction.execute(sql`
-            delete from integration_channel_change_authorizations
-            where id = '00000000-0000-4000-8000-000000026006'::uuid
-          `);
-        }),
-      /records are retained/u,
-    );
+    // The delete assertion that stood here is gone with the blanket retain
+    // guard migration 0029 removed. Leaving it would have been worse than
+    // useless: the delete shares a transaction with the synthetic
+    // prerequisites, so once it stopped raising, the transaction committed and
+    // every later fixture insert in this file collided on users_pkey.
+    //
+    // DELETE on this table remains impossible for the application because the
+    // grant was never made; the immutability assertion above is unchanged.
   });
 
   test('database constraints reject real and drill substitution', async () => {
@@ -5539,7 +5536,10 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
         .filter((row) => row.event_object_table === tableName)
         .map((row) => row.event_manipulation);
       expect(events).toContain('UPDATE');
-      expect(events).toContain('DELETE');
+      // The delivery-test tables had no targeted DELETE guard of their own —
+      // only the blanket retain guard migration 0029 removed. DELETE stays
+      // impossible for the application because the grant was never made.
+      expect(events).not.toContain('DELETE');
     }
 
     const mutationProbes = [
@@ -5582,20 +5582,11 @@ describeWithDatabase('fresh PostgreSQL migration and synthetic seed', () => {
           }),
         /immutable truth cannot be changed/u,
       );
-      await expectPostgresRejection(
-        () =>
-          db.transaction(async (transaction) => {
-            await insertDeliveryTestStructuralFixture(transaction);
-            if (probe.tableName === 'delivery_test_reports') {
-              await insertInitialDeliveryTestEvidence(transaction, 'unknown');
-              await transaction.execute(insertIncompleteDeliveryTestReport);
-            }
-            await transaction.execute(
-              sql.raw(`delete from ${probe.tableName}`),
-            );
-          }),
-        /records are retained/u,
-      );
+      // Same as the sites above: the blanket retain guard is gone with
+      // migration 0029, and this delete shared a transaction with the
+      // structural fixture, so keeping the assertion would have committed it.
+      // The delivery-test tables stay append-only for the application through
+      // the grant, and their UPDATE guards are asserted directly above.
     }
   });
 

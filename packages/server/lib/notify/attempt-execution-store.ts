@@ -193,30 +193,46 @@ export function createDrizzleAttemptExecutionStore(
       const expiresAt = sql<Date>`clock_timestamp() + make_interval(secs => ${leaseMilliseconds} / 1000.0)`;
 
       return database.transaction(async (transaction) => {
-        // Serialize claimants for this attempt. Without the row lock two
-        // workers can both read "expired" and both take the lease, which is the
-        // duplicate send this store exists to prevent.
+        // The first claim is decided by the insert, not by a prior read.
+        //
+        // `SELECT ... FOR UPDATE` locks rows that exist; on a missing row it
+        // locks nothing at all. Reading first and inserting when the read came
+        // back empty therefore lets two simultaneous first-claims both see
+        // nothing and both insert, and the loser surfaces a raw duplicate-key
+        // error instead of being told that somebody else holds the lease —
+        // which is the one question this method exists to answer.
+        //
+        // Letting the primary key arbitrate removes the race: exactly one
+        // insert can win, and a caller that inserted nothing goes on to read
+        // the row the winner just wrote, which now exists and can be locked.
+        const inserted = await transaction
+          .insert(channelAttemptExecutions)
+          .values({
+            attemptId,
+            fingerprint,
+            leaseExpiresAt: expiresAt,
+            leaseToken: sql`gen_random_uuid()`,
+          })
+          .onConflictDoNothing({ target: channelAttemptExecutions.attemptId })
+          .returning();
+        const won = inserted[0];
+        if (won !== undefined) {
+          return Object.freeze({
+            kind: 'acquired' as const,
+            leaseToken: String(won.leaseToken),
+          });
+        }
+
         const [row] = await transaction
           .select()
           .from(channelAttemptExecutions)
           .where(eq(channelAttemptExecutions.attemptId, attemptId))
           .limit(1)
           .for('update');
-
         if (row === undefined) {
-          const [inserted] = await transaction
-            .insert(channelAttemptExecutions)
-            .values({
-              attemptId,
-              fingerprint,
-              leaseToken: sql`gen_random_uuid()`,
-              leaseExpiresAt: expiresAt,
-            })
-            .returning();
-          return Object.freeze({
-            kind: 'acquired' as const,
-            leaseToken: String(inserted?.leaseToken),
-          });
+          // The holder released between the conflict and this read, so the
+          // attempt is workable again and the caller should simply retry.
+          return Object.freeze({ kind: 'in-progress' as const });
         }
 
         if (row.fingerprint !== fingerprint) {

@@ -75,8 +75,8 @@ jobs:
           REQUIRED_SECRETS: >-
             ${{ vars.GOOGLE_GROUPS_SECRET_ARN }}
             ${{ vars.GOOGLE_OAUTH_SECRET_ARN }}
-            /psd-eoc/exploration-smoke/database/application
-            /psd-eoc/exploration-smoke/bootstrap/approved-identity
+            /psd-eoc/database/application
+            /psd-eoc/bootstrap/approved-identity
         run: |
           set -euo pipefail
           missing=0

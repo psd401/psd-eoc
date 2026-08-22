@@ -335,6 +335,10 @@ describe('bootstrap coordinator', () => {
       BOOTSTRAP_MODE: 'migrate',
     });
     const calls: string[] = [];
+    // The two steps that create something count their runs, so the mocks
+    // behave the way the real ones do: create on the first pass, no-op after.
+    let accessRuns = 0;
+    let districtRuns = 0;
     const dependencies = {
       async acquireAdvisoryLock(): Promise<void> {
         calls.push('acquire-lock');
@@ -363,10 +367,25 @@ describe('bootstrap coordinator', () => {
       },
       async bootstrapAccess() {
         calls.push('bootstrap-access');
+        // Idempotent, like the real one: the first run creates the group and
+        // every run after it finds the group already there. A mock reporting
+        // 'created' forever would hide the very thing the second run exists
+        // to prove.
+        return accessRuns++ === 0
+          ? {
+              kind: 'created' as const,
+              groupSourceId: 'synthetic',
+              email: 'admins@example.invalid',
+            }
+          : { kind: 'already-configured' as const, activeGroupCount: 1 };
+      },
+      async bootstrapDistrict() {
+        calls.push('bootstrap-district');
         return {
-          kind: 'created' as const,
-          groupSourceId: 'synthetic',
-          email: 'admins@example.invalid',
+          facilitiesConfigured: 2,
+          facilitiesCreated: districtRuns++ === 0 ? 2 : 0,
+          neighborhoodsConfigured: 1,
+          neighborhoodsCreated: districtRuns === 1 ? 1 : 0,
         };
       },
       async verifyApplicationLogin(): Promise<void> {
@@ -384,6 +403,7 @@ describe('bootstrap coordinator', () => {
       'configure-application-role',
       'seed-reference',
       'bootstrap-access',
+      'bootstrap-district',
       'verify-application-login',
       'verify-application-tls',
     ];
@@ -446,6 +466,15 @@ describe('bootstrap coordinator', () => {
         calls.push('bootstrap-access');
         return { kind: 'not-configured' as const };
       },
+      async bootstrapDistrict() {
+        calls.push('bootstrap-district');
+        return {
+          facilitiesConfigured: 0,
+          facilitiesCreated: 0,
+          neighborhoodsConfigured: 0,
+          neighborhoodsCreated: 0,
+        };
+      },
       async verifyApplicationLogin(): Promise<void> {
         calls.push('verify-application-login');
       },
@@ -462,6 +491,7 @@ describe('bootstrap coordinator', () => {
       'seed-reference',
       // Runs on every deploy and reports that it had nothing to do.
       'bootstrap-access',
+      'bootstrap-district',
       'verify-application-login',
       'verify-application-tls',
     ];
@@ -507,6 +537,15 @@ describe('bootstrap coordinator', () => {
           kind: 'created' as const,
           groupSourceId: 'synthetic',
           email: 'admins@example.invalid',
+        };
+      },
+      async bootstrapDistrict() {
+        calls.push('bootstrap-district');
+        return {
+          facilitiesConfigured: 0,
+          facilitiesCreated: 0,
+          neighborhoodsConfigured: 0,
+          neighborhoodsCreated: 0,
         };
       },
       async verifyApplicationLogin(): Promise<void> {

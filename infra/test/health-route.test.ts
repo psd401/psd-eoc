@@ -22,7 +22,7 @@ const QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT_ID}/${QUEUE_NAM
 const QUEUE_ARN = `arn:aws:sqs:${REGION}:${ACCOUNT_ID}:${QUEUE_NAME}`;
 const RUNTIME_SECRET_ARN = `arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:psd-eoc-runtime-AbCdEf`;
 const DATABASE_HOST =
-  'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com';
+  'psd-eoc.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com';
 const DATABASE_PASSWORD = 'synthetic-native-health-password-value';
 const DATABASE_SSL_ROOT_CERT = new URL(
   '../../packages/server/certs/aws-rds-global-bundle.pem',
@@ -444,6 +444,89 @@ describe('deep health GET contract', () => {
       'runtime-secrets',
     ]);
     expectNoCache(response);
+  });
+
+  it('never writes driver statement text or bound parameters to the log', async () => {
+    // What drizzle actually throws: the statement and the bound parameters are
+    // in the message, and again on .query/.params. Logging cause.message
+    // verbatim would put a staff address or a credential into CloudWatch.
+    const wrapped = Object.assign(
+      new Error(
+        'Failed query: insert into "group_members" ("email") values ($1)\nparams: someone@psd401.net',
+      ),
+      {
+        name: 'DrizzleQueryError',
+        query: 'insert into "group_members" ("email") values ($1)',
+        params: ['someone@psd401.net'],
+      },
+    );
+    const handler = createHealthRouteHandler({
+      checkDatabase: () => Promise.reject(wrapped),
+      checkDeliveryQueue: () => Promise.resolve(),
+      checkRuntimeSecrets: () => Promise.resolve(),
+    });
+
+    const written: string[] = [];
+    const original = console.error;
+    console.error = (line: unknown) => {
+      written.push(String(line));
+    };
+    try {
+      const response = await handler();
+      expect(response.status).toBe(503);
+    } finally {
+      console.error = original;
+    }
+
+    const all = written.join('\n');
+    expect(all).toContain('health-check-failed');
+    expect(all).toContain('database');
+    // The whole point: none of the payload survives.
+    expect(all).not.toContain('someone@psd401.net');
+    expect(all).not.toContain('group_members');
+    expect(all).not.toContain('insert into');
+    expect(all).not.toContain('params:');
+    expect(all).toContain('redacted');
+    // This wrapper has no inner cause, so the wrapper's own name is all there
+    // is to report. The sibling test below covers the case that actually
+    // matters: a real drizzle wrapper with the PostgresError underneath it.
+    expect(all).toContain('class=DrizzleQueryError');
+  });
+
+  it('reports the SQLSTATE from inside the drizzle wrapper, not the wrapper', async () => {
+    // What drizzle really produces: its wrapper is itself driver-shaped (it
+    // always sets query and params) but carries no code, and its .name is the
+    // inherited 'Error'. The real error is one link down .cause.
+    const inner = Object.assign(new Error('division by zero'), {
+      name: 'PostgresError',
+      severity: 'ERROR',
+      code: '22012',
+      routine: 'int4div',
+    });
+    const wrapper = Object.assign(
+      new Error('Failed query: select 1/0\nparams: '),
+      { query: 'select 1/0', params: [], cause: inner },
+    );
+    const handler = createHealthRouteHandler({
+      checkDatabase: () => Promise.reject(wrapper),
+      checkDeliveryQueue: () => Promise.resolve(),
+      checkRuntimeSecrets: () => Promise.resolve(),
+    });
+    const written: string[] = [];
+    const original = console.error;
+    console.error = (line: unknown) => {
+      written.push(String(line));
+    };
+    try {
+      expect((await handler()).status).toBe(503);
+    } finally {
+      console.error = original;
+    }
+    const all = written.join('\n');
+    expect(all).toContain('class=PostgresError');
+    expect(all).toContain('code=22012');
+    expect(all).not.toContain('select 1/0');
+    expect(all).not.toContain('division by zero');
   });
 
   it('coalesces concurrent public probes into one set of dependency reads', async () => {
@@ -1114,7 +1197,12 @@ describe('production deep health reads', () => {
 
     await expect(
       dependencies.checkRuntimeSecrets(new AbortController().signal),
-    ).rejects.toThrow('Health dependency configuration is unavailable.');
+      // The message now names the cause. That is the point of it: a 503 from
+      // /api/health used to say only 'unavailable', which during a live outage
+      // gave no way to tell a bad OAuth contract from an unreachable database.
+    ).rejects.toThrow(
+      'Health dependency configuration is unavailable: GOOGLE_OAUTH_CONFIG must contain exactly the approved five fields.',
+    );
     expect(fetchCalled).toBe(false);
   });
 
