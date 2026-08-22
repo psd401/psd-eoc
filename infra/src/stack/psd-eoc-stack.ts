@@ -431,10 +431,23 @@ export class PsdEocStack extends Stack {
       'GoogleOidcCookieSecret',
       {
         description:
-          'Generated base64url-compatible key material for Google OIDC transient state.',
+          'Generated base64url key material for Google OIDC transient state.',
         generateSecretString: {
+          // 44 characters, not 43. The reader requires *canonical* unpadded
+          // base64url: it decodes the value and re-encodes it, and refuses
+          // anything that does not round-trip. A 43-character string encodes
+          // 32 bytes plus 2 leftover bits, so it only round-trips when those
+          // bits happen to be zero — true for about a quarter of randomly
+          // generated strings. At 44 characters the length is a multiple of
+          // four, there are no leftover bits, and every generated value
+          // round-trips. It decodes to 33 bytes, inside the required 32..64.
+          //
+          // The original 43 shipped and worked purely because the first
+          // generated secret drew a lucky value. A rebuilt deployment had a
+          // roughly three-in-four chance of a secret the application would
+          // refuse at startup, surfacing only as a failed health check.
           excludePunctuation: true,
-          passwordLength: 43,
+          passwordLength: 44,
         },
         removalPolicy: RemovalPolicy.RETAIN,
         secretName: `${SECRET_PREFIX}/google-oidc-cookie-secret`,
