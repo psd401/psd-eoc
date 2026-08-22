@@ -22,7 +22,7 @@ const QUEUE_URL = `https://sqs.${REGION}.amazonaws.com/${ACCOUNT_ID}/${QUEUE_NAM
 const QUEUE_ARN = `arn:aws:sqs:${REGION}:${ACCOUNT_ID}:${QUEUE_NAME}`;
 const RUNTIME_SECRET_ARN = `arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:psd-eoc-runtime-AbCdEf`;
 const DATABASE_HOST =
-  'psd-eoc-exploration-smoke.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com';
+  'psd-eoc.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com';
 const DATABASE_PASSWORD = 'synthetic-native-health-password-value';
 const DATABASE_SSL_ROOT_CERT = new URL(
   '../../packages/server/certs/aws-rds-global-bundle.pem',

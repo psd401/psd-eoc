@@ -257,7 +257,7 @@ describe('deployment boundary', () => {
     expect(bootstrapSourceSha).not.toHaveProperty('Default');
     expect(oauthArn.NoEcho).toBe(true);
     expect(oauthArn.AllowedPattern).toBe(
-      '^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/google-oauth-[A-Za-z0-9]{6}$',
+      '^arn:aws:secretsmanager:us-west-2:338414773271:secret:/psd-eoc/(?:[a-z0-9-]+/)*google-oauth-[A-Za-z0-9]{6}$',
     );
     // The approved-staff identity fed the removed access fixture. The
     // bootstrap container's environment schema is strict, so leaving these
@@ -584,7 +584,10 @@ describe('minimal isolated resource shape', () => {
       properties(byName.get('/psd-eoc/google-oidc-cookie-secret') ?? {})
         .GenerateSecretString,
     );
-    expect(cookie.PasswordLength).toBe(43);
+    // 44, not 43: the reader requires canonical unpadded base64url and a
+    // 43-character value only round-trips when its two leftover bits happen
+    // to be zero, which is true of about a quarter of generated secrets.
+    expect(cookie.PasswordLength).toBe(44);
     expect(cookie.ExcludePunctuation).toBe(true);
   });
 });
@@ -615,7 +618,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(serviceProperties.Tags).toEqual([
       {
         Key: 'Application',
-        Value: 'PSD EOC Exploration Smoke',
+        Value: 'PSD EOC',
       },
       {
         Key: 'DataClassification',
@@ -660,7 +663,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(connector.Tags).toEqual([
       {
         Key: 'Application',
-        Value: 'PSD EOC Exploration Smoke',
+        Value: 'PSD EOC',
       },
       {
         Key: 'DataClassification',

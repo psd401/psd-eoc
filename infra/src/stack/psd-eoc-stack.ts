@@ -455,7 +455,7 @@ export class PsdEocStack extends Stack {
     );
     const apiSaltSecret = new secretsmanager.Secret(this, 'ApiSaltSecret', {
       description:
-        'Generated application-only salt for exploration API credential hashing.',
+        'Generated application-only salt for API credential hashing.',
       generateSecretString: {
         excludePunctuation: true,
         passwordLength: 64,
@@ -865,7 +865,7 @@ export class PsdEocStack extends Stack {
     // rest of the stack carries the live-pilot classification.
     Tags.of(appRunnerVpcConnector).add(
       'Application',
-      'PSD EOC Exploration Smoke',
+      'PSD EOC',
       { priority: 300 },
     );
     Tags.of(appRunnerVpcConnector).add('DataClassification', 'synthetic-only', {
@@ -1129,7 +1129,7 @@ export class PsdEocStack extends Stack {
     const imageAccessRole = new iam.Role(this, 'AppRunnerImageAccessRole', {
       assumedBy: new iam.ServicePrincipal('build.apprunner.amazonaws.com'),
       description:
-        'Reads only the digest-pinned exploration server image from its isolated ECR repository.',
+        'Reads only the digest-pinned server image from its isolated ECR repository.',
     });
     const imagePullGrant = imageRepository.grantPull(imageAccessRole);
 
@@ -1338,7 +1338,7 @@ export class PsdEocStack extends Stack {
     // App Runner replaces a service when its tags change. Keep the existing
     // service's immutable legacy tags while its reviewed runtime configuration
     // and every non-service dark resource carry the live-pilot classification.
-    Tags.of(appRunnerService).add('Application', 'PSD EOC Exploration Smoke', {
+    Tags.of(appRunnerService).add('Application', 'PSD EOC', {
       priority: 300,
     });
     Tags.of(appRunnerService).add('DataClassification', 'synthetic-only', {

@@ -1335,7 +1335,7 @@ export function createRuntimeCanaryRouteDependencies(
 ): CanaryRouteDependencies {
   if (connection.driver !== 'postgres') {
     throw new Error(
-      'The exploration health canary requires native PostgreSQL.',
+      'The health canary requires native PostgreSQL.',
     );
   }
   const baseRuntime = createAgentRestRuntime(connection);

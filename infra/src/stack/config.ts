@@ -4,13 +4,13 @@ export const AWS_REGION = 'us-west-2';
 /**
  * The deployed CloudFormation stack's name.
  *
- * "ExplorationSmoke" is a leftover from this system's first week and means
- * nothing — it is not exploratory and it is not a smoke test, it serves
- * production traffic. The value cannot simply be corrected: CloudFormation
- * identifies a stack by name, so changing it does not rename anything, it
- * creates a second stack and orphans the first, including the Aurora cluster
- * holding the live data. The same is true of the physical names derived from
- * it throughout this file.
+ * This was `PsdEocExplorationSmoke` until 2026-08-21 — a leftover from the
+ * system's first week that meant nothing, since it is neither exploratory nor a
+ * smoke test and it serves production traffic. CloudFormation identifies a
+ * stack by name, so the value could not simply be corrected: changing it does
+ * not rename anything, it creates a second stack and orphans the first. The
+ * rename was therefore done by deleting the old stack and creating this one,
+ * reissuing every physical name derived from it below.
  *
  * Renaming them is a planned migration with downtime, tracked separately. Until
  * then this constant carries the old value deliberately, and every identifier

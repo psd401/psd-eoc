@@ -1,10 +1,11 @@
-# Live-pilot deployment evidence (retained exploration-smoke name)
+# Live-pilot deployment evidence
 
 Status: **issue #204 source is configured-unverified; no issue #204 AWS, DNS,
 provider, recipient, or send write is proved**
 
 This record is the durable evidence template for the staff-only live-pilot
-stack whose physical name remains `PsdEocExplorationSmoke`. Issue #178
+stack, named `PsdEocExplorationSmoke` until the rename to `PsdEoc` on
+2026-08-21. Issue #178
 superseded its database path with private native PostgreSQL. Issue #204
 reclassifies the source boundary from synthetic exploration to staff-minimized
 live pilot and adds dark SES readiness; it does not activate or exercise email.
