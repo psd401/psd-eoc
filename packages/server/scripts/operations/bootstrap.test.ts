@@ -630,7 +630,7 @@ describe('bootstrap statement executor', () => {
         code: '42601',
         severity: 'ERROR',
         routine: 'scanner_yyerror',
-        constraint: 'psd_eoc_app_pkey',
+        constraint_name: 'psd_eoc_app_pkey',
         detail: 'Key (email)=(staff@example.invalid) already exists.',
         hint: 'Perhaps you meant to reference the column "t.email".',
         where: 'PL/pgSQL function inline_code_block line 3',
@@ -650,7 +650,7 @@ describe('bootstrap statement executor', () => {
     ).rejects.toThrow(
       'A native database bootstrap statement failed. statement=GRANT' +
         ' code=42601 severity=ERROR routine=scanner_yyerror' +
-        ' constraint=psd_eoc_app_pkey',
+        ' constraint_name=psd_eoc_app_pkey',
     );
   });
 

@@ -26,15 +26,23 @@ export function singleLine(value: string, maximum: number): string {
  * role DDL is the application password literal. This is an allowlist for that
  * reason: `PostgresError` copies every field the server sent onto itself, so
  * anything not named here must be assumed to carry a value.
+ *
+ * The names must match the driver's, not the wire protocol's. postgres.js maps
+ * the server's `s`, `t`, `c`, and `n` fields to `schema_name`, `table_name`,
+ * `column_name`, and `constraint_name` (src/connection.js), so allowlisting
+ * `schema`/`table`/`column`/`constraint` matched nothing and dropped the only
+ * fields that say which table or constraint a failure hit. `column` is worse
+ * than merely absent: Bun puts a source-position `column` on every error, so
+ * that entry surfaced a JavaScript line offset dressed up as a database column.
  */
 const SAFE_DRIVER_ERROR_FIELDS = Object.freeze([
   'code',
   'severity',
   'routine',
-  'schema',
-  'table',
-  'column',
-  'constraint',
+  'schema_name',
+  'table_name',
+  'column_name',
+  'constraint_name',
 ] as const);
 
 const SQLSTATE = /^[0-9A-Z]{5}$/u;

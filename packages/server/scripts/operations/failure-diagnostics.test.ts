@@ -111,6 +111,9 @@ describe('driver errors', () => {
       code: '22P02',
       severity: 'ERROR',
       routine: 'string_to_uuid',
+      schema_name: 'public',
+      table_name: 'access_group_members',
+      constraint_name: 'access_group_members_pkey',
       detail: 'Key (email)=(staff@example.invalid) already exists.',
       hint: 'Perhaps you meant to reference the column "t.email".',
       where: 'PL/pgSQL function inline_code_block line 3',
@@ -161,9 +164,28 @@ describe('driver errors', () => {
   });
 
   test('reduces a driver error to allowlisted fields', () => {
+    // The names are the driver's, not the wire protocol's: postgres.js maps
+    // the server's s/t/c/n fields to schema_name/table_name/column_name/
+    // constraint_name, so the shorter names matched nothing at all.
     expect(describeDriverError(postgresError())).toBe(
-      ' code=22P02 severity=ERROR routine=string_to_uuid',
+      ' code=22P02 severity=ERROR routine=string_to_uuid schema_name=public' +
+        ' table_name=access_group_members' +
+        ' constraint_name=access_group_members_pkey',
     );
+  });
+
+  test('ignores the source position Bun hangs on every error', () => {
+    // Bun sets `line` and `column` on errors as JavaScript source offsets.
+    // Allowlisting `column` surfaced one as though it named a database column.
+    const error = Object.assign(new Error('x'), {
+      name: 'PostgresError',
+      code: '42601',
+      severity: 'ERROR',
+      column: '21',
+      line: '331',
+    });
+
+    expect(describeDriverError(error)).toBe(' code=42601 severity=ERROR');
   });
 
   test('never describes a driver error by its message', () => {
@@ -174,7 +196,9 @@ describe('driver errors', () => {
 
     expect(described.split('\n')[0]).toBe(
       `${PREFIX} name=PostgresError code=22P02 severity=ERROR` +
-        ' routine=string_to_uuid',
+        ' routine=string_to_uuid schema_name=public' +
+        ' table_name=access_group_members' +
+        ' constraint_name=access_group_members_pkey',
     );
     for (const leak of [
       'invalid input syntax',
