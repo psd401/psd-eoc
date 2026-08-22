@@ -618,7 +618,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(serviceProperties.Tags).toEqual([
       {
         Key: 'Application',
-        Value: 'PSD EOC',
+        Value: 'PSD EOC Exploration Smoke',
       },
       {
         Key: 'DataClassification',
@@ -663,7 +663,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(connector.Tags).toEqual([
       {
         Key: 'Application',
-        Value: 'PSD EOC',
+        Value: 'PSD EOC Exploration Smoke',
       },
       {
         Key: 'DataClassification',

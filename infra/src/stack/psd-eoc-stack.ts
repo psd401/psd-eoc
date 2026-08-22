@@ -859,13 +859,16 @@ export class PsdEocStack extends Stack {
         vpcConnectorName: 'psd-eoc-vpc',
       },
     );
-    // App Runner replaces a VPC connector when its tags change, but rejects a
-    // replacement with the same subnet/security-group combination as the live
-    // connector. Keep this immutable bridge on its original tags while the
-    // rest of the stack carries the live-pilot classification.
+    // Deliberately still 'PSD EOC Exploration Smoke', and the only place that
+    // name survives. App Runner replaces a VPC connector when its tags change
+    // and then rejects the replacement, because a connector with the same
+    // subnet/security-group combination already exists — the live one. Editing
+    // this string therefore cannot be done in place: it needs the connector
+    // deleted first, which takes the service's network with it and means a
+    // production outage for a metadata value. Tried on 2026-08-22, rolled back.
     Tags.of(appRunnerVpcConnector).add(
       'Application',
-      'PSD EOC',
+      'PSD EOC Exploration Smoke',
       { priority: 300 },
     );
     Tags.of(appRunnerVpcConnector).add('DataClassification', 'synthetic-only', {
@@ -1335,10 +1338,10 @@ export class PsdEocStack extends Stack {
       },
     );
     appRunnerService.cfnOptions.condition = shouldProvisionApplication;
-    // App Runner replaces a service when its tags change. Keep the existing
-    // service's immutable legacy tags while its reviewed runtime configuration
-    // and every non-service dark resource carry the live-pilot classification.
-    Tags.of(appRunnerService).add('Application', 'PSD EOC', {
+    // Same constraint as the VPC connector above, and the same reason this
+    // still reads 'Exploration Smoke': App Runner replaces a service when its
+    // tags change, and the replacement collides with the live connector.
+    Tags.of(appRunnerService).add('Application', 'PSD EOC Exploration Smoke', {
       priority: 300,
     });
     Tags.of(appRunnerService).add('DataClassification', 'synthetic-only', {
