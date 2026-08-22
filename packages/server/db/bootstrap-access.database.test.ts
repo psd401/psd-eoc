@@ -66,10 +66,36 @@ describe('initial access group configuration', () => {
         PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: 'Admins@Example.Invalid',
       }),
     ).toEqual({
-      googleGroupId: 'groups/one',
+      googleGroupId: 'one',
       email: 'admins@example.invalid',
       displayName: 'Administrators',
     });
+  });
+
+  test('strips the Cloud Identity "groups/" prefix, which nothing downstream stores', () => {
+    // The membership reader slices the prefix off before anything reaches the
+    // database, and the evaluated-group schema refuses a slash outright. A
+    // stored "groups/<id>" can therefore never equal a resolved id, and the
+    // sync fails closed forever while looking correctly configured.
+    for (const supplied of ['groups/03jtnz0s3nmkpvk', '03jtnz0s3nmkpvk']) {
+      expect(
+        readInitialAccessGroupConfiguration({
+          PSD_EOC_INITIAL_ACCESS_GROUP_ID: supplied,
+          PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: 'admins@example.invalid',
+        })?.googleGroupId,
+      ).toBe('03jtnz0s3nmkpvk');
+    }
+  });
+
+  test('refuses a group id the evaluated-group schema could never match', () => {
+    for (const value of ['groups/', 'has space', 'nested/path/id', 'has.dot']) {
+      expect(() =>
+        readInitialAccessGroupConfiguration({
+          PSD_EOC_INITIAL_ACCESS_GROUP_ID: value,
+          PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL: 'admins@example.invalid',
+        }),
+      ).toThrow(InitialAccessGroupConfigurationError);
+    }
   });
 
   test('refuses an address that is not one', () => {
@@ -129,7 +155,7 @@ describeWithDatabase(
         purpose: 'access',
         active: true,
         grantedRole: 'admin',
-        googleGroupId: CONFIGURATION.googleGroupId,
+        googleGroupId: 'synthetic-initial-administrators',
         email: CONFIGURATION.email,
       });
       // The group, not its membership: the scheduled sync reads the provider.

@@ -39,7 +39,7 @@ and the OIDC client:
 
 | Variable | Value |
 |---|---|
-| `PSD_EOC_INITIAL_ACCESS_GROUP_ID` | `groups/03x8tuzt4fpsm6y` |
+| `PSD_EOC_INITIAL_ACCESS_GROUP_ID` | `03x8tuzt4fpsm6y` (a leading `groups/` is accepted and stripped) |
 | `PSD_EOC_INITIAL_ACCESS_GROUP_EMAIL` | `eoc-administrators@yourdistrict.org` |
 | `PSD_EOC_INITIAL_ACCESS_GROUP_NAME` | Optional. Defaults to `Administrators`. |
 

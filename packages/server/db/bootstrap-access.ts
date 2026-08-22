@@ -74,9 +74,27 @@ export function readInitialAccessGroupConfiguration(
       `${GROUP_ID_ENV} and ${GROUP_EMAIL_ENV} must be set together.`,
     );
   }
-  if (googleGroupId.length > 255) {
+  // Cloud Identity names a group "groups/<id>", and that is the form its API
+  // returns and the form an administrator copies out of the console. Everything
+  // downstream stores and compares the bare <id>: the membership reader slices
+  // the prefix off before it ever reaches the database, and the evaluated-group
+  // schema refuses anything outside [A-Za-z0-9_-], so a stored "groups/..."
+  // can never equal a resolved id.
+  //
+  // Accepting the prefixed form verbatim produced a deployment that looked
+  // correctly configured and could never sync: every run failed closed with
+  // ACCESS_CONFIGURATION_CHANGED, and because roles are derived from
+  // membership, nobody could sign in. Normalise it here instead, where the
+  // value enters the system.
+  const normalisedGroupId = googleGroupId.replace(/^groups\//u, '');
+  if (normalisedGroupId.length > 255 || normalisedGroupId.length === 0) {
     throw new InitialAccessGroupConfigurationError(
-      `${GROUP_ID_ENV} must be at most 255 characters.`,
+      `${GROUP_ID_ENV} must be between 1 and 255 characters.`,
+    );
+  }
+  if (!/^[A-Za-z0-9_-]+$/u.test(normalisedGroupId)) {
+    throw new InitialAccessGroupConfigurationError(
+      `${GROUP_ID_ENV} must be a Cloud Identity group id, optionally prefixed with "groups/".`,
     );
   }
   if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) {
@@ -90,7 +108,7 @@ export function readInitialAccessGroupConfiguration(
     );
   }
   return Object.freeze({
-    googleGroupId,
+    googleGroupId: normalisedGroupId,
     email: email.toLowerCase(),
     displayName: displayName ?? 'Administrators',
   });
