@@ -22,6 +22,9 @@ import postgres from 'postgres';
 import {
   DRIVER_FAILURE_LEAKS,
   driverFailureFixture,
+  WRAPPED_PARAMETERS,
+  WRAPPED_STATEMENT,
+  wrappedDriverFailureFixture,
 } from './driver-error-test-fixtures';
 
 import {
@@ -757,8 +760,11 @@ describe('bootstrap steps that issue SQL outside the executor', () => {
    * proven wrapped wherever in its work it first reaches the database.
    */
   function failingConnection() {
+    // Wrapped, because that is the only shape these steps can actually raise:
+    // drizzle wraps every failed query. A bare PostgresError matches at depth 0
+    // and so passes whether or not the cause chain is walked at all.
     const raise = (): never => {
-      throw driverFailureFixture();
+      throw wrappedDriverFailureFixture(driverFailureFixture());
     };
     const db = new Proxy({} as Record<string, unknown>, {
       get: raise,
@@ -819,7 +825,12 @@ describe('bootstrap steps that issue SQL outside the executor', () => {
       const message = String(Reflect.get(Object(raised), 'message'));
       expect(message).toContain(`The ${label} step failed in the database.`);
       expect(message).toContain('code=23505');
-      for (const leak of DRIVER_FAILURE_LEAKS) {
+      for (const leak of [
+        ...DRIVER_FAILURE_LEAKS,
+        WRAPPED_STATEMENT,
+        ...WRAPPED_PARAMETERS,
+        'Failed query',
+      ]) {
         expect(message).not.toContain(leak);
       }
     });
