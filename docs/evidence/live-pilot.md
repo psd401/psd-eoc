@@ -26,11 +26,11 @@ worker, provider call, cloud mutation, recipient mutation, or send is included.
 | AWS account alias       | `psd401`                                                                         |
 | AWS account ID          | `338414773271`                                                                   |
 | AWS region              | `us-west-2`                                                                      |
-| CloudFormation stack    | `PsdEocExplorationSmoke`                                                         |
+| CloudFormation stack    | `PsdEoc`                                                         |
 | Environment tag         | `live-pilot`                                                                     |
 | Data classification tag | `staff-minimized`                                                                |
 | GitHub workflow         | `.github/workflows/deploy.yml`                                                   |
-| GitHub environment      | `exploration-smoke` with required reviewers and main-only deployment protection  |
+| GitHub environment      | `production` with required reviewers and main-only deployment protection        |
 | Identity                | Google OIDC, hosted domain `psd401.net`, one approved immutable subject          |
 | Roster/access data      | Staff-only access; no student data; population changes are separately owned      |
 | Notification channels   | Email `configured-unverified` and disabled; every other provider remains blocked |
@@ -163,25 +163,25 @@ The preview job has `contents: read` only. It must not request an OIDC token or
 call AWS, GCP, DNS, mobile-store, or notification-provider APIs. Pinned
 container/base-image reads and loopback-only registry writes are allowed. The
 deploy job receives `id-token: write` only after GitHub's protected
-`exploration-smoke` environment approval. The workflow must use no static AWS
+`production` environment approval. The workflow must use no static AWS
 access key and must reject any account, alias, region, stack, source SHA, image
 digest, or OAuth secret ARN outside the fixed boundary.
 
 ## Prerequisites that must be proved, not assumed
 
-- [ ] The GitHub `exploration-smoke` environment exists, allows deployments
+- [ ] The GitHub `production` environment exists, allows deployments
       only from `main`, and requires Kris Hagel or a delegated human reviewer.
-- [ ] `AWS_EXPLORATION_SMOKE_DEPLOY_ROLE_ARN` is an environment variable naming
+- [ ] `AWS_DEPLOY_ROLE_ARN` is an environment variable naming
       the reviewed OIDC deployment role in account `338414773271`; its trust and
       permissions are linked, and no static AWS credential is configured.
 - [ ] The shared provider is exactly
       `arn:aws:iam::338414773271:oidc-provider/token.actions.githubusercontent.com`.
       The role trust contains one `sts:AssumeRoleWithWebIdentity` allow for that
       provider and exact `StringEquals` claims `aud=sts.amazonaws.com` and
-      `sub=repo:psd401@1902994/psd-eoc@1326178900:environment:exploration-smoke`.
-- [ ] `AWS_EXPLORATION_SMOKE_DEPLOY_POLICY_SHA256` contains the reviewed
+      `sub=repo:psd401@1902994/psd-eoc@1326178900:environment:production`.
+- [ ] `AWS_DEPLOY_POLICY_SHA256` contains the reviewed
       normalized deployment-role policy inventory hash, and
-      `AWS_EXPLORATION_SMOKE_DEPLOY_PERMISSIONS_BOUNDARY_ARN` contains the exact
+      `AWS_DEPLOY_PERMISSIONS_BOUNDARY_ARN` contains the exact
       reviewed boundary ARN or the literal `none`. The live attachment lists,
       inline documents, managed default versions, boundary, and role trust must
       remain stable across the gate and match both expectations before a write.
@@ -190,7 +190,7 @@ digest, or OAuth secret ARN outside the fixed boundary.
       `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:GetPolicy`,
       `iam:GetPolicyVersion`, and `iam:SimulatePrincipalPolicy`. It permits
       `logs:DescribeLogGroups` on `*` and `logs:PutRetentionPolicy` only on
-      `arn:aws:logs:us-west-2:338414773271:log-group:/aws/apprunner/psd-eoc-exploration-smoke/*/application:*`
+      `arn:aws:logs:us-west-2:338414773271:log-group:/aws/apprunner/psd-eoc/*/application:*`
       and the corresponding `/service:*` ARN. Positive and neighboring-resource
       negative simulations must pass before provisioning.
 - [ ] The deployment role also permits `ecs:RunTask` only for the output
@@ -307,7 +307,7 @@ store, and notification actions are separate changes.
 - [ ] STS account, account alias, region, stack ID/status, and all resource
       physical IDs match the fixed boundary.
 - [ ] Every supported resource has `Environment=live-pilot` and
-      `DataClassification=staff-minimized`; physical exploration-smoke names
+      `DataClassification=staff-minimized`; physical names
       are retained only for compatibility.
 - [ ] ECR reports the exact requested manifest digest; App Runner has automatic
       deployment disabled and references `repository-uri@sha256:...` exactly.
