@@ -143,17 +143,28 @@ export async function bootstrapAccessConfiguration(
     return Object.freeze({ kind: 'not-configured' as const });
   }
 
-  const existing = await database
+  // Only an *active* access group counts as configured.
+  //
+  // This used to consider every row, active or not, so that configuration
+  // could never reopen a deployment a district had deliberately closed. But
+  // group_sources is append-only by trigger — DELETE is refused outright and
+  // provider locators are immutable — so an inactive row can never be removed.
+  // One bad row therefore blocked seeding permanently, and since roles derive
+  // from group membership and the page that manages access groups sits behind
+  // sign-in, the deployment became unrecoverable: nobody could sign in, and no
+  // supported path could create a group that worked.
+  //
+  // Deactivating every access group already means nobody can sign in, so
+  // seeding from configuration at that point restores the documented first-run
+  // recovery rather than widening access. It still only happens when the
+  // initial-group variables are set, which is opt-in per deployment.
+  const active = await database
     .select({ id: groupSources.id })
     .from(groupSources)
-    .where(eq(groupSources.purpose, 'access'));
-  if (existing.length > 0) {
-    const active = await database
-      .select({ id: groupSources.id })
-      .from(groupSources)
-      .where(
-        and(eq(groupSources.purpose, 'access'), eq(groupSources.active, true)),
-      );
+    .where(
+      and(eq(groupSources.purpose, 'access'), eq(groupSources.active, true)),
+    );
+  if (active.length > 0) {
     return Object.freeze({
       kind: 'already-configured' as const,
       activeGroupCount: active.length,
