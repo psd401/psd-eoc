@@ -118,15 +118,46 @@ describe('driver errors', () => {
     });
   }
 
-  test('recognizes a driver error by name or SQLSTATE', () => {
+  test('recognizes a driver error by name, or by SQLSTATE with severity', () => {
     expect(isDriverError(postgresError())).toBe(true);
     expect(
-      isDriverError(Object.assign(new Error('x'), { code: '42501' })),
+      isDriverError(
+        Object.assign(new Error('x'), { code: '42501', severity: 'ERROR' }),
+      ),
     ).toBe(true);
     expect(isDriverError(new Error('authored'))).toBe(false);
     expect(
       isDriverError(Object.assign(new Error('x'), { code: 'ECONNREFUSED' })),
     ).toBe(false);
+  });
+
+  test('never mistakes a Node errno code for a SQLSTATE', () => {
+    // These are all exactly five uppercase characters. Classifying one as a
+    // driver error would suppress the message naming the path or endpoint at
+    // fault, and this container runs on a read-only root filesystem reading a
+    // certificate by path, so they are reachable.
+    for (const code of [
+      'EPIPE',
+      'EPERM',
+      'EBUSY',
+      'EROFS',
+      'EBADF',
+      'EINTR',
+      'ESRCH',
+      'EXDEV',
+      'ENXIO',
+      'ELOOP',
+      'EIDRM',
+    ]) {
+      const error = Object.assign(new Error(`write ${code} /etc/rds-ca.pem`), {
+        code,
+      });
+
+      expect(isDriverError(error)).toBe(false);
+      expect(describeFailure(PREFIX, error)).toContain(
+        `message=write ${code} /etc/rds-ca.pem`,
+      );
+    }
   });
 
   test('reduces a driver error to allowlisted fields', () => {

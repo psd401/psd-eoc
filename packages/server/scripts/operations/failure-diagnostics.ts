@@ -50,14 +50,28 @@ function readString(source: object, key: string): string | undefined {
 }
 
 /**
- * Whether an error came from the database driver, and so must be reduced to
+ * Whether an error came from the database server, and so must be reduced to
  * allowlisted fields rather than described by its message.
+ *
+ * A SQLSTATE-shaped code is not sufficient on its own. Node's errno codes are
+ * the same five uppercase characters — EPIPE, EPERM, EBUSY, EROFS, EBADF,
+ * EINTR, ESRCH, EXDEV, ENXIO, ELOOP, EIDRM — and this container runs on a
+ * read-only root filesystem reading a certificate by path, so those are
+ * reachable. Treating one as a driver error would suppress a message that is
+ * both safe and the only thing naming the path or endpoint at fault, which is
+ * the diagnostic loss this module exists to prevent. Postgres always sends a
+ * severity with an error, and never a code beginning with `E`, so requiring a
+ * corroborating field separates the two spaces exactly.
  */
 export function isDriverError(error: object): boolean {
+  if (readString(error, 'name') === 'PostgresError') {
+    return true;
+  }
   const code = readString(error, 'code');
   return (
-    readString(error, 'name') === 'PostgresError' ||
-    (code !== undefined && SQLSTATE.test(code))
+    code !== undefined &&
+    SQLSTATE.test(code) &&
+    readString(error, 'severity') !== undefined
   );
 }
 
