@@ -16,6 +16,7 @@ import {
   type PostgresDatabaseConnection,
 } from '../../db/client';
 import {
+  facilities,
   groupMembers,
   accessMembershipSnapshots,
   groupSources,
@@ -283,7 +284,7 @@ describeWithDatabase('access-membership atomic database publication', () => {
       groupSourceId: string;
       groupEmail: string;
       googleGroupId: string;
-      grantedRole: 'staff' | 'admin';
+      grantedRole: 'staff' | 'admin' | null;
       memberEmails: readonly string[];
     }>[],
   ): EvaluatedAccessMembershipSet {
@@ -623,5 +624,214 @@ describeWithDatabase('access-membership atomic database publication', () => {
           .limit(1)
       )[0]?.version,
     ).toBe(1);
+  });
+  test('reads and publishes a building group alongside the access groups', async () => {
+    // The generalization: one sync fills membership for every active group,
+    // whatever its purpose. A school's staff group grants no role, so it can
+    // never widen who may sign in — only who an event at that school reaches.
+    const database = databaseConnection().db;
+    const store = createDrizzleAccessMembershipSyncStore(database);
+    const facilityId = randomUUID();
+    const buildingSourceId = randomUUID();
+    await database.insert(facilities).values({
+      id: facilityId,
+      code: 'SYNCTEST',
+      name: 'Sync Test School',
+    });
+    await database.insert(groupSources).values({
+      id: buildingSourceId,
+      kind: 'google-group',
+      purpose: 'building',
+      facilityId,
+      displayName: 'Sync Test School staff',
+      active: true,
+      grantedRole: null,
+      membersCapturedAt: null,
+      googleGroupId: 'sync_test_school_staff',
+      email: 'synctest-staff@example.invalid',
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+
+    const configured = await store.readConfiguredAccessGroups();
+    const building = configured.find(
+      ({ groupSourceId }) => groupSourceId === buildingSourceId,
+    );
+    expect(building).toBeDefined();
+    expect(building?.grantedRole).toBeNull();
+
+    // Publication revalidates each group against its stored provider id, so
+    // read them rather than assuming.
+    const providerIds = new Map(
+      (
+        await database
+          .select({
+            id: groupSources.id,
+            googleGroupId: groupSources.googleGroupId,
+          })
+          .from(groupSources)
+      ).map(({ id, googleGroupId }) => [id, googleGroupId ?? '']),
+    );
+    const reservation = await reserve(store, 'access-sync:building-0001');
+    if (reservation.kind !== 'reserved') throw new Error('expected reserved');
+    await store.publish(
+      reservation.id,
+      evaluationFor(
+        configured.map((group) => ({
+          groupSourceId: group.groupSourceId,
+          groupEmail: group.email,
+          googleGroupId: providerIds.get(group.groupSourceId) ?? '',
+          grantedRole: group.grantedRole,
+          memberEmails:
+            group.groupSourceId === buildingSourceId
+              ? ['schoolstaff@example.invalid']
+              : [RECOVERY_EMAIL],
+        })),
+      ),
+    );
+
+    // The building group's members landed, and its read was stamped.
+    const members = await database
+      .select({ email: groupMembers.email })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupSourceId, buildingSourceId));
+    expect(members.map(({ email }) => email)).toEqual([
+      'schoolstaff@example.invalid',
+    ]);
+    const [source] = await database
+      .select({ capturedAt: groupSources.membersCapturedAt })
+      .from(groupSources)
+      .where(eq(groupSources.id, buildingSourceId));
+    expect(source?.capturedAt).not.toBeNull();
+
+    // And it grants nobody sign-in, which is the property that lets one
+    // membership table serve both purposes.
+    expect(
+      await decideAccess(database, {
+        email: 'schoolstaff@example.invalid',
+        checkedAt: new Date(SYNC_TIME),
+      }),
+    ).toMatchObject({ granted: false });
+  });
+
+  test('the database refuses a group whose role does not match its purpose', async () => {
+    // A building group granting a role would silently widen who may sign in;
+    // an access group granting none would admit people to nothing. Both are
+    // refused by `group_sources_access_role_present`, which is why the sync
+    // does not check it again — the invariant has one home.
+    const database = databaseConnection().db;
+    const facilityId = randomUUID();
+    await database.insert(facilities).values({
+      id: facilityId,
+      code: 'BADROLE',
+      name: 'Bad Role School',
+    });
+
+    async function refusedBy(row: Record<string, unknown>): Promise<string> {
+      try {
+        await database.insert(groupSources).values(row as never);
+      } catch (error) {
+        // The constraint name is on the driver error, not the wrapper message.
+        return String(
+          Reflect.get(Object(error), 'constraint_name') ??
+            Reflect.get(
+              Object(Reflect.get(Object(error), 'cause')),
+              'constraint_name',
+            ) ??
+            Reflect.get(Object(error), 'message'),
+        );
+      }
+      throw new Error('the insert was accepted');
+    }
+
+    expect(
+      await refusedBy({
+        id: randomUUID(),
+        kind: 'google-group',
+        purpose: 'building',
+        facilityId,
+        displayName: 'Bad Role School staff',
+        active: true,
+        grantedRole: 'admin',
+        membersCapturedAt: null,
+        googleGroupId: 'bad_role_school_staff',
+        email: 'badrole-staff@example.invalid',
+        fixtureKey: null,
+        createdAt: BASELINE_TIME,
+      }),
+    ).toBe('group_sources_access_role_present');
+
+    expect(
+      await refusedBy({
+        id: randomUUID(),
+        kind: 'google-group',
+        purpose: 'access',
+        facilityId: null,
+        displayName: 'Roleless access group',
+        active: true,
+        grantedRole: null,
+        membersCapturedAt: null,
+        googleGroupId: 'roleless_access_group',
+        email: 'roleless@example.invalid',
+        fixtureKey: null,
+        createdAt: BASELINE_TIME,
+      }),
+    ).toBe('group_sources_access_role_present');
+  });
+
+  test('a building group stays immutable in every column but the read stamp', async () => {
+    // 0028 released exactly one column. If it released the guard instead, a
+    // building group could be repointed at a different provider group or a
+    // different school after schools had been notified from it.
+    const database = databaseConnection().db;
+    const facilityId = randomUUID();
+    const sourceId = randomUUID();
+    await database
+      .insert(facilities)
+      .values({ id: facilityId, code: 'IMMUT', name: 'Immutable School' });
+    await database.insert(groupSources).values({
+      id: sourceId,
+      kind: 'google-group',
+      purpose: 'building',
+      facilityId,
+      displayName: 'Immutable School staff',
+      active: true,
+      grantedRole: null,
+      membersCapturedAt: null,
+      googleGroupId: 'immutable_school_staff',
+      email: 'immutable-staff@example.invalid',
+      fixtureKey: null,
+      createdAt: BASELINE_TIME,
+    });
+
+    // Allowed: the one column the sync has to write.
+    await database
+      .update(groupSources)
+      .set({ membersCapturedAt: new Date(SYNC_TIME) })
+      .where(eq(groupSources.id, sourceId));
+    expect(
+      (
+        await database
+          .select({ capturedAt: groupSources.membersCapturedAt })
+          .from(groupSources)
+          .where(eq(groupSources.id, sourceId))
+      )[0]?.capturedAt,
+    ).not.toBeNull();
+
+    // Refused: everything else, still.
+    for (const change of [
+      { googleGroupId: 'a_different_google_group' },
+      { email: 'somewhere-else@example.invalid' },
+      { displayName: 'Renamed' },
+      { active: false },
+    ]) {
+      await expect(
+        (async () =>
+          database
+            .update(groupSources)
+            .set(change)
+            .where(eq(groupSources.id, sourceId)))(),
+      ).rejects.toThrow();
+    }
   });
 });
