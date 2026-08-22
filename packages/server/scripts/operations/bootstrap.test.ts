@@ -18,11 +18,7 @@ import {
   parseApplicationDatabaseSecretResponse,
 } from './application-secret';
 import { createRoleStatementExecutor, runBootstrap } from './bootstrap';
-import {
-  DATABASE_LOGIN,
-  DATABASE_ROLE,
-  readBootstrapConfig,
-} from './config';
+import { DATABASE_LOGIN, DATABASE_ROLE, readBootstrapConfig } from './config';
 
 const SOURCE_SHA = '1234567890abcdef1234567890abcdef12345678';
 const APPLICATION_SECRET_ARN =
