@@ -202,7 +202,12 @@ export async function bootstrapAccessConfiguration(
       displayName: configuration.displayName,
       active: true,
       grantedRole: 'admin',
-      googleGroupId: configuration.googleGroupId,
+      // Normalised again at the point the row is written, not only where the
+      // environment is read. A caller can hand this function a configuration
+      // object it built itself — the tests do — and a locator with the
+      // "groups/" prefix still on it is one the membership sync can never
+      // match, which is the failure this whole path exists to prevent.
+      googleGroupId: configuration.googleGroupId.replace(/^groups\//u, ''),
       email: configuration.email,
       fixtureKey: null,
     })
