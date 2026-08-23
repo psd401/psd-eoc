@@ -3,9 +3,7 @@ name: Mobile E2E
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-    types: [labeled, reopened, synchronize]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -29,7 +27,6 @@ env:
 jobs:
   ios:
     name: Maestro iOS (synthetic only)
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mobile-e2e')
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -93,7 +90,6 @@ jobs:
 
   android:
     name: Maestro Android (synthetic only)
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mobile-e2e')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:

@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [labeled, opened, reopened, synchronize]
   push:
     branches: [main]
 
@@ -374,3 +375,10 @@ jobs:
           grep -Fq '<string name="expo_system_ui_user_interface_style" translatable="false">light</string>' android/app/src/main/res/values/strings.xml
           grep -A1 -F '<key>UIUserInterfaceStyle</key>' ios/PSDEOC/Info.plist | grep -Fq '<string>Light</string>'
           grep -RFq --include='*.entitlements' '<key>aps-environment</key>' ios
+
+  native-e2e:
+    name: Opt-in native E2E
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mobile-e2e')
+    uses: ./.github/workflows/mobile-e2e.yml
+    permissions:
+      contents: read
