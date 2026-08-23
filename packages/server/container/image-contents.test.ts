@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 
 import { describe, expect, test } from 'bun:test';
 
@@ -7,10 +7,11 @@ import { describe, expect, test } from 'bun:test';
  * The server image is assembled from named files, not from the repository.
  *
  * `psd-eoc.Dockerfile` copies `packages/server`, `packages/contracts/src`, and
- * then two specific files out of `workers/`. Importing any other worker module
- * from the server compiles everywhere except inside the image, where the file
- * simply is not there — and the failure surfaces as a `next build` type error
- * during the deploy, after the image has already been building for a minute.
+ * then explicitly named files out of `workers/`. Importing another worker
+ * module directly or transitively compiles everywhere except inside the image,
+ * where the file simply is not there — and the failure surfaces as a
+ * `next build` error during the deploy, after the image has already been
+ * building for a minute.
  *
  * CI cannot catch this by building the server: it builds with the whole
  * repository checked out, so the import resolves. This checks the thing that
@@ -46,20 +47,62 @@ function sourceFiles(directory: string): readonly string[] {
   return found;
 }
 
-/** Every `workers/...` module the server reaches for, repository-relative. */
+function resolveWorkerModule(
+  importer: string,
+  specifier: string,
+): string | undefined {
+  const unresolved = specifier.startsWith('workers/')
+    ? join(REPOSITORY_ROOT, specifier)
+    : resolve(dirname(importer), specifier);
+  for (const candidate of [`${unresolved}.ts`, join(unresolved, 'index.ts')]) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/** Every `workers/...` module the server reaches, including transitive imports. */
 function importedWorkerModules(): readonly string[] {
-  const pattern = /from\s+'(?:\.\.\/)+(workers\/[A-Za-z0-9._/-]+)'/gu;
+  const directPattern = /from\s+'(?:\.\.\/)+(workers\/[A-Za-z0-9._/-]+)'/gu;
+  const relativePattern = /from\s+'(\.{1,2}\/[A-Za-z0-9._/-]+)'/gu;
   const modules = new Set<string>();
+  const pending: string[] = [];
   for (const file of sourceFiles(SERVER_ROOT)) {
     const contents = readFileSync(file, 'utf8');
-    for (const match of contents.matchAll(pattern)) {
+    for (const match of contents.matchAll(directPattern)) {
       const specifier = match[1];
-      if (specifier !== undefined) {
-        modules.add(specifier);
+      const moduleFile =
+        specifier === undefined
+          ? undefined
+          : resolveWorkerModule(file, specifier);
+      if (moduleFile !== undefined && !modules.has(moduleFile)) {
+        modules.add(moduleFile);
+        pending.push(moduleFile);
       }
     }
   }
-  return [...modules].sort();
+  while (pending.length > 0) {
+    const importer = pending.pop();
+    if (importer === undefined) {
+      continue;
+    }
+    const contents = readFileSync(importer, 'utf8');
+    for (const match of contents.matchAll(relativePattern)) {
+      const specifier = match[1];
+      const moduleFile =
+        specifier === undefined
+          ? undefined
+          : resolveWorkerModule(importer, specifier);
+      if (moduleFile !== undefined && !modules.has(moduleFile)) {
+        modules.add(moduleFile);
+        pending.push(moduleFile);
+      }
+    }
+  }
+  return [...modules]
+    .map((file) => relative(REPOSITORY_ROOT, file).replace(/\.ts$/u, ''))
+    .sort();
 }
 
 /** Every `workers/...` file the Dockerfile copies into the build stage. */
