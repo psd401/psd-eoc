@@ -301,8 +301,8 @@ async function readDatabaseEvidence(database: AdminQueryDatabase) {
       membersCapturedAt: Date | null;
     }>[],
     activeFacilityIds,
-    neighborhoodFacilityIds: neighborhoodRows.map(({ facilityId }) =>
-      String(facilityId),
+    neighborhoodFacilityIds: neighborhoodRows.map(
+      ({ facilityId }) => facilityId,
     ),
     audienceFacilityIds: audienceRows.map(({ facilityId }) => facilityId),
     latestRosterAttempt: latestRosterAttempt ?? null,
