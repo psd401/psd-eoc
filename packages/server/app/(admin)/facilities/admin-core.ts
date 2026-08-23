@@ -30,6 +30,7 @@ import {
 import {
   CapabilityEngineError,
   executeCapability,
+  preflightCapabilityInvocation,
   resolveHumanCapabilityInvocation,
   type CapabilityAuditEvent,
   type CapabilityEngineStore,
@@ -569,6 +570,35 @@ function getAdminCapabilityStoreBinding(
     );
   }
   return binding;
+}
+
+/**
+ * Validates a query and its exact request-bound store without opening a
+ * database transaction. Callers may use this before bounded provider reads;
+ * canonical capability execution must still follow for authorization/audit.
+ */
+export function preflightAdminQueryCapability<
+  Id extends RegisteredCapabilityId,
+>(
+  capabilityId: Id,
+  input: unknown,
+  authenticated: AuthenticatedSession,
+  store: AdminCapabilityStore,
+  metadata: AdminQueryMetadata = {},
+): CapabilityInput<Id> {
+  const binding = getAdminCapabilityStoreBinding(store);
+  if (binding.authenticated !== authenticated) {
+    throw new AdminCapabilityError(
+      'FORBIDDEN',
+      'The administrator query store is bound to a different session.',
+      403,
+    );
+  }
+  return preflightCapabilityInvocation(
+    capabilityId,
+    input,
+    queryInvocation(authenticated, metadata),
+  );
 }
 
 /**

@@ -22,12 +22,12 @@ interface NavDestination {
 const DESTINATIONS: readonly NavDestination[] = Object.freeze([
   { href: '/start', label: 'Start', adminOnly: false },
   { href: '/records', label: 'Records', adminOnly: false },
+  { href: '/admin', label: 'Readiness', adminOnly: true },
   { href: '/facilities', label: 'Schools', adminOnly: true },
   { href: '/event-types', label: 'Event types', adminOnly: true },
   { href: '/access', label: 'Access', adminOnly: true },
   { href: '/devices', label: 'Devices', adminOnly: true },
   { href: '/integrations', label: 'Integrations', adminOnly: true },
-  { href: '/emergency', label: 'Notifications', adminOnly: true },
   { href: '/audit', label: 'Audit', adminOnly: true },
 ]);
 
