@@ -156,7 +156,9 @@ jobs:
             -no-window \
             -noaudio \
             -no-boot-anim \
+            -no-metrics \
             -no-snapshot \
+            -partition-size 2048 \
             -gpu swiftshader_indirect \
             > "$RUNNER_TEMP/android-emulator.log" 2>&1 &
           if ! timeout 120s adb wait-for-device; then
