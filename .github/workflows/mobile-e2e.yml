@@ -130,14 +130,20 @@ jobs:
         run: |
           set -euo pipefail
           system_image='system-images;android-35;google_apis;x86_64'
-          sdkmanager --install "$system_image"
-          printf 'no\n' | avdmanager create avd \
+          sdkmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          avdmanager_bin="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          emulator_bin="$ANDROID_HOME/emulator/emulator"
+          test -x "$sdkmanager_bin"
+          test -x "$avdmanager_bin"
+          "$sdkmanager_bin" --install "$system_image"
+          test -x "$emulator_bin"
+          printf 'no\n' | "$avdmanager_bin" create avd \
             --force \
             --name issue32_api35 \
             --package "$system_image" \
             --device pixel_6
           sudo chmod 0666 /dev/kvm
-          emulator \
+          "$emulator_bin" \
             -avd issue32_api35 \
             -no-window \
             -noaudio \

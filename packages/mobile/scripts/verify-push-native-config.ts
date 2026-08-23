@@ -70,8 +70,11 @@ const reviewedNotificationModules = new Set([
   'expo-notifications/build/NotificationsEmitter',
   'expo-notifications/build/NotificationsHandler',
   'expo-notifications/build/TokenEmitter',
+  'expo-notifications/build/cancelAllScheduledNotificationsAsync',
+  'expo-notifications/build/dismissAllNotificationsAsync',
   'expo-notifications/build/getDevicePushTokenAsync',
   'expo-notifications/build/getNotificationChannelAsync',
+  'expo-notifications/build/scheduleNotificationAsync',
   'expo-notifications/build/setNotificationChannelAsync',
 ]);
 const runtimeGlob = new Bun.Glob('src/**/*.{ts,tsx}');
