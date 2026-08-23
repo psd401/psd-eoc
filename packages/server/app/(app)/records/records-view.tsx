@@ -3,6 +3,7 @@ import type {
   EventTypeListItem,
   Facility,
 } from '@psd-eoc/contracts';
+import Link from 'next/link';
 
 export interface RecordsFilters {
   readonly facilityId: string;
@@ -126,9 +127,9 @@ export function DrillRecordsView({
             event or sends a notification.
           </p>
         </div>
-        <a className="button button--secondary" href="/">
+        <Link className="button button--secondary" href="/">
           Back to active events
-        </a>
+        </Link>
       </header>
 
       <div className="records-classification" role="note">
