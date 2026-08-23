@@ -148,8 +148,8 @@ class SesWebhookRequestError extends Error {
 }
 
 class SesWebhookPersistenceError extends Error {
-  public constructor() {
-    super('The SES callback could not be persisted safely.');
+  public constructor(options?: ErrorOptions) {
+    super('The SES callback could not be persisted safely.', options);
     this.name = 'SesWebhookPersistenceError';
   }
 }
@@ -316,8 +316,8 @@ function readExpectedTopicArn(
   }
   try {
     parseSnsTopicArn(value);
-  } catch {
-    throw new SesWebhookPersistenceError();
+  } catch (cause) {
+    throw new SesWebhookPersistenceError({ cause });
   }
   return value;
 }

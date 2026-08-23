@@ -200,7 +200,7 @@ export function readDeploymentIdentity(node: {
   );
   if (!organizationName.success) {
     throw new Error(
-      'CDK context psdEoc:organizationName must be set for this deployment. See docs/guides/first-administrator.md.',
+      'CDK context psdEoc:organizationName must be a display-safe name of at most 160 UTF-16 code units and 320 UTF-8 bytes.',
     );
   }
   return Object.freeze({
