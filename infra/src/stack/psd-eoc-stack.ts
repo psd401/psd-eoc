@@ -524,6 +524,8 @@ export class PsdEocStack extends Stack {
       'DatabaseSecurityGroup',
       {
         allowAllOutbound: false,
+        // Also stale, and left for the same reason: two groups reach the writer
+        // now, not one. See the note on psd-eoc-application above.
         description:
           'Isolated Aurora; accepts native PostgreSQL only from the application/bootstrap security group.',
         vpc: network as unknown as ec2.IVpc,
@@ -534,6 +536,19 @@ export class PsdEocStack extends Stack {
       'ApplicationSecurityGroup',
       {
         allowAllOutbound: false,
+        // This description is stale and deliberately left alone: App Runner
+        // moved to psd-eoc-apprunner, so this group now serves the scheduled
+        // access-membership-sync task and one-off bootstrap runs only.
+        //
+        // GroupDescription requires replacement. Correcting the wording forces
+        // CloudFormation to replace this group *and* the database group beside
+        // it, which the live Aurora cluster is attached to — and `cdk diff`
+        // cannot even build a change set for it, so the real blast radius is
+        // unverifiable up front. Replacing the database's security group on a
+        // serving cluster is not a trade worth making for a sentence.
+        //
+        // Read the group names, not these descriptions: psd-eoc-application is
+        // the task path, psd-eoc-apprunner is the service path.
         description:
           'Native PostgreSQL and HTTPS egress only for App Runner and one-off bootstrap tasks.',
         securityGroupName: 'psd-eoc-application',
