@@ -32,6 +32,7 @@ const RETIRED_SCHOOL = randomUUID();
 const UNCONFIGURED_SCHOOL = randomUUID();
 
 const HIGH_GROUP = randomUUID();
+const HIGH_SYNTHETIC_GROUP = randomUUID();
 const MIDDLE_GROUP = randomUUID();
 const LONE_GROUP = randomUUID();
 const RETIRED_GROUP = randomUUID();
@@ -126,6 +127,22 @@ describeWithDatabase('event recipient resolution from the domain', () => {
 
     await opened.db.insert(groupSources).values([
       buildingGroup(HIGH_GROUP, HIGH_SCHOOL, true, READ_RECENTLY),
+      // A synthetic population for the same school. This is what the health
+      // check and integrations test mode address, and it must be invisible to
+      // a staff activation.
+      {
+        id: HIGH_SYNTHETIC_GROUP,
+        kind: 'synthetic' as const,
+        purpose: 'building' as const,
+        facilityId: HIGH_SCHOOL,
+        displayName: 'High School synthetic',
+        active: true,
+        grantedRole: null,
+        membersCapturedAt: READ_RECENTLY,
+        googleGroupId: null,
+        email: null,
+        fixtureKey: 'high-school-synthetic',
+      },
       buildingGroup(MIDDLE_GROUP, MIDDLE_SCHOOL, true, READ_LONG_AGO),
       buildingGroup(LONE_GROUP, LONE_SCHOOL, true, null),
       buildingGroup(RETIRED_GROUP, RETIRED_SCHOOL, false, READ_RECENTLY),
@@ -156,6 +173,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
       { groupSourceId: MIDDLE_GROUP, email: 'counselor@example.invalid' },
       { groupSourceId: LONE_GROUP, email: 'lonestaff@example.invalid' },
       { groupSourceId: RETIRED_GROUP, email: 'formerstaff@example.invalid' },
+      { groupSourceId: HIGH_SYNTHETIC_GROUP, email: 'canary@example.invalid' },
       // An administrator who is in no building group at all.
       { groupSourceId: ACCESS_GROUP, email: 'superintendent@example.invalid' },
     ]);
@@ -169,6 +187,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: HIGH_SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     expect(result.emails).toEqual([
@@ -184,6 +203,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: HIGH_SCHOOL,
       reach: 'neighborhood',
+      population: 'staff',
     });
 
     // Version 2 is current and holds high + middle. The lone school was in
@@ -199,6 +219,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: HIGH_SCHOOL,
       reach: 'neighborhood',
+      population: 'staff',
     });
 
     expect(result.emails).toEqual([
@@ -218,6 +239,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
       const result = await resolveEventRecipients(database(), {
         facilityId: HIGH_SCHOOL,
         reach,
+        population: 'staff',
       });
       expect(result.emails).not.toContain('superintendent@example.invalid');
       expect(
@@ -230,6 +252,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: RETIRED_SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     expect(result.emails).toEqual([]);
@@ -241,6 +264,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: UNCONFIGURED_SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     expect(result.emails).toEqual([]);
@@ -252,6 +276,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: HIGH_SCHOOL,
       reach: 'neighborhood',
+      population: 'staff',
     });
 
     // High was read a minute ago, middle 30 hours ago. The person confirming
@@ -268,6 +293,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: MIDDLE_SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     expect(result.emails).toEqual([
@@ -283,6 +309,7 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: LONE_SCHOOL,
       reach: 'building',
+      population: 'staff',
     });
 
     // Members exist because a fixture wrote them, but the group has never been
@@ -295,11 +322,58 @@ describeWithDatabase('event recipient resolution from the domain', () => {
     const result = await resolveEventRecipients(database(), {
       facilityId: LONE_SCHOOL,
       reach: 'neighborhood',
+      population: 'staff',
     });
 
     expect(result.facilities.map(({ facilityId }) => facilityId)).toEqual([
       LONE_SCHOOL,
     ]);
     expect(result.emails).toEqual(['lonestaff@example.invalid']);
+  });
+
+  test('a staff activation cannot see a synthetic member', async () => {
+    // The binding `EventTargetingSchema` makes in the contract, enforced by the
+    // query rather than downstream: a staff event never reads a synthetic
+    // source, so a synthetic address cannot appear in a real consequence
+    // preview even by mistake.
+    const result = await resolveEventRecipients(database(), {
+      facilityId: HIGH_SCHOOL,
+      reach: 'building',
+      population: 'staff',
+    });
+
+    expect(result.emails).not.toContain('canary@example.invalid');
+    expect(result.facilities.map(({ groupSourceId }) => groupSourceId)).toEqual(
+      [HIGH_GROUP],
+    );
+  });
+
+  test('a synthetic activation cannot see a real staff member', async () => {
+    // The half that actually protects people: the health check exercises this
+    // path continuously, and it must not be able to reach a real address.
+    const result = await resolveEventRecipients(database(), {
+      facilityId: HIGH_SCHOOL,
+      reach: 'building',
+      population: 'synthetic',
+    });
+
+    expect(result.emails).toEqual(['canary@example.invalid']);
+    expect(result.emails).not.toContain('principal@example.invalid');
+    expect(result.emails).not.toContain('teacher@example.invalid');
+    expect(result.facilities.map(({ groupSourceId }) => groupSourceId)).toEqual(
+      [HIGH_SYNTHETIC_GROUP],
+    );
+  });
+
+  test('a school with no synthetic group resolves to nobody, not to its staff', async () => {
+    // Failing open here would point the health check at real staff.
+    const result = await resolveEventRecipients(database(), {
+      facilityId: MIDDLE_SCHOOL,
+      reach: 'building',
+      population: 'synthetic',
+    });
+
+    expect(result.emails).toEqual([]);
+    expect(result.unconfiguredFacilityIds).toEqual([MIDDLE_SCHOOL]);
   });
 });
