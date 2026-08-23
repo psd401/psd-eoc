@@ -468,7 +468,9 @@ describe('minimal isolated resource shape', () => {
     template.resourceCountIs('AWS::Lambda::Function', 3);
     template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
 
-    template.resourceCountIs('AWS::EC2::SecurityGroup', 2);
+    // Three: the database, the shared bootstrap-task group, and the App Runner
+    // connector's own group.
+    template.resourceCountIs('AWS::EC2::SecurityGroup', 3);
     const securityGroups = resourceEntries('AWS::EC2::SecurityGroup');
     const databaseSecurityGroup = securityGroups.find(([, resource]) =>
       String(properties(resource).GroupDescription).startsWith(
@@ -491,24 +493,49 @@ describe('minimal isolated resource shape', () => {
       'GroupName',
     );
 
-    const ingress = properties(onlyResource('AWS::EC2::SecurityGroupIngress'));
-    expect(ingress.FromPort).toBe(DATABASE_PORT);
-    expect(ingress.ToPort).toBe(DATABASE_PORT);
-    expect(ingress.IpProtocol).toBe('tcp');
-    expect(JSON.stringify(ingress.GroupId)).toContain(databaseSecurityGroup[0]);
-    expect(JSON.stringify(ingress.SourceSecurityGroupId)).toContain(
-      applicationSecurityGroup[0],
+    // Two now, not one: the shared bootstrap-task group and the App Runner
+    // connector's own group each reach the writer. Both must be the database
+    // port from a named group — never a CIDR.
+    const ingressRules = Object.values(
+      template.findResources('AWS::EC2::SecurityGroupIngress'),
+    ).map(
+      (resource) =>
+        (resource as { Properties: Record<string, unknown> }).Properties,
     );
-    expect(ingress).not.toHaveProperty('CidrIp');
+    expect(ingressRules).toHaveLength(2);
+    for (const ingress of ingressRules) {
+      expect(ingress.FromPort).toBe(DATABASE_PORT);
+      expect(ingress.ToPort).toBe(DATABASE_PORT);
+      expect(ingress.IpProtocol).toBe('tcp');
+      expect(JSON.stringify(ingress.GroupId)).toContain(
+        databaseSecurityGroup[0],
+      );
+      expect(ingress).not.toHaveProperty('CidrIp');
+    }
+    const ingressSources = JSON.stringify(
+      ingressRules.map((rule) => rule.SourceSecurityGroupId),
+    );
+    expect(ingressSources).toContain(applicationSecurityGroup[0]);
+    expect(ingressSources).toContain('AppRunnerConnectorSecurityGroup');
 
-    const databaseEgress = properties(
-      onlyResource('AWS::EC2::SecurityGroupEgress'),
-    );
-    expect(databaseEgress.FromPort).toBe(DATABASE_PORT);
-    expect(databaseEgress.ToPort).toBe(DATABASE_PORT);
-    expect(JSON.stringify(databaseEgress.DestinationSecurityGroupId)).toContain(
-      databaseSecurityGroup[0],
-    );
+    // Also two: each group that reaches the writer has its own egress rule to
+    // it. Every one must be the database port to the database group, so neither
+    // path can be widened without this failing.
+    const databaseEgressRules = Object.values(
+      template.findResources('AWS::EC2::SecurityGroupEgress'),
+    )
+      .map(
+        (resource) =>
+          (resource as { Properties: Record<string, unknown> }).Properties,
+      )
+      .filter((rule) => rule.FromPort === DATABASE_PORT);
+    expect(databaseEgressRules).toHaveLength(2);
+    for (const databaseEgress of databaseEgressRules) {
+      expect(databaseEgress.ToPort).toBe(DATABASE_PORT);
+      expect(
+        JSON.stringify(databaseEgress.DestinationSecurityGroupId),
+      ).toContain(databaseSecurityGroup[0]);
+    }
   });
 
   it('generates credentials and stores the NoEcho bootstrap identity as JSON', () => {
@@ -618,7 +645,7 @@ describe('App Runner runtime safety boundary', () => {
     expect(serviceProperties.Tags).toEqual([
       {
         Key: 'Application',
-        Value: 'PSD EOC Exploration Smoke',
+        Value: 'PSD EOC',
       },
       {
         Key: 'DataClassification',
@@ -657,13 +684,20 @@ describe('App Runner runtime safety boundary', () => {
       'DatabaseNetworkApplicationSubnet2',
     );
     expect(asArray(connector.SecurityGroups)).toHaveLength(1);
+    // Its own group, not the one the bootstrap tasks share. App Runner refuses
+    // to create a connector whose subnet and security-group combination matches
+    // an existing one, so sharing made the live connector collide with its own
+    // replacement and nothing about it could be edited without deleting it.
     expect(JSON.stringify(connector.SecurityGroups)).toContain(
+      'AppRunnerConnectorSecurityGroup',
+    );
+    expect(JSON.stringify(connector.SecurityGroups)).not.toContain(
       'ApplicationSecurityGroup',
     );
     expect(connector.Tags).toEqual([
       {
         Key: 'Application',
-        Value: 'PSD EOC Exploration Smoke',
+        Value: 'PSD EOC',
       },
       {
         Key: 'DataClassification',

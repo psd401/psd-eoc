@@ -853,27 +853,64 @@ export class PsdEocStack extends Stack {
       'GoogleGroupsSecret',
       googleGroupsSecretArn.valueAsString,
     );
+    // The connector gets its own security group rather than sharing the one the
+    // bootstrap tasks use.
+    //
+    // App Runner treats a VPC connector as immutable — any change replaces it —
+    // and it refuses to create a replacement whose subnet and security-group
+    // combination matches a connector that already exists. Sharing a group with
+    // the bootstrap tasks therefore made the live connector collide with its own
+    // replacement, so nothing about it could ever be edited without first
+    // deleting it and taking the running service's network down with it. That
+    // is what pinned a stale tag onto this stack for two days.
+    //
+    // Separate groups also describe the two egress paths honestly: they happen
+    // to need the same rules today, but a one-off migration task and a
+    // continuously running web service are not the same trust boundary.
+    const appRunnerConnectorSecurityGroup = new ec2.SecurityGroup(
+      this,
+      'AppRunnerConnectorSecurityGroup',
+      {
+        allowAllOutbound: false,
+        description:
+          'Native PostgreSQL and HTTPS egress for the App Runner service.',
+        securityGroupName: 'psd-eoc-apprunner',
+        vpc: network as unknown as ec2.IVpc,
+      },
+    );
+    appRunnerConnectorSecurityGroup.addEgressRule(
+      databaseSecurityGroup,
+      ec2.Port.tcp(DATABASE_PORT),
+      'Native PostgreSQL TLS to the isolated Aurora writer only.',
+    );
+    appRunnerConnectorSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS through the NAT gateway for Google OAuth and AWS dependencies.',
+    );
+    databaseSecurityGroup.addIngressRule(
+      appRunnerConnectorSecurityGroup,
+      ec2.Port.tcp(DATABASE_PORT),
+      'Native PostgreSQL TLS from the App Runner service only.',
+    );
     const appRunnerVpcConnector = new apprunner.CfnVpcConnector(
       this,
       'AppRunnerVpcConnector',
       {
-        securityGroups: [applicationSecurityGroup.securityGroupId],
+        securityGroups: [appRunnerConnectorSecurityGroup.securityGroupId],
         subnets: applicationSubnets.subnetIds,
-        vpcConnectorName: 'psd-eoc-vpc',
+        // Not 'psd-eoc-vpc'. App Runner creates the replacement before deleting
+        // the original, so a connector being replaced collides with its own
+        // name. Renaming it alongside the dedicated security group breaks that,
+        // and 'psd-eoc-apprunner' says what it actually connects.
+        vpcConnectorName: 'psd-eoc-apprunner',
       },
     );
-    // Deliberately still 'PSD EOC Exploration Smoke', and the only place that
-    // name survives. App Runner replaces a VPC connector when its tags change
-    // and then rejects the replacement, because a connector with the same
-    // subnet/security-group combination already exists — the live one. Editing
-    // this string therefore cannot be done in place: it needs the connector
-    // deleted first, which takes the service's network with it and means a
-    // production outage for a metadata value. Tried on 2026-08-22, rolled back.
-    Tags.of(appRunnerVpcConnector).add(
-      'Application',
-      'PSD EOC Exploration Smoke',
-      { priority: 300 },
-    );
+    // Editable at last: the connector's replacement no longer collides with the
+    // live one now that it carries its own security group.
+    Tags.of(appRunnerVpcConnector).add('Application', 'PSD EOC', {
+      priority: 300,
+    });
     Tags.of(appRunnerVpcConnector).add('DataClassification', 'synthetic-only', {
       priority: 300,
     });
@@ -1341,10 +1378,9 @@ export class PsdEocStack extends Stack {
       },
     );
     appRunnerService.cfnOptions.condition = shouldProvisionApplication;
-    // Same constraint as the VPC connector above, and the same reason this
-    // still reads 'Exploration Smoke': App Runner replaces a service when its
-    // tags change, and the replacement collides with the live connector.
-    Tags.of(appRunnerService).add('Application', 'PSD EOC Exploration Smoke', {
+    // Same constraint as the VPC connector above: App Runner replaces the
+    // service when its tags change, so this was retired in the same outage.
+    Tags.of(appRunnerService).add('Application', 'PSD EOC', {
       priority: 300,
     });
     Tags.of(appRunnerService).add('DataClassification', 'synthetic-only', {
