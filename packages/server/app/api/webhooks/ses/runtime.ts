@@ -42,10 +42,12 @@ import {
   SnsSignatureError,
   canonicalSnsEnvelopeDigest,
   parseSnsEnvelope,
+  parseSnsTopicArn,
   verifySnsSignature,
   type SnsNotificationEnvelope,
 } from '../../../../../../workers/email/sns-signature';
 import {
+  SES_CONFIGURATION_SET_NAME,
   parseSesEvent,
   type ParsedSesEvent,
 } from '../../../../../../workers/email/ses-events';
@@ -53,14 +55,6 @@ import {
 export const SES_SNS_TOPIC_ARN_ENV = 'PSD_EOC_SES_SNS_TOPIC_ARN' as const;
 export const SES_WEBHOOK_MAX_BODY_BYTES = 512 * 1024;
 
-/**
- * The one SNS topic this webhook accepts, matched by shape rather than pinned
- * to one district's account and region. Which topic exactly is still pinned —
- * by `PSD_EOC_SES_SNS_TOPIC_ARN`, checked against this — so a notification from
- * any other topic is still refused.
- */
-const EXPECTED_TOPIC_ARN =
-  /^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$/u;
 const CALLBACK_LEASE_MILLISECONDS = 5 * 60_000;
 const CALLBACK_LOCK_NAMESPACE = 4_013;
 const CALLBACK_GENERATION_WIDTH = 6;
@@ -317,7 +311,12 @@ function readExpectedTopicArn(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
   const value = environment[SES_SNS_TOPIC_ARN_ENV];
-  if (value === undefined || !EXPECTED_TOPIC_ARN.test(value)) {
+  if (value === undefined) {
+    throw new SesWebhookPersistenceError();
+  }
+  try {
+    parseSnsTopicArn(value);
+  } catch {
     throw new SesWebhookPersistenceError();
   }
   return value;
@@ -392,6 +391,13 @@ function authorizeWebhookCapability(
   >,
 ): void {
   const context = request.context;
+  let topicArnValid = false;
+  try {
+    parseSnsTopicArn(context.topicArn);
+    topicArnValid = true;
+  } catch {
+    topicArnValid = false;
+  }
   const baseAllowed =
     (request.definition.id === 'record-delivery-evidence' ||
       request.definition.id === 'record-endpoint-status') &&
@@ -407,7 +413,7 @@ function authorizeWebhookCapability(
     context.source === 'webhook' &&
     context.transport === 'webhook-delivery' &&
     context.signatureVerified === true &&
-    EXPECTED_TOPIC_ARN.test(context.topicArn) &&
+    topicArnValid &&
     UuidSchema.safeParse(context.snsMessageId).success &&
     context.attempt.channel === 'email';
   if (!baseAllowed) {
@@ -578,6 +584,8 @@ export function createSesWebhookRouteHandler(
     let event: ParsedSesEvent;
     try {
       event = parseSesEvent(envelope.Message, {
+        expectedConfigurationSetName: SES_CONFIGURATION_SET_NAME,
+        expectedSendingAccountId: parseSnsTopicArn(expectedTopicArn).accountId,
         snsMessageId: envelope.MessageId,
       });
     } catch {

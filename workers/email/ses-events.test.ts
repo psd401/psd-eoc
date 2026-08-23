@@ -14,6 +14,7 @@ import {
 import { SesEventError, parseSesEvent } from './ses-events';
 
 const SNS_MESSAGE_ID = '20000000-0000-4000-8000-000000000001';
+const SES_ACCOUNT_ID = '000000000000';
 const SES_MESSAGE_ID = '0101010198f-synthetic-provider-id';
 const EVENT_TIME = '2026-08-11T20:30:00.000Z';
 
@@ -33,8 +34,8 @@ function sesEvent(
     mail: {
       timestamp: EVENT_TIME,
       messageId: SES_MESSAGE_ID,
-      source: 'synthetic-sender@alerts.psd401.net',
-      sendingAccountId: '<aws-account-id>',
+      source: 'synthetic-sender@alerts.example.invalid',
+      sendingAccountId: SES_ACCOUNT_ID,
       destination: ['private-recipient@example.invalid'],
       tags: {
         'ses:configuration-set': [SES_CONFIGURATION_SET_NAME],
@@ -52,7 +53,11 @@ function sesEvent(
 }
 
 function parse(message: string) {
-  return parseSesEvent(message, { snsMessageId: SNS_MESSAGE_ID });
+  return parseSesEvent(message, {
+    expectedConfigurationSetName: SES_CONFIGURATION_SET_NAME,
+    expectedSendingAccountId: SES_ACCOUNT_ID,
+    snsMessageId: SNS_MESSAGE_ID,
+  });
 }
 
 describe('signed SES configuration-set event mapping', () => {
@@ -237,22 +242,10 @@ describe('signed SES configuration-set event mapping', () => {
     real.mail.tags[SES_CORRELATION_TAG_NAMES.templateMode] = ['real'];
     real.mail.tags[SES_CORRELATION_TAG_NAMES.eventKind] = ['incident'];
 
-    expect(
-      parseSesEvent(JSON.stringify(drill), { snsMessageId: SNS_MESSAGE_ID })
-        .templateMode,
-    ).toBe('drill');
-    expect(
-      parseSesEvent(JSON.stringify(real), { snsMessageId: SNS_MESSAGE_ID })
-        .templateMode,
-    ).toBe('real');
-    expect(
-      parseSesEvent(JSON.stringify(drill), { snsMessageId: SNS_MESSAGE_ID })
-        .eventKind,
-    ).toBe('test');
-    expect(
-      parseSesEvent(JSON.stringify(real), { snsMessageId: SNS_MESSAGE_ID })
-        .eventKind,
-    ).toBe('incident');
+    expect(parse(JSON.stringify(drill)).templateMode).toBe('drill');
+    expect(parse(JSON.stringify(real)).templateMode).toBe('real');
+    expect(parse(JSON.stringify(drill)).eventKind).toBe('test');
+    expect(parse(JSON.stringify(real)).eventKind).toBe('incident');
   });
 
   test('rejects missing, duplicated, malformed, or cross-account correlation tags', () => {
@@ -294,7 +287,7 @@ describe('signed SES configuration-set event mapping', () => {
     wrongConfigurationSet.mail.tags['ses:configuration-set'] = ['other'];
     candidates.push(wrongConfigurationSet);
     const wrongAccount = structuredClone(base);
-    wrongAccount.mail.sendingAccountId = '000000000000';
+    wrongAccount.mail.sendingAccountId = '111111111111';
     candidates.push(wrongAccount);
 
     for (const candidate of candidates) {
@@ -317,7 +310,11 @@ describe('signed SES configuration-set event mapping', () => {
       ),
     ).toThrow(expect.objectContaining({ code: 'INVALID_MESSAGE' }));
     expect(() =>
-      parseSesEvent(sesEvent('Send', {}), { snsMessageId: 'not-a-uuid' }),
+      parseSesEvent(sesEvent('Send', {}), {
+        expectedConfigurationSetName: SES_CONFIGURATION_SET_NAME,
+        expectedSendingAccountId: SES_ACCOUNT_ID,
+        snsMessageId: 'not-a-uuid',
+      }),
     ).toThrow(expect.objectContaining({ code: 'INVALID_MESSAGE' }));
   });
 });
