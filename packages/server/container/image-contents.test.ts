@@ -23,6 +23,10 @@ const DOCKERFILE = join(
   'packages/server/container/psd-eoc.Dockerfile',
 );
 
+function dockerfileText(): string {
+  return readFileSync(DOCKERFILE, 'utf8');
+}
+
 const SKIP_DIRECTORIES = new Set(['node_modules', '.next', 'dist', 'coverage']);
 const SOURCE_SUFFIXES = ['.ts', '.tsx', '.mts', '.cts'];
 
@@ -60,7 +64,7 @@ function importedWorkerModules(): readonly string[] {
 
 /** Every `workers/...` file the Dockerfile copies into the build stage. */
 function copiedWorkerFiles(): readonly string[] {
-  const dockerfile = readFileSync(DOCKERFILE, 'utf8');
+  const dockerfile = dockerfileText();
   const copied = new Set<string>();
   for (const line of dockerfile.split('\n')) {
     if (!line.startsWith('COPY ')) {
@@ -76,6 +80,20 @@ function copiedWorkerFiles(): readonly string[] {
 }
 
 describe('server image contents', () => {
+  test('uses configured source metadata and project-neutral label keys', () => {
+    const dockerfile = dockerfileText();
+
+    expect(dockerfile).toContain('ARG SOURCE_REPOSITORY_URL');
+    expect(dockerfile).toContain(
+      'org.opencontainers.image.source="$SOURCE_REPOSITORY_URL"',
+    );
+    expect(dockerfile).toContain('org.psd-eoc.environment="live-pilot"');
+    expect(dockerfile).toContain(
+      'org.psd-eoc.data-classification="staff-minimized"',
+    );
+    expect(dockerfile).not.toMatch(/psd401|<aws-account-id>/iu);
+  });
+
   test('every worker module the server imports is copied into the image', () => {
     const copied = copiedWorkerFiles();
     expect(copied.length).toBeGreaterThan(0);

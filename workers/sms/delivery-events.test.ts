@@ -35,10 +35,10 @@ const IDS = Object.freeze({
 const NOW = new Date('2026-08-11T18:00:00.000Z');
 const OCCURRED_AT = new Date('2026-08-11T17:59:00.000Z').getTime();
 const CONFIGURATION = Object.freeze({
-  accountId: '<aws-account-id>',
-  region: 'us-west-2',
+  accountId: '000000000000',
+  region: 'us-east-1',
   eventBridgeRuleArn:
-    'arn:aws:events:us-west-2:<aws-account-id>:rule/psd-eoc-sms-delivery',
+    'arn:aws:events:us-east-1:000000000000:rule/psd-eoc-sms-delivery',
   clock: () => new Date(NOW),
 });
 const TRUSTED_INVOCATION = Symbol('trusted-eventbridge-invocation');
@@ -221,7 +221,7 @@ describe('AWS EUM SMS delivery event truth mapping', () => {
 
     expect(() =>
       parseAwsEumSmsDeliveryEvent(
-        deliveryEvent('DELIVERED', { account: '000000000000' }),
+        deliveryEvent('DELIVERED', { account: '111111111111' }),
         CONFIGURATION,
       ),
     ).toThrow(AwsEumSmsDeliveryEventError);
@@ -458,7 +458,7 @@ describe('SMS delivery event processor', () => {
         invocation: {
           ...INVOCATION,
           ruleArn:
-            'arn:aws:events:us-west-2:<aws-account-id>:rule/forged-sms-delivery',
+            'arn:aws:events:us-east-1:000000000000:rule/forged-sms-delivery',
         },
         authorize: authorizeInvocation,
       },

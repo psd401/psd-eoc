@@ -179,10 +179,11 @@ describe('deployment boundary', () => {
     expect(dockerfile).toContain(
       'org.opencontainers.image.title="PSD EOC live pilot"',
     );
-    expect(dockerfile).toContain('net.psd401.environment="live-pilot"');
+    expect(dockerfile).toContain('org.psd-eoc.environment="live-pilot"');
     expect(dockerfile).toContain(
-      'net.psd401.data-classification="staff-minimized"',
+      'org.psd-eoc.data-classification="staff-minimized"',
     );
+    expect(dockerfile).not.toMatch(/psd401|<aws-account-id>/iu);
     expect(dockerfile).not.toContain('synthetic-only');
   });
 

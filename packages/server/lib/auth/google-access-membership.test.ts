@@ -40,7 +40,7 @@ function configuration(
 ): GoogleCloudIdentityRosterConfiguration {
   return Object.freeze({
     serviceAccountEmail:
-      'roster-sync-reader@psd401-eoc.iam.gserviceaccount.com',
+      'roster-sync-reader@example-eoc-project.iam.gserviceaccount.com',
     privateKeyId: 'a'.repeat(40),
     privateKey: syntheticPrivateKey,
     timeoutMilliseconds,
