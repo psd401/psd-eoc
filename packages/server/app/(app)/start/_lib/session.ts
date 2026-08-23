@@ -11,7 +11,7 @@ import { authenticateWebSession } from '../../../../lib/auth/request-session';
 
 /** Resolves a fresh server-side session without any Google dependency. */
 export async function requirePageSession(
-  returnTo: '/' | StartFlowReturnPath,
+  returnTo: '/' | '/start' | StartFlowReturnPath,
 ): Promise<AuthenticatedSession> {
   const token = (await cookies()).get(WEB_SESSION_COOKIE_NAME)?.value;
   if (token === undefined) {

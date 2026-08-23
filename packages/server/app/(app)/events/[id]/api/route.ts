@@ -19,7 +19,10 @@ import {
 } from '../../../../../lib/capabilities/engine';
 import { getDefaultEventRoomCapabilityRuntime } from '../../../../../lib/capabilities/event-room';
 import { getDefaultEventCapabilityRuntime } from '../../../../../lib/capabilities/events';
-import { getDefaultJournalCapabilityRuntime } from '../../../../../lib/capabilities/journal';
+import {
+  EVENT_CONFIRMATION_PHRASES,
+  getDefaultJournalCapabilityRuntime,
+} from '../../../../../lib/capabilities/journal';
 import { eventApiErrorResponse } from '../../../../api/events/_lib/http';
 
 const JSON_MEDIA_TYPE = 'application/json';
@@ -505,11 +508,7 @@ async function handleMutation(
   }
 
   if (operation === 'all-clear') {
-    assertOnlyKeys(body, [
-      'operation',
-      'lifecyclePreviewId',
-      'confirmationPhrase',
-    ]);
+    assertOnlyKeys(body, ['operation', 'lifecyclePreviewId']);
     const lifecyclePreviewId = requiredString(
       body,
       'lifecyclePreviewId',
@@ -520,11 +519,7 @@ async function handleMutation(
       eventId,
       action: 'all-clear',
       lifecyclePreviewId,
-      confirmationPhrase: requiredString(
-        body,
-        'confirmationPhrase',
-        'The all-clear confirmation phrase is required.',
-      ),
+      confirmationPhrase: EVENT_CONFIRMATION_PHRASES['all-clear'],
       requestId,
       now: serverTime,
     });
@@ -559,17 +554,13 @@ async function handleMutation(
   }
 
   if (operation === 'close') {
-    assertOnlyKeys(body, ['operation', 'confirmationPhrase']);
+    assertOnlyKeys(body, ['operation']);
     const confirmation = await journalRuntime.issueHumanConfirmation({
       authenticated,
       eventId,
       action: 'close',
       lifecyclePreviewId: null,
-      confirmationPhrase: requiredString(
-        body,
-        'confirmationPhrase',
-        'The close confirmation phrase is required.',
-      ),
+      confirmationPhrase: EVENT_CONFIRMATION_PHRASES.close,
       requestId,
       now: serverTime,
     });

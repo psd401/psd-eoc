@@ -1,25 +1,16 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
-import { PrimaryNav } from '../../nav/primary-nav';
+import '../facilities/styles.css';
+import { OperatorShell } from '../../nav/operator-shell';
 
 export const metadata: Metadata = {
-  title: 'Device sessions | PSD EOC',
-  description: 'Review and revoke staff device sessions for PSD EOC.',
+  title: 'Device sessions | Emergency operations',
+  description: 'Review and revoke staff device sessions.',
 };
 
 export default function DevicesRootLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
-  return (
-    <html lang="en">
-      <body>
-        <a className="skip-link" href="#main-content">
-          Skip to main content
-        </a>
-        <PrimaryNav />
-        {children}
-      </body>
-    </html>
-  );
+  return <OperatorShell>{children}</OperatorShell>;
 }

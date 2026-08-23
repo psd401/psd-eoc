@@ -371,20 +371,6 @@ summary:focus-visible,
   outline-offset: 0.15rem;
 }
 
-.skip-link {
-  position: absolute;
-  z-index: 10;
-  top: -5rem;
-  left: 0.75rem;
-  background: #fff;
-  color: #0f172a;
-  padding: 0.75rem;
-}
-
-.skip-link:focus {
-  top: 0.75rem;
-}
-
 @media (max-width: 46rem) {
   main {
     width: min(100% - 1rem, 96rem);

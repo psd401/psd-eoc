@@ -4,8 +4,8 @@ import { redirect } from 'next/navigation';
 import {
   WEB_CSRF_COOKIE_NAME,
   WEB_SESSION_COOKIE_NAME,
-  getDefaultSessionService,
 } from '../../../lib/auth/sessions';
+import { authenticateWebSession } from '../../../lib/auth/request-session';
 import { executeListGroupSourcesCapability } from '../facilities/capabilities';
 import { AdminCapabilityError } from '../facilities/admin-core';
 import { AccessAdminView, NON_ADMIN_ACCESS_VIEW } from './access-admin-view';
@@ -32,10 +32,7 @@ export default async function AccessPage({
   }
   let authenticated;
   try {
-    authenticated = await getDefaultSessionService().authenticate(
-      sessionToken,
-      'web',
-    );
+    authenticated = await authenticateWebSession(sessionToken);
   } catch {
     redirect('/login?reason=session-expired');
   }

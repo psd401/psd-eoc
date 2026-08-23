@@ -167,9 +167,7 @@ interface DeliveryTestPreviewConfirmationProps {
   readonly activateOutcomeUnknown: boolean;
   readonly activatePending: boolean;
   readonly activated: boolean;
-  readonly humanChecked: boolean;
   readonly onActivate: () => void;
-  readonly onHumanCheckedChange: (checked: boolean) => void;
   readonly preview: DeliveryTestPreview;
 }
 
@@ -178,12 +176,18 @@ export function DeliveryTestPreviewConfirmation({
   activateOutcomeUnknown,
   activatePending,
   activated,
-  humanChecked,
   onActivate,
-  onHumanCheckedChange,
   preview,
 }: DeliveryTestPreviewConfirmationProps) {
   const previewReady = canActivateDeliveryTest(preview);
+  const channelSummary = preview.channels
+    .map(
+      (channel) =>
+        `${channelLabel(channel.channel)} (${channel.endpointCount} endpoint${
+          channel.endpointCount === 1 ? '' : 's'
+        })`,
+    )
+    .join(', ');
   return (
     <section
       className="panel delivery-test-drill"
@@ -192,25 +196,22 @@ export function DeliveryTestPreviewConfirmation({
       <p className="delivery-test-classification">
         DRILL — LIVE CANARY — TRAINING ONLY
       </p>
-      <h2 id="live-canary-confirm-heading">3. Review and explicitly confirm</h2>
+      <h2 id="live-canary-confirm-heading">
+        3. Review consequences and confirm
+      </h2>
       <p>
         This is a real provider send to the exact approved controlled canary
         endpoints, rendered unmistakably as a DRILL. It is not a real incident.
       </p>
-      <dl className="facts">
-        <dt>Target version</dt>
-        <dd>{preview.targetSet.version}</dd>
-        <dt>Approved endpoint-reference digest</dt>
-        <dd className="code-value">
-          <code>{preview.endpointReferenceDigest}</code>
-        </dd>
-        <dt>Recipients</dt>
-        <dd>{preview.activationPreview.recipientCount}</dd>
-        <dt>Preview expires</dt>
-        <dd>
-          <time dateTime={preview.expiresAt}>{preview.expiresAt}</time>
-        </dd>
-      </dl>
+      <p className="delivery-test-consequence-summary">
+        <strong>
+          {preview.activationPreview.recipientCount} approved recipients across{' '}
+          {preview.channels.length} channels:
+        </strong>{' '}
+        {channelSummary}. Select “Confirm and start DRILL live canary” to send
+        the exact DRILL messages shown below, or leave this page to send
+        nothing.
+      </p>
       <div className="delivery-test-channels">
         {preview.channels.map((channel) => {
           const consequence = preview.activationPreview.channels.find(
@@ -245,36 +246,52 @@ export function DeliveryTestPreviewConfirmation({
             Every channel must be live-verified with verified credentials,
             nonzero approved endpoints, and a current exact preview.
           </p>
-          {preview.activationPreview.blockingReasonCodes.length > 0 ? (
-            <ul>
-              {preview.activationPreview.blockingReasonCodes.map((reason) => (
-                <li key={reason}>
-                  {reason.replaceAll('_', ' ').toLowerCase()}
-                </li>
-              ))}
-            </ul>
-          ) : null}
         </div>
       ) : null}
 
-      <label className="delivery-test-human-check">
-        <input
-          checked={humanChecked}
-          disabled={!previewReady || activatePending || activated}
-          onChange={(event) =>
-            onHumanCheckedChange(event.currentTarget.checked)
-          }
-          type="checkbox"
-        />
-        I am an authenticated human making a fresh decision to start this DRILL
-        and send these exact messages to only the pinned approved canary
-        endpoint references.
-      </label>
+      <details className="delivery-test-technical-details">
+        <summary>Technical preview details</summary>
+        <dl className="facts">
+          <dt>Target set ID</dt>
+          <dd className="code-value">
+            <code>{preview.targetSet.id}</code>
+          </dd>
+          <dt>Target version</dt>
+          <dd>{preview.targetSet.version}</dd>
+          <dt>Event type version ID</dt>
+          <dd className="code-value">
+            <code>{preview.activationPreview.eventTypeVersion.id}</code>
+          </dd>
+          <dt>Approved endpoint-reference digest</dt>
+          <dd className="code-value">
+            <code>{preview.endpointReferenceDigest}</code>
+          </dd>
+          <dt>Consequence digest</dt>
+          <dd className="code-value">
+            <code>{preview.consequenceDigest}</code>
+          </dd>
+          <dt>Preview expires</dt>
+          <dd>
+            <time dateTime={preview.expiresAt}>{preview.expiresAt}</time>
+          </dd>
+        </dl>
+        {preview.activationPreview.blockingReasonCodes.length > 0 ? (
+          <>
+            <h3>Blocking reason codes</h3>
+            <ul>
+              {preview.activationPreview.blockingReasonCodes.map((reason) => (
+                <li key={reason}>
+                  <code>{reason}</code>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </details>
       <button
         className="button delivery-test-activate"
         disabled={
           !previewReady ||
-          !humanChecked ||
           activatePending ||
           activateOutcomeUnknown ||
           activated
@@ -328,7 +345,6 @@ export function DeliveryTestConsole({
   const [previewPending, setPreviewPending] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewInFlight = useRef(false);
-  const [humanChecked, setHumanChecked] = useState(false);
   const [activatePending, setActivatePending] = useState(false);
   const [activateError, setActivateError] = useState<string | null>(null);
   const [activateOutcomeUnknown, setActivateOutcomeUnknown] = useState(false);
@@ -459,7 +475,6 @@ export function DeliveryTestConsole({
     setPreview(null);
     setPreviewError(null);
     setActivateError(null);
-    setHumanChecked(false);
     try {
       const eventType = drillEventTypes.find(
         ({ latestVersion }) => latestVersion.id === eventTypeVersionId,
@@ -505,7 +520,6 @@ export function DeliveryTestConsole({
     if (
       preview === null ||
       !canActivateDeliveryTest(preview) ||
-      !humanChecked ||
       activationInFlight.current ||
       activateOutcomeUnknown ||
       activatedEventId !== null
@@ -964,9 +978,7 @@ export function DeliveryTestConsole({
           activateOutcomeUnknown={activateOutcomeUnknown}
           activatePending={activatePending}
           activated={activatedEventId !== null}
-          humanChecked={humanChecked}
           onActivate={() => void activate()}
-          onHumanCheckedChange={setHumanChecked}
           preview={preview}
         />
       ) : null}

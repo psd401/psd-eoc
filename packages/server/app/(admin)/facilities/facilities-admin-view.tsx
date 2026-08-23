@@ -8,7 +8,6 @@ import type {
 } from '@psd-eoc/contracts';
 
 import { AdminMutationFields } from './admin-form-fields';
-import { AdminNavigation } from './admin-nav';
 
 /** A denied view cannot carry configuration that might accidentally render. */
 export const NON_ADMIN_FACILITIES_VIEW = Object.freeze({
@@ -737,7 +736,6 @@ export function FacilitiesAdminView(props: FacilitiesAdminViewProps) {
       id="main-content"
       tabIndex={-1}
     >
-      <AdminNavigation />
       <header>
         <p>Administration</p>
         <h1 id="facilities-admin-heading">
