@@ -24,7 +24,7 @@ RUN bun install --frozen-lockfile
 
 COPY packages/contracts/src packages/contracts/src
 COPY packages/server packages/server
-COPY workers/email/ses-events.ts workers/email/sns-signature.ts workers/email/
+COPY workers/email/aws-arn.ts workers/email/ses-events.ts workers/email/sns-signature.ts workers/email/
 
 RUN bun run --cwd packages/server build
 
