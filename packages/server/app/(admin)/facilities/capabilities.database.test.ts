@@ -1682,23 +1682,40 @@ describeWithDatabase('facilities administrator database flow', () => {
     }
     expect(firstGroup.grantedRole).toBe('admin');
 
+    const renameCommand = {
+      id: firstGroup.id,
+      kind: firstGroup.kind,
+      purpose: firstGroup.purpose,
+      facilityId: firstGroup.facilityId,
+      grantedRole: 'admin' as const,
+      displayName: `${firstGroup.displayName} changed`,
+      active: firstGroup.active,
+      googleGroupId: firstGroup.googleGroupId,
+      email: firstGroup.email,
+    };
+    const renameMetadata = metadata('first-access-display-change', requestIds);
     const renamed = await executeUpdateGroupSourceCapability({
       authenticated,
       store,
-      command: {
-        id: firstGroup.id,
-        kind: firstGroup.kind,
-        purpose: firstGroup.purpose,
-        facilityId: firstGroup.facilityId,
-        grantedRole: 'admin',
-        displayName: `${firstGroup.displayName} changed`,
-        active: firstGroup.active,
-        googleGroupId: firstGroup.googleGroupId,
-        email: firstGroup.email,
-      },
-      metadata: metadata('first-access-display-change', requestIds),
+      command: renameCommand,
+      metadata: renameMetadata,
     });
     expect(renamed.displayName).toBe(`${firstGroup.displayName} changed`);
+    const renamedCapturedAt = new Date('2026-08-22T17:00:00.000Z');
+    await database
+      .update(groupSources)
+      .set({ membersCapturedAt: renamedCapturedAt })
+      .where(eq(groupSources.id, renamed.id));
+    const renamedReplay = await executeUpdateGroupSourceCapability({
+      authenticated,
+      store,
+      command: renameCommand,
+      metadata: replayMetadata(renameMetadata, requestIds),
+    });
+    expect(renamedReplay).toEqual({
+      ...renamed,
+      membersCapturedAt: renamedCapturedAt.toISOString(),
+    });
 
     const secondGroup = await executeCreateGroupSourceCapability({
       authenticated,
@@ -2083,6 +2100,11 @@ describeWithDatabase('facilities administrator database flow', () => {
       staffBuildingMetadata,
       requestIds,
     );
+    const staffBuildingCapturedAt = new Date('2026-08-22T17:05:00.000Z');
+    await database
+      .update(groupSources)
+      .set({ membersCapturedAt: staffBuildingCapturedAt })
+      .where(eq(groupSources.id, staffBuilding.id));
     expect(
       await executeCreateGroupSourceCapability({
         authenticated,
@@ -2090,7 +2112,10 @@ describeWithDatabase('facilities administrator database flow', () => {
         command: staffBuildingCommand,
         metadata: staffBuildingReplayMetadata,
       }),
-    ).toEqual(staffBuilding);
+    ).toEqual({
+      ...staffBuilding,
+      membersCapturedAt: staffBuildingCapturedAt.toISOString(),
+    });
     for (const requestId of [
       staffBuildingMetadata.requestId,
       staffBuildingReplayMetadata.requestId,

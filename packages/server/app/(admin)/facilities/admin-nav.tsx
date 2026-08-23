@@ -3,6 +3,9 @@ export function AdminNavigation() {
     <nav aria-label="Administration" className="admin-nav">
       <ul>
         <li>
+          <a href="/admin">Deployment readiness</a>
+        </li>
+        <li>
           <a href="/facilities">Facilities and audiences</a>
         </li>
         <li>
@@ -10,9 +13,6 @@ export function AdminNavigation() {
         </li>
         <li>
           <a href="/integrations">Integrations and test mode</a>
-        </li>
-        <li>
-          <a href="/emergency">Emergency notification control</a>
         </li>
         <li>
           <a href="/audit">Security audit</a>

@@ -24,6 +24,7 @@ const GOOGLE_SOURCE = GroupSourceSchema.parse({
   grantedRole: null,
   displayName: 'Synthetic staff group',
   active: true,
+  membersCapturedAt: null,
   googleGroupId: 'synthetic-staff-group',
   email: 'synthetic-staff@example.invalid',
   createdAt: TEST_TIME,

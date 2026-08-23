@@ -784,6 +784,8 @@ function groupSourceFromRow(
     // row that drifted from the database check constraint fails here loudly
     // rather than presenting a group whose authority is unclear.
     grantedRole: row.grantedRole,
+    membersCapturedAt:
+      row.membersCapturedAt === null ? null : dateIso(row.membersCapturedAt),
     createdAt: dateIso(row.createdAt),
   };
   return GroupSourceSchema.parse(
@@ -1857,6 +1859,12 @@ function assertReplayOutput(reference: ResultReference, output: unknown): void {
   }
 }
 
+function groupSourceConfigurationProjection(source: GroupSource): unknown {
+  const { membersCapturedAt, ...configuration } = source;
+  void membersCapturedAt;
+  return configuration;
+}
+
 function requireVersion(reference: ResultReference): number {
   if (reference.version === null) {
     throw conflict('The idempotency result version is unavailable.');
@@ -2033,7 +2041,12 @@ export const createGroupSourceRegistration: ServerCapabilityRegistration<
     });
     return output;
   },
-  resultReference: (output) => resultReference(output.id, null, output),
+  resultReference: (output) =>
+    resultReference(
+      output.id,
+      null,
+      groupSourceConfigurationProjection(output),
+    ),
   async loadReplay(reference, context) {
     const parsed = parseResultReference(reference);
     const output = await getGroupSource(
@@ -2041,7 +2054,7 @@ export const createGroupSourceRegistration: ServerCapabilityRegistration<
       parsed.id,
     );
     if (output === null) throw conflict('The group source is unavailable.');
-    assertReplayOutput(parsed, output);
+    assertReplayOutput(parsed, groupSourceConfigurationProjection(output));
     context.transaction.setAuditTarget({
       kind: 'configuration',
       id: output.id,
@@ -2082,7 +2095,12 @@ export const updateGroupSourceRegistration: ServerCapabilityRegistration<
     });
     return output;
   },
-  resultReference: (output) => resultReference(output.id, null, output),
+  resultReference: (output) =>
+    resultReference(
+      output.id,
+      null,
+      groupSourceConfigurationProjection(output),
+    ),
   async loadReplay(reference, context) {
     const parsed = parseResultReference(reference);
     const output = await getGroupSource(
@@ -2090,7 +2108,7 @@ export const updateGroupSourceRegistration: ServerCapabilityRegistration<
       parsed.id,
     );
     if (output === null) throw conflict('The group source is unavailable.');
-    assertReplayOutput(parsed, output);
+    assertReplayOutput(parsed, groupSourceConfigurationProjection(output));
     context.transaction.setAuditTarget({
       kind: 'configuration',
       id: output.id,

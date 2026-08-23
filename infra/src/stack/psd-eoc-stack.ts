@@ -1196,7 +1196,7 @@ export class PsdEocStack extends Stack {
     const runtimeRole = new iam.Role(this, 'AppRunnerRuntimeRole', {
       assumedBy: new iam.ServicePrincipal('tasks.apprunner.amazonaws.com'),
       description:
-        'Least-privilege live-pilot runtime; it has no notification-provider authority.',
+        'Least-privilege live-pilot runtime; it has no notification-provider write authority.',
     });
     const runtimeGrants = [
       databaseApplicationSecret.grantRead(runtimeRole),
@@ -1220,6 +1220,17 @@ export class PsdEocStack extends Stack {
         actions: ['sqs:GetQueueAttributes', 'sqs:SendMessage'],
         grantee: runtimeRole,
         resourceArns: [deliveryQueue.queueArn],
+      }),
+      // The readiness page sees counts only. It may list subscriptions on the
+      // two alarm topics, but cannot subscribe, publish, mutate, or read any
+      // other notification-provider topic.
+      iam.Grant.addToPrincipal({
+        actions: ['sns:ListSubscriptionsByTopic'],
+        grantee: runtimeRole,
+        resourceArns: [
+          operationsAlarmTopic.topicArn,
+          criticalAlarmTopic.topicArn,
+        ],
       }),
     ];
 
@@ -1365,6 +1376,14 @@ export class PsdEocStack extends Stack {
                 {
                   name: 'DELIVERY_QUEUE_URL',
                   value: deliveryQueue.queueUrl,
+                },
+                {
+                  name: 'PSD_EOC_OPERATIONS_ALARM_TOPIC_ARN',
+                  value: operationsAlarmTopic.topicArn,
+                },
+                {
+                  name: 'PSD_EOC_CRITICAL_ALARM_TOPIC_ARN',
+                  value: criticalAlarmTopic.topicArn,
                 },
                 {
                   name: 'NODE_ENV',
